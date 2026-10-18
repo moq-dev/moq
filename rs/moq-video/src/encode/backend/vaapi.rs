@@ -41,8 +41,9 @@ use moq_vaapi::encode::{Config as VaapiConfig, Encoder};
 
 use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
 use super::{Backend, Encoded, keyframe_annexb};
+use crate::color::Matrix;
 use crate::frame::{DmaBuf, DrmFormat, I420, vaapi};
-use crate::{Error, Frame, Surface};
+use crate::{Color, Error, Frame, Surface};
 
 pub(crate) const NAME: &str = "vaapi";
 
@@ -68,9 +69,19 @@ impl Vaapi {
 	fn new(config: &Config) -> Result<Self, Error> {
 		let bitrate = config.resolved_bitrate().as_bps().min(u32::MAX as u64) as u32;
 		let Gop::Keyframe { interval } = config.gop;
+		// moq-vaapi derives the VUI's primaries and transfer from the matrix, the
+		// way SD and HD video pair them, so any other pairing is refused.
+		let color = config.resolved_color();
+		let paired = match color.matrix {
+			Matrix::Bt601 => Color::BT601,
+			_ => Color::BT709,
+		};
+		if color != paired.with_range(color.range) {
+			return Err(Error::Unsupported(format!("VA-API cannot signal {color:?}")));
+		}
 		let vaapi = VaapiConfig {
 			device: vaapi::device().map(Path::to_path_buf),
-			color: vaapi::color(config.resolved_color()),
+			color: vaapi::color(color)?,
 			..VaapiConfig::new(
 				config.width,
 				config.height,
@@ -536,8 +547,8 @@ mod tests {
 		// Opposite of the space `resolved_color` would infer from the size, so a
 		// backend that ignores `Config::color` cannot pass.
 		for (size, color, described) in [
-			(Size::new(640, 480), Color::Bt709Limited, BT709_DESCRIBED),
-			(Size::new(1920, 1080), Color::Bt601Limited, BT601_DESCRIBED),
+			(Size::new(640, 480), Color::BT709, BT709_DESCRIBED),
+			(Size::new(1920, 1080), Color::BT601, BT601_DESCRIBED),
 		] {
 			let config = Config {
 				kind: EncodeKind::Named(NAME.into()),

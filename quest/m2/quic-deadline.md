@@ -51,11 +51,6 @@ raises loss or latency under any profile stays off by default.
 
 Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it.
 
-## Required
-
-- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - the
-  scheduler decides which stream's data a probe carries
-
 ## Related
 
 - [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - measures whether

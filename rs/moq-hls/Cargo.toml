@@ -37,7 +37,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-async-trait = "0.1"
+async-trait = { workspace = true }
 futures = { workspace = true }
 moq-archive = { path = "../moq-archive" }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["tcp", "quic", "aws-lc-rs"] }

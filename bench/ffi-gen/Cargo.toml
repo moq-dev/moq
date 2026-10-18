@@ -1,0 +1,65 @@
+[package]
+name = "moq-ffi-gen"
+description = "One moq-ffi slice bound by UniFFI or BoltFFI, to compare the generators"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Its own workspace and lockfile, so BoltFFI never enters the main lockfile or `just check`.
+[workspace]
+members = ["uniffi-shim"]
+
+[lib]
+name = "moq_ffi_gen"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+default = ["client"]
+# Pick exactly one generator per build.
+uniffi = ["dep:uniffi", "dep:moq-ffi-gen-uniffi-shim"]
+boltffi = ["dep:boltffi"]
+# `MoqClient` and `MoqSession`, native only: the browser dials through
+# web-transport-wasm, which the slice leaves out. A feature rather than a target `cfg`,
+# because BoltFFI's macros never see the target, so `cfg(target_arch)` reads as unset.
+client = ["dep:moq-tokio", "dep:url"]
+
+[dependencies]
+boltffi = { version = "=0.31.1", optional = true }
+# Not a path dependency: BoltFFI 0.31.1 scans every local (path) dependency whose
+# source has an item-level `#[error]`, which thiserror structs trip, and then fails on
+# moq-tokio's `#[path]` module (see README.md). Bump `rev` to re-measure.
+kio = { git = "https://github.com/moq-dev/moq", rev = "b4eab0db18aa6846dc9a486283aa3207d4577a58" }
+moq-net = { git = "https://github.com/moq-dev/moq", rev = "b4eab0db18aa6846dc9a486283aa3207d4577a58" }
+moq-ffi-gen-uniffi-shim = { path = "uniffi-shim", optional = true }
+uniffi = { version = "0.32", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+moq-tokio = { git = "https://github.com/moq-dev/moq", rev = "b4eab0db18aa6846dc9a486283aa3207d4577a58", optional = true }
+tokio = { version = "1.48", features = ["rt-multi-thread"] }
+url = { version = "2", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+# As moq-ffi: drops the `Send` bounds moq-net's wasm futures and handles cannot meet.
+uniffi = { version = "0.32", optional = true, features = ["wasm-unstable-single-threaded"] }
+web-async = "0.1.5"
+
+[dev-dependencies]
+libc = "0.2"
+
+[[example]]
+name = "bench"
+required-features = ["uniffi"]
+
+# The root workspace's release profile, which every language package ships.
+# UniFFI reads the symbol table, so only debuginfo is stripped, as for moq-ffi.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
+
+# The root's `wasm-release`, which moq-wasm ships.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"

@@ -24,6 +24,9 @@
 //!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
+// Custom timings measure the real time the work took, not the ambient clock.
+#![allow(clippy::disallowed_methods)]
+
 #[path = "../tests/integration/support/mod.rs"]
 mod support;
 
@@ -1030,7 +1033,7 @@ impl Generation {
 	async fn announce(&self, epoch: &Epoch) {
 		self.route(epoch);
 		for track in &self.tracks {
-			tokio::time::timeout(COPY_WAIT, track.demand().used())
+			moq_clock::timeout(COPY_WAIT, track.demand().used())
 				.await
 				.expect("route swap did not splice")
 				.expect("replacement track closed");
@@ -1060,14 +1063,14 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	let epoch = Epoch::mint();
 	let first = Generation::build(&producer, tracks);
 	first.route(&epoch);
-	let resolved = tokio::time::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH, None))
+	let resolved = moq_clock::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH, None))
 		.await
 		.expect("front did not resolve")
 		.expect("front refused");
 	let mut subscribers = Vec::with_capacity(tracks);
 	for i in 0..tracks {
 		let track = resolved.track(&format!("{i}")).unwrap();
-		let subscriber = tokio::time::timeout(COPY_WAIT, track.subscribe(None))
+		let subscriber = moq_clock::timeout(COPY_WAIT, track.subscribe(None))
 			.await
 			.expect("track did not splice")
 			.expect("subscribe failed");
@@ -1175,7 +1178,7 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> Resum
 		(broadcast, track)
 	};
 	let mut generations = vec![generation(&mut (0..retained))];
-	let resolved = tokio::time::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH, None))
+	let resolved = moq_clock::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH, None))
 		.await
 		.expect("front did not resolve")
 		.expect("front refused");
@@ -1184,7 +1187,7 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> Resum
 	let subscription = track::Subscription::default().with_max_delay(Duration::from_secs(3600));
 	let mut subscribers = Vec::with_capacity(readers);
 	for _ in 0..readers {
-		let mut subscriber = tokio::time::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
+		let mut subscriber = moq_clock::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
 			.await
 			.expect("track did not splice")
 			.expect("subscribe failed");
@@ -1196,7 +1199,7 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> Resum
 	for _ in 1..routes {
 		generations.push(generation(&mut (0..retained).rev()));
 		let (_, latest) = generations.last().unwrap();
-		tokio::time::timeout(COPY_WAIT, latest.demand().used())
+		moq_clock::timeout(COPY_WAIT, latest.demand().used())
 			.await
 			.expect("route swap did not splice")
 			.expect("replacement track closed");

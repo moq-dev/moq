@@ -36,10 +36,8 @@ async def main():
             broadcast = await client.request_broadcast(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
 
-            for name, audio in catalog.audio.items():
-                # The track is the rendition's `track` when set, otherwise its catalog key.
-                track = audio.track if audio.track is not None else name
-                frames = await moq.media.TrackConsumer.subscribe(broadcast, track, audio.container)
+            for id, audio in catalog.audio.items():
+                frames = await moq.media.TrackConsumer.subscribe(broadcast, id, audio)
                 async with frames:
                     async for frame in frames:
                         print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp}")
@@ -129,14 +127,17 @@ client = moq.Client(
 
 ### Connection
 
-- **`connect(url, *, tls_verify=True, tls_roots=(), tls_system_roots=None, tls_fingerprints=(), tls_cert=None, tls_key=None, bind=None, versions=(), max_streams=None, websocket_enabled=None, websocket_delay=None, reconnect=True, backoff=None, publish=None, consume=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
+- **`connect(url, *, tls_verify=True, tls_roots=(), tls_system_roots=None, tls_fingerprints=(), tls_cert=None, tls_key=None, tls_host_name=None, bind=None, versions=(), timeout=None, race=None, resolution_delay=None, max_streams=None, idle_timeout=None, keep_alive=None, gso=None, mtu_discovery=None, congestion_control=None, qlog=None, websocket_enabled=None, websocket_delay=None, reconnect=True, backoff=None, publish=None, consume=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
 - **`Client(url, *, ...)`**, taking the same arguments. Async context manager for connecting to a relay.
   - `tls_roots`. PEM root certificate file path(s) to trust instead of the system roots.
   - `tls_system_roots`. Whether to trust platform roots in addition to custom roots.
   - `tls_fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `tls_verify=False`.
   - `tls_cert`, `tls_key`. Paired PEM certificate chain and private key paths for mTLS.
+  - `tls_host_name`. Verify the certificate against this name (SNI) instead of the URL's host.
   - `max_streams`. Raise the peer's inbound stream cap.
-  - `versions`. Protocol versions to offer, most preferred first (e.g. `"moq-lite-03"`); empty offers all.
+  - `idle_timeout`, `keep_alive`, `gso`, `mtu_discovery`, `congestion_control`, `qlog`. QUIC tuning; `keep_alive=timedelta(0)` disables pings, `congestion_control` takes a `CongestionControl`, and `qlog` is a trace directory when `qlog_supported()`.
+  - `versions`. Protocol versions to offer, most preferred first (e.g. `"moq-lite-03"`); empty offers all, which `versions()` lists.
+  - `timeout`, `race`, `resolution_delay`. Bound one connect attempt and pace Happy Eyeballs.
   - `reconnect`, `backoff`. Redial with a `Backoff` when the transport drops; `reconnect=False` dials once.
   - `.session`. The established `Session` (or `None` before connecting / after exit).
 - **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), versions=(), max_streams=None, publish=None, consume=None)`**. Async context manager + async iterator of incoming `Request`s.
@@ -153,7 +154,7 @@ client = moq.Client(
   - `.cancel(code)`, `await session.shutdown()`. Cancel immediately, or drain within one second, raising on failure. Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older Lite versions, including default lite-06, wait only for transport ACKs. IETF also waits for transport ACKs.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
-  - `await .status() → ConnectionStatus`, `.connects()`. Watch reconnects; `connects()` counts connections, 1 on the first.
+  - `await .status() → ConnectionStatus`, `.connects()`, `.failure()`. Watch reconnects; `connects()` counts connections, 1 on the first, and `failure()` says why a reconnect is under way.
   - `.bandwidth() → Bandwidth`. Divide the send estimate between encoders and app-owned tracks.
 
 ### Publishing
@@ -194,10 +195,11 @@ client = moq.Client(
   the clock for subsequent producers.
 - `await media.CatalogConsumer.subscribe(broadcast)` streams catalog snapshots;
   `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
-- `await media.TrackConsumer.subscribe(broadcast, name, container, *, subscription=None)`
-  decodes live media. Pass the catalog rendition's `track` (or its key when unset) and `container`.
-- `await media.GroupConsumer.fetch(broadcast, name, sequence, container, *, options=None)`
-  fetches and decodes exactly one group.
+- `await media.TrackConsumer.subscribe(broadcast, id, rendition, *, subscription=None)`
+  decodes live media from a catalog rendition: its ID (catalog key) and its `Video` or `Audio`
+  config. It follows the rendition's `broadcast` and `track` itself.
+- `await media.GroupConsumer.fetch(broadcast, id, rendition, sequence, *, options=None)`
+  fetches and decodes exactly one group of a catalog rendition.
 - `media.GroupConsumer(group, container)` decodes a raw group, such as one from
   `TrackConsumer.recv_group()` for arrival-order reads, with container media time on each frame
   as it lands.

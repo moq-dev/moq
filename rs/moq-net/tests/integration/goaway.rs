@@ -45,10 +45,10 @@ const GOAWAY_VERSIONS: &[&str] = &[
 /// Server drains with a redirect URI; the client observes it through
 /// `Session::draining()`. Exercises every GOAWAY channel in the version
 /// matrix, in both directions.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn goaway_send_receive_all_versions() {
 	for version in GOAWAY_VERSIONS {
-		moq_net_sim::timeout(TEST_TIMEOUT, async {
+		moq_clock::timeout(TEST_TIMEOUT, async {
 			let version: Version = version.parse().unwrap();
 			let pair = connect_mock(MockConnectOptions::new(version)).await;
 
@@ -89,9 +89,9 @@ async fn goaway_send_receive_all_versions() {
 
 /// The IETF draft-17+ GOAWAY carries a timeout on the wire; the receiver
 /// observes the sender's advertised deadline.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn goaway_wire_timeout_moq_transport_17() {
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let version: Version = "moq-transport-17".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
@@ -117,9 +117,9 @@ async fn goaway_wire_timeout_moq_transport_17() {
 }
 
 /// The client also drains the server: GOAWAY is symmetric.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn goaway_client_to_server_moq_lite_04() {
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let version: Version = "moq-lite-04".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
@@ -144,9 +144,9 @@ async fn goaway_client_to_server_moq_lite_04() {
 /// A version with no GOAWAY message (moq-lite-03 and earlier) still drains: the
 /// deadline is the sender's own timer, so the session closes on schedule even
 /// though the peer is never told why. Callers do not branch on the version.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn goaway_drains_without_a_wire_message_moq_lite_03() {
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let version: Version = "moq-lite-03".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
@@ -171,9 +171,9 @@ async fn goaway_drains_without_a_wire_message_moq_lite_03() {
 
 /// A moq-transport client cannot tell a server where to reconnect, so naming a
 /// URI is refused locally instead of getting the session closed by the peer.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn goaway_client_redirect_refused_moq_transport_19() {
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let version: Version = "moq-transport-19".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
@@ -204,9 +204,9 @@ async fn goaway_client_redirect_refused_moq_transport_19() {
 
 /// The draining side force-closes the session when the peer overstays the
 /// deadline, and the peer observes the GOAWAY_TIMEOUT close code.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn goaway_timeout_force_close_moq_transport_17() {
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let version: Version = "moq-transport-17".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
@@ -243,7 +243,7 @@ async fn goaway_timeout_force_close_moq_transport_17() {
 /// The public API's drain claim only ever sends one GOAWAY per session, so the
 /// handshake is hand-rolled to keep a raw transport clone for injecting
 /// wire-level GOAWAY control streams.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 	/// Open a raw lite Goaway control stream:
 	/// `[ControlType::Goaway][message size][uri length][uri bytes]`.
@@ -271,7 +271,7 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 		while let Ok(Some(_)) = recv.read(&mut buf).await {}
 	}
 
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let version: Version = "moq-lite-04".parse().unwrap();
 
 		let mut mock = moq_net::transport::memory::Config::default();
@@ -322,7 +322,7 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 /// After a received GOAWAY, a new subscription still opens on the draining
 /// session, which is the only route, while an existing one keeps delivering.
 async fn goaway_keeps_new_subscribes(version: Version) {
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		// Server publishes a broadcast with one live track.
 		let pub_origin = produce_origin(Hop::random());
 		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
@@ -411,17 +411,17 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 	.expect("test timed out (likely a mock deadlock)");
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn goaway_keeps_new_subscribes_moq_lite_04() {
 	goaway_keeps_new_subscribes("moq-lite-04".parse().unwrap()).await;
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn goaway_keeps_new_subscribes_moq_lite_05() {
 	goaway_keeps_new_subscribes("moq-lite-05".parse().unwrap()).await;
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn goaway_keeps_new_subscribes_moq_transport_19() {
 	goaway_keeps_new_subscribes("moq-transport-19".parse().unwrap()).await;
 }
@@ -433,7 +433,7 @@ async fn goaway_keeps_new_subscribes_moq_transport_19() {
 /// subscriber has to react to the signal itself, not to a later announce that a
 /// draining peer has no reason to send.
 async fn goaway_drains_routes(version: Version) {
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let pub_origin = produce_origin(Hop::random());
 		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
@@ -475,12 +475,12 @@ async fn goaway_drains_routes(version: Version) {
 	.expect("test timed out (likely a route that never drained)");
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn goaway_drains_routes_moq_lite_04() {
 	goaway_drains_routes("moq-lite-04".parse().unwrap()).await;
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn goaway_drains_routes_moq_transport_19() {
 	goaway_drains_routes("moq-transport-19".parse().unwrap()).await;
 }

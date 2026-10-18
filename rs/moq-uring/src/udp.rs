@@ -177,9 +177,7 @@ impl Ecn {
 pub struct Transmit {
 	/// The destination.
 	pub to: SocketAddr,
-	/// How many bytes of the buffer to send.
-	pub len: usize,
-	/// The datagram size; the buffer is sent as `len / segment` datagrams,
+	/// The datagram size; the buffer is sent in datagrams of this many bytes,
 	/// the last possibly short.
 	pub segment: usize,
 	/// The ECN codepoint every datagram carries, if any.
@@ -263,8 +261,8 @@ fn grow_rx(rx: &mut Rx, config: &Config) -> bool {
 /// Allocate more send buffers, up to [`Config::tx_buffers_max`]. Returns
 /// whether the pool grew.
 ///
-/// The `Box<[u8]>` allocations are stable across the `Vec` growth, which is
-/// what lets a live [`TxBuf`] keep a raw pointer into one.
+/// The payload allocations are stable across the `Vec` growth, which is what
+/// lets an in-flight send keep a raw pointer into one.
 fn grow_tx(tx: &mut Tx, config: &Config) -> bool {
 	let Some(target) = grown(tx.bufs.len(), config.tx_buffers_max) else {
 		return false;
@@ -363,7 +361,9 @@ struct Tx {
 /// Stable storage reused by every checkout of one transmit slot: the payload
 /// the kernel reads and the `sendmsg` headers pointing into it.
 struct TxSlot {
-	data: Box<[u8]>,
+	/// Empty while a [`TxBuf`] has it checked out; sending or dropping that
+	/// hands the payload back.
+	data: Vec<u8>,
 	headers: Vec<SendHdr>,
 	/// Sends staged from this slot that the kernel has not completed. The slot
 	/// returns to the free list when it hits zero.
@@ -373,7 +373,7 @@ struct TxSlot {
 impl TxSlot {
 	fn new(len: usize) -> Self {
 		Self {
-			data: vec![0u8; len].into_boxed_slice(),
+			data: Vec::with_capacity(len),
 			headers: Vec::new(),
 			in_flight: 0,
 		}
@@ -413,6 +413,7 @@ pub(crate) struct SockShared {
 	/// The worker, as the I/O built on this socket carries it.
 	owner: Owner,
 	/// This socket's slot in a steered reuseport group, if it is in one.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	shard: Option<moq_sock::shard::Shard>,
 	/// The worker's counters, held directly rather than reached through
 	/// `owner`, so counting a datagram is not a `Weak::upgrade`.
@@ -450,9 +451,11 @@ impl SockShared {
 		}
 	}
 
-	fn release_tx(&self, id: u16) {
+	fn release_tx(&self, id: u16, data: Vec<u8>) {
 		let mut tx = self.tx.borrow_mut();
-		debug_assert_eq!(tx.bufs[id as usize].in_flight, 0);
+		let slot = &mut tx.bufs[id as usize];
+		debug_assert_eq!(slot.in_flight, 0);
+		slot.data = data;
 		tx.free.push(id);
 		tx.stalled = false;
 		tx.waiters.wake();
@@ -665,11 +668,13 @@ impl Socket {
 	}
 
 	/// The worker driving this socket, which everything built on it runs on.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub(crate) fn owner(&self) -> Owner {
 		self.shared.owner.clone()
 	}
 
 	/// This socket's slot in a steered reuseport group, if it is in one.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub(crate) fn shard(&self) -> Option<moq_sock::shard::Shard> {
 		self.shared.shard
 	}
@@ -743,16 +748,18 @@ impl Socket {
 			grow_tx(&mut tx, &self.shared.config);
 		}
 		if let Some(id) = tx.free.pop() {
-			let slot = &mut tx.bufs[id as usize];
-			// SAFETY: `id` was exclusively checked out of the free list; the
-			// allocation is stable (see TxBuf).
-			let ptr = unsafe { NonNull::new_unchecked(slot.data.as_mut_ptr()) };
-			let cap = slot.data.len();
+			let mut data = std::mem::take(&mut tx.bufs[id as usize].data);
+			data.clear();
+			// A checkout is a `Vec` its holder may have shrunk or regrown before
+			// dropping it; every checkout holds exactly one pool-sized train.
+			let cap = self.shared.config.tx_buffer_len;
+			if data.capacity() != cap {
+				data = Vec::with_capacity(cap);
+			}
 			return Poll::Ready(Ok(TxBuf {
 				sock: self.shared.clone(),
 				id,
-				ptr,
-				cap,
+				data,
 				armed: false,
 			}));
 		}
@@ -828,18 +835,6 @@ impl Packet {
 		// `sock` Rc keeps alive; the pool never touches it while outstanding.
 		unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
 	}
-
-	/// The whole coalesced payload, mutably (QUIC decrypts in place).
-	pub fn payload_mut(&mut self) -> &mut [u8] {
-		// SAFETY: as `payload`, and `&mut self` forbids aliasing our slices.
-		unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
-	}
-
-	/// The individual datagrams.
-	pub fn segments(&mut self) -> impl Iterator<Item = &mut [u8]> {
-		let stride = self.stride;
-		self.payload_mut().chunks_mut(stride)
-	}
 }
 
 impl Drop for Packet {
@@ -859,21 +854,21 @@ impl std::fmt::Debug for Packet {
 	}
 }
 
-/// A checked-out send-staging buffer: fill it, then [`send`](Self::send) it.
+/// A checked-out send-staging buffer, empty with room for
+/// [`Config::tx_buffer_len`] bytes: fill it, then [`send`](Self::send) it.
 ///
 /// The buffer belongs to the socket it was acquired from, and sending goes
 /// back through that socket. Dropping it unsent returns it to the pool.
 pub struct TxBuf {
 	sock: Rc<SockShared>,
 	id: u16,
-	ptr: NonNull<u8>,
-	cap: usize,
+	data: Vec<u8>,
 	armed: bool,
 }
 
 impl TxBuf {
-	/// Send `self[..len]` on the owning socket as datagrams of `segment`
-	/// bytes (the last may be short), marked with `ecn`. Fire-and-forget:
+	/// Send the buffer on the owning socket as datagrams of `segment` bytes
+	/// (the last may be short), marked with `ecn`. Fire-and-forget:
 	/// the buffer returns to the pool when the kernel completes, and a
 	/// failed send surfaces on the next pool acquire.
 	///
@@ -882,16 +877,17 @@ impl TxBuf {
 	/// to submit staged datagrams and drain their completions, but does not
 	/// guarantee kernel completion or delivery.
 	pub fn send(mut self, transmit: Transmit) -> io::Result<()> {
-		let Transmit { to, len, segment, ecn } = transmit;
+		let Transmit { to, segment, ecn } = transmit;
+		let len = self.data.len();
+		let cap = self.sock.config.tx_buffer_len;
 		// `UDP_SEGMENT` is a u16, so an oversized segment would silently
 		// truncate into a tiny stride and explode the implied segment count.
-		if len == 0 || len > self.cap || segment == 0 || segment > usize::from(u16::MAX) {
+		// A buffer grown past the pool's size is refused rather than sent, so
+		// the configured ceiling holds for every train.
+		if len == 0 || len > cap || segment == 0 || segment > usize::from(u16::MAX) {
 			return Err(io::Error::new(
 				io::ErrorKind::InvalidInput,
-				format!(
-					"invalid send: {len} bytes in {segment} byte segments from a {} byte buffer",
-					self.cap
-				),
+				format!("invalid send: {len} bytes in {segment} byte segments from a {cap} byte buffer"),
 			));
 		}
 		let shared = match self.sock.owner.upgrade() {
@@ -918,17 +914,21 @@ impl TxBuf {
 
 		self.armed = true;
 		let sock = self.sock.clone();
-		let base = self.ptr.as_ptr();
-		let headers = {
+		let (base, headers) = {
 			let mut tx = sock.tx.borrow_mut();
-			let headers = &mut tx.bufs[self.id as usize].headers;
-			if headers.len() < segments {
-				headers.resize_with(segments, SendHdr::zeroed);
+			let slot = &mut tx.bufs[self.id as usize];
+			// The slot keeps the payload while the kernel reads it. Moving the
+			// `Vec` leaves its heap allocation where it is.
+			slot.data = std::mem::take(&mut self.data);
+			if slot.headers.len() < segments {
+				slot.headers.resize_with(segments, SendHdr::zeroed);
 			}
 			// SAFETY: the slot is checked out, so it cannot be sent from again
-			// (and its headers cannot grow again) until every send below
-			// completes and returns it to the free list.
-			unsafe { NonNull::new_unchecked(headers.as_mut_ptr()) }
+			// (and its payload and headers cannot change) until every send
+			// below completes and returns it to the free list.
+			(slot.data.as_mut_ptr(), unsafe {
+				NonNull::new_unchecked(slot.headers.as_mut_ptr())
+			})
 		};
 		let staging = Staging {
 			sock: sock.clone(),
@@ -957,32 +957,30 @@ impl TxBuf {
 }
 
 impl std::ops::Deref for TxBuf {
-	type Target = [u8];
+	type Target = Vec<u8>;
 
-	fn deref(&self) -> &[u8] {
-		// SAFETY: `id` is exclusively ours until release; stable allocation.
-		unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.cap) }
+	fn deref(&self) -> &Vec<u8> {
+		&self.data
 	}
 }
 
 impl std::ops::DerefMut for TxBuf {
-	fn deref_mut(&mut self) -> &mut [u8] {
-		// SAFETY: as `deref`.
-		unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.cap) }
+	fn deref_mut(&mut self) -> &mut Vec<u8> {
+		&mut self.data
 	}
 }
 
 impl Drop for TxBuf {
 	fn drop(&mut self) {
 		if !self.armed {
-			self.sock.release_tx(self.id);
+			self.sock.release_tx(self.id, std::mem::take(&mut self.data));
 		}
 	}
 }
 
 impl std::fmt::Debug for TxBuf {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("TxBuf").field("cap", &self.cap).finish()
+		f.debug_struct("TxBuf").field("len", &self.data.len()).finish()
 	}
 }
 
@@ -1262,8 +1260,7 @@ pub(crate) fn on_recv(
 	match received {
 		Ok((_, Some(queued))) => {
 			sock.metrics.rx_receives.add(1);
-			// A zero stride would be a kernel that reported a `UDP_GRO` size of
-			// zero; count the receive as one datagram rather than dividing by it.
+			// Only an empty datagram has a zero stride; it is still one datagram.
 			sock.metrics
 				.rx_datagrams
 				.add(queued.len.div_ceil(queued.stride.max(1)) as u64);
@@ -1454,7 +1451,8 @@ fn resend_unsegmented(op: &SendOp, base: NonNull<u8>, one: &SendOne) -> io::Resu
 /// What the kernel said about one receive, from its control buffer.
 #[derive(Default)]
 struct RecvMeta {
-	/// The `UDP_GRO` segment size, if the receive was coalesced.
+	/// The `UDP_GRO` segment size, if the receive was coalesced. Never zero:
+	/// splitting a payload into zero-byte datagrams would never finish.
 	stride: Option<usize>,
 	/// The ECN codepoint from `IP_TOS` or `IPV6_TCLASS`, if marked.
 	ecn: Option<Ecn>,
@@ -1478,7 +1476,9 @@ impl RecvMeta {
 			let data = &control[offset + header_len..offset + message_len];
 			match (header.cmsg_level, header.cmsg_type) {
 				(libc::SOL_UDP, libc::UDP_GRO) => {
-					meta.stride = read_int(data).and_then(|value| usize::try_from(value).ok());
+					meta.stride = read_int(data)
+						.and_then(|value| usize::try_from(value).ok())
+						.filter(|&stride| stride > 0);
 				}
 				// Linux reports the TOS byte itself, but the traffic class as an int.
 				(libc::IPPROTO_IP, libc::IP_TOS) => {
@@ -1593,6 +1593,34 @@ mod tests {
 	use super::*;
 	use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4};
 
+	/// One `UDP_GRO` control message carrying `size`.
+	fn gro(size: libc::c_int) -> Vec<u8> {
+		let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) } as usize;
+		let mut control = vec![0u8; space];
+		let header = libc::cmsghdr {
+			cmsg_len: unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) } as _,
+			cmsg_level: libc::SOL_UDP,
+			cmsg_type: libc::UDP_GRO,
+		};
+		let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
+		// SAFETY: `control` holds a header plus an int.
+		unsafe {
+			control.as_mut_ptr().cast::<libc::cmsghdr>().write_unaligned(header);
+			control
+				.as_mut_ptr()
+				.add(header_len)
+				.cast::<libc::c_int>()
+				.write_unaligned(size);
+		}
+		control
+	}
+
+	#[test]
+	fn a_zero_gro_size_is_no_stride() {
+		assert_eq!(RecvMeta::parse(&gro(1200)).stride, Some(1200));
+		assert_eq!(RecvMeta::parse(&gro(0)).stride, None);
+	}
+
 	/// Round-trip an address through the kernel wire encoding.
 	fn roundtrip(addr: SocketAddr) -> Option<SocketAddr> {
 		// SAFETY: all-zero is a valid sockaddr_storage.
@@ -1694,10 +1722,9 @@ mod tests {
 		let err = worker
 			.block_on(async {
 				let mut tx = sock.acquire().await.expect("send buffer");
-				tx[..4].copy_from_slice(b"lost");
+				tx.extend_from_slice(b"lost");
 				tx.send(Transmit {
 					to: SocketAddr::new(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), 1),
-					len: 4,
 					segment: 4,
 					ecn: None,
 				})

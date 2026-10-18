@@ -95,13 +95,12 @@ async fn silent_peer_detected() {
 	{
 		connect.websocket.enabled = Some(false);
 	}
-	let client = connect.init(Default::default()).expect("client init");
 
 	let mut config = cluster::Config::default();
 	config.connect = vec![Peer::new(format!("https://127.0.0.1:{port}/"))];
 	let cluster = cluster::Cluster::new(cluster::Options::new(config))
 		.expect("cluster init")
-		.with_client(client);
+		.with_connect(connect, Default::default());
 	let mut announced = cluster.origin.consume().announced();
 	let run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
 

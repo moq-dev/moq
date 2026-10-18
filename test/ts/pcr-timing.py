@@ -444,31 +444,63 @@ def check_rate(scan, args):
     receiver locks to the rate it sees the PCR arrive at. `release` cannot see this: a
     clock running at a steady wrong rate keeps its intervals and only adds to the drift.
     The rate is the least-squares slope of PCR value against arrival over each time base,
-    after the first third of the sample (the start-up fill), which averages the per-PCR
-    release jitter down to a few ppm.
+    after the first third of the sample (the start-up fill).
+
+    Two things move arrival that are not the clock, and the fit is shaped to exclude both.
+    A read stamp is an upper bound on its release, so scheduling and pipe delay only ever
+    add to it: the fit takes the least-delayed PCR in each second, the floor those delays
+    sit on, rather than averaging milliseconds of one-sided wander into the slope. And a
+    floor that moves by more than the `release` tolerance from one second to the next is
+    a standing lag that changed, not a clock, so the fit breaks there and pools the runs
+    either side, each about its own mean. Fit across one, a stall the sender caught up
+    from is a step in the line, and a least-squares slope reads a step of D seconds at
+    fraction f of a span T as a rate of 6 D f (1 - f) / T: a 70 ms standing lag left
+    mid-sample fails a 30 ppm limit forty times over, though `release` already bounds it
+    as lag. A clock off rate moves the floor by microseconds a second, so it never steps
+    and stays measured.
     """
     stamped = [i for i, (_, _, arrival, _) in enumerate(scan.pcr) if arrival is not None]
     if len(stamped) < 3:
         return ("pcr-rate", HARD, True, "not measured (no arrival stamps)", {})
     cut = len(stamped) // 3
-    segments = [[]]
+    bases = [[]]
     for i in stamped[cut:]:
         if i in scan.new_base:
-            segments.append([])
-        segments[-1].append((scan.pcr[i][2], scan.pcr[i][1] / (TICKS_PER_MS * 1000.0)))
+            bases.append([])
+        bases[-1].append((scan.pcr[i][2], scan.pcr[i][1] / (TICKS_PER_MS * 1000.0)))
     rates = []
-    for points in segments:
-        if len(points) < 3 or points[-1][0] - points[0][0] < 1.0:
+    steps = 0
+    for points in bases:
+        # The least-delayed (arrival, PCR seconds) in each second, in order.
+        floor = {}
+        for x, y in points:
+            second = int(y - points[0][1])
+            if second not in floor or x - y < floor[second][0] - floor[second][1]:
+                floor[second] = (x, y)
+        runs = [[]]
+        for x, y in floor.values():
+            if runs[-1] and abs((x - y) - (runs[-1][-1][0] - runs[-1][-1][1])) * 1000.0 > args.release_ms:
+                runs.append([])
+                steps += 1
+            runs[-1].append((x, y))
+        runs = [run for run in runs if len(run) >= 2]
+        if sum(run[-1][0] - run[0][0] for run in runs) < 1.0:
             continue
-        mx = statistics.fmean(x for x, _ in points)
-        my = statistics.fmean(y for _, y in points)
-        var = sum((x - mx) ** 2 for x, _ in points)
-        cov = sum((x - mx) * (y - my) for x, y in points)
+        var = cov = 0.0
+        for run in runs:
+            mx = statistics.fmean(x for x, _ in run)
+            my = statistics.fmean(y for _, y in run)
+            var += sum((x - mx) ** 2 for x, _ in run)
+            cov += sum((x - mx) * (y - my) for x, y in run)
         rates.append((cov / var - 1.0) * 1e6)
     if not rates:
         return ("pcr-rate", HARD, False, "no gradable span (each time base under a second)", {})
     worst = max(rates, key=abs)
-    detail = {"ppm": [round(r, 2) for r in rates], "limit_ppm": args.rate_ppm}
+    detail = {
+        "ppm": [round(r, 2) for r in rates],
+        "limit_ppm": args.rate_ppm,
+        "lag_steps": steps,
+    }
     return (
         "pcr-rate",
         HARD,
@@ -761,6 +793,13 @@ def main():
                     "packets": scan.packets,
                     "pcr_count": len(scan.pcr),
                     "live": args.live,
+                    "clock": "time.monotonic" if args.live else None,
+                    "pcr_samples": scan.pcr,
+                    "new_base": sorted(scan.new_base),
+                    "wraps": scan.wraps,
+                    "pcr_pid": scan.pcr_pid,
+                    "other_pcr_pids": scan.other_pcr_pids,
+                    "parameters": vars(args),
                     "checks": [
                         {"name": n, "severity": s, "ok": ok, "headline": h, "detail": d} for n, s, ok, h, d in results
                     ],

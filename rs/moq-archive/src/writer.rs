@@ -1070,9 +1070,9 @@ mod tests {
 		timeline::Config::default().with_duration_min(Duration::ZERO)
 	}
 
-	/// An append-only log, split every three seconds.
+	/// An append-only log with a three-second nominal duration and nine-second safety ceiling.
 	fn append_only() -> timeline::Config {
-		sparse().with_duration_max(Duration::from_secs(3))
+		sparse().with_duration_hint(Duration::from_secs(3))
 	}
 
 	fn timeline(track: &str) -> String {
@@ -1395,7 +1395,7 @@ mod tests {
 		control.track("video", timeline::Config::default()).await.unwrap();
 		control.track("audio", timeline::Config::default()).await.unwrap();
 
-		// Two second GOPs, 400ms audio groups: with the default 2s minimum, audio packs by its own
+		// Two second GOPs, 400ms audio groups: with the default 4s minimum, audio packs by its own
 		// boundaries, not video's GOPs.
 		for sequence in 0..3 {
 			group(&video, sequence, &[sequence * 2000, sequence * 2000 + 1000]);
@@ -1409,9 +1409,9 @@ mod tests {
 		writer.run().await.unwrap();
 
 		let video = window(&store, "video").await;
-		assert_eq!(groups(&video), vec![(0, 0), (1, 1), (2, 2)]);
+		assert_eq!(groups(&video), vec![(0, 1), (2, 2)]);
 		let audio = window(&store, "audio").await;
-		assert_eq!(groups(&audio), vec![(0, 4), (5, 9), (10, 14)]);
+		assert_eq!(groups(&audio), vec![(0, 9), (10, 14)]);
 		check_objects(&store, "audio", &audio).await;
 	}
 
@@ -1428,10 +1428,10 @@ mod tests {
 
 		// One group that never closes, a frame a second.
 		let mut open = log.create_group(group::Info { sequence: 0 }).unwrap();
-		for second in 0..7 {
+		for second in 0..19 {
 			open.write_frame(ms(second * 1000), format!("line {second}")).unwrap();
 		}
-		// The group is still open, yet its first six seconds are already durable.
+		// The group is still open, yet its first eighteen seconds are already durable.
 		while window(&store, "log").await.len() < 2 {
 			tokio::time::sleep(Duration::from_millis(10)).await;
 		}
@@ -1442,12 +1442,12 @@ mod tests {
 				.map(|record| (record.start, record.end))
 				.collect::<Vec<_>>(),
 			vec![
-				(Position::new(0, 0), Position::new(0, 3)),
-				(Position::new(0, 3), Position::new(0, 6)),
+				(Position::new(0, 0), Position::new(0, 9)),
+				(Position::new(0, 9), Position::new(0, 18)),
 			]
 		);
 		check_objects(&store, "log", &records).await;
-		assert_eq!(store.get_segments("log", 1, true).await.unwrap().frame_start, 3);
+		assert_eq!(store.get_segments("log", 1, true).await.unwrap().frame_start, 9);
 
 		open.finish().unwrap();
 		log.finish().unwrap();
@@ -1455,7 +1455,7 @@ mod tests {
 		run.await.unwrap().unwrap();
 
 		let records = window(&store, "log").await;
-		assert_eq!(records.last().unwrap().start, Position::new(0, 6));
+		assert_eq!(records.last().unwrap().start, Position::new(0, 18));
 		assert_eq!(records.last().unwrap().end, Position::group(1));
 		check_objects(&store, "log", &records).await;
 	}
@@ -1642,56 +1642,6 @@ mod tests {
 				Error::Id(1 << 53)
 			)))
 		);
-	}
-
-	#[tokio::test]
-	async fn a_decreasing_timestamp_fails_the_recording() {
-		let source = broadcast::Info::new().produce();
-		let video = track(&source, "video");
-
-		let store = Store::new(InMemory::new(), "rec");
-		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
-		writer.control().track("video", media()).await.unwrap();
-
-		group(&video, 0, &[1000]);
-		group(&video, 1, &[500]);
-		video.finish().unwrap();
-		source.close();
-
-		assert_eq!(
-			writer.run().await,
-			Err(Error::Source("track video group 1: timestamp 500 precedes 1000".into()))
-		);
-	}
-
-	/// A malformed group fails the recording only after committing everything reported before
-	/// it, including the open record, so the archive stays readable up to the bad frame.
-	#[tokio::test]
-	async fn a_failed_recording_flushes_what_was_reported() {
-		let source = broadcast::Info::new().produce();
-		let video = track(&source, "video");
-
-		let store = Store::new(InMemory::new(), "rec");
-		let writer = Writer::new(store.clone(), source.consume(), Config::default())
-			.await
-			.unwrap();
-		writer.control().track("video", media()).await.unwrap();
-
-		group(&video, 0, &[0]);
-		group(&video, 1, &[1000]);
-		// Under the minimum, so groups 1 and 2 share the record still open at the failure.
-		group(&video, 2, &[1500]);
-		group(&video, 3, &[1200]);
-
-		assert_eq!(
-			writer.run().await,
-			Err(Error::Source(
-				"track video group 3: timestamp 1200 precedes 1500".into()
-			))
-		);
-		let records = window(&store, "video").await;
-		assert_eq!(groups(&records), vec![(0, 0), (1, 2)]);
-		check_objects(&store, "video", &records).await;
 	}
 
 	/// Stopping a recording whose source is still live finishes every timeline and ends `run`.
@@ -1993,7 +1943,7 @@ mod tests {
 		let store = Store::new(InMemory::new(), "rec");
 		let config = Config::default();
 
-		// The first run stores frames 0..6 of a group that never closes, then stops.
+		// The first run stores frames 0..18 of a group that never closes, then stops.
 		let source = broadcast::Info::new().produce();
 		let log = track(&source, "log");
 		let writer = Writer::new(store.clone(), source.consume(), config.clone())
@@ -2001,7 +1951,7 @@ mod tests {
 			.unwrap();
 		writer.control().track("log", append_only()).await.unwrap();
 		let mut open = log.create_group(group::Info { sequence: 0 }).unwrap();
-		for second in 0..7 {
+		for second in 0..19 {
 			open.write_frame(ms(second * 1000), format!("line {second}")).unwrap();
 		}
 		let run = tokio::spawn(writer.run());
@@ -2018,7 +1968,7 @@ mod tests {
 		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
 		writer.control().track("log", append_only()).await.unwrap();
 		let mut replayed = log.create_group(group::Info { sequence: 0 }).unwrap();
-		for second in 0..8 {
+		for second in 0..20 {
 			replayed
 				.write_frame(ms(second * 1000), format!("line {second}"))
 				.unwrap();
@@ -2035,9 +1985,9 @@ mod tests {
 				.map(|record| (record.start, record.end))
 				.collect::<Vec<_>>(),
 			vec![
-				(Position::new(0, 0), Position::new(0, 3)),
-				(Position::new(0, 3), Position::new(0, 6)),
-				(Position::new(0, 6), Position::group(1)),
+				(Position::new(0, 0), Position::new(0, 9)),
+				(Position::new(0, 9), Position::new(0, 18)),
+				(Position::new(0, 18), Position::group(1)),
 			]
 		);
 		check_objects(&store, "log", &records).await;

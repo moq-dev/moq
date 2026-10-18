@@ -24,7 +24,7 @@ pub(crate) struct Peer {
 	pub auth: bool,
 
 	/// MoQ Active Count: whether the REQUEST_OK answering SUBSCRIBE_NAMESPACE counts the
-	/// NAMESPACE messages before the subscription is caught up, in both directions.
+	/// NAMESPACE messages before the subscription is synced, in both directions.
 	pub active_count: bool,
 }
 
@@ -77,7 +77,7 @@ mod tests {
 	/// The announce loops read the peer's declaration once and hold it, while
 	/// subscription serving re-reads it. A second SETUP overwriting the identity would
 	/// split those two apart, so the first write is the one that counts.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn first_write_wins() {
 		let first = Peer {
 			cluster: cluster::Peer {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -210,6 +211,86 @@ func TestEncodeAudioWithOpusObject(t *testing.T) {
 		if err := broadcast.Close(); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
+func TestAudioConsumerDelay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	broadcast, err := origin.CreateBroadcast("audio-delay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := "mic"
+	catalogProducer, err := moqmedia.NewCatalogProducer(broadcast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio, err := moqaudio.NewProducer(catalogProducer,
+		moqaudio.EncoderInput{Format: moq.AudioSampleFormatF32, SampleRate: 48000, Channels: 1},
+		moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &track},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broadcast.Announce(moq.Route{}); err != nil {
+		t.Fatal(err)
+	}
+
+	bc, err := origin.Consume().RequestBroadcast(ctx, "audio-delay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := moqmedia.CatalogSnapshot(ctx, bc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendition, ok := catalog.Audio[track]
+	if !ok {
+		t.Fatalf("catalog has no %q rendition: %v", track, catalog.Audio)
+	}
+
+	fixedDelay := 80 * time.Millisecond
+	fixed, err := moqaudio.Subscribe(ctx, bc, track, rendition, moqaudio.DecoderOutput{Format: moq.AudioSampleFormatF32, Delay: &fixedDelay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixed.Cancel()
+	estimated, err := moqaudio.Subscribe(ctx, bc, track, rendition, moqaudio.DecoderOutput{Format: moq.AudioSampleFormatF32})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer estimated.Cancel()
+	if got := fixed.Delay(); got != fixedDelay {
+		t.Fatalf("fixed delay = %v, want %v", got, fixedDelay)
+	}
+	initial := estimated.Delay()
+
+	// Two 20 ms Opus frames of silence at 48 kHz mono.
+	for i := range 2 {
+		if err := audio.Write(moqaudio.Frame{Timestamp: time.Duration(i) * 20 * time.Millisecond, Data: make([]byte, 960*4)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, consumer := range []*moqaudio.Consumer{fixed, estimated} {
+		if frame, err := consumer.Next(ctx); err != nil || frame == nil {
+			t.Fatalf("next = %v, %v", frame, err)
+		}
+	}
+
+	if got := fixed.Delay(); got != fixedDelay {
+		t.Fatalf("fixed delay after a read = %v, want %v", got, fixedDelay)
+	}
+	if got := estimated.Delay(); got == initial {
+		t.Fatalf("estimated delay stayed at %v after a read", got)
+	}
+
+	if err := audio.Finish(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -551,7 +632,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("audio = %+v, want opus/48000/2", audio)
 	}
 
-	mediaConsumer, err := moqmedia.NewTrackConsumer(ctx, bc, moqmedia.TrackConfig{Name: trackName, Container: audio.Container, Subscription: nil})
+	mediaConsumer, err := moqmedia.NewTrackConsumer(ctx, bc, moqmedia.TrackConfig{Rendition: moqmedia.AudioRendition(trackName, audio)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -657,6 +738,58 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 	if string(frame.Payload) != "group" || frame.Timestamp == nil || *frame.Timestamp != 23_456*time.Microsecond {
 		t.Fatalf("frame = %+v, want payload=group ts=23456", frame)
+	}
+}
+
+func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("backlog", timedInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		group, err := track.AppendGroup()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := group.WriteFrame(moq.Frame{Payload: []byte("x"), Timestamp: ts(time.Duration(i) * time.Millisecond)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := group.Finish(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	order := moq.OrderAscending
+	consumer, err := track.Consume(&moq.Subscription{
+		MaxDelay: 10 * time.Second,
+		Ranges:   []moq.Range{{Start: moq.AnchorRelative{Groups: 2}}},
+		Order:    &order,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Cancel()
+
+	var sequences []uint64
+	for range 3 {
+		group, err := consumer.RecvGroup(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if group == nil {
+			t.Fatal("expected a group")
+		}
+		sequences = append(sequences, group.Sequence())
+	}
+	if !slices.Equal(sequences, []uint64{0, 1, 2}) {
+		t.Fatalf("sequences = %v, want [0 1 2]", sequences)
 	}
 }
 
@@ -838,7 +971,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	}
 	subscribe := make(chan subscribeResult, 1)
 	go func() {
-		media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Name: "requested-audio", Container: moqmedia.LegacyContainer(), Subscription: nil})
+		media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.AudioRendition("requested-audio", moqmedia.Audio{Codec: "opus", SampleRate: 48000, ChannelCount: 2, Enabled: true, Container: moqmedia.LegacyContainer()})})
 		subscribe <- subscribeResult{media: media, err: err}
 	}()
 

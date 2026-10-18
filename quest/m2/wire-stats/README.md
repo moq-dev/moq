@@ -52,20 +52,12 @@ see cost per tenant.
   which loses a crashed session and lags a long one.
 - **One source registry for sessions and embedders.** An embedder registers
   a gateway connection's wire source against a (tier, root) on its stats
-  handle, the same path the relay's own sessions use, like
-  [session outcomes](/quest/m1/session-outcomes.md)' embedder refusals.
+  handle, the same path the relay's own sessions use, like the existing
+  `stats::Handle::refuse` API.
 
 ## Required
 
-- [Presence wire counters](/quest/m2/wire-stats/presence.md) - QUIC,
-  WebTransport, and WebSocket sessions and embedder sources count per
-  (tier, root)
 - [qmux byte counters](/quest/m2/wire-stats/qmux.md) - a WebSocket session
   reports its TCP bytes
 - [moq-srt wire source](/quest/m2/wire-stats/srt.md) - an SRT connection
   reports its wire bytes
-
-## Related
-
-- [Session outcomes](/quest/m1/session-outcomes.md) - the other per-root
-  `Presence` counters and the embedder stats-handle pattern

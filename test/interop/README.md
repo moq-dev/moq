@@ -282,6 +282,11 @@ Each run covers, against a real local relay:
   within 1.5s of the fixture's painted frame within 2s, both bounds about twice
   the worst seen in looped runs under CPU load. A rejoin and a reattach cross
   the same demand gap, so they must reach live the same way.
+- **codec identity and coded-size changes** - an AVC-to-VP8 change keeps the
+  broadcast and rendition ID while moving to a fresh track. Playback must keep
+  advancing and in sync through the change. A VP8 resize doubles the presented
+  dimensions on the same track. The pixels carry a source generation, so old
+  pictures cannot reappear after the new generation starts presenting.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
@@ -295,6 +300,11 @@ boundary and the canvas holding a frame up to one frame old.
 Each window opens once the player's audio buffer has filled and plays. Until
 then the player holds its first decoded frame, silent, for its sync delay, which
 rises past 400ms under load; that is startup, not a gap in playback.
+
+Run a focused lifecycle case with `just test media --media-cases rename`.
+It uses the same real fixture, player and content oracles while leaving cold-start
+grading and the unrelated negative controls to the default full run. A focused
+pass makes no claim about those omitted checks.
 
 The run ends with negative controls. Each injects a defect and names the
 assertion that has to catch it, and passes only by failing there:

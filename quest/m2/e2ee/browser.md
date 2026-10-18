@@ -12,8 +12,4 @@ Existing plaintext operation remains the default; an explicit application creden
 - Accept keys through a programmatic property/API only, never an HTML attribute, URL, persistent browser storage, analytics event, or log. Clear owned secret bytes when the component is replaced or disconnected; do not make extractability a hidden requirement.
 - Derive the opaque broadcast name from the semantic one, discover the newest epoch under that prefix, derive the encrypted catalog name from that generation, decrypt it before existing Hang selection, then subscribe to its opaque media and timeline tracks. Publish every catalog representation and semantic track name through the same protected naming contract.
 - Refuse the stats track and the `echo` attribute while a credential is set: they would publish rendition IDs and per-track counters in plaintext beside the protected broadcast. This quest owns the refusal (decided 2026-10-08), since the stats quests have no encrypted mode to refuse until this credential exists.
-- Cover camera/microphone publication, the stats and `echo` refusal, audio/video playback, late subscription, bounded WebCrypto backpressure, a restarted publisher under a new epoch, bad-group termination, and bad-datagram events in browser tests.
-
-## Required
-
-- [TypeScript E2EE core](/quest/m2/e2ee/typescript.md) - provides browser encryption, decryption, naming, and failure behavior
+- Cover camera/microphone publication, the stats and `echo` refusal, audio/video playback, late subscription, WebCrypto backpressure through awaited writes, a restarted publisher under a new epoch, bad-group termination, and bad-datagram events in browser tests.

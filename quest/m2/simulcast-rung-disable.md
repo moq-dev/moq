@@ -41,10 +41,8 @@ grant.
   settles how that number also orders sends.
 - OBS: each OBS video encoder is its own rendition
   (`video_tracks` in `cpp/obs/src/moq-output.cpp`), so apply the rule per
-  encoder through the generated C++ package. It builds on the plugin
-  following its grant ([Rate control](/quest/m2/obs-moq-video/rate-control.md));
-  if that has not landed, split the OBS slice into its own quest instead of
-  blocking the rest.
+  encoder through the generated C++ package, on top of the per-encoder
+  grant following (`MoQRate` in `cpp/obs/src/moq-rate.h`).
 
 Tests with mocked time: a shrinking grant disables the top rung first and
 keeps the lower ones at their share; a recovering grant re-enables it only
@@ -58,6 +56,5 @@ publishers expose for it. Wire: none; `enabled` already exists.
 ## Related
 
 - [Ladder controller](/quest/m3/ladder/controller.md) - the same rung disable for generated transcode ladders
-- [Rendition preference](/quest/m2/rendition-preference.md) - viewer selection that drops disabled renditions before ranking the rest
 - [OBS multitrack](/quest/m2/obs-multitrack.md) - OBS's native multitrack encoders as the renditions this disables
 - [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes

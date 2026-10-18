@@ -69,7 +69,7 @@ impl Shard {
     /// the group size leaves: `256 / count` values.
     fn prefix(self) -> u8 {
         let count = u32::from(self.count);
-        let stride = rand::rng().random_range(0..256 / count);
+        let stride = crate::entropy::rng().random_range(0..256 / count);
         (stride * count + u32::from(self.index)) as u8
     }
 
@@ -137,7 +137,7 @@ impl RandomConnectionIdGenerator {
 impl ConnectionIdGenerator for RandomConnectionIdGenerator {
     fn generate_cid(&mut self) -> ConnectionId {
         let mut bytes_arr = [0; MAX_CID_SIZE];
-        rand::rng().fill_bytes(&mut bytes_arr[..self.cid_len]);
+        crate::entropy::rng().fill_bytes(&mut bytes_arr[..self.cid_len]);
         if let Some(shard) = self.shard {
             bytes_arr[0] = shard.prefix();
             bytes_arr[SHARD_MARKER_BYTE] |= SHARD_MARKER;
@@ -176,7 +176,7 @@ pub struct HashedConnectionIdGenerator {
 impl HashedConnectionIdGenerator {
     /// Create a generator with a random key
     pub fn new() -> Self {
-        Self::from_key(rand::rng().random())
+        Self::from_key(crate::entropy::rng().random())
     }
 
     /// Create a generator with a specific key
@@ -206,7 +206,7 @@ impl Default for HashedConnectionIdGenerator {
 impl ConnectionIdGenerator for HashedConnectionIdGenerator {
     fn generate_cid(&mut self) -> ConnectionId {
         let mut bytes_arr = [0; NONCE_LEN + SIGNATURE_LEN];
-        rand::rng().fill_bytes(&mut bytes_arr[..NONCE_LEN]);
+        crate::entropy::rng().fill_bytes(&mut bytes_arr[..NONCE_LEN]);
         let mut hasher = rustc_hash::FxHasher::default();
         hasher.write_u64(self.key);
         hasher.write(&bytes_arr[..NONCE_LEN]);

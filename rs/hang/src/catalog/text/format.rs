@@ -18,8 +18,8 @@ pub enum TextFormat {
 	#[default]
 	Vtt,
 
-	/// TTML / IMSC1 ([W3C IMSC]) fragment (XML). Each frame's payload is a document fragment with
-	/// absolute timing.
+	/// TTML / IMSC1 ([W3C IMSC]). Each frame's payload is one complete TTML document with absolute
+	/// timing, clipped to the frame: its `body` begins at the frame timestamp.
 	///
 	/// [W3C IMSC]: https://www.w3.org/TR/ttml-imsc1.1/
 	#[display("ttml")]

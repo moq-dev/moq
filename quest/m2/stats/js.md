@@ -37,10 +37,6 @@ echo path of a catalog soliciting feedback. Both use the `@moq/hang` schemas.
   stats track and the `echo` attribute when it adds one: they would publish
   rendition IDs and per-track counters in plaintext beside it.
 
-## Required
-
-- [Schema](/quest/m2/stats/schema.md) - the zod schemas this fills
-
 ## Related
 
 - [Encrypted browser components](/quest/m2/e2ee/browser.md) - refuses stats and feedback on an encrypted broadcast

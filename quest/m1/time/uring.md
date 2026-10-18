@@ -33,10 +33,6 @@ Public API: breaking. `moq_uring::Timer` is re-exported, and `Timer::set`
 takes `Option<moq_clock::Instant>` instead of std's; no conversion shim.
 Wire: none.
 
-## Required
-
-- [moq-net on moq-clock](/quest/m1/time/net.md) - the driver's instant becomes moq-clock's
-
 ## Closes
 
 - [#3122](https://github.com/moq-dev/moq/issues/3122) - close this issue when the quest finishes

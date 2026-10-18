@@ -29,6 +29,7 @@ use std::{
 mod cid_queue;
 pub mod coding;
 mod constant_time;
+mod entropy;
 // Not part of the public API: compiled only for the crate's own tests and for the
 // `fuzz/` harness. The connection target needs a TLS provider.
 #[cfg(all(
@@ -54,8 +55,8 @@ mod connection;
 pub use crate::connection::{
     Checkpoint, Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Credit,
     CreditStats, Datagrams, Event, FinishError, FrameStats, PathStats, ReadError, ReadableError,
-    RecvStream, RttEstimator, SendDatagramError, SendStream, ShouldTransmit, StreamEvent, Streams,
-    UdpStats, WriteError, Written,
+    RecvStream, RttEstimator, SendDatagramError, SendDomain, SendGroup, SendGroups, SendStream,
+    ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;
@@ -64,12 +65,14 @@ pub use connection::qlog::QlogStream;
 pub use rustls;
 
 mod config;
+mod limits;
 #[cfg(feature = "qlog")]
 pub use config::QlogConfig;
 pub use config::{
     AckFrequencyConfig, ClientConfig, ConfigError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig,
     ServerConfig, StdSystemTime, TimeSource, TransportConfig, ValidationTokenConfig,
 };
+pub use limits::{Limits, LimitsError};
 
 pub mod crypto;
 

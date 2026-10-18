@@ -3,6 +3,7 @@
  * a watch coming and going over held watches and attached sessions.
  */
 
+import { Once } from "@moq/signals";
 import { announcedView } from "../src/announced.test-util";
 import * as Announce from "../src/announced.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
@@ -28,7 +29,7 @@ class FakeSession {
 	die!: () => void;
 
 	constructor() {
-		registerWire(this, { consume: () => new BroadcastProducer().consume() });
+		registerWire(this, { consume: () => new BroadcastProducer().consume(), goaway: new Once() });
 		this.closed = new Promise((resolve) => {
 			this.die = () => resolve(null);
 		});

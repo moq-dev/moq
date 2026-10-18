@@ -30,11 +30,14 @@ tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-async-trait = "0.1"
+async-trait = { workspace = true }
+axum = { workspace = true }
 criterion = { workspace = true }
-object_store = { workspace = true, features = ["fs"] }
+object_store = { workspace = true, features = ["fs", "aws"] }
+s3s = "0.17"
+s3s-fs = "0.17"
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "test-util"] }
 
 [[bench]]
 name = "writer"

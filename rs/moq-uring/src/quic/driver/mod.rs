@@ -11,10 +11,12 @@
 
 mod connection;
 mod endpoint;
+mod group;
 mod stream;
 
 pub use connection::Connection;
 pub use endpoint::Endpoint;
+pub use group::SendGroup;
 pub use stream::{Credit, RecvStream, SendStream};
 
 pub(crate) use connection::{End, Shared};
@@ -79,9 +81,9 @@ impl From<moq_quic::ConnectionError> for Error {
 				reason: err.reason.clone(),
 			},
 			ConnectionError::TimedOut => Self::TimedOut,
+			ConnectionError::LocallyClosed => Self::Closed,
 			// The rest (a stateless reset, an unsupported version, exhausted
-			// ids) have no code to report, and a local close is published
-			// where it happens rather than waited for as an event.
+			// ids) have no code to report.
 			err => Self::Quic(err.to_string()),
 		}
 	}

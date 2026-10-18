@@ -30,9 +30,10 @@ public final class BroadcastConsumer: Sendable {
     ///
     /// `reference` is `Media.Video.broadcast` / `Media.Audio.broadcast`: `nil` or empty names this
     /// broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
-    /// rendition that carries one before `Media.TrackConsumer.subscribe`, `subscribeTrack`, `fetchGroup`, or
-    /// `Media.GroupConsumer.fetch`, which take a track name rather than a rendition: the rendition's
-    /// `track`, or its catalog key when `nil`. `Audio.Consumer.subscribe` and `Video.Consumer.subscribe` resolve both themselves.
+    /// rendition that carries one before `subscribeTrack` or `fetchGroup`, which take a track name
+    /// rather than a rendition: the rendition's `track`, or its ID when `nil`. The
+    /// rendition-based `Media.TrackConsumer.subscribe`, `Media.GroupConsumer.fetch`,
+    /// `Audio.Consumer.subscribe`, and `Video.Consumer.subscribe` resolve both themselves.
     ///
     /// Throws if this broadcast came from a local producer rather than an origin, since a
     /// standalone broadcast has no sibling to name.

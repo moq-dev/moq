@@ -36,6 +36,12 @@ export async function probe(wanted: { sampleRate: number; width: number; height:
 				codedHeight: wanted.height,
 			}),
 		),
+		"encode vp8": await supports(() =>
+			VideoEncoder.isConfigSupported({ codec: "vp8", width: wanted.width, height: wanted.height }),
+		),
+		"decode vp8": await supports(() =>
+			VideoDecoder.isConfigSupported({ codec: "vp8", codedWidth: wanted.width, codedHeight: wanted.height }),
+		),
 		"encode opus": await supports(() =>
 			AudioEncoder.isConfigSupported({ codec: "opus", sampleRate: wanted.sampleRate, numberOfChannels: 1 }),
 		),
@@ -57,8 +63,17 @@ export function missing(found: Capabilities, role: Role): string[] {
 					"MediaStreamTrackProcessor",
 					"canvas.captureStream",
 					"encode avc1.42001f",
+					"encode vp8",
 					"encode opus",
 				]
-			: ["WebSocket", "VideoDecoder", "AudioDecoder", "AudioWorkletNode", "decode avc1.42001f", "decode opus"];
+			: [
+					"WebSocket",
+					"VideoDecoder",
+					"AudioDecoder",
+					"AudioWorkletNode",
+					"decode avc1.42001f",
+					"decode vp8",
+					"decode opus",
+				];
 	return required.filter((name) => found[name] !== true);
 }

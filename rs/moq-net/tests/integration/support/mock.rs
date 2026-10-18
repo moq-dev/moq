@@ -14,7 +14,7 @@ use std::{
 	collections::VecDeque,
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll, ready},
 	time::Duration,
@@ -36,7 +36,7 @@ struct Line {
 	/// When the reset reaches the reader.
 	reset: Mutex<Option<Instant>>,
 	/// The send order last set, for [`MockSession::release_unis_by_priority`].
-	priority: AtomicI32,
+	priority: AtomicI64,
 	/// Opened while its opener held streams back.
 	held: bool,
 	/// Once released, delivers what follows the first write; see [`MockSession::split_unis`].
@@ -212,6 +212,7 @@ impl MockSendStream {
 
 impl poll::SendStream for MockSendStream {
 	type Error = memory::Error;
+	type Group = poll::Ungrouped;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		let written = self.inner.poll_write(cx, buf);
@@ -224,9 +225,13 @@ impl poll::SendStream for MockSendStream {
 		self.wrote(first, written)
 	}
 
-	fn set_priority(&mut self, order: i32) {
+	fn set_priority(&mut self, order: i64) {
 		self.line.priority.store(order, Ordering::Relaxed);
 		self.inner.set_priority(order);
+	}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match *group {}
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
@@ -344,8 +349,8 @@ impl MockRecvStream {
 			if self.landing != Some(arrival) {
 				self.landing = Some(arrival);
 				let waker = cx.waker().clone();
-				drop(moq_net_sim::spawn(async move {
-					moq_net_sim::sleep_until(arrival).await;
+				drop(moq_clock::sim::spawn(async move {
+					moq_clock::sleep_until(arrival).await;
 					waker.wake();
 				}));
 			}
@@ -369,8 +374,8 @@ impl MockRecvStream {
 			poll::RecvStream::stop(&mut inner, code);
 			return;
 		}
-		drop(moq_net_sim::spawn(async move {
-			moq_net_sim::sleep(latency).await;
+		drop(moq_clock::sim::spawn(async move {
+			moq_clock::sleep(latency).await;
 			poll::RecvStream::stop(&mut inner, code);
 		}));
 	}
@@ -464,6 +469,8 @@ struct Side {
 	stats_reads: AtomicUsize,
 	/// Whether reading the stats panics; see [`MockSession::panic_on_stats`].
 	panic_on_stats: AtomicBool,
+	/// The wire counters [`poll::Session::wire`] exposes, which a test updates as a transport would.
+	wire: moq_net::transport::Wire,
 }
 
 /// The connection statistics a [`MockSession`] reports. Unavailable by default.
@@ -591,11 +598,20 @@ impl poll::Session for MockSession {
 		Poll::Ready(Ok(send))
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+	fn send_group(&mut self, _: i64) -> Option<poll::Ungrouped> {
+		None
+	}
+
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&poll::Ungrouped>,
+		order: i64,
+	) -> Result<(), Self::Error> {
 		if self.side.lossy.load(Ordering::Relaxed) {
-			return Poll::Ready(Ok(()));
+			return Ok(());
 		}
-		self.inner.poll_send_datagram(cx, payload)
+		self.inner.send_datagram(payload, group, order)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -629,6 +645,10 @@ impl poll::Session for MockSession {
 		);
 		self.side.stats_reads.fetch_add(1, Ordering::Relaxed);
 		*self.side.stats.lock().unwrap()
+	}
+
+	fn wire(&self) -> Option<moq_net::transport::Wire> {
+		Some(self.side.wire.clone())
 	}
 }
 
@@ -667,6 +687,11 @@ impl MockSession {
 	/// How many times the stats were read.
 	pub fn stats_reads(&self) -> usize {
 		self.side.stats_reads.load(Ordering::Relaxed)
+	}
+
+	/// The wire counters this side's transport exposes.
+	pub fn wire(&self) -> &moq_net::transport::Wire {
+		&self.side.wire
 	}
 
 	/// Panic on the driver's next stats sample, which a [`moq_net::Session::stats`]
@@ -849,6 +874,7 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			stats: Default::default(),
 			stats_reads: Default::default(),
 			panic_on_stats: Default::default(),
+			wire: Default::default(),
 		}),
 		accept_uni: Default::default(),
 		accept_bi: Default::default(),

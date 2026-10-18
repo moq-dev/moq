@@ -17,8 +17,7 @@ and falls when that record is evicted. Codex flagged it
 The 09-28 audit reversed #4280's decision 4 (the observed maximum), and the
 09-29 planning settled the rest:
 
-- The target is `ceil` of the reference timeline's declared duration from
-  [Timelines declare their segment duration](/quest/m1/archive/declared-duration.md).
+- The target is `ceil` of the reference timeline's declared duration.
   Until that timeline's entry is declared, the rendition has no playlist yet.
 - A segment whose rounded `EXTINF` exceeds the target (a GOP that overran the
   publisher's declared value) is listed anyway, with a rate-limited warning.
@@ -42,7 +41,3 @@ comment ("default 1s minimum"; the minimum is 2s). Hold the target per
 playlist URI, not per `Rendition`: `renditions::Producer::sync` replaces the
 `Rendition` on a catalog reconfigure, so test that a reconfigure mid-run
 keeps the original target.
-
-## Required
-
-- [Timelines declare their segment duration](/quest/m1/archive/declared-duration.md) - the declared value the target is taken from

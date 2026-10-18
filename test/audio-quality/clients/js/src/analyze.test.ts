@@ -73,6 +73,14 @@ describe("analyze", () => {
 		expect(summary.drift.find((d) => d.clock === "render")).toEqual({ clock: "render", rate: 0, offset: 1000 });
 	});
 
+	test("a render clock that only starts with the audio is not void", () => {
+		// A native device sits unpulled for the first two seconds of its stream, before first audio.
+		const startup = Array.from({ length: 8 }, (_, i) => ({ at: i * 125, render: 0, stalled: true }));
+		const summary = analyze(input([...startup, ...clean()]));
+		expect(summary.voids).toEqual([]);
+		expect(summary.drift.find((d) => d.clock === "render")).toEqual({ clock: "render", rate: 0, offset: 1000 });
+	});
+
 	test("a gap on the render clock is counted where it lands on the viewer's", () => {
 		const samples = clean();
 		// 20 s into the viewer clock is 19 s on the render clock.

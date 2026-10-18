@@ -138,7 +138,7 @@ enum Op {
     Datagram {
         who: Who,
         len: u16,
-        drop: bool,
+        order: i8,
     },
     Ping {
         who: Who,
@@ -554,7 +554,7 @@ impl Pair {
                     conn.set_send_window(window.into());
                 }
             }
-            Op::Datagram { who, len, drop } => {
+            Op::Datagram { who, len, order } => {
                 let peer = self.peer(who);
                 let seq = peer.datagrams_sent.len() as u64;
                 let Some(conn) = peer.conn() else {
@@ -566,7 +566,7 @@ impl Pair {
                     .chain((0..len).map(|i| datagram_byte(seq, i.into())))
                     .collect();
                 let size = data.len();
-                if conn.datagrams().send(data, drop).is_ok() {
+                if conn.datagrams().send(data, None, order.into()).is_ok() {
                     peer.datagrams_sent.push(size);
                 }
             }
@@ -820,7 +820,7 @@ pub(super) fn datagrams() -> Vec<Vec<u8>> {
         Op::Datagram {
             who: Who::Server,
             len: 10,
-            drop: false,
+            order: 0,
         },
         Op::KeyUpdate { who: Who::Client },
         Op::Ping { who: Who::Client },

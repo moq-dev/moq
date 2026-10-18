@@ -1,16 +1,16 @@
 import { expect, test } from "bun:test";
-import { authorize, type Claims, ClaimsSchema, ScopeSchema } from "./claims.ts";
+import { authorize, type Claims, ClaimsSchema, type Permissions, ScopeSchema } from "./claims.ts";
 import { encodeGrants } from "./wire.ts";
 
 // These cases mirror the Rust moq-auth crate's claims::tests one-for-one, so both
 // sides stay pinned to the same authorization semantics.
 
 function claims(root: string, subscribe: string[], publish: string[]): Claims {
-	return { root, subscribe, publish };
+	return ClaimsSchema.parse({ root, subscribe, publish });
 }
 
-function texts(permissions: { subscribe: { toJSON(): string[] }; publish: { toJSON(): string[] } }) {
-	return { subscribe: permissions.subscribe.toJSON(), publish: permissions.publish.toJSON() };
+function texts(permissions: Permissions) {
+	return { subscribe: permissions.subscribe.path.toJSON(), publish: permissions.publish.path.toJSON() };
 }
 
 test("claims granting nothing are rejected, matching Rust's useless-token rule", () => {
@@ -21,13 +21,13 @@ test("claims granting nothing are rejected, matching Rust's useless-token rule",
 	expect(() => ClaimsSchema.parse({ root: "demo" })).toThrow();
 
 	// `**` is everything under the root, which is a real grant.
-	expect(ClaimsSchema.parse({ root: "demo", publish: ["**"] }).publish).toEqual(["**"]);
+	expect(ClaimsSchema.parse({ root: "demo", publish: ["**"] }).publish?.toJSON()).toEqual(["**"]);
 });
 
 test("claims read legacy put/get prefixes as subtrees", () => {
 	const claims = ClaimsSchema.parse({ root: "demo", put: ["alice", "/a//b/"], get: "" });
-	expect(claims.publish).toEqual(["alice/**", "a/b/**"]);
-	expect(claims.subscribe).toEqual(["**"]);
+	expect(claims.publish?.toJSON()).toEqual(["a/b/**", "alice/**"]);
+	expect(claims.subscribe?.toJSON()).toEqual(["**"]);
 	expect(ScopeSchema.parse({ root: "demo", put: ["room"] }).publish).toEqual(["room/**"]);
 });
 
@@ -96,7 +96,7 @@ test("authorize - empty root", () => {
 
 test("authorize - slashes are implicit", () => {
 	const permissions = authorize(claims("/room/123/", ["bob/**"], []), "//room/123//");
-	expect(permissions.subscribe.toJSON()).toEqual(["bob/**"]);
+	expect(permissions.subscribe.path.toJSON()).toEqual(["bob/**"]);
 });
 
 test("authorize - respects segment boundaries", () => {
@@ -116,5 +116,12 @@ test("authorize - no access at path", () => {
 test("authorize - wildcards rebase as a set", () => {
 	// `**/chat` reached at `chat` is both the path itself and deeper `**/chat`.
 	const permissions = authorize(claims("", ["**/chat"], []), "chat");
-	expect(permissions.subscribe.toJSON()).toEqual(["", "**/chat"]);
+	expect(permissions.subscribe.path.toJSON()).toEqual(["", "**/chat"]);
+});
+
+test("a capped role retains its cap instead of encoding legacy put", () => {
+	const claims = ClaimsSchema.parse({ publish: { path: "alice/**", rate: 8_000_000 } });
+	const encoded = encodeGrants(claims);
+	expect(encoded).toHaveProperty("publish.rate", 8_000_000);
+	expect(encoded).not.toHaveProperty("put");
 });

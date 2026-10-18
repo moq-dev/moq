@@ -1,6 +1,7 @@
 package dev.moq
 
 import dev.moq.media.*
+import dev.moq.audio.Consumer as AudioConsumer
 import dev.moq.audio.Producer as AudioProducer
 import dev.moq.video.Consumer as VideoConsumer
 import dev.moq.video.Producer as VideoProducer
@@ -141,6 +142,21 @@ class SmokeTest {
         }
     }
 
+    /** A settings UI reads its defaults and menus from the library rather than repeating them. */
+    @Test
+    fun `client defaults and versions come from the library`() {
+        val defaults = clientDefaults()
+        assertNotNull(defaults.quic.maxStreams)
+        assertNotNull(defaults.quic.idleTimeout)
+        assertNotNull(defaults.timeout)
+        assertNull(defaults.quic.congestionControl)
+        assertTrue(versions().isNotEmpty())
+        val congestion: CongestionControl = CongestionControl.DELAY
+        assertEquals(congestion, QuicConfig(congestionControl = congestion).congestionControl)
+        // Dialing with the reported defaults is the same as dialing with none.
+        Client(defaults).close()
+    }
+
     /**
      * The `dev.moq` typealiases resolve to the FFI objects, and the wrapper
      * extensions apply to them. Constructing through an alias is enough to
@@ -241,6 +257,27 @@ class SmokeTest {
     }
 
     @Test
+    fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
+            for (ms in 0uL until 3uL) {
+                val group = track.appendGroup()
+                group.writeFrame(Frame(payload = "x".encodeToByteArray(), timestampUs = ms * 1_000uL))
+                group.finish()
+            }
+            val consumer = track.consume(
+                Subscription(
+                    maxDelayUs = 10_000_000uL,
+                    ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
+                    order = Order.ASCENDING,
+                ),
+            )
+            val sequences = List(3) { checkNotNull(consumer.recvGroup()).sequence() }
+            assertEquals(listOf(0uL, 1uL, 2uL), sequences)
+        }
+    }
+
+    @Test
     fun `readFrame skips empty then populated groups`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
@@ -318,7 +355,7 @@ class SmokeTest {
 
             // Fetch while the track is still published: finishing the media producer
             // unpublishes it, and the fetch would then miss with NotFound.
-            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(name = name, sequence = 0uL, container = audio.container, options = FetchGroupOptions(priority = 3u)))
+            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(rendition = dev.moq.media.AudioRendition(name, audio), sequence = 0uL, options = FetchGroupOptions(priority = 3u)))
 
             // Close the group so the fetched stream terminates instead of waiting for more.
             media.finish()
@@ -359,7 +396,6 @@ class SmokeTest {
         fun stats(rttUs: ULong?) = ConnectionStats(
             rttUs = rttUs,
             estimatedSendRateBps = null,
-            estimatedRecvRateBps = null,
             bytesSent = null,
             bytesReceived = null,
             bytesLost = null,
@@ -582,6 +618,46 @@ class SmokeTest {
 
             val connected = connect.await().exceptionOrNull()
             assertTrue(connected is MoqException.Cancelled, "expected a cancelled connect, got: $connected")
+        }
+    }
+
+    /** A fixed playout delay is reported back as is, and an estimated one moves as frames are read. */
+    @Test
+    fun `audio consumer reports its playout delay`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            origin.createBroadcast("audio-delay").use { broadcast ->
+                val audio = AudioProducer(
+                    CatalogProducer(broadcast),
+                    AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
+                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "mic"),
+                )
+                broadcast.announce(Route())
+
+                val consumer = origin.consume().requestBroadcast("audio-delay")
+                val catalog = CatalogConsumer.subscribe(consumer).next()!!
+                val rendition = catalog.audio["mic"]!!
+
+                val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delayUs = 80_000uL)
+                assertEquals(80.milliseconds, fixedOutput.delay)
+                val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
+                val estimated = AudioConsumer.subscribe(consumer, "mic", rendition, AudioDecoderOutput(format = AudioSampleFormat.F32))
+                assertEquals(80.milliseconds, fixed.delay)
+                val initial = estimated.delay
+
+                // Two 20 ms Opus frames of silence at 48 kHz mono.
+                for (i in 0 until 2) {
+                    audio.write(AudioFrame(timestampUs = i.toULong() * 20_000uL, data = ByteArray(960 * 4)))
+                }
+                assertNotNull(fixed.next())
+                assertNotNull(estimated.next())
+
+                assertEquals(80.milliseconds, fixed.delay)
+                assertTrue(estimated.delay != initial, "the estimate should move as frames are read")
+
+                fixed.cancel()
+                estimated.cancel()
+                audio.finish()
+            }
         }
     }
 

@@ -3,6 +3,10 @@
 //! Maps the AV1CodecConfigurationRecord (av1C) flag bits into the
 //! catalog's AV1 codec struct, and provides an [`Import`] that publishes
 //! raw AV1 bitstreams (OBU-framed) to a moq broadcast.
+//!
+//! The sequence header has no sample aspect. AV1's per-frame
+//! [`render_size`](https://aomediacodec.github.io/av1-spec/#render-size-syntax)
+//! hint can change between frames, so it does not establish a display aspect for the whole rendition.
 
 mod import;
 mod split;
@@ -71,6 +75,8 @@ pub(crate) fn config_from_av1c(av1c: &[u8]) -> Result<hang::catalog::VideoConfig
 		chroma_sample_position: av1c[2] & 0x03,
 		..Default::default()
 	});
+	// configOBUs follow the four header bytes, usually with the sequence header.
+	config.color = color(&av1c[4..]);
 	config.description = Some(bytes::Bytes::copy_from_slice(av1c));
 	Ok(config)
 }
