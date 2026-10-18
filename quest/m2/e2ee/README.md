@@ -20,7 +20,7 @@ The contract is [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md), pro
 ### Epoch and identity
 
 - Every publisher instance mints an epoch, a UUIDv7 in lowercase text, and publishes at `<opaque>` with the epoch on its route, where `<opaque>` derives from the credential and the semantic broadcast name without the epoch. The epoch is an input to every HKDF derivation, so a restart, takeover, or explicit group sequence cannot repeat a nonce under a key: nothing is persisted across instances and no generation counter is redistributed. The epoch is the shared [`Epoch`](/doc/concept/moq-lite.md#publisher-epochs) primitive. Subscribers resolve `<opaque>` and take the epoch from its route, where the newest wins; on a wire without route epochs the application supplies it.
-- An encrypting publisher refuses a shared or explicit epoch (maintainer, 2026-10-08). A redundant pair under one `moq --epoch`, or the same-epoch importers of [Same-epoch importers](/quest/m1/hop-aligned-import.md), would derive the same keys and repeat every nonce. Both cores produce only under an epoch they minted themselves; consuming still binds a discovered one. Rejected: a per-instance salt. State the rule in the draft's epoch section.
+- An encrypting publisher refuses a shared or explicit epoch (maintainer, 2026-10-08). A redundant pair under one `moq --epoch`, or the same-epoch importers of [Same-epoch importers](/quest/m2/hop-aligned-import.md), would derive the same keys and repeat every nonce. Both cores produce only under an epoch they minted themselves; consuming still binds a discovered one. Rejected: a per-instance salt. State the rule in the draft's epoch section.
 - The epoch is untrusted and unauthenticated. A wrong epoch fails authentication and a withheld one denies service; neither can make a nonce repeat, because only the publisher instance chooses what it encrypts under. This is the same trust a cache needs to serve the right instance. Plaintext broadcasts adopt the same epoch by default through [broadcast epochs](/quest/m0/broadcast-epoch/README.md).
 - Nothing in the path says the bytes are encrypted. The format after decryption (`meeting.hang`) is inside the opaque name; a plaintext player, exporter, or matcher that opens a protected broadcast finds no catalog it can read and fails with its usual typed refusal, the same as for any format it does not support.
 - One 32-byte secret authorizes the whole broadcast; HKDF-SHA-256 derives separate AES-128-GCM keys for each physical track and for grouped-frame versus datagram domains. A grouped frame uses the 96-bit nonce `uint64_be(group) || uint32_be(frame)`; a datagram uses its sequence with frame zero under the datagram domain. Empty AAD: every immutable end-to-end field is in the HKDF info or the nonce.
@@ -43,10 +43,12 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 - A platform that forwards and meters protected bytes must never preview, record, archive, transmux, transcode, transcribe, compose, or inspect them, rejecting those paths before opening a processing session or writing product state. Applications needing those operations terminate E2EE outside the platform. A platform classifies protected broadcasts by its own credential or product state, never by name; the moq.pro (downstream) exclusion classifier and dashboard work stay downstream.
 - The first proof covers browser TypeScript and native Rust publication and playback in both directions, with grouped audio and video over both moq-lite and MoQ Transport. Shared vectors cover groups and moq-lite datagrams. JavaScript carries MoQ Transport datagrams since [#4979](https://github.com/moq-dev/moq/pull/4979), so the proof covers them too.
 
+### Dynamic names
+
+Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so a publisher cannot answer a request for a name it never declared. [Dynamic names](/quest/m2/e2ee/dynamic-names.md) designs that before any implementation, and [#5876](https://github.com/moq-dev/moq/pull/5876) (the broadcast wrappers, whose `reserve_track` covers only names declared in advance) is held until it decides.
+
 ## Required
 
-- [TypeScript E2EE core](/quest/m2/e2ee/typescript.md) - the `@moq/e2ee` package
-  mirroring the Rust surface, with WebCrypto in a serial pump
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust media
   and catalog publishers accept opaque physical names and emit no plaintext
   semantic catalog in E2EE mode
@@ -59,6 +61,9 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
+- [Dynamic names](/quest/m2/e2ee/dynamic-names.md) - a reviewed design for
+  answering requests for undeclared track names, split into implementation
+  quests; #5876 waits on it
 
 ## Closes
 
@@ -68,4 +73,4 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 ## Related
 
 - [archive](/quest/m1/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats
-- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the shared-epoch redundancy an encrypting publisher refuses
+- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - the shared-epoch redundancy an encrypting publisher refuses

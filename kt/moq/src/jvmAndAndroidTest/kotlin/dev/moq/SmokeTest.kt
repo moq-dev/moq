@@ -1,6 +1,10 @@
 package dev.moq
 
 import dev.moq.media.*
+import dev.moq.audio.Consumer as AudioConsumer
+import dev.moq.audio.Producer as AudioProducer
+import dev.moq.video.Consumer as VideoConsumer
+import dev.moq.video.Producer as VideoProducer
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
@@ -25,6 +29,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration
 import kotlin.time.Instant
 
 @Serializable
@@ -137,6 +142,21 @@ class SmokeTest {
         }
     }
 
+    /** A settings UI reads its defaults and menus from the library rather than repeating them. */
+    @Test
+    fun `client defaults and versions come from the library`() {
+        val defaults = clientDefaults()
+        assertNotNull(defaults.quic.maxStreams)
+        assertNotNull(defaults.quic.idleTimeout)
+        assertNotNull(defaults.timeout)
+        assertNull(defaults.quic.congestionControl)
+        assertTrue(versions().isNotEmpty())
+        val congestion: CongestionControl = CongestionControl.DELAY
+        assertEquals(congestion, QuicConfig(congestionControl = congestion).congestionControl)
+        // Dialing with the reported defaults is the same as dialing with none.
+        Client(defaults).close()
+    }
+
     /**
      * The `dev.moq` typealiases resolve to the FFI objects, and the wrapper
      * extensions apply to them. Constructing through an alias is enough to
@@ -237,6 +257,27 @@ class SmokeTest {
     }
 
     @Test
+    fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
+            for (ms in 0uL until 3uL) {
+                val group = track.appendGroup()
+                group.writeFrame(Frame(payload = "x".encodeToByteArray(), timestampUs = ms * 1_000uL))
+                group.finish()
+            }
+            val consumer = track.consume(
+                Subscription(
+                    maxDelayUs = 10_000_000uL,
+                    ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
+                    order = Order.ASCENDING,
+                ),
+            )
+            val sequences = List(3) { checkNotNull(consumer.recvGroup()).sequence() }
+            assertEquals(listOf(0uL, 1uL, 2uL), sequences)
+        }
+    }
+
+    @Test
     fun `readFrame skips empty then populated groups`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
@@ -314,7 +355,7 @@ class SmokeTest {
 
             // Fetch while the track is still published: finishing the media producer
             // unpublishes it, and the fetch would then miss with NotFound.
-            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(name = name, sequence = 0uL, container = audio.container, options = FetchGroupOptions(priority = 3u)))
+            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(rendition = dev.moq.media.AudioRendition(name, audio), sequence = 0uL, options = FetchGroupOptions(priority = 3u)))
 
             // Close the group so the fetched stream terminates instead of waiting for more.
             media.finish()
@@ -338,8 +379,8 @@ class SmokeTest {
      */
     @Test
     fun `video consumer exposes a frames flow like audio does`() {
-        val video: (VideoConsumer) -> Flow<VideoDecodedFrame> = VideoConsumer::frames
-        val audio: (AudioConsumer) -> Flow<AudioFrame> = AudioConsumer::frames
+        val video: (dev.moq.video.Consumer) -> Flow<VideoDecodedFrame> = dev.moq.video.Consumer::frames
+        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Frame> = dev.moq.audio.Consumer::frames
         assertNotNull(video)
         assertNotNull(audio)
     }
@@ -355,7 +396,6 @@ class SmokeTest {
         fun stats(rttUs: ULong?) = ConnectionStats(
             rttUs = rttUs,
             estimatedSendRateBps = null,
-            estimatedRecvRateBps = null,
             bytesSent = null,
             bytesReceived = null,
             bytesLost = null,
@@ -366,7 +406,7 @@ class SmokeTest {
         assertNull(stats(null).rtt)
         assertEquals(1_500.microseconds, stats(1_500uL).rtt)
         assertEquals(20.milliseconds, Frame(payload = ByteArray(0), timestampUs = 20_000uL).timestamp)
-        assertEquals(20.milliseconds, AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
+        assertEquals(Duration.ZERO, AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
     }
 
     @Test
@@ -540,20 +580,21 @@ class SmokeTest {
         val input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u)
 
         BroadcastProducer().use { broadcast ->
-            val fine = broadcast.encodeAudio(
-                "fine",
+            val catalog = CatalogProducer(broadcast)
+            val fine = AudioProducer(
+                catalog,
                 input,
-                AudioEncoderOutput(codec = AudioCodec.opus(), frameDurationUs = 2_500u),
+                AudioEncoderOutput(codec = AudioCodec.opus(), track = "fine", frameDurationUs = 2_500u),
             )
             // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
             fine.write(AudioFrame(timestampUs = 0uL, data = ByteArray(120 * 4)))
             fine.finish()
 
             assertFailsWith<MoqException.Audio> {
-                broadcast.encodeAudio(
-                    "coarse",
+                AudioProducer(
+                    catalog,
                     input,
-                    AudioEncoderOutput(codec = AudioCodec.opus(), frameDurationUs = 2_000u),
+                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "coarse", frameDurationUs = 2_000u),
                 )
             }
         }
@@ -580,11 +621,52 @@ class SmokeTest {
         }
     }
 
+    /** A fixed playout delay is reported back as is, and an estimated one moves as frames are read. */
+    @Test
+    fun `audio consumer reports its playout delay`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            origin.createBroadcast("audio-delay").use { broadcast ->
+                val audio = AudioProducer(
+                    CatalogProducer(broadcast),
+                    AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
+                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "mic"),
+                )
+                broadcast.announce(Route())
+
+                val consumer = origin.consume().requestBroadcast("audio-delay")
+                val catalog = CatalogConsumer.subscribe(consumer).next()!!
+                val rendition = catalog.audio["mic"]!!
+
+                val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delayUs = 80_000uL)
+                assertEquals(80.milliseconds, fixedOutput.delay)
+                val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
+                val estimated = AudioConsumer.subscribe(consumer, "mic", rendition, AudioDecoderOutput(format = AudioSampleFormat.F32))
+                assertEquals(80.milliseconds, fixed.delay)
+                val initial = estimated.delay
+
+                // Two 20 ms Opus frames of silence at 48 kHz mono.
+                for (i in 0 until 2) {
+                    audio.write(AudioFrame(timestampUs = i.toULong() * 20_000uL, data = ByteArray(960 * 4)))
+                }
+                assertNotNull(fixed.next())
+                assertNotNull(estimated.next())
+
+                assertEquals(80.milliseconds, fixed.delay)
+                assertTrue(estimated.delay != initial, "the estimate should move as frames are read")
+
+                fixed.cancel()
+                estimated.cancel()
+                audio.finish()
+            }
+        }
+    }
+
     @Test
     fun `decoded video frame owns its picture`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.createBroadcast("video-decode-frame").use { broadcast ->
-                val video = broadcast.encodeVideo(
+                val video = VideoProducer(
+                    CatalogProducer(broadcast),
                     VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
                     // Software so the encode is deterministic everywhere.
                     VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
@@ -603,7 +685,7 @@ class SmokeTest {
                 val catalog = CatalogConsumer.subscribe(consumer).next()!!
                 val rendition = catalog.video["camera"]!!
 
-                val decoder = consumer.decodeVideo("camera", rendition, VideoDecoderOutput())
+                val decoder = VideoConsumer.subscribe(consumer, "camera", rendition, VideoDecoderOutput())
 
                 // Keep the encoder fed so the decoder sees frames after it joined.
                 for (i in 10 until 40) {
@@ -637,8 +719,8 @@ class SmokeTest {
         for (codecFirst in listOf(true, false)) {
             BroadcastProducer().use { broadcast ->
                 val codec = AudioCodec.opus()
-                val output = AudioEncoderOutput(codec = codec)
-                val producer = broadcast.encodeAudio("mic", input, output)
+                val output = AudioEncoderOutput(codec = codec, track = "mic")
+                val producer = AudioProducer(CatalogProducer(broadcast), input, output)
                 if (codecFirst) {
                     codec.close()
                 } else {
@@ -650,7 +732,7 @@ class SmokeTest {
                 } else {
                     codec.close()
                 }
-                assertEquals("mic", producer.name())
+                assertEquals("mic", producer.demand().name())
                 producer.finish()
             }
         }

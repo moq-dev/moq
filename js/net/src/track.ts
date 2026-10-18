@@ -13,7 +13,11 @@ import {
 	finalSequence,
 	groupBounds,
 	hooks,
+	insertRun,
 	type Recv,
+	type Run,
+	removeRun,
+	runGaps,
 	type TrackRequestOptions,
 	type TrackSequence,
 	type TrackSequences,
@@ -312,6 +316,9 @@ export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
 	priority?: number;
 
+	/** Maximum age behind the live edge this caller accepts. Omission uses publisher retention alone. */
+	maxDelay?: Milli;
+
 	/**
 	 * Abandons this fetch, rejecting with the signal's reason. Concurrent fetches of the same
 	 * group share one stream, cancelled only once every caller has left. An already-aborted
@@ -360,12 +367,15 @@ export class Consumer {
 
 	/** Fetch a single group by sequence without holding a live subscription. */
 	fetchGroup(sequence: number, options?: FetchGroupOptions): Promise<GroupConsumer> {
+		if (options?.maxDelay !== undefined) {
+			options = { ...options, maxDelay: wireMillis("maxDelay", options.maxDelay) };
+		}
 		return this.#broadcast.fetchGroup(this.name, sequence, options);
 	}
 }
 
 // The index of the first timeline group at or after `sequence`.
-function timelineIndex(timeline: GroupConsumer[], sequence: number): number {
+function timelineIndex(timeline: readonly { sequence: number }[], sequence: number): number {
 	let lo = 0;
 	let hi = timeline.length;
 	while (lo < hi) {
@@ -395,6 +405,11 @@ class TrackState {
 	/** The producer fanning into this sink, so a subscriber can mint a sibling of itself. */
 	producer?: Producer;
 	groups = new Signal<GroupConsumer[]>([]);
+	// Sequences the upstream publisher gave up: an incoming SUBSCRIBE_DROP or a producer
+	// cut. Kept apart from the cache so reclaim cannot erase a disposition a downstream
+	// publisher still has to forward, and as runs so a wide DROP costs one entry. Replaced
+	// rather than mutated, so a cursor can tell it changed by identity.
+	drops = new Signal<readonly Run[]>([]);
 	// Every group still in the producer's replay cache, including groups this
 	// subscriber already consumed, sorted by sequence. Drift anchors have the same
 	// lifetime as content. Sorted so the latency guard, evaluated per group and per
@@ -455,7 +470,39 @@ async function resolveInfo(state: TrackState): Promise<Info> {
 // A source group retained in the producer cache, with the mirror handed to each sink
 // so eviction can drop them together.
 // `arrived` is when the group joined this track, which its mirrors age a predecessor from.
-type CachedGroup = { group: GroupProducer; mirrors: Map<TrackState, GroupConsumer>; arrived: Instant };
+// `bound` is its first frame's timestamp once checked to fit between its neighbors', which
+// bounds theirs; `unverified` marks one accepted below the eviction watermark instead.
+type CachedGroup = {
+	group: GroupProducer;
+	mirrors: Map<TrackState, GroupConsumer>;
+	arrived: Instant;
+	bound?: Timestamp;
+	unverified?: boolean;
+};
+
+// A group's checked start, kept by sequence.
+type Start = { sequence: number; start: Timestamp };
+
+// Whether `a` presents before `b`, whatever their scales. Cross-scale products can pass
+// 2^53, so they are compared exactly in BigInt, as Rust does in u128.
+function earlier(a: Timestamp, b: Timestamp): boolean {
+	if (a.scale === b.scale) return a.value < b.value;
+	const [ma, ea] = binary(a.value);
+	const [mb, eb] = binary(b.value);
+	const e = Math.min(ea, eb);
+	return (ma * BigInt(b.scale)) << BigInt(ea - e) < (mb * BigInt(a.scale)) << BigInt(eb - e);
+}
+
+// A finite, non-negative `value` exactly as `mantissa * 2^exponent`. Doubling is exact, so
+// a fraction becomes an integer within its binary digits.
+function binary(value: number): [bigint, number] {
+	let exponent = 0;
+	while (!Number.isInteger(value)) {
+		value *= 2;
+		exponent--;
+	}
+	return [BigInt(value), exponent];
+}
 
 let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 
@@ -562,6 +609,16 @@ export class Producer {
 	#cache: CachedGroup[] = [];
 	// The same entries by sequence, so a write finds a duplicate without a scan.
 	#cached = new Map<number, CachedGroup>();
+	// The cached groups' checked starts, sorted by sequence, so a first frame finds its
+	// neighbors' with a search.
+	#bounds: Start[] = [];
+	// The highest-sequence checked start evicted. Eviction is not a sequence prefix, so a
+	// group above it is checked against it as well as its cached neighbors; one at or below
+	// it may have lost its lower bound. One entry, so nothing grows with the cache.
+	#evicted?: Start;
+	// A session's copy of a remote track, whose groups are never checked for a rewind: a
+	// received timestamp may not be media time (a lite-05/06 untimed track carries send times).
+	#remote = false;
 	// When the cache was last scanned. See #prune.
 	#pruned = Number.NEGATIVE_INFINITY;
 	// When the track closed, which restarts the former newest group's idle window. See #prune.
@@ -587,11 +644,21 @@ export class Producer {
 
 	static {
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
+		hooks.receiveTrack = (producer) => {
+			producer.#remote = true;
+		};
 		// Anything written before binding still counts, so the namespace never goes backwards.
 		bindProducerSequence = (producer, sequence) => {
 			const own = producer.#sequence;
 			if (own === sequence) return;
 			sequence.next = Math.max(sequence.next, producer.#received);
+			// What earlier producers of the name wrote is gone from this track's cache, so their
+			// highest checked start is its eviction watermark.
+			const previous = sequence.bound;
+			if (previous && (!producer.#evicted || producer.#evicted.sequence < previous.sequence)) {
+				producer.#evicted = previous;
+			}
+			if (own.bound && (!previous || previous.sequence < own.bound.sequence)) sequence.bound = own.bound;
 			producer.#sequence = sequence;
 			if (producer.#state.closed.peek() !== undefined) return;
 			own.holders--;
@@ -599,6 +666,28 @@ export class Producer {
 		};
 		hooks.bindSequence = bindProducerSequence;
 		hooks.cachedLargest = (producer) => producer.#largest();
+		hooks.dropTrackGroups = (producer, start, end) => producer.#drop(start, end);
+	}
+
+	#drop(start: number, end: number): void {
+		if (start >= end) return;
+		for (const state of [this.#state, ...this.#sinks]) {
+			state.drops.update((drops) => {
+				const next = [...drops];
+				insertRun(next, start, end);
+				return next;
+			});
+		}
+	}
+
+	// A publisher may re-create a group it cut; the sequence is no longer given up.
+	#undrop(sequence: number): void {
+		for (const state of [this.#state, ...this.#sinks]) {
+			const drops = state.drops.peek();
+			if (runGaps(drops, sequence, sequence + 1).length === 0) {
+				state.drops.set(removeRun(drops, sequence, sequence + 1));
+			}
+		}
 	}
 
 	/**
@@ -730,6 +819,7 @@ export class Producer {
 
 		this.#prune();
 		for (const entry of this.#cache) this.#mirror(entry, sink);
+		sink.drops.set(this.#state.drops.peek());
 
 		sink.received.set(this.#received);
 		sink.end.set(this.#state.end.peek());
@@ -754,6 +844,7 @@ export class Producer {
 	#mirror(entry: CachedGroup, sink: TrackState): void {
 		const dst = entry.group.mirror();
 		hooks.arriveGroup(dst, entry.arrived);
+		if (entry.unverified) hooks.unverifyGroup(dst);
 		entry.mirrors.set(sink, dst);
 		timelineInsert(sink.timeline, dst);
 		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
@@ -793,9 +884,60 @@ export class Producer {
 	}
 
 	// Take a cached group out of the cache lookups.
-	#uncache(entry: CachedGroup): void {
+	#uncache(entry: CachedGroup, evicted = false): void {
 		this.#cache.splice(this.#cache.indexOf(entry), 1);
 		this.#cached.delete(entry.group.sequence);
+		this.#unbound(entry, evicted);
+	}
+
+	// The starts a first frame of group `sequence` must fall between: the nearest checked
+	// starts cached on either side, since groups land out of sequence order, and the eviction
+	// watermark. Throws {@link TimestampMismatch} on a rewind; an equal start is allowed. Returns
+	// whether the group is late, at or below the watermark, where its floor may be gone, so
+	// the watermark caps it instead and it is accepted unverified.
+	#admit(sequence: number, start: Timestamp): boolean {
+		const bounds = this.#bounds;
+		const index = timelineIndex(bounds, sequence);
+		let floor = bounds[index - 1]?.start;
+		let ceiling = bounds[bounds[index]?.sequence === sequence ? index + 1 : index]?.start;
+		const evicted = this.#evicted;
+		const late = evicted !== undefined && sequence <= evicted.sequence;
+		if (evicted && late) {
+			if (ceiling === undefined || earlier(evicted.start, ceiling)) ceiling = evicted.start;
+		} else if (evicted) {
+			if (floor === undefined || earlier(floor, evicted.start)) floor = evicted.start;
+		}
+		if ((floor && earlier(start, floor)) || (ceiling && earlier(ceiling, start))) throw new TimestampMismatch();
+		return late;
+	}
+
+	// Record a cached group's checked start: a bound for its neighbors, or unverified.
+	#record(entry: CachedGroup, start: Timestamp, late: boolean): void {
+		if (late) {
+			entry.unverified = true;
+			for (const mirror of entry.mirrors.values()) hooks.unverifyGroup(mirror);
+			return;
+		}
+		entry.bound = start;
+		const sequence = entry.group.sequence;
+		const shared = this.#sequence.bound;
+		if (!shared || shared.sequence < sequence) this.#sequence.bound = { sequence, start };
+		const last = this.#bounds.at(-1);
+		if (!last || last.sequence < sequence) this.#bounds.push({ sequence, start });
+		else this.#bounds.splice(timelineIndex(this.#bounds, sequence), 0, { sequence, start });
+	}
+
+	// Drop a group's checked start as it leaves the cache, raising the watermark to it when
+	// it was evicted.
+	#unbound(entry: CachedGroup, evicted = false): void {
+		const start = entry.bound;
+		if (start === undefined) return;
+		const sequence = entry.group.sequence;
+		const index = timelineIndex(this.#bounds, sequence);
+		if (this.#bounds[index]?.sequence === sequence) this.#bounds.splice(index, 1);
+		if (evicted && (this.#evicted === undefined || sequence > this.#evicted.sequence)) {
+			this.#evicted = { sequence, start };
+		}
 	}
 
 	// The newest group remains replayable while the track is live, even after the group
@@ -859,6 +1001,7 @@ export class Producer {
 				if (oldest === undefined || activity < oldest) oldest = activity;
 			} else {
 				this.#cached.delete(entry.group.sequence);
+				this.#unbound(entry, true);
 				this.#evict(entry);
 			}
 		}
@@ -893,9 +1036,30 @@ export class Producer {
 		this.#pruneTimerAt = at;
 	}
 
-	// Retain a source group and fan it out to every live sink.
-	#publish(group: GroupProducer): void {
+	// Retain a source group and fan it out to every live sink. A group that already holds
+	// frame 0 passes its checked `start` and whether it is `late`; any other checks frame 0
+	// against this track when it lands.
+	#publish(group: GroupProducer, start?: Timestamp, late = false): void {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
+		this.#undrop(group.sequence);
+		group.closed.then((closed) => {
+			if (!(closed instanceof Error) || closed instanceof TooFarBehind) return;
+			// A re-created group already replaced this one.
+			const current = this.#cached.get(group.sequence);
+			if (current && current.group !== group) return;
+			this.#drop(group.sequence, group.sequence + 1);
+		});
+		const sequence = group.sequence;
+		if (this.#remote) {
+			// Only a local publisher's writes are checked.
+		} else if (start) {
+			this.#record(entry, start, late);
+		} else {
+			hooks.admitGroupStart(group, (start) => {
+				const late = this.#admit(sequence, start);
+				return () => this.#record(entry, start, late);
+			});
+		}
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
 		this.#advance(group.sequence);
@@ -962,6 +1126,7 @@ export class Producer {
 	 *
 	 * Its frames must match the track's {@link Info.timescale}: a timestamp on every frame of
 	 * a timed track and none on an untimed one, or the write throws {@link TimestampMismatch}.
+	 * So does a first frame that starts before the group below it or after the one above it.
 	 */
 	appendGroup(): GroupProducer {
 		const group = new GroupProducer(this.#nextSequence());
@@ -980,23 +1145,28 @@ export class Producer {
 	 * sequence again. Best effort (mirrors Rust): nothing remembers a sequence whose cache
 	 * entry is already gone, so a long-evicted sequence is accepted as new. Throws
 	 * {@link TimestampMismatch} if the group already holds a frame whose timedness
-	 * disagrees with the track's {@link Info.timescale}.
+	 * disagrees with the track's {@link Info.timescale}, or whose first frame starts before
+	 * the group below it or after the one above it.
 	 */
 	writeGroup(group: GroupProducer) {
 		this.#writable(group.sequence);
 		this.#bind(group);
 		this.#cap(group);
-
 		const existing = this.#cached.get(group.sequence);
 		if (existing) {
 			if (!(existing.group.closed.peek() instanceof Error)) {
 				throw new Error(`duplicate group: sequence=${group.sequence}`);
 			}
+			// Subscribers may have seen the aborted incarnation's start, so it stays a watermark.
 			this.#evict(existing);
-			this.#uncache(existing);
+			this.#uncache(existing, true);
 		}
 
-		this.#publish(group);
+		// A group written before it joined is checked here, before it is cached or fanned out.
+		const start = this.#remote ? undefined : hooks.groupStart(group);
+		const late = start !== undefined && this.#admit(group.sequence, start);
+
+		this.#publish(group, start, late);
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
@@ -1174,12 +1344,20 @@ export class Subscriber {
 	#state: TrackState;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
-	#enforceLatency = true;
+	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
+	// default, an omitted one is unbounded, leaving publisher retention alone.
+	#fetchBudget?: number;
 	// Which cursor owns this subscription. Both cursors draw from one buffer, so the
 	// first group read commits the track to arrival order and {@link ordered} commits
 	// it to sequence order; whichever wins is the only one allowed from here on.
 	// Datagrams are a separate cursor and never commit.
 	#mode?: "arrival" | "ordered";
+	// What the lite publisher forwards as drops: sequences given up and not reported yet,
+	// the track's drops last folded in, and every sequence already reported. Drops are
+	// persistent track state, so they are tracked here rather than removed for everyone.
+	#pending: Run[] = [];
+	#dropsSeen?: { drops: readonly Run[]; start: number; end?: number };
+	#reported: Run[] = [];
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -1210,14 +1388,10 @@ export class Subscriber {
 			break;
 		}
 
-		const requested = this.#state.update.peek()?.maxDelay ?? 0;
+		const requested = this.#fetchBudget ?? this.#state.update.peek()?.maxDelay ?? 0;
 		const retained = this.#state.info.peek()?.maxAge;
 		return {
-			budget: this.#enforceLatency
-				? retained === undefined
-					? requested
-					: Math.min(requested, retained)
-				: Number.POSITIVE_INFINITY,
+			budget: retained === undefined ? requested : Math.min(requested, retained),
 			presentation,
 			end,
 		};
@@ -1228,11 +1402,9 @@ export class Subscriber {
 	//
 	// Its first timestamp is the furthest presentation time `sequence` could still reach.
 	// An upper bound, deliberately: a frame's duration is not on the wire, so a group's own
-	// last timestamp says where it starts presenting, not where it ends. Only the
-	// *immediate* successor counts: timestamps need not rise with sequence (a rewind
-	// reorders them), so a later stamped group proves nothing about where an unstamped
-	// successor will begin, and shrinking the bound is the unsafe direction. An unstamped
-	// successor leaves the reach unbounded until it presents a frame.
+	// last timestamp says where it starts presenting, not where it ends. The bound is the
+	// *immediate* successor's start, so an unstamped successor leaves the reach unbounded
+	// until it presents a frame.
 	#successor(sequence: number, end?: number): GroupConsumer | undefined {
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, sequence + 1); i < timeline.length; i++) {
@@ -1314,7 +1486,6 @@ export class Subscriber {
 	}
 
 	#guard(group: GroupConsumer): GroupConsumer {
-		if (!this.#enforceLatency) return group;
 		hooks.expireGroup(group, {
 			expired: () => this.#isStale(group, this.#drift(), true),
 			changed: [
@@ -1342,10 +1513,10 @@ export class Subscriber {
 
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
-		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
+		hooks.tryRecvGroup = (subscriber, started) => subscriber.#tryRecvGroup(started);
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
-		hooks.exemptFetch = (subscriber) => {
-			subscriber.#enforceLatency = false;
+		hooks.fetchBudget = (subscriber, maxDelay) => {
+			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
 		};
 		hooks.replaceGroups = (subscriber, groups) => subscriber.#replaceGroups(groups);
 		// The sequence cursor lives here (it shares the buffer and the drift anchor with
@@ -1447,6 +1618,7 @@ export class Subscriber {
 		return undefined;
 	}
 
+	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * An independent subscriber to the same track, with its own cursor and its own replay of
 	 * the retained window.
@@ -1534,6 +1706,8 @@ export class Subscriber {
 			switch (recv.kind) {
 				case "group":
 					return recv.group;
+				case "drop":
+					continue;
 				case "done":
 					return undefined;
 				case "error":
@@ -1553,10 +1727,41 @@ export class Subscriber {
 
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
-	#tryRecvGroup(): Recv {
+	#tryRecvGroup(dispositions = false): Recv {
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
-		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+		// The first part of `[from, to)` this cursor has not reported yet, now reported.
+		const report = (from: number, to: number): Recv | undefined => {
+			if (!dispositions) return undefined;
+			const [gap] = runGaps(this.#reported, Math.max(from, start), Math.min(to, end ?? to));
+			if (!gap) return undefined;
+			insertRun(this.#reported, gap.start, gap.end);
+			return { kind: "drop", ...gap };
+		};
+
+		while (groups.length > 0 && groups[0].sequence < start) {
+			const skipped = groups.shift();
+			if (!skipped) break;
+			skipped.close();
+			const dropped = report(skipped.sequence, skipped.sequence + 1);
+			if (dropped) return dropped;
+		}
+		if (dispositions) {
+			// Rescanned only after it changed, so an idle poll costs nothing per drop held.
+			// Out-of-window runs were skipped, so a moved window rescans too.
+			const drops = this.#state.drops.peek();
+			const seen = this.#dropsSeen;
+			if (!seen || seen.drops !== drops || seen.start !== start || seen.end !== end) {
+				this.#dropsSeen = { drops, start, end };
+				for (const run of drops) insertRun(this.#pending, run.start, run.end);
+			}
+			for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
+				const dropped = report(run.start, run.end);
+				if (!dropped || dropped.kind !== "drop") continue;
+				if (dropped.end < run.end) this.#pending.unshift({ start: dropped.end, end: run.end });
+				return dropped;
+			}
+		}
 		const drift = this.#drift();
 
 		for (;;) {
@@ -1565,8 +1770,21 @@ export class Subscriber {
 			const group = groups[0];
 			if (!group || (end !== undefined && group.sequence >= end)) break;
 			groups.shift();
+			// A sequence this cursor already reported dropped stays dropped: the subscriber
+			// accounted for it, so a group re-created under it is not served.
+			if (dispositions && runGaps(this.#reported, group.sequence, group.sequence + 1).length === 0) {
+				group.close();
+				continue;
+			}
+			if (dispositions && group.closed.peek() instanceof Error) {
+				const dropped = report(group.sequence, group.sequence + 1);
+				if (dropped) return dropped;
+				continue;
+			}
 			if (this.#isStale(group, drift)) {
 				group.close();
+				const dropped = report(group.sequence, group.sequence + 1);
+				if (dropped) return dropped;
 				continue;
 			}
 			return { kind: "group", group: this.#guard(group) };
@@ -1594,6 +1812,7 @@ export class Subscriber {
 	#groupChanged(fn: () => void): Dispose {
 		const dispose = [
 			this.#state.groups.changed(fn),
+			this.#state.drops.changed(fn),
 			this.#cursor.changed(fn),
 			this.#state.closed.changed(fn),
 			this.#state.end.changed(fn),

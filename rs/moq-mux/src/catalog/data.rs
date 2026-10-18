@@ -91,7 +91,7 @@ impl Listing {
 		}
 		self.clock = clock;
 		let now = clock.now();
-		let flush = captured.map(|captured| (captured, std::time::Instant::now()));
+		let flush = captured.map(|captured| (captured, moq_clock::Instant::now()));
 		self.record_at(now, bytes, flush)
 	}
 
@@ -101,7 +101,7 @@ impl Listing {
 		&mut self,
 		now: moq_net::Timestamp,
 		bytes: usize,
-		flush: Option<(moq_net::Timestamp, std::time::Instant)>,
+		flush: Option<(moq_net::Timestamp, moq_clock::Instant)>,
 	) -> crate::Result<()> {
 		// Each write is its own span, closed by the next one.
 		self.estimator.cut(Some(now));

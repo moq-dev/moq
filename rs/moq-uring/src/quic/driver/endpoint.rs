@@ -9,7 +9,7 @@
 //! shared with the rest of the endpoint implementation.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -50,6 +50,9 @@ pub(crate) struct Inner {
 	/// owns connection-id routing (and its hasher choices) itself, so nothing
 	/// a peer picks reaches this map.
 	conns: RefCell<FxHashMap<ConnectionHandle, connection::Shared>>,
+	/// Every live connection by the peer it was launched toward, so a send
+	/// that finds no route only visits the connections dialing that peer.
+	peers: RefCell<BTreeSet<(SocketAddr, ConnectionHandle)>>,
 	/// Incoming handshakes in flight. Together with the accept queue this is
 	/// bounded by [`Config::backlog`].
 	pending: Cell<usize>,
@@ -88,6 +91,7 @@ impl Endpoint {
 			return Err(Error::Io(Shared::gone_error().to_string()));
 		};
 		let local = socket.local_addr().map_err(|err| Error::Io(err.to_string()))?;
+		socket.route_unreachable();
 		let server = match &config.server {
 			Some(server) => {
 				let mut server = super::server_config(server)?;
@@ -111,6 +115,7 @@ impl Endpoint {
 			endpoint: RefCell::new(endpoint),
 			accepting: RefCell::new(accepting),
 			conns: RefCell::new(FxHashMap::default()),
+			peers: RefCell::new(BTreeSet::new()),
 			pending: Cell::new(0),
 			backlog: config.backlog,
 			handshake: config.handshake,
@@ -228,12 +233,16 @@ impl Inner {
 		// Handle drops and connection teardowns re-check the exit condition.
 		waiter.register(&mut self.task_waiters.borrow_mut());
 
+		while let Some((addr, err)) = self.socket.take_unreachable() {
+			self.unreachable(addr, &err);
+		}
+
 		loop {
 			if self.handles.get() == 0 && self.conns.borrow().is_empty() {
 				return Poll::Ready(());
 			}
 			match self.socket.poll_recv(waiter) {
-				Poll::Ready(Ok(mut packet)) => self.demux(&mut packet),
+				Poll::Ready(Ok(packet)) => self.demux(&packet),
 				Poll::Ready(Err(err)) => {
 					self.fail(Error::Io(err.to_string()));
 					return Poll::Ready(());
@@ -244,7 +253,7 @@ impl Inner {
 	}
 
 	/// Route every datagram in one receive, then kick the connections fed.
-	fn demux(self: &Rc<Self>, packet: &mut udp::Packet) {
+	fn demux(self: &Rc<Self>, packet: &udp::Packet) {
 		let from = packet.from();
 		let ecn = packet.ecn().map(super::ecn_to_quic);
 		// Where the endpoint writes its own answers (version negotiation,
@@ -255,19 +264,25 @@ impl Inner {
 		// coalesce is a single source, and ids rarely change mid-burst).
 		let mut fed: Vec<ConnectionHandle> = Vec::new();
 
-		for segment in packet.segments() {
+		// moq-quic takes each datagram as an owned `BytesMut`: copy the whole
+		// completion out of the receive pool once and split it per datagram.
+		// The last one is taken whole, since a split makes the allocation
+		// shared, which a lone datagram has no use for.
+		let mut payload = BytesMut::from(packet.payload());
+		let stride = packet.stride();
+		while !payload.is_empty() {
+			let segment = match payload.len() > stride {
+				true => payload.split_to(stride),
+				false => std::mem::take(&mut payload),
+			};
 			buf.clear();
 			// The socket does not report which local address a datagram
 			// arrived on, so the four-tuple stays half known, exactly as it
 			// does on a platform without `IP_PKTINFO`.
-			let event = self.endpoint.borrow_mut().handle(
-				moq_clock::Instant::now(),
-				from,
-				None,
-				ecn,
-				BytesMut::from(&segment[..]),
-				&mut buf,
-			);
+			let event =
+				self.endpoint
+					.borrow_mut()
+					.handle(moq_clock::Instant::now(), from, None, ecn, segment, &mut buf);
 			match event {
 				Some(DatagramEvent::ConnectionEvent(key, event)) => {
 					let conn = self.conns.borrow().get(&key).cloned();
@@ -275,6 +290,7 @@ impl Inner {
 					// we can feed.
 					if let Some(conn) = conn {
 						conn.conn.borrow_mut().handle_event(event);
+						conn.wire.set_received_bytes(conn.conn.borrow().stats().udp_rx.bytes);
 						if !fed.contains(&key) {
 							fed.push(key);
 						}
@@ -399,14 +415,13 @@ impl Inner {
 		let Poll::Ready(Ok(mut tx)) = self.socket.poll_acquire(&kio::Waiter::noop()) else {
 			return;
 		};
-		if transmit.size > tx.len() {
+		if transmit.size > tx.capacity() {
 			tracing::debug!(size = transmit.size, "dropping an oversized endpoint response");
 			return;
 		}
-		tx[..transmit.size].copy_from_slice(&buf[..transmit.size]);
+		tx.extend_from_slice(&buf[..transmit.size]);
 		let transmit = udp::Transmit {
 			to: transmit.destination,
-			len: transmit.size,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
 		};
@@ -417,13 +432,15 @@ impl Inner {
 
 	/// Register `conn`, spawn its driver, and arrange its teardown.
 	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: moq_quic::Connection) -> connection::Shared {
+		let peer = conn.remote_address();
 		let (shared, driver) = connection::launch(&self.owner, self.socket.clone(), Rc::downgrade(self), key, conn);
 		self.conns.borrow_mut().insert(key, shared.clone());
+		self.peers.borrow_mut().insert((peer, key));
 
 		let inner = self.clone();
 		self.owner.spawn(async move {
 			driver.await;
-			inner.release(key);
+			inner.release(key, peer);
 		});
 		shared
 	}
@@ -439,10 +456,31 @@ impl Inner {
 	}
 
 	/// A connection's driver ended; forget it.
-	fn release(&self, key: ConnectionHandle) {
+	fn release(&self, key: ConnectionHandle, peer: SocketAddr) {
 		self.conns.borrow_mut().remove(&key);
+		self.peers.borrow_mut().remove(&(peer, key));
 		// The demux task may be waiting on us to exit.
 		self.task_waiters.borrow_mut().wake();
+	}
+
+	/// A send to `addr` found no route: tell every connection to that peer,
+	/// and moq-quic decides which of them give up.
+	fn unreachable(&self, addr: SocketAddr, err: &std::io::Error) {
+		tracing::debug!(%addr, %err, "no route to the peer");
+		let conns: Vec<connection::Shared> = {
+			let all = self.conns.borrow();
+			self.peers
+				.borrow()
+				.range((addr, ConnectionHandle(0))..=(addr, ConnectionHandle(usize::MAX)))
+				.filter_map(|(_, key)| all.get(key))
+				.cloned()
+				.collect()
+		};
+		for conn in conns {
+			conn.conn.borrow_mut().handle_unreachable();
+			// The driver reports a failed handshake and drains it out of the table.
+			conn.kick();
+		}
 	}
 
 	/// The socket died: everything on it fails with `err`.

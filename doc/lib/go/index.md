@@ -83,7 +83,10 @@ for event, err := range announced.All(ctx) {
 ```
 
 ```go
-import "time"
+import (
+    "time"
+    moqvideo "moq.dev/moq/video"
+)
 
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
@@ -94,12 +97,13 @@ _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: &timestamp})
 _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 
 track := "camera"
-video, _ := broadcast.EncodeVideo(
-    moq.VideoEncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: 30},
-    moq.VideoEncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.AutoEncoder()},
+catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
+video, _ := moqvideo.NewProducer(catalogProducer,
+    moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: 30},
+    moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.AutoEncoder()},
     nil,
 )
-_ = video.Write(moq.VideoFrame{TimestampUs: pts, Data: rgba})
+_ = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 epoch := moq.MintEpoch() // a fresh epoch per run
 _ = broadcast.Announce(moq.Route{Epoch: &epoch})
 _ = audio.Finish()
@@ -110,7 +114,8 @@ broadcast.Close()    // keep the producer reachable while publishing, then close
 ## Things to know
 
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
-one to one; the API reference has the names.
+one to one; the API reference has the names, and [Layers](/lib/layers)
+shows which module holds each.
 
 - **Context cancellation.** Every call that can block takes a `context.Context` first, and cancelling it tears down the native work, not just your wait. A one-shot call (`RequestBroadcast`, `FetchGroup`, `Server.Accept`) aborts alone; a stream read (`Next`, `ReadFrame`, and the iterators over them) cancels the stream it reads.
 - **Keep owners reachable.** An origin from `moq.NewOriginProducer` has no `Close`. It ends when the garbage collector reaches its last owner (each producer, published broadcast, and `OriginDynamic`), and its consumers then fail with `moq.ErrClosed`.
@@ -118,7 +123,7 @@ one to one; the API reference has the names.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `Flush(timestamp)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** `Close` each `VideoDecodedFrame` promptly, or the decoder stalls. `Resize` is best effort, so read each frame's `Width()` and `Height()`.
 - **Closing.** `client.Close()` drains for up to one second and returns an error on failure. `session.Shutdown(ctx)` does the same, and `session.Cancel(code)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
-- **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, `EstimatedRecvRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero.
+- **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero. `Version` names the negotiated protocol, and while a client session reconnects `Session().Failure()` says why. Hold the owned `BandwidthConsumer` returned by `Session().RecvBandwidth()` to receive bandwidth estimates. `Peek()` reads the current estimate in bits per second and `Changed(ctx)` waits for a new one. Calling `Close()` on the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Errors.** Read diagnostic payloads from `Reason` and structured protocol failures from `Details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 - **Track demand.** Obtain a dynamic track request’s `Demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
@@ -137,6 +142,8 @@ kind `ProtocolKindTooManyRequests`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
+A session closed because its credential expired reports `ProtocolKindExpired`, and a request refused for an expired token raises `moq.ErrExpired`; refresh the token before retrying.
+A catalog that needs a newer moq-hang draft than this build reads raises `moq.ErrUnsupportedCatalog`; upgrade the library to read it.
 
 ## Reference
 

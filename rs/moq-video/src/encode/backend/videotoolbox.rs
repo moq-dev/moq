@@ -26,9 +26,11 @@ use objc2_core_media::{
 };
 use objc2_core_video::CVImageBuffer;
 use objc2_core_video::{
-	kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferColorPrimaries_SMPTE_C,
-	kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_601_4,
-	kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+	kCVImageBufferColorPrimaries_EBU_3213, kCVImageBufferColorPrimaries_ITU_R_709_2,
+	kCVImageBufferColorPrimaries_ITU_R_2020, kCVImageBufferColorPrimaries_SMPTE_C,
+	kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferTransferFunction_ITU_R_2100_HLG,
+	kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ, kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+	kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_2020,
 };
 use objc2_video_toolbox::{
 	VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty, kVTCompressionPropertyKey_AllowFrameReordering,
@@ -42,8 +44,9 @@ use objc2_video_toolbox::{
 
 use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
 use super::{Backend, Encoded, keyframe_nal};
+use crate::color::{Matrix, Primaries, Transfer};
 use crate::frame::Surface;
-use crate::{Color, Error, Frame};
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "videotoolbox";
 
@@ -154,24 +157,29 @@ impl VideoToolbox {
 		)?;
 
 		// State the color space in the SPS so a decoder doesn't fall back to
-		// guessing it from the frame height. BT.601 goes out as SMPTE C primaries
-		// and the 601 matrix (both code point 6) with the BT.709 transfer curve (1),
-		// since 601 and 709 differ in primaries and matrix, not in gamma. CoreVideo
-		// does have a 170M transfer constant, but it is deprecated, and Media
-		// Foundation has none, so 1 is what every backend emits.
+		// guessing it from the frame height. The SDR curve goes out as BT.709 (1)
+		// whatever the matrix: CoreVideo's 170M transfer constant is deprecated
+		// and Media Foundation has none, so 1 is what every backend emits.
+		let color = config.resolved_color();
 		let (primaries, transfer, matrix) = unsafe {
-			match config.resolved_color() {
-				Color::Bt601Limited | Color::Bt601Full => (
-					kCVImageBufferColorPrimaries_SMPTE_C,
-					kCVImageBufferTransferFunction_ITU_R_709_2,
-					kCVImageBufferYCbCrMatrix_ITU_R_601_4,
-				),
-				Color::Bt709Limited | Color::Bt709Full => (
-					kCVImageBufferColorPrimaries_ITU_R_709_2,
-					kCVImageBufferTransferFunction_ITU_R_709_2,
-					kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-				),
-			}
+			(
+				match color.primaries {
+					Primaries::Smpte170m => kCVImageBufferColorPrimaries_SMPTE_C,
+					Primaries::Bt470bg => kCVImageBufferColorPrimaries_EBU_3213,
+					Primaries::Bt709 => kCVImageBufferColorPrimaries_ITU_R_709_2,
+					Primaries::Bt2020 => kCVImageBufferColorPrimaries_ITU_R_2020,
+				},
+				match color.transfer {
+					Transfer::Bt709 => kCVImageBufferTransferFunction_ITU_R_709_2,
+					Transfer::Pq => kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ,
+					Transfer::Hlg => kCVImageBufferTransferFunction_ITU_R_2100_HLG,
+				},
+				match color.matrix {
+					Matrix::Bt601 => kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+					Matrix::Bt709 => kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+					Matrix::Bt2020 => kCVImageBufferYCbCrMatrix_ITU_R_2020,
+				},
+			)
 		};
 		set_property(&session, unsafe { kVTCompressionPropertyKey_ColorPrimaries }, primaries)?;
 		set_property(

@@ -26,6 +26,10 @@ pub enum SessionError {
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// The peer's token has expired. Retrying with refreshed credentials may succeed.
+	#[error("authorization token expired")]
+	Expired,
+
 	/// The peer broke a protocol rule; the session is unusable.
 	#[error("protocol violation")]
 	ProtocolViolation,
@@ -81,6 +85,14 @@ pub enum SessionError {
 	/// A request ID was reused or violated the negotiated draft’s order or parity rules.
 	#[error("invalid request id")]
 	InvalidRequestId,
+
+	/// The peer sent a PATH it may not send, such as a server sending one at all.
+	#[error("invalid path")]
+	InvalidPath,
+
+	/// The peer sent an AUTHORITY it may not send, such as a server sending one at all.
+	#[error("invalid authority")]
+	InvalidAuthority,
 }
 
 impl SessionError {
@@ -90,15 +102,18 @@ impl SessionError {
 			Self::Cancel => 0x0,
 			Self::Internal => 0x1,
 			Self::Unauthorized => 0x2,
+			Self::Expired => 0x18,
 			Self::ProtocolViolation => 0x3,
 			Self::InvalidRequestId => 0x4,
 			Self::KeyValueFormatting => 0x6,
 			Self::TooManyRequests => 0x7,
+			Self::InvalidPath => 0x8,
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
 			Self::AuthTokenCacheOverflow => 0x13,
 			Self::Version => 0x15,
 			Self::UnknownAuthTokenAlias => 0x17,
+			Self::InvalidAuthority => 0x19,
 			Self::Unsupported => 0x1,
 			Self::TooManyRequestUpdates => 0x1B,
 			Self::App(app) => *app as u32 + 64,
@@ -116,15 +131,18 @@ impl SessionError {
 			0x0 => Self::Cancel,
 			0x1 => Self::Internal,
 			0x2 => Self::Unauthorized,
+			0x18 => Self::Expired,
 			0x3 => Self::ProtocolViolation,
 			0x4 => Self::InvalidRequestId,
 			0x6 => Self::KeyValueFormatting,
 			0x7 => Self::TooManyRequests,
+			0x8 => Self::InvalidPath,
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
 			0x13 => Self::AuthTokenCacheOverflow,
 			0x15 => Self::Version,
 			0x17 => Self::UnknownAuthTokenAlias,
+			0x19 => Self::InvalidAuthority,
 			0x1B => Self::TooManyRequestUpdates,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
@@ -217,9 +235,10 @@ pub enum StreamError {
 	#[error("group too large")]
 	GroupTooLarge,
 
-	/// A frame's timestamp doesn't match its track: missing on a timed track, present on
-	/// an untimed one, or out of range for the track's timescale.
-	#[error("frame timestamp doesn't match track timescale")]
+	/// A frame's timestamp doesn't fit its track: missing on a timed track, present on an
+	/// untimed one, out of range for the track's timescale, or starting a group earlier
+	/// than the group before it.
+	#[error("frame timestamp doesn't fit its track")]
 	TimestampMismatch,
 
 	/// The grant does not cover this subscription, fetch, or announcement, or no longer
@@ -408,6 +427,10 @@ pub enum Error {
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// The authorization token has expired and can be refreshed.
+	#[error("authorization token expired")]
+	Expired,
+
 	/// A valid message arrived in a state where it is not allowed.
 	#[error("unexpected message")]
 	UnexpectedMessage,
@@ -468,9 +491,10 @@ pub enum Error {
 	#[error("frame already open")]
 	FrameOpen,
 
-	/// A frame's timestamp doesn't match its track: it's missing on a timed track,
-	/// present on an untimed track, or out of range for the track's timescale.
-	#[error("frame timestamp doesn't match track timescale")]
+	/// A frame's timestamp doesn't fit its track: it's missing on a timed track, present
+	/// on an untimed track, out of range for the track's timescale, or starts a group
+	/// earlier than the group before it.
+	#[error("frame timestamp doesn't fit its track")]
 	TimestampMismatch,
 
 	/// The group was evicted by its own track to pay eviction debt under memory
@@ -520,6 +544,9 @@ pub enum Error {
 	/// Session and stream unknowns are [`Self::Session`] / [`Self::Stream`], not this.
 	#[error("remote error: code={0}")]
 	Remote(u32),
+	/// The underlying connection reached its transport idle deadline.
+	#[error("transport idle timeout")]
+	IdleTimeout,
 }
 
 impl Error {
@@ -547,6 +574,10 @@ impl Error {
 	/// [`StreamError::from_code`]. Reading a stream reset with the session table (or the
 	/// reverse) silently mistranslates, since e.g. 0 is "no error" for a session but an
 	/// internal error for a stream.
+	///
+	/// Without either code, the transport's [`close_kind`](crate::transport::Error::close_kind)
+	/// decides: an idle timeout is [`Error::IdleTimeout`], a local close is
+	/// `Error::Session(SessionError::Cancel)`, and anything else is [`Error::Transport`].
 	pub fn from_transport(err: impl crate::transport::Error) -> Self {
 		if let Some((code, _reason)) = err.session_error() {
 			return SessionError::from_code(code).into();
@@ -556,7 +587,12 @@ impl Error {
 			return StreamError::from_code(code).into();
 		}
 
-		Self::Transport(err.to_string())
+		match err.close_kind() {
+			crate::transport::CloseKind::IdleTimeout => Self::IdleTimeout,
+			// A connection ending must not become the model's clean end-of-content.
+			crate::transport::CloseKind::Closed => SessionError::Cancel.into(),
+			_ => Self::Transport(err.to_string()),
+		}
 	}
 }
 
@@ -589,6 +625,7 @@ impl From<&Error> for SessionError {
 			Error::Stream(_) => Self::Internal,
 			Error::Cancel | Error::Closed | Error::GoingAway | Error::SessionClosed => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
+			Error::Expired => Self::Expired,
 			Error::Unsupported => Self::Unsupported,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
 			Error::TooManyParameters => Self::KeyValueFormatting,
@@ -640,8 +677,9 @@ impl From<&Error> for StreamError {
 			Error::FrameTooLarge => Self::FrameTooLarge,
 			Error::GroupTooLarge => Self::GroupTooLarge,
 			Error::TimestampMismatch => Self::TimestampMismatch,
-			// Losing access ends this stream, not the session.
-			Error::Unauthorized => Self::Unauthorized,
+			// Losing access ends this stream, not the session. A request can expire on its
+			// own (REQUEST_ERROR 0x5), and the stream registry has no expiry code.
+			Error::Unauthorized | Error::Expired => Self::Unauthorized,
 			Error::Timeout => Self::DeliveryTimeout,
 			Error::GoingAway => Self::GoingAway,
 			// Our own parse failure is, from the peer's side, a malformed track.
@@ -668,6 +706,13 @@ impl From<&Error> for StreamError {
 }
 
 impl crate::transport::Error for Error {
+	fn close_kind(&self) -> crate::transport::CloseKind {
+		match self {
+			Self::IdleTimeout => crate::transport::CloseKind::IdleTimeout,
+			// Closed also ends model handles and virtual streams, not just connections.
+			_ => crate::transport::CloseKind::Transport,
+		}
+	}
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}
@@ -695,15 +740,18 @@ mod tests {
 			SessionError::Cancel,
 			SessionError::Internal,
 			SessionError::Unauthorized,
+			SessionError::Expired,
 			SessionError::ProtocolViolation,
 			SessionError::InvalidRequestId,
 			SessionError::KeyValueFormatting,
 			SessionError::TooManyRequests,
+			SessionError::InvalidPath,
 			SessionError::GoawayTimeout,
 			SessionError::Timeout,
 			SessionError::AuthTokenCacheOverflow,
 			SessionError::Version,
 			SessionError::UnknownAuthTokenAlias,
+			SessionError::InvalidAuthority,
 			SessionError::TooManyRequestUpdates,
 			SessionError::App(0),
 			SessionError::App(404),
@@ -718,12 +766,15 @@ mod tests {
 
 		// The moq-transport codes we reuse must keep moq-transport's values.
 		assert_eq!(SessionError::Unauthorized.to_code(), 0x2);
+		assert_eq!(SessionError::Expired.to_code(), 0x18);
 		assert_eq!(SessionError::InvalidRequestId.to_code(), 0x4);
 		assert_eq!(SessionError::TooManyRequests.to_code(), 0x7);
+		assert_eq!(SessionError::InvalidPath.to_code(), 0x8);
 		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
 		assert_eq!(SessionError::AuthTokenCacheOverflow.to_code(), 0x13);
 		assert_eq!(SessionError::Version.to_code(), 0x15);
 		assert_eq!(SessionError::UnknownAuthTokenAlias.to_code(), 0x17);
+		assert_eq!(SessionError::InvalidAuthority.to_code(), 0x19);
 		assert_eq!(SessionError::TooManyRequestUpdates.to_code(), 0x1B);
 
 		// The reserved 32-47 range, and anything else unregistered, keeps its value instead
@@ -739,6 +790,10 @@ mod tests {
 			SessionError::ProtocolViolation
 		);
 		assert_eq!(StreamError::from(&Error::UnexpectedStream), StreamError::Internal);
+
+		// An expired request (REQUEST_ERROR 0x5) relayed onto a stream ends only that
+		// request; SESSION_CLOSED would falsely tell the peer its session is going away.
+		assert_eq!(StreamError::from(&Error::Expired), StreamError::Unauthorized);
 	}
 
 	#[test]

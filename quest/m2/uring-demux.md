@@ -18,13 +18,13 @@ customer feature, and moq.pro already ranks one-port above its uring
 rollout.
 
 Decided 2026-10-08: the UDP demux shrinks to QUIC plus the WebRTC hook, and
-the public STUN responder moves to the m1 P2P line, so the ring carries no
+the public STUN responder belongs to the deferred m2 P2P line, so the ring carries no
 STUN responder class either. An ICE Binding request is WebRTC traffic and
 follows that class.
 
 Each worker's endpoint receives a batch and feeds every segment straight to
 the QUIC endpoint. The classifier and flow table from the
-[UDP demux](/quest/m1/p2p/udp-demux.md), split there into a
+[UDP demux](/quest/m2/p2p/udp-demux.md), split there into a
 runtime-agnostic piece, run first on each segment; only QUIC continues into
 the endpoint. The worker is thread-per-core and `!Send`, while the consumers
 of the other classes (`moq-rtc`, `moq-srt`) run on
@@ -49,7 +49,7 @@ off on the ring, from shard steering.
 
 ## Required
 
-- [UDP demux](/quest/m1/p2p/udp-demux.md) - the classifier and flow table this runs on the ring
+- [UDP demux](/quest/m2/p2p/udp-demux.md) - the classifier and flow table this runs on the ring
 - [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - the fed RTC socket and transmit contract the ring integrates
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - the SRT state machines fed through the shared demux
 

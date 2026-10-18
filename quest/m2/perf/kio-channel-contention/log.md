@@ -6,12 +6,12 @@ kio exports an append-only log channel whose consumers read committed entries
 by cursor without taking a lock, and the hottest moq-net channels the
 [epic](/quest/m2/perf/kio-channel-contention/README.md)'s baseline names
 (expected: `GroupState` frames, `TrackState` arrival order) move onto it.
-Lands with the contended bench (`rs/kio/benches/contended.rs`) and `just bench-lock` before and after; a
+Lands with the contended bench (`rs/kio/benches/contended.rs`) and `just bench-profile lock` before and after; a
 measured no-win abandons it.
 
 ## Plan
 
-- First measure a multi-frame (video-heavy) shape with `just bench-lock`,
+- First measure a multi-frame (video-heavy) shape with `just bench-profile lock`,
   since the baseline's chat and fanout shapes both send one-frame groups and
   leave `GroupState` frame contention unmeasured. Choose the target channels
   from that.

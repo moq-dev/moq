@@ -189,6 +189,7 @@ class Frames extends Fanout<VideoFrame> {
 		effect.cleanup(release);
 
 		const reader = live.getReader();
+		let cancelled = false;
 		return new ReadableStream<VideoFrame>(
 			{
 				pull: async (controller) => {
@@ -203,7 +204,13 @@ class Frames extends Fanout<VideoFrame> {
 					for (;;) {
 						const { value } = await reader.read();
 						if (!value) {
-							controller.close();
+							if (!cancelled) controller.close();
+							return;
+						}
+
+						// Cancelled while this read was resolving, so the stream can no longer take it.
+						if (cancelled) {
+							value.close();
 							return;
 						}
 
@@ -217,6 +224,7 @@ class Frames extends Fanout<VideoFrame> {
 					}
 				},
 				cancel: async (reason) => {
+					cancelled = true;
 					release();
 					await reader.cancel(reason);
 				},

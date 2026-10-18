@@ -9,7 +9,7 @@ A public relay needs a reachable UDP port, a trusted certificate, and an
 explicit access policy. Start from the local config and change these:
 
 1. Give the relay a stable hostname and forward its UDP port (QUIC and WebTransport). Forward TCP too if you enable HTTPS or the WebSocket fallback.
-2. Install a publicly trusted certificate. Generated certificates and disabled verification are for development.
+2. Get a publicly trusted certificate, ideally from the relay's own `[acme]` client. Generated certificates and disabled verification are for development.
 3. Configure [authentication](/bin/relay/auth). Leave nothing anonymous unless you mean to.
 4. Keep the operational endpoints (`/metrics`, `/nodes`) on the `[internal]` listener, bound to loopback or a private network.
 5. Raise Linux UDP socket buffers (below).
@@ -18,21 +18,41 @@ explicit access policy. Start from the local config and change these:
 [listen]
 bind = "[::]:443"
 
-[listen.tls]
-cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
-key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
-
-# HTTPS and WebSocket fallback on TCP. The same certificate works.
+# HTTPS and WebSocket fallback on TCP, which also answers the ACME challenge.
 [web.https]
 listen = "[::]:443"
-cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
-key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
+
+# A Let's Encrypt certificate for QUIC and HTTPS, renewed in the background.
+[acme]
+domains = ["relay.example.com"]
+contact = ["mailto:ops@example.com"]
+dir = "/var/lib/moq-relay/acme"
 
 [auth]
 key = "/etc/moq/public.jwk"
 
 [internal]
 listen = "127.0.0.1:9101"
+```
+
+Let's Encrypt validates the domain by connecting to TCP port 443, so
+`web.https.listen` must be reachable there, directly or forwarded. The first
+start waits for the certificate before serving anything; later starts reuse
+the one kept in `dir`. Test against the staging directory first, since
+production rate-limits failed attempts. See [`[acme]`](/bin/relay/config#acme).
+
+To bring your own certificate instead (certbot, cert-manager, a private CA),
+drop `[acme]` and point `listen.tls` and `web.https` at the files:
+
+```toml
+[listen.tls]
+cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
+key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
+
+[web.https]
+listen = "[::]:443"
+cert = "/etc/letsencrypt/live/relay.example.com/fullchain.pem"
+key = "/etc/letsencrypt/live/relay.example.com/privkey.pem"
 ```
 
 Certificate files are watched and reloaded for new connections. See the

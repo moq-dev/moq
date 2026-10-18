@@ -62,7 +62,7 @@ third route, simultaneous relay decisions,
 loss/reordering, cancelled demand, and stale/replayed progress. Wire these into
 CI. Report actual media overlap, control traffic, wakes, switches, and memory
 across tracks, candidate connections, and downstream readers. Extend the
-[P2P harness](/quest/m1/p2p/harness.md) with real browser/native cases:
+[P2P harness](/quest/m2/p2p/harness.md) with real browser/native cases:
 metadata-only standby, stalled payload with advancing control, same-epoch
 promotion with bounded overlap, verified failback, and epochless exclusion.
 Add a route-health section to the routing concept page.

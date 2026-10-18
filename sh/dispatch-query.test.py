@@ -54,17 +54,37 @@ class QueryTests(unittest.TestCase):
         return subprocess.run(["bash", "sh/dispatch.sh", f"ci-{job}", base, "--query"],
                               cwd=self.repo, env=self.env, text=True, capture_output=True)
 
-    def expect(self, needed, job="test", base="origin/main"):
+    def expect(self, needed, job="test", base="origin/main", rust=None):
         result = self.run_query(job, base)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, f"needed={str(needed).lower()}\n")
+        output = dict(line.split("=") for line in result.stdout.splitlines())
+        self.assertEqual(set(output), {"needed", "rust"})
+        self.assertEqual(output["needed"], str(needed).lower())
+        if rust is not None:
+            self.assertEqual(output["rust"], str(rust).lower())
         self.assertNotIn("missing", result.stderr)
         self.assertNotIn("skipping", result.stderr)
 
     def test_quest_only_has_no_tests_but_keeps_repository_lints(self):
         self.change("quest/m1/example.md")
-        self.expect(False)
-        self.expect(True, "check")
+        self.expect(False, rust=False)
+        self.expect(True, "check", rust=False)
+
+    def test_rust_cache_follows_modules_that_compile_rust(self):
+        # Path, then Check's Rust, then Test's selection and Rust.
+        for path, check, test, test_rust in (("rs/moq-net/src/lib.rs", True, True, True),
+                                             ("py/moq-rs/example.py", True, True, True),
+                                             ("js/net/src/index.ts", True, True, False),
+                                             ("kt/example.kt", True, False, False),
+                                             ("infra/moq-sh/install.sh", False, False, False),
+                                             (".github/workflows/check.yml", False, False, False)):
+            with self.subTest(path=path):
+                self.change(path)
+                self.expect(True, "check", rust=check)
+                self.expect(test, rust=test_rust)
+                (self.repo / path).unlink()
+        self.expect(True, "check", "--all", rust=True)
+        self.expect(True, base="--all", rust=True)
 
     def test_empty_diff_keeps_repository_lints(self):
         self.expect(False)

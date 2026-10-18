@@ -27,7 +27,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/b7027a3ded4b0a36505f40eb7ed788c1023e7a49";
+      url = "github:kixelated/quest/d5560d738a0e1043e045e805b7c5fccd80004cea";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -80,6 +80,9 @@
             "clippy"
             "rust-src"
             "rust-analyzer"
+            # llvm-cov and llvm-profdata for `just rs coverage`, which must
+            # match rustc's LLVM. cargo-llvm-cov finds them in the sysroot.
+            "llvm-tools"
           ];
           targets = [
             "wasm32-unknown-unknown"
@@ -138,6 +141,8 @@
             # unification would otherwise hide a broken single-crate build.
             cargo-hack
             cargo-nextest
+            # Source-based test coverage (`just rs coverage`).
+            cargo-llvm-cov
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
             # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
             # crate is pinned to nixpkgs' CLI version); bump both together.
@@ -362,28 +367,30 @@
         #
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
-        # rs/moq-ffi/Cargo.toml. Five other places name the same tag and must be
+        # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
         # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
         # cpp/moq/README.md, .github/workflows/cpp.yml,
-        # .github/workflows/obs.yml, and .github/workflows/release-cpp.yml.
+        # .github/workflows/platform.yml, .github/workflows/release-cpp.yml, and
+        # .github/workflows/release-shared-ffi.yml.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
-        # and the fork adds `error_style = "expected"`, which cpp/moq/uniffi.toml
-        # turns on. Its tags add a `-kixelated.N` pre-release so they never
-        # collide with upstream's. Move back upstream once one tags both.
+        # and the fork adds `error_style = "expected"` and `strip_type_prefix`,
+        # which cpp/moq/uniffi.toml turns on. Its tags add a `-kixelated.N`
+        # pre-release so they never collide with upstream's. Move back upstream
+        # once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-cpp";
-          version = "0.11.0-kixelated.4+v0.32.2";
+          version = "0.11.0-kixelated.5+v0.32.2";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
             rev = "v${version}";
-            hash = "sha256-pmk9M5Wt6DYlXZYPjJ2Nn0tbDi1ve3wCH0Lel9xomCY=";
+            hash = "sha256-y148irMNOsMrfjbUT/f3jlNmpxT0/z/2LVlP+t1oq8I=";
           };
 
-          cargoHash = "sha256-/DRrwhJiKFCzibiJU2D3QaBM3XTmieRgUNc7tHDiGXI=";
+          cargoHash = "sha256-QBURLIg255O6J4A+wzZVk4cUJPdJb6JepZKofX0fLZg=";
 
           # The workspace's other member is the fixture crate, which pulls the
           # uniffi examples in from git; build only the generator.
@@ -566,8 +573,12 @@
             ++ dartDeps
             ++ devTools
             ++ [ quest-cli ]
-            # perf records relay worker off-CPU stacks for `just bench-lock`.
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.perf ];
+            # `just bench-profile`: perf records relay waits and CPU stacks, and
+            # jemalloc's jeprof symbolizes heap snapshots.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              pkgs.perf
+              pkgs.jemalloc
+            ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

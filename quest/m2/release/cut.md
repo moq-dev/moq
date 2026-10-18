@@ -20,3 +20,4 @@ published versions, as CONTRIBUTING.md's release procedure describes.
 ## Required
 
 - [Breaking release readiness](/quest/m1/README.md) - code, protocol and package proofs
+- [API-diff check](/quest/m2/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry

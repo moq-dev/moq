@@ -1,6 +1,6 @@
 use futures::FutureExt;
 use hang::catalog::Container;
-use mp4_atom::{Decode, Encode};
+use mp4_atom::{Atom, Decode, Encode};
 
 /// A drift budget no test timeline comes close to, so every group is read.
 ///
@@ -64,6 +64,128 @@ fn decode_init(init: &[u8]) -> (mp4_atom::Ftyp, mp4_atom::Moov) {
 	let ftyp = mp4_atom::Ftyp::decode(&mut cursor).expect("invalid ftyp");
 	let moov = mp4_atom::Moov::decode(&mut cursor).expect("invalid moov");
 	(ftyp, moov)
+}
+
+fn video_config(codec: mp4_atom::Codec) -> hang::catalog::VideoConfig {
+	let (ftyp, mut moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+	let trak = moov
+		.trak
+		.iter_mut()
+		.find(|trak| matches!(trak.mdia.minf.stbl.stsd.codecs.first(), Some(mp4_atom::Codec::Avc1(_))))
+		.unwrap();
+	trak.mdia.minf.stbl.stsd.codecs = vec![codec];
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut import = super::Import::new(broadcast, catalog.reserve());
+	import.decode(&init).unwrap();
+	import.finish().unwrap();
+	catalog.snapshot().video.renditions.values().next().unwrap().clone()
+}
+
+#[test]
+fn sample_entries_resolve_display_aspect() {
+	use crate::codec::{h264, h265};
+	for (avc, hevc, expected) in [
+		(h264::fixtures::SPS_IPB, h265::fixtures::SPS_NVENC, (None, None)),
+		(
+			h264::fixtures::SPS_ANAMORPHIC,
+			h265::fixtures::SPS_ANAMORPHIC,
+			(Some(16), Some(9)),
+		),
+	] {
+		let avcc = mp4_atom::Avcc::new(avc, h264::fixtures::PPS).unwrap();
+		let mut bytes = h265::build_hvcc(
+			&[bytes::Bytes::from_static(h265::fixtures::VPS)],
+			&[bytes::Bytes::from_static(hevc)],
+			&[bytes::Bytes::from_static(h265::fixtures::PPS)],
+		)
+		.unwrap();
+		let hvcc = mp4_atom::Hvcc::decode_body(&mut bytes).unwrap();
+		let mut avc_visual = mp4_atom::Visual {
+			width: 1440,
+			height: 1080,
+			..Default::default()
+		};
+		let mut hevc_visual = avc_visual.clone();
+		if expected == (None, None) {
+			avc_visual.width = 64;
+			avc_visual.height = 64;
+			hevc_visual.width = 1280;
+			hevc_visual.height = 720;
+		}
+		for codec in [
+			mp4_atom::Codec::Avc1(mp4_atom::Avc1 {
+				avcc: avcc.clone(),
+				visual: avc_visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Avc3(mp4_atom::Avc3 {
+				avcc: avcc.clone(),
+				visual: avc_visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Hvc1(mp4_atom::Hvc1 {
+				hvcc: hvcc.clone(),
+				visual: hevc_visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Hev1(mp4_atom::Hev1 {
+				hvcc: hvcc.clone(),
+				visual: hevc_visual.clone(),
+				..Default::default()
+			}),
+		] {
+			let config = video_config(codec);
+			assert_eq!(
+				(config.display_aspect_width, config.display_aspect_height),
+				expected,
+				"{}",
+				config.codec
+			);
+		}
+	}
+}
+
+#[test]
+fn in_band_entries_without_parameter_sets_keep_visual_dimensions() {
+	let mut avcc =
+		mp4_atom::Avcc::new(crate::codec::h264::fixtures::SPS_IPB, crate::codec::h264::fixtures::PPS).unwrap();
+	avcc.sequence_parameter_sets.clear();
+	avcc.picture_parameter_sets.clear();
+	let mut bytes = crate::codec::h265::fixtures::hvcc();
+	let mut hvcc = mp4_atom::Hvcc::decode_body(&mut bytes).unwrap();
+	hvcc.arrays.clear();
+	let visual = mp4_atom::Visual {
+		width: 720,
+		height: 576,
+		..Default::default()
+	};
+	for codec in [
+		mp4_atom::Codec::Avc3(mp4_atom::Avc3 {
+			avcc,
+			visual: visual.clone(),
+			..Default::default()
+		}),
+		mp4_atom::Codec::Hev1(mp4_atom::Hev1 {
+			hvcc,
+			visual,
+			..Default::default()
+		}),
+	] {
+		let config = video_config(codec);
+		assert_eq!((config.coded_width, config.coded_height), (Some(720), Some(576)));
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(None, None)
+		);
+		assert!(
+			matches!(&config.codec, hang::catalog::VideoCodec::H264(h264) if h264.inline)
+				|| matches!(&config.codec, hang::catalog::VideoCodec::H265(h265) if h265.in_band)
+		);
+	}
 }
 
 #[test]
@@ -269,6 +391,12 @@ fn test_av1_catalog() {
 
 	let video = catalog.video.renditions.values().next().unwrap();
 	assert!(video.codec.to_string().starts_with("av01."), "codec: {}", video.codec);
+	// The av1C's sequence header leaves the code points unspecified, but AV1 always states the range.
+	let color = video.color.as_ref().expect("the range");
+	assert_eq!(
+		(color.primaries, color.range),
+		(None, Some(hang::catalog::Range::Limited))
+	);
 	assert!(matches!(video.container, Container::Cmaf { .. }));
 
 	let Container::Cmaf { init, .. } = &video.container else {
@@ -476,7 +604,12 @@ async fn subscribe(
 	section: &hang::catalog::Archive,
 	track: &str,
 ) -> crate::timeline::Consumer {
-	crate::timeline::Consumer::<()>::subscribe(consumer, section, track)
+	let mut section = section.clone();
+	section
+		.timelines
+		.entry(track.to_string())
+		.or_insert_with(|| hang::catalog::Timeline::new(hang::timeline::default_name(track), 0));
+	crate::timeline::Consumer::<()>::subscribe(consumer, &section, track)
 		.await
 		.unwrap()
 }
@@ -517,12 +650,11 @@ async fn import_populates_the_broadcast_timeline() {
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
 
-	// Each rendition's timeline is advertised at the catalog root.
+	// This short fixture ends before the four-second estimation record closes, so finishing the
+	// import flushes it and declares the minimum while the catalog stays live.
 	let section = snapshot.archive.clone().expect("the import advertises its timelines");
-	assert_eq!(
-		section.timelines[&video_name],
-		hang::timeline::default_name(&video_name)
-	);
+	assert_eq!(section.timelines[&video_name].duration, Some(4_000));
+	assert_eq!(section.timelines[&audio_name].duration, Some(4_000));
 
 	// Subscribe while the producer is alive, then finish so the timeline groups close and the
 	// readers terminate rather than blocking.
@@ -1517,7 +1649,8 @@ async fn import_refuses_a_restart() {
 }
 
 /// Skipping sequences (an HLS media-sequence gap) is not a new timeline: a rewound decode time
-/// after a seek is still refused. Only a signalled discontinuity starts the comparison afresh.
+/// after a seek is still refused. A signalled discontinuity skips the import's own comparison,
+/// but the track still refuses a group that starts before the one before it.
 #[tokio::test]
 async fn seek_keeps_the_decode_time_until_a_discontinuity() {
 	let (init, _, _) = bbb_init();
@@ -1539,8 +1672,11 @@ async fn seek_keeps_the_decode_time_until_a_discontinuity() {
 
 	fmp4.discontinuity();
 	fmp4.seek(200).unwrap();
-	fmp4.decode(&live_session(0, 5))
-		.expect("a signalled discontinuity starts a new timeline");
+	let err = fmp4.decode(&live_session(0, 5)).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::Moq(moq_net::Error::TimestampMismatch)),
+		"{err:?}"
+	);
 }
 
 /// The catalog is first published at the first fragment, carrying the clock that fragment
@@ -1586,20 +1722,25 @@ fn a_second_moov_is_refused() {
 }
 
 /// A moov with every track deselected releases its reservation at once, since no fragment will
-/// ever anchor: the catalog's next change publishes without one.
+/// ever anchor. It declares no track, so the catalog stays unpublished until one is listed.
 #[tokio::test]
-async fn a_moov_with_nothing_selected_publishes() {
+async fn a_moov_with_nothing_selected_releases_its_reservation() {
 	let (init, _, _) = bbb_init();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve())
 		.with_select(crate::select::Broadcast::default());
 
 	fmp4.decode(&init).unwrap();
 	catalog.timebase().anchor(moq_net::Timestamp::ZERO).unwrap();
-	assert_eq!(clocks.drain().len(), 1, "the catalog publishes without a fragment");
+	assert!(clocks.drain().is_empty(), "nothing servable is published");
+
+	catalog
+		.mutate(|catalog| catalog.m2ts = Some(hang::catalog::M2ts::new("input.m2ts")))
+		.unwrap();
+	assert_eq!(clocks.drain().len(), 1, "no reservation still gates the catalog");
 }
 
 /// A moov after `finish()` is refused: its tracks would be declared but never finished.
@@ -2077,4 +2218,320 @@ fn malformed_webvtt_origins_and_comments_are_refused() {
 		let mut importer = super::Import::new(broadcast, catalog.reserve());
 		assert!(importer.decode(&webvtt_input(payload, 1250)).is_err());
 	}
+}
+
+/// An `stpp` init segment. mp4-atom cannot encode an `stpp` entry, so encode a `metx` entry, whose
+/// strings line up with `stpp`'s namespace, schema location and auxiliary MIME types, and rename it.
+fn ttml_init(namespace: &str, mime: &str, timescale: u32) -> Vec<u8> {
+	let (_, moov) = decode_init(&webvtt_init("WEBVTT"));
+	let mut trak = moov.trak[0].clone();
+	trak.mdia.hdlr.handler = b"subt".into();
+	trak.mdia.mdhd.timescale = timescale;
+	trak.mdia.minf.stbl.stsd.codecs = vec![mp4_atom::Codec::Metx(mp4_atom::Metx {
+		metadata: mp4_atom::MetaData {
+			data_reference_index: 1,
+		},
+		content_encoding: namespace.into(),
+		namespace: String::new(),
+		schema_location: mime.into(),
+		btrt: None,
+	})];
+	let mut init = audio_init(trak);
+	let at = init.windows(4).position(|kind| kind == b"metx").unwrap();
+	init[at..at + 4].copy_from_slice(b"stpp");
+	init
+}
+
+const TTML: &str = r#"<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body><div begin="00:01:41"><p begin="0.5s" end="2s">Hello</p></div></body></tt>"#;
+
+/// Import one TTML sample lasting 4 s from source time 100 s, returning its rendition and frame.
+async fn imported_ttml(
+	timebase: crate::catalog::Timebase,
+	broadcast: moq_net::broadcast::Producer,
+	catalog: &crate::catalog::Producer,
+	consumer: &moq_net::broadcast::Consumer,
+) -> (hang::catalog::TextConfig, crate::container::Frame) {
+	let mut input = ttml_init("http://www.w3.org/ns/ttml", "", 1000);
+	input.extend(webvtt_fragment(100_000, &[TTML.as_bytes().to_vec()], 4000));
+	let mut importer = super::Import::new(broadcast, timebase.reserve());
+	importer.decode(&input).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let (name, config) = snapshot.text.renditions.iter().next().unwrap();
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	(config.clone(), reader.read_frame().await.unwrap().unwrap())
+}
+
+#[tokio::test(start_paused = true)]
+async fn ttml_samples_become_timed_text_with_source_metadata() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let (config, frame) = imported_ttml(catalog.timebase(), broadcast, &catalog, &consumer).await;
+	assert_eq!(config.format, hang::catalog::TextFormat::Ttml);
+	assert_eq!(config.lang.as_deref(), Some("eng"));
+	assert_eq!(config.label.as_deref(), Some("English captions"));
+	assert_eq!(frame.timestamp.as_micros(), 100_000_000);
+	assert_eq!(
+		&frame.payload[..],
+		br#"<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body begin="00:01:40" end="00:01:44"><div begin="00:00:01"><p begin="0.5s" end="2s">Hello</p></div></body></tt>"#
+	);
+}
+
+/// The source joins a catalog clock another input already fixed, so its TTML times move with it.
+#[tokio::test(start_paused = true)]
+async fn ttml_follows_a_shifted_source_clock() {
+	let wall = std::time::SystemTime::now();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	catalog
+		.timebase()
+		.place(moq_net::Timestamp::from_secs(10).unwrap(), wall)
+		.unwrap();
+	let timebase = catalog.timebase();
+	timebase
+		.place(moq_net::Timestamp::from_secs(100).unwrap(), wall)
+		.unwrap();
+	let (_, frame) = imported_ttml(timebase, broadcast, &catalog, &consumer).await;
+	assert_eq!(frame.timestamp.as_micros(), 10_000_000);
+	assert_eq!(
+		&frame.payload[..],
+		br#"<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en"><body begin="00:00:10" end="00:00:14"><div begin="00:00:01"><p begin="0.5s" end="2s">Hello</p></div></body></tt>"#
+	);
+}
+
+/// An `stpp` entry naming another XML namespace, or carrying image subsamples, skips only its track.
+#[test]
+fn unsupported_stpp_tracks_are_skipped() {
+	for (namespace, mime) in [("urn:example:not-ttml", ""), ("http://www.w3.org/ns/ttml", "image/png")] {
+		let mut input = ttml_init(namespace, mime, 1000);
+		input.extend(webvtt_fragment(0, &[TTML.as_bytes().to_vec()], 1000));
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		importer.decode(&input).unwrap();
+		importer.finish().unwrap();
+		assert!(catalog.snapshot().text.renditions.is_empty(), "{namespace} {mime}");
+	}
+}
+
+/// A document the profile refuses fails the import instead of publishing as TTML.
+#[test]
+fn ttml_documents_outside_the_profile_are_refused() {
+	for document in [
+		r#"<tt xmlns="urn:example:not-ttml"/>"#,
+		r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" ttp:timeBase="smpte"/>"#,
+	] {
+		let mut input = ttml_init("http://www.w3.org/ns/ttml", "", 1000);
+		input.extend(webvtt_fragment(0, &[document.as_bytes().to_vec()], 1000));
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut importer = super::Import::new(broadcast, catalog.reserve());
+		assert!(importer.decode(&input).is_err(), "{document}");
+	}
+}
+
+/// A 90 kHz sample start is not a whole microsecond; the body still begins at the serialized
+/// frame timestamp.
+#[tokio::test(start_paused = true)]
+async fn ttml_body_begins_at_the_serialized_frame_timestamp() {
+	let mut input = ttml_init("http://www.w3.org/ns/ttml", "", 90_000);
+	input.extend(webvtt_fragment(9_000_001, &[TTML.as_bytes().to_vec()], 360_000));
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&input).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let name = snapshot.text.renditions.keys().next().unwrap();
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read_frame().await.unwrap().unwrap();
+	assert_eq!(frame.timestamp.as_micros(), 100_000_011);
+	let payload = std::str::from_utf8(&frame.payload).unwrap();
+	assert!(
+		payload.contains(r#"<body begin="00:01:40.000011" end="00:01:44.000011">"#),
+		"{payload}"
+	);
+}
+
+/// An avc1 init whose avcC carries `sps` and whose sample entry carries the `colr` box for `color`.
+fn avc1_init(sps: &'static [u8], color: Option<hang::catalog::Color>) -> bytes::Bytes {
+	use crate::codec::h264::fixtures::PPS;
+	use bytes::Bytes;
+	use hang::catalog::{H264, VideoConfig};
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(sps)], &[Bytes::from_static(PPS)]).unwrap();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x0a,
+		inline: false,
+	});
+	config.coded_width = Some(64);
+	config.coded_height = Some(64);
+	config.color = color;
+	let trak = super::synthesize_video_trak(1, 90_000, &config, Some(&avcc)).unwrap();
+	let trex = mp4_atom::Trex {
+		track_id: 1,
+		default_sample_description_index: 1,
+		..Default::default()
+	};
+	super::encode_init(None, vec![trak], vec![trex]).unwrap()
+}
+
+fn color(primaries: u8, transfer: u8, matrix: u8, full_range: bool) -> hang::catalog::Color {
+	crate::codec::color::cicp(primaries, transfer, matrix, Some(full_range)).unwrap()
+}
+
+/// A colr box the SPS disagrees with loses to the SPS: the encoder signalled it.
+#[test]
+fn sps_color_outranks_colr() {
+	let catalog = run_fmp4(&avc1_init(
+		crate::codec::h264::fixtures::SPS_BT709,
+		Some(color(9, 16, 9, true)),
+	));
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, Some(color(1, 1, 1, false)));
+}
+
+/// A colr box fills what the SPS leaves unspecified.
+#[test]
+fn colr_fills_what_the_sps_leaves_unsaid() {
+	let catalog = run_fmp4(&avc1_init(
+		crate::codec::h264::fixtures::SPS_IPB,
+		Some(color(9, 16, 9, true)),
+	));
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, Some(color(9, 16, 9, true)));
+}
+
+/// A source that signals no colour adds no catalog field and no colr box.
+#[test]
+fn unsignalled_color_stays_absent() {
+	let init = avc1_init(crate::codec::h264::fixtures::SPS_IPB, None);
+	let (_, moov) = decode_init(&init);
+	let mp4_atom::Codec::Avc1(avc1) = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
+		panic!("expected avc1");
+	};
+	assert_eq!(avc1.colr, None);
+
+	let catalog = run_fmp4(&init);
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, None);
+	assert!(serde_json::to_value(video).unwrap().get("color").is_none());
+}
+
+/// An SDR init imported to the catalog and exported again is byte-identical.
+#[test]
+fn sdr_color_round_trips_byte_identical() {
+	let init = avc1_init(crate::codec::h264::fixtures::SPS_BT709, Some(color(1, 1, 1, false)));
+	let catalog = run_fmp4(&init);
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, Some(color(1, 1, 1, false)));
+
+	let trak = super::synthesize_video_trak(1, 90_000, video, video.description.as_deref()).unwrap();
+	let trex = mp4_atom::Trex {
+		track_id: 1,
+		default_sample_description_index: 1,
+		..Default::default()
+	};
+	assert_eq!(super::encode_init(None, vec![trak], vec![trex]).unwrap(), init);
+}
+
+/// VP8's vpcC carries its colour as VP9's does: export writes the catalog's, unspecified when
+/// unknown rather than mp4-atom's BT.709 default, and import reads it back.
+#[test]
+fn vp8_color_round_trips_through_vpcc() {
+	use hang::catalog::{VideoCodec, VideoConfig};
+
+	let init = |color: Option<hang::catalog::Color>| {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(64);
+		config.coded_height = Some(64);
+		config.color = color;
+		let trak = super::synthesize_video_trak(1, 90_000, &config, None).unwrap();
+		let trex = mp4_atom::Trex {
+			track_id: 1,
+			default_sample_description_index: 1,
+			..Default::default()
+		};
+		super::encode_init(None, vec![trak], vec![trex]).unwrap()
+	};
+
+	let catalog = run_fmp4(&init(Some(color(9, 18, 9, true))));
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, Some(color(9, 18, 9, true)));
+
+	// Without a catalog colour, only vpcC's always-explicit range survives, never a made-up BT.709.
+	let catalog = run_fmp4(&init(None));
+	let color = catalog.video.renditions.values().next().unwrap().color.clone().unwrap();
+	assert_eq!((color.primaries, color.transfer, color.matrix), (None, None, None));
+}
+
+/// A VP9 codec string holding a container's placeholder BT.709 does not contradict the resolved
+/// colour: export writes the catalog colour into vpcC too, so a reimport keeps it.
+#[test]
+fn vp9_vpcc_carries_the_resolved_color() {
+	use hang::catalog::{VP9, VideoConfig};
+
+	let mut config = VideoConfig::new(VP9 {
+		profile: 0,
+		level: 0,
+		bit_depth: 8,
+		chroma_subsampling: 1,
+		color_primaries: 1,
+		transfer_characteristics: 1,
+		matrix_coefficients: 1,
+		full_range: false,
+	});
+	config.coded_width = Some(64);
+	config.coded_height = Some(64);
+	let reimport = |resolved: hang::catalog::Color| {
+		let mut config = config.clone();
+		config.color = Some(resolved);
+		let trak = super::synthesize_video_trak(1, 90_000, &config, None).unwrap();
+		let trex = mp4_atom::Trex {
+			track_id: 1,
+			default_sample_description_index: 1,
+			..Default::default()
+		};
+		let catalog = run_fmp4(&super::encode_init(None, vec![trak], vec![trex]).unwrap());
+		catalog.video.renditions.values().next().unwrap().color.clone()
+	};
+
+	assert_eq!(reimport(color(9, 16, 9, false)), Some(color(9, 16, 9, false)));
+
+	// A partial colour leaves the rest unspecified, never the placeholder's BT.709.
+	let mut primaries = hang::catalog::Color::default();
+	primaries.primaries = Some(9);
+	let back = reimport(primaries).unwrap();
+	assert_eq!((back.primaries, back.transfer, back.matrix), (Some(9), None, None));
+}
+
+/// QuickTime's `nclc` carries the code points without a range, and keeps them; a code point past
+/// 255 is refused.
+#[test]
+fn colr_nclc_keeps_its_code_points() {
+	let nclc = mp4_atom::Colr::Nclc {
+		colour_primaries: 9,
+		transfer_characteristics: 16,
+		matrix_coefficients: 9,
+	};
+	let color = super::colr_color(&nclc).unwrap().unwrap();
+	assert_eq!(
+		(color.primaries, color.transfer, color.matrix, color.range),
+		(Some(9), Some(16), Some(9), None)
+	);
+	assert!(super::colr_color(&mp4_atom::Colr::new(300, 1, 1, false).unwrap()).is_err());
 }

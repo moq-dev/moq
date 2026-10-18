@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
+use moq_clock::Instant;
 use moq_net::{PathOwned, origin, stats::Registry, track};
-use web_async::time::Instant;
 
 use super::{Drain, PendingPair, Task};
 
@@ -51,7 +51,7 @@ impl Driver {
 	/// Drain the registry and encode every track once.
 	pub fn tick(&mut self) -> FrameBytes {
 		self.drain.collect();
-		self.drain.publish(Instant::now());
+		self.drain.publish(moq_clock::now());
 		self.drain.publisher_frame_bytes()
 	}
 
@@ -63,5 +63,19 @@ impl Driver {
 		let root = PathOwned::from(root.to_string());
 		group.adopt_presence(&self.drain.report, root.clone(), PendingPair::default());
 		group.presence[&root].pair.plain.track.subscribe(None)
+	}
+
+	/// Hold broadcast prefix `path`'s track as a reader would; see
+	/// [`Self::hold_presence`].
+	pub fn hold_prefix(&mut self, path: &str) -> track::Subscriber {
+		let tick = self.drain.tick;
+		let group = self.drain.groups.get_mut("").expect("the depth 0 broadcast");
+		group.adopt_prefix(
+			&self.drain.report,
+			PathOwned::from(path.to_string()),
+			PendingPair::default(),
+			tick,
+		);
+		group.prefixes[path].pair.plain.track.subscribe(None)
 	}
 }

@@ -81,10 +81,19 @@ typedef Named = NamedMoqMediaTarget;
 /// A subscriber-requested track.
 typedef Requested = RequestedMoqMediaTarget;
 
-/// A track name, container, and live delivery options.
+/// A catalog rendition: its ID (catalog key) and its video or audio config.
+typedef Rendition = MoqRendition;
+
+/// A catalog video rendition.
+typedef VideoRendition = VideoMoqRendition;
+
+/// A catalog audio rendition.
+typedef AudioRendition = AudioMoqRendition;
+
+/// A catalog rendition and live delivery options.
 typedef TrackConfig = MoqMediaTrackConfig;
 
-/// A fetched group name, sequence, container, and delivery options.
+/// A catalog rendition's group sequence and fetch delivery options.
 typedef GroupConfig = MoqMediaGroupConfig;
 
 /// The packaging advertised for a media track.

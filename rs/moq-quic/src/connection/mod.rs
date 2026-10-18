@@ -15,15 +15,15 @@ use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
-    Dir, Duration, EndpointConfig, Frame, Instant, MAX_CID_SIZE, MAX_STREAM_COUNT,
-    MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError,
-    TransportErrorCode, VarInt,
+    Dir, Duration, EndpointConfig, Frame, Instant, Limits, LimitsError, MAX_CID_SIZE,
+    MAX_STREAM_COUNT, MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit,
+    TransportError, TransportErrorCode, VarInt,
     cid_queue::CidQueue,
     coding::BufMutExt,
     config::{ServerConfig, TransportConfig},
     connection::spaces::LostPacket,
     crypto::{self, KeyPair, Keys, PacketKey},
-    frame::{self, Close, Datagram, FrameStruct, NewConnectionId, NewToken},
+    frame::{self, Close, FrameStruct, NewConnectionId, NewToken},
     packet::{
         FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, LongType, Packet,
         PacketNumber, PartialDecode, SpaceId,
@@ -69,23 +69,33 @@ mod send_buffer;
 
 mod sent_packets;
 mod spaces;
-#[cfg(fuzzing)]
-pub use spaces::Retransmits;
-#[cfg(not(fuzzing))]
-use spaces::Retransmits;
+pub(crate) use spaces::Retransmits;
 use spaces::{PacketNumberFilter, PacketSpace, SendableFrames, SentPacket, ThinRetransmits};
 
 mod stats;
-pub use stats::{ConnectionStats, FrameStats, PathStats, UdpStats};
+
+/// Identifies one connection, so state handed out by it cannot be returned to another.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConnectionTag(u64);
+
+impl ConnectionTag {
+    /// No connection, for state that has not come from one yet.
+    pub(crate) const NONE: Self = Self(0);
+
+    /// A tag no other connection in this process has.
+    pub(crate) fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 
 mod streams;
-#[cfg(fuzzing)]
-pub use streams::StreamsState;
-#[cfg(not(fuzzing))]
-use streams::StreamsState;
+pub(crate) use streams::StreamsState;
 pub use streams::{
-    Chunks, ClosedStream, FinishError, ReadError, ReadableError, RecvStream, SendStream,
-    ShouldTransmit, StreamEvent, Streams, WriteError, Written,
+    Checkpoint, Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream,
+    SendDomain, SendGroup, SendGroups, SendStream, ShouldTransmit, StreamEvent, Streams,
+    WriteError, Written,
 };
 
 mod timer;
@@ -430,6 +440,14 @@ impl Connection {
         Streams {
             state: &mut self.streams,
             conn_state: &self.state,
+        }
+    }
+
+    /// Provide control over the send groups that schedule outgoing streams
+    #[must_use]
+    pub fn send_groups(&mut self) -> SendGroups<'_> {
+        SendGroups {
+            state: &mut self.streams,
         }
     }
 
@@ -946,7 +964,7 @@ impl Connection {
                     && !can_send.acks
                     && can_send.other
                     && (buf_capacity - builder.datagram_start) == self.path.current_mtu() as usize
-                    && self.datagrams.outgoing.is_empty()),
+                    && self.streams.datagram_bytes() == 0),
                 "SendableFrames was {can_send:?}, but only ACKs have been written"
             );
             pad_datagram |= sent.requires_padding;
@@ -1335,6 +1353,18 @@ impl Connection {
         )
     }
 
+    /// Report that a send to the peer found no route, such as `ENETUNREACH`
+    ///
+    /// A handshake can never finish, so it fails at once with `NO_VIABLE_PATH`, sending no
+    /// CONNECTION_CLOSE the peer could not receive anyway. An established connection is left
+    /// alone, since a route that drops for a moment (a client switching networks) comes back, so
+    /// the datagram is just lost.
+    pub fn handle_unreachable(&mut self) {
+        if self.state.is_handshake() {
+            self.kill(TransportError::NO_VIABLE_PATH("no route to the peer").into());
+        }
+    }
+
     fn close_inner(&mut self, now: Instant, reason: Close) {
         let was_closed = self.state.is_closed();
         if !was_closed {
@@ -1358,8 +1388,22 @@ impl Connection {
         stats.path.cwnd = self.path.congestion.window();
         stats.path.bandwidth_estimate = self.path.congestion.metrics().bandwidth_estimate;
         stats.path.current_mtu = self.path.mtud.current_mtu();
+        stats.credit = self.streams.credit_stats();
 
         stats
+    }
+
+    /// Return connection flow control credit taken by [`Chunks::hold()`] to the peer.
+    ///
+    /// If [`ShouldTransmit::should_transmit()`] returns `true`, call
+    /// [`Self::poll_transmit()`] soon so the peer learns of the larger window.
+    ///
+    /// # Panics
+    /// If `credit` came from another connection.
+    pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
+        let transmit = self.streams.release(credit);
+        self.spaces[SpaceId::Data].pending.max_data |= transmit.should_transmit();
+        transmit
     }
 
     /// Ping the remote endpoint
@@ -1524,6 +1568,25 @@ impl Connection {
         if self.streams.set_receive_window(receive_window) {
             self.spaces[SpaceId::Data].pending.max_data = true;
         }
+    }
+
+    /// Change every limit `limits` sets, leaving the others as they are
+    ///
+    /// Errors, changing nothing, on limits [`Limits::validate`] refuses.
+    pub fn set_limits(&mut self, limits: Limits) -> Result<(), LimitsError> {
+        limits.validate()?;
+        if let Some(window) = limits.receive_window {
+            self.set_receive_window(VarInt::from_u64(window.get()).expect("validated"));
+        }
+        if let Some(window) = limits.send_window {
+            self.set_send_window(window.get());
+        }
+        if let Some(streams) = limits.max_streams {
+            let streams = VarInt::from_u64(streams.get()).expect("validated");
+            self.set_max_concurrent_streams(Dir::Bi, streams);
+            self.set_max_concurrent_streams(Dir::Uni, streams);
+        }
+        Ok(())
     }
 
     fn on_ack_received(
@@ -1752,13 +1815,20 @@ impl Connection {
 
         // Update state for confirmed delivery of frames
         if let Some(retransmits) = info.retransmits.get() {
-            for (id, _) in retransmits.reset_stream.iter() {
-                self.streams.reset_acked(*id);
+            for &(id, reliable_size) in retransmits.reset_stream.iter() {
+                self.streams.reset_acked(id, reliable_size);
             }
         }
 
         for frame in info.stream_frames {
-            self.streams.received_ack_of(frame);
+            let id = frame.id;
+            // A reset held for a peer without RESET_STREAM_AT goes out once it holds the data
+            if let Some(reliable_size) = self.streams.received_ack_of(frame) {
+                self.spaces[SpaceId::Data]
+                    .pending
+                    .reset_stream
+                    .push((id, reliable_size));
+            }
         }
     }
 
@@ -3075,6 +3145,13 @@ impl Connection {
                     self.streams.received_max_streams(dir, count)?;
                 }
                 Frame::ResetStream(frame) => {
+                    if frame.reliable_size.is_some() && !self.config.reset_stream_at {
+                        // We never advertised it, so it is an unknown frame type
+                        let mut err =
+                            TransportError::FRAME_ENCODING_ERROR("unsupported RESET_STREAM_AT");
+                        err.frame = Some(frame::FrameType::RESET_STREAM_AT);
+                        return Err(err);
+                    }
                     if self.streams.received_reset(frame)?.should_transmit() {
                         self.spaces[SpaceId::Data].pending.max_data = true;
                     }
@@ -3118,7 +3195,13 @@ impl Connection {
                             "STOP_SENDING on unopened stream",
                         ));
                     }
-                    self.streams.received_stop_sending(id, error_code);
+                    if let Some(reliable_size) = self.streams.received_stop_sending(id, error_code)
+                    {
+                        self.spaces[SpaceId::Data]
+                            .pending
+                            .reset_stream
+                            .push((id, reliable_size));
+                    }
                 }
                 Frame::RetireConnectionId { sequence } => {
                     let allow_more_cids = self
@@ -3574,23 +3657,6 @@ impl Connection {
             self.stats.frame_tx.retire_connection_id += 1;
         }
 
-        // DATAGRAM
-        let mut sent_datagrams = false;
-        while buf.len() + Datagram::SIZE_BOUND < max_size && space_id == SpaceId::Data {
-            match self.datagrams.write(buf, max_size) {
-                true => {
-                    sent_datagrams = true;
-                    sent.non_retransmits = true;
-                    self.stats.frame_tx.datagram += 1;
-                }
-                false => break,
-            }
-        }
-        if self.datagrams.send_blocked && sent_datagrams {
-            self.events.push_back(Event::DatagramsUnblocked);
-            self.datagrams.send_blocked = false;
-        }
-
         // NEW_TOKEN
         while let Some(remote_addr) = space.pending.new_tokens.pop() {
             debug_assert_eq!(space_id, SpaceId::Data);
@@ -3630,12 +3696,17 @@ impl Connection {
             self.stats.frame_tx.new_token += 1;
         }
 
-        // STREAM
+        // STREAM and DATAGRAM, interleaved in schedule order
         if space_id == SpaceId::Data {
-            sent.stream_frames =
-                self.streams
-                    .write_stream_frames(buf, max_size, self.config.send_fairness);
+            let written = self.streams.write_frames(
+                buf,
+                pre_payload_len..max_size,
+                self.config.send_fairness,
+            );
+            sent.stream_frames = written.streams;
+            sent.non_retransmits |= written.datagrams > 0;
             self.stats.frame_tx.stream += sent.stream_frames.len() as u64;
+            self.stats.frame_tx.datagram += written.datagrams;
         }
 
         // Bundle ACK with other frames when there is room for them.
@@ -3878,6 +3949,27 @@ impl Connection {
         Some(packet.payload.to_vec())
     }
 
+    /// Encrypts `payload` as this connection's next packet in `space`, untracked, so tests can
+    /// send frames a correct peer never would
+    #[cfg(test)]
+    pub(crate) fn forge_packet(&mut self, now: Instant, space: SpaceId, payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let builder = PacketBuilder::new(
+            now,
+            space,
+            self.rem_cids.active(),
+            &mut buf,
+            usize::MAX,
+            0,
+            true,
+            self,
+        )
+        .expect("connection can still send");
+        buf.extend_from_slice(payload);
+        builder.finish(self, now, &mut buf);
+        buf
+    }
+
     /// The number of bytes of packets containing retransmittable frames that have not been
     /// acknowledged or declared lost.
     #[cfg(test)]
@@ -3947,14 +4039,13 @@ impl Connection {
     ///
     /// See also `self.space(SpaceId::Data).can_send()`
     fn can_send_1rtt(&self, max_size: usize) -> bool {
-        self.streams.can_send_stream_data()
+        self.streams.can_send_frames(max_size)
             || self.path.challenge_pending
             || self
                 .prev_path
                 .as_ref()
                 .is_some_and(|(_, x)| x.challenge_pending)
             || !self.path_responses.is_empty()
-            || self.datagrams.outgoing.can_send_1rtt(max_size)
     }
 
     /// Update counters to account for a packet becoming acknowledged, lost, or abandoned
@@ -4221,9 +4312,8 @@ impl From<ConnectionError> for io::Error {
     }
 }
 
-#[allow(unreachable_pub)] // fuzzing only
 #[derive(Clone)]
-pub enum State {
+pub(crate) enum State {
     Handshake(state::Handshake),
     Established,
     Closed(state::Closed),
@@ -4259,9 +4349,8 @@ impl State {
 mod state {
     use super::*;
 
-    #[allow(unnameable_types, unreachable_pub)] // fuzzing only
     #[derive(Clone)]
-    pub struct Handshake {
+    pub(crate) struct Handshake {
         /// Whether the remote CID has been set by the peer yet
         ///
         /// Always set for servers
@@ -4276,9 +4365,8 @@ mod state {
         pub(super) client_hello: Option<Bytes>,
     }
 
-    #[allow(unnameable_types, unreachable_pub)] // fuzzing only
     #[derive(Clone)]
-    pub struct Closed {
+    pub(crate) struct Closed {
         pub(super) reason: Close,
     }
 }
@@ -4307,8 +4395,6 @@ pub enum Event {
     Stream(StreamEvent),
     /// One or more application datagrams have been received
     DatagramReceived,
-    /// One or more application datagrams have been sent after blocking
-    DatagramsUnblocked,
     /// The currently active path was updated
     PathUpdated,
 }

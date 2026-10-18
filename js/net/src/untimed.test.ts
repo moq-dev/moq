@@ -1,5 +1,5 @@
 // A track keeps its timedness end to end: no receive path fills in arrival time, and a
-// wire that can't declare a timeline delivers frames untimed. Mirrors rs/moq-net/tests/untimed.rs.
+// wire that can't declare a timeline delivers frames untimed. Mirrors rs/moq-net/tests/integration/untimed.rs.
 import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";

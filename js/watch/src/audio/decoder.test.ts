@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from "bun:test";
-import { Micro, Milli, Nano, now } from "@moq/clock";
+import { Manual, Micro, Milli, Nano, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
-import { Signal } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { type Delay, Sync } from "../sync";
 import { SharedRingBuffer } from "./shared-ring-buffer";
@@ -660,6 +660,218 @@ describe("fatal decoder errors", () => {
 			expect(playback.codecs()).toBe(1);
 		} finally {
 			playback.close();
+		}
+	});
+});
+
+// A manual clock installed at `ms`, so arrivals are stamped only as fast as a test advances it.
+function manualAt(ms: number) {
+	const clock = new Manual();
+	clock.advance(Nano.fromMilli(Milli(ms)));
+	const restore = clock.install();
+	return { advance: (by: number) => clock.advanceAsync(Nano.fromMilli(Milli(by))), restore };
+}
+
+// A legacy container frame: the media timestamp, then one payload byte.
+function legacyFrame(media: Micro): Moq.Group.Frame {
+	const timestamp = Moq.Varint.encode(media);
+	const payload = new Uint8Array(timestamp.byteLength + 1);
+	payload.set(timestamp, 0);
+	return { payload, timestamp: Moq.Time.Timestamp.fromMicros(media) };
+}
+
+// A live "auto" playback reading real tracks through real container consumers on a manual clock.
+// One 20ms Opus frame per group, flushed in runs of `burst`, so each run's first frame lands that
+// much late. Each tick renders 20ms from the decoder's ring the way the worklet does.
+async function livePlayback(burst: number) {
+	const FRAME = 20;
+	const clock = manualAt(0);
+	const insert = spyOn(SharedRingBuffer.prototype, "insert");
+
+	const audio = Catalog.AudioConfigSchema.parse({
+		codec: "opus",
+		container: { kind: "legacy" },
+		sampleRate: 48_000,
+		numberOfChannels: 2,
+	});
+	const catalog = new Signal<Catalog.Root>({ audio: { renditions: { audio } } });
+	// The broadcast the rendition reads, which a `broadcast` override can move to another path.
+	let producer = new Moq.Broadcast.Producer();
+	const media = new Signal<Moq.Broadcast.Consumer>(producer.consume());
+	const broadcast = new Signal<Broadcast | undefined>({
+		in: { enabled: new Signal(true) },
+		out: { catalog, active: new Signal({ closed: {} }) },
+		relativeBroadcast: (effect: Effect) => effect.get(media),
+	} as unknown as Broadcast);
+	const source = new Source({ broadcast, supported: async () => true });
+	const sync = new Sync({ delay: new Signal<Delay>("auto") });
+	// Published before the decoder subscribes, since a broadcast with no request handler refuses
+	// an unknown track.
+	let track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI });
+	const decoder = new Decoder({ source, sync });
+
+	const samples = (48_000 * FRAME) / 1000;
+	const output = [new Float32Array(samples), new Float32Array(samples)];
+	const counts = { inserted: 0, played: 0, silent: 0 };
+	let frame = 0;
+	let sequence = 0;
+	let held: number[] = [];
+
+	const ring = () => insert.mock.contexts.at(-1) as SharedRingBuffer | undefined;
+	return {
+		sync,
+		error: decoder.out.error,
+		counts,
+		ring,
+		get burst() {
+			return burst;
+		},
+		set burst(value: number) {
+			burst = value;
+		},
+		// Rename the rendition, publishing the rest of the timeline on the new track.
+		rename(name: string, patch: Record<string, unknown> = {}) {
+			track.close();
+			track = producer.createTrack(name, { timescale: Moq.Time.Timescale.MILLI });
+			sequence = 0;
+			catalog.set({ audio: { renditions: { [name]: Catalog.AudioConfigSchema.parse({ ...audio, ...patch }) } } });
+		},
+		// Serve the same rendition from another path, as a `broadcast` override does.
+		move(path: string) {
+			media.peek().close();
+			producer = new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path));
+			track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI });
+			sequence = 0;
+			media.set(producer.consume());
+		},
+		// Remove the rendition from the catalog.
+		remove: () => catalog.set({}),
+		// Publish every frame due through `until`, rendering 20ms per tick.
+		async run(until: number) {
+			for (let t = frame * FRAME; t <= until; t += FRAME) {
+				await clock.advance(FRAME);
+				for (; frame * FRAME <= t; frame++) {
+					held.push(frame * FRAME);
+					if (held.length < burst) continue;
+					for (const timestamp of held) {
+						const group = new Moq.Group.Producer(sequence++);
+						group.writeFrame(legacyFrame(Micro.fromMilli(Milli(timestamp))));
+						group.close();
+						track.writeGroup(group);
+					}
+					held = [];
+				}
+				await new Promise((resolve) => setImmediate(resolve));
+				await microtasks();
+
+				const current = ring();
+				if (!current || current.stalled) continue;
+				const read = current.read(output);
+				counts.played += read;
+				if (read < samples) counts.silent++;
+			}
+			counts.inserted = insert.mock.calls.reduce((sum, [, data]) => sum + (data as Float32Array[])[0].length, 0);
+		},
+		async close() {
+			decoder.close();
+			source.close();
+			sync.close();
+			media.peek().close();
+			producer.close();
+			await microtasks();
+			clock.restore();
+		},
+	};
+}
+
+describe("Decoder across a rename", () => {
+	// A codec change renames the audio track, and the replacement's consumer reads the same path.
+	// Clearing the estimate at teardown and restarting it from the cold-start prior dropped the
+	// shared "auto" delay and climbed back as the new track relearned the lateness, so the ring
+	// skipped ahead on the drop and went silent refilling on each rise.
+	it("keeps the delay, so the ring neither skips nor goes silent", async () => {
+		// Flushed in runs of 12, so each run's first frame lands ~220ms late.
+		const playback = await livePlayback(12);
+		try {
+			// Long enough for the estimate to settle on the lateness this path shows.
+			await playback.run(20_000);
+			const delay = playback.sync.out.delay.peek();
+			expect(delay).toBeGreaterThan(Milli(200));
+			const ring = playback.ring();
+			const before = { ...playback.counts, buffered: ring?.length ?? 0 };
+			let lowest = delay;
+			const watch = new Effect();
+			watch.subscribe(playback.sync.out.delay, (value) => {
+				lowest = Milli(Math.min(lowest, value));
+			});
+
+			playback.rename("audio/1");
+			await playback.run(26_000);
+			watch.close();
+
+			const { inserted, played, silent } = playback.counts;
+			const buffered = playback.ring()?.length ?? 0;
+			const skipped = inserted - before.inserted - (played - before.played) - (buffered - before.buffered);
+			expect({ skipped, silent: silent - before.silent }).toEqual({ skipped: 0, silent: 0 });
+			expect(playback.ring()).toBe(ring);
+			expect(lowest).toBeGreaterThanOrEqual(delay);
+		} finally {
+			await playback.close();
+		}
+	});
+
+	// Another path's arrivals say nothing about this one's, so a rendition read from elsewhere
+	// learns its own estimate instead of inheriting the outgoing one.
+	it("does not carry the delay to another path", async () => {
+		const playback = await livePlayback(12);
+		try {
+			await playback.run(20_000);
+			const warm = playback.sync.out.delay.peek();
+			expect(warm).toBeGreaterThan(Milli(200));
+
+			// The same media from another path, where every frame lands on time.
+			playback.move("elsewhere");
+			playback.burst = 1;
+			await playback.run(22_000);
+
+			expect(playback.sync.out.delay.peek()).toBeLessThan(warm);
+		} finally {
+			await playback.close();
+		}
+	});
+
+	// The probe accepts a CMAF init segment it cannot parse for Opus, so setup throws before the
+	// replacement's consumer exists. Nothing replaces the outgoing estimate, so it must not linger.
+	it("reports a replacement that fails to set up and stops holding the delay", async () => {
+		const playback = await livePlayback(12);
+		try {
+			await playback.run(20_000);
+			const warm = playback.sync.out.delay.peek();
+			expect(warm).toBeGreaterThan(Milli(200));
+
+			playback.rename("audio/1", { container: { kind: "cmaf", init: "AAAA" } });
+			await microtasks();
+
+			expect(playback.error.peek()).toBeInstanceOf(Error);
+			expect(playback.sync.out.delay.peek()).toBeLessThan(warm);
+		} finally {
+			await playback.close();
+		}
+	});
+
+	it("stops holding the delay once the rendition is removed", async () => {
+		const playback = await livePlayback(12);
+		try {
+			await playback.run(20_000);
+			const warm = playback.sync.out.delay.peek();
+			expect(warm).toBeGreaterThan(Milli(200));
+
+			playback.remove();
+			await microtasks();
+
+			expect(playback.sync.out.delay.peek()).toBeLessThan(warm);
+		} finally {
+			await playback.close();
 		}
 	});
 });

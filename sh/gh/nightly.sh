@@ -2,25 +2,30 @@
 # Keep benchmark builds together while unrelated Nightly workloads run independently.
 set -euo pipefail
 
-usage='usage: just gh nightly rust|js'
+usage='usage: just gh nightly rust-test|rust-bench|js'
 if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
 fi
+# The measured groups write a report for the benchmark site; rust-test only runs.
 case "$1" in
-    rust | js) ;;
+    rust-test) report= ;;
+    rust-bench) report=rust ;;
+    js) report=js ;;
     *)
         echo "$usage" >&2
         exit 2
         ;;
 esac
 
-root=$(git rev-parse --show-toplevel)
-out=${MOQ_BENCH_RESULTS:-$root/target/bench/nightly/$1}
-mkdir -p "$out"
-export MOQ_BENCH_RUNS="$out/criterion-runs.txt"
-: >"$MOQ_BENCH_RUNS"
-rm -f "$out/report.json"
+if [[ -n $report ]]; then
+    root=$(git rev-parse --show-toplevel)
+    out=${MOQ_BENCH_RESULTS:-$root/target/bench/nightly/$1}
+    mkdir -p "$out"
+    export MOQ_BENCH_RUNS="$out/criterion-runs.txt"
+    : >"$MOQ_BENCH_RUNS"
+    rm -f "$out/report.json"
+fi
 
 failed=()
 run() {
@@ -42,8 +47,9 @@ javascript() {
     if ! "$@" | tee "$out/raw/$label.csv"; then failed+=("$*"); fi
 }
 
-case "${1:-}" in
-    rust)
+case "$1" in
+    # Ignored benchmark tests under nextest: the release builds first, then the test-profile ones.
+    rust-test)
         run just rs bench-latency
         run just rs test -p moq-bench --release --run-ignored only \
             -E 'test(benchmark_readiness_establishment)' --success-output immediate
@@ -51,29 +57,34 @@ case "${1:-}" in
         run just rs test --release -p moq-quic -E 'test(benchmark_ack_cleanup)' \
             --run-ignored only --success-output immediate
         run just rs bench-feed-fetch
+        run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
-        # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
-        criterion net --no-fail-fast -p moq-net --features fuzz --bench '*'
-        # Exercise the optional thread-CPU clock as well as the normal elapsed-time smoke.
-        SESSION_CPU=1 criterion net-cpu -p moq-net --bench session -- session_delivery_group_cost_cpu
-        # Measure each kio routine, including the contended bench's worker threads.
-        criterion kio --no-fail-fast -p kio --bench '*'
-        # One invocation unifies this release build instead of rebuilding shared crates
-        # independently for each target. Keep the explicit targets: '*' would add coverage.
-        criterion shared --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
-            --features moq-stats/bench \
-            --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
-            --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
-            --bench chunk_interleaving --bench worker_turns
         run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
             -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_reference_handoff_fanout)' \
             --run-ignored only --success-output immediate
         # Codecs are irrelevant to timebase reservation, so skip building them.
         run just rs test -p moq-ffi --no-default-features -E 'test(benchmark_timebase_reservation_fanout)' \
             --run-ignored only --success-output immediate
+        run just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
+        ;;
+    # Measured Cargo bench targets, all in the bench profile.
+    rust-bench)
+        # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
+        criterion net --no-fail-fast -p moq-net --features fuzz --bench '*'
+        # Measure the optional thread-CPU clock as well as the normal elapsed time.
+        SESSION_CPU=1 criterion net-cpu -p moq-net --bench session -- session_delivery_group_cost_cpu
+        # Measure each kio routine, including the contended bench's worker threads.
+        criterion kio --no-fail-fast -p kio --bench '*'
+        # One invocation unifies this release build instead of rebuilding shared crates
+        # independently for each target. Keep the explicit targets: '*' would add coverage.
+        criterion shared --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
+            -p moq-quic --features moq-stats/bench \
+            --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
+            --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
+            --bench chunk_interleaving --bench worker_turns \
+            --bench streams --bench receive --bench endpoint --bench wire
         # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
         criterion gst -p moq-gst --bench catalog
-        run just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
         ;;
     js)
         for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track interests priority; do
@@ -82,11 +93,8 @@ case "${1:-}" in
         javascript catalog just js catalog-bench
         javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench
+        javascript e2ee just js e2ee-bench
         javascript signals just js signals-bench
-        ;;
-    *)
-        echo "$usage" >&2
-        exit 2
         ;;
 esac
 
@@ -95,4 +103,6 @@ if ((${#failed[@]})); then
     exit 1
 fi
 
-just gh benchmark-report "$1" "$out" "$out/report.json"
+if [[ -n $report ]]; then
+    just gh benchmark-report "$report" "$out" "$out/report.json"
+fi

@@ -30,7 +30,7 @@ class SelectTest(unittest.TestCase):
     def test_nextest_launcher_selects_workspace(self):
         for action in ("check", "check-test", "lint", "test"):
             with self.subTest(action=action):
-                self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz",
+                self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz",
                               self.selected("sh/rs/nextest.sh", action=action))
         selected = self.selected("sh/rs/nextest.sh")
         for recipe in ("tokio-features --all", "net-features", "wasm", "uring-check", "media-features --all"):

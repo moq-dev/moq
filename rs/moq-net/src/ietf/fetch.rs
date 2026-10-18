@@ -5,7 +5,7 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	ietf::{
 		Filter, GroupOrder, Location, Opaque, Parameters, RequestId,
-		namespace::{decode_namespace, encode_namespace},
+		namespace::{decode_track, encode_namespace},
 		subscribe::has_range_filters,
 	},
 };
@@ -87,8 +87,8 @@ impl Decode<Version> for FetchType<'_> {
 		let fetch_type = buf.varint()?;
 		Ok(match fetch_type {
 			0x1 => {
-				let namespace = decode_namespace(buf)?;
-				let track = Cow::Owned(buf.string()?);
+				let (namespace, track) = decode_track(buf)?;
+				let track = Cow::Owned(track);
 				let start = Location::decode(buf, version)?;
 				let end = Location::decode(buf, version)?;
 				FetchType::Standalone {
@@ -246,8 +246,8 @@ impl Message for Fetch<'_> {
 				}
 				// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
 				_ => {
-					let namespace = decode_namespace(buf)?;
-					let track = Cow::Owned(buf.string()?);
+					let (namespace, track) = decode_track(buf)?;
+					let track = Cow::Owned(track);
 					decode_params!(buf, version,
 						0x03 => authorization_token: Vec<super::token::RequestToken>,
 						0x0A => fill_timeout: Option<u64>,

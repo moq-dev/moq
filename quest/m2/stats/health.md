@@ -31,7 +31,7 @@ broadcast, which #4510 replaced with these tracks (the relay's own
 
 Guidance, to be settled while building:
 
-- Inputs are the snapshot types from [the schema](/quest/m2/stats/schema.md):
+- Inputs are the snapshot types from [the schema](/doc/concept/stats.md#media-reports):
   `transport` (rtt, rate, cumulative bytes and packets lost, sample age) and
   the per-rendition counters. Decided in the 2026-10-10 audit: rendition
   rates and transport loss use deltas of cumulative counters over the two
@@ -61,12 +61,8 @@ change, from shared fixtures in both languages. Docs: the media section of `doc/
 
 Public API: new health types in `hang` and `@moq/hang`. Wire: none.
 
-## Required
-
-- [Schema](/quest/m2/stats/schema.md) - the snapshot types the model reads
-
 ## Related
 
-- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, which a combined downstream verdict also reads
+- [QoS](/quest/m2/qos/README.md) - the relay's delivery counters, which a combined downstream verdict also reads
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a new epoch is one way a counter reset shows
 - [TS health counters](/quest/m2/ts-health-stats.md) - container counters kept out of the verdict

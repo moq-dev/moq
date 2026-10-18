@@ -21,6 +21,7 @@ struct TaskEntry {
 enum Link {
 	/// A dialed connection: a loop that redials, so it is offline between connections.
 	Dialed {
+		connection: moq_tokio::Connection,
 		/// Reads live connection stats, reporting `None` while reconnecting.
 		monitor: moq_tokio::connection::Monitor,
 		/// One allocator for the session. Every `moq_session_bandwidth` handle clones
@@ -102,6 +103,7 @@ impl Session {
 		// before moving it into the spawned task.
 		let reconnect = client.connect(url);
 		let link = Link::Dialed {
+			connection: reconnect.clone(),
 			monitor: reconnect.monitor(),
 			bandwidth: moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth()),
 		};
@@ -261,6 +263,14 @@ impl Session {
 		}
 	}
 
+	/// Mint receive-estimate demand only when the caller asks for a consumer.
+	pub fn recv_bandwidth(&self, id: Id) -> Result<Option<moq_net::bandwidth::Consumer>, Error> {
+		match self.link(id)? {
+			Link::Dialed { connection, .. } => Ok(Some(connection.recv_bandwidth())),
+			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.session.recv_bandwidth()),
+		}
+	}
+
 	/// Snapshot the current connection's stats.
 	///
 	/// Errors with [`Error::SessionNotFound`] if the handle is unknown, or [`Error::Offline`]
@@ -284,6 +294,17 @@ impl Session {
 				Ok((session.stats(), session.version()))
 			}
 		}
+	}
+
+	/// Why a dialed session is reconnecting, or `None` while nothing has failed since the
+	/// last connect. A server-accepted session never reconnects, so it is always `None`.
+	///
+	/// Errors with [`Error::SessionNotFound`] if the handle is unknown.
+	pub fn failure(&self, id: Id) -> Result<Option<Error>, Error> {
+		Ok(match self.link(id)? {
+			Link::Dialed { monitor, .. } => monitor.failure().map(map_connect_error),
+			Link::Accepted(_) => None,
+		})
 	}
 
 	/// Forward connect counts to the status callback until the reconnect loop stops.
@@ -364,6 +385,10 @@ mod tests {
 		assert_eq!(Error::Unauthorized.code(), -34);
 		assert_eq!(Error::Forbidden.code(), -35);
 		assert_eq!(map_connect_error(moq_net::Error::Unauthorized.into()).code(), -34);
+		// A refused request's expiry is not a session close, so it has its own status.
+		let expired = map_connect_error(moq_net::Error::Expired.into());
+		assert_eq!(expired.code(), -42);
+		assert!(expired.protocol().is_none());
 		assert_eq!(
 			map_connect_error(moq_net::Error::from(moq_net::SessionError::Unauthorized).into()).code(),
 			-2

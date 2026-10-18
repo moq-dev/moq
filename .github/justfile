@@ -4,6 +4,7 @@ set working-directory := '..'
 check:
     actionlint
     sh/gh/alert.sh check-coverage
+    bun test sh/gh/alert.test.ts
     bun sh/gh/check-runs.ts
 
 # Tests of repository tooling; nightly, not on every pull request.
@@ -17,7 +18,6 @@ test:
     python3 bench/profile.test.py
     python3 bench/ffi.test.py
     python3 sh/gh/gst-formula.test.py
-    python3 test/drill/pr.test.py
     python3 sh/changed.test.py
     python3 sh/dispatch-query.test.py
     python3 sh/dispatch-query.test.py --bench
@@ -31,6 +31,7 @@ test:
     python3 sh/rs/select.test.py
     python3 sh/js/workspace.test.py
     python3 sh/rs/test-lints.test.py
+    python3 sh/rs/model-markers.test.py
     python3 sh/gh/nightly.test.py
     python3 sh/gh/bench-report.test.py
     sh/go/publish-wrapper.test.sh
@@ -42,7 +43,7 @@ test:
 release *args:
     sh/gh/release.sh "$@"
 
-# Post a failed run to Discord, or check that alert.yml covers every workflow.
+# Post a failed run to Discord, or check cron and publishing alert coverage.
 [positional-arguments]
 alert *args:
     sh/gh/alert.sh "$@"

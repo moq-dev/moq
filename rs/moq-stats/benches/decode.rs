@@ -6,6 +6,9 @@
 //!
 //! Run `cargo bench -p moq-stats --bench decode` and compare the table across revisions.
 
+// Custom timings measure the real time the work took, not the ambient clock.
+#![allow(clippy::disallowed_methods)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

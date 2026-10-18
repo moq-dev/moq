@@ -41,9 +41,9 @@ Backends that return unsupported from `poll_acked` keep the group-granularity
 sampling from the parent quest, so the histogram never disappears over qmux or
 a browser transport; document which resolution a node offers.
 
-Decided in the 2026-09-30 audit: moved to m2. The group-granularity sampler
-from the parent quest answers the m1 question, and this waits on the m2 ACK
-hook.
+Deferred to m2 with the parent QoS sampler. Group-granularity lag lands
+first after the next release; frame-granularity sampling then adds the ACK
+hook without making either resolution a release gate.
 
 Decided 2026-10-08: the group-granularity sampler is the egress lag histogram
 from the QoS line, which so far exists only on its line branch, so that quest
@@ -60,5 +60,5 @@ unsupported.
 
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
   hook this samples through
-- [Egress lag histogram](/quest/m1/qos/lag-histogram.md) - the
+- [Egress lag histogram](/quest/m2/qos/lag-histogram.md) - the
   group-granularity sampler and starvation histogram this refines

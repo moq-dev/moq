@@ -21,7 +21,7 @@ Critical fixes continue to reach the existing release through backports.
 
 ## Required
 
-- [m0: immediate priorities](/quest/m0/README.md) - everything in flight now: relay hardening and the IETF interop fixes for Seattle, and broadcast epochs
-- [m1: next wave](/quest/m1/README.md) - reliability, capabilities, performance, and the planning that settles their contracts
-- [m2: later work](/quest/m2/README.md) - deferred features, design studies, and experiments
+- [m0: immediate priorities](/quest/m0/README.md) - urgent correctness fixes and maintenance of the current release
+- [m1: next wave](/quest/m1/README.md) - the agreed next breaking cut, with its required correctness and validation
+- [m2: later work](/quest/m2/README.md) - release execution first, then deferred features, optimization, and design studies
 - [m3: deferred](/quest/m3/README.md) - gated on the outside world (hardware, a partner, a consumer, a provider's offer, or an upstream release), or speculative with no named consumer

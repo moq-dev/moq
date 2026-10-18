@@ -29,6 +29,8 @@ const TRAIN_SEGMENTS: usize = 63;
 /// waiter without ever holding both.
 pub(crate) struct Inner {
 	pub(crate) conn: RefCell<moq_quic::Connection>,
+	/// Updated by packet ingress and egress, so readers never wake the worker to sample.
+	pub(crate) wire: moq_net::transport::Wire,
 	pub(crate) state: RefCell<State>,
 	/// The worker driving this connection, which anything layered on it
 	/// (the WebTransport handshake, say) runs on too.
@@ -72,7 +74,6 @@ pub(crate) struct State {
 	sends: FxHashMap<StreamId, Option<End>>,
 
 	datagram_recv_waiters: kio::WaiterList,
-	datagram_send_waiters: kio::WaiterList,
 
 	/// The terminal error, set exactly once; everything fails with it after.
 	closed: Option<Error>,
@@ -103,7 +104,6 @@ impl State {
 			finishing: FxHashMap::default(),
 			sends: FxHashMap::default(),
 			datagram_recv_waiters: kio::WaiterList::new(),
-			datagram_send_waiters: kio::WaiterList::new(),
 			closed: None,
 			closed_waiters: kio::WaiterList::new(),
 			dead: false,
@@ -139,7 +139,6 @@ impl State {
 		self.accept_uni_waiters.wake();
 		self.open_waiters.wake();
 		self.datagram_recv_waiters.wake();
-		self.datagram_send_waiters.wake();
 		for waiters in self.readable.values_mut() {
 			waiters.wake();
 		}
@@ -266,8 +265,8 @@ impl Inner {
 /// concurrent pending operations don't trample each other's wakeups. Dropping
 /// every handle (and every stream) drops the driver's `Rc` peers, but the
 /// driver itself keeps the connection alive until it ends; close explicitly
-/// with [`close`](web_transport_trait::poll::Session::close) (which moq's
-/// session machine does).
+/// with [`close`](web_transport_trait::poll::Session::close), or wrap it in
+/// [`crate::quic::web::Session`], whose last handle closes it.
 ///
 /// That close only records the code: the driver task is what frames the
 /// CONNECTION_CLOSE and hands it to the socket. Drive the worker until
@@ -301,6 +300,31 @@ impl Connection {
 	/// The worker driving this connection.
 	pub(crate) fn owner(&self) -> &Owner {
 		&self.shared.owner
+	}
+
+	/// Open a send group at `priority`, for streams to join with
+	/// [`SendStream::set_group`](super::SendStream::set_group).
+	pub fn send_group(&self, priority: i64) -> super::SendGroup {
+		super::SendGroup::new(self.shared.clone(), priority)
+	}
+
+	/// Send a datagram in `group` at `order`, scheduled like one of the group's streams at
+	/// priority `order`, or among the ungrouped streams without a group.
+	///
+	/// Never blocks: a full buffer drops the oldest datagram of the lowest-priority group,
+	/// see [`moq_quic::Datagrams::send`].
+	pub fn send_datagram(&self, payload: Bytes, group: Option<&super::SendGroup>, order: i64) -> Result<(), Error> {
+		if let Some(err) = self.shared.closed() {
+			return Err(err);
+		}
+		self.shared
+			.conn
+			.borrow_mut()
+			.datagrams()
+			.send(payload, group.map(super::SendGroup::id), order)
+			.map_err(|err| Error::Quic(err.to_string()))?;
+		self.shared.kick();
+		Ok(())
 	}
 
 	/// The peer's certificate chain in DER, leaf first, or `None` if it
@@ -337,6 +361,27 @@ impl Connection {
 	pub fn handshake(&self) -> &crate::quic::handshake::Info {
 		&self.handshake
 	}
+
+	/// Change the flow-control limits `limits` sets; a raise reaches the peer
+	/// on the next packet.
+	///
+	/// Errors, changing nothing, on limits [`Limits::validate`](crate::quic::Limits::validate)
+	/// refuses.
+	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), Error> {
+		self.shared.conn.borrow_mut().set_limits(limits)?;
+		self.shared.kick();
+		Ok(())
+	}
+
+	/// Returns connection statistics.
+	pub fn stats(&self) -> moq_quic::ConnectionStats {
+		self.shared.conn.borrow().stats()
+	}
+
+	/// The wire counters this connection updates as it sends and receives.
+	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
+		self.shared.wire.clone()
+	}
 }
 
 impl Clone for Connection {
@@ -365,7 +410,13 @@ pub(crate) fn launch(
 	key: ConnectionHandle,
 	conn: moq_quic::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
+	// The handshake's first datagrams arrived before this driver existed.
+	let stats = conn.stats();
+	let wire = moq_net::transport::Wire::new();
+	wire.set_sent_bytes(stats.udp_tx.bytes);
+	wire.set_received_bytes(stats.udp_rx.bytes);
 	let shared = Rc::new(Inner {
+		wire,
 		conn: RefCell::new(conn),
 		state: RefCell::new(State::new()),
 		owner: owner.clone(),
@@ -377,7 +428,6 @@ pub(crate) fn launch(
 		endpoint,
 		key,
 		deadline: owner.timer(),
-		scratch: Vec::with_capacity(TRAIN_SEGMENTS * SEGMENT),
 		close_staged: false,
 	};
 	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
@@ -547,25 +597,8 @@ impl web_transport_trait::poll::Session for Connection {
 		}
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		let waiter = self.park.hold(cx);
-		if let Some(err) = self.shared.closed() {
-			return Poll::Ready(Err(err));
-		}
-		let payload = Bytes::copy_from_slice(payload);
-		match self.shared.conn.borrow_mut().datagrams().send(payload, false) {
-			Ok(()) => {
-				self.shared.kick();
-				Poll::Ready(Ok(()))
-			}
-			// The send queue is full; a flush frees space.
-			Err(moq_quic::SendDatagramError::Blocked(_)) => {
-				let mut state = self.shared.state.borrow_mut();
-				waiter.register(&mut state.datagram_send_waiters);
-				Poll::Pending
-			}
-			Err(err) => Poll::Ready(Err(Error::Quic(err.to_string()))),
-		}
+	fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Self::send_datagram(self, Bytes::copy_from_slice(payload), None, 0))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -692,9 +725,6 @@ struct Driver {
 	endpoint: Weak<endpoint::Inner>,
 	key: ConnectionHandle,
 	deadline: crate::Timer,
-	/// Egress staging: moq-quic writes into a `Vec`, so a train is built
-	/// here and copied into the socket's registered buffer.
-	scratch: Vec<u8>,
 	/// A CONNECTION_CLOSE has been handed to the socket. Not implied by a
 	/// flush that came back empty: moq-quic paces the close like any other packet,
 	/// so it can sit behind a pacing timer after the application asked for it.
@@ -790,7 +820,6 @@ impl Driver {
 				}
 				moq_quic::Event::ConnectionLost { reason } => state.fail(reason.into()),
 				moq_quic::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
-				moq_quic::Event::DatagramsUnblocked => state.datagram_send_waiters.wake(),
 				moq_quic::Event::HandshakeDataReady => {}
 				moq_quic::Event::Stream(event) => sweep_stream(&mut state, event),
 				// Non-exhaustive upstream; nothing else needs a wakeup.
@@ -843,31 +872,31 @@ impl Driver {
 			Poll::Pending => return Poll::Pending,
 		};
 
-		let segments = (tx.len() / SEGMENT).min(TRAIN_SEGMENTS);
+		let segments = (tx.capacity() / SEGMENT).min(TRAIN_SEGMENTS);
 		if segments == 0 {
 			return Poll::Ready(Err(Error::Io(format!(
 				"transmit buffer of {} bytes holds no {SEGMENT} byte segment",
-				tx.len()
+				tx.capacity()
 			))));
 		}
 
-		self.scratch.clear();
 		let (transmit, closing) = {
 			let mut conn = self.shared.conn.borrow_mut();
+			// moq-quic encrypts the train straight into the socket's buffer.
 			// Nothing to send, or paced; the buffer returns to the pool on drop.
-			let Some(transmit) = conn.poll_transmit(moq_clock::Instant::now(), segments, &mut self.scratch) else {
+			let Some(transmit) = conn.poll_transmit(moq_clock::Instant::now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
+			self.shared.wire.set_sent_bytes(conn.stats().udp_tx.bytes);
 			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
 			(transmit, conn.is_closed())
 		};
+		debug_assert_eq!(transmit.size, tx.len());
 
-		tx[..transmit.size].copy_from_slice(&self.scratch[..transmit.size]);
 		// A lone datagram is its own segment size, and the socket's GSO
 		// stride has to match what moq-quic actually packed.
 		let transmit = udp::Transmit {
 			to: transmit.destination,
-			len: transmit.size,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
 		};
@@ -875,8 +904,6 @@ impl Driver {
 			return Poll::Ready(Err(Error::Io(err.to_string())));
 		}
 		self.close_staged |= closing;
-		// A flush frees datagram-send queue space.
-		self.shared.state.borrow_mut().datagram_send_waiters.wake();
 		Poll::Ready(Ok(()))
 	}
 }

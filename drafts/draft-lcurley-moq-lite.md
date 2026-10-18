@@ -174,7 +174,9 @@ A Group Stream normally starts at frame 0, but MAY start later when the publishe
 
 Each frame of a timed Track carries a presentation timestamp expressed in the Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
 A Track without a `Timescale` is untimed: its frames and datagrams carry no timestamp.
+A publisher MUST NOT start a timed Group's frame 0 earlier than that of any lower-sequence Group it publishes.
 lite-05 and lite-06 cannot encode an untimed Track, so a publisher on those versions declares a `Timescale` of 1000 for it and stamps every frame and datagram with its send time in milliseconds.
+A receiver cannot tell such send times from presentation timestamps, and they need not rise with sequence, so it does not check received Groups against this rule.
 
 ## Positions {#positions}
 A Position is a (Group Sequence, Frame Index) pair identifying one frame within a Track.
@@ -273,7 +275,7 @@ The codes moq-lite uses are listed in full below; an endpoint MUST NOT assign a 
 
 Codes 64 and above are the application's, opaque to moq-lite.
 An endpoint MUST ignore a code it does not recognize, treating it as an unspecified error.
-An endpoint MUST NOT infer a meaning for an unregistered code; in particular, it MUST NOT assume a code is an authorization failure unless it is UNAUTHORIZED.
+An endpoint MUST NOT infer a meaning for an unregistered code; in particular, it MUST NOT assume a code is an authorization failure unless it is UNAUTHORIZED or EXPIRED_AUTH_TOKEN.
 
 Codes 32 through 47 are reserved for a future revision: nothing is assigned there and a value in it MUST NOT be interpreted.
 
@@ -299,6 +301,8 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x7   | TOO_MANY_REQUESTS | The peer held more announcements or subscriptions than the endpoint allows. |
 | ------- | ------------- | ----------- |
+|  0x8   | INVALID_PATH | A moq-transport PATH was sent where that draft forbids it, such as by a server; moq-lite has no PATH. |
+| ------- | ------------- | ----------- |
 |  0x10  | GOAWAY_TIMEOUT | The peer did not close within the GOAWAY drain deadline. |
 | ------- | ------------- | ----------- |
 |  0x11  | CONTROL_MESSAGE_TIMEOUT | The peer took too long to respond to a control message. |
@@ -308,6 +312,10 @@ Sent when terminating the session, via the transport's session close.
 |  0x15  | VERSION_NEGOTIATION_FAILED | No version could be negotiated. |
 | ------- | ------------- | ----------- |
 |  0x17  | UNKNOWN_AUTH_TOKEN_ALIAS | A token named an alias that was never registered. |
+| ------- | ------------- | ----------- |
+|  0x18  | EXPIRED_AUTH_TOKEN | The endpoint's token expired. Unlike UNAUTHORIZED, refreshed credentials may succeed. |
+| ------- | ------------- | ----------- |
+|  0x19  | INVALID_AUTHORITY | A moq-transport AUTHORITY was sent where that draft forbids it, such as by a server; moq-lite has no AUTHORITY. |
 | ------- | ------------- | ----------- |
 |  0x1B  | TOO_MANY_REQUEST_UPDATES | The peer left more request updates unanswered than the endpoint allows. |
 | ------- | ------------- | ----------- |
@@ -594,6 +602,7 @@ The subscriber's `Group Order` determines which Group within the Track is transm
 
 A publisher SHOULD attempt to transmit streams based on these rules.
 This depends on the QUIC implementation and it may not be possible to get fine-grained control.
+A publisher SHOULD order a [datagram](#datagrams) among the subscription's streams as if it were its Group's stream, ahead of that stream when both exist.
 
 ### Priority
 The `Subscriber Priority` is scoped to the connection and MAY change over the life of the subscription via SUBSCRIBE_UPDATE.
@@ -644,6 +653,7 @@ A subscriber MUST support gaps and out-of-order delivery regardless.
 Expiration governs when an older group is dropped.
 The publisher SHOULD reset Group Streams for non-latest groups whose age reaches `Subscriber Max Age` (see [SUBSCRIBE](#subscribe), and the age definition below); the subscriber MAY also locally drop such groups.
 Expiration only removes the group from live delivery; the publisher MAY still retain it for FETCH or new subscriptions until its age exceeds `Publisher Max Age` (see [TRACK_INFO](#track-info)).
+A FETCH can additionally carry `Subscriber Max Age`; it can tighten, but never relax, the publisher bound.
 
 It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization), but a lower priority group still consumes RAM, bandwidth, and potentially flow control.
 It is RECOMMENDED that an application set conservative limits and only resort to expiration when data is absolutely no longer needed.
@@ -722,7 +732,7 @@ A publisher sends a datagram to a subscription only when its Group Sequence is i
 A datagram is never cached or retransmitted, and FETCH never returns one.
 A publisher MAY send a new subscription the datagrams still in a short send buffer, so a subscriber cannot assume a datagram was sent after it subscribed.
 A publisher that knows a FETCH names a group delivered only as a datagram resets the stream with NOT_FETCHABLE; otherwise it answers as for a group that does not exist, with NOT_FOUND.
-A publisher SHOULD only send a datagram if the congestion controller can transmit it immediately.
+A publisher SHOULD drop a datagram rather than block when the transport has no room for it.
 There is no separate subscription for datagram delivery: datagrams are routed to existing subscriptions via the Subscribe ID, and a subscriber receiving the same group via both a stream and a datagram MUST deduplicate by group sequence.
 
 Each datagram body has the following encoding (note: there is no message length prefix; the QUIC datagram boundary delimits the payload):
@@ -1340,6 +1350,7 @@ FETCH Message {
   Epoch (b)
   Track Name (s)
   Subscriber Priority (8)
+  Subscriber Max Age (i)
   Group Sequence (i)
   Frame Start (i)
   Frame End (i)
@@ -1355,6 +1366,10 @@ The name of the track to fetch from.
 **Subscriber Priority**:
 The priority of the fetch within the session, represented as a u8.
 See the [Prioritization](#prioritization) section for more information.
+
+**Subscriber Max Age**:
+The optional maximum age in milliseconds that the subscriber accepts, encoded as the value plus one; 0 omits the reader bound.
+The publisher still applies `Publisher Max Age`, and MUST use the tighter bound while serving and while the returned group remains open.
 
 **Group Sequence**:
 The sequence number of the group to fetch.
@@ -1569,14 +1584,17 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's. Receivers do not check it, since a received timestamp may be a send time.
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1). A relay requests descending upstream unless every subscription it serves is ascending.
 - Listed the shared INVALID_REQUEST_ID (0x4) session code used by moq-transport drafts 14 through 16.
+- Listed the shared EXPIRED_AUTH_TOKEN (0x18) session code. A request that expires on its own resets with the UNAUTHORIZED stream code.
 
 - SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
 - Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
+- A publisher SHOULD order a datagram among the subscription's streams as if it were its Group's stream, ahead of that stream when both exist. It SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
 - A subscriber MAY cancel by FIN on its Subscribe Stream, and the publisher then FINs without SUBSCRIBE_END.
@@ -1585,6 +1603,7 @@ The `Message Length` describes the payload size on the wire.
 - A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
 - Replaced Warm and Cold Route Cost with one static Route Cost in moq-lite-07-wip; lite-06 retains both fields, reading Warm and writing Cold at saturation.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
+- Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
 - Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path for new requests, while subscriptions to the older one stay until their route goes. Replaces the first-hop identity.
 - Added ANNOUNCE_RESTART (0x3): another publisher instance replaces a live advertisement, under a new Epoch or, without one, through another route, including a path beneath a prefix moving to another route. Older versions send ANNOUNCE_END then ANNOUNCE_START for it.
@@ -1604,6 +1623,7 @@ The `Message Length` describes the payload size on the wire.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.
 - Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
 - Added the AUTH_TOKEN_CACHE_OVERFLOW (0x13), UNKNOWN_AUTH_TOKEN_ALIAS (0x17), and TOO_MANY_REQUEST_UPDATES (0x1B) session codes, with moq-transport's meaning.
+- Added the INVALID_PATH (0x8) and INVALID_AUTHORITY (0x19) session codes, with moq-transport's meaning.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
 - Invalid UTF-8 or an oversized AUTH_ERROR reason closes the session with PROTOCOL_VIOLATION.
 - An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION.

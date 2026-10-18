@@ -102,7 +102,7 @@ pub fn to_stream_code(err: &StreamError, version: Version) -> u32 {
 /// A code the draft does not assign stays [`StreamError::Unknown`], which surfaces as
 /// [`Error::Stream`](crate::Error::Stream): an error, but never one given a meaning it did
 /// not carry. That includes the codes this crate has no local counterpart for
-/// (UNKNOWN_OBJECT_STATUS, EXPIRED_AUTH_TOKEN, EXCESSIVE_LOAD) and every value a later
+/// (UNKNOWN_OBJECT_STATUS, EXCESSIVE_LOAD) and every value a later
 /// draft may add.
 pub fn from_stream_code(code: u32, version: Version) -> StreamError {
 	match code {
@@ -146,6 +146,7 @@ pub(crate) fn to_session_code(error: &SessionError) -> u32 {
 /// | DOES_NOT_EXIST | 0x4 | 0x4 | - | - | - | 0x10 |
 /// | UNINTERESTED | - | - | 0x4 | 0x4 | - | 0x20 |
 /// | MALFORMED_TRACK | - | 0x9 | - | - | - | 0x12 |
+/// | EXPIRED_AUTH_TOKEN | 0x12 | 0x12 | - | 0x12 | 0x12 | 0x5 |
 /// | GOING_AWAY | - | - | - | - | - | 0x6 (17+) |
 ///
 /// The renumbering is the trap: draft-14 SUBSCRIBE_ERROR gives 0x4 to TRACK_DOES_NOT_EXIST
@@ -228,6 +229,12 @@ pub(crate) mod request {
 	/// The same condition from draft-15 on, where 0x10 became DOES_NOT_EXIST.
 	const MALFORMED_AUTH_TOKEN: u64 = 0x4;
 
+	/// An expired AUTHORIZATION TOKEN, as draft-14 numbers it.
+	const EXPIRED_AUTH_TOKEN_14: u64 = 0x12;
+
+	/// The same condition from draft-15 on, where 0x12 became MALFORMED_TRACK.
+	const EXPIRED_AUTH_TOKEN: u64 = 0x5;
+
 	/// The value for "the thing you asked for is not here", or `None` where the draft and
 	/// request assign none.
 	fn does_not_exist(kind: Kind, version: Version) -> Option<u64> {
@@ -298,6 +305,16 @@ pub(crate) mod request {
 		}
 	}
 
+	/// The value for an expired token, or `None` where the draft and request assign none.
+	/// Draft-14 registers none on PUBLISH_ERROR.
+	fn expired_auth_token(kind: Kind, version: Version) -> Option<u64> {
+		match (version, kind) {
+			(Version::Draft14, Kind::Publish) => None,
+			(Version::Draft14, _) => Some(EXPIRED_AUTH_TOKEN_14),
+			_ => Some(EXPIRED_AUTH_TOKEN),
+		}
+	}
+
 	/// The value for a draining session, or `None` before draft-17 registered one.
 	fn going_away(version: Version) -> Option<u64> {
 		match version {
@@ -318,6 +335,7 @@ pub(crate) mod request {
 			Error::Unauthorized
 			| Error::Session(SessionError::Unauthorized)
 			| Error::Stream(StreamError::Unauthorized) => return UNAUTHORIZED,
+			Error::Expired | Error::Session(SessionError::Expired) => expired_auth_token(kind, version),
 			Error::Timeout | Error::Stream(StreamError::DeliveryTimeout) | Error::Session(SessionError::Timeout) => {
 				return TIMEOUT;
 			}
@@ -367,6 +385,7 @@ pub(crate) mod request {
 			UNAUTHORIZED => Error::Unauthorized,
 			TIMEOUT => Error::Timeout,
 			NOT_SUPPORTED => Error::Unsupported,
+			code if Some(code) == expired_auth_token(kind, version) => Error::Expired,
 			code if Some(code) == does_not_exist(kind, version) => Error::NotFound,
 			code if Some(code) == invalid_range(kind, version) => Error::InvalidRange,
 			code if Some(code) == invalid_joining_request_id(kind, version) => Error::InvalidJoiningRequestId,
@@ -405,9 +424,10 @@ pub(crate) mod request {
 		/// Every error a rejection distinguishes, plus one it does not, so the checks below cover
 		/// the whole registry rather than the variants someone remembered. A new arm in
 		/// [`to_code`] belongs here.
-		const EVERY_ERROR: [Error; 13] = [
+		const EVERY_ERROR: [Error; 14] = [
 			Error::Duplicate,
 			Error::Unauthorized,
+			Error::Expired,
 			Error::Timeout,
 			Error::Unsupported,
 			Error::Session(SessionError::Unsupported),
@@ -497,6 +517,24 @@ pub(crate) mod request {
 				assert_eq!(to_code(&err, kind, Version::Draft14), draft14);
 				for version in ALL.into_iter().skip(1) {
 					assert_eq!(to_code(&err, kind, version), 0x4);
+				}
+			}
+		}
+
+		/// Draft-15 moved EXPIRED_AUTH_TOKEN from 0x12 to 0x5, and draft-14 gives PUBLISH_ERROR
+		/// no value for it.
+		#[test]
+		fn an_expired_token_uses_the_draft_s_own_number() {
+			for kind in KINDS {
+				if kind == Kind::Publish {
+					assert_eq!(to_code(&Error::Expired, kind, Version::Draft14), INTERNAL_ERROR);
+				} else {
+					assert_eq!(to_code(&Error::Expired, kind, Version::Draft14), 0x12);
+					assert!(matches!(from_code(0x12, kind, Version::Draft14), Error::Expired));
+				}
+				for version in ALL.into_iter().skip(1) {
+					assert_eq!(to_code(&Error::Expired, kind, version), 0x5);
+					assert!(matches!(from_code(0x5, kind, version), Error::Expired));
 				}
 			}
 		}

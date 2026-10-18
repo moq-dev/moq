@@ -47,6 +47,47 @@ pub enum Binding {
 	InBand,
 }
 
+/// One connection's cumulative wire counters, which its transport updates as it sends and receives.
+///
+/// Clones share the counters, so stats read them without polling the session or keeping the
+/// connection alive, and the final totals stay readable after it closes. Each counter is
+/// independent: a transport records the ones it tracks, and the rest stay zero.
+#[derive(Clone, Debug, Default)]
+pub struct Wire(std::sync::Arc<WireCounters>);
+
+#[derive(Debug, Default)]
+struct WireCounters {
+	sent_bytes: std::sync::atomic::AtomicU64,
+	received_bytes: std::sync::atomic::AtomicU64,
+}
+
+impl Wire {
+	/// Create counters that start at zero.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// The bytes sent so far, including transport framing and retransmissions.
+	pub fn sent_bytes(&self) -> u64 {
+		self.0.sent_bytes.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// The bytes received so far, including transport framing.
+	pub fn received_bytes(&self) -> u64 {
+		self.0.received_bytes.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Record the cumulative bytes sent so far.
+	pub fn set_sent_bytes(&self, total: u64) {
+		self.0.sent_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// Record the cumulative bytes received so far.
+	pub fn set_received_bytes(&self, total: u64) {
+		self.0.received_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+}
+
 /// Connection-level statistics.
 ///
 /// Methods return `Option`: `None` means the implementation doesn't track
@@ -97,10 +138,27 @@ pub trait Stats {
 pub struct StatsUnavailable;
 impl Stats for StatsUnavailable {}
 
+/// The typed transport condition when no application code was received.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CloseKind {
+	/// The transport failed without a more specific classification.
+	#[default]
+	Transport,
+	/// The connection reached its idle deadline.
+	IdleTimeout,
+	/// This endpoint closed the connection locally.
+	Closed,
+}
+
 /// A transport failure with optional session and stream application codes.
 ///
 /// Session codes and stream codes belong to separate registries.
 pub trait Error: std::error::Error + MaybeSend + MaybeSync + 'static {
+	/// The typed transport condition, independent of application close codes.
+	fn close_kind(&self) -> CloseKind {
+		CloseKind::Transport
+	}
 	/// Returns the error code and reason if this was an application error.
 	///
 	/// Close reasons are exposed as UTF-8 strings at the transport boundary.
@@ -154,24 +212,37 @@ pub mod poll {
 		/// concurrent streams.
 		fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<BiStreams<Self>, Self::Error>>;
 
-		/// Poll to send a datagram over the network.
+		/// Open a send group at `priority`, or `None` when the transport orders streams by
+		/// their own priority alone.
 		///
-		/// Returns [`Poll::Pending`] while the transport has no room for it, so a caller
-		/// can wait for capacity rather than having the payload dropped underneath it.
+		/// Streams that [join](SendStream::set_group) a group share bytes with the session's
+		/// other groups: a higher priority group preempts every lower one, and groups of equal
+		/// priority get an equal share of bytes however many streams each has queued. Streams
+		/// outside every group go before all of them. The group is released once its last
+		/// handle is dropped and its streams finish.
+		fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group>;
+
+		/// Send a datagram in `group` at `order`, best-effort.
 		///
-		/// `payload` is taken by reference, not by value or as a [`Buf`]: a
-		/// [`Poll::Pending`] return means the caller retries with the same datagram, and
-		/// both of those would have consumed it. (A datagram also needs *contiguous*
-		/// bytes, and the only way to get those from a generic [`Buf`] is
-		/// [`Buf::copy_to_bytes`], which consumes.)
+		/// `order` ranks the datagram among the group's streams like a stream's own
+		/// [priority](SendStream::set_priority), and a datagram goes ahead of a stream of equal
+		/// order. Without a group it is ranked among the ungrouped streams. A transport that
+		/// cannot rank datagrams against streams ignores both.
+		///
+		/// Never blocks: a transport with no room drops a queued datagram, the lowest priority
+		/// first where it can tell, exactly as the network is allowed to.
 		///
 		/// Accepting a datagram is not delivery. QUIC datagrams may still be dropped:
 		/// - Network congestion.
 		/// - Random packet loss.
 		/// - Payload is larger than `max_datagram_size()`
 		/// - Peer is not receiving datagrams.
-		/// - ???
-		fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>>;
+		fn send_datagram(
+			&mut self,
+			payload: Bytes,
+			group: Option<&<Self::SendStream as SendStream>::Group>,
+			order: i64,
+		) -> Result<(), Self::Error>;
 
 		/// Poll for a datagram from the network.
 		fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>>;
@@ -207,6 +278,11 @@ pub mod poll {
 		/// rather than defaulted for the same reason as [`protocol`](Self::protocol).
 		fn stats(&self) -> impl Stats;
 
+		/// Return the wire counters this transport updates, or `None` when it tracks none.
+		fn wire(&self) -> Option<super::Wire> {
+			None
+		}
+
 		/// Accept the next unidirectional stream opened by the peer.
 		fn accept_uni(&mut self) -> AcceptUni<'_, Self> {
 			AcceptUni(self)
@@ -230,16 +306,6 @@ pub mod poll {
 		/// Receive the next datagram from the peer.
 		fn recv_datagram(&mut self) -> RecvDatagram<'_, Self> {
 			RecvDatagram(self)
-		}
-
-		/// Send a datagram, best-effort: if the transport has no room for it right
-		/// now, the datagram is dropped, exactly as the network is allowed to do.
-		fn send_datagram(&mut self, payload: &[u8]) -> Result<(), Self::Error> {
-			let mut cx = Context::from_waker(std::task::Waker::noop());
-			match self.poll_send_datagram(&mut cx, payload) {
-				Poll::Ready(res) => res,
-				Poll::Pending => Ok(()),
-			}
 		}
 
 		/// Wait until the session is closed by either side, returning the reason.
@@ -295,19 +361,54 @@ pub mod poll {
 	/// boxed drivers (`Send` boxes on native): what the moq-transport path
 	/// requires until it too becomes named machines. Implemented automatically.
 	pub trait Boxable:
-		Session<SendStream: MaybeSend, RecvStream: MaybeSend, Error: MaybeSend> + MaybeSend + MaybeSync
+		Session<
+			SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
+			RecvStream: MaybeSend,
+			Error: MaybeSend,
+		> + MaybeSend
+		+ MaybeSync
 	{
 	}
 
 	impl<S> Boxable for S where
-		S: Session<SendStream: MaybeSend, RecvStream: MaybeSend, Error: MaybeSend> + MaybeSend + MaybeSync
+		S: Session<
+				SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
+				RecvStream: MaybeSend,
+				Error: MaybeSend,
+			> + MaybeSend
+			+ MaybeSync
 	{
+	}
+
+	/// The send group of a session's streams.
+	#[cfg(feature = "async")]
+	pub(crate) type GroupOf<S> = <<S as Session>::SendStream as SendStream>::Group;
+
+	/// A transport's send group, from [`Session::send_group`].
+	///
+	/// Clones share the group.
+	pub trait SendGroup: Clone + 'static {
+		/// Change the group's priority: higher preempts lower.
+		fn set_priority(&mut self, priority: i64);
+	}
+
+	/// The send group of a transport that has none, which cannot be constructed.
+	#[derive(Clone, Debug)]
+	pub enum Ungrouped {}
+
+	impl SendGroup for Ungrouped {
+		fn set_priority(&mut self, _: i64) {
+			match *self {}
+		}
 	}
 
 	/// An outgoing stream with partial writes, priorities, and reset codes.
 	pub trait SendStream: 'static {
 		/// The error type for every operation on this stream.
 		type Error: Error;
+
+		/// The transport's send group, [`Ungrouped`] for a transport without them.
+		type Group: SendGroup;
 
 		/// Poll to write some of the buffer to the stream, returning how many bytes were
 		/// written. See [`poll_write_buf`](Self::poll_write_buf) for the partial-write
@@ -338,17 +439,18 @@ pub mod poll {
 			Poll::Ready(Ok(size))
 		}
 
-		/// Set the stream's priority.
+		/// Set the priority within the stream's send group, or session-wide when ungrouped.
 		///
 		/// Streams with higher values will be sent first, but are not guaranteed to
 		/// arrive first. This matches the W3C WebTransport `sendOrder` convention (and
 		/// quinn's scheduler).
 		///
-		/// The full `i32` range is available so callers can bit-pack a composite ordering
-		/// (for example a track priority in the high bits and a sequence number in the low
-		/// bits) into a single value. Backends that cannot express that many distinct
-		/// levels approximate it, so treat the ordering as best-effort.
-		fn set_priority(&mut self, order: i32);
+		/// Backends with a narrower priority saturate or approximate it, so treat the
+		/// ordering as best-effort.
+		fn set_priority(&mut self, priority: i64);
+
+		/// Move the stream into `group`, which belongs to this stream's session.
+		fn set_group(&mut self, group: &Self::Group);
 
 		/// Mark the stream as finished, erroring on any future writes.
 		///
@@ -655,5 +757,43 @@ mod tests {
 			read.poll_read_buf(&mut cx, &mut empty),
 			Poll::Ready(Ok(Some(0)))
 		));
+	}
+
+	#[test]
+	fn default_read_buf_caps_the_initialized_slice_on_ready_and_pending() {
+		struct ReadSpan(bool);
+		impl super::poll::RecvStream for ReadSpan {
+			type Error = crate::Error;
+			fn poll_read(&mut self, _: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+				assert_eq!(
+					dst.len(),
+					64 * 1024,
+					"one poll must not initialize the whole spare capacity"
+				);
+				assert!(dst.iter().all(|byte| *byte == 0));
+				if self.0 {
+					return Poll::Pending;
+				}
+				dst.fill(7);
+				Poll::Ready(Ok(Some(dst.len())))
+			}
+			fn stop(&mut self, _: u32) {}
+			fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+				Poll::Pending
+			}
+		}
+		for pending in [false, true] {
+			let mut buf = BytesMut::with_capacity(256 * 1024);
+			let mut cx = Context::from_waker(std::task::Waker::noop());
+			let result = ReadSpan(pending).poll_read_buf(&mut cx, &mut buf);
+			if pending {
+				assert!(result.is_pending());
+				assert!(buf.is_empty());
+			} else {
+				assert!(matches!(result, Poll::Ready(Ok(Some(65536)))));
+				assert_eq!(buf.len(), 64 * 1024);
+				assert!(buf.iter().all(|byte| *byte == 7));
+			}
+		}
 	}
 }

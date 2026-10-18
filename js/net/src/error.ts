@@ -34,6 +34,8 @@ export const SessionCode = Object.freeze(
 		Internal: 0x1 as SessionCode,
 		/** The credentials don't grant the requested path or operation. Retrying will fail again. */
 		Unauthorized: 0x2 as SessionCode,
+		/** The authorization token expired. Retrying with refreshed credentials may succeed. */
+		Expired: 0x18 as SessionCode,
 		/** A protocol rule was broken; the session is unusable. */
 		ProtocolViolation: 0x3 as SessionCode,
 		/** A request ID was reused or violated the negotiated draft’s order or parity rules. */
@@ -42,6 +44,8 @@ export const SessionCode = Object.freeze(
 		KeyValueFormatting: 0x6 as SessionCode,
 		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements or subscriptions. */
 		TooManyRequests: 0x7 as SessionCode,
+		/** A PATH the peer may not send, such as a server sending one at all. */
+		InvalidPath: 0x8 as SessionCode,
 		/** The peer did not close within the GOAWAY drain deadline. */
 		GoawayTimeout: 0x10 as SessionCode,
 		/** A control message took too long. */
@@ -52,6 +56,8 @@ export const SessionCode = Object.freeze(
 		Version: 0x15 as SessionCode,
 		/** A token named an alias that was never registered. */
 		UnknownAuthTokenAlias: 0x17 as SessionCode,
+		/** An AUTHORITY the peer may not send, such as a server sending one at all. */
+		InvalidAuthority: 0x19 as SessionCode,
 		/** The peer cannot support the requested feature; moq-lite only. */
 		Unsupported: 0x30 as SessionCode,
 		/** The peer left more request updates unanswered than MAX_REQUEST_UPDATES allows. */
@@ -251,8 +257,8 @@ export class GroupTooLarge extends Stream {
 }
 
 /**
- * A frame's timedness doesn't match its track: a timestamp on a track with no timescale, or
- * none on a track that has one.
+ * A frame's timestamp doesn't fit its track: a timestamp on a track with no timescale, none
+ * on a track that has one, or a group's first frame starting before the group below it.
  *
  * Raised locally by a frame or datagram write, and decoded from a moq-lite peer's
  * `TIMESTAMP_MISMATCH` reset. Mirrors the Rust `Error::TimestampMismatch`.
@@ -263,7 +269,7 @@ export class TimestampMismatch extends Stream {
 	constructor(options?: { cause?: unknown }) {
 		super(StreamCode.TimestampMismatch, {
 			...options,
-			message: "frame timestamp doesn't match track timescale",
+			message: "frame timestamp doesn't fit its track",
 		});
 		this.name = "TimestampMismatch";
 	}
@@ -370,6 +376,18 @@ function localStreamCode(err: unknown): StreamCode {
 	// Session-scoped: the peer learns which rule it broke from the session close, not from here.
 	if (err instanceof ProtocolViolation) return StreamCode.SessionClosed;
 	return StreamCode.Internal;
+}
+
+/**
+ * The transport refused a request stream or failed to grant stream credit before its deadline.
+ *
+ * This local failure is terminal and has no wire code. The request is not retried.
+ */
+export class NoStreamCredit extends Error {
+	constructor(options?: ErrorOptions) {
+		super("no stream credit", options);
+		this.name = "NoStreamCredit";
+	}
 }
 
 /**

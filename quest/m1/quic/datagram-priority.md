@@ -30,7 +30,7 @@ Decided 2026-10-10 with the maintainer:
   datagram track starve streams up to the congestion window, which is what
   every stack does today.
 - **A datagram queue per send group.** Each send group (one per
-  subscription, from [the scheduler](/quest/m1/quic/scheduler.md)) owns a
+  subscription, from `moq-quic`'s `SendGroups`) owns a
   datagram queue. Datagram bytes spend
   the group's fair-share credit, so a datagram-heavy subscription buys no
   extra bandwidth over its equal-priority peers. The datagram send API takes
@@ -103,10 +103,8 @@ on the browser's WebTransport, which cannot rank a datagram against
 a stream, so it ignores the handle and order and keeps its current
 best-effort send. Wire: none.
 
-## Required
-
-- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - supplies
-  the send groups and fair tier the datagram queues join
+Docs: the Priority row in `doc/concept/moq-lite.md` says datagrams are not
+part of the equal-priority byte split yet; drop that once they are.
 
 ## Related
 

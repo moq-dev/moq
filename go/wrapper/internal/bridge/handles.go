@@ -21,6 +21,14 @@ var (
 	GroupConsumer func(any) *ffi.MoqGroupConsumer
 	// TrackDemand wraps a handle as a *moq.TrackDemand.
 	TrackDemand func(*ffi.MoqTrackDemand) any
+	// Bandwidth returns the handle behind a *moq.Bandwidth.
+	Bandwidth func(any) *ffi.MoqBandwidth
+	// Reservation wraps a native reservation as *moq.Reservation.
+	Reservation func(*ffi.MoqReservation) any
+	// CatalogProducer returns the handle behind a *media.CatalogProducer.
+	CatalogProducer func(any) *ffi.MoqMediaCatalogProducer
+	// VideoDecodedFrame wraps a decoded frame as a *moq.VideoDecodedFrame.
+	VideoDecodedFrame func(*ffi.MoqVideoDecodedFrame) any
 )
 
 // BroadcastConsumer returns the handle behind a *moq.BroadcastConsumer.

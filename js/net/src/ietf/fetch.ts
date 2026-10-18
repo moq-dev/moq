@@ -81,14 +81,12 @@ export class Fetch {
 		let trackNamespace: Path.Valid | undefined;
 		if (isDraft20(version)) {
 			// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
-			trackNamespace = await Namespace.decode(r);
-			await r.string();
+			trackNamespace = (await Namespace.decodeTrack(r)).namespace;
 		} else {
 			const fetchType = await r.u53();
 			switch (fetchType) {
 				case 0x1: // Standalone: namespace, name, start and end Locations
-					trackNamespace = await Namespace.decode(r);
-					await r.string();
+					trackNamespace = (await Namespace.decodeTrack(r)).namespace;
 					for (let i = 0; i < 4; i++) await r.u62();
 					break;
 				case 0x2: // Relative Joining: subscription, group offset

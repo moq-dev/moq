@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 /// below it as handed out (see [`Self::forget_below`]). The run starting at 0 is that
 /// floor, so only the gaps above it cost memory.
 #[derive(Default)]
-pub(crate) struct Delivered {
+pub(super) struct Delivered {
 	/// First to last sequence, inclusive, never adjacent to each other.
 	runs: BTreeMap<u64, u64>,
 }
@@ -56,7 +56,7 @@ impl Delivered {
 	}
 
 	/// The lowest sequence handed out above a gap: once it is past the reader's budget,
-	/// so is the gap, since group timestamps on a track never rewind.
+	/// so is the gap, since a timed track refuses a group whose start rewinds.
 	pub fn above_gap(&self) -> Option<u64> {
 		let mut runs = self.runs.keys();
 		match runs.next()? {

@@ -66,6 +66,9 @@ pub trait UdpSender: Send + Sync + Debug + 'static {
     ///
     /// A single [`UdpSender`] will be re-used, even if `poll_send` returns `Poll::Ready` once,
     /// unlike [`Future::poll`], so calling it again after readiness should not panic.
+    ///
+    /// An error matching [`moq_sock::udp::is_unreachable_err`] reaches
+    /// [`moq_quic::Connection::handle_unreachable`]; any other error closes the connection.
     fn poll_send(
         self: Pin<&mut Self>,
         transmit: &Transmit<'_>,
@@ -162,10 +165,7 @@ where
                 // registers us for a wakeup, or the send succeeds if this really was just a
                 // transient failure.
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => {
-                    log_sendmsg_error(this.last_send_error, &e, transmit);
-                    return Poll::Ready(Ok(()));
-                }
+                Err(e) => return Poll::Ready(send_failed(this.last_send_error, e, transmit)),
                 Ok(()) => return Poll::Ready(Ok(())),
             }
         }
@@ -179,22 +179,30 @@ where
 /// Limits I/O error logging to one message per minute.
 const IO_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
-fn log_sendmsg_error(
+/// What a failed send, other than `WouldBlock`, means for [`UdpSender::poll_send`]
+///
+/// No route to the destination comes back, since retransmitting cannot help and the connection
+/// decides whether to give up on the peer. Anything else is logged at most once per
+/// [`IO_ERROR_LOG_INTERVAL`] and treated as loss, which UDP always allows.
+pub(crate) fn send_failed(
     last_send_error: &mut Option<Instant>,
-    error: &io::Error,
+    error: io::Error,
     transmit: &Transmit<'_>,
-) {
+) -> io::Result<()> {
+    if moq_sock::udp::is_unreachable_err(&error) {
+        return Err(error);
+    }
     #[cfg(unix)]
     // Unix `EMSGSIZE` is expected for MTU probes.
-    if moq_sock::udp::is_msg_size_err(error) {
-        return;
+    if moq_sock::udp::is_msg_size_err(&error) {
+        return Ok(());
     }
 
     let now = Instant::now();
     if last_send_error
         .is_some_and(|last| now.saturating_duration_since(last) <= IO_ERROR_LOG_INTERVAL)
     {
-        return;
+        return Ok(());
     }
     *last_send_error = Some(now);
 
@@ -207,6 +215,7 @@ fn log_sendmsg_error(
         transmit.contents.len(),
         transmit.segment_size
     );
+    Ok(())
 }
 
 /// Parts of the [`UdpSender`] trait that aren't asynchronous or require storing wakers.
@@ -235,28 +244,50 @@ mod tests {
 
     #[test]
     fn non_would_block_send_errors_are_logged_and_ignored() {
-        let mut sender = Box::pin(UdpSenderHelper::new(TestSocket, writable));
-        let transmit = Transmit {
-            destination: SocketAddr::from(([127, 0, 0, 1], 4433)),
-            ecn: None,
-            contents: &[],
-            segment_size: None,
-            src_ip: None,
-        };
+        let mut sender = Box::pin(UdpSenderHelper::new(
+            TestSocket(io::ErrorKind::PermissionDenied),
+            writable,
+        ));
         let mut cx = Context::from_waker(Waker::noop());
 
-        let result = sender.as_mut().poll_send(&transmit, &mut cx);
+        let result = sender.as_mut().poll_send(&transmit(), &mut cx);
 
         assert!(matches!(result, Poll::Ready(Ok(()))));
         assert!(sender.last_send_error.is_some());
     }
 
+    #[test]
+    fn unreachable_send_errors_are_returned() {
+        let mut sender = Box::pin(UdpSenderHelper::new(
+            TestSocket(io::ErrorKind::NetworkUnreachable),
+            writable,
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+
+        let result = sender.as_mut().poll_send(&transmit(), &mut cx);
+
+        assert!(
+            matches!(result, Poll::Ready(Err(ref e)) if e.kind() == io::ErrorKind::NetworkUnreachable),
+            "{result:?}"
+        );
+    }
+
+    fn transmit() -> Transmit<'static> {
+        Transmit {
+            destination: SocketAddr::from(([127, 0, 0, 1], 4433)),
+            ecn: None,
+            contents: &[],
+            segment_size: None,
+            src_ip: None,
+        }
+    }
+
     #[derive(Debug)]
-    struct TestSocket;
+    struct TestSocket(io::ErrorKind);
 
     impl UdpSenderHelperSocket for TestSocket {
         fn try_send(&self, _transmit: &Transmit<'_>) -> io::Result<()> {
-            Err(io::ErrorKind::PermissionDenied.into())
+            Err(self.0.into())
         }
 
         fn max_transmit_segments(&self) -> usize {

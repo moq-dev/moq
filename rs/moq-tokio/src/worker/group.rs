@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use super::Config;
-use crate::{Error, Result, Server, abort::AbortOnDrop, listen::Socket as ShardSocket, server::SocketRetainer};
+use crate::{Error, Result, Server, abort::AbortOnDrop, listen::Socket as ShardSocket};
 
 /// A bound group of QUIC workers sharing one port.
 ///
@@ -91,20 +91,16 @@ impl Workers {
 		// The group owns everything a reuseport group has to get right: it takes
 		// the port before the first member binds and holds it until the group is
 		// dropped, refuses a size the steering filter could not address, and
-		// hands out one member per slot in the order the kernel numbers them by.
-		let mut forming = moq_sock::shard::Group::acquire(requested, config.count).map_err(|err| match err {
+		// binds one member per slot in the order the kernel numbers them by.
+		let mut group = moq_sock::shard::bind(requested, config.count).map_err(|err| match err {
 			moq_sock::shard::Error::Count { count, max } => Error::WorkerCount { count, max },
-			moq_sock::shard::Error::Resolve(err) => crate::quic::Error::BindSocket(err).into(),
-			// The port lock is the only other way to lose the address, and it is
-			// held by exactly one thing: another group of this UID.
-			_ => Error::WorkerOverlap { addr: requested },
+			moq_sock::shard::Error::Overlap { .. } => Error::WorkerOverlap { addr: requested },
+			moq_sock::shard::Error::Resolve(err)
+			| moq_sock::shard::Error::Bind { source: err, .. }
+			| moq_sock::shard::Error::Steer(err) => crate::quic::Error::BindSocket(err).into(),
+			err => crate::quic::Error::BindSocket(std::io::Error::other(err)).into(),
 		})?;
-		let count = forming.count();
-		let mut claims = Vec::with_capacity(count as usize);
-		while let Some(member) = forming.member() {
-			claims.push(member.bind().map_err(crate::quic::Error::BindSocket)?);
-		}
-		let mut group = forming.complete(claims).map_err(crate::quic::Error::BindSocket)?;
+		let count = group.count();
 
 		let shared = Arc::new(Shared::default());
 
@@ -177,21 +173,6 @@ impl Workers {
 			Some(worker) => worker.shared.clone(),
 			None => Arc::new(Shared::default()),
 		};
-
-		// Retain every socket before handing any server out: dropping a server
-		// afterwards closes its endpoint, but the retainer keeps the socket in
-		// the group, so the kernel never renumbers a survivor.
-		let mut retainers = Vec::with_capacity(self.workers.len());
-		for worker in &self.workers {
-			retainers.push(
-				worker
-					.server
-					.as_ref()
-					.expect("a bound worker holds its server before the split")
-					.retain(),
-			);
-		}
-		*shared.retainers.lock().unwrap() = retainers;
 
 		Group {
 			workers: self.workers,
@@ -426,16 +407,14 @@ fn join(threads: Vec<(u16, std::thread::JoinHandle<()>)>) {
 	}
 }
 
-/// What the workers share: the shutdown signal and the retained sockets.
+/// What the workers share: the shutdown signal.
 ///
 /// One per group, held by the group and borrowed by every spawner. Cancelling
-/// it stops every worker thread; the retainers keep every socket in the
-/// reuseport group until the group is gone.
+/// it stops every worker thread.
 #[derive(Debug, Default)]
 struct Shared {
 	shutdown: AtomicBool,
 	notify: tokio::sync::Notify,
-	retainers: std::sync::Mutex<Vec<SocketRetainer>>,
 }
 
 impl Shared {
@@ -774,6 +753,7 @@ fn run(
 			return;
 		}
 	};
+	let closer = server.quic_closer();
 
 	if ready
 		.send(Ok(Ready {
@@ -798,6 +778,13 @@ fn run(
 				_ = shared.stopped() => break,
 				Some(spawn) = spawn.recv() => spawn(),
 			}
+		}
+
+		// Dropping the runtime drops the endpoint driver with it, so every
+		// connection's close has to be sent first. Otherwise a peer only learns
+		// the session is gone at its idle timeout.
+		if let Some(closer) = closer {
+			closer.close().await;
 		}
 	});
 	tracing::debug!(index, "QUIC worker stopped");

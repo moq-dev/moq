@@ -25,6 +25,9 @@
 #   ./run.sh --full                # the same with two audio PIDs, filling its multiplex with no nulls
 #   ./run.sh --fragment-pes        # split generated clear PES headers across packets
 #   ./run.sh --delay 2s            # pass the exporter's --delay
+#   ./run.sh --loss 10             # drop 10% of the relay's datagrams to the subscriber (moq-shaper)
+#   ./run.sh --passthrough         # carry the multiplex whole (`import/export ts --passthrough`)
+#   ./run.sh --passthrough --mpts  # the same with two programs whose recovery points rarely line up
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
 # on the stream's own PCR clock, which is the right basis for the IRD model it
@@ -55,7 +58,7 @@ source "$DIR/process.sh"
 # Captured before the parse below consumes it, so the rerun command carries the
 # source capture, mux rate, EIT fixture, and analyzer thresholds this run used,
 # whether they arrived as flags or as environment overrides.
-RERUN="$(harness_env TSC_DURATION TSC_BITRATE TSC_PORT TSC_PROFILE)just test ts$(harness_argv "$@")"
+RERUN="$(harness_env TSC_DURATION TSC_BITRATE TSC_PORT TSC_PROFILE TSC_SEED)just test ts$(harness_argv "$@")"
 
 # Seamless session replacement needs an explicit publisher epoch. Keep this
 # opt-in local to the validation rig; epochless replacement is tested as refusal.
@@ -79,6 +82,9 @@ HEADROOM=""     # the same plus four audio PIDs, in a multiplex faster than the 
 LEAK=""         # publish video with no HRD at its level's leak, as a full-rate feed does
 FULL=""         # the same with audio, in a multiplex the source fills with no nulls
 FRAGMENT_PES="" # use following null slots for fragmented PES headers
+LOSS=""         # percent of relay -> subscriber datagrams dropped by moq-shaper
+PASSTHROUGH=""  # carry the multiplex whole and grade the capture packet by packet against the source
+MPTS=""         # publish two programs, which only --passthrough carries whole
 EXPORT=()       # extra `export ts` flags (--delay)
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
@@ -167,6 +173,18 @@ while [[ $# -gt 0 ]]; do
             EXPORT=(--delay "$2")
             shift 2
             ;;
+        --loss)
+            LOSS="$2"
+            shift 2
+            ;;
+        --passthrough)
+            PASSTHROUGH=1
+            shift
+            ;;
+        --mpts)
+            MPTS=1
+            shift
+            ;;
         *)
             PASSTHRU+=("$1")
             shift
@@ -236,6 +254,35 @@ if [[ -n "$FRAGMENT_PES" && -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN
     exit 1
 fi
 
+# The #4613 path: random loss on the relay's datagrams to the subscriber and 25 ms each way,
+# through moq-shaper so it needs no privileges and leaves the host's network alone.
+if [[ -n "$LOSS" ]]; then
+    if [[ -n "$ANALYZE_ONLY$PAIR" ]]; then
+        echo "error: --loss impairs the round-trip's one subscriber and cannot be combined with --analyze-only or --pair" >&2
+        exit 1
+    fi
+    if ! [[ "$LOSS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v p="$LOSS" 'BEGIN { exit !(p > 0 && p < 100) }'; then
+        echo "error: --loss takes a percentage above 0 and below 100 (got '$LOSS')" >&2
+        exit 1
+    fi
+fi
+
+# The capture is the source's own packets, graded against it by passthrough.py; the arms that
+# grade a second capture or the live pipe grade the demultiplexed export's choices.
+if [[ -n "$PASSTHROUGH" && -n "$ANALYZE_ONLY$PAIR$LIVE" ]]; then
+    echo "error: --passthrough cannot be combined with --analyze-only, --pair, or --live" >&2
+    exit 1
+fi
+if [[ -n "$MPTS" && (-z "$PASSTHROUGH" || -n "$SOURCE$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES") ]]; then
+    echo "error: --mpts generates its own clip and needs --passthrough, the mode that carries a multiplex whole" >&2
+    exit 1
+fi
+IMPORT=(import ts)
+if [[ -n "$PASSTHROUGH" ]]; then
+    IMPORT+=(--passthrough)
+    EXPORT+=(--passthrough)
+fi
+
 URL="" # set once a port is reserved, below
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -301,9 +348,11 @@ TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Carg
 echo "### building moq-relay + moq-cli ($PROFILE)"
 flag=()
 [[ "$PROFILE" == "release" ]] && flag=(--release)
+[[ -n "$LOSS" ]] && flag+=(-p moq-shaper)
 (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-relay -p moq-cli)
 RELAY="$TARGET_BASE/$PROFILE/moq-relay"
 MOQ="$TARGET_BASE/$PROFILE/moq"
+SHAPER="$TARGET_BASE/$PROFILE/moq-shaper"
 
 BROADCAST="tscompliance-$$-${RANDOM}.hang"
 SRC_TS="$HARNESS_RUN/source.ts"
@@ -348,6 +397,20 @@ elif [[ -n "$HRD$HEADROOM" ]]; then
         -t "$DURATION" "${AUDIO[@]}" \
         -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
         -x264-params "keyint=25:min-keyint=25:scenecut=0:nal-hrd=cbr" -b:v 9M -maxrate 9M -bufsize 9M \
+        -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+elif [[ -n "$MPTS" ]]; then
+    echo "### generating ~${DURATION}s two-program clip with ffmpeg"
+    # Two services in one multiplex, each with its own PCR PID, their keyframes every 25 and
+    # 40 frames: they coincide every 8 s, so most of the importer's groups, which open on
+    # program 1's random access points, open mid-GOP for program 2.
+    ffmpeg -y -hide_banner -loglevel error \
+        -f lavfi -i "testsrc=size=640x360:rate=25" -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
+        -f lavfi -i "testsrc2=size=640x360:rate=25" -f lavfi -i "sine=frequency=500:sample_rate=48000" \
+        -t "$DURATION" -map 0:v -map 1:a -map 2:v -map 3:a \
+        -c:v libx264 -profile:v high -preset veryfast -pix_fmt yuv420p -b:v 2M \
+        -x264-params:v:0 "keyint=25:min-keyint=25:scenecut=0" -x264-params:v:1 "keyint=40:min-keyint=40:scenecut=0" \
+        -c:a aac -b:a 128k \
+        -program program_num=1:st=0:st=1 -program program_num=2:st=2:st=3 \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
 elif [[ -n "$LEAK" ]]; then
     echo "### generating ~${DURATION}s 1080p clip with no HRD at its level's 24 Mb/s leak with ffmpeg"
@@ -453,6 +516,42 @@ if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
 fi
 harness_endpoint relay "$URL"
 
+# Subscribers dial the relay directly, or the shaper in front of it under --loss. The
+# shaper carries only UDP, so the certificate's fingerprint comes from the relay itself.
+SUB_CONNECT=(--connect "$URL")
+if [[ -n "$LOSS" ]]; then
+    harness_port shaper
+    SHAPER_PORT="$HARNESS_PORT"
+    SEED="${TSC_SEED:-1}"
+    cat >"$HARNESS_RUN/shaper.toml" <<EOF
+name = "ts-loss-$LOSS"
+seed = $SEED
+
+[up]
+delay = "25ms"
+
+[down]
+delay = "25ms"
+loss = $(awk -v p="$LOSS" 'BEGIN { print p / 100 }')
+EOF
+    echo "### starting moq-shaper on 127.0.0.1:${SHAPER_PORT}: ${LOSS}% loss to the subscriber, 25 ms each way, seed $SEED"
+    harness_spawn shaper "$HARNESS_RUN/shaper.log" "$SHAPER" --listen "127.0.0.1:$SHAPER_PORT" \
+        --target "127.0.0.1:$PORT" --profile "$HARNESS_RUN/shaper.toml" --report "$HARNESS_RUN/shaper.json"
+    SHAPER_PID="$HARNESS_PID"
+    # It prints its seed and profile once bound; a subscriber dialing before that loses its handshake.
+    until grep -q '^shaper:' "$HARNESS_RUN/shaper.log" 2>/dev/null; do
+        if harness_exited "$SHAPER_PID"; then
+            echo "error: moq-shaper exited before binding" >&2
+            sed 's/^/  shaper: /' "$HARNESS_RUN/shaper.log" >&2 || true
+            exit 1
+        fi
+        sleep 0.05
+    done
+    # No WebSocket fallback: it would race the impaired QUIC path over TCP, which the shaper does not carry.
+    FINGERPRINT=$(curl -fsS "$URL/certificate.sha256")
+    SUB_CONNECT=(--connect "https://127.0.0.1:${SHAPER_PORT}" --connect-tls-fingerprint "$FINGERPRINT" --connect-websocket-enabled=false)
+fi
+
 # Start the subscriber first so it is waiting on the announce before the
 # publisher appears; a live broadcast has no history, so a late joiner would miss
 # the start of the stream (or the whole thing for a short clip).
@@ -479,8 +578,9 @@ grade_live() {
     # status we are here to record.
     set +e
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} 2>"$HARNESS_RUN/sub.log" |
+        "$MOQ" "${SUB_CONNECT[@]}" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} 2>"$HARNESS_RUN/sub.log" |
         ts_drain python3 "$DIR/pcr-timing.py" --live --seconds "$DURATION" --release-pct-max 1 $STRICT \
+            --report-json "$HARNESS_RUN/pcr-timing.json" \
             ${SCHEDULE[@]+"${SCHEDULE[@]}"} ${PASSTHRU[@]+"${PASSTHRU[@]}"} >"$HARNESS_RUN/timing.out" 2>&1
     printf '%s\n' "${PIPESTATUS[0]} ${PIPESTATUS[1]}" >"$HARNESS_RUN/timing.rc"
 }
@@ -488,7 +588,7 @@ grade_live() {
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 capture() {
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_TS" 2>"$HARNESS_RUN/sub.log"
+        "$MOQ" "${SUB_CONNECT[@]}" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_TS" 2>"$HARNESS_RUN/sub.log"
 }
 
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
@@ -499,7 +599,7 @@ capture_b() {
     # the media, because it has no shared history to derive them from.
     sleep "$PAIR_JOIN"
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_B_TS" 2>"$HARNESS_RUN/sub-b.log"
+        "$MOQ" "${SUB_CONNECT[@]}" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_B_TS" 2>"$HARNESS_RUN/sub-b.log"
 }
 
 if [[ -n "$LIVE" ]]; then
@@ -534,8 +634,8 @@ publish() {
     # shellcheck disable=SC2016  # $1..$5 are the child bash -c positionals, not ours.
     timeout -k 3 $((DURATION + 20 + 30)) bash -o pipefail -c '
         tsp -I file "$1" -P regulate --pcr-synchronous --wait-min 5 |
-            "$2" --connect "$3" --connect-version "$5" --broadcast "$4" import ts
-    ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" "$VERSION"
+            "$2" --connect "$3" --connect-version "$5" --broadcast "$4" "${@:6}"
+    ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" "$VERSION" "${IMPORT[@]}"
 }
 harness_spawn pub "$HARNESS_RUN/pub.log" publish
 PUB_PID="$HARNESS_PID"
@@ -552,9 +652,34 @@ if ! ts_wait "$PUB_PID" publisher; then
     exit 1
 fi
 
+# SIGTERM, not the harness's SIGKILL: the shaper writes its counters and fails if the
+# profile never acted, which would turn the impaired run into an unimpaired pass.
+# shellcheck disable=SC2329  # invoked once the subscriber is done, below
+stop_shaper() {
+    [[ -n "$LOSS" ]] || return 0
+    kill -TERM -- -"$SHAPER_PID" 2>/dev/null || true
+    ts_wait "$SHAPER_PID" shaper || {
+        sed 's/^/  shaper: /' "$HARNESS_RUN/shaper.log" >&2 || true
+        return 1
+    }
+    # The shaper accepts a silent profile while silence is still likely; a lossy run needs loss.
+    if ! python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["down"]["lost"] == 0)' "$HARNESS_RUN/shaper.json"; then
+        echo "error: moq-shaper dropped none of the relay's datagrams at ${LOSS}% loss; raise --loss or --duration" >&2
+        return 1
+    fi
+    # What the path dropped beside what that cost the output: QUIC retransmits the former,
+    # and the exporter counts the units that still missed their deadline or never came.
+    echo
+    echo "### path (moq-shaper, seed $SEED)"
+    tail -n 1 "$HARNESS_RUN/shaper.log" | sed 's/^shaper: /  /'
+    sed 's/\x1b\[[0-9;]*m//g' "$HARNESS_RUN/sub.log" | grep -E 'TS (export|passthrough) release clock' | tail -n 1 |
+        grep -oE 'dropped=[0-9]*( trimmed=[0-9]* gaps=[0-9]*)?' | sed 's/^/  export: /' || true
+}
+
 # ── live: the grader owns the verdict ───────────────────────────────────────
 if [[ -n "$LIVE" ]]; then
     harness_wait "$SUB_PID" || true
+    stop_shaper || exit 1
     if [[ ! -s "$HARNESS_RUN/timing.rc" ]]; then
         echo "error: the live grader never reported a status" >&2
         dump_logs
@@ -583,7 +708,11 @@ fi
 
 # Let the exporter drain to EOF within its existing timeout. Killing it after a
 # sleep can both truncate a valid tail and conceal an earlier process failure.
-if ! ts_wait "$SUB_PID" exporter; then
+EXPORTED=0
+ts_wait "$SUB_PID" exporter || EXPORTED=$?
+# The path's counters explain a failed export too, so they come first.
+stop_shaper || exit 1
+if [[ "$EXPORTED" -ne 0 ]]; then
     dump_logs
     exit 1
 fi
@@ -627,13 +756,60 @@ fi
 
 echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
 
+# ── passthrough: the source is the oracle ───────────────────────────────────
+# Every captured packet must be the source's at its exact position from the first one on, and
+# compliance.py must grade the capture as it grades that interval of the source, whatever the
+# source's own verdict. QUIC retransmits what --loss drops, so a gap fails here as it does under
+# holes.py; passthrough.py says whether packets went missing or were rewritten.
+if [[ -n "$PASSTHROUGH" ]]; then
+    echo
+    if ! python3 "$DIR/passthrough.py" "$SRC_TS" "$SUB_TS" --report-json "$HARNESS_RUN/passthrough.json"; then
+        echo >&2
+        echo "error: the capture is not the source's packets in place; the exporter reported:" >&2
+        sed 's/\x1b\[[0-9;]*m//g' "$HARNESS_RUN/sub.log" |
+            grep -E 'TS passthrough release clock|media skipped upstream|missed its deadline|group evicted' |
+            tail -n 20 | sed 's/^/  sub: /' >&2 || true
+        exit 1
+    fi
+    echo
+    if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$MPTS" ]]; then
+        python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode" || exit 1
+    else
+        echo "decoded-content comparison: not covered for this profile"
+    fi
+    exit 0
+fi
+
 # The initial decoded-content profile is the generated closed-GOP H.264/AAC
 # pair. Other arms retain their specific structural/model oracles until their
 # acquisition and decoder-priming contracts are covered by fixtures.
 if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL" ]]; then
-    python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode"
+    if ! python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode"; then
+        # The exporter counts what it dropped (late), trimmed (before its output began),
+        # and lost upstream (gaps), and logs each loss, so the failure says which it was.
+        echo >&2
+        echo "error: the decoded capture differs from the source; the exporter reported:" >&2
+        grep -E 'TS export release clock|media skipped upstream|missed its deadline|group evicted' \
+            "$HARNESS_RUN/sub.log" | sed 's/^/  sub: /' >&2 || true
+        exit 1
+    fi
 else
     echo "decoded-content comparison: not covered for this profile"
+fi
+
+# The other generated clips keep one frame step per stream, so media missing from the capture
+# shows in its timestamps even where its content is not compared. The compliance checks below
+# grade only the access units that arrived.
+if [[ -n "$HRD$HEADROOM$LEAK$FULL" ]]; then
+    echo
+    if ! python3 "$DIR/holes.py" "$SUB_TS" "$SRC_TS"; then
+        echo >&2
+        echo "error: the capture is missing media; the exporter reported:" >&2
+        sed 's/\x1b\[[0-9;]*m//g' "$HARNESS_RUN/sub.log" |
+            grep -E 'TS export release clock|media skipped upstream|missed its deadline|group evicted' |
+            tail -n 20 | sed 's/^/  sub: /' >&2 || true
+        exit 1
+    fi
 fi
 
 # Which SI survived the round-trip. Informational: the exporter rebuilds SI from the
