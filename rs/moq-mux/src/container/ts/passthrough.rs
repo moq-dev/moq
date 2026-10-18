@@ -41,7 +41,7 @@
 //! the catalog lists the track from the first such window on, or at the end of the input if that
 //! comes first. [`random_access`](hang::catalog::M2ts::random_access) is true when every group
 //! the window started is a random access point and the layout allowed random access throughout it
-//! (one program, one video stream); [`mux_rate`](hang::catalog::M2ts::mux_rate) is the rate the
+//! (one program, at most one video stream); [`mux_rate`](hang::catalog::M2ts::mux_rate) is the rate the
 //! window was paced at, when the PCRs arrived unbroken across it and agree on one. An input that
 //! ends before its first window publishes the random access of everything it carried and the rate
 //! of the window in progress.

@@ -19,8 +19,8 @@ pub struct M2ts {
 	pub track: String,
 
 	/// Whether every group the publisher's latest two-second window started began at a random
-	/// access point of the multiplex's one video stream, so a subscriber can decode from the first
-	/// object of any of them.
+	/// access point of the multiplex's video stream, or of its clock PID when it has none, so a
+	/// subscriber can decode from the first object of any of them.
 	///
 	/// Only ever true for a single program with at most one video stream: programs or video
 	/// streams sharing a clock can stagger their GOPs, leaving no packet that starts all of them.
