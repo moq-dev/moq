@@ -22,11 +22,16 @@ parking, while `routed_broadcast` stays registered until its route completes.
 The front ends only once every parked requester has been handled, so one
 requester's disposition never ends another's wait.
 
-Decided 2026-10-08: benchmark first. Land a benchmark swept over requesters
-and route-table churn, and build the parked front only if the re-mint shows
-as a real slope; the same benchmark then shows the replacement is cheaper. A
-measured no-win deletes this quest. The `origin/viewer_*` benches do not
-cover the retry loop. `origin/unroutable_churn` sweeps 0, 1, 32, and 256
+Decided 2026-10-08: benchmark first. Build the parked front only if the
+re-mint shows as a real slope; the same benchmark then shows the replacement
+is cheaper. A measured no-win deletes this quest.
+
+Pending: whether to park is undecided until the benchmark has been timed. No
+timed results exist yet; the next step is the quiet-host measurement below,
+then either the parked front or deleting this quest.
+
+The `origin/viewer_*` benches do not cover the retry loop.
+`origin/unroutable_churn` sweeps 0, 1, 32, and 256
 requesters against 1 and 32 repricings after a covering handler refuses.
 Shared and distinct paths separate requester fan-out from front count;
 unrelated repricings and zero requesters provide controls. Each change is
