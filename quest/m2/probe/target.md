@@ -2,14 +2,15 @@
 
 ## Goal
 
-A moq-net session and a `js/net` connection each keep one probe target: the
-larger of its local target and the peer's PROBE target. The local target sums
-what the session wants to send (its publisher reservations) and what it wants
-to receive (its viewer handles), so several broadcasts on one connection add
-up without the application coordinating them. The session advertises PROBE
-`Increase` where a sender exists, sends its viewer target to the peer, and
-hands the probe target to whichever sender its transport has. Without a
-sender, behavior is today's: `Report`, and nothing probes.
+A moq-net session and a `js/net` connection each keep one target per
+direction, so several broadcasts on one connection add up without the
+application coordinating them. The send target is the larger of what the
+session wants to send (the sum of its publisher reservations) and the peer's
+PROBE target; the session hands it to whichever sender its transport has and
+advertises PROBE `Increase` where one exists. The receive target is the sum of
+its viewer handles, sent to the peer as its PROBE target. The two never mix: a
+session that publishes and watches doesn't probe its uplink for what it
+watches. Without a sender, behavior is today's: `Report`, and nothing probes.
 
 ## Plan
 
@@ -34,7 +35,12 @@ Decided with the maintainer on 2026-10-17 (see the
 - **Peer target.** A sending session probes to the larger of its own target
   and the peer's PROBE target. Each hop is independent: a relay never forwards
   a viewer's target upstream, and the PROBE target stays per connection, with
-  no per-track wire field. moq-net reads no catalog.
+  no per-track wire field. moq-net reads no catalog. A peer's target is
+  untrusted, but it only sets how high to probe: each probe scales the
+  current estimate (BBR's 1.25x phase, padding's 2x cluster) and stays under
+  congestion control, so a huge target costs no more than one just above the
+  estimate. Clamp it to the session's rate cap where one exists
+  ([rate grant](/quest/m2/rate-grant.md)) rather than adding a constant.
 - **Automatic, opt-out.** Targets are on by default; an application can
   override the session's target or disable probing.
 - **The sender seam.** Define the hook a transport implements to probe up to a
@@ -58,8 +64,9 @@ Notes for the implementer:
   Report the public API in the PR, mirrored across Rust and JS, and carry it
   through moq-ffi and the bindings per the cross-package sync table.
 
-Tests with mocked time, Rust and JS: the target follows reservations being
-added, updated, and dropped, demanded or not; viewer handles sum into the
-PROBE target sent to the peer; the session probes to the larger of its own
-and the peer's target; `Increase` is advertised only with a sender; opting
-out sends no target and probes nothing.
+Tests with mocked time, Rust and JS: the send target follows reservations
+being added, updated, and dropped, demanded or not; viewer handles sum into
+the PROBE target sent to the peer; the session probes to the larger of its
+reservations and the peer's target; a session that publishes and watches
+keeps the two directions apart; `Increase` is advertised only with a sender;
+opting out sends no target and probes nothing.

@@ -59,7 +59,7 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Session probe target](/quest/m2/probe/target.md) - a session sums its reservations and viewer handles into one target, honors the peer's PROBE target, and advertises `Increase` where a sender exists
+- [Session probe target](/quest/m2/probe/target.md) - a session probes up to its reservations or the peer's PROBE target, sends its viewer handles as its own PROBE target, and advertises `Increase` where a sender exists
 - [Native probing](/quest/m2/probe/native.md) - moq-quic retransmits in-flight data during BBR3's ProbeBW_UP so an app-limited sender still validates headroom up to the target
 - [Padding probes](/quest/m2/probe/padding.md) - a lowest-priority padding stream probes on an ALR schedule where the stack can't retransmit, in browsers and on other QUIC backends
 - [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate

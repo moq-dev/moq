@@ -19,6 +19,11 @@ enabled rendition is one it could switch to. Targets are on by default.
 - The handle comes from the [target](/quest/m2/probe/target.md) quest; this
   quest only decides its `max`.
 - Settle what a rendition without a catalog bitrate contributes.
+- A probe that reaches the target must make the rendition selectable.
+  Selection discounts the estimate (0.8x in `js/watch/src/video/source.ts`)
+  and audio shares the downlink, so either the handle covers both or the
+  [up-switch](/quest/m2/probe/viewer-upswitch.md) stops discounting a probed
+  estimate; settle which with that quest.
 
 Tests with mocked catalogs: the target tracks the highest enabled rendition
 through enable and disable flips, ignores disabled ones, drops when unwatched,
