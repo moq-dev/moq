@@ -244,6 +244,17 @@ test("a broadcast speaks semantic names and puts physical names on the wire", as
 	net.close();
 });
 
+test("closing a protected consumer releases its broadcast handle", () => {
+	const generation = credential().produce();
+	const net = new Broadcast.Producer();
+	const consumer = new Protected.Consumer(net.consume(), generation.credential.consume(generation.epoch));
+	expect(consumer.closed.peek()).toBeUndefined();
+	consumer.close();
+	consumer.close();
+	expect(consumer.closed.peek()).toBeNull();
+	net.close();
+});
+
 test("a broadcast refuses a name its generation already claimed elsewhere", async () => {
 	const generation = credential().produce();
 	await new Protected.Producer(new Broadcast.Producer(), generation).createTrack("video");

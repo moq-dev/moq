@@ -51,15 +51,25 @@ export class Consumer {
 	readonly generation: Generation.Consumer;
 	#inner: NetBroadcast.Consumer;
 
-	/** Read `inner` under `generation`. */
+	/** Read `inner` under `generation`, taking ownership of it: {@link close} releases it. */
 	constructor(inner: NetBroadcast.Consumer, generation: Generation.Consumer) {
 		this.#inner = inner;
 		this.generation = generation;
+	}
+
+	/** Settles with `null` once the wrapped broadcast closes, as `@moq/net`'s `closed` does. */
+	get closed(): NetBroadcast.Consumer["closed"] {
+		return this.#inner.closed;
 	}
 
 	/** Subscribe to the track for `semantic` under its physical name; rejects with {@link Failure} `identity` past 65535 bytes. */
 	async subscribe(semantic: string, subscription?: NetTrack.Subscription): Promise<Track.Consumer> {
 		const name = await this.generation.name(semantic);
 		return this.generation.consume(this.#inner.track(name).subscribe(subscription));
+	}
+
+	/** Release the wrapped broadcast handle, as `@moq/net`'s `close` does. Idempotent. */
+	close(): void {
+		this.#inner.close();
 	}
 }
