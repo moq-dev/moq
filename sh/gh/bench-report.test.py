@@ -68,6 +68,11 @@ class ReportTest(unittest.TestCase):
         entries = [{'name': 'go/round', 'unit': 'MB/s', 'value': 4},
                    {'name': 'go/round vs rust-ffi', 'unit': 'x', 'value': 2}]
         (source / 'report.json').write_text(json.dumps(entries))
+        (source / 'outcome.json').write_text('{"status":"success"}')
+        # Another nightly artifact with the same prefix and its own report schema.
+        unrelated = self.root / 'bench-browser'
+        unrelated.mkdir()
+        (unrelated / 'report.json').write_text('{"samples": []}')
         failed = self.root / 'bench-rust'
         failed.mkdir()
         (failed / 'outcome.json').write_text('{"status":"failure"}')
@@ -76,7 +81,6 @@ class ReportTest(unittest.TestCase):
         report.prepare(self.root, output)
         self.assertEqual(json.loads((output / 'rates.json').read_text())[0]['value'], 4)
         self.assertEqual(json.loads((output / 'costs.json').read_text())[0]['value'], 2)
-        (source / 'outcome.json').write_text('{"status":"success"}')
         (source / 'report.json').unlink()
         with self.assertRaises(ValueError):
             report.prepare(self.root, output)

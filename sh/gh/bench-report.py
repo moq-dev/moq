@@ -120,19 +120,19 @@ def javascript(directory):
 def prepare(directory, output):
     costs, rates = [], []
     for source in sorted(directory.glob('bench-*')):
+        # Other nightly artifacts share the prefix; only a recorded outcome marks a chart source.
         status = source / 'outcome.json'
-        if status.exists():
-            outcome = json.loads(status.read_text())['status']
-            if outcome not in {'success', 'failure', 'cancelled', 'skipped'}:
-                raise ValueError(f'invalid benchmark outcome: {source}')
-            if outcome != 'success':
-                print(f'{source.name}: {outcome}; no history point')
-                continue
+        if not status.exists():
+            continue
+        outcome = json.loads(status.read_text())['status']
+        if outcome not in {'success', 'failure', 'cancelled', 'skipped'}:
+            raise ValueError(f'invalid benchmark outcome: {source}')
+        if outcome != 'success':
+            print(f'{source.name}: {outcome}; no history point')
+            continue
         report = source / 'report.json'
         if not report.exists():
-            if status.exists():
-                raise ValueError(f'successful benchmark has no report: {source}')
-            continue
+            raise ValueError(f'successful benchmark has no report: {source}')
         entries = checked(json.loads(report.read_text()))
         for entry in entries:
             target = rates if entry['unit'] in BIGGER else costs
