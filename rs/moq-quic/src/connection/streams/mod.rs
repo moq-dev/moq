@@ -374,7 +374,8 @@ impl<'a> SendStream<'a> {
 
     /// How many bytes were written to the stream so far, the offset the next write starts at
     ///
-    /// Zero before the first write, or once the stream is gone.
+    /// After a reset, the bytes the reset still delivers. Zero before the first write, or once
+    /// the stream is gone.
     ///
     /// # Panics
     /// - when applied to a receive stream

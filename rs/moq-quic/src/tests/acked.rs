@@ -255,6 +255,7 @@ fn reset_reports_a_dropped_waiter() {
     pair.client_send(client_ch, s)
         .reset_at(kept, VarInt(42))
         .unwrap();
+    assert_eq!(pair.client_send(client_ch, s).offset(), kept);
     assert!(reported(&mut pair, client_ch, s).is_some());
     assert_eq!(
         acked(&mut pair, client_ch, s, dropped),
