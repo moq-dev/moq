@@ -89,6 +89,43 @@ impl EndpointConfig {
         self
     }
 
+    /// Derive the reset key from `secret` with HKDF-SHA256, so endpoints given the same secret
+    /// reset each other's connections, including a predecessor's after a restart
+    ///
+    /// Also keys a [`HashedConnectionIdGenerator`] from it, since an endpoint drops packets for
+    /// connection IDs it can't validate instead of resetting them. Set
+    /// [`cid_generator`](Self::cid_generator) afterwards to use another generator; it must accept
+    /// the predecessor's IDs for the reset to reach them.
+    #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+    pub fn reset_secret(&mut self, secret: &[u8]) -> &mut Self {
+        #[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
+        use aws_lc_rs::{hkdf, hmac};
+        #[cfg(feature = "ring")]
+        use ring::{hkdf, hmac};
+
+        struct Len(usize);
+        impl hkdf::KeyType for Len {
+            fn len(&self) -> usize {
+                self.0
+            }
+        }
+
+        let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(secret);
+        let reset_key = prk
+            .expand(&[b"moq-quic reset key"], hmac::HMAC_SHA256)
+            .expect("an HMAC key fits HKDF-SHA256");
+        self.reset_key = Arc::new(hmac::Key::from(reset_key));
+
+        let mut cid_key = [0; 8];
+        prk.expand(&[b"moq-quic cid key"], Len(cid_key.len()))
+            .and_then(|okm| okm.fill(&mut cid_key))
+            .expect("8 bytes fit HKDF-SHA256");
+        let cid_key = u64::from_le_bytes(cid_key);
+        self.connection_id_generator_factory =
+            Arc::new(move || Box::new(HashedConnectionIdGenerator::from_key(cid_key)));
+        self
+    }
+
     /// Maximum UDP payload size accepted from peers (excluding UDP and IP overhead).
     ///
     /// Must be greater or equal than 1200.

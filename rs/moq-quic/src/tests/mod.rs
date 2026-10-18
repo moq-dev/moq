@@ -577,6 +577,40 @@ fn client_stateless_reset() {
     assert_matches!(conn.poll(), None);
 }
 
+/// Restart the server from a fresh config built from `restart`, and report whether the client's
+/// next packet for the old connection drew a stateless reset
+fn restarted_server_resets(restart: &[u8]) -> bool {
+    let _guard = subscribe();
+    let config = |secret: &[u8]| {
+        let mut config = EndpointConfig::default();
+        config.reset_secret(secret);
+        Arc::new(config)
+    };
+
+    let mut pair = Pair::new(config(b"first secret"), server_config());
+    let (client_ch, _) = pair.connect();
+    pair.drive(); // Flush any post-handshake frames
+    pair.server.endpoint = Endpoint::new(config(restart), Some(Arc::new(server_config())), true);
+    pair.client.connections.get_mut(&client_ch).unwrap().ping();
+    pair.drive();
+    matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::ConnectionLost {
+            reason: ConnectionError::Reset
+        })
+    )
+}
+
+#[test]
+fn reset_secret_survives_a_restart() {
+    assert!(restarted_server_resets(b"first secret"));
+}
+
+#[test]
+fn reset_secret_must_match() {
+    assert!(!restarted_server_resets(b"other secret"));
+}
+
 /// The client reads CONNECTION_CLOSE after the server forgets the connection.
 /// The client's reply triggers a reset before the application polls.
 #[test]

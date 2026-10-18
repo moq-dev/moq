@@ -47,6 +47,14 @@ pub struct Config {
 
 	/// How incoming handshakes are bounded.
 	pub handshake: super::handshake::Config,
+
+	/// The secret the stateless reset key is derived from, or `None` for a random
+	/// key per endpoint.
+	///
+	/// Endpoints given the same secret reset each other's connections, so a
+	/// restarted one resets its predecessor's instead of leaving peers to wait out
+	/// their idle timeout.
+	pub reset_secret: Option<std::sync::Arc<[u8]>>,
 }
 
 impl Default for Config {
@@ -56,6 +64,7 @@ impl Default for Config {
 			activity: Default::default(),
 			backlog: 1024,
 			handshake: Default::default(),
+			reset_secret: None,
 		}
 	}
 }

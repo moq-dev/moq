@@ -105,7 +105,11 @@ impl Endpoint {
 		let accepting = server.is_some().then(|| Accepting { queue: VecDeque::new() });
 		// MTU discovery is off (the GSO pool sends fixed SEGMENT datagrams),
 		// so the endpoint has no reason to allow it either.
-		let endpoint = moq_quic::Endpoint::new(super::endpoint_config(socket.shard())?, server, false);
+		let endpoint = moq_quic::Endpoint::new(
+			super::endpoint_config(socket.shard(), config.reset_secret.as_deref())?,
+			server,
+			false,
+		);
 
 		let inner = Rc::new(Inner {
 			activity: config.activity,

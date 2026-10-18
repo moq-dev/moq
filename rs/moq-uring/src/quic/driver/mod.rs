@@ -100,10 +100,17 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 		.clone()
 }
 
-/// The endpoint-wide configuration: how connection ids are minted, and the
-/// largest datagram we tell peers we can receive.
-pub(crate) fn endpoint_config(shard: Option<moq_sock::shard::Shard>) -> Result<Arc<moq_quic::EndpointConfig>, Error> {
+/// The endpoint-wide configuration: how connection ids are minted, the reset
+/// key, and the largest datagram we tell peers we can receive.
+pub(crate) fn endpoint_config(
+	shard: Option<moq_sock::shard::Shard>,
+	reset_secret: Option<&[u8]>,
+) -> Result<Arc<moq_quic::EndpointConfig>, Error> {
 	let mut config = moq_quic::EndpointConfig::default();
+	// The random ids below validate a predecessor's too, so the reset reaches them.
+	if let Some(secret) = reset_secret {
+		config.reset_secret(secret);
+	}
 	// The steering filter recognizes short headers by their fixed bit.
 	config.grease_quic_bit(shard.is_none());
 	// moq-quic asks its generator for every id it issues, dials and rotations

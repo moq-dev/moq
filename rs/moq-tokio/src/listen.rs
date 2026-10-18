@@ -77,6 +77,9 @@ impl<'de> serde::Deserialize<'de> for Bind {
 /// How long an accepted connection has to finish its handshake, unless overridden by `--listen-timeout`.
 pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The shortest reset key secret accepted: 256 bits, if it is random bytes.
+const MIN_RESET_SECRET: usize = 32;
+
 /// The accept side of an endpoint: what to listen on and how to be trusted.
 ///
 /// Derives [`usage::Args`], so flatten it into a binary's own parser with
@@ -249,6 +252,22 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub load_balancer: Option<crate::quic::LoadBalancer>,
 
+	/// File holding the secret the QUIC stateless reset key is derived from.
+	///
+	/// A server restarted with the same file resets its predecessor's connections,
+	/// so peers reconnect at once instead of waiting out their idle timeout. Servers
+	/// sharing it can reset each other's. Unset draws a random key per process.
+	/// Needs at least 32 bytes, ignoring surrounding whitespace.
+	#[usage(
+		name = "listen-quic-reset-key",
+		long = "listen-quic-reset-key",
+		env = "MOQ_LISTEN_QUIC_RESET_KEY",
+		setting = "listen.reset_key"
+	)]
+	#[usage(value_hint = usage::ValueHint::FilePath)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub reset_key: Option<std::path::PathBuf>,
+
 	/// The released `--server-*` spellings and their env vars, kept parsing but
 	/// hidden. Never read as settings: [`Config::deprecated`] names what replaced
 	/// each one so a process can say so and stop.
@@ -286,6 +305,7 @@ impl Default for Config {
 			lb_id: None,
 			lb_nonce: None,
 			load_balancer: None,
+			reset_key: None,
 			legacy: Default::default(),
 			quic: None,
 		}
@@ -507,6 +527,10 @@ impl Config {
 				self.lb_id.is_some() || self.load_balancer.is_some(),
 				"--listen-quic-lb-id (load_balancer) needs a QUIC listener (--listen)",
 			),
+			(
+				self.reset_key.is_some(),
+				"--listen-quic-reset-key needs a QUIC listener (--listen)",
+			),
 		];
 		match refused.into_iter().find(|(set, _)| *set) {
 			Some((_, reason)) => Err(crate::Error::NoBackend(reason)),
@@ -523,6 +547,29 @@ impl Config {
 			.or(self.timeout)
 			.unwrap_or(DEFAULT_TIMEOUT);
 		(!timeout.is_zero() && std::time::Instant::now().checked_add(timeout).is_some()).then_some(timeout)
+	}
+
+	/// Read the secret in the [`reset_key`](Self::reset_key) file, if one is configured.
+	///
+	/// Errors when the file can't be read, or holds fewer than 32 bytes once trimmed.
+	pub fn reset_secret(&self) -> std::io::Result<Option<Vec<u8>>> {
+		let Some(path) = &self.reset_key else {
+			return Ok(None);
+		};
+		let secret =
+			std::fs::read(path).map_err(|err| std::io::Error::new(err.kind(), format!("{}: {err}", path.display())))?;
+		let secret = secret.trim_ascii();
+		if secret.len() < MIN_RESET_SECRET {
+			return Err(std::io::Error::new(
+				std::io::ErrorKind::InvalidData,
+				format!(
+					"{} holds {} bytes, but a reset key needs at least {MIN_RESET_SECRET}",
+					path.display(),
+					secret.len()
+				),
+			));
+		}
+		Ok(Some(secret.to_vec()))
 	}
 
 	#[cfg(feature = "quic")]
@@ -723,6 +770,24 @@ load_balancer = { id = "cd", nonce = 4 }
 		);
 	}
 
+	/// A reset key file is read trimmed, and refused when too short to be a secret.
+	#[test]
+	fn reset_key_needs_32_bytes() {
+		let dir = tempfile::tempdir().unwrap();
+		let config = |contents: &[u8]| {
+			let path = dir.path().join("reset.key");
+			std::fs::write(&path, contents).unwrap();
+			let toml = format!("reset_key = {:?}", path.display().to_string());
+			toml::from_str::<Config>(&toml).unwrap().reset_secret()
+		};
+
+		assert_eq!(Config::default().reset_secret().unwrap(), None);
+		let secret = config(format!("{}\n", "a".repeat(32)).as_bytes()).unwrap();
+		assert_eq!(secret.as_deref(), Some("a".repeat(32).as_bytes()));
+		let err = config(format!(" {} \n", "a".repeat(31)).as_bytes()).unwrap_err();
+		assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+	}
+
 	/// Programmatic configuration keeps the QUIC-LB id and nonce paired.
 	#[cfg(feature = "quic")]
 	#[test]
@@ -770,7 +835,7 @@ load_balancer = { id = "ab", nonce = 8 }
 			..Default::default()
 		};
 		type Set = fn(&mut Config);
-		let cases: [(&str, Set); 7] = [
+		let cases: [(&str, Set); 8] = [
 			("--listen-tls-cert", |c| c.tls.cert = vec!["cert.pem".into()]),
 			("--listen-tls-key", |c| c.tls.key = vec!["key.pem".into()]),
 			("--listen-tls-generate", |c| c.tls.generate = vec!["localhost".into()]),
@@ -787,6 +852,7 @@ load_balancer = { id = "ab", nonce = 8 }
 					nonce: 8,
 				})
 			}),
+			("--listen-quic-reset-key", |c| c.reset_key = Some("reset.key".into())),
 		];
 		for (name, set) in cases {
 			let mut config = stream_only();

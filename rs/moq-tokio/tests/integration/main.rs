@@ -10,6 +10,7 @@ mod close_code;
 mod keylog;
 mod max_age;
 mod reconnect;
+mod reset_key;
 mod stream_code;
 mod subscription_end_integrity;
 mod unannounce;
