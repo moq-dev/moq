@@ -140,6 +140,14 @@ impl AckFrequencyState {
                 "Requested Max Ack Delay in ACK_FREQUENCY frame is less than min_ack_delay",
             ));
         }
+        // As for the max_ack_delay transport parameter (RFC 9000 section 18.2), 2^14 ms or more
+        // is invalid
+        // https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-14.html#section-4
+        if max_ack_delay >= Duration::from_millis(1 << 14) {
+            return Err(TransportError::PROTOCOL_VIOLATION(
+                "Requested Max Ack Delay in ACK_FREQUENCY frame is 2^14 ms or more",
+            ));
+        }
         self.max_ack_delay = max_ack_delay;
 
         // Update the rest of the params
