@@ -45,7 +45,7 @@ What clones a group producer today (compile probe on #5725's head, deleting
 Shape:
 
 - One public writer, `group::Producer`, with no `Clone`.
-- A crate-private handle minted from the writer that reads group state,
+- A crate-private `group::Handle` minted from the writer that reads group state,
   hands out consumers, waits on `poll_closed` and `poll_unused`, aborts
   through `&self` (`abort`, `abort_unused`), and backs the cache slot's
   accounting and `reveal_group`. It has no write or finish. The 13 sites
@@ -85,22 +85,22 @@ until the slot goes. After the split it runs when the writer drops. Split
 If any of those reads worse than today, bring it to the maintainer before
 landing.
 
-Open questions, the maintainer's call (do not settle them in the
-implementation PR without asking):
+Decided by the maintainer on 2026-10-18 (#5892):
 
-- The crate-private handle's name.
-- Whether the public `Error::FrameOpen` goes. Ingest kept it as a backstop
-  for crate-internal duplicates that could write, which this shape removes.
-  [Dropped sources](/quest/m1/dropped-sources.md) lists it among the
-  variants that need a real arm; update it there if it goes.
-- `finish(&self)` today: whether it becomes `finish(&mut self)` like every
-  other write.
-- `Deref<Target = Info>`: a downstream `producer.clone()` now silently
-  copies the `Copy` `Info` and fails later. Ingest left "say so in the
-  changelog, or drop the `Deref`" open.
+- m1, under the public-model epic, since #5717 already put the Clone
+  removal there. The public owned chunked writer stays in ingest, which
+  requires this quest.
+- The handle is `group::Handle`.
+- Delete the public `Error::FrameOpen`: one writer makes it unreachable.
+  The in-flight-frame check becomes a `debug_assert`. Update any remaining
+  references to it.
+- `finish(&mut self)`, like every other write.
+- Keep `Deref<Target = Info>`. A downstream `producer.clone()` now silently
+  copies the `Copy` `Info` and fails later, so MIGRATE.md names that.
 
-Landing: breaking public API (no `Clone`), so `rs/moq-net/MIGRATE.md` gets
-an entry under `## Unreleased` naming the `Info` pitfall, plus moq-ffi's if
+Landing: breaking public API (no `Clone`, no `FrameOpen`, `finish` takes
+`&mut self`), so `rs/moq-net/MIGRATE.md` gets an entry under
+`## Unreleased` naming the `Info` pitfall, plus moq-ffi's if
 its exported surface changes (it should not). JS has no equivalent: a JS
 `Group.Producer` is a single object and needs no change. Docs: none beyond
 MIGRATE, since `doc/` never documents cloning a group producer.

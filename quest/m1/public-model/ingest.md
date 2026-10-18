@@ -78,7 +78,8 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     refuses a duplicate sequence.
     - Dropping `Clone` and the crate-private non-writing handle moved to
       [One group writer](/quest/m1/public-model/group-writer.md), which
-      settles the handle and the fate of `FrameOpen`. This item keeps the
+      names the handle `group::Handle` and deletes `FrameOpen` (decided
+      2026-10-18, #5892), so the backstop above goes. This item keeps the
       public owned chunked writer. Its callers that hold a
       `&mut group::Producer` (hang's `Frame::write_to`, moq-mux's LOC and
       fMP4 encoders) cannot call a consuming `create_frame(self)`; weigh
