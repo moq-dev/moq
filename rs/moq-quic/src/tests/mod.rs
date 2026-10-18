@@ -247,14 +247,12 @@ fn close_before_the_client_finished_leaves_survives_a_lost_flight() {
     close_before_the_server_has_the_finished(LostFlight::Close);
 }
 
-fn close_before_the_server_has_the_finished(lost: LostFlight) {
-    let _guard = subscribe();
-    let mut pair = Pair::default();
-    let client_ch = pair.begin_connect(client_config());
+/// Hands the client the server's flight without letting it transmit, as a pacer would.
+fn connect_before_the_finished_leaves(pair: &mut Pair, config: ClientConfig) -> ConnectionHandle {
+    let client_ch = pair.begin_connect(config);
     pair.drive_client();
     pair.drive_server();
 
-    // Hand the client the server's flight without letting it transmit, as a pacer would.
     let mut buf = Vec::new();
     while let Some((recv_time, ecn, packet)) = pair.client.inbound.pop_front() {
         let server = pair.server.addr;
@@ -268,12 +266,120 @@ fn close_before_the_server_has_the_finished(lost: LostFlight) {
         pair.client_conn_mut(client_ch).handle_event(event);
     }
 
-    const REASON: &[u8] = b"whee";
-    let now = pair.time;
-    let server = pair.server.addr;
     let client = pair.client_conn_mut(client_ch);
     assert_matches!(client.poll(), Some(Event::HandshakeDataReady));
     assert_matches!(client.poll(), Some(Event::Connected));
+    client_ch
+}
+
+/// A client certificate flight that fits the close packet but crowds out the coalesced 1-RTT close
+/// falls back to the plain close, instead of resending the flight on every poll of a one-datagram
+/// budget and never reaching the close.
+#[test]
+fn close_before_a_client_certificate_leaves_ends() {
+    let _guard = subscribe();
+    let provider = Arc::new(default_provider());
+    let mut roots = RootCertStore::empty();
+    roots.add(CERTIFIED_KEY.cert.der().clone()).unwrap();
+
+    let (mut carried, mut fell_back) = (0, 0);
+    // Grow the client certificate by names, sweeping its flight past the room in the close packet.
+    for len in (0..1400).step_by(16) {
+        let mut names = vec!["localhost".to_string()];
+        names.extend((0..len / 50).map(|i| format!("{i:03}{}.test", "a".repeat(42))));
+        names.push(format!("{}.test", "b".repeat(len % 50 + 1)));
+        let identity = rcgen::generate_simple_self_signed(names).unwrap();
+
+        let mut store = RootCertStore::empty();
+        store.add(identity.cert.der().clone()).unwrap();
+        let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(
+                WebPkiClientVerifier::builder_with_provider(Arc::new(store), provider.clone())
+                    .build()
+                    .unwrap(),
+            )
+            .with_single_cert(
+                vec![CERTIFIED_KEY.cert.der().clone()],
+                PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.serialize_der()).into(),
+            )
+            .unwrap();
+        let client = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(roots.clone())
+            .with_client_auth_cert(
+                vec![identity.cert.der().clone()],
+                PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()).into(),
+            )
+            .unwrap();
+        let mut client = ClientConfig::new(Arc::new(
+            crypto::rustls::QuicClientConfig::try_from(client).unwrap(),
+        ));
+        client.transport = Arc::new(cubic_transport());
+
+        let mut pair = Pair::new(
+            Default::default(),
+            ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server).unwrap())),
+        );
+        let client_ch = connect_before_the_finished_leaves(&mut pair, client);
+
+        let now = pair.time;
+        let client = pair.client_conn_mut(client_ch);
+        client.close(now, VarInt(42), Bytes::new());
+        let mut transmits = Vec::new();
+        let mut buf = Vec::new();
+        while transmits.len() <= 2
+            && let Some(transmit) = client.poll_transmit(now, 1, &mut buf)
+        {
+            let datagram = Bytes::copy_from_slice(&buf[..transmit.size]);
+            transmits.push((transmit, datagram));
+            buf.clear();
+        }
+        assert_eq!(transmits.len(), 1, "{len} bytes of names");
+        pair.client.outbound.extend(transmits);
+        pair.drive();
+
+        let server_ch = pair.server.assert_accept();
+        let server = pair.server_conn_mut(server_ch);
+        let mut connected = false;
+        while let Some(event) = server.poll() {
+            match event {
+                Event::Connected => connected = true,
+                Event::ConnectionLost { reason } if connected => {
+                    assert_matches!(
+                        reason,
+                        ConnectionError::ApplicationClosed(ApplicationClose {
+                            error_code: VarInt(42),
+                            ..
+                        })
+                    );
+                }
+                _ => {}
+            }
+        }
+        if connected {
+            carried += 1;
+        } else {
+            fell_back += 1;
+        }
+    }
+    // The sweep covers a flight carried with the close and one too big for it.
+    assert!(
+        carried > 0 && fell_back > 0,
+        "{carried} carried, {fell_back} fell back"
+    );
+}
+
+fn close_before_the_server_has_the_finished(lost: LostFlight) {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let client_ch = connect_before_the_finished_leaves(&mut pair, client_config());
+
+    const REASON: &[u8] = b"whee";
+    let now = pair.time;
+    let server = pair.server.addr;
     if lost == LostFlight::Finished {
         pair.client.drive(now, server);
         assert!(!pair.client.outbound.is_empty());

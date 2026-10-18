@@ -886,6 +886,9 @@ impl Connection {
 
                 // All or nothing: part of the flight would not complete the handshake. A flight
                 // too big for one packet (a large client certificate chain) keeps the plain close.
+                // It must also leave room to coalesce the 1-RTT close, or a one-datagram budget
+                // resends this packet on every poll and never reaches the close. Both spaces share
+                // the negotiated suite, so the 1-RTT tag is as long as this one.
                 // Nothing is dequeued, so a close resent for a lost flight carries it again.
                 let finished = &self.spaces[space_id];
                 let carry_finished = finish_first
@@ -895,6 +898,8 @@ impl Connection {
                             .unacked_crypto()
                             .map(|frame| frame::Crypto::SIZE_BOUND + frame.data.len())
                             .sum::<usize>()
+                        + MIN_PACKET_SPACE
+                        + builder.tag_len
                         <= builder.max_size;
                 if carry_finished {
                     for frame in finished.unacked_crypto() {
