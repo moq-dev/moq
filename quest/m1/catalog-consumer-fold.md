@@ -22,3 +22,4 @@ adapter. Wire: none.
 ## Related
 
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` catalog checks
+- [Compressed tracks](/quest/m1/compress/README.md) - drops `catalog.json.z`, so the folded consumer need not keep the hangz format
