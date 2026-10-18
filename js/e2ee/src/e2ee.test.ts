@@ -255,6 +255,14 @@ test("closing a protected consumer releases its broadcast handle", () => {
 	net.close();
 });
 
+test("closing a protected producer ends its broadcast", () => {
+	const producer = new Protected.Producer(new Broadcast.Producer(), credential().produce());
+	expect(producer.closed.peek()).toBeUndefined();
+	producer.close();
+	producer.close();
+	expect(producer.closed.peek()).toBeNull();
+});
+
 test("a broadcast refuses a name its generation already claimed elsewhere", async () => {
 	const generation = credential().produce();
 	await new Protected.Producer(new Broadcast.Producer(), generation).createTrack("video");

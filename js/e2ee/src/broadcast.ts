@@ -22,10 +22,15 @@ export class Producer {
 	readonly generation: Generation.Producer;
 	#inner: NetBroadcast.Producer;
 
-	/** Protect `inner` under `generation`. */
+	/** Protect `inner` under `generation`, taking ownership of it: {@link close} ends it. */
 	constructor(inner: NetBroadcast.Producer, generation: Generation.Producer) {
 		this.#inner = inner;
 		this.generation = generation;
+	}
+
+	/** Settles with `null` once the wrapped broadcast closes, as `@moq/net`'s `closed` does. */
+	get closed(): NetBroadcast.Producer["closed"] {
+		return this.#inner.closed;
 	}
 
 	/**
@@ -38,6 +43,11 @@ export class Producer {
 	async createTrack(semantic: string, info: Partial<NetTrack.Info> = {}): Promise<Track.Producer> {
 		const name = await this.generation.name(semantic);
 		return this.generation.produce(this.#inner.createTrack(name, info));
+	}
+
+	/** End the wrapped broadcast, as `@moq/net`'s `close` does. Idempotent. */
+	close(): void {
+		this.#inner.close();
 	}
 }
 
