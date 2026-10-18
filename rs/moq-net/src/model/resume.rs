@@ -530,13 +530,14 @@ impl Reader {
 			if !copy.replaced || copy.needed(Some(copy.generation) == serving) {
 				return true;
 			}
+			// Its group channel ran out: it feeds nothing more.
+			if copy.done.is_some() {
+				return false;
+			}
 			// Not yet bounded, it may still feed a group the new copy never has, unless
 			// nobody reads groups at all.
 			if copy.until.is_none() && groups_read {
 				return true;
-			}
-			if copy.done.is_some() {
-				return false;
 			}
 			let end = copy.end();
 			let Poll::Ready(Ok(sub)) = copy.poll_ready(groups, &kio::Waiter::noop()) else {
@@ -553,10 +554,11 @@ impl Reader {
 		});
 	}
 
-	/// The copy at `index` delivered `sequence`. The serving copy's first group bounds the
+	/// The copy at `index` hands out `sequence`. The serving copy's first group bounds the
 	/// copies it replaced just below it: what they hold under it may be groups the new route
 	/// never has, and what is at or above it the new route delivers. Never below a group
-	/// already handed out.
+	/// already handed out. A group it replays, already handed out, bounds nothing: the
+	/// replaced copies may still hold the next.
 	fn observe(&mut self, index: usize, sequence: u64) {
 		if Some(self.copies[index].generation) != self.generation {
 			return;
@@ -640,10 +642,10 @@ impl Reader {
 				match res {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(group))) => {
-						self.observe(index, group.sequence);
 						if !Self::deliverable(&self.copies[index], group.sequence, delivered) {
 							continue;
 						}
+						self.observe(index, group.sequence);
 						let group = self.hand_out(index, group);
 						return Some(Poll::Ready(Ok(Some(group))));
 					}
@@ -1423,6 +1425,27 @@ mod test {
 			assert_eq!(drain(&mut sub, ordered), Vec::<u64>::new());
 			write(&b, 3);
 			assert_eq!(drain(&mut sub, ordered), [3]);
+		}
+	}
+
+	/// A group the new copy replays, already handed out, does not bound the replaced copy:
+	/// the old route's next group still arrives.
+	#[test]
+	fn a_group_the_new_route_replays_bounds_nothing() {
+		for ordered in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::ZERO);
+			write(&a, 0);
+			assert_eq!(drain(&mut sub, ordered), [0]);
+			write(&a, 1);
+
+			let b = copy();
+			routes.serve(b.consume());
+			write(&b, 0);
+			assert_eq!(drain(&mut sub, ordered), [1]);
 		}
 	}
 
@@ -2726,7 +2749,9 @@ mod test {
 					let waiter = kio::Waiter::new(wake.clone().into());
 					assert!(reading.poll(&waiter).is_pending());
 					if recovered {
-						// Retire the original copy so its preferences stop being mirrored.
+						// Retire the original copy so its preferences stop being mirrored: its
+						// route goes away, since a replayed group alone never bounds it.
+						a.clone().abort(Error::Dropped).unwrap();
 						assert!(sub.recv_group().now_or_never().is_none());
 						assert!(a.subscription().is_none());
 					}

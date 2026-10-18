@@ -356,9 +356,10 @@ class Reader implements ResumeSource {
 	}
 
 	/**
-	 * `copy` delivered `sequence`. The serving copy's first group bounds the copies it replaced
+	 * `copy` handed out `sequence`. The serving copy's first group bounds the copies it replaced
 	 * just below it: what they hold under it may be groups the new route never has, and what
-	 * is at or above it the new route delivers. Never below a group already handed out.
+	 * is at or above it the new route delivers. Never below a group already handed out. A group
+	 * it replays, already handed out, bounds nothing: the replaced copies may still hold the next.
 	 */
 	#observe(copy: Copy, sequence: number): void {
 		if (copy.generation !== this.#generation) return;
@@ -396,11 +397,11 @@ class Reader implements ResumeSource {
 			for (;;) {
 				const recv = take(copy, ordered);
 				if (recv.kind === "group") {
-					this.#observe(copy, recv.group.sequence);
 					if (!this.#deliverable(copy, recv.group.sequence, delivered)) {
 						recv.group.close();
 						continue;
 					}
+					this.#observe(copy, recv.group.sequence);
 					return { kind: "group", group: this.#handOut(copy, recv.group) };
 				}
 				// Drained: the track ended as the copy did, which is not cleanly when its
@@ -429,7 +430,6 @@ class Reader implements ResumeSource {
 				}
 				const recv = take(copy, ordered);
 				if (recv.kind !== "group") break;
-				this.#observe(copy, recv.group.sequence);
 				recv.group.close();
 			}
 		}
@@ -512,16 +512,14 @@ class Reader implements ResumeSource {
 		this.#copies = this.#copies.filter((copy) => {
 			// The serving copy, or one between routes with nothing replacing it yet.
 			if (!copy.replaced || copy.lease > 0) return true;
-			// Not yet bounded, it may still feed a group the new copy never has, unless nobody
-			// reads groups at all.
-			if (copy.until === undefined && delivered) return true;
-			if (
-				copy.done === undefined &&
-				delivered &&
-				hooks.hasUnreadGroup(copy.sub, cursor.start, copyEnd(copy), delivered)
-			) {
-				return true;
+			// Its group channel ran out, or nobody reads groups at all: it feeds nothing more.
+			if (copy.done !== undefined || !delivered) {
+				this.#drop(copy);
+				return false;
 			}
+			// Not yet bounded, it may still feed a group the new copy never has.
+			if (copy.until === undefined) return true;
+			if (hooks.hasUnreadGroup(copy.sub, cursor.start, copyEnd(copy), delivered)) return true;
 			this.#drop(copy);
 			return false;
 		});
@@ -1105,7 +1103,14 @@ export class Front {
 			const signal = options?.signal ? AbortSignal.any([options.signal, retired]) : retired;
 			try {
 				await until(this.#verify(name, source), signal);
-				return { group: await source.wire.fetchGroup(name, sequence, { ...options, signal }), source };
+				const group = await source.wire.fetchGroup(name, sequence, { ...options, signal });
+				// A copy that already failed continues nothing: that is the route failing again.
+				const failed = group.closed.peek();
+				if (failed instanceof Error) {
+					group.close();
+					throw failed;
+				}
+				return { group, source };
 			} catch (err) {
 				source.release();
 				if (retired.aborted && !options?.signal?.aborted && !this.#concluded) continue;

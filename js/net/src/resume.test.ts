@@ -664,6 +664,57 @@ test("a group the old route gets after the swap, which the new route never has, 
 	b.close();
 });
 
+test("a group the new route replays bounds nothing, so the old route's next group still arrives", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	expect(drain(sub)).toEqual([0]);
+	ta.write(1);
+	front.serve(b.consume());
+	await settle();
+	// The new route only replays group 0, which was already handed out.
+	tb.write(0);
+	expect(drain(sub)).toEqual([1]);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("a fetched group that fails on the route still serving waits for the next route", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const failing = ta.write(5, 1, false);
+	front.serve(a.consume());
+	const group = await front.consumer.track("seq").fetchGroup(5);
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.0");
+
+	// Its route stays current, so its only copy of group 5 is the failed one.
+	failing.close(new StreamError(StreamCode.SessionClosed));
+	const read = group.readFrame();
+	// Timers still run: recovery does not spin on the failed copy.
+	await settle();
+	await settle();
+
+	tb.write(5, 2);
+	front.serve(b.consume());
+	expect(dec.decode((await read)?.payload)).toBe("5.1");
+	expect(await group.readFrame()).toBeUndefined();
+
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
 test("a group handed out already failed with its route still continues on the next one", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
