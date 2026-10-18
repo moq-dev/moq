@@ -438,7 +438,7 @@ async fn export_emits_blocks_for_each_frame() {
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
 				if let Some(deadline) = exporter.next_deadline() {
-					tokio::time::advance(deadline.saturating_duration_since(web_async::time::Instant::now())).await;
+					tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
 				} else {
 					importer = None;
 				}
@@ -681,7 +681,7 @@ async fn export_fragment_duration_batches_blocks() {
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
 				if let Some(deadline) = exporter.next_deadline() {
-					tokio::time::advance(deadline.saturating_duration_since(web_async::time::Instant::now())).await;
+					tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
 				} else {
 					importer = None;
 				}
@@ -925,7 +925,7 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 		.with_delay(delay)
 		.with_fragment_duration(std::time::Duration::ZERO);
 	export.next().await.unwrap().unwrap();
-	let start = web_async::time::Instant::now();
+	let start = moq_clock::now();
 	live.track.write(raw_frame(0, b"first", true)).unwrap();
 	let first = export.next().await.unwrap().unwrap();
 	assert!(first.windows(5).any(|part| part == b"first"));

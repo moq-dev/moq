@@ -58,6 +58,7 @@ The API is the most important thing to get right.
 A bad shape costs a breaking change in every language, and the surface is huge.
 
 - Report the public API and wire impact of every change, in the PR description and whenever asked.
+- A breaking change adds an entry under `## Unreleased` in each affected package's `MIGRATE.md` saying how to migrate.
 - Keep things private until a consumer needs them. Scrutinize every new exported item.
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` instead.
 - Let the type system make misuse unrepresentable
@@ -70,6 +71,7 @@ A bad shape costs a breaking change in every language, and the surface is huge.
 - Short names under a module namespace (`encode::Config`, not `EncoderConfig`). Mirror names across Rust, JS, and the bindings.
 - Document every exported symbol in one plain line, the way you'd say it out loud.
 - Prefer refactoring and simplification; many APIs have not been published yet.
+- The `moq-net` API and moq-lite take priority over moq-transport. Map moq-transport onto them, not the reverse, and skip any of its features or MUSTs that add cost without a real behavioral benefit.
 
 MoQ is split into many layers as part of the public API.
 The boundary between packages is extremely important to keep things modular and reusable.
@@ -82,6 +84,7 @@ Wire changes should be backwards compatible for any *published* drafts/versions.
 
 Before starting, `git fetch origin` and set the upstream to the base branch.
 Pass PR bodies to `gh` on stdin (`--body-file -`); never write to a directory other agents share.
+Keep scratch files in your worktree's `.scratch/`, not `target/`: build output may live outside the checkout and gets wiped.
 
 Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.

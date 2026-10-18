@@ -5,15 +5,14 @@
 //! captures don't carry (scrambling, several programs, a wrap, a flagged jump, oversized groups)
 //! is built by [`Mux`].
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use bytes::Bytes;
 
+use super::fixture::{ACCESS, Flags, MS, Mux, WRAP, paced, program};
 use super::passthrough::{
 	GROUP_BYTES_MAX, GROUP_OBJECTS_MAX, PacketSizeError, Passthrough, PcrGapError, PcrRestartError, PcrRewindError,
 };
-use super::psi;
 
 /// A delay budget no test timeline comes close to, so the reader sees every group.
 const RECORDING_MAX_DELAY: Duration = Duration::from_secs(30);
@@ -32,6 +31,8 @@ struct Object {
 struct Imported {
 	catalog: hang::catalog::Catalog,
 	objects: Vec<Object>,
+	/// The sequence of each break marker: a group of one object with no bytes.
+	markers: Vec<u64>,
 }
 
 impl Imported {
@@ -91,8 +92,13 @@ async fn import_onto(
 		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_DELAY))
 		.await?;
 	let mut objects = Vec::new();
+	let mut markers = Vec::new();
 	while let Some(mut group) = tokio::time::timeout(Duration::from_secs(1), track.recv_group()).await?? {
 		while let Some(frame) = group.read_frame().await? {
+			if frame.payload.is_empty() {
+				markers.push(group.sequence);
+				continue;
+			}
 			let frame = hang::container::Frame::decode(frame.payload)?;
 			objects.push(Object {
 				group: group.sequence,
@@ -104,6 +110,7 @@ async fn import_onto(
 	Ok(Imported {
 		catalog: catalog.snapshot(),
 		objects,
+		markers,
 	})
 }
 
@@ -136,169 +143,6 @@ fn header(pkt: &[u8]) -> Header {
 		}
 	}
 	header
-}
-
-/// Builds a transport stream packet by packet.
-#[derive(Default)]
-struct Mux {
-	out: Vec<u8>,
-	cc: HashMap<u16, u8>,
-}
-
-#[derive(Clone, Copy, Default)]
-struct Flags {
-	pcr: Option<u64>,
-	random_access: bool,
-	discontinuity: bool,
-}
-
-impl Flags {
-	fn pcr(ticks: u64) -> Self {
-		Self {
-			pcr: Some(ticks),
-			..Default::default()
-		}
-	}
-
-	fn random_access(mut self) -> Self {
-		self.random_access = true;
-		self
-	}
-
-	fn discontinuity(mut self) -> Self {
-		self.discontinuity = true;
-		self
-	}
-}
-
-const ACCESS: Flags = Flags {
-	pcr: None,
-	random_access: true,
-	discontinuity: false,
-};
-
-impl Mux {
-	fn cc(&mut self, pid: u16) -> u8 {
-		let cc = self.cc.entry(pid).or_default();
-		let out = *cc;
-		*cc = (*cc + 1) & 0x0f;
-		out
-	}
-
-	/// One packet on `pid`, its payload filled with the PID's low byte.
-	fn packet(&mut self, pid: u16, flags: Flags) -> &mut Self {
-		let cc = self.cc(pid);
-		let mut pkt = vec![0x47, (pid >> 8) as u8 & 0x1f, pid as u8];
-		let marked = flags.pcr.is_some() || flags.random_access || flags.discontinuity;
-		if marked {
-			pkt.push(0x30 | cc);
-			let mut field = vec![
-				u8::from(flags.discontinuity) << 7
-					| u8::from(flags.random_access) << 6
-					| u8::from(flags.pcr.is_some()) << 4,
-			];
-			if let Some(pcr) = flags.pcr {
-				let (base, ext) = (pcr / 300, pcr % 300);
-				field.extend_from_slice(&[
-					(base >> 25) as u8,
-					(base >> 17) as u8,
-					(base >> 9) as u8,
-					(base >> 1) as u8,
-					((base & 1) << 7) as u8 | 0x7e | (ext >> 8) as u8,
-					ext as u8,
-				]);
-			}
-			pkt.push(field.len() as u8);
-			pkt.extend_from_slice(&field);
-		} else {
-			pkt.push(0x10 | cc);
-		}
-		pkt.resize(188, pid as u8);
-		self.out.extend_from_slice(&pkt);
-		self
-	}
-
-	/// `n` plain packets on `pid`.
-	fn fill(&mut self, pid: u16, n: usize) -> &mut Self {
-		for _ in 0..n {
-			self.packet(pid, Flags::default());
-		}
-		self
-	}
-
-	/// A section on `pid`, split across as many packets as it needs.
-	fn section(&mut self, pid: u16, section: &[u8]) -> &mut Self {
-		let mut payload = vec![0u8];
-		payload.extend_from_slice(section);
-		for (i, chunk) in payload.chunks(184).enumerate() {
-			let cc = self.cc(pid);
-			let pusi = if i == 0 { 0x40 } else { 0 };
-			let mut pkt = vec![0x47, pusi | (pid >> 8) as u8 & 0x1f, pid as u8, 0x10 | cc];
-			pkt.extend_from_slice(chunk);
-			pkt.resize(188, 0xff);
-			self.out.extend_from_slice(&pkt);
-		}
-		self
-	}
-
-	fn pat(&mut self, programs: &[(u16, u16)]) -> &mut Self {
-		let body: Vec<u8> = programs
-			.iter()
-			.flat_map(|&(number, pmt)| [(number >> 8) as u8, number as u8, 0xe0 | (pmt >> 8) as u8, pmt as u8])
-			.collect();
-		self.section(0, &psi::section(psi::PAT_TABLE_ID, 1, 0, 0, 0, &body))
-	}
-
-	/// A PMT whose `program_info` holds `info` bytes of private descriptors, so a large one
-	/// spans packets.
-	fn pmt(&mut self, pid: u16, program: u16, pcr_pid: u16, streams: &[(u8, u16)], info: usize) -> &mut Self {
-		let mut descriptors = Vec::new();
-		while descriptors.len() < info {
-			let len = (info - descriptors.len()).clamp(2, 200) - 2;
-			descriptors.push(0x80);
-			descriptors.push(len as u8);
-			descriptors.extend(std::iter::repeat_n(0xaa, len));
-		}
-		let mut body = vec![
-			0xe0 | (pcr_pid >> 8) as u8,
-			pcr_pid as u8,
-			0xf0 | (descriptors.len() >> 8) as u8,
-			descriptors.len() as u8,
-		];
-		body.extend_from_slice(&descriptors);
-		for &(stream_type, es) in streams {
-			body.extend_from_slice(&[stream_type, 0xe0 | (es >> 8) as u8, es as u8, 0xf0, 0x00]);
-		}
-		self.section(pid, &psi::section(psi::PMT_TABLE_ID, program, 0, 0, 0, &body))
-	}
-
-	fn bytes(&self) -> Vec<u8> {
-		self.out.clone()
-	}
-}
-
-/// 27 MHz ticks per millisecond.
-const MS: u64 = 27_000;
-
-/// A single program: PMT on 0x20, H.264 video on 0x100, audio on 0x101, the clock on `pcr_pid`.
-fn program(mux: &mut Mux, pcr_pid: u16) {
-	mux.pat(&[(1, 0x20)])
-		.pmt(0x20, 1, pcr_pid, &[(0x1b, 0x100), (0x0f, 0x101)], 0);
-}
-
-/// `seconds` of a stream paced 40 ms per PCR on `pcr_pid`, starting at `start` ticks, with a
-/// video random access point every `gop` PCRs (none when zero). Each PCR interval is the PCR
-/// packet then `fill` packets alternating video and audio.
-fn paced(mux: &mut Mux, pcr_pid: u16, start: u64, intervals: u64, gop: u64, fill: usize) {
-	for i in 0..intervals {
-		mux.packet(pcr_pid, Flags::pcr(start + i * 40 * MS));
-		if gop != 0 && i % gop == 0 {
-			mux.packet(0x100, ACCESS);
-		}
-		for j in 0..fill {
-			mux.fill(if j % 2 == 0 { 0x100 } else { 0x101 }, 1);
-		}
-	}
 }
 
 /// Where in `data` the packet starting the first object sits, checking every packet from there on
@@ -674,7 +518,6 @@ async fn the_section_goes_with_the_importer() {
 
 #[tokio::test(start_paused = true)]
 async fn the_pcr_wrap_continues_the_timeline() {
-	const WRAP: u64 = (1 << 33) * 300;
 	let mut mux = Mux::default();
 	program(&mut mux, 0x100);
 	let start = WRAP - 2_000 * MS;
@@ -726,10 +569,11 @@ async fn a_flagged_jump_forward_starts_a_group_behind_a_break() {
 		assert!((11_959_000..11_960_000).contains(&before), "{before}");
 		assert!((29_999_000..30_000_000).contains(&after), "{after}");
 		assert_eq!(
-			groups[jump][0].group,
-			groups[jump - 1][0].group + 2,
-			"a skipped sequence marks the break, random access {random_access}"
+			imported.markers,
+			[groups[jump - 1][0].group + 1],
+			"a marker group between them declares the break, random access {random_access}"
 		);
+		assert_eq!(groups[jump][0].group, groups[jump - 1][0].group + 2);
 		assert_eq!(imported.section().random_access, random_access);
 	}
 }
@@ -842,6 +686,7 @@ async fn a_retransmitted_break_declares_one_jump() {
 		.filter(|group| header(&group[0].payload).discontinuity)
 		.count();
 	assert_eq!(breaks, 1);
+	assert_eq!(imported.markers.len(), 1, "one marker for the one jump");
 	assert_suffix(&data, &imported);
 }
 

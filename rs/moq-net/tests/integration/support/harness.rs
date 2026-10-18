@@ -16,19 +16,16 @@ use moq_net::{Client, Server, Session, Version, origin};
 
 use super::mock::{MockSession, MockStats, create_mock_session_pair};
 
-/// The current instant: simulated under `moq_net_sim`, tokio's in the benches.
+/// The current ambient instant.
 pub fn now() -> moq_net::time::Instant {
-	match moq_net_sim::is_running() {
-		true => moq_net_sim::now(),
-		false => tokio::time::Instant::now().into_std(),
-	}
+	moq_clock::now()
 }
 
-/// Run a protocol driver in the background: on `moq_net_sim` in tests, on tokio in
+/// Run a protocol driver in the background: on `moq-clock`'s sim in tests, on tokio in
 /// the benches.
 pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
-	match moq_net_sim::is_running() {
-		true => drop(moq_net_sim::spawn(moq_net_sim::drive(move |now, waiter| {
+	match moq_clock::sim::is_running() {
+		true => drop(moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}))),
 		false => drop(tokio::spawn(moq_net::time::run(driver))),
@@ -84,6 +81,8 @@ pub struct MockConnectOptions {
 	pub cost: Option<u64>,
 	/// What both transports report as their connection statistics.
 	pub stats: MockStats,
+	/// The context the server records under.
+	pub server_stats: moq_net::stats::Session,
 	/// Count server driver polls into this counter when supplied.
 	pub server_polls: Option<Arc<AtomicUsize>>,
 }
@@ -104,6 +103,7 @@ impl MockConnectOptions {
 			server_extensions: Default::default(),
 			cost: None,
 			stats: MockStats::default(),
+			server_stats: Default::default(),
 			server_polls: None,
 		}
 	}
@@ -153,6 +153,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	}
 
 	let mut server = Server::new()
+		.with_stats(opts.server_stats)
 		.with_versions(opts.version.into())
 		.with_extensions(opts.server_extensions);
 	if let Some(publish) = &opts.server_publish {

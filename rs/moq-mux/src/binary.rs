@@ -35,7 +35,7 @@
 //!
 //! A payload timed on the broadcast [`Clock`](crate::Clock) is written at that timestamp as given,
 //! and the entry advertises how late payloads reach the transport as its `jitter` and `delay`, the
-//! way a media rendition does. A capture [`Instant`](std::time::Instant) converts with
+//! way a media rendition does. A capture [`Instant`](moq_clock::Instant) converts with
 //! [`Clock::capture`](crate::Clock::capture) on the catalog's clock:
 //!
 //! ```no_run
@@ -43,7 +43,7 @@
 //! #     catalog: &moq_mux::catalog::Producer,
 //! #     thumbnail: &mut moq_mux::binary::Snapshot,
 //! #     jpeg: bytes::Bytes,
-//! #     captured: std::time::Instant,
+//! #     captured: moq_clock::Instant,
 //! # ) -> moq_mux::Result<()> {
 //! let at = catalog.clock().capture(captured)?;
 //! thumbnail.update(moq_net::Timed::from(jpeg).at(at))?;
@@ -464,7 +464,7 @@ mod test {
 			.binary_stream(timed_track(&mut broadcast, "bare"), Config::default())
 			.unwrap();
 
-		let anchor = std::time::Instant::now();
+		let anchor = moq_clock::Instant::now();
 		for i in 0..20u64 {
 			let now = moq_net::Timestamp::from_micros(i * 100_000).unwrap();
 			let at = |late: u64| anchor + std::time::Duration::from_millis(i * 100 + late);
@@ -491,14 +491,15 @@ mod test {
 
 	/// A captured payload measures through the real clock: written right after capture, it
 	/// advertises no delay beyond the scheduling noise of the test itself.
-	#[test]
-	fn a_capture_measures_through_the_clock() {
+	#[moq_clock::test]
+	async fn a_capture_measures_through_the_clock() {
+		moq_clock::sleep(std::time::Duration::from_secs(1)).await;
 		let (mut broadcast, catalog) = catalog();
 		let mut telemetry = catalog
 			.binary_stream(timed_track(&mut broadcast, "telemetry"), Config::default())
 			.unwrap();
 
-		let captured = std::time::Instant::now();
+		let captured = moq_clock::Instant::now();
 		let at = catalog.clock().capture(captured).unwrap();
 		telemetry.append(Timed::from(&b"now"[..]).at(at)).unwrap();
 		let late = catalog
@@ -544,7 +545,7 @@ mod test {
 			.binary_stream(timed_track(&mut broadcast, "ahead"), Config::default())
 			.unwrap();
 
-		let anchor = std::time::Instant::now();
+		let anchor = moq_clock::Instant::now();
 		for i in 0..20u64 {
 			let now = moq_net::Timestamp::from_micros(i * 100_000).unwrap();
 			let at = |late: u64| anchor + std::time::Duration::from_millis(i * 100 + late);
@@ -948,7 +949,7 @@ mod test {
 				.unwrap();
 
 			let listing = telemetry.listing.as_mut().unwrap();
-			let anchor = std::time::Instant::now();
+			let anchor = moq_clock::Instant::now();
 			for i in 0..60u64 {
 				let now = moq_net::Timestamp::from_micros(i * 40_000).unwrap();
 				// Every other payload reaches the transport 10ms later than the rest.

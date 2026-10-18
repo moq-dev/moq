@@ -100,14 +100,10 @@ remain with their current quests.
 ## Required
 
 - [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
-- [Raw stream types](/quest/m1/ts-reliability/stream-type.md) - unknown stream types survive export instead of failing the PMT
-- [Whole-PES export](/quest/m1/ts-reliability/pes-export.md) - export writes `pesPacket` tracks byte for byte at their placement
 - [Whole-PES import](/quest/m1/ts-reliability/pes-import.md) - private PES travels whole at its source placement, a missing PTS stays missing, and the `pes` framing is deleted
 - [Section placement](/quest/m1/ts-reliability/section-placement.md) - sections share the PCR placement clock instead of the video PTS
+- [Sequence holes get a time budget](/quest/m1/ts-reliability/hole-budget.md) - a hole gives up on max(wall, pts), so a break marker behind it on a paused track is delivered
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
-- [Data-track breaks](/quest/m1/ts-reliability/data-break.md) - a data track's declared break reads as a break, not as media lost upstream
-- [Audio behind the keyframe](/quest/m1/ts-reliability/audio-lead.md) - an export whose video start group is dropped still begins on a keyframe
-- [T-STD TS export](/quest/m1/tstd/README.md) - the semantic mux schedules the content it admits within its supported buffer models
 
 ## Related
 
@@ -116,4 +112,3 @@ remain with their current quests.
 - [TS health counters](/quest/m2/ts-health-stats.md) - ingress and egress evidence need distinct monitoring points
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
 
-- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - a new mode that does not gate correctness of existing TS modes

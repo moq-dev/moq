@@ -19,6 +19,7 @@ Docker; see [Install](/setup/install).
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Pull a remote HLS playlist. |
 | `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
+| `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
 | `export` | `hls --listen` | Serve the broadcast as HLS over HTTP. |
@@ -62,7 +63,8 @@ each session can publish or subscribe to, including stats; see the relay's
 [statistics configuration](/bin/relay/config#stats).
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
-one; every flag is documented there.
+one; every flag is documented there. Flags renamed between releases are listed in
+[MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md).
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)
@@ -99,6 +101,24 @@ publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
 program aboard, for what demultiplexing cannot carry, such as a scrambled
 service; `export ts --passthrough` writes it back out. FLV covers H.264 + AAC.
+
+`import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
+re-encoding. RTP rides the RTSP connection, so run it on the camera's network
+and the camera needs no inbound port. Credentials go in the URL
+(`rtsp://user:pass@camera/stream`), which other local users can read from the
+process list. Audio nothing in the stack plays, such as G.711, is skipped with
+a warning, and the broadcast goes on video-only. It reconnects with backoff,
+including when the camera sends no media for 10 seconds or no keyframe for 30,
+until a fatal error (refused access, or no stream it can publish), and
+each RTSP session is a new broadcast with its own catalog, since the session's
+RTP time restarts; a camera whose clock jumps mid-session is restarted the same
+way. Embed [`moq-rtsp`](https://docs.rs/moq-rtsp) for your own supervision,
+such as two of a camera's URLs as renditions of one broadcast.
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast camera.hang \
+    import rtsp --connect rtsp://admin:secret@192.168.1.64/stream1
+```
 
 ## Export
 
@@ -143,6 +163,7 @@ error names the `--delay` it needs.
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
 moq ... play --no-video             # audio only, without a window
+moq ... play --no-video --metrics play.ndjson   # log what the speaker played
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
@@ -155,7 +176,11 @@ default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 [algorithm](/concept/audio-jitter) as the browser player. A duration fixes the
 delay and is also how long a stalled group is waited on before it is skipped.
 Each role follows the catalog, switching rendition when the publisher retires
-the one playing.
+the one playing. With `--no-video`, `--metrics <PATH>` writes a JSON line every
+250 ms with the playhead, the delay, and every gap and stall the speaker hit, in
+the schema the
+[audio quality harness](https://github.com/moq-dev/moq/tree/main/test/audio-quality)
+reduces to underruns, skips, and silence.
 
 The broadcast's announcement is its online signal, followed until the window
 closes. Playback starts when the name is announced. A
@@ -291,8 +316,8 @@ moq --connect https://relay.example.com/anon \
 
 Each run of `moq` announces a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), kept across reconnects.
-The RTMP, SRT, and WHIP ingests mint one per connection instead, and
-`import ts --program all` one per program.
+The RTMP, SRT, and WHIP ingests mint one per connection instead, `import
+rtsp` one per RTSP session, and `import ts --program all` one per program.
 
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
@@ -306,13 +331,14 @@ On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
 `uuidgen -7` prints) are one publisher: relays fail over between them
 mid-group, so they must produce identical tracks with aligned groups, which no
 importer guarantees yet. Only `import fmp4`, `flv`, `hls`, and `ts` (one
-program, or `--passthrough`) accept it. The RTMP, SRT, and WHIP ingests and
-`import ts --program all` refuse it because they mint their own, and `import
+program, or `--passthrough`) accept it. The RTMP, SRT, RTSP, and WHIP ingests
+and `import ts --program all` refuse it because they mint their own, and `import
 avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
 timestamps or bytes come from the instance rather than the input. Each that
-accepts it announces once its input has declared its tracks (for `ts`, the
-first PMT), so a standby started ahead of its feed is never asked for tracks it
-cannot serve yet; empty input exits 1 without announcing.
+accepts it announces once its catalog names a servable track, so a standby
+started ahead of its feed is never asked for tracks it cannot serve yet. Input
+that ends before then, such as an empty input or a PMT or header that
+configures no track, exits 1 without announcing.
 
 ## Cluster
 
@@ -329,7 +355,11 @@ moq --cluster-lan --cluster-lan-secret /etc/moq/cluster.key import capture
 MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
-so it needs no `--connect`.
+so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
+`--cluster-connect-api`) share `--connect-bind` with `--connect`, and each binds
+it, while LAN dials take an ephemeral port. So a fixed `--connect-bind` port with
+both `--connect` and a WAN cluster peer is refused at startup: use port 0, or drop
+`--connect` (unset `MOQ_CONNECT` if it supplies the URL).
 
 ## Auth
 

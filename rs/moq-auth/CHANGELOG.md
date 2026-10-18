@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] Publish and subscribe roles in claims, grants, and permissions now carry `Access { path, rate }`. Optional positive bitrate caps survive signing, authorization, and grant serialization; key scopes refuse them. Gateway embedders must enforce caps or refuse capped grants before admitting media.
+
 - Auth requests distinguish `webtransport` from native `quic`. Upgrade auth servers before relays: older servers reject the new value. Rust and JavaScript auth parsers now map future transport names to `unknown`.
 
 ## [0.2.1](https://github.com/moq-dev/moq/compare/moq-auth-v0.2.0...moq-auth-v0.2.1) - 2026-10-03

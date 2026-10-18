@@ -1,7 +1,4 @@
-use std::{
-    collections::{BinaryHeap, hash_map},
-    io,
-};
+use std::{collections::hash_map, io};
 
 use bytes::Bytes;
 use thiserror::Error;
@@ -16,7 +13,12 @@ use crate::{
 
 mod recv;
 use recv::Recv;
+
+#[cfg(test)]
+mod saturated;
+mod schedule;
 pub use recv::{Chunks, Credit, ReadError, ReadableError};
+use schedule::{Next, Schedule};
 
 mod send;
 pub(crate) use send::{ByteSlice, BytesArray};
@@ -24,8 +26,7 @@ use send::{BytesSource, Send, SendState};
 pub use send::{FinishError, WriteError, Written};
 
 mod state;
-#[allow(unreachable_pub)] // fuzzing only
-pub use state::StreamsState;
+pub(crate) use state::StreamsState;
 
 /// Access to streams
 pub struct Streams<'a> {
@@ -33,10 +34,11 @@ pub struct Streams<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // Needed for cfg(fuzzing)
+#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> Streams<'a> {
-    #[cfg(fuzzing)]
-    pub fn new(state: &'a mut StreamsState, conn_state: &'a super::State) -> Self {
+    /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
+    #[cfg(any(test, feature = "fuzz"))]
+    pub(crate) fn new(state: &'a mut StreamsState, conn_state: &'a super::State) -> Self {
         Self { state, conn_state }
     }
 
@@ -50,6 +52,7 @@ impl<'a> Streams<'a> {
 
         if self.state.next[dir as usize] >= self.state.max[dir as usize] {
             self.state.streams_blocked[dir as usize] = true;
+            self.state.open_refused[dir as usize] = true;
             return None;
         }
 
@@ -76,11 +79,6 @@ impl<'a> Streams<'a> {
         }
 
         Some(StreamId::new(!self.state.side, dir, x))
-    }
-
-    #[cfg(fuzzing)]
-    pub fn state(&mut self) -> &mut StreamsState {
-        self.state
     }
 
     /// The number of streams that may have unacknowledged data.
@@ -200,10 +198,11 @@ pub struct SendStream<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // Needed for cfg(fuzzing)
+#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> SendStream<'a> {
-    #[cfg(fuzzing)]
-    pub fn new(
+    /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
+    #[cfg(any(test, feature = "fuzz"))]
+    pub(crate) fn new(
         id: StreamId,
         state: &'a mut StreamsState,
         pending: &'a mut Retransmits,
@@ -232,6 +231,25 @@ impl<'a> SendStream<'a> {
     /// the chunk will be advanced and contain only non-written data after the call.
     pub fn write_chunks(&mut self, data: &mut [Bytes]) -> Result<Written, WriteError> {
         self.write_source(&mut BytesArray::from_chunks(data))
+    }
+
+    /// How many bytes a write would accept right now
+    ///
+    /// Zero when a write would block or fail. Lets a caller size a chunk before taking it from a
+    /// buffer it cannot put bytes back into.
+    pub fn write_limit(&self) -> usize {
+        if self.conn_state.is_closed() {
+            return 0;
+        }
+        let budget = match self.state.send.get(&self.id) {
+            None => return 0,
+            Some(None) => self.state.max_send_data(self.id).into_inner(),
+            Some(Some(stream)) if !stream.is_writable() || stream.stop_reason.is_some() => {
+                return 0;
+            }
+            Some(Some(stream)) => stream.max_data - stream.offset(),
+        };
+        usize::try_from(budget.min(self.state.write_limit())).unwrap_or(usize::MAX)
     }
 
     fn write_source<B: BytesSource>(&mut self, source: &mut B) -> Result<Written, WriteError> {
@@ -286,7 +304,9 @@ impl<'a> SendStream<'a> {
         self.state.buffered_data += written.bytes as u64;
         trace!(stream = %self.id, "wrote {} bytes", written.bytes);
         if !was_pending {
-            self.state.pending.push_pending(self.id, stream.priority);
+            self.state
+                .pending
+                .push(self.id, &mut stream.slot, stream.priority);
         }
         Ok(written)
     }
@@ -317,7 +337,9 @@ impl<'a> SendStream<'a> {
         let was_pending = stream.is_pending();
         stream.finish()?;
         if !was_pending {
-            self.state.pending.push_pending(self.id, stream.priority);
+            self.state
+                .pending
+                .push(self.id, &mut stream.slot, stream.priority);
         }
 
         Ok(())
@@ -378,6 +400,10 @@ impl<'a> SendStream<'a> {
         let buffered = stream.pending.buffered();
         let send = stream.reset(error_code, reliable_size, at);
         self.state.buffered_data -= buffered - stream.pending.buffered();
+        // Only data below the Reliable Size is left to send
+        if !stream.is_pending() {
+            self.state.pending.remove(&mut stream.slot);
+        }
         if let Some(reliable_size) = send {
             self.pending.reset_stream.push((self.id, reliable_size));
         }
@@ -386,11 +412,15 @@ impl<'a> SendStream<'a> {
         Ok(())
     }
 
-    /// Set the priority of a stream
+    /// Set the priority within the stream's send group, or session-wide when ungrouped
+    ///
+    /// Higher values go first; equal values share bytes round robin. A queued stream moves to
+    /// its new priority the next time it is requeued, which is after every frame when
+    /// [`TransportConfig::send_fairness`](crate::TransportConfig::send_fairness) is on.
     ///
     /// # Panics
     /// - when applied to a receive stream
-    pub fn set_priority(&mut self, priority: i32) -> Result<(), ClosedStream> {
+    pub fn set_priority(&mut self, priority: i64) -> Result<(), ClosedStream> {
         let max_send_data = self.state.max_send_data(self.id);
         let stream = self
             .state
@@ -407,7 +437,7 @@ impl<'a> SendStream<'a> {
     ///
     /// # Panics
     /// - when applied to a receive stream
-    pub fn priority(&self) -> Result<i32, ClosedStream> {
+    pub fn priority(&self) -> Result<i64, ClosedStream> {
         let stream = self
             .state
             .send
@@ -415,6 +445,29 @@ impl<'a> SendStream<'a> {
             .ok_or(ClosedStream { _private: () })?;
 
         Ok(stream.as_ref().map(|s| s.priority).unwrap_or_default())
+    }
+
+    /// Move the stream into a send group, or with `None` back to the ungrouped streams
+    ///
+    /// Ungrouped streams are sent before any send group. A queued stream keeps its place.
+    ///
+    /// # Panics
+    /// - when applied to a receive stream
+    /// - when `group` was opened on another connection
+    pub fn set_group(&mut self, group: Option<&SendGroup>) -> Result<(), ClosedStream> {
+        let max_send_data = self.state.max_send_data(self.id);
+        let stream = self
+            .state
+            .send
+            .get_mut(&self.id)
+            .ok_or(ClosedStream { _private: () })?
+            .get_or_insert_with(|| Send::new(max_send_data));
+
+        let group = group.map(|g| g.index(self.state.tag));
+        self.state
+            .pending
+            .join(self.id, &mut stream.slot, group, stream.priority);
+        Ok(())
     }
 }
 
@@ -463,91 +516,150 @@ impl Checkpoint {
     }
 }
 
-/// A queue of streams with pending outgoing data, sorted by priority
-struct PendingStreamsQueue {
-    streams: BinaryHeap<PendingStream>,
-    /// The next stream to write out. This is `Some` when `TransportConfig::send_fairness(false)` and writing a stream is
-    /// interrupted while the stream still has some pending data. See `reinsert_pending()`.
-    next: Option<PendingStream>,
-    /// A monotonically decreasing counter, used to implement round-robin scheduling for streams of the same priority.
-    /// Underflowing is not a practical concern, as it is initialized to u64::MAX and only decremented by 1 in `push_pending`
-    recency: u64,
+/// Scheduling of outgoing streams between send groups
+///
+/// A send group shares bytes with the other groups of its domain: a higher priority group
+/// preempts every lower one, and groups of equal priority get an equal share of bytes no
+/// matter how many streams each has queued. Domains share bytes equally whatever their
+/// groups' priorities. Streams outside any group go before all of it. A group's datagrams,
+/// from [`Datagrams::send`](crate::Datagrams::send), share its bytes in the same order.
+pub struct SendGroups<'a> {
+    pub(super) state: &'a mut StreamsState,
 }
 
-impl PendingStreamsQueue {
-    fn new() -> Self {
-        Self {
-            streams: BinaryHeap::new(),
-            next: None,
-            recency: u64::MAX,
+impl SendGroups<'_> {
+    /// Open a send group at `priority` in `domain`, or in the default domain
+    ///
+    /// # Panics
+    /// - when `domain` was opened on another connection
+    pub fn open(&mut self, priority: i64, domain: Option<&SendDomain>) -> SendGroup {
+        let tag = self.state.tag;
+        let domain = domain.map(|d| d.index(tag));
+        SendGroup {
+            index: self.state.pending.open_group(priority, domain),
+            tag,
         }
     }
 
-    /// Reinsert a stream that was pending and still contains unsent data.
-    fn reinsert_pending(&mut self, id: StreamId, priority: i32) {
-        assert!(self.next.is_none());
-
-        self.next = Some(PendingStream {
-            priority,
-            recency: self.recency, // the value here doesn't really matter
-            id,
-        });
+    /// Release a send group; its streams keep their place until they finish
+    ///
+    /// # Panics
+    /// - when `group` was opened on another connection
+    pub fn close(&mut self, group: SendGroup) {
+        let index = group.index(self.state.tag);
+        self.state.pending.close_group(index);
     }
 
-    /// Push a pending stream ID with the given priority, queued after any already-queued streams for the priority
-    fn push_pending(&mut self, id: StreamId, priority: i32) {
-        // Note that in the case where fairness is disabled, if we have a reinserted stream we don't
-        // bump it even if priority > next.priority. In order to minimize fragmentation we
-        // always try to complete a stream once part of it has been written.
-
-        // As the recency counter is monotonically decreasing, we know that using its value to sort this stream will queue it
-        // after all other queued streams of the same priority.
-        // This is enough to implement round-robin scheduling for streams that are still pending even after being handled,
-        // as in that case they are removed from the `BinaryHeap`, handled, and then immediately reinserted.
-        self.recency -= 1;
-        self.streams.push(PendingStream {
-            priority,
-            recency: self.recency,
-            id,
-        });
+    /// Change a group's priority, moving any data it has queued along with it
+    ///
+    /// # Panics
+    /// - when `group` was opened on another connection
+    pub fn set_priority(&mut self, group: &SendGroup, priority: i64) {
+        let index = group.index(self.state.tag);
+        self.state.pending.set_group_priority(index, priority);
     }
 
-    fn pop(&mut self) -> Option<PendingStream> {
-        self.next.take().or_else(|| self.streams.pop())
+    /// The group's priority
+    ///
+    /// # Panics
+    /// - when `group` was opened on another connection
+    pub fn priority(&self, group: &SendGroup) -> i64 {
+        self.state
+            .pending
+            .group_priority(group.index(self.state.tag))
     }
 
-    fn clear(&mut self) {
-        self.next = None;
-        self.streams.clear();
+    /// Open a domain, which gets an equal share of bytes with every other domain
+    pub fn open_domain(&mut self) -> SendDomain {
+        SendDomain {
+            index: self.state.pending.open_domain(),
+            tag: self.state.tag,
+        }
     }
 
-    fn iter(&self) -> impl Iterator<Item = &PendingStream> {
-        self.next.iter().chain(self.streams.iter())
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.streams.len() + self.next.is_some() as usize
+    /// Release a domain; its groups keep their share until they are released
+    ///
+    /// # Panics
+    /// - when `domain` was opened on another connection
+    pub fn close_domain(&mut self, domain: SendDomain) {
+        let index = domain.index(self.state.tag);
+        self.state.pending.close_domain(index);
     }
 }
 
-/// The [`StreamId`] of a stream with pending data queued, ordered by its priority and recency
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct PendingStream {
-    /// The priority of the stream
-    // Note that this field should be kept above the `recency` field, in order for the `Ord` derive to be correct
-    // (See https://doc.rust-lang.org/stable/std/cmp/trait.Ord.html#derivable)
-    priority: i32,
-    /// A tie-breaker for streams of the same priority, used to improve fairness by implementing round-robin scheduling:
-    /// Larger values are prioritized, so it is initialised to `u64::MAX`, and when a stream writes data, we know
-    /// that it currently has the highest recency value, so it is deprioritized by setting its recency to 1 less than the
-    /// previous lowest recency value, such that all other streams of this priority will get processed once before we get back
-    /// round to this one
-    recency: u64,
-    /// The ID of the stream
-    // The way this type is used ensures that every instance has a unique `recency` value, so this field should be kept below
-    // the `priority` and `recency` fields, so that it does not interfere with the behaviour of the `Ord` derive
-    id: StreamId,
+impl StreamsState {
+    /// Queue a datagram in `group` at `order`, within `budget` bytes of queued datagrams.
+    ///
+    /// Returns whether it stayed queued rather than being evicted itself.
+    ///
+    /// # Panics
+    /// - when `group` was opened on another connection
+    pub(crate) fn queue_datagram(
+        &mut self,
+        datagram: frame::Datagram,
+        group: Option<&SendGroup>,
+        order: i64,
+        budget: usize,
+    ) -> bool {
+        let group = group.map(|g| g.index(self.tag));
+        let frame = datagram.size(true);
+        self.pending
+            .push_datagram(group, order, datagram, frame, budget)
+    }
+
+    /// Drop queued datagrams with a payload over `max_payload` bytes, returning whether any was.
+    pub(crate) fn drop_oversized_datagrams(&mut self, max_payload: usize) -> bool {
+        self.pending.retain_datagrams(|datagram| {
+            let keep = datagram.data.len() <= max_payload;
+            if !keep {
+                trace!(
+                    "dropping {} byte datagram violating {} byte limit",
+                    datagram.data.len(),
+                    max_payload
+                );
+            }
+            keep
+        })
+    }
+
+    /// Frame bytes queued datagrams hold against the send buffer.
+    pub(crate) fn datagram_bytes(&self) -> usize {
+        self.pending.datagram_bytes()
+    }
+}
+
+/// A send group, from [`SendGroups::open`]
+///
+/// Release it with [`SendGroups::close`] on the connection that opened it.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "a send group lives until it is closed"]
+pub struct SendGroup {
+    index: usize,
+    tag: ConnectionTag,
+}
+
+impl SendGroup {
+    fn index(&self, tag: ConnectionTag) -> usize {
+        assert_eq!(self.tag, tag, "send group used on another connection");
+        self.index
+    }
+}
+
+/// A domain of send groups, from [`SendGroups::open_domain`]
+///
+/// Release it with [`SendGroups::close_domain`] on the connection that opened it.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "a domain lives until it is closed"]
+pub struct SendDomain {
+    index: usize,
+    tag: ConnectionTag,
+}
+
+impl SendDomain {
+    fn index(&self, tag: ConnectionTag) -> usize {
+        assert_eq!(self.tag, tag, "send domain used on another connection");
+        self.index
+    }
 }
 
 /// Application events about streams

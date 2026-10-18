@@ -147,7 +147,7 @@ struct FlvTrack {
 	source: ExportSource,
 	pending: Option<crate::jitter::Arrival<Frame>>,
 	/// When the source was last empty, bounding the next frame's arrival.
-	empty: web_async::time::Instant,
+	empty: moq_clock::Instant,
 	finished: bool,
 	/// The FLV payload shape (legacy CodecID vs enhanced FourCC) to mux this
 	/// track as, fixed from its catalog codec when it's bound.
@@ -303,7 +303,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	#[cfg(test)]
-	pub(super) fn next_deadline(&self) -> Option<web_async::time::Instant> {
+	pub(super) fn next_deadline(&self) -> Option<moq_clock::Instant> {
 		self.jitter.next_deadline()
 	}
 
@@ -349,7 +349,7 @@ impl<S: Stream> Export<S> {
 								break;
 							}
 							Poll::Pending => {
-								track.empty = web_async::time::Instant::now();
+								track.empty = moq_clock::now();
 								break;
 							}
 						};
@@ -358,7 +358,7 @@ impl<S: Stream> Export<S> {
 						}
 						crate::jitter::Arrival {
 							arrived: track.empty,
-							read: web_async::time::Instant::now(),
+							read: moq_clock::now(),
 							decode: frame.timestamp,
 							restart: track.source.markers(),
 							skip: track.source.skips(),
@@ -482,7 +482,7 @@ impl<S: Stream> Export<S> {
 				track_id,
 				source,
 				pending: None,
-				empty: web_async::time::Instant::now(),
+				empty: moq_clock::now(),
 				finished: false,
 				flavor,
 				fallback_description,
@@ -528,7 +528,7 @@ impl<S: Stream> Export<S> {
 				track_id,
 				source,
 				pending: None,
-				empty: web_async::time::Instant::now(),
+				empty: moq_clock::now(),
 				finished: false,
 				flavor,
 				fallback_description: None,

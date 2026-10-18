@@ -39,7 +39,7 @@ pub trait StreamCodes {
 			return self.decode_stream_code(code).into();
 		}
 
-		Error::Transport(err.to_string())
+		Error::from_transport(err)
 	}
 }
 
@@ -172,6 +172,18 @@ mod tests {
 				"{version:?} cancels with a different code than the Writer's Drop sends"
 			);
 		}
+	}
+
+	/// `Closed` also describes virtual streams, so it cannot claim that the transport's
+	/// connection closed. Native transport adapters supply that metadata themselves.
+	#[test]
+	fn a_virtual_stream_close_does_not_claim_the_connection_closed() {
+		let version = ietf::Version::Draft16;
+		assert!(matches!(version.transport_error(Error::Closed), Error::Transport(_)));
+		assert!(matches!(
+			version.transport_error(Error::IdleTimeout),
+			Error::IdleTimeout
+		));
 	}
 
 	/// A session close is not stream-scoped, so it keeps the session registry whichever
