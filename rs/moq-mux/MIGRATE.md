@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON and binary consumers return `Timed<T>` (#5677)
+
+The `json` and `binary` consumers' `next` / `poll_next` return `moq_net::Timed<T>`; read `.value` and the optional `.at`.
+On a snapshot track `next` yields every state; call `latest` / `poll_latest` for the newest. `latest` on a stream track fails with `UnsupportedMode`.
+
 ### `fmp4::Wire::new` refuses a track that isn't audio or video (#5815)
 
 `container::fmp4::Wire::new` returns `Result<Wire>`, as `Wire::from_init` already did, and refuses any other handler instead of treating it as data.

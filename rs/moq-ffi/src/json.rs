@@ -172,6 +172,8 @@ pub struct MoqJsonValue {
 	/// The JSON document.
 	pub value: String,
 	/// The frame's timestamp on the broadcast clock in microseconds, or null when untimed.
+	/// Rounded down to a whole microsecond, so a tick on a track like 90 kHz may not survive a
+	/// read and republish exactly.
 	pub timestamp_us: Option<u64>,
 }
 

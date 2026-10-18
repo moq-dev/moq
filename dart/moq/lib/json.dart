@@ -38,5 +38,7 @@ typedef StreamConsumer = MoqJsonStreamConsumer;
 typedef StreamConfig = MoqJsonStreamConfig;
 
 /// A JSON string read from a track, with the timestamp of the frame that
-/// carried it in microseconds, or null when untimed.
+/// carried it in microseconds, or null when untimed. Rounded down to a whole
+/// microsecond, so a tick on a track like 90 kHz may not survive a read and
+/// republish exactly.
 typedef Value = MoqJsonValue;

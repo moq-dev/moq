@@ -170,7 +170,7 @@ impl Prefix {
 	/// [`FrameTooLarge`](moq_net::Error::FrameTooLarge) once the frame outgrows
 	/// the cache.
 	pub async fn next(&mut self) -> Result<Option<PrefixFrame>> {
-		Ok(self.inner.next().await?)
+		Ok(self.inner.latest().await?.map(|value| value.value))
 	}
 }
 

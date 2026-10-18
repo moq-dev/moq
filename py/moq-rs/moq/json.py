@@ -34,7 +34,9 @@ __all__ = ["SnapshotConsumer", "SnapshotProducer", "StreamConsumer", "StreamProd
 class Timed:
     """A parsed JSON value and the timestamp of the frame that carried it.
 
-    ``timestamp`` is on the broadcast clock, and ``None`` on an untimed track.
+    ``timestamp`` is on the broadcast clock, and ``None`` on an untimed track. It is
+    rounded down to a whole microsecond, so a tick on a track like 90 kHz may not
+    survive a read and republish exactly.
     """
 
     value: Any

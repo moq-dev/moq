@@ -458,7 +458,8 @@ pub struct moq_json_value {
 	pub json_len: usize,
 
 	/// The timestamp of the frame that carried the value in microseconds, or 0 when
-	/// `timestamp_present` is false.
+	/// `timestamp_present` is false. Rounded down to a whole microsecond, so a tick on a track
+	/// like 90 kHz may not survive a read and republish exactly.
 	pub timestamp_us: u64,
 
 	/// Whether the frame carries a timestamp. A value read from an untimed track does not.

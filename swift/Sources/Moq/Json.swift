@@ -17,6 +17,8 @@ extension Json {
         /// The decoded value.
         public let value: Value
         /// The frame's timestamp on the broadcast clock in microseconds, or `nil` when untimed.
+        /// Rounded down to a whole microsecond, so a tick on a track like 90 kHz may not survive
+        /// a read and republish exactly.
         public let timestampUs: UInt64?
 
         /// Pair `value` with its frame timestamp.

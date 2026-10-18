@@ -156,7 +156,9 @@ func (p *StreamProducer) Finish() error {
 type Timed struct {
 	// Value is the JSON document.
 	Value stdjson.RawMessage
-	// Timestamp is on the broadcast clock, or nil on an untimed track.
+	// Timestamp is on the broadcast clock, or nil on an untimed track. It is rounded down
+	// to a whole microsecond, so a tick on a track like 90 kHz may not survive a read and
+	// republish exactly.
 	Timestamp *time.Duration
 }
 

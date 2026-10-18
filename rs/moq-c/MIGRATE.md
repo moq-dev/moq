@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON values carry their timestamp (#5677)
+
+`moq_json_value` gains `timestamp_us` and `timestamp_present`, which changes its ABI.
+A snapshot consumer's callback now fires for each state in order instead of only the newest.
+Timestamps are rounded down to a whole microsecond.
+
 ### Subscriptions carry group ranges (#5732)
 
 `moq_subscription`'s `group_start`, `group_end`, and their `_present` flags are replaced by `ranges` and `ranges_len`, an array of `moq_range` whose ends are `moq_anchor`s, and `order` (`moq_order`), which changes its ABI.
