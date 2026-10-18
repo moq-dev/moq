@@ -2379,6 +2379,28 @@ mod test {
 		assert_eq!(read(&mut fetched), None);
 	}
 
+	/// A fetched frame read to its end no longer holds the logical track, so a caller
+	/// keeping the handle does not stop the track from parking.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_read_frame_releases_the_track() {
+		let routes = Producer::new();
+		let a = copy();
+		routes.serve(a.consume());
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+
+		let logical = logical(&routes);
+		let demand = logical.demand();
+		let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
+		assert!(demand.is_used(), "an open fetched group holds the track");
+		let mut frame = fetched.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		drop(fetched);
+		assert!(demand.is_used(), "an unread frame holds the track");
+		assert_eq!(frame.read_all().now_or_never().unwrap().unwrap(), b"a".as_ref());
+		assert!(!demand.is_used(), "a read frame does not");
+	}
+
 	/// A rerouted fetch keeps its own age budget: the new route is asked with it, and a
 	/// read waiting on that route gives up once the group falls past it there.
 	#[test]
