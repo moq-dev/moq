@@ -1256,7 +1256,9 @@ where
 						//
 						// The advertisement itself stays live on the wire, epoch and all.
 						tracing::debug!(%path, "dropping reflected namespace");
-						let held = live.entry(path.clone()).or_insert(Advertisement { id: None, epoch: None });
+						let held = live
+							.entry(path.clone())
+							.or_insert(Advertisement { id: None, epoch: None });
 						held.epoch = params.epoch;
 						if let Some(id) = held.id.take() {
 							let _ = self.stop_announce(path, id, false);
@@ -1266,7 +1268,9 @@ where
 					let advert = advert.with_epoch(params.epoch.clone());
 
 					tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, epoch = ?params.epoch, "namespace");
-					let held = live.entry(path.clone()).or_insert(Advertisement { id: None, epoch: None });
+					let held = live
+						.entry(path.clone())
+						.or_insert(Advertisement { id: None, epoch: None });
 					held.epoch = params.epoch;
 					match held.id {
 						// A repeat replaces the advertisement atomically; nothing is torn
