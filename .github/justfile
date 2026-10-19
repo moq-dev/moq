@@ -34,6 +34,7 @@ test:
     python3 sh/rs/model-markers.test.py
     python3 sh/gh/nightly.test.py
     python3 sh/gh/bench-report.test.py
+    python3 sh/gh/ts-paths.test.py
     sh/go/publish-wrapper.test.sh
     bash .claude/hooks/direnv.test.sh
     python3 sh/rs/uring.test.py
