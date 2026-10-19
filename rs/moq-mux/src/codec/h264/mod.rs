@@ -168,6 +168,55 @@ pub(crate) fn sps_color(nal: &[u8]) -> Option<hang::catalog::Color> {
 	sps_vui(nal)?.color
 }
 
+/// How a buffering period SEI lays out the delays of the NAL HRD an SPS NAL unit declares.
+pub(crate) fn sps_buffering(nal: &[u8]) -> Option<Buffering> {
+	sps_vui(nal)?.buffering
+}
+
+/// How a buffering period SEI lays out the delays of an SPS's NAL HRD (ITU-T H.264 D.1.2, E.1.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Buffering {
+	/// `cpb_cnt_minus1 + 1`: the schedules it gives a delay and an offset for.
+	schedules: u32,
+	/// `initial_cpb_removal_delay_length_minus1 + 1`: the bits each takes.
+	bits: u32,
+}
+
+/// The `initial_cpb_removal_delay`, in 90 kHz ticks, that a buffering period SEI in an access
+/// unit of `length_size`-prefixed NAL units gives the NAL HRD's last schedule, the one
+/// [`sps_hrd`] reads: how long the HRD holds the unit's first bit before decoding it.
+pub(crate) fn initial_cpb_removal_delay(au: &[u8], length_size: usize, buffering: Buffering) -> Option<u32> {
+	use h264_parser::bitreader::BitReader;
+	use h264_parser::eg::read_ue;
+
+	for nal in crate::codec::annexb::length_prefixed_nals(au, length_size)
+		.ok()?
+		.map_while(std::result::Result::ok)
+	{
+		match nal.first().map(|header| header & 0x1f) {
+			Some(6) => {}
+			// SEI precedes the first slice of its access unit (7.4.1.2.3).
+			Some(1..=5) => return None,
+			_ => continue,
+		}
+		let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
+		for message in h264_parser::sei::SeiMessage::parse(&rbsp).ok()? {
+			let h264_parser::sei::SeiPayload::Unknown(0, payload) = message.payload else {
+				continue;
+			};
+			let mut r = BitReader::new(&payload);
+			read_ue(&mut r).ok()?; // seq_parameter_set_id
+			let mut delay = None;
+			for _ in 0..buffering.schedules {
+				delay = Some(r.read_bits(buffering.bits).ok()?);
+				r.skip_bits(buffering.bits).ok()?; // initial_cpb_removal_delay_offset
+			}
+			return delay;
+		}
+	}
+	None
+}
+
 /// What an SPS VUI declares about picture timing, sample shape, and colour.
 struct Vui {
 	/// The sample aspect, when the VUI specifies one.
@@ -182,6 +231,8 @@ struct Vui {
 	depth: Option<u32>,
 	/// The NAL HRD, when present.
 	hrd: Option<crate::codec::video::Hrd>,
+	/// How a buffering period SEI lays out the NAL HRD's delays.
+	buffering: Option<Buffering>,
 }
 
 impl Vui {
@@ -328,9 +379,12 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 		}
 	}
 	let nal_hrd = r.read_flag()?;
-	let hrd = match nal_hrd {
-		true => Some(read_hrd(&mut r)?),
-		false => None,
+	let (hrd, buffering) = match nal_hrd {
+		true => {
+			let (hrd, buffering) = read_hrd(&mut r)?;
+			(Some(hrd), Some(buffering))
+		}
+		false => (None, None),
 	};
 	let vcl_hrd = r.read_flag()?;
 	if vcl_hrd {
@@ -348,6 +402,7 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 			period,
 			depth: None,
 			hrd,
+			buffering,
 		}));
 	}
 	r.skip_bits(1)?; // motion_vectors_over_pic_boundaries_flag
@@ -362,11 +417,13 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 		period,
 		depth: Some(depth),
 		hrd,
+		buffering,
 	}))
 }
 
-/// Read `hrd_parameters()` (ITU-T H.264 E.1.2) down to its last schedule (E.2.2).
-fn read_hrd(r: &mut h264_parser::bitreader::BitReader) -> h264_parser::Result<crate::codec::video::Hrd> {
+/// Read `hrd_parameters()` (ITU-T H.264 E.1.2) down to its last schedule (E.2.2), and how a
+/// buffering period SEI lays out its delays.
+fn read_hrd(r: &mut h264_parser::bitreader::BitReader) -> h264_parser::Result<(crate::codec::video::Hrd, Buffering)> {
 	use h264_parser::eg::read_ue;
 
 	let cpb_cnt_minus1 = read_ue(r)?;
@@ -388,8 +445,15 @@ fn read_hrd(r: &mut h264_parser::bitreader::BitReader) -> h264_parser::Result<cr
 			cpb_size: cpb_size << (4 + cpb_size_scale),
 		};
 	}
-	r.skip_bits(20)?; // four delay/offset lengths
-	Ok(hrd)
+	let bits = r.read_bits(5)? + 1; // initial_cpb_removal_delay_length_minus1
+	r.skip_bits(15)?; // cpb_removal_delay, dpb_output_delay and time_offset lengths
+	Ok((
+		hrd,
+		Buffering {
+			schedules: cpb_cnt_minus1 + 1,
+			bits,
+		},
+	))
 }
 
 /// Parsed AVCDecoderConfigurationRecord (ISO/IEC 14496-15 §5.3.3.1.2).
@@ -815,6 +879,42 @@ pub(crate) mod fixtures {
 	];
 	/// x264's `cll=1000,400` SEI.
 	pub(crate) const SEI_CONTENT_LIGHT: &[u8] = &[0x06, 0x90, 0x04, 0x03, 0xe8, 0x01, 0x90, 0x80];
+	/// Baseline `bframes=0:force-cfr=1:nal-hrd=cbr:bitrate=800:vbv-maxrate=800:vbv-bufsize=320` at
+	/// 320x240: an 800 kb/s CBR NAL HRD with 0.4 s of buffer delay.
+	pub(crate) const SPS_HRD_SHORT: &[u8] = &[
+		0x67, 0x42, 0xc0, 0x14, 0xd9, 0x01, 0x41, 0xfb, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00, 0x10, 0x00, 0x00, 0x03,
+		0x03, 0x2e, 0x4a, 0x00, 0x30, 0xd4, 0x01, 0x38, 0xe2, 0x83, 0x00, 0x78, 0xa1, 0x52, 0x40,
+	];
+	/// The buffering period SEI x264 opens [`SPS_HRD_SHORT`]'s first picture with: 32,399 ticks
+	/// of `initial_cpb_removal_delay`, and 3,601 of offset.
+	pub(crate) const SEI_BUFFERING_SHORT: &[u8] = &[0x06, 0x00, 0x05, 0x8f, 0xd1, 0xe0, 0x70, 0x8c, 0x80];
+
+	/// A buffering period SEI NAL unit giving each schedule a `bits`-wide delay from `delays`,
+	/// and an offset of one.
+	pub(crate) fn buffering_period(delays: &[u32], bits: u32) -> Vec<u8> {
+		let mut fields = vec![(1, 1)]; // seq_parameter_set_id 0
+		for &delay in delays {
+			fields.extend([(delay, bits), (1, bits)]);
+		}
+		fields.push((1, 1)); // bit_equal_to_one, then zeros to the byte
+		let (mut payload, mut acc, mut held) = (Vec::new(), 0u64, 0);
+		for (value, width) in fields {
+			acc = acc << width | u64::from(value);
+			held += width;
+			while held >= 8 {
+				held -= 8;
+				payload.push((acc >> held) as u8);
+			}
+			acc &= (1 << held) - 1;
+		}
+		if held > 0 {
+			payload.push((acc << (8 - held)) as u8);
+		}
+		let mut nal = vec![0x06, 0x00, payload.len() as u8];
+		nal.extend(payload);
+		nal.push(0x80);
+		nal
+	}
 }
 
 #[cfg(test)]
@@ -918,6 +1018,49 @@ mod tests {
 			})
 		);
 		assert_eq!(sps_hrd(fixtures::SPS_IPB), None);
+	}
+
+	fn length_prefixed(nals: &[&[u8]]) -> Vec<u8> {
+		nals.iter()
+			.flat_map(|nal| (nal.len() as u32).to_be_bytes().into_iter().chain(nal.iter().copied()))
+			.collect()
+	}
+
+	#[test]
+	fn initial_cpb_removal_delay_reads_the_last_schedule() {
+		use crate::codec::video::Hrd;
+		use fixtures::buffering_period;
+
+		assert_eq!(
+			sps_buffering(fixtures::SPS_HRD),
+			Some(Buffering { schedules: 1, bits: 19 })
+		);
+		assert_eq!(sps_buffering(fixtures::SPS_IPB), None);
+		let short = sps_buffering(fixtures::SPS_HRD_SHORT).expect("a NAL HRD");
+		assert_eq!(short, Buffering { schedules: 1, bits: 18 });
+		assert_eq!(
+			sps_hrd(fixtures::SPS_HRD_SHORT),
+			Some(Hrd {
+				bit_rate: 800_000,
+				cpb_size: 320_000
+			})
+		);
+		let aud: &[u8] = &[0x09, 0xf0];
+		let slice: &[u8] = &[0x65, 0x88, 0x84];
+		let au = length_prefixed(&[aud, fixtures::SEI_BUFFERING_SHORT, slice]);
+		assert_eq!(initial_cpb_removal_delay(&au, 4, short), Some(32_399));
+		let two = Buffering { schedules: 2, bits: 18 };
+		let au = length_prefixed(&[&buffering_period(&[90_000, 36_000], 18), slice]);
+		assert_eq!(initial_cpb_removal_delay(&au, 4, two), Some(36_000));
+		// No buffering period before the first slice, none at all, and one cut short.
+		let au = length_prefixed(&[slice, fixtures::SEI_BUFFERING_SHORT]);
+		assert_eq!(initial_cpb_removal_delay(&au, 4, short), None);
+		assert_eq!(
+			initial_cpb_removal_delay(&length_prefixed(&[aud, slice]), 4, short),
+			None
+		);
+		let au = length_prefixed(&[fixtures::SEI_BUFFERING_SHORT]);
+		assert_eq!(initial_cpb_removal_delay(&au[..au.len() - 3], 4, short), None);
 	}
 
 	fn annexb_frame(nals: &[&[u8]]) -> Bytes {

@@ -12,8 +12,10 @@
 //! the first slot the group's first unit may go out in. Where it lands depends on its group's
 //! earlier units and nothing else, so a leg that lacks a group, or joined after it, lays the
 //! next one where every other leg does. A group still unfinished in its lane when the next
-//! one is due pushes the next one back, which only a leg holding both does: a lane needs the
-//! headroom to carry each group within its own duration.
+//! one is due pushes the next one back, which only a leg holding both does. A lane needs the
+//! headroom to carry each group within its own duration, unless the next group's first picture
+//! opens an H.264 buffering period: the export then releases it late enough for its HRD to rule
+//! that out.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -211,6 +213,18 @@ impl Layout {
 			}
 		}
 		owners
+	}
+
+	/// `release` moved later by as long as lane `lane` takes to carry `bits` of payload, unless a
+	/// unit of `count` packets laid from there would arrive after `by`.
+	pub fn later(&self, lane: usize, release: u128, bits: u64, by: u128, count: usize) -> u128 {
+		let later = release + u128::from(bits) * 1_000_000_000 / u128::from(self.payload_rate(lane).max(1));
+		let positions = self.take(lane, self.at(later), count.max(1));
+		let last = *positions.last().expect("at least one position");
+		match self.time(last + 1) > by {
+			true => release,
+			false => later,
+		}
 	}
 
 	/// The next `count` positions of lane `lane` at or after the timeline's packet `from`.
@@ -728,6 +742,17 @@ mod test {
 		let placed = lane.plan(&layout, (1, false), start(10), u128::MAX, 2).unwrap();
 		assert_eq!(placed.counter, 0);
 		assert!(placed.positions[0] >= layout.first(10));
+	}
+
+	#[test]
+	fn a_release_moves_later_only_while_its_unit_meets_its_deadline() {
+		let layout = layout();
+		// Half a second of lane 0's payload.
+		let bits = layout.payload_rate(0) / 2;
+		let later = layout.later(0, start(100), bits, start(200), 2);
+		assert!((start(119)..=start(120)).contains(&later), "{later}");
+		assert_eq!(layout.later(0, start(100), bits, start(110), 2), start(100));
+		assert_eq!(layout.later(0, start(100), 0, start(110), 2), start(100));
 	}
 
 	#[test]

@@ -82,6 +82,11 @@ struct Live {
 	sync: bool,
 	/// Video is a B-pyramid: see [`Self::reorder`].
 	reorder: bool,
+	/// The `initial_cpb_removal_delay` each group's first picture opens a buffering period with:
+	/// see [`Self::buffering`].
+	periods: Option<u32>,
+	/// A video tick whose frame is four times the size of a keyframe.
+	burst: Option<u64>,
 	/// The media time of the first frame, in µs.
 	origin: u64,
 	/// How much later than its video the source sends audio of the same media time, in µs;
@@ -151,6 +156,8 @@ impl Live {
 			rate: MUX_RATE,
 			sync: false,
 			reorder: false,
+			periods: None,
+			burst: None,
 			origin: 0,
 			audio_lag,
 			start: moq_clock::now(),
@@ -197,6 +204,20 @@ impl Live {
 			config.description = Some(description.clone());
 		}
 		self.reorder = true;
+	}
+
+	/// Declare an 800 kb/s CBR NAL HRD with 0.4 s of buffer delay, and open each group with a
+	/// buffering period SEI giving its first picture `delay` ticks of `initial_cpb_removal_delay`.
+	fn buffering(&mut self, delay: u32) {
+		use crate::codec::h264::fixtures::SPS_HRD_SHORT;
+
+		let description =
+			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_HRD_SHORT)], &[Bytes::from_static(PPS)]).unwrap();
+		let mut catalog = self.catalog.modify().unwrap();
+		for config in catalog.video.renditions.values_mut() {
+			config.description = Some(description.clone());
+		}
+		self.periods = Some(delay);
 	}
 
 	/// Abort the open video group, as a relay does to a subscriber left too far behind: the
@@ -270,10 +291,15 @@ impl Live {
 				if stall(tick) {
 					self.stalling = true;
 				} else if !self.stalling {
-					let slice = if keyframe {
-						vec![0x65u8; 3_000]
-					} else {
-						vec![0x41u8; 400]
+					let slice = match (keyframe, self.burst == Some(tick)) {
+						(true, _) => vec![0x65u8; 3_000],
+						(false, true) => vec![0x41u8; 12_000],
+						(false, false) => vec![0x41u8; 400],
+					};
+					// The delay field is as wide as `SPS_HRD_SHORT` declares.
+					let sei = match self.periods {
+						Some(delay) if keyframe => crate::codec::h264::fixtures::buffering_period(&[delay], 18),
+						_ => Vec::new(),
 					};
 					let presented = match self.reorder {
 						true => (tick - tick % GOP + PYRAMID[(tick % GOP) as usize] + PYRAMID_DELAY) * VIDEO_US,
@@ -286,7 +312,10 @@ impl Live {
 							&[Frame {
 								timestamp: Timestamp::from_micros(self.origin + presented).unwrap(),
 								duration: None,
-								payload: length_prefixed(&[&slice]),
+								payload: match sei.is_empty() {
+									true => length_prefixed(&[&slice]),
+									false => length_prefixed(&[&sei, &slice]),
+								},
 								keyframe,
 							}],
 						)
@@ -1114,6 +1143,42 @@ async fn complementary_losses(reorder: bool, stop: bool) {
 				"lag {lag}: the merged legs differ from a clean leg at {at} µs"
 			);
 		}
+	}
+}
+
+/// A group ending in a burst still fills its lane at the next group's release, so a leg holding
+/// it would lay the next group behind where a leg that lost it does. When the next group's
+/// first picture opens a buffering period, it goes out late enough for neither leg's lane to be
+/// busy, and both lay it alike.
+#[tokio::test(start_paused = true)]
+async fn a_leg_that_lost_a_burst_lays_the_next_buffering_period_alike() {
+	let lost = |tick: u64| (5 * GOP + 8..6 * GOP).contains(&tick);
+	for lag in LAGS {
+		let mut paths = Vec::new();
+		for _ in 0..2 {
+			let mut live = Live::new(1.0, lag).await;
+			live.sync = true;
+			// A lane the HRD's Rx narrows cannot carry the first keyframe by a decode time of zero.
+			live.origin = 10_000_000;
+			// Half the HRD's buffer delay: a group's first picture waits 0.2 s before it decodes.
+			live.buffering(18_000);
+			live.burst = Some(6 * GOP - 1);
+			paths.push(live);
+		}
+		let [mut whole, mut lossy] = <[Live; 2]>::try_from(paths).ok().unwrap();
+		assert!(whole.start == lossy.start);
+		let mut a = whole.join(Duration::ZERO).await;
+		let mut b = lossy.join(Duration::from_millis(100)).await;
+		for tick in 1..=10 * GOP {
+			whole.run(tick, &mut [&mut a], |_| false).await;
+			lossy.run(tick, &mut [&mut b], lost).await;
+		}
+		whole.finish(&mut [&mut a]).await;
+		lossy.finish(&mut [&mut b]).await;
+		assert!(
+			assert_same_synced(&a, &b, 2 * GOP * VIDEO_US) > 0,
+			"lag {lag}: the lossy leg lost nothing"
+		);
 	}
 }
 

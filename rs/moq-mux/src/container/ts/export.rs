@@ -708,6 +708,10 @@ impl Track {
 		let by = decode.as_nanos().saturating_sub(self.drain().as_nanos());
 		let release = lane::release(by, self.ahead_slots(delay));
 		let video = matches!(self.kind, Kind::Video(_));
+		let room = match video && group.1 {
+			true => self.timing.room(frame),
+			false => None,
+		};
 		let Some(sync) = &mut self.sync else {
 			return Ok(None);
 		};
@@ -742,6 +746,16 @@ impl Track {
 			}
 		}
 		let count = packets.len() / TsPacket::SIZE;
+		// A unit is released as early as a full CPB would need it. A group's first picture whose
+		// buffering period says how much room its encoder's HRD has left when it decodes it goes
+		// out as much later as its lane takes to carry that room. The HRD received every earlier
+		// picture before that picture's first bit (ITU-T H.264 C.3), so a lane faster than the
+		// HRD's rate has by then carried the group before on any leg that holds it. It never goes
+		// out so late that it would miss its own deadline.
+		let release = match room {
+			Some(bits) => sync.layout.later(sync.lane.index(), release, bits, by, count),
+			None => release,
+		};
 		let overruns = sync.lane.overruns();
 		let plan = sync.lane.plan(&sync.layout, group, release, by, count);
 		if sync.lane.overruns() > overruns {
@@ -926,6 +940,8 @@ struct Timing {
 	level: Option<Level>,
 	/// The HRD its SPS declares.
 	hrd: Option<Hrd>,
+	/// The NAL unit length and buffering period layout of an H.264 rendition with a NAL HRD.
+	buffering: Option<(usize, crate::codec::h264::Buffering)>,
 }
 
 impl Timing {
@@ -945,6 +961,7 @@ impl Timing {
 		self.description = description.cloned();
 		self.declared = description.and_then(|d| declared_reorder(stream_type, d));
 		self.hrd = description.and_then(|d| declared_hrd(stream_type, d));
+		self.buffering = description.and_then(|d| declared_buffering(stream_type, d));
 		tracing::debug!(track = %name, reorder = ?self.reorder(), "video reordering declared");
 		if synced && self.declared.is_none() {
 			tracing::warn!(track = %name, "no reorder depth declared: if it reorders, --sync legs may give it different DTS");
@@ -980,6 +997,18 @@ impl Timing {
 	/// source may send a picture, so the export has to as well.
 	fn buffer_delay(&self) -> Option<Duration> {
 		self.hrd.map(|hrd| fill(hrd.cpb_size, hrd.bit_rate))
+	}
+
+	/// The room, in bits, the HRD's CPB has left when it decodes `frame`, the first picture of a
+	/// buffering period: its size less what reaches it at its BitRate over the
+	/// `initial_cpb_removal_delay` the period's SEI gives.
+	fn room(&self, frame: &Frame) -> Option<u64> {
+		let ((length_size, buffering), hrd) = (self.buffering?, self.hrd?);
+		let delay = crate::codec::h264::initial_cpb_removal_delay(&frame.payload, length_size, buffering)?;
+		Some(
+			hrd.cpb_size
+				.saturating_sub(hrd.bit_rate.saturating_mul(u64::from(delay)) / 90_000),
+		)
 	}
 
 	/// The least reorder delay and lookahead the SPS declares, in ticks, so two exporters agree
@@ -4327,6 +4356,16 @@ fn declared_hrd(stream_type: StreamType, description: &[u8]) -> Option<Hrd> {
 		}
 		_ => None,
 	}
+}
+
+/// The NAL unit length and buffering period layout of an H.264 rendition whose first SPS
+/// declares a NAL HRD.
+fn declared_buffering(stream_type: StreamType, description: &[u8]) -> Option<(usize, crate::codec::h264::Buffering)> {
+	if !matches!(stream_type, StreamType::H264) {
+		return None;
+	}
+	let avcc = crate::codec::h264::Avcc::parse(description).ok()?;
+	Some((avcc.length_size, crate::codec::h264::sps_buffering(avcc.sps.first()?)?))
 }
 
 /// The reordering declared by the first SPS in a video rendition's avcC/hvcC.
