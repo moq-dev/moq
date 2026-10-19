@@ -79,10 +79,16 @@ when a track no longer exists"):
   properties and no name or stream-specific field; the name is the only thing
   wrapping it. A lister MAY skip the Track Stream for a track it learned this
   way, since the properties are the same immutable ones.
-- **Synced.** An ordered SYNCED event, sent once, the first time the
-  reader's queue drains: the first time its `poll_next` returns Pending.
-  That is the whole rule, decided by the maintainer on 2026-10-19 (renamed
-  from CAUGHT_UP the same day). A removal may land before SYNCED, and an add
+- **Synced.** An ordered SYNCED event, sent once, at the first of two
+  points: the first time the reader's queue drains (its `poll_next` returns
+  Pending), or once the reader has been sent N events, where N is the
+  snapshot size it recorded when it subscribed. Decided by the maintainer on
+  2026-10-19 (renamed from CAUGHT_UP the same day), with the bound added so
+  live churn cannot postpone SYNCED ("It doesn't even need to be the exact
+  count, it could be something like count * 2 as an upper bound"). N is
+  enough, with no slack, because the reader's queue delivers in insertion
+  order: the snapshot entries go in first, and collapsing only removes them
+  or rewrites them in place, so nothing ever lands ahead of them. A removal may land before SYNCED, and an add
   and removal the reader has not reached collapse (see churn below), so the
   lister then holds every track this hop held that is still live. Entries
   after it are live. There is no
@@ -149,7 +155,8 @@ Guidance:
     can send. Each reader keeps a pending queue keyed by name, as origin
     announcement consumers do (`OriginConsumerState` in
     `rs/moq-net/src/model/origin.rs`), decided by the maintainer on
-    2026-10-19. A removal for an add still queued for that reader cancels
+    2026-10-19. It delivers in insertion order rather than origin's
+    lexicographic `BTreeMap` order, which the SYNCED bound needs. A removal for an add still queued for that reader cancels
     both, before or after SYNCED. A removal for an add it already saw is
     queued once, and a later add of the name joins it, as origin's
     `UnannounceAnnounce` does. A reader's state is therefore bounded by the
@@ -175,6 +182,8 @@ SUBSCRIBE from the listing gets its first group from the cache), a track
 removed and created again under its name (removal sent before the new add),
 add and remove churn collapsing for a stalled reader (including an initial
 track removed before the reader reaches it, with SYNCED still arriving), a
+stalled reader under continuous churn of new names getting SYNCED once it
+has been sent N events, a
 removal of a track the reader saw landing before SYNCED, a stalled reader
 holding no more than the names it saw plus the live set under churn, a removal
 naming a track that is not live refused, a TRACKS refused on a
