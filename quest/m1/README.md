@@ -121,6 +121,8 @@ lands before the cut.
 
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
 
+- [Dead code and API surface audit](/quest/m1/audit-dead-code.md) - repeat the removal audit before the next major release
+
 ## Related
 
 - [A busy js/net serve yields](https://github.com/moq-dev/moq/pull/5289) - js/net's serve loop leaves the browser its event loop under a fast publisher, if it does not already
