@@ -290,6 +290,11 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					// that cannot cut fails the rung here: its groups could never
 					// mirror the source's, which is what this rung promises.
 					encoder.cut().await?;
+					// Demand can also leave while the codec works above. Nothing is
+					// open yet, so there is nothing to finish.
+					if !demand.is_used() {
+						break 'session;
+					}
 					// Mirror the source sequence so fetches and rendition
 					// switches map 1:1.
 					let info = moq_net::group::Info { sequence };
