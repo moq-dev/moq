@@ -1927,8 +1927,13 @@ function framedGroup(producer: TrackProducer, sequence: number, frames: number):
 
 /** Whether `promise` is still pending once queued work settles. */
 async function isPending(promise: Promise<unknown>): Promise<boolean> {
+	let settled = false;
+	void promise.then(
+		() => (settled = true),
+		() => (settled = true),
+	);
 	await settle();
-	return (await Promise.race([promise.then(() => false), Promise.resolve(true)])) as boolean;
+	return !settled;
 }
 
 // A cap below the live edge reports the newest cached group under it, follows that group's
