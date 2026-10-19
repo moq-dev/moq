@@ -221,16 +221,29 @@ impl Peer {
     ///
     /// Decodes it the way the endpoint and connection would, coalesced packets and all,
     /// so a frame they accept is never missed. Over-counting only skips a check.
-    fn taint(&mut self, datagram: &[u8]) {
+    ///
+    /// `from` is the first byte that may differ from what the sender sent. Packets ending
+    /// before it are untouched, and a change inside a packet's tag alters nothing: the tag
+    /// is never checked and bounds no packet.
+    fn taint(&mut self, datagram: &[u8], from: usize) {
         let parser = FixedLengthConnectionIdParser::new(CID_LEN);
         let mut rest = Some(BytesMut::from(datagram));
         while let Some(data) = rest.take() {
+            let start = datagram.len() - data.len();
             let Ok((partial, next)) =
                 PartialDecode::new(data, &parser, DEFAULT_SUPPORTED_VERSIONS, true)
             else {
                 return;
             };
+            let end = datagram.len() - next.as_ref().map_or(0, |next| next.len());
             rest = next;
+
+            if end <= from {
+                continue;
+            }
+            if start <= from && from + TAG_LEN >= end {
+                return;
+            }
 
             let Ok(packet) = partial.finish(Some(&Clear)) else {
                 continue;
@@ -648,12 +661,12 @@ impl Pair {
                     let offset = offset as usize % front.len();
                     front[offset] ^= xor;
                     let front = front.clone();
-                    peer.taint(&front);
+                    peer.taint(&front, offset);
                 }
             }
             Op::Inject { to, data } => {
                 let peer = self.peer(to);
-                peer.taint(&data);
+                peer.taint(&data, 0);
                 peer.inbound.push_back(BytesMut::from(&data[..]));
             }
             Op::Tick => self.tick(),
@@ -960,9 +973,10 @@ mod tests {
         assert_eq!(pair.server.read.get(&StreamId(0)), Some(&3));
     }
 
-    /// A corruption that flips no bits leaves the datagram's streams checked.
+    /// A corruption that leaves every frame intact, by flipping no bits or only a byte of
+    /// the unchecked tag, leaves the datagram's streams checked.
     #[test]
-    fn zero_corruption_taints_nothing() {
+    fn intact_frames_taint_nothing() {
         let mut pair = Pair::new();
         assert!(pair.handshake());
         for op in [
@@ -993,8 +1007,16 @@ mod tests {
         });
         assert!(pair.server.forged_streams.is_empty());
 
+        // The last byte belongs to the last packet's tag.
+        pair.apply(Op::Corrupt {
+            to: Who::Server,
+            offset: (front.len() - 1).try_into().unwrap(),
+            xor: 0xff,
+        });
+        assert!(pair.server.forged_streams.is_empty());
+
         // The same datagram does carry stream data, so a real corruption would taint it.
-        pair.server.taint(&front);
+        pair.server.taint(&front, 0);
         assert!(!pair.server.forged_streams.is_empty());
     }
 
