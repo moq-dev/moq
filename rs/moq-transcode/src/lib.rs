@@ -1629,6 +1629,94 @@ mod tests {
 		transcoder.abort();
 	}
 
+	/// Demand that ends between groups never opens another one. Here the next
+	/// source group is already queued for the live path when the last fetch
+	/// ends, so the live path sees both at once. It leaves its source rather
+	/// than opening that group and riding it out with nobody asking.
+	///
+	/// The live path picks between the two at random, so without the fix this
+	/// fails about half the rounds, so a run of several fails almost every time.
+	#[tokio::test(start_paused = true)]
+	async fn ended_demand_opens_no_new_live_group() {
+		for _ in 0..8 {
+			let source = source_catalog(320, 240);
+			let source_demand = source._track.demand();
+			// Parks the rung's own fetch of the group below, so that fetch is
+			// demand for as long as the caller holds it and nothing else serves it.
+			let _source_fetches = source._track.dynamic();
+
+			let mut encoder = moq_video::encode::Encoder::new(&{
+				let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+				config.kind = moq_video::encode::Kind::Software;
+				config
+			})
+			.unwrap();
+			let gray = vec![0x80u8; 320 * 240 * 4];
+			let mut write = |group: &mut moq_net::group::Producer, timestamps: &[u64]| {
+				encoder.cut().unwrap();
+				for &timestamp in timestamps {
+					for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+						hang::container::Frame {
+							timestamp: encoded.timestamp,
+							payload: encoded.payload,
+						}
+						.write_to(group)
+						.unwrap();
+					}
+				}
+			};
+			let mut group = source._track.create_group(0u64.into()).unwrap();
+			write(&mut group, &[0, 33_333]);
+
+			let config = Config {
+				ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+				encoder: moq_video::encode::Kind::Software,
+				decoder: moq_video::decode::Kind::Software,
+				source: None,
+				..Default::default()
+			};
+			let output = moq_net::broadcast::Info::default().produce();
+			let consumer = output.consume();
+			let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+			let catalog = loop {
+				match consumer.track(hang::Catalog::DEFAULT_NAME) {
+					Ok(track) => break track,
+					Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+					Err(err) => panic!("catalog track: {err}"),
+				}
+			};
+			let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+			await_catalog(&mut catalogs, |snapshot| {
+				snapshot.video.renditions.contains_key("video/120p")
+			})
+			.await;
+
+			// The only demand on the rung, parked on a sequence the live path never
+			// reaches. Held until the live path has finished group 0.
+			let rung = consumer.track("video/120p").unwrap();
+			let fetching = rung.fetch_group(7, None);
+			let mut edge = rung.clone();
+			while edge.largest().await.map(|position| (position.group, position.frame)) != Some((0, 1)) {}
+			let mut fetched = rung.fetch_group(0, None).await.unwrap();
+			group.finish().unwrap();
+			while fetched.read_frame().await.expect("group 0 was aborted").is_some() {}
+
+			// Queue the next source group first, so it is waiting for the live
+			// path by the time it sees the demand go.
+			let mut next = source._track.create_group(1u64.into()).unwrap();
+			write(&mut next, &[66_666]);
+			drop(fetching);
+
+			tokio::time::timeout(std::time::Duration::from_secs(10), source_demand.unused())
+				.await
+				.expect("the live path opened a group nobody asked for")
+				.unwrap();
+
+			transcoder.abort();
+		}
+	}
+
 	/// Two transcoders fed the same source publish groups that mirror the
 	/// source's sequences and timestamps rather than anything numbered per
 	/// instance.

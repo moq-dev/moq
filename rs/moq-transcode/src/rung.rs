@@ -259,10 +259,11 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				}
 			};
 
-			// Demand can come back without the `used` branch seeing it, when the
-			// select picked this item instead. A returning viewer keeps the session
-			// rather than missing the next group while a new one attaches.
-			leaving &= !demand.is_used();
+			// Demand can change without the `unused` or `used` branch seeing it,
+			// when the select picked this item instead. A returning viewer keeps
+			// the session rather than missing the next group while a new one
+			// attaches, and a departed one never opens another group.
+			leaving = !demand.is_used();
 
 			match item {
 				Some(Item::Group(sequence)) => {
@@ -309,8 +310,14 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				}
 				Some(Item::Frame(frame)) => {
 					// No open group: attached mid-group, skipped a duplicate, or
-					// recovering from a lag. Wait for the next boundary.
-					let Some(output) = &mut current else { continue };
+					// recovering from a lag. Wait for the next boundary, unless
+					// nobody is left to serve it.
+					let Some(output) = &mut current else {
+						if leaving {
+							break 'session;
+						}
+						continue;
+					};
 
 					// The feed decodes at the source's native size; size this rung's copy
 					// here. Supported GPU paths feed the encoder without touching the
@@ -330,7 +337,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 						output.finish()?;
 					}
 					// Or during the flush.
-					leaving &= !demand.is_used();
+					leaving = !demand.is_used();
 					if retiring || leaving {
 						break 'session;
 					}
