@@ -1604,6 +1604,7 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 				Poll::Ready(Ok(request)) => {
 					let serve = TrackServe {
 						validity: self.validity.clone(),
+						route: Some(self.route.clone()),
 						subscriber: self.subscriber.clone(),
 						path: self.path.clone(),
 						epoch: self.epoch.clone(),
@@ -2430,6 +2431,7 @@ mod tests {
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
+				route: None,
 				subscriber,
 				path: Path::new("room").to_owned(),
 				epoch: None,
@@ -2501,6 +2503,7 @@ mod tests {
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
+			route: None,
 			subscriber,
 			path: Path::new("room").to_owned(),
 			epoch: None,
@@ -2547,6 +2550,7 @@ mod tests {
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
+			route: None,
 			subscriber,
 			path: Path::new("room").to_owned(),
 			epoch: None,
@@ -2723,6 +2727,7 @@ mod tests {
 		let run = TrackServeRun::new(
 			TrackServe {
 				validity: Default::default(),
+				route: None,
 				subscriber: subscriber.clone(),
 				path: Path::new("room").to_owned(),
 				epoch: None,
@@ -2782,6 +2787,7 @@ mod tests {
 			let mut run = TrackServeRun::new(
 				TrackServe {
 					validity: Default::default(),
+					route: None,
 					subscriber,
 					path: Path::new("room").to_owned(),
 					epoch: None,
@@ -2833,6 +2839,7 @@ mod tests {
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
 			validity: Default::default(),
+			route: None,
 			subscriber,
 			path: Path::new("room/host").to_owned(),
 			epoch: None,
@@ -2900,6 +2907,7 @@ mod tests {
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
 			validity: Default::default(),
+			route: None,
 			subscriber,
 			path: Path::new("room/host").to_owned(),
 			epoch: None,
@@ -2967,6 +2975,7 @@ mod tests {
 			Self {
 				serve: TrackServe {
 					validity: Default::default(),
+					route: None,
 					subscriber,
 					path: Path::new("room/host").to_owned(),
 					epoch: None,
@@ -3029,6 +3038,7 @@ mod tests {
 		});
 		let serve = TrackServe {
 			validity: Default::default(),
+			route: None,
 			subscriber,
 			path: Path::new("room").to_owned(),
 			epoch: None,
@@ -3079,6 +3089,7 @@ mod tests {
 			});
 			let serve = TrackServe {
 				validity: Default::default(),
+				route: None,
 				subscriber,
 				path: Path::new("room").to_owned(),
 				epoch: None,
@@ -5002,6 +5013,8 @@ enum ServeEnd {
 #[derive(Clone)]
 struct TrackServe<S: crate::transport::poll::Session> {
 	validity: crate::model::broadcast::RequestValidity,
+	/// The advertisement that minted this source, absent for standalone test sources.
+	route: Option<kio::Consumer<()>>,
 	subscriber: Subscriber<S>,
 	path: PathOwned,
 	/// The publisher instance to ask for; the peer refuses a request for another.
@@ -5624,6 +5637,13 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(track::Info, HeldTrack<S>), Error>> {
 		self.validity.check(waiter)?;
+		if serve
+			.route
+			.as_ref()
+			.is_some_and(|route| route.poll_closed(waiter).is_ready())
+		{
+			return Poll::Ready(Err(Error::Unroutable));
+		}
 		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
@@ -5919,6 +5939,16 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 	}
 
 	fn poll(&mut self, serve: &TrackServe<S>, waiter: &kio::Waiter) -> Poll<ServeEnd> {
+		// Immutable TRACK_INFO stays usable locally after withdrawal. Its wire hold
+		// is only a bridge to SUBSCRIBE while this source is still advertised.
+		if self.held.is_some()
+			&& serve
+				.route
+				.as_ref()
+				.is_some_and(|route| route.poll_closed(waiter).is_ready())
+		{
+			self.held = None;
+		}
 		loop {
 			match &mut self.mode {
 				ServeMode::Establish(est) => {
