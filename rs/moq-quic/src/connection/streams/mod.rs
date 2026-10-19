@@ -171,6 +171,7 @@ impl RecvStream<'_> {
         if !stream.final_offset_unknown() {
             let recv = entry.remove().expect("must have recv when stopping");
             self.state.stream_recv_freed(self.id, recv);
+            self.state.queue_max_stream_id(self.pending);
         }
 
         if self.state.add_read_credits(read_credits).should_transmit() {
