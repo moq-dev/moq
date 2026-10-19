@@ -102,6 +102,7 @@ lands before the cut.
 - [Decode errors end the reader](/quest/m1/decode-errors.md) - a container decode error fails the reader in Rust and JS instead of reading as loss
 - [Transcode finishes its group](/quest/m1/transcode-open-group.md) - `moq-transcode` never aborts a group a fetch's live loop opened
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
+- [A stalled subscriber holds bounded state](/quest/m1/egress-held-state.md) - group machines and bytes a credit-withholding downstream makes a publisher hold plateau at what its credit and the latency budget allow, on lite and moq-transport
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
 - [Bufferbloat harness](/quest/m1/bufferbloat.md) - acceptance and performance checks impair paths with a rate limit and a deep queue, not random loss
 - [Random-loss audit](/quest/m1/random-loss-audit.md) - every decision random-loss gates drove is kept, reworked, or reverted on shaped paths
