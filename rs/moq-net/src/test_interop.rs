@@ -366,6 +366,73 @@ fn lite_auth_unsupported_interop() {
 	assert!(reader.is_empty());
 }
 
+#[derive(serde::Deserialize)]
+struct AuthIdEcho {
+	id: String,
+	named: Option<String>,
+	auth: Vec<u8>,
+	subscribe: Vec<u8>,
+	refused: bool,
+}
+
+/// The largest AUTH ID a request can name crosses the Rust/JS lite-07 boundary both ways, on
+/// AUTH and as a SUBSCRIBE's `Auth`, and the one past it is refused on both sides.
+#[test]
+#[ignore = "requires Bun; run by just test interop"]
+fn lite_auth_id_interop() {
+	use crate::coding::Decode;
+
+	let version = lite::Version::Lite07;
+	let id = u64::MAX - 1;
+	let auth = lite::Auth {
+		id,
+		token: bytes::Bytes::from_static(b"jwt"),
+	};
+	let subscribe = lite::Subscribe {
+		id: 7,
+		broadcast: crate::Path::new("room"),
+		epoch: None,
+		track: "video".into(),
+		priority: 1,
+		order: crate::track::Order::Descending,
+		max_delay: std::time::Duration::ZERO,
+		start_group: None,
+		end_group: None,
+		start_frame: 0,
+		end_frame: None,
+		auth: Some(id),
+	};
+	let auth_bytes = auth.encode_bytes(version).unwrap().to_vec();
+	let subscribe_bytes = subscribe.encode_bytes(version).unwrap().to_vec();
+
+	// No encoder writes it, so build the refused AUTH by hand.
+	let mut refused = Vec::new();
+	let mut w = Encoder::new(&mut refused, version.into());
+	let prefix = w.prefix_varint();
+	w.varint(u64::MAX).unwrap();
+	w.bytes(b"").unwrap();
+	w.fill(prefix).unwrap();
+	assert!(lite::Auth::decode(&mut Decoder::new(&refused, version.into()), version).is_err());
+
+	let input = serde_json::json!({ "auth": auth_bytes, "subscribe": subscribe_bytes, "refused": refused });
+	let echo: AuthIdEcho = serde_json::from_slice(&bun("auth-id.ts", input)).expect("JS returned its encodings");
+	assert_eq!(echo.id, id.to_string());
+	assert_eq!(echo.named, Some(id.to_string()));
+	assert!(echo.refused, "JS accepted an AUTH ID no request can name");
+	assert_eq!(echo.auth, auth_bytes);
+	assert_eq!(echo.subscribe, subscribe_bytes);
+	assert_eq!(
+		lite::Auth::decode(&mut Decoder::new(&echo.auth, version.into()), version).unwrap(),
+		auth
+	);
+	assert_eq!(
+		lite::Subscribe::decode(&mut Decoder::new(&echo.subscribe, version.into()), version)
+			.unwrap()
+			.auth,
+		Some(id)
+	);
+}
+
 /// TRACK_STATUS on every draft: the JS publisher decodes what Rust encodes and answers with a
 /// TRACK_STATUS_OK the Rust subscriber reads, carrying what a SUBSCRIBE_OK would as far as the
 /// draft has room, or refuses a missing broadcast DOES_NOT_EXIST.

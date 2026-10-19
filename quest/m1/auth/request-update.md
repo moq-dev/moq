@@ -5,9 +5,8 @@
 A publisher renews the credential behind a live announcement without
 reopening it. A `Route` holds an optional `moq_net::auth::Auth`; when the
 application swaps it, the session sends REQUEST_UPDATE (moq-transport)
-carrying the new auth, and the request stays up. Lite renews by
-ANNOUNCE_UPDATE once [Requests name their auth](/quest/m1/auth/request-auth-id.md)
-gives it a way to name one. The first consumer is a client that keeps a
+carrying the new auth, and the request stays up. Lite-07 already renews by
+ANNOUNCE_UPDATE naming the new auth. The first consumer is a client that keeps a
 PUBLISH_NAMESPACE alive past its credential's expiry by sending
 REQUEST_UPDATE with a fresh token before it expires.
 
@@ -68,19 +67,13 @@ because it has a consumer now. The decisions are recorded in the
   against #5148's earlier serial refresh.)
 - On moq-transport the update carries the token as USE_VALUE and needs only
   step 1, so the PUBLISH_NAMESPACE consumer doesn't wait on the lite wire. On
-  lite it names the auth registered through
-  [Requests name their auth](/quest/m1/auth/request-auth-id.md), so the lite
-  path follows that quest. A refused update ends only that request.
+  lite-07 the ANNOUNCE_UPDATE names the new auth's ID, which already ships. A refused update ends only that request.
 - Mirror `Auth` and `Route::auth` in `js/net`; the bindings expose no auth
   yet, so [Bindings](/quest/m1/auth/bindings.md) carries them.
 - Describe request renewal in `doc/concept/moq-lite.md`'s Authorization
   section, and in `doc/concept/standard.md`, which describes only incoming request
-  tokens; the moq-transport path can land before the lite one.
+  tokens.
 
 Public API: a new optional auth on routes in Rust and JS.
 Wire: none beyond the existing AUTHORIZATION TOKEN on PUBLISH_NAMESPACE and its
-REQUEST_UPDATE; lite's ANNOUNCE_UPDATE waits on Requests name their auth.
-
-## Related
-
-- [Requests name their auth](/quest/m1/auth/request-auth-id.md) - the lite path's prerequisite; moq-transport renewal doesn't wait on it
+REQUEST_UPDATE.

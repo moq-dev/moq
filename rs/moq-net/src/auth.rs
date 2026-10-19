@@ -3030,7 +3030,11 @@ mod request_token_tests {
 
 		handle.peer_ended(1);
 		assert_eq!(verdict(1, "room"), Verdict::Denied, "over");
-		assert_eq!(verdict(0, "room"), Verdict::Waiting, "still in flight below the ended one");
+		assert_eq!(
+			verdict(0, "room"),
+			Verdict::Waiting,
+			"still in flight below the ended one"
+		);
 		handle.peer_arrived(0).unwrap();
 		handle.peer_ended(0);
 		assert!(handle.peer_arrived(0).is_err(), "below the watermark");
@@ -3077,7 +3081,10 @@ mod request_token_tests {
 		handle.peer_granted(1, &room());
 		assert_eq!(authority.verdict(Direction::Publish, "room", false), Verdict::Admitted);
 		let waiter = kio::Waiter::noop();
-		assert!(handle.poll_peer_unnamed(0, &waiter).is_ready(), "moving off releases the old token");
+		assert!(
+			handle.poll_peer_unnamed(0, &waiter).is_ready(),
+			"moving off releases the old token"
+		);
 
 		authority.rename(None);
 		assert_eq!(

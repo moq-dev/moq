@@ -281,7 +281,12 @@ mod tests {
 	fn request_auth_round_trips() {
 		for auth in [None, Some(0), Some(u64::MAX - 1)] {
 			let mut buf = Vec::new();
-			encode_auth(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07, auth).unwrap();
+			encode_auth(
+				&mut Encoder::new(&mut buf, Version::Lite07.into()),
+				Version::Lite07,
+				auth,
+			)
+			.unwrap();
 			let mut r = Decoder::new(&buf, Version::Lite07.into());
 			assert_eq!(decode_auth(&mut r, Version::Lite07).unwrap(), auth);
 			assert!(r.is_empty());

@@ -305,7 +305,9 @@ async fn lite_07_a_named_route_is_held_to_its_token() {
 		wait_announced(&served, "b/y", true).await;
 		moq_clock::sleep(Duration::from_secs(1)).await;
 		assert!(
-			futures::FutureExt::now_or_never(served.routed("a/x")).flatten().is_none(),
+			futures::FutureExt::now_or_never(served.routed("a/x"))
+				.flatten()
+				.is_none(),
 			"admitted outside its token"
 		);
 

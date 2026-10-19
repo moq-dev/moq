@@ -565,7 +565,8 @@ Each endpoint SHOULD open one Auth Stream with an empty token right after the se
 The acceptor replies with an AUTH_OK carrying the grant, or an AUTH_ERROR refusing the token.
 It MAY send further AUTH_OK messages to replace the grant, such as with a lowered expiry, and MAY send an AUTH_ERROR after an AUTH_OK to revoke it; the latest AUTH_OK is the token's grant.
 After an AUTH_ERROR the acceptor closes its side of the stream.
-The opener withdraws a token by closing or resetting its side of the stream, and the acceptor then closes its own.
+The opener withdraws a token by closing its side of the stream: the grant leaves the union at once, and the acceptor closes its own side once no request names the token (see [Named Requests](#named-requests)).
+Resetting the stream ends the token at once, with every request naming it.
 
 A grant names the paths the opener may publish to the acceptor and subscribe to from it, relative to the session.
 An endpoint's scope is the union of the grants of its open Auth Streams, and a stream that ends removes its grant from the union.
@@ -576,6 +577,20 @@ An endpoint that announces a broadcast outside the union once its own setup toke
 An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, MUST send AUTH_ERROR with NOT_SUPPORTED and close its side of the stream.
 This applies before or after an AUTH_OK, including when a grant exceeds the message size limit.
 A presenter receiving a stream reset before any reply treats it as unsupported, for compatibility with peers that do not support the Auth Stream (see [STREAM_TYPE](#stream_type)).
+
+#### Named Requests {#named-requests}
+SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, ANNOUNCE_REQUEST, ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART carry an `Auth` field: 0 for the sender's scope, or the [Auth ID](#auth-message) of one of the sender's Auth Streams plus 1.
+A named request is held to that token's grant alone instead of the scope: the subscribe patterns for a subscriber's request, the publish patterns for an announcement.
+The receiver:
+
+- holds a request naming an Auth ID it has not received, or not yet answered, until it has;
+- refuses a request naming a token that has ended or been withdrawn with UNAUTHORIZED;
+- ends a request with UNAUTHORIZED, or withholds an announcement, once its token ends or its grant stops covering it.
+
+A named ANNOUNCE_REQUEST receives only the routes its token's grant covers.
+An announcement outside its token's grant is withheld rather than closing the session.
+SUBSCRIBE_UPDATE, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART replace the request's `Auth`; the previous token keeps deciding the request until the new one is answered.
+A withdrawn token keeps deciding the requests that already name it, so an opener renews a token by presenting the new one, naming it, and then withdrawing the old one.
 
 ### Goaway
 Either endpoint can open a Goaway Stream (0x5) to initiate a graceful session shutdown.
@@ -919,6 +934,7 @@ ANNOUNCE_REQUEST Message {
   Message Length (i)
   Broadcast Path Prefix (s),
   Hidden (8),
+  Auth (i),
 }
 ~~~
 
@@ -928,6 +944,9 @@ Indicate interest for any broadcasts with a path that starts with this prefix.
 **Hidden**:
 1 to also receive hidden routes (see [Hidden Paths](#hidden)), 0 otherwise.
 Any other value is a PROTOCOL_VIOLATION.
+
+**Auth**:
+The Auth Stream whose grant admits the request (see [Named Requests](#named-requests)).
 
 The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching routes, followed by ANNOUNCE_START, ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART messages for any future updates, subject to [Routing](#routing).
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
@@ -975,6 +994,7 @@ ANNOUNCE_START Message {
   Epoch (b),
   Hops (..),
   Route Cost (i),
+  Auth (i),
 }
 
 Hops {
@@ -1031,6 +1051,9 @@ A peer whose wire carries no route cost contributes 0 before the arriving link's
 
 lite-06 carries Warm and Cold Route Cost fields. A receiver MUST read Warm as Route Cost and ignore Cold. A sender MUST write Route Cost as Warm and 2^62-1 as Cold.
 
+**Auth**:
+The Auth Stream whose grant admits the route (see [Named Requests](#named-requests)).
+
 
 ## ANNOUNCE_END {#announce-end}
 A publisher sends an ANNOUNCE_END message to retract a previously started route, referencing its Announce ID.
@@ -1068,6 +1091,7 @@ ANNOUNCE_UPDATE Message {
   Announce ID (i),
   Hops (..),
   Route Cost (i),
+  Auth (i),
 }
 ~~~
 
@@ -1078,10 +1102,10 @@ Set to 0x2 to indicate an ANNOUNCE_UPDATE message.
 The ordinal implicitly assigned by a prior ANNOUNCE_START on this stream.
 Referencing an id that was never assigned, or one already retired by an ANNOUNCE_END, is a protocol violation.
 
-**Hops** and **Route Cost**:
+**Hops**, **Route Cost**, and **Auth**:
 As defined for [ANNOUNCE_START](#announce-start).
 `Hop Base` may name this advertisement itself, which resolves against the list being replaced.
-An update whose only change is a Route Cost is valid: it is how a relay re-prices a route without disturbing it.
+An update whose only change is a Route Cost or Auth is valid: it is how a relay re-prices a route, or a publisher renews its token, without disturbing it.
 
 
 ## ANNOUNCE_RESTART {#announce-restart}
@@ -1097,6 +1121,7 @@ ANNOUNCE_RESTART Message {
   Epoch (b),
   Hops (..),
   Route Cost (i),
+  Auth (i),
 }
 ~~~
 
@@ -1106,7 +1131,7 @@ Set to 0x3 to indicate an ANNOUNCE_RESTART message.
 **Announce ID**:
 As defined for [ANNOUNCE_UPDATE](#announce-update).
 
-**Epoch**, **Hops**, and **Route Cost**:
+**Epoch**, **Hops**, **Route Cost**, and **Auth**:
 As defined for [ANNOUNCE_START](#announce-start), replacing the advertisement's.
 `Hop Base` may name this advertisement itself, which resolves against the list being replaced.
 
@@ -1128,6 +1153,7 @@ SUBSCRIBE Message {
   Group End (i)
   Frame Start (i)
   Frame End (i)
+  Auth (i)
 }
 ~~~
 
@@ -1182,6 +1208,9 @@ MUST be 0 when `Group End` is 0, since an unbounded subscription has no end grou
 
 `Group End` and `Frame End` are offset by 1 so 0 can mean "absent". `Group Start` is an absolute sequence, and 0 is group 0.
 
+**Auth**:
+The Auth Stream whose grant admits the subscription (see [Named Requests](#named-requests)).
+
 ## SUBSCRIBE_UPDATE
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
 A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscription.
@@ -1197,6 +1226,7 @@ SUBSCRIBE_UPDATE Message {
   Group End (i)
   Frame Start (i)
   Frame End (i)
+  Auth (i)
 }
 ~~~
 
@@ -1355,6 +1385,7 @@ FETCH Message {
   Group Sequence (i)
   Frame Start (i)
   Frame End (i)
+  Auth (i)
 }
 ~~~
 
@@ -1383,6 +1414,9 @@ A plain absolute index; 0 means the start of the group (default).
 The last frame to return (inclusive), encoded as the absolute frame index + 1.
 A value of 0 means through the end of the group (default).
 A `Frame End` below `Frame Start` once decoded is a protocol violation; equal bounds are a legal single-frame range.
+
+**Auth**:
+The Auth Stream whose grant admits the fetch (see [Named Requests](#named-requests)).
 
 The publisher responds with FRAME messages directly on the same stream — there is no response header.
 The subscriber parses them using the track's [TRACK_INFO](#track-info), which it MUST already have (see the [Track Stream](#track-stream)); the group sequence and the index of the first frame are implicit from the FETCH request.
@@ -1449,9 +1483,14 @@ AUTH is the first message on an Auth Stream, presenting a token.
 ~~~
 AUTH Message {
   Message Length (i)
+  Auth ID (i)
   Token (b)
 }
 ~~~
+
+**Auth ID**:
+The opener's number for the token, which its requests name: 0 for the first Auth Stream it opens on the session, and one more for each after.
+A receiver MUST close the session with PROTOCOL_VIOLATION on an Auth ID it already received, or on 2^64-1, which no request can name.
 
 **Token**:
 The credential to verify, opaque to moq-lite.
@@ -1632,6 +1671,7 @@ The `Message Length` describes the payload size on the wire.
 - Any Setup Stream or bidirectional stream message that fails to decode closes the session with PROTOCOL_VIOLATION; previously only an unexpected Message Length did, as a SHOULD. A stream ending mid-message outside the Setup and Auth Streams, a malformed GROUP or FRAME, and a stream type the negotiated version predates still affect only that stream.
 - A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
 - Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
+- AUTH carries an Auth ID, numbered from 0 per opener. SUBSCRIBE, SUBSCRIBE_UPDATE, FETCH, ANNOUNCE_REQUEST, ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART carry an `Auth` field naming one, which holds the request to that token's grant instead of the scope. Closing an Auth Stream withdraws its token while named requests linger on it; a reset ends them.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
 
 ## moq-lite-06

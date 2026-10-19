@@ -55,14 +55,18 @@ test("AUTH round-trips its ID and token", async () => {
 
 // The same bytes as `auth_golden` in `rs/moq-net/src/lite/auth.rs`.
 test("AUTH matches the Rust encoding", async () => {
-	const r = await roundTrip((w) => new AuthMessage(1n, new TextEncoder().encode("jwt")).encode(w, Lite.Version.DRAFT_07));
+	const r = await roundTrip((w) =>
+		new AuthMessage(1n, new TextEncoder().encode("jwt")).encode(w, Lite.Version.DRAFT_07),
+	);
 	expect([...(await r.readAll())]).toEqual([0x05, 0x01, 0x03, ...new TextEncoder().encode("jwt")]);
 });
 
 // No request can name the largest varint as its ID plus one, so neither side sends it.
 test("the largest AUTH ID is refused", async () => {
 	const max = 0xffff_ffff_ffff_ffffn;
-	await expect(roundTrip((w) => new AuthMessage(max, new Uint8Array()).encode(w, Lite.Version.DRAFT_07))).rejects.toThrow();
+	await expect(
+		roundTrip((w) => new AuthMessage(max, new Uint8Array()).encode(w, Lite.Version.DRAFT_07)),
+	).rejects.toThrow();
 	const r = await roundTrip((w) =>
 		Message.encode(w, async (body) => {
 			await body.u62(max);
@@ -86,7 +90,9 @@ test("a request names an AUTH as its ID plus one", async () => {
 test("a reused AUTH ID is a protocol violation", async () => {
 	const wire = new LiteAuthWire({} as WebTransport, Lite.Version.DRAFT_07);
 	const accept = async (id: bigint) => {
-		const data = await (await roundTrip((w) => new AuthMessage(id, new Uint8Array()).encode(w, Lite.Version.DRAFT_07))).readAll();
+		const data = await (
+			await roundTrip((w) => new AuthMessage(id, new Uint8Array()).encode(w, Lite.Version.DRAFT_07))
+		).readAll();
 		const stream = new Stream({
 			readable: new ReadableStream({
 				start(controller) {

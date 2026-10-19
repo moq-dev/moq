@@ -6746,10 +6746,13 @@ mod tests {
 		);
 
 		auth.peer_arrived(0).unwrap();
-		auth.peer_granted(0, &crate::auth::Grant {
-			subscribe: crate::Pattern::subtree("room").unwrap().into(),
-			..Default::default()
-		});
+		auth.peer_granted(
+			0,
+			&crate::auth::Grant {
+				subscribe: crate::Pattern::subtree("room").unwrap().into(),
+				..Default::default()
+			},
+		);
 		assert!(!drive(&mut serve).await);
 		let _track = dynamic
 			.requested_track()
@@ -6822,7 +6825,10 @@ mod tests {
 		session.push(&update.encode_bytes(Version::Lite07).unwrap());
 		assert!(!drive(&mut serve).await, "renamed to a token in flight");
 		auth.peer_withdrawn(0);
-		assert!(!drive(&mut serve).await, "the withdrawn token stopped deciding mid-renewal");
+		assert!(
+			!drive(&mut serve).await,
+			"the withdrawn token stopped deciding mid-renewal"
+		);
 
 		auth.peer_arrived(1).unwrap();
 		auth.peer_granted(1, &room);

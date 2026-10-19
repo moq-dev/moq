@@ -347,7 +347,8 @@ export class AuthSession implements Handle {
 	 * issued, or for one withdrawn or ended, leaving the request under the session's scope.
 	 */
 	named(token: Auth | undefined): bigint | undefined {
-		if (!(token instanceof Presented) || !this.#issued.has(token) || token.withdrawn || token.ended) return undefined;
+		if (!(token instanceof Presented) || !this.#issued.has(token) || token.withdrawn || token.ended)
+			return undefined;
 		return token.id;
 	}
 

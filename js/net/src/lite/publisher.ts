@@ -491,7 +491,8 @@ export class Publisher {
 		};
 
 		// The ID of our token a route names on lite-07+, or undefined for the session's scope.
-		const named = (route: Route): bigint | undefined => (hasAuth(this.version) ? this.#named?.(route.auth) : undefined);
+		const named = (route: Route): bigint | undefined =>
+			hasAuth(this.version) ? this.#named?.(route.auth) : undefined;
 
 		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
 		// there must not restart, and the token goes out as its ID alone.

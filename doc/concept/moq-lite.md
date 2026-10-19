@@ -179,9 +179,12 @@ to a prefix. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
-union of every open token's grant. A token the peer has no verifier for, or
-whose grant is too large to send, fails with `Unsupported` and ends only that
-token; the session and its other grants stay up. A relay with an
+union of every open token's grant. An announcement whose route names a token
+(`Route::auth`) is instead held to that token's grant alone and ends with it;
+naming a new token and dropping the old one renews it without a gap. A token
+the peer has no verifier for, or whose grant is too large to send, fails with
+`Unsupported` and ends only that token; the session and its other grants stay
+up. A relay with an
 [auth server](/bin/relay/auth#in-band-renewal) verifies these tokens through it,
 so a fresh grant can keep the connection alive after its original credential
 expires; under public rules or a client certificate it refuses them as
@@ -197,8 +200,9 @@ to namespace prefixes. Older versions have no grant; the URL token keeps working
 everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. The token belongs to the session that added it, so after a
-reconnect the application adds it again and re-announces. moq-lite has no
-per-request token yet, so there an announcement rides the session's scope.
+reconnect the application adds it again and re-announces. Subscriptions do not
+name a token yet, so they ride the session's scope, and a JavaScript acceptor
+holds every request to its origin scopes rather than the named token's grant.
 
 ## Subscriptions
 
