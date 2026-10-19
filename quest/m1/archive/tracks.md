@@ -3,8 +3,8 @@
 ## Goal
 
 A moq-lite-07 TRACKS request lists the tracks of one broadcast as its
-producer creates them, each with its name and TRACK_INFO, marks when the
-lister has caught up with every track that existed when it asked, and names
+producer creates them, each with its name and TRACK_INFO, marks with SYNCED
+when the lister has drained what this hop held, and names
 each track that no longer exists. The subscriber then SUBSCRIBEs to each track it wants, so
 delivery stays pull: nothing is ever pushed into a pulled copy. A listing
 never creates a track the publisher serves only on request (an any-name
@@ -79,17 +79,19 @@ when a track no longer exists"):
   properties and no name or stream-specific field; the name is the only thing
   wrapping it. A lister MAY skip the Track Stream for a track it learned this
   way, since the properties are the same immutable ones.
-- **Caught up.** An ordered CAUGHT_UP event, sent once, when the reader
-  reaches what was the live head when it asked. The lister then holds every
-  track this hop knew then that is still live: one removed before the reader
-  reached its add collapses with it and never appears (see churn below).
-  Entries after it are live. There is no
+- **Synced.** An ordered SYNCED event, sent once, the first time the
+  reader's queue drains: the first time its `poll_next` returns Pending.
+  That is the whole rule, decided by the maintainer on 2026-10-19 (renamed
+  from CAUGHT_UP the same day). A removal may land before SYNCED, and an add
+  and removal the reader has not reached collapse (see churn below), so the
+  lister then holds every track this hop held that is still live. Entries
+  after it are live. There is no
   count anywhere, decided by the maintainer on 2026-10-19 ("We don't need the
   count at all"): a count sent first commits to that many adds, which a track
   removed before a slow reader reaches its add would break. The event itself
   is the whole wire cost. The announce stream gets the same event in lite-07
-  ([Announce CAUGHT_UP](/quest/m1/announce-caught-up.md)), identical in shape.
-  Caught up means caught up with this hop, decided by the maintainer on
+  ([Announce SYNCED](/quest/m1/announce-synced.md)), identical in shape.
+  Synced means synced with this hop, decided by the maintainer on
   2026-10-19: a relay answers at once with what it currently holds and never
   waits on its upstream, since relays never block on peers. A cold relay may
   report zero; the upstream's tracks then arrive as live adds.
@@ -144,37 +146,37 @@ Guidance:
     budget for discovery state a peer pushes at us; past it, the relay resets
     the listing rather than holding more. Names keep the existing length caps.
   - A hostile publisher can churn, adding and removing tracks as fast as it
-    can send. The hop holds the live set, each entry stamped with the order it
-    was added, plus a tombstone for a removed entry while some reader that
-    already sent its add has not yet sent its removal. Each reader keeps two
-    positions: the last add it sent and the last removal it sent. It sends,
-    in the order events happened, every live entry added past its add
-    position and every tombstone past its removal position whose entry it
-    already passed. An add and its removal that a reader has not reached
-    collapse to nothing, before or after CAUGHT_UP, since the entry is gone and
-    it never passed it. A stalled reader pins only tombstones for entries it
-    passed, which were live when it stalled, so at most the live set (bounded
-    by the `announces` cap) per stalled reader; later churn is invisible to
-    it. Churn costs per-event work across a broadcast's listings (the same
-    fan-out an Announce stream pays), never a backlog.
+    can send. Each reader keeps a pending queue keyed by name, as origin
+    announcement consumers do (`OriginConsumerState` in
+    `rs/moq-net/src/model/origin.rs`), decided by the maintainer on
+    2026-10-19. A removal for an add still queued for that reader cancels
+    both, before or after SYNCED. A removal for an add it already saw is
+    queued once, and a later add of the name joins it, as origin's
+    `UnannounceAnnounce` does. A reader's state is therefore bounded by the
+    names it saw plus the live set (bounded by the `announces` cap), however
+    long it stalls, with no global budget. Churn costs per-event work across
+    a broadcast's listings (the same fan-out an Announce stream pays), never
+    a backlog.
   - A hostile subscriber can open many TRACKS. Each takes a subscription slot,
     downstream listings of one broadcast share one upstream TRACKS, and a
-    downstream reader is a cursor into the shared listing, so a slow or stalled
-    reader costs flow control, not a copy of the listing.
+    slow or stalled reader holds only its pending queue, bounded as above,
+    not a copy of the listing's history.
 - Fan-out: benchmark downstream listings against tracks per broadcast and
   broadcasts per relay, per the AGENTS.md fan-out rule; a new track's cost
   must not grow with the broadcast count.
 - Split the JS half into its own quest if the PR grows too large to review.
 
 Test on mock time, directly and through a relay: tracks present at the
-request arriving before CAUGHT_UP, a cold relay answering
-caught up at once with what it holds and the upstream's tracks following as
+request arriving before SYNCED, SYNCED sent the first time the reader's
+queue drains, a cold relay answering SYNCED at once with what it holds and
+the upstream's tracks following as
 live adds, a track added later (a
 SUBSCRIBE from the listing gets its first group from the cache), a track
 removed and created again under its name (removal sent before the new add),
 add and remove churn collapsing for a stalled reader (including an initial
-track removed before the reader reaches it, with CAUGHT_UP still arriving),
-a stalled reader pinning no more than the live set under churn, a removal
+track removed before the reader reaches it, with SYNCED still arriving), a
+removal of a track the reader saw landing before SYNCED, a stalled reader
+holding no more than the names it saw plus the live set under churn, a removal
 naming a track that is not live refused, a TRACKS refused on a
 covering-prefix route, the broadcast ending the listing, a new epoch at the same path not continuing an old
 listing, a dynamic-only track never created, two downstream listings sharing

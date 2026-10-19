@@ -41,7 +41,7 @@ TRACKS' three events (see its Plan) map as follows:
 | TRACKS event | Inbound: we answer SUBSCRIBE_TRACKS by its FORWARD | Outbound: we send it with FORWARD=0 |
 |---|---|---|
 | Track added, with TRACK_INFO | FORWARD=0: a paused PUBLISH, its Track Properties carrying TRACK_INFO as SUBSCRIBE_OK does today, or a PUBLISH_SKIPPED (PUBLISH_BLOCKED on draft-18) past the subscription cap. FORWARD=1 or omitted: a PUBLISH_SKIPPED naming the track from draft-19 on; on draft-18 the whole request is refused with REQUEST_ERROR | a PUBLISH, TRACK_INFO from its Track Properties; or a PUBLISH_SKIPPED (PUBLISH_BLOCKED on draft-18), TRACK_INFO from the SUBSCRIBE_OK of a paused SUBSCRIBE we open for it |
-| Caught up | nothing to send: moq-transport has no marker | not needed: the lite side sends CAUGHT_UP for this hop at once, and PUBLISHes arrive as live adds |
+| Synced | nothing to send: moq-transport has no marker | not needed: the lite side sends SYNCED for this hop at once, and PUBLISHes arrive as live adds |
 | Track removed | PUBLISH_DONE with TRACK_ENDED on that PUBLISH; nothing for a skipped track, whose removal reaches the peer only through its own SUBSCRIBE ending with TRACK_ENDED | PUBLISH_DONE with TRACK_ENDED on the held paused PUBLISH or SUBSCRIBE; any other status fails the listing |
 
 - **Inbound answers by the peer's FORWARD**, decided by the maintainer on
@@ -67,8 +67,8 @@ TRACKS' three events (see its Plan) map as follows:
     streams, so it would falsely report exhaustion. There, refuse the whole
     SUBSCRIBE_TRACKS with REQUEST_ERROR (NOT_SUPPORTED, its reason naming
     FORWARD=0), and the peer retries with FORWARD=0 or SUBSCRIBEs directly.
-- **Caught up has no IETF equivalent, and needs none.** Caught up means
-  caught up with this hop (see TRACKS), so a relay answers a lite TRACKS at
+- **SYNCED has no IETF equivalent, and needs none.** Synced means synced
+  with this hop (see TRACKS), so a relay answers a lite TRACKS at
   once with what it holds, whatever its upstream speaks, and every PUBLISH the
   FORWARD=0 SUBSCRIBE_TRACKS brings is a live add. Inbound, nothing stands in
   for it.
@@ -146,8 +146,10 @@ TRACKS' three events (see its Plan) map as follows:
     held one as the entry and refuse the new one: DUPLICATE_SUBSCRIPTION on
     draft-18, UNINTERESTED from draft-19.
   - Each lite listing filters its request's results to its exact namespace.
-  - A refused update fails the new listing loudly, never silently narrows
-    it. A request never narrows while a listing under it remains, and is
+  - A refused update resets every affected listing loudly, so each
+    re-requests: the new one, and any whose sibling request was cancelled
+    for the fold, since that request no longer reports adds for it. Never
+    silently narrow. A request never narrows while a listing under it remains, and is
     cancelled when the last one closes.
   - Cost: the extra tracks held are only those of broadcasts nested under a
     listed one, bounded by the `announces` cap below; past it the listings
@@ -209,7 +211,9 @@ TRACKS(`/a`) on one session widens the one SUBSCRIBE_TRACKS, lists `/a`'s
 tracks, and keeps `/a/b`'s held PUBLISHes, and the reverse order shares it
 unchanged; TRACKS(`/a/b`) and TRACKS(`/a/c`) open two requests and hold no
 track outside them, and a later TRACKS(`/a`) folds both into one, keeping
-every held entry and refusing any duplicate PUBLISH; on draft-18, a PUBLISH for
+every held entry and refusing any duplicate PUBLISH; when widening `/a/b` to
+`/a` is refused after `/a/c` was cancelled, the `/a` and `/a/c` listings
+reset and re-request, while `/a/b` keeps its request; on draft-18, a PUBLISH for
 a track we already SUBSCRIBEd lists it through that SUBSCRIBE and is refused
 with DUPLICATE_SUBSCRIPTION; a moq-transport subscriber resuming our paused
 PUBLISH gets the groups its filter asks for from the cache; a moq-transport subscriber gets
