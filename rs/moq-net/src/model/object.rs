@@ -66,6 +66,31 @@ impl Properties {
 	}
 }
 
+/// The Track Properties moq-net does not interpret, which a relay forwards unchanged.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+// private: passthrough
+pub(crate) struct TrackProperties {
+	/// In arrival order, with Immutable Properties (0x0b) as its serialized bytes.
+	pub values: Vec<Property>,
+	/// How the publisher serialized the keys inside Immutable Properties, when present.
+	pub immutable: Option<Encoding>,
+	/// The keys inside Immutable Properties, which egress must not restate as mutable.
+	pub sealed: Vec<u64>,
+	/// Property 0x06 means SUBGROUP_DELIVERY_TIMEOUT on the ingress draft.
+	pub delivery_timeout: bool,
+}
+
+impl TrackProperties {
+	/// Whether one is a Mandatory Track Property (0x4000-0x7FFF), which by definition is
+	/// one moq-net does not understand: the track must be neither processed nor forwarded.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub fn mandatory(&self) -> bool {
+		const MANDATORY: std::ops::RangeInclusive<u64> = 0x4000..=0x7fff;
+		self.values.iter().any(|property| MANDATORY.contains(&property.id))
+			|| self.sealed.iter().any(|id| MANDATORY.contains(id))
+	}
+}
+
 /// Object numbering is separate from the public frame's ordinal in its group.
 #[derive(Clone, Debug)]
 // private: passthrough

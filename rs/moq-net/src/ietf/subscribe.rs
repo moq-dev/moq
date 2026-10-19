@@ -1283,6 +1283,7 @@ mod tests {
 			track_alias: 42,
 			largest: None,
 			properties: Properties {
+				unknown: Default::default(),
 				dynamic_groups: false,
 				max_cache_duration: None,
 				timescale: None,
@@ -1313,6 +1314,7 @@ mod tests {
 			track_alias: 42,
 			largest: None,
 			properties: Properties {
+				unknown: Default::default(),
 				dynamic_groups: false,
 				max_cache_duration: None,
 				timescale: None,

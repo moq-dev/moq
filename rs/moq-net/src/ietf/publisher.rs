@@ -48,11 +48,32 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 /// Declaring the timescale is what opts the track into timestamps; every object Timestamp
 /// is in these units. We serve the newest group first by default, matching moq-lite. A draft
 /// without room for a property drops it on encode.
-fn track_properties(info: &track::Info, wanted: bool) -> ietf::Properties {
+///
+/// Fails with [`Error::Unsupported`] for Immutable Properties the draft cannot carry:
+/// rewriting them for its encoding would break them, and forwarding them unchanged would
+/// change their meaning.
+fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Result<ietf::Properties, Error> {
 	if !wanted {
-		return ietf::Properties::default();
+		return Ok(ietf::Properties::default());
 	}
-	ietf::Properties {
+	let mut unknown = info.properties.as_deref().cloned().unwrap_or_default();
+	let block = !matches!(version, Version::Draft14 | Version::Draft15);
+	if block
+		&& unknown
+			.immutable
+			.is_some_and(|ingress| ingress != super::object::encoding(version))
+	{
+		return Err(Error::Unsupported);
+	}
+	// Across draft-19, forwarding 0x06 would give it a different meaning, as for object
+	// properties. A mutable one is dropped; a sealed one is refused.
+	if !unknown.values.is_empty() && unknown.delivery_timeout != super::object::has_delivery_timeout(version) {
+		if block && unknown.sealed.contains(&0x06) {
+			return Err(Error::Unsupported);
+		}
+		unknown.values.retain(|property| property.id != 0x06);
+	}
+	Ok(ietf::Properties {
 		max_cache_duration: info.max_age,
 		timescale: info.timescale,
 		priority: Some(super::priority::to_wire(info.priority)),
@@ -60,7 +81,8 @@ fn track_properties(info: &track::Info, wanted: bool) -> ietf::Properties {
 		// Advertised only where an upstream session carries the request back to the
 		// original publisher; a local track has nothing to answer it.
 		dynamic_groups: info.dynamic_groups,
-	}
+		unknown,
+	})
 }
 
 /// The rendezvous cap is zero, but asking to wait still makes a missing publisher a timeout.
@@ -1215,6 +1237,15 @@ where
 						.info()
 						.timescale
 						.filter(|_| ietf::Properties::sends_timescale(self.version));
+					let mut properties = match track_properties(track.info(), msg.properties_wanted, self.version) {
+						Ok(properties) => properties,
+						Err(err) => return Ok(Subscribed::Refused(err.to_string(), err)),
+					};
+					// Through draft-15 this restates the order the subscription is served in.
+					// Later drafts carry the publisher's default instead.
+					if matches!(self.version, Version::Draft14 | Version::Draft15) {
+						properties.group_order = Some(order.into());
+					}
 
 					// Serve the track while reading updates; only abrupt closure cancels on
 					// draft-19+. A fill or joining FETCH ranks in the same subscription as the group
@@ -1264,15 +1295,7 @@ where
 							track_alias: request_id.0,
 							// The subscription floor and FETCH/FILL cap use this same snapshot.
 							largest: edge.largest,
-							properties: {
-								let mut properties = track_properties(track_serve.track.info(), msg.properties_wanted);
-								// Through draft-15 this restates the order the subscription is served
-								// in. Later drafts carry the publisher's default instead.
-								if matches!(self.version, Version::Draft14 | Version::Draft15) {
-									properties.group_order = Some(order.into());
-								}
-								properties
-							},
+							properties,
 						})
 						.await?;
 
@@ -2399,6 +2422,10 @@ where
 				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
 			}
 		}
+		let properties = match track_properties(&group.info, msg.properties_wanted, self.version) {
+			Ok(properties) => properties,
+			Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
+		};
 		let draft20 = Filter::is_draft20(self.version);
 		let end_of_track = !joined && group.complete && track.final_sequence() == group.sequence.checked_add(1);
 		// Draft-20 caps the response at Largest Object, and refuses a start past it (section
@@ -2497,7 +2524,7 @@ where
 					},
 					end_of_track,
 					end_location,
-					properties: track_properties(&group.info, msg.properties_wanted),
+					properties,
 				})
 				.await?;
 
@@ -2727,8 +2754,8 @@ where
 			})
 			.await
 		};
-		let info = match info {
-			Some(Ok(info)) => info,
+		let properties = match info.map(|info| track_properties(&info?, msg.properties_wanted, self.version)) {
+			Some(Ok(properties)) => properties,
 			Some(Err(err)) => return self.reject_track_status(stream, request_id, &err).await,
 			None => return Ok(()),
 		};
@@ -2742,7 +2769,7 @@ where
 					_ => None,
 				},
 				largest: live_edge(&track).largest,
-				properties: track_properties(&info, msg.properties_wanted),
+				properties,
 			};
 			stream.writer.varint(ietf::TrackStatusOk::id(self.version)).await?;
 			stream.writer.encode(&ok).await?;
@@ -7521,7 +7548,7 @@ mod serve_tests {
 					Version::Draft16 | Version::Draft17 => ietf::Properties::default(),
 					// Only draft-20 can carry the opt-out.
 					_ if !wanted && Filter::is_draft20(version) => ietf::Properties::default(),
-					_ => track_properties(&track::Info::timed(), true),
+					_ => track_properties(&track::Info::timed(), true, version).unwrap(),
 				};
 				assert_eq!(
 					ok,
@@ -8547,7 +8574,7 @@ mod serve_tests {
 			}
 			let properties = match ietf::Properties::sends_timescale(version) {
 				false => ietf::Properties::default(),
-				true => track_properties(&track::Info::timed(), true),
+				true => track_properties(&track::Info::timed(), true, version).unwrap(),
 			};
 			assert_eq!(ok.properties, properties, "{version}: wrong properties");
 			assert_eq!(
@@ -9108,7 +9135,7 @@ mod serve_tests {
 				let expected = match ietf::Properties::sends_timescale(version) {
 					// Drafts 14-16 write no properties, as their SUBSCRIBE_OK does not.
 					false => ietf::Properties::default(),
-					true => track_properties(&info, wanted),
+					true => track_properties(&info, wanted, version).unwrap(),
 				};
 				assert_eq!(ok.properties, expected, "{version} wanted={wanted}");
 
@@ -9129,6 +9156,169 @@ mod serve_tests {
 				}
 			}
 		}
+	}
+
+	/// The Track Properties block a publisher upstream of a relay sent on `version`: an even
+	/// property the draft defines but moq-net does not implement (OBJECT_DELIVERY_TIMEOUT),
+	/// and an odd one from the application range.
+	fn unknown_properties(version: Version) -> ietf::Properties {
+		let mut block = Vec::new();
+		let mut w = Encoder::new(&mut block, version.into());
+		w.varint(0x02).unwrap();
+		w.varint(5000).unwrap();
+		w.varint(0x3801 - 0x02).unwrap();
+		w.bytes(b"opaque").unwrap();
+		let properties =
+			crate::coding::decode_buf(&mut bytes::Bytes::from(block), version, ietf::Properties::decode).unwrap();
+		assert_eq!(properties.unknown.values.len(), 2, "{version}");
+		properties
+	}
+
+	/// Every answer describing the track forwards the properties moq-net does not interpret
+	/// unchanged, beside the ones it does, on every draft with a Track Properties block.
+	#[moq_clock::test]
+	async fn unknown_track_properties_are_forwarded() {
+		for version in [Version::Draft16, Version::Draft17, Version::Draft22] {
+			let upstream = unknown_properties(version);
+			let info = track::Info {
+				properties: Some(Arc::new(upstream.unknown.clone())),
+				..track::Info::timed()
+			};
+
+			let mut h = serve_track(version, info.clone());
+			run_live(&mut h, subscribe(Filter::NextObject, None)).await;
+			assert_eq!(
+				subscribe_ok(&h.log, version).properties.unknown,
+				upstream.unknown,
+				"{version}: SUBSCRIBE_OK"
+			);
+
+			let h = serve_track(version, info.clone());
+			let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+			group.write_frame(timestamp(), b"a".as_slice()).unwrap();
+			group.finish().unwrap();
+			settle().await;
+			let range = fetch_range(
+				version,
+				"video",
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 0 },
+			);
+			let (ok, _) = fetch_answer(run_fetch(&h, range, GroupOrder::Ascending, true).await, version);
+			assert_eq!(ok.properties.unknown, upstream.unknown, "{version}: FETCH_OK");
+
+			// Drafts 16 and 17 answer TRACK_STATUS with REQUEST_OK, which has no block.
+			if version == Version::Draft22 {
+				let h = serve_track(version, info);
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				h.publisher
+					.clone()
+					.handle_stream(
+						ietf::TrackStatus::ID,
+						ietf::Body(track_status("room", true, version).into()),
+						stream,
+					)
+					.unwrap()
+					.await;
+				let wire = h.log.writes.lock().unwrap().clone();
+				let mut buf = Decoder::new(&wire, version.into());
+				assert_eq!(buf.varint().unwrap(), ietf::TrackStatusOk::id(version));
+				let ok = ietf::TrackStatusOk::decode(&mut buf, version).unwrap();
+				assert_eq!(ok.properties.unknown, upstream.unknown, "{version}: TRACK_STATUS_OK");
+			}
+		}
+	}
+
+	/// Immutable Properties keep the bytes their publisher sealed, so they are forwarded
+	/// only to a draft that encodes them the same way, and refused elsewhere.
+	#[moq_clock::test]
+	async fn immutable_track_properties_keep_their_encoding() {
+		// Sealed: OBJECT_DELIVERY_TIMEOUT = 42 and DYNAMIC_GROUPS = 1.
+		let block = [0x0b, 4, 0x02, 42, 0x2e, 1];
+		let upstream = crate::coding::decode_buf(
+			&mut bytes::Bytes::copy_from_slice(&block),
+			Version::Draft22,
+			ietf::Properties::decode,
+		)
+		.unwrap();
+		assert!(upstream.dynamic_groups);
+		let info = track::Info {
+			dynamic_groups: true,
+			properties: Some(Arc::new(upstream.unknown.clone())),
+			..track::Info::timed()
+		};
+
+		let mut h = serve_track(Version::Draft22, info.clone());
+		run_live(&mut h, subscribe(Filter::NextObject, None)).await;
+		// DYNAMIC_GROUPS stays sealed: restating it as mutable too would fail this decode.
+		let ok = subscribe_ok(&h.log, Version::Draft22);
+		assert!(ok.properties.dynamic_groups);
+		assert_eq!(ok.properties.unknown, upstream.unknown);
+		// Its key is delta-encoded against TIMESCALE now, but the sealed bytes are verbatim.
+		assert_eq!(occurrences(&h.log, &block[1..]), 1);
+
+		// Draft 17 forbids the 7-byte varints draft 18 allows, and draft 16 has QUIC varints.
+		for version in [Version::Draft16, Version::Draft17] {
+			let h = serve_track(version, info.clone());
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			h.publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+				.await
+				.unwrap();
+			let wire = h.log.writes.lock().unwrap().clone();
+			let mut buf = Decoder::new(&wire, version.into());
+			assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version}");
+			let error = ietf::RequestError::decode(&mut buf, version).unwrap();
+			assert_eq!(
+				error.error_code,
+				request::to_code(&Error::Unsupported, request::Kind::Subscribe, version),
+				"{version}"
+			);
+		}
+	}
+
+	/// Draft 19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a track property 0x06 crosses
+	/// that boundary as an object property does: dropped when mutable, refused when sealed.
+	#[test]
+	fn track_property_0x06_does_not_cross_draft_19() {
+		let upstream = |block: &[u8]| {
+			let properties = crate::coding::decode_buf(
+				&mut bytes::Bytes::copy_from_slice(block),
+				Version::Draft18,
+				ietf::Properties::decode,
+			)
+			.unwrap();
+			track::Info {
+				properties: Some(Arc::new(properties.unknown)),
+				..Default::default()
+			}
+		};
+		let ids = |properties: ietf::Properties| properties.unknown.values.iter().map(|p| p.id).collect::<Vec<_>>();
+
+		// 0x06 = 42, 0x3801 = "hi"
+		let mut block = Vec::new();
+		let mut w = Encoder::new(&mut block, Version::Draft18.into());
+		w.varint(0x06).unwrap();
+		w.varint(42).unwrap();
+		w.varint(0x3801 - 0x06).unwrap();
+		w.bytes(b"hi").unwrap();
+		let mutable = upstream(&block);
+		assert_eq!(
+			ids(track_properties(&mutable, true, Version::Draft18).unwrap()),
+			[0x06, 0x3801]
+		);
+		assert_eq!(
+			ids(track_properties(&mutable, true, Version::Draft22).unwrap()),
+			[0x3801]
+		);
+
+		let sealed = upstream(&[0x0b, 2, 0x06, 42]);
+		assert!(track_properties(&sealed, true, Version::Draft18).is_ok());
+		assert!(matches!(
+			track_properties(&sealed, true, Version::Draft22),
+			Err(Error::Unsupported)
+		));
 	}
 
 	/// A range ending inside its group stops at its End Object, which draft 20 counts

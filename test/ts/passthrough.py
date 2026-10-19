@@ -19,7 +19,8 @@ buffer models included, must give it the verdict it gives that interval. The exp
 whatever the source is, so it is graded against the source, not against an absolute bar. Under
 `--loss-ok` gaps are reported rather than failed, and the checks report on the capture alone:
 a gap can take part of a PES or the next table with it, so the bytes being the source's says
-nothing about whether the rest decodes.
+nothing about whether the rest decodes. The capture must still end on the source's last packet:
+a stall, or a latency grown past the exporter's delay, loses the tail.
 
 Exit status is 0 when the capture passes, 1 otherwise.
 """
@@ -104,6 +105,15 @@ def place(source: list[bytes], capture: list[bytes]) -> Placement:
     return placement
 
 
+def shortfall(placement: Placement, loss_ok: bool) -> str | None:
+    """Why the source packets `placement` lacks fail the capture, or None when they do not."""
+    if placement.tail:
+        return f"the capture ends {placement.tail} packets before its source"
+    if placement.gaps and not loss_ok:
+        return "the capture is missing source packets; --loss-ok reports gaps instead"
+    return None
+
+
 def verdicts(path: Path) -> dict[str, list[str]]:
     """Every compliance.py check's status and detail for `path`."""
     import compliance
@@ -115,7 +125,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("source", type=Path)
     parser.add_argument("capture", type=Path)
-    parser.add_argument("--loss-ok", action="store_true", help="report gaps instead of failing on them")
+    parser.add_argument("--loss-ok", action="store_true", help="report gaps instead of failing on them, but not a lost tail")
     parser.add_argument("--report-json", type=Path)
     args = parser.parse_args()
 
@@ -165,8 +175,9 @@ def main() -> int:
         print("### compliance.py on the capture (report only: it has gaps)")
         for name, (status, detail) in report["compliance"]["capture"].items():
             print(f"  {name}: {status}  {detail}")
-        if not args.loss_ok:
-            print("passthrough: FAIL: the capture is missing source packets; --loss-ok reports gaps instead", file=sys.stderr)
+        reason = shortfall(placement, args.loss_ok)
+        if reason:
+            print(f"passthrough: FAIL: {reason}", file=sys.stderr)
             code = 1
 
     if args.report_json:

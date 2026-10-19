@@ -130,7 +130,7 @@ impl Message for TrackStatusOk {
 				request_id: self.request_id,
 				track_alias: 0,
 				largest: self.largest,
-				properties: self.properties,
+				properties: self.properties.clone(),
 			}
 			.encode_msg(w, version);
 		}
@@ -377,6 +377,7 @@ mod tests {
 	#[test]
 	fn test_track_status_ok_round_trip() {
 		let properties = Properties {
+			unknown: Default::default(),
 			dynamic_groups: false,
 			max_cache_duration: Some(std::time::Duration::from_secs(30)),
 			timescale: Some(crate::Timescale::MILLI),
@@ -390,7 +391,7 @@ mod tests {
 				request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 					.then_some(RequestId(3)),
 				largest,
-				properties,
+				properties: properties.clone(),
 			};
 			let decoded: TrackStatusOk =
 				decode_message(&encode_message(&msg, version), version).unwrap_or_else(|e| panic!("{version}: {e}"));
@@ -401,7 +402,7 @@ mod tests {
 					..Default::default()
 				},
 				Version::Draft16 | Version::Draft17 => Properties::default(),
-				_ => properties,
+				_ => properties.clone(),
 			};
 			assert_eq!(decoded.request_id, msg.request_id, "{version}");
 			assert_eq!(decoded.largest, largest, "{version}");
