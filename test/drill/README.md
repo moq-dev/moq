@@ -47,8 +47,10 @@ drill does assert is the half of that behavior worth grading here.
 
 The impaired cluster drills arm a one-shot ingress burst once the origin has subscribed
 to the publisher, since the gate also holds the replies and credit that subscription needs.
-The shaper keeps seeded loss, then collects surviving datagrams on the publisher's
-upstream flow until they exceed the rate bucket's burst and queue allowance. It
+The shaper collects datagrams on the publisher's upstream flow until they exceed
+the rate bucket's burst and queue allowance, exempting them from seeded loss: the
+gate also holds the acknowledgments a sender needs to replace a lost datagram, so
+a gate waiting on survivors could idle the publisher out. It
 accounts that batch at one instant, so scheduling gaps cannot silently drain the
 fault away. Transport credit holds two bucket allowances but remains smaller than
 the application burst. The first burst's newest frame also fills that window, since

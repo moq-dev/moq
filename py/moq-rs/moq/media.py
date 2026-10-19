@@ -23,12 +23,10 @@ from moq_ffi import (
 )
 from moq_ffi import (
     MoqContainerInit,
-    MoqContainerStreamInit,
     MoqError,
     MoqMediaCatalogConsumer,
     MoqMediaCatalogProducer,
     MoqMediaContainerProducer,
-    MoqMediaContainerStreamProducer,
     MoqMediaFrame,
     MoqMediaGroupConfig,
     MoqMediaGroupConsumer,
@@ -77,17 +75,6 @@ class ContainerInit:
         return MoqContainerInit(
             format=self.format, data=self.data, timebase=self.timebase._inner if self.timebase else None
         )
-
-
-@dataclass(frozen=True)
-class ContainerStreamInit:
-    """A byte-stream container format and an optional shared source timebase."""
-
-    format: ContainerFormat
-    timebase: Timebase | None = field(default=None, kw_only=True)
-
-    def _ffi(self) -> MoqContainerStreamInit:
-        return MoqContainerStreamInit(format=self.format, timebase=self.timebase._inner if self.timebase else None)
 
 
 @dataclass(frozen=True)
@@ -226,7 +213,7 @@ class ContainerProducer:
         self._inner = MoqMediaContainerProducer(broadcast._inner, init._ffi())
 
     def write(self, payload: bytes) -> None:
-        """Write a whole chunk of container bytes."""
+        """Write container bytes; the container recovers its own framing, so chunks may split anywhere."""
         self._inner.write(payload)
 
     def cut(self) -> None:
@@ -241,21 +228,6 @@ class ContainerProducer:
     def seek(self, sequence: int) -> None:
         """Start a new segment and number its groups ``sequence``."""
         self._inner.seek(sequence)
-
-    def finish(self) -> None:
-        """Finish every track this container publishes."""
-        self._inner.finish()
-
-
-class ContainerStreamProducer:
-    """Publish a container fed by a raw byte stream, which recovers its own framing."""
-
-    def __init__(self, broadcast: BroadcastProducer, init: ContainerStreamInit) -> None:
-        self._inner = MoqMediaContainerStreamProducer(broadcast._inner, init._ffi())
-
-    def write(self, payload: bytes) -> None:
-        """Push raw container bytes; chunk boundaries don't matter."""
-        self._inner.write(payload)
 
     def finish(self) -> None:
         """Finish every track this container publishes."""
@@ -464,7 +436,6 @@ __all__ = [
     "TrackProducer",
     "TrackStreamProducer",
     "ContainerProducer",
-    "ContainerStreamProducer",
     "TrackConsumer",
     "GroupConsumer",
     "Audio",
@@ -480,7 +451,6 @@ __all__ = [
     "AudioInit",
     "VideoInit",
     "ContainerInit",
-    "ContainerStreamInit",
     "Timebase",
     "catalog",
 ]

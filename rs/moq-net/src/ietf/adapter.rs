@@ -1597,7 +1597,7 @@ mod tests {
 		ietf::PublishNamespace {
 			request_id,
 			track_namespace: crate::Path::new(namespace),
-			cluster: None,
+			params: Default::default(),
 			authorization_token: None,
 		}
 	}

@@ -2,6 +2,7 @@ import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
+import * as Epoch from "../epoch.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import { hooks } from "../internal.ts";
@@ -241,7 +242,7 @@ async function acceptSubscribeNamespace(transport: WebTransport): Promise<Stream
 /** Advertise `path` inline on a SUBSCRIBE_NAMESPACE stream. */
 async function inlineNamespace(stream: Stream, path: Path.Valid, cluster?: Cluster.Advert): Promise<void> {
 	await stream.writer.u53(SubscribeNamespaceEntry.id);
-	await new SubscribeNamespaceEntry({ suffix: path, cluster }).encode(stream.writer, VERSION);
+	await new SubscribeNamespaceEntry({ suffix: path, params: cluster && { cluster } }).encode(stream.writer, VERSION);
 }
 
 /**
@@ -548,7 +549,7 @@ test("a PUBLISH_NAMESPACE that looped back through us is refused", async () => {
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("mine"),
-			cluster: { hops: [SELF, PEER], cost: 0n },
+			params: { cluster: { hops: [SELF, PEER], cost: 0n } },
 		}),
 		request,
 	);
@@ -607,7 +608,7 @@ test("a malformed PUBLISH_NAMESPACE update closes the session", async () => {
 		await new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),
-			cluster: { hops: [PEER], cost: 0n },
+			params: { cluster: { hops: [PEER], cost: 0n } },
 		}).encode(request.writer, VERSION);
 
 		expect(await request.reader.u53()).toBe(RequestOk.id);
@@ -649,7 +650,7 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),
-			cluster: { hops: [publisher, PEER], cost: 0n },
+			params: { cluster: { hops: [publisher, PEER], cost: 0n } },
 		}),
 		request,
 	);
@@ -782,7 +783,7 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),
-			cluster: { hops: [PEER], cost: 4n },
+			params: { cluster: { hops: [PEER], cost: 4n } },
 		}),
 		request,
 	);
@@ -831,7 +832,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 		new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("theirs"),
-			cluster: { hops: [HopSchema.parse(11n), PEER], cost: 0n },
+			params: { cluster: { hops: [HopSchema.parse(11n), PEER], cost: 0n } },
 		}),
 		request,
 	);
@@ -880,7 +881,7 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	const advert = new PublishNamespace({
 		requestId: 0n,
 		trackNamespace: Path.from("theirs"),
-		cluster: { hops: [PEER], cost: 0n },
+		params: { cluster: { hops: [PEER], cost: 0n } },
 	});
 	const request = await Stream.open(pair.server, { version: VERSION });
 	const handler = subscriber.runPublishNamespace(advert, request);
@@ -2264,4 +2265,209 @@ test.each(["done", "fin"] as const)("a counted set cut short by %s closes the se
 		}
 		await violationClosed(pair);
 	}
+});
+
+/** Advertise `path` inline under `epoch`, on a session that negotiated MoQ Epoch alone. */
+async function inlineEpoch(stream: Stream, path: Path.Valid, epoch: Epoch.Valid): Promise<void> {
+	await stream.writer.u53(SubscribeNamespaceEntry.id);
+	await new SubscribeNamespaceEntry({ suffix: path, params: { epoch } }).encode(stream.writer, VERSION);
+}
+
+/** Open a PUBLISH_NAMESPACE for `path` under `epoch`, returning the handler and the peer's end. */
+async function publishEpoch(
+	pair: ReturnType<typeof createMockTransportPair>,
+	subscriber: Subscriber,
+	path: Path.Valid,
+	epoch: Epoch.Valid,
+): Promise<{ handler: Promise<void>; peer: Stream }> {
+	const stream = await Stream.open(pair.server, { version: VERSION });
+	const handler = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 0n, trackNamespace: path, params: { epoch } }),
+		stream,
+	);
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(peer.reader, VERSION);
+	return { handler, peer };
+}
+
+/** The route names the advertised instance, and so does every SUBSCRIBE sent for it. */
+test("an advertised epoch reaches the route and the SUBSCRIBE", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	await acceptSubscribeNamespace(pair.client);
+
+	const epoch = Epoch.mint();
+	await publishEpoch(pair, subscriber, Path.from("room"), epoch);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start", route: { epoch } });
+
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	onTestFinished(() => track.close());
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no SUBSCRIBE stream");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	expect((await Subscribe.decode(peer.reader, VERSION)).epoch).toBe(epoch);
+	announced.close();
+});
+
+test("an inline NAMESPACE route carries its epoch", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const epoch = Epoch.mint();
+	await inlineEpoch(subscription, Path.from("room"), epoch);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start", route: { epoch } });
+	announced.close();
+});
+
+/**
+ * A NAMESPACE repeated under another epoch replaces the instance in place: the path
+ * restarts and is never absent, and a fresh reader hears the new instance standing.
+ */
+test("a NAMESPACE repeated under another epoch restarts the path in place", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const path = Path.from("room");
+	const first = Epoch.mint();
+	await inlineEpoch(subscription, path, first);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: first } });
+
+	const second = Epoch.mint();
+	await inlineEpoch(subscription, path, second);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart", route: { epoch: second } });
+
+	const fresh = subscriber.announced();
+	expect(await fresh.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: second } });
+	fresh.close();
+	announced.close();
+});
+
+/**
+ * A namespace advertised both inline and by a later PUBLISH_NAMESPACE takes another epoch
+ * from either: an inline repeat under the new epoch is the newest advertisement, not an
+ * update to the older of the two.
+ */
+test("a NAMESPACE repeat under another epoch outranks a later PUBLISH_NAMESPACE", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const path = Path.from("room");
+	const first = Epoch.mint();
+	await inlineEpoch(subscription, path, first);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: first } });
+	await publishEpoch(pair, subscriber, path, first);
+
+	const second = Epoch.mint();
+	await inlineEpoch(subscription, path, second);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart", route: { epoch: second } });
+	announced.close();
+});
+
+/**
+ * A NAMESPACE that loops back through us detaches its route, but the advertisement stays
+ * live on the wire until its NAMESPACE_DONE: a repeat that restores a clean path while
+ * losing its epoch is still the violation it would be without the loop.
+ */
+test("a reflected NAMESPACE keeps its epoch live", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, quic: pair.server, cluster: { self: SELF, peer: PEER }, epoch: true });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	onTestFinished(() => warn.mockRestore());
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const epoch = Epoch.mint();
+	const send = async (hops: Hop[], named?: Epoch.Valid) => {
+		await subscription.writer.u53(SubscribeNamespaceEntry.id);
+		await new SubscribeNamespaceEntry({
+			suffix: Path.from("room"),
+			params: { cluster: { hops, cost: 0n }, epoch: named },
+		}).encode(subscription.writer, VERSION);
+	};
+	await send([PEER], epoch);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
+	await send([SELF, PEER], epoch);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "end" });
+
+	await send([PEER]);
+	await violationClosed(pair);
+});
+
+/**
+ * Gaining or losing an epoch is not one instance replacing another, so a repeat that does
+ * either means the peer skipped the NAMESPACE_DONE.
+ */
+test.each(["gains", "loses"] as const)("a NAMESPACE repeat that %s an epoch closes the session", async (change) => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, quic: pair.server, epoch: true });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	onTestFinished(() => warn.mockRestore());
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const epoch = Epoch.mint();
+	const send = async (path: Path.Valid, named?: Epoch.Valid) => {
+		await subscription.writer.u53(SubscribeNamespaceEntry.id);
+		await new SubscribeNamespaceEntry({ suffix: path, params: { epoch: named } }).encode(
+			subscription.writer,
+			VERSION,
+		);
+	};
+	const [before, after] = change === "gains" ? [undefined, epoch] : [epoch, undefined];
+	await send(Path.from("room"), before);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
+
+	// Control: a repeat that keeps the epoch, or its absence, is not a violation.
+	await send(Path.from("room"), before);
+	await send(Path.from("sentinel"), before);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("sentinel"), kind: "start" });
+
+	await send(Path.from("room"), after);
+	await violationClosed(pair);
+});
+
+/**
+ * Two PUBLISH_NAMESPACE requests travel on independent streams, so a restarted publisher's
+ * new advertisement can land before its old one's withdrawal. The newest stands throughout.
+ */
+test("a stale instance's withdrawal arriving last keeps the newer epoch", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	await acceptSubscribeNamespace(pair.client);
+
+	const path = Path.from("room");
+	const first = Epoch.mint();
+	const old = await publishEpoch(pair, subscriber, path, first);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: first } });
+
+	const second = Epoch.mint();
+	await publishEpoch(pair, subscriber, path, second);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart", route: { epoch: second } });
+
+	old.peer.close();
+	await old.handler;
+
+	const next = await Promise.race([
+		announced.next(),
+		new Promise<"nothing">((resolve) => setTimeout(() => resolve("nothing"), 250)),
+	]);
+	expect(next).toBe("nothing");
+
+	// A fresh reader hears the newer instance as the one standing.
+	const fresh = subscriber.announced();
+	expect(await fresh.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: second } });
+	fresh.close();
+	announced.close();
 });
