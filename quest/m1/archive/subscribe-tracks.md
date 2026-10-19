@@ -117,30 +117,45 @@ TRACKS' three events (see its Plan) map as follows:
   credit the upstream may have run short of when it skipped, so an upstream
   short on capacity fails and retries the listing rather than leave an entry
   that is never removed.
-- **One SUBSCRIBE_TRACKS per session, widened in place.** SUBSCRIBE_TRACKS
-  matches every namespace under its prefix, and a session may not hold two
-  whose prefixes "share a common prefix" (PREFIX_OVERLAP). Read loosely, that
-  bans even siblings like `/a/b` and `/a/c`, and asking for the exact
-  namespace does not avoid it, since `/a` is a prefix of `/a/b`. So keep one
-  outbound SUBSCRIBE_TRACKS per session, its prefix the longest common prefix
-  of every broadcast listed through that session, and filter each lite
-  listing to its exact namespace.
-  - A listing outside the prefix, such as TRACKS(`/a`) after TRACKS(`/a/b`),
-    widens it with REQUEST_UPDATE carrying TRACK_NAMESPACE_PREFIX (draft-18
-    on). The overlap rule checks only other requests, so updating our own one
-    is legal. The update leaves existing subscriptions alone (draft-22
-    section 9.5.2), so the held PUBLISHes stay. The newly covered tracks
-    arrive as PUBLISHes, and PUBLISH_SKIPPED suffixes are read against the
-    updated prefix.
+- **One SUBSCRIBE_TRACKS per nesting chain, widened in place.**
+  SUBSCRIBE_TRACKS matches every namespace under its prefix, and a session
+  may not hold two whose prefixes "share a common prefix" (PREFIX_OVERLAP).
+  Read that strictly: two prefixes overlap only when one is a prefix of the
+  other, so their matched namespaces intersect. Draft-14 section 9.28, where
+  the rule began for SUBSCRIBE_NAMESPACE, says "a prefix of, suffix of, or
+  equal to"; draft-16 section 9.25 rephrased it as "shares a common prefix"
+  under "A subscriber cannot make overlapping namespace subscriptions"; and
+  siblings such as `/a/b` and `/a/c` match disjoint namespaces. No draft
+  forbids siblings outright. Asking for the exact namespace does not avoid
+  the rule, since `/a` is a prefix of `/a/b`, so:
+  - Siblings get separate SUBSCRIBE_TRACKS requests.
+  - Nested listings share one request at the broader of the two, never a
+    common ancestor nobody listed. TRACKS(`/a`) after TRACKS(`/a/b`) widens
+    the request in place with REQUEST_UPDATE carrying TRACK_NAMESPACE_PREFIX
+    (draft-18 on); the overlap rule checks only other requests, so updating
+    our own is legal. The update leaves existing subscriptions alone
+    (draft-22 section 9.5.2), so the held PUBLISHes stay; the newly covered
+    tracks arrive as PUBLISHes, and PUBLISH_SKIPPED suffixes are read against
+    the updated prefix.
+  - A broader listing over several sibling requests, such as TRACKS(`/a`)
+    over `/a/b` and `/a/c`, folds them. The widened prefix may not overlap
+    another request, so cancel the others first and then widen one. The
+    cancel ends only those requests, and the PUBLISH subscriptions they
+    produced keep their own streams (draft-18 section 6.1), so their entries
+    stay. If the widened request PUBLISHes a track we already hold, keep the
+    held one as the entry and refuse the new one: DUPLICATE_SUBSCRIPTION on
+    draft-18, UNINTERESTED from draft-19.
+  - Each lite listing filters its request's results to its exact namespace.
   - A refused update fails the new listing loudly, never silently narrows
-    it.
-  - The prefix never narrows while listings remain. The request is cancelled
-    when the last one closes.
-  - Cost: tracks of unlisted broadcasts between the listed ones are held too.
-    They are bounded by the `announces` cap below, and past it the listings
+    it. A request never narrows while a listing under it remains, and is
+    cancelled when the last one closes.
+  - Cost: the extra tracks held are only those of broadcasts nested under a
+    listed one, bounded by the `announces` cap below; past it the listings
     reset as for any other overflow.
-  - Rejected: cancelling the narrow request and sending a broader one. The
-    peer would PUBLISH the held tracks again, a duplicate on draft-18.
+  - Rejected: cancelling the narrow request and sending a broader one, since
+    the peer would PUBLISH the held tracks again, a duplicate on draft-18;
+    and one request per session at the common ancestor, which for `/a/b`
+    and `/c/d` is the root and holds every track the peer has.
 - **Push inventory only.** An IETF relay lists the tracks it has been
   PUBLISHed or already holds, not what an upstream would serve on SUBSCRIBE.
   A track served only on request is unlisted, which matches TRACKS' rule.
@@ -192,7 +207,9 @@ gets the data, a TRACK_ENDED on that paused SUBSCRIBE removes it,
 and a refused paused SUBSCRIBE resets the listing; TRACKS(`/a/b`) then
 TRACKS(`/a`) on one session widens the one SUBSCRIBE_TRACKS, lists `/a`'s
 tracks, and keeps `/a/b`'s held PUBLISHes, and the reverse order shares it
-unchanged; on draft-18, a PUBLISH for
+unchanged; TRACKS(`/a/b`) and TRACKS(`/a/c`) open two requests and hold no
+track outside them, and a later TRACKS(`/a`) folds both into one, keeping
+every held entry and refusing any duplicate PUBLISH; on draft-18, a PUBLISH for
 a track we already SUBSCRIBEd lists it through that SUBSCRIBE and is refused
 with DUPLICATE_SUBSCRIPTION; a moq-transport subscriber resuming our paused
 PUBLISH gets the groups its filter asks for from the cache; a moq-transport subscriber gets
