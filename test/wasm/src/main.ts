@@ -146,8 +146,8 @@ async function withPublisher<T>(
 	const broadcast = origin.createBroadcast(Moq.Path.from(path));
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const missing = broadcast.createTrack("missing");
-	const used = track.demand().used;
-	const missingUsed = missing.demand().used;
+	const used = track.demand().wanted;
+	const missingUsed = missing.demand().wanted;
 	broadcast.announce();
 	const connection = await Moq.Connection.connect({ url: new URL(relay.url), publish: origin.consume() });
 
@@ -160,7 +160,7 @@ async function withPublisher<T>(
 	};
 	const writer = (async () => {
 		while (!stopped && track.closed.peek() === undefined) {
-			if (!used.peek() || wanted === 0) {
+			if (used.peek() === undefined || wanted === 0) {
 				const advanced = new Promise<void>((resolve) => {
 					wake = resolve;
 				});
@@ -177,10 +177,10 @@ async function withPublisher<T>(
 		track.close();
 	})();
 	const rejecting = (async () => {
-		while (!missingUsed.peek() && missing.closed.peek() === undefined) {
+		while (missingUsed.peek() === undefined && missing.closed.peek() === undefined) {
 			await Promise.race([missingUsed.changed(), missing.closed]);
 		}
-		if (missingUsed.peek()) missing.close(new Error("no such track: missing"));
+		if (missingUsed.peek() !== undefined) missing.close(new Error("no such track: missing"));
 	})();
 
 	try {

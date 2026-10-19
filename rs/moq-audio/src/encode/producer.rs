@@ -272,7 +272,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// A watch-only handle to the track's subscriber demand, created eagerly so
 	/// subscription state is observable before any frames arrive. Watch it via
-	/// [`used`](moq_net::track::Demand::used) / [`unused`](moq_net::track::Demand::unused).
+	/// [`wanted`](moq_net::track::Demand::wanted) / [`wanted_changed`](moq_net::track::Demand::wanted_changed).
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
 	}

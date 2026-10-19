@@ -10714,7 +10714,7 @@ mod tests {
 	}
 
 	/// An origin front drops the source track as soon as its last reader leaves,
-	/// so the publisher's `unused()` resolves far below `track::IDLE_LINGER`.
+	/// so the publisher's demand goes unwanted far below `track::IDLE_LINGER`.
 	/// Cached groups stay on the front for the linger; a returning reader
 	/// replays them and asks the source again for groups past that edge.
 	#[moq_clock::test]
@@ -10852,7 +10852,7 @@ mod tests {
 	}
 
 	/// A front serving from another front still drops upstream on the unused edge,
-	/// so the publisher's `unused()` resolves far below `track::IDLE_LINGER` through
+	/// so the publisher's demand goes unwanted far below `track::IDLE_LINGER` through
 	/// the whole chain, and a returning reader reaches the publisher's cache afresh.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]

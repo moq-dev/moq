@@ -176,7 +176,7 @@ fn group_abort_flag_never_leads_the_group_state() {
 	});
 }
 
-/// A publisher parked on `Demand::used` drives on-demand capture, so a subscriber
+/// A publisher parked on `Demand::wanted_changed` drives on-demand capture, so a subscriber
 /// appearing on another thread must always wake it.
 #[test]
 fn subscriber_wakes_parked_demand() {
