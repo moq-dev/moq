@@ -9,13 +9,16 @@ set -euo pipefail
 ffi_dir=""
 archive=""
 if [[ $# -gt 0 ]]; then
-    if [[ $# != 2 || ( "$1" != --ffi-dir && "$1" != --archive ) ]]; then
+    if [[ $# != 2 || ("$1" != --ffi-dir && "$1" != --archive) ]]; then
         echo "Usage: $0 [--ffi-dir DIR | --archive FILE]" >&2
         exit 1
     fi
     if [[ "$1" == --archive ]]; then
         archive="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
-        [[ -f "$archive" ]] || { echo "Archive not found: $archive" >&2; exit 1; }
+        [[ -f "$archive" ]] || {
+            echo "Archive not found: $archive" >&2
+            exit 1
+        }
     else
         ffi_dir="$(cd "$2" && pwd)"
     fi
@@ -29,7 +32,7 @@ build=moq/build
 if [[ -n "$ffi_dir" ]]; then build=moq/build/prebuilt; fi
 if [[ -n "$archive" ]]; then
     build=moq/build/archive
-    version=$(tr -d '[:space:]' < moq/VERSION)
+    version=$(tr -d '[:space:]' <moq/VERSION)
     target=$(rustc -vV | sed -n 's/^host: //p')
     name="moq-cpp-$version-$target"
     extension=tar.gz

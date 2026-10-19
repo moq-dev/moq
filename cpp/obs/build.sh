@@ -40,7 +40,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --moq-archive)
             MOQ_ARCHIVE_FILE="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
-            [[ -f "$MOQ_ARCHIVE_FILE" ]] || { echo "Archive not found: $MOQ_ARCHIVE_FILE" >&2; exit 1; }
+            [[ -f "$MOQ_ARCHIVE_FILE" ]] || {
+                echo "Archive not found: $MOQ_ARCHIVE_FILE" >&2
+                exit 1
+            }
             shift 2
             ;;
         --moq-release)

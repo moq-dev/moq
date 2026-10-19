@@ -65,8 +65,14 @@ if command -v cmake >/dev/null; then
         args=("-DMOQ_ARCHIVE_FILE=$archive" -DMOQ_VERSION=0.0.0 -DMOQ_TARGET=x86_64-unknown-linux-gnu -DMOQ_ARCHIVE=tar.gz)
         case "$scenario" in
             conflict) expected="MOQ_ARCHIVE_FILE requires an empty MOQ_LOCAL" ;;
-            missing) args+=(-DMOQ_LOCAL= "-DMOQ_ARCHIVE_FILE=$build_dir/missing.tar.gz"); expected="moq-cpp archive not found" ;;
-            mismatch) args+=(-DMOQ_LOCAL= -DMOQ_TARGET=aarch64-apple-darwin); expected="moq-cpp archive does not match" ;;
+            missing)
+                args+=(-DMOQ_LOCAL= "-DMOQ_ARCHIVE_FILE=$build_dir/missing.tar.gz")
+                expected="moq-cpp archive not found"
+                ;;
+            mismatch)
+                args+=(-DMOQ_LOCAL= -DMOQ_TARGET=aarch64-apple-darwin)
+                expected="moq-cpp archive does not match"
+                ;;
         esac
         if cmake -S . -B "$build_dir/$scenario" "${args[@]}" >"$build_dir/configure.log" 2>&1; then
             echo "CMake accepted invalid archive input: $scenario" >&2
