@@ -15,6 +15,12 @@ publication and adoption steps that follow m1. m3 holds external conditions
 and speculative work. A milestone is a priority horizon; m0 maintenance does
 not make unrelated infrastructure a gate for the main-to-release cut.
 
+Milestones shift up after each major release (decided 2026-10-19): m0 is the
+current release line, m1 the next major, m2 the one after, and m3 stays the
+deferred bucket. The [release cut](/quest/m2/release/cut.md) recurs and
+performs the shift, and the hygiene audits at the end of m0 recur once per
+release behind it.
+
 The [release execution](/quest/m2/release/README.md) starts after m1 is ready.
 It publishes artifacts before downstream adoption and rollout can complete.
 Critical fixes continue to reach the existing release through backports.
