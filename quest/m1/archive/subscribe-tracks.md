@@ -37,8 +37,8 @@ TRACKS' three events (see its Plan) map as follows:
 | TRACKS event | Inbound: we answer SUBSCRIBE_TRACKS | Outbound: we send it with FORWARD=0 |
 |---|---|---|
 | Track added, with TRACK_INFO | a PUBLISH, its Track Properties carrying TRACK_INFO as SUBSCRIBE_OK does today | a PUBLISH; TRACK_INFO from its Track Properties |
-| Caught up | nothing to send: moq-transport has no marker | not needed: the lite side reports this hop's state at once, and PUBLISHes arrive as live adds |
-| Track removed | PUBLISH_DONE with TRACK_ENDED on that PUBLISH | PUBLISH_DONE on the paused PUBLISH |
+| Caught up | nothing to send: moq-transport has no marker | not needed: the lite side sends CAUGHT_UP for this hop at once, and PUBLISHes arrive as live adds |
+| Track removed | PUBLISH_DONE with TRACK_ENDED on that PUBLISH | PUBLISH_DONE with TRACK_ENDED on the paused PUBLISH; any other status fails the listing |
 
 - **Caught up has no IETF equivalent, and needs none.** Caught up means
   caught up with this hop (see TRACKS), so a relay answers a lite TRACKS at
@@ -51,9 +51,13 @@ TRACKS' three events (see its Plan) map as follows:
   SUBSCRIBE from the existing path, which joins from the cache like a lite
   one. Multiple subscriptions to one track are allowed. Resuming the paused
   PUBLISH instead starts at the live edge (draft-22 section 9.8), missing the
-  first groups. TRACK_ENDED means the track is gone; any other status
-  (GOING_AWAY, EXCESSIVE_LOAD) also ends what we know of it, so it removes the
-  entry too, and a later PUBLISH for the name is a new add. The cost is a
+  first groups. Only TRACK_ENDED ("no longer being published") is a removal,
+  and a later PUBLISH for the name is a new add. Any other status
+  (GOING_AWAY, EXCESSIVE_LOAD, ...) ends only that subscription while the
+  track may still be published, and the peer need not PUBLISH it again, so it
+  fails the listing loudly: the lite TRACKS stream resets and the lister
+  requests again, which re-issues SUBSCRIBE_TRACKS. Never turn it into a
+  removal, which would hide a live track for good. The cost is a
   paused subscription per listed track at both ends, bounded below.
 - **Prefix, not broadcast.** SUBSCRIBE_TRACKS matches every namespace under
   the prefix, so a listing of one broadcast filters to its exact namespace.
@@ -93,7 +97,8 @@ Test on mock time through a relay: a moq-transport subscriber's
 SUBSCRIBE_TRACKS receives a PUBLISH per track, including a later track and a
 later broadcast under the prefix; a lite TRACKS over a moq-transport upstream
 lists its tracks with FORWARD=0, its SUBSCRIBE gets a new track's first
-group, and a PUBLISH_DONE removes the entry; a moq-transport subscriber gets
+group, a PUBLISH_DONE with TRACK_ENDED removes the entry, and one with
+another status resets the listing; a moq-transport subscriber gets
 PUBLISH_DONE when a lite track is removed; an unsolicited PUBLISH is refused.
 
 Public API: none beyond the TRACKS hook. Wire: moq-transport support for an

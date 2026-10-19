@@ -71,10 +71,14 @@ when a track no longer exists"):
   wraps it: the name, and an implicit ID assigned per entry, as ANNOUNCE_START
   assigns Announce IDs. A lister MAY skip the Track Stream for a track it
   learned this way, since the properties are the same immutable ones.
-- **Caught up.** Mirror ANNOUNCE_OK's `Active Count`: the reply opens with a
-  count of the tracks in the initial set, sent first, so the lister knows when
-  it holds every track this hop knew when it asked; entries past the count are
-  live. Caught up means caught up with this hop, decided by the maintainer on
+- **Caught up.** An explicit CAUGHT_UP event, sent once, in order, when the
+  reader's cursor reaches what was the live head when it asked, so the lister
+  knows it holds every track this hop knew then; entries after it are live.
+  Not ANNOUNCE_OK's `Active Count`: a count sent first commits to that many
+  adds, so a track removed before a slow reader reaches its add would either
+  leave the count unmet forever or force the hop to retain every initial
+  entry per reader, which a stalled hostile reader pins. The event costs
+  about a byte more per stream and keeps each reader an O(1) cursor. Caught up means caught up with this hop, decided by the maintainer on
   2026-10-19: a relay answers at once with what it currently holds and never
   waits on its upstream, since relays never block on peers. A cold relay may
   report zero; the upstream's tracks then arrive as live adds.
@@ -124,9 +128,12 @@ Guidance:
   - A hostile publisher can churn, adding and removing tracks as fast as it
     can send. Held state is the live set, never the history, and a
     downstream cursor reads the current set rather than a log: an add and its
-    removal that a slow reader has not reached collapse to nothing, so churn
+    removal that a slow reader has not reached collapse to nothing, before or
+    after CAUGHT_UP, so churn
     costs a relay per-event work across its listings of that broadcast (the
-    same fan-out an Announce stream pays) but no backlog. Implicit IDs keep
+    same fan-out an Announce stream pays) but no backlog. Implicit IDs are
+    assigned per emitted add on each stream, never per source event, so a
+    collapsed pair consumes no ID and later removals stay in sync. They keep
     growing, which costs a varint byte now and then, not state.
   - A hostile subscriber can open many TRACKS. Each takes a subscription slot,
     downstream listings of one broadcast share one upstream TRACKS, and a
@@ -138,12 +145,13 @@ Guidance:
 - Split the JS half into its own quest if the PR grows too large to review.
 
 Test on mock time, directly and through a relay: tracks present at the
-request and the caught-up count matching them, a cold relay answering
+request arriving before CAUGHT_UP, a cold relay answering
 caught up at once with what it holds and the upstream's tracks following as
 live adds, a track added later (a
 SUBSCRIBE from the listing gets its first group from the cache), a track
 removed and created again under its name (a new ID), add and remove churn
-collapsing for a stalled reader, a removal of an unknown ID refused, the
+collapsing for a stalled reader (including an initial track removed before
+the reader reaches it, with CAUGHT_UP still arriving and later IDs in sync), a removal of an unknown ID refused, the
 broadcast
 ending the listing, a new epoch at the same path not continuing an old
 listing, a dynamic-only track never created, two downstream listings sharing
