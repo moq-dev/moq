@@ -90,6 +90,11 @@ taking the wrap that lands it nearest the clock, so media that gets more than
 13.25 hours ahead of it (a jump that far, or a long file read faster than real
 time) reads as a rewind.
 
+For a source already in MPEG-TS, `ffmpeg -c copy -f mpegts` re-muxes and drops PIDs
+(NIT, TDT/TOT, extra audio, teletext, SCTE-35), so pipe its bytes instead, for example
+`tsp -I ip 239.1.2.3:1234 -O file - | moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts`,
+or use [`import srt`](/bin/srt).
+
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
 and every other stream it does not decode (KLV, subtitles, DVB AC-3) through as
 tracks. Each such PES goes through whole, at its place on the program clock

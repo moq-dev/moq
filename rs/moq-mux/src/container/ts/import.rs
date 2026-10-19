@@ -514,6 +514,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 
 		for es in &pmt.streams {
+			let new = !self.streams.contains_key(&es.pid) && !self.sections.contains_key(&es.pid.as_u16());
 			// Stash ES descriptors so a decoded media track can record them once its
 			// (lazily created) track exists; verbatim streams record their own.
 			if self.supports_mpegts {
@@ -527,6 +528,28 @@ impl<E: catalog::Catalog> Import<E> {
 				self.ensure_section(es.pid, es.stream_type, &es.descriptors)?;
 			} else {
 				self.ensure_stream(es.pid, es.stream_type, &es.descriptors)?;
+			}
+			if new {
+				let (outcome, carriage) = match self.streams.get(&es.pid) {
+					Some(
+						Stream::H264 { .. }
+						| Stream::H265 { .. }
+						| Stream::Aac(_)
+						| Stream::Opus(_)
+						| Stream::Legacy(_),
+					) => ("track", "decoded"),
+					Some(Stream::PesPacket(_)) => ("verbatim", "pesPacket"),
+					Some(Stream::Clock) => ("dropped", "clock only"),
+					Some(Stream::Ignored) => ("dropped", "none"),
+					None => ("verbatim", "section"),
+				};
+				tracing::info!(
+					pid = es.pid.as_u16(),
+					stream_type = es.stream_type,
+					outcome,
+					carriage,
+					"TS elementary stream"
+				);
 			}
 		}
 		let pids: Vec<u16> = pmt.streams.iter().map(|es| es.pid.as_u16()).collect();
@@ -9349,6 +9372,71 @@ pub(super) mod test {
 		assert_eq!(catalog.audio.renditions.len(), 1, "only the MP2 track");
 		let audio = catalog.audio.renditions.values().next().unwrap();
 		assert_eq!(audio.codec.to_string(), "mp2");
+	}
+
+	/// Repeated PMTs are quiet, while streams added by a later PMT get their own report.
+	#[test]
+	#[tracing_test::traced_test]
+	fn pmt_reports_each_new_stream_once() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default()
+				.with_catalog(crate::catalog::hang::Catalog::<crate::container::ts::catalog::Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let mut pmt = Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(0x100).unwrap()),
+			program_info: Vec::new(),
+			streams: [0x1b, 0x06, 0x05, 0x86, 0x02]
+				.into_iter()
+				.enumerate()
+				.map(|(index, stream_type)| Es {
+					stream_type,
+					pid: Pid::new(0x100 + index as u16).unwrap(),
+					descriptors: Vec::new(),
+				})
+				.collect(),
+		};
+		import.handle_pmt(pmt.clone()).unwrap();
+		import.handle_pmt(pmt.clone()).unwrap();
+		pmt.streams.push(Es {
+			stream_type: 0x0f,
+			pid: Pid::new(0x105).unwrap(),
+			descriptors: Vec::new(),
+		});
+		import.handle_pmt(pmt).unwrap();
+		import.finish().unwrap();
+		logs_assert(|lines| {
+			let streams: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("TS elementary stream"))
+				.collect();
+			if streams.len() != 6 {
+				return Err(format!("expected one report per new stream, got {streams:?}"));
+			}
+			for (pid, stream_type, outcome, carriage) in [
+				(256, 0x1b, "track", "decoded"),
+				(257, 0x06, "verbatim", "pesPacket"),
+				(258, 0x05, "verbatim", "section"),
+				(259, 0x86, "dropped", "none"),
+				(260, 0x02, "dropped", "clock only"),
+				(261, 0x0f, "track", "decoded"),
+			] {
+				if !streams.iter().any(|line| {
+					line.contains(&format!("pid={pid} "))
+						&& line.contains(&format!("stream_type={stream_type} "))
+						&& line.contains(&format!("outcome=\"{outcome}\""))
+						&& line.contains(&format!("carriage=\"{carriage}\""))
+				}) {
+					return Err(format!("missing {outcome} report for PID {pid}: {streams:?}"));
+				}
+			}
+			Ok(())
+		});
 	}
 
 	/// A PID refused as private PES for want of a PCR routes again when a later PMT gives it a
