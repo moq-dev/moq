@@ -51,14 +51,18 @@ Watch for:
   send an update per subscriber; extend `track_subscriber_churn` in
   `rs/moq-net/benches/track.rs` with resolving readers, swept over subscriber
   count.
-- Check whether `js/net` aggregates demand the same way and needs the same
-  fix.
+- **`js/net` has the same bug and is in scope.** `combineSubscriptions` in
+  `js/net/src/track.ts` clears the aggregate start whenever any subscriber
+  has no floor, while `hooks.startTrack` records the copy's resolved start, so
+  a warm JS relay suppresses a lower absolute floor the same way. Fix it with
+  the same rule and land a JS regression test beside the Rust one.
 
 Test on mock time through a relay: a reader with an absolute floor below a
 copy an "oldest" reader resolved gets the groups upstream still caches (fails
 on `main`); the same through a cold relay gives the same answer; a late group
 below a resolved start is still delivered within max age; and a reader
-resolving alone sends no SUBSCRIBE_UPDATE.
+resolving alone sends no SUBSCRIBE_UPDATE. Cover the warm-relay case in
+`js/net` too (fails on `main`).
 
 Public API: none. Wire: no encoding change; a relay now sends a lower
 SUBSCRIBE_UPDATE floor upstream in the case above.
