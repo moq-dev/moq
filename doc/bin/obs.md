@@ -17,7 +17,7 @@ The client's automatic reconnects keep the same epoch. A stop/start, or an OBS
 auto-reconnect after the client gives up, republishes the broadcast under a new
 epoch, which peers using an epoch-capable protocol see as a new publisher run.
 
-MoQ Source follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A failed replacement leaves the current rendition playing; removing a media kind from the catalog clears it.
+MoQ Source follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A failed replacement leaves the current rendition playing; removing a media kind from the catalog clears it. It also follows a restarted or replaced publisher, playing the new one from its first keyframe.
 
 The source plays Opus, AAC-LC (mono or stereo), and PCM audio. A channel count names its speakers by the WAVE convention: 1, 2, 3 (2.1), 6 (5.1), and 8 (7.1) play on the matching OBS layout, while quad and 5.0 are upmixed to 5.1 and 6.1 to 7.1, which OBS lacks. Other counts are refused.
 
@@ -48,10 +48,11 @@ broadcast with a `.hang` suffix, use a canvas at least as tall as the top rung
 (1080p by default), and a source bitrate above that rung (the Quality profile's
 8 Mbps clears the default 5 Mbps 1080p rung).
 
-Local check before moq.pro (requires a CLI built with the `transcode` feature):
+Local check before moq.pro (requires a CLI built with the `transcode` feature, plus
+`openh264` for the software encoder a GPU-less host needs):
 
 ```bash
-cargo install --locked moq-cli --features transcode
+cargo install --locked moq-cli --features transcode,openh264
 # OBS Go Live to e.g. my-obs.hang on a local relay, then:
 moq --connect http://localhost:4443/anon --broadcast my-obs.hang transcode
 # Watch my-obs.hang/transcode.hang

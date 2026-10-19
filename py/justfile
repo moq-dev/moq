@@ -52,7 +52,8 @@ fix:
 # Run the unit tests, on a build with the test clock (`moq.testing`).
 test:
     uv sync --locked --no-install-workspace
-    just _develop --features testing
+    # `--features` replaces pyproject's list, so name the software encoder the tests use again.
+    just _develop --features testing,openh264
     uv run --no-sync pytest moq-rs/tests/ moq-ffi/tests/
 
 # Local dev build: editable install of moq-ffi (with the cdylib + uniffi
