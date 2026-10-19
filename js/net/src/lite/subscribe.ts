@@ -3,6 +3,7 @@ import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Location, Order } from "../track.ts";
+import { decodeRequestAuth, encodeRequestAuth } from "./auth.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
 import {
@@ -200,6 +201,8 @@ export class SubscribeUpdate {
 	startFrame: number;
 	/** See {@link Subscribe.endFrame}. */
 	endFrame?: number;
+	/** See {@link Subscribe.auth}: the update moves the subscription to this auth. */
+	auth?: bigint;
 
 	constructor(props: {
 		priority: number;
@@ -209,6 +212,7 @@ export class SubscribeUpdate {
 		endGroup?: number;
 		startFrame?: number;
 		endFrame?: number;
+		auth?: bigint;
 	}) {
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
@@ -217,6 +221,7 @@ export class SubscribeUpdate {
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
+		this.auth = props.auth;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -232,6 +237,7 @@ export class SubscribeUpdate {
 				await encodeStartGroup(w, version, this.startGroup);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				await encodeFrameBounds(w, version, this);
+				await encodeRequestAuth(w, version, this.auth);
 				break;
 		}
 	}
@@ -249,6 +255,7 @@ export class SubscribeUpdate {
 				const endGroup = (await r.u53()) || undefined;
 				const end = endGroup !== undefined ? endGroup - 1 : undefined;
 				const frames = await decodeFrameBounds(r, version, startGroup, end);
+				const auth = await decodeRequestAuth(r, version);
 				return new SubscribeUpdate({
 					priority,
 					order,
@@ -256,6 +263,7 @@ export class SubscribeUpdate {
 					startGroup: canonicalStartGroup(version, startGroup, frames.startFrame),
 					endGroup: end,
 					...frames,
+					auth,
 				});
 			}
 		}
@@ -305,6 +313,12 @@ export class Subscribe {
 	 */
 	endFrame?: number;
 
+	/**
+	 * The ID of the subscriber's AUTH that admits this subscription, or undefined for the
+	 * session's scope. Lite-07+.
+	 */
+	auth?: bigint;
+
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
@@ -317,6 +331,7 @@ export class Subscribe {
 		endGroup?: number;
 		startFrame?: number;
 		endFrame?: number;
+		auth?: bigint;
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
@@ -329,6 +344,7 @@ export class Subscribe {
 		this.endGroup = props.endGroup;
 		this.startFrame = props.startFrame ?? 0;
 		this.endFrame = props.endFrame;
+		this.auth = props.auth;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -348,6 +364,7 @@ export class Subscribe {
 				await encodeStartGroup(w, version, this.startGroup);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				await encodeFrameBounds(w, version, this);
+				await encodeRequestAuth(w, version, this.auth);
 				break;
 		}
 	}
@@ -370,6 +387,7 @@ export class Subscribe {
 				const endGroup = (await r.u53()) || undefined;
 				const end = endGroup !== undefined ? endGroup - 1 : undefined;
 				const frames = await decodeFrameBounds(r, version, startGroup, end);
+				const auth = await decodeRequestAuth(r, version);
 				return new Subscribe({
 					id,
 					broadcast,
@@ -381,6 +399,7 @@ export class Subscribe {
 					startGroup: canonicalStartGroup(version, startGroup, frames.startFrame),
 					endGroup: end,
 					...frames,
+					auth,
 				});
 			}
 		}

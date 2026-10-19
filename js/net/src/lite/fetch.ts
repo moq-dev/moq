@@ -2,6 +2,7 @@ import type { Milli } from "@moq/clock";
 import type * as Epoch from "../epoch.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { decodeRequestAuth, encodeRequestAuth } from "./auth.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
 import { hasFetchMaxDelay, hasFrameBounds, Version } from "./version.ts";
@@ -35,6 +36,9 @@ export class Fetch {
 	 */
 	endFrame?: number;
 
+	/** The ID of the requester's AUTH that admits this fetch, or undefined for the session's scope. Lite-07+. */
+	auth?: bigint;
+
 	constructor({
 		broadcast,
 		epoch,
@@ -44,6 +48,7 @@ export class Fetch {
 		group,
 		startFrame = 0,
 		endFrame,
+		auth,
 	}: {
 		broadcast: Path.Valid;
 		epoch?: Epoch.Valid;
@@ -53,6 +58,7 @@ export class Fetch {
 		group: number;
 		startFrame?: number;
 		endFrame?: number;
+		auth?: bigint;
 	}) {
 		this.broadcast = broadcast;
 		this.epoch = epoch;
@@ -62,6 +68,7 @@ export class Fetch {
 		this.group = group;
 		this.startFrame = startFrame;
 		this.endFrame = endFrame;
+		this.auth = auth;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -80,6 +87,7 @@ export class Fetch {
 			// The peer would serve the whole group, including frames we excluded.
 			throw new Error("frame bounds not supported for this version");
 		}
+		await encodeRequestAuth(w, version, this.auth);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Fetch> {
@@ -110,6 +118,7 @@ export class Fetch {
 			group,
 			startFrame,
 			endFrame: endFrame > 0 ? endFrame - 1 : undefined,
+			auth: await decodeRequestAuth(r, version),
 		});
 	}
 

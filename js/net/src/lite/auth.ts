@@ -16,22 +16,35 @@ function guardAuth(version: Version) {
 /** Longest AUTH_ERROR reason, in bytes, matching the Rust decoder. */
 const MAX_REASON = 8192;
 
+/** The largest varint, which no request can name as its AUTH ID plus one. */
+const MAX_ID = 0xffff_ffff_ffff_ffffn;
+
 /** The first message on an Auth Stream: the token the opener presents. Lite07+. */
 export class AuthMessage {
+	/**
+	 * The opener's number for this token, which its requests name: 0 for its first Auth
+	 * Stream, one more for each after. Never the largest varint.
+	 */
+	id: bigint;
 	token: Uint8Array;
 
-	constructor(token: Uint8Array) {
+	constructor(id: bigint, token: Uint8Array) {
+		this.id = id;
 		this.token = token;
 	}
 
 	async #encode(w: Writer) {
+		if (this.id >= MAX_ID) throw new Error("AUTH ID too large");
+		await w.u62(this.id);
 		await w.u53(this.token.byteLength);
 		if (this.token.byteLength > 0) await w.write(this.token);
 	}
 
 	static async #decode(r: Reader): Promise<AuthMessage> {
+		const id = await r.u62();
+		if (id >= MAX_ID) throw new ProtocolViolation("AUTH ID too large");
 		const size = await r.u53();
-		return new AuthMessage(await r.read(size));
+		return new AuthMessage(id, await r.read(size));
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -43,6 +56,25 @@ export class AuthMessage {
 		guardAuth(version);
 		return Message.decode(r, AuthMessage.#decode);
 	}
+}
+
+/**
+ * Encode a request's `Auth` field: the ID of the requester's AUTH that admits it, or
+ * undefined for the session's scope. Versions before lite-07 have no field to name one in.
+ */
+export async function encodeRequestAuth(w: Writer, version: Version, auth: bigint | undefined): Promise<void> {
+	if (!hasAuth(version)) {
+		if (auth !== undefined) throw new Error("auth not supported for this version");
+		return;
+	}
+	await w.u62(auth === undefined ? 0n : auth + 1n);
+}
+
+/** Decode a request's `Auth` field, the inverse of {@link encodeRequestAuth}. */
+export async function decodeRequestAuth(r: Reader, version: Version): Promise<bigint | undefined> {
+	if (!hasAuth(version)) return undefined;
+	const value = await r.u62();
+	return value === 0n ? undefined : value - 1n;
 }
 
 // Each pattern travels as its canonical text.
@@ -181,17 +213,29 @@ export async function decodeAuthReplyMaybe(r: Reader, version: Version): Promise
 export class LiteAuthWire implements AuthWire {
 	#quic: WebTransport;
 	#version: Version;
+	// Our Auth Streams are numbered from 0 in the order we present them.
+	#next = 0n;
+	// The peer's: every ID below `#arrived` has come, plus those ahead of a gap.
+	#arrived = 0n;
+	#ahead = new Set<bigint>();
 
 	constructor(quic: WebTransport, version: Version) {
 		this.#quic = quic;
 		this.#version = version;
 	}
 
-	async present(token: Uint8Array): Promise<Stream> {
+	async present(token: Uint8Array): Promise<{ stream: Stream; id: bigint }> {
+		// Numbered before the stream opens, so concurrent presents keep their order.
+		const id = this.#next++;
 		const stream = await Stream.open(this.#quic, { version: this.#version });
 		await stream.writer.u53(StreamId.Auth);
-		await new AuthMessage(token).encode(stream.writer, this.#version);
-		return stream;
+		await new AuthMessage(id, token).encode(stream.writer, this.#version);
+		return { stream, id };
+	}
+
+	/** A FIN, so the peer keeps the token for the requests still naming it until they move off. */
+	withdraw(stream: Stream): void {
+		stream.writer.close();
 	}
 
 	async read(stream: Stream): Promise<WireReply | undefined> {
@@ -217,6 +261,11 @@ export class LiteAuthWire implements AuthWire {
 	/** The stream type is already consumed by the dispatcher. */
 	async accept(stream: Stream): Promise<Uint8Array> {
 		const msg = await AuthMessage.decode(stream.reader, this.#version);
+		if (msg.id < this.#arrived || this.#ahead.has(msg.id)) {
+			throw new ProtocolViolation(`AUTH ID ${msg.id} reused`);
+		}
+		this.#ahead.add(msg.id);
+		while (this.#ahead.delete(this.#arrived)) this.#arrived++;
 		return msg.token;
 	}
 

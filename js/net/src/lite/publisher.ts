@@ -1,6 +1,6 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
-import type { Grant } from "../auth.ts";
+import type { Auth, Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
@@ -41,6 +41,7 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasAnnounceRestart,
+	hasAuth,
 	hasDatagrams,
 	hasLargest,
 	hasProbeRtt,
@@ -399,6 +400,8 @@ export class Publisher {
 	// withdraws what it no longer covers. Undefined until the peer answers, and forever on a
 	// version without AUTH, which allows everything.
 	#grant?: Getter<Grant | undefined>;
+	// The ID a route's own token goes out under (lite-07+), or undefined for the session's scope.
+	#named?: (auth: Auth | undefined) => bigint | undefined;
 	// Holds every incoming request to that grant from dispatch to its end.
 	#gate: Gate;
 
@@ -420,8 +423,8 @@ export class Publisher {
 	 * @param version - Negotiated protocol version
 	 * @param origin - Hop id shared with the Subscriber
 	 * @param publish - The origin whose broadcasts this session serves; omit to publish nothing
-	 * @param auth - The union of our tokens' grants, which bounds what we publish, and when the
-	 *   setup tokens are answered
+	 * @param auth - The union of our tokens' grants, which bounds what we publish, when the
+	 *   setup tokens are answered, and the ID a route names its own token by
 	 * @param limits - How many live requests the peer may hold
 	 *
 	 * @internal
@@ -431,13 +434,18 @@ export class Publisher {
 		version: Version,
 		hop: Hop,
 		publish?: OriginConsumer,
-		auth?: { grant: Getter<Grant | undefined>; ready: Promise<void> },
+		auth?: {
+			grant: Getter<Grant | undefined>;
+			ready: Promise<void>;
+			named?: (auth: Auth | undefined) => bigint | undefined;
+		},
 		limits: Limits = LIMITS,
 	) {
 		this.#quic = quic;
 		this.#interests = new Interests(new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" }));
 		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = auth?.grant;
+		this.#named = auth?.named;
 		this.#gate = new Gate(auth?.grant);
 		this.#ready = auth?.ready ?? Promise.resolve();
 		this.version = version;
@@ -482,9 +490,11 @@ export class Publisher {
 			return [...route.hops, this.hop];
 		};
 
+		// The ID of our token a route names on lite-07+, or undefined for the session's scope.
+		const named = (route: Route): bigint | undefined => (hasAuth(this.version) ? this.#named?.(route.auth) : undefined);
+
 		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
-		// there must not restart.
-		// moq-lite carries no per-request auth, so a swap alone sends nothing.
+		// there must not restart, and the token goes out as its ID alone.
 		const onWire = (route: Route): Route => ({
 			...route,
 			cost: hasRouteCost(this.version) ? route.cost : Cost.zero,
@@ -496,7 +506,14 @@ export class Publisher {
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "active", suffix, epoch: route.epoch, hops: wireHops(route), cost: route.cost },
+				{
+					status: "active",
+					suffix,
+					epoch: route.epoch,
+					hops: wireHops(route),
+					cost: route.cost,
+					auth: named(route),
+				},
 				this.version,
 			);
 		};
@@ -515,7 +532,7 @@ export class Publisher {
 			console.debug(`announce: broadcast=${suffix} update=true`);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "update", id, hops: wireHops(route), cost: route.cost },
+				{ status: "update", id, hops: wireHops(route), cost: route.cost, auth: named(route) },
 				this.version,
 			);
 		};
@@ -531,7 +548,14 @@ export class Publisher {
 			console.debug(`announce: broadcast=${suffix} restart=true epoch=${route.epoch}`);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "restart", id, epoch: route.epoch, hops: wireHops(route), cost: route.cost },
+				{
+					status: "restart",
+					id,
+					epoch: route.epoch,
+					hops: wireHops(route),
+					cost: route.cost,
+					auth: named(route),
+				},
 				this.version,
 			);
 		};
@@ -653,7 +677,10 @@ export class Publisher {
 						await announce(suffix, snap.route);
 					} else if (!sameInstance(prev, snap)) {
 						await restart(suffix, snap.route);
-					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
+					} else if (
+						!routesEqual(onWire(prev.route), onWire(snap.route)) ||
+						named(prev.route) !== named(snap.route)
+					) {
 						await update(suffix, snap.route);
 					}
 				}

@@ -32,8 +32,10 @@ export type WireReply = { grant: WireGrant } | { refused: Error };
  * @internal
  */
 export interface AuthWire {
-	/** Open a stream and present the token on it. */
-	present(token: Uint8Array): Promise<Stream>;
+	/** Open a stream and present the token on it, with the ID a moq-lite request names it by. */
+	present(token: Uint8Array): Promise<{ stream: Stream; id?: bigint }>;
+	/** Withdraw a presented token, whose stream then ends once the acceptor lets go. */
+	withdraw(stream: Stream): void;
 	/** The next reply on a presented token's stream, or undefined once the acceptor finished it. */
 	read(stream: Stream): Promise<WireReply | undefined>;
 	/** The token the peer presents on a stream it opened. */
@@ -59,10 +61,6 @@ function union(grants: Iterable<Grant>): Grant {
 	return { publish, subscribe, expires };
 }
 
-function cancel(): StreamError {
-	return new StreamError(StreamCode.Cancel, { message: "cancel" });
-}
-
 /** One token this side presented. */
 class Presented implements Auth {
 	readonly grant = new Signal<Grant | undefined>(undefined);
@@ -72,6 +70,8 @@ class Presented implements Auth {
 	readonly token: Uint8Array;
 
 	stream?: Stream;
+	/** The ID a moq-lite request names it by, once its stream opened. */
+	id?: bigint;
 	withdrawn = false;
 	isAnswered = false;
 	ended = false;
@@ -79,10 +79,12 @@ class Presented implements Auth {
 	#close!: (err: Error | null) => void;
 	#answer!: () => void;
 	#refuse!: (err: Error) => void;
+	#withdraw: (token: Presented) => void;
 
-	constructor(token: Uint8Array, setup: boolean) {
+	constructor(token: Uint8Array, setup: boolean, withdraw: (token: Presented) => void) {
 		this.token = token;
 		this.setup = setup;
+		this.#withdraw = withdraw;
 		this.closed = new Promise((resolve) => {
 			this.#close = resolve;
 		});
@@ -114,10 +116,7 @@ class Presented implements Auth {
 	close() {
 		if (this.withdrawn) return;
 		this.withdrawn = true;
-		// The stream's loop notices and ends the token; one still opening checks on arrival.
-		// One without a stream to come (carried only by requests) ends here.
-		if (this.stream) this.stream.abort(cancel());
-		else if (this.isAnswered) this.end(null);
+		this.#withdraw(this);
 	}
 }
 
@@ -323,7 +322,7 @@ export class AuthSession implements Handle {
 		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token.slice();
 		if (!this.#wire) {
 			// Only a request carries it, and the peer judges it there: no grant to wait for.
-			const presented = new Presented(bytes, false);
+			const presented = new Presented(bytes, false, (token) => this.#withdraw(token));
 			presented.answer();
 			this.#track(presented);
 			return presented;
@@ -341,6 +340,15 @@ export class AuthSession implements Handle {
 		if (!this.#requests || !(token instanceof Presented) || !this.#issued.has(token) || token.ended)
 			return undefined;
 		return token.token;
+	}
+
+	/**
+	 * The ID a moq-lite request names `token` by: undefined for none, for one another session
+	 * issued, or for one withdrawn or ended, leaving the request under the session's scope.
+	 */
+	named(token: Auth | undefined): bigint | undefined {
+		if (!(token instanceof Presented) || !this.#issued.has(token) || token.withdrawn || token.ended) return undefined;
+		return token.id;
 	}
 
 	/** Bumps whenever one of this session's tokens ends, so a request carrying it drops it. */
@@ -411,7 +419,7 @@ export class AuthSession implements Handle {
 	}
 
 	#present(wire: AuthWire, token: Uint8Array, setup: boolean): Presented {
-		const presented = new Presented(token, setup);
+		const presented = new Presented(token, setup, (token) => this.#withdraw(token));
 		this.#track(presented);
 		if (setup) this.#setupPending.update((n) => n + 1);
 		void this.#run(wire, presented);
@@ -428,12 +436,26 @@ export class AuthSession implements Handle {
 		});
 	}
 
+	/**
+	 * Withdraw `token`: its grant leaves the union at once, while its stream, if any, ends once
+	 * the wire lets it go. One still opening checks on arrival, and one without a stream to
+	 * come (carried only by requests) ends here.
+	 */
+	#withdraw(token: Presented) {
+		token.grant.set(undefined);
+		this.#recompute();
+		if (token.stream) this.#wire?.withdraw(token.stream);
+		else if (token.isAnswered) token.end(null);
+	}
+
 	async #run(wire: AuthWire, token: Presented) {
 		let result: Error | null = null;
 		try {
-			const stream = await wire.present(token.token);
+			const { stream, id } = await wire.present(token.token);
 			token.stream = stream;
-			if (token.withdrawn) throw cancel();
+			token.id = id;
+			// Withdrawn while its stream opened: let it go as if it had been open all along.
+			if (token.withdrawn) wire.withdraw(stream);
 
 			for (;;) {
 				let reply: WireReply | undefined;
@@ -450,13 +472,16 @@ export class AuthSession implements Handle {
 					throw new ProtocolViolation("malformed AUTH reply", { cause: err });
 				}
 				if (!reply) {
-					// The peer ended the grant without revoking it, or closed without ever
-					// answering. Close our side too, which is what settles its Issued.closed.
-					result = token.isAnswered ? null : new Unsupported();
+					// The peer ended the grant without revoking it, let a withdrawn one go, or
+					// closed without ever answering. Close our side too, which is what settles
+					// its Issued.closed.
+					result = token.isAnswered || token.withdrawn ? null : new Unsupported();
 					stream.close();
 					break;
 				}
 				if ("grant" in reply) {
+					// A withdrawn token's grant stays out of the union while it lingers.
+					if (token.withdrawn) continue;
 					const expires = reply.grant.expires === undefined ? undefined : wall() + reply.grant.expires;
 					token.grant.set({ publish: reply.grant.publish, subscribe: reply.grant.subscribe, expires });
 					this.#replied = true;

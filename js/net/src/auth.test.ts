@@ -13,10 +13,11 @@ import { Version as IetfVersion } from "./ietf/version.ts";
 import { AuthMessage as LiteAuthMessage, LiteAuthWire } from "./lite/auth.ts";
 import * as Lite from "./lite/index.ts";
 import * as LiteMessage from "./lite/message.ts";
+import { StreamId as LiteStreamId } from "./lite/stream.ts";
 import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { type Stream, Writer } from "./stream.ts";
+import { Stream, Writer } from "./stream.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
@@ -500,9 +501,14 @@ test("withdrawn queued tokens are pruned before the next application decision", 
 		const setup = await requests.next();
 		if (!setup) throw new Error("setup token missing");
 		setup.accept(grant(["a"], []));
-		const wire = new LiteAuthWire(transport, Lite.Version.DRAFT_07);
+		// Numbered past the client's own, which a reused ID would close the session over.
 		for (let index = 0; index < 3; index++) {
-			const stream = await wire.present(new TextEncoder().encode("withdrawn"));
+			const stream = await Stream.open(transport, { version: Lite.Version.DRAFT_07 });
+			await stream.writer.u53(LiteStreamId.Auth);
+			await new LiteAuthMessage(BigInt(100 + index), new TextEncoder().encode("withdrawn")).encode(
+				stream.writer,
+				Lite.Version.DRAFT_07,
+			);
 			await stream.writer.close();
 			await stream.reader.closed;
 		}
@@ -531,9 +537,9 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH 
 			this: LiteAuthWire & IetfAuthWire,
 			token,
 		) {
-			const stream = await original.call(this, token);
-			streams.push(stream);
-			return stream;
+			const presented = await original.call(this, token);
+			streams.push(presented.stream);
+			return presented;
 		});
 		let pair: Pair | undefined;
 		try {

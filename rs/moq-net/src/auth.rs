@@ -19,8 +19,9 @@
 //! Every token the peer presents is one kind of [`Request`], answered on the same queue,
 //! wherever it rode: its own AUTH stream, or a moq-transport `AUTHORIZATION TOKEN` on a
 //! SUBSCRIBE or PUBLISH_NAMESPACE. The session enforces each grant it issues. A request
-//! that carried a token is held to that token's grant alone and ends with it; any other
-//! request is held to the session's scope, which a token carried by a request never joins.
+//! that carried a token, or on moq-lite-07 named an AUTH stream's token by its ID, is held
+//! to that token's grant alone and ends with it; any other request is held to the session's
+//! scope, which a token carried by a request never joins.
 //!
 //! moq-transport draft-17+ carries the same exchange when both sides negotiate the
 //! MoQ Auth extension. Older versions, and peers that do not negotiate it, carry no

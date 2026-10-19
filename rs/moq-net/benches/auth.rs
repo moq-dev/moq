@@ -8,6 +8,11 @@
 //! accepted every token. It sweeps the routes and the sessions publishing that origin:
 //! the others carry no auth for those routes, so their cost is waking on a change that
 //! sends nothing.
+//!
+//! `named` times narrowing one of the peer's lite-07 tokens off the one route that names it,
+//! and widening it back, until the subscriber has withheld and restored that route. It
+//! sweeps the tokens the peer holds and the routes naming the others, which the change
+//! leaves alone: a cost growing with either is a scan of the whole table.
 
 #[path = "../tests/integration/support/mod.rs"]
 mod support;
@@ -206,5 +211,141 @@ fn renewal(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, admission, renewal);
+/// A lite-07 client publishing `origin` to a server subscribing into `relay`, with the
+/// server's token requests.
+async fn named_pair(origin: &origin::Producer, relay: origin::Producer) -> (Session, Session, auth::Requests) {
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let mut mock = moq_net::transport::memory::Config::default();
+	mock.protocol = Some(version.alpn().to_string());
+	let (client, server) = create_mock_session_pair(mock);
+	let client = async {
+		let (session, driver) = moq_net::Client::new()
+			.with_versions(version.into())
+			.with_publisher(origin.consume())
+			.connect(harness::now(), client)
+			.await
+			.unwrap();
+		harness::spawn(driver);
+		session
+	};
+	let server = async {
+		let request = moq_net::Server::new()
+			.with_versions(version.into())
+			.with_subscriber(relay)
+			.accept_request(harness::now(), server)
+			.await
+			.unwrap();
+		let requests = request.auth().requests().unwrap();
+		let (session, driver) = request.ok().await.unwrap();
+		harness::spawn(driver);
+		(session, requests)
+	};
+	let (client, (server, requests)) = futures::join!(client, server);
+	(client, server, requests)
+}
+
+/// Read `announced` until `path` starts (`true`) or ends (`false`).
+async fn announced(announced: &mut moq_net::announce::Consumer, path: &str, active: bool) {
+	loop {
+		match announced.next().await.unwrap() {
+			moq_net::announce::Event::Start(update) | moq_net::announce::Event::Restart(update)
+				if active && update.prefix.as_str() == path =>
+			{
+				return;
+			}
+			moq_net::announce::Event::End(update) if !active && update.prefix.as_str() == path => return,
+			_ => {}
+		}
+	}
+}
+
+fn named(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let mut group = c.benchmark_group("auth/named");
+	group.sample_size(10);
+	group.warm_up_time(Duration::from_millis(100));
+	group.measurement_time(Duration::from_millis(300));
+	for tokens in [1, 16, 128] {
+		for routes in [1, 16, 128] {
+			group.throughput(Throughput::Elements(1));
+			group.bench_with_input(
+				BenchmarkId::new(tokens.to_string(), routes),
+				&(tokens, routes),
+				|b, &(tokens, routes)| {
+					let _guard = runtime.enter();
+					let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(2).unwrap()));
+					harness::spawn(driver);
+					// No hold, so an iteration times the change rather than the origin batching it.
+					let mut config = origin::Config::new(Hop::new(1).unwrap());
+					config.update_hold = Duration::ZERO;
+					let (relay, driver) = origin::Producer::new(config);
+					harness::spawn(driver);
+					let mut watch = relay.consume().announced();
+					let (client, _server, mut requests) = runtime.block_on(named_pair(&origin, relay));
+					let handle = client.auth();
+					let (auths, token, _issued) = runtime.block_on(async {
+						let initial = requests.next().await.unwrap().accept(auth::Grant::all());
+						// Token 0 first and alone, so its grant is the one answered next.
+						let (first, token) = futures::join!(handle.add(Bytes::from_static(b"token")), async {
+							requests.next().await.unwrap().accept(auth::Grant::all())
+						});
+						let present = join_all((1..tokens).map(|_| handle.add(Bytes::from_static(b"token"))));
+						let accept = async {
+							let mut issued = vec![initial];
+							for _ in 1..tokens {
+								issued.push(requests.next().await.unwrap().accept(auth::Grant::all()));
+							}
+							issued
+						};
+						let (rest, issued) = futures::join!(present, accept);
+						let auths: Vec<_> = std::iter::once(first).chain(rest).map(Result::unwrap).collect();
+						(auths, token, issued)
+					});
+					// Route 0 alone names token 0; the rest share the other tokens, or the
+					// session's scope when there are none.
+					let broadcasts: Vec<_> = (0..routes)
+						.map(|route| {
+							let broadcast = origin.create_broadcast(format!("room/{route}").as_str()).unwrap();
+							let auth = match (route, tokens) {
+								(0, _) => Some(auths[0].clone()),
+								(_, 1) => None,
+								(route, tokens) => Some(auths[1 + route % (tokens - 1)].clone()),
+							};
+							let route = match auth {
+								Some(auth) => origin::Route::default().with_auth(auth),
+								None => origin::Route::default(),
+							};
+							broadcast.announce(route).unwrap();
+							broadcast
+						})
+						.collect();
+					runtime.block_on(async {
+						let mut pending: std::collections::HashSet<_> =
+							(0..routes).map(|route| format!("room/{route}")).collect();
+						while !pending.is_empty() {
+							if let moq_net::announce::Event::Start(update) = watch.next().await.unwrap() {
+								pending.remove(update.prefix.as_str());
+							}
+						}
+					});
+					b.iter(|| {
+						runtime.block_on(async {
+							token.update(auth::Grant::default());
+							announced(&mut watch, "room/0", false).await;
+							token.update(auth::Grant::all());
+							announced(&mut watch, "room/0", true).await;
+						})
+					});
+					drop(broadcasts);
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, admission, renewal, named);
 criterion_main!(benches);

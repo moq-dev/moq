@@ -1,6 +1,6 @@
 import { Unsupported } from "../auth.ts";
 import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
-import { SessionCode, SessionError } from "../error.ts";
+import { SessionCode, SessionError, StreamCode, StreamError } from "../error.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream, Writer } from "../stream.ts";
 import type { Session } from "./adapter.ts";
@@ -224,12 +224,16 @@ export class IetfAuthWire implements AuthWire {
 		this.#version = session.version;
 	}
 
-	async present(token: Uint8Array): Promise<Stream> {
+	async present(token: Uint8Array): Promise<{ stream: Stream }> {
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) throw new Error("no request id available");
 		const stream = await this.#session.openBi();
 		await new AuthMessage(requestId, token).encode(stream.writer, this.#version);
-		return stream;
+		return { stream };
+	}
+
+	withdraw(stream: Stream): void {
+		stream.abort(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 	}
 
 	async read(stream: Stream): Promise<WireReply | undefined> {

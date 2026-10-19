@@ -466,13 +466,14 @@ pub struct Route {
 	/// The credential the request advertising this route carries, from
 	/// [`auth::Handle`](crate::auth::Handle)'s `add`, or `None` for the session's scope.
 	///
-	/// Only a session the auth was presented on carries it, as the token on its
-	/// moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE answering a
-	/// solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer with a
-	/// PUBLISH_NAMESPACE, which carries it), and moq-lite (which rides the session's scope)
-	/// advertise the route unnamed. Swapping it is an update that renews the request with
-	/// REQUEST_UPDATE from draft 17, or ends and makes it again before. After a
-	/// reconnect, add the token on the new session and name that. Local, like
+	/// Only a session the auth was presented on carries it: as the token on its
+	/// moq-transport PUBLISH_NAMESPACE, or by its AUTH ID on a moq-lite-07 announcement,
+	/// which the peer then holds to that token's grant alone. Any other session, the inline
+	/// NAMESPACE answering a solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and
+	/// 15 answer with a PUBLISH_NAMESPACE, which carries it), and older moq-lite advertise
+	/// the route unnamed. Swapping it is an update that renews the request: in place on
+	/// moq-lite, with REQUEST_UPDATE from draft 17, or by ending and making it again before.
+	/// After a reconnect, add the token on the new session and name that. Local, like
 	/// [`Self::source`]: a relay never forwards it.
 	pub auth: Option<crate::auth::Auth>,
 

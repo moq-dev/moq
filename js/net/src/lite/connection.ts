@@ -162,9 +162,11 @@ export class Connection implements Established {
 			this.abort();
 		});
 
+		const auth = this.#auth;
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish, {
-			grant: this.#auth.grant,
-			ready: this.#auth.setupAnswered(),
+			grant: auth.grant,
+			ready: auth.setupAnswered(),
+			named: (token) => auth.named(token),
 		});
 		this.#subscriber = new Subscriber(
 			this.#quic,

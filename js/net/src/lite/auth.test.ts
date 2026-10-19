@@ -2,7 +2,15 @@ import { expect, test } from "bun:test";
 import { SessionCode } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
-import { AuthError, AuthMessage, AuthOk, decodeAuthReplyMaybe, LiteAuthWire } from "./auth.ts";
+import {
+	AuthError,
+	AuthMessage,
+	AuthOk,
+	decodeAuthReplyMaybe,
+	decodeRequestAuth,
+	encodeRequestAuth,
+	LiteAuthWire,
+} from "./auth.ts";
 import * as Lite from "./index.ts";
 import * as Message from "./message.ts";
 
@@ -34,10 +42,70 @@ async function roundTrip(write: (w: Writer) => Promise<void>): Promise<Reader> {
 	return new Reader(undefined, buf, Lite.Version.DRAFT_07);
 }
 
-test("AUTH round-trips its token", async () => {
-	const r = await roundTrip((w) => new AuthMessage(new TextEncoder().encode("jwt")).encode(w, Lite.Version.DRAFT_07));
-	const msg = await AuthMessage.decode(r, Lite.Version.DRAFT_07);
-	expect(new TextDecoder().decode(msg.token)).toBe("jwt");
+test("AUTH round-trips its ID and token", async () => {
+	for (const id of [0n, 0xffff_ffff_ffff_fffen]) {
+		const r = await roundTrip((w) =>
+			new AuthMessage(id, new TextEncoder().encode("jwt")).encode(w, Lite.Version.DRAFT_07),
+		);
+		const msg = await AuthMessage.decode(r, Lite.Version.DRAFT_07);
+		expect(msg.id).toBe(id);
+		expect(new TextDecoder().decode(msg.token)).toBe("jwt");
+	}
+});
+
+// The same bytes as `auth_golden` in `rs/moq-net/src/lite/auth.rs`.
+test("AUTH matches the Rust encoding", async () => {
+	const r = await roundTrip((w) => new AuthMessage(1n, new TextEncoder().encode("jwt")).encode(w, Lite.Version.DRAFT_07));
+	expect([...(await r.readAll())]).toEqual([0x05, 0x01, 0x03, ...new TextEncoder().encode("jwt")]);
+});
+
+// No request can name the largest varint as its ID plus one, so neither side sends it.
+test("the largest AUTH ID is refused", async () => {
+	const max = 0xffff_ffff_ffff_ffffn;
+	await expect(roundTrip((w) => new AuthMessage(max, new Uint8Array()).encode(w, Lite.Version.DRAFT_07))).rejects.toThrow();
+	const r = await roundTrip((w) =>
+		Message.encode(w, async (body) => {
+			await body.u62(max);
+			await body.u53(0);
+		}),
+	);
+	await expect(AuthMessage.decode(r, Lite.Version.DRAFT_07)).rejects.toThrow("AUTH ID too large");
+});
+
+test("a request names an AUTH as its ID plus one", async () => {
+	for (const auth of [undefined, 0n, 0xffff_ffff_ffff_fffen]) {
+		const r = await roundTrip((w) => encodeRequestAuth(w, Lite.Version.DRAFT_07, auth));
+		expect(await decodeRequestAuth(r, Lite.Version.DRAFT_07)).toBe(auth);
+	}
+	// Older versions have no field: nothing to read, and nothing to name.
+	const r = await roundTrip((w) => encodeRequestAuth(w, Lite.Version.DRAFT_06, undefined));
+	expect([...(await r.readAll())]).toEqual([]);
+	await expect(roundTrip((w) => encodeRequestAuth(w, Lite.Version.DRAFT_06, 0n))).rejects.toThrow();
+});
+
+test("a reused AUTH ID is a protocol violation", async () => {
+	const wire = new LiteAuthWire({} as WebTransport, Lite.Version.DRAFT_07);
+	const accept = async (id: bigint) => {
+		const data = await (await roundTrip((w) => new AuthMessage(id, new Uint8Array()).encode(w, Lite.Version.DRAFT_07))).readAll();
+		const stream = new Stream({
+			readable: new ReadableStream({
+				start(controller) {
+					controller.enqueue(data);
+					controller.close();
+				},
+			}),
+			writable: new WritableStream(),
+			version: Lite.Version.DRAFT_07,
+		});
+		return wire.accept(stream);
+	};
+	// Out of order is fine; each ID only once, ahead of a gap or below it.
+	await accept(1n);
+	await accept(0n);
+	await expect(accept(1n)).rejects.toThrow("reused");
+	await expect(accept(0n)).rejects.toThrow("reused");
+	await accept(3n);
+	await expect(accept(3n)).rejects.toThrow("reused");
 });
 
 test("AUTH_OK and AUTH_ERROR round-trip behind their type", async () => {
@@ -116,7 +184,7 @@ test.each([
 	["lite-05", Lite.Version.DRAFT_05],
 	["lite-06", Lite.Version.DRAFT_06],
 ])("%s carries no AUTH", async (_, version) => {
-	await expect(roundTrip((w) => new AuthMessage(new Uint8Array()).encode(w, version))).rejects.toThrow();
+	await expect(roundTrip((w) => new AuthMessage(0n, new Uint8Array()).encode(w, version))).rejects.toThrow();
 });
 
 test("unsupported after AUTH_OK is an AUTH_ERROR on the wire", async () => {

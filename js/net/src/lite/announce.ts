@@ -3,6 +3,7 @@ import { ProtocolViolation } from "../error.ts";
 import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { decodeRequestAuth, encodeRequestAuth } from "./auth.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
 import {
@@ -55,7 +56,8 @@ export type AnnounceBroadcast =
 	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
 	 * `undefined` on a wire with no room for one. On lite-07, `suffix` follows the
 	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. The epoch
-	 * (lite-07+) changes only with a `restart`. */
+	 * (lite-07+) changes only with a `restart`. `auth` (lite-07+) is the ID of the
+	 * publisher's AUTH that admits the route, or undefined for the session's scope. */
 	| {
 			status: "active";
 			suffix: Path.Valid;
@@ -64,6 +66,7 @@ export type AnnounceBroadcast =
 			cost?: Cost;
 			pathBase?: Base;
 			hopBase?: Base;
+			auth?: bigint;
 	  }
 	/** Pre-lite-06: a broadcast is no longer available, retracted by path. */
 	| { status: "ended"; suffix: Path.Valid }
@@ -72,11 +75,11 @@ export type AnnounceBroadcast =
 	| { status: "endedId"; id: bigint }
 	/** Lite06+: atomically replace the metadata of the announcement with this id (e.g. a
 	 * new hop chain after a relay failover, or a route whose cost moved). The id stays live. */
-	| { status: "update"; id: bigint; hops: Hop[]; cost?: Cost; hopBase?: Base }
+	| { status: "update"; id: bigint; hops: Hop[]; cost?: Cost; hopBase?: Base; auth?: bigint }
 	/** Lite07+: another publisher instance replaces the announcement with this id, under
 	 * the epoch given (or none). What the receiver resolved under its prefix is the old
 	 * instance. The id stays live. */
-	| { status: "restart"; id: bigint; epoch?: Epoch.Valid; hops: Hop[]; cost?: Cost; hopBase?: Base }
+	| { status: "restart"; id: bigint; epoch?: Epoch.Valid; hops: Hop[]; cost?: Cost; hopBase?: Base; auth?: bigint }
 	/** An unknown lite-06+ announce type, skipped by length. Does not assign an id. */
 	| { status: "skipped" };
 
@@ -221,6 +224,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			await encodeEpoch(w, version, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
+			await encodeRequestAuth(w, version, msg.auth);
 			break;
 		case "endedId":
 			await w.u62(msg.id);
@@ -229,12 +233,14 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			await w.u62(msg.id);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
+			await encodeRequestAuth(w, version, msg.auth);
 			break;
 		case "restart":
 			await w.u62(msg.id);
 			await encodeEpoch(w, version, msg.epoch);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
+			await encodeRequestAuth(w, version, msg.auth);
 			break;
 		case "ended":
 			// The pre-lite-06 path-form retraction has no place on lite-06.
@@ -270,14 +276,16 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 			const path = await decodePath(r, version);
 			const epoch = await decodeEpoch(r, version);
 			const hops = await decodeHopsBlock(r, version);
-			return { status: "active", ...path, epoch, ...hops, cost: await decodeRouteCost(r, version) };
+			const cost = await decodeRouteCost(r, version);
+			return { status: "active", ...path, epoch, ...hops, cost, auth: await decodeRequestAuth(r, version) };
 		}
 		case ANNOUNCE_END:
 			return { status: "endedId", id: await r.u62() };
 		case ANNOUNCE_UPDATE: {
 			const id = await r.u62();
 			const hops = await decodeHopsBlock(r, version);
-			return { status: "update", id, ...hops, cost: await decodeRouteCost(r, version) };
+			const cost = await decodeRouteCost(r, version);
+			return { status: "update", id, ...hops, cost, auth: await decodeRequestAuth(r, version) };
 		}
 		case ANNOUNCE_RESTART: {
 			// Unknown before lite-07: skipped below like any other.
@@ -285,7 +293,8 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 			const id = await r.u62();
 			const epoch = await decodeEpoch(r, version);
 			const hops = await decodeHopsBlock(r, version);
-			return { status: "restart", id, epoch, ...hops, cost: await decodeRouteCost(r, version) };
+			const cost = await decodeRouteCost(r, version);
+			return { status: "restart", id, epoch, ...hops, cost, auth: await decodeRequestAuth(r, version) };
 		}
 	}
 	// Skip the length-prefixed body so an earlier Lite06 build negotiating
@@ -440,11 +449,15 @@ export class AnnounceRequest {
 	 * the wire earlier, so a value set here is ignored when encoding for an older version
 	 * and decodes as false. */
 	hidden: boolean;
+	/** Lite07+: the ID of the subscriber's AUTH that admits the request, or undefined for
+	 * the session's scope. */
+	auth?: bigint;
 
-	constructor(prefix: Path.Valid, excludeHop: bigint = 0n, hidden = false) {
+	constructor(prefix: Path.Valid, excludeHop: bigint = 0n, hidden = false, auth?: bigint) {
 		this.prefix = prefix;
 		this.excludeHop = excludeHop;
 		this.hidden = hidden;
+		this.auth = auth;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -455,13 +468,14 @@ export class AnnounceRequest {
 		if (hasHidden(version)) {
 			await w.bool(this.hidden);
 		}
+		await encodeRequestAuth(w, version, this.auth);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<AnnounceRequest> {
 		const prefix = Path.decode(await r.string());
 		const excludeHop = hasExcludeHop(version) ? await r.u62() : 0n;
 		const hidden = hasHidden(version) ? await r.bool() : false;
-		return new AnnounceRequest(prefix, excludeHop, hidden);
+		return new AnnounceRequest(prefix, excludeHop, hidden, await decodeRequestAuth(r, version));
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
