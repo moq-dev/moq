@@ -2,15 +2,13 @@
 
 ## Goal
 
-A client's credentials can travel inside the session instead of the URL, and
-several of them can ride one connection. Every client in this repository
-takes tokens as configuration separate from the address, presents each on its
-own AUTH stream at setup, and the relay admits the session on what the URL
-carried and widens it as the streams are answered. Peers without the AUTH
-stream keep working unchanged: the client puts the first token in the URL whenever any
-version it offers has no AUTH stream, so nothing is refused and nothing goes
-silent, and the token leaves the URL for good only once the offered set is
-AUTH-capable.
+Several credentials can ride one connection. Every client in this repository
+takes tokens as configuration separate from the address, puts the first in
+the CONNECT request, presents each other one on its own AUTH stream at setup,
+and the relay admits the session on what the CONNECT request carried and
+widens it as the streams are answered. Peers without the AUTH stream keep
+working unchanged, so nothing is refused and nothing goes silent, and a
+session's first requests wait on no AUTH.
 
 ## Plan
 
@@ -38,12 +36,14 @@ already carries the full pattern grant.
   its own AUTH stream so the accepted grant union remains live. Keep `?jwt=`
   as the fallback for peers without AUTH. Choose the public credential-source
   API while implementing this quest.
-- Presenting: WebTransport negotiates the moq version as a subprotocol of
-  the CONNECT request that carries the URL, so the client cannot wait to
-  learn whether the peer speaks AUTH. The client copies the first configured
-  token into the URL query whenever any offered version lacks AUTH (every
-  published lite version, since AUTH lands in the wip one), and omits it once every offered version has the
-  stream. A token that went into the URL or the setup option is the
+- Presenting: ✅ Decided 2026-10-19 (maintainer, closing
+  [#5927](https://github.com/moq-dev/moq/pull/5927)): the client always
+  copies the first configured token into the CONNECT request, the URL query
+  today and an auth header once browsers allow one, whatever versions it
+  offers. The acceptor judges it before the session starts, so no request
+  waits on an AUTH for it, and WebTransport negotiates the moq version in that
+  same request, so the client could not wait to learn whether the peer speaks
+  AUTH anyway. A token that went into the URL or the setup option is the
   connection credential, and the empty-token stream is its one and only
   stream; every other configured token gets its own AUTH stream on an
   AUTH-capable session, so no token is ever granted twice. On moq-transport
@@ -53,29 +53,24 @@ already carries the full pattern grant.
   auth server sees the same credential twice: `moq auth serve` admits a SETUP
   token equal to the `?jwt=` value and refuses two different ones
   (`serve::Refusal::TwoTokens`). Never send different values in the two places.
-- The relay admits on the URL, then widens. An anonymous connection today is
-  admitted with the public grant when one is configured and refused
-  otherwise; with this quest a connection with no URL credential and no
-  public grant is held for a short deadline after SETUP for its first
-  accepted AUTH before being refused, so an AUTH-capable client with tokens
-  only in band gets in and a client that never presents anything is still
-  refused. The URL query stays the connect-time credential in the `moq_auth::Request`.
+- The relay admits on the URL, then widens. An anonymous connection is
+  admitted with the public grant when one is configured and refused at
+  connect otherwise, as today: a client with tokens always carries one in the
+  CONNECT request, so the relay needs no admission deadline. The URL query stays the connect-time credential in the `moq_auth::Request`.
 - A URL credential is still refused at connect when both arms reject it, and
   an in-band refusal is an AUTH_ERROR after connect.
-- Docs: `doc/bin/cli.md`, `doc/bin/relay/auth.md` (the admission deadline and
-  that the URL token is one member of the union), `doc/lib/*` client
+- Docs: `doc/bin/cli.md`, `doc/bin/relay/auth.md` (that the URL token is one
+  member of the union), `doc/lib/*` client
   configuration, and the example invocations carrying `?jwt=` in `doc/`,
   `demo/`, and the READMEs, keeping the URL form documented as the way to
   reach an older relay.
 - Tests: a client with a configured token against an AUTH-capable relay is
-  scoped exactly as the URL variant and the URL carries the token only while
-  an old version is offered; the same client against a lite-05 relay still
+  scoped exactly as the URL variant, with the first token in the URL; the
+  same client against a lite-05 relay still
   authenticates through the URL; a moq-transport client offering a draft
   without AUTH, carrying the token in both the URL and the setup option, is
-  admitted by `moq auth serve`; two configured tokens union; a client with
-  in-band tokens only and no public grant is admitted, and one that presents
-  nothing is refused at the deadline; the cross-language harness runs with
-  tokens configured.
+  admitted by `moq auth serve`; two configured tokens union; the
+  cross-language harness runs with tokens configured.
 
 Additive.
 
