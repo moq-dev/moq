@@ -21,7 +21,7 @@ export function checkU53(value: number): void {
 }
 
 /** Refuse a frame that is not an integer in `0..=2^32-1`. */
-export function checkU32(value: number): void {
+function checkU32(value: number): void {
 	if (!Number.isInteger(value) || value < 0 || value > MAX_U32) throw new Failure("identity");
 }
 
