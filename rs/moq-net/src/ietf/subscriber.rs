@@ -459,12 +459,18 @@ impl Target {
 /// The model's info for a track the publisher described (SUBSCRIBE_OK or TRACK_STATUS_OK).
 ///
 /// The copy keeps microsecond timestamps whatever units the publisher declared: each
-/// object converts on receipt.
+/// object converts on receipt. A sealed TIMESCALE is the exception: it travels downstream
+/// unchanged, so the copy keeps its units for the timestamps it labels.
 fn accepted_info(properties: &ietf::Properties) -> track::Info {
-	// Normalized to microseconds, but only for a track that declared a timescale: an
-	// untimed one must not gain a timeline downstream.
+	// Only for a track that declared a timescale: an untimed one must not gain a timeline
+	// downstream.
+	let sealed = properties.unknown.sealed.contains(&super::properties::TIMESCALE);
 	let mut info = track::Info::default()
-		.with_timescale(properties.timescale.map(|_| Timescale::MICRO))
+		.with_timescale(
+			properties
+				.timescale
+				.map(|timescale| if sealed { timescale } else { Timescale::MICRO }),
+		)
 		.with_max_age(properties.max_cache_duration)
 		.with_priority(super::priority::from_wire(properties.priority.unwrap_or(128)));
 	// This session carries NEW_GROUP_REQUEST back to the original publisher.
@@ -2794,7 +2800,7 @@ where
 			Ok(Some(accepted)) if accepted.properties.unknown.mandatory() => {
 				let err = Error::UnsupportedExtension;
 				tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, %err, "subscribe refused");
-				self.cancel_subscribe(stream, request_id).await;
+				// Refuse before waiting on the peer to acknowledge the cancellation.
 				if let Some(pending) = self.take_pending(request_id) {
 					pending.reject(err.clone());
 				}
@@ -2802,6 +2808,7 @@ where
 				if let Some(idle) = resumed {
 					let _ = idle.track.abort(err);
 				}
+				self.cancel_subscribe(stream, request_id).await;
 				return None;
 			}
 			Ok(Some(accepted)) => accepted,
@@ -15228,6 +15235,27 @@ mod track_property_tests {
 					probe.state.lock().subscribes.is_empty(),
 					"{version}: the subscription was kept"
 				);
+			}
+		}
+	}
+
+	/// A mutable TIMESCALE is normalized to microseconds, but a sealed one travels downstream
+	/// unchanged, so the track keeps its units for the timestamps it labels.
+	#[moq_clock::test]
+	async fn a_sealed_timescale_keeps_its_units() {
+		for version in VERSIONS {
+			let timescale = Property {
+				id: super::super::properties::TIMESCALE,
+				value: Value::Int(1000),
+			};
+			let sealed = Property {
+				id: 0x0b,
+				value: Value::Bytes(block(version, std::slice::from_ref(&timescale)).into()),
+			};
+			for (property, units) in [(timescale, Timescale::MICRO), (sealed, Timescale::MILLI)] {
+				let (subscribed, _probe) = subscribe(version, &block(version, &[property])).await;
+				let subscriber = subscribed.unwrap_or_else(|err| panic!("{version}: {err}"));
+				assert_eq!(subscriber.info().timescale, Some(units), "{version}");
 			}
 		}
 	}

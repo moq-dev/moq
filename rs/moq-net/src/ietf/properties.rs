@@ -30,7 +30,7 @@ const MAX_CACHE_DURATION: u64 = 0x04;
 ///
 /// Track scope: it declares the units of every object Timestamp on the track, and its
 /// presence is what opts the track into timestamps at all.
-const TIMESCALE: u64 = 0x08;
+pub(super) const TIMESCALE: u64 = 0x08;
 
 /// DEFAULT_PUBLISHER_GROUP_ORDER (0x22), the publisher's delivery preference for the track.
 ///

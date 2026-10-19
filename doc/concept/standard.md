@@ -69,8 +69,8 @@ choices. They follow the product model.
   [Draft 18 §2.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-18.html#section-2.5)
   says a relay that does not understand a property still forwards and caches
   it. Rust moq-transport relay paths do so, for object properties and for the
-  track properties in `SUBSCRIBE_OK`, `FETCH_OK`, and `TRACK_STATUS_OK` (drafts 14
-  and 15 have no room for the latter); the public API, plain moq-lite, and
+  track properties in `SUBSCRIBE_OK` and `FETCH_OK` from draft 16, and in
+  `TRACK_STATUS_OK` from draft 18; the public API, plain moq-lite, and
   JavaScript [leave other per-object metadata out](/concept/moq-lite#what-moq-lite-leaves-out).
   Immutable property blocks retain their bytes. Forwarding is refused when the
   negotiated drafts use incompatible key or integer encodings, or when the block
