@@ -39,9 +39,11 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     for received groups: with arrival order immediate and the judgments
     gated, the whole moq-net suite passes except the two tests that assert
     the old design. Consequences:
-    - `largest()` stops reporting a frameless newest group as (N, 0) and
-      reports the last frame that exists. This touches
-      [Live largest location](/quest/m1/largest.md); align with it there.
+    - The cache's internal largest stops reporting a frameless newest group
+      as (N, 0) and reports the last frame that exists. The public
+      `largest()` stream (#5725) deliberately does not: the maintainer
+      decided on 2026-10-17 that it counts every sequence seen, an empty
+      group at its head, so a late group below it never moves it.
     - Regression guard: `rejoin_waits_for_the_answers_first_frame`
       (`rs/moq-net/tests/integration/rejoin.rs`, fails when the judgments count a
       frameless group) and
@@ -74,6 +76,14 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     crate-internal duplicates. `track::Producer` keeps `Clone`: several
     writers creating groups is legitimate, and `claim_sequence` already
     refuses a duplicate sequence.
+    - Dropping `Clone` and the crate-private non-writing handle moved to
+      [One group writer](/quest/m1/public-model/group-writer.md), which
+      names the handle `group::Handle` and deletes `FrameOpen` (decided
+      2026-10-18, #5892), so the backstop above goes. This item keeps the
+      public owned chunked writer. Its callers that hold a
+      `&mut group::Producer` (hang's `Frame::write_to`, moq-mux's LOC and
+      fMP4 encoders) cannot call a consuming `create_frame(self)`; weigh
+      that before landing it.
     - Compile probe at dd95d5804: 26 `group::Producer` clone sites, 16
       model-internal and 7 in the sessions (kept by the crate-private
       duplicate), and 3 outside the crate (2 in
@@ -186,6 +196,10 @@ JS items (`js/net/src/`): mirror each Rust decision under the same name.
 Tests: each public call gets a mock-time test in its language, and the
 built-in subscribers move onto the public calls, so their existing suites
 cover the behavior.
+
+## Required
+
+- [One group writer](/quest/m1/public-model/group-writer.md) - the non-Clone writer the owned chunked writer builds on
 
 ## Related
 

@@ -340,5 +340,61 @@ Rust Criterion coverage includes `moq-pattern`'s
 and payload size; CMAF also varies track count. Separate frame and byte rates
 use the same fixtures, with byte rates counting the encoded stream size.
 Fixture generation, publisher setup and destruction stay outside timing.
-The existing shared Rust benchmark nightly invocation runs both targets; their `--test` mode
-exercises every case without making timing claims.
+The shared Rust benchmark nightly invocation measures both targets in quick mode.
+
+## Nightly trends
+
+The trend site will be at <https://moq-dev.github.io/moq/bench/> once the
+maintainer enables GitHub Pages with **Source: GitHub Actions**. The Nightly
+workflow keeps history on one `gh-pages` branch and deploys the generated
+`github-action-benchmark` charts explicitly. The publisher runs only on `main`,
+serializes history writes, and leaves regression alerts and comments disabled.
+Enabling Pages is a separate repository setting; merging the workflow does not
+change it. Until it is enabled, the Nightly's Benchmark site job still records
+history on `gh-pages`, then fails at deployment.
+
+The charts include these measurements:
+
+- Binding delivery in MB/s, process CPU in ms/MB, sync calls in ns, and each
+  wrapper's ratio to `rust-ffi`. Ratios above 1 mean more cost than Rust on the
+  same host, including for throughput, where the ratio is Rust/wrapper.
+- Rust Criterion mean ns per iteration, with the measured confidence interval.
+  The `net-cpu` source and the moq-quic targets time thread CPU; the others
+  time elapsed time. The Rust bench targets job measures them with a short warmup
+  and Criterion's quick mode. Per-group benchmark settings can override the default warmup. Quick estimates
+  trade precision for nightly runtime; use full paired runs to assess a change.
+- JS benchmark CSV time columns (`ns`, `us`, `ms`, and their per-operation
+  variants), retaining every workload dimension in each series name.
+
+Hosted runners vary across nights. Raw trends are informational, and binding
+ratios compare languages within one run. A failed suite contributes no point;
+malformed, empty, nonfinite, or duplicate measurements fail validation. The
+nightly artifacts retain the reports, raw JS output, and each Criterion run's
+metadata and estimates for 45 days. Relay load, audio quality, and the Rust
+benchmark tests job's nextest output do not enter these charts.
+
+Reproduce the chart inputs locally:
+
+```bash
+nix develop --command just bench-ffi
+nix develop --command just gh nightly rust-bench
+nix develop --command just gh nightly js
+```
+
+The latter two write `target/bench/nightly/{rust-bench,js}/report.json`. For a focused
+measured Rust run using the same evidence lifecycle:
+
+```bash
+nix develop --command env MOQ_BENCH_LABEL=pattern MOQ_BENCH_RUNS=/tmp/criterion-runs.txt just gh criterion -p moq-pattern --bench matching
+nix develop --command just gh benchmark-report rust /tmp /tmp/rust-report.json
+```
+
+A new source uploads a `bench-*` artifact containing `report.json`, a nonempty
+JSON array of `{ "name": "case/dimensions", "unit": "ns", "value": 123 }`,
+and `outcome.json` containing `{ "status": "success" }`. Names must be unique
+within a source; dimensions belong in the name. Supported units are `ns`, `us`,
+`µs`, `ms`, `s`, `ms/MB`, `x`, `bytes`, `B`, `MiB`, `MB/s`, `MiB/s`, `B/s`,
+`ops/s`, and `frames/s`. Optional `range` and `extra` fields retain uncertainty
+and context. Validate and split sources into cost and throughput charts with
+`just gh benchmark-report prepare INPUT_DIRECTORY OUTPUT_DIRECTORY`; extending
+the site requires no new chart renderer or data branch.

@@ -10,6 +10,12 @@ site.
 
 ## Plan
 
+The pipeline is in review. Remaining: the maintainer enables repository Pages
+with **Source: GitHub Actions** (until then the Nightly's Benchmark site job
+fails at deployment), then verifies the first Nightly deployment at
+<https://moq-dev.github.io/moq/bench/>. The "Rust benchmark tests" job is not
+charted yet: its nextest benchmarks print no structured measurements.
+
 Decided with the maintainer on 2026-10-15:
 
 - **GitHub Pages via github-action-benchmark**: the nightly pushes each

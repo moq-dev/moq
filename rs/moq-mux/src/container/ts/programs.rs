@@ -44,10 +44,13 @@ struct Program {
 impl Program {
 	/// Announce the broadcast once its catalog has gone out.
 	fn announce_if_listed(&mut self) -> anyhow::Result<bool> {
-		let Some((route, listed)) = &self.pending else {
+		let Some((route, listed)) = &mut self.pending else {
 			return Ok(true);
 		};
-		if listed.latest().is_none() {
+		if !matches!(
+			listed.poll_largest(&kio::Waiter::noop()),
+			std::task::Poll::Ready(Some(_))
+		) {
 			return Ok(false);
 		}
 		self.broadcast

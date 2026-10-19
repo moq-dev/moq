@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Track readers follow `largest()` instead of reading `latest()` (#5725)
+
+`latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.
+Await `largest()` and read `.group` where you used the sequence; where you read the edge without waiting, poll `poll_largest` once with `kio::Waiter::noop()`.
+It streams the newest location, the current one at once and then each newer one, and `None` once the track ends.
+A new group or datagram raises it at frame 0 before any frame lands, and it can name a frame the publisher reported before its group arrives.
+
 ### Session stats are keyed by label, not auth root (#5731)
 
 `stats::Handle::session`, `stats::Handle::request`, and `stats::Handle::refuse` take the stats label where they took the auth root.

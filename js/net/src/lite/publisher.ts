@@ -353,7 +353,7 @@ function carriesMaxDelay(version: Version): boolean {
 function positionCursor(track: track.Subscriber, version: Version, startGroup: number | undefined) {
 	if (resolvesStart(version) || startGroup !== undefined) return;
 
-	const latest = track.latest();
+	const latest = hooks.latestSequence(track);
 	if (latest !== undefined) hooks.replaceGroups(track, { start: { included: latest } });
 }
 
@@ -1028,7 +1028,7 @@ export class Publisher {
 		// stream FIN says where it stops.
 		const boundary = () => {
 			const end = track.end();
-			return end ? finalSequence(end) : (track.latest() ?? -1) + 1;
+			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1) + 1;
 		};
 
 		// Before lite-07, SUBSCRIBE_END names that boundary, which a cap can hold groups back
@@ -1087,7 +1087,7 @@ export class Publisher {
 								update.startGroup === undefined &&
 								requested !== undefined &&
 								!resolvesStart(this.version)
-									? (track.latest() ?? 0)
+									? (hooks.latestSequence(track) ?? 0)
 									: update.startGroup;
 							hooks.replaceGroups(track, {
 								start: start === undefined ? undefined : { included: start },
@@ -1120,7 +1120,7 @@ export class Publisher {
 				// Exactly-once arrival-order serving. This synchronous package-internal pop
 				// and frameRange call are the operation's linearization point.
 				// Popping or filtering a group removes the subscriber's view of its edge.
-				const largest = !startSent && hasLargest(this.version) ? track.largest() : undefined;
+				const largest = !startSent && hasLargest(this.version) ? hooks.bufferedLargest(track) : undefined;
 				const recv = hooks.tryRecvGroup(track, startSent);
 				switch (recv.kind) {
 					case "error":

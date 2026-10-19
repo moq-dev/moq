@@ -259,6 +259,17 @@ export const hooks: {
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Location | undefined;
+	// private: capability gap
+	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
+	reportedLargest: (producer: Producer, largest: Location | undefined) => void;
+	// pending: /quest/m1/public-model/serve.md
+	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
+	latestSequence: (subscriber: Subscriber) => number | undefined;
+	// pending: /quest/m1/public-model/serve.md
+	/** The newest frame buffered for a subscriber, which wire answers name; assigned by `track.ts`. */
+	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
+	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
+	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
 	// pending: /quest/m1/public-model/ingest.md
 	/** Record sequences `[start, end)` an upstream publisher explicitly gave up. */
 	dropTrackGroups: (producer: Producer, start: number, end: number) => void;
@@ -353,6 +364,18 @@ export const hooks: {
 	},
 	cachedLargest: () => {
 		throw new Error("track.ts not loaded");
+	},
+	reportedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	latestSequence: () => {
+		throw new Error("track.ts not loaded");
+	},
+	bufferedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	groupProgress: () => {
+		throw new Error("group.ts not loaded");
 	},
 	dropTrackGroups: () => {
 		throw new Error("track.ts not loaded");

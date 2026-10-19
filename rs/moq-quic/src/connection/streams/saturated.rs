@@ -523,7 +523,7 @@ fn reliable_reset_sends_its_prefix_then_frees_its_group() {
     sender.send(finished).finish().unwrap();
     sender.groups().close(group);
 
-    sender.send(reset).reset_to(0u32.into(), 3_000).unwrap();
+    sender.send(reset).reset_at(3_000, 0u32.into()).unwrap();
     assert!(sender.state.can_send_stream_data());
     sender.drain(100);
     assert_eq!(sender.bytes(&[reset]), 3_000, "only the reliable prefix");
@@ -555,7 +555,7 @@ fn stop_sending_drops_a_reliable_prefix_from_the_schedule() {
     let mut sender = Sender::new();
     let group = sender.group(0);
     let reset = sender.open(Some(&group), 0, 10_000);
-    sender.send(reset).reset_to(0u32.into(), 3_000).unwrap();
+    sender.send(reset).reset_at(3_000, 0u32.into()).unwrap();
     assert!(sender.state.can_send_stream_data());
 
     assert_eq!(

@@ -112,4 +112,4 @@ interacts with the precautionary probe stop under Google differences.
 ## Related
 
 - [TS validation](/test/ts/README.md) - the `--loss` rig, `holes.py` and the full measurements
-- [Discover media headroom](/quest/m2/quic-probe.md) - preserving an estimate and discovering spare capacity are separate problems
+- [Native probing](/quest/m2/probe/native.md) - preserving an estimate and discovering spare capacity are separate problems

@@ -1474,7 +1474,6 @@ test("local cursor bounds can skip, pause, and release buffered groups", async (
 
 	for (let sequence = 0; sequence < 5; sequence++) producer.writeGroup(new GroupProducer(sequence));
 
-	expect(track.latest()).toBe(4);
 	track.setGroups({ start: { included: 1 } });
 	track.setGroups({ end: { excluded: 3 } });
 	expect((await track.nextGroup())?.sequence).toBe(1);
@@ -1791,33 +1790,154 @@ test("largest names the newest frame written", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	const subscriber = producer.subscribe({ maxDelay: Milli(1_000) });
 
-	// Nothing published yet.
-	expect(subscriber.largest()).toBeUndefined();
+	// Nothing published yet, so the first read waits.
+	const initial = subscriber.largest();
+	expect(await Promise.race([initial.then(() => "ready"), Promise.resolve("pending")])).toBe("pending");
 
 	const first = producer.appendGroup();
 	first.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.now() });
 	first.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.now() });
-	expect(subscriber.largest()).toEqual({ group: 0, frame: 1 });
+	expect(await initial).toEqual({ group: 0, frame: 1 });
 	first.close();
 
-	// A group with no frames yet has no object of its own, so the edge stays in the group
-	// before it rather than reading as an empty track.
+	// A new group raises the largest at its head before any frame, so its first frame names
+	// nothing newer.
 	const second = producer.appendGroup();
-	expect(subscriber.largest()).toEqual({ group: 0, frame: 1 });
+	expect(await subscriber.largest()).toEqual({ group: 1, frame: 0 });
 
 	second.writeFrame({ payload: enc.encode("c"), timestamp: Timestamp.now() });
-	expect(subscriber.largest()).toEqual({ group: 1, frame: 0 });
+	let advanced = false;
+	const next = subscriber.largest().then((largest) => {
+		advanced = true;
+		return largest;
+	});
+	await settle();
+	expect(advanced).toBe(false);
+	second.writeFrame({ payload: enc.encode("d"), timestamp: Timestamp.now() });
+	expect(await next).toEqual({ group: 1, frame: 1 });
 	second.close();
 
 	// Reading a group does not move the edge: it is what the track produced, not what is left.
 	await subscriber.recvGroup();
-	expect(subscriber.largest()).toEqual({ group: 1, frame: 0 });
-
+	const ended = subscriber.largest();
 	producer.close();
+	expect(await ended).toBeUndefined();
 });
 
 // A subscriber that arrives after the frames were written reads mirrors. largest is the
 // last frame successfully written, even after an overflow aborts the group.
+test("largest ends at the declared end while the producer stays open", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe();
+
+	const group = producer.appendGroup();
+	group.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.now() });
+	expect(await subscriber.largest()).toEqual({ group: 0, frame: 0 });
+
+	// The end is reached, but the open group can still raise the largest.
+	producer.finishAt({ group: 1, frame: 0 });
+	const ended = subscriber.largest();
+	expect(await Promise.race([ended.then(() => "ready"), Promise.resolve("pending")])).toBe("pending");
+
+	group.close();
+	expect(await ended).toBeUndefined();
+	producer.close();
+});
+
+// Every sequence below a reached end already raised the largest, so a late group below it
+// changes nothing, and the ended stream stays ended.
+test("a late group below the largest changes nothing", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe();
+
+	const framed = new GroupProducer(2);
+	producer.writeGroup(framed);
+	framed.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.now() });
+	framed.close();
+	const empty = new GroupProducer(5);
+	producer.writeGroup(empty);
+	empty.close();
+	producer.finishAt({ group: 6, frame: 0 });
+
+	expect(await subscriber.largest()).toEqual({ group: 5, frame: 0 });
+	expect(await subscriber.largest()).toBeUndefined();
+
+	// Late content below the end is still admitted; it just isn't the largest.
+	const late = new GroupProducer(4);
+	producer.writeGroup(late);
+	late.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.now() });
+	expect(await subscriber.largest()).toBeUndefined();
+	expect(await producer.subscribe().largest()).toEqual({ group: 5, frame: 0 });
+	producer.close();
+});
+
+// An aborted largest group can still be recreated, so the stream stays open past the end
+// until a copy of it closes cleanly, and the recreated frames are reported before it ends.
+test("a recreated largest group is reported before the end", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe();
+	// The recreated group carries the same content, timestamps included.
+	const timestamp = Timestamp.now();
+	const first = new GroupProducer(0);
+	producer.writeGroup(first);
+	first.writeFrame({ payload: enc.encode("a"), timestamp });
+	first.close(new Error("cut"));
+	producer.finishAt({ group: 1, frame: 0 });
+
+	expect(await subscriber.largest()).toEqual({ group: 0, frame: 0 });
+	let advanced = false;
+	const next = subscriber.largest().then((largest) => {
+		advanced = true;
+		return largest;
+	});
+	await settle();
+	expect(advanced).toBe(false);
+
+	const again = new GroupProducer(0);
+	producer.writeGroup(again);
+	for (const payload of ["a", "b"]) again.writeFrame({ payload: enc.encode(payload), timestamp });
+	expect(await next).toEqual({ group: 0, frame: 1 });
+	again.close();
+	expect(await subscriber.largest()).toBeUndefined();
+	producer.close();
+});
+
+test("a datagram raises the largest", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe();
+	producer.appendGroup().close();
+	expect(producer.appendDatagram(Timestamp.now(), enc.encode("d"))).toBe(1);
+	expect(await subscriber.largest()).toEqual({ group: 1, frame: 0 });
+	producer.close();
+});
+
+// A reader that starts at the largest group while it is still empty is at the live edge: it
+// gets that group, which ends with nothing, then the next one.
+test("a live-edge reader starts on an empty largest group", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const first = producer.appendGroup();
+	first.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.now() });
+	first.close();
+	const empty = producer.appendGroup();
+
+	const reader = producer.subscribe({ maxDelay: Milli(30_000) });
+	const edge = await reader.largest();
+	expect(edge).toEqual({ group: 1, frame: 0 });
+	reader.setGroups({ start: { included: edge?.group ?? 0 } });
+
+	empty.close();
+	const next = producer.appendGroup();
+	next.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.now() });
+
+	const group = await reader.recvGroup();
+	expect(group?.sequence).toBe(1);
+	expect(await group?.readFrame()).toBeUndefined();
+	const after = await reader.recvGroup();
+	expect(after?.sequence).toBe(2);
+	expect(await after?.readFrame()).toBeDefined();
+	producer.close();
+});
+
 test("largest survives a mirror replay of an aborted group", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 
@@ -1829,7 +1949,7 @@ test("largest survives a mirror replay of an aborted group", async () => {
 
 	// Subscribing now replays into a fresh sink; the last legal frame is still the edge.
 	const late = producer.subscribe();
-	expect(late.largest()).toEqual({ group: 0, frame: MAX_GROUP_FRAMES - 1 });
+	expect(await late.largest()).toEqual({ group: 0, frame: MAX_GROUP_FRAMES - 1 });
 
 	producer.close();
 });
@@ -2447,7 +2567,7 @@ test("a mid-group end survives eviction and a filtered late reader", async () =>
 		producer.close();
 		await clock.advance(10_000 + CACHE_WINDOW_MS + 1);
 		const reader = producer.subscribe().withGroups({ end: { excluded: 5 } });
-		expect(reader.largest()).toBeUndefined();
+		expect(await reader.largest()).toEqual({ group: 5, frame: 4 });
 		expect(reader.end()).toEqual({ group: 5, frame: 5 });
 		reader.close();
 	} finally {

@@ -1433,6 +1433,30 @@ mod tests {
 		assert_eq!(items(&mut consumer).await, ["0", "1000"]);
 	}
 
+	/// A live-edge reader positioned on the largest group while it is still empty does not
+	/// stall there: once a budget of newer media lands, it moves on like any stalled group.
+	#[tokio::test]
+	async fn a_live_edge_start_on_an_empty_group_moves_on() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		write_group(&mut track, 0, &[ts(0)]);
+		let _empty = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+
+		let mut subscriber =
+			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500)));
+		let edge = match subscriber.poll_largest(&moq_net::kio::Waiter::noop()) {
+			std::task::Poll::Ready(Some(edge)) => edge,
+			_ => panic!("the empty group is the largest"),
+		};
+		assert_eq!(edge.group, 1);
+		subscriber.set_groups(edge.group..);
+		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio));
+
+		write_group(&mut track, 2, &[ts(1_000_000), ts(1_600_000)]);
+		track.finish().unwrap();
+
+		assert_eq!(items(&mut consumer).await, ["1000000", "1600000"]);
+	}
+
 	#[tokio::test]
 	async fn latency_skip_reports_a_gap() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
