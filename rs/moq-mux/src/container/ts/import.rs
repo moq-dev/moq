@@ -6982,6 +6982,20 @@ pub(super) mod test {
 		}
 	}
 
+	/// Reading a file faster than real time must not choose wraps from the host clock.
+	#[tokio::test(start_paused = true)]
+	async fn a_fast_import_follows_pts_history_past_half_a_wrap() {
+		let (_, catalog, mut import) = two_stream_import();
+		for i in 0..64 {
+			let pts = i * 900 * 90_000;
+			import
+				.decode(&mp2_pes(PCR_PID, i as u8, pts % (1 << 33), [1, 2]))
+				.unwrap();
+		}
+		import.finish().unwrap();
+		assert!(!catalog.snapshot().audio.renditions.is_empty());
+	}
+
 	/// One step of a shared source: a PES on each stream, 144 ms of MP2.
 	const STEP: u64 = 12_960;
 	/// The 33-bit PTS field's period.

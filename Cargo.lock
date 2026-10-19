@@ -4707,6 +4707,7 @@ dependencies = [
  "moq-rtc",
  "moq-rtmp",
  "moq-rtsp",
+ "moq-shaper",
  "moq-srt",
  "moq-tokio",
  "moq-transcode",

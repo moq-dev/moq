@@ -443,7 +443,7 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 - Added the `m2ts` section, a transport stream carried whole, with its mapping onto MSFTS; the comparison uses MSFTS's `mpeg2ts` names.
 - Added the `pesPacket` record: each frame one whole PES packet, timestamped with its placement. A consumer that predates it drops the track rather than refusing the catalog.
 - A flagged PCR jump on an `m2ts` track follows hang's discontinuity marker rather than a skipped group sequence.
-- An `m2ts` track's fallback cut falls on whole seconds of a PCR count whose wraps follow the catalog clock, and `randomAccess` and `muxRate` describe the latest two-second window rather than the whole track, so publishers sharing a clock cut and describe the multiplex alike.
+- An `m2ts` track unwraps PCRs from its history, clamps extrapolated object times at a forward discontinuity, and cuts a fallback group after one second. `randomAccess` covers every published group; `muxRate` follows the measured source rate.
 
 ## draft-lcurley-moq-mpegts-00
 {:numbered="false"}

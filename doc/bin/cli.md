@@ -85,10 +85,8 @@ to the wall time the first frame arrived. A timeline that rewinds, such as a
 restarted encoder or a looping file wrapping to the top, ends the import with
 an error; run it again to publish anew. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
-MPEG-TS timestamps run on across their 33-bit wrap (every 26.5 hours), each
-taking the wrap that lands it nearest the clock, so media that gets more than
-13.25 hours ahead of it (a jump that far, or a long file read faster than real
-time) reads as a rewind.
+MPEG-TS timestamps follow their source history across the 33-bit wrap
+(every 26.5 hours), including files imported faster than real time.
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
 and subtitle PIDs through as tracks. SCTE-35 cues wait for a media timestamp;
