@@ -172,8 +172,7 @@ impl Properties {
 
 		let mut prev_type: u64 = 0;
 		let mut i: u64 = 0;
-		// Searched in both lists, but it holds one value: a second is malformed.
-		let mut dynamic_groups = None;
+		let mut seen = Vec::new();
 
 		while !r.is_empty() {
 			if i >= MAX_PROPERTIES {
@@ -192,30 +191,11 @@ impl Properties {
 			if abs % 2 == 0 {
 				// Even type: single varint value
 				let value = r.varint()?;
-				match abs {
-					MAX_CACHE_DURATION => properties.max_cache_duration = Some(Duration::from_millis(value)),
-					TIMESCALE => {
-						// A zero timescale is invalid; treat it as no declaration rather than
-						// failing the whole message over one property we could have ignored.
-						properties.timescale = Timescale::new(value).ok();
-					}
-					DEFAULT_PUBLISHER_PRIORITY => {
-						properties.priority = Some(u8::try_from(value).map_err(|_| DecodeError::InvalidValue)?);
-					}
-					DEFAULT_PUBLISHER_GROUP_ORDER => {
-						// Only Ascending and Descending are defined here. Unlike the draft-14
-						// fields, 0x0 has no "publisher decides" meaning to fall back on.
-						properties.group_order = match value {
-							1 => Some(GroupOrder::Ascending),
-							2 => Some(GroupOrder::Descending),
-							_ => return Err(DecodeError::InvalidValue),
-						};
-					}
-					DYNAMIC_GROUPS => set_dynamic_groups(&mut dynamic_groups, value)?,
-					id => properties.unknown.values.push(Property {
-						id,
+				if !properties.known(abs, value, &mut seen)? {
+					properties.unknown.values.push(Property {
+						id: abs,
 						value: Value::Int(value),
-					}),
+					});
 				}
 			} else {
 				// Odd type: length-prefixed bytes
@@ -234,7 +214,8 @@ impl Properties {
 					{
 						return Err(DecodeError::InvalidValue);
 					}
-					properties.unknown.sealed = sealed(&mut Decoder::new(value, version.into()), &mut dynamic_groups)?;
+					let sealed = sealed(&mut Decoder::new(value, version.into()), &mut properties, &mut seen)?;
+					properties.unknown.sealed = sealed;
 				}
 				// A small kept property must not pin the message's larger buffer.
 				properties.unknown.values.push(Property {
@@ -244,8 +225,40 @@ impl Properties {
 			}
 		}
 
-		properties.dynamic_groups = dynamic_groups.unwrap_or(false);
 		Ok(properties)
+	}
+
+	/// Apply a property we understand, returning `false` for any other. Each holds one
+	/// value and is searched in both lists, so a second occurrence, mutable or sealed, is
+	/// malformed: forwarding the sealed one would contradict the one we act on.
+	fn known(&mut self, id: u64, value: u64, seen: &mut Vec<u64>) -> Result<bool, DecodeError> {
+		match id {
+			MAX_CACHE_DURATION => self.max_cache_duration = Some(Duration::from_millis(value)),
+			TIMESCALE => {
+				// A zero timescale is invalid; treat it as no declaration rather than
+				// failing the whole message over one property we could have ignored.
+				self.timescale = Timescale::new(value).ok();
+			}
+			DEFAULT_PUBLISHER_PRIORITY => {
+				self.priority = Some(u8::try_from(value).map_err(|_| DecodeError::InvalidValue)?);
+			}
+			DEFAULT_PUBLISHER_GROUP_ORDER => {
+				// Only Ascending and Descending are defined here. Unlike the draft-14
+				// fields, 0x0 has no "publisher decides" meaning to fall back on.
+				self.group_order = match value {
+					1 => Some(GroupOrder::Ascending),
+					2 => Some(GroupOrder::Descending),
+					_ => return Err(DecodeError::InvalidValue),
+				};
+			}
+			DYNAMIC_GROUPS => self.dynamic_groups = dynamic_groups(value)?,
+			_ => return Ok(false),
+		}
+		if seen.contains(&id) {
+			return Err(DecodeError::InvalidValue);
+		}
+		seen.push(id);
+		Ok(true)
 	}
 }
 
@@ -258,27 +271,16 @@ pub(super) fn dynamic_groups(value: u64) -> Result<bool, DecodeError> {
 	}
 }
 
-/// Record a DYNAMIC_GROUPS value, refusing anything but 0 or 1, and a second occurrence.
-fn set_dynamic_groups(dynamic_groups: &mut Option<bool>, value: u64) -> Result<(), DecodeError> {
-	match dynamic_groups.replace(self::dynamic_groups(value)?) {
-		Some(_) => Err(DecodeError::InvalidValue),
-		None => Ok(()),
-	}
-}
-
-/// The keys inside an Immutable Properties value, looking for DYNAMIC_GROUPS among them,
-/// which the draft makes a processor search too. Its pairs are delta-encoded like the
-/// outer list, and nesting another Immutable Properties makes the track malformed.
-fn sealed(r: &mut Decoder<'_>, dynamic_groups: &mut Option<bool>) -> Result<Vec<u64>, DecodeError> {
+/// The keys inside an Immutable Properties value, applying the ones we understand, which
+/// the draft makes a processor search too. Its pairs are delta-encoded like the outer
+/// list, and nesting another Immutable Properties makes the track malformed.
+fn sealed(r: &mut Decoder<'_>, properties: &mut Properties, seen: &mut Vec<u64>) -> Result<Vec<u64>, DecodeError> {
 	let mut ids = Vec::new();
 	let mut id: u64 = 0;
 	while !r.is_empty() {
 		id = id.checked_add(r.varint()?).ok_or(DecodeError::BoundsExceeded)?;
 		if id.is_multiple_of(2) {
-			let value = r.varint()?;
-			if id == DYNAMIC_GROUPS {
-				set_dynamic_groups(dynamic_groups, value)?;
-			}
+			properties.known(id, r.varint()?, seen)?;
 		} else {
 			if id == IMMUTABLE {
 				return Err(DecodeError::InvalidValue);
@@ -587,6 +589,32 @@ mod tests {
 		let (properties, written) = round_trip(Version::Draft22, &block);
 		assert!(properties.dynamic_groups);
 		assert_eq!(written, block);
+	}
+
+	/// A sealed property we understand is applied, and stating it in both lists is malformed:
+	/// we would act on one value and forward the other.
+	#[test]
+	fn sealed_known_properties_are_applied_once() {
+		let mut sealed = Vec::new();
+		let mut w = Encoder::new(&mut sealed, Version::Draft22.into());
+		w.varint(TIMESCALE).unwrap();
+		w.varint(1000).unwrap();
+		let mut block = Vec::new();
+		let mut w = Encoder::new(&mut block, Version::Draft22.into());
+		w.varint(IMMUTABLE).unwrap();
+		w.bytes(&sealed).unwrap();
+
+		let (properties, written) = round_trip(Version::Draft22, &block);
+		assert_eq!(properties.timescale, Some(Timescale::MILLI));
+		assert_eq!(written, block);
+
+		let mut both = Vec::new();
+		let mut w = Encoder::new(&mut both, Version::Draft22.into());
+		w.varint(TIMESCALE).unwrap();
+		w.varint(90_000).unwrap();
+		w.varint(IMMUTABLE - TIMESCALE).unwrap();
+		w.bytes(&sealed).unwrap();
+		assert!(matches!(decode_draft22(&both), Err(DecodeError::InvalidValue)));
 	}
 
 	/// The sealed list is unambiguous only with one Immutable Properties.
