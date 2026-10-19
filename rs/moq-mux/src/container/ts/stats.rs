@@ -110,7 +110,7 @@ pub struct Stream {
 	pub unconfirmed: u64,
 	/// Damaged packets, PES, or access units refused whole on this PID. Export stays zero.
 	pub damaged: u64,
-	/// Whole PES dropped from a private PES track because the program clock could not place
+	/// Whole PES or sections dropped because the program clock could not place
 	/// them: before the first PCR, after the last with no interval to extrapolate from, or
 	/// before the broadcast clock's zero. Export stays zero.
 	pub unplaced: u64,
