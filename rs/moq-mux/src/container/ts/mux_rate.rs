@@ -190,8 +190,9 @@ pub(super) struct Windows {
 	packets: u64,
 	/// The last PCR, unwrapped.
 	last: Option<u64>,
-	/// The PCR the unbroken run of intervals started at.
-	since: u64,
+	/// Whether the window in progress missed an interval: one started in it broken, or
+	/// the run of intervals began after its start.
+	spoiled: bool,
 	/// The window the last PCR falls in.
 	window: u64,
 	/// The window's samples, each with its index on the sample grid.
@@ -218,7 +219,7 @@ impl Windows {
 	pub fn pcr(&mut self, ticks: u64, broken: bool) -> Option<Ended> {
 		let packets = std::mem::take(&mut self.packets);
 		let Some(last) = self.last.replace(ticks) else {
-			self.since = ticks;
+			self.spoiled = !ticks.is_multiple_of(WINDOW);
 			self.window = ticks / WINDOW;
 			return None;
 		};
@@ -226,8 +227,9 @@ impl Windows {
 			packets,
 			ticks: ticks.saturating_sub(last),
 		};
-		if broken || interval.ticks == 0 || interval.ticks > MAX_INTERVAL {
-			self.since = ticks;
+		let bad = broken || interval.ticks == 0 || interval.ticks > MAX_INTERVAL;
+		if bad {
+			self.spoiled = true;
 		} else {
 			let index = last / SAMPLE;
 			match self.samples.last_mut() {
@@ -243,6 +245,8 @@ impl Windows {
 			rate: self.rate(&self.samples),
 		};
 		self.window = ticks / WINDOW;
+		// A broken interval reaching into this window covered its start.
+		self.spoiled = bad && !ticks.is_multiple_of(WINDOW);
 		self.samples.clear();
 		Some(ended)
 	}
@@ -262,7 +266,7 @@ impl Windows {
 	}
 
 	fn rate(&self, samples: &[(u64, Interval)]) -> Option<u64> {
-		if self.since > self.window * WINDOW {
+		if self.spoiled {
 			return None;
 		}
 		let mut whole = Interval::default();
@@ -470,6 +474,20 @@ mod test {
 			],
 			"only the windows the run broke in, or began part-way through, go unmeasured"
 		);
+	}
+
+	#[test]
+	fn an_empty_interval_on_a_line_spoils_its_window() {
+		let mut windows = Windows::default();
+		let mut pcrs = Vec::new();
+		// Fifty intervals a window, so a PCR lands on every line, then that PCR repeated.
+		let paced = (44, WINDOW / 50);
+		let mut ended = feed_windows(&mut windows, &mut pcrs, std::iter::repeat_n(paced, 51));
+		ended.extend(feed_windows(&mut windows, &mut pcrs, [(44, 0)]));
+		ended.extend(feed_windows(&mut windows, &mut pcrs, std::iter::repeat_n(paced, 100)));
+		let measured = ended[0].1;
+		assert!(measured.is_some());
+		assert_eq!(ended, vec![(0, measured), (1, None), (2, measured)]);
 	}
 
 	#[test]
