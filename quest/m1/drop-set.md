@@ -51,17 +51,20 @@ which keeps drops final for now.
 - **A widening re-offers the dropped runs now inside its budget,** through
   the re-offer path the resolved-demand quest adds, in the subscription's
   order. Upstream, the relay's own widening asks for them again.
-- **A stale run that loses its edge is invalidated** as one span, the same
-  as a widening invalidates it, matching resolved-demand's stale-edge trigger. Each stale
-  run records the edge it was judged against: for a local verdict, the
-  newer group that convicted it; for a received drop, this hop's newest group
-  when the drop arrived. When that group is aborted or evicted here, so the
-  edge moves back past the record, the run's sequences become unknown: a
-  cached group is re-offered, and a missing one is judged again against the
-  current edge (`TrackState::drifted`) or waited for. Across hops, the
-  upstream applies the same rule on lite-07 and re-offers the group, which
-  wins over the drop downstream too. Cuts and never-produced runs carry no
-  edge and are unaffected. No wire field: the record is local.
+- **A local stale run that loses its edge is invalidated** as one span, the
+  same as a widening invalidates it, matching resolved-demand's stale-edge
+  trigger. A run this hop judged stale records the newer group here that
+  convicted it. When that group is aborted or evicted, the run's sequences
+  become unknown: a cached group is re-offered, and a missing one is judged
+  again against the current edge (`TrackState::drifted`) or waited for.
+- **A received stale run records no edge.** Its groups are not held here,
+  so a cold cursor at this relay would fill them from upstream by range, and
+  the upstream, still holding its edge, would drop them again. A local abort
+  or eviction therefore never makes a received verdict obsolete; only the
+  upstream changing its mind does, and it says so: on lite-07 it re-offers
+  the group when its own edge is lost, and a widening re-asks. A received
+  run is invalidated only by an upstream re-offer or a widening. Cuts and
+  never-produced runs carry no edge and are unaffected. No wire field.
 - **A stale drop names its budget.** A SUBSCRIBE_UPDATE has no
   acknowledgement, so after a widening from B1 to B2, an in-flight B1 drop
   and the B2 re-drop look identical, and no guess settles a B2 reader. On
@@ -134,11 +137,12 @@ Test on mock time through a relay:
   the re-drop tagged B2 settles the B2 reader.
 - A group arriving after its drop is served, and a drop arriving after its
   group leaves it served.
-- Cross-hop, at the same budget B: a group G reported stale because of a
-  newer edge E is served to a B reader once E is aborted or evicted, both
-  when E is lost at the relay (the run is invalidated and G re-offered from
-  the cache) and when E is lost upstream (the upstream re-offers G, which
-  wins over the stored drop), as a cold relay would serve it.
+- At the same budget B, for a group G judged stale because of a newer
+  edge E: when the relay judged G itself and E is aborted or evicted there,
+  a B reader gets G re-offered from the cache. When G was reported stale by
+  the upstream and E is lost upstream, the upstream re-offers G, which wins
+  over the stored drop. When E is evicted only at the relay, the received
+  drop stands, as a cold relay filling G from upstream would also be told.
 - Through a lite-06 hop, a reported group stays dropped for every reader,
   with no session error.
 - A shrink sends no drops.
@@ -158,8 +162,8 @@ unchanged.
 ## Required
 
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - the re-offer path this extends to reported groups
+- [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md) - restores the lite-07 drop whose wire and behavior this extends
 
 ## Related
 
-- [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md) - restores the lite-07 drop these rules apply to
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
