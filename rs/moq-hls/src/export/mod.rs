@@ -5,7 +5,7 @@
 //! pure function of the timeline records, and media bytes move only when an HTTP client requests
 //! a segment, which FETCHes exactly the frames that segment covers from the relay cache and
 //! transmuxes them to CMAF. A broadcast whose catalog advertises no timelines can't be served this
-//! way and is skipped. A `moq-archive` recording replayed onto a broadcast is served the same way:
+//! way and is skipped, and a rendition is served only once its own timeline is advertised. A `moq-archive` recording replayed onto a broadcast is served the same way:
 //! its playlists read only the stored timelines, and a segment GETs only its rendition's objects.
 //!
 //! Segment boundaries come from one reference rendition's records, numbered by record sequence,
@@ -173,14 +173,16 @@ impl Broadcaster {
 	}
 
 	/// Look up a rendition by kind and name. Video and audio are separate axes, so a
-	/// video and an audio rendition may share a name without colliding.
+	/// video and an audio rendition may share a name without colliding. A rendition is found
+	/// only once the catalog advertises its own timeline.
 	pub fn rendition(&self, kind: Kind, name: &str) -> Option<Arc<Rendition>> {
 		self.renditions.get(kind, name)
 	}
 
 	/// A cursor over rendition add/remove events, for a consumer that mirrors or records the
 	/// whole broadcast. It replays the current renditions, then yields changes, and returns
-	/// `None` once the source closes.
+	/// `None` once the source closes. A rendition is added once the catalog advertises its own
+	/// timeline, which an unhinted publisher declares only after its first record.
 	pub fn renditions(&self) -> renditions::Consumer {
 		self.renditions.subscribe()
 	}
@@ -3683,11 +3685,11 @@ mod tests {
 		let renditions = renditions::Producer::new(Config::default().window);
 		let media = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		catalog.video.renditions.insert("video".to_string(), media);
+		catalog.video.renditions.insert("video0".to_string(), media);
 		catalog.archive = Some(archive(&["video0", "audio0"]));
 		renditions.sync(&upstream, &catalog);
 
-		let rendition = renditions.get(Kind::Video, "video").expect("rendition synced");
+		let rendition = renditions.get(Kind::Video, "video0").expect("rendition synced");
 		let mut segments = rendition.segments();
 
 		// The catalog drops the rendition: its cursor must run dry rather than park.
@@ -3701,6 +3703,48 @@ mod tests {
 		assert!(ended.is_none(), "no segments remained to drain");
 
 		drop((broadcast, rendition));
+	}
+
+	// A rendition is hidden until its own timeline is advertised, then added beside its siblings.
+	#[tokio::test]
+	async fn a_rendition_appears_once_its_timeline_is_advertised() {
+		let origin = produce_origin();
+		let broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let upstream = crate::resolved(&origin, "live").await;
+
+		let renditions = renditions::Producer::new(Config::default().window);
+		let mut cursor = renditions.subscribe();
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		catalog.video.renditions.insert("video0".to_string(), video_config());
+		catalog.audio.renditions.insert(
+			"audio0".to_string(),
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+		);
+		catalog.archive = Some(archive(&["video0"]));
+		renditions.sync(&upstream, &catalog);
+
+		let video = renditions.get(Kind::Video, "video0").expect("video has a timeline");
+		assert!(
+			renditions.get(Kind::Audio, "audio0").is_none(),
+			"audio has no timeline yet"
+		);
+		assert!(
+			matches!(next_event(&mut cursor).await, Some(renditions::Event::Added(added)) if added.kind == Kind::Video)
+		);
+		assert!(next_event(&mut cursor).await.is_none(), "audio is not announced early");
+
+		catalog.archive = Some(archive(&["video0", "audio0"]));
+		renditions.sync(&upstream, &catalog);
+		assert!(
+			matches!(next_event(&mut cursor).await, Some(renditions::Event::Added(added)) if added.kind == Kind::Audio)
+		);
+		let same = renditions.get(Kind::Video, "video0").unwrap();
+		assert!(Arc::ptr_eq(&video, &same), "the video sibling keeps its identity");
+		assert!(renditions.get(Kind::Audio, "audio0").is_some());
+
+		drop(broadcast);
 	}
 
 	// Dropping the broadcaster must release its renditions even when a cursor (and an

@@ -716,17 +716,12 @@ async fn range_playlist_refuses_non_durable_or_windowed_timelines() {
 		Some(Err(crate::Error::RangeNotDurable))
 	));
 
-	// A rendition without its own timeline would list only gaps.
+	// A rendition without its own timeline would list only gaps, so it is not served at all.
 	let mut archive = durable();
 	archive.timelines.remove("360p");
 	let untimed = Replay::open_with(&recording, 64 * 1024 * 1024, archive, config).await;
-	assert!(matches!(
-		untimed
-			.rendition(Kind::Video, "360p")
-			.playlist(Some(range), None)
-			.now_or_never(),
-		Some(Err(crate::Error::RangeUnavailable(_)))
-	));
+	assert!(untimed.broadcaster.rendition(Kind::Video, "360p").is_none());
+	assert!(untimed.broadcaster.rendition(Kind::Video, "1080p").is_some());
 }
 
 #[tokio::test(start_paused = true)]
