@@ -65,6 +65,7 @@ http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "r
 humantime = { workspace = true }
 hyper-util = { workspace = true }
 moq-auth = { workspace = true, features = ["client"] }
+moq-clock = { workspace = true }
 moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true, optional = true }
@@ -101,6 +102,8 @@ sd-notify = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
+# Clocks only the test moves, wall time included, so a grant's life is exact.
+moq-clock = { path = "../moq-clock", features = ["manual", "sim"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rand = { workspace = true }
