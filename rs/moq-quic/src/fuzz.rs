@@ -9,8 +9,11 @@
 //! `packet`, `params`, `streamid`, and `streams` are ported from upstream quinn's
 //! `fuzz/fuzz_targets/`. Compiled only under `cfg(test)` or the `fuzz` feature, so none
 //! of this is part of the published API. See `fuzz/README.md` for the workflow.
+//!
+//! [`Plaintext`] is the crypto the `connection` target and the benchmarks run on.
 
 mod connection;
+mod plaintext;
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
@@ -28,6 +31,7 @@ use crate::{
 };
 
 pub use connection::connection;
+pub use plaintext::Plaintext;
 
 /// One fuzz target body: it returns whether the input got past the first parse, which
 /// is what [`seeds`] is checked against.

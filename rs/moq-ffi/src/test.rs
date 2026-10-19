@@ -4106,6 +4106,39 @@ async fn raw_read_frame_skips_empty_then_populated_groups() {
 	assert_eq!(frame.timestamp_us, Some(2_000));
 }
 
+/// A group a hop reset as expired is skipped like an empty one, as a locally expired
+/// group is (`test_a_pending_timer_waits_for_advance` in py covers that).
+#[tokio::test]
+async fn raw_read_frame_skips_a_group_reset_as_old() {
+	let broadcast = moq_net::broadcast::Info::default().produce();
+	let track = broadcast
+		.create_track(
+			"status",
+			Some(moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)),
+		)
+		.unwrap();
+	let consumer = MoqTrackConsumer::new(track.subscribe(None), crate::ffi::Background::default());
+
+	let expired = track.append_group().unwrap();
+	// The read holds the group when the reset lands, as one arriving over the wire does.
+	let read = spawn_parked(async move { consumer.read_frame().await }).await;
+	expired
+		.abort(moq_net::Error::Stream(moq_net::StreamError::Old))
+		.unwrap();
+	let mut later = track.append_group().unwrap();
+	later
+		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"later".as_slice())
+		.unwrap();
+
+	let frame = tokio::time::timeout(TIMEOUT, read)
+		.await
+		.expect("timed out skipping the expired group")
+		.expect("read task panicked")
+		.unwrap()
+		.expect("expected the later group's first frame");
+	assert_eq!(frame.payload, b"later");
+}
+
 /// A foreign cancel only stops polling a read; uniffi drops it later, at `rust_future_free`.
 /// Until then the cancelled read must not take the frame the next read is waiting for.
 #[tokio::test]

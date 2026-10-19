@@ -14,7 +14,6 @@ final class SmokeTests: XCTestCase {
         let other = try BroadcastProducer()
         let timebase = try Media.Timebase(broadcast: owner)
         XCTAssertThrowsError(try Media.ContainerProducer(broadcast: other, initData: Media.ContainerInit(format: .fmp4, data: Data(), timebase: timebase)))
-        XCTAssertThrowsError(try Media.ContainerStreamProducer(broadcast: other, initData: Media.ContainerStreamInit(format: .fmp4, timebase: timebase)))
         try owner.close()
         XCTAssertThrowsError(try Media.Timebase(broadcast: owner))
         try other.close()

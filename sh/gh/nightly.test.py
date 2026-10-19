@@ -52,6 +52,7 @@ class NightlyTest(unittest.TestCase):
         self.assertIn("--bench matching", shared[0])
         self.assertIn("--bench containers", shared[0])
         self.assertIn("-p moq-quic", shared[0])
+        self.assertIn("moq-quic/fuzz", shared[0])
         self.assertIn("--bench wire", shared[0])
         self.assertEqual(release[-1], "just gh criterion -p moq-gst --bench catalog")
         self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))

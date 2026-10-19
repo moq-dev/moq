@@ -8,9 +8,10 @@
 //! every frame exactly once, in order, whether the route changes between groups or
 //! in the middle of one, and however it changes.
 //!
-//! Older wire versions cannot carry the epoch, so `R` cannot tell the two routes
-//! serve the same bytes: its subscription stays on its route and ends with it, while
-//! a better route restarts the path for new requests.
+//! moq-transport carries the epoch with the MoQ Epoch extension (draft-17+), so it
+//! behaves the same. Older wire versions cannot carry the epoch, so `R` cannot tell the
+//! two routes serve the same bytes: its subscription stays on its route and ends with
+//! it, while a better route restarts the path for new requests.
 //!
 //! Two publishers sharing one explicit epoch, a redundant pair, are one source the
 //! same way.
@@ -466,6 +467,9 @@ macro_rules! route_change_tests {
 
 route_change_tests! {
 	lite_07: "moq-lite-07-wip",
+	ietf_17: "moq-transport-17",
+	ietf_19: "moq-transport-19",
+	ietf_22: "moq-transport-22",
 }
 
 macro_rules! pinned_tests {
@@ -507,8 +511,8 @@ pinned_tests! {
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",
-	ietf_19: "moq-transport-19",
-	ietf_22: "moq-transport-22",
+	ietf_14: "moq-transport-14",
+	ietf_16: "moq-transport-16",
 }
 
 /// `P` feeds `A` slowly and `B` promptly, and `R` reads through `A` until that route dies
@@ -613,6 +617,7 @@ macro_rules! route_flap_tests {
 
 route_flap_tests! {
 	flaps_lite_07: "moq-lite-07-wip",
+	flaps_ietf_22: "moq-transport-22",
 }
 
 /// How the incumbent of a redundant pair goes away.
