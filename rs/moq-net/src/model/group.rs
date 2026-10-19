@@ -3062,7 +3062,11 @@ mod test {
 	/// group keep nothing.
 	#[test]
 	fn an_abort_hands_the_head_to_its_resumers() {
-		for (err, kept) in [(Error::Cancel, true), (Error::Evicted, false), (Error::GroupTooLarge, false)] {
+		for (err, kept) in [
+			(Error::Cancel, true),
+			(Error::Evicted, false),
+			(Error::GroupTooLarge, false),
+		] {
 			let pool = cache::Pool::unbounded();
 			let cache = cache::Track::new(pool.clone(), kio::Weak::new());
 			let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
