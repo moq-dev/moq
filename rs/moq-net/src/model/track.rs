@@ -7430,7 +7430,7 @@ mod test {
 				"{info:?} primed={primed}: the wall deadline never fired"
 			);
 			let result = reading.poll_read_frame(&waiter);
-			assert!(matches!(result, Poll::Ready(Ok(None))), "{info:?}: {result:?}");
+			assert!(matches!(result, Poll::Ready(Err(Error::Old))), "{info:?}: {result:?}");
 		}
 	}
 
@@ -7464,7 +7464,7 @@ mod test {
 			elapse(&producer, Duration::from_millis(100));
 			assert!(woken.load(Ordering::SeqCst), "{info:?}: the wall deadline never fired");
 			let result = reading.poll_read_frame(&waiter);
-			assert!(matches!(result, Poll::Ready(Ok(None))), "{info:?}: {result:?}");
+			assert!(matches!(result, Poll::Ready(Err(Error::Old))), "{info:?}: {result:?}");
 		}
 	}
 
@@ -7966,12 +7966,9 @@ mod test {
 		elapse(&producer, Duration::from_secs(1));
 		append_at(&mut producer, 1000);
 
-		// It ends rather than fails: the reader took every frame the group ever had
-		// (none), so nothing was truncated. What it was waiting for was the producer,
-		// and a group abandoned where its reader stands looks exactly like one that
-		// ended there.
+		// The producer never finished it, so even an empty prefix is not the group.
 		let result = pending.await.unwrap();
-		assert!(matches!(result, Ok(None)), "the held group ends: {result:?}");
+		assert!(matches!(result, Err(Error::Old)), "the held group fails: {result:?}");
 	}
 
 	/// A first timestamp on a *newer* group can convict a held one, so the held reader has
@@ -8007,9 +8004,9 @@ mod test {
 		moq_clock::sim::yield_now().await;
 
 		assert!(pending.is_finished(), "the new presentation edge wakes the held reader");
-		// Drained, so the budget ends the group rather than truncating it.
+		// Drained but never finished, so the budget fails the group.
 		let result = pending.await.unwrap();
-		assert!(matches!(result, Ok(None)), "the held group ends: {result:?}");
+		assert!(matches!(result, Err(Error::Old)), "the held group fails: {result:?}");
 	}
 
 	/// An appended group wakes only the parked reads whose expiry it crosses, plus the
@@ -8090,7 +8087,10 @@ mod test {
 		for (i, (group, waiter)) in held.iter_mut().zip(&waiters).enumerate() {
 			let result = group.poll_read_frame(waiter);
 			if i < 4 {
-				assert!(matches!(result, Poll::Ready(Ok(None))), "read {i} expired: {result:?}");
+				assert!(
+					matches!(result, Poll::Ready(Err(Error::Old))),
+					"read {i} expired: {result:?}"
+				);
 			} else {
 				assert!(result.is_pending(), "read {i} is in budget: {result:?}");
 			}
@@ -8150,7 +8150,10 @@ mod test {
 			"the edge reaching the deadline wakes the read"
 		);
 		let result = next.as_mut().poll(&mut cx);
-		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Old))),
+			"the head is stale: {result:?}"
+		);
 	}
 
 	/// An aborted edge hands the edge to a group between it and the successor, and neither
@@ -8197,7 +8200,10 @@ mod test {
 			"the edge's abort, then a new edge below it, lost the wakeup"
 		);
 		let result = next.as_mut().poll(&mut cx);
-		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Old))),
+			"the head is stale: {result:?}"
+		);
 	}
 
 	/// An aborted successor hands the reach to the next group, which sits below the edge
@@ -8248,7 +8254,10 @@ mod test {
 			"the replacement's first frame bounds the reach"
 		);
 		let result = next.as_mut().poll(&mut cx);
-		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Old))),
+			"the head is stale: {result:?}"
+		);
 	}
 
 	/// An edge's abort hands the edge back to a lower group whose frames already ran past
@@ -8293,7 +8302,10 @@ mod test {
 		edge.abort(Error::Cancel).unwrap();
 		assert!(woken.load(Ordering::SeqCst), "the edge's abort lost its wakeup");
 		let result = next.as_mut().poll(&mut cx);
-		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Old))),
+			"the head is stale: {result:?}"
+		);
 	}
 
 	/// A received group's frames present while it is hidden, so a parked read they wake
@@ -8337,7 +8349,10 @@ mod test {
 		producer.reveal_group(&received);
 		assert!(woken.load(Ordering::SeqCst), "the reveal wakes the expired read");
 		let result = next.as_mut().poll(&mut cx);
-		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Old))),
+			"the head is stale: {result:?}"
+		);
 	}
 
 	/// A route can declare the end, then land every group's header before its first frame.
@@ -8411,13 +8426,12 @@ mod test {
 	/// The ordinary live case, at the default real-time budget: 2s GOPs produced one at
 	/// a time and read as they arrive. The budget must take the live edge without
 	/// shortening the group the reader is already on, so every frame of every group is
-	/// delivered and each group *ends* rather than fails at its boundary.
+	/// delivered.
 	///
-	/// Two things would break this. Measuring drift from a group's first frame rather
-	/// than its reader's position convicts every group the moment its successor opens,
-	/// since a live reader is always a little behind the edge. And the reader is parked
-	/// at its group's end when that happens, because the FIN and the next group's first
-	/// frame are separate events and the wire does not order them.
+	/// The reader is parked at its group's end when the successor opens, because the FIN
+	/// and the next group's first frame are separate events and the wire does not order
+	/// them. A zero budget gives up there, and the group fails with [`Error::Old`] since
+	/// its producer never finished it, but only after the reader took every frame.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn real_time_reads_a_live_stream_without_truncating_it() {
@@ -8469,8 +8483,8 @@ mod test {
 					Poll::Pending => end.await,
 				};
 				assert!(
-					matches!(res, Ok(None)),
-					"group {sequence} ends at the boundary rather than failing: {res:?}"
+					matches!(res, Err(Error::Old)),
+					"group {sequence} gives up at the boundary, after its last frame: {res:?}"
 				);
 				opened
 			};
@@ -8537,12 +8551,11 @@ mod test {
 		);
 	}
 
-	/// A group the budget ends rather than fails stays ended. `expired` alone would
-	/// turn the clean answer into [`Error::Old`] on the next poll, and a caller is
-	/// allowed to probe again past the end of a group.
+	/// A drained group the budget gives up on fails with [`Error::Old`] on every probe,
+	/// including [`group::Consumer::finished`]: the producer never finished it.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	async fn an_ended_group_stays_ended_when_probed_again() {
+	async fn an_expired_group_stays_old_when_probed_again() {
 		let mut producer = track_producer("test", Info::timed());
 		let mut subscriber = producer.subscribe(None);
 		let mut open = producer.append_group().unwrap();
@@ -8563,9 +8576,9 @@ mod test {
 		append_at(&mut producer, 1000);
 
 		let (first, second, finished) = probes.await.unwrap();
-		assert!(matches!(first, Ok(None)), "the group ends: {first:?}");
-		assert!(matches!(second, Ok(None)), "and stays ended: {second:?}");
-		assert!(matches!(finished, Ok(1)), "reporting what it delivered: {finished:?}");
+		assert!(matches!(first, Err(Error::Old)), "the group fails: {first:?}");
+		assert!(matches!(second, Err(Error::Old)), "and stays failed: {second:?}");
+		assert!(matches!(finished, Err(Error::Old)), "never finished: {finished:?}");
 	}
 
 	#[moq_clock::test]
@@ -8581,7 +8594,6 @@ mod test {
 		append_at(&mut producer, 1000);
 
 		assert!(group.read_frame().await.unwrap().is_none());
-		assert!(!group.latency_expired());
 	}
 
 	#[moq_clock::test]
@@ -9037,21 +9049,17 @@ mod test {
 		let mut fetched = consumer.fetch_group(0, options).await.unwrap();
 		assert!(fetched.read_frame().await.unwrap().is_some());
 
-		let pending = moq_clock::sim::spawn(async move {
-			let result = fetched.read_frame().await;
-			(result, fetched.latency_expired())
-		});
+		let pending = moq_clock::sim::spawn(async move { fetched.read_frame().await });
 		moq_clock::sim::yield_now().await;
 		elapse(&producer, Duration::from_secs(1));
 		append_at(&mut producer, 1000);
 		append_at(&mut producer, 2000);
 
-		let (result, expired) = pending.await.unwrap();
+		let result = pending.await.unwrap();
 		assert!(
-			matches!(result, Ok(None)),
-			"a fully drained group ends cleanly: {result:?}"
+			matches!(result, Err(Error::Old)),
+			"a drained but unfinished group fails: {result:?}"
 		);
-		assert!(expired, "the fetch budget caused that end");
 	}
 
 	/// A fetched group installs metadata but never accepts the track's live feed.

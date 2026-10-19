@@ -236,7 +236,7 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   that identity, and every later hop follows its own route to it, so
   forwarding needs a route but not the claim.
 - Reselecting the origin at every hop loops although each origin's routes are
-  loop-free (RFC 8966 s2.7): a ring of same-epoch importers whose relays
+  loop-free (RFC 8966 s2.7): a ring of same-epoch origins whose relays
   prioritize different links, and nested wildcards where a relay has not
   heard the specific claim, both cycle past requester exclusion; joining
   another relay's subscription by path or epoch deadlocks; and without an

@@ -411,6 +411,11 @@ impl Client {
 
 				tracing::warn!(url = %RedactedUrl::new(&fingerprint), "performing insecure HTTP request for certificate");
 
+				// Even a plaintext fetch builds reqwest's TLS stack, which panics without a
+				// process default when another crate (iroh) builds it as `rustls-no-provider`.
+				// An error only means one is already installed.
+				let _ = crate::crypto::install_default();
+
 				let resp = reqwest::get(fingerprint.as_str())
 					.await
 					.map_err(|err| Error::FetchFingerprint(crate::error::message(err)))?;
@@ -1071,6 +1076,40 @@ mod tests {
 
 		let err = result.expect_err("an unroutable send must reach the connection");
 		assert_eq!(err.kind(), std::io::ErrorKind::NetworkUnreachable);
+	}
+
+	/// The certificate fetch goes out without a process-default crypto provider installed,
+	/// even when reqwest is built with rustls but no provider (as iroh builds it).
+	#[tokio::test]
+	async fn http_dial_needs_no_installed_provider() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let port = listener.local_addr().unwrap().port();
+		tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut buf = [0; 1024];
+			let _ = socket.read(&mut buf).await;
+			let _ = socket
+				.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+				.await;
+		});
+
+		let config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			..Default::default()
+		};
+		let tls = config.tls.build().expect("tls config");
+		let client = Client::new(&config, &crate::quic::Config::default()).expect("client init");
+		let url: Url = format!("http://127.0.0.1:{port}/").parse().unwrap();
+		let versions = moq_net::Versions::default();
+		let result = tokio::time::timeout(Duration::from_secs(5), client.connect(&tls, url.into(), &versions))
+			.await
+			.expect("dial timed out");
+		assert!(
+			matches!(result, Err(Error::FingerprintStatus(404))),
+			"the fetch should reach the server"
+		);
 	}
 
 	async fn pinned_connection(bind: &str, host_name: Option<&str>) {
