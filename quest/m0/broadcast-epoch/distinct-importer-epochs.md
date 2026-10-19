@@ -20,9 +20,10 @@ or upstream, by merging legs before a single importer.
 
 ## Plan
 
-Decided 2026-10-19 by the maintainer, superseding the 2026-10-13
-active-active plan (the deleted `epoch-anchor` and `hop-aligned-import`
-quests) and #5895's one-second group grid: independently fed importers
+Decided 2026-10-19 by the maintainer, settling the redundancy-model
+decision quest for switchover and superseding the 2026-10-13 active-active
+plan (the deleted `epoch-anchor` and `hop-aligned-import` quests) and
+#5895's one-second group grid: independently fed importers
 cannot publish identical tracks. Each sees its own loss, start point, and
 history, and once loss or reordering reaches one, "same epoch, same content"
 is false and a mid-group resume splices two streams. Every alignment rule so
@@ -67,7 +68,8 @@ Tests: #4354's 1+1 setup on distinct epochs, on lite-07: one relay, two
 `moq import ts` fed one stream (and again with `--passthrough`), two
 `moq export ts --stitch`. Stopping the serving importer, and starting a
 backup, each produce one marked program switch and no exit, and a restarted
-importer wins again as the newest. Tests that only proved same-epoch
+importer wins again as the newest. Run it on the bufferbloat harness and
+report the gap a viewer sees at each switch. Tests that only proved same-epoch
 agreement go with the code they covered.
 
 Public API: removes `moq --epoch`, plus whatever `moq-mux` surface the audit

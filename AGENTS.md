@@ -64,6 +64,7 @@ A bad shape costs a breaking change in every language, and the surface is huge.
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` instead.
 - Let the type system make misuse unrepresentable
 - A broadcast, track, or group name always means the same content. MoQ has no ETag-style invalidation, so a publisher that reuses a name for different content (such as restarting group numbers) is a bug; publish a new broadcast instead of working around it.
+- Design for one publisher per broadcast instance. Redundancy is a second instance under its own epoch, which the subscriber switches to and marks as a seam; never make independent publishers produce identical output so the relay can stitch them.
 - Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
 - Avoid 4+ args; use a struct or object.
 - Prefer nesting related API, configuration, and structured output fields under their shared role.

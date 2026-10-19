@@ -85,10 +85,6 @@ agreement alone.
 Public API: `moq export ts --sync`.
 
 
-## Required
-
-- [Redundancy model](/quest/m1/redundancy-model.md) - whether a redundant pair stays active-active or fails over by epoch switchover
-
 ## Related
 
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - packetizes these slots with matching RTP headers for ST 2022-7
