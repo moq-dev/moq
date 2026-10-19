@@ -44,9 +44,12 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     but these callers move a live reader's bounds through `&mut` today, so
     the rename needs a way to rebind (take and replace the reader, or a
     crate-private setter the builder wraps):
-    - `rs/moq-c/src/consume.rs` `apply_raw_subscription` re-applies the range
-      on every subscription update, first clearing it so a relative range
-      counts from the edge.
+    - `rs/moq-c/src/consume.rs` `RawReader::apply` re-applies the range on
+      every subscription update, counting a relative start from the track
+      `Consumer`'s unbounded largest. `set_groups` only raises the floor, so an
+      update cannot lower a floor an earlier one put above the live edge
+      (Codex on #5924). Making the floor assign fixes it; land that with a
+      moq-c test where a later relative update delivers the next group.
     - The lite and IETF publishers move the cursor on SUBSCRIBE_UPDATE
       (`start_at`, `end_at`; JS `hooks.replaceGroups` and the IETF
       publisher's `setGroups({ start })`).

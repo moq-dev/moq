@@ -111,6 +111,53 @@ struct RawTaskEntry {
 	callback: OnStatus,
 }
 
+/// A raw track's reader, with the track handle its subscription updates resolve against.
+struct RawReader {
+	// A relative range counts from this track's largest: the reader's own reports only
+	// within the bounds the update is replacing. Kept unpolled, so each clone reports the
+	// current largest rather than only a newer one.
+	edge: moq_net::track::Consumer,
+	track: moq_net::track::Ordered,
+}
+
+impl RawReader {
+	fn apply(&mut self, subscription: Option<moq_net::track::Subscription>) {
+		let subscription = subscription.unwrap_or_default();
+		// Reads start where the lowest range does. Without a floor of its own (the oldest
+		// range, the default) a raw reader joins at the latest group.
+		let latest = match self.edge.clone().poll_largest(&kio::Waiter::noop()) {
+			Poll::Ready(Some(position)) => Some(position.group),
+			_ => None,
+		};
+		let start = subscription
+			.ranges
+			.iter()
+			.map(|range| match range.start {
+				moq_net::track::Anchor::Absolute(start) => Some(start.group),
+				moq_net::track::Anchor::Relative(u64::MAX) => latest,
+				moq_net::track::Anchor::Relative(back) => latest.map(|latest| latest.saturating_sub(back)),
+			})
+			.min()
+			.flatten();
+		// They stop past the last absolute end; an open or relative one follows the live edge.
+		let end = subscription
+			.ranges
+			.iter()
+			.map(|range| match range.end {
+				Some(moq_net::track::Anchor::Absolute(end)) => Some(end),
+				_ => None,
+			})
+			.collect::<Option<Vec<_>>>()
+			.map(|ends| ends.into_iter().max().unwrap_or_default());
+		self.track.set_groups((
+			start.map_or(Bound::Unbounded, Bound::Included),
+			end.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
+		));
+		// A closed track makes the update meaningless; the reader already sees the close.
+		let _ = self.track.update(subscription);
+	}
+}
+
 /// Outcome of polling a raw track source alongside its control channels.
 enum RawStep<T> {
 	/// A delivered value: the next group, or the next frame within a group.
@@ -665,9 +712,11 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(async move {
-				let mut track = broadcast.track(&name)?.subscribe(subscription.clone()).await?.ordered();
-				Self::apply_raw_subscription(&mut track, subscription);
-				Self::run_raw(on_frame, track, channel.1, updates).await
+				let edge = broadcast.track(&name)?;
+				let track = edge.subscribe(subscription.clone()).await?.ordered();
+				let mut reader = RawReader { edge, track };
+				reader.apply(subscription);
+				Self::run_raw(on_frame, reader, channel.1, updates).await
 			}))
 			.await;
 
@@ -682,47 +731,9 @@ impl Consume {
 		Ok(id)
 	}
 
-	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
-		let subscription = subscription.unwrap_or_default();
-		// Reads start where the lowest range does. Without a floor of its own (the oldest
-		// range, the default) a raw reader joins at the latest group. Lift the last update's
-		// cap first: the largest reports within it, and a relative range counts from the edge.
-		track.set_groups(..);
-		let latest = match track.poll_largest(&kio::Waiter::noop()) {
-			std::task::Poll::Ready(Some(position)) => Some(position.group),
-			_ => None,
-		};
-		let start = subscription
-			.ranges
-			.iter()
-			.map(|range| match range.start {
-				moq_net::track::Anchor::Absolute(start) => Some(start.group),
-				moq_net::track::Anchor::Relative(u64::MAX) => latest,
-				moq_net::track::Anchor::Relative(back) => latest.map(|latest| latest.saturating_sub(back)),
-			})
-			.min()
-			.flatten();
-		// They stop past the last absolute end; an open or relative one follows the live edge.
-		let end = subscription
-			.ranges
-			.iter()
-			.map(|range| match range.end {
-				Some(moq_net::track::Anchor::Absolute(end)) => Some(end),
-				_ => None,
-			})
-			.collect::<Option<Vec<_>>>()
-			.map(|ends| ends.into_iter().max().unwrap_or_default());
-		track.set_groups((
-			start.map_or(Bound::Unbounded, Bound::Included),
-			end.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
-		));
-		// A closed track makes the update meaningless; the reader already sees the close.
-		let _ = track.update(subscription);
-	}
-
 	async fn run_raw(
 		callback: OnStatus,
-		mut track: moq_net::track::Ordered,
+		mut reader: RawReader,
 		mut close: oneshot::Receiver<()>,
 		mut updates: mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
 	) -> Result<(), Error> {
@@ -736,10 +747,10 @@ impl Consume {
 		loop {
 			let mut group =
 				match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::group::Consumer>, Error>> {
-					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut reader, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
-					match ready!(track.poll_next_group(waiter))? {
+					match ready!(reader.track.poll_next_group(waiter))? {
 						Some(group) => Poll::Ready(Ok(RawStep::Item(group))),
 						None => Poll::Ready(Ok(RawStep::End)),
 					}
@@ -753,7 +764,7 @@ impl Consume {
 
 			loop {
 				let frame = match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
-					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut reader, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
 					match ready!(group.poll_read_frame(waiter))? {
@@ -782,12 +793,12 @@ impl Consume {
 	/// Returns `true` when the task must stop: either the consumer was closed
 	/// (`close` fired) or the update channel was dropped. The caller must then
 	/// unwind rather than poll `close` again, since a completed oneshot panics if
-	/// re-polled. Borrows `track` only for the duration of the call so the caller
+	/// re-polled. Borrows `reader` only for the duration of the call so the caller
 	/// can poll a track/group source afterwards.
 	fn poll_raw_control(
 		close: &mut oneshot::Receiver<()>,
 		updates: &mut mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
-		track: &mut moq_net::track::Ordered,
+		reader: &mut RawReader,
 		waiter: &moq_net::kio::Waiter,
 	) -> bool {
 		let mut cx = waiter.context();
@@ -797,7 +808,7 @@ impl Consume {
 
 		loop {
 			match updates.poll_recv(&mut cx) {
-				Poll::Ready(Some(subscription)) => Self::apply_raw_subscription(track, subscription),
+				Poll::Ready(Some(subscription)) => reader.apply(subscription),
 				Poll::Ready(None) => return true,
 				Poll::Pending => return false,
 			}
