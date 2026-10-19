@@ -22,11 +22,16 @@ cut shifts the milestones up, as the root [questline](/quest/README.md)
 describes. This epic's remaining publication and adoption quests move to m0,
 the rest of m2 moves to m1, and every link to a moved path is rewritten. That
 PR also removes this path from every `Required`, which releases the audits
-waiting on it. It then re-creates this quest at the same path under a fresh
-release epic in m2, keeping the Goal and this paragraph and requiring the new
-`/quest/m1/README.md`. Only `/quest-delete` ends the recurrence.
+waiting on it. It then re-creates this quest, the [API shape
+review](/quest/m2/release/api-review.md), and the [feature
+review](/quest/m2/release/feature-review.md) at the same paths under a fresh
+release epic in m2. Each keeps its Goal and recurrence paragraph and requires
+the new `/quest/m1/README.md`, and the cut also requires both reviews. Only
+`/quest-delete` ends the recurrence.
 
 ## Required
 
 - [Breaking release readiness](/quest/m1/README.md) - code, protocol and package proofs
 - [API-diff check](/quest/m2/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
+- [API shape review](/quest/m2/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
+- [Feature review](/quest/m2/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed
