@@ -13,6 +13,11 @@ Loop on `wanted_changed()` until it returns non-null where you awaited `used()`,
 `MoqTrackInfo` gains `refresh`, the ratio past which a joining subscriber asks for a new group.
 `MoqGroupDemand` is unchanged.
 
+### OpenH264 is a build feature (#5771)
+
+The published libraries still carry the software H.264 fallback.
+A source build (`cargo build -p moq-ffi`) leaves it out; add `--features openh264` to keep it.
+
 ### Subscriptions carry group ranges (#5732)
 
 `MoqSubscription::group_start` and `group_end` are replaced by `ranges`, a list of `MoqRange { start, end }` whose ends are `MoqAnchor::Absolute { group, frame }` or `MoqAnchor::Relative { groups }`, and an optional `order`.

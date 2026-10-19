@@ -114,6 +114,8 @@ struct Track {
 	const char *kind;
 	// The rendition's catalog ID.
 	std::string id;
+	// The publisher instance the track reads, so a newer one resubscribes even an unchanged rendition.
+	uint64_t instance = 0;
 	// The rendition the decoder was built from.
 	std::optional<moq::Video> video_config;
 	std::optional<moq::Audio> audio_config;
@@ -137,14 +139,17 @@ struct Connection {
 	std::shared_ptr<moq::Client> client;
 	std::shared_ptr<moq::Session> session;
 	std::shared_ptr<moq::AnnouncedBroadcast> announced;
+
+	// How many publisher instances `announced` has handed out; the newest is the one read.
+	uint64_t instance = 0;
 	std::shared_ptr<moq::BroadcastConsumer> consumer;
 	std::shared_ptr<moq::MediaCatalogConsumer> catalog;
 
 	// The connect, then the session's status transitions.
 	std::optional<moq::Continuation> session_call;
-	// Waiting for the broadcast to be announced, then subscribing to its catalog.
-	std::optional<moq::Continuation> broadcast_call;
-	// The next catalog update.
+	// Waiting for the next publisher instance.
+	std::optional<moq::Continuation> available_call;
+	// Subscribing to the instance's catalog, then its next update.
 	std::optional<moq::Continuation> catalog_call;
 
 	std::shared_ptr<Track> video;
@@ -190,6 +195,7 @@ static void moq_source_disconnect_locked(struct moq_source *ctx);
 static void moq_source_blank_video(struct moq_source *ctx);
 static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				  moq::expected<std::shared_ptr<moq::Session>> result);
+static void moq_source_next_broadcast(struct moq_source *ctx, const std::shared_ptr<Connection> &conn);
 static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				    moq::expected<std::shared_ptr<moq::BroadcastConsumer>> result);
 static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
@@ -223,6 +229,22 @@ static std::function<void(Output)> moq_source_current(struct moq_source *ctx, co
 			return;
 		callback(ctx, current, std::move(output));
 	};
+}
+
+// Wraps a continuation so it also runs only while `conn` reads the publisher instance it
+// was issued for. Replacing the instance cancels its calls, but a result may be queued.
+template<typename Output>
+static std::function<void(Output)>
+moq_source_instance_current(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+			    void (*callback)(struct moq_source *, const std::shared_ptr<Connection> &, Output))
+{
+	return moq_source_current<Output>(ctx, conn,
+					  [instance = conn->instance, callback](struct moq_source *ctx,
+										const std::shared_ptr<Connection> &conn,
+										Output output) {
+						  if (conn->instance == instance)
+							  callback(ctx, conn, std::move(output));
+					  });
 }
 
 static void *moq_source_create(obs_data_t *settings, obs_source_t *source)
@@ -381,7 +403,13 @@ static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<
 	conn->announced = *announced;
 	LOG_INFO("Requesting broadcast: %s", conn->broadcast.c_str());
 
-	conn->broadcast_call = conn->announced->available().then(
+	moq_source_next_broadcast(ctx, conn);
+}
+
+// Waits for the next publisher instance: the first one announced, then each that takes over.
+static void moq_source_next_broadcast(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)
+{
+	conn->available_call = conn->announced->available().then(
 		ctx->worker.Executor(), moq_source_current<moq::expected<std::shared_ptr<moq::BroadcastConsumer>>>(
 						ctx, conn, moq_source_on_broadcast));
 }
@@ -396,20 +424,33 @@ static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_pt
 		return;
 	}
 
+	// Another instance took over, or the broadcast came back. The previous one's active tracks
+	// keep playing until the new catalog's renditions commit, or until they end once its
+	// route dies, holding the last frame.
+	if (conn->instance++ > 0)
+		LOG_INFO("Following a new publisher instance of broadcast: %s", conn->broadcast.c_str());
 	conn->consumer = *result;
-	conn->broadcast_call =
+	conn->catalog.reset();
+	conn->pending_video.reset();
+	conn->pending_audio.reset();
+
+	conn->catalog_call =
 		moq::MediaCatalogConsumer::subscribe(conn->consumer)
 			.then(ctx->worker.Executor(),
-			      moq_source_current<moq::expected<std::shared_ptr<moq::MediaCatalogConsumer>>>(
+			      moq_source_instance_current<moq::expected<std::shared_ptr<moq::MediaCatalogConsumer>>>(
 				      ctx, conn, moq_source_on_catalogs));
+	moq_source_next_broadcast(ctx, conn);
 }
 
 static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				   moq::expected<std::shared_ptr<moq::MediaCatalogConsumer>> result)
 {
 	if (!result) {
+		// Stop the instance this one replaced too, and wait for the next one.
 		LOG_ERROR("Failed to subscribe to catalog: %s", result.error().to_string().c_str());
-		moq_source_fail_locked(ctx);
+		moq_source_clear_video_locked(ctx);
+		moq_source_clear_audio_locked(ctx);
+		moq_source_blank_video(ctx);
 		return;
 	}
 
@@ -439,7 +480,7 @@ static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<C
 
 	switch (*result) {
 	case moq::ConnectionStatus::kConnected:
-		// The existing subscriptions ride out the gap; nothing to redo.
+		// `available()` hands out the broadcast announced over the new connect; nothing to redo here.
 		LOG_INFO("MoQ session reconnected (connect %llu)", (unsigned long long)conn->session->connects());
 		break;
 	case moq::ConnectionStatus::kDisconnected:
@@ -455,8 +496,8 @@ static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<C
 static void moq_source_next_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)
 {
 	conn->catalog_call = conn->catalog->next().then(
-		ctx->worker.Executor(),
-		moq_source_current<moq::expected<std::optional<moq::Catalog>>>(ctx, conn, moq_source_on_catalog));
+		ctx->worker.Executor(), moq_source_instance_current<moq::expected<std::optional<moq::Catalog>>>(
+						ctx, conn, moq_source_on_catalog));
 }
 
 static void moq_source_on_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
@@ -776,7 +817,8 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 	}
 
 	const auto &id = rendition->first;
-	if (moq_source_same_video(conn->video.get(), id, rendition->second)) {
+	if (moq_source_same_video(conn->video.get(), id, rendition->second) &&
+	    conn->video->instance == conn->instance) {
 		conn->pending_video.reset();
 		return;
 	}
@@ -792,6 +834,7 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 	}
 
 	auto track = std::make_shared<Track>("Video", id);
+	track->instance = conn->instance;
 	track->video_config = rendition->second;
 	track->video_decoder = std::move(decoder);
 	conn->pending_video = track;
@@ -810,7 +853,8 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 		return;
 	}
 	const auto &id = rendition->first;
-	if (moq_source_same_audio(conn->audio.get(), id, rendition->second)) {
+	if (moq_source_same_audio(conn->audio.get(), id, rendition->second) &&
+	    conn->audio->instance == conn->instance) {
 		conn->pending_audio.reset();
 		return;
 	}
@@ -834,6 +878,7 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 	LOG_INFO("Subscribing to audio track (%s, %u Hz, %u ch)", config.codec.c_str(), config.sample_rate,
 		 config.channel_count);
 	auto track = std::make_shared<Track>("Audio", id);
+	track->instance = conn->instance;
 	track->audio_config = config;
 	track->audio_layout = *layout;
 	conn->pending_audio = track;
