@@ -573,7 +573,7 @@ async fn objects_after_the_last_pcr_extrapolate_its_rate() {
 async fn the_section_goes_with_the_importer() {
 	let mut mux = Mux::default();
 	program(&mut mux, 0x100);
-	paced(&mut mux, 0x100, 0, 75, 10, 4);
+	paced(&mut mux, 0x100, 0, 125, 10, 4);
 	let data = mux.bytes();
 	for abort in [false, true] {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -851,6 +851,34 @@ async fn importers_sharing_an_epoch_split_full_groups_alike() {
 		.count();
 	assert!(full >= 3, "{full} groups at the ceiling");
 	assert!(!first.section().random_access);
+}
+
+/// A joiner whose first PCR lands exactly on a window's line misses the grid cut its partner made
+/// there, so the first window it describes is the one after: describing that window would publish
+/// random access the partner lost to the cut.
+#[tokio::test(start_paused = true)]
+async fn a_joiner_on_a_window_line_describes_the_window_after() {
+	const WINDOW: u64 = 2_000 * MS;
+	let mut mux = Mux::default();
+	program(&mut mux, 0x100);
+	let prefix = mux.out.len();
+	// The placed epoch puts these PCRs one wrap on, so `offset` lands every fiftieth on a line.
+	let offset = (WINDOW - WRAP % WINDOW) % WINDOW;
+	for i in 0..400 {
+		mux.packet(0x100, Flags::pcr(offset + i * 40 * MS));
+		// No random access before 4 s, then one just after the PCR on each whole second.
+		if i >= 100 && i % 25 == 0 {
+			mux.packet(0x100, ACCESS);
+		}
+		mux.fill(0x101, 4);
+	}
+	let data = mux.bytes();
+	let (first, second) = import_twice_placed(&data, prefix, offset + 4_000 * MS).await;
+	assert!(
+		first.section().random_access,
+		"every group from 6 s on is a random access point"
+	);
+	assert_eq!(first.section(), second.section());
 }
 
 /// The grid lies on the timeline the epoch places, so it runs on regularly across a PCR wrap that

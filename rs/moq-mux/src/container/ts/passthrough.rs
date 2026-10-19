@@ -37,9 +37,9 @@
 //! The section is written for each window of a grid every two seconds on the PCR timeline, once
 //! the clock passes it; a window holds the PCR intervals that start in it, so the packets up to
 //! the first PCR past a line, and any layout change among them, count in the window before the
-//! line. It is written only for windows that start at or after the importer's first group:
-//! the catalog lists the track from the first such window on, or at the end of the input if that
-//! comes first. [`random_access`](hang::catalog::M2ts::random_access) is true when every group
+//! line. It is written only for windows that start after the PCR the importer's first group
+//! follows: the catalog lists the track from the first such window on, or at the end of the input
+//! if that comes first. [`random_access`](hang::catalog::M2ts::random_access) is true when every group
 //! the window started is a random access point and the layout allowed random access throughout it
 //! (one program, at most one video stream); [`mux_rate`](hang::catalog::M2ts::mux_rate) is the rate the
 //! window was paced at, when the PCRs arrived unbroken across it and agree on one. An input that
@@ -613,14 +613,15 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	}
 
 	/// The section for the window a PCR at `ticks` ended, if it ended one: written once the window
-	/// starts at or after the first group, since every group start and layout change in it is
-	/// then one an importer running since before saw the same way.
+	/// starts after the PCR the first group follows, since every group start and layout change in
+	/// it is then one an importer running since before saw the same way. A window starting on that
+	/// PCR is not: the partner may have cut earlier in the same PCR interval.
 	fn end_window(&mut self, ticks: u64, broken: bool) -> anyhow::Result<()> {
 		let Some(ended) = self.windows.pcr(ticks, broken) else {
 			return Ok(());
 		};
 		let random_access = std::mem::replace(&mut self.window_random_access, self.single);
-		if self.first_mark.is_some_and(|mark| mark <= ended.index * WINDOW) {
+		if self.first_mark.is_some_and(|mark| mark < ended.index * WINDOW) {
 			self.record(random_access, ended.rate)?;
 		}
 		Ok(())
