@@ -709,8 +709,22 @@ test("Consumer keeps the first of several decode errors", async () => {
 
 // A transport reset is loss: frames decoded before it are kept and the cut tail reads as a gap.
 test("Consumer keeps frames decoded before a group reset (truncated GoP)", async () => {
+	// Reset only once both frames are decoded: a reset discards whatever is still unread.
+	const format = new LegacyFormat("data");
+	const decode = format.decode.bind(format);
+	let decodes = 0;
+	let resolveDecoded!: () => void;
+	const decoded = new Promise<void>((resolve) => {
+		resolveDecoded = resolve;
+	});
+	format.decode = (frame) => {
+		const frames = decode(frame);
+		if (++decodes === 2) resolveDecoded();
+		return frames;
+	};
+
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 500 as Milli });
+	const consumer = new Consumer(replay(track), { format, maxDelay: 500 as Milli });
 
 	const g0 = new Group.Producer(0);
 	for (const timestamp of [1, 2]) {
@@ -720,7 +734,7 @@ test("Consumer keeps frames decoded before a group reset (truncated GoP)", async
 		});
 	}
 	track.writeGroup(g0);
-	await settle();
+	await decoded;
 	g0.close(new NetError.Stream(StreamCode.Cancel));
 
 	writeGroupWithLegacyFrames(track, 1, [4 as Micro]);
