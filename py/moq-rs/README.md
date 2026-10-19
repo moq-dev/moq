@@ -127,7 +127,7 @@ client = moq.Client(
 
 ### Connection
 
-- **`connect(url, *, tls_verify=True, tls_roots=(), tls_system_roots=None, tls_fingerprints=(), tls_cert=None, tls_key=None, tls_host_name=None, bind=None, versions=(), timeout=None, race=None, resolution_delay=None, max_streams=None, idle_timeout=None, keep_alive=None, gso=None, mtu_discovery=None, congestion_control=None, qlog=None, websocket_enabled=None, websocket_delay=None, reconnect=True, backoff=None, publish=None, consume=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
+- **`connect(url, *, tls_verify=True, tls_roots=(), tls_system_roots=None, tls_fingerprints=(), tls_cert=None, tls_key=None, tls_host_name=None, bind=None, versions=(), timeout=None, race=None, resolution_delay=None, max_streams=None, idle_timeout=None, keep_alive=None, gso=None, mtu_discovery=None, congestion_control=None, qlog=None, keylog=False, websocket_enabled=None, websocket_delay=None, reconnect=True, backoff=None, publish=None, consume=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
 - **`Client(url, *, ...)`**, taking the same arguments. Async context manager for connecting to a relay.
   - `tls_roots`. PEM root certificate file path(s) to trust instead of the system roots.
   - `tls_system_roots`. Whether to trust platform roots in addition to custom roots.
@@ -136,11 +136,13 @@ client = moq.Client(
   - `tls_host_name`. Verify the certificate against this name (SNI) instead of the URL's host.
   - `max_streams`. Raise the peer's inbound stream cap.
   - `idle_timeout`, `keep_alive`, `gso`, `mtu_discovery`, `congestion_control`, `qlog`. QUIC tuning; `keep_alive=timedelta(0)` disables pings, `congestion_control` takes a `CongestionControl`, and `qlog` is a trace directory when `qlog_supported()`.
+  - `keylog`. Write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` the client refuses to build.
   - `versions`. Protocol versions to offer, most preferred first (e.g. `"moq-lite-03"`); empty offers all, which `versions()` lists.
   - `timeout`, `race`, `resolution_delay`. Bound one connect attempt and pace Happy Eyeballs.
   - `reconnect`, `backoff`. Redial with a `Backoff` when the transport drops; `reconnect=False` dials once.
   - `.session`. The established `Session` (or `None` before connecting / after exit).
-- **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), versions=(), max_streams=None, publish=None, consume=None)`**. Async context manager + async iterator of incoming `Request`s.
+- **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), versions=(), max_streams=None, keylog=False, publish=None, consume=None)`**. Async context manager + async iterator of incoming `Request`s.
+  - `keylog`. Write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` entering the server fails.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
   - `.create_broadcast(path) → BroadcastProducer`. Create an unannounced broadcast, invisible to everyone; `announce()` makes it discoverable and reachable; `close()` ends it.
