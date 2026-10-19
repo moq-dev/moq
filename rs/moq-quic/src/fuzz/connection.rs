@@ -161,6 +161,14 @@ struct Sent {
     fin: bool,
 }
 
+/// A datagram in flight.
+#[derive(Clone)]
+struct Inbound {
+    data: BytesMut,
+    /// The first byte a tamper op may have changed, tainting it once the connection takes it.
+    tampered: Option<usize>,
+}
+
 struct Peer {
     side: Side,
     endpoint: Endpoint,
@@ -168,7 +176,7 @@ struct Peer {
     conn: Option<(ConnectionHandle, Connection)>,
     connected: bool,
     /// Datagrams in flight toward this side, oldest first.
-    inbound: VecDeque<BytesMut>,
+    inbound: VecDeque<Inbound>,
     /// Streams this side writes: opened here, or accepted bidirectional.
     send: Vec<StreamId>,
     /// Streams this side reads: accepted, or opened here bidirectional.
@@ -180,9 +188,10 @@ struct Peer {
     datagrams_sent: Vec<usize>,
     /// The sequence numbers of the datagrams this side received.
     datagrams_received: HashSet<u64>,
-    /// Streams a tampered packet toward this side carried data for, whose reads go unchecked.
+    /// Streams a tampered packet this side's connection took carried data for, whose reads
+    /// go unchecked.
     forged_streams: HashSet<StreamId>,
-    /// Payloads of the datagrams a tampered packet toward this side carried.
+    /// Payloads of the datagrams a tampered packet this side's connection took carried.
     forged_datagrams: HashSet<Bytes>,
 }
 
@@ -217,7 +226,7 @@ impl Peer {
         self.conn.as_mut().map(|(_, conn)| conn)
     }
 
-    /// Record the streams and datagrams a tampered datagram toward this side carries.
+    /// Record the streams and datagrams a tampered datagram this side's connection took carries.
     ///
     /// Decodes it the way the endpoint and connection would, coalesced packets and all,
     /// so a frame they accept is never missed. Over-counting only skips a check.
@@ -373,12 +382,14 @@ impl Pair {
         let (peer, other, capture) = self.split(side);
         let mut buf = Vec::new();
         for _ in 0..count {
-            let Some(datagram) = peer.inbound.pop_front() else {
+            let Some(Inbound { data, tampered }) = peer.inbound.pop_front() else {
                 break;
             };
+            // Only what the connection takes can deliver frames; the endpoint drops the rest.
+            let tampered = tampered.map(|from| (data.clone(), from));
             let event = peer
                 .endpoint
-                .handle(now, other.addr, None, None, datagram, &mut buf);
+                .handle(now, other.addr, None, None, data, &mut buf);
             match event {
                 Some(DatagramEvent::NewConnection(incoming)) => {
                     // One connection per run: a forged Initial after it is turned away.
@@ -387,13 +398,17 @@ impl Pair {
                     } else if let Ok(accepted) = peer.endpoint.accept(incoming, now, &mut buf, None)
                     {
                         peer.conn = Some(accepted);
+                        if let Some((data, from)) = tampered {
+                            peer.taint(&data, from);
+                        }
                     }
                 }
                 Some(DatagramEvent::ConnectionEvent(ch, event)) => {
-                    if let Some((handle, conn)) = &mut peer.conn
-                        && *handle == ch
-                    {
-                        conn.handle_event(event);
+                    if peer.conn.as_ref().is_some_and(|(handle, _)| *handle == ch) {
+                        if let Some((data, from)) = tampered {
+                            peer.taint(&data, from);
+                        }
+                        peer.conn().unwrap().handle_event(event);
                     }
                 }
                 Some(DatagramEvent::Response(transmit)) => {
@@ -656,18 +671,18 @@ impl Pair {
                 // A zero XOR changes nothing, so tainting would only skip checks on real traffic.
                 if xor != 0
                     && let Some(front) = peer.inbound.front_mut()
-                    && !front.is_empty()
+                    && !front.data.is_empty()
                 {
-                    let offset = offset as usize % front.len();
-                    front[offset] ^= xor;
-                    let front = front.clone();
-                    peer.taint(&front, offset);
+                    let offset = offset as usize % front.data.len();
+                    front.data[offset] ^= xor;
+                    front.tampered = Some(front.tampered.map_or(offset, |from| from.min(offset)));
                 }
             }
             Op::Inject { to, data } => {
-                let peer = self.peer(to);
-                peer.taint(&data, 0);
-                peer.inbound.push_back(BytesMut::from(&data[..]));
+                self.peer(to).inbound.push_back(Inbound {
+                    data: BytesMut::from(&data[..]),
+                    tampered: Some(0),
+                });
             }
             Op::Tick => self.tick(),
             Op::Advance { millis } => {
@@ -721,7 +736,7 @@ impl Pair {
 
 /// Queue a transmit for the peer, split into datagrams if it was batched.
 fn send(
-    inbound: &mut VecDeque<BytesMut>,
+    inbound: &mut VecDeque<Inbound>,
     capture: &mut Option<Vec<Vec<u8>>>,
     data: &[u8],
     segment_size: Option<usize>,
@@ -730,7 +745,10 @@ fn send(
         if let Some(capture) = capture {
             capture.push(datagram.to_vec());
         }
-        inbound.push_back(BytesMut::from(datagram));
+        inbound.push_back(Inbound {
+            data: BytesMut::from(datagram),
+            tampered: None,
+        });
     }
 }
 
@@ -949,6 +967,7 @@ mod tests {
             .inbound
             .back()
             .expect("the ping sent nothing")
+            .data
             .clone();
         let parser = FixedLengthConnectionIdParser::new(CID_LEN);
         let (ping, _) = PartialDecode::new(ping, &parser, DEFAULT_SUPPORTED_VERSIONS, true)
@@ -971,6 +990,28 @@ mod tests {
         pair.drain();
 
         assert_eq!(pair.server.read.get(&StreamId(0)), Some(&3));
+    }
+
+    /// An injected packet for a CID the server never issued is dropped by the endpoint, so
+    /// its frames never reach the connection and real traffic on the same stream stays checked.
+    #[test]
+    fn unrouted_injection_taints_nothing() {
+        let mut pair = Pair::new();
+        assert!(pair.handshake());
+
+        let mut packet = vec![0x40 | 0x03];
+        packet.extend_from_slice(&[0xaa; CID_LEN]);
+        packet.extend_from_slice(&1000u32.to_be_bytes());
+        packet.extend_from_slice(&[0x0b, 0x00, 0x03, b'b', b'a', b'd']);
+        packet.extend_from_slice(&[0; TAG_LEN]);
+
+        pair.apply(Op::Inject {
+            to: Who::Server,
+            data: packet,
+        });
+        pair.drain();
+
+        assert!(pair.server.forged_streams.is_empty());
     }
 
     /// A corruption that leaves every frame intact, by flipping no bits or only a byte of
@@ -998,21 +1039,28 @@ mod tests {
             .inbound
             .front()
             .expect("the write sent nothing")
+            .data
             .clone();
 
-        pair.apply(Op::Corrupt {
-            to: Who::Server,
-            offset: 0,
-            xor: 0,
-        });
-        assert!(pair.server.forged_streams.is_empty());
-
         // The last byte belongs to the last packet's tag.
-        pair.apply(Op::Corrupt {
-            to: Who::Server,
-            offset: (front.len() - 1).try_into().unwrap(),
-            xor: 0xff,
-        });
+        for op in [
+            Op::Corrupt {
+                to: Who::Server,
+                offset: 0,
+                xor: 0,
+            },
+            Op::Corrupt {
+                to: Who::Server,
+                offset: (front.len() - 1).try_into().unwrap(),
+                xor: 0xff,
+            },
+            Op::Deliver {
+                to: Who::Server,
+                count: 1,
+            },
+        ] {
+            pair.apply(op);
+        }
         assert!(pair.server.forged_streams.is_empty());
 
         // The same datagram does carry stream data, so a real corruption would taint it.
