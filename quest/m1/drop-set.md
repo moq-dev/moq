@@ -40,11 +40,21 @@ which keeps drops final for now.
 - **A widening re-offers the dropped runs now inside its budget,** through
   the re-offer path the resolved-demand quest adds, in the subscription's
   order. Upstream, the relay's own widening asks for them again.
-- **A received drop's budget.** A SUBSCRIBE_UPDATE has no acknowledgement,
-  so a drop that arrives after a widening may have been judged under either
-  budget. Record the narrowest budget sent upstream since the last widening.
-  A guess that is too narrow only makes a wide reader wait for its own
-  verdict, never drop early.
+- **A stale drop names its budget.** A SUBSCRIBE_UPDATE has no
+  acknowledgement, so after a widening from B1 to B2, an in-flight B1 drop
+  and the B2 re-drop look identical, and no guess settles a B2 reader. On
+  lite-07 SUBSCRIBE_DROP carries `Max Age`: the budget a staleness verdict
+  was judged under, encoded like `Publisher Max Age` (milliseconds plus one),
+  with `0` for a drop that does not depend on the budget (a cut, a group
+  never produced). The relay records each run with that exact budget. A B1
+  drop then settles only readers no wider than B1, and the B2 re-drop
+  settles a B2 reader. The cost is one varint per drop, a few bytes on an
+  event that is already per group, which is worth an unambiguous term.
+  Rejected: an implicit generation counted by both sides per
+  SUBSCRIBE_UPDATE. It needs a generation-to-budget history at the relay
+  and agreement on every update counted, while the budget itself is
+  self-describing, order-free, and unaffected by updates that change
+  nothing.
 - **lite-07 only for re-offering reported groups.** Released lite-05 and
   lite-06 peers treat a flushed SUBSCRIBE_DROP as final, so a drop received
   over those versions is final for every reader, and a lite-07 hop never
@@ -59,7 +69,8 @@ which keeps drops final for now.
   when it was sent, that a widening re-offers held groups and re-drops the
   rest, and that a later group wins over its drop. Whichever of this and
   [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md)
-  lands second writes it. No new wire field.
+  lands second writes it, including the `Max Age` field above, which is
+  free to add because lite-07 is unpublished.
 
 Code it replaces, in Rust and `js/net` alike:
 
@@ -72,12 +83,22 @@ Code it replaces, in Rust and `js/net` alike:
   wire cursor's `#pending`, `#dropsSeen`, and `#reported`, whose
   `#tryRecvGroup` closes any group already reported.
 
-Untrusted input: a hostile peer can fragment the set by alternating drops
-and arrivals. The set never holds more runs than the groups in the
-subscription range, the same order as the cache index, so it needs no limit
-constant. Extend `track_subscriber_churn` in `rs/moq-net/benches/track.rs`
-with a fragmented set, swept over subscriber count and runs, so enumeration
-cost tracks the touched runs, not the set.
+Untrusted input: a hostile upstream can fragment the set by alternating
+drops and arrivals, and an open live range is no bound, since its groups are
+evicted while their runs would stay. Bill each run to the cache's existing
+byte accounting like a group: the Rust `Pool` through a `Charge` at a fixed
+per-run cost, and the same eviction bound in `js/net`. Under pressure the
+pool evicts the oldest runs as it evicts groups, and a run older than the
+cache's retention window is forgotten, so the set never outgrows what the
+pool would hold, with no new constant. An evicted run's sequences become
+unknown again. A cursor judges an unknown missing sequence as it would a
+group never received: locally against its own budget (`TrackState::drifted`),
+and otherwise as a cache miss, which the relay fills upstream by range
+([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)), so no reader
+waits indefinitely on forgotten state. Extend `track_subscriber_churn` in
+`rs/moq-net/benches/track.rs` with a fragmented set up to pool capacity,
+swept over subscriber count and runs, so enumeration cost tracks the touched
+runs, not the set.
 
 Test on mock time through a relay:
 - On a live track, a reader no wider than the upstream budget gets a prompt
@@ -86,17 +107,23 @@ Test on mock time through a relay:
   drop, whether the drop was flushed before or after the widening
   SUBSCRIBE_UPDATE. Check what each reader receives, not only tail
   accounting.
+- On lite-07, after a widening from B1 to B2 for a group the upstream no
+  longer holds, an in-flight drop tagged B1 settles only the B1 reader, and
+  the re-drop tagged B2 settles the B2 reader.
 - A group arriving after its drop is served, and a drop arriving after its
   group leaves it served.
 - Through a lite-06 hop, a reported group stays dropped for every reader,
   with no session error.
 - A shrink sends no drops.
-- Alternating drops and arrivals never grow the set past the range.
+- A flood of fragmented runs stays within the pool, evicting the oldest
+  runs first, and a sequence whose run was evicted is judged locally or
+  filled by range, never waited on indefinitely.
 
 Mirror each case in `js/net`.
 
-Public API: none. Wire: no encoding change; lite-07 SUBSCRIBE_DROP gains the
-widening and ordering rules above.
+Public API: none. Wire: lite-07 SUBSCRIBE_DROP (unpublished) gains `Max Age`
+and the widening and ordering rules above; published versions are
+unchanged.
 
 ## Required
 
@@ -105,3 +132,4 @@ widening and ordering rules above.
 ## Related
 
 - [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md) - restores the lite-07 drop these rules apply to
+- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
