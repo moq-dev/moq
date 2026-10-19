@@ -114,11 +114,11 @@ pub struct Stream {
 	/// them: before the first PCR, after the last with no interval to extrapolate from, or
 	/// before the broadcast clock's zero. Export stays zero.
 	pub unplaced: u64,
-	/// Times this PID's stream was refused rather than carried altered: a private PES stream
-	/// with a clock field only the PTS and DTS of are rebased (ESCR, a `pack_header_field`, a
-	/// TREF), PES-level scrambling, an unbounded non-video PES, a header export refuses, or a
-	/// program with no PCR to place it by. Its track ends and leaves the catalog. Export stays
-	/// zero.
+	/// Times this PID's stream was refused rather than carried altered: an undecoded stream
+	/// in a program with no PCR to place it by, or a private PES stream with a clock field only
+	/// the PTS and DTS of are rebased (ESCR, a `pack_header_field`, a TREF), PES-level scrambling,
+	/// an unbounded non-video PES, or a header export refuses. Its track ends and leaves the
+	/// catalog. Export stays zero.
 	pub refused: u64,
 	/// This PID's share of [`Snapshot::continuity_count_error`].
 	pub continuity_count_error: u64,

@@ -260,7 +260,8 @@ A timebase ends at a PCR discontinuity, and at a PMT that moves the `PCR_PID`.
 Each PCR takes the 2^33 multiple of its base that lands it nearest the media's PTS, and the placement moves onto the catalog clock by the same shift as the media, so its timestamp depends only on the input and that shift.
 A PES or section before the first PCR the publisher reads, or past a lone one, has nothing to place it and is dropped.
 The publisher moves each PTS and DTS by the media's shift modulo 2^33, keeping their prefix and marker bits, and leaves every other byte as received; the PES CRC covers the previous packet's data bytes, not its header, so it stays valid.
-It MUST refuse to carry a stream rather than alter it: one in a program with no PCR, and one whose PES carry a clock the shift does not reach (an ESCR, a `pack_header_field`, or a TREF), PES-level scrambling, a zero `PES_packet_length` on a stream that is not video, or a header whose flagged optional fields overrun its `PES_header_data_length`, which a consumer refuses.
+The publisher MUST refuse a `verbatim` or `pesPacket` stream in a program with no PCR.
+It MUST also refuse a `pesPacket` stream whose PES carry a clock the shift does not reach (an ESCR, a `pack_header_field`, or a TREF), PES-level scrambling, a zero `PES_packet_length` on a stream that is not video, or a header whose flagged optional fields overrun its `PES_header_data_length`, which a consumer refuses.
 
 A verbatim or whole-PES track has no codec, dimensions, or decoder configuration, so a publisher MUST NOT describe it as a media rendition and MUST describe it only by its `tracks` entry, and a consumer MUST refuse a catalog that describes one as both.
 Nothing there declares a container, so its frames use hang's `legacy` container ({{hang}}): a varint microsecond timestamp followed by the payload.

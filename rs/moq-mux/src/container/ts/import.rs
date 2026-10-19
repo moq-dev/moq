@@ -60,10 +60,10 @@ use moq_net::Timestamp;
 /// or with no interval to extrapolate from, is dropped and counted in
 /// [`stats::Stream::unplaced`]. A section's SCTE-35 splice times absorb the media's offset in
 /// `pts_adjustment`; a whole PES's PTS and DTS move by that offset, and every other byte is kept.
-/// A stream whose PES carry a clock only the PTS and DTS of are
-/// rebased (ESCR, a `pack_header_field`, a TREF), PES-level scrambling, an unbounded non-video
-/// PES, or a header export would refuse is refused rather than altered, as is every such stream
-/// in a program with no PCR: [`stats::Stream::refused`]. A PMT that moves the PCR PID ends the
+/// A stream whose PES carry a clock only the PTS and DTS of are rebased (ESCR, a
+/// `pack_header_field`, a TREF), PES-level scrambling, an unbounded non-video PES, or a header
+/// export would refuse is refused rather than altered. A program with no PCR refuses both
+/// whole PES and section streams: [`stats::Stream::refused`]. A PMT that moves the PCR PID ends the
 /// placement timebase, as a clock break does; one that drops the PCR refuses those streams, and
 /// one that names it again carries them.
 ///
@@ -137,9 +137,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	placement: Placement,
 	/// Whole PES and sections dropped for want of a clock to place them, keyed by PID.
 	unplaced: BTreeMap<u16, u64>,
-	/// Private PES streams refused rather than carried altered, keyed by PID.
+	/// Undecoded streams refused rather than carried altered, keyed by PID.
 	refused: BTreeMap<u16, u64>,
-	/// The `stream_type` of each private PES stream refused only for want of a PCR, routed again
+	/// The `stream_type` of each undecoded stream refused only for want of a PCR, routed again
 	/// once a PMT names one or gives the PID another type.
 	unclocked: HashMap<Pid, u8>,
 	/// One program-wide budget for PES payloads and sections awaiting their clock.
@@ -755,6 +755,15 @@ impl<E: catalog::Catalog> Import<E> {
 	/// intercepted (see [`Self::decode`]) with a verbatim track when the catalog
 	/// carries the `mpegts` section, dropped as `Ignored` when it can't.
 	fn ensure_section(&mut self, pid: Pid, stream_type: u8, descriptors: &[catalog::Descriptor]) -> anyhow::Result<()> {
+		if self.supports_mpegts && self.pcr_pid.is_none() {
+			if self.unclocked.get(&pid) != Some(&stream_type) {
+				self.refuse(pid, "the program has no PCR to place it by")?;
+				self.unclocked.insert(pid, stream_type);
+			}
+			self.liveness.register(pid.as_u16());
+			self.initialized = true;
+			return Ok(());
+		}
 		if self.sections.contains_key(&pid.as_u16()) {
 			return Ok(());
 		}
@@ -1073,17 +1082,20 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// Refuse the private PES stream on `pid` rather than carry it altered: its track ends with an
+	/// Refuse the undecoded stream on `pid` rather than carry it altered: its track ends with an
 	/// error and leaves the catalog, and the PID is dropped from here on.
 	fn refuse(&mut self, pid: Pid, why: &str) -> anyhow::Result<()> {
 		self.pending.remove(&pid);
 		self.headers.remove(&pid);
+		if let Some(section) = self.sections.remove(&pid.as_u16()) {
+			section.abort(moq_net::Error::Unsupported);
+		}
 		if let Some(stream) = self.retire_stream(pid) {
 			stream.abort(moq_net::Error::Unsupported);
 		}
 		self.streams.insert(pid, Stream::Ignored);
 		*self.refused.entry(pid.as_u16()).or_default() += 1;
-		tracing::warn!(pid = pid.as_u16(), why, "refused a private PES stream");
+		tracing::warn!(pid = pid.as_u16(), why, "refused an undecoded stream");
 		Ok(())
 	}
 
@@ -9488,6 +9500,81 @@ pub(super) mod test {
 		assert_eq!(catalog.audio.renditions.len(), 1, "only the MP2 track");
 		let audio = catalog.audio.renditions.values().next().unwrap();
 		assert_eq!(audio.codec.to_string(), "mp2");
+	}
+
+	/// Section routes refuse a missing PCR PID, then return when a later PMT supplies one.
+	#[tokio::test(start_paused = true)]
+	async fn a_pmt_naming_or_dropping_the_pcr_reroutes_sections() {
+		use crate::container::ts::psi::{Es, Pmt};
+		for stream_type in [0x05, 0x86] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(
+				&mut broadcast,
+				crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+			)
+			.unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve());
+			let pid = Pid::new(0x21).unwrap();
+			let pmt = |pcr_pid| Pmt {
+				program_number: 1,
+				pcr_pid,
+				program_info: vec![super::catalog::Descriptor {
+					tag: 5,
+					data: bytes::Bytes::from_static(b"CUEI"),
+				}],
+				streams: vec![
+					Es {
+						stream_type: 0x02,
+						pid: Pid::new(PCR_PID).unwrap(),
+						descriptors: Vec::new(),
+					},
+					Es {
+						stream_type,
+						pid,
+						descriptors: Vec::new(),
+					},
+				],
+			};
+			import.handle_pmt(pmt(None)).unwrap();
+			import.handle_pmt(pmt(None)).unwrap();
+			assert_eq!(import.stats().streams[&0x21].refused, 1, "once per refused route");
+			assert!(catalog.snapshot().ext.mpegts.tracks.is_empty());
+			assert!(matches!(import.streams[&pid], super::Stream::Ignored));
+			import.handle_pmt(pmt(Some(Pid::new(PCR_PID).unwrap()))).unwrap();
+			let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
+			let data = [
+				pcr_packet(PCR_PID, 27_000_000),
+				pes_packet(PCR_PID, 99_000),
+				packet(true, 0, 0, &CUE),
+				pcr_packet(PCR_PID, 29_700_000),
+				pcr_packet(PCR_PID, 32_400_000),
+			]
+			.concat();
+			import.decode(&data).unwrap();
+			let track = consumer
+				.track(&name)
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+				.await
+				.unwrap();
+			let mut reader = crate::container::Consumer::new(
+				track,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+			);
+			assert_eq!(reader.read_frame().await.unwrap().unwrap().payload.as_ref(), CUE);
+			import.handle_pmt(pmt(None)).unwrap();
+			assert_eq!(import.stats().streams[&0x21].refused, 2);
+			assert!(
+				reader.read_frame().await.is_err(),
+				"losing the PCR ends the track with an error"
+			);
+			assert!(catalog.snapshot().ext.mpegts.tracks.is_empty());
+			import.handle_pmt(pmt(Some(Pid::new(PCR_PID).unwrap()))).unwrap();
+			let next = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
+			assert_ne!(next, name, "restoring a stream publishes a new track");
+			import.finish().unwrap();
+		}
 	}
 
 	/// A PID refused as private PES for want of a PCR routes again when a later PMT gives it a
