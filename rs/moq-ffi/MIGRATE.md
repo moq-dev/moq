@@ -13,6 +13,11 @@ Loop on `wanted_changed()` until it returns non-null where you awaited `used()`,
 `MoqTrackInfo` gains `refresh`, the ratio past which a joining subscriber asks for a new group.
 `MoqGroupDemand` is unchanged.
 
+### `MoqCongestionControl` gained `None` (#5926)
+
+`MoqCongestionControl::None` runs no congestion control and no pacing, for tests and controlled links.
+An exhaustive match needs one more arm.
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

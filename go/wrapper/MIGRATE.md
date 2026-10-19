@@ -11,6 +11,11 @@ How to update your code for each breaking change, newest first.
 Loop on `WantedChanged` until it returns non-nil where you called `Used`, and nil where you called `Unused`.
 `TrackInfo` gains `Refresh`. `GroupDemand` is unchanged.
 
+### `CongestionControl` gained `CongestionControlNone` (#5926)
+
+`CongestionControlNone` runs no congestion control and no pacing, for tests and controlled links.
+A `switch` that handles every value needs one more case.
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

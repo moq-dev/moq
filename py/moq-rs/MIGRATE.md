@@ -11,6 +11,11 @@ How to update your code for each breaking change, newest first.
 Loop on `wanted_changed()` until it returns non-`None` where you awaited `used()`, and `None` where you awaited `unused()`.
 `TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
 
+### `CongestionControl` gained `NONE` (#5926)
+
+`CongestionControl.NONE` runs no congestion control and no pacing, for tests and controlled links.
+Code that handles every value needs one more case.
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

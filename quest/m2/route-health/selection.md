@@ -38,4 +38,3 @@ report any required surface change. No independent wire extension planned.
 
 - [Health design](/quest/m2/route-health/design.md) - the proven selection boundary
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - shared candidate and identity model
-- [JS track handover](/quest/m1/js-group-handover.md) - matching logical-track resume behavior
