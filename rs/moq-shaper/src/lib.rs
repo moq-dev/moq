@@ -484,10 +484,12 @@ impl Shaper {
 	///
 	/// Armed after a handshake, this accounts the collected datagrams at one instant,
 	/// regardless of scheduling gaps. Collected datagrams are never lost, so the
-	/// gate opens on what the sender offers, not on the loss draws. The chosen direction needs a fixed rate profile;
-	/// other flows and the opposite direction keep forwarding. A shared link collects
-	/// all its clients together. Holding enough bytes
-	/// requires transport credit beyond the bucket's burst plus queue allowance.
+	/// gate opens on what the sender offers, not on the loss draws, and
+	/// [`Shaper::verify`] never counts them as chances for loss. The chosen
+	/// direction needs a fixed rate profile; other flows and the opposite direction
+	/// keep forwarding. A shared link collects all its clients together. Holding
+	/// enough bytes requires transport credit beyond the bucket's burst plus queue
+	/// allowance.
 	#[cfg(any(test, feature = "test"))]
 	pub fn burst(&self, direction: ingress::Direction) -> anyhow::Result<ingress::Burst> {
 		let (index, profile, options) = match direction {
@@ -562,12 +564,26 @@ impl Shaper {
 		}
 
 		let counts = [UP, DOWN].map(|dir| self.tally[dir].phases.lock().unwrap().clone());
+		let exempt = [UP, DOWN].map(|dir| self.tally[dir].exempt.load(Ordering::Relaxed));
 		let phases: Vec<(Profile, u64)> = [
-			(&self.setup.config.up, &self.setup.up, &counts[UP]),
-			(&self.setup.config.down, &self.setup.down, &counts[DOWN]),
+			(&self.setup.config.up, &self.setup.up, &counts[UP], exempt[UP]),
+			(&self.setup.config.down, &self.setup.down, &counts[DOWN], exempt[DOWN]),
 		]
 		.into_iter()
-		.flat_map(|(profile, options, counts)| phased(profile, &options.steps, counts))
+		.flat_map(|(profile, options, counts, exempt)| {
+			let mut phases = phased(profile, &options.steps, counts);
+			// An ingress burst needs a fixed profile, so the datagrams it kept from
+			// loss all fell in the only phase, and were no chance for loss to act.
+			if exempt > 0 {
+				phases[0].1 -= exempt;
+				let lossless = Profile {
+					loss: 0.0,
+					..phases[0].0.clone()
+				};
+				phases.push((lossless, exempt));
+			}
+			phases
+		})
 		.collect();
 		let mut missing: Vec<String> = unapplied(&phases, &stats).into_iter().map(String::from).collect();
 		let batched = self
@@ -645,6 +661,8 @@ struct Tally {
 	phases: Mutex<BTreeMap<usize, u64>>,
 	/// Datagrams a batch held past when they would otherwise have left.
 	batched: AtomicU64,
+	/// Datagrams an ingress burst collected, which loss never drops.
+	exempt: AtomicU64,
 }
 
 impl Tally {
@@ -1042,6 +1060,7 @@ impl Link {
 			// a lost one: the gate holds the acknowledgments a sender needs to replace
 			// it, so a gate waiting on surviving bytes could wait out the connection.
 			let draw = self.draw(now, tally);
+			bump(&tally.exempt);
 			let packet = ingress::Held {
 				datagram,
 				socket: socket.clone(),
@@ -1251,6 +1270,29 @@ mod tests {
 		link.push(start, vec![0; 1000], &socket, LOCALHOST, &tally);
 		assert_eq!(tally.lost.load(Ordering::Relaxed), 1);
 		assert!(received.try_recv().is_err());
+	}
+
+	/// Datagrams a gate kept from loss were never a chance for loss to act, so a
+	/// run whose lossy traffic all went through the gate still verifies.
+	#[tokio::test(start_paused = true)]
+	async fn an_ingress_burst_is_no_chance_for_loss_to_act() {
+		let profile = Profile {
+			loss: 1.0,
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let (shaper, client) = setup(42, profile, Profile::default()).await;
+		let burst = shaper.burst(ingress::Direction::Up).unwrap();
+		for _ in 0..3 {
+			client.send(&[0; 1000]).await.unwrap();
+		}
+		burst.completed().await.unwrap();
+		let stats = shaper.verify().unwrap();
+		assert_eq!((stats.up.packets, stats.up.lost), (3, 0));
 	}
 
 	#[tokio::test(start_paused = true)]
