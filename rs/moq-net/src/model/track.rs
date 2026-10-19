@@ -3465,6 +3465,8 @@ pub(super) enum DemandState {
 }
 
 /// A watch-only handle to a track's live arrivals.
+// Legacy fetch batches share one ledger read per poll.
+// private: tuning
 pub(crate) struct Arrivals {
 	state: kio::ConsumerWeak<TrackState>,
 }
@@ -3472,11 +3474,15 @@ pub(crate) struct Arrivals {
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 impl Arrivals {
 	/// Whether both handles watch the same track.
+	// A fetch batch may share only one track's arrival ledger.
+	// private: tuning
 	pub(crate) fn same_channel(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
 
 	/// Read the ledger and wake its owner when arrivals or terminal bounds change.
+	// One owner watch opens batch deadlines without waking each held fetch.
+	// private: tuning
 	pub(crate) fn poll(&self, waiter: &kio::Waiter) -> ArrivalRead<'_> {
 		let _ = self.state.poll(waiter, |_| Poll::<()>::Pending);
 		let state = self.state.read();
@@ -3489,6 +3495,7 @@ impl Arrivals {
 }
 
 /// A locked arrival ledger, so a batch never copies or re-locks its runs per fetch.
+// private: tuning
 pub(crate) struct ArrivalRead<'a> {
 	state: kio::Ref<'a, TrackState>,
 	grace: Duration,
@@ -3497,16 +3504,22 @@ pub(crate) struct ArrivalRead<'a> {
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 impl ArrivalRead<'_> {
 	/// Whether the live feed can no longer deliver any missing group.
+	// The batch checks closure without re-locking the track.
+	// private: tuning
 	pub(crate) fn is_closed(&self) -> bool {
 		self.state.is_closed()
 	}
 
 	/// Gaps that can expire held fetches, including the gap before the first arrival.
+	// Only the session's held-fetch deadline index needs all live gaps.
+	// private: tuning
 	pub(crate) fn folds(&self) -> impl Iterator<Item = (ops::Range<u64>, crate::time::Instant)> + '_ {
 		self.state.arrivals.folds(self.grace)
 	}
 
 	/// Judge one live group and register only for its own arrival or terminal bound.
+	// Legacy wires lack FETCH, so held requests need the live-feed verdict.
+	// private: capability gap
 	pub(crate) fn poll_group(
 		&self,
 		sequence: u64,
@@ -3726,6 +3739,8 @@ impl Consumer {
 	}
 
 	/// The live arrivals of the track this handle reads now, without joining its demand.
+	// This batch view avoids per-fetch ledger copies and locks in the session.
+	// private: tuning
 	pub(crate) fn arrivals(&self) -> Option<Arrivals> {
 		self.with_state(|state| state.map(|state| Arrivals { state: state.clone() }))
 	}
