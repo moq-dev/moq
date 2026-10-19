@@ -411,6 +411,7 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		// Unset means the backend's own default, and live media wants a steady
 		// send rate an encoder can track over CUBIC's sawtooth.
 		Some(moq_tokio::quic::CongestionControl::Delay) | None => moq_uring::quic::Congestion::Delay,
+		Some(moq_tokio::quic::CongestionControl::None) => moq_uring::quic::Congestion::None,
 		// A family added to the tokio stack later, rather than a silent
 		// substitution the operator would never learn about.
 		Some(other) => anyhow::bail!("io_uring workers cannot run the {other:?} congestion controller"),

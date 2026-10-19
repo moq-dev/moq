@@ -93,7 +93,7 @@ impl Endpoint {
 		socket.route_unreachable();
 		let server = match &config.server {
 			Some(server) => {
-				let mut server = super::server_config(server, handle.clock())?;
+				let mut server = super::server_config(server)?;
 				// moq-quic buffers half-open handshakes itself, so it enforces
 				// the same bound the accept queue does.
 				server.max_incoming(config.backlog);
@@ -164,10 +164,7 @@ impl Endpoint {
 		if let Some(err) = self.inner.closed() {
 			return Err(err);
 		}
-		let Some(worker) = self.inner.owner.upgrade() else {
-			return Err(Error::Io(Shared::gone_error().to_string()));
-		};
-		let client = super::client_config(config, &worker.clock)?;
+		let client = super::client_config(config)?;
 		let (key, conn) = self
 			.inner
 			.endpoint

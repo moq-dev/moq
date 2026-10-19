@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### `MoqCongestionControl` gained `None` (#5926)
+
+`MoqCongestionControl::None` runs no congestion control and no pacing, for tests and controlled links.
+An exhaustive match needs one more arm.
+
 ### OpenH264 is a build feature (#5771)
 
 The published libraries still carry the software H.264 fallback.

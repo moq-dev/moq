@@ -861,8 +861,8 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 /// phase closes in its own error space.
 ///
 /// The relay and the client run on a manual clock, so only the test passes time.
-/// Neither paces, since pacing waits on time passing: the relay's workers never
-/// pace on a manual clock, and the client is configured not to.
+/// Both select no congestion control, so neither paces: a pacer waits on time
+/// passing.
 #[cfg(feature = "quic")]
 #[test]
 fn uring_workers_bound_stalled_handshakes() {
@@ -885,6 +885,7 @@ fn uring_workers_bound_stalled_handshakes() {
 		let (cert, key) = certificate(dir.path());
 		let mut config = uring_config(&cert, &key);
 		config.listen.timeout = Some(LISTEN);
+		config.quic.congestion_control = Some(moq_tokio::quic::CongestionControl::None);
 		let relay = Relay::load(config).await.expect("load relay");
 		let port = relay.addr().expect("workers bound an address").port();
 		let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -897,11 +898,8 @@ fn uring_workers_bound_stalled_handshakes() {
 			let mut tls = tls.clone();
 			tls.alpn_protocols = vec![alpn.to_vec()];
 			let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
-			// A window past `u32::MAX` turns pacing off.
-			let mut unpaced = driver::congestion::CubicConfig::default();
-			unpaced.initial_window(1 << 40);
 			let mut transport = driver::TransportConfig::default();
-			transport.congestion_controller_factory(std::sync::Arc::new(unpaced));
+			transport.congestion_controller_factory(std::sync::Arc::new(driver::congestion::Unlimited));
 			let mut config = driver::ClientConfig::new(std::sync::Arc::new(crypto));
 			config.transport_config(std::sync::Arc::new(transport));
 			config

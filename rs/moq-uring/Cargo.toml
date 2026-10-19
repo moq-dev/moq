@@ -25,8 +25,7 @@ quic = ["dep:moq-quic", "dep:rustls", "dep:rustls-platform-verifier"]
 # no use for.
 qlog = ["moq-quic?/qlog"]
 # Workers created inside a tokio runtime with a `moq_clock::Manual` clock installed
-# run on that clock, so a test decides when their time passes. Their QUIC connections
-# do not pace, since a pacer waits on time passing. For test builds.
+# run on that clock, so a test decides when their time passes. For test builds.
 manual = ["moq-clock/manual"]
 
 [target.'cfg(target_os = "linux")'.dependencies]

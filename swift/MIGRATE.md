@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `CongestionControl` gained `none` (#5926)
+
+`CongestionControl.none` runs no congestion control and no pacing, for tests and controlled links.
+An exhaustive `switch` needs one more case.
+Spell it out as `CongestionControl.none` when assigning to `QuicConfig.congestionControl`: a bare `.none` there is `nil`, the backend's default.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.groupStart` and `groupEnd` are replaced by `ranges`, a list of `Subscription.Range` whose ends are a `Subscription.Anchor` (`.absolute(group:frame:)` or `.relative(groups:)`), and an optional `order`.

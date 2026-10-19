@@ -43,16 +43,6 @@ impl Clock {
 		Self::Host(Host::calibrate())
 	}
 
-	/// Whether time passes only when a test advances it.
-	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
-	pub fn is_manual(&self) -> bool {
-		match self {
-			Self::Host(_) => false,
-			#[cfg(feature = "manual")]
-			Self::Installed(_) => true,
-		}
-	}
-
 	/// Read the clock.
 	pub fn now(&self) -> Instant {
 		match self {
