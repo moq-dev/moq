@@ -80,10 +80,8 @@ precondition.
   `Clock::wall_clock` never enters it.
 - Every catalog field an importer derives from its history rather than the
   content at hand derives from the epoch and the content instead (maintainer,
-  superseding #5412's adoption from the live catalog). In TS passthrough that
-  is the M2ts section's `random_access` and recorded `mux_rate`, owned by
-  [raw TS cuts](/quest/m2/ts-passthrough-epoch-cuts.md); audit the other
-  importers for more.
+  superseding #5412's adoption from the live catalog). TS passthrough's M2ts
+  section already does; audit the other importers for more.
 - A restart under the same epoch re-derives the same coordinate, including
   after a total outage, so the epoch keeps naming one timeline and resuming
   across the outage is a gap, not a stitch (maintainer, reversing #5412's
@@ -119,6 +117,11 @@ Public API: no new items. Under a shared epoch the root `clock` and the
 timestamps move from arrival to the epoch's derivation; the `--epoch` docs
 state the accuracy bound. `--epoch` needs no subscribe right (#5412's
 breaking grant for publish-only tokens is dropped). Wire: none.
+
+
+## Required
+
+- [Redundancy model](/quest/m1/redundancy-model.md) - whether a redundant pair stays active-active or fails over by epoch switchover
 
 ## Related
 

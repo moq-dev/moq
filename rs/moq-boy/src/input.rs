@@ -133,7 +133,7 @@ async fn handle_viewer_commands(
 			Ok(Some(command)) => command,
 			Ok(None) => break,
 			// A malformed command is skipped; a track error ends the stream.
-			Err(moq_json::Error::Json(err)) => {
+			Err(err @ (moq_json::Error::Json(_) | moq_json::Error::DuplicateKey)) => {
 				tracing::warn!(%viewer_id, %err, "invalid command");
 				continue;
 			}

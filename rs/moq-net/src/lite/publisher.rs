@@ -2209,7 +2209,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 									*batch_pos = 0;
 									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
-								Poll::Ready(Ok(_)) => return Poll::Ready(fetch_end(group)),
+								Poll::Ready(Ok(_)) => return Poll::Ready(Ok(ControlFlow::Break(()))),
 								Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 								Poll::Pending => {}
 							}
@@ -2226,23 +2226,13 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 									*frame = Some(next);
 									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
-								None => return Poll::Ready(fetch_end(group)),
+								None => return Poll::Ready(Ok(ControlFlow::Break(()))),
 							}
 						}
 					}
 				}
 			}
 		}
-	}
-}
-
-/// End a FETCH response once its group's read ends. A budget giving up on a drained
-/// group ends that read cleanly, but a FIN would tell the requester the group is whole,
-/// so it resets as too old instead.
-fn fetch_end(group: &group::Consumer) -> Result<ControlFlow<()>, Error> {
-	match group.latency_expired() {
-		true => Err(Error::Old),
-		false => Ok(ControlFlow::Break(())),
 	}
 }
 
@@ -4311,6 +4301,55 @@ mod serve_group_test {
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
+	/// A group parked at its tail when the budget gives up resets with `Old`. A FIN would
+	/// tell the next hop the frames it already has are the whole group.
+	#[moq_clock::test]
+	async fn a_group_parked_at_its_tail_expires_with_old() {
+		let log = Log::default();
+		let session = SinkSession::new(log.clone());
+		let steer = kio::Producer::new(Steer::default());
+		let subscription = Subscription {
+			session,
+			id: 0,
+			track_name: "test".into(),
+			priority: PriorityQueue::default(),
+			group: None,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
+			version: Version::Lite06,
+			timescale: Some(crate::Timescale::MILLI),
+			runtime: crate::time::sim(),
+			opens: Default::default(),
+		};
+
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let mut subscriber = track.subscribe(None);
+		let mut old = track.append_group().unwrap();
+		old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+		let group = subscriber.recv_group().await.unwrap().expect("old group");
+
+		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+		let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group));
+		assert!(
+			futures::poll!(serve.as_mut()).is_pending(),
+			"parked waiting for the next frame"
+		);
+
+		moq_clock::sim::advance(Duration::from_secs(1)).await;
+		let mut edge = track.append_group().unwrap();
+		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+			.unwrap();
+		edge.finish().unwrap();
+
+		assert!(matches!(serve.await, Err(Error::Old)));
+		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+		old.abort(Error::Cancel).unwrap();
 	}
 
 	/// The final payload remains guarded after its frame has advanced the group cursor.
