@@ -62,6 +62,40 @@ with no wire change.
   at the same max age when a stale verdict loses its edge: the newer group
   that made an older one stale is aborted or evicted, and `TrackState::is_stale`
   revalidates the edge, so a cold cursor would serve the older group.
+- **A widening outranks a reported drop**, decided by the maintainer on
+  2026-10-19. On lite-05 and lite-06 the publisher reports a stale skip with
+  SUBSCRIBE_DROP (lite-07 removed it), and today a reported sequence is
+  refused for good, so a re-offer alone would still lose the group.
+  - SUBSCRIBE_UPDATE stays incremental and never resets, since a reset races
+    in-flight, out-of-order data. A widening obliges the publisher to serve
+    the newly covered groups it still holds and never delivered on this
+    subscription, including ones it skipped as stale or reported in
+    SUBSCRIBE_DROP ("if we grow, we want that data"). Nothing delivered goes
+    out twice.
+  - A shrink stops serving what it removed without sending drops for it.
+  - Data wins over a drop. A drop rides the subscribe stream and groups their
+    own streams, so either can land first. A drop means "not coming under the
+    old terms": a group arriving after its drop is accepted, and a drop never
+    removes a group that already arrived.
+  - An evicted group comes back only through a separate past-range request
+    (subscribe ranges on lite-07, FETCH before it), never through the live
+    subscription, and arrivals are deduped by sequence.
+
+  Code that changes: the Rust lite publisher's `TrackRun::served`
+  (`rs/moq-net/src/lite/publisher.rs`) holds served and dropped sequences in
+  one set and refuses any group in it, so split dropped from served and gate
+  only on served (`a_cut_dropped_then_recreated_is_not_served` flips); the
+  same for `#reported` in `js/net/src/track.ts`, whose `#tryRecvGroup` closes
+  any group already reported. On the model side, an arrival already clears
+  its drop (the insert path in `rs/moq-net/src/model/track.rs`, `#undrop` in
+  JS), but `TrackState::drop_groups` and JS `#drop` record the whole range,
+  so a drop landing after its group marks a cached group dropped and the
+  relay's cursor forwards it; both must skip sequences already cached. The
+  subscribers' SUBSCRIBE_DROP handling (`rs/moq-net/src/lite/subscriber.rs`,
+  `js/net/src/lite/subscriber.ts`) only accounts the tail, which must keep
+  accepting a later stream for an accounted sequence. No wire field and no
+  draft change: lite-07 has no SUBSCRIBE_DROP, and lite-05 and lite-06 are
+  published, with these rules affecting only behavior.
 - **Cost, accepted.** Groups below a newcomer's floor that the wider budget
   covers also come upstream, and the relay drops them locally. Bounded by the
   max age and the cache.
@@ -92,12 +126,16 @@ a re-offered group is never delivered twice to one subscriber; and a widen,
 shrink, evict, widen sequence at the relay gets the evicted groups back
 through the range miss fill, not a re-offer; and at the same max age, aborting
 or evicting the group that made an older one stale re-offers the older one,
-as a cold relay would serve it. Cover the
+as a cold relay would serve it; on lite-05 and lite-06, a stale group whose
+SUBSCRIBE_DROP is flushed before the widening SUBSCRIBE_UPDATE is still
+served after it, and the same with the update first; a group arriving after
+its drop is accepted, and a drop arriving after its group leaves it served;
+a shrink sends no drops. Cover the
 warm-relay case in `js/net` too.
 
 Public API: none. Wire: no encoding change; a publisher now re-offers
 cached groups when a SUBSCRIBE_UPDATE widens the max age or a stale verdict
-loses its edge.
+loses its edge, including groups it reported in SUBSCRIBE_DROP.
 
 ## Related
 
