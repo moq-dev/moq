@@ -484,7 +484,9 @@ export class Subscriber {
 
 		// Suffixes live on this stream, with the advertisement each holds and the epoch it named,
 		// so a repeat is recognized as an update to it rather than a second one, which would leak.
-		const live = new Map<Path.Valid, { id: number; epoch?: Epoch.Valid }>();
+		// An advertisement stays live on the wire until its NAMESPACE_DONE, even while its
+		// route is detached (`id` unset) for looping back through us.
+		const live = new Map<Path.Valid, { id?: number; epoch?: Epoch.Valid }>();
 
 		// Set once the teardown below has given back everything this stream held. The read
 		// loop is not awaited when the local consumer closes first, and closing the stream
@@ -628,10 +630,8 @@ export class Subscriber {
 							// over: the path is gone even though the message says active.
 							if (this.#reflected(params.cluster)) {
 								console.debug(`dropping reflected namespace: broadcast=${path}`);
-								if (held !== undefined) {
-									live.delete(path);
-									this.#detachAnnounce(path, held.id);
-								}
+								if (held?.id !== undefined) this.#detachAnnounce(path, held.id);
+								live.set(path, { epoch: params.epoch });
 								continue;
 							}
 
@@ -639,7 +639,7 @@ export class Subscriber {
 							// can change without a NAMESPACE_DONE, and another epoch restarts the
 							// path without it ever going absent. Only the first is a new path.
 							const route = this.#route(params);
-							if (held !== undefined) {
+							if (held?.id !== undefined) {
 								held.epoch = params.epoch;
 								this.#updateAnnounce(path, held.id, route);
 							} else {
@@ -651,10 +651,8 @@ export class Subscriber {
 							const path = Path.join(prefix, entry.suffix);
 
 							const held = live.get(path);
-							if (held !== undefined) {
-								live.delete(path);
-								this.#detachAnnounce(path, held.id);
-							}
+							live.delete(path);
+							if (held?.id !== undefined) this.#detachAnnounce(path, held.id);
 						} else if (msgType === PublishBlocked.id && version === Version.DRAFT_17) {
 							const blocked = await PublishBlocked.decode(stream.reader, version);
 							console.debug(`publish_blocked: suffix=${blocked.suffix} track=${blocked.trackName}`);
@@ -704,7 +702,7 @@ export class Subscriber {
 			// pin the path for the session even after the other source withdrew.
 			released = true;
 			for (const [path, held] of live) {
-				this.#detachAnnounce(path, held.id);
+				if (held.id !== undefined) this.#detachAnnounce(path, held.id);
 			}
 			live.clear();
 		}

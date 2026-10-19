@@ -641,10 +641,13 @@ impl Advertised {
 	}
 }
 
-/// One NAMESPACE a SUBSCRIBE_NAMESPACE stream holds.
+/// One NAMESPACE a SUBSCRIBE_NAMESPACE stream holds, live on the wire until its
+/// NAMESPACE_DONE whether or not its route is attached.
 struct Advertisement {
-	/// Names it to [`Subscriber::stop_announce`] and [`Subscriber::update_announce`].
-	id: u64,
+	/// Names its attached route to [`Subscriber::stop_announce`] and
+	/// [`Subscriber::update_announce`]; `None` while it loops back through us or falls
+	/// outside the scope.
+	id: Option<u64>,
 	/// The publisher instance it names: a repeat may name another, but not gain or lose one.
 	epoch: Option<crate::Epoch>,
 }
@@ -1188,7 +1191,9 @@ where
 			)
 			.await;
 		for (path, advert) in live {
-			let _ = self.stop_announce(path, advert.id, false);
+			if let Some(id) = advert.id {
+				let _ = self.stop_announce(path, id, false);
+			}
 		}
 		res
 	}
@@ -1248,32 +1253,28 @@ where
 						// An update replaces the advertisement it repeats, so a reflected
 						// replacement retracts the route we were holding. Keeping it would
 						// leave subscriptions on a path the peer no longer offers.
+						//
+						// The advertisement itself stays live on the wire, epoch and all.
 						tracing::debug!(%path, "dropping reflected namespace");
-						if let Some(held) = live.remove(&path) {
-							let _ = self.stop_announce(path, held.id, false);
+						let held = live.entry(path.clone()).or_insert(Advertisement { id: None, epoch: None });
+						held.epoch = params.epoch;
+						if let Some(id) = held.id.take() {
+							let _ = self.stop_announce(path, id, false);
 						}
 						continue;
 					};
 					let advert = advert.with_epoch(params.epoch.clone());
 
 					tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, epoch = ?params.epoch, "namespace");
-					if let Some(held) = live.get_mut(&path) {
+					let held = live.entry(path.clone()).or_insert(Advertisement { id: None, epoch: None });
+					held.epoch = params.epoch;
+					match held.id {
 						// A repeat replaces the advertisement atomically; nothing is torn
 						// down merely because an update arrived, and another epoch restarts
 						// the route without it ever going absent.
-						held.epoch = params.epoch;
-						self.update_announce(path, held.id, advert)?;
-					} else {
-						match self.start_announce(path.clone(), advert, Admit::Session) {
-							Ok(id) => {
-								live.insert(
-									path,
-									Advertisement {
-										id,
-										epoch: params.epoch,
-									},
-								);
-							}
+						Some(id) => self.update_announce(path, id, advert)?,
+						None => match self.start_announce(path.clone(), advert, Admit::Session) {
+							Ok(id) => held.id = Some(id),
 							// The interest names a pattern's literal head, so the peer
 							// legitimately advertises namespaces beneath it that the
 							// scope excludes; those are filtered here, not fatal.
@@ -1281,7 +1282,7 @@ where
 								tracing::debug!(%path, "namespace outside the subscribe scope; ignoring");
 							}
 							Err(err) => return Err(err),
-						}
+						},
 					}
 				}
 				// Only NAMESPACE may come before the counted set is in.
@@ -1290,8 +1291,8 @@ where
 					let msg = ietf::NamespaceDone::decode_msg(&mut data, self.version)?;
 					let path = prefix.join(&msg.suffix);
 					tracing::debug!(%path, "namespace_done");
-					if let Some(held) = live.remove(&path) {
-						let _ = self.stop_announce(path, held.id, false);
+					if let Some(id) = live.remove(&path).and_then(|held| held.id) {
+						let _ = self.stop_announce(path, id, false);
 					}
 				}
 				_ => {
@@ -6042,6 +6043,90 @@ mod tests {
 		);
 	}
 
+	/// A NAMESPACE that loops back through us detaches its route, but the advertisement
+	/// stays live on the wire until its NAMESPACE_DONE: a repeat that restores a clean path
+	/// while gaining or losing an epoch is still the violation it would be without the loop.
+	#[moq_clock::test]
+	async fn a_reflected_namespace_keeps_its_epoch_live() {
+		const VERSION: Version = Version::Draft18;
+		let us = crate::Hop::new(5).unwrap();
+		let epoch = crate::Epoch::mint();
+
+		for (reflected, drops) in [(false, true), (true, true), (true, false)] {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.varint(ietf::RequestOk::ID).await.unwrap();
+			writer
+				.encode(&ietf::RequestOk {
+					request_id: None,
+					active: None,
+				})
+				.await
+				.unwrap();
+			let mut adverts = vec![(hop_path(&[7, 9]), Some(epoch.clone()))];
+			if reflected {
+				adverts.push((hop_path(&[7, 5, 9]), Some(epoch.clone())));
+			}
+			adverts.push((hop_path(&[7, 9]), (!drops).then(|| epoch.clone())));
+			for (hops, epoch) in adverts {
+				writer.varint(ietf::Namespace::ID).await.unwrap();
+				writer
+					.encode(&ietf::Namespace {
+						suffix: crate::Path::new("room"),
+						params: Some(ietf::AdvertParams {
+							cluster: Some(cluster::Advert { hops, cost: 0 }),
+							epoch,
+						}),
+					})
+					.await
+					.unwrap();
+			}
+			let script = log.writes.lock().unwrap().clone();
+
+			let origin = crate::origin::Config::new(us).produce();
+			let session = crate::lite::test_transport::ScriptedSession::new(script);
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer {
+				cluster: cluster::Peer {
+					hop: Some(crate::Hop::new(9).unwrap()),
+					cost: None,
+				},
+				epoch: true,
+				..Default::default()
+			});
+			let mut subscriber = Subscriber::new(
+				crate::time::sim(),
+				session.clone(),
+				origin,
+				Control::new(None, false),
+				None,
+				peer_setup,
+				us,
+				None,
+				VERSION,
+				tasks,
+				Default::default(),
+			);
+
+			let prefix = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
+			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+			let mut run =
+				std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
+			let mut result = None;
+			for _ in 0..100 {
+				if let std::task::Poll::Ready(done) = futures::poll!(run.as_mut()) {
+					result = Some(done);
+					break;
+				}
+				settle().await;
+			}
+			let violated = matches!(result, Some(Err(ref err)) if is_protocol_violation(err));
+			assert_eq!(violated, drops, "reflected: {reflected}, drops: {drops}: {result:?}");
+		}
+	}
+
 	/// MoQ Active Count is negotiated, so a REQUEST_OK that breaks the negotiation
 	/// either way is the peer's fault: a count we cannot rely on, or one missing where we
 	/// would otherwise wait on it forever.
@@ -8493,12 +8578,18 @@ mod tests {
 		let inline = advert(&subscriber, &old);
 		let inline = subscriber.start_announce(path.clone(), inline, Admit::Session).unwrap();
 		let request = advert(&subscriber, &old);
-		let request = subscriber.start_announce(path.clone(), request, Admit::Session).unwrap();
+		let request = subscriber
+			.start_announce(path.clone(), request, Admit::Session)
+			.unwrap();
 		assert_eq!(epoch_now(), Some(old.clone()));
 
 		let repeat = advert(&subscriber, &new);
 		subscriber.update_announce(path.clone(), inline, repeat).unwrap();
-		assert_eq!(epoch_now(), Some(new.clone()), "the older request kept the old instance");
+		assert_eq!(
+			epoch_now(),
+			Some(new.clone()),
+			"the older request kept the old instance"
+		);
 
 		// The old instance's withdrawal leaves the new one standing.
 		subscriber.stop_announce(path.clone(), request, false).unwrap();

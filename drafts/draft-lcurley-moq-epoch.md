@@ -188,6 +188,14 @@ The Setup Option is even, so its value is a bare varint; the parameter is odd, s
 
 --- back
 
+# Appendix A: Changelog
+
+## moq-epoch-00
+- The EPOCH Setup Option (0x40B68) negotiates the extension on draft-17 and later.
+- The EPOCH parameter (0x40B69), a UUIDv7, names the publisher instance on PUBLISH_NAMESPACE, NAMESPACE, SUBSCRIBE, TRACK_STATUS, and a FETCH that names its track.
+- An advertisement's EPOCH is fixed. Another instance named by an EPOCH is advertised before the old one is withdrawn, so the namespace is never absent; one gaining or losing an EPOCH is withdrawn and advertised again.
+- A request that carries EPOCH is served only by that instance, and refused as a namespace that does not exist otherwise.
+
 # Acknowledgments
 {:numbered="false"}
 

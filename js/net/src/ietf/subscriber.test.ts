@@ -2373,6 +2373,37 @@ test("a NAMESPACE repeat under another epoch outranks a later PUBLISH_NAMESPACE"
 });
 
 /**
+ * A NAMESPACE that loops back through us detaches its route, but the advertisement stays
+ * live on the wire until its NAMESPACE_DONE: a repeat that restores a clean path while
+ * losing its epoch is still the violation it would be without the loop.
+ */
+test("a reflected NAMESPACE keeps its epoch live", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, quic: pair.server, cluster: { self: SELF, peer: PEER }, epoch: true });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	onTestFinished(() => warn.mockRestore());
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const epoch = Epoch.mint();
+	const send = async (hops: Hop[], named?: Epoch.Valid) => {
+		await subscription.writer.u53(SubscribeNamespaceEntry.id);
+		await new SubscribeNamespaceEntry({
+			suffix: Path.from("room"),
+			params: { cluster: { hops, cost: 0n }, epoch: named },
+		}).encode(subscription.writer, VERSION);
+	};
+	await send([PEER], epoch);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
+	await send([SELF, PEER], epoch);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "end" });
+
+	await send([PEER]);
+	await violationClosed(pair);
+});
+
+/**
  * Gaining or losing an epoch is not one instance replacing another, so a repeat that does
  * either means the peer skipped the NAMESPACE_DONE.
  */
