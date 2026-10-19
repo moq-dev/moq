@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `quic::Config::keylog` (`--quic-keylog`, `MOQ_QUIC_KEYLOG`, `[quic] keylog`) as well; it now covers the iroh backend too.
+Setting it without `SSLKEYLOGFILE` fails with `Error::KeylogUnset`.
+
 ### QUIC limits are `moq_quic::Limits`, set through `Request::quic` (#5871)
 
 `server::Request::set_quic_limits` and `Error::QuicLimits` are gone.
