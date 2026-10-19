@@ -1309,7 +1309,7 @@ The second case is easy to get wrong, so to be explicit: a subscriber that reque
 The frame offset belonged to group 5 and is gone along with the rest of it; it does not carry forward to whichever group the publisher resolved to.
 
 **Largest Group** and **Largest Frame**:
-The largest position the publisher has for the track when it answers: the last frame that exists, like moq-transport's Largest Location.
+The largest position the publisher knows of for the track when it answers: the last frame that exists, like moq-transport's Largest Location, including one a relay's source reported that has yet to arrive.
 `Largest Group` is the group sequence plus one, and 0 means the track has nothing yet, in which case `Largest Frame` is absent.
 A subscriber takes it as where the live feed is: a relay holding groups from an earlier subscription serves them from cache only once this says they are current, which a publisher answering promptly lets it do without waiting for a frame.
 
