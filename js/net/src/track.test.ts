@@ -1980,8 +1980,11 @@ test("largest re-reports when the bounds move", async () => {
 	reader.setGroups({ end: { excluded: 2 } });
 	expect(await isPending(next)).toBe(true);
 
+	// Lifting it again leaves the last report standing.
 	reader.setGroups({});
-	expect(await next).toEqual({ group: 5, frame: 0 });
+	expect(await isPending(next)).toBe(true);
+	framedGroup(producer, 6, 0);
+	expect(await next).toEqual({ group: 6, frame: 0 });
 	reader.setGroups({ start: { included: 3 } });
 	expect(await isPending(reader.largest())).toBe(true);
 	producer.close();

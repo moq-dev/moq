@@ -1765,9 +1765,12 @@ export class Subscriber {
 			const seen = this.#largestSeen;
 			if (this.#largestMoved) {
 				// New bounds report the largest within them again, even one below the last report.
-				this.#largestMoved = false;
-				this.#largestSeen = within;
-				if (within && !(seen && within.group === seen.group && within.frame === seen.frame)) return within;
+				// Until one is within them, the last report and the move both stand.
+				if (within) {
+					this.#largestMoved = false;
+					this.#largestSeen = within;
+					if (!(seen && within.group === seen.group && within.frame === seen.frame)) return within;
+				}
 			} else if (within && (!seen || after(within, seen))) {
 				this.#largestSeen = within;
 				return within;

@@ -5621,12 +5621,20 @@ impl Subscriber {
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		self.largest.park(waiter.waker());
 		let bounds = self.bounds();
-		if std::mem::take(&mut self.largest.moved) {
+		if self.largest.moved {
 			// New bounds report the largest within them again, even one below the last report.
+			// Until one is within them, the last report and the move both stand.
 			let last = self.largest.position.take();
 			match self.poll_largest_within(bounds, waiter) {
-				Poll::Ready(Some(position)) if Some(position) == last => {}
-				poll => return poll,
+				Poll::Pending => {
+					self.largest.position = last;
+					return Poll::Pending;
+				}
+				Poll::Ready(Some(position)) if Some(position) == last => self.largest.moved = false,
+				poll => {
+					self.largest.moved = false;
+					return poll;
+				}
 			}
 		}
 		self.poll_largest_within(bounds, waiter)
@@ -6474,16 +6482,38 @@ mod test {
 		);
 
 		reader.set_groups(..);
-		assert_eq!(
-			reader.poll_largest(&noop),
-			Poll::Ready(Some(Position::group(5))),
-			"lifting it again reports the largest again"
+		assert!(
+			reader.poll_largest(&noop).is_pending(),
+			"lifting it again leaves the last report standing"
 		);
 		reader.set_groups(3..);
 		assert!(
 			reader.poll_largest(&noop).is_pending(),
 			"a floor below the largest leaves it where it was"
 		);
+	}
+
+	/// Bounds that move while the copy is idle keep the last report, so going live again
+	/// does not repeat it.
+	#[test]
+	fn largest_keeps_its_last_report_across_an_idle_move() {
+		let mut producer = track_producer("test", Info::default());
+		let noop = kio::Waiter::noop();
+		let _groups: Vec<_> = (0..3).map(|sequence| framed(&producer, sequence, 1)).collect();
+
+		let mut reader = producer.subscribe(replay());
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(2))));
+		producer.set_idle();
+		reader.set_groups(..);
+		assert!(reader.poll_largest(&noop).is_pending(), "the copy is idle");
+
+		producer.set_live(Some(Position::group(2)));
+		assert!(
+			reader.poll_largest(&noop).is_pending(),
+			"the same largest is not reported again"
+		);
+		let _next = framed(&producer, 3, 1);
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(3))));
 	}
 
 	/// An idle copy's largest is what an ended feed left, so nothing reports until the
