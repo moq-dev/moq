@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Lite-07 accounts for groups with SUBSCRIBE_DROP
+
+Construct `SubscribeEnd(group)` without a stream count; remove reads of `.streams` and calls to `hasStreamCount()`.
+The unpublished `moq-lite-07-wip` wire restores SUBSCRIBE_DROP and removes Stream Count from SUBSCRIBE_END. Update both ends together; published lite versions keep their framing.
+
 ### An expired group fails with `Old` even when drained (#5944)
 
 A reader parked at the end of an unfinished group whose `maxDelay` gives up now rejects with a `StreamError` of code `StreamCode.Old`, even after reading every frame, where `readFrame()` used to resolve `undefined`.

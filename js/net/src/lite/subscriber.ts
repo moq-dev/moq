@@ -55,7 +55,6 @@ import {
 	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
-	hasStreamCount,
 	resolvesStart,
 	updateSupported,
 	Version,
@@ -125,8 +124,6 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
-	// Group streams opened by the publisher, when SUBSCRIBE_END carries the count.
-	streams?: number;
 	// The TRACK stream that answered (lite-05+), held open as interest in the track until
 	// the SUBSCRIBE has its first response, so the publisher's demand never lapses between
 	// the two.
@@ -1211,7 +1208,6 @@ export class Subscriber {
 			} else if ("end" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				entry.end = resp.end.group;
-				if (hasStreamCount(this.version)) entry.streams = resp.end.streams;
 				// A local close can win the race with the response; there is nothing left to end.
 				if (entry.track.closed.peek() !== undefined) continue;
 				try {
@@ -1236,15 +1232,13 @@ export class Subscriber {
 
 	// Wait for the group streams the publisher still owes once it has ended the subscription.
 	//
-	// lite-07 counts streams, so skipped sequences owe nothing. Older drafts account for
-	// the range using received headers and SUBSCRIBE_DROP. A counted stream reset before
-	// its header leaves no trace, so the grace still bounds that wait. Streams whose
+	// Received headers and SUBSCRIBE_DROP account for the range. An unaccounted
+	// sequence, such as a lost datagram, still waits out the grace. Streams whose
 	// headers arrived keep reading until their own FIN or reset.
 	#settleTail(entry: SubscribeEntry): Promise<void> {
 		const { tail, track } = entry;
 
 		const complete = () => {
-			if (entry.streams !== undefined) return tail.streams >= entry.streams;
 			// Without SUBSCRIBE_END (older drafts) nothing says which groups are owed.
 			if (entry.end === undefined) return false;
 			// Without SUBSCRIBE_START the publisher served no group at all.

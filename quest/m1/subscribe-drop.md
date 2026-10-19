@@ -95,6 +95,20 @@ publisher skipped or never opened ends the track without waiting out the
 grace. Decided in the 2026-09-30 audit: the case moved here so the basic
 tail interop could land first.
 
+Checkpoint (2026-10-19): the implementation draft restores SUBSCRIBE_DROP and
+removes Stream Count on unpublished lite-07, enables range accounting on it,
+reports groups whose send failed before the peer could identify them, and extends
+the Rust/JS relay tail case to lite-07. Published lite-05/06 retain their framing;
+lite-03/04 publishers remain unchanged.
+
+Unresolved: `SubscribeDrop.error` currently means an application-specific code,
+with 0 meaning unavailable without an error. The required live-reader error
+cannot silently reinterpret published lite-05/06 values as the stream-reset
+registry. Settle that interpretation before implementing error propagation.
+Cut errors must then survive cache reclaim and cap changes, settle an open
+resumed latest group before FIN, and take precedence over pending recovery
+fetches without treating a cut as a failed route. This quest remains open.
+
 ## Related
 
 - [Resume reorder](/quest/m1/resume-reorder.md) - late stream headers are not proof that a group was dropped

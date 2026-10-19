@@ -45,7 +45,6 @@ import {
 	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
-	hasStreamCount,
 	resolvesStart,
 	Version,
 	waitsForSubscriberFin,
@@ -313,7 +312,11 @@ function newer(a: track.Location | undefined, b: track.Location | undefined): tr
 // Register both readiness sources in the same turn after the caller observed neither ready.
 // The winner disposes both registrations, so an idle subscription accumulates nothing no
 // matter how many times it wakes.
-function waitForSubscription(controls: SubscriptionControls, subscriber: track.Subscriber): Promise<void> {
+function waitForSubscription(
+	controls: SubscriptionControls,
+	subscriber: track.Subscriber,
+	drops: Signal<readonly SubscribeDrop[]>,
+): Promise<void> {
 	return new Promise((resolve) => {
 		let settled = false;
 		const dispose: Dispose[] = [];
@@ -324,6 +327,7 @@ function waitForSubscription(controls: SubscriptionControls, subscriber: track.S
 			resolve();
 		};
 		dispose.push(controls.changed(wake), hooks.groupChanged(subscriber, wake));
+		dispose.push(drops.changed(wake));
 	});
 }
 
@@ -996,17 +1000,12 @@ export class Publisher {
 		let startSequence: number | undefined;
 		let endSent = false;
 
-		// Lite-07+ counts the group streams in SUBSCRIBE_END, so it goes out only once every
-		// served group has opened its stream or given up, and a cap holding groups back
-		// delays it until they are released.
-		const countStreams = hasStreamCount(this.version);
-
-		// Lite-05 and lite-06 name every sequence below the end that this subscription never
+		// Lite-05 and later name every sequence below the end that this subscription never
 		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
 		// for a group that will not come. The sequences served or dropped. A gap that never
 		// arrived stays until the end sweep names it: this side cannot tell when the
 		// subscriber stopped waiting for it. Undefined on other versions.
-		const served: Run[] | undefined = emitRange && !countStreams ? [] : undefined;
+		const served: Run[] | undefined = emitRange ? [] : undefined;
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped yet.
 		const drop = async (start: number, end: number): Promise<boolean> => {
 			if (!served) return true;
@@ -1018,8 +1017,6 @@ export class Publisher {
 			}
 			return true;
 		};
-		let streams = 0;
-		const opening = new Set<Promise<unknown>>();
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
 		// straight into finish_at, so it must name the track's boundary (which counts
@@ -1033,19 +1030,12 @@ export class Publisher {
 			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1) + 1;
 		};
 
-		// Before lite-07, SUBSCRIBE_END names that boundary, which a cap can hold groups back
-		// from, so it goes out as soon as the producer finishes and the subscription keeps
-		// serving whatever a later cap raise releases (see the Rust publisher's Recv::Boundary).
+		// Declare the boundary immediately; groups below it can still be in flight.
 		const sendEnd = async (): Promise<boolean> => {
 			endSent = true;
 			if (!emitRange) return true;
 			return controls.response(
-				(async () => {
-					// A group that gives up before its stream opens is never counted.
-					if (countStreams) while (opening.size > 0) await Promise.all(opening);
-					const end = new SubscribeEnd(boundary(), streams);
-					await encodeSubscribeResponse(stream, { end }, this.version);
-				})(),
+				encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version),
 			);
 		};
 
@@ -1054,6 +1044,7 @@ export class Publisher {
 
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
+		const drops = new Signal<readonly SubscribeDrop[]>([]);
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -1065,6 +1056,16 @@ export class Publisher {
 		});
 		try {
 			for (;;) {
+				const pending = drops.peek();
+				if (pending.length > 0) {
+					drops.set([]);
+					for (const dropped of pending) {
+						if (
+							!(await controls.response(encodeSubscribeResponse(stream, { drop: dropped }, this.version)))
+						)
+							return false;
+					}
+				}
 				// Control before data, matching the Rust publisher: every control decoded while
 				// the loop was parked applies to the next pop, never to one already made. This
 				// drain is synchronous, so nothing the decoder holds can land between the pop
@@ -1161,23 +1162,21 @@ export class Publisher {
 								continue;
 							}
 						}
-						// Before lite-07, an end declared ahead of the live edge goes out as
-						// soon as it is known, while the remaining groups are still being
-						// produced. The lite-07 count is not final until those groups open.
-						if (!endSent && !countStreams && track.end() !== undefined) {
+						// A declared end goes out while lower groups are still being produced.
+						if (!endSent && track.end() !== undefined) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						await waitForSubscription(controls, track);
+						await waitForSubscription(controls, track, drops);
 						continue;
 					case "boundary":
 						// The producer finished but is still holding groups above the cap.
 						// Declare the boundary, then wait for an update to release them.
-						if (!endSent && !countStreams) {
+						if (!endSent) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						await waitForSubscription(controls, track);
+						await waitForSubscription(controls, track, drops);
 						continue;
 					case "done": {
 						// Name every sequence from the start to the end this subscription never
@@ -1198,6 +1197,7 @@ export class Publisher {
 						const end = await Promise.race([Promise.all(groups).then(() => drained), controls.ended]);
 						if (end instanceof Error) throw end;
 						if (end !== drained) return false;
+						if (drops.peek().length > 0) continue;
 						finished = true;
 						return true;
 					}
@@ -1242,19 +1242,24 @@ export class Publisher {
 					start: range.start,
 					end: range.end,
 				};
-				// `opening` settles when the stream opens so the lite-07 count can be sent.
-				// `groups` covers the serve too, so the FIN still waits for every stream to
+				// The FIN waits for every stream to
 				// finish or reset, including one that has not opened yet.
 				const opened = this.#openGroup(options);
 				const task = opened.then(async (writer) => {
-					if (!writer) return;
-					streams += 1;
-					await this.#serveGroup(writer, options);
+					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
+					if (emitRange && failed instanceof Error) {
+						drops.update((pending) => [
+							...pending,
+							new SubscribeDrop({
+								start: group.sequence,
+								end: group.sequence,
+								error: 0,
+							}),
+						]);
+					}
 				});
 				groups.add(task);
 				void task.finally(() => groups.delete(task));
-				opening.add(opened);
-				void opened.finally(() => opening.delete(opened));
 			}
 		} finally {
 			if (!finished) unsubscribe();
@@ -1457,11 +1462,11 @@ export class Publisher {
 
 	/**
 	 * Opens the unidirectional stream for one group, or closes the group and resolves
-	 * `undefined` when it cannot get one.
+	 * an error when it cannot get one.
 	 *
 	 * @internal
 	 */
-	async #openGroup(options: RunGroup): Promise<Writer | undefined> {
+	async #openGroup(options: RunGroup): Promise<Writer | Error> {
 		const { group, priority, unsubscribed, start } = options;
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
@@ -1477,11 +1482,16 @@ export class Publisher {
 				cancel: unsubscribed,
 				waitUntilAvailable: false,
 			});
-			if (!stream) group.close(new Error("no stream slot"));
+			if (!stream) {
+				const failed = new Error("no stream slot");
+				group.close(failed);
+				return failed;
+			}
 			return stream;
 		} catch (err: unknown) {
-			group.close(error(err));
-			return undefined;
+			const failed = error(err);
+			group.close(failed);
+			return failed;
 		}
 	}
 
@@ -1552,9 +1562,11 @@ export class Publisher {
 			const e = error(err);
 			stream.reset(e);
 			group.close(e);
+			return e;
 		} finally {
 			priority.remove(stream);
 		}
+		return undefined;
 	}
 
 	/**

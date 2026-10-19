@@ -218,6 +218,8 @@ Each subscription carries the knobs that decide behavior under congestion:
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 | **Ranges** | Which groups to ask for: from a group, or a number of groups back from the latest, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
 
+On moq-lite 05 and later, a publisher explicitly reports groups it gives up, so a subscriber can stop waiting without waiting for the track to finish. Datagram delivery stays best effort.
+
 Ranges are a request, not a filter. A subscriber reads from where its lowest
 range starts, and may also get groups another subscriber of the same track
 asked for. A relay merges its subscribers' ranges into one upstream request,

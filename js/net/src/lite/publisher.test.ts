@@ -1256,21 +1256,19 @@ test("lite draft-05: subscribe end is 0 when no groups were produced", async () 
 	expect((await subscribeEnd([])).group).toBe(0);
 });
 
-// The count is of group streams opened, not of groups below the end: a group the track
-// never produced has no stream and is not counted.
-test("lite draft-07: subscribe end counts the group streams opened", async () => {
+// The boundary clears every produced group even when a sequence was skipped.
+test("lite draft-07: subscribe end names the final boundary", async () => {
 	const end = await subscribeEnd([0, 2], Version.DRAFT_07);
-	expect([end.group, end.streams]).toEqual([3, 2]);
+	expect(end.group).toBe(3);
 });
 
-test("lite draft-07: subscribe end counts zero streams when no groups were produced", async () => {
+test("lite draft-07: an empty track ends at zero", async () => {
 	const end = await subscribeEnd([], Version.DRAFT_07);
-	expect([end.group, end.streams]).toEqual([0, 0]);
+	expect(end.group).toBe(0);
 });
 
-// finishAt names the end while groups below it are still being produced. The count
-// cannot include a stream that has not opened, so SUBSCRIBE_END waits for them.
-test("lite draft-07: subscribe end waits for groups below a declared finish", async () => {
+// finishAt declares the boundary while lower groups are still being produced.
+test("lite draft-07: subscribe end precedes groups below a declared finish", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
@@ -1295,8 +1293,8 @@ test("lite draft-07: subscribe end waits for groups below a declared finish", as
 		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
 		expect("start" in start).toBe(true);
 		const pending = decodeSubscribeResponse(client.reader, Version.DRAFT_07);
-		const early = await Promise.race([pending, new Promise((resolve) => setTimeout(resolve, IDLE_MS))]);
-		expect(early).toBeUndefined();
+		const early = await pending;
+		expect("end" in early).toBe(true);
 
 		const second = new GroupProducer(1);
 		second.writeFrame(textFrame("hello"));
@@ -1306,7 +1304,7 @@ test("lite draft-07: subscribe end waits for groups below a declared finish", as
 
 		const resp = await pending;
 		if (!("end" in resp)) throw new Error("expected SUBSCRIBE_END");
-		expect([resp.end.group, resp.end.streams]).toEqual([2, 2]);
+		expect(resp.end.group).toBe(2);
 	} finally {
 		publisher.close();
 		client.close();
@@ -1353,6 +1351,7 @@ async function heldOpenEnd() {
 	return {
 		end,
 		open,
+		next: () => decodeSubscribeResponse(client.reader, Version.DRAFT_07),
 		close() {
 			publisher.close();
 			client.close();
@@ -1360,31 +1359,33 @@ async function heldOpenEnd() {
 	};
 }
 
-// The count is final only once no served group is still waiting for its stream, so
-// SUBSCRIBE_END waits for the open.
-test("lite draft-07: subscribe end waits for every group stream to open", async () => {
+// The end is known even when a group is waiting for stream credit.
+test("lite draft-07: subscribe end precedes a blocked stream open", async () => {
 	const held = await heldOpenEnd();
 	try {
-		const early = await Promise.race([held.end, new Promise((resolve) => setTimeout(resolve, IDLE_MS))]);
-		expect(early).toBeUndefined();
+		const early = await held.end;
+		expect("end" in early).toBe(true);
 
 		held.open(true);
 		const resp = await held.end;
 		if (!("end" in resp)) throw new Error("expected SUBSCRIBE_END");
-		expect([resp.end.group, resp.end.streams]).toEqual([1, 1]);
+		expect(resp.end.group).toBe(1);
 	} finally {
 		held.close();
 	}
 });
 
-// A group that never gets a stream owes the subscriber nothing, so it is not counted.
-test("lite draft-07: a group whose stream never opened is not counted", async () => {
+// A failed open does not prevent the declared boundary from reaching the subscriber.
+test("lite draft-07: subscribe end precedes a failed stream open", async () => {
 	const held = await heldOpenEnd();
 	try {
 		held.open(false);
 		const resp = await held.end;
 		if (!("end" in resp)) throw new Error("expected SUBSCRIBE_END");
-		expect([resp.end.group, resp.end.streams]).toEqual([1, 0]);
+		expect(resp.end.group).toBe(1);
+		const dropped = await held.next();
+		if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([dropped.drop.start, dropped.drop.end, dropped.drop.error]).toEqual([0, 0, 0]);
 	} finally {
 		held.close();
 	}
