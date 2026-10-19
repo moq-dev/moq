@@ -80,6 +80,7 @@ mod tests {
 	#[test]
 	fn draft21_matches_draft20_on_the_wire() {
 		let properties = Properties {
+			unknown: Default::default(),
 			dynamic_groups: false,
 			max_cache_duration: None,
 			timescale: Some(Timescale::new(90_000).unwrap()),
@@ -104,6 +105,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		let subscribe_ok = SubscribeOk {
@@ -111,7 +113,7 @@ mod tests {
 			request_id: None,
 			track_alias: 4,
 			largest: Some(Location { group: 5, object: 2 }),
-			properties,
+			properties: properties.clone(),
 		};
 
 		let publish = Publish {
@@ -142,6 +144,7 @@ mod tests {
 			range_filters: false,
 			fill_timeout: false,
 			properties_wanted: false,
+			epoch: None,
 		};
 
 		let group = GroupHeader {
@@ -178,6 +181,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		// Draft-20 spells Next Object as a Length of 2 and two zero fields; draft-22 as type 0x05.

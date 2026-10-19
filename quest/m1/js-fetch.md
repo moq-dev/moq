@@ -29,10 +29,6 @@ The JS publisher already answers the TRACK_STATUS a native fetch-only request
 asks before its first FETCH, so after that answer the FETCH is all that is
 refused today.
 
-Decided 2026-10-13: once this lands, check whether the Rust IETF subscriber's
-fallback to SUBSCRIBE on a NOT_SUPPORTED TRACK_STATUS is still needed, and
-delete it if no in-tree publisher refuses anymore.
-
 Verify with an in-memory application responder: a browser publisher serves a
 native IETF subscriber after a group is evicted or was never cached. Run the
 supported-draft matrix and `just test interop --all` through CI.

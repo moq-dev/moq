@@ -272,6 +272,8 @@ fn descriptors(mut data: &[u8]) -> Option<Vec<Descriptor>> {
 
 /// A complete PES header and the payload bytes that follow it.
 pub(super) struct PesStart<'a> {
+	/// The packet's header, from its start code through the optional fields and stuffing.
+	pub header: &'a [u8],
 	pub stream_id: u8,
 	/// Raw 90 kHz.
 	pub pts: Option<u64>,
@@ -294,14 +296,13 @@ impl<'a> PesStart<'a> {
 		if payload.len() < 6 {
 			return Ok(6);
 		}
-		if matches!(payload[3], 0xbc | 0xbe | 0xbf | 0xf0 | 0xf1 | 0xf2 | 0xf8 | 0xff) {
+		if !has_optional_header(payload[3]) {
 			return Ok(6);
 		}
 		if payload.len() < 9 {
 			return Ok(9);
 		}
 		anyhow::ensure!(payload[6] & 0xc0 == 0x80, "unexpected PES header marker bits");
-		anyhow::ensure!(payload[6] & 0x30 == 0, "scrambled PES is not supported");
 		anyhow::ensure!(payload[7] & 0xc0 != 0x40, "PES DTS without a PTS");
 		let len = usize::from(payload[8]);
 		let packet_len = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
@@ -316,7 +317,8 @@ impl<'a> PesStart<'a> {
 	///
 	/// Optional fields this demux has no use for (ESCR, ES rate, trick mode, copy info, the
 	/// PES CRC, extensions, stuffing) are skipped by `PES_header_data_length`. Incomplete headers
-	/// must be assembled before parsing; malformed headers are refused.
+	/// must be assembled before parsing; malformed headers are refused. A scrambled one parses,
+	/// for its stream to refuse: [`Self::scrambled`].
 	pub fn parse(payload: &'a [u8]) -> anyhow::Result<Self> {
 		let header_len = Self::header_len(payload)?;
 		anyhow::ensure!(payload.len() >= header_len, "PES header truncated");
@@ -326,6 +328,7 @@ impl<'a> PesStart<'a> {
 		// Streams that carry no optional header (ISO/IEC 13818-1 table 2-21).
 		if header_len == 6 {
 			return Ok(Self {
+				header: &payload[..6],
 				stream_id,
 				pts: None,
 				dts: None,
@@ -354,6 +357,7 @@ impl<'a> PesStart<'a> {
 			),
 		};
 		Ok(Self {
+			header: &payload[..9 + header_len],
 			stream_id,
 			pts,
 			dts,
@@ -361,6 +365,92 @@ impl<'a> PesStart<'a> {
 			data: &payload[9 + header_len..],
 		})
 	}
+}
+
+impl PesStart<'_> {
+	/// Whether `PES_scrambling_control` says the payload is scrambled.
+	pub fn scrambled(&self) -> bool {
+		self.header.get(6).is_some_and(|flags| flags & 0x30 != 0)
+	}
+
+	/// Check the header as a whole-PES track carries it, on a stream of `stream_type`, and return
+	/// the clock field it carries that only the PTS and DTS of are moved onto the catalog clock:
+	/// ESCR, a `pack_header_field`, or a TREF (ISO 13818-1 2.4.3.7). Refuses an unbounded PES
+	/// that is not video, and a flagged optional field that runs past `PES_header_data_length`.
+	pub fn whole(&self, stream_type: u8) -> anyhow::Result<Option<&'static str>> {
+		let stream_id = self.stream_id;
+		let video = matches!(stream_id, 0xe0..=0xef) || (stream_id == 0xfd && is_video_stream_type(stream_type));
+		anyhow::ensure!(
+			self.header[4..6] != [0, 0] || video,
+			"PES_packet_length 0 on stream_id {stream_id:#04x}, which only a video stream may leave unbounded"
+		);
+		let Some(fields) = self.header.get(9..) else {
+			return Ok(None);
+		};
+		let flags = self.header[7];
+		// Each flagged field in order (Table 2-21): PTS, DTS, ESCR, ES_rate, DSM trick mode,
+		// additional_copy_info, previous_PES_CRC; stuffing fills the rest.
+		let mut at = [
+			(0x80, 5),
+			(0x40, 5),
+			(0x20, 6),
+			(0x10, 3),
+			(0x08, 1),
+			(0x04, 1),
+			(0x02, 2),
+		]
+		.iter()
+		.filter(|&&(flag, _)| flags & flag != 0)
+		.map(|&(_, len)| len)
+		.sum::<usize>();
+		let mut clock = (flags & 0x20 != 0).then_some("ESCR");
+		if flags & 0x01 != 0 {
+			let read = |at: usize| fields.get(at).copied().context("PES extension runs past its header");
+			let extension = read(at)?;
+			at += 1;
+			// PES_private_data, then pack_header_field behind its own length byte.
+			if extension & 0x80 != 0 {
+				at += 16;
+			}
+			if extension & 0x40 != 0 {
+				clock = clock.or(Some("pack_header_field"));
+				at += 1 + usize::from(read(at)?);
+			}
+			// program_packet_sequence_counter and P-STD_buffer.
+			at += 2 * usize::from(extension & 0x20 != 0) + 2 * usize::from(extension & 0x10 != 0);
+			if extension & 0x01 != 0 {
+				let len = usize::from(read(at)? & 0x7f);
+				// A set stream_id_extension_flag with a clear tref_extension_flag says a TREF
+				// follows.
+				if len > 0 && read(at + 1)? & 0x81 == 0x80 {
+					clock = clock.or(Some("TREF"));
+				}
+				at += 1 + len;
+			}
+		}
+		anyhow::ensure!(
+			at <= fields.len(),
+			"PES optional fields need {at} bytes where PES_header_data_length gives {}",
+			fields.len()
+		);
+		Ok(clock)
+	}
+}
+
+/// Whether a PES of `stream_id` carries the optional header: all but program_stream_map,
+/// padding, private_stream_2, the ECM and EMM streams, DSMCC, H.222.1 type E and the program
+/// stream directory (ISO 13818-1 table 2-21).
+pub(super) fn has_optional_header(stream_id: u8) -> bool {
+	!matches!(stream_id, 0xbc | 0xbe | 0xbf | 0xf0 | 0xf1 | 0xf2 | 0xf8 | 0xff)
+}
+
+/// Whether a PMT `stream_type` carries video (ISO 13818-1 Table 2-34, and VC-1's 0xEA), whose
+/// PES alone may leave `PES_packet_length` unbounded.
+pub(super) fn is_video_stream_type(stream_type: u8) -> bool {
+	matches!(
+		stream_type,
+		0x01 | 0x02 | 0x10 | 0x1b | 0x1e..=0x26 | 0x28..=0x2b | 0x31..=0x35 | 0xea
+	)
 }
 
 /// A 33-bit PTS or DTS behind its 4-bit prefix and three marker bits.

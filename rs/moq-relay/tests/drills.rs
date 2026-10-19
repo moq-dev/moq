@@ -54,6 +54,8 @@ const TRACK: &str = "drill";
 /// hostile one, and the drills' own budgets (a 2s idle timeout, 10s waits) hold
 /// under it unchanged. The loss is 5% because a drill only sends a few hundred
 /// datagrams, and at 2% that is a drop or two, which barely exercises recovery.
+/// Random loss only proves correctness, which is all a drill asserts; nothing
+/// here judges quality, latency or throughput.
 fn impairment() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		delay: Duration::from_millis(20),
@@ -802,8 +804,8 @@ const SETTLE: Duration = Duration::from_secs(10);
 /// burst overruns, so its tail waits in the queue or is dropped from it. It is
 /// slower than [`credit`]'s receive window lets a sender go. The first burst
 /// is collected at ingress after setup, so scheduling cannot drain the bucket
-/// between its datagrams; its surviving bytes exceed the burst and 50ms queue
-/// allowance before they are accounted at one instant.
+/// between its datagrams; its bytes exceed the burst and 50ms queue allowance
+/// before they are accounted at one instant.
 fn bursty() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		rate: Some(moq_shaper::Rate {
