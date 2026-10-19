@@ -46,10 +46,10 @@ that connects and never speaks is closed instead of held open by keep-alives.
 
 `reset_key` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of
-waiting out the idle timeout. Keep the file secret and to one relay: any holder
-resets every other holder's connections, so live relays behind one address
-would reset each other's clients unless the load balancer routes by connection
-ID (`lb_id`, QUIC-LB). Relays on different addresses gain nothing from sharing
+waiting out the idle timeout. Keep the file secret, and give it to one relay
+only: any holder resets every other holder's connections, so live relays behind
+one address would reset each other's clients unless the load balancer routes by
+connection ID (`lb_id`, QUIC-LB). Relays on different addresses gain nothing from sharing
 it, since a client accepts a reset only from its relay's address.
 Create one with `openssl rand -hex 32 > reset.key`.
 

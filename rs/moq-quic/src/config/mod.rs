@@ -183,8 +183,8 @@ impl EndpointConfig {
 
     /// Minimum interval between outgoing stateless reset packets
     ///
-    /// Defaults to 20ms, or 1ms after [`reset_secret`](Self::reset_secret). Limits the impact of attacks which flood an endpoint with garbage packets,
-    /// e.g. [ISAKMP/IKE amplification]. Larger values provide a stronger defense, but may delay
+    /// Defaults to 20ms, or 1ms after [`reset_secret`](Self::reset_secret). Limits the impact of
+    /// attacks which flood an endpoint with garbage packets, e.g. [ISAKMP/IKE amplification]. Larger values provide a stronger defense, but may delay
     /// detection of some error conditions by clients. Using a [`ConnectionIdGenerator`] with a low
     /// rate of false positives in [`validate`](ConnectionIdGenerator::validate) reduces the risk
     /// incurred by a small minimum reset interval.
