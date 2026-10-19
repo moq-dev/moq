@@ -46,7 +46,13 @@ Scope is one broadcast, decided by the maintainer on 2026-10-19. ANNOUNCE alread
 discovers broadcasts under a prefix, with their epochs and restarts; a
 prefix-scoped TRACKS would duplicate that and need every route handler to
 answer for a whole prefix (#5931's `Lister`). A prefix consumer composes the
-two: ANNOUNCE for broadcasts, TRACKS per announced broadcast. TRACKS names a
+two: ANNOUNCE for broadcasts, TRACKS per announced broadcast. A route is
+capability, not inventory: a covering-prefix announcement names no
+broadcast, and a service serving paths under it on request lists nothing,
+like an on-demand track. A prefix consumer therefore covers the broadcasts
+announced at their own path (the lite draft already says an advertiser
+SHOULD announce a concrete path once it is producing) and treats TRACKS
+refused on an announced path as "not a broadcast". TRACKS names a
 broadcast path and an Epoch and resolves like TRACK and SUBSCRIBE, so the
 listing is pinned to the instance that answers it and ends with that
 instance, never spliced into the next one. Rejected: a prefix-scoped TRACKS,
@@ -67,26 +73,29 @@ when a track no longer exists"):
   length-prefixed TRACK_INFO, so one decoder serves both streams and any
   field TRACK_INFO gains (refresh, compress) reaches listings without a second
   wire change. It fits because TRACK_INFO holds only fixed per-track
-  properties and no name or stream-specific field. What differs is only what
-  wraps it: the name, and an implicit ID assigned per entry, as ANNOUNCE_START
-  assigns Announce IDs. A lister MAY skip the Track Stream for a track it
-  learned this way, since the properties are the same immutable ones.
-- **Caught up.** An explicit CAUGHT_UP event, sent once, in order, when the
-  reader's cursor reaches what was the live head when it asked, so the lister
-  knows it holds every track this hop knew then; entries after it are live.
-  Not ANNOUNCE_OK's `Active Count`: a count sent first commits to that many
-  adds, so a track removed before a slow reader reaches its add would either
-  leave the count unmet forever or force the hop to retain every initial
-  entry per reader, which a stalled hostile reader pins. The event costs
-  about a byte more per stream and keeps each reader an O(1) cursor. Caught up means caught up with this hop, decided by the maintainer on
+  properties and no name or stream-specific field; the name is the only thing
+  wrapping it. A lister MAY skip the Track Stream for a track it learned this
+  way, since the properties are the same immutable ones.
+- **Caught up.** An ordered CAUGHT_UP event, sent once, when the reader
+  reaches what was the live head when it asked, so the lister knows it holds
+  every track this hop knew then; entries after it are live. There is no
+  count anywhere, decided by the maintainer on 2026-10-19 ("We don't need the
+  count at all"): a count sent first commits to that many adds, which a track
+  removed before a slow reader reaches its add would break. The event itself
+  is the whole wire cost. The announce stream gets the same event in lite-07
+  ([Announce CAUGHT_UP](/quest/m1/announce-caught-up.md)), identical in shape.
+  Caught up means caught up with this hop, decided by the maintainer on
   2026-10-19: a relay answers at once with what it currently holds and never
   waits on its upstream, since relays never block on peers. A cold relay may
   report zero; the upstream's tracks then arrive as live adds.
-- **Track removed.** A named event referencing the entry's ID, sent when the
-  publisher no longer serves the name (it left the broadcast's track table),
-  so a SUBSCRIBE for it would now be refused. A track created again under the
-  name gets a new entry and ID. Removing an ID that is not live is a protocol
-  violation, as on the Announce stream.
+- **Track removed.** Names the track, sent when the publisher no longer
+  serves it (it left the broadcast's track table), so a SUBSCRIBE for it
+  would now be refused. There are no entry IDs: a name is unique among a
+  broadcast's live tracks, so the name identifies the entry, and a track
+  created again under it is a later add. Removing a name that is not live on
+  the stream is a protocol violation. A removal costs the name's bytes instead
+  of a varint, which is worth it: the receiver keys tracks by name anyway, and
+  the sender needs no per-reader ID state (below).
 
 Costs, accepted:
 
@@ -126,15 +135,19 @@ Guidance:
     budget for discovery state a peer pushes at us; past it, the relay resets
     the listing rather than holding more. Names keep the existing length caps.
   - A hostile publisher can churn, adding and removing tracks as fast as it
-    can send. Held state is the live set, never the history, and a
-    downstream cursor reads the current set rather than a log: an add and its
-    removal that a slow reader has not reached collapse to nothing, before or
-    after CAUGHT_UP, so churn
-    costs a relay per-event work across its listings of that broadcast (the
-    same fan-out an Announce stream pays) but no backlog. Implicit IDs are
-    assigned per emitted add on each stream, never per source event, so a
-    collapsed pair consumes no ID and later removals stay in sync. They keep
-    growing, which costs a varint byte now and then, not state.
+    can send. The hop holds the live set, each entry stamped with the order it
+    was added, plus a tombstone for a removed entry while some reader that
+    already sent its add has not yet sent its removal. Each reader keeps two
+    positions: the last add it sent and the last removal it sent. It sends,
+    in the order events happened, every live entry added past its add
+    position and every tombstone past its removal position whose entry it
+    already passed. An add and its removal that a reader has not reached
+    collapse to nothing, before or after CAUGHT_UP, since the entry is gone and
+    it never passed it. A stalled reader pins only tombstones for entries it
+    passed, which were live when it stalled, so at most the live set (bounded
+    by the `announces` cap) per stalled reader; later churn is invisible to
+    it. Churn costs per-event work across a broadcast's listings (the same
+    fan-out an Announce stream pays), never a backlog.
   - A hostile subscriber can open many TRACKS. Each takes a subscription slot,
     downstream listings of one broadcast share one upstream TRACKS, and a
     downstream reader is a cursor into the shared listing, so a slow or stalled
@@ -149,11 +162,12 @@ request arriving before CAUGHT_UP, a cold relay answering
 caught up at once with what it holds and the upstream's tracks following as
 live adds, a track added later (a
 SUBSCRIBE from the listing gets its first group from the cache), a track
-removed and created again under its name (a new ID), add and remove churn
-collapsing for a stalled reader (including an initial track removed before
-the reader reaches it, with CAUGHT_UP still arriving and later IDs in sync), a removal of an unknown ID refused, the
-broadcast
-ending the listing, a new epoch at the same path not continuing an old
+removed and created again under its name (removal sent before the new add),
+add and remove churn collapsing for a stalled reader (including an initial
+track removed before the reader reaches it, with CAUGHT_UP still arriving),
+a stalled reader pinning no more than the live set under churn, a removal
+naming a track that is not live refused, a TRACKS refused on a
+covering-prefix route, the broadcast ending the listing, a new epoch at the same path not continuing an old
 listing, a dynamic-only track never created, two downstream listings sharing
 one upstream TRACKS, and the `announces` cap resetting an oversized listing.
 

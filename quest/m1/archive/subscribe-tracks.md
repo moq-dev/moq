@@ -75,9 +75,11 @@ TRACKS' three events (see its Plan) map as follows:
 Untrusted input:
 
 - Inbound, a hostile subscriber's SUBSCRIBE_TRACKS makes us open a PUBLISH
-  per track. Each holds a subscription slot; past the cap, send
-  PUBLISH_SKIPPED (draft-20 on) rather than hold more. Drafts 18 and 19 have
-  no skip signal, so there the track is simply not published.
+  per track. Each holds a subscription slot; past the cap, tell the peer
+  rather than hold more or omit the track silently: PUBLISH_BLOCKED on
+  draft-18, PUBLISH_SKIPPED (its rename) from draft-19 on. Draft-17 has no
+  SUBSCRIBE_TRACKS (its PUBLISH half rode SUBSCRIBE_NAMESPACE, which stays
+  refused), so nothing changes there.
 - Outbound, a hostile publisher can PUBLISH without bound. Each held paused
   PUBLISH counts against the session's `announces` cap, as a lite listed track
   does; past it, refuse the PUBLISH (EXCESSIVE_LOAD) rather than hold more. The

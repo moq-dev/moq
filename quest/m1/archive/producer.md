@@ -15,8 +15,12 @@ Decided by the maintainer on 2026-10-17 (see the
 [epic](/quest/m1/archive/README.md)):
 
 - **Input.** One producer records every broadcast under a prefix as it
-  appears: ANNOUNCE finds each broadcast, [TRACKS](/quest/m1/archive/tracks.md)
-  lists its tracks, and each track records through its own SUBSCRIBE
+  appears: ANNOUNCE finds each broadcast announced at its own path,
+  [TRACKS](/quest/m1/archive/tracks.md) lists its tracks, and each track
+  records through its own SUBSCRIBE. A covering-prefix route is capability,
+  not inventory, so broadcasts served under one on request without their own
+  announcement are not recorded, and a TRACKS refused on an announced path
+  means it is not a broadcast
   (decided 2026-10-19, replacing one SUBSCRIBE_ALL). The application maps
   each broadcast (path and epoch) to its key prefix, so a different epoch is
   a different prefix and the producer stores no epoch. Open since discovery
