@@ -12,6 +12,7 @@ That covers every quinn security advisory published through 2026-09-30.
 Cherry-picked since the fork point:
 
 - [`48854d48`](https://github.com/quinn-rs/quinn/commit/48854d48635875d259a95973cc0575db8c1792a4): accept non-minimally encoded integer transport parameters, as RFC 9000 section 16 allows.
+- [`17596dde`](https://github.com/quinn-rs/quinn/commit/17596ddefb09dae895129520824055d0ac8da5d5) (`moq_sock::udp`): on Windows, query `IPV6_V6ONLY` only on IPv6 sockets, so Winsock refusing the option on an IPv4 socket cannot fail endpoint creation.
 
 The fork never merges upstream.
 Upstream fixes are cherry-picked by hand, and the crate keeps quinn's formatting (rustfmt defaults) so the patches apply cleanly.
