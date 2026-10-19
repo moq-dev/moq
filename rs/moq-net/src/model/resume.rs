@@ -139,10 +139,16 @@ impl Consumer {
 		self.state.read().copy.clone()
 	}
 
-	/// Poll for a largest location newer than `seen` on the serving copy, recording it there.
-	/// A copy ending is its route failing, so the logical track ends only with the route:
-	/// at once when the front ends it, or with the last copy once the front concluded.
-	pub(super) fn poll_largest(&self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+	/// Poll for a largest location within `bounds` newer than `seen` on the serving copy,
+	/// recording it there. A copy ending is its route failing, so the logical track ends
+	/// only with the route: at once when the front ends it, or with the last copy once the
+	/// front concluded.
+	pub(super) fn poll_largest(
+		&self,
+		seen: &mut Option<Position>,
+		bounds: track::Bounds,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<Position>> {
 		loop {
 			let (generation, copy) = {
 				let route = self.state.read();
@@ -150,7 +156,7 @@ impl Consumer {
 			};
 			let end = self.end();
 			// A replacement copy can start below what an earlier one reported.
-			match copy.map(|copy| copy.poll_largest_after(seen, waiter)) {
+			match copy.map(|copy| copy.poll_largest_after(seen, bounds, waiter)) {
 				Some(Poll::Ready(Some(largest))) => return Poll::Ready(Some(largest)),
 				_ if matches!(end, Some(Some(_))) => return Poll::Ready(None),
 				Some(Poll::Pending) if end.is_some() => return Poll::Pending,
@@ -439,10 +445,24 @@ impl Subscriber {
 		self.reader().latest()
 	}
 
-	/// Poll for a largest location newer than `seen`; see [`Consumer::poll_largest`].
-	pub(super) fn poll_largest(&mut self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+	/// Poll for a largest location within `bounds` newer than `seen`; see [`Consumer::poll_largest`].
+	pub(super) fn poll_largest(
+		&mut self,
+		seen: &mut Option<Position>,
+		bounds: track::Bounds,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<Position>> {
 		let route = self.reader().route.clone();
-		route.poll_largest(seen, waiter)
+		route.poll_largest(seen, bounds, waiter)
+	}
+
+	/// The local group filter, as [`track::Subscriber::poll_largest`] reports within it.
+	pub(super) fn bounds(&self) -> track::Bounds {
+		let (start, end) = self.reader().groups;
+		track::Bounds {
+			start,
+			end: end.exclusive(),
+		}
 	}
 
 	/// The groups the copies' drift budget skipped since the last call, counted against
@@ -1402,6 +1422,24 @@ mod test {
 		routes.end(Ok(()));
 		drop(b);
 		assert_eq!(sub.largest().now_or_never(), Some(None));
+	}
+
+	/// A front's reader reports the largest within its cap on the serving copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn largest_honours_the_cap_on_the_serving_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		for sequence in 0..5 {
+			write(&a, sequence);
+		}
+		sub.set_groups(..3);
+		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(2))));
+		sub.set_groups(..);
+		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(4))));
 	}
 
 	/// A track reader waiting before any route serves is woken by the first one's frame.

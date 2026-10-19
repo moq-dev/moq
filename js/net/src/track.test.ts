@@ -1911,6 +1911,98 @@ test("a datagram raises the largest", async () => {
 	producer.close();
 });
 
+/** Write untimed group `sequence` with `frames` frames, left open. */
+function framedGroup(producer: TrackProducer, sequence: number, frames: number): GroupProducer {
+	const group = new GroupProducer(sequence);
+	producer.writeGroup(group);
+	for (let i = 0; i < frames; i++) group.writeFrame({ payload: enc.encode("x") });
+	return group;
+}
+
+/** Whether `promise` is still pending once queued work settles. */
+async function isPending(promise: Promise<unknown>): Promise<boolean> {
+	await settle();
+	return (await Promise.race([promise.then(() => false), Promise.resolve(true)])) as boolean;
+}
+
+// A cap below the live edge reports the newest cached group under it, follows that group's
+// frames, and ignores the edge moving on.
+test("largest reports within a cap below the live edge", async () => {
+	const producer = new TrackProducer("test").accept({});
+	const groups = [0, 1, 2, 3, 4, 5].map((sequence) => framedGroup(producer, sequence, 2));
+
+	const reader = producer.subscribe().withGroups({ end: { excluded: 3 } });
+	expect(await reader.largest()).toEqual({ group: 2, frame: 1 });
+
+	const next = reader.largest();
+	expect(await isPending(next)).toBe(true);
+	groups[2].writeFrame({ payload: enc.encode("x") });
+	expect(await next).toEqual({ group: 2, frame: 2 });
+
+	framedGroup(producer, 6, 1);
+	groups[5].writeFrame({ payload: enc.encode("x") });
+	expect(await isPending(reader.largest())).toBe(true);
+
+	const ordered = producer
+		.subscribe()
+		.ordered()
+		.withGroups({ end: { included: 3 } });
+	expect(await ordered.largest()).toEqual({ group: 3, frame: 1 });
+	producer.close();
+});
+
+// A gap under the cap reports the newest group the cache holds there, and a floor above the
+// edge reports nothing until a group reaches it.
+test("largest skips gaps under the cap and waits for the floor", async () => {
+	const producer = new TrackProducer("test").accept({});
+	framedGroup(producer, 0, 1);
+	framedGroup(producer, 1, 3);
+	framedGroup(producer, 5, 1);
+
+	const capped = producer.subscribe().withGroups({ end: { excluded: 4 } });
+	expect(await capped.largest()).toEqual({ group: 1, frame: 2 });
+
+	const floored = producer.subscribe().withGroups({ start: { included: 8 } });
+	const next = floored.largest();
+	expect(await isPending(next)).toBe(true);
+	framedGroup(producer, 8, 0);
+	expect(await next).toEqual({ group: 8, frame: 0 });
+	producer.close();
+});
+
+// Moving the cap wakes a pending read and reports the largest within the new bounds, lower ones
+// included; bounds that did not move report nothing again.
+test("largest re-reports when the cap moves", async () => {
+	const producer = new TrackProducer("test").accept({});
+	for (let sequence = 0; sequence < 6; sequence++) framedGroup(producer, sequence, 1);
+
+	const reader = producer
+		.subscribe()
+		.ordered()
+		.withGroups({ end: { excluded: 3 } });
+	expect(await reader.largest()).toEqual({ group: 2, frame: 0 });
+
+	let next = reader.largest();
+	expect(await isPending(next)).toBe(true);
+	reader.setGroups({ end: { excluded: 5 } });
+	expect(await next).toEqual({ group: 4, frame: 0 });
+
+	next = reader.largest();
+	expect(await isPending(next)).toBe(true);
+	reader.setGroups({ end: { excluded: 2 } });
+	expect(await next).toEqual({ group: 1, frame: 0 });
+
+	reader.setGroups({ end: { excluded: 2 } });
+	next = reader.largest();
+	expect(await isPending(next)).toBe(true);
+
+	reader.setGroups({});
+	expect(await next).toEqual({ group: 5, frame: 0 });
+	reader.setGroups({ start: { included: 3 } });
+	expect(await isPending(reader.largest())).toBe(true);
+	producer.close();
+});
+
 // A reader that starts at the largest group while it is still empty is at the live edge: it
 // gets that group, which ends with nothing, then the next one.
 test("a live-edge reader starts on an empty largest group", async () => {
@@ -2566,8 +2658,10 @@ test("a mid-group end survives eviction and a filtered late reader", async () =>
 		group.close();
 		producer.close();
 		await clock.advance(10_000 + CACHE_WINDOW_MS + 1);
+		expect(await producer.subscribe().largest()).toEqual({ group: 5, frame: 4 });
+		// The cap excludes the only group, so nothing is within it.
 		const reader = producer.subscribe().withGroups({ end: { excluded: 5 } });
-		expect(await reader.largest()).toEqual({ group: 5, frame: 4 });
+		expect(await reader.largest()).toBeUndefined();
 		expect(reader.end()).toEqual({ group: 5, frame: 5 });
 		reader.close();
 	} finally {

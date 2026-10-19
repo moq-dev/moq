@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A reader's `largest()` reports within its `set_groups` bounds
+
+`track::Subscriber::largest()` and `track::Ordered::largest()` (and their `poll_largest`) report the largest location within the bounds set with `set_groups`, where they used to report the track's.
+Past a cap of `..N`, they report the newest cached group below `N`; below the floor, nothing.
+Moving the bounds reports again within the new ones, even below the last report.
+Unbounded readers, `track::Producer`, and `track::Consumer` are unchanged.
+To read the track's edge from a capped reader, lift the cap with `set_groups(..)` first.
+
 ### Track readers follow `largest()` instead of reading `latest()` (#5725)
 
 `latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.

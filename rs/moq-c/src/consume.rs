@@ -685,7 +685,9 @@ impl Consume {
 	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
 		let subscription = subscription.unwrap_or_default();
 		// Reads start where the lowest range does. Without a floor of its own (the oldest
-		// range, the default) a raw reader joins at the latest group.
+		// range, the default) a raw reader joins at the latest group. Lift the last update's
+		// cap first: the largest reports within it, and a relative range counts from the edge.
+		track.set_groups(..);
 		let latest = match track.poll_largest(&kio::Waiter::noop()) {
 			std::task::Poll::Ready(Some(position)) => Some(position.group),
 			_ => None,

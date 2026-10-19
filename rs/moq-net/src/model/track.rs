@@ -1961,24 +1961,26 @@ impl TrackState {
 			|| self.datagrams.iter().any(|datagram| datagram.sequence >= sequence)
 	}
 
-	/// The newest live group the cache holds, and the number of frames it has so far.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	fn newest(&self) -> Option<(u64, u64)> {
-		let (sequence, slot) = self
-			.lookup
-			.iter()
-			.rev()
-			.find(|(_, slot)| slot.visible && !slot.pending)?;
-		Some((*sequence, slot.group.frame_count() as u64))
-	}
-
 	/// The largest position the cache holds: the newest live group's last frame (its head,
 	/// while it has none).
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn largest(&self) -> Option<Position> {
-		self.newest().map(|(group, frames)| Position {
-			group,
-			frame: frames.saturating_sub(1),
+		self.largest_within(Bounds::default())
+	}
+
+	/// [`Self::largest`] among the groups within `bounds`.
+	fn largest_within(&self, bounds: Bounds) -> Option<Position> {
+		if bounds.end.is_some_and(|end| end <= bounds.start) {
+			return None;
+		}
+		let end = bounds.end.map_or(Bound::Unbounded, Bound::Excluded);
+		let (sequence, slot) = self
+			.lookup
+			.range((Bound::Included(bounds.start), end))
+			.rev()
+			.find(|(_, slot)| slot.visible && !slot.pending)?;
+		Some(Position {
+			group: *sequence,
+			frame: (slot.group.frame_count() as u64).saturating_sub(1),
 		})
 	}
 
@@ -2095,20 +2097,47 @@ fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) {
 	state.close();
 }
 
-/// Poll `cache` for a largest location newer than `seen`. `ended` polls the track for
-/// [`TrackState::largest_settled`], or its channel closing without ending the cache (a
-/// dropped request), either of which ends the stream.
+/// A reader's local group bounds: the floor, and the exclusive cap (`None` for none).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Bounds {
+	pub start: u64,
+	pub end: Option<u64>,
+}
+
+/// Poll `cache` for a largest location within `bounds` newer than `seen`, recording it there.
+///
+/// The track's largest while it is within them; past the cap, the newest group the cache
+/// holds below it, which `below` reads from the track; nothing while below the floor.
+/// `ended` polls the track for [`TrackState::largest_settled`], or its channel closing
+/// without ending the cache (a dropped request), either of which ends the stream.
 fn poll_largest(
 	cache: &cache::Track,
 	seen: &mut Option<Position>,
+	bounds: Bounds,
+	below: impl Fn() -> Option<Position>,
 	waiter: &kio::Waiter,
 	ended: impl FnOnce(&kio::Waiter) -> Poll<()>,
 ) -> Poll<Option<Position>> {
-	if let Poll::Ready(next) = cache.poll_largest(seen, waiter) {
-		return Poll::Ready(next);
+	loop {
+		let (largest, revision) = cache.largest();
+		let within = largest.and_then(|largest| match largest.group {
+			group if group < bounds.start => None,
+			group if super::subscription::before_end(group, bounds.end) => Some(largest),
+			// Read outside the largest lock: the track and group locks come first.
+			_ => below(),
+		});
+		if let Some(next) = within.filter(|next| seen.is_none_or(|seen| *next > seen)) {
+			*seen = Some(next);
+			return Poll::Ready(Some(next));
+		}
+		match cache.poll_largest_changed(revision, waiter) {
+			Poll::Ready(true) => continue,
+			Poll::Ready(false) => return Poll::Ready(None),
+			Poll::Pending => {}
+		}
+		ready!(ended(waiter));
+		return Poll::Ready(None);
 	}
-	ready!(ended(waiter));
-	Poll::Ready(cache.take_largest(seen))
 }
 
 /// Ready once the track's largest can no longer advance; see [`TrackState::largest_settled`].
@@ -2696,9 +2725,15 @@ impl Producer {
 	/// Poll for the track's largest location: the current one, then each newer one, and `None` once the track ends.
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let cache = self.state.read().cache.clone();
-		poll_largest(&cache, &mut self.largest, waiter, |waiter| {
-			self.state.poll(waiter, |state| largest_ended(state)).map(|_| ())
-		})
+		let state = &self.state;
+		poll_largest(
+			&cache,
+			&mut self.largest,
+			Bounds::default(),
+			|| state.read().largest(),
+			waiter,
+			|waiter| state.poll(waiter, |state| largest_ended(state)).map(|_| ()),
+		)
 	}
 
 	/// The track's largest location, its newest group or datagram at the newest frame (0 while empty): the current one, then each newer one, and `None` once the track ends.
@@ -2785,7 +2820,7 @@ impl Producer {
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
 			stats: stats::Scope::default(),
 			_stats_sub: stats::Subscription::default(),
-			largest: None,
+			largest: Reported::default(),
 		}
 	}
 
@@ -3819,17 +3854,18 @@ impl Consumer {
 	/// Poll for the track's largest location: the current one, then each newer one, and `None` once the track ends.
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let mut seen = self.largest;
-		let next = self.poll_largest_after(&mut seen, waiter);
+		let next = self.poll_largest_after(&mut seen, Bounds::default(), waiter);
 		self.largest = seen;
 		next
 	}
 
-	/// Poll for a largest frame newer than `seen`, recording it there. A front's logical
-	/// track follows the route serving it. Reads the instance served now without asking for
-	/// it, so a broadcast serving nothing under the name ends the stream.
+	/// Poll for a largest frame within `bounds` newer than `seen`, recording it there. A
+	/// front's logical track follows the route serving it. Reads the instance served now
+	/// without asking for it, so a broadcast serving nothing under the name ends the stream.
 	pub(super) fn poll_largest_after(
 		&self,
 		seen: &mut Option<Position>,
+		bounds: Bounds,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<Position>> {
 		self.with_state(|state| {
@@ -3841,10 +3877,15 @@ impl Consumer {
 				(state.routes.clone(), state.cache.clone())
 			};
 			match routes {
-				Some(routes) => routes.poll_largest(seen, waiter),
-				None => poll_largest(&cache, seen, waiter, |waiter| {
-					state.poll(waiter, |state| largest_ended(state)).map(|_| ())
-				}),
+				Some(routes) => routes.poll_largest(seen, bounds, waiter),
+				None => poll_largest(
+					&cache,
+					seen,
+					bounds,
+					|| state.read().largest_within(bounds),
+					waiter,
+					|waiter| state.poll(waiter, |state| largest_ended(state)).map(|_| ()),
+				),
 			}
 		})
 	}
@@ -3953,7 +3994,7 @@ impl Subscribing {
 			delivered: Delivered::default(),
 			stats: self.stats.clone(),
 			_stats_sub: self.stats.subscribe(),
-			largest: None,
+			largest: Reported::default(),
 		}))
 	}
 
@@ -4393,8 +4434,35 @@ pub struct Subscriber {
 	// The subscription guard: bumps `subscriptions` (and the egress viewer refcount)
 	// while held, closing them on drop. Empty (no-op) for an untagged track.
 	_stats_sub: stats::Subscription,
-	// Last position this handle yielded through `largest`.
-	largest: Option<Position>,
+	largest: Reported,
+}
+
+/// What a [`Subscriber`]'s `largest` stream last reported.
+#[derive(Default)]
+struct Reported {
+	position: Option<Position>,
+	// The bounds moved since, so the next poll reports within the new ones.
+	moved: bool,
+	// The task that last polled, woken when the bounds move. One is enough: polling
+	// takes `&mut self`.
+	waker: Option<std::task::Waker>,
+}
+
+impl Reported {
+	/// Remember the polling task, to wake when the bounds move.
+	fn park(&mut self, waker: &std::task::Waker) {
+		if !self.waker.as_ref().is_some_and(|last| last.will_wake(waker)) {
+			self.waker = Some(waker.clone());
+		}
+	}
+
+	/// The bounds moved: report within them again, waking a parked poll.
+	fn bounds_moved(&mut self) {
+		self.moved = true;
+		if let Some(waker) = self.waker.take() {
+			waker.wake();
+		}
+	}
 }
 
 /// Unread groups a logical reader can still take from a replaced copy.
@@ -5441,6 +5509,7 @@ impl Subscriber {
 	/// `2..=5` includes groups 2 through 5; `2..5` excludes group 5. An omitted
 	/// start preserves the current floor, and an omitted end removes the cap.
 	/// Groups above the end remain buffered and can be read after raising the cap.
+	/// [`Self::poll_largest`] reports within these bounds.
 	/// This changes only local delivery; use [`Subscription::ranges`] and
 	/// [`Self::update`] to change the requested groups.
 	pub fn set_groups(&mut self, groups: impl RangeBounds<u64>) {
@@ -5465,6 +5534,7 @@ impl Subscriber {
 			// leave a finished group below the old floor unread.
 			Inner::Resume(resume, _) => resume.start_at(sequence),
 		}
+		self.largest.bounds_moved();
 	}
 
 	/// Raise the read cursor's floor to `sequence`, keeping any higher floor already set.
@@ -5474,6 +5544,7 @@ impl Subscriber {
 			Inner::Plain(cursor) => cursor.min_sequence = cursor.min_sequence.max(sequence),
 			Inner::Resume(resume, _) => resume.raise_start_to(sequence),
 		}
+		self.largest.bounds_moved();
 	}
 
 	/// Cap this subscriber's read cursor at `end`, or remove the cap with `..`.
@@ -5498,6 +5569,18 @@ impl Subscriber {
 			}
 			Inner::Resume(resume, _) => resume.end_at(end.into()),
 		}
+		self.largest.bounds_moved();
+	}
+
+	/// The local bounds `largest` reports within.
+	fn bounds(&self) -> Bounds {
+		match &self.inner {
+			Inner::Plain(cursor) => Bounds {
+				start: cursor.min_sequence,
+				end: cursor.end_sequence,
+			},
+			Inner::Resume(resume, _) => resume.bounds(),
+		}
 	}
 
 	/// This subscriber's current preferences.
@@ -5518,20 +5601,47 @@ impl Subscriber {
 		channel.update(subscription)
 	}
 
-	/// Poll for the track's largest location: the current one, then each newer one, and `None` once the track ends.
+	/// Poll for the largest location within [`Self::set_groups`]: the current one, then each newer one, and `None` once the track ends.
+	///
+	/// While the track's largest is within the bounds, that is its newest group or datagram
+	/// at the newest frame (0 while empty). Past the cap, it is the newest cached group
+	/// below the cap, so `..N` reports group `N - 1` once it arrives; below the floor,
+	/// nothing. Moving the bounds reports again within the new ones, even below the last
+	/// report.
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		self.largest.park(waiter.waker());
+		let bounds = self.bounds();
+		if std::mem::take(&mut self.largest.moved) {
+			// New bounds report the largest within them again, even one below the last report.
+			let last = self.largest.position.take();
+			match self.poll_largest_within(bounds, waiter) {
+				Poll::Ready(Some(position)) if Some(position) == last => {}
+				poll => return poll,
+			}
+		}
+		self.poll_largest_within(bounds, waiter)
+	}
+
+	fn poll_largest_within(&mut self, bounds: Bounds, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		let seen = &mut self.largest.position;
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
-				let cache = cursor.state.read().cache.clone();
-				poll_largest(&cache, &mut self.largest, waiter, |waiter| {
-					cursor.state.poll(waiter, |state| largest_ended(state)).map(|_| ())
-				})
+				let state = &cursor.state;
+				let cache = state.read().cache.clone();
+				poll_largest(
+					&cache,
+					seen,
+					bounds,
+					|| state.read().largest_within(bounds),
+					waiter,
+					|waiter| state.poll(waiter, |state| largest_ended(state)).map(|_| ()),
+				)
 			}
-			Inner::Resume(resume, _) => resume.poll_largest(&mut self.largest, waiter),
+			Inner::Resume(resume, _) => resume.poll_largest(seen, bounds, waiter),
 		}
 	}
 
-	/// The track's largest location, its newest group or datagram at the newest frame (0 while empty): the current one, then each newer one, and `None` once the track ends.
+	/// The largest location within [`Self::set_groups`]; see [`Self::poll_largest`].
 	#[cfg(feature = "async")]
 	pub async fn largest(&mut self) -> Option<Position> {
 		kio::wait(|waiter| self.poll_largest(waiter)).await
@@ -5676,12 +5786,12 @@ impl Ordered {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 
-	/// Poll for the track's largest location: the current one, then each newer one, and `None` once the track ends.
+	/// Poll for the largest location within [`Self::set_groups`]; see [`Subscriber::poll_largest`].
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		self.inner.poll_largest(waiter)
 	}
 
-	/// The track's largest location, its newest group or datagram at the newest frame (0 while empty): the current one, then each newer one, and `None` once the track ends.
+	/// The largest location within [`Self::set_groups`]; see [`Subscriber::poll_largest`].
 	#[cfg(feature = "async")]
 	pub async fn largest(&mut self) -> Option<Position> {
 		kio::wait(|waiter| self.poll_largest(waiter)).await
@@ -6251,6 +6361,137 @@ mod test {
 
 		producer.report_largest(Position { group: 8, frame: 0 });
 		assert_eq!(subscriber.largest().await, Some(Position { group: 8, frame: 0 }));
+	}
+
+	/// Wakes record that a parked poll was woken.
+	struct Flag(std::sync::atomic::AtomicBool);
+
+	impl futures::task::ArcWake for Flag {
+		fn wake_by_ref(flag: &Arc<Self>) {
+			flag.0.store(true, std::sync::atomic::Ordering::SeqCst);
+		}
+	}
+
+	impl Flag {
+		fn waiter() -> (Arc<Self>, kio::Waiter) {
+			let flag = Arc::new(Self(Default::default()));
+			let waiter = kio::Waiter::new(futures::task::waker(flag.clone()));
+			(flag, waiter)
+		}
+
+		fn take(&self) -> bool {
+			self.0.swap(false, std::sync::atomic::Ordering::SeqCst)
+		}
+	}
+
+	/// Write group `sequence` with `frames` frames, left open.
+	fn framed(producer: &Producer, sequence: u64, frames: usize) -> group::Producer {
+		let mut group = producer.create_group(group::Info { sequence }).unwrap();
+		for _ in 0..frames {
+			group.write_frame(None, &b"x"[..]).unwrap();
+		}
+		group
+	}
+
+	/// A cap below the live edge reports the newest cached group under it, follows that
+	/// group's frames, and ignores the edge moving on.
+	#[test]
+	fn largest_reports_within_a_cap_below_the_live_edge() {
+		let producer = track_producer("test", Info::default());
+		let noop = kio::Waiter::noop();
+		let mut groups: Vec<_> = (0..6).map(|sequence| framed(&producer, sequence, 2)).collect();
+
+		let mut reader = producer.subscribe(replay());
+		reader.set_groups(..3);
+		assert_eq!(
+			reader.poll_largest(&noop),
+			Poll::Ready(Some(Position { group: 2, frame: 1 }))
+		);
+
+		let (flag, waiter) = Flag::waiter();
+		assert!(reader.poll_largest(&waiter).is_pending());
+		groups[2].write_frame(None, &b"x"[..]).unwrap();
+		assert!(flag.take(), "a frame below the cap woke the reader");
+		assert_eq!(
+			reader.poll_largest(&noop),
+			Poll::Ready(Some(Position { group: 2, frame: 2 }))
+		);
+
+		groups.push(framed(&producer, 6, 1));
+		groups[5].write_frame(None, &b"x"[..]).unwrap();
+		assert!(reader.poll_largest(&noop).is_pending(), "the edge moved past the cap");
+
+		// An inclusive cap reports the group it names.
+		let mut ordered = producer.subscribe(replay()).ordered();
+		ordered.set_groups(..=3);
+		assert_eq!(
+			ordered.poll_largest(&noop),
+			Poll::Ready(Some(Position { group: 3, frame: 1 }))
+		);
+	}
+
+	/// A gap under the cap reports the newest group the cache holds there, and a floor
+	/// above the edge reports nothing until a group reaches it.
+	#[test]
+	fn largest_skips_gaps_under_the_cap_and_waits_for_the_floor() {
+		let producer = track_producer("test", Info::default());
+		let noop = kio::Waiter::noop();
+		let _groups = [
+			framed(&producer, 0, 1),
+			framed(&producer, 1, 3),
+			framed(&producer, 5, 1),
+		];
+
+		let mut capped = producer.subscribe(replay());
+		capped.set_groups(..4);
+		assert_eq!(
+			capped.poll_largest(&noop),
+			Poll::Ready(Some(Position { group: 1, frame: 2 }))
+		);
+
+		let mut floored = producer.subscribe(replay());
+		floored.set_groups(8..);
+		assert!(floored.poll_largest(&noop).is_pending(), "the edge is below the floor");
+		let _late = framed(&producer, 8, 0);
+		assert_eq!(floored.poll_largest(&noop), Poll::Ready(Some(Position::group(8))));
+	}
+
+	/// Moving the cap wakes a parked reader and reports the largest within the new bounds,
+	/// lower ones included; bounds that did not move report nothing again.
+	#[test]
+	fn largest_rereports_when_the_cap_moves() {
+		let producer = track_producer("test", Info::default());
+		let noop = kio::Waiter::noop();
+		let _groups: Vec<_> = (0..6).map(|sequence| framed(&producer, sequence, 1)).collect();
+
+		let mut reader = producer.subscribe(replay()).ordered();
+		reader.set_groups(..3);
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(2))));
+
+		let (flag, waiter) = Flag::waiter();
+		assert!(reader.poll_largest(&waiter).is_pending());
+		reader.set_groups(..5);
+		assert!(flag.take(), "raising the cap woke the reader");
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(4))));
+
+		assert!(reader.poll_largest(&waiter).is_pending());
+		reader.set_groups(..2);
+		assert!(flag.take(), "lowering the cap woke the reader");
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(1))));
+
+		reader.set_groups(..2);
+		assert!(
+			reader.poll_largest(&noop).is_pending(),
+			"the same bounds report nothing new"
+		);
+
+		reader.set_groups(..);
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
+		reader.set_groups(3..);
+		assert!(
+			reader.poll_largest(&noop).is_pending(),
+			"a floor below the edge leaves the largest where it was"
+		);
 	}
 
 	#[test]

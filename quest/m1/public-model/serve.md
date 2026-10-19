@@ -28,10 +28,11 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - **Cursor** (`track::Subscriber::start_at`, `raise_start_to`, `end_at`,
   `subscription::Cap`; both publishers). **Decision**:
   - ✅ One public method assigns the floor and the cap in either direction,
-    renamed from `set_groups` to `set_bounds` (JS `setBounds`) on
-    `track::Subscriber` and `track::Ordered`, since it sets the reader's
-    bounds. Each reader already hands a sequence out once (#5446), so a
-    SUBSCRIBE_UPDATE that widens the start re-offers only unread groups.
+    renamed from `set_groups` to `limit` (JS `limit`) on
+    `track::Subscriber` and `track::Ordered`. The maintainer changed this
+    from `set_bounds` to `limit` on 2026-10-18. Each reader already hands a
+    sequence out once (#5446), so a SUBSCRIBE_UPDATE that widens the start
+    re-offers only unread groups.
     `start_at`, `raise_start_to`, `end_at`, and `Cap` go. Precondition:
     lowering the floor re-offers unread cached groups in every mode. Today
     only the resume cursor does; the arrival-order (Plain) cursor walks a
@@ -39,20 +40,23 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     groups it never handed out. Rewrite the doc ("without rewinding read
     progress") to say what lowering does. JS's chaining form,
     `withGroups` on `Track.Subscriber` and `Track.Ordered`, becomes
-    `withBounds`.
+    `withLimit`.
   - A second public `replace_groups`.
-- **Bounds naming** (decided 2026-10-16 in #5717): ✅ the siblings follow the
-  rename, so every range setter says bounds. `group::Consumer::set_frames`
-  becomes `set_bounds`, and `Subscription::with_groups` becomes
-  `with_bounds`, with the JS mirrors (the `Subscription.groups` field
-  becomes `bounds`, and any group-level frame bounds setter matches).
+- **Bounds naming** (decided 2026-10-16 in #5717, changed to `limit` by the
+  maintainer on 2026-10-18): ✅ the siblings follow the rename:
+  `group::Consumer::limit` (today `set_frames`), `Subscription::with_limit`
+  (today `with_groups`), JS `limit` / `withLimit`, and the field
+  `Subscription.limit` (today `Subscription.groups`). Open question: two of
+  these read poorly. The `Subscription.limit` field and `with_limit` name a
+  request to the publisher, so they blur with the reader's local `limit`,
+  and alone `limit` reads as a count rather than a range. A floor-only call
+  such as `limit(5..)` also reads oddly, since "limit" suggests a cap.
 - `group::Consumer::start_at`, `end_at` (both publishers): remove the need;
-  the public `set_bounds` (today `set_frames`) and `skip_to` cover them.
+  the public `limit` (today `set_frames`) and `skip_to` cover them.
 - `Subscription::{start, end, set_bounds, with_start, with_end}` (both
   publishers, IETF subscriber, from #5732): the covering span a wire without
   ranges carries. Derive it from the public `ranges` instead, or make it
-  public. Either way, rename the crate `set_bounds` so it doesn't clash with
-  the public `with_bounds`.
+  public.
 - `subscription::Position::final_sequence` (lite publisher): public, the
   one-line wire translation of an exclusive end that both languages
   already duplicate. `track::Consumer::final_sequence` (IETF publisher) goes;
@@ -76,7 +80,7 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 JS items (`js/net/src/`):
 
 - `hooks.replaceGroups` (lite publisher): mirror the cursor decision, so
-  `Track.Subscriber.setBounds` assigns the floor and the hook goes.
+  `Track.Subscriber.limit` assigns the floor and the hook goes.
 - `hooks.tryRecvGroup` with its `Recv` union, and `hooks.groupChanged`
   (lite publisher). The public `Subscriber.tryRecvGroup()` returns
   `undefined` for both a held boundary and a drained end, so a synchronous
