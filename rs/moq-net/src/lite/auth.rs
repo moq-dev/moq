@@ -13,6 +13,9 @@ use super::{Message, Version};
 /// URL, a client certificate), or nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Auth {
+	/// The opener's number for this token, which its requests name: 0 for its first
+	/// Auth Stream, one more for each after. Never `u64::MAX`, which no request can name.
+	pub id: u64,
 	pub token: Bytes,
 }
 
@@ -21,7 +24,12 @@ impl Message for Auth {
 		if !version.has_auth() {
 			return Err(DecodeError::Version);
 		}
+		let id = r.varint()?;
+		if id == u64::MAX {
+			return Err(DecodeError::InvalidValue);
+		}
 		Ok(Self {
+			id,
 			token: Bytes::copy_from_slice(r.bytes()?),
 		})
 	}
@@ -30,7 +38,30 @@ impl Message for Auth {
 		if !version.has_auth() {
 			return Err(EncodeError::Version);
 		}
+		if self.id == u64::MAX {
+			return Err(EncodeError::TooLarge);
+		}
+		w.varint(self.id)?;
 		w.bytes(&self.token)
+	}
+}
+
+/// Decode a request's `Auth` field: the ID of the peer's AUTH that admits it, or `None`
+/// for the session's scope. Versions before lite-07 carry no field and name nothing.
+pub(super) fn decode_auth(r: &mut Decoder<'_>, version: Version) -> Result<Option<u64>, DecodeError> {
+	match version.has_auth() {
+		true => r.varint_opt(),
+		false => Ok(None),
+	}
+}
+
+/// Encode a request's `Auth` field, the inverse of [`decode_auth`]. A version without the
+/// field has no AUTH stream to name.
+pub(super) fn encode_auth(w: &mut Encoder<'_>, version: Version, auth: Option<u64>) -> Result<(), EncodeError> {
+	match version.has_auth() {
+		true => w.varint_opt(auth),
+		false if auth.is_some() => Err(EncodeError::Version),
+		false => Ok(()),
 	}
 }
 
@@ -207,10 +238,64 @@ mod tests {
 
 	#[test]
 	fn auth_round_trips() {
-		for token in [Bytes::new(), Bytes::from_static(b"eyJhbGciOi.jwt")] {
-			let msg = Auth { token };
+		for (id, token) in [(0, Bytes::new()), (u64::MAX - 1, Bytes::from_static(b"eyJhbGciOi.jwt"))] {
+			let msg = Auth { id, token };
 			assert_eq!(round_trip(&msg), msg);
 		}
+	}
+
+	/// The exact bytes, shared with `js/net/src/lite/auth.test.ts` so both encoders agree.
+	#[test]
+	fn auth_golden() {
+		let msg = Auth {
+			id: 1,
+			token: Bytes::from_static(b"jwt"),
+		};
+		let buf = encode(&msg, Version::Lite07).unwrap();
+		assert_eq!(&buf[..], &[0x05, 0x01, 0x03, b'j', b'w', b't']);
+	}
+
+	/// No request can name `u64::MAX` as its ID plus one, so neither side puts it on the wire.
+	#[test]
+	fn the_largest_id_is_refused() {
+		let msg = Auth {
+			id: u64::MAX,
+			token: Bytes::new(),
+		};
+		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::TooLarge)));
+
+		let mut buf = Vec::new();
+		let mut w = Encoder::new(&mut buf, Version::Lite07.into());
+		let prefix = w.prefix_varint();
+		w.varint(u64::MAX).unwrap();
+		w.bytes(b"").unwrap();
+		w.fill(prefix).unwrap();
+		assert!(matches!(
+			Auth::decode(&mut Decoder::new(&buf, Version::Lite07.into()), Version::Lite07),
+			Err(DecodeError::InvalidValue)
+		));
+	}
+
+	/// A request names an auth as its ID plus one, so 0 is the session's scope.
+	#[test]
+	fn request_auth_round_trips() {
+		for auth in [None, Some(0), Some(u64::MAX - 1)] {
+			let mut buf = Vec::new();
+			encode_auth(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07, auth).unwrap();
+			let mut r = Decoder::new(&buf, Version::Lite07.into());
+			assert_eq!(decode_auth(&mut r, Version::Lite07).unwrap(), auth);
+			assert!(r.is_empty());
+		}
+
+		// An older version has no field: nothing is written, and naming an auth fails.
+		let mut buf = Vec::new();
+		let mut w = Encoder::new(&mut buf, Version::Lite06.into());
+		encode_auth(&mut w, Version::Lite06, None).unwrap();
+		assert!(matches!(
+			encode_auth(&mut w, Version::Lite06, Some(0)),
+			Err(EncodeError::Version)
+		));
+		assert!(buf.is_empty());
 	}
 
 	/// `**` grants everything, the empty pattern only the root, and the empty list
@@ -319,6 +404,7 @@ mod tests {
 	#[test]
 	fn oversized_message_is_refused() {
 		let msg = Auth {
+			id: 0,
 			token: Bytes::from(vec![0; super::super::message::MAX_MESSAGE_SIZE + 1]),
 		};
 		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::TooLarge)));
@@ -335,7 +421,13 @@ mod tests {
 			Version::Lite06,
 		] {
 			assert!(matches!(
-				encode(&Auth { token: Bytes::new() }, version),
+				encode(
+					&Auth {
+						id: 0,
+						token: Bytes::new()
+					},
+					version
+				),
 				Err(EncodeError::Version)
 			));
 			assert!(matches!(

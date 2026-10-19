@@ -37,6 +37,9 @@ pub struct Subscribe<'a> {
 	/// Which pending group to send first. Lite07+ only; earlier wires decode as
 	/// [`Order::Descending`] and cannot ask for anything else.
 	pub order: Order,
+	/// The ID of the subscriber's AUTH that admits this subscription, or `None` for the
+	/// session's scope. Lite07+ only.
+	pub auth: Option<u64>,
 }
 
 impl Version {
@@ -71,6 +74,7 @@ impl Message for Subscribe<'_> {
 
 		let (start_frame, end_frame) = decode_frame_bounds(r, version, start_group, end_group)?;
 		let start_group = canonical_start_group(version, start_group, start_frame);
+		let auth = super::decode_auth(r, version)?;
 
 		Ok(Self {
 			id,
@@ -84,6 +88,7 @@ impl Message for Subscribe<'_> {
 			start_frame,
 			end_frame,
 			order,
+			auth,
 		})
 	}
 
@@ -112,6 +117,7 @@ impl Message for Subscribe<'_> {
 			self.end_group,
 			self.end_frame,
 		)?;
+		super::encode_auth(w, version, self.auth)?;
 
 		Ok(())
 	}
@@ -422,6 +428,8 @@ pub struct SubscribeUpdate {
 	pub end_frame: Option<u64>,
 	/// See [`Subscribe::order`].
 	pub order: Order,
+	/// See [`Subscribe::auth`]: the update moves the subscription to this auth.
+	pub auth: Option<u64>,
 }
 
 impl Message for SubscribeUpdate {
@@ -444,6 +452,7 @@ impl Message for SubscribeUpdate {
 
 		let (start_frame, end_frame) = decode_frame_bounds(r, version, start_group, end_group)?;
 		let start_group = canonical_start_group(version, start_group, start_frame);
+		let auth = super::decode_auth(r, version)?;
 
 		Ok(Self {
 			priority,
@@ -453,6 +462,7 @@ impl Message for SubscribeUpdate {
 			start_frame,
 			end_frame,
 			order,
+			auth,
 		})
 	}
 
@@ -480,6 +490,7 @@ impl Message for SubscribeUpdate {
 			self.end_group,
 			self.end_frame,
 		)?;
+		super::encode_auth(w, version, self.auth)?;
 
 		Ok(())
 	}
@@ -758,6 +769,7 @@ mod test {
 			end_group: Some(9),
 			start_frame: 4,
 			end_frame: Some(2),
+			auth: None,
 		}
 	}
 
@@ -954,6 +966,7 @@ mod test {
 				start_frame: 0,
 				end_frame: None,
 				order,
+				auth: None,
 			};
 			let mut buf = Vec::new();
 			update

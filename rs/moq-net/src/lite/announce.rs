@@ -53,6 +53,9 @@ pub enum AnnounceBroadcast<'a> {
 		epoch: Option<Epoch>,
 		hops: HopsRef,
 		cost: Cost,
+		/// The ID of the publisher's AUTH that admits the route, or `None` for the
+		/// session's scope. Lite07+ only.
+		auth: Option<u64>,
 	},
 	/// Pre-lite-06: a broadcast is no longer available, retracted by path.
 	Ended { suffix: Path<'a>, hops: Hops },
@@ -61,8 +64,13 @@ pub enum AnnounceBroadcast<'a> {
 	EndedId { id: u64 },
 	/// ANNOUNCE_UPDATE (lite-06+): atomically replace the metadata of the announcement
 	/// with this id (e.g. a new hop chain after a relay failover, or a route whose cost
-	/// moved). The id stays live.
-	Update { id: u64, hops: HopsRef, cost: Cost },
+	/// moved, or a renewed auth). The id stays live.
+	Update {
+		id: u64,
+		hops: HopsRef,
+		cost: Cost,
+		auth: Option<u64>,
+	},
 	/// ANNOUNCE_RESTART (lite-07+): another publisher instance replaces the announcement
 	/// with this id, under the epoch given (or none). Whatever the receiver resolved
 	/// under its prefix is the old instance. The id stays live.
@@ -71,6 +79,7 @@ pub enum AnnounceBroadcast<'a> {
 		epoch: Option<Epoch>,
 		hops: HopsRef,
 		cost: Cost,
+		auth: Option<u64>,
 	},
 	/// An unknown lite-06+ announce type. The length-prefixed body was skipped so
 	/// the stream stays up; it does not assign an announce id.
@@ -186,6 +195,7 @@ impl AnnounceBroadcast<'_> {
 				epoch,
 				hops,
 				cost,
+				auth,
 			} => AnnounceBroadcast::Active {
 				suffix: PathRef {
 					base: suffix.base,
@@ -195,14 +205,27 @@ impl AnnounceBroadcast<'_> {
 				epoch,
 				hops,
 				cost,
+				auth,
 			},
 			Self::Ended { suffix, hops } => AnnounceBroadcast::Ended {
 				suffix: suffix.into_owned(),
 				hops,
 			},
 			Self::EndedId { id } => AnnounceBroadcast::EndedId { id },
-			Self::Update { id, hops, cost } => AnnounceBroadcast::Update { id, hops, cost },
-			Self::Restart { id, epoch, hops, cost } => AnnounceBroadcast::Restart { id, epoch, hops, cost },
+			Self::Update { id, hops, cost, auth } => AnnounceBroadcast::Update { id, hops, cost, auth },
+			Self::Restart {
+				id,
+				epoch,
+				hops,
+				cost,
+				auth,
+			} => AnnounceBroadcast::Restart {
+				id,
+				epoch,
+				hops,
+				cost,
+				auth,
+			},
 			Self::Skipped => AnnounceBroadcast::Skipped,
 		}
 	}
@@ -264,23 +287,33 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 					epoch,
 					hops,
 					cost,
+					auth,
 				} => {
 					suffix.encode(w, version)?;
 					super::epoch::encode_epoch(w, version, epoch.as_ref())?;
 					hops.encode(w, version)?;
 					cost.encode(w, version)?;
+					super::encode_auth(w, version, *auth)?;
 				}
 				Self::EndedId { id } => w.varint(*id)?,
-				Self::Update { id, hops, cost } => {
+				Self::Update { id, hops, cost, auth } => {
 					w.varint(*id)?;
 					hops.encode(w, version)?;
 					cost.encode(w, version)?;
+					super::encode_auth(w, version, *auth)?;
 				}
-				Self::Restart { id, epoch, hops, cost } => {
+				Self::Restart {
+					id,
+					epoch,
+					hops,
+					cost,
+					auth,
+				} => {
 					w.varint(*id)?;
 					super::epoch::encode_epoch(w, version, epoch.as_ref())?;
 					hops.encode(w, version)?;
 					cost.encode(w, version)?;
+					super::encode_auth(w, version, *auth)?;
 				}
 				Self::Ended { .. } | Self::Skipped => unreachable!("refused above"),
 			}
@@ -296,9 +329,9 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 		let prefix = w.prefix_varint();
 		match self {
 			// The cost is a lite-06 addition, so it is simply not on the wire here.
-			Self::Active { suffix, hops, .. } => {
-				// Bases are a lite-07 addition; PathRef and HopsRef refuse one here.
-				if suffix.base != 0 || hops.base != 0 {
+			Self::Active { suffix, hops, auth, .. } => {
+				// Bases and auths are lite-07 additions; PathRef and HopsRef refuse a base here.
+				if suffix.base != 0 || hops.base != 0 || auth.is_some() {
 					return Err(EncodeError::Version);
 				}
 				AnnounceStatus::Active.encode(w, version)?;
@@ -336,18 +369,21 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 					epoch: super::epoch::decode_epoch(&mut body, version)?,
 					hops: HopsRef::decode(&mut body, version)?,
 					cost: Cost::decode(&mut body, version)?,
+					auth: super::decode_auth(&mut body, version)?,
 				},
 				ANNOUNCE_END => Self::EndedId { id: body.varint()? },
 				ANNOUNCE_UPDATE => Self::Update {
 					id: body.varint()?,
 					hops: HopsRef::decode(&mut body, version)?,
 					cost: Cost::decode(&mut body, version)?,
+					auth: super::decode_auth(&mut body, version)?,
 				},
 				ANNOUNCE_RESTART if version.has_announce_restart() => Self::Restart {
 					id: body.varint()?,
 					epoch: super::epoch::decode_epoch(&mut body, version)?,
 					hops: HopsRef::decode(&mut body, version)?,
 					cost: Cost::decode(&mut body, version)?,
+					auth: super::decode_auth(&mut body, version)?,
 				},
 				// Unknown types are skipped by length so an earlier Lite06 build
 				// negotiating the same ALPN does not kill the announce stream.
@@ -400,6 +436,7 @@ impl AnnounceBroadcast<'_> {
 				epoch: None,
 				hops: HopsRef::literal(hops),
 				cost: Cost::UNKNOWN,
+				auth: None,
 			},
 			AnnounceStatus::Ended => Self::Ended { suffix, hops },
 			// On lite-05 an update travels as a duplicate ANNOUNCE (a second `Active`), so accept
@@ -412,6 +449,7 @@ impl AnnounceBroadcast<'_> {
 				epoch: None,
 				hops: HopsRef::literal(hops),
 				cost: Cost::UNKNOWN,
+				auth: None,
 			},
 			AnnounceStatus::Update => return Err(DecodeError::InvalidValue),
 		})
@@ -444,6 +482,8 @@ pub struct AnnounceRequest<'a> {
 	// Not on the wire earlier, so the value set here is ignored when encoding for an
 	// older version and decodes as false.
 	pub hidden: bool,
+	/// See [`Subscribe::auth`](super::Subscribe::auth).
+	pub auth: Option<u64>,
 }
 
 impl Message for AnnounceRequest<'_> {
@@ -457,10 +497,12 @@ impl Message for AnnounceRequest<'_> {
 			true => r.bool()?,
 			false => false,
 		};
+		let auth = super::decode_auth(r, version)?;
 		Ok(Self {
 			prefix,
 			exclude_hop,
 			hidden,
+			auth,
 		})
 	}
 
@@ -472,6 +514,7 @@ impl Message for AnnounceRequest<'_> {
 		if version.has_hidden() {
 			w.bool(self.hidden);
 		}
+		super::encode_auth(w, version, self.auth)?;
 
 		Ok(())
 	}
@@ -602,6 +645,7 @@ mod tests {
 			suffix: PathRef::literal(Path::new("foo/bar")),
 			hops: HopsRef::default(),
 			cost: Cost::default(),
+			auth: None,
 		}
 		.encode(&mut Encoder::new(&mut buf, version.into()), version)
 		.expect("encode");
@@ -693,6 +737,7 @@ mod tests {
 			suffix: PathRef::literal(Path::new("room/cam")),
 			hops: HopsRef::literal(hops.clone()),
 			cost: Cost::UNKNOWN,
+			auth: None,
 		};
 		assert_eq!(broadcast_round_trip(&msg, Version::Lite05), msg);
 
@@ -716,6 +761,7 @@ mod tests {
 			suffix: PathRef::literal(Path::new("room/cam")),
 			hops: HopsRef::literal(hops.clone()),
 			cost,
+			auth: None,
 		};
 		assert_eq!(broadcast_round_trip(&active, Version::Lite06), active);
 
@@ -726,6 +772,7 @@ mod tests {
 			id: 3,
 			hops: HopsRef::literal(hops),
 			cost,
+			auth: None,
 		};
 		assert_eq!(broadcast_round_trip(&update, Version::Lite06), update);
 	}
@@ -750,6 +797,7 @@ mod tests {
 				keep: 2,
 			},
 			cost,
+			auth: None,
 		};
 		assert_eq!(broadcast_round_trip(&active, Version::Lite07), active);
 
@@ -761,6 +809,7 @@ mod tests {
 				keep: 1,
 			},
 			cost,
+			auth: None,
 		};
 		assert_eq!(broadcast_round_trip(&update, Version::Lite07), update);
 
@@ -774,6 +823,7 @@ mod tests {
 					keep: 1,
 				},
 				cost,
+				auth: None,
 			};
 			assert_eq!(broadcast_round_trip(&restart, Version::Lite07), restart);
 		}
@@ -788,6 +838,7 @@ mod tests {
 			epoch: None,
 			hops: HopsRef::default(),
 			cost: Cost::default(),
+			auth: None,
 		};
 		let mut buf = Vec::new();
 		assert!(matches!(
@@ -838,6 +889,7 @@ mod tests {
 			},
 			hops: HopsRef::default(),
 			cost: Cost::default(),
+			auth: None,
 		};
 		for version in [Version::Lite05, Version::Lite06] {
 			let mut buf = Vec::new();
@@ -861,7 +913,8 @@ mod tests {
 			AnnounceBroadcast::Update {
 				id: 1,
 				hops: HopsRef::default(),
-				cost: Cost::default()
+				cost: Cost::default(),
+				auth: None,
 			}
 			.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05),
 			Err(EncodeError::Version)
@@ -887,6 +940,7 @@ mod tests {
 			suffix: PathRef::literal(Path::new("room/cam")),
 			hops: HopsRef::default(),
 			cost: Cost::new(9),
+			auth: None,
 		};
 		let got = broadcast_round_trip(&msg, Version::Lite05);
 		assert_eq!(
@@ -896,6 +950,7 @@ mod tests {
 				suffix: PathRef::literal(Path::new("room/cam")),
 				hops: HopsRef::default(),
 				cost: Cost::UNKNOWN,
+				auth: None,
 			}
 		);
 	}
@@ -961,7 +1016,66 @@ mod tests {
 			prefix: got.prefix.to_owned(),
 			exclude_hop: got.exclude_hop,
 			hidden: got.hidden,
+			auth: got.auth,
 		}
+	}
+
+	// Lite07 names the requester's auth; every earlier version names none and has no field.
+	#[test]
+	fn announce_request_carries_auth_from_lite07() {
+		for auth in [None, Some(0), Some(7)] {
+			let msg = AnnounceRequest {
+				prefix: Path::new("room"),
+				exclude_hop: 0,
+				hidden: false,
+				auth,
+			};
+			assert_eq!(request_round_trip(&msg, Version::Lite07).auth, auth);
+		}
+	}
+
+	// Every message that advertises a route names the auth that admits it.
+	#[test]
+	fn announcements_carry_auth_on_lite07() {
+		for auth in [None, Some(0), Some(3)] {
+			let active = AnnounceBroadcast::Active {
+				epoch: None,
+				suffix: PathRef::literal(Path::new("room/cam")),
+				hops: HopsRef::default(),
+				cost: Cost::default(),
+				auth,
+			};
+			assert_eq!(broadcast_round_trip(&active, Version::Lite07), active);
+			let update = AnnounceBroadcast::Update {
+				id: 0,
+				hops: HopsRef::default(),
+				cost: Cost::default(),
+				auth,
+			};
+			assert_eq!(broadcast_round_trip(&update, Version::Lite07), update);
+			let restart = AnnounceBroadcast::Restart {
+				id: 0,
+				epoch: None,
+				hops: HopsRef::default(),
+				cost: Cost::default(),
+				auth,
+			};
+			assert_eq!(broadcast_round_trip(&restart, Version::Lite07), restart);
+		}
+
+		// lite-06 has no field, so a named route cannot be sent there.
+		let named = AnnounceBroadcast::Active {
+			epoch: None,
+			suffix: PathRef::literal(Path::new("room/cam")),
+			hops: HopsRef::default(),
+			cost: Cost::default(),
+			auth: Some(0),
+		};
+		let mut buf = Vec::new();
+		assert!(matches!(
+			named.encode(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06),
+			Err(EncodeError::Version)
+		));
 	}
 
 	// Lite07 carries the hidden opt-in; every earlier version decodes as not opted in.
@@ -972,6 +1086,7 @@ mod tests {
 				prefix: Path::new("room/"),
 				exclude_hop: 0,
 				hidden,
+				auth: None,
 			};
 			assert_eq!(request_round_trip(&msg, Version::Lite07).hidden, hidden);
 			assert!(!request_round_trip(&msg, Version::Lite06).hidden);
@@ -1002,6 +1117,7 @@ mod tests {
 			prefix: Path::new("room/"),
 			exclude_hop: 42,
 			hidden: false,
+			auth: None,
 		};
 		assert_eq!(request_round_trip(&msg, Version::Lite05).exclude_hop, 42);
 	}
@@ -1014,6 +1130,7 @@ mod tests {
 			prefix: Path::new("room/"),
 			exclude_hop: 42,
 			hidden: false,
+			auth: None,
 		};
 		assert_eq!(request_round_trip(&msg, Version::Lite06).exclude_hop, 0);
 

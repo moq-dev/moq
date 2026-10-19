@@ -492,7 +492,7 @@ impl<S: crate::transport::poll::Session> Present<S> {
 			let _ = self.handle.acceptor();
 			self.started = true;
 		}
-		while let Poll::Ready(Some((id, token))) = self.handle.poll_opening(waiter) {
+		while let Poll::Ready(Some((id, wire, token))) = self.handle.poll_opening(waiter) {
 			self.tokens.push(PresentToken {
 				runtime: self.runtime.clone(),
 				session: self.session.clone(),
@@ -501,7 +501,7 @@ impl<S: crate::transport::poll::Session> Present<S> {
 				going_away: self.going_away.clone(),
 				violation: self.violation.clone(),
 				id,
-				state: PresentState::Open { token },
+				state: PresentState::Open { wire, token },
 			});
 		}
 		let _ = self.tokens.poll(waiter);
@@ -527,8 +527,18 @@ struct PresentToken<S: crate::transport::poll::Session> {
 }
 
 enum PresentState<S: crate::transport::poll::Session> {
-	Open { token: bytes::Bytes },
-	Run { stream: Stream<S, Version>, answered: bool },
+	Open {
+		/// The ID the AUTH carries, which our requests name the token by.
+		wire: u64,
+		token: bytes::Bytes,
+	},
+	Run {
+		stream: Stream<S, Version>,
+		answered: bool,
+		/// Withdrawn: our side is finished, and the peer ends the token once none of our
+		/// requests names it any more.
+		withdrawn: bool,
+	},
 	Done,
 }
 
@@ -537,11 +547,20 @@ impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let err = ready!(self.poll_present(waiter));
-		let answered = matches!(self.state, PresentState::Run { answered: true, .. });
-		if let PresentState::Run { stream, .. } = std::mem::replace(&mut self.state, PresentState::Done) {
+		let (answered, withdrawn) = match &self.state {
+			PresentState::Run {
+				answered, withdrawn, ..
+			} => (*answered, *withdrawn),
+			_ => (false, false),
+		};
+		if let PresentState::Run { stream, withdrawn, .. } = std::mem::replace(&mut self.state, PresentState::Done)
+			&& !withdrawn
+		{
 			stream.writer.abort(&Error::Cancel);
 		}
 		let err = match err {
+			// However the peer ends a token we withdrew, we are the reason it ended.
+			Error::Cancel | Error::Unsupported | Error::Stream(_) if withdrawn => Error::Cancel,
 			// A peer that predates AUTH resets a stream type it does not know, and one
 			// that takes no tokens in band refuses the same way: either way, before any
 			// reply, this token earns nothing here.
@@ -570,12 +589,15 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 		let mut cx = Context::from_waker(waiter.waker());
 		loop {
 			match &mut self.state {
-				PresentState::Open { token } => {
+				PresentState::Open { wire, token } => {
 					// After a GOAWAY the peer must not see new streams.
 					if self.going_away.is_set() {
 						return Poll::Ready(Error::GoingAway);
 					}
-					let token = token.clone();
+					let msg = super::Auth {
+						id: *wire,
+						token: token.clone(),
+					};
 					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
@@ -583,22 +605,32 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 					let res = stream
 						.writer
 						.buffer(&super::ControlType::Auth)
-						.and_then(|()| stream.writer.buffer(&super::Auth { token }));
+						.and_then(|()| stream.writer.buffer(&msg));
 					if let Err(err) = res {
 						return Poll::Ready(err);
 					}
 					self.state = PresentState::Run {
 						stream,
 						answered: false,
+						withdrawn: false,
 					};
 				}
-				PresentState::Run { stream, answered } => {
+				PresentState::Run {
+					stream,
+					answered,
+					withdrawn,
+				} => {
 					if let Err(err) = ready!(stream.writer.poll_flush(&mut cx)) {
 						return Poll::Ready(err);
 					}
-					// Withdrawn: closing the stream is what tells the peer.
-					if self.handle.poll_withdrawn(self.id, waiter).is_ready() {
-						return Poll::Ready(Error::Cancel);
+					// Withdrawn: finishing our side tells the peer, which keeps the token for
+					// whatever still names it (a route mid-rename) and then closes its own.
+					if !*withdrawn && self.handle.poll_withdrawn(self.id, waiter).is_ready() {
+						if let Err(err) = stream.writer.finish() {
+							return Poll::Ready(err);
+						}
+						*withdrawn = true;
+						continue;
 					}
 					let reply = match ready!(stream.reader.poll_decode_maybe::<super::AuthReply>(&mut cx)) {
 						Ok(Some(reply)) => reply,

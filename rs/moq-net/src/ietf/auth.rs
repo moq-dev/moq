@@ -254,7 +254,8 @@ where
 
 	let mut tasks = crate::util::TaskSet::owned();
 	let violation: kio::Shared<Option<Error>> = Default::default();
-	while let Some((id, token)) = tasks
+	// moq-transport numbers each token by its Request ID instead.
+	while let Some((id, _, token)) = tasks
 		.drive(|waiter| {
 			if let Poll::Ready(mut err) = violation.poll(waiter, |err| match err.is_some() {
 				true => Poll::Ready(()),

@@ -246,12 +246,14 @@ impl AnnounceWriter {
 					suffix,
 					hops,
 					cost: Default::default(),
+					auth: None,
 				}
 			}
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
 				hops: self.encoder.update(*id, hops.clone()),
 				cost: Default::default(),
+				auth: None,
 			},
 			Announced::End(id) => {
 				self.encoder.end(*id);
@@ -424,6 +426,7 @@ impl LiteSample {
 				end_group: None,
 				start_frame: 0,
 				end_frame: None,
+				auth: None,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -609,6 +612,7 @@ impl Default for Messages {
 				end_group: None,
 				start_frame: 0,
 				end_frame: None,
+				auth: None,
 			},
 			lite_update: lite::SubscribeUpdate {
 				order: crate::track::Order::Descending,
@@ -618,6 +622,7 @@ impl Default for Messages {
 				end_group: Some(2_000),
 				start_frame: 0,
 				end_frame: None,
+				auth: None,
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				group: 1_234,

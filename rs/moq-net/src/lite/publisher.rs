@@ -410,6 +410,10 @@ struct AuthServe<S: crate::transport::poll::Session> {
 	/// The default acceptor's grant for the connection's credential, re-sent as a
 	/// new limit changes it. `None` when the app answers.
 	default: Option<crate::auth::DefaultGrant>,
+	/// The ID the peer's AUTH carried, which its requests name the token by.
+	id: Option<u64>,
+	/// The presenter finished its side: the token ends once none of its requests names it.
+	withdrawn: bool,
 	/// Our side is finished: FIN sent, waiting for the acknowledgement.
 	finished: bool,
 	unsupported: bool,
@@ -426,6 +430,8 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			stream: Some(stream),
 			serving: None,
 			default: None,
+			id: None,
+			withdrawn: false,
 			finished: false,
 			unsupported: false,
 		})
@@ -457,6 +463,9 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 		if let Some(serving) = &self.serving {
 			serving.end(err.clone());
 		}
+		if let Some(id) = self.id {
+			self.shared.auth.peer_ended(id);
+		}
 		if matches!(err, Error::ProtocolViolation) {
 			self.shared.auth.close(err.clone());
 			return Poll::Ready(Err(err));
@@ -472,6 +481,9 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			Some(serving) => serving.issue.clone(),
 			None => {
 				let msg = ready!(stream.reader.poll_decode::<lite::Auth>(&mut cx))?;
+				// A reused ID would make the peer's requests ambiguous.
+				self.shared.auth.peer_arrived(msg.id)?;
+				self.id = Some(msg.id);
 				let serving = crate::auth::Serving::new(self.shared.auth.clone());
 				let issue = serving.issue.clone();
 				match self.shared.auth.acceptor() {
@@ -509,20 +521,42 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 
 			// The presenter withdrew the token, by FIN or by a cancelling reset, or its
 			// stream died.
-			if let Poll::Ready(res) = stream.reader.poll_read_chunk(&mut cx, 1).map(|res| {
-				res.and_then(|chunk| match chunk {
-					None => Ok(()),
-					Some(_) => Err(Error::ProtocolViolation),
-				})
-			}) {
+			if !self.withdrawn
+				&& let Poll::Ready(res) = stream.reader.poll_read_chunk(&mut cx, 1).map(|res| {
+					res.and_then(|chunk| match chunk {
+						None => Ok(()),
+						Some(_) => Err(Error::ProtocolViolation),
+					})
+				}) {
 				match res {
-					Ok(()) | Err(Error::Stream(crate::StreamError::Cancel)) => {}
+					// A FIN withdraws it gracefully: it leaves the scope and no request may newly
+					// name it, but what names it now keeps it until it moves off or ends, so a
+					// rename racing the withdrawal across streams still lands.
+					Ok(()) => {
+						self.withdrawn = true;
+						self.serving.as_ref().expect("serving").withdraw();
+						if let Some(id) = self.id {
+							self.shared.auth.peer_withdrawn(id);
+						}
+						continue;
+					}
+					Err(Error::Stream(crate::StreamError::Cancel)) => {}
 					Err(err) => return Poll::Ready(Err(err)),
 				}
 				// That is why the token ended, whether or not our own FIN reaches a
 				// presenter that left.
 				issue.lock().peer.get_or_insert(Error::Cancel);
-				stream.writer.finish()?;
+				Self::finish(&self.shared, self.id, stream)?;
+				self.finished = true;
+				continue;
+			}
+
+			if self.withdrawn
+				&& let Some(id) = self.id
+				&& self.shared.auth.poll_peer_unnamed(id, waiter).is_ready()
+			{
+				issue.lock().peer.get_or_insert(Error::Cancel);
+				Self::finish(&self.shared, self.id, stream)?;
 				self.finished = true;
 				continue;
 			}
@@ -543,7 +577,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			match state.outbox.pop_front() {
 				Some(reply) => {
 					drop(state);
-					if !Self::write(&self.shared, stream, reply)? {
+					if !Self::write(&self.shared, self.id, stream, reply)? {
 						self.unsupported = true;
 						let mut state = issue.lock();
 						state.outbox.clear();
@@ -553,14 +587,32 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 				// The app is done with the grant, or refused the token: close our side.
 				None => {
 					drop(state);
-					stream.writer.finish()?;
+					Self::finish(&self.shared, self.id, stream)?;
 					self.finished = true;
 				}
 			}
 		}
 	}
 
-	fn write(shared: &Shared<S>, stream: &mut Stream<S, Version>, reply: crate::auth::Reply) -> Result<bool, Error> {
+	/// Close our side, which ends the token for every request naming it.
+	fn finish(shared: &Shared<S>, id: Option<u64>, stream: &mut Stream<S, Version>) -> Result<(), Error> {
+		if let Some(id) = id {
+			shared.auth.peer_ended(id);
+		}
+		stream.writer.finish()
+	}
+
+	fn write(
+		shared: &Shared<S>,
+		id: Option<u64>,
+		stream: &mut Stream<S, Version>,
+		reply: crate::auth::Reply,
+	) -> Result<bool, Error> {
+		// The latest grant sent decides every request that names the token.
+		let named = match (id, &reply) {
+			(Some(id), crate::auth::Reply::Grant(grant)) => Some((id, grant.clone())),
+			_ => None,
+		};
 		let msg = match reply {
 			crate::auth::Reply::Grant(grant) => {
 				let now = shared.runtime.now();
@@ -583,6 +635,9 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 				reason: Error::Unsupported.to_string(),
 			}))?;
 			return Ok(false);
+		}
+		if let Some((id, grant)) = named {
+			shared.auth.peer_granted(id, &grant);
 		}
 		Ok(true)
 	}
@@ -838,7 +893,11 @@ enum AnnounceState {
 	Decode,
 	/// Waiting on the peer's SETUP for the session-wide excluded origin
 	/// (lite-05, whose wire carries no per-stream exclude_hop).
-	ExcludeHop { prefix: crate::PathOwned, hidden: bool },
+	ExcludeHop {
+		prefix: crate::PathOwned,
+		hidden: bool,
+		auth: Option<u64>,
+	},
 	/// Streaming announce updates.
 	Run {
 		origin: origin::Consumer,
@@ -866,6 +925,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 					let interest = ready!(stream.reader.poll_decode::<lite::AnnounceRequest>(&mut cx))?;
 					let prefix = interest.prefix.to_owned();
 					let hidden = interest.hidden;
+					let auth = interest.auth;
 
 					// The identity whose routes we filter out. Lite-04/05 carry it per
 					// announce stream; lite-06+ reads the session-wide SETUP Hop
@@ -877,20 +937,20 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 							0 => assigned,
 							id => id,
 						};
-						self.start(prefix, exclude_hop, hidden);
+						self.start(prefix, exclude_hop, hidden, auth);
 					} else if self.shared.version.has_setup_stream() {
-						self.state = AnnounceState::ExcludeHop { prefix, hidden };
+						self.state = AnnounceState::ExcludeHop { prefix, hidden, auth };
 					} else {
-						self.start(prefix, assigned, hidden);
+						self.start(prefix, assigned, hidden, auth);
 					}
 				}
-				AnnounceState::ExcludeHop { prefix, hidden } => {
+				AnnounceState::ExcludeHop { prefix, hidden, auth } => {
 					let assigned = self.shared.peer_hop.map(|origin| origin.id()).unwrap_or(0);
 					let exclude_hop = ready!(self.shared.peer_setup.poll_hop(waiter))
 						.map(|origin| origin.id())
 						.unwrap_or(assigned);
-					let (prefix, hidden) = (prefix.clone(), *hidden);
-					self.start(prefix, exclude_hop, hidden);
+					let (prefix, hidden, auth) = (prefix.clone(), *hidden, *auth);
+					self.start(prefix, exclude_hop, hidden, auth);
 				}
 				AnnounceState::Run { origin, announced, run } => {
 					let stream = self.stream.as_mut().expect("stream present");
@@ -919,7 +979,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		}
 	}
 
-	fn start(&mut self, prefix: crate::PathOwned, exclude_hop: u64, hidden: bool) {
+	fn start(&mut self, prefix: crate::PathOwned, exclude_hop: u64, hidden: bool, auth: Option<u64>) {
 		// If the requested prefix is outside our scope (an empty origin, or a token
 		// that doesn't grant it), we simply have nothing to announce. Respond with an
 		// empty set and keep the stream open (the subscriber treats a FIN here as a
@@ -954,6 +1014,8 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 			run.prefix.clone(),
 			crate::auth::Direction::Publish,
 		));
+		run.named = auth.map(|id| crate::auth::Naming::new(self.shared.auth.clone(), id));
+		run.presenter = Some(self.shared.auth.clone());
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
 }
@@ -978,7 +1040,13 @@ struct AnnounceRun {
 	// Our grant and the ceiling on the peer: only what both let us publish is
 	// announced, and a shrink withdraws what they no longer cover.
 	auth: Option<crate::auth::Gate>,
+	/// The peer's token the request names, which stands in for the scope.
+	named: Option<crate::auth::Naming>,
+	/// Our tokens, which give the ID a route's own token goes out under.
+	presenter: Option<crate::auth::Handle>,
 	epoch: u64,
+	// What the session allows, before the named token narrows it.
+	session: crate::auth::Permit,
 	// What we may announce right now.
 	permit: crate::auth::Permit,
 }
@@ -987,10 +1055,18 @@ struct AnnounceRun {
 struct Advertised {
 	/// The announce id, on versions that assign them.
 	id: Option<u64>,
-	/// The chain and cost last put on the wire. The origin also reports changes the
-	/// wire cannot carry (the route's source, servability), which must not restart.
+	/// What was last put on the wire. The origin also reports changes the wire cannot
+	/// carry (the route's source, servability), which must not restart.
+	wire: Outgoing,
+}
+
+/// The parts of a route the wire carries.
+#[derive(Clone, PartialEq)]
+struct Outgoing {
 	hops: Hops,
 	cost: crate::origin::Cost,
+	/// The ID of our token the route names (lite-07+), or `None` for the session's scope.
+	auth: Option<u64>,
 }
 
 enum AnnouncePhase {
@@ -1012,8 +1088,24 @@ impl AnnounceRun {
 			live: HashMap::new(),
 			phase: AnnouncePhase::Init,
 			auth: None,
+			named: None,
+			presenter: None,
 			epoch: 0,
+			session: Default::default(),
 			permit: Default::default(),
+		}
+	}
+
+	/// What we may announce under the session's `permit`, narrowed to the token the request
+	/// names: `None` while that token is in flight or unanswered.
+	fn narrow(&mut self, permit: crate::auth::Permit) -> Result<Option<crate::auth::Permit>, Error> {
+		let Some(named) = &mut self.named else {
+			return Ok(Some(permit));
+		};
+		match named.limit(crate::auth::Direction::Publish) {
+			crate::auth::Limit::Waiting => Ok(None),
+			crate::auth::Limit::Patterns(patterns) => Ok(Some(permit.limited(patterns))),
+			crate::auth::Limit::Ended => Err(Error::Unauthorized),
 		}
 	}
 
@@ -1070,39 +1162,38 @@ impl AnnounceRun {
 				continue;
 			}
 			let absolute = origin.absolute(&suffix);
-			if let Some((hops, cost)) = self.outgoing(&route, &absolute) {
-				self.advertise(stream, suffix, hops, cost, route.epoch, &absolute)?;
+			if let Some(wire) = self.outgoing(&route, &absolute) {
+				self.advertise(stream, suffix, wire, route.epoch, &absolute)?;
 			}
 		}
 		Ok(())
 	}
 
-	/// Put `suffix` on the wire with this chain and cost: start it, restart it in place
-	/// when its metadata changed, or leave it alone when the peer already holds it.
+	/// Put `suffix` on the wire: start it, restart it in place when its metadata
+	/// changed, or leave it alone when the peer already holds it.
 	fn advertise<S: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		suffix: crate::PathOwned,
-		hops: Hops,
-		cost: crate::origin::Cost,
+		wire: Outgoing,
 		epoch: Option<crate::Epoch>,
 		absolute: &crate::Path,
 	) -> Result<(), Error> {
 		match self.live.get_mut(&suffix) {
 			// The peer would decode what it already holds.
-			Some(advertised) if advertised.hops == hops && advertised.cost == cost => {}
+			Some(advertised) if advertised.wire == wire => {}
 			// A metadata update on a live advertisement: restart it in
 			// place (lite-05 restarts via a duplicate ANNOUNCE).
 			Some(advertised) if lite::update_supported(self.version) => {
 				tracing::debug!(route = %absolute, "reannounce");
-				advertised.hops = hops.clone();
-				advertised.cost = cost;
+				advertised.wire = wire.clone();
+				let Outgoing { hops, cost, auth } = wire;
 				match advertised.id {
 					Some(id) => {
 						let hops = self.encoder.update(id, hops);
 						stream
 							.writer
-							.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost })?
+							.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost, auth })?
 					}
 					// lite-05: a duplicate ANNOUNCE, which assigns no id.
 					None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
@@ -1110,6 +1201,7 @@ impl AnnounceRun {
 						suffix: lite::PathRef::literal(suffix),
 						hops: lite::HopsRef::literal(hops),
 						cost,
+						auth,
 					})?,
 				}
 			}
@@ -1118,15 +1210,14 @@ impl AnnounceRun {
 			Some(_) => {}
 			None => {
 				tracing::debug!(route = %absolute, "announce");
-				self.start(stream, suffix, hops, cost, epoch)?;
+				self.start(stream, suffix, wire, epoch)?;
 			}
 		}
 		Ok(())
 	}
 
-	/// The chain and cost to put on the wire for `route`, or `None` when it must
-	/// not be forwarded.
-	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Path) -> Option<(Hops, crate::origin::Cost)> {
+	/// What to put on the wire for `route`, or `None` when it must not be forwarded.
+	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Path) -> Option<Outgoing> {
 		let mut hops = route.hops.clone();
 
 		// A route that already passed through us is a reflection. The origin
@@ -1150,7 +1241,12 @@ impl AnnounceRun {
 			true => route.cost,
 			false => crate::origin::Cost::UNKNOWN,
 		};
-		Some((hops, cost))
+		// A token of ours that ended leaves the route under the session's scope.
+		let auth = match (&self.presenter, &route.auth) {
+			(Some(presenter), Some(auth)) if self.version.has_auth() => presenter.wire(auth),
+			_ => None,
+		};
+		Some(Outgoing { hops, cost, auth })
 	}
 
 	/// Start advertising `suffix`, recording its announce id.
@@ -1158,18 +1254,19 @@ impl AnnounceRun {
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		suffix: crate::PathOwned,
-		hops: Hops,
-		cost: crate::origin::Cost,
+		wire: Outgoing,
 		// Fixed while the peer holds the advertisement: a new one is a restart.
 		epoch: Option<crate::Epoch>,
 	) -> Result<(), Error> {
-		let (id, wire, chain) = self.encoder.start(suffix.clone(), hops.clone());
-		self.live.insert(suffix, Advertised { id, hops, cost });
+		let (id, path, chain) = self.encoder.start(suffix.clone(), wire.hops.clone());
+		let (cost, auth) = (wire.cost, wire.auth);
+		self.live.insert(suffix, Advertised { id, wire });
 		stream.writer.buffer(&lite::AnnounceBroadcast::Active {
 			epoch,
-			suffix: wire,
+			suffix: path,
 			hops: chain,
 			cost,
+			auth,
 		})?;
 		Ok(())
 	}
@@ -1180,8 +1277,7 @@ impl AnnounceRun {
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		suffix: crate::PathOwned,
-		hops: Hops,
-		cost: crate::origin::Cost,
+		wire: Outgoing,
 		epoch: Option<crate::Epoch>,
 		absolute: &crate::Path,
 	) -> Result<(), Error> {
@@ -1193,18 +1289,22 @@ impl AnnounceRun {
 					suffix,
 					Advertised {
 						id: Some(id),
-						hops: hops.clone(),
-						cost,
+						wire: wire.clone(),
 					},
 				);
+				let Outgoing { hops, cost, auth } = wire;
 				let hops = self.encoder.update(id, hops);
-				stream
-					.writer
-					.buffer(&lite::AnnounceBroadcast::Restart { id, epoch, hops, cost })?;
+				stream.writer.buffer(&lite::AnnounceBroadcast::Restart {
+					id,
+					epoch,
+					hops,
+					cost,
+					auth,
+				})?;
 			}
 			_ => {
 				self.retract(stream, suffix.clone(), absolute)?;
-				self.start(stream, suffix, hops, cost, epoch)?;
+				self.start(stream, suffix, wire, epoch)?;
 			}
 		}
 		Ok(())
@@ -1254,9 +1354,9 @@ impl AnnounceRun {
 					return None;
 				}
 				let absolute = origin.absolute(&suffix);
-				let (hops, cost) = self.outgoing(&update.route, &absolute)?;
+				let wire = self.outgoing(&update.route, &absolute)?;
 				tracing::debug!(route = %absolute, "announce");
-				Some((suffix, hops, cost, update.route.epoch))
+				Some((suffix, wire, update.route.epoch))
 			})
 			.collect();
 		match self.version {
@@ -1264,8 +1364,8 @@ impl AnnounceRun {
 				let suffixes = initial.iter().map(|(suffix, ..)| suffix.clone()).collect();
 				stream.writer.buffer(&lite::AnnounceInit { suffixes })?;
 				// The peer holds these now, so a later retraction or narrower grant ends them.
-				for (suffix, hops, cost, _) in initial {
-					self.live.insert(suffix, Advertised { id: None, hops, cost });
+				for (suffix, wire, _) in initial {
+					self.live.insert(suffix, Advertised { id: None, wire });
 				}
 			}
 			_ => {
@@ -1273,8 +1373,8 @@ impl AnnounceRun {
 					origin: self.self_origin,
 					active: initial.len() as u64,
 				})?;
-				for (suffix, hops, cost, epoch) in initial {
-					self.start(stream, suffix, hops, cost, epoch)?;
+				for (suffix, wire, epoch) in initial {
+					self.start(stream, suffix, wire, epoch)?;
 				}
 			}
 		}
@@ -1317,10 +1417,15 @@ impl AnnounceRun {
 			// advertises something it would withdraw, or abort over, a moment later.
 			if let Some(auth) = &self.auth {
 				ready!(auth.poll_setup_answered(waiter));
-				if let Poll::Ready(permit) = auth.poll_permit(&mut self.epoch, waiter) {
-					self.permit = permit;
+				while let Poll::Ready(permit) = auth.poll_permit(&mut self.epoch, waiter) {
+					self.session = permit;
 				}
 			}
+			// A request naming a token still in flight waits for it before announcing anything.
+			let Some(permit) = self.narrow(self.session.clone())? else {
+				return Poll::Pending;
+			};
+			self.permit = permit;
 			self.init(stream, origin, announced)?;
 			self.phase = AnnouncePhase::Running;
 		}
@@ -1342,9 +1447,16 @@ impl AnnounceRun {
 			// covers is withdrawn rather than re-sent.
 			if let Some(auth) = &self.auth
 				&& let Poll::Ready(permit) = auth.poll_permit(&mut self.epoch, waiter)
-				&& self.permit != permit
 			{
-				self.regrant(stream, origin, permit)?;
+				self.session = permit;
+				// Once answered a token never goes back to waiting; were it to, announce nothing.
+				let permit = match self.narrow(self.session.clone())? {
+					Some(permit) => permit,
+					None => self.session.clone().limited(Default::default()),
+				};
+				if self.permit != permit {
+					self.regrant(stream, origin, permit)?;
+				}
 				continue;
 			}
 
@@ -1377,12 +1489,10 @@ impl AnnounceRun {
 			}
 
 			match self.outgoing(&update.route, &absolute) {
-				Some((hops, cost)) if restart && self.live.contains_key(&suffix) => {
-					self.restart(stream, suffix, hops, cost, update.route.epoch, &absolute)?;
+				Some(wire) if restart && self.live.contains_key(&suffix) => {
+					self.restart(stream, suffix, wire, update.route.epoch, &absolute)?;
 				}
-				Some((hops, cost)) => {
-					self.advertise(stream, suffix, hops, cost, update.route.epoch.clone(), &absolute)?
-				}
+				Some(wire) => self.advertise(stream, suffix, wire, update.route.epoch.clone(), &absolute)?,
 				// The chain must not be forwarded (reflected, or full): retract
 				// whatever the peer holds.
 				None => self.retract(stream, suffix, &absolute)?,
@@ -1428,6 +1538,16 @@ trait Request<S: crate::transport::poll::Session>: Sized {
 
 	/// The publisher instance the request names, if any.
 	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch>;
+
+	/// The ID of the requester's AUTH that admits the request, or `None` for the scope.
+	fn auth(_msg: &Self::Message) -> Option<u64> {
+		None
+	}
+
+	/// The auth an update moves the request to, if it can carry one.
+	fn rename(_update: &Self::Update) -> Option<Option<u64>> {
+		None
+	}
 
 	/// Start answering, once the broadcast resolves.
 	fn start(shared: &Shared<S>, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error>;
@@ -1560,13 +1680,14 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 	}
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if let Some(gate) = &mut self.gate
-			&& gate.poll_denied(waiter).is_ready()
-		{
-			return Poll::Ready(Err(Error::Unauthorized));
-		}
 		let mut cx = waiter.context();
 		loop {
+			// Checked every pass: an update read below may have renamed the request's auth.
+			if let Some(gate) = &mut self.gate
+				&& gate.poll_denied(waiter).is_ready()
+			{
+				return Poll::Ready(Err(Error::Unauthorized));
+			}
 			ready!(self.budget.poll_yield(waiter));
 			// Once answered, the requester's FIN is the normal end, not a cancel.
 			if matches!(self.state, RequestState::Resolve { .. } | RequestState::Serve(_))
@@ -1617,6 +1738,9 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 					// Checked before anything is resolved, so a broadcast the session does not
 					// allow is never served, not just cut off later.
 					let mut gate = self.shared.gate(R::target(&msg).0);
+					if self.shared.version.has_auth() {
+						gate = gate.naming(R::auth(&msg));
+					}
 					let denied = gate.poll_denied(waiter).is_ready();
 					self.gate = Some(gate);
 					self.state = RequestState::Resolve { msg, requesting: None };
@@ -1626,6 +1750,12 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 				}
 				RequestState::Resolve { msg, requesting } => {
 					if requesting.is_none() {
+						// A request naming an auth that is still in flight, or unanswered, waits
+						// for it while holding its slot.
+						let gate = self.gate.as_mut().expect("gated at decode");
+						if !ready!(gate.poll_admitted(waiter)) {
+							return Poll::Ready(Err(Error::Unauthorized));
+						}
 						// The peer requested this exact path, so it has already seen an
 						// announcement for it. `request_broadcast` resolves it immediately, is
 						// served on demand by the route covering it (an `origin::Dynamic`), or
@@ -1727,6 +1857,13 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 					return Poll::Ready(Err(err));
 				}
 			};
+			if let Some(auth) = R::rename(&update)
+				&& let Some(gate) = &mut self.gate
+			{
+				gate.rename(auth);
+				// Re-poll so the gate judges the rename even if nothing else wakes us.
+				cx.waker().wake_by_ref();
+			}
 			match &mut self.state {
 				RequestState::Serve(request) => request.update(update),
 				_ => self.update = Some(update),
@@ -1930,6 +2067,14 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		msg.epoch.as_ref()
 	}
 
+	fn auth(msg: &Self::Message) -> Option<u64> {
+		msg.auth
+	}
+
+	fn rename(update: &Self::Update) -> Option<Option<u64>> {
+		Some(update.auth)
+	}
+
 	fn start(shared: &Shared<S>, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
 		let subscription = crate::track::Subscription {
 			priority: msg.priority,
@@ -2108,6 +2253,10 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 
 	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch> {
 		msg.epoch.as_ref()
+	}
+
+	fn auth(msg: &Self::Message) -> Option<u64> {
+		msg.auth
 	}
 
 	fn start(_: &Shared<S>, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
@@ -2714,7 +2863,7 @@ mod announce_test {
 		moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Update { id: 0, hops, cost }] => {
+			[lite::AnnounceBroadcast::Update { id: 0, hops, cost, .. }] => {
 				assert_eq!(hops, &lite::HopsRef::literal(pub_hops()));
 				assert_eq!(*cost, crate::origin::Cost::new(3));
 			}
@@ -4688,6 +4837,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		});
 		{
 			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -4762,6 +4912,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		});
 		let second = track
 			.append_datagram(Timestamp::from_millis(2).unwrap(), b"b".as_slice())
@@ -5021,6 +5172,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		});
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(drops(&mut writer, &log, version).await, [(2, 2)]);
@@ -5175,6 +5327,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		});
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -5217,6 +5370,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		});
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -5262,6 +5416,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		};
 		run.update(update(5));
 		{
@@ -5307,6 +5462,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		};
 		run.update(update(5));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -5354,6 +5510,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		});
 		write_group(&mut track, 5, 5);
 		assert_eq!(settle(&mut run), 1, "served a group below the latest");
@@ -5385,6 +5542,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		});
 
 		write_group(&mut track, 0, 0);
@@ -5521,6 +5679,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		});
 		relay.settle();
 		assert_eq!(relay.opened(), 1, "the finished group is the live edge");
@@ -5552,6 +5711,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		});
 		relay.settle();
 		assert_eq!(relay.opened(), 2, "group 0 was passed, not skipped");
@@ -5580,6 +5740,7 @@ mod serve_group_test {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		};
 		relay.run.update(update);
 		relay.settle();
@@ -6307,6 +6468,7 @@ mod tests {
 						end_group: None,
 						start_frame: 0,
 						end_frame: None,
+						auth: None,
 					};
 					leave_request::<SubscribeServe<ScriptedSession>>(version, &subscribe, wait, close).await;
 
@@ -6319,6 +6481,7 @@ mod tests {
 						group: 0,
 						start_frame: 0,
 						end_frame: None,
+						auth: None,
 					};
 					leave_request::<FetchServe>(version, &fetch, wait, close).await;
 				}
@@ -6457,6 +6620,7 @@ mod tests {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -6481,6 +6645,7 @@ mod tests {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		};
 		session.push(&update.encode_bytes(version).unwrap());
 		assert!(!drive(&mut serve).await, "an update ended the subscription");
@@ -6497,6 +6662,178 @@ mod tests {
 			panic!("the subscription is not running");
 		};
 		assert_eq!(run.steer_tx.read().priority, 7, "the update was lost");
+	}
+
+	/// Serve a lite-07 SUBSCRIBE to `room` naming the peer's token `auth`, under a session
+	/// whose scope grants the peer nothing, so only the named token can admit it.
+	async fn named_subscribe(
+		auth: &crate::auth::Handle,
+		named: Option<u64>,
+	) -> (
+		RequestServe<ScriptedSession, SubscribeServe<ScriptedSession>>,
+		ScriptedSession,
+		crate::broadcast::Dynamic,
+		crate::broadcast::Producer,
+	) {
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		let dynamic = broadcast.dynamic();
+		broadcast.announce(Default::default()).unwrap();
+		auth.authorize(&crate::auth::Grant::default());
+
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
+		peer_setup.set(crate::lite::Setup::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let version = Version::Lite07;
+		let publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::sim(),
+			session: ScriptedSession::new(Vec::new()),
+			origin: origin.consume(),
+			version,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			auth: auth.clone(),
+			peer_grant: Default::default(),
+			client: false,
+			subscriptions: Default::default(),
+			fetches: Default::default(),
+			estimate: kio::Producer::default().weak(),
+		});
+
+		let mut script = Vec::new();
+		lite::Subscribe {
+			order: crate::track::Order::Descending,
+			epoch: None,
+			id: 0,
+			broadcast: crate::Path::new("room"),
+			track: "video".into(),
+			priority: 1,
+			max_delay: Duration::ZERO,
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+			auth: named,
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+		.unwrap();
+		let mut session = ScriptedSession::new(script);
+		let (send, recv) = futures::future::poll_fn(|cx| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
+		})
+		.await
+		.unwrap();
+		let stream = Stream::<ScriptedSession, Version> {
+			writer: Writer::new(send, version),
+			reader: crate::coding::Reader::new(recv, version),
+		};
+		let serve = RequestServe::<_, SubscribeServe<ScriptedSession>>::new(publisher.shared.clone(), stream);
+		(serve, session, dynamic, broadcast)
+	}
+
+	/// A SUBSCRIBE naming a token still in flight waits for it, holding its slot, rather than
+	/// being judged by the session's scope; once that token admits it, the token ending ends
+	/// the subscription.
+	#[moq_clock::test]
+	async fn a_named_subscribe_waits_for_its_token_and_ends_with_it() {
+		let auth = crate::auth::Handle::new(true);
+		let (mut serve, session, mut dynamic, _broadcast) = named_subscribe(&auth, Some(0)).await;
+		assert!(!drive(&mut serve).await, "refused before its token arrived");
+		assert!(
+			dynamic.requested_track().now_or_never().is_none(),
+			"resolved before its token decided"
+		);
+
+		auth.peer_arrived(0).unwrap();
+		auth.peer_granted(0, &crate::auth::Grant {
+			subscribe: crate::Pattern::subtree("room").unwrap().into(),
+			..Default::default()
+		});
+		assert!(!drive(&mut serve).await);
+		let _track = dynamic
+			.requested_track()
+			.now_or_never()
+			.expect("track requested")
+			.unwrap()
+			.accept(crate::track::Info::timed());
+		assert!(!drive(&mut serve).await, "the subscription ended");
+		assert!(session.log.resets().is_empty());
+
+		auth.peer_ended(0);
+		assert!(drive(&mut serve).await, "outlived its token");
+		assert_eq!(session.log.resets(), vec![crate::StreamError::Unauthorized.to_code()]);
+	}
+
+	/// A named SUBSCRIBE is held to its own token's grant, not the union of the peer's tokens,
+	/// and a token that already ended admits nothing.
+	#[moq_clock::test]
+	async fn a_named_subscribe_is_held_to_its_own_token() {
+		let elsewhere = crate::auth::Grant {
+			subscribe: crate::Pattern::subtree("other").unwrap().into(),
+			..Default::default()
+		};
+		let auth = crate::auth::Handle::new(true);
+		auth.peer_arrived(0).unwrap();
+		auth.peer_granted(0, &elsewhere);
+		let (mut serve, session, _dynamic, _broadcast) = named_subscribe(&auth, Some(0)).await;
+		assert!(drive(&mut serve).await, "admitted outside its token");
+		assert_eq!(session.log.resets(), vec![crate::StreamError::Unauthorized.to_code()]);
+
+		let auth = crate::auth::Handle::new(true);
+		auth.peer_arrived(0).unwrap();
+		auth.peer_ended(0);
+		let (mut serve, session, _dynamic, _broadcast) = named_subscribe(&auth, Some(0)).await;
+		assert!(drive(&mut serve).await, "admitted by an ended token");
+		assert_eq!(session.log.resets(), vec![crate::StreamError::Unauthorized.to_code()]);
+	}
+
+	/// SUBSCRIBE_UPDATE moves a subscription to another token without a gap: the old one
+	/// decides until the new one does, so withdrawing the old one mid-renewal keeps it.
+	#[moq_clock::test]
+	async fn a_subscribe_update_renames_its_token() {
+		let room = crate::auth::Grant {
+			subscribe: crate::Pattern::subtree("room").unwrap().into(),
+			..Default::default()
+		};
+		let auth = crate::auth::Handle::new(true);
+		auth.peer_arrived(0).unwrap();
+		auth.peer_granted(0, &room);
+		let (mut serve, session, mut dynamic, _broadcast) = named_subscribe(&auth, Some(0)).await;
+		assert!(!drive(&mut serve).await);
+		let _track = dynamic
+			.requested_track()
+			.now_or_never()
+			.expect("track requested")
+			.unwrap()
+			.accept(crate::track::Info::timed());
+		assert!(!drive(&mut serve).await);
+
+		let update = lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
+			priority: 1,
+			max_delay: Duration::ZERO,
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+			auth: Some(1),
+		};
+		session.push(&update.encode_bytes(Version::Lite07).unwrap());
+		assert!(!drive(&mut serve).await, "renamed to a token in flight");
+		auth.peer_withdrawn(0);
+		assert!(!drive(&mut serve).await, "the withdrawn token stopped deciding mid-renewal");
+
+		auth.peer_arrived(1).unwrap();
+		auth.peer_granted(1, &room);
+		assert!(!drive(&mut serve).await);
+		assert!(
+			auth.poll_peer_unnamed(0, &kio::Waiter::noop()).is_ready(),
+			"still named after moving off"
+		);
+		auth.peer_ended(1);
+		assert!(drive(&mut serve).await, "outlived the token it moved to");
+		assert_eq!(session.log.resets(), vec![crate::StreamError::Unauthorized.to_code()]);
 	}
 
 	/// A subscription that always has another group ready yields within its budget, so a
@@ -6550,6 +6887,7 @@ mod tests {
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 		.unwrap();
@@ -6655,6 +6993,7 @@ mod tests {
 				end_group: None,
 				start_frame: 0,
 				end_frame: None,
+				auth: None,
 			}
 			.encode(&mut crate::coding::Encoder::new(script, VERSION.into()), VERSION)
 			.unwrap()
@@ -6743,6 +7082,7 @@ mod tests {
 			group: 0,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
 		.unwrap();
@@ -6810,6 +7150,7 @@ mod tests {
 			group: 7,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
 		.unwrap();
@@ -6976,6 +7317,7 @@ mod tests {
 				end_group: None,
 				start_frame: 0,
 				end_frame: None,
+				auth: None,
 			};
 			let mut session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
 			let log = session.log.clone();
@@ -7028,6 +7370,7 @@ mod tests {
 				end_group: None,
 				start_frame: 0,
 				end_frame: None,
+				auth: None,
 			};
 			let mut session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
 			let log = session.log.clone();

@@ -26,6 +26,8 @@ pub struct Fetch<'a> {
 	/// Index of the last frame to return (inclusive), or `None` for through the end of
 	/// the group. Lite06+ only.
 	pub end_frame: Option<u64>,
+	/// See [`Subscribe::auth`](super::Subscribe::auth).
+	pub auth: Option<u64>,
 }
 
 impl Message for Fetch<'_> {
@@ -55,6 +57,7 @@ impl Message for Fetch<'_> {
 		if end_frame.is_some_and(|end| end < start_frame) {
 			return Err(DecodeError::InvalidSubscribeLocation);
 		}
+		let auth = super::decode_auth(r, version)?;
 
 		Ok(Self {
 			broadcast,
@@ -65,6 +68,7 @@ impl Message for Fetch<'_> {
 			group,
 			start_frame,
 			end_frame,
+			auth,
 		})
 	}
 
@@ -99,6 +103,7 @@ impl Message for Fetch<'_> {
 			// The peer would serve the whole group, including frames the caller excluded.
 			return Err(EncodeError::Version);
 		}
+		super::encode_auth(w, version, self.auth)?;
 
 		Ok(())
 	}
@@ -118,6 +123,7 @@ mod test {
 			group: 7,
 			start_frame: 0,
 			end_frame: None,
+			auth: None,
 		}
 	}
 

@@ -134,6 +134,10 @@ pub(crate) struct State {
 	closed: Option<Error>,
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	next_id: u64,
+	/// The ID the next AUTH stream this side opens carries, so the IDs on the wire run from
+	/// 0 without a gap however tokens are withdrawn before their stream opens.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	next_wire: u64,
 	/// Every token this side presented that has not ended.
 	tokens: BTreeMap<u64, Slot>,
 	/// Tokens waiting for the driver to open their stream.
@@ -154,6 +158,8 @@ pub(crate) struct State {
 	/// The session's scope for the peer: the limit and every issued grant, `None` while the
 	/// limit is.
 	scope: Option<Grant>,
+	/// The peer's AUTH tokens by the ID it numbered them with, for the requests that name one.
+	peer: Peer,
 	/// Bumped whenever the union or the scope changes, so the session's per-stream
 	/// gates can skip re-matching paths on every wakeup.
 	epoch: u64,
@@ -171,6 +177,8 @@ pub(crate) struct Slot {
 	grant: Option<Grant>,
 	/// Handed to the driver to open its AUTH stream, which then owns ending it.
 	streamed: bool,
+	/// The ID its AUTH stream carries, which a moq-lite request names it by.
+	wire: Option<u64>,
 	/// The first reply: `Ok` for an AUTH_OK, the refusal otherwise.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	answered: Option<Result<()>>,
@@ -192,6 +200,72 @@ enum Acceptor {
 	/// The session answers from its own origin handles.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	Default,
+}
+
+/// The peer's moq-lite AUTH tokens by the ID it numbered them with, which its requests name.
+///
+/// The peer numbers its Auth Streams from 0 without a gap, but they arrive in any order, so
+/// an ID is either still in flight, live, or over: the arrival watermark and the few IDs
+/// ahead of it tell the first from the last without remembering every ended ID.
+#[derive(Default)]
+struct Peer {
+	/// Every ID below this one has arrived.
+	arrived: u64,
+	/// IDs that arrived ahead of a lower one still in flight.
+	ahead: std::collections::BTreeSet<u64>,
+	/// The tokens not over yet.
+	live: BTreeMap<u64, Named>,
+}
+
+/// One of the peer's AUTH tokens, as its requests see it.
+#[derive(Default)]
+struct Named {
+	/// The grant last sent for it, `None` before the first.
+	grant: Option<Grant>,
+	/// The peer closed its side: no request may newly name it, and it ends once none does.
+	withdrawn: bool,
+	/// How many admitted requests name it.
+	requests: usize,
+}
+
+/// What a request naming one of the peer's tokens may do right now.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+enum Status<'a> {
+	/// The token has not arrived, or the acceptor has not answered it yet.
+	Waiting,
+	/// The token's grant, and whether the peer withdrew it.
+	Granted(&'a Grant, bool),
+	/// The token is over: refused, revoked, or withdrawn and no longer named.
+	Ended,
+}
+
+impl Peer {
+	/// Record that the token `id` arrived, or `false` for an ID that already did.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	fn arrive(&mut self, id: u64) -> bool {
+		if id < self.arrived || !self.ahead.insert(id) {
+			return false;
+		}
+		while self.ahead.remove(&self.arrived) {
+			self.arrived += 1;
+		}
+		self.live.insert(id, Named::default());
+		true
+	}
+
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	fn status(&self, id: u64) -> Status<'_> {
+		match self.live.get(&id) {
+			Some(Named {
+				grant: Some(grant),
+				withdrawn,
+				..
+			}) => Status::Granted(grant, *withdrawn),
+			Some(_) => Status::Waiting,
+			None if id < self.arrived || self.ahead.contains(&id) => Status::Ended,
+			None => Status::Waiting,
+		}
+	}
 }
 
 impl State {
@@ -277,6 +351,16 @@ pub(crate) struct Permit {
 }
 
 impl Permit {
+	/// The same grant under another limit: the peer's token a request names, standing in
+	/// for the scope.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn limited(self, limit: Patterns) -> Self {
+		Self {
+			limit: Some(limit),
+			..self
+		}
+	}
+
 	/// Whether both allow `path`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn matches(&self, path: &str) -> bool {
@@ -394,6 +478,7 @@ impl Handle {
 				setup,
 				grant: None,
 				streamed: false,
+				wire: None,
 				answered,
 				ended: None,
 				withdrawn: false,
@@ -408,6 +493,22 @@ impl Handle {
 				id,
 			}),
 		})
+	}
+
+	/// The ID a moq-lite request names `auth` by, or `None` when the request goes out unnamed
+	/// under the session's scope: `auth` came from another handle, its stream has not opened,
+	/// or it was withdrawn or ended.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn wire(&self, auth: &Auth) -> Option<u64> {
+		if !auth.presented.state.same_channel(&self.state) {
+			return None;
+		}
+		let state = self.state.read();
+		let slot = state.tokens.get(&auth.presented.id)?;
+		match slot.ended.is_none() && !slot.withdrawn {
+			true => slot.wire,
+			false => None,
+		}
 	}
 
 	/// The token a request carries for `auth`, or `None` when the request goes out unnamed
@@ -499,9 +600,10 @@ impl Handle {
 		}
 	}
 
-	/// The next token to open a stream for, or `Ready(None)` once the session ends.
+	/// The next token to open a stream for, or `Ready(None)` once the session ends: its slot,
+	/// the ID its AUTH carries, and the token.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn poll_opening(&self, waiter: &kio::Waiter) -> Poll<Option<(u64, Bytes)>> {
+	pub(crate) fn poll_opening(&self, waiter: &kio::Waiter) -> Poll<Option<(u64, u64, Bytes)>> {
 		let mut state = ready_or!(self.state.poll(waiter, |state| {
 			match state.opening.is_empty() && state.closed.is_none() {
 				true => Poll::Pending,
@@ -512,12 +614,17 @@ impl Handle {
 			return Poll::Ready(None);
 		}
 		let id = state.opening.pop_front().expect("checked non-empty");
+		let wire = state.next_wire;
 		let token = state.tokens.get_mut(&id).map(|slot| {
 			slot.streamed = true;
+			slot.wire = Some(wire);
 			slot.token.clone()
 		});
 		match token {
-			Some(token) => Poll::Ready(Some((id, token))),
+			Some(token) => {
+				state.next_wire += 1;
+				Poll::Ready(Some((id, wire, token)))
+			}
 			// Withdrawn before its stream opened: nothing to present.
 			None => {
 				drop(state);
@@ -551,7 +658,11 @@ impl Handle {
 		let Some(slot) = state.tokens.get_mut(&id) else {
 			return;
 		};
-		slot.grant = Some(grant);
+		// A withdrawn token's stream stays up while the peer still has requests naming it,
+		// but its grant left the union with the withdrawal.
+		if !slot.withdrawn {
+			slot.grant = Some(grant);
+		}
 		slot.answered.get_or_insert(Ok(()));
 		state.replied = true;
 		state.recompute();
@@ -641,6 +752,61 @@ impl Handle {
 			None => state.issued.remove(&id),
 		};
 		state.rescope();
+	}
+
+	/// Record the peer's moq-lite AUTH numbered `id`, which its requests may now name.
+	///
+	/// # Errors
+	///
+	/// [`Error::ProtocolViolation`] for an ID the peer already used.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn peer_arrived(&self, id: u64) -> Result<()> {
+		match self.state.lock().peer.arrive(id) {
+			true => Ok(()),
+			false => Err(Error::ProtocolViolation),
+		}
+	}
+
+	/// Record the grant last sent for the peer's token `id`, which decides every request naming
+	/// it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn peer_granted(&self, id: u64, grant: &Grant) {
+		let mut state = self.state.lock();
+		if let Some(named) = state.peer.live.get_mut(&id)
+			&& named.grant.as_ref() != Some(grant)
+		{
+			named.grant = Some(grant.clone());
+			state.epoch += 1;
+		}
+	}
+
+	/// The peer closed its side of token `id`'s stream: no request may newly name it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn peer_withdrawn(&self, id: u64) {
+		let mut state = self.state.lock();
+		if let Some(named) = state.peer.live.get_mut(&id) {
+			named.withdrawn = true;
+			state.epoch += 1;
+		}
+	}
+
+	/// The peer's token `id` is over, ending every request that still names it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn peer_ended(&self, id: u64) {
+		let mut state = self.state.lock();
+		if state.peer.live.remove(&id).is_some() {
+			state.epoch += 1;
+		}
+	}
+
+	/// Resolve once no admitted request names the peer's token `id`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn poll_peer_unnamed(&self, id: u64, waiter: &kio::Waiter) -> Poll<()> {
+		let _ = ready_or!(self.state.poll(waiter, |state| match state.peer.live.get(&id) {
+			Some(named) if named.requests > 0 => Poll::Pending,
+			_ => Poll::Ready(()),
+		}));
+		Poll::Ready(())
 	}
 
 	/// The union once it changed since `epoch` last saw it, advancing `epoch`. It
@@ -841,12 +1007,14 @@ impl Drop for Presented {
 			return;
 		};
 		slot.withdrawn = true;
+		// The grant leaves the union now, even while the stream closes gracefully.
+		slot.grant = None;
 		// Already over, or no stream whose close would end it: nothing left to close.
 		if slot.ended.is_some() || !slot.streamed {
 			state.opening.retain(|id| *id != self.id);
 			state.tokens.remove(&self.id);
-			state.recompute();
 		}
+		state.recompute();
 	}
 }
 
@@ -1112,6 +1280,16 @@ impl Serving {
 				..Default::default()
 			}),
 			handle,
+		}
+	}
+
+	/// The peer withdrew the token while requests still name it: its grant leaves the scope
+	/// for good, while the acceptor may still update or revoke it for those requests.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn withdraw(&self) {
+		let mut issue = self.issue.lock();
+		if let Some((handle, id)) = issue.scoped.take() {
+			handle.issue(id, None);
 		}
 	}
 
@@ -1619,6 +1797,8 @@ pub(crate) struct Gate {
 	part: Part,
 	/// Whether the scope allowed the path at the last permit.
 	within_limit: bool,
+	/// Re-check on the next poll even without a change: the request was just renamed.
+	stale: bool,
 }
 
 /// Which part of a [`Permit`] a [`Gate`] watches.
@@ -1630,6 +1810,8 @@ enum Part {
 	Granted,
 	/// The peer's grant, and the scope once the announce that stood in for it closes.
 	Announced(kio::Consumer<()>),
+	/// The peer's grant, and the scope or the moq-lite token the request names.
+	Named(Authority, Verdict),
 }
 
 impl Gate {
@@ -1643,6 +1825,7 @@ impl Gate {
 			epoch: 0,
 			part: Part::Both,
 			within_limit,
+			stale: false,
 		}
 	}
 
@@ -1651,6 +1834,38 @@ impl Gate {
 	pub(crate) fn named(mut self) -> Self {
 		self.part = Part::Granted;
 		self
+	}
+
+	/// Hold a moq-lite request to the peer's token `auth` names instead of the scope, and let
+	/// the peer [`rename`](Self::rename) it later. `None` is the scope.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn naming(mut self, auth: Option<u64>) -> Self {
+		self.part = Part::Named(Authority::new(self.handle.clone(), auth), Verdict::Waiting);
+		self.stale = true;
+		self
+	}
+
+	/// Move a [`naming`](Self::naming) request to the peer's token `auth`, or the scope with
+	/// `None`, once that one decides. Until it does, the one it names now still decides it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn rename(&mut self, auth: Option<u64>) {
+		if let Part::Named(authority, _) = &mut self.part {
+			authority.rename(auth);
+			self.stale = true;
+		}
+	}
+
+	/// Resolve once the request may start, with whether it may: a request naming a token that
+	/// has not arrived, or is not answered yet, waits for it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn poll_admitted(&mut self, waiter: &kio::Waiter) -> Poll<bool> {
+		if self.poll_denied(waiter).is_ready() {
+			return Poll::Ready(false);
+		}
+		match &self.part {
+			Part::Named(_, Verdict::Waiting) => Poll::Pending,
+			_ => Poll::Ready(true),
+		}
 	}
 
 	/// A gate for a request under a namespace the peer announced, while `live` stays open:
@@ -1677,6 +1892,7 @@ impl Gate {
 				Part::Both => self.within_limit,
 				Part::Granted => true,
 				Part::Announced(live) => self.within_limit || !live.is_closed(),
+				Part::Named(_, verdict) => matches!(verdict, Verdict::Admitted),
 			}
 	}
 
@@ -1722,12 +1938,27 @@ impl Gate {
 	/// allow everything.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_denied(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		while let Poll::Ready(permit) = self.handle.poll_permit(self.direction, &mut self.epoch, waiter) {
+		loop {
+			let permit = match std::mem::take(&mut self.stale) {
+				true => {
+					let state = self.handle.state.read();
+					self.epoch = state.epoch;
+					state.permit(self.direction)
+				}
+				false => match self.handle.poll_permit(self.direction, &mut self.epoch, waiter) {
+					Poll::Ready(permit) => permit,
+					Poll::Pending => break,
+				},
+			};
 			let path = self.path.as_str();
 			self.within_limit = permit.within_limit(path);
-			let allowed = match self.part {
+			let allowed = match &mut self.part {
 				Part::Both => permit.matches(path),
 				Part::Granted | Part::Announced(_) => permit.granted(path),
+				Part::Named(authority, verdict) => {
+					*verdict = authority.verdict(self.direction, path, self.within_limit);
+					permit.granted(path) && !matches!(verdict, Verdict::Denied)
+				}
 			};
 			if !allowed {
 				return Poll::Ready(());
@@ -1736,6 +1967,156 @@ impl Gate {
 		match &self.part {
 			Part::Announced(live) if !self.within_limit => live.poll_closed(waiter),
 			_ => Poll::Pending,
+		}
+	}
+}
+
+/// What the grant deciding a request allows it right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+pub(crate) enum Verdict {
+	/// The token it names has not arrived, or is not answered yet.
+	Waiting,
+	Admitted,
+	Denied,
+}
+
+/// A moq-lite request's claim on the peer's token it names, by the ID the peer's AUTH
+/// carried.
+///
+/// Once admitted it counts toward that token, so a token the peer withdraws stays up until
+/// no request names it. Dropping it, or a denial, gives the count back.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+pub(crate) struct Naming {
+	handle: Handle,
+	id: u64,
+	counted: bool,
+}
+
+/// What a [`Naming`] limits an announce request to, from [`Naming::limit`].
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+pub(crate) enum Limit {
+	/// The token has not arrived, or is not answered yet.
+	Waiting,
+	/// The patterns the token's grant allows in the request's direction.
+	Patterns(Patterns),
+	/// The token is over, or withdrawn before the request counted toward it.
+	Ended,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+impl Naming {
+	pub(crate) fn new(handle: Handle, id: u64) -> Self {
+		Self {
+			handle,
+			id,
+			counted: false,
+		}
+	}
+
+	/// The patterns the token allows in `direction`, counting the request toward it while it
+	/// is live. A withdrawn token admits only a request already counted.
+	pub(crate) fn limit(&mut self, direction: Direction) -> Limit {
+		let mut state = self.handle.state.lock();
+		let limit = match state.peer.status(self.id) {
+			Status::Waiting => Limit::Waiting,
+			Status::Ended => Limit::Ended,
+			Status::Granted(_, true) if !self.counted => Limit::Ended,
+			// The grant names what the peer may do: what we send is what it may subscribe to.
+			Status::Granted(grant, _) => Limit::Patterns(match direction {
+				Direction::Publish => grant.subscribe.clone(),
+				Direction::Subscribe => grant.publish.clone(),
+			}),
+		};
+		let count = matches!(limit, Limit::Patterns(_));
+		if count != self.counted
+			&& let Some(named) = state.peer.live.get_mut(&self.id)
+		{
+			match count {
+				true => named.requests += 1,
+				false => named.requests -= 1,
+			}
+		}
+		self.counted = count && state.peer.live.contains_key(&self.id);
+		limit
+	}
+
+	/// Whether the token admits `direction` at `path` right now.
+	pub(crate) fn verdict(&mut self, direction: Direction, path: &str) -> Verdict {
+		match self.limit(direction) {
+			Limit::Waiting => Verdict::Waiting,
+			Limit::Patterns(patterns) if patterns.matches(path) => Verdict::Admitted,
+			Limit::Patterns(_) => {
+				self.release();
+				Verdict::Denied
+			}
+			Limit::Ended => Verdict::Denied,
+		}
+	}
+
+	/// Stop counting toward the token, which a withdrawn one may then end on.
+	fn release(&mut self) {
+		if std::mem::take(&mut self.counted)
+			&& let Some(named) = self.handle.state.lock().peer.live.get_mut(&self.id)
+		{
+			named.requests -= 1;
+		}
+	}
+}
+
+impl Drop for Naming {
+	fn drop(&mut self) {
+		self.release();
+	}
+}
+
+/// Which grant decides one of the peer's moq-lite requests: the session's scope, or the
+/// token it names. A rename takes effect once the new one decides, so a request moving to a
+/// token still in flight stays held to the old one meanwhile, never to nothing.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+pub(crate) struct Authority {
+	handle: Handle,
+	/// The token deciding it now, or `None` for the scope.
+	current: Option<Naming>,
+	/// A rename waiting for its token to decide.
+	next: Option<Option<Naming>>,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+impl Authority {
+	pub(crate) fn new(handle: Handle, auth: Option<u64>) -> Self {
+		Self {
+			current: auth.map(|id| Naming::new(handle.clone(), id)),
+			handle,
+			next: None,
+		}
+	}
+
+	/// Move to the token `auth`, or the scope with `None`, once it decides.
+	pub(crate) fn rename(&mut self, auth: Option<u64>) {
+		self.next = match auth == self.current.as_ref().map(|naming| naming.id) {
+			true => None,
+			false => Some(auth.map(|id| Naming::new(self.handle.clone(), id))),
+		};
+	}
+
+	/// Whether the request may go on at `path`, given whether the session's scope allows it:
+	/// a pending rename applies once its token decides, and a refused one denies the request.
+	pub(crate) fn verdict(&mut self, direction: Direction, path: &str, scoped: bool) -> Verdict {
+		let scope = match scoped {
+			true => Verdict::Admitted,
+			false => Verdict::Denied,
+		};
+		if let Some(next) = &mut self.next {
+			match next.as_mut().map_or(scope, |naming| naming.verdict(direction, path)) {
+				Verdict::Waiting => {}
+				Verdict::Admitted => self.current = self.next.take().expect("checked above"),
+				Verdict::Denied => return Verdict::Denied,
+			}
+		}
+		match &mut self.current {
+			Some(naming) => naming.verdict(direction, path),
+			None => scope,
 		}
 	}
 }
@@ -2029,7 +2410,7 @@ mod tests {
 	fn the_last_clone_withdraws_the_auth() {
 		let handle = Handle::new(true);
 		let auth = handle.present(Bytes::from_static(b"jwt"), false).unwrap();
-		let Poll::Ready(Some((id, _))) = handle.poll_opening(&kio::Waiter::noop()) else {
+		let Poll::Ready(Some((id, _, _))) = handle.poll_opening(&kio::Waiter::noop()) else {
 			panic!("nothing to open");
 		};
 		let clone = auth.clone();
@@ -2620,6 +3001,89 @@ mod request_token_tests {
 			expires: None,
 		};
 		assert!(RequestKind::Subscribe.covers(&read, "room"));
+	}
+
+	/// A grant letting the peer subscribe to `room`.
+	fn room() -> Grant {
+		Grant {
+			publish: Patterns::new(),
+			subscribe: crate::Pattern::subtree("room").unwrap().into(),
+			expires: None,
+		}
+	}
+
+	/// The peer numbers its AUTH streams from 0 without a gap, so an ID it has not sent is in
+	/// flight, one that came and went is over, and a repeat is refused.
+	#[test]
+	fn a_named_token_is_in_flight_live_or_over() {
+		let handle = Handle::new(true);
+		let verdict = |id, path| Naming::new(handle.clone(), id).verdict(Direction::Publish, path);
+
+		assert_eq!(verdict(1, "room"), Verdict::Waiting, "not arrived");
+		handle.peer_arrived(1).unwrap();
+		assert_eq!(verdict(1, "room"), Verdict::Waiting, "not answered");
+		handle.peer_granted(1, &room());
+		assert_eq!(verdict(1, "room"), Verdict::Admitted);
+		assert_eq!(verdict(1, "other"), Verdict::Denied, "outside its own grant");
+		assert!(handle.peer_arrived(1).is_err(), "a repeated ID");
+
+		handle.peer_ended(1);
+		assert_eq!(verdict(1, "room"), Verdict::Denied, "over");
+		assert_eq!(verdict(0, "room"), Verdict::Waiting, "still in flight below the ended one");
+		handle.peer_arrived(0).unwrap();
+		handle.peer_ended(0);
+		assert!(handle.peer_arrived(0).is_err(), "below the watermark");
+	}
+
+	/// A token the peer withdraws keeps deciding the requests already naming it, takes no
+	/// new one, and ends once the last moves off.
+	#[test]
+	fn a_withdrawn_token_lingers_while_named() {
+		let handle = Handle::new(true);
+		handle.peer_arrived(0).unwrap();
+		handle.peer_granted(0, &room());
+		let mut named = Naming::new(handle.clone(), 0);
+		assert_eq!(named.verdict(Direction::Publish, "room"), Verdict::Admitted);
+
+		handle.peer_withdrawn(0);
+		assert_eq!(named.verdict(Direction::Publish, "room"), Verdict::Admitted);
+		assert_eq!(
+			Naming::new(handle.clone(), 0).verdict(Direction::Publish, "room"),
+			Verdict::Denied,
+			"no request newly names a withdrawn token"
+		);
+		let waiter = kio::Waiter::noop();
+		assert!(handle.poll_peer_unnamed(0, &waiter).is_pending());
+		drop(named);
+		assert!(handle.poll_peer_unnamed(0, &waiter).is_ready());
+	}
+
+	/// A request moving to a token still in flight stays held to the one it names now, even
+	/// once that one is withdrawn, so a renewal never leaves a gap.
+	#[test]
+	fn a_rename_applies_once_its_token_decides() {
+		let handle = Handle::new(true);
+		handle.peer_arrived(0).unwrap();
+		handle.peer_granted(0, &room());
+		let mut authority = Authority::new(handle.clone(), Some(0));
+		assert_eq!(authority.verdict(Direction::Publish, "room", false), Verdict::Admitted);
+
+		authority.rename(Some(1));
+		handle.peer_withdrawn(0);
+		assert_eq!(authority.verdict(Direction::Publish, "room", false), Verdict::Admitted);
+
+		handle.peer_arrived(1).unwrap();
+		handle.peer_granted(1, &room());
+		assert_eq!(authority.verdict(Direction::Publish, "room", false), Verdict::Admitted);
+		let waiter = kio::Waiter::noop();
+		assert!(handle.poll_peer_unnamed(0, &waiter).is_ready(), "moving off releases the old token");
+
+		authority.rename(None);
+		assert_eq!(
+			authority.verdict(Direction::Publish, "room", false),
+			Verdict::Denied,
+			"the scope does not cover it"
+		);
 	}
 
 	/// An acceptor-side revoke ends the request before the deadline, and does not close the

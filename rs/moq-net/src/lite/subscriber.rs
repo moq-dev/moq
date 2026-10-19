@@ -184,6 +184,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 				epoch,
 				hops,
 				cost,
+				auth,
 			} => {
 				let (suffix, hops) = match self.version.has_announce_id() {
 					// Every `active` assigns the next ordinal, even ones we drop locally.
@@ -192,6 +193,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 					false => (suffix.rest.into_owned(), hops.literal),
 				};
 				let path = prefix.join(&suffix);
+				if !run.announced.contains(&path) {
+					run.announced.name(&self.auth, &path, auth);
+				}
 				if lite::update_supported(self.version)
 					&& !self.version.has_announce_id()
 					&& run.announced.contains(&path)
@@ -232,11 +236,12 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 				tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 				run.announced.withdraw(&path);
 			}
-			lite::AnnounceBroadcast::Update { id, hops, cost } => {
+			lite::AnnounceBroadcast::Update { id, hops, cost, auth } => {
 				// Resolve the id; it stays live (the replacement reuses it). An unknown
 				// or retired id is a protocol violation.
 				let (suffix, hops) = run.decoder.update(id, hops)?;
 				let path = prefix.join(&suffix);
+				run.announced.name(&self.auth, &path, auth);
 				self.update_announce(
 					path,
 					hops,
@@ -246,11 +251,18 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 					&mut run.announced,
 				)?;
 			}
-			lite::AnnounceBroadcast::Restart { id, epoch, hops, cost } => {
+			lite::AnnounceBroadcast::Restart {
+				id,
+				epoch,
+				hops,
+				cost,
+				auth,
+			} => {
 				// Resolved like an update: the id stays live.
 				let (suffix, hops) = run.decoder.update(id, hops)?;
 				let path = prefix.join(&suffix);
 				run.announced.restart(&path, epoch);
+				run.announced.name(&self.auth, &path, auth);
 				self.restart_announce(
 					path,
 					hops,
@@ -423,10 +435,14 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "update");
 		let metadata = self.announced_route(&path, hops, cost, link_cost, responder_origin, announced);
 
-		// A re-price keeps the route's prefix (and its
-		// served paths) and re-prices in place. In-flight tracks keep flowing.
-		if let Some(entry) = announced.attached(&path) {
-			entry.update(metadata);
+		// A re-price keeps the route's prefix (and its served paths) and re-prices in place,
+		// so in-flight tracks keep flowing, unless the token it now names refuses it.
+		if announced.attached(&path).is_some() {
+			if !announced.admits(self, &path) {
+				announced.withhold(self, path, metadata);
+				return Ok(false);
+			}
+			announced.attached(&path).expect("checked above").update(metadata);
 			return Ok(true);
 		}
 
@@ -1376,6 +1392,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						prefix: self.prefix.as_path(),
 						exclude_hop: self.subscriber.self_origin.id(),
 						hidden: true,
+						auth: None,
 					})?;
 					self.state = PrefixState::Send { stream };
 				}
@@ -1482,12 +1499,13 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					// A new limit holds back what the peer may no longer publish to us,
 					// and brings back what it may again. The peer still holds each
 					// advertisement either way.
-					while let Poll::Ready(permit) =
-						self.subscriber
-							.auth
-							.poll_permit(crate::auth::Direction::Subscribe, &mut run.auth_epoch, waiter)
+					while self
+						.subscriber
+						.auth
+						.poll_permit(crate::auth::Direction::Subscribe, &mut run.auth_epoch, waiter)
+						.is_ready()
 					{
-						run.announced.limit(&permit, &self.subscriber);
+						run.announced.regrant(&self.subscriber);
 					}
 					loop {
 						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
@@ -4306,6 +4324,7 @@ mod tests {
 			suffix: lite::PathRef::literal(Path::new(suffix)),
 			hops: lite::HopsRef::literal(crate::Hops::new()),
 			cost: crate::origin::Cost::default(),
+			auth: None,
 		};
 		let mut script = Vec::new();
 		lite::AnnounceOk {
@@ -4376,6 +4395,7 @@ mod tests {
 				suffix: lite::PathRef::literal(Path::new(suffix)),
 				hops: lite::HopsRef::literal(crate::Hops::new()),
 				cost: crate::origin::Cost::default(),
+				auth: None,
 			}
 			.encode(w, version)
 			.unwrap()
@@ -4536,6 +4556,7 @@ mod tests {
 			suffix: lite::PathRef::literal(Path::new(suffix)),
 			hops: lite::HopsRef::literal(crate::Hops::new()),
 			cost: crate::origin::Cost::default(),
+			auth: None,
 		};
 		let mut script = Vec::new();
 		lite::AnnounceOk {
@@ -4676,6 +4697,9 @@ enum Sub<S: crate::transport::poll::Session> {
 /// owns its path and announce id until it retracts or restarts it.
 struct Announced {
 	routes: HashMap<PathOwned, Held>,
+	/// The peer's token each advertisement names (lite-07+), which decides it in place of
+	/// the session's scope. Absent for one under the scope.
+	names: HashMap<PathOwned, crate::auth::Authority>,
 	/// The session's announce cap, and one slot taken from it per entry in `routes`.
 	slots: crate::session::Slots,
 	held: Vec<crate::session::Slot>,
@@ -4710,6 +4734,7 @@ impl Announced {
 	fn new(slots: crate::session::Slots) -> Self {
 		Self {
 			routes: HashMap::new(),
+			names: HashMap::new(),
 			slots,
 			held: Vec::new(),
 			epochs: HashMap::new(),
@@ -4733,8 +4758,48 @@ impl Announced {
 		self.routes.insert(path, Held::Attached(Box::new(route)));
 	}
 
+	/// Name the peer's token `auth` decides the advertisement at `path`, or the session's
+	/// scope with `None`. A renamed one stays decided by the old token until the new one
+	/// decides.
+	fn name(&mut self, handle: &crate::auth::Handle, path: &PathOwned, auth: Option<u64>) {
+		match self.names.get_mut(path) {
+			Some(authority) => authority.rename(auth),
+			None if auth.is_some() => {
+				self.names
+					.insert(path.clone(), crate::auth::Authority::new(handle.clone(), auth));
+			}
+			None => {}
+		}
+	}
+
+	/// Whether the grant deciding the advertisement at `path` admits it right now: the
+	/// peer's token it names, or the session's limit. A token still in flight admits nothing.
+	fn admits<S: crate::transport::poll::Session>(&mut self, subscriber: &Subscriber<S>, path: &PathOwned) -> bool {
+		let direction = crate::auth::Direction::Subscribe;
+		let scoped = subscriber.auth.within_limit(direction, path.as_str());
+		match self.names.get_mut(path) {
+			Some(authority) => matches!(
+				authority.verdict(direction, path.as_str(), scoped),
+				crate::auth::Verdict::Admitted
+			),
+			None => scoped,
+		}
+	}
+
+	/// Hold the route at `path` back until a grant admits it, closing its sources if it was
+	/// attached (tracks in flight end on their own gates, with `Unauthorized`).
+	fn withhold<S: crate::transport::poll::Session>(
+		&mut self,
+		subscriber: &Subscriber<S>,
+		path: PathOwned,
+		route: crate::origin::Route,
+	) {
+		tracing::debug!(route = %subscriber.log_path(&path), "withholding announce outside its grant");
+		self.routes.insert(path, Held::Withheld(route));
+	}
+
 	/// Put the peer's route into the origin, so paths under it resolve through this
-	/// session on demand, or hold it back when the session's limit does not cover it.
+	/// session on demand, or hold it back when the grant deciding it does not cover it.
 	/// Returns whether it attached.
 	fn offer<S: crate::transport::poll::Session>(
 		&mut self,
@@ -4742,12 +4807,8 @@ impl Announced {
 		path: PathOwned,
 		route: crate::origin::Route,
 	) -> bool {
-		if !subscriber
-			.auth
-			.within_limit(crate::auth::Direction::Subscribe, path.as_str())
-		{
-			tracing::debug!(route = %subscriber.log_path(&path), "withholding announce outside the limit");
-			self.routes.insert(path, Held::Withheld(route));
+		if !self.admits(subscriber, &path) {
+			self.withhold(subscriber, path, route);
 			return false;
 		}
 		// An error means the prefix is outside our origin's scope, so don't serve it.
@@ -4813,6 +4874,7 @@ impl Announced {
 	/// session from the same peer. Dropping its sources closes their requests.
 	fn withdraw(&mut self, path: &PathOwned) {
 		self.epochs.remove(path);
+		self.names.remove(path);
 		let Some(held) = self.routes.remove(path) else {
 			return;
 		};
@@ -4868,17 +4930,30 @@ impl Announced {
 		}
 	}
 
-	/// Apply a new limit: hold back every attached route it no longer covers, closing
-	/// its sources (tracks in flight end on their own gates, with `Unauthorized`), and
-	/// attach every withheld one it now does.
-	fn limit<S: crate::transport::poll::Session>(&mut self, permit: &crate::auth::Permit, subscriber: &Subscriber<S>) {
+	/// Apply a change to the limit or the peer's tokens: hold back every attached route its
+	/// grant no longer covers, closing its sources (tracks in flight end on their own gates,
+	/// with `Unauthorized`), and attach every withheld one it now does.
+	fn regrant<S: crate::transport::poll::Session>(&mut self, subscriber: &Subscriber<S>) {
+		let direction = crate::auth::Direction::Subscribe;
+		let names = &mut self.names;
 		let changed: Vec<PathOwned> = self
 			.routes
 			.iter()
-			.filter(|(path, held)| match held {
-				Held::Attached(_) => !permit.within_limit(path.as_str()),
-				Held::Withheld(_) => permit.within_limit(path.as_str()),
-				Held::Declined => false,
+			.filter(|(path, held)| {
+				let attached = match held {
+					Held::Attached(_) => true,
+					Held::Withheld(_) => false,
+					Held::Declined => return false,
+				};
+				let scoped = subscriber.auth.within_limit(direction, path.as_str());
+				let admitted = match names.get_mut(*path) {
+					Some(authority) => matches!(
+						authority.verdict(direction, path.as_str(), scoped),
+						crate::auth::Verdict::Admitted
+					),
+					None => scoped,
+				};
+				attached != admitted
 			})
 			.map(|(path, _)| path.clone())
 			.collect();
@@ -5288,6 +5363,7 @@ fn buffer_update<S: crate::transport::poll::Session>(
 		start_frame: bounds.start_frame,
 		end_frame: bounds.end_frame,
 		order: active.order,
+		auth: None,
 	})
 }
 
@@ -5345,6 +5421,8 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 						start_frame: bounds.start_frame,
 						end_frame: bounds.end_frame,
 						order: self.subscription.order,
+						// Under the session's scope: a subscription names no token of its own yet.
+						auth: None,
 					};
 					stream.writer.buffer(&lite::ControlType::Subscribe)?;
 					stream.writer.buffer(&msg)?;
@@ -6381,6 +6459,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						// would cache a group indistinguishable from a complete one. A
 						// downstream cap is applied when serving, not when fetching.
 						end_frame: None,
+						auth: None,
 					};
 					let buffered = stream
 						.writer

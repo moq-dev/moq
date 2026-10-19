@@ -271,6 +271,104 @@ async fn moqt_22_a_revoked_route_auth_remakes_its_announce() {
 	.expect("timed out");
 }
 
+/// A lite-07 route naming one of the client's tokens is admitted by that token's grant
+/// alone: outside it the route is withheld even where the union of the client's tokens
+/// covers it, and the token's revocation withholds it even where the setup grant still does.
+#[moq_clock::test]
+async fn lite_07_a_named_route_is_held_to_its_token() {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let mut pair = connect(Options {
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut issued = serve(pair.requests.take().unwrap(), |token| match token {
+			b"" => Some(grant(&["a", "b"], &[])),
+			b"t1" => Some(grant(&["b"], &[])),
+			_ => None,
+		});
+		let (_, _setup) = issued.next().await.unwrap();
+		let t1 = pair.client.auth().add("t1").await.expect("t1 granted");
+		let (_, t1_issued) = issued.next().await.unwrap();
+		let served = relay.consume();
+
+		let outside = publisher.create_broadcast("a/x").unwrap();
+		outside
+			.announce(origin::Route::default().with_auth(t1.clone()))
+			.unwrap();
+		let inside = publisher.create_broadcast("b/y").unwrap();
+		inside.announce(origin::Route::default().with_auth(t1)).unwrap();
+		wait_announced(&served, "b/y", true).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			futures::FutureExt::now_or_never(served.routed("a/x")).flatten().is_none(),
+			"admitted outside its token"
+		);
+
+		// Moving it to the session's scope admits it.
+		outside.announce(origin::Route::default()).unwrap();
+		wait_announced(&served, "a/x", true).await;
+
+		t1_issued.revoke(SessionError::Unauthorized, "revoked");
+		wait_announced(&served, "b/y", false).await;
+		wait_announced(&served, "a/x", true).await;
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Renewing a lite-07 route's token keeps it announced: the old token, withdrawn as the
+/// route moves off it, still decides the route until the new one does, and then ends.
+#[moq_clock::test]
+async fn lite_07_renewing_a_route_token_keeps_it_announced() {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let mut pair = connect(Options {
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut issued = serve(pair.requests.take().unwrap(), |token| match token {
+			b"" => Some(grant(&[], &[])),
+			_ => Some(grant(&["b"], &[])),
+		});
+		let (_, _setup) = issued.next().await.unwrap();
+		let served = relay.consume();
+		let mut announced = served.announced();
+
+		let first = pair.client.auth().add("first").await.expect("granted");
+		let (_, first_issued) = issued.next().await.unwrap();
+		let broadcast = publisher.create_broadcast("b/y").unwrap();
+		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
+		wait_announced(&served, "b/y", true).await;
+
+		let second = pair.client.auth().add("second").await.expect("granted");
+		let (_, _second_issued) = issued.next().await.unwrap();
+		// Dropping the only other handle on the first token withdraws it with the swap.
+		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
+		assert!(matches!(first_issued.closed().await, Error::Cancel));
+
+		while let Some(event) = futures::FutureExt::now_or_never(announced.next()).flatten() {
+			assert!(
+				!matches!(event, moq_net::announce::Event::End(_)),
+				"the renewal dropped the route: {event:?}"
+			);
+		}
+		wait_announced(&served, "b/y", true).await;
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// A pair where the client declines MoQ Auth, so every token the server sees rode a
 /// request, and the server declines MoQ Solicit, so the client announces with
 /// PUBLISH_NAMESPACE rather than answering a SUBSCRIBE_NAMESPACE.
