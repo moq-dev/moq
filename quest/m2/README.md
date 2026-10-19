@@ -26,7 +26,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
 - [P2P](/quest/m2/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [Epoch anchor](/quest/m2/epoch-anchor.md) - same-epoch importers each derive the catalog clock and timestamp era from the epoch and stay live, so they agree across a 33-bit wrap, a forward clock break, and a restart
-- [Raw TS cuts on the epoch timeline](/quest/m2/ts-passthrough-epoch-cuts.md) - passthrough fallback cuts fall on the epoch's grid and the M2ts section derives from the epoch and content, so instances started apart publish identical groups and catalogs
 - [Same-epoch importers](/quest/m2/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [Hard-fork the binding generator](/quest/m2/uniffi-fork.md) - one moq-dev repo holds the chosen generator's core and every language backend, released under one tag and one pin
 - [Benchmark trend site](/quest/m2/bench-site.md) - a GitHub Pages site charts the binding, Rust, and JS nightly benchmarks over time
@@ -94,7 +93,6 @@ ranked just below deterministic TS legs, which it requires.
 - [moqsrc A/V sync](/quest/m2/moqsrc-av-sync.md) - a nightly test measures A/V skew from `moqsrc` through clock-synced sinks
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
-- [Container aspect signals](/quest/m2/container-aspect.md) - fMP4 `pasp` and Matroska display size feed the catalog display aspect
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed the encoder from the OBS compositor without CPU readback

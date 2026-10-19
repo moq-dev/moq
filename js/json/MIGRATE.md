@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Duplicate keys are refused
+
+Every decoder throws `DuplicateKey` for a frame in which a JSON object repeats a key, where `JSON.parse` used to keep the last copy.
+Fix any publisher that writes a repeated key.
+
 ### Consumers return `Timed` values (#5099)
 
 The snapshot and stream consumers' `next()` and async iterator yield `{ value, at }`, where `at` is the frame's timestamp and absent on an untimed track.
