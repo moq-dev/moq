@@ -109,7 +109,7 @@ lands before the cut.
 - [Timed-out requests clean up](/quest/m1/legacy-request-timeout-cleanup.md) - on drafts 14-16, Rust and JS send PUBLISH_NAMESPACE_DONE or UNSUBSCRIBE_NAMESPACE for a timed-out request before its local reset
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Resume reorder](/quest/m1/resume-reorder.md) - a group whose stream header arrives after its successor's still resumes on failover; only a dropped or long-gone group fails
-- [A floor below a resolved copy reaches upstream](/quest/m1/resolved-demand.md) - a relay fetches groups a reader asks for below where an "oldest" reader already resolved its copy
+- [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - a warm relay serves a reader with a wider max age the cached groups a cold relay would, with no wire change
 - [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [HLS export drains after End](/quest/m1/hls-export-end-drain.md) - a cleanly ended broadcast still exports its retained segments
