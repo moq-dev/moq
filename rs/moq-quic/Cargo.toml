@@ -60,7 +60,8 @@ aws-lc-rs = { version = "1.9", default-features = false, optional = true }
 bytes = { workspace = true }
 fastbloom = { version = "0.17", default-features = false, optional = true }
 lru-slab = "0.1.2"
-moq-clock = { workspace = true }
+# Without the runtime, which is meant for dev-dependencies; a driver brings its own.
+moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
 rand_pcg = "0.10"
@@ -88,6 +89,8 @@ arbitrary = { version = "1.5", features = ["derive"] }
 assert_matches = "1.1"
 criterion = { workspace = true }
 hex-literal = "1"
+# The tests and benches read time through the runtime, as the drivers do.
+moq-clock = { path = "../moq-clock" }
 proptest = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
 # The benches build their own TLS configs, which the crate only re-exports behind `rustls`.

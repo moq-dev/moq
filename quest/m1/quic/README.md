@@ -70,8 +70,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
   tail grace
 - [Schedule datagrams by subscription priority](/quest/m1/quic/datagram-priority.md) -
   datagrams join their subscription's send group instead of preempting every stream
-- [A FIN below received data is a final size error](/quest/m1/quic/final-size-below-received.md) - a shrunken final size closes with FINAL_SIZE_ERROR instead of blocking the reader forever
-- [A stateless reset keeps a closed connection's reason](/quest/m1/quic/close-reason-after-reset.md) - a reset after a local transport error neither replaces the reason nor reports a second loss
 
 ## Related
 

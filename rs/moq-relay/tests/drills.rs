@@ -187,9 +187,14 @@ fn seed(lane: Lane) -> u64 {
 
 impl Drop for Path {
 	fn drop(&mut self) {
-		// A drill that failed before `verify` still reports what the path did.
+		// A drill that failed before `verify` still reports what the path did,
+		// including a shaper that stopped forwarding, which the drill itself
+		// only sees as a client timing out.
 		if let Some(shaper) = &self.shaper {
-			println!("shaper: {}", shaper.stats());
+			match shaper.verify() {
+				Ok(stats) => println!("shaper: {stats}"),
+				Err(err) => println!("shaper: {err:#}"),
+			}
 		}
 	}
 }
