@@ -1065,40 +1065,12 @@ impl Link {
 	fn push(&mut self, now: Instant, datagram: Vec<u8>, socket: &Arc<UdpSocket>, dest: SocketAddr, tally: &Tally) {
 		#[cfg(any(test, feature = "test"))]
 		if let Some(state) = self.ingress.selected(self.stream) {
-			// Draw as usual so later datagrams see the same seeded stream, but keep
-			// a lost one: the gate holds the acknowledgments a sender needs to replace
-			// it, so a gate waiting on surviving bytes could wait out the connection.
-			let draw = self.draw(now, tally, true);
-			let packet = ingress::Held {
-				datagram,
-				socket: socket.clone(),
-				dest,
-				draw,
-			};
-			let released = state
-				.lock()
-				.expect("ingress poisoned")
-				.hold(self.profile.rate.as_ref().expect("validated rate"), packet);
-			if let Some(released) = released {
-				for packet in released.packets {
-					if let Some((at, delayed)) = self.schedule(now, packet.datagram.len(), packet.draw, tally) {
-						let _ = self.queue.send(Parcel {
-							arrived: now,
-							at,
-							delayed,
-							datagram: packet.datagram,
-							socket: packet.socket,
-							dest: packet.dest,
-						});
-					}
-				}
-				state.lock().expect("ingress poisoned").finished = true;
-				if let Some(done) = released.done {
-					let _ = done.send(());
-				}
-			}
-			return;
+			return self.gate(&state, now, datagram, socket, dest, tally);
 		}
+		self.forward(now, datagram, socket, dest, tally);
+	}
+
+	fn forward(&mut self, now: Instant, datagram: Vec<u8>, socket: &Arc<UdpSocket>, dest: SocketAddr, tally: &Tally) {
 		let Some((at, delayed)) = self.treat(now, datagram.len(), tally) else {
 			return;
 		};
@@ -1111,6 +1083,56 @@ impl Link {
 			socket: socket.clone(),
 			dest,
 		});
+	}
+
+	/// Hold a datagram at the ingress burst that selected this link.
+	#[cfg(any(test, feature = "test"))]
+	fn gate(
+		&mut self,
+		state: &Mutex<ingress::State>,
+		now: Instant,
+		datagram: Vec<u8>,
+		socket: &Arc<UdpSocket>,
+		dest: SocketAddr,
+		tally: &Tally,
+	) {
+		// Held across the draw, so a burst dropped since it selected this link
+		// cannot exempt a datagram it never holds.
+		let mut burst = state.lock().expect("ingress poisoned");
+		if burst.cancelled {
+			drop(burst);
+			return self.forward(now, datagram, socket, dest, tally);
+		}
+		// Draw as usual so later datagrams see the same seeded stream, but keep
+		// a lost one: the gate holds the acknowledgments a sender needs to replace
+		// it, so a gate waiting on surviving bytes could wait out the connection.
+		let draw = self.draw(now, tally, true);
+		let packet = ingress::Held {
+			datagram,
+			socket: socket.clone(),
+			dest,
+			draw,
+		};
+		let Some(released) = burst.hold(self.profile.rate.as_ref().expect("validated rate"), packet) else {
+			return;
+		};
+		burst.finished = true;
+		drop(burst);
+		for packet in released.packets {
+			if let Some((at, delayed)) = self.schedule(now, packet.datagram.len(), packet.draw, tally) {
+				let _ = self.queue.send(Parcel {
+					arrived: now,
+					at,
+					delayed,
+					datagram: packet.datagram,
+					socket: packet.socket,
+					dest: packet.dest,
+				});
+			}
+		}
+		if let Some(done) = released.done {
+			let _ = done.send(());
+		}
 	}
 
 	/// When a datagram of `size` bytes arriving `now` leaves, and whether it was
@@ -1240,6 +1262,32 @@ mod tests {
 			assert_eq!(received.try_recv().unwrap().arrived, start + Duration::from_secs(20));
 		}
 		assert!(received.try_recv().is_err());
+	}
+
+	/// A burst dropped after it selected a datagram, before the gate held it,
+	/// forwarded a datagram drawn for loss as if the gate had kept it.
+	#[tokio::test(start_paused = true)]
+	async fn an_ingress_burst_cancelled_mid_selection_leaves_loss_acting() {
+		let profile = Profile {
+			loss: 1.0,
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let (send, mut received) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &Options::default(), 42, 0, start, send);
+		let burst = link.ingress.arm().unwrap();
+		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
+		let tally = Tally::default();
+		let state = link.ingress.selected(link.stream).unwrap();
+		drop(burst);
+		link.gate(&state, start, vec![0; 1000], &socket, LOCALHOST, &tally);
+		assert_eq!(tally.lost.load(Ordering::Relaxed), 1);
+		assert!(received.try_recv().is_err(), "a datagram drawn for loss was forwarded");
 	}
 
 	/// A gate that waited on surviving bytes never opened when loss took what a
