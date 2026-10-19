@@ -148,6 +148,7 @@ pub(crate) fn to_session_code(error: &SessionError) -> u32 {
 /// | MALFORMED_TRACK | - | 0x9 | - | - | - | 0x12 |
 /// | EXPIRED_AUTH_TOKEN | 0x12 | 0x12 | - | 0x12 | 0x12 | 0x5 |
 /// | GOING_AWAY | - | - | - | - | - | 0x6 (17+) |
+/// | UNSUPPORTED_EXTENSION | - | - | - | - | - | 0x33 (18+) |
 ///
 /// The renumbering is the trap: draft-14 SUBSCRIBE_ERROR gives 0x4 to TRACK_DOES_NOT_EXIST
 /// and 0x10 to MALFORMED_AUTH_TOKEN, and draft-15 swaps the two. Sending either number
@@ -200,6 +201,10 @@ pub(crate) mod request {
 	/// An invalid FETCH range: draft-14 FETCH_ERROR and draft-15+ REQUEST_ERROR.
 	const INVALID_RANGE_14: u64 = 0x5;
 	const INVALID_RANGE: u64 = 0x11;
+
+	/// The track holds a Mandatory Track Property the endpoint does not understand. Draft-18
+	/// and later; draft-15 gave 0x33 another meaning.
+	const UNSUPPORTED_EXTENSION: u64 = 0x33;
 
 	/// A Range Filter exceeds MAX_FILTER_RANGES (draft-19 and later).
 	pub(crate) const INVALID_FILTER: u64 = 0x36;
@@ -315,6 +320,15 @@ pub(crate) mod request {
 		}
 	}
 
+	/// The value for a track needing a property we do not understand, or `None` before
+	/// draft-18 registered one.
+	fn unsupported_extension(version: Version) -> Option<u64> {
+		match version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => None,
+			_ => Some(UNSUPPORTED_EXTENSION),
+		}
+	}
+
 	/// The value for a draining session, or `None` before draft-17 registered one.
 	fn going_away(version: Version) -> Option<u64> {
 		match version {
@@ -368,6 +382,8 @@ pub(crate) mod request {
 			| Error::MalformedTrack
 			| Error::Stream(StreamError::MalformedTrack) => malformed_track(kind, version),
 			Error::GoingAway | Error::Stream(StreamError::GoingAway) => going_away(version),
+			// Before its code, the closest is that we do not implement what the track needs.
+			Error::UnsupportedExtension => unsupported_extension(version).or(Some(NOT_SUPPORTED)),
 			// Everything else, a duplicate included: no draft assigns it a value, and
 			// INTERNAL_ERROR is how a peer reads an unregistered code anyway.
 			_ => return INTERNAL_ERROR,
@@ -392,6 +408,7 @@ pub(crate) mod request {
 			code if Some(code) == uninterested(kind, version) => Error::Unroutable,
 			code if Some(code) == malformed_track(kind, version) => Error::MalformedTrack,
 			code if Some(code) == going_away(version) => Error::GoingAway,
+			code if Some(code) == unsupported_extension(version) => Error::UnsupportedExtension,
 			code => Error::Remote(u32::try_from(code).unwrap_or(u32::MAX)),
 		}
 	}
@@ -424,7 +441,7 @@ pub(crate) mod request {
 		/// Every error a rejection distinguishes, plus one it does not, so the checks below cover
 		/// the whole registry rather than the variants someone remembered. A new arm in
 		/// [`to_code`] belongs here.
-		const EVERY_ERROR: [Error; 14] = [
+		const EVERY_ERROR: [Error; 15] = [
 			Error::Duplicate,
 			Error::Unauthorized,
 			Error::Expired,
@@ -438,6 +455,7 @@ pub(crate) mod request {
 			Error::Unroutable,
 			Error::MalformedTrack,
 			Error::GoingAway,
+			Error::UnsupportedExtension,
 			Error::Remote(0x30),
 		];
 
@@ -559,6 +577,27 @@ pub(crate) mod request {
 				] {
 					assert_eq!(to_code(&Error::GoingAway, kind, version), GOING_AWAY);
 					assert!(matches!(from_code(GOING_AWAY, kind, version), Error::GoingAway));
+				}
+			}
+		}
+
+		/// UNSUPPORTED_EXTENSION arrived in draft-18. Draft-15 gave its 0x33 to
+		/// UNKNOWN_STATUS_IN_RANGE, so earlier drafts say NOT_SUPPORTED instead.
+		#[test]
+		fn unsupported_extension_only_exists_from_draft_18() {
+			for kind in KINDS {
+				for version in ALL {
+					let code = to_code(&Error::UnsupportedExtension, kind, version);
+					match version {
+						Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+							assert_eq!(code, NOT_SUPPORTED, "{version}");
+							assert!(!matches!(from_code(0x33, kind, version), Error::UnsupportedExtension));
+						}
+						_ => {
+							assert_eq!(code, 0x33, "{version}");
+							assert!(matches!(from_code(code, kind, version), Error::UnsupportedExtension));
+						}
+					}
 				}
 			}
 		}
