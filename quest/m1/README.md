@@ -97,6 +97,7 @@ lands before the cut.
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence, and the media fixture's cold-start audio-tone flake is fixed at its cause
 - [Handshake deadline covers admission](/quest/m1/handshake-admission-deadline.md) - `listen.timeout` bounds a connection through auth admission on both listeners, replacing the hardcoded admission timeout
+- [Ring SETUP token](/quest/m1/uring-setup-token.md) - the ring forwards a moq-transport SETUP token to the auth decider, as tokio does
 - [Drain cleanup](/quest/m1/drain-cleanup.md) - sessions force-closed at the drain deadline record their lease end and bytes before the relay or CLI exits, while unfinished handshakes stay bounded
 - [GOAWAY coverage](/quest/m1/goaway-coverage.md) - every IETF request stream handles GOAWAY, a closed control stream is a violation, and the draft-18 cutoff is honored
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust

@@ -22,6 +22,11 @@ reads `Handshake::token()` (`rs/moq-net/src/server.rs:855`). The tokio path
 copies it in `request_for` (`rs/moq-relay/src/auth.rs:1034`) from
 `moq_tokio::server::Request::token()`. Found in #5917's review.
 
+Decided by the maintainer on #5957:
+
+- ✅ Milestone m1, not m2: it is an auth bug, so it lands on the
+  breaking-release horizon even though the ring is opt-in and not yet
+  packaged. It also stays in the packaged-relay parity bar.
 - ✅ One helper builds the request from a moq-net SETUP: path and `?query`
   split from the SETUP path (`/` when empty), the token, and the role, given
   the auth transport. It sits in `auth.rs` beside `request_for`. The ring
