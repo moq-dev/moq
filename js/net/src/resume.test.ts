@@ -840,6 +840,48 @@ test.each([
 	},
 );
 
+test.each([true, false])(
+	"a replaced copy whose route fails still backs a group handed out while it held it (ordered: %p)",
+	async (ordered) => {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe();
+		const view = ordered ? sub.ordered() : undefined;
+		const next = () => (view ? view.nextGroup() : sub.recvGroup());
+		ta.write(0);
+		(await next())?.close();
+		front.serve(b.consume());
+		await settle();
+
+		ta.write(1, 2);
+		const failing = tb.write(1, 1, false);
+		const group = await next();
+		if (group?.sequence !== 1) throw new Error("expected group 1");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.0");
+
+		// The old route goes away, and the reader reads on and sees its copy end.
+		ta.producer.close(new StreamError(StreamCode.SessionClosed));
+		const later = next();
+		await settle();
+		failing.close(new StreamError(StreamCode.SessionClosed));
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.1");
+		expect(await group.readFrame()).toBeUndefined();
+
+		group.close();
+		tb.write(2);
+		expect((await later)?.sequence).toBe(2);
+		view?.close();
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	},
+);
+
 test("a fetched group that fails on the route still serving waits for the next route", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
