@@ -124,6 +124,10 @@ pub struct MoqQuicConfig {
 	/// [`moq_qlog_supported`].
 	#[uniffi(default = None)]
 	pub qlog: Option<String>,
+	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a
+	/// capture. Null is off; on without `SSLKEYLOGFILE` fails `new`.
+	#[uniffi(default = None)]
+	pub keylog: Option<bool>,
 }
 
 /// The congestion control family for a QUIC connection.
@@ -133,6 +137,8 @@ pub enum MoqCongestionControl {
 	Loss,
 	/// Delay-based (BBR): keeps queues short and the send rate steady enough for an encoder to track.
 	Delay,
+	/// No congestion control and no pacing, for tests and controlled links.
+	None,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -141,6 +147,7 @@ impl From<MoqCongestionControl> for moq_tokio::quic::CongestionControl {
 		match family {
 			MoqCongestionControl::Loss => Self::Loss,
 			MoqCongestionControl::Delay => Self::Delay,
+			MoqCongestionControl::None => Self::None,
 		}
 	}
 }
@@ -156,6 +163,7 @@ impl From<MoqQuicConfig> for moq_tokio::quic::Config {
 		quic.mtu_discovery = config.mtu_discovery;
 		quic.congestion_control = config.congestion_control.map(Into::into);
 		quic.qlog = config.qlog.map(Into::into);
+		quic.keylog = config.keylog;
 		quic
 	}
 }

@@ -88,6 +88,7 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn driver::congestion::
 	match family {
 		CongestionControl::Loss => Arc::new(driver::congestion::CubicConfig::default()),
 		CongestionControl::Delay => Arc::new(driver::congestion::Bbr3Config::default()),
+		CongestionControl::None => Arc::new(driver::congestion::Unlimited),
 	}
 }
 
@@ -326,6 +327,8 @@ pub(crate) struct Client {
 	/// whether an IPv4 destination is reachable at all. Captured here because the
 	/// endpoint owns the socket from here on and `local_addr` can't tell us.
 	dual_stack: bool,
+	/// Whether to write session secrets to `SSLKEYLOGFILE` (see [`crate::quic::Config::keylog`]).
+	keylog: bool,
 }
 
 impl Client {
@@ -339,6 +342,7 @@ impl Client {
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "client")?;
 		let transport = Arc::new(transport);
+		let keylog = quic.keylog;
 
 		// There's a bit more boilerplate to make a generic endpoint.
 		// The driver spawns its tasks on the current tokio runtime.
@@ -356,6 +360,7 @@ impl Client {
 			failover_delay: resolved.race,
 			resolution_delay: resolved.resolution_delay,
 			dual_stack,
+			keylog,
 		})
 	}
 
@@ -446,7 +451,9 @@ impl Client {
 		};
 
 		config.alpn_protocols = alpns;
-		config.key_log = Arc::new(rustls::KeyLogFile::new());
+		if self.keylog {
+			config.key_log = Arc::new(rustls::KeyLogFile::new());
+		}
 
 		let config: driver::crypto::rustls::QuicClientConfig = config.try_into()?;
 		let mut config = driver::ClientConfig::new(Arc::new(config));
@@ -749,6 +756,7 @@ impl Server {
 		let quic = quic.resolve();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "server")?;
+		let keylog = quic.keylog;
 		let transport = Arc::new(transport);
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
@@ -761,7 +769,9 @@ impl Server {
 		alpns.push(web::ALPN.as_bytes().to_vec());
 
 		let mut tls = (*served.config(alpns)?).clone();
-		tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		if keylog {
+			tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		}
 
 		let tls: driver::crypto::rustls::QuicServerConfig = tls.try_into()?;
 		let mut tls = driver::ServerConfig::with_crypto(Arc::new(tls));
@@ -1203,6 +1213,9 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<driver::congestion::Bbr3>().is_ok());
+
+		let none = congestion_factory(CongestionControl::None).build(now, mtu);
+		assert!(none.into_any().downcast::<driver::congestion::Unlimited>().is_ok());
 	}
 
 	/// Loopback regression test: with the knob unset, live QUIC connections must run
