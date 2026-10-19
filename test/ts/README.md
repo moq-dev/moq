@@ -800,7 +800,8 @@ pending acquisition. `rs/moq-net/tests/integration/catalog_acquisition.rs` cover
 outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
 
 [`.github/workflows/ts.yml`](../../.github/workflows/ts.yml) is independent of
-browser interop. Relevant mux, Hang, CLI, transport, harness and toolchain PRs run
+browser interop. PRs touching a workspace crate `run.sh` builds (kept in sync by
+`sh/gh/ts-paths.py`), the harness, or the toolchain run
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
 open-GOP, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.

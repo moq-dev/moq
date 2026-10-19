@@ -12,6 +12,11 @@ Moving the bounds reports again within the new ones, even below the last report.
 Unbounded readers and `Track.Producer.largest()` are unchanged.
 To read the track's edge from a capped reader, lift the cap with `setGroups({})` first.
 
+### An expired group fails with `Old` even when drained (#5944)
+
+A reader parked at the end of an unfinished group whose `maxDelay` gives up now rejects with a `StreamError` of code `StreamCode.Old`, even after reading every frame, where `readFrame()` used to resolve `undefined`.
+Handle it like any other skipped group.
+
 ### Track readers follow `largest()` instead of reading `latest()` (#5725)
 
 `latest()` on `Track.Subscriber` and `Track.Ordered` is gone, and `Subscriber.largest()` is no longer a synchronous buffered snapshot.

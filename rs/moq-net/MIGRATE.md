@@ -12,6 +12,12 @@ Moving the bounds reports again within the new ones, even below the last report.
 Unbounded readers, `track::Producer`, and `track::Consumer` are unchanged.
 To read the track's edge from a capped reader, lift the cap with `set_groups(..)` first.
 
+### An expired group fails with `Old` even when drained (#5944)
+
+A reader parked at the end of an unfinished group whose max delay gives up now gets `Error::Old`, even after reading every frame, where it used to end cleanly.
+`group::Consumer::finished` reports the same error.
+Handle it like any other skipped group.
+
 ### Track readers follow `largest()` instead of reading `latest()` (#5725)
 
 `latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.

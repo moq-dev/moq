@@ -163,7 +163,7 @@ export class Connection implements Established {
 		});
 
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish, {
-			grant: this.#auth.grant,
+			grant: this.#auth.scope,
 			ready: this.#auth.setupAnswered(),
 		});
 		this.#subscriber = new Subscriber(
@@ -173,7 +173,7 @@ export class Connection implements Established {
 			this.#probe,
 			this.#peerSetup,
 			this.#goaway,
-			this.#auth.grant,
+			this.#auth.scope,
 		);
 		this.#client = client;
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });

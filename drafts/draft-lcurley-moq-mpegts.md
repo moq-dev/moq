@@ -278,10 +278,10 @@ type M2ts = {
 `track` names the one track carrying the multiplex, in the same broadcast as the catalog.
 A second multiplex is a second broadcast.
 
-`randomAccess` says that every group starts at a random access point ({{m2ts-groups}}).
+`randomAccess` says that every group of the latest window the section describes started at a random access point ({{m2ts-groups}}).
 A publisher MUST write it, and a consumer MUST read an absent `randomAccess` as false.
 
-`muxRate` follows {{field-mux-rate}}, measured over every packet of the track.
+`muxRate` follows {{field-mux-rate}}, measured over every packet of that window.
 
 The section records no program, PID, descriptor, or table: they all reach the consumer inside the packets, as the publisher received them.
 A track named here MUST NOT also be described as a rendition or in an `mpegts` section.
@@ -302,11 +302,15 @@ A group starts at:
 
 - a packet with `random_access_indicator` set on the video PID of the clock's program (the first PID its PMT declares with a video `stream_type`), or on the clock PID when that program has no video;
 - a PCR on the clock PID with `discontinuity_indicator` set that steps forward ({{m2ts-timestamps}}), since a group MUST NOT contain a PCR discontinuity;
-- otherwise, the first PCR at least one second of PCR time after the group's start;
+- the first PCR at or past a whole second of the PCR count ({{m2ts-timestamps}}), unless a random access point or a forward jump fell in the second before it, each counted at the PCR before it (its own, if its packet carries one);
 - the frame that would take a group past a size bound the publisher chooses below what a relay caches of one group; frames are never split to meet it.
 
-`randomAccess` is true only while the PAT lists one program, its PMT declares at most one video stream, and the clock PID is that PMT's `PCR_PID`, and only if every group so far has started at a `random_access_indicator`.
-The first group that starts any other way, or that carries packets while that layout does not hold, republishes the section with `randomAccess` false for the rest of the track.
+Before its first group, a publisher starts one at a second only once it has watched from a PCR before the second before it, with the PMT of the clock's program read, so it never cuts where a publisher running longer saw a random access point or a jump (the first PCR it saw may carry a flag it missed).
+
+The section describes two-second windows of the PCR count, each holding the PCR intervals that start in it.
+As the count passes each window, from the first that starts after the PCR the publisher's first group follows, the section takes that window's values; a window whose values match the last one's leaves the catalog unchanged.
+An input that ends before its first such window takes `randomAccess` from every group it carried and `muxRate` from the window in progress.
+For a window, `randomAccess` is true only if the PAT listed one program, its PMT declared at most one video stream, and the clock PID was that PMT's `PCR_PID` throughout it, and every group it started began at a `random_access_indicator`.
 With more programs or video streams the random access points can stagger, so a group start is not one for all of them.
 
 Both indicators sit in the adaptation field, which TS-level scrambling leaves in the clear, so a scrambled multiplex groups like its clear twin.
@@ -318,11 +322,11 @@ A PCR gives the time of the byte holding the last bit of its `program_clock_refe
 A byte between two PCRs is placed at the rate between them; a byte past the last PCR of a timebase takes the rate of the interval before it, and one before the first PCR of a timebase takes the rate of the interval after it.
 
 PCRs are unwrapped into a 64-bit count of 27 MHz ticks, and timestamps never decrease.
-A step forward of at most half the 2^33 × 300 tick period adds to the count, across the wrap included, so a wrap is not a discontinuity.
-A PCR with `discontinuity_indicator` set whose step is forward by that measure adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}).
+Each PCR takes the number of 2^33 × 300 tick wraps that lands it nearest the current time on the catalog clock ({{hang}}), so the count runs on across the wrap, which is not a discontinuity, and a PCR more than half a wrap ahead of that time lands a wrap back.
+A PCR with `discontinuity_indicator` set that lands at or past the one before it adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}).
 A PCR that steps backwards MUST end the track with an error, flagged or not: a flagged one is a restart, which is new content, so a publisher that carries on publishes it as a new broadcast.
 
-The timeline depends only on the bytes since the publisher's first PCR, so two publishers that start at the same packet of one input publish identical frames.
+The count therefore depends only on the bytes and the catalog clock, so publishers of one input whose catalog clocks agree publish identical frames, group boundaries, and sections wherever each started, from the later one's first group on.
 
 ## Mapping onto MSFTS {#m2ts-msfts}
 Stripping each frame's timestamp leaves an {{msfts}} object of whole source packets, and the groups carry over unchanged.
@@ -443,6 +447,7 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 - Added the `m2ts` section, a transport stream carried whole, with its mapping onto MSFTS; the comparison uses MSFTS's `mpeg2ts` names.
 - Added the `pesPacket` record: each frame one whole PES packet, timestamped with its placement. A consumer that predates it drops the track rather than refusing the catalog.
 - A flagged PCR jump on an `m2ts` track follows hang's discontinuity marker rather than a skipped group sequence.
+- An `m2ts` track's fallback cut falls on whole seconds of a PCR count whose wraps follow the catalog clock, and `randomAccess` and `muxRate` describe the latest two-second window rather than the whole track, so publishers sharing a clock cut and describe the multiplex alike.
 
 ## draft-lcurley-moq-mpegts-00
 {:numbered="false"}
