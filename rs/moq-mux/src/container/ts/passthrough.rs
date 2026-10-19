@@ -22,9 +22,10 @@
 //!   split to meet the bound.
 //!
 //! A random access point or a jump counts against the grid at the PCR before it (its own PCR, if
-//! its packet carries one). Only the first kind of start makes a group a random access point. A
-//! group the PCR discontinuity starts is behind a break even when it is also a random access
-//! point.
+//! its packet carries one), and a flagged first PCR counts as a jump, since an importer running
+//! longer counted that one, or the one it retransmits. Only the first kind of start makes a group
+//! a random access point. A group the PCR discontinuity starts is behind a break even when it is
+//! also a random access point.
 //!
 //! Bytes before the first group are dropped: until the PMT, a PCR, and a group start have all
 //! been seen there is no group to put them in. A jump before the first group starts none, and a
@@ -560,6 +561,11 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 				samples: VecDeque::from([Sample { at, ticks }]),
 			});
 			self.watching_since = self.mapped.then_some(ticks);
+			// A flagged first PCR is a jump an importer running since before counted against the
+			// grid, the original if this one is a retransmitted copy, so it counts here too.
+			if flagged {
+				self.last_mark = Some(ticks);
+			}
 			self.windows.pcr(ticks, false);
 			self.window_random_access = self.single;
 			return Ok(None);

@@ -704,9 +704,13 @@ fn starts(imported: &Imported) -> Vec<bool> {
 /// first group on, both must publish the same objects in the same groups, and from the second's
 /// first section on, the same section after every PCR.
 async fn import_twice_placed(data: &[u8], prefix: usize, join: u64) -> (Imported, Imported) {
+	import_twice_placed_from(data, prefix, pcr_at(data, join)).await
+}
+
+/// [`import_twice_placed`], the second importer joining at byte `split`.
+async fn import_twice_placed_from(data: &[u8], prefix: usize, split: usize) -> (Imported, Imported) {
 	let epoch = epoch_time();
 	let hosts = [epoch + Duration::from_secs(600), epoch + Duration::from_millis(600_007)];
-	let split = pcr_at(data, join);
 	crate::clock::fake_host_wall(hosts[0]);
 	let mut first = Placed::new(epoch);
 	first.passthrough.decode(&data[..split]).unwrap();
@@ -879,6 +883,26 @@ async fn a_joiner_on_a_window_line_describes_the_window_after() {
 		"every group from 6 s on is a random access point"
 	);
 	assert_eq!(first.section(), second.section());
+}
+
+/// A joiner whose first PCR is the retransmitted copy of a flagged jump on a line of the grid counts
+/// the jump there as its partner did, so neither cuts on the line after.
+#[tokio::test(start_paused = true)]
+async fn a_joiner_on_a_retransmitted_jump_counts_it_against_the_grid() {
+	const LINE: u64 = 1_000 * MS;
+	let mut mux = Mux::default();
+	program(&mut mux, 0x100);
+	let prefix = mux.out.len();
+	// The placed epoch puts these PCRs one wrap on, so `offset` lands every 25th on a line.
+	let offset = (LINE - WRAP % LINE) % LINE;
+	paced(&mut mux, 0x100, offset, 100, 0, 4);
+	let jump = offset + 11 * LINE;
+	mux.packet(0x100, Flags::pcr(jump).discontinuity());
+	mux.out.extend_from_within(mux.out.len() - 188..);
+	mux.fill(0x101, 4);
+	paced(&mut mux, 0x100, jump + 40 * MS, 250, 0, 4);
+	let data = mux.bytes();
+	import_twice_placed_from(&data, prefix, pcr_at(&data, jump) + 188).await;
 }
 
 /// The grid lies on the timeline the epoch places, so it runs on regularly across a PCR wrap that

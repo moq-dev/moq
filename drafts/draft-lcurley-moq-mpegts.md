@@ -306,6 +306,7 @@ A group starts at:
 - the frame that would take a group past a size bound the publisher chooses below what a relay caches of one group; frames are never split to meet it.
 
 Before its first group, a publisher starts one at a second only once it has watched the whole second before it, the PMT of the clock's program read and a PCR seen, so it never cuts where a publisher running longer saw a random access point.
+A flagged first PCR counts as a forward jump, since a publisher running longer counted that jump, or the one it retransmits, at the same PCR.
 
 The section describes two-second windows of the PCR count, each holding the PCR intervals that start in it.
 As the count passes each window, from the first that starts after the PCR the publisher's first group follows, the section takes that window's values; a window whose values match the last one's leaves the catalog unchanged.
