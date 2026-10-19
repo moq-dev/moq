@@ -337,7 +337,7 @@ impl<F: Container> Consumer<F> {
 					false => self.pending.front().expect("a group has a frame").sequence,
 				};
 				// Nothing has been read, so discarding what lies below the start is no gap.
-				self.discard(|group| group.sequence < start)?;
+				self.discard(waiter, |group, _| group.sequence < start)?;
 				self.current = start;
 				self.startup = false;
 			}
@@ -346,12 +346,18 @@ impl<F: Container> Consumer<F> {
 		// Reap aborted groups the cursor hasn't reached: nothing below settles them
 		// (the read arm only handles the front at the cursor, and neither the skip
 		// target scan nor the empty-group check counts an abort), so one left ahead
-		// of a sequence gap would park the consumer forever. Buffered frames read
-		// before the abort stay deliverable, so such a group is kept; the front at
-		// the cursor keeps the eviction fast path in the read arm below.
+		// of a sequence gap would park the consumer forever. Frames read before the
+		// abort stay deliverable, and a fault among them waits for its place in
+		// delivery order, so a group decoded to either is kept; the front at the
+		// cursor keeps the eviction fast path in the read arm below.
 		// poll_aborted registers the waiter on live groups, so a later abort re-polls.
 		let current = self.current;
-		self.discard(|group| group.sequence > current && group.buffered.is_empty() && group.poll_aborted(waiter))?;
+		self.discard(waiter, |group, format| {
+			group.sequence > current && group.poll_aborted(waiter) && {
+				let _ = group.look_all(waiter, format);
+				group.buffered.is_empty() && group.fault.is_none()
+			}
+		})?;
 
 		'read: loop {
 			// Return the next frame from the current group if possible.
@@ -411,7 +417,7 @@ impl<F: Container> Consumer<F> {
 						// Whatever the group still held is lost, so this is a skip like any other.
 						self.lose();
 						let current = self.current;
-						self.discard(|group| group.sequence <= current)?;
+						self.discard(waiter, |group, _| group.sequence <= current)?;
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
 						continue 'read;
 					}
@@ -529,7 +535,7 @@ impl<F: Container> Consumer<F> {
 					.take(new_idx)
 					.any(|group| !group.buffered.is_empty());
 				let target = self.pending[new_idx].sequence;
-				self.discard(|group| group.sequence < target)?;
+				self.discard(waiter, |group, _| group.sequence < target)?;
 				if hole || had_marker || discarded {
 					self.lose();
 				}
@@ -629,16 +635,24 @@ impl<F: Container> Consumer<F> {
 	}
 
 	// Drop the pending groups `pick` selects without delivering them. A drop must not hide a
-	// malformed group, so the lowest one holding a fault, or reaching below the start of the
-	// latest delivered group, ends the reader instead.
-	fn discard(&mut self, mut pick: impl FnMut(&mut GroupBuffer<F>) -> bool) -> Result<(), F::Error> {
+	// malformed group, so each is decoded through what has arrived first, and the lowest one
+	// holding a fault, or reaching below the start of the latest delivered group, ends the reader
+	// instead. Each arrived payload is decoded once either way, so a peer can't make this cost
+	// more than the bytes the transport already holds for the group.
+	fn discard(
+		&mut self,
+		waiter: &kio::Waiter,
+		mut pick: impl FnMut(&mut GroupBuffer<F>, &F) -> bool,
+	) -> Result<(), F::Error> {
 		let start = self.start;
+		let format = &self.format;
 		let mut fault = None;
 		self.pending.retain_mut(|group| {
-			if !pick(group) {
+			if !pick(group, format) {
 				return true;
 			}
 			if fault.is_none() {
+				let _ = group.look_all(waiter, format);
 				fault = match (start, group.min_timestamp) {
 					(Some((prev, floor)), Some(min))
 						if group.sequence > prev && min.as_micros() < floor.as_micros() =>
@@ -2764,6 +2778,60 @@ mod tests {
 		newest.finish().unwrap();
 		track.finish().unwrap();
 
+		let read = read_past_frames(&mut consumer).await;
+		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
+	}
+
+	/// A live start decodes every group it discards, not only up to the first with a frame, so a
+	/// malformed one between a valid oldest group and the newest still ends the reader.
+	#[tokio::test]
+	async fn a_live_start_decodes_every_discarded_group() {
+		tokio::time::pause();
+		let track = track_producer("test", timed());
+		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode).live();
+
+		for (sequence, micros) in [(0, Some(0)), (1, None), (2, Some(20_000))] {
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			write_failing(&mut group, micros);
+			group.finish().unwrap();
+		}
+		track.finish().unwrap();
+
+		let read = read_past_frames(&mut consumer).await;
+		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
+	}
+
+	/// An aborted later group holding a fault is not reaped ahead of its place: its error waits
+	/// for the current group's frames, as a live group's does.
+	#[tokio::test]
+	async fn an_aborted_later_group_keeps_its_fault_in_delivery_order() {
+		tokio::time::pause();
+		let track = track_producer("test", timed());
+		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
+
+		let mut current = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_failing(&mut current, Some(0));
+		let first = consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(first.timestamp, ts(0));
+
+		let mut later = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		write_failing(&mut later, None);
+		// The reader looks ahead into the later group while it waits on the open one.
+		assert!(
+			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_err()
+		);
+		later.abort(moq_net::Error::Cancel).unwrap();
+
+		write_failing(&mut current, Some(10_000));
+		let frame = consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(frame.timestamp, ts(10_000));
+
+		current.finish().unwrap();
+		track.finish().unwrap();
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
 	}
