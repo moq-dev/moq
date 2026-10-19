@@ -2277,8 +2277,14 @@ where
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(entry) => {
 				let entry = entry.into_mut();
-				match entry.adverts.iter_mut().find(|(advert, _)| *advert == id) {
-					Some((_, held)) => *held = route,
+				match entry.adverts.iter().position(|(advert, _)| *advert == id) {
+					// A repeat under another epoch is a newer advertisement, so it becomes the
+					// newest; one of the same instance stays where it is.
+					Some(index) if entry.adverts[index].1.epoch != route.epoch => {
+						entry.adverts.remove(index);
+						entry.adverts.push((id, route));
+					}
+					Some(index) => entry.adverts[index].1 = route,
 					None => entry.adverts.push((id, route)),
 				}
 				// The newest advertisement stands, and an update to an older one changes
@@ -8463,6 +8469,41 @@ mod tests {
 		);
 
 		subscriber.stop_announce(path, second, false).unwrap();
+		assert_eq!(routed_now(&consumer, "room/host"), None);
+	}
+
+	/// MoQ Epoch: a namespace advertised both inline and by a later PUBLISH_NAMESPACE takes
+	/// another epoch from either. An inline repeat under the new epoch is the newest
+	/// advertisement, not an update to the older of the two.
+	#[moq_clock::test]
+	async fn a_repeat_under_another_epoch_becomes_the_newest() {
+		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
+		let consumer = origin.consume();
+		let path = crate::Path::new("room/host").to_owned();
+		let peer = cluster::Peer::default();
+		let (old, new) = (crate::Epoch::mint(), crate::Epoch::mint());
+		let advert = |subscriber: &Subscriber<_>, epoch: &crate::Epoch| {
+			subscriber
+				.route(None, &peer)
+				.expect("route")
+				.with_epoch(Some(epoch.clone()))
+		};
+		let epoch_now = || routed_now(&consumer, "room/host").and_then(|route| route.epoch);
+
+		let inline = advert(&subscriber, &old);
+		let inline = subscriber.start_announce(path.clone(), inline, Admit::Session).unwrap();
+		let request = advert(&subscriber, &old);
+		let request = subscriber.start_announce(path.clone(), request, Admit::Session).unwrap();
+		assert_eq!(epoch_now(), Some(old.clone()));
+
+		let repeat = advert(&subscriber, &new);
+		subscriber.update_announce(path.clone(), inline, repeat).unwrap();
+		assert_eq!(epoch_now(), Some(new.clone()), "the older request kept the old instance");
+
+		// The old instance's withdrawal leaves the new one standing.
+		subscriber.stop_announce(path.clone(), request, false).unwrap();
+		assert_eq!(epoch_now(), Some(new));
+		subscriber.stop_announce(path, inline, false).unwrap();
 		assert_eq!(routed_now(&consumer, "room/host"), None);
 	}
 

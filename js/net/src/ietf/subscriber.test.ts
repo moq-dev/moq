@@ -2350,6 +2350,29 @@ test("a NAMESPACE repeated under another epoch restarts the path in place", asyn
 });
 
 /**
+ * A namespace advertised both inline and by a later PUBLISH_NAMESPACE takes another epoch
+ * from either: an inline repeat under the new epoch is the newest advertisement, not an
+ * update to the older of the two.
+ */
+test("a NAMESPACE repeat under another epoch outranks a later PUBLISH_NAMESPACE", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const path = Path.from("room");
+	const first = Epoch.mint();
+	await inlineEpoch(subscription, path, first);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: first } });
+	await publishEpoch(pair, subscriber, path, first);
+
+	const second = Epoch.mint();
+	await inlineEpoch(subscription, path, second);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart", route: { epoch: second } });
+	announced.close();
+});
+
+/**
  * Gaining or losing an epoch is not one instance replacing another, so a repeat that does
  * either means the peer skipped the NAMESPACE_DONE.
  */

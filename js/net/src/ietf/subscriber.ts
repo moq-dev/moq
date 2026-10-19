@@ -380,6 +380,12 @@ export class Subscriber {
 		const existing = this.#announced.get(path);
 		const advert = existing?.adverts.find((advert) => advert.id === id);
 		if (existing === undefined || advert === undefined) return;
+		// A repeat under another epoch is a newer advertisement, so it becomes the newest;
+		// one of the same instance stays where it is.
+		if (advert.route.epoch !== route.epoch) {
+			existing.adverts.splice(existing.adverts.indexOf(advert), 1);
+			existing.adverts.push(advert);
+		}
 		advert.route = route;
 		this.#settleAnnounce(path, existing);
 	}
@@ -402,6 +408,8 @@ export class Subscriber {
 		const kind = restart ? "restart" : "update";
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
+			// A consumer that closed stays registered until its reader loop notices.
+			if (consumer.closed.peek() !== undefined) continue;
 			const scope = filter.scope;
 			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind, route });
 		}
