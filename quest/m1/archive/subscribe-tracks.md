@@ -91,11 +91,15 @@ TRACKS' three events (see its Plan) map as follows:
   either way, and readers keep their own lite subscriptions downstream. The
   costs are that a listed track's upstream subscription lives as long as its
   entry, paused while unread, and that the existing SUBSCRIBE path adopts a
-  held PUBLISH as the track's copy instead of opening one. On draft-18, a
-  PUBLISH for a track we already SUBSCRIBEd is that same duplicate, so the
-  existing SUBSCRIBE becomes the entry and the PUBLISH is refused with
-  DUPLICATE_SUBSCRIPTION; for a SUBSCRIBE still pending, end it first, as
-  section 5.1 requires. Only TRACK_ENDED ("no longer being published") is a removal,
+  held PUBLISH as the track's copy instead of opening one. Conversely, on
+  every draft, a PUBLISH for a track we already SUBSCRIBEd (established or
+  pending) is redundant: the existing SUBSCRIBE becomes the entry and stays
+  the one copy, and the PUBLISH is refused, with DUPLICATE_SUBSCRIPTION on
+  draft-18 and UNINTERESTED from draft-19. Draft-18 section 5.1 only asks a
+  subscriber to end its pending SUBSCRIBE before sending PUBLISH_OK, which a
+  refusal never sends. A pending SUBSCRIBE's add goes downstream once its
+  SUBSCRIBE_OK arrives, and a refused one fails the listing loudly, as for a
+  skipped track. Only TRACK_ENDED ("no longer being published") is a removal,
   and a later PUBLISH for the name is a new add. Any other status
   (GOING_AWAY, EXCESSIVE_LOAD, ...) ends only that subscription while the
   track may still be published, and the peer need not PUBLISH it again, so it
@@ -218,9 +222,10 @@ unchanged; TRACKS(`/a/b`) and TRACKS(`/a/c`) open two requests and hold no
 track outside them, and a later TRACKS(`/a`) folds both into one, keeping
 every held entry and refusing any duplicate PUBLISH; when widening `/a/b` to
 `/a` is refused after `/a/c` was cancelled, the `/a`, `/a/b`, and `/a/c`
-listings all reset and re-request; on draft-18, a PUBLISH for
-a track we already SUBSCRIBEd lists it through that SUBSCRIBE and is refused
-with DUPLICATE_SUBSCRIPTION; a moq-transport subscriber resuming our paused
+listings all reset and re-request; a PUBLISH for a track we already
+SUBSCRIBEd, established or pending, lists it through that SUBSCRIBE and is
+refused (DUPLICATE_SUBSCRIPTION on draft-18, UNINTERESTED from draft-19),
+leaving one upstream subscription; a moq-transport subscriber resuming our paused
 PUBLISH gets the groups its filter asks for from the cache; a moq-transport subscriber gets
 PUBLISH_DONE when a lite track is removed; an unsolicited PUBLISH is refused.
 

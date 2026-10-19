@@ -39,9 +39,12 @@ Decided by the maintainer on 2026-10-17 (see the
   boundaries. Each object preserves group sequences, frame boundaries,
   timestamps, and payloads. Rejected: whole-broadcast objects per window and
   size-based cuts.
-- **Keys.** `<prefix>/<track>/<first group>-<first pts>` for a timed track and
-  `<prefix>/<track>/<first group>` for an untimed one, zero-padded so keys sort
-  in content order. `<track>` is the name in the existing canonical percent
+- **Keys.** `<prefix>/<track>/<first group>-<first frame>-<first pts>` for a
+  timed track and `<prefix>/<track>/<first group>` for an untimed one,
+  zero-padded so keys sort in content order. The frame index keeps the
+  fragments of an oversized timed group unique and ordered, since they share
+  the group and pts can repeat or go backward in decode order; pts stays for
+  time lookups. `<track>` is the name in the existing canonical percent
   encoding (`rs/moq-archive/src/path.rs`, everything but `A-Z a-z 0-9 _ -`
   escaped), so a name holding `/` stays one segment and no name collides with
   `.info`; a consumer refuses a non-canonical segment. A sorted LIST answers
@@ -70,7 +73,7 @@ Decided by the maintainer on 2026-10-17 (see the
   continues at the frame after its last stored one: its subscription starts
   at `Position(last group, stored frame count)`, so a group split across
   objects or still open at the restart loses nothing. A timed track stores
-  the rest as a new object keyed by its first frame's pts. An untimed track
+  the rest as a new object keyed by its first frame's index and pts. An untimed track
   reads its newest object back and keeps rewriting it in place with the
   appended frames. A completed group yields no more frames, so this is the
   same rule whether or not the restart landed mid-group; if the source has
@@ -91,7 +94,8 @@ Decided by the maintainer on 2026-10-17 (see the
 
 Test on mock time with the in-memory store: a lost group recorded as a gap
 without stalling later groups, duration and wall-clock cuts, a split oversized
-timed group, an open untimed group rewritten in place, an idle track flushed
+timed group whose fragments get unique keys in frame order even when pts
+repeats or goes backward, an open untimed group rewritten in place, an idle track flushed
 within the bound, resume after a restart (including mismatched properties,
 and a restart mid-group for both a split timed group and an open untimed
 group, with no frame lost or duplicated), a track name holding `/` or

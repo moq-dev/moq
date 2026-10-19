@@ -40,8 +40,9 @@ archive (per-track `.timeline.z` records named by the catalog's root
   capped by configuration; a group still missing at the cap is a gap, never a
   stall. Anything younger is still in the live cache.
 - **Per-track objects, keyed by position.** Groups coalesce in order into
-  objects cut by duration, keyed `<prefix>/<track>/<first group>-<first pts>`
-  (`<first group>` for an untimed track, `<track>` percent-encoded as one
+  objects cut by duration, keyed
+  `<prefix>/<track>/<first group>-<first frame>-<first pts>` (`<first group>`
+  for an untimed track, `<track>` percent-encoded as one
   segment), beside a small per-track `.info` holding its timescale and
   priority. A served track advertises the archive's retention (no limit), not
   the source's max age, which would expire archived history. The key listing is the index: no index object,
