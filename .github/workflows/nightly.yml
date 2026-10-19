@@ -118,6 +118,9 @@ jobs:
           - name: Audit
             recipe: rs audit
             uncached: true
+          - name: JS audit
+            recipe: js audit
+            uncached: true
           # Uncached: the instrumented build bypasses mbx, so the cache can't serve it.
           - name: moq-quic coverage
             recipe: rs coverage moq-quic

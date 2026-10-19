@@ -1,6 +1,6 @@
 # cargo-deny configuration. See https://embarkstudios.github.io/cargo-deny/
 #
-# Run `cargo deny check` to validate; runs in `just rs check` and `just rs ci`.
+# Run `just rs audit` to validate; runs nightly.
 
 [graph]
 all-features = true
