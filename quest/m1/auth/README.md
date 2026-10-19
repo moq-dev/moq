@@ -138,7 +138,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
   the rest, with the URL kept for peers without the AUTH stream
-  subscription even while its joining FETCH waits for request-ID credit
 
 ## Related
 
