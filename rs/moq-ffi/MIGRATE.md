@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Key logging is off (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+The `quic.keylog` switch that turns it back on is not in `MoqQuicConfig` yet, so these bindings cannot capture session keys.
+
 ### Subscriptions carry group ranges (#5732)
 
 `MoqSubscription::group_start` and `group_end` are replaced by `ranges`, a list of `MoqRange { start, end }` whose ends are `MoqAnchor::Absolute { group, frame }` or `MoqAnchor::Relative { groups }`, and an optional `order`.
