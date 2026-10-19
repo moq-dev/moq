@@ -123,6 +123,67 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 	}
 }
 
+/// Grants by ID, with their union kept as counts per pattern and deadline, so changing one
+/// costs that grant rather than a pass over all of them.
+#[derive(Default)]
+struct Tally {
+	grants: BTreeMap<u64, Grant>,
+	publish: BTreeMap<crate::Pattern, usize>,
+	subscribe: BTreeMap<crate::Pattern, usize>,
+	expires: BTreeMap<Instant, usize>,
+}
+
+impl Tally {
+	fn get(&self, id: u64) -> Option<&Grant> {
+		self.grants.get(&id)
+	}
+
+	/// Replace the grant for `id`, or forget it with `None`.
+	fn set(&mut self, id: u64, grant: Option<Grant>) {
+		let old = match grant {
+			Some(grant) => {
+				self.count(&grant, true);
+				self.grants.insert(id, grant)
+			}
+			None => self.grants.remove(&id),
+		};
+		if let Some(old) = old {
+			self.count(&old, false);
+		}
+	}
+
+	fn count(&mut self, grant: &Grant, add: bool) {
+		fn step<K: Ord + Clone>(counts: &mut BTreeMap<K, usize>, key: &K, add: bool) {
+			if add {
+				*counts.entry(key.clone()).or_default() += 1;
+			} else if let Some(count) = counts.get_mut(key) {
+				*count -= 1;
+				if *count == 0 {
+					counts.remove(key);
+				}
+			}
+		}
+		for pattern in grant.publish.iter() {
+			step(&mut self.publish, pattern, add);
+		}
+		for pattern in grant.subscribe.iter() {
+			step(&mut self.subscribe, pattern, add);
+		}
+		if let Some(expires) = &grant.expires {
+			step(&mut self.expires, expires, add);
+		}
+	}
+
+	/// What any of the grants allows, lapsing at the earliest expiry.
+	fn union(&self) -> Grant {
+		Grant {
+			publish: self.publish.keys().cloned().collect(),
+			subscribe: self.subscribe.keys().cloned().collect(),
+			expires: self.expires.keys().next().copied(),
+		}
+	}
+}
+
 /// The shared state behind every auth handle of one session.
 #[derive(Default)]
 pub(crate) struct State {
@@ -141,6 +202,8 @@ pub(crate) struct State {
 	next_wire: u64,
 	/// Every token this side presented that has not ended.
 	tokens: BTreeMap<u64, Slot>,
+	/// Each token's latest AUTH_OK, absent before the first and after the token ends.
+	granted: Tally,
 	/// Tokens waiting for the driver to open their stream.
 	opening: VecDeque<u64>,
 	/// The union of every open token's grant, `None` until the peer first replies.
@@ -153,7 +216,7 @@ pub(crate) struct State {
 	limit: Option<Grant>,
 	/// The grants the application issued to the peer's AUTH tokens, by stream, in the
 	/// peer's terms. A token on a single request never joins them.
-	issued: BTreeMap<u64, Grant>,
+	issued: Tally,
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	next_issue: u64,
 	/// The session's scope for the peer: the limit and every issued grant, `None` while the
@@ -172,8 +235,6 @@ pub(crate) struct Slot {
 	/// Presented by the session itself at setup, so enforcement waits on it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	setup: bool,
-	/// The latest AUTH_OK, `None` before the first and after the token ends.
-	grant: Option<Grant>,
 	/// Handed to the driver to open its AUTH stream, which then owns ending it.
 	streamed: bool,
 	/// The ID its AUTH stream carries, which a moq-lite request names it by.
@@ -210,8 +271,8 @@ enum Acceptor {
 /// an ID is either still in flight, live, or over: the arrival watermark and the few IDs
 /// ahead of it tell the first from the last without remembering every ended ID.
 ///
-/// Kept apart from [`State`], which nothing here mutates, so a change to one token wakes
-/// only the [`Changes`] watching it: neither every request nor every other token.
+/// Kept apart from [`State`], so a change to one token wakes only the [`Changes`] of what
+/// names it, never every waiter on the session's state.
 #[derive(Default)]
 struct Peer {
 	/// Every ID below this one has arrived.
@@ -310,6 +371,7 @@ impl Peer {
 		self.watchers.entry(id).or_default().push(changes.clone());
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn unwatch(&mut self, id: u64, changes: &Changes) {
 		let Some(watchers) = self.watchers.get_mut(&id) else {
 			return;
@@ -339,14 +401,10 @@ impl Peer {
 
 impl State {
 	fn recompute(&mut self) {
-		let mut granted = self.tokens.values().filter_map(|slot| slot.grant.as_ref()).peekable();
-		if granted.peek().is_none() && !self.replied {
+		if self.granted.grants.is_empty() && !self.replied {
 			return;
 		}
-		let mut union = Grant::default();
-		for grant in granted {
-			union.union(grant);
-		}
+		let union = self.granted.union();
 		if self.union.as_ref() != Some(&union) {
 			self.union = Some(union);
 			self.epoch += 1;
@@ -357,9 +415,7 @@ impl State {
 	fn rescope(&mut self) {
 		let scope = self.limit.as_ref().map(|limit| {
 			let mut scope = limit.clone();
-			for grant in self.issued.values() {
-				scope.union(grant);
-			}
+			scope.union(&self.issued.union());
 			scope
 		});
 		if self.scope != scope {
@@ -550,7 +606,6 @@ impl Handle {
 			Slot {
 				token,
 				setup,
-				grant: None,
 				streamed: false,
 				wire: None,
 				answered,
@@ -731,12 +786,12 @@ impl Handle {
 		let Some(slot) = state.tokens.get_mut(&id) else {
 			return;
 		};
+		slot.answered.get_or_insert(Ok(()));
 		// A withdrawn token's stream stays up while the peer still has requests naming it,
 		// but its grant left the union with the withdrawal.
 		if !slot.withdrawn {
-			slot.grant = Some(grant);
+			state.granted.set(id, Some(grant));
 		}
-		slot.answered.get_or_insert(Ok(()));
 		state.replied = true;
 		state.recompute();
 	}
@@ -757,10 +812,10 @@ impl Handle {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn ended(&self, id: u64, err: Error) {
 		let mut state = self.state.lock();
+		state.granted.set(id, None);
 		let Some(slot) = state.tokens.get_mut(&id) else {
 			return;
 		};
-		slot.grant = None;
 		slot.answered.get_or_insert(Err(err.clone()));
 		slot.ended = Some(err);
 		// The handle is gone and the token is over: nothing will read the slot again.
@@ -820,10 +875,7 @@ impl Handle {
 	/// `None`, resizing the scope.
 	fn issue(&self, id: u64, grant: Option<Grant>) {
 		let mut state = self.state.lock();
-		match grant {
-			Some(grant) => state.issued.insert(id, grant),
-			None => state.issued.remove(&id),
-		};
+		state.issued.set(id, grant);
 		state.rescope();
 	}
 
@@ -991,10 +1043,10 @@ impl Handle {
 		state.closed = Some(err.clone());
 		state.opening.clear();
 		for slot in state.tokens.values_mut() {
-			slot.grant = None;
 			slot.answered.get_or_insert(Err(err.clone()));
 			slot.ended.get_or_insert(err.clone());
 		}
+		state.granted = Tally::default();
 		state.recompute();
 		let queue = match &state.acceptor {
 			Acceptor::App(queue) => Some(queue.clone()),
@@ -1081,12 +1133,12 @@ impl std::fmt::Debug for Auth {
 impl Drop for Presented {
 	fn drop(&mut self) {
 		let mut state = self.state.lock();
+		// The grant leaves the union now, even while the stream closes gracefully.
+		state.granted.set(self.id, None);
 		let Some(slot) = state.tokens.get_mut(&self.id) else {
 			return;
 		};
 		slot.withdrawn = true;
-		// The grant leaves the union now, even while the stream closes gracefully.
-		slot.grant = None;
 		// Already over, or no stream whose close would end it: nothing left to close.
 		if slot.ended.is_some() || !slot.streamed {
 			state.opening.retain(|id| *id != self.id);
@@ -1124,7 +1176,7 @@ impl Watch {
 	fn current(&self, state: &State) -> Option<Grant> {
 		match self.selector {
 			Selector::Union => state.union.clone(),
-			Selector::Slot(id) => state.tokens.get(&id).and_then(|slot| slot.grant.clone()),
+			Selector::Slot(id) => state.granted.get(id).cloned(),
 		}
 	}
 
@@ -1158,7 +1210,7 @@ impl Watch {
 		let state = ready_or!(self.state.poll(waiter, |state| {
 			let current = match selector {
 				Selector::Union => state.union.as_ref(),
-				Selector::Slot(id) => state.tokens.get(id).and_then(|slot| slot.grant.as_ref()),
+				Selector::Slot(id) => state.granted.get(*id),
 			};
 			let ended = state.closed.is_some()
 				|| match selector {
@@ -2509,6 +2561,49 @@ mod tests {
 		let issuer = Handle::ietf(false);
 		let auth = issuer.present(Bytes::from_static(b"jwt"), false).unwrap();
 		assert_eq!(Handle::ietf(false).token(&auth), None);
+	}
+
+	/// A tally's union is what the grants it still holds allow, lapsing at the earliest
+	/// expiry among them, however they were replaced.
+	#[test]
+	fn a_tally_unions_what_it_holds() {
+		let soon = Instant::ZERO + std::time::Duration::from_secs(1);
+		let later = soon + std::time::Duration::from_secs(1);
+		let mut tally = Tally::default();
+		tally.set(0, Some(grant(&["room"], &["room"])));
+		tally.set(1, Some(grant(&["room/alice"], &["lobby"])));
+		tally.set(
+			2,
+			Some(Grant {
+				expires: Some(soon),
+				..grant(&[], &["lobby"])
+			}),
+		);
+		assert_eq!(
+			tally.union(),
+			Grant {
+				expires: Some(soon),
+				..grant(&["room"], &["room", "lobby"])
+			}
+		);
+
+		tally.set(0, Some(grant(&[], &[])));
+		tally.set(
+			2,
+			Some(Grant {
+				expires: Some(later),
+				..grant(&[], &[])
+			}),
+		);
+		assert_eq!(
+			tally.union(),
+			Grant {
+				expires: Some(later),
+				..grant(&["room/alice"], &["lobby"])
+			}
+		);
+		tally.set(2, None);
+		assert_eq!(tally.union(), grant(&["room/alice"], &["lobby"]));
 	}
 
 	/// Every clone names one credential, which stays presented until the last drops.
