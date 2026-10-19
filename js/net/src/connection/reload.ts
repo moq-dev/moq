@@ -136,6 +136,9 @@ export class Reload {
 	 */
 	readonly bandwidth: Allocator;
 
+	/** Ordered protocol offer retained across retries and redirects. */
+	readonly protocols?: readonly string[];
+
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
 
@@ -232,6 +235,7 @@ export class Reload {
 		this.delay = props?.delay ?? {};
 		this.goaway = props?.goaway ?? {};
 		this.redirect = this.#redirect;
+		this.protocols = props?.protocols ? [...props.protocols] : undefined;
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		this.publish = props?.publish;
@@ -389,6 +393,7 @@ export class Reload {
 							url: dialing,
 							// A redirect names the relay; a fallback URL pinned for the old one does not follow.
 							websocket: this.#redirect.peek() ? { ...this.websocket, url: undefined } : this.websocket,
+							protocols: this.protocols,
 							webtransport: this.webtransport,
 							publish: this.publish,
 							consume: this.consume,

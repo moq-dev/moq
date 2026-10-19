@@ -63,10 +63,54 @@ export interface WebTransportProps extends Omit<WebTransportOptions, "serverCert
 	serverCertificate?: string | BufferSource;
 }
 
+const PROTOCOL_VERSIONS = {
+	[Lite.ALPN_07_WIP]: null,
+	[Lite.ALPN_06]: null,
+	[Lite.ALPN_05]: null,
+	[Lite.ALPN_04]: null,
+	[Lite.ALPN_03]: null,
+	[Lite.ALPN]: null,
+	[Ietf.ALPN.DRAFT_22]: "qmux-01",
+	[Ietf.ALPN.DRAFT_21]: "qmux-01",
+	[Ietf.ALPN.DRAFT_20]: "qmux-01",
+	[Ietf.ALPN.DRAFT_19]: "qmux-01",
+	[Ietf.ALPN.DRAFT_18]: "qmux-01",
+	[Ietf.ALPN.DRAFT_17]: null,
+	[Ietf.ALPN.DRAFT_16]: null,
+	[Ietf.ALPN.DRAFT_15]: null,
+} as const satisfies Record<string, QmuxVersion | QmuxVersion[] | null>;
+
+// Experimental lite-07 stays opt-in on both transports.
+const DEFAULT_PROTOCOLS = Object.keys(PROTOCOL_VERSIONS).filter((protocol) => protocol !== Lite.ALPN_07_WIP);
+
+/** Validate and snapshot an ordered protocol offer before acquiring a connection. @internal */
+export function normalizeProtocols(
+	protocols?: readonly string[],
+	webtransport?: WebTransportProps,
+): string[] | undefined {
+	if (protocols === undefined) return undefined;
+	if (webtransport?.protocols !== undefined)
+		throw new TypeError("set protocols on the connection instead of webtransport");
+	if (protocols.length === 0) throw new TypeError("protocols must not be empty");
+	const seen = new Set<string>();
+	for (const protocol of protocols) {
+		if (!Object.hasOwn(PROTOCOL_VERSIONS, protocol)) throw new TypeError(`unsupported protocol: ${protocol}`);
+		if (seen.has(protocol)) throw new TypeError(`duplicate protocol: ${protocol}`);
+		seen.add(protocol);
+	}
+	return [...protocols];
+}
+
 /** Options for {@link connect}. */
 export interface ConnectProps {
 	/** The relay URL. */
 	url: URL;
+
+	/**
+	 * Ordered ALPNs to offer on both transports, including any desired fallbacks; omit for stable defaults.
+	 * A legacy peer that negotiates no application ALPN still uses the compatibility handshake.
+	 */
+	protocols?: readonly string[];
 
 	/** WebTransport options. */
 	webtransport?: WebTransportProps;
@@ -142,6 +186,8 @@ const NEVER_ABORTED = new AbortController().signal;
  */
 export async function connect({ url, ...props }: ConnectProps): Promise<Established> {
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
+	props.protocols = normalizeProtocols(props.protocols, props.webtransport);
+	if (props.transport && props.protocols) throw new TypeError("protocols cannot reconfigure a supplied transport");
 	const signal = props.signal ?? NEVER_ABORTED;
 	signal.throwIfAborted();
 
@@ -184,7 +230,13 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 	const { promise: raced, resolve: done } = Promise.withResolvers<void>();
 	const cancel = Promise.race([raced, abort]);
 
-	const webtransport = isWebTransportSupported() ? connectWebTransport(url, cancel, props.webtransport) : undefined;
+	const webtransport = isWebTransportSupported()
+		? connectWebTransport(
+				url,
+				cancel,
+				props.protocols ? { ...props.webtransport, protocols: [...props.protocols] } : props.webtransport,
+			)
+		: undefined;
 
 	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket has won in the past.
 	// NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
@@ -192,7 +244,7 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 		!webtransport || websocketWon.has(url.toString()) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
 	const websocket =
 		props.websocket?.enabled !== false
-			? connectWebSocket(props.websocket?.url ?? url, headstart, cancel)
+			? connectWebSocket(props.websocket?.url ?? url, { delay: headstart, cancel, protocols: props.protocols })
 			: undefined;
 
 	if (!websocket && !webtransport) {
@@ -225,6 +277,11 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 	}
 
 	// The remaining setup is identical whether the transport was raced or supplied.
+	const protocol = (session as { protocol?: string }).protocol;
+	if (props.protocols && protocol && !props.protocols.includes(protocol)) {
+		session.close();
+		throw new Error(`server selected an unoffered protocol: ${protocol}`);
+	}
 	return await connectTransport(url, session as WebTransport, wiring);
 }
 
@@ -453,23 +510,7 @@ async function connectWebTransport(
 	const finalOptions: WebTransportOptions = {
 		allowPooling: false,
 		congestionControl: "low-latency",
-		protocols: [
-			// Lite.ALPN_07_WIP is intentionally omitted: lite-07 is work-in-progress and
-			// not advertised by default (negotiate still accepts it if a server selects it).
-			Lite.ALPN_06,
-			Lite.ALPN_05,
-			Lite.ALPN_04,
-			Lite.ALPN_03,
-			Lite.ALPN,
-			Ietf.ALPN.DRAFT_22,
-			Ietf.ALPN.DRAFT_21,
-			Ietf.ALPN.DRAFT_20,
-			Ietf.ALPN.DRAFT_19,
-			Ietf.ALPN.DRAFT_18,
-			Ietf.ALPN.DRAFT_17,
-			Ietf.ALPN.DRAFT_16,
-			Ietf.ALPN.DRAFT_15,
-		],
+		protocols: DEFAULT_PROTOCOLS,
 		...webtransport,
 	};
 
@@ -525,7 +566,10 @@ async function connectWebTransport(
 }
 
 // TODO accept arguments to control the port/path used.
-async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>): Promise<Session | undefined> {
+async function connectWebSocket(
+	url: URL,
+	{ delay, cancel, protocols }: { delay: number; cancel: Promise<void>; protocols?: readonly string[] },
+): Promise<Session | undefined> {
 	const timer = sleep(Nano.fromMilli(Milli(delay)));
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
@@ -536,30 +580,14 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 	// don't want to lock that in: set the value to `null` so the polyfill
 	// advertises every QMux draft it knows about and the server picks one.
 	// Insertion order is the negotiation preference on the wire.
-	const versions = {
-		// Lite.ALPN_07_WIP omitted on purpose: lite-07 is work-in-progress, not advertised by default.
-		[Lite.ALPN_06]: null,
-		[Lite.ALPN_05]: null,
-		[Lite.ALPN_04]: null,
-		[Lite.ALPN_03]: null,
-		[Lite.ALPN]: null,
-		[Ietf.ALPN.DRAFT_22]: "qmux-01",
-		[Ietf.ALPN.DRAFT_21]: "qmux-01",
-		[Ietf.ALPN.DRAFT_20]: "qmux-01",
-		[Ietf.ALPN.DRAFT_19]: "qmux-01",
-		[Ietf.ALPN.DRAFT_18]: "qmux-01",
-		[Ietf.ALPN.DRAFT_17]: null,
-		[Ietf.ALPN.DRAFT_16]: null,
-		[Ietf.ALPN.DRAFT_15]: null,
-	} as const satisfies Record<string, QmuxVersion | QmuxVersion[] | null>;
 
 	// The default (`requireProtocol: false`) also advertises bare `qmux-01`,
 	// `qmux-00`, and `webtransport` so we still interop with relays that only
 	// know a wire-format version (today's moq-relay only accepts bare
 	// `webtransport`).
 	const quic = new Session(url, {
-		protocols: Object.keys(versions),
-		versions,
+		protocols: [...(protocols ?? DEFAULT_PROTOCOLS)],
+		versions: PROTOCOL_VERSIONS,
 	});
 
 	// Wait for the WebSocket to connect, or for the cancel promise to resolve.

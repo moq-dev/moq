@@ -1,7 +1,10 @@
 import { expect, jest, test } from "bun:test";
+import { Manual, Nano } from "@moq/clock";
 import { SessionCode, SessionError } from "../error.ts";
+import * as Ietf from "../ietf/index.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP } from "../lite/version.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
 
 const url = new URL("https://example.com/test");
@@ -290,5 +293,79 @@ test("SETUP preserves a delayed session close code", async () => {
 		closed.resolve({ closeCode: 0, reason: "test cleanup" });
 		await result;
 		jest.useRealTimers();
+	}
+});
+
+test("one protocol preference reaches WebTransport", async () => {
+	const protocols = [ALPN_07_WIP, ALPN_06];
+	expect((await offered(ALPN_07_WIP, { protocols })).protocols).toEqual(protocols);
+});
+
+test("one protocol preference reaches the WebSocket fallback", async () => {
+	const originalTransport = globalThis.WebTransport;
+	const originalSocket = globalThis.WebSocket;
+	const clock = new Manual();
+	const restore = clock.install();
+	let protocols: string[] | undefined;
+	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
+	globalThis.WebSocket = function CaptureSocket(_url: string, offered: string[]) {
+		protocols = offered;
+		throw new Error("captured WebSocket offer");
+	} as unknown as typeof WebSocket;
+	try {
+		const result = connect(url, { protocols: [ALPN_07_WIP, ALPN_06] }).catch((err: unknown) => err);
+		await clock.advanceAsync(Nano.zero);
+		expect(await result).toBeInstanceOf(AggregateError);
+		const application = protocols
+			?.filter((protocol) => protocol.includes(".moq-"))
+			.map((protocol) => protocol.slice(protocol.indexOf(".") + 1));
+		// QMux may support more drafts later; every variant keeps the app preference.
+		expect(application?.filter((protocol, index) => index === 0 || protocol !== application[index - 1])).toEqual([
+			ALPN_07_WIP,
+			ALPN_06,
+		]);
+	} finally {
+		globalThis.WebTransport = originalTransport;
+		globalThis.WebSocket = originalSocket;
+		restore();
+	}
+});
+
+test("protocol preferences reject empty, duplicate and unsupported offers", async () => {
+	for (const protocols of [[], [ALPN_06, ALPN_06], ["unknown"]]) {
+		expect(await connect(url, { protocols }).catch((err: unknown) => err)).toBeInstanceOf(TypeError);
+	}
+	expect(
+		await connect(url, { protocols: [ALPN_06], webtransport: { protocols: [ALPN_05] } }).catch(
+			(err: unknown) => err,
+		),
+	).toBeInstanceOf(TypeError);
+});
+
+test("a peer cannot select outside the explicit protocol offer", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const restore = stubWebTransport(pair.client);
+	try {
+		expect(
+			await connect(url, { protocols: [ALPN_06], websocket: { enabled: false } }).catch((err: unknown) => err),
+		).toHaveProperty("message", `server selected an unoffered protocol: ${ALPN_05}`);
+	} finally {
+		restore();
+	}
+});
+
+test("IETF ALPN preferences are not confused with display names", async () => {
+	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_22);
+	const restore = stubWebTransport(pair.client);
+	try {
+		const [client, server] = await Promise.all([
+			connect(url, { protocols: [Ietf.ALPN.DRAFT_22], websocket: { enabled: false } }),
+			accept({ url, transport: pair.server }),
+		]);
+		expect(client.version).toBe("moq-transport-22");
+		client.abort();
+		server.abort();
+	} finally {
+		restore();
 	}
 });
