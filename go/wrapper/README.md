@@ -78,11 +78,10 @@ Media lives in `moq.dev/moq/media`. `NewAudioTrackProducer` / `NewVideoTrackProd
 take a broadcast, a `Named` or `Requested` target, and an `AudioInit` / `VideoInit`.
 A `Named` target chooses a track name or lets the importer derive one; a `Requested`
 target takes over a subscriber's pending request. A duplicate name fails.
-`VideoInit.Hint` seeds fields the bitstream cannot supply. `NewContainerProducer` /
-`NewContainerStreamProducer` demux whole chunks or a byte stream into their own tracks,
-using `ContainerInit` or `ContainerStreamInit`. Share `NewTimebase(broadcast)` in these
-records for containers on one source timeline; omitting it gives each an independent
-offset. Timebases belong to one broadcast and do not keep it open. Call `Close` to
+`VideoInit.Hint` seeds fields the bitstream cannot supply. `NewContainerProducer` demuxes
+a container from chunks split anywhere, such as a byte stream, into its own tracks.
+Share `NewTimebase(broadcast)` in its `ContainerInit` for containers on one source
+timeline; omitting it gives each an independent offset. Timebases belong to one broadcast and do not keep it open. Call `Close` to
 release the timebase handle on the calling goroutine.
 `NewCatalogProducer` holds its broadcast weakly and owns catalog properties and sections.
 `NewCatalogConsumer`, `NewTrackConsumer`, and `FetchGroup` read

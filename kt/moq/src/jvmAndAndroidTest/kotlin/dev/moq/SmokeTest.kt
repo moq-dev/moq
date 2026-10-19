@@ -72,9 +72,6 @@ class SmokeTest {
                     assertFailsWith<MoqException.Codec> {
                         ContainerProducer(other, ContainerInit(ContainerFormat.FMP4, byteArrayOf(), timebase))
                     }
-                    assertFailsWith<MoqException.Codec> {
-                        ContainerStreamProducer(other, ContainerStreamInit(ContainerFormat.FMP4, timebase))
-                    }
                     owner.end()
                     assertFailsWith<MoqException.Closed> { Timebase(owner) }
                 }

@@ -22,9 +22,8 @@ in the fork instead of waiting for upstream.
 - Reuse the two-crate spike harness from #5460 as the regression: both
   layers export `GroupConsumer` and `Frame`, and every generator compiles
   and runs the consumer.
-- Re-running the per-layer crate split decision is a follow-up once this
-  lands. [FFI shape](/quest/m1/ffi-shape/README.md) points here as its
-  revisit condition.
+- Re-running the per-layer crate split decision (rejected in #5460) is a
+  follow-up once this lands.
 
 Public API: none in moq until the crate split is re-decided. Wire: none.
 

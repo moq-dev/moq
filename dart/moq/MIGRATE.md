@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `CongestionControl` gained `none` (#5926)
+
+`CongestionControl.none` runs no congestion control and no pacing, for tests and controlled links.
+An exhaustive `switch` needs one more case.
+
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `ConnectOptions.keylog` or `ListenOptions.keylog` as well to capture them; without `SSLKEYLOGFILE` the connect or listen fails.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.groupStart` and `groupEnd` are replaced by `ranges`, a list of `Range` whose ends are an `Anchor` (an absolute group and frame, or a count of groups before the latest), and an optional `order`.
@@ -92,11 +102,15 @@ Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 final audio = media.TrackProducer.audio(broadcast: broadcast, target: media.Named(null), init: init);
 ```
 
-### Container byte-stream importers take an init record
+### Container byte streams use `media.ContainerProducer` (#5919)
 
-`media.ContainerStreamProducer` takes a `ContainerStreamInit` holding the format instead of a bare format.
-Its optional `timebase`, also on `ContainerInit`, shares one source's offset across container imports.
-Replace `format: ...` with `init: media.ContainerStreamInit(format: ...)`.
+`publishContainerStream` has no separate importer: a container recovers its own framing, so `media.ContainerProducer` takes chunks split anywhere.
+Pass empty `data` and write the stream through it.
+`ContainerInit`'s optional `timebase` shares one source's offset across container imports.
+
+```dart
+final stream = media.ContainerProducer(broadcast: broadcast, init: media.ContainerInit(format: media.ContainerFormat.fmp4, data: Uint8List(0)));
+```
 
 ### Timestamps are optional
 

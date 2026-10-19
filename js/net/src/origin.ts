@@ -29,6 +29,7 @@ import {
 	spreadHash,
 } from "./internal.ts";
 import * as Path from "./path.ts";
+import { Front } from "./resume.ts";
 import {
 	type Advertised,
 	type Advertisements,
@@ -1570,7 +1571,9 @@ export class Requesting {
 	/**
 	 * The current broadcast, or undefined while nothing provides the path.
 	 * Announced requests without an epoch follow publisher restarts. Blind and epoch-pinned
-	 * requests retain their accepted instance. Closing this handle affects only this request.
+	 * requests retain their accepted instance. Another route of the same epoch taking over keeps
+	 * this handle: its tracks resume on that route from the first group each reader lacks.
+	 * Closing this handle affects only this request.
 	 */
 	readonly active: Getter<broadcast.Consumer | undefined>;
 
@@ -1874,20 +1877,33 @@ export class Consumer {
 		// Memoized on the route's identity: the same front resolving again returns the handle
 		// we already made, and only a real swap clones a new one (cloning before closing the
 		// old, so a broadcast that both routes share never briefly loses its last handle).
+		// Under an epoch the handle is a logical front instead: another route of the same epoch
+		// serves the same broadcast, so the front re-sources its tracks and the handle stays.
 		let released = false;
 		let source: Resolution | undefined;
 		let handle: broadcast.Consumer | undefined;
+		let logical: Front | undefined;
 		const own = (resolution: Resolution | undefined): broadcast.Consumer | undefined => {
 			if (released) return undefined;
 			const front = epoch === undefined || resolution?.epoch === epoch ? resolution?.front : undefined;
+			if (logical && source?.epoch !== undefined && resolution?.epoch === source.epoch) {
+				// Between routes of the instance, readers wait for the next one to answer.
+				if (front) logical.serve(front);
+				else logical.park();
+				return handle;
+			}
 			if (front !== source?.front || resolution?.epoch !== source?.epoch) {
 				const previous = handle;
+				const concluded = logical;
 				source = front ? { front, epoch: resolution?.epoch } : undefined;
-				handle = front?.clone();
+				logical = front && resolution?.epoch !== undefined ? new Front() : undefined;
+				logical?.serve(front as broadcast.Consumer);
+				handle = logical ? logical.consumer : front?.clone();
 				if (handle) {
 					hooks.stampPath(handle, relative);
 					hooks.stampEpoch(handle, resolution?.epoch);
 				}
+				concluded?.conclude();
 				previous?.close();
 			}
 			return handle;
@@ -1923,13 +1939,15 @@ export class Consumer {
 			(resolution, answerers, ended) =>
 				ended !== undefined ||
 				(epoch !== undefined && resolution?.epoch !== epoch) ||
-				(!resolution?.front && answerers === 0),
+				(!own(resolution) && answerers === 0),
 		);
 
 		return makeRequesting(relative, active, unroutable, closed, () => {
 			// Releases this request's handle; the route itself belongs to the table.
 			released = true;
 			unsubscribe();
+			logical?.conclude();
+			logical = undefined;
 			handle?.close();
 			handle = undefined;
 			source = undefined;

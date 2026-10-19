@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `CongestionControl` gained `NONE` (#5926)
+
+`CongestionControl.NONE` runs no congestion control and no pacing, for tests and controlled links.
+Code that handles every value needs one more case.
+
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Pass `keylog=True` to `Client`, `connect`, or `Server` as well to capture them; without `SSLKEYLOGFILE` the client refuses to build and the server refuses to listen.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.group_start` and `group_end` are replaced by `ranges`, a list of `Range` whose ends are an `Anchor` (an absolute group and frame, or a count of groups before the latest), and an optional `order`.
@@ -96,10 +106,15 @@ Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head))
 ```
 
-### Container byte-stream importers take an init record
+### Container byte streams use `moq.media.ContainerProducer` (#5919)
 
-Wrap the format passed to `moq.media.ContainerStreamProducer` in a `moq.media.ContainerStreamInit`.
-Its optional `timebase`, also on `ContainerInit`, shares one source's offset across container imports.
+`BroadcastProducer.publish_container_stream` has no separate importer: a container recovers its own framing, so `moq.media.ContainerProducer` takes chunks split anywhere.
+Pass empty `data` and write the stream through it.
+`ContainerInit`'s optional `timebase` shares one source's offset across container imports.
+
+```python
+stream = moq.media.ContainerProducer(broadcast, moq.media.ContainerInit(moq.media.ContainerFormat.FMP4, b""))
+```
 
 ### Durations are `timedelta`
 

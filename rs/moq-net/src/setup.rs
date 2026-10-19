@@ -28,7 +28,7 @@ pub(crate) const SETUP_V17: u64 = 0x2F00;
 /// The moq-transport Setup Options this side offers, each on by default.
 ///
 /// Turning one off connects as a peer that does not speak that extension. moq-lite carries
-/// both in its core, so this only changes moq-transport sessions.
+/// them in its core, so this only changes moq-transport sessions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -38,6 +38,9 @@ pub struct Extensions {
 	/// The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than
 	/// announcing unasked.
 	pub solicit: bool,
+	/// The MoQ Epoch extension: announcements and requests carry the publisher's
+	/// [`Epoch`](crate::Epoch), as moq-lite 07 does (draft-17+).
+	pub epoch: bool,
 }
 
 impl Default for Extensions {
@@ -45,6 +48,7 @@ impl Default for Extensions {
 		Self {
 			auth: true,
 			solicit: true,
+			epoch: true,
 		}
 	}
 }
