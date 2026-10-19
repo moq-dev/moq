@@ -1096,6 +1096,37 @@ int main()
 	}
 	report("follows a replacement instance");
 
+	// A replacement instance whose catalog subscribe fails stops the old instance too, blanks,
+	// and waits for the next instance.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher first(relay, "obs/test");
+		void *source = createSource();
+		CHECK(first.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		const int blanks = g_blank_calls;
+		// The relay cannot refuse a catalog, so deliver the failure once the replacement is
+		// handed out; its own catalog never arrives, since it publishes no tracks.
+		auto *ctx = static_cast<moq_source *>(source);
+		Publisher broken(relay, "obs/test", false, false);
+		CHECK(first.WriteUntil([&] {
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			return ctx->connection->instance == 2;
+		}));
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			CHECK(ctx->connection->video && ctx->connection->audio);
+			moq_source_on_catalogs(ctx, ctx->connection,
+					       moq::unexpected(moq::Error(moq::Error::kInternal{"catalog refused"})));
+			CHECK(!ctx->connection->video && !ctx->connection->audio);
+		}
+		CHECK(g_blank_calls > blanks);
+		Publisher third(relay, "obs/test", true, true, 1'000'000'000);
+		CHECK(third.WriteUntil([] { return PlaysFrom(1'000'000'000); }));
+		destroySource(source);
+	}
+	report("failed replacement catalog waits for the next instance");
+
 	// A publisher that restarts, ending its broadcast before the new instance announces, plays
 	// again once it returns.
 	{

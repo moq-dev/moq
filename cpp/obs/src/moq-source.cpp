@@ -446,8 +446,10 @@ static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr
 				   moq::expected<std::shared_ptr<moq::MediaCatalogConsumer>> result)
 {
 	if (!result) {
-		// The next instance may still play.
+		// Stop the instance this one replaced too, and wait for the next one.
 		LOG_ERROR("Failed to subscribe to catalog: %s", result.error().to_string().c_str());
+		moq_source_clear_video_locked(ctx);
+		moq_source_clear_audio_locked(ctx);
 		moq_source_blank_video(ctx);
 		return;
 	}
