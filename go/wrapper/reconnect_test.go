@@ -314,6 +314,7 @@ func TestDialConnectionOptions(t *testing.T) {
 		moq.WithQUICGSO(false),
 		moq.WithQUICMTUDiscovery(true),
 		moq.WithQUICCongestionControl(moq.CongestionControlLoss),
+		moq.WithQUICKeylog(false),
 		moq.WithWebSocketEnabled(false),
 	)
 	if err != nil {

@@ -266,6 +266,7 @@ async def test_client_connection_knobs():
                 gso=False,
                 mtu_discovery=True,
                 congestion_control=moq.CongestionControl.LOSS,
+                keylog=False,
                 websocket_enabled=False,
             ) as client:
                 assert client.session is not None

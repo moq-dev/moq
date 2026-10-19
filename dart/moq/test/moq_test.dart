@@ -245,6 +245,7 @@ void main() {
         gso: false,
         mtuDiscovery: true,
         congestionControl: CongestionControl.loss,
+        keylog: false,
         reconnect: false,
         backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
         websocketEnabled: false,

@@ -1140,6 +1140,10 @@ pub struct moq_client_config {
 	/// compile-time optional; see [moq_qlog_supported].
 	pub quic_qlog: *const c_char,
 	pub quic_qlog_len: usize,
+
+	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
+	/// decrypting a capture. Off when false; on without `SSLKEYLOGFILE` fails the dial.
+	pub quic_keylog: bool,
 }
 
 /// The settings [moq_session_connect] dials with when given NULL.

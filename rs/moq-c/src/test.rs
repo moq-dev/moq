@@ -4557,6 +4557,7 @@ fn a_zeroed_config_is_the_defaults() {
 	assert!(parsed.connect.tls.root.is_empty());
 	assert!(parsed.quic.gso.is_none());
 	assert!(parsed.quic.mtu_discovery.is_none());
+	assert!(!parsed.quic.resolve().keylog);
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,
@@ -4764,6 +4765,7 @@ fn config_quic_and_backoff_knobs_apply() {
 	config.has_quic_gso = true;
 	config.quic_mtu_discovery = true;
 	config.has_quic_mtu_discovery = true;
+	config.quic_keylog = true;
 
 	let dir = "/tmp/qlog";
 	config.quic_qlog = dir.as_ptr() as *const c_char;
@@ -4784,6 +4786,7 @@ fn config_quic_and_backoff_knobs_apply() {
 	assert_eq!(parsed.quic.gso, Some(false));
 	assert_eq!(parsed.quic.mtu_discovery, Some(true));
 	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));
+	assert_eq!(parsed.quic.keylog, Some(true));
 }
 
 /// Whether a qlog directory works at all is a compile-time feature, so the capability
