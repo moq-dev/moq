@@ -41,6 +41,14 @@ Decided by the maintainer on 2026-10-17 (see the
   boundaries. Each object preserves group sequences, frame boundaries,
   timestamps, and payloads. Rejected: whole-broadcast objects per window and
   size-based cuts.
+- **Datagrams keep their form.** A track's groups and datagrams share one
+  sequence space, so each stored sequence records its forwarding form, group
+  or datagram, and a datagram is stored as its one payload and timestamp in
+  sequence order beside the groups. The consumer replays a datagram as a
+  datagram, never as a cached one-frame group, so the replay keeps the
+  source's lossy contract. A datagram is never split and counts as one
+  sequence for keys, cuts, and resume. Datagrams sent before the track's
+  SUBSCRIBE took effect are not recorded, as above.
 - **Keys.** `<prefix>/<track>/<first group>-<first frame>-<first pts>` for a
   timed track and `<prefix>/<track>/<first group>` for an untimed one,
   zero-padded so keys sort in content order. The frame index keeps the
@@ -49,7 +57,7 @@ Decided by the maintainer on 2026-10-17 (see the
   time lookups. `<track>` is the name in the existing canonical percent
   encoding (`rs/moq-archive/src/path.rs`, everything but `A-Z a-z 0-9 _ -`
   escaped), so a name holding `/` stays one segment and no name collides with
-  `.info`; a consumer refuses a non-canonical segment. A sorted LIST answers
+  `.info` or `.end`; a consumer refuses a non-canonical segment. A sorted LIST answers
   group and time lookups; there is no index object or manifest. Rejected for
   untimed: `<first group>-<first frame>`, since an untimed group is never
   split.
@@ -66,6 +74,18 @@ Decided by the maintainer on 2026-10-17 (see the
   (timestamp age measures a group against the newest one), so the consumer
   advertises its own retention instead. Rejected: properties only in each
   object's header.
+- **Completion markers.** When a track ends cleanly, at its declared end
+  (`track::Subscriber::poll_finished`) with every frame below it stored, the
+  producer writes a small `<prefix>/<track>/.end` holding that exclusive end
+  as a `Position` (group and frame), the shape `track::Producer::finish_at`
+  takes, so a mid-group end survives. Once the broadcast's listing has ended
+  with the instance and every track it listed has its `.end`, the producer
+  writes `<prefix>/.end`, which says no track will be added. A track that
+  ends with an error gets no marker, and neither does its broadcast. The
+  consumer finishes on reading a marker and otherwise treats the archive as
+  live. A crashed producer leaves no marker, so its archive reads as still
+  growing. A resume skips a track that already has its `.end`, and DVR
+  pruning never deletes a marker.
 - **Bounded flush** (folded from the idle-flush quest): an object holding a
   frame is stored within a bounded wall-clock delay of that frame's arrival,
   even when its track goes idle. The bound covers closing the object, not
@@ -102,8 +122,12 @@ within the bound, resume after a restart (including mismatched properties,
 and a restart mid-group for both a split timed group and an open untimed
 group, with no frame lost or duplicated), a track name holding `/` or
 starting with `.` round-tripping as one segment,
-DVR pruning with grace, a track added mid-recording, and two broadcasts under
-the prefix landing under their own key prefixes.
+DVR pruning with grace, a track added mid-recording, two broadcasts under
+the prefix landing under their own key prefixes, a track interleaving groups
+and datagrams stored with each sequence's form, a clean end writing each
+track's `.end` (including a mid-group end) and then the broadcast's, and a
+track ending with an error or a producer stopped mid-recording writing no
+marker.
 
 Public API: `archive::Producer` and its config replace `Writer`, `Control`,
 and the timeline-driven types. Wire: none.

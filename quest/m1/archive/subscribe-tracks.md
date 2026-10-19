@@ -145,6 +145,20 @@ TRACKS' three events (see its Plan) map as follows:
     request PUBLISHes a track we already hold, keep the held one as the
     entry and refuse the new one: DUPLICATE_SUBSCRIPTION on draft-18,
     UNINTERESTED from draft-19.
+  - The broader request opens only once every cancelled request's stream
+    has closed on the peer's side, since streams are not ordered against
+    each other and a peer that reads the new request first answers
+    PREFIX_OVERLAP. Cancel by closing only our sending half (FIN on
+    draft-18, where a FIN cancels; RESET_STREAM from draft-19, as draft-22
+    section 6.4.2.3 describes), then keep reading the response half until
+    the peer FINs or resets it. Delay STOP_SENDING: QUIC answers it with an
+    automatic RESET_STREAM before the peer's application has seen the
+    cancel, while the peer's own close of its half comes from its
+    application once the request is gone (the existing publisher ends the
+    request on `poll_cancel` in `rs/moq-net/src/ietf/request_stream.rs`).
+    A peer that never closes its half stalls only the broader listing.
+    Should PREFIX_OVERLAP still come back, it is a refusal like any other:
+    the listings reset loudly below, with no automatic retry.
   - A track created and removed between that cancel and the open is missed,
     which the listing contract allows: a listing reports current state, not
     history, and a lagging lite reader misses a short-lived track the same
@@ -216,7 +230,8 @@ and a refused paused SUBSCRIBE resets the listing; TRACKS(`/a/b`) after
 TRACKS(`/a`) on one session reuses the `/a` request, sends nothing, and
 lists only `/a/b`'s tracks; TRACKS(`/a/b`) and TRACKS(`/a/c`) open two
 requests and hold no track outside them, and a later TRACKS(`/a`) cancels
-both before opening SUBSCRIBE_TRACKS(`/a`), keeping every held entry and
+both and opens SUBSCRIBE_TRACKS(`/a`) only after the peer closes both
+cancelled streams, even when it is slow to, keeping every held entry and
 refusing any duplicate PUBLISH; when that SUBSCRIBE_TRACKS(`/a`) is refused,
 the `/a`, `/a/b`, and `/a/c` listings all reset and re-request; a PUBLISH for a track we already
 SUBSCRIBEd, established or pending, lists it through that SUBSCRIBE and is

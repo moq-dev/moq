@@ -35,6 +35,15 @@ Decided by the maintainer on 2026-10-17 (see the
   quest's union and `enabled: false` handling are dropped with it.
 - The served broadcast takes its epoch from the caller or mints one; it never
   claims the source's epoch, since it is served at another path.
+- Each stored sequence replays in its recorded form: a group as a group, a
+  datagram as a datagram (`track::Producer::insert_datagram`), so the replay
+  keeps the source's lossy, uncached datagram contract.
+- A track's `.end` finishes it, mirroring `moq_archive::Reader::finish`
+  today: refreshing stops, the track is finished at the recorded end
+  (`track::Producer::finish_at`), and committed groups stay servable. The
+  broadcast's `.end` stops the search for added tracks. Without markers the
+  archive is live and followed through refresh, which is how a producer
+  that crashed reads. This replaces the caller-driven `Reader::finish`.
 
 Guidance:
 
@@ -56,8 +65,10 @@ Test with the in-memory store: a round trip preserving structure and payloads
 byte for byte, a gap, a pruned start, a growing archive followed through
 refresh (including two tracks where a new key sorts before the other track's
 cursor, and a track added mid-recording), history older than the source's max
-age still served, an untimed track, and an empty or unrecognized prefix
-refused loudly.
+age still served, an untimed track, an interleaved group and datagram track
+replayed in its original forms, a completed archive whose replay ends at
+each track's recorded end (including mid-group), a growing archive with no
+markers staying open, and an empty or unrecognized prefix refused loudly.
 
 Public API: `archive::Consumer` replaces `Reader`. Wire: none.
 
