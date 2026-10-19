@@ -93,8 +93,10 @@ gauge) and the bytes they retain outside the pool (batches, chunks, and
 unsent transport data), beside pool-billed bytes compared with a
 no-subscriber baseline. Only lite counts pending opens today; IETF
 `TrackServe` counts streams only after they open, so add the gauge there. On
-main they grow with time; done, they plateau. Sweep tracks by groups per track, per the fan-out benchmark
-rule, so a cost that grows with the table shows up as a slope. Cover lite and
+main they grow with time; done, they plateau. Per the fan-out benchmark rule,
+sweep tracks by groups per track, and subscribers by tracks, timing each
+stream grant too, so a cost that grows with the table (such as scanning every
+subscription when one stream frees up) shows up as a slope. Cover lite and
 moq-transport, and scenario 5 still receives the latest group.
 Include a benign withholder: a peer bounded by
 [Bound incomplete messages](/quest/m1/quic/receive-memory.md) withholds credit
