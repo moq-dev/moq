@@ -735,9 +735,7 @@ mod supervision_tests {
 
 	#[tokio::test]
 	async fn container_importers_keep_the_origin_failure_after_other_owners_are_released() {
-		use crate::media::{
-			MoqContainerFormat, MoqContainerInit, MoqMediaContainerProducer, MoqMediaTimebase,
-		};
+		use crate::media::{MoqContainerFormat, MoqContainerInit, MoqMediaContainerProducer, MoqMediaTimebase};
 		let (inner, completion, trigger) = crate::ffi::panicking_origin();
 		let origin = MoqOriginProducer::from_inner(Origin {
 			inner,
