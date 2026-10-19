@@ -21,9 +21,12 @@ Decided 2026-10-19 by the maintainer (#5881):
   `doc/concept/standard.md`, replacing its "advisory" paragraph.
 - Define it in `drafts/draft-lcurley-moq-timestamp.md`, whose age-based
   dropping already allows an application-supplied threshold. Pick a code
-  point from that draft's space. Validate with `just drafts check`. Check
-  each draft's rule for an unknown SUBSCRIBE parameter; where a peer may
-  refuse one, send it only when negotiated.
+  point from that draft's space. Validate with `just drafts check`.
+- Negotiate it with its own Setup Option, as the hidden draft does for
+  HIDDEN. Drafts 16 and later close the session on an unknown SUBSCRIBE
+  parameter, so send the parameter only to a peer that declared the option.
+  The draft's "require no SETUP negotiation" sentence covers its properties,
+  not this parameter.
 - It maps onto `Subscription::max_delay` on SUBSCRIBE (`serving_subscription`
   in `rs/moq-net/src/ietf/publisher.rs`) and REQUEST_UPDATE. Absent keeps
   `MAX_SAFE_DELAY_MS`, never `Duration::ZERO`, which means skip at once.
@@ -35,7 +38,7 @@ Decided 2026-10-19 by the maintainer (#5881):
   with a short max age is skipped to the live edge, and that a catalog's
   newest group survives any budget.
 
-Public API: none. Wire: a new SUBSCRIBE and REQUEST_UPDATE parameter.
+Public API: none. Wire: a new Setup Option and SUBSCRIBE and REQUEST_UPDATE parameter.
 
 ## Closes
 
