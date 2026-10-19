@@ -110,9 +110,14 @@ An advertisement without EPOCH names no instance, so nothing says another advert
 A publisher includes the EPOCH of the instance it serves in each advertisement to a peer that negotiated this extension.
 A relay forwards the EPOCH it received unchanged, and MUST NOT include one for an advertisement that arrived without one.
 
-An advertisement's EPOCH is fixed for as long as it stands.
-An endpoint replacing the instance behind an advertisement withdraws it (PUBLISH_NAMESPACE_DONE, cancelling the PUBLISH_NAMESPACE, or NAMESPACE_DONE) and advertises again with the new EPOCH.
-A receiver MUST close the session with a PROTOCOL_VIOLATION on a NAMESPACE that repeats a live suffix with a different EPOCH, or adds or drops one, without a NAMESPACE_DONE between them.
+An advertisement's EPOCH is fixed for as long as it stands, and an update never changes it.
+An endpoint replacing one instance with another, both named by an EPOCH, advertises the new instance before it withdraws the old, so the namespace is never absent in between:
+
+- With PUBLISH_NAMESPACE, it sends a new PUBLISH_NAMESPACE with the new EPOCH, and withdraws the old one (PUBLISH_NAMESPACE_DONE, or cancelling it) after the new one is answered. The two travel on different streams, and the answer is what orders them.
+- With NAMESPACE, it repeats the live suffix with the new EPOCH, which replaces the old advertisement with no NAMESPACE_DONE between them.
+
+An advertisement that gains or loses an EPOCH names no instance on one side, so the endpoint withdraws it and advertises again.
+A receiver MUST close the session with a PROTOCOL_VIOLATION on a NAMESPACE that repeats a live suffix and adds or drops an EPOCH, without a NAMESPACE_DONE between them.
 
 A withdrawal and the advertisement replacing it can travel on different streams and arrive in either order.
 A receiver holding several live advertisements of one namespace from a peer treats the one received last as current, so the late withdrawal or update of an older one does not restore the instance it named.
@@ -140,7 +145,7 @@ The same separation applies to a joining FETCH, to subscriptions to an old and a
 # Peers Without This Extension {#downgrade}
 
 A relay serves a peer that did not negotiate this extension with the names that peer already uses.
-It replaces an instance it advertised to such a peer by withdrawing the advertisement and sending a new one, keeps that peer's established subscriptions on the instance they started on until it ends, and resolves new requests to the current instance.
+It replaces an instance it advertised to such a peer by withdrawing the advertisement before sending a new one, since a second advertisement would read as the same instance; it keeps that peer's established subscriptions on the instance they started on until it ends, and resolves new requests to the current instance.
 A relay MAY hide a move between advertisements of the same instance from such a peer.
 
 This is how a relay behaves, not a cache invalidation mechanism.

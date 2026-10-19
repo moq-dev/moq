@@ -154,8 +154,11 @@ type Refused = "never" | number;
  */
 type Answer = "held" | "dropped" | Refused;
 
+/** One open PUBLISH_NAMESPACE request. */
+type NamespaceRequest = { path: Path.Valid; requestId: bigint; stream: Stream; auth?: Auth };
+
 /** The open PUBLISH_NAMESPACE request per advertised path. */
-type Requests = Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream; auth?: Auth }>;
+type Requests = Map<Path.Valid, NamespaceRequest>;
 
 /** What one announce loop knows about the peer, keyed the way that loop names namespaces. */
 interface Namespaces {
@@ -180,6 +183,13 @@ interface Carrier {
 interface Target {
 	/** Advertise a namespace the peer does not hold. */
 	advertise(key: Path.Valid, next: Advertised): Promise<Answer>;
+
+	/**
+	 * Replace the instance behind a namespace the peer holds with another (MoQ Epoch): the
+	 * new advertisement goes out before the old is withdrawn, so the peer never sees the
+	 * namespace absent.
+	 */
+	replace(key: Path.Valid, next: Advertised): Promise<Answer>;
 
 	/** Reprice a namespace the peer holds: the same broadcast at a new hop chain or cost. */
 	update(key: Path.Valid, next: Advertised, reprice: Reprice): Promise<Answer>;
@@ -1277,6 +1287,7 @@ export class Publisher {
 			const target: Target = legacy
 				? {
 						advertise: (suffix, snap) => this.#advertise(Path.join(prefix, suffix), requests, snap.route),
+						replace: (suffix, snap) => this.#replace(Path.join(prefix, suffix), requests, snap.route),
 						update: (suffix, _snap, reprice) => this.#update(Path.join(prefix, suffix), requests, reprice),
 						withdraw: (suffix) => this.#withdraw(Path.join(prefix, suffix), requests),
 						held: (suffix) => requests.get(Path.join(prefix, suffix))?.auth,
@@ -1284,6 +1295,8 @@ export class Publisher {
 					}
 				: {
 						advertise: namespace,
+						// A repeat under another epoch replaces the instance in place.
+						replace: namespace,
 						update: namespace,
 						held: () => undefined,
 						carry: () => undefined,
@@ -1435,6 +1448,7 @@ export class Publisher {
 		const requests: Requests = new Map();
 		const target: Target = {
 			advertise: (path, snap) => this.#advertise(path, requests, snap.route),
+			replace: (path, snap) => this.#replace(path, requests, snap.route),
 			update: (path, _snap, reprice) => this.#update(path, requests, reprice),
 			withdraw: (path) => this.#withdraw(path, requests),
 			held: (path) => requests.get(path)?.auth,
@@ -1528,8 +1542,9 @@ export class Publisher {
 	 * Bring the peer's view in line with `updated`, one namespace at a time, and report
 	 * whether anything it should hold is still missing and worth coming back for.
 	 *
-	 * Nothing the peer cannot see is sent, a reprice updates the namespace in place, and
-	 * anything else is withdrawn first so a republish reads as withdraw-then-advertise.
+	 * Nothing the peer cannot see is sent, a reprice updates the namespace in place, another
+	 * epoch replaces it in place (MoQ Epoch), and anything else is withdrawn first so a
+	 * republish reads as withdraw-then-advertise.
 	 * `ns` records what the peer holds rather than what we attempted: a declined
 	 * advertisement or update stays out of it, so the next turn offers it fresh instead
 	 * of believing it is already up.
@@ -1552,7 +1567,8 @@ export class Publisher {
 
 		const held = new Map(ns.active);
 		for (const [key, snap] of ns.active) {
-			if (this.#change(key, snap, updated.get(key), target) !== "restart") continue;
+			const next = updated.get(key);
+			if (this.#change(key, snap, next, target) !== "restart" || this.#replaces(snap, next)) continue;
 			await target.withdraw(key);
 			held.delete(key);
 		}
@@ -1565,6 +1581,9 @@ export class Publisher {
 			let answer: Answer;
 			if (prev !== undefined && diff !== "restart") {
 				answer = await target.update(key, snap, diff);
+			} else if (prev !== undefined) {
+				// Still held through a restart: another epoch replacing it.
+				answer = await target.replace(key, snap);
 			} else {
 				// A fresh offer waits for what a refusal asked for, whatever brought us back.
 				if (!this.#offerable(key, ns.refused)) continue;
@@ -1617,6 +1636,16 @@ export class Publisher {
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
 		if (from === undefined || to === undefined || legacy) return "restart";
 		return { ...(diff === "same" ? {} : diff), token: to };
+	}
+
+	/**
+	 * Whether `next` replaces the instance the peer holds in `held` with another, both named
+	 * by an epoch on the wire (MoQ Epoch). Gaining or losing one is withdrawn and advertised
+	 * afresh, and so is any instance change on a peer that cannot tell them apart.
+	 */
+	#replaces(held: Advertised, next: Advertised | undefined): boolean {
+		const [from, to] = [held.route.epoch, next?.route.epoch];
+		return this.#epoch && from !== undefined && to !== undefined && from !== to;
 	}
 
 	/** `auth` when a request of this session can carry it. */
@@ -1828,11 +1857,28 @@ export class Publisher {
 	 * End a namespace's PUBLISH_NAMESPACE request: PUBLISH_NAMESPACE_DONE then FIN before
 	 * draft-17, a cancel in both directions after.
 	 */
+	/**
+	 * Replace the PUBLISH_NAMESPACE request for `path` with one for another instance. The two
+	 * streams are unordered, so the old one is withdrawn only once the peer answered the new
+	 * one, refused or not: it serves another instance either way.
+	 */
+	async #replace(path: Path.Valid, requests: Requests, route: Route): Promise<Answer> {
+		const old = requests.get(path);
+		requests.delete(path);
+		const answer = await this.#advertise(path, requests, route);
+		if (old) await this.#end(old);
+		return answer;
+	}
+
 	async #withdraw(path: Path.Valid, requests: Requests) {
 		const request = requests.get(path);
 		if (!request) return;
 		requests.delete(path);
+		await this.#end(request);
+	}
 
+	/** Withdraw one PUBLISH_NAMESPACE request, already out of its map. */
+	async #end(request: NamespaceRequest) {
 		// Draft-17+ withdraws by cancelling the request in both directions; a FIN is only
 		// allowed to end SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS.
 		const version = this.#session.version;

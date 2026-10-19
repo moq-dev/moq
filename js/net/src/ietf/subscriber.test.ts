@@ -2325,10 +2325,35 @@ test("an inline NAMESPACE route carries its epoch", async () => {
 });
 
 /**
- * A NAMESPACE names its instance until its NAMESPACE_DONE, so a repeat under another one
- * means the peer skipped the withdrawal.
+ * A NAMESPACE repeated under another epoch replaces the instance in place: the path
+ * restarts and is never absent, and a fresh reader hears the new instance standing.
  */
-test("a NAMESPACE repeated under another epoch closes the session", async () => {
+test("a NAMESPACE repeated under another epoch restarts the path in place", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true), epoch: true });
+	const announced = subscriber.announced();
+	const subscription = await acceptSubscribeNamespace(pair.client);
+
+	const path = Path.from("room");
+	const first = Epoch.mint();
+	await inlineEpoch(subscription, path, first);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: first } });
+
+	const second = Epoch.mint();
+	await inlineEpoch(subscription, path, second);
+	expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart", route: { epoch: second } });
+
+	const fresh = subscriber.announced();
+	expect(await fresh.next()).toMatchObject({ prefix: path, kind: "start", route: { epoch: second } });
+	fresh.close();
+	announced.close();
+});
+
+/**
+ * Gaining or losing an epoch is not one instance replacing another, so a repeat that does
+ * either means the peer skipped the NAMESPACE_DONE.
+ */
+test.each(["gains", "loses"] as const)("a NAMESPACE repeat that %s an epoch closes the session", async (change) => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, quic: pair.server, epoch: true });
@@ -2338,15 +2363,23 @@ test("a NAMESPACE repeated under another epoch closes the session", async () => 
 	const subscription = await acceptSubscribeNamespace(pair.client);
 
 	const epoch = Epoch.mint();
-	await inlineEpoch(subscription, Path.from("room"), epoch);
+	const send = async (path: Path.Valid, named?: Epoch.Valid) => {
+		await subscription.writer.u53(SubscribeNamespaceEntry.id);
+		await new SubscribeNamespaceEntry({ suffix: path, params: { epoch: named } }).encode(
+			subscription.writer,
+			VERSION,
+		);
+	};
+	const [before, after] = change === "gains" ? [undefined, epoch] : [epoch, undefined];
+	await send(Path.from("room"), before);
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
 
-	// Control: a repeat under the same instance is a reprice, not a violation.
-	await inlineEpoch(subscription, Path.from("room"), epoch);
-	await inlineEpoch(subscription, Path.from("sentinel"), epoch);
+	// Control: a repeat that keeps the epoch, or its absence, is not a violation.
+	await send(Path.from("room"), before);
+	await send(Path.from("sentinel"), before);
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("sentinel"), kind: "start" });
 
-	await inlineEpoch(subscription, Path.from("room"), Epoch.mint());
+	await send(Path.from("room"), after);
 	await violationClosed(pair);
 });
 

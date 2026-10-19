@@ -2963,10 +2963,14 @@ where
 		let request = requests.get_mut(suffix);
 		let held_auth = request.as_ref().and_then(|request| request.auth.clone());
 		let unchanged = advert == watch.sent && auth == held_auth;
-		// The epoch names the advertisement's instance for as long as it stands, so another
-		// one withdraws it and advertises afresh (MoQ Epoch). A restart arrives as an end and
-		// a start, so this only guards a change that skipped one.
-		let renamed = wanted && held && advert.params().epoch != watch.sent.params().epoch;
+		// The epoch names the advertisement's instance for as long as it stands, so an
+		// update never changes it (MoQ Epoch). One instance named by an epoch is replaced
+		// by another in place, the new advertised before the old is withdrawn, so the peer
+		// never sees the namespace absent. Gaining or losing an epoch withdraws and
+		// advertises afresh.
+		let (held_epoch, epoch) = (watch.sent.params().epoch, advert.params().epoch);
+		let renamed = wanted && held && held_epoch != epoch;
+		let replaced = renamed && held_epoch.is_some() && epoch.is_some();
 		// moq-transport renames a request's auth with REQUEST_UPDATE, but cannot name one on
 		// a request that had none, nor drop one, and before draft-17 cannot update a
 		// namespace at all: those withdraw the request and make it again.
@@ -3019,6 +3023,19 @@ where
 						}
 						self.withdraw_namespace(target, requests, suffix.clone()).await?;
 					}
+					(true, Some(_)) if replaced => {
+						// Separate streams are unordered, so the old one goes only once the
+						// peer answered the new one, refused or not: it serves another
+						// instance either way.
+						tracing::debug!(broadcast = %absolute, "publish_namespace for another epoch");
+						let old = requests.remove(suffix);
+						refused = self
+							.advertise_namespace(requests, path, suffix.clone(), advert.params(), auth)
+							.await?;
+						if let Some(old) = old {
+							self.end_request(old).await;
+						}
+					}
 					(true, Some(_)) => {
 						tracing::debug!(broadcast = %absolute, renamed, "publish_namespace restart");
 						self.withdraw_namespace(target, requests, suffix.clone()).await?;
@@ -3044,8 +3061,9 @@ where
 			Target::Inline(stream) => {
 				match (advert.wanted(), held) {
 					(true, _) => {
-						if renamed {
-							tracing::debug!(broadcast = %absolute, "namespace_done for another epoch");
+						// A repeat under another epoch replaces the instance in place.
+						if renamed && !replaced {
+							tracing::debug!(broadcast = %absolute, "namespace_done for an epoch gained or lost");
 							stream.writer.varint(ietf::NamespaceDone::ID).await?;
 							stream
 								.writer
@@ -3505,28 +3523,8 @@ where
 	) -> Result<(), Error> {
 		match target {
 			Target::Requests(_) => {
-				if let Some(mut request) = requests.remove(&suffix) {
-					// Draft-17+ withdraws by cancelling the request in both directions; a FIN
-					// is only allowed to end SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS.
-					if !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-						request.stream.reader.abort(&Error::Cancel);
-						request.stream.writer.abort(&Error::Cancel);
-						return Ok(());
-					}
-
-					// Best effort: the peer may already be gone.
-					let _ = request
-						.stream
-						.writer
-						.encode_message(&ietf::PublishNamespaceDone {
-							track_namespace: request.path.as_path(),
-							request_id: request.request_id,
-						})
-						.await;
-
-					// The withdrawal rides this request's own stream, which drops with it, so
-					// it needs the acknowledgement before the drop-time reset can discard it.
-					let _ = request.stream.writer.close().await;
+				if let Some(request) = requests.remove(&suffix) {
+					self.end_request(request).await;
 				}
 			}
 			Target::Inline(stream) => {
@@ -3540,6 +3538,30 @@ where
 			}
 		}
 		Ok(())
+	}
+
+	/// Withdraw one PUBLISH_NAMESPACE request, best effort: the peer may already be gone.
+	async fn end_request(&self, mut request: NamespaceRequest<S>) {
+		// Draft-17+ withdraws by cancelling the request in both directions; a FIN is only
+		// allowed to end SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS.
+		if !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+			request.stream.reader.abort(&Error::Cancel);
+			request.stream.writer.abort(&Error::Cancel);
+			return;
+		}
+
+		let _ = request
+			.stream
+			.writer
+			.encode_message(&ietf::PublishNamespaceDone {
+				track_namespace: request.path.as_path(),
+				request_id: request.request_id,
+			})
+			.await;
+
+		// The withdrawal rides this request's own stream, which drops with it, so it needs
+		// the acknowledgement before the drop-time reset can discard it.
+		let _ = request.stream.writer.close().await;
 	}
 
 	/// Close out every open PUBLISH_NAMESPACE request. A no-op for a loop whose entries
@@ -3999,8 +4021,10 @@ where
 				}
 				NamespaceEvent::Update(Some((update, active, restart))) => {
 					// moq-transport has no restart: the peer sees the namespace end and start
-					// again, and resubscribes.
-					if restart {
+					// again, and resubscribes. One that tells instances apart (MoQ Epoch) takes
+					// another epoch in place instead, which `sync_namespace` makes before it
+					// breaks the old.
+					if restart && !Self::replaces(&ns, &update) {
 						self.apply_update(&mut ns, &prefix, update.clone(), false).await?;
 					}
 					self.apply_update(&mut ns, &prefix, update, active).await?;
@@ -4012,6 +4036,16 @@ where
 		self.withdraw_requests(&mut ns.target, &mut ns.requests).await;
 
 		res
+	}
+
+	/// Whether a restart onto `update` replaces one instance the peer holds by epoch with
+	/// another, rather than ending the advertisement.
+	fn replaces(ns: &Namespaces<S>, update: &crate::announce::Announce) -> bool {
+		let held = ns
+			.watched
+			.get(&update.prefix)
+			.and_then(|watch| watch.sent.params().epoch);
+		ns.epochs && held.is_some() && update.route.epoch.is_some() && held != update.route.epoch
 	}
 
 	/// Reconcile what the peer holds with one route (un)announce.
@@ -12674,6 +12708,89 @@ mod tests {
 			1,
 			"re-offered a namespace the peer asked not to be offered again"
 		);
+	}
+
+	/// MoQ Epoch: a restart onto another epoch advertises the new instance before it
+	/// withdraws the old, and only once the peer accepted it, since the two streams are
+	/// unordered. The peer never sees the namespace absent. A peer without the extension
+	/// cannot tell the two apart, so it still sees the old one withdrawn first.
+	#[moq_clock::test]
+	async fn another_epoch_is_advertised_before_the_old_is_withdrawn() {
+		use crate::lite::test_transport::Sent;
+		const VERSION: Version = Version::Draft17;
+
+		for epochs in [true, false] {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let _old = origin
+				.announce("cam", crate::origin::Route::default().with_epoch(crate::Epoch::mint()))
+				.unwrap();
+			settle().await;
+
+			let ok = publish_namespace_ok(VERSION).await;
+			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok.clone(), ok]);
+			let log = session.log.clone();
+			let declared = peer::PeerSetup::default();
+			declared.set(peer::Peer {
+				solicit: Some(false),
+				epoch: epochs,
+				..Default::default()
+			});
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				session,
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				declared,
+				VERSION,
+			);
+
+			let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+			let mut _new = None;
+			for count in [1, 2] {
+				for _ in 0..100 {
+					assert!(futures::poll!(run.as_mut()).is_pending());
+					if occurrences(&log, b"cam") >= count {
+						break;
+					}
+					settle().await;
+				}
+				assert_eq!(occurrences(&log, b"cam"), count, "epochs: {epochs}");
+				if count == 1 {
+					// A newer epoch outranks the old at the same path: a restart.
+					let route = crate::origin::Route::default().with_epoch(crate::Epoch::mint());
+					_new = Some(origin.announce("cam", route).unwrap());
+				}
+			}
+			for _ in 0..10 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				settle().await;
+			}
+
+			// Where each advertisement went out, and where the first one was withdrawn.
+			let trail = log.trail();
+			let advertised: Vec<(usize, usize)> = trail
+				.iter()
+				.enumerate()
+				.filter_map(|(at, (stream, sent))| match sent {
+					Sent::Write(bytes) if bytes.windows(3).any(|window| window == b"cam") => Some((at, *stream)),
+					_ => None,
+				})
+				.collect();
+			let [(_, old), (made, new)] = advertised[..] else {
+				panic!("epochs: {epochs}: expected two advertisements, got {advertised:?}");
+			};
+			assert_ne!(old, new, "epochs: {epochs}: one request carried both");
+			let broken = trail
+				.iter()
+				.position(|(stream, sent)| *stream == old && matches!(sent, Sent::Reset(_)))
+				.unwrap_or_else(|| panic!("epochs: {epochs}: the old advertisement was never withdrawn"));
+			assert_eq!(
+				made < broken,
+				epochs,
+				"epochs: {epochs}: advertised at {made}, withdrew at {broken}"
+			);
+		}
 	}
 
 	async fn publish_namespace_ok(version: Version) -> Vec<u8> {

@@ -1224,29 +1224,81 @@ test("an advertisement carries its epoch only once negotiated", async () => {
 	}
 });
 
-/** A new instance at a path is other content, so it is a withdrawal and a fresh advertisement. */
-test("an epoch change withdraws and advertises the new epoch", async () => {
+/**
+ * A new instance at a path is other content, but the namespace never goes absent: the new
+ * epoch is advertised first, and the old one withdrawn only once the peer accepted it,
+ * since the two streams are unordered. A peer without MoQ Epoch cannot tell the two apart,
+ * so it still sees the old one withdrawn first.
+ */
+test.each([true, false])(
+	"an epoch change advertises the new epoch before withdrawing the old (negotiated: %p)",
+	async (negotiated) => {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const { pub, origin } = publisher(pair.server, { epoch: negotiated });
+		const streams = accepted(pair.client);
+		try {
+			const broadcast = origin.createBroadcast(Path.from("mine"));
+			const first = Epoch.mint();
+			broadcast.announce({ epoch: first });
+			void pub.runPublishNamespaces();
+
+			const old = await take(streams);
+			expect(await old.reader.u53()).toBe(PublishNamespace.id);
+			expect((await PublishNamespace.decode(old.reader, VERSION, EPOCH)).params.epoch).toBe(
+				negotiated ? first : undefined,
+			);
+			await acceptPublishNamespace(old);
+
+			const second = Epoch.mint();
+			broadcast.announce({ ...broadcast.route, epoch: second });
+			const withdrawn = watch(old.reader.done());
+
+			const next = await take(streams);
+			expect(await next.reader.u53()).toBe(PublishNamespace.id);
+			expect((await PublishNamespace.decode(next.reader, VERSION, EPOCH)).params.epoch).toBe(
+				negotiated ? second : undefined,
+			);
+			await flush();
+			expect(withdrawn.state).toBe(negotiated ? "pending" : "rejected");
+
+			await acceptPublishNamespace(next);
+			expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
+		} finally {
+			origin.close();
+		}
+	},
+);
+
+/** On a SUBSCRIBE_NAMESPACE stream, another epoch is one NAMESPACE and no NAMESPACE_DONE. */
+test("a solicited namespace takes another epoch as one NAMESPACE and no NAMESPACE_DONE", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const { pub, origin } = publisher(pair.server, { epoch: true });
-	const streams = accepted(pair.client);
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, epoch: true });
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
 		const first = Epoch.mint();
 		broadcast.announce({ epoch: first });
-		void pub.runPublishNamespaces();
 
-		const old = await take(streams);
-		expect(await old.reader.u53()).toBe(PublishNamespace.id);
-		expect((await PublishNamespace.decode(old.reader, VERSION, EPOCH)).params.epoch).toBe(first);
-		await acceptPublishNamespace(old);
+		const subscription = await Stream.open(pair.client, { version: VERSION });
+		const stream = await Stream.accept(pair.server, VERSION);
+		if (!stream) throw new Error("the subscription stream was never accepted");
+		void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }), stream);
+		const entry = async () => {
+			expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+			return await SubscribeNamespaceEntry.decode(subscription.reader, VERSION, EPOCH);
+		};
+
+		expect(await subscription.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(subscription.reader, VERSION);
+		expect(await entry()).toMatchObject({ suffix: Path.from("mine"), params: { epoch: first } });
 
 		const second = Epoch.mint();
 		broadcast.announce({ ...broadcast.route, epoch: second });
+		expect(await entry()).toMatchObject({ suffix: Path.from("mine"), params: { epoch: second } });
 
-		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
-		const next = await take(streams);
-		expect(await next.reader.u53()).toBe(PublishNamespace.id);
-		expect((await PublishNamespace.decode(next.reader, VERSION, EPOCH)).params.epoch).toBe(second);
+		const more = watch(subscription.reader.u53());
+		await flush();
+		expect(more.state).toBe("pending");
+		subscription.close();
 	} finally {
 		origin.close();
 	}

@@ -608,11 +608,10 @@ export class Subscriber {
 							const params = entry.params ?? {};
 							const held = live.get(path);
 
-							// The epoch names the advertisement's instance for as long as it
-							// stands: a replacement is a NAMESPACE_DONE and a fresh NAMESPACE,
-							// never a repeat.
-							if (held !== undefined && held.epoch !== params.epoch) {
-								throw new ProtocolViolation(`NAMESPACE repeated under another epoch: ${path}`);
+							// A repeat under another epoch replaces the instance in place, but one
+							// that gains or loses an epoch skipped the NAMESPACE_DONE it needs.
+							if (held !== undefined && (held.epoch === undefined) !== (params.epoch === undefined)) {
+								throw new ProtocolViolation(`NAMESPACE repeated gaining or losing an epoch: ${path}`);
 							}
 
 							// A repeat updates the advertisement in place, so one that now
@@ -628,9 +627,11 @@ export class Subscriber {
 							}
 
 							// A repeat replaces the advertisement in place: HOP_PATH / ROUTE_COST
-							// can change without a NAMESPACE_DONE. Only the first is a new path.
+							// can change without a NAMESPACE_DONE, and another epoch restarts the
+							// path without it ever going absent. Only the first is a new path.
 							const route = this.#route(params);
 							if (held !== undefined) {
+								held.epoch = params.epoch;
 								this.#updateAnnounce(path, held.id, route);
 							} else {
 								live.set(path, { id: this.#attachAnnounce(path, route), epoch: params.epoch });

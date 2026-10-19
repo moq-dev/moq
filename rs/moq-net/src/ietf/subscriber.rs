@@ -643,7 +643,7 @@ impl Advertised {
 struct Advertisement {
 	/// Names it to [`Subscriber::stop_announce`] and [`Subscriber::update_announce`].
 	id: u64,
-	/// The publisher instance it named, which a repeat must not change.
+	/// The publisher instance it names: a repeat may name another, but not gain or lose one.
 	epoch: Option<crate::Epoch>,
 }
 
@@ -1231,12 +1231,12 @@ where
 					initial.initial = initial.initial.saturating_sub(1);
 					let path = prefix.join(&msg.suffix);
 					let params = msg.params.unwrap_or_default();
-					// The epoch names the advertisement's instance for as long as it stands: a
-					// replacement is a NAMESPACE_DONE and a fresh NAMESPACE, never a repeat.
+					// A repeat under another epoch replaces the instance in place, but one that
+					// gains or loses an epoch skipped the NAMESPACE_DONE it needs.
 					if let Some(held) = live.get(&path)
-						&& held.epoch != params.epoch
+						&& held.epoch.is_some() != params.epoch.is_some()
 					{
-						tracing::warn!(%path, "namespace repeated under another epoch");
+						tracing::warn!(%path, "namespace repeated gaining or losing an epoch");
 						return Err(Error::ProtocolViolation);
 					}
 					let Some(advert) = self.route(params.cluster.as_ref(), peer) else {
@@ -1255,9 +1255,11 @@ where
 					let advert = advert.with_epoch(params.epoch.clone());
 
 					tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, epoch = ?params.epoch, "namespace");
-					if let Some(held) = live.get(&path) {
+					if let Some(held) = live.get_mut(&path) {
 						// A repeat replaces the advertisement atomically; nothing is torn
-						// down merely because an update arrived.
+						// down merely because an update arrived, and another epoch restarts
+						// the route without it ever going absent.
+						held.epoch = params.epoch;
 						self.update_announce(path, held.id, advert)?;
 					} else {
 						match self.start_announce(path.clone(), advert, Admit::Session) {
