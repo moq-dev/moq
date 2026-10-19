@@ -939,7 +939,7 @@ mod tests {
 	}
 
 	/// VAAPI returns its buffered tail before the consumer reports track end.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
+	#[cfg(all(target_os = "linux", feature = "vaapi", feature = "openh264"))]
 	#[tokio::test]
 	async fn the_track_ending_drains_the_decoder() {
 		const FRAMES: u64 = 5;

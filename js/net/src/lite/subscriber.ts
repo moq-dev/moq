@@ -12,10 +12,11 @@ import { error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { grace } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
-import { TAIL_GRACE_MS, Tail } from "../tail.ts";
+import { Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
@@ -859,10 +860,7 @@ export class Subscriber {
 			// presentation-time drift), but it is how long the subscriber was willing to wait
 			// for a late group anyway. Already the smaller of the subscriber's and the track's.
 			tail: new Tail({
-				grace: () => {
-					const maxDelay = producer.subscription.peek()?.maxDelay ?? Milli.zero;
-					return maxDelay > 0 ? maxDelay : TAIL_GRACE_MS;
-				},
+				grace: () => grace(producer.subscription.peek()?.maxDelay ?? Milli.zero),
 			}),
 			requested: msg.startGroup,
 			held: state.track,
@@ -1205,6 +1203,7 @@ export class Subscriber {
 
 			if ("start" in resp) {
 				entry.start = resp.start.group;
+				hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
 				hooks.reportedLargest(entry.track, resp.start.largest);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
 				// demand asks later. One that still arrives is delivered.
@@ -1216,7 +1215,9 @@ export class Subscriber {
 				// A local close can win the race with the response; there is nothing left to end.
 				if (entry.track.closed.peek() !== undefined) continue;
 				try {
-					entry.track.finishAt({ group: entry.end, frame: 0 });
+					// Lower groups may still be on the wire behind a higher one, so readers hold
+					// at a hole below the end until the tail settles.
+					hooks.endTrack(entry.track, { group: entry.end, frame: 0 });
 				} catch (err) {
 					// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so
 					// there an end below a received group only costs the early boundary: the FIN

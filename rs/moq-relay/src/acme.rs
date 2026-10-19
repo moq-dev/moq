@@ -27,6 +27,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long each systemd start-timeout extension lasts while issuance is pending.
+#[cfg(unix)]
 const EXTEND_USEC: u32 = 90_000_000;
 
 /// How often the start timeout is extended, well inside [`EXTEND_USEC`].
