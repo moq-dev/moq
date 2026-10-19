@@ -316,35 +316,33 @@ const CASES: Case[] = [
 		},
 	},
 	{
-		// A refusal surfaces at different points depending on the version: lite-05
-		// looks a track's info up before subscribing, so `subscribe` itself rejects,
-		// while IETF and lite-02 have no such lookup and only find out when no group
-		// arrives. Either is fine. Delivering a group is not, and neither is never
-		// settling, which the case timeout catches.
+		// The refusal has to surface as an error. Where depends on the version: lite-06
+		// looks a track's info up before subscribing, so `subscribe` rejects, while IETF
+		// (REQUEST_ERROR, or PUBLISH_DONE after SUBSCRIBE_OK) and lite-02 can accept first
+		// and reject the read. Delivering a group or ending cleanly is not a refusal, and
+		// never settling fails on the case timeout.
 		name: "refuses a track the publisher does not serve",
 		run: async (wasm, relay) => {
 			const path = `wasm-test/${relay.name}-refuse`;
 			await withPublisher(relay, path, async () => {
 				await withSession(wasm, relay, async (session) => {
 					const broadcast = await consume(session, path);
-					let delivered = false;
+					let read: string;
 					try {
 						const track = await broadcast.subscribe("missing");
 						try {
 							const group = await track.recvGroup();
-							if (group) {
-								delivered = true;
-								group.free();
-							}
+							group?.free();
+							read = group ? "delivered a group" : "ended cleanly";
 						} finally {
 							track.free();
 						}
 					} catch {
-						// The refusal surfaced as a rejection, the other legal shape.
+						return;
 					} finally {
 						broadcast.free();
 					}
-					if (delivered) throw new Error("an unserved track delivered a group");
+					throw new Error(`an unserved track ${read}, want a refusal`);
 				});
 			});
 		},

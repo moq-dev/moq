@@ -1,4 +1,4 @@
-# More tests hold up under load
+# [S] More tests hold up under load
 
 ## Goal
 
@@ -32,11 +32,6 @@ times on a loaded machine, as the first round did. moq-tokio's
 known exception, tracked by [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [BBR marking seed](/quest/m1/test-flakes-2/bbr-marking-seed.md) - the BBR marking test seeds its probe schedule, replays a failing seed, and its rare drop is fixed at the cause
-- [WASM refused track](/quest/m1/test-flakes-2/wasm-refused-track.md) - the refused-track case passes and fails on its refusal, not a timeout
 
 ## Related
 

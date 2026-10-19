@@ -7,6 +7,7 @@ mod alpn;
 mod backend;
 mod broadcast;
 mod close_code;
+mod keylog;
 mod max_age;
 mod reconnect;
 mod stream_code;

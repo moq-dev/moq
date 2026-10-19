@@ -4985,6 +4985,7 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(defaults.quic.mtu_discovery, None);
 	assert_eq!(defaults.quic.congestion_control, None);
 	assert_eq!(defaults.quic.qlog, None);
+	assert_eq!(defaults.quic.keylog, None);
 
 	assert!(MoqClient::new(defaults).is_ok());
 }
@@ -5026,6 +5027,86 @@ async fn client_new_validates_the_connection_knobs() {
 		..Default::default()
 	};
 	assert_eq!(client(MoqClientTls::default(), qlog).is_ok(), moq_qlog_supported());
+}
+
+/// `quic.keylog` reaches the backend: refused without `SSLKEYLOGFILE`, and writing the client's
+/// session secrets once it names a file.
+#[tokio::test]
+async fn client_keylog_writes_session_keys() {
+	let keylog = MoqQuicConfig {
+		keylog: Some(true),
+		..Default::default()
+	};
+	let client = |quic: MoqQuicConfig, fingerprints: Vec<String>| {
+		MoqClient::new(MoqClientConfig {
+			tls: MoqClientTls {
+				host_name: Some("localhost".into()),
+				fingerprints,
+				..Default::default()
+			},
+			quic,
+			websocket: MoqWebSocketConfig {
+				enabled: Some(false),
+				delay_us: None,
+			},
+			..Default::default()
+		})
+	};
+
+	// SAFETY: nextest runs each test in its own process, and nothing has spawned a thread that
+	// reads the environment yet.
+	unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+	assert!(matches!(
+		client(keylog.clone(), Vec::new()),
+		Err(MoqError::Config { .. })
+	));
+
+	let path = std::env::temp_dir().join(format!("moq-ffi-keylog-{}.log", std::process::id()));
+	let _ = std::fs::remove_file(&path);
+	// SAFETY: as above.
+	unsafe { std::env::set_var("SSLKEYLOGFILE", &path) };
+
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept()
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+		request.accept(None, None).await.expect("handshake failed")
+	});
+
+	let client = client(keylog, server.cert_fingerprints().unwrap()).unwrap();
+	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("server accept timed out")
+		.expect("server accept task panicked");
+
+	let log = std::fs::read_to_string(&path).unwrap_or_default();
+	let _ = std::fs::remove_file(&path);
+	assert!(
+		log.lines().any(|line| line.starts_with("CLIENT_TRAFFIC_SECRET_0 ")),
+		"quic.keylog wrote no session keys: {log:?}"
+	);
+
+	session.cancel(0);
+	server_session.cancel(0);
+	client.cancel();
+	server.cancel();
 }
 
 /// Every connection knob set at once still dials, so none of them is refused or misapplied.
@@ -5072,6 +5153,7 @@ async fn client_connects_with_every_knob_set() {
 			mtu_discovery: Some(true),
 			congestion_control: Some(MoqCongestionControl::Loss),
 			qlog: None,
+			keylog: Some(false),
 		},
 		websocket: MoqWebSocketConfig {
 			enabled: Some(false),

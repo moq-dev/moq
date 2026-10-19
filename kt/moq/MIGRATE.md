@@ -11,6 +11,11 @@ How to update your code for each breaking change, newest first.
 Loop on `wantedChanged()` until it returns non-null where you called `used()`, and null where you called `unused()`.
 `TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
 
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `QuicConfig.keylog` to `true` as well to capture them; without `SSLKEYLOGFILE` the client or server refuses to build.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.groupStart` and `groupEnd` are replaced by `ranges`, a list of `Range` whose ends are `AnchorAbsolute` or `AnchorRelative` (an absolute group and frame, or a count of groups before the latest), and an optional `order`.

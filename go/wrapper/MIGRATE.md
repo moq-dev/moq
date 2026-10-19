@@ -11,6 +11,11 @@ How to update your code for each breaking change, newest first.
 Loop on `WantedChanged` until it returns non-nil where you called `Used`, and nil where you called `Unused`.
 `TrackInfo` gains `Refresh`. `GroupDemand` is unchanged.
 
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Pass `WithQUICKeylog(true)` to `Dial` or `WithServerQUICKeylog(true)` to `Listen` as well to capture them; without `SSLKEYLOGFILE` the dial or listen fails.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.GroupStart` and `GroupEnd` are replaced by `Ranges`, a slice of `Range` whose ends are `AnchorAbsolute` or `AnchorRelative` (an absolute group and frame, or a count of groups before the latest), and an optional `Order`.

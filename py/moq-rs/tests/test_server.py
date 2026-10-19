@@ -266,6 +266,7 @@ async def test_client_connection_knobs():
                 gso=False,
                 mtu_discovery=True,
                 congestion_control=moq.CongestionControl.LOSS,
+                keylog=False,
                 websocket_enabled=False,
             ) as client:
                 assert client.session is not None
@@ -287,6 +288,16 @@ async def test_invalid_config_fails_on_enter():
             pass
     with pytest.raises(moq.Error.Config):  # type: ignore[attr-defined]
         async with moq.Server("not-an-address", tls_generate=["localhost"]):
+            pass
+
+
+async def test_server_keylog_requires_sslkeylogfile(monkeypatch):
+    """keylog reaches the native server, which refuses it without SSLKEYLOGFILE."""
+    monkeypatch.delenv("SSLKEYLOGFILE", raising=False)
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], keylog=False):
+        pass
+    with pytest.raises(moq.Error.Config, match="SSLKEYLOGFILE"):  # type: ignore[attr-defined]
+        async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], keylog=True):
             pass
 
 
