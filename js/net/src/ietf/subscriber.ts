@@ -832,7 +832,7 @@ export class Subscriber {
 				producer.closed.then(() => localEnded),
 				revoked,
 			]);
-			void this.#runUpdates(stream, requestId, producer, priority, unanswered, done);
+			const updates = this.#runUpdates(stream, requestId, producer, priority, unanswered, done);
 
 			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
 			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
@@ -856,6 +856,11 @@ export class Subscriber {
 			} else {
 				producer.close();
 			}
+
+			// Closing settled `done`, so an update still being written finishes and nothing starts
+			// another. Its bytes must not interleave with the cancellation, and on drafts 14 and 15
+			// its spent request ID must reach the wire before any later one can.
+			await updates;
 
 			// The publisher already ended the request, so there is nothing to cancel. Sending
 			// UNSUBSCRIBE here would name a request it has already torn down.
