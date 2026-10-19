@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### TS private PES rides `pesPacket` tracks; `verbatim` is sections only
+### TS private PES rides `pesPacket` tracks; `verbatim` is sections only (#5921)
 
 `ts::Framing::Pes` and `ts::Verbatim::stream_id` are gone, and `Verbatim::framing` no longer defaults: a catalog naming `"framing": "pes"`, or a `verbatim` record without `framing`, fails to parse.
 `ts::Import` now publishes every undecoded PES stream as a `ts::PesPacket` track, each frame one whole PES packet placed by the PCR.
