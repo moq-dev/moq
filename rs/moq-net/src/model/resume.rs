@@ -2209,7 +2209,7 @@ mod test {
 			if partial {
 				assert!(matches!(chunks.read_chunk().now_or_never(), Some(Err(Error::Old))));
 			} else {
-				assert!(matches!(reading.read_frame().now_or_never(), Some(Ok(None))));
+				assert!(matches!(reading.read_frame().now_or_never(), Some(Err(Error::Old))));
 			}
 		}
 	}
@@ -2863,15 +2863,10 @@ mod test {
 							result.is_pending(),
 							"recovered={recovered}, chunked={chunked}: widened budget was ignored"
 						);
-					} else if chunked {
-						assert!(
-							matches!(result, Poll::Ready(Err(Error::Old))),
-							"recovered={recovered}: narrowed budget did not truncate the frame"
-						);
 					} else {
 						assert!(
-							matches!(result, Poll::Ready(Ok(()))),
-							"recovered={recovered}: narrowed budget did not end the drained group"
+							matches!(result, Poll::Ready(Err(Error::Old))),
+							"recovered={recovered}, chunked={chunked}: narrowed budget did not expire the read"
 						);
 					}
 					assert_eq!(source.subscription().unwrap().priority, 7);
