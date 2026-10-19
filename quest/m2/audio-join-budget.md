@@ -18,8 +18,7 @@ session.
 Reproduce it the same way first: a publisher bursting one-frame groups over
 `moq_net::transport::memory` before the update lands. If it holds, subscribe with the full
 budget from the start and keep the warmup reach local, as the export now picks its live
-edge in the consumer instead of on the wire.
-
-## Related
-
-- [TS MP2 join hole](/quest/m1/test-flakes-2/ts-mp2-join-hole.md) - the TS export still loses MP2 groups after its live join; it may share this race
+edge in the consumer instead of on the wire. The export anchors that edge on the
+publisher's largest (`track::Subscriber::poll_largest`), which a relay now forwards from
+its source; `moq_mux::container::test_util::Link::held` delivers one group stream ahead of
+the rest, the way the export's join test does.

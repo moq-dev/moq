@@ -464,7 +464,7 @@ impl Target {
 ///
 /// The copy keeps the units the publisher declared, so it matches a copy of the same
 /// instance that arrived over another route: resuming across routes refuses one whose
-/// metadata differs.
+/// metadata differs. A sealed TIMESCALE travels downstream unchanged, so it must too.
 fn accepted_info(properties: &ietf::Properties) -> track::Info {
 	let mut info = track::Info::default()
 		.with_timescale(properties.timescale)
@@ -472,6 +472,8 @@ fn accepted_info(properties: &ietf::Properties) -> track::Info {
 		.with_priority(super::priority::from_wire(properties.priority.unwrap_or(128)));
 	// This session carries NEW_GROUP_REQUEST back to the original publisher.
 	info.dynamic_groups = properties.dynamic_groups;
+	info.properties =
+		Some(std::sync::Arc::new(properties.unknown.clone())).filter(|unknown| !unknown.values.is_empty());
 	info
 }
 
@@ -2907,6 +2909,22 @@ where
 		// SUBSCRIBE_OK commits the model's immutable metadata before the alias releases
 		// any data stream that arrived ahead of this control response.
 		let accepted = match response {
+			// A track that needs a property we do not understand is neither processed nor
+			// forwarded: the subscription is cancelled and the subscribers refused.
+			Ok(Some(accepted)) if accepted.properties.unknown.mandatory() => {
+				let err = Error::UnsupportedExtension;
+				tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, %err, "subscribe refused");
+				// Refuse before waiting on the peer to acknowledge the cancellation.
+				if let Some(pending) = self.take_pending(request_id) {
+					pending.reject(err.clone());
+				}
+				self.remove_subscribe(request_id);
+				if let Some(idle) = resumed {
+					let _ = idle.track.abort(err);
+				}
+				self.cancel_subscribe(stream, request_id).await;
+				return None;
+			}
 			Ok(Some(accepted)) => accepted,
 			Ok(None) => {
 				if let Some(pending) = self.take_pending(request_id) {
@@ -3780,6 +3798,11 @@ where
 		// FIN our side too and let the stream drop.
 		let _ = stream.writer.finish();
 		let ok = match response {
+			// A track that needs a property we do not understand is not forwarded.
+			Ok(ok) if ok.properties.unknown.mandatory() => Err(Error::UnsupportedExtension),
+			res => res,
+		};
+		let ok = match ok {
 			Ok(ok) => ok,
 			// NOT_SUPPORTED refuses the method, not the track. The origin queries a track before
 			// its first reader's subscription lands, so this is often a subscriber's request.
@@ -15375,5 +15398,180 @@ mod new_group_tests {
 		let _c = subscribe(&relay.track, Some(6));
 		assert_eq!(update(&mut stream).await, Some(6));
 		relay.serving.abort();
+	}
+}
+
+/// Track Properties on SUBSCRIBE_OK, with the original publisher's end of the session played
+/// by hand.
+#[cfg(test)]
+mod track_property_tests {
+	use super::*;
+	use crate::{
+		coding::Encoder,
+		model::{
+			ProduceTest,
+			object::{Property, Value},
+		},
+		transport::memory,
+	};
+
+	/// The newest draft and an older one, both with a request stream per subscription.
+	const VERSIONS: [Version; 2] = [Version::Draft17, Version::Draft22];
+
+	/// Subscribe to one track through a relay on `version`, whose publisher answers with
+	/// `block` as SUBSCRIBE_OK's Track Properties, returning what the subscriber got.
+	async fn subscribe(
+		version: Version,
+		block: &[u8],
+	) -> (Result<track::Subscriber, Error>, Subscriber<memory::Session>) {
+		let (session, mut peer) = memory::pair(memory::Config::default());
+		let (tasks, _task_set) = TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::sim(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		);
+		let broadcast = crate::broadcast::Info::default().produce();
+		let mut dynamic = broadcast.dynamic();
+		let track = broadcast.consume().track("video").unwrap();
+		let subscribing = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let probe = subscriber.clone();
+		let serving = moq_clock::sim::spawn(async move {
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
+		});
+
+		let mut stream = Stream::accept(&mut peer, version).await.unwrap();
+		assert_eq!(stream.reader.varint().await.unwrap(), ietf::Subscribe::ID);
+		let _subscribe: ietf::Body = stream.reader.decode().await.unwrap();
+
+		let mut body = Vec::new();
+		ietf::SubscribeOk {
+			request_id: None,
+			track_alias: 7,
+			largest: None,
+			properties: Default::default(),
+		}
+		.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+		.unwrap();
+		// Track Properties are the final field.
+		body.extend_from_slice(block);
+		let mut frame = Vec::new();
+		Encoder::new(&mut frame, version.into())
+			.varint(ietf::SubscribeOk::ID)
+			.unwrap();
+		frame.extend(u16::try_from(body.len()).unwrap().to_be_bytes());
+		frame.extend(body);
+		stream.writer.write_all(&mut bytes::Bytes::from(frame)).await.unwrap();
+
+		let subscribed = moq_clock::timeout(Duration::from_secs(1), subscribing)
+			.await
+			.expect("the subscription was never answered");
+		moq_clock::sleep(Duration::from_millis(1)).await;
+		serving.abort();
+		(subscribed, probe)
+	}
+
+	/// A Track Properties block holding `pairs`, in ascending order.
+	fn block(version: Version, pairs: &[Property]) -> Vec<u8> {
+		let mut block = Vec::new();
+		let mut w = Encoder::new(&mut block, version.into());
+		let mut prev = 0;
+		for Property { id, value } in pairs {
+			w.varint(id - prev).unwrap();
+			prev = *id;
+			match value {
+				Value::Int(value) => w.varint(*value).unwrap(),
+				Value::Bytes(value) => w.bytes(value).unwrap(),
+			}
+		}
+		block
+	}
+
+	/// An even property the draft defines but moq-net does not implement
+	/// (OBJECT_DELIVERY_TIMEOUT) and an odd one from the application range reach the track
+	/// unchanged, for the relay's own answers downstream to forward.
+	#[moq_clock::test]
+	async fn unknown_properties_reach_the_track() {
+		for version in VERSIONS {
+			let unknown = vec![
+				Property {
+					id: 0x02,
+					value: Value::Int(5000),
+				},
+				Property {
+					id: 0x3801,
+					value: Value::Bytes(bytes::Bytes::from_static(b"opaque")),
+				},
+			];
+			let (subscribed, _probe) = subscribe(version, &block(version, &unknown)).await;
+			let subscriber = subscribed.unwrap_or_else(|err| panic!("{version}: {err}"));
+			let properties = subscriber
+				.info()
+				.properties
+				.clone()
+				.expect("the properties were dropped");
+			assert_eq!(properties.values, unknown, "{version}");
+			assert_eq!(properties.immutable, None, "{version}");
+		}
+	}
+
+	/// A Mandatory Track Property we do not understand, mutable or sealed, refuses the
+	/// track with UNSUPPORTED_EXTENSION instead of forwarding it.
+	#[moq_clock::test]
+	async fn a_mandatory_property_refuses_the_track() {
+		for version in VERSIONS {
+			let mandatory = Property {
+				id: 0x4000,
+				value: Value::Int(1),
+			};
+			let sealed = Property {
+				id: 0x0b,
+				value: Value::Bytes(block(version, std::slice::from_ref(&mandatory)).into()),
+			};
+			for property in [mandatory, sealed] {
+				let (subscribed, probe) = subscribe(version, &block(version, &[property])).await;
+				assert!(
+					matches!(subscribed, Err(Error::UnsupportedExtension)),
+					"{version}: {:?}",
+					subscribed.map(|subscriber| subscriber.info().clone())
+				);
+				assert!(
+					probe.state.lock().subscribes.is_empty(),
+					"{version}: the subscription was kept"
+				);
+			}
+		}
+	}
+
+	/// A TIMESCALE keeps the publisher's units, mutable or sealed: a sealed one travels
+	/// downstream unchanged, and a mutable one matches a copy that arrived over another route.
+	#[moq_clock::test]
+	async fn a_timescale_keeps_its_units() {
+		for version in VERSIONS {
+			let timescale = Property {
+				id: super::super::properties::TIMESCALE,
+				value: Value::Int(1000),
+			};
+			let sealed = Property {
+				id: 0x0b,
+				value: Value::Bytes(block(version, std::slice::from_ref(&timescale)).into()),
+			};
+			for property in [timescale, sealed] {
+				let (subscribed, _probe) = subscribe(version, &block(version, &[property])).await;
+				let subscriber = subscribed.unwrap_or_else(|err| panic!("{version}: {err}"));
+				assert_eq!(subscriber.info().timescale, Some(Timescale::MILLI), "{version}");
+			}
+		}
 	}
 }

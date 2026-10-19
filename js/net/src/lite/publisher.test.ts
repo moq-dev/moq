@@ -2300,6 +2300,44 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 	}
 });
 
+// A relay that holds only the first group of a backlog answers with the largest its source
+// reported, so a live joiner downstream starts at the newest group rather than the oldest one
+// the budget serves.
+test("lite draft-07 reports the source's largest position past what a relay holds", async () => {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("relayed"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	// The source answered with group 4 as its largest; only group 0 has landed.
+	hooks.reportedLargest(track, { group: 4, frame: 0 });
+	const group = new GroupProducer(0);
+	group.writeFrame(textFrame("oldest"));
+	group.close();
+	track.writeGroup(group);
+	const client = await Stream.open(pair.client, { version });
+	const server = await Stream.accept(pair.server, version);
+	if (!server) throw new Error("missing subscribe stream");
+	const running = publisher.runSubscribe(
+		replaySubscribe({ id: 0n, broadcast: Path.from("relayed"), track: "video", priority: 0 }),
+		server,
+	);
+	try {
+		const response = await decodeSubscribeResponse(client.reader, version);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+		expect([response.start.group, response.start.largest]).toEqual([0, { group: 4, frame: 0 }]);
+	} finally {
+		client.close();
+		publisher.close();
+		broadcast.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+		await running;
+	}
+});
+
 async function settleControls(): Promise<void> {
 	await new Promise<void>((resolve) => {
 		const channel = new MessageChannel();
