@@ -1,7 +1,7 @@
 //! Timing of a delayed [`Export`] on a live clock: what a receiver renders when it joins a
 //! broadcast already running, when one track loses frames, when the source falls silent and
 //! resumes, when the source's clock runs off the receiver's, and when two receivers render one
-//! broadcast for a 1+1 (SMPTE ST 2022-7) pair.
+//! broadcast for a 1+1 pair.
 //!
 //! Every case runs on the paused clock, with each frame written at the instant a live source
 //! would send it. A receiver's view is measured from its own output: the lead of each PES (its
@@ -749,6 +749,49 @@ async fn the_video_held_at_the_end_goes_out() {
 		assert_eq!(leg.export.dropped(), 0, "lag {lag}: frames dropped");
 		let video = leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
 		assert_eq!(video, last, "lag {lag}: {video} of {last} video units went out");
+	}
+}
+
+/// The last PCR a leg carried, 90 kHz.
+fn last_pcr(out: &[(Instant, Frame)]) -> u64 {
+	let bytes: Vec<u8> = out
+		.iter()
+		.flat_map(|(_, frame)| frame.payload.iter().copied())
+		.collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut pcr = None;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(clock) = packet.adaptation_field.as_ref().and_then(|af| af.pcr) {
+			pcr = Some(clock.as_u64() / 300);
+		}
+	}
+	pcr.expect("a PCR")
+}
+
+/// The media goes out up to the delay ahead of its decode time, so at the end of the broadcast
+/// the clock runs on alone until the last unit decodes, with or without `--sync`: a receiver
+/// removes a unit from its buffer only once the clock reaches its decode time.
+#[tokio::test(start_paused = true)]
+async fn the_clock_runs_on_to_the_last_decode_time() {
+	for sync in [false, true] {
+		let mut live = Live::new(1.0, LAGS[0]).await;
+		live.sync = sync;
+		live.origin = 10_000_000;
+		let mut leg = live.join(Duration::ZERO).await;
+		live.run(4 * GOP, &mut [&mut leg], |_| false).await;
+		live.finish(&mut [&mut leg]).await;
+
+		let last = leg
+			.units()
+			.iter()
+			.map(|unit| unit.decode)
+			.max()
+			.expect("units went out");
+		let short = diff90(last, last_pcr(&leg.out)) as f64 / 90.0;
+		assert!(
+			short <= SLOT_MS,
+			"sync {sync}: the clock stops {short} ms before the last decode time"
+		);
 	}
 }
 

@@ -606,6 +606,12 @@ impl Schedule {
 		self.sync.as_ref()
 	}
 
+	/// Under [`Self::set_sync`], keep the clock running until `decode`, nanoseconds on the
+	/// media timeline, as a unit queued here would: the grid holds packets, not decode times.
+	pub fn decodes_at(&mut self, decode: u128) {
+		self.horizon = self.horizon.max(Some(decode.div_ceil(PCR_INTERVAL.as_nanos())));
+	}
+
 	/// Hold the packets on `pid` to `buffer`.
 	pub fn set_buffer(&mut self, pid: u16, buffer: Buffer) {
 		let before = self.transport_buffer(pid);
@@ -806,7 +812,10 @@ impl Schedule {
 	/// Whether nothing is left to lay out: every unit sent, and the clock past its decode time.
 	pub fn is_empty(&self) -> bool {
 		if let Some(grid) = &self.sync {
-			return grid.is_empty();
+			return grid.is_empty()
+				&& self
+					.horizon
+					.is_none_or(|horizon| grid.index().is_none_or(|next| next > horizon));
 		}
 		self.units.is_empty()
 			&& self

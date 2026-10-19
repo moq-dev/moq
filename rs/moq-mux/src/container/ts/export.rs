@@ -1419,7 +1419,7 @@ where
 
 	/// Render every packet as a function of the broadcast alone, so two exports of it that
 	/// joined at different moments and received it with different skew emit identical TS for
-	/// the content both hold, continuity counters included: a 1+1 (SMPTE ST 2022-7) pair.
+	/// the content both hold, continuity counters included, as the legs of a 1+1 pair must.
 	///
 	/// Each PID gets a fixed lane of the constant multiplex rate, a function of the slot and
 	/// the catalog, and each MoQ group lays its units from a position its first unit's
@@ -2720,6 +2720,7 @@ where
 		let Some(planned) = queued.planned else {
 			return Ok(());
 		};
+		self.schedule.decodes_at(queued.decode.as_nanos());
 		let grid = self.schedule.sync().context("MPEG-TS --sync lanes not laid out")?;
 		grid.place(&planned.packets, &planned.positions, queued.frame.keyframe);
 		Ok(())
