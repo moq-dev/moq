@@ -111,8 +111,11 @@ Public API: none. Wire: no encoding change. A publisher now re-offers
 cached groups it never reported dropped when a SUBSCRIBE_UPDATE widens the
 max age or a stale verdict loses its edge.
 
+## Required
+
+- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - #5929 lands the re-offer and serving path and the range miss fill this reuses
+
 ## Related
 
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - #5929 lands its serving half, including the re-offer this extends
 - [Archive producer](/quest/m1/archive/producer.md) - its resume floor crosses relays that viewers may have warmed
 - [Drop set](/quest/m1/drop-set.md) - closes the gap this leaves for groups already reported dropped

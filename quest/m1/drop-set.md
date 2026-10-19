@@ -23,14 +23,25 @@ which keeps drops final for now.
   reason (stale, cut, never produced, evicted) and, for a stale run, the
   budget it was judged under. A group that arrives removes its sequence; a
   drop never removes a group that already arrived.
-- **Each cursor judges for itself.** A cursor enumerates the missing
-  sequences in its range from the set:
+- **Each cursor judges for itself, a run at a time.** A cursor walks the
+  set's runs in its range, never their sequences, and settles each whole run
+  in O(1):
   - A run whose reason does not depend on the budget (a cut, a group never
-    produced) is dropped for every reader, as today.
-  - A stale run is dropped promptly for a reader whose budget is no wider
-    than the one it was judged under, and for any reader under whose own
-    budget `TrackState::drifted` convicts it.
-  - A wider reader waits for the group, a re-offer, or its own verdict.
+    produced) is dropped for every reader as one range, as today.
+  - A stale run is dropped promptly as one range for a reader whose budget
+    is no wider than the one it was judged under, and for any reader under
+    whose own budget `TrackState::drifted` convicts it. `drifted` judges a
+    missing sequence by its successor here, and every sequence in a missing
+    run shares one successor, so one call settles the run.
+  - A wider reader skips the run and waits for a group, a re-offer, or its
+    own verdict, each of which splits the run at most once.
+  - An unknown span (a gap between runs, or an evicted run) is judged the
+    same way, as one unit bounded by its neighbours: by one `drifted` call
+    against its shared successor, or by one range miss fill upstream.
+
+  A hostile upstream's huge run costs one Charge and O(1) per cursor, and
+  splitting it costs per-run Charges the pool bounds, so CPU tracks pool
+  bytes, never span.
 
   This fixes the gap Codex found on
   [moq-dev/moq#5986](https://github.com/moq-dev/moq/pull/5986): today
@@ -40,8 +51,8 @@ which keeps drops final for now.
 - **A widening re-offers the dropped runs now inside its budget,** through
   the re-offer path the resolved-demand quest adds, in the subscription's
   order. Upstream, the relay's own widening asks for them again.
-- **A stale run that loses its edge is invalidated,** the same as a widening
-  invalidates it, matching resolved-demand's stale-edge trigger. Each stale
+- **A stale run that loses its edge is invalidated** as one span, the same
+  as a widening invalidates it, matching resolved-demand's stale-edge trigger. Each stale
   run records the edge it was judged against: for a local verdict, the
   newer group that convicted it; for a received drop, this hop's newest group
   when the drop arrived. When that group is aborted or evicted here, so the
@@ -108,8 +119,8 @@ and otherwise as a cache miss, which the relay fills upstream by range
 ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)), so no reader
 waits indefinitely on forgotten state. Extend `track_subscriber_churn` in
 `rs/moq-net/benches/track.rs` with a fragmented set up to pool capacity,
-swept over subscriber count and runs, so enumeration cost tracks the touched
-runs, not the set.
+swept over subscriber count, run count, and run span, so enumeration cost
+tracks the touched runs, never the set or a run's span.
 
 Test on mock time through a relay:
 - On a live track, a reader no wider than the upstream budget gets a prompt
@@ -134,6 +145,9 @@ Test on mock time through a relay:
 - A flood of fragmented runs stays within the pool, evicting the oldest
   runs first, and a sequence whose run was evicted is judged locally or
   filled by range, never waited on indefinitely.
+- A single run spanning billions of sequences is settled by each cursor in
+  one step, whether dropped, skipped by a wider reader, or evicted and
+  judged again.
 
 Mirror each case in `js/net`.
 
