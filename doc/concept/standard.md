@@ -42,11 +42,13 @@ ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
 [auth](/draft/moq-auth) to tell each peer what it may publish and subscribe to,
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
-before a `SUBSCRIBE_NAMESPACE` is synced, and
+before a `SUBSCRIBE_NAMESPACE` is synced,
+[epoch](/draft/moq-epoch) to carry [publisher epochs](/concept/moq-lite#publisher-epochs)
+without changing a path, and
 [probe](/draft/moq-probe) for bandwidth estimation. Rust sessions request PROBE
 only while an owned `recv_bandwidth()` consumer is held. Read estimates through
 its `peek()` or `changed()` methods; session statistics do not request PROBE.
-Both libraries offer solicit and auth (draft 17 and later) unless a side's
+Both libraries offer solicit, auth, and epoch (draft 17 and later) unless a side's
 `extensions` setting declines one, which connects it as a peer that does not
 speak that extension. The pooled JavaScript `Connection` has no such setting yet.
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension. It encrypts
@@ -65,14 +67,19 @@ choices. They follow the product model.
   [publisher epochs](/concept/moq-lite#publisher-epochs) for how that one route
   is chosen.
 
-- **Plain readers leave object properties out.**
+- **Plain readers leave object and track properties out.**
   [Draft 18 §2.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-18.html#section-2.5)
   says a relay that does not understand a property still forwards and caches
-  it. Rust moq-transport relay paths do so; the public API, plain moq-lite, and
+  it. Rust moq-transport relay paths do so, for object properties and for the
+  track properties in `SUBSCRIBE_OK` and `FETCH_OK` from draft 16, and in
+  `TRACK_STATUS_OK` from draft 18; the public API, plain moq-lite, and
   JavaScript [leave other per-object metadata out](/concept/moq-lite#what-moq-lite-leaves-out).
   Immutable property blocks retain their bytes. Forwarding is refused when the
   negotiated drafts use incompatible key or integer encodings, or when the block
-  holds a Timestamp in units the response does not declare.
+  holds a Timestamp in units the response does not declare. Property 0x06 crosses
+  the draft-19 boundary as it does on an object. A track carrying a
+  Mandatory Track Property (0x4000-0x7FFF) is refused with `UNSUPPORTED_EXTENSION`
+  instead, or `NOT_SUPPORTED` before draft 18.
 
 - **`SUBSCRIBE_OK` before an old source answers.** moq-lite 01 through 04 have
   no track stream, so the relay cannot learn from that source whether the track

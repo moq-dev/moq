@@ -120,6 +120,8 @@ impl Workers {
 	///
 	/// Shares one served identity with every member; stream listeners are served separately.
 	pub fn bind(server: moq_tokio::server::Config, config: moq_tokio::worker::Config) -> anyhow::Result<Self> {
+		// Before any TLS loads or socket binds, so a bad `[quic]` has no side effects.
+		server.quic.validate()?;
 		let listen = &server.listen;
 		let quic = &server.quic;
 		let tls = match server.tls {
@@ -198,8 +200,13 @@ impl Workers {
 			.map(|alpn| alpn.as_bytes().to_vec())
 			.chain([b"h3".to_vec()])
 			.collect();
-		let mut server = moq_uring::quic::server::Config::new(tls.config(alpn)?);
 		let quic = quic.resolve();
+		let mut tls = tls.config(alpn)?;
+		if quic.keylog {
+			let tls = Arc::make_mut(&mut tls);
+			tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		}
+		let mut server = moq_uring::quic::server::Config::new(tls);
 		server.transport = transport(&quic)?;
 
 		// GSO is a property of the socket, not the connection, so it rides the
@@ -411,6 +418,7 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		// Unset means the backend's own default, and live media wants a steady
 		// send rate an encoder can track over CUBIC's sawtooth.
 		Some(moq_tokio::quic::CongestionControl::Delay) | None => moq_uring::quic::Congestion::Delay,
+		Some(moq_tokio::quic::CongestionControl::None) => moq_uring::quic::Congestion::None,
 		// A family added to the tokio stack later, rather than a silent
 		// substitution the operator would never learn about.
 		Some(other) => anyhow::bail!("io_uring workers cannot run the {other:?} congestion controller"),
@@ -500,7 +508,11 @@ fn serve_worker(spawn: Spawn) -> bool {
 	let setup = (|| -> anyhow::Result<(moq_uring::Worker, moq_uring::quic::Endpoint)> {
 		let mut config = moq_uring::Config::default();
 		config.metrics = metrics;
-		let worker = moq_uring::Worker::new(config).context("io_uring setup failed")?;
+		// Built inside the shared runtime, so the worker keeps that runtime's clock.
+		let worker = {
+			let _shared = serve.tokio.enter();
+			moq_uring::Worker::new(config).context("io_uring setup failed")?
+		};
 		// The member carries its slot in the steered group, so adopting it is
 		// what makes the endpoint issue connection ids that steer back here.
 		let socket = worker
@@ -889,6 +901,23 @@ mod tests {
 			);
 			assert_eq!(uring, (Some(tokio.0), Some(tokio.1), Some(tokio.2)));
 		}
+	}
+
+	/// A direct `bind` validates `[quic]` too, so a key log nobody can read back fails
+	/// instead of binding and logging nothing.
+	#[test]
+	#[allow(clippy::field_reassign_with_default)]
+	fn bind_refuses_a_keylog_without_sslkeylogfile() {
+		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
+		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		let mut server = moq_tokio::server::Config::default();
+		server.quic.keylog = Some(true);
+		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
+			.expect_err("a keylog without SSLKEYLOGFILE must be refused");
+		assert!(
+			matches!(err.downcast_ref(), Some(moq_tokio::Error::KeylogUnset)),
+			"{err:#}"
+		);
 	}
 
 	/// An auth decision still pending at the drain deadline is abandoned then,

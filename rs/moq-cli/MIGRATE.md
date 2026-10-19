@@ -4,6 +4,11 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Add `--quic-keylog` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = true`) to capture them; without `SSLKEYLOGFILE` it stops startup.
+
 ### `capture`, `transcode`, and `play` no longer include OpenH264 (#5771)
 
 Those features pull in moq-video without its software H.264 fallback, so a host without a hardware codec cannot encode or decode H.264.

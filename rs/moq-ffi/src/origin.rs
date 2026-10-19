@@ -735,10 +735,7 @@ mod supervision_tests {
 
 	#[tokio::test]
 	async fn container_importers_keep_the_origin_failure_after_other_owners_are_released() {
-		use crate::media::{
-			MoqContainerFormat, MoqContainerInit, MoqContainerStreamInit, MoqMediaContainerProducer,
-			MoqMediaContainerStreamProducer, MoqMediaTimebase,
-		};
+		use crate::media::{MoqContainerFormat, MoqContainerInit, MoqMediaContainerProducer, MoqMediaTimebase};
 		let (inner, completion, trigger) = crate::ffi::panicking_origin();
 		let origin = MoqOriginProducer::from_inner(Origin {
 			inner,
@@ -756,10 +753,11 @@ mod supervision_tests {
 			},
 		)
 		.unwrap();
-		let stream = MoqMediaContainerStreamProducer::new(
+		let independent = MoqMediaContainerProducer::new(
 			&broadcast,
-			MoqContainerStreamInit {
+			MoqContainerInit {
 				format: MoqContainerFormat::Ts,
+				data: Vec::new(),
 				timebase: None,
 			},
 		)
@@ -773,9 +771,9 @@ mod supervision_tests {
 		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
 		drop(completion);
 		assert!(matches!(container.cut(), Err(MoqError::Task { .. })));
-		assert!(matches!(stream.write(Vec::new()), Err(MoqError::Task { .. })));
+		assert!(matches!(independent.write(Vec::new()), Err(MoqError::Task { .. })));
 		assert!(matches!(container.finish(), Err(MoqError::Task { .. })));
-		assert!(matches!(stream.finish(), Err(MoqError::Task { .. })));
+		assert!(matches!(independent.finish(), Err(MoqError::Task { .. })));
 	}
 
 	#[tokio::test]
