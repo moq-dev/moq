@@ -309,7 +309,7 @@ Before its first group, a publisher starts one at a second only once it has watc
 
 The section describes two-second windows of the PCR count, each holding the PCR intervals that start in it.
 As the count passes each window, from the first that starts after the PCR the publisher's first group follows, the section takes that window's values; a window whose values match the last one's leaves the catalog unchanged.
-An input that ends before its first such window is described by everything it carried.
+An input that ends before its first such window takes `randomAccess` from every group it carried and `muxRate` from the window in progress.
 For a window, `randomAccess` is true only if the PAT listed one program, its PMT declared at most one video stream, and the clock PID was that PMT's `PCR_PID` throughout it, and every group it started began at a `random_access_indicator`.
 With more programs or video streams the random access points can stagger, so a group start is not one for all of them.
 
