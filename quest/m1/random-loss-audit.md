@@ -14,7 +14,15 @@ is not how real paths fail, so anything tuned to survive it as a quality or
 performance target may be wrong. Scope is every random-loss-driven
 decision, not only the 10% TS work. Small reverts land in the audit's PR;
 anything bigger becomes its own quest. Verdicts are measured on the
-[bufferbloat harness](/quest/m1/bufferbloat.md), not argued.
+bufferbloat harness (`just test ts --rate`, see `test/ts/README.md`), not
+argued.
+
+Measured with that harness 2026-10-18: BBRv3 alone keeps about a round trip
+queued, so a deep queue never overflows and congestion lands at the relay as
+`Old` group evictions instead. A verdict that needs congestion loss, such as
+BBR's loss response, needs a queue about a round trip deep or a loss-based
+sender sharing the path. The nightly overflowing path (2026-10-19) runs
+CUBIC alone behind a 250 ms queue, which it overflows every run.
 
 Leads found 2026-10-17 (no production default or congestion threshold was
 changed for random loss; `LOSS_THRESH` is still 2%):
@@ -46,7 +54,3 @@ Record each verdict (decision, origin PR, keep/rework/revert, evidence) in
 the PR description.
 
 Public API: depends on the verdicts. Wire: none expected.
-
-## Required
-
-- [Bufferbloat harness](/quest/m1/bufferbloat.md) - verdicts are measured on shaped paths

@@ -17,7 +17,7 @@ pub(super) fn encoding(version: Version) -> Encoding {
 }
 
 /// Draft-19 assigns property 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
-fn has_delivery_timeout(version: Version) -> bool {
+pub(super) fn has_delivery_timeout(version: Version) -> bool {
 	!matches!(
 		version,
 		Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18
