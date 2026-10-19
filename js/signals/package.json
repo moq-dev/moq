@@ -28,7 +28,7 @@
 		"@types/bun": "^1.4.2",
 		"@types/react": "^19.3.0",
 		"react": "^19.3.0",
-		"solid-js": "^1.9.15"
+		"solid-js": "^1.9.17"
 	},
 	"peerDependencies": {
 		"@types/react": "^19.2.17",

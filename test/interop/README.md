@@ -239,7 +239,7 @@ Firefox and WebKit players explicitly use WebSocket; Chromium keeps normal
 transport selection. This does not measure Firefox's QUIC path.
 
 The capability report names the engine version and separately lists missing
-publisher and player APIs. Firefox 155 in Playwright 1.63 exposes WebTransport and
+publisher and player APIs. Firefox 157 in Playwright 1.64 exposes WebTransport and
 WebCodecs but lacks `MediaStreamTrackProcessor`, so it can play this fixture but
 cannot publish it. Capabilities are measured on every run rather than assumed
 from an engine name. Playwright WebKit is not Safari; Safari device/transport
