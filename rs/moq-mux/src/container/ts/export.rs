@@ -1081,10 +1081,11 @@ where
 	/// ride is laid, and each slot goes out the delay after its own time on the source's
 	/// clock rather than a delay later still.
 	///
-	/// The clock is acquired before anything goes out: frames are held until a track starts
-	/// a new group, or for the delay at most, and the freshest of them against its release
-	/// time sets the clock, so a joiner runs at the delay from its first output and every
-	/// frame has the whole delay to arrive in. A source that sends its video its send-ahead
+	/// The clock is acquired before anything goes out: frames are held until every expected
+	/// track has delivered (two delays at most) and a track starts a new group, or for a delay
+	/// at most once all have. The track sent latest against its release time sets the clock,
+	/// so a joiner runs at the delay from its first output and every frame has the whole delay
+	/// to arrive in. A source that sends its video its send-ahead
 	/// early, as a TS mux does, is trailed by the delay; one that sends every track at its
 	/// decode time, by the delay and the video's send-ahead. The output then keeps the
 	/// source's pace and muxes every track in `(release time, PID)` order whatever the
