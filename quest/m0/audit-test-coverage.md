@@ -18,9 +18,10 @@ recurrence. Small, safe fixes (no public API change, no open decision) land in
 the run's PR, one commit each; everything else becomes a follow-up through
 `/quest-plan`.
 
-Starting points (2026-10-19): no coverage is measured. The first run picks the
-tool (`cargo llvm-cov` for Rust, the test runner's own coverage for `js/`)
-and records per-crate baselines here. Look for `#[ignore]` tests and JS tests
+Starting points (2026-10-19): nightly measures only moq-quic, through
+`just rs coverage <crate>` (`cargo llvm-cov`). Extend that recipe to the
+remaining crates, pick a tool for `js/`, and record per-crate baselines
+here. Look for `#[ignore]` tests and JS tests
 that no CI job runs (AGENTS.md wires every test into CI, at least nightly),
 fixes merged since the previous run without a regression test, and gaps in the
 `just test interop --all` matrix.

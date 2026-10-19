@@ -21,6 +21,6 @@ the run's PR, one commit each; everything else becomes a follow-up through
 Follow `doc/AGENTS.md` for what belongs in `doc/`. Starting points
 (2026-10-19): check every CLI example against `--help`, and walk the
 Cross-Package Sync table in AGENTS.md for changes merged since the previous
-run that skipped a target. `#![warn(missing_docs)]` is set in only 6 crates
-(moq-net, moq-e2ee, moq-rtmp, moq-hls, moq-pattern, moq-quic). VitePress
+run that skipped a target. `#![warn(missing_docs)]` is set in 12 of 42
+crates; find the published ones without it. VitePress
 checks internal links only; nothing checks external ones (try `lychee`).
