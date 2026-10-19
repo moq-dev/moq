@@ -87,7 +87,7 @@ pub struct Consumer<F: Container> {
 	// subscription names no start. Cleared once a first group is chosen.
 	startup: bool,
 
-	// Latch onto the newest group to arrive instead, discarding what arrived below it.
+	// Latch onto the newest group instead, discarding what arrived below it.
 	newest: bool,
 
 	// How far we may drift from the live edge before skipping a group.
@@ -193,9 +193,10 @@ impl<F: Container> Consumer<F> {
 		}
 	}
 
-	/// Start at the newest group to arrive, the live edge, rather than the floor or the oldest
-	/// group the publisher serves. The subscription keeps its budget, so every group after the
-	/// start arrives as it would for any reader; what arrived below the start is discarded.
+	/// Start at the newest group, the live edge, rather than the floor or the oldest group the
+	/// publisher serves: the publisher's largest when it reports one past what has arrived. The
+	/// subscription keeps its budget, so every group after the start arrives as it would for any
+	/// reader; what arrived below the start is discarded.
 	pub(crate) fn live(mut self) -> Self {
 		self.startup = true;
 		self.newest = true;
@@ -299,14 +300,21 @@ impl<F: Container> Consumer<F> {
 				!group.empty
 			});
 			if any_frame {
-				// A live reader takes the newest group announced so far, though its frames may
-				// still be on their way, and discards the older ones the budget also delivers.
+				// A live reader takes the newest group, though its frames may still be on their
+				// way, and discards the older ones the budget also delivers. The publisher's
+				// largest names it before its stream lands: the backlog's oldest group can arrive
+				// first, and starting there loses the groups after it once the live edge moves a
+				// budget past them.
 				let start = match self.newest {
-					true => self.pending.back(),
-					false => self.pending.front(),
-				}
-				.expect("a group has a frame")
-				.sequence;
+					true => {
+						let mut start = self.pending.back().expect("a group has a frame").sequence;
+						while let Poll::Ready(Some(largest)) = self.track.poll_largest(waiter) {
+							start = start.max(largest.group);
+						}
+						start
+					}
+					false => self.pending.front().expect("a group has a frame").sequence,
+				};
 				// Nothing has been read, so discarding what lies below the start is no gap.
 				self.pending.retain(|group| group.sequence >= start);
 				self.current = start;

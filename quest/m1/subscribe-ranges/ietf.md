@@ -33,6 +33,17 @@ bounded FETCH that ends exactly at the track's last object reports
 when the track has finished and the FETCH reaches its final object, never from
 a live track's Largest Object, and test both cases.
 
+Upstream range changes ride the subscription update that already carries the
+aggregate priority (`write_update` in `ietf/subscriber.rs`). Narrowing is
+allowed from draft-15 on. Widening is a bug today: on draft-20 and later, a
+subscriber from a future group puts its absolute start in the SUBSCRIBE filter,
+and a live subscriber merged in after it never gets the current group. Draft-20
+lets an update lower the start with FILL_PARAMETERS for what it missed, which
+opens a second fill stream on the subscription. Draft 14 forbids widening, and
+15 to 19 have no fill. `rs/moq-net/tests/integration/subscribe_ranges.rs`
+leaves draft-20+ out for that reason; add it back once the update carries the
+widened filter.
+
 moq-transport has no time filter, so a downstream `Time(pts)` end is
 resolved against the relay's cache before it goes upstream as a group range,
 or refused when the cache cannot resolve it.

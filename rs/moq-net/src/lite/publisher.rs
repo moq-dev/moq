@@ -3693,11 +3693,13 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		self.start = Some(start);
 		// Only the group: the subscriber derives the start frame from its own request
 		// (see `lite::SubscribeStart`). The track is live by now, since its first group
-		// was readable.
-		let largest = match self.track.poll_live(&kio::Waiter::noop()) {
+		// was readable. A relay can hold just the first group of a backlog its source
+		// already answered past, so the source's largest says where the live feed is.
+		let live = match self.track.poll_live(&kio::Waiter::noop()) {
 			Poll::Ready(largest) => largest,
 			Poll::Pending => None,
 		};
+		let largest = live.max(self.track.peek_largest());
 		writer.buffer(&lite::SubscribeResponse::Start(lite::SubscribeStart {
 			group: start,
 			largest,
@@ -4893,6 +4895,36 @@ mod serve_group_test {
 
 		// SUBSCRIBE_START at 0 (largest 0.0), then SUBSCRIBE_END at 3 with 2 streams.
 		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 1, 2, 3, 2]);
+	}
+
+	/// A relay that holds only the first group of a backlog answers with the largest its
+	/// source reported, so a live joiner downstream starts at the newest group rather than
+	/// the oldest one the budget serves.
+	#[moq_clock::test]
+	async fn lite07_start_reports_the_sources_largest() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		// The source answered with group 4 as its largest; only group 0 has landed.
+		track.report_largest(track::Position::group(4));
+		let subscriber = track.subscribe(None);
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.start.is_none() {
+			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+		}
+		kio::wait(|waiter| writer.poll_flush(&mut waiter.context()))
+			.await
+			.unwrap();
+
+		let writes = log.writes.lock().unwrap().clone();
+		let (msg, _) = lite::SubscribeResponse::decode_slice(&writes, Version::Lite07).unwrap();
+		let lite::SubscribeResponse::Start(start) = msg else {
+			panic!("expected SUBSCRIBE_START, got {msg:?}");
+		};
+		assert_eq!((start.group, start.largest), (0, Some(track::Position::group(4))));
 	}
 
 	/// The SUBSCRIBE_DROP ranges a run loop's subscribe stream carried, once flushed.
