@@ -20,12 +20,10 @@ export type CreateOptions<T extends HTMLElement> = {
 /** Creates an HTML element, applying the given options and appending the given children. */
 export function create<K extends keyof HTMLElementTagNameMap>(
 	tagName: K,
-	options?: CreateOptions<HTMLElementTagNameMap[K] & HTMLElement>,
+	options: CreateOptions<HTMLElementTagNameMap[K] & HTMLElement> = {},
 	...children: (HTMLElement | string)[]
 ): HTMLElementTagNameMap[K] {
 	const element = document.createElement(tagName);
-
-	if (!options) return element;
 
 	const { style, classList, dataset, attributes, ...props } = options;
 
