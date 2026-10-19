@@ -48,13 +48,31 @@ which keeps drops final for now.
   `TrackRun::poll_forward_drop` emits only recorded drops, cuts, or stale
   cached groups. A sequence the relay never cached is not judged until the
   track finishes.
+- **Each cursor keeps its own disposition record,** next to the per-track
+  set, as the maintainer first framed it ("keep what was dropped within each
+  cursor and within the track state"). The shared set cannot hold it: a
+  group that arrives leaves the shared set, so it cannot remember that this
+  cursor reported cached G stale, and after a widening or edge loss the
+  cursor could not tell G (re-offer it) from a group it delivered (never
+  resend it). The record is one run-length map per cursor, each run marked
+  delivered or reported, a reported run carrying its reason, the budget it
+  was judged under, and for a local stale verdict the convicting edge. It
+  replaces today's `Delivered` (`rs/moq-net/src/model/delivered.rs`), whose
+  floor (`forget_below`) folds stale gaps in with delivered groups, and
+  absorbs `TrackRun::served` and JS `#reported`. Delivery must be recorded,
+  not inferred from the cursor position: an arrival-order or descending
+  cursor delivers out of sequence order, and #5929 re-offers below the
+  position, so only the delivered runs say what never goes out twice. The
+  record only answers "re-offer or not"; the serving and re-offer path stays
+  #5929's.
 - **A widening re-offers the dropped runs now inside its budget,** through
   the re-offer path the resolved-demand quest adds, in the subscription's
   order. Upstream, the relay's own widening asks for them again.
 - **A local stale run that loses its edge is invalidated** as one span, the
   same as a widening invalidates it, matching resolved-demand's stale-edge
-  trigger. A run this hop judged stale records the newer group here that
-  convicted it. When that group is aborted or evicted, the run's sequences
+  trigger. A run this cursor judged stale records, in its disposition
+  record, the newer group here that convicted it. When that group is
+  aborted or evicted, the run's sequences
   become unknown: a cached group is re-offered, and a missing one is judged
   again against the current edge (`TrackState::drifted`) or waited for.
 - **A received stale run records no edge.** Its groups are not held here,
@@ -102,11 +120,14 @@ Code it replaces, in Rust and `js/net` alike:
 - `TrackState::drop_groups`, the `drops` range set and `DropCursor` in
   `rs/moq-net/src/model/track.rs`, which record a whole range without its
   reason or budget, even over groups already cached.
-- `TrackRun::served` in `rs/moq-net/src/lite/publisher.rs`, which holds
-  served and dropped sequences in one set and refuses any group in it.
-- In `js/net/src/track.ts`: `#drop`, `#undrop`, the `drops` signal, and the
-  wire cursor's `#pending`, `#dropsSeen`, and `#reported`, whose
-  `#tryRecvGroup` closes any group already reported.
+- `Delivered` in `rs/moq-net/src/model/delivered.rs` and
+  `TrackRun::served` in `rs/moq-net/src/lite/publisher.rs`, which hold
+  served and dropped sequences in one set and refuse any group in it. Both
+  become the per-cursor disposition record, which tells them apart.
+- In `js/net/src/track.ts`: `#drop`, `#undrop`, and the `drops` signal go;
+  the wire cursor's `#pending`, `#dropsSeen`, and `#reported`, whose
+  `#tryRecvGroup` closes any group already reported, become the same
+  per-cursor record.
 
 Untrusted input: a hostile upstream can fragment the set by alternating
 drops and arrivals, and an open live range is no bound, since its groups are
@@ -116,14 +137,32 @@ per-run cost, and the same eviction bound in `js/net`. Under pressure the
 pool evicts the oldest runs as it evicts groups, and a run older than the
 cache's retention window is forgotten, so the set never outgrows what the
 pool would hold, with no new constant. An evicted run's sequences become
-unknown again. A cursor judges an unknown missing sequence as it would a
+unknown again.
+
+Each cursor's disposition record is billed the same way, a fixed per-run
+cost on the same `Pool`, and is settled a run at a time like the shared
+set, so a cursor's state and CPU track its runs, never their span. The pool
+evicts a cursor's oldest run first:
+
+- An evicted reported run becomes unknown and is judged again from the
+  shared set and locally, as below. Nothing below it is recorded as
+  delivered, since older runs went first, so this never resends a delivered
+  group. A run reported over lite-05 or lite-06 was final on the wire, so
+  it is folded into the floor instead.
+- An evicted delivered run raises the cursor's floor through it, as
+  `forget_below` does today: nothing below the floor is offered again,
+  which keeps a delivered group from going out twice at the cost of no
+  longer re-offering a gap the pool could not remember.
+
+ A cursor judges an unknown missing sequence as it would a
 group never received: locally against its own budget (`TrackState::drifted`),
 and otherwise as a cache miss, which the relay fills upstream by range
 ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)), so no reader
 waits indefinitely on forgotten state. Extend `track_subscriber_churn` in
 `rs/moq-net/benches/track.rs` with a fragmented set up to pool capacity,
-swept over subscriber count, run count, and run span, so enumeration cost
-tracks the touched runs, never the set or a run's span.
+swept over subscriber count, shared runs, runs per cursor record, and run
+span, so enumeration cost tracks the touched runs, never the set, the
+record, or a run's span.
 
 Test on mock time through a relay:
 - On a live track, a reader no wider than the upstream budget gets a prompt
@@ -146,6 +185,14 @@ Test on mock time through a relay:
 - Through a lite-06 hop, a reported group stays dropped for every reader,
   with no session error.
 - A shrink sends no drops.
+- On lite-07, a cursor that delivered F, reported its neighbour G stale
+  while G stayed cached, and delivered H, gets only G after a widening that
+  covers all three: G is re-offered and F and H are never resent. The same
+  holds when G's convicting edge is lost instead of a widening.
+- A cursor whose disposition record is evicted under pool pressure never
+  resends a delivered group: an evicted reported run is judged again, and
+  an evicted delivered run raises the floor. Through a lite-06 hop, an
+  evicted reported run stays dropped.
 - A flood of fragmented runs stays within the pool, evicting the oldest
   runs first, and a sequence whose run was evicted is judged locally or
   filled by range, never waited on indefinitely.
