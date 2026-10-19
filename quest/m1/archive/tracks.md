@@ -52,7 +52,10 @@ broadcast, and a service serving paths under it on request lists nothing,
 like an on-demand track. A prefix consumer therefore covers the broadcasts
 announced at their own path (the lite draft already says an advertiser
 SHOULD announce a concrete path once it is producing) and treats TRACKS
-refused on an announced path as "not a broadcast". TRACKS names a
+refused with NOT_FOUND on an announced path as "not a broadcast". Any other
+refusal, UNAUTHORIZED included, keeps its reason and reaches the caller as
+that broadcast's error, since a real broadcast refuses a lister without
+permission. TRACKS names a
 broadcast path and an Epoch and resolves like TRACK and SUBSCRIBE, so the
 listing is pinned to the instance that answers it and ends with that
 instance, never spliced into the next one. Rejected: a prefix-scoped TRACKS,
@@ -77,8 +80,10 @@ when a track no longer exists"):
   wrapping it. A lister MAY skip the Track Stream for a track it learned this
   way, since the properties are the same immutable ones.
 - **Caught up.** An ordered CAUGHT_UP event, sent once, when the reader
-  reaches what was the live head when it asked, so the lister knows it holds
-  every track this hop knew then; entries after it are live. There is no
+  reaches what was the live head when it asked. The lister then holds every
+  track this hop knew then that is still live: one removed before the reader
+  reached its add collapses with it and never appears (see churn below).
+  Entries after it are live. There is no
   count anywhere, decided by the maintainer on 2026-10-19 ("We don't need the
   count at all"): a count sent first commits to that many adds, which a track
   removed before a slow reader reaches its add would break. The event itself
@@ -92,7 +97,11 @@ when a track no longer exists"):
   serves it (it left the broadcast's track table), so a SUBSCRIBE for it
   would now be refused. There are no entry IDs: a name is unique among a
   broadcast's live tracks, so the name identifies the entry, and a track
-  created again under it is a later add. Removing a name that is not live on
+  created again under it is a later add of the same track: within one
+  broadcast instance a name always means the same content, so its group
+  sequences continue rather than restart. A publisher that restarts them is
+  buggy and publishes a new broadcast (a new Epoch) instead, so an archive
+  keyed by broadcast, track, and first group never collides on a re-add. Removing a name that is not live on
   the stream is a protocol violation. A removal costs the name's bytes instead
   of a varint, which is worth it: the receiver keys tracks by name anyway, and
   the sender needs no per-reader ID state (below).

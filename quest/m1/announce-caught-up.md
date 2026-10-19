@@ -5,8 +5,8 @@
 On lite-07, the Announce stream marks the end of its initial set with the
 same ordered CAUGHT_UP event [TRACKS](/quest/m1/archive/tracks.md) uses,
 replacing ANNOUNCE_OK's `Active Count`. A subscriber knows it holds every
-route this hop knew when it asked, even when one of those routes ends before
-a slow reader reaches it. Published versions keep `Active Count` unchanged.
+route this hop knew when it asked that is still live; one that ends before a
+slow reader reaches its ANNOUNCE_START is omitted, as in TRACKS. Published versions keep `Active Count` unchanged.
 
 ## Plan
 
@@ -16,7 +16,7 @@ an initial route that ends before a slow reader reaches its start leaves
 the count unmet, unless the hop retains every initial announcement per
 reader. CAUGHT_UP is sent once, in order, when the reader reaches what was
 the live head when it asked, so an initial route that comes and goes before
-then collapses like any other. Keep the event identical in shape to TRACKS'
+then is omitted from the initial set, collapsing like any other. Keep the event identical in shape to TRACKS'
 CAUGHT_UP, so one encoding and one consumer rule serve both streams.
 
 - Caught up means caught up with this hop: a relay answers at once with what

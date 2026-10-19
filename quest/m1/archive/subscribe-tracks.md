@@ -33,13 +33,14 @@ maintainer declined.
 FORWARD=0, verified against the draft-18 and draft-22 text (draft-22 sections
 3.1.1, 3.6, 9.8 and 9.20.18): each PUBLISH a SUBSCRIBE_TRACKS produces starts its
 subscription paused, carrying the full track name, Track Properties, and
-LARGEST_OBJECT, and no objects flow until the subscriber resumes it.
+LARGEST_OBJECT once the track has published an object (omitted before), and no
+objects flow until the subscriber resumes it.
 
 TRACKS' three events (see its Plan) map as follows:
 
 | TRACKS event | Inbound: we answer SUBSCRIBE_TRACKS by its FORWARD | Outbound: we send it with FORWARD=0 |
 |---|---|---|
-| Track added, with TRACK_INFO | FORWARD=0: a paused PUBLISH, its Track Properties carrying TRACK_INFO as SUBSCRIBE_OK does today, or a PUBLISH_SKIPPED (PUBLISH_BLOCKED on draft-18) past the subscription cap. FORWARD=1 or omitted: a PUBLISH_SKIPPED (PUBLISH_BLOCKED on draft-18) naming the track | a PUBLISH, TRACK_INFO from its Track Properties; or a PUBLISH_SKIPPED (PUBLISH_BLOCKED on draft-18), TRACK_INFO from the SUBSCRIBE_OK of a paused SUBSCRIBE we open for it |
+| Track added, with TRACK_INFO | FORWARD=0: a paused PUBLISH, its Track Properties carrying TRACK_INFO as SUBSCRIBE_OK does today, or a PUBLISH_SKIPPED (PUBLISH_BLOCKED on draft-18) past the subscription cap. FORWARD=1 or omitted: a PUBLISH_SKIPPED naming the track from draft-19 on; on draft-18 the whole request is refused with REQUEST_ERROR | a PUBLISH, TRACK_INFO from its Track Properties; or a PUBLISH_SKIPPED (PUBLISH_BLOCKED on draft-18), TRACK_INFO from the SUBSCRIBE_OK of a paused SUBSCRIBE we open for it |
 | Caught up | nothing to send: moq-transport has no marker | not needed: the lite side sends CAUGHT_UP for this hop at once, and PUBLISHes arrive as live adds |
 | Track removed | PUBLISH_DONE with TRACK_ENDED on that PUBLISH; nothing for a skipped track, whose removal reaches the peer only through its own SUBSCRIBE ending with TRACK_ENDED | PUBLISH_DONE with TRACK_ENDED on the held paused PUBLISH or SUBSCRIBE; any other status fails the listing |
 
@@ -56,15 +57,16 @@ TRACKS' three events (see its Plan) map as follows:
     PUBLISHes "will set the FORWARD parameter to 1"; drafts 20 to 22 use the
     SUBSCRIBE_TRACKS parameters as each PUBLISH's initial subscription
     parameters, and forbid PUBLISH_STATE_NOTIFY from changing a
-    subscriber-controlled one unasked. So answer each listed track with
-    PUBLISH_SKIPPED (PUBLISH_BLOCKED on draft-18), and the peer SUBSCRIBEs
-    what it wants. A skip holds no subscription and has no PUBLISH_DONE, so
-    a removal reaches the peer only through its own SUBSCRIBE. Draft-18 words
-    PUBLISH_BLOCKED for a publisher out of bidirectional streams only;
-    draft-19 on allow "any other reason".
-  - Rejected, an agent pick: refusing a FORWARD=1 request with REQUEST_ERROR.
-    It is legal, but lists nothing, and since FORWARD defaults to 1 it would
-    refuse every peer that omits the parameter.
+    subscriber-controlled one unasked. The maintainer's rule follows: "if we
+    can't deny their request and do forward=0 instead, then PUBLISH_SKIPPED".
+    From draft-19 on, which allows a skip "for any other reason", answer each
+    listed track with PUBLISH_SKIPPED, and the peer SUBSCRIBEs what it wants.
+    A skip holds no subscription and has no PUBLISH_DONE, so a removal
+    reaches the peer only through its own SUBSCRIBE. Draft-18 has no such
+    skip: PUBLISH_BLOCKED is only for a publisher out of bidirectional
+    streams, so it would falsely report exhaustion. There, refuse the whole
+    SUBSCRIBE_TRACKS with REQUEST_ERROR (NOT_SUPPORTED, its reason naming
+    FORWARD=0), and the peer retries with FORWARD=0 or SUBSCRIBEs directly.
 - **Caught up has no IETF equivalent, and needs none.** Caught up means
   caught up with this hop (see TRACKS), so a relay answers a lite TRACKS at
   once with what it holds, whatever its upstream speaks, and every PUBLISH the
@@ -77,7 +79,11 @@ TRACKS' three events (see its Plan) map as follows:
   to FORWARD=1 with the filter our SUBSCRIBE would have sent
   (SUBSCRIPTION_FILTER through draft-19, LOCATION_FILTER and FILL_PARAMETERS
   from draft-20, whose section 3.6.2 names this join), and back to FORWARD=0
-  when the last reader leaves, rather than unsubscribing. A second SUBSCRIBE
+  when the last reader leaves, rather than unsubscribing. On draft-18 and
+  draft-19 a filter does not deliver objects already published, so a start
+  below the Largest Object also sends a Joining FETCH on the held
+  subscription's request ID, as the existing pre-draft-20 SUBSCRIBE path
+  does (draft-18 section 5.1.3, draft-19 section 5.1.5). A second SUBSCRIBE
   is not an option on every draft: draft-18 section 5.1 allows one
   subscription per track per role and fails a second with
   DUPLICATE_SUBSCRIPTION; draft-19 on allow several. Nothing is lost: the
@@ -129,7 +135,8 @@ Untrusted input:
 - Inbound, a hostile subscriber's FORWARD=0 SUBSCRIBE_TRACKS makes us open a
   paused PUBLISH per track. Each holds a subscription slot; past the cap, tell
   the peer rather than hold more or omit the track silently: PUBLISH_BLOCKED on
-  draft-18, PUBLISH_SKIPPED (its rename) from draft-19 on. Draft-17 has no
+  draft-18, where the cap is the bidirectional streams we allow ourselves for
+  PUBLISH, and PUBLISH_SKIPPED (its rename) from draft-19 on. Draft-17 has no
   SUBSCRIBE_TRACKS (its PUBLISH half rode SUBSCRIBE_NAMESPACE, which stays
   refused), so nothing changes there. A FORWARD=1 listing holds no
   subscription per track, only the listing reader's state, as on lite.
@@ -151,12 +158,14 @@ Guidance:
 Test on mock time through a relay: a moq-transport subscriber's FORWARD=0
 SUBSCRIBE_TRACKS receives a paused PUBLISH per track, including a later track
 and a later broadcast under the prefix, with no objects until it resumes one,
-and a PUBLISH_SKIPPED past the subscription cap; one with FORWARD=1 or none
-receives a PUBLISH_SKIPPED per track and no PUBLISH, and its SUBSCRIBE to a
-listed track gets data; both on draft-18 (PUBLISH_BLOCKED) and draft-19 on; a lite TRACKS over a moq-transport upstream
+and a PUBLISH_SKIPPED past the subscription cap (PUBLISH_BLOCKED on
+draft-18); one with FORWARD=1 or none receives a PUBLISH_SKIPPED per track and
+no PUBLISH from draft-19 on, and its SUBSCRIBE to a listed track gets data,
+while on draft-18 it gets REQUEST_ERROR; a lite TRACKS over a moq-transport upstream
 lists its tracks with FORWARD=0, a lite SUBSCRIBE resumes the held PUBLISH
 with its join filter and gets a new track's first group with no second
-upstream SUBSCRIBE (on draft-18 and draft-19 on), the last reader leaving
+upstream SUBSCRIBE (on draft-18 and draft-19 on), a past start on draft-18
+and draft-19 gets the cached groups through a Joining FETCH, the last reader leaving
 pauses it and keeps the entry, a PUBLISH_DONE with TRACK_ENDED removes the entry, and one with
 another status resets the listing; a PUBLISH_SKIPPED (PUBLISH_BLOCKED on
 draft-18) lists the track once its paused SUBSCRIBE answers, resuming it
