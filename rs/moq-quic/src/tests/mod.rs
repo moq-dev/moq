@@ -6703,8 +6703,9 @@ fn bbr_marking_versus_dropping() {
     const SEED: u64 = 66;
 
     let _guard = subscribe();
-    entropy::reseed(SEED);
+    // Both runs replay the same inputs, so they differ only in how the bottleneck signals.
     let run = |marks_ce| {
+        entropy::reseed(SEED);
         let mut pair = Pair::new(Default::default(), server_config());
         pair.latency = Duration::from_millis(10);
         let (client_ch, server_ch) = pair.connect_with(client_config());
@@ -6730,7 +6731,7 @@ fn bbr_marking_versus_dropping() {
     let (marking_goodput, marking) = run(true);
     let (dropping_goodput, dropping) = run(false);
     // Over seeds 0-6999: 3.6-5.3ms mean delay for marking and 6.9-8.4ms for dropping, 0.68-1.13s
-    // and 1.47-1.81s past the marking threshold, and 23-37 drops when dropping. Without a CE
+    // and 1.46-1.80s past the marking threshold, and 24-38 drops when dropping. Without a CE
     // response this seed's marking run drops 35 packets, at 7.4ms and 1.59s.
     //
     // The marking run drops one packet on 1% of those seeds, never more. The first probe after
