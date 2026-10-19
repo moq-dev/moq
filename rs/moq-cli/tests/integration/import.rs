@@ -219,6 +219,135 @@ async fn importers_sharing_an_epoch_publish_identical_timestamps() {
 	);
 }
 
+/// Two importers of one path under one epoch, started together through the two relays of a
+/// cluster, so neither is first: each relay hears the other's broadcast as a route with the same
+/// epoch. Both stay live to their input's end, and each relay serves its own importer's broadcast
+/// on the timeline the epoch places, every frame both carry at the same timestamp.
+#[tokio::test]
+async fn importers_co_started_across_a_cluster_publish_one_timeline() {
+	let _ = moq_tokio::crypto::install_default();
+	let first = moq_relay::test_relay().await.expect("first relay");
+	let second = moq_relay::test_relay_peered(&first.url, &first.fingerprint)
+		.await
+		.expect("second relay");
+	let endpoints = [
+		(first.url.clone(), first.fingerprint.clone()),
+		(second.url.clone(), second.fingerprint.clone()),
+	];
+	let mut origins = Vec::new();
+	for fixture in [first, second] {
+		origins.push(fixture.relay.cluster().origin.clone());
+		let ready = fixture.relay.ready();
+		tokio::spawn(fixture.relay.run());
+		ready.wait().await.expect("relay ready");
+	}
+	let probe = origins[0].create_broadcast("probe").expect("probe broadcast");
+	probe.announce(Default::default()).expect("announce the probe");
+	tokio::time::timeout(TIMEOUT, origins[1].consume().routed_broadcast("probe"))
+		.await
+		.expect("the second relay never heard the first")
+		.expect("probe resolves");
+	drop(probe);
+
+	let epoch = moq_net::Epoch::mint();
+	let global = ["--epoch", epoch.as_str()];
+	// The second takes the source from a third of the way in, at the next PAT and PMT, so each
+	// relay's broadcast shows whose it is.
+	let join = BBB.len() / 188 / 3 * 188;
+	let mut children = endpoints
+		.each_ref()
+		.map(|(url, fingerprint)| import_as(url.as_str(), fingerprint, &global, "demo"));
+	let mut stdins: Vec<_> = children
+		.iter_mut()
+		.map(|child| child.stdin.take().expect("stdin"))
+		.collect();
+	let (first_input, second_input) = stdins.split_at_mut(1);
+	let (written, other) = tokio::join!(first_input[0].write_all(BBB), second_input[0].write_all(&BBB[join..]));
+	written.and(other).expect("write stdin");
+
+	// Each relay's own importer, not the route its peer forwards.
+	let mut published = Vec::new();
+	for (child, origin) in children.iter_mut().zip(&origins) {
+		let broadcast = running(
+			child,
+			"the broadcast",
+			origin.consume().local().routed_broadcast("demo"),
+		)
+		.await
+		.expect("announced broadcast resolves");
+		let mut catalogs = running(
+			child,
+			"the catalog subscription",
+			hang::catalog::Catalog::<()>::subscribe(&broadcast),
+		)
+		.await
+		.expect("subscribe to the catalog");
+		let catalog = running(child, "the first catalog", catalogs.next())
+			.await
+			.expect("catalog read")
+			.expect("a catalog");
+		let video = catalog
+			.video
+			.renditions
+			.keys()
+			.next()
+			.expect("a video rendition")
+			.clone();
+		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60));
+		let track = running(
+			child,
+			"the video subscription",
+			broadcast.track(&video).expect("track").subscribe(subscription),
+		)
+		.await
+		.expect("subscribe to the video");
+		published.push((catalog.clock, track));
+	}
+	// Together: a relay may resume a subscription on its peer's route, which ends only with
+	// the other input.
+	drop(stdins);
+
+	let mut timelines = Vec::new();
+	for (clock, mut track) in published {
+		let mut frames = std::collections::HashSet::new();
+		while let Some(mut group) = tokio::time::timeout(TIMEOUT, track.recv_group())
+			.await
+			.expect("the video never ended")
+			.expect("video group")
+		{
+			while let Some(frame) = group.read_frame().await.expect("video frame") {
+				let frame = hang::container::Frame::decode(frame.payload).expect("a timestamped frame");
+				frames.insert((frame.timestamp.as_micros(), frame.payload));
+			}
+		}
+		timelines.push((clock, frames));
+	}
+	for (child, name) in children.iter_mut().zip(["first", "second"]) {
+		let status = tokio::time::timeout(TIMEOUT, child.wait())
+			.await
+			.expect("moq never exited")
+			.expect("wait for moq");
+		assert!(status.success(), "the {name} importer exited with {status}");
+	}
+
+	let [(first_clock, first), (second_clock, second)] = &timelines[..] else {
+		unreachable!("two relays");
+	};
+	assert!(first_clock.is_some(), "the epoch places the root clock");
+	assert_eq!(second_clock, first_clock);
+	assert!(
+		!second.is_empty() && second.len() < first.len(),
+		"each relay serves its own importer: {} of {}",
+		second.len(),
+		first.len()
+	);
+	let moved: Vec<_> = second.difference(first).map(|(micros, _)| *micros).collect();
+	assert!(
+		moved.is_empty(),
+		"frames the second published at other timestamps: {moved:?}"
+	);
+}
+
 /// About one second of CBR HEVC and Opus: shorter than the two-second mux-rate window, so
 /// the catalog is only released at EOF.
 const SHORT: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data/bbb_cbr.ts")

@@ -20,13 +20,29 @@ pub struct TestRelay {
 
 /// Bind a public test relay on ephemeral loopback ports without TOML or port probes.
 pub async fn test_relay() -> anyhow::Result<TestRelay> {
+	bind(config()?).await
+}
+
+/// Bind a test relay like [`test_relay`] that dials another as its cluster peer, given that
+/// one's [`TestRelay::url`] and [`TestRelay::fingerprint`].
+pub async fn test_relay_peered(peer: &url::Url, fingerprint: &str) -> anyhow::Result<TestRelay> {
+	let mut config = config()?;
+	config.connect.tls.fingerprint = vec![fingerprint.to_string()];
+	config.cluster.connect = vec![crate::cluster::Peer::new(peer.to_string())];
+	bind(config).await
+}
+
+fn config() -> anyhow::Result<Config> {
 	let mut config = Config::default();
 	config.drain_timeout = std::time::Duration::ZERO;
 	config.listen.bind = Some("127.0.0.1:0".parse()?);
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.web.http.listen = Some("127.0.0.1:0".parse()?);
 	config.auth.public = vec![moq_auth::Pattern::all()];
+	Ok(config)
+}
 
+async fn bind(config: Config) -> anyhow::Result<TestRelay> {
 	let relay = Relay::load(config).await?;
 	let quic = relay.quic_addr()?;
 	let http = relay.web_addrs().http.expect("HTTP listener was configured");
