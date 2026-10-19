@@ -1387,7 +1387,6 @@ impl Producer {
 			stats: stats::Meter::default(),
 			expiry: None,
 			expired: false,
-			ended: false,
 			adopted: false,
 			stale_counted: Arc::default(),
 			recover: None,
@@ -1648,11 +1647,6 @@ pub struct Consumer {
 	// hands it out, while its reader is waiting for the first or next frame.
 	expiry: Option<Arc<dyn Expiry>>,
 	expired: bool,
-	// Sticky: the budget gave up on a cursor that had already taken every frame, so
-	// the group ends rather than fails. Recorded because `expired` alone would turn a
-	// clean end into `Error::Old` on the next poll, and a caller is allowed to probe
-	// again after the end.
-	ended: bool,
 	// A replacement copy was adopted and has not yet returned a frame that matches. Its
 	// ordinals match this group's only while its Object IDs do.
 	adopted: bool,
@@ -1726,7 +1720,6 @@ impl Clone for Consumer {
 			stats: self.stats.clone(),
 			expiry: self.expiry.clone(),
 			expired: self.expired,
-			ended: self.ended,
 			adopted: self.adopted,
 			stale_counted: self.stale_counted.clone(),
 			recover: self.recover.clone(),
@@ -1829,7 +1822,7 @@ impl Consumer {
 		loop {
 			let res = read(self, waiter);
 			// The reader's own budget gave up on it: that is no route's doing.
-			if self.expired || self.ended {
+			if self.expired {
 				return res;
 			}
 			let Some(recover) = self.recover.as_mut() else {
@@ -1887,7 +1880,8 @@ impl Consumer {
 		self.poll_expired_while_pending(waiter, false)
 	}
 
-	/// Apply the drift budget to a read that found nothing and is about to park.
+	/// Apply the drift budget to a read that found nothing and is about to park, failing
+	/// it with [`Error::Old`] once the budget gives up.
 	///
 	/// A group with frames in hand is always drained to its end: the budget bounds a
 	/// group that has *stalled* while the live edge moved on, not one whose reader is
@@ -1895,35 +1889,18 @@ impl Consumer {
 	/// of every group, since the arrival of the next group is exactly what makes the
 	/// current one no longer newest.
 	///
+	/// A reader that took every frame still fails: the producer never finished the
+	/// group, so a clean end would pass the prefix off as the whole group to anyone it
+	/// is served to.
+	///
 	/// Keeping it off the ready path also keeps it off the hot path: evaluating the
 	/// policy walks the track's group cache under its lock, which is shared by every
 	/// subscriber of that track.
-	///
-	/// `Some(false)` ends the group cleanly and `Some(true)` fails it with
-	/// [`Error::Old`]; see [`Self::expired_truncates`].
-	fn poll_expired_if_blocked(&mut self, waiter: &kio::Waiter) -> Option<bool> {
-		if self.ended {
-			return Some(false);
+	fn poll_expired_if_blocked<T>(&mut self, waiter: &kio::Waiter, res: Poll<Result<T>>) -> Poll<Result<T>> {
+		match res.is_pending() && self.poll_expired(waiter) {
+			true => Poll::Ready(Err(Error::Old)),
+			false => res,
 		}
-		if !self.poll_expired(waiter) {
-			return None;
-		}
-		let truncates = self.expired_truncates();
-		self.ended = !truncates;
-		Some(truncates)
-	}
-
-	/// Whether giving up on this group now loses the reader anything.
-	///
-	/// A frame-level read only parks once the cursor has taken every frame the group
-	/// holds, so expiring there costs nothing: the reader got everything that exists,
-	/// and the group ends rather than fails. What it was still waiting for was the
-	/// producer's FIN, and a group abandoned at its own end is indistinguishable from
-	/// one that ended. A cursor that still holds unread content (a wire publisher with
-	/// buffered frames, a half-read payload) is genuinely truncated and reports it.
-	fn expired_truncates(&self) -> bool {
-		let unread = self.cursor.unread_content();
-		unread.frames > 0 || unread.bytes > 0
 	}
 
 	/// Keep checking expiry while a wire publisher still owns buffered group data.
@@ -1946,14 +1923,6 @@ impl Consumer {
 	/// Whether expiry can still discard content or unblock a group that may grow.
 	fn expiry_pending(&self) -> bool {
 		self.cursor.expiry_pending()
-	}
-
-	/// Whether a max delay budget gave up on this group, including a clean end of a drained
-	/// one: a server must not answer that end as if the group were whole.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/serve.md
-	pub(crate) fn latency_expired(&self) -> bool {
-		self.expired
 	}
 
 	/// Whether the group has been aborted (including pool eviction); the abort
@@ -2064,9 +2033,6 @@ impl Consumer {
 	}
 
 	fn poll_next_frame_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
-		if self.ended {
-			return Poll::Ready(Ok(None));
-		}
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
@@ -2076,11 +2042,7 @@ impl Consumer {
 			.as_ref()
 			.map(|policy| frame::Expiry::new(policy.clone(), stats.clone(), self.stale_counted.clone()));
 		let res = self.cursor.poll_next_frame(waiter, &stats, expiry);
-		match res.is_pending().then(|| self.poll_expired_if_blocked(waiter)).flatten() {
-			Some(true) => Poll::Ready(Err(Error::Old)),
-			Some(false) => Poll::Ready(Ok(None)),
-			None => res,
-		}
+		self.poll_expired_if_blocked(waiter, res)
 	}
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
@@ -2104,18 +2066,11 @@ impl Consumer {
 	}
 
 	fn poll_read_frame_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
-		if self.ended {
-			return Poll::Ready(Ok(None));
-		}
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
 		let res = self.cursor.poll_read_frame(waiter, &self.stats);
-		match res.is_pending().then(|| self.poll_expired_if_blocked(waiter)).flatten() {
-			Some(true) => Poll::Ready(Err(Error::Old)),
-			Some(false) => Poll::Ready(Ok(None)),
-			None => res,
-		}
+		self.poll_expired_if_blocked(waiter, res)
 	}
 
 	/// Read the next frame (timestamp and payload) all at once.
@@ -2191,9 +2146,6 @@ impl Consumer {
 	}
 
 	fn poll_finished_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
-		if self.ended {
-			return Poll::Ready(Ok(self.index()));
-		}
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
@@ -2202,12 +2154,7 @@ impl Consumer {
 			.cursor
 			.poll(waiter, |state| state.poll_end(index))
 			.map(|res| res.map(|()| index as u64));
-		match res.is_pending().then(|| self.poll_expired_if_blocked(waiter)).flatten() {
-			Some(true) => Poll::Ready(Err(Error::Old)),
-			// The group ended where the cursor stands, so that is its frame count.
-			Some(false) => Poll::Ready(Ok(self.index())),
-			None => res,
-		}
+		self.poll_expired_if_blocked(waiter, res)
 	}
 
 	/// Block until the group terminates, returning this cursor's next frame index.
@@ -3624,5 +3571,46 @@ mod test {
 		let mut third = a.create_frame_owned(sized(1024), &budget).unwrap();
 		third.write(Bytes::from_static(b"x")).unwrap();
 		assert_eq!(third.allocated(), 1024, "the finished frame did not return its share");
+	}
+
+	/// A budget that gives up exactly when the test says so.
+	struct Switch(Arc<AtomicBool>);
+
+	impl Expiry for Switch {
+		fn is_expired(&self, _: Option<std::time::Duration>, _: &kio::Waiter) -> bool {
+			self.0.load(Ordering::Relaxed)
+		}
+
+		fn for_track(&self, _: &track::Consumer) -> Arc<dyn Expiry> {
+			Arc::new(Switch(self.0.clone()))
+		}
+	}
+
+	/// A reader that took every frame of an unfinished group still fails with `Old` when
+	/// the budget gives up: the producer never finished it, so a clean end would pass the
+	/// prefix off as the whole group.
+	#[test]
+	fn a_drained_unfinished_group_expires_as_old() {
+		let mut producer = Info { sequence: 0 }.produce();
+		producer
+			.write_frame(crate::Timestamp::ZERO, Bytes::from_static(b"a"))
+			.unwrap();
+
+		let expired = Arc::new(AtomicBool::new(false));
+		let mut group = producer.consume().with_expiry(Arc::new(Switch(expired.clone())));
+		let waiter = kio::Waiter::noop();
+		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(group.poll_read_frame(&waiter).is_pending(), "parked at the tail");
+
+		expired.store(true, Ordering::Relaxed);
+		let mut next = group.clone();
+		let mut finished = group.clone();
+		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Err(Error::Old))));
+		assert!(
+			matches!(group.poll_read_frame(&waiter), Poll::Ready(Err(Error::Old))),
+			"and stays failed when probed again"
+		);
+		assert!(matches!(next.poll_next_frame(&waiter), Poll::Ready(Err(Error::Old))));
+		assert!(matches!(finished.poll_finished(&waiter), Poll::Ready(Err(Error::Old))));
 	}
 }

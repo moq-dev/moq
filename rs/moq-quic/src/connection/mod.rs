@@ -243,8 +243,6 @@ pub struct Connection {
     //
     /// Whether the most recently received packet had an ECN codepoint set
     receiving_ecn: bool,
-    /// Number of packets authenticated
-    total_authed_packets: u64,
     /// Whether the last `poll_transmit` call ran out of data because there was
     /// no outgoing application data.
     app_limited: bool,
@@ -365,7 +363,6 @@ impl Connection {
 
             app_limited: false,
             receiving_ecn: false,
-            total_authed_packets: 0,
 
             streams: StreamsState::new(
                 side,
@@ -2187,7 +2184,6 @@ impl Connection {
         spin: bool,
         is_1rtt: bool,
     ) {
-        self.total_authed_packets += 1;
         self.reset_keep_alive(now);
         self.reset_idle_timeout(now, space_id);
         self.permit_idle_reset = true;
@@ -2700,9 +2696,12 @@ impl Connection {
     ) {
         // State transitions for error cases
         if let Err(ConnectionError::Reset) = result
-            && matches!(self.state, State::Draining | State::Drained)
+            && matches!(
+                self.state,
+                State::Closed(_) | State::Draining | State::Drained
+            )
         {
-            // Preserve the original close reason once draining has begun.
+            // Preserve the original close reason once the connection has closed.
             self.state = State::Drained;
         } else if let Err(conn_err) = result {
             self.error = Some(conn_err.clone());
@@ -2798,6 +2797,9 @@ impl Connection {
             State::Draining | State::Drained => return Ok(()),
             State::Handshake(state) => state,
         };
+        // Whether a server Initial was processed or a Retry accepted. Packets the client discards
+        // never count, or a forged Retry would make it ignore the genuine one.
+        let processed_server_packet = state.rem_cid_set || self.retry_src_cid.is_some();
 
         match packet.header {
             Header::Retry {
@@ -2807,7 +2809,7 @@ impl Connection {
                     return Err(TransportError::PROTOCOL_VIOLATION("client sent Retry").into());
                 }
 
-                if self.total_authed_packets > 1
+                if processed_server_packet
                             || packet.payload.len() <= 16 // token + 16 byte tag
                             || !self.crypto.is_valid_retry(
                                 self.rem_cids.active(),
@@ -2994,7 +2996,8 @@ impl Connection {
                 Ok(())
             }
             Header::VersionNegotiate { .. } => {
-                if self.total_authed_packets > 1 {
+                // RFC 9000 6.2: discard once any other packet was processed
+                if processed_server_packet {
                     return Ok(());
                 }
                 let supported = packet
