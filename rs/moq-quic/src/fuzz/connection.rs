@@ -640,7 +640,9 @@ impl Pair {
             }
             Op::Corrupt { to, offset, xor } => {
                 let peer = self.peer(to);
-                if let Some(front) = peer.inbound.front_mut()
+                // A zero XOR changes nothing, so tainting would only skip checks on real traffic.
+                if xor != 0
+                    && let Some(front) = peer.inbound.front_mut()
                     && !front.is_empty()
                 {
                     let offset = offset as usize % front.len();
@@ -956,6 +958,44 @@ mod tests {
         pair.drain();
 
         assert_eq!(pair.server.read.get(&StreamId(0)), Some(&3));
+    }
+
+    /// A corruption that flips no bits leaves the datagram's streams checked.
+    #[test]
+    fn zero_corruption_taints_nothing() {
+        let mut pair = Pair::new();
+        assert!(pair.handshake());
+        for op in [
+            Op::Open {
+                who: Who::Client,
+                uni: true,
+            },
+            Op::Write {
+                who: Who::Client,
+                stream: 0,
+                len: 100,
+            },
+            Op::Advance { millis: 100 },
+        ] {
+            pair.apply(op);
+        }
+        let front = pair
+            .server
+            .inbound
+            .front()
+            .expect("the write sent nothing")
+            .clone();
+
+        pair.apply(Op::Corrupt {
+            to: Who::Server,
+            offset: 0,
+            xor: 0,
+        });
+        assert!(pair.server.forged_streams.is_empty());
+
+        // The same datagram does carry stream data, so a real corruption would taint it.
+        pair.server.taint(&front);
+        assert!(!pair.server.forged_streams.is_empty());
     }
 
     /// Corrupted packets decrypt and deliver mangled frames, which the checks must skip
