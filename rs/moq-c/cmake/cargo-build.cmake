@@ -1,9 +1,9 @@
 # Run with `cmake -DCARGO_BUILD_FLAG=... -DHEADER=... -P cargo-build.cmake` from rs/moq-c.
 #
-# Builds moq-c, then copies moq.h to HEADER. build.rs writes the header into
+# Builds moq-c with the OpenH264 software fallback the release archives carry, then copies moq.h to HEADER. build.rs writes the header into
 # its OUT_DIR, whose hashed path only cargo's JSON messages name.
 execute_process(
-    COMMAND cargo build --locked ${CARGO_BUILD_FLAG} --message-format=json-render-diagnostics
+    COMMAND cargo build --locked --features openh264 ${CARGO_BUILD_FLAG} --message-format=json-render-diagnostics
     OUTPUT_VARIABLE _messages
     COMMAND_ERROR_IS_FATAL ANY
 )

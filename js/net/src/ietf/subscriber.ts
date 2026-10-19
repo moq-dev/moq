@@ -18,7 +18,15 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { finalSequence, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import {
+	finalSequence,
+	groupBounds,
+	hiddenBelow,
+	hooks,
+	scopeCaptures,
+	scopeHead,
+	scopeOverlaps,
+} from "../internal.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
@@ -1007,10 +1015,18 @@ export class Subscriber {
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 		});
+		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
+			throw new RangeError("largest group exceeds safe integers");
+		}
+		// The live join starts at the publisher's edge, whatever floor the demand asked for.
+		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
+		// still arrive after a higher one's.
+		const groups = request.subscription.groups;
+		hooks.startTrack(subscription.track, {
+			start: ok.largest ? Number(ok.largest.groupId) : 0,
+			requested: groups?.start === undefined ? undefined : groupBounds(groups).start,
+		});
 		if (ok.largest) {
-			if (ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
-				throw new RangeError("largest group exceeds safe integers");
-			}
 			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
 			// the group carries over: its first frame is the edge a reader can count on.
 			hooks.reportedLargest(subscription.track, { group: Number(ok.largest.groupId), frame: 0 });
