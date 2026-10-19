@@ -64,6 +64,38 @@ with no wire change.
   at the same max age when a stale verdict loses its edge: the newer group
   that made an older one stale is aborted or evicted, and `TrackState::is_stale`
   revalidates the edge, so a cold cursor would serve the older group.
+- **Each cursor keeps a disposition record,** as the maintainer first framed
+  it ("keep what was dropped within each cursor and within the track
+  state"). It is what makes a re-offer safe: the cursor must tell a group it
+  gave up as stale (re-offer it) from one it delivered (never resend it).
+  The record is one run-length map per cursor, each run marked delivered,
+  skipped as stale (with the budget it was judged under and the newer group
+  here that convicted it, which the edge-loss trigger watches), or reported
+  in SUBSCRIBE_DROP (final for now, below). It replaces today's `Delivered`
+  (`rs/moq-net/src/model/delivered.rs`), whose floor (`forget_below`) folds
+  stale gaps in with delivered groups, and absorbs `TrackRun::served` in
+  `rs/moq-net/src/lite/publisher.rs` and the JS wire cursor's `#reported` in
+  `js/net/src/track.ts`. Delivery is recorded, not inferred from the cursor
+  position: an arrival-order or descending cursor delivers out of sequence
+  order, and #5929 re-offers below the position. The record only answers
+  "re-offer or not"; the serving and re-offer path stays #5929's.
+- **The record is bounded by the pool, never by guessing.** Each run is
+  billed to the cache's `Pool` through a `Charge` at a fixed per-run cost
+  (the same bound in `js/net`) and is settled a run at a time, so a cursor's
+  state and CPU track its runs, never their span. The floor only rises over
+  a final prefix: the runs from the floor up to the lowest run that is not
+  final. Final means delivered, reported, or skipped as stale past the
+  track's max age bound, which no widening can reach since every budget is
+  clamped to it. A skipped stale run within reach is not final, and neither
+  is an unknown hole: a descending or arrival-order cursor can deliver H
+  while a lower G is still unknown, and folding H would silently treat G as
+  handled. When the pool evicts one of a cursor's runs:
+  - A run inside the final prefix folds into the floor, as `forget_below`
+    does today, and nothing is lost.
+  - Any other run cannot go without guessing, so the cursor fails: the
+    subscription ends with `TooFarBehind` (stream code 0x5, already meaning
+    a reader that fell too far behind and lost content), the subscriber
+    re-subscribes, and the cursor's whole record is released with it.
 - **Drops are final for now**, decided by the maintainer on 2026-10-19. A
   widening re-offers only groups this cursor never reported in
   SUBSCRIBE_DROP; a reported group stays dropped, as today. That leaves a
@@ -87,7 +119,7 @@ Watch for:
   re-offered, not the cache, and make sure a reader joining with the same max
   age causes no scan and no SUBSCRIBE_UPDATE. Extend `track_subscriber_churn`
   in `rs/moq-net/benches/track.rs` with widening readers, swept over
-  subscriber count and cached groups.
+  subscriber count, cached groups, and runs per cursor record.
 - **`js/net` has the same bug and is in scope.** `combineSubscriptions` in
   `js/net/src/track.ts` already sends no floor when any subscriber has none,
   and its publisher needs the same re-offer on a widened max age. Land a JS
@@ -103,8 +135,14 @@ shrink, evict, widen sequence at the relay gets the evicted groups back
 through the range miss fill, not a re-offer; and at the same max age, aborting
 or evicting the group that made an older one stale re-offers the older one,
 as a cold relay would serve it; and a stale group already reported in
-SUBSCRIBE_DROP stays dropped after a widening, never served after its drop.
-Cover the
+SUBSCRIBE_DROP stays dropped after a widening, never served after its drop;
+and a cursor that delivered F, skipped its neighbour G as stale while G
+stayed cached, and delivered H, gets only G after a widening that covers
+all three, or after G's convicting edge is lost, never F or H again; and a
+cursor whose final prefix is evicted under pool pressure folds it and
+resends nothing; and a descending cursor that delivered H while a lower G
+is still unknown or skipped within reach, under pool pressure that evicts
+H's run, ends with `TooFarBehind` instead of skipping G. Cover the
 warm-relay case in `js/net` too.
 
 Public API: none. Wire: no encoding change. A publisher now re-offers

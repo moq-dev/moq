@@ -48,30 +48,21 @@ which keeps drops final for now.
   `TrackRun::poll_forward_drop` emits only recorded drops, cuts, or stale
   cached groups. A sequence the relay never cached is not judged until the
   track finishes.
-- **Each cursor keeps its own disposition record,** next to the per-track
-  set, as the maintainer first framed it ("keep what was dropped within each
-  cursor and within the track state"). The shared set cannot hold it: a
-  group that arrives leaves the shared set, so it cannot remember that this
-  cursor reported cached G stale, and after a widening or edge loss the
-  cursor could not tell G (re-offer it) from a group it delivered (never
-  resend it). The record is one run-length map per cursor, each run marked
-  delivered or reported, a reported run carrying its reason, the budget it
-  was judged under, and for a local stale verdict the convicting edge. It
-  replaces today's `Delivered` (`rs/moq-net/src/model/delivered.rs`), whose
-  floor (`forget_below`) folds stale gaps in with delivered groups, and
-  absorbs `TrackRun::served` and JS `#reported`. Delivery must be recorded,
-  not inferred from the cursor position: an arrival-order or descending
-  cursor delivers out of sequence order, and #5929 re-offers below the
-  position, so only the delivered runs say what never goes out twice. The
-  record only answers "re-offer or not"; the serving and re-offer path stays
-  #5929's.
+- **It extends resolved-demand's per-cursor disposition record,** which
+  stays next to the per-track set: a group that arrives leaves the shared
+  set, so only the cursor's record remembers that it reported cached G
+  stale. A reported run now carries its reason and, for a stale one, the
+  budget it was judged under. On lite-07 a reported stale run is no longer
+  final: like a skipped one, it is re-offered when a widening or edge loss
+  covers it.
 - **A widening re-offers the dropped runs now inside its budget,** through
   the re-offer path the resolved-demand quest adds, in the subscription's
   order. Upstream, the relay's own widening asks for them again.
 - **A local stale run that loses its edge is invalidated** as one span, the
   same as a widening invalidates it, matching resolved-demand's stale-edge
-  trigger. A run this cursor judged stale records, in its disposition
-  record, the newer group here that convicted it. When that group is
+  trigger. A run this cursor judged stale records, in resolved-demand's
+  disposition record, the newer group here that convicted it. When that
+  group is
   aborted or evicted, the run's sequences
   become unknown: a cached group is re-offered, and a missing one is judged
   again against the current edge (`TrackState::drifted`) or waited for.
@@ -120,14 +111,9 @@ Code it replaces, in Rust and `js/net` alike:
 - `TrackState::drop_groups`, the `drops` range set and `DropCursor` in
   `rs/moq-net/src/model/track.rs`, which record a whole range without its
   reason or budget, even over groups already cached.
-- `Delivered` in `rs/moq-net/src/model/delivered.rs` and
-  `TrackRun::served` in `rs/moq-net/src/lite/publisher.rs`, which hold
-  served and dropped sequences in one set and refuse any group in it. Both
-  become the per-cursor disposition record, which tells them apart.
-- In `js/net/src/track.ts`: `#drop`, `#undrop`, and the `drops` signal go;
-  the wire cursor's `#pending`, `#dropsSeen`, and `#reported`, whose
-  `#tryRecvGroup` closes any group already reported, become the same
-  per-cursor record.
+- In `js/net/src/track.ts`: `#drop`, `#undrop`, the `drops` signal, and
+  the wire cursor's `#pending` and `#dropsSeen`, whose `#tryRecvGroup`
+  closes any group already reported.
 
 Untrusted input: a hostile upstream can fragment the set by alternating
 drops and arrivals, and an open live range is no bound, since its groups are
@@ -139,24 +125,14 @@ cache's retention window is forgotten, so the set never outgrows what the
 pool would hold, with no new constant. An evicted run's sequences become
 unknown again.
 
-Each cursor's disposition record is billed the same way, a fixed per-run
-cost on the same `Pool`, and is settled a run at a time like the shared
-set, so a cursor's state and CPU track its runs, never their span. The
-floor only rises over a settled prefix: the runs from the floor up to the
-cursor's lowest unknown hole, each delivered or reported to the subscriber.
-It never rises over a hole, since a descending or arrival-order cursor can
-deliver H while a lower G is still unknown, and folding H would silently
-treat G as handled. When the pool evicts a cursor's oldest run:
-
-- A run inside the settled prefix folds into the floor, as `forget_below`
-  does today. Nothing is lost: a delivered group is never sent again, and a
-  reported one was already reported, so folding it only forgoes re-offering
-  it after a widening or edge loss.
-- A run above an unknown hole cannot be dropped without guessing, so the
-  cursor fails instead: the subscription ends with `TooFarBehind` (stream
-  code 0x5, already meaning a reader that fell too far behind and lost
-  content), and the subscriber re-subscribes. The cursor's whole record is
-  released with it.
+The per-cursor record keeps resolved-demand's pool bound and floor rule,
+with "final" narrowed: only a delivered run or a budget-independent drop (a
+cut, a group never produced, or any drop reported over lite-05 or lite-06)
+folds into the floor. A stale run reported on lite-07 within reach of the
+max age bound is budget-qualified, so it is treated like an unknown hole:
+the floor never rises over it, and if the pool must evict it or a run above
+it, the cursor fails with `TooFarBehind`. Folding it would forgo the
+re-offer this plan promises after a widening.
 
 A cursor judges an unknown missing sequence as it would a
 group never received: locally against its own budget (`TrackState::drifted`),
@@ -193,12 +169,11 @@ Test on mock time through a relay:
   while G stayed cached, and delivered H, gets only G after a widening that
   covers all three: G is re-offered and F and H are never resent. The same
   holds when G's convicting edge is lost instead of a widening.
-- A cursor whose settled prefix is evicted under pool pressure folds it
-  into the floor and never resends a delivered group or re-offers a folded
-  reported one.
-- A descending cursor that delivered H while a lower G is still unknown,
-  under pool pressure that evicts H's run, ends with `TooFarBehind` instead
-  of skipping G.
+- Under pool pressure, a cursor's delivered runs and budget-independent
+  drops fold into the floor, while evicting a lite-07 stale-reported run
+  within reach, or a run above it, ends the cursor with `TooFarBehind`
+  instead of losing the re-offer. Through a lite-06 hop the reported run
+  folds.
 - A flood of fragmented runs stays within the pool, evicting the oldest
   runs first, and a sequence whose run was evicted is judged locally or
   filled by range, never waited on indefinitely.
