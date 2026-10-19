@@ -3146,7 +3146,11 @@ mod test {
 			objects: Vec::new(),
 		};
 		adopter.adopt_head(&head);
-		assert_eq!(adopter.state.read().offset, 1, "the head does not fit beside the open frame");
+		assert_eq!(
+			adopter.state.read().offset,
+			1,
+			"the head does not fit beside the open frame"
+		);
 	}
 
 	/// An adopted head leads the fields and the wire header, whether the header was set
