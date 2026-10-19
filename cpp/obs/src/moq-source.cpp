@@ -114,7 +114,7 @@ struct Track {
 	const char *kind;
 	// The rendition's catalog ID.
 	std::string id;
-	// The publisher instance the track reads. Once a newer one arrives, nothing it reads applies.
+	// The publisher instance the track reads, so a newer one resubscribes even an unchanged rendition.
 	uint64_t instance = 0;
 	// The rendition the decoder was built from.
 	std::optional<moq::Video> video_config;
@@ -424,22 +424,15 @@ static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_pt
 		return;
 	}
 
-	// Another instance took over, or the broadcast came back. Stop reading the previous one,
-	// whose tracks end once its route dies, but keep its tracks' decoders and last frame
-	// until the new catalog's renditions replace them.
+	// Another instance took over, or the broadcast came back. The previous one's active tracks
+	// keep playing until the new catalog's renditions commit, or until they end once its
+	// route dies, holding the last frame.
 	if (conn->instance++ > 0)
 		LOG_INFO("Following a new publisher instance of broadcast: %s", conn->broadcast.c_str());
 	conn->consumer = *result;
 	conn->catalog.reset();
 	conn->pending_video.reset();
 	conn->pending_audio.reset();
-	for (const auto &track : {conn->video, conn->audio}) {
-		if (track) {
-			track->call.reset();
-			track->consumer.reset();
-			track->audio_consumer.reset();
-		}
-	}
 
 	conn->catalog_call =
 		moq::MediaCatalogConsumer::subscribe(conn->consumer)
@@ -548,13 +541,12 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 				const std::shared_ptr<Track> &track,
 				moq::expected<std::optional<moq::MediaFrame>> result);
 
-// The track, while it is still one of the connection's tracks and reads its current instance.
+// The track, while it is still the connection's current video or audio track.
 static std::shared_ptr<Track> moq_source_track(const Connection &conn, const std::weak_ptr<Track> &weak)
 {
 	auto track = weak.lock();
-	return track && track->instance == conn.instance &&
-			       (track == conn.video || track == conn.audio || track == conn.pending_video ||
-				track == conn.pending_audio)
+	return track && (track == conn.video || track == conn.audio || track == conn.pending_video ||
+			 track == conn.pending_audio)
 		       ? track
 		       : nullptr;
 }
@@ -823,8 +815,8 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 	}
 
 	const auto &id = rendition->first;
-	const bool same = moq_source_same_video(conn->video.get(), id, rendition->second);
-	if (same && conn->video->instance == conn->instance) {
+	if (moq_source_same_video(conn->video.get(), id, rendition->second) &&
+	    conn->video->instance == conn->instance) {
 		conn->pending_video.reset();
 		return;
 	}
@@ -832,16 +824,8 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 		return;
 	conn->pending_video.reset();
 
-	// A new publisher instance of the same rendition keeps the decoder, restarting it at the
-	// instance's first keyframe. Otherwise an unusable replacement leaves the current track
-	// and decoder playing.
-	std::unique_ptr<VideoDecoder> decoder;
-	if (same && conn->video->video_decoder) {
-		decoder = std::move(conn->video->video_decoder);
-		decoder->got_keyframe = false;
-	} else {
-		decoder = moq_source_prepare_decoder(rendition->second);
-	}
+	// An unusable replacement leaves the current track and decoder playing.
+	auto decoder = moq_source_prepare_decoder(rendition->second);
 	if (!decoder) {
 		LOG_ERROR("Failed to initialize decoder");
 		return;

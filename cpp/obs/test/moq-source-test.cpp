@@ -1066,8 +1066,8 @@ int main()
 	report("undecodable rendition");
 
 	// Another publisher instance taking over the path while the source plays, as a GOAWAY
-	// drain's replacement session does, plays without a blank on the same video decoder,
-	// and keeps playing once the old instance ends.
+	// drain's replacement session does, plays without a blank. The old instance keeps playing
+	// until the new one delivers, and the new one keeps playing once the old one ends.
 	{
 		TestRelay relay;
 		reset(relay.Url());
@@ -1077,14 +1077,21 @@ int main()
 		const int blanks = g_blank_calls;
 		const int opens = g_decoder_opens;
 		Publisher second(relay, "obs/test", true, true, 1'000'000'000);
+		// The new instance's video candidate opens its own decoder while the old one still plays.
+		CHECK(first->WriteUntil([&] { return g_decoder_opens == opens + 1; }));
+		int frames = g_output_frames;
+		int audio = g_output_audio;
+		CHECK(first->WriteUntil(
+			[&] { return g_output_frames >= frames + 10 && g_output_audio >= audio + 10; }));
+		CHECK(!PlaysFrom(1'000'000'000));
 		CHECK(second.WriteUntil([] { return PlaysFrom(1'000'000'000); }));
 		first.reset();
-		const int frames = g_output_frames;
-		const int audio = g_output_audio;
+		frames = g_output_frames;
+		audio = g_output_audio;
 		CHECK(second.WriteUntil(
 			[&] { return g_output_frames >= frames + 10 && g_output_audio >= audio + 10; }));
 		CHECK(g_blank_calls == blanks);
-		CHECK(g_decoder_opens == opens);
+		CHECK(g_decoder_opens == opens + 1);
 		destroySource(source);
 	}
 	report("follows a replacement instance");
