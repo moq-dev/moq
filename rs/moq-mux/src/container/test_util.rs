@@ -213,3 +213,176 @@ pub(crate) fn common_offset(
 	}
 	offset.expect("frames were published")
 }
+
+/// An origin at `hop`, its driver spawned.
+pub(crate) fn origin(hop: u64) -> moq_net::origin::Producer {
+	let config = moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap());
+	let (producer, driver) = moq_net::origin::Producer::new(config);
+	tokio::spawn(moq_net::time::run(driver));
+	producer
+}
+
+/// A lite-07 session over memory carrying `from`'s broadcasts into `to`, open while held.
+pub(crate) struct Link {
+	_sessions: (moq_net::Session, moq_net::Session),
+	gate: Gate,
+}
+
+impl Link {
+	/// Link `from` into `to`, which accepts every stream.
+	pub(crate) async fn new(from: &moq_net::origin::Producer, to: &moq_net::origin::Producer) -> Self {
+		Self::held(from, to, usize::MAX).await
+	}
+
+	/// Link `from` into `to`, which accepts only its first `uni` uni streams until
+	/// [`open`](Self::open), as a network can deliver one group stream well ahead of the
+	/// rest. SETUP takes the first.
+	pub(crate) async fn held(from: &moq_net::origin::Producer, to: &moq_net::origin::Producer, uni: usize) -> Self {
+		use moq_net::transport::memory;
+
+		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+		let mut config = memory::Config::default();
+		config.protocol = Some(version.alpn().to_string());
+		let (client_transport, server_transport) = memory::pair(config);
+		let gate = Gate(std::sync::Arc::new(std::sync::Mutex::new((uni, None))));
+		let server_transport = Gated {
+			inner: server_transport,
+			gate: gate.clone(),
+		};
+		let client = moq_net::Client::new()
+			.with_versions(version.into())
+			.with_publisher(from.consume());
+		let server = moq_net::Server::new()
+			.with_versions(version.into())
+			.with_subscriber(to.clone());
+		// Each driver runs as soon as its handshake resolves: the accept waits on the client's SETUP.
+		let sessions = tokio::join!(
+			async {
+				let (session, driver) = client
+					.connect_lite(moq_net::time::now(), client_transport)
+					.await
+					.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			},
+			async {
+				let (session, driver) = server
+					.accept_lite(moq_net::time::now(), server_transport)
+					.await
+					.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			}
+		);
+		Self {
+			_sessions: sessions,
+			gate,
+		}
+	}
+
+	/// Accept every stream from now on, the held ones first.
+	pub(crate) fn open(&self) {
+		let mut gate = self.gate.0.lock().unwrap();
+		gate.0 = usize::MAX;
+		if let Some(waker) = gate.1.take() {
+			waker.wake();
+		}
+	}
+}
+
+/// The uni streams a [`Gated`] session may still accept, and its accept's waker.
+#[derive(Clone)]
+struct Gate(std::sync::Arc<std::sync::Mutex<(usize, Option<std::task::Waker>)>>);
+
+/// A memory session that accepts uni streams only while its [`Gate`] allows.
+#[derive(Clone)]
+struct Gated {
+	inner: moq_net::transport::memory::Session,
+	gate: Gate,
+}
+
+impl moq_net::transport::poll::Session for Gated {
+	type SendStream = <moq_net::transport::memory::Session as moq_net::transport::poll::Session>::SendStream;
+	type RecvStream = <moq_net::transport::memory::Session as moq_net::transport::poll::Session>::RecvStream;
+	type Error = <moq_net::transport::memory::Session as moq_net::transport::poll::Session>::Error;
+
+	fn poll_accept_uni(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+	) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
+		{
+			let mut gate = self.gate.0.lock().unwrap();
+			if gate.0 == 0 {
+				gate.1 = Some(cx.waker().clone());
+				return std::task::Poll::Pending;
+			}
+		}
+		let accepted = std::task::ready!(self.inner.poll_accept_uni(cx));
+		let mut gate = self.gate.0.lock().unwrap();
+		gate.0 = gate.0.saturating_sub(1);
+		std::task::Poll::Ready(accepted)
+	}
+
+	fn poll_accept_bi(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+	) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, Self::Error>> {
+		self.inner.poll_accept_bi(cx)
+	}
+
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
+	) -> std::task::Poll<Result<Self::SendStream, Self::Error>> {
+		self.inner.poll_open_uni(cx, options)
+	}
+
+	fn poll_open_bi(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
+	) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, Self::Error>> {
+		self.inner.poll_open_bi(cx, options)
+	}
+
+	fn send_group(&mut self, priority: i64) -> Option<moq_net::transport::poll::Ungrouped> {
+		self.inner.send_group(priority)
+	}
+
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		options: moq_net::transport::poll::SendOptions<'_, moq_net::transport::poll::Ungrouped>,
+	) -> Result<(), Self::Error> {
+		self.inner.send_datagram(payload, options)
+	}
+
+	fn poll_recv_datagram(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<Bytes, Self::Error>> {
+		self.inner.poll_recv_datagram(cx)
+	}
+
+	fn max_datagram_size(&self) -> usize {
+		self.inner.max_datagram_size()
+	}
+
+	fn protocol(&self) -> Option<&str> {
+		self.inner.protocol()
+	}
+
+	fn binding(&self) -> moq_net::transport::Binding {
+		self.inner.binding()
+	}
+
+	fn close(&mut self, code: u32, reason: &str) {
+		self.inner.close(code, reason)
+	}
+
+	fn poll_closed(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Error> {
+		self.inner.poll_closed(cx)
+	}
+
+	fn stats(&self) -> impl moq_net::transport::Stats {
+		self.inner.stats()
+	}
+}

@@ -30,7 +30,8 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
     position. It is not known when a live group's opening header is sent;
     frames must flow before the publisher ends the group.
   - Datagrams gain their object ID, properties, and status.
-  - Track info gains the unknown track properties.
+  - Track info gains the unknown track properties: `track::Info::properties`
+    (`model::object::TrackProperties`), with its sealed keys.
   - Immutable properties carry their ingress encoding family alongside the
     unchanged inner bytes, so downstream IETF egress can refuse incompatible
     encodings.
@@ -52,10 +53,6 @@ encoding provenance.
 
 Public API: `setup::Extensions::ietf`. Wire: a new lite-07 SETUP extension
 and the framing above, only when negotiated.
-
-## Required
-
-- [Track properties](/quest/m1/ietf-extension/track-properties.md) - the track properties it frames
 
 ## Related
 

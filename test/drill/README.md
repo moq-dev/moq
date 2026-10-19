@@ -137,6 +137,15 @@ would turn this lane into a second loopback run that passes for free.
 
 There are no retries: a drill that only passes on loopback is a finding.
 
+Random loss is not how real paths fail, so it may prove correctness but never
+judge quality, latency or throughput; those run on a congested path (see
+`test/ts/README.md`). Every drill here proves correctness: that a resource is
+released, a failure surfaces, a route or publisher comes back, or every group is
+recovered. The cluster drills' 10s bound on each group is a stall check, a third
+of the 30s stalls of #4349, not a latency target. So the impaired lane keeps its
+loss, which is what drops the `MAX_STREAMS` and `MAX_DATA` frames the cluster
+drills' senders wait on.
+
 The same shaper is a binary, for putting in front of a relay from another
 process. It applies one profile both ways, prints the seed at start and the
 counters at exit (Ctrl-C or SIGTERM), and exits nonzero if the profile never
