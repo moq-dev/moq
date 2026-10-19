@@ -39,7 +39,10 @@ fn bench_loss(c: &mut Criterion<ThreadCpu>) {
                             let target = pair.server.received.finished + streams as u64;
                             let conn = pair.client();
                             for _ in 0..streams {
-                                let id = conn.streams().open(Dir::Uni).expect("stream limit");
+                                let id = conn
+                                    .streams()
+                                    .open(Dir::Uni, Default::default())
+                                    .expect("stream limit");
                                 let mut stream = conn.send_stream(id);
                                 assert_eq!(stream.write(&data).unwrap(), data.len());
                                 stream.finish().unwrap();
@@ -75,7 +78,10 @@ fn bench_reset(c: &mut Criterion<ThreadCpu>) {
                         let conn = pair.client();
                         let ids: Vec<_> = (0..streams)
                             .map(|_| {
-                                let id = conn.streams().open(Dir::Uni).expect("stream limit");
+                                let id = conn
+                                    .streams()
+                                    .open(Dir::Uni, Default::default())
+                                    .expect("stream limit");
                                 assert_eq!(conn.send_stream(id).write(&data).unwrap(), bytes);
                                 id
                             })
@@ -116,7 +122,10 @@ fn bench_stop(c: &mut Criterion<ThreadCpu>) {
                         let target = pair.server.received.stopped + streams as u64;
                         let conn = pair.client();
                         for _ in 0..streams {
-                            let id = conn.streams().open(Dir::Uni).expect("stream limit");
+                            let id = conn
+                                .streams()
+                                .open(Dir::Uni, Default::default())
+                                .expect("stream limit");
                             assert_eq!(conn.send_stream(id).write(&data).unwrap(), bytes);
                         }
                         pair.drive_until(|pair| {

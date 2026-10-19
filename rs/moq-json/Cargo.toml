@@ -25,6 +25,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+futures = { workspace = true }
 json-patch = "4"
 proptest = { workspace = true, features = ["handle-panics"] }
 

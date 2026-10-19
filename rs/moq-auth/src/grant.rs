@@ -45,6 +45,9 @@ pub struct Grant {
 	/// An opaque label handed to stats, so traffic can be bucketed.
 	pub tier: Option<String>,
 
+	/// The literal path this session's stats record under, independent of its root. Absent records under the empty label.
+	pub label: Option<String>,
+
 	/// The session is a cluster peer (another relay): what it announces entered
 	/// the cluster elsewhere, not here.
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -91,6 +94,9 @@ impl Grant {
 		if self.revalidate.is_some_and(|cadence| cadence.is_zero()) {
 			return Err(crate::Error::ZeroRevalidate);
 		}
+		if let Some(label) = &self.label {
+			moq_pattern::Pattern::literal(label).map_err(crate::Error::InvalidLabel)?;
+		}
 		if self.expires.is_some_and(|expires| expires <= SystemTime::now()) {
 			return Err(crate::Error::GrantExpired);
 		}
@@ -116,6 +122,7 @@ mod tests {
 			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
+			label: Some("project/key/123".into()),
 			peer: true,
 			upstream: true,
 		};
@@ -140,12 +147,13 @@ mod tests {
 			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
+			label: Some("project/key/123".into()),
 			peer: true,
 			upstream: true,
 		};
 		assert_eq!(
 			serde_json::to_string(&grant).unwrap(),
-			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","peer":true,"upstream":true}"#
+			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","peer":true,"upstream":true}"#
 		);
 	}
 
@@ -196,6 +204,13 @@ mod tests {
 		assert!(matches!(grant.validate(), Err(crate::Error::UpstreamWithoutPeer)));
 		grant.peer = true;
 		grant.validate().unwrap();
+	}
+
+	#[test]
+	fn validate_refuses_an_invalid_stats_label() {
+		let mut grant = Grant::new(patterns(&["**"]), Access::default());
+		grant.label = Some("project/*".into());
+		assert!(matches!(grant.validate(), Err(crate::Error::InvalidLabel(_))));
 	}
 
 	#[cfg(feature = "tokio")]

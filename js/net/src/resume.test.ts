@@ -893,3 +893,43 @@ test("a fetch still out on the old route moves to the new one", async () => {
 	a.close();
 	b.close();
 });
+
+test("the largest follows the serving copy across a swap without moving back, and ends with the route", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(3);
+	expect(await sub.largest()).toEqual({ group: 3, frame: 0 });
+
+	// The route fails: its copy's stream ends, the logical track's does not.
+	ta.producer.close(new StreamError(StreamCode.SessionClosed));
+	let settled = false;
+	const next = sub.largest().finally(() => {
+		settled = true;
+	});
+	await settle();
+	expect(settled).toBe(false);
+
+	// The replacement starts behind what is already known.
+	tb.write(2);
+	front.serve(b.consume());
+	await settle();
+	expect(settled).toBe(false);
+	tb.write(4);
+	expect(await next).toEqual({ group: 4, frame: 0 });
+
+	// No route replaces this one: the stream ends with its copy.
+	front.conclude();
+	const last = sub.largest();
+	tb.producer.close();
+	expect(await last).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});

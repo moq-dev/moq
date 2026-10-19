@@ -29,6 +29,25 @@ layer instead of reopening it.
 - Report the public API impact per crate: deleted generic `Session<S>`
   adapters, and new impls on concrete session types.
 
+The two native QUIC stacks drifted apart behind the adapters. Align them while
+each gets its own impl:
+
+- moq-tokio's `quic::web::Session` derefs to `quic::driver::Connection`, so it
+  has two `send_datagram`s with different framing: its own prefixes the
+  WebTransport session id, the driver's reached through `Deref` does not.
+  Prefer dropping the `Deref` over documenting the trap.
+- The driver stream setters disagree: moq-tokio's `set_priority`/`set_group`
+  take `&self` and return `Result<(), ClosedStream>`, moq-uring's take
+  `&mut self` and return nothing.
+- The sealed `Grouped::send_group` takes `&self` in moq-tokio and `&mut self`
+  in moq-uring, and only moq-tokio requires `GroupedSend::Group: Send + Sync`.
+- moq-uring's driver opens streams only through `web_transport_trait`, so
+  `SendOptions` reach a new stream through its setters in both runtimes'
+  adapters. A native impl can pass them to the open, as moq-tokio's driver
+  `open_uni`/`open_bi` already accept.
+- moq-tokio's `quic::driver` and `quic::web` modules are public but
+  `#[doc(hidden)]`. Decide whether they are API or should be private.
+
 Notes from related quests:
 - [qmux on moq-quic](/quest/m2/quic-qmux.md) planned to port qmux's
   `web-transport-trait` impl. If it lands first, its impl targets moq-net's

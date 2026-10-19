@@ -155,7 +155,10 @@ fn duplicate_packet_is_discarded() {
     let _guard = subscribe();
     let (mut pair, client_ch, server_ch) = connected();
     pair.drive();
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s).write(MSG).unwrap();
     pair.drive_client();
     assert_eq!(pair.server.inbound.len(), 1);
@@ -297,7 +300,10 @@ fn zero_rtt_retransmit_after_retry() {
 
     let client_ch = pair.begin_connect(config);
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s).write(MSG).unwrap();
     pair.drive();
 
@@ -344,7 +350,10 @@ fn path_validation_failure_reverts() {
     assert_matches!(updates.as_slice(), [.., Event::PathUpdated]);
 
     // The connection still works on the old path
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s).write(MSG).unwrap();
     pair.drive();
     assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));

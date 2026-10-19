@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Track readers follow `largest()` instead of reading `latest()` (#5725)
+
+`latest()` on `Track.Subscriber` and `Track.Ordered` is gone, and `Subscriber.largest()` is no longer a synchronous buffered snapshot.
+Await `largest()` and read `.group` where you used the sequence.
+It streams the newest location, the current one at once and then each newer one, and `undefined` once the track ends.
+A new group or datagram raises it at frame 0 before any frame lands, and it can name a frame the publisher reported before its group arrives.
+
 ### A timed track refuses a group that rewinds (#5803)
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, throws `TimestampMismatch`.

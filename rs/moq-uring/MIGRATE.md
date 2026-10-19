@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Datagrams take `SendOptions` (#5770, #5872)
+
+`quic::Connection::send_datagram` and `quic::web::Session::send_datagram` take a `quic::SendOptions { group, priority }` and never block; pass `SendOptions::default()` for an ungrouped datagram.
+
 ### QUIC limits are `moq_quic::Limits` (#5871)
 
 `quic::Limits` is `moq_quic::Limits`, where each `None` field keeps that limit, and an invalid one fails `set_limits` with `Error::Limits` instead of `WindowRange` or `StreamsRange`.

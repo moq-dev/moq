@@ -439,6 +439,14 @@ pub struct MoqSide {
 	/// restarted publisher replace the old broadcast instead of resuming into it.
 	/// Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
 	/// accept it, since the other publishers' tracks differ between instances.
+	///
+	/// The epoch's wall time also fixes the catalog clock, so publishers of one stream
+	/// agree on it and on every timestamp wherever each started: PTS zero is the epoch's
+	/// time, and for `ts` one 33-bit wrap (about 26.5 hours) before it. The wall mapping is
+	/// then off by the source clock's reading at the epoch's time, which for a TS program
+	/// clock is anywhere within half a wrap. Near either end of that range, processes whose
+	/// clocks or delivery differ can place one timestamp a wrap apart, and redundant `flv`
+	/// imports stop matching at FLV's 49.7-day millisecond wrap.
 	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
 	pub epoch: Option<hang::moq_net::Epoch>,
 
@@ -790,6 +798,8 @@ pub enum ImportSource {
 	Rtmp(crate::rtmp::Args),
 	/// SRT: pull a remote stream (`--connect`) or accept incoming publishes (`--listen`).
 	Srt(crate::srt::ImportArgs),
+	/// RTSP: pull an IP camera's stream (`--connect`), reconnecting on failure.
+	Rtsp(crate::rtsp::ImportArgs),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
 	Rtc(crate::rtc::Args),
 	/// Replay a recording from an object store, serving its groups on demand.
@@ -825,6 +835,7 @@ impl ImportSource {
 				Some("`import ts --program all` mints an epoch per program")
 			}
 			Self::Rtmp(_) | Self::Srt(_) => Some("the RTMP and SRT imports mint an epoch per connection"),
+			Self::Rtsp(_) => Some("`import rtsp` mints an epoch per RTSP session, since each restarts its RTP time"),
 			Self::Rtc(rtc) if rtc.listen.is_some() => Some("the WHIP listener mints an epoch per connection"),
 			Self::Rtc(_) => Some("`import rtc --connect` timestamps frames from its own RTP session"),
 			Self::Avc3 => Some("`import avc3` timestamps frames from their arrival on stdin"),
@@ -1578,6 +1589,7 @@ mod tests {
 			&["import", "rtmp", "--listen", "[::]:1935"][..],
 			&["import", "rtmp", "--connect", "rtmp://example.com/live/key"],
 			&["import", "srt", "--connect", "srt://example.com:9000"],
+			&["import", "rtsp", "--connect", "rtsp://example.com/stream"],
 			&["import", "rtc", "--listen", "[::]:8080"],
 			&["import", "rtc", "--connect", "https://example.com/whep"],
 			&["import", "ts", "--program", "all"],

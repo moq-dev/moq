@@ -303,17 +303,21 @@ impl Connection {
 	}
 
 	/// Open a send group at `priority`, for streams to join with
-	/// [`SendStream::set_group`](super::SendStream::set_group).
+	/// [`SendStream::set_group`](super::SendStream::set_group) and datagrams with
+	/// [`SendOptions`](super::SendOptions).
 	pub fn send_group(&self, priority: i64) -> super::SendGroup {
 		super::SendGroup::new(self.shared.clone(), priority)
 	}
 
-	/// Send a datagram in `group` at `order`, scheduled like one of the group's streams at
-	/// priority `order`, or among the ungrouped streams without a group.
+	/// Send a datagram scheduled by `options`, like one of its group's streams at its priority,
+	/// or among the ungrouped streams without a group.
 	///
 	/// Never blocks: a full buffer drops the oldest datagram of the lowest-priority group,
 	/// see [`moq_quic::Datagrams::send`].
-	pub fn send_datagram(&self, payload: Bytes, group: Option<&super::SendGroup>, order: i64) -> Result<(), Error> {
+	///
+	/// # Panics
+	/// - when `options.group` belongs to another connection
+	pub fn send_datagram(&self, payload: Bytes, options: super::SendOptions<'_>) -> Result<(), Error> {
 		if let Some(err) = self.shared.closed() {
 			return Err(err);
 		}
@@ -321,7 +325,7 @@ impl Connection {
 			.conn
 			.borrow_mut()
 			.datagrams()
-			.send(payload, group.map(super::SendGroup::id), order)
+			.send(payload, super::group::to_quic(options))
 			.map_err(|err| Error::Quic(err.to_string()))?;
 		self.shared.kick();
 		Ok(())
@@ -564,7 +568,12 @@ impl web_transport_trait::poll::Session for Connection {
 		}
 		// The peer's MAX_STREAMS credit is what gates us: `open` hands back
 		// nothing while it is spent.
-		let opened = self.shared.conn.borrow_mut().streams().open(Dir::Uni);
+		let opened = self
+			.shared
+			.conn
+			.borrow_mut()
+			.streams()
+			.open(Dir::Uni, Default::default());
 		match opened {
 			Some(id) => Poll::Ready(Ok(super::SendStream::new(self.shared.clone(), id))),
 			None => {
@@ -583,7 +592,12 @@ impl web_transport_trait::poll::Session for Connection {
 		if let Some(err) = self.shared.closed() {
 			return Poll::Ready(Err(err));
 		}
-		let opened = self.shared.conn.borrow_mut().streams().open(Dir::Bi);
+		let opened = self
+			.shared
+			.conn
+			.borrow_mut()
+			.streams()
+			.open(Dir::Bi, Default::default());
 		match opened {
 			Some(id) => Poll::Ready(Ok((
 				super::SendStream::new(self.shared.clone(), id),
@@ -598,7 +612,11 @@ impl web_transport_trait::poll::Session for Connection {
 	}
 
 	fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Self::send_datagram(self, Bytes::copy_from_slice(payload), None, 0))
+		Poll::Ready(Self::send_datagram(
+			self,
+			Bytes::copy_from_slice(payload),
+			Default::default(),
+		))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -956,6 +974,8 @@ fn sweep_stream(state: &mut State, event: moq_quic::StreamEvent) {
 				waiters.wake();
 			}
 		}
+		// Nothing waits on a send stream's acknowledgment yet.
+		moq_quic::StreamEvent::Acked { .. } => {}
 	}
 }
 

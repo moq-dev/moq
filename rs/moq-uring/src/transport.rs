@@ -22,10 +22,13 @@ impl Grouped for quic::web::Session {
 	fn send_datagram(
 		&mut self,
 		payload: bytes::Bytes,
-		group: Option<&quic::SendGroup>,
-		order: i64,
+		options: moq_net::transport::poll::SendOptions<'_, quic::SendGroup>,
 	) -> Result<(), Self::Error> {
-		quic::web::Session::send_datagram(self, payload, group, order)
+		let options = quic::SendOptions {
+			group: options.group,
+			priority: options.priority,
+		};
+		quic::web::Session::send_datagram(self, payload, options)
 	}
 }
 

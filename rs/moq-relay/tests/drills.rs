@@ -485,19 +485,20 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	// a moq publisher (`write_frame` is synchronous, and a reader that falls too
 	// far behind is shed rather than waited for), so an unread backlog is what
 	// backpressure looks like from here.
+	let mut behind = None;
 	let backlog = tokio::time::timeout(TIMEOUT, async {
-		loop {
-			match reader.track.latest() {
-				Some(latest) if latest >= first + STALL_GROUPS as u64 => return latest - first,
-				_ => tokio::time::sleep(Duration::from_millis(10)).await,
+		while let Some(largest) = reader.track.largest().await {
+			behind = Some(largest.group - first);
+			if largest.group >= first + STALL_GROUPS as u64 {
+				return largest.group - first;
 			}
 		}
+		panic!("the stalled reader ended before its backlog queued");
 	})
 	.await
 	.unwrap_or_else(|_| {
 		panic!(
-			"the stalled reader is only {:?} groups behind: nothing was queued, so there is no backlog to cancel under",
-			reader.track.latest().map(|latest| latest - first)
+			"the stalled reader is only {behind:?} groups behind: nothing was queued, so there is no backlog to cancel under"
 		)
 	});
 	println!("fault activated: cancelling with {backlog} unread groups queued");

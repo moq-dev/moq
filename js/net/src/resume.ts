@@ -566,7 +566,7 @@ class Reader implements ResumeSource {
 	latest(): number | undefined {
 		let latest: number | undefined;
 		for (const copy of this.#copies) {
-			const sequence = copy.sub.latest();
+			const sequence = hooks.latestSequence(copy.sub);
 			if (sequence !== undefined && (latest === undefined || sequence > latest)) latest = sequence;
 		}
 		return latest;
@@ -604,9 +604,37 @@ class Reader implements ResumeSource {
 		}
 	}
 
-	largest(): track.Location | undefined {
+	bufferedLargest(): track.Location | undefined {
 		this.sync();
-		return this.#serving()?.sub.largest();
+		const serving = this.#serving();
+		return serving && hooks.bufferedLargest(serving.sub);
+	}
+
+	async largest(seen: track.Location | undefined): Promise<track.Location | undefined> {
+		for (;;) {
+			this.sync();
+			const serving = this.#serving();
+			const view = serving && hooks.peekLargest(serving.sub);
+			const largest = view?.largest;
+			// A replacement copy can start below what an earlier one reported.
+			if (
+				largest &&
+				(!seen || largest.group > seen.group || (largest.group === seen.group && largest.frame > seen.frame))
+			)
+				return largest;
+			// A copy ending is its route failing: the logical track's stream ends only with the route.
+			if (this.#shell.closed.peek() !== undefined) return undefined;
+			if ((this.route.concluded || this.route.refusal) && (!serving || view?.ended)) return undefined;
+			await new Promise<void>((resolve) => {
+				const disposes: Dispose[] = [];
+				const wake = () => {
+					for (const dispose of disposes) dispose();
+					resolve();
+				};
+				disposes.push(this.changed(wake), this.#shell.closed.changed(wake));
+				if (serving) disposes.push(hooks.largestChanged(serving.sub, wake));
+			});
+		}
 	}
 
 	fork(options?: track.Subscription): track.Subscriber {

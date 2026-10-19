@@ -1105,7 +1105,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// is already past `sequence` continues from its own next group instead.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.text.values_mut() {
-			let next = track.producer.track().latest().map_or(0, |latest| latest + 1);
+			let next = track.producer.next_sequence();
 			track.producer.seek(sequence.max(next))?;
 		}
 		for track in self.tracks.values_mut() {

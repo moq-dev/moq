@@ -170,8 +170,8 @@ async fn gateway_admission_refuses_once_in_the_shared_stats_registry() {
 	let mut report = moq_net::stats::Report::default();
 	registry.report(&mut report);
 	assert_eq!(
-		report.sessions[0].root.as_str(),
+		report.sessions[0].label.as_str(),
 		"",
-		"refused admission cannot claim the dialed root"
+		"a refused admission counts under the empty label"
 	);
 }

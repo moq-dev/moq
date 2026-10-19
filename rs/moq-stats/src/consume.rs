@@ -38,7 +38,7 @@ impl Config {
 /// Subscribe to the tracks you care about with [`Self::totals`],
 /// [`Self::traffic`], [`Self::sessions`], [`Self::presence`], and
 /// [`Self::prefix`]. A named tier's tracks are held open with an empty frame
-/// until the tier records, and a root's presence track and a prefix's track
+/// until the tier records, and a label's presence track and a prefix's track
 /// are produced only while subscribed.
 pub struct Consumer {
 	broadcast: broadcast::Consumer,
@@ -78,11 +78,11 @@ impl Consumer {
 		})
 	}
 
-	/// Subscribe to the presence track for auth `root`, awaiting the
+	/// Subscribe to the presence track for `label`, awaiting the
 	/// subscription handshake. Fails with
-	/// [`NotFound`](moq_net::Error::NotFound) for a root outside the group.
-	pub async fn presence(&self, root: impl AsPath) -> Result<Presence> {
-		let name = presence_track(root, self.config.compression);
+	/// [`NotFound`](moq_net::Error::NotFound) for a label outside the group.
+	pub async fn presence(&self, label: impl AsPath) -> Result<Presence> {
+		let name = presence_track(label, self.config.compression);
 		Ok(Presence {
 			inner: self.subscribe(&name).await?,
 		})
@@ -146,7 +146,7 @@ impl Totals {
 	}
 }
 
-/// A typed reader over one root's presence track; see [`Traffic`].
+/// A typed reader over one label's presence track; see [`Traffic`].
 pub struct Presence {
 	inner: moq_json::snapshot::Consumer<PresenceFrame>,
 }
@@ -223,7 +223,7 @@ mod tests {
 	}
 
 	/// A tagged egress feed into a producer's registry, holding the handles needed
-	/// to write more traffic incrementally. Presence is recorded under `root`.
+	/// to write more traffic incrementally. Presence is recorded under `label`.
 	struct Feed {
 		track: track::Producer,
 		sub: track::Subscriber,
@@ -244,8 +244,8 @@ mod tests {
 		}
 	}
 
-	async fn feed(producer: &Producer, tier: Tier, root: &str, path: &str) -> Feed {
-		let ctx = producer.registry().tier(tier).session(root);
+	async fn feed(producer: &Producer, tier: Tier, label: &str, path: &str) -> Feed {
+		let ctx = producer.registry().tier(tier).session(label);
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 

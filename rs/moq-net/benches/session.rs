@@ -260,12 +260,13 @@ impl MeasurementClock {
 	}
 }
 
-fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) {
+fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
 	let mut group = track.append_group().unwrap();
 	for _ in 0..frames {
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 	}
 	group.finish().unwrap();
+	group.sequence
 }
 
 /// Read one whole group, returning its payload bytes so skipped work can't look
@@ -567,9 +568,10 @@ impl Room {
 				}
 			}
 		}
+		let mut newest = vec![0; self.cluster.tracks.len()];
 		for &broadcast in &self.watched {
 			for _ in 0..self.shape.burst {
-				write_group(&self.cluster.tracks[broadcast], &self.payload, FRAMES);
+				newest[broadcast] = write_group(&self.cluster.tracks[broadcast], &self.payload, FRAMES);
 			}
 		}
 		let mut bytes = 0;
@@ -580,8 +582,7 @@ impl Room {
 				let read = async {
 					let mut bytes = 0;
 					for (broadcast, track) in &viewer.fetches {
-						let sequence = self.cluster.tracks[*broadcast].latest().unwrap();
-						let mut group = track.fetch_group(sequence, None).await.unwrap();
+						let mut group = track.fetch_group(newest[*broadcast], None).await.unwrap();
 						while let Some(frame) = group.read_frame().await.unwrap() {
 							bytes += frame.payload.len();
 						}

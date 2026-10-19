@@ -4,9 +4,9 @@
 //!
 //! Run with `cargo bench -p moq-net --bench stats`.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{announce, broadcast, origin, stats};
+use moq_net::{announce, broadcast, fuzz, origin, stats};
 
 /// `(broadcasts, tiers)` shapes; every broadcast records under every tier.
 const SHAPES: [(usize, usize); 4] = [(100, 1), (1_000, 1), (100, 10), (1_000, 10)];
@@ -87,5 +87,69 @@ fn request(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, report, request);
+fn write(c: &mut Criterion) {
+	let registry = stats::Registry::new(stats::Config::new());
+	let tier = stats::Tier::default();
+	let path = fuzz::path_meter(&registry, &tier, "room/live");
+	let session = fuzz::session_meter(&registry, tier, "root", "room/live");
+	c.bench_function("stats/write/path-bytes", |b| b.iter(|| path.bytes(1)));
+	c.bench_function("stats/write/session-bytes", |b| b.iter(|| session.bytes(1)));
+}
+
+fn session_report(c: &mut Criterion) {
+	let mut group = c.benchmark_group("stats/session-report");
+	for labels in [1, 100, 1_000] {
+		for sessions in [1, 10] {
+			let registry = stats::Registry::new(stats::Config::new());
+			let handle = registry.tier(stats::Tier::default());
+			let contexts: Vec<_> = (0..labels)
+				.flat_map(|label| {
+					let handle = handle.clone();
+					(0..sessions).map(move |_| handle.session(format!("project/key/{label}")))
+				})
+				.collect();
+			let mut report = stats::Report::default();
+			group.bench_function(BenchmarkId::from_parameter(format!("{labels}x{sessions}")), |b| {
+				b.iter(|| registry.report(&mut report));
+			});
+			std::hint::black_box(contexts);
+		}
+	}
+	group.finish();
+}
+
+/// Move every session on one label to another and back, as a revalidation that relabels
+/// a whole project does. Per-session cost should stay flat as sessions and labels grow.
+fn retag(c: &mut Criterion) {
+	let mut group = c.benchmark_group("stats/retag");
+	for labels in [1, 100] {
+		for sessions in [1, 100, 10_000] {
+			let registry = stats::Registry::new(stats::Config::new());
+			let tier = stats::Tier::default();
+			let handle = registry.tier(tier.clone());
+			let mut contexts: Vec<_> = (0..labels)
+				.flat_map(|label| {
+					let handle = handle.clone();
+					(0..sessions).map(move |_| handle.session(format!("project/key/{label}")))
+				})
+				.collect();
+			let moving = contexts.split_off(contexts.len() - sessions);
+			group.throughput(Throughput::Elements(sessions as u64 * 2));
+			group.bench_function(BenchmarkId::from_parameter(format!("{labels}x{sessions}")), |b| {
+				b.iter(|| {
+					for session in moving.iter().rev() {
+						session.retag(tier.clone(), "project/moved");
+					}
+					for session in moving.iter().rev() {
+						session.retag(tier.clone(), format!("project/key/{}", labels - 1));
+					}
+				});
+			});
+			std::hint::black_box((contexts, moving));
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, report, request, write, session_report, retag);
 criterion_main!(benches);

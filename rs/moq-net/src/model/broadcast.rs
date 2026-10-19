@@ -1278,9 +1278,30 @@ mod test {
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
 		track.append_group().unwrap();
 		let handle = consumer.track("a").unwrap();
-		assert_eq!(handle.latest(), Some(0));
+		assert_eq!(handle.latest_sequence(), Some(0));
 		drop(track);
-		assert_eq!(handle.latest(), None);
+		assert_eq!(handle.latest_sequence(), None);
+	}
+
+	/// A handle's largest reads the instance its open broadcast serves now, without asking
+	/// for it, and ends once nothing is served under the name.
+	#[test]
+	fn a_handle_follows_the_largest_its_broadcast_serves() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.create_track("a", crate::track::Info::default()).unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(None, &b"a"[..]).unwrap();
+		let mut handle = consumer.track("a").unwrap();
+		let waiter = kio::Waiter::noop();
+		assert_eq!(
+			handle.poll_largest(&waiter),
+			std::task::Poll::Ready(Some(crate::track::Position { group: 0, frame: 0 }))
+		);
+		assert!(handle.poll_largest(&waiter).is_pending(), "nothing newer yet");
+		drop(group);
+		drop(track);
+		assert_eq!(handle.poll_largest(&waiter), std::task::Poll::Ready(None));
 	}
 
 	/// Once the broadcast ends, a handle keeps reading the track it saw when it was made.
@@ -1293,7 +1314,7 @@ mod test {
 		let handle = consumer.track("a").unwrap();
 		producer.close();
 		drop(track);
-		assert_eq!(handle.latest(), Some(0));
+		assert_eq!(handle.latest_sequence(), Some(0));
 	}
 
 	#[test]

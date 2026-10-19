@@ -60,4 +60,3 @@ resolved start on lite-07 SUBSCRIBE_OK, through Lite-07 ranges.
 ## Required
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the reader's requested ranges set the floor, and every sequence in them arrives or is dropped
-- [Live largest location](/quest/m1/largest.md) - the reader learns the live edge before the first group arrives

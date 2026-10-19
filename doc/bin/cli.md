@@ -19,6 +19,7 @@ Docker; see [Install](/setup/install).
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Pull a remote HLS playlist. |
 | `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
+| `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
 | `export` | `hls --listen` | Serve the broadcast as HLS over HTTP. |
@@ -84,6 +85,10 @@ to the wall time the first frame arrived. A timeline that rewinds, such as a
 restarted encoder or a looping file wrapping to the top, ends the import with
 an error; run it again to publish anew. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
+MPEG-TS timestamps run on across their 33-bit wrap (every 26.5 hours), each
+taking the wrap that lands it nearest the clock, so media that gets more than
+13.25 hours ahead of it (a jump that far, or a long file read faster than real
+time) reads as a rewind.
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
 and subtitle PIDs through as tracks. SCTE-35 cues wait for a media timestamp;
@@ -100,6 +105,24 @@ publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
 program aboard, for what demultiplexing cannot carry, such as a scrambled
 service; `export ts --passthrough` writes it back out. FLV covers H.264 + AAC.
+
+`import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
+re-encoding. RTP rides the RTSP connection, so run it on the camera's network
+and the camera needs no inbound port. Credentials go in the URL
+(`rtsp://user:pass@camera/stream`), which other local users can read from the
+process list. Audio nothing in the stack plays, such as G.711, is skipped with
+a warning, and the broadcast goes on video-only. It reconnects with backoff,
+including when the camera sends no media for 10 seconds or no keyframe for 30,
+until a fatal error (refused access, or no stream it can publish), and
+each RTSP session is a new broadcast with its own catalog, since the session's
+RTP time restarts; a camera whose clock jumps mid-session is restarted the same
+way. Embed [`moq-rtsp`](https://docs.rs/moq-rtsp) for your own supervision,
+such as two of a camera's URLs as renditions of one broadcast.
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast camera.hang \
+    import rtsp --connect rtsp://admin:secret@192.168.1.64/stream1
+```
 
 ## Export
 
@@ -297,8 +320,8 @@ moq --connect https://relay.example.com/anon \
 
 Each run of `moq` announces a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), kept across reconnects.
-The RTMP, SRT, and WHIP ingests mint one per connection instead, and
-`import ts --program all` one per program.
+The RTMP, SRT, and WHIP ingests mint one per connection instead, `import
+rtsp` one per RTSP session, and `import ts --program all` one per program.
 
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
@@ -310,10 +333,23 @@ or a better one.
 
 On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
 `uuidgen -7` prints) are one publisher: relays fail over between them
-mid-group, so they must produce identical tracks with aligned groups, which no
-importer guarantees yet. Only `import fmp4`, `flv`, `hls`, and `ts` (one
-program, or `--passthrough`) accept it. The RTMP, SRT, and WHIP ingests and
-`import ts --program all` refuse it because they mint their own, and `import
+mid-group, so they must produce identical tracks with aligned groups. Each
+derives its catalog clock from the epoch's wall time, so fed one stream they
+publish the same clock and timestamps wherever each started, without reading
+anything from the other; group numbering is not aligned yet. PTS zero is the
+epoch's time, and for `ts` one 33-bit wrap before it. The wall mapping is
+therefore off by the source clock's reading at the epoch's time: for a TS
+program clock, anywhere within 13.25 hours. Each process picks a TS timestamp's
+wrap from its own clock, so near either end of that range, processes whose host
+clocks or delivery differ by more than the distance left can put one timestamp
+in adjacent wraps, 26.5 hours apart, and one later reads its media as a rewind.
+FLV's millisecond timestamps are not unwrapped, so redundant `flv` imports stop
+matching at its 49.7-day wrap: the incumbent rewinds and exits, and one started
+after it publishes timestamps near zero. A host whose clock reads before the
+epoch's time cannot place an `fmp4`, `flv`, or `hls` import on it, and exits 1.
+Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
+accept it. The RTMP, SRT, RTSP, and WHIP ingests
+and `import ts --program all` refuse it because they mint their own, and `import
 avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
 timestamps or bytes come from the instance rather than the input. Each that
 accepts it announces once its catalog names a servable track, so a standby
@@ -396,7 +432,9 @@ continuity error, and the rest carry on. It takes neither `--linger`,
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same
-stream. A replacement (a restarted publisher, under a new
+stream. A return that cannot be read yet, such as one still routed through a
+dead session, keeps it waiting for the next announcement; if the linger runs
+out first, it exits 1 with that error. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. `--linger` also bounds a mid-stream stitch from the replacement

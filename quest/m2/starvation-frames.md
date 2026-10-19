@@ -31,10 +31,11 @@ span from the newest acknowledged frame to the newest written one, which is
 the exact media the viewer lost.
 
 Add a second byte-weighted cumulative histogram of delivery delay:
-`acked.received - written_at` per frame, where `received` is the
-ACK-delay-corrected instant the hook returns. Its low edge approaches the
-path RTT and its spread is the jitter. Document that the value still includes
-the return one-way delay and that a backend without the hook leaves the
+`acked_at - written_at` per frame, where `acked_at` is when the serve task is
+woken by `poll_acked`. Its low edge approaches the path RTT and its spread is
+the jitter. Document that the value still includes the return one-way delay
+and the peer's delayed-ACK timer, since the hook reports no corrected instant
+(decided 2026-10-17 on #5817), and that a backend without the hook leaves the
 histogram absent, never zero.
 
 Backends that return unsupported from `poll_acked` keep the group-granularity
@@ -52,8 +53,8 @@ is Required.
 Tests: the frontier tracking frame ends under a peer that acknowledges in
 bursts, with interval samples landing one bucket lower than group-granularity
 tracking of the same run; a reset mid-group attributing only the
-unacknowledged span to `dropped_duration`; delivery delay under an injected ACK delay staying inside one bucket of the
-true RTT; and fallback to group-granularity frontier tracking when the hook is
+unacknowledged span to `dropped_duration`; delivery delay staying inside one bucket of the true RTT plus the peer's
+`max_ack_delay`; and fallback to group-granularity frontier tracking when the hook is
 unsupported.
 
 ## Required

@@ -140,6 +140,28 @@ impl Consumer {
 		self.state.read().copy.clone()
 	}
 
+	/// Poll for a largest location newer than `seen` on the serving copy, recording it there.
+	/// A copy ending is its route failing, so the logical track ends only with the route:
+	/// at once when the front ends it, or with the last copy once the front concluded.
+	pub(super) fn poll_largest(&self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		loop {
+			let (generation, copy) = {
+				let route = self.state.read();
+				(route.generation, route.copy.clone())
+			};
+			let end = self.end();
+			// A replacement copy can start below what an earlier one reported.
+			match copy.map(|copy| copy.poll_largest_after(seen, waiter)) {
+				Some(Poll::Ready(Some(largest))) => return Poll::Ready(Some(largest)),
+				_ if matches!(end, Some(Some(_))) => return Poll::Ready(None),
+				Some(Poll::Pending) if end.is_some() => return Poll::Pending,
+				Some(Poll::Ready(None)) | None if end.is_some() => return Poll::Ready(None),
+				_ => {}
+			}
+			ready!(self.poll_changed(generation, waiter));
+		}
+	}
+
 	/// Subscribe to the logical track with the reader's own preferences.
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let mirrored = subscription.read().clone();
@@ -259,9 +281,10 @@ struct Copy {
 	lease: Arc<()>,
 }
 
+// Boxed: a subscriber is twice a pending answer, and a copy holds one for its whole life.
 enum Sub {
 	Pending(kio::Pending<track::Subscribing>),
-	Ready(track::Subscriber),
+	Ready(Box<track::Subscriber>),
 }
 
 impl Copy {
@@ -297,7 +320,7 @@ impl Copy {
 			let mut sub = ready!(pending.poll_ok(waiter))?;
 			sub.raise_start_to(groups.0);
 			sub.end_at(groups.1);
-			self.sub = Sub::Ready(sub);
+			self.sub = Sub::Ready(Box::new(sub));
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
 		Poll::Ready(Ok(sub))
@@ -415,8 +438,15 @@ impl Subscriber {
 	}
 
 	/// The newest sequence any copy has.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(super) fn latest(&self) -> Option<u64> {
 		self.reader().latest()
+	}
+
+	/// Poll for a largest location newer than `seen`; see [`Consumer::poll_largest`].
+	pub(super) fn poll_largest(&mut self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		let route = self.reader().route.clone();
+		route.poll_largest(seen, waiter)
 	}
 
 	/// The groups the copies' drift budget skipped since the last call, counted against
@@ -692,10 +722,11 @@ impl Reader {
 				None | Some(Some(_)) => return Some(Poll::Ready(Ok(None))),
 				Some(None) => {}
 			},
-			// No front is left to replace the copy: the track ends as it does. A locally
-			// closed copy ends it cleanly; a connection ending retains its session error.
+			// No front is left to replace the copy: the track ends as it does, or unroutable
+			// when no route served it. A locally closed copy ends it cleanly; a connection
+			// ending retains its session error.
 			Some(None) => match serving.map(&done) {
-				None => return Some(Poll::Ready(Err(Error::Dropped))),
+				None => return Some(Poll::Ready(Err(Error::Unroutable))),
 				Some(Some(Ok(()) | Err(Error::Closed))) => return Some(Poll::Ready(Ok(None))),
 				Some(Some(Err(err))) => return Some(Poll::Ready(Err(err))),
 				Some(None) => {}
@@ -793,7 +824,7 @@ impl Reader {
 				_ => {}
 			}
 		} else if concluded.is_some() {
-			return Poll::Ready(Err(Error::Dropped));
+			return Poll::Ready(Err(Error::Unroutable));
 		}
 		let _ = self.route.poll_changed(serving.unwrap_or_default(), waiter);
 		Poll::Pending
@@ -857,8 +888,9 @@ impl Reader {
 		}
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn latest(&self) -> Option<u64> {
-		self.copies.iter().filter_map(|copy| copy.track.latest()).max()
+		self.copies.iter().filter_map(|copy| copy.track.latest_sequence()).max()
 	}
 }
 
@@ -1373,6 +1405,82 @@ mod test {
 		routes.serve(b.consume());
 		assert_eq!(recv(&mut sub).sequence, 2);
 		assert!(sub.recv_group().now_or_never().is_none());
+	}
+
+	/// The largest follows the serving copy across a failover without moving back,
+	/// and ends only with the route.
+	#[test]
+	#[cfg(feature = "async")]
+	fn largest_follows_the_serving_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 3);
+		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(3))));
+
+		// The route fails: its copy's stream ends, the logical track's does not.
+		a.clone().abort(Error::Dropped).unwrap();
+		assert!(sub.largest().now_or_never().is_none());
+
+		// The replacement starts behind what is already known.
+		let b = copy();
+		write(&b, 2);
+		routes.serve(b.consume());
+		assert!(sub.largest().now_or_never().is_none());
+		write(&b, 4);
+		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(4))));
+
+		routes.end(Ok(()));
+		drop(b);
+		assert_eq!(sub.largest().now_or_never(), Some(None));
+	}
+
+	/// A track reader waiting before any route serves is woken by the first one's frame.
+	/// The front ending the track ends the stream, though the copy's producer stays open.
+	#[test]
+	fn largest_ends_with_the_route() {
+		let routes = Producer::new();
+		let mut consumer = logical(&routes).consume();
+		let a = copy();
+		routes.serve(a.consume());
+		write(&a, 5);
+		let noop = kio::Waiter::noop();
+		assert_eq!(consumer.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
+		assert!(consumer.poll_largest(&noop).is_pending(), "the copy is still open");
+
+		routes.end(Ok(()));
+		assert_eq!(consumer.poll_largest(&noop), Poll::Ready(None));
+		drop(a);
+	}
+
+	#[test]
+	fn largest_waits_for_a_serving_copy() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		struct Flag(AtomicBool);
+		impl futures::task::ArcWake for Flag {
+			fn wake_by_ref(flag: &Arc<Self>) {
+				flag.0.store(true, Ordering::SeqCst);
+			}
+		}
+
+		let routes = Producer::new();
+		let mut consumer = logical(&routes).consume();
+		let flag = Arc::new(Flag(AtomicBool::new(false)));
+		let waiter = kio::Waiter::new(futures::task::waker(flag.clone()));
+		assert!(consumer.poll_largest(&waiter).is_pending());
+
+		let a = copy();
+		routes.serve(a.consume());
+		assert!(flag.0.load(Ordering::SeqCst), "the serving copy woke the reader");
+		assert!(consumer.poll_largest(&waiter).is_pending(), "it has no group yet");
+		write(&a, 5);
+		assert_eq!(
+			consumer.poll_largest(&kio::Waiter::noop()),
+			Poll::Ready(Some(Position::group(5)))
+		);
 	}
 
 	/// A budget that never writes off a group in these tests.

@@ -793,7 +793,10 @@ async fn run_setup<S: crate::transport::poll::Session>(
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
-	let send = session.open_uni().await.map_err(Error::from_transport)?;
+	let send = session
+		.open_uni(Default::default())
+		.await
+		.map_err(Error::from_transport)?;
 	let mut writer: Writer<S::SendStream, crate::Version> = Writer::new(send, outer_version);
 
 	let mut parameters = ietf::Parameters::default();
