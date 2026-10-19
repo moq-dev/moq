@@ -43,7 +43,7 @@ Decided with the maintainer on 2026-10-15:
 - Document the site URL, what each series means, and local reproduction in
   `bench/README.md`.
 
-The implementation and documentation above are on `main`; verify their
-first deployed reports rather than rebuilding the pipeline.
+Keep the landed publisher and documented local reproduction; verify the
+deployed reports before filling any remaining measurement gaps.
 
 Public API: none. Wire: none.
