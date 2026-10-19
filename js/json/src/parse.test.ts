@@ -15,6 +15,13 @@ test("parse refuses a repeated key and accepts its near misses", () => {
 	for (const text of vectors.accepted) expect(parse(encode(text)), text).toEqual(JSON.parse(text));
 });
 
+test("parse accepts nesting deeper than the call stack", () => {
+	const depth = 100_000;
+	const text = `${'[{"a":'.repeat(depth)}0${"}]".repeat(depth)}`;
+	expect(() => parse(encode(text))).not.toThrow();
+	expect(() => parse(encode(`${'[{"a":0,"a":'.repeat(depth)}0${"}]".repeat(depth)}`))).toThrow(DuplicateKey);
+});
+
 test("malformed JSON stays a syntax error", () => {
 	expect(() => parse(encode('{"a":1,"b"'))).toThrow(SyntaxError);
 	expect(() => parse(encode('{"a":1} {}'))).toThrow(SyntaxError);

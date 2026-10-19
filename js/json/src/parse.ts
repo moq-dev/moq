@@ -34,14 +34,17 @@ function colons(bytes: Uint8Array): number {
 	return count;
 }
 
-// Count the object members in a parsed value.
-function members(value: unknown): number {
-	if (typeof value !== "object" || value === null) return 0;
+// Count the object members in a parsed value, without recursion so any nesting `JSON.parse` accepts
+// cannot overflow the call stack.
+function members(root: unknown): number {
 	let count = 0;
-	if (Array.isArray(value)) {
-		for (const item of value) count += members(item);
-	} else {
-		for (const item of Object.values(value)) count += 1 + members(item);
+	const pending = [root];
+	while (pending.length > 0) {
+		const value = pending.pop();
+		if (typeof value !== "object" || value === null) continue;
+		const items = Array.isArray(value) ? value : Object.values(value);
+		if (!Array.isArray(value)) count += items.length;
+		for (const item of items) pending.push(item);
 	}
 	return count;
 }
