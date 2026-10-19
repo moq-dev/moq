@@ -3453,6 +3453,7 @@ class MoqQuicConfig {
   final bool? mtuDiscovery;
   final MoqCongestionControl? congestionControl;
   final String? qlog;
+  final bool? keylog;
   MoqQuicConfig({
     this.maxStreams = null,
     this.idleTimeoutUs = null,
@@ -3461,6 +3462,7 @@ class MoqQuicConfig {
     this.mtuDiscovery = null,
     this.congestionControl = null,
     this.qlog = null,
+    this.keylog = null,
   });
 }
 
@@ -3507,6 +3509,11 @@ class FfiConverterMoqQuicConfig {
     );
     final qlog = qlog_lifted.value;
     new_offset += qlog_lifted.bytesRead;
+    final keylog_lifted = FfiConverterOptionalBool.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final keylog = keylog_lifted.value;
+    new_offset += keylog_lifted.bytesRead;
     return LiftRetVal(
       MoqQuicConfig(
         maxStreams: maxStreams,
@@ -3516,6 +3523,7 @@ class FfiConverterMoqQuicConfig {
         mtuDiscovery: mtuDiscovery,
         congestionControl: congestionControl,
         qlog: qlog,
+        keylog: keylog,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -3532,6 +3540,7 @@ class FfiConverterMoqQuicConfig {
           value.congestionControl,
         ) +
         FfiConverterOptionalString.allocationSize(value.qlog) +
+        FfiConverterOptionalBool.allocationSize(value.keylog) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -3568,6 +3577,10 @@ class FfiConverterMoqQuicConfig {
       value.qlog,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalBool.write(
+      value.keylog,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -3581,6 +3594,7 @@ class FfiConverterMoqQuicConfig {
           value.congestionControl,
         ) +
         FfiConverterOptionalString.allocationSize(value.qlog) +
+        FfiConverterOptionalBool.allocationSize(value.keylog) +
         0;
   }
 }

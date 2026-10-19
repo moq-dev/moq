@@ -73,6 +73,9 @@ class Client:
     certificate against another name (SNI). ``idle_timeout``, ``keep_alive`` (zero disables
     it), ``gso``, ``mtu_discovery``, ``congestion_control``, and ``qlog`` (a directory, when
     :func:`qlog_supported`) tune QUIC. ``None`` keeps the library default throughout.
+
+    ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
+    decrypting a capture; without ``SSLKEYLOGFILE`` the client refuses to build.
     """
 
     def __init__(
@@ -98,6 +101,7 @@ class Client:
         mtu_discovery: bool | None = None,
         congestion_control: CongestionControl | None = None,
         qlog: str | None = None,
+        keylog: bool = False,
         websocket_enabled: bool | None = None,
         websocket_delay: timedelta | None = None,
         reconnect: bool = True,
@@ -131,6 +135,7 @@ class Client:
                 mtu_discovery=mtu_discovery,
                 congestion_control=congestion_control,
                 qlog=qlog,
+                keylog=keylog,
             ),
             websocket=MoqWebSocketConfig(
                 enabled=websocket_enabled,
@@ -245,6 +250,7 @@ def connect(
     mtu_discovery: bool | None = None,
     congestion_control: CongestionControl | None = None,
     qlog: str | None = None,
+    keylog: bool = False,
     websocket_enabled: bool | None = None,
     websocket_delay: timedelta | None = None,
     reconnect: bool = True,
@@ -280,6 +286,7 @@ def connect(
         mtu_discovery=mtu_discovery,
         congestion_control=congestion_control,
         qlog=qlog,
+        keylog=keylog,
         websocket_enabled=websocket_enabled,
         websocket_delay=websocket_delay,
         reconnect=reconnect,

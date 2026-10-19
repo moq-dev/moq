@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 `CongestionControl.none` runs no congestion control and no pacing, for tests and controlled links.
 An exhaustive `switch` needs one more case.
 
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `ConnectOptions.keylog` or `ListenOptions.keylog` as well to capture them; without `SSLKEYLOGFILE` the connect or listen fails.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.groupStart` and `groupEnd` are replaced by `ranges`, a list of `Range` whose ends are an `Anchor` (an absolute group and frame, or a count of groups before the latest), and an optional `order`.

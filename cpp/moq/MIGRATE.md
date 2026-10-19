@@ -18,6 +18,11 @@ Pass empty `data` and write the stream through it.
 auto stream = ok(moq::MediaContainerProducer::init(broadcast, {moq::ContainerFormat::kFmp4, {}}));
 ```
 
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `QuicConfig::keylog` to `true` as well to capture them; without `SSLKEYLOGFILE` the client or server refuses to build.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription::group_start` and `group_end` are replaced by `ranges`, a list of `Range` whose ends are an `Anchor` (an absolute group and frame, or a count of groups before the latest), and an optional `order`.

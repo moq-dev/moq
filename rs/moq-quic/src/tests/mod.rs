@@ -6694,31 +6694,23 @@ fn congestion_callbacks_identify_the_initial_a_retry_acks() {
 
 /// A 1 MB/s bottleneck with a 20ms RTT and a one-BDP buffer carries a BBR upload, once marking
 /// CE at half full and once only tail-dropping when full. BBR answers the marks, so the marking
-/// run holds a shorter queue without drops at the dropping run's goodput.
+/// run holds a shorter queue at the dropping run's goodput, and drops at most the one packet its
+/// first bandwidth probe can overshoot before that probe's marks come back.
 #[test]
 fn bbr_marking_versus_dropping() {
     const TOTAL_BYTES: usize = 4_000_000;
     const BPS_LIMIT: u64 = 1_000_000;
-    const SEED: [u8; 16] = [0; 16];
+    // Replays the whole run: packet numbers, keys, and BBR's probe schedule. This seed's first
+    // probe overshoots by one packet.
+    const SEED: u64 = 66;
 
     let _guard = subscribe();
+    // Both runs replay the same inputs, so they differ only in how the bottleneck signals.
     let run = |marks_ce| {
-        let mut transport = TransportConfig::default();
-        // Random packet-number gaps change their encoded width and therefore the exact queue
-        // schedule. This test grades BBR's response to one reproducible bottleneck, not QUIC's
-        // packet-number randomization.
-        transport.deterministic_packet_numbers(true);
-        let mut bbr = congestion::Bbr3Config::default();
-        bbr.probe_rng_seed(SEED);
-        transport.congestion_controller_factory(Arc::new(bbr));
-        let transport = Arc::new(transport);
-        let mut server_cfg = server_config();
-        server_cfg.transport = transport.clone();
-        let mut pair = Pair::new(Default::default(), server_cfg);
+        entropy::reseed(SEED);
+        let mut pair = Pair::new(Default::default(), server_config());
         pair.latency = Duration::from_millis(10);
-        let mut client_cfg = client_config();
-        client_cfg.transport = transport;
-        let (client_ch, server_ch) = pair.connect_with(client_cfg);
+        let (client_ch, server_ch) = pair.connect_with(client_config());
         pair.to_server.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 20_000, marks_ce));
         let time = upload(&mut pair, client_ch, server_ch, TOTAL_BYTES, |_| {});
         let goodput = TOTAL_BYTES as f64 / time.as_secs_f64();
@@ -6740,21 +6732,26 @@ fn bbr_marking_versus_dropping() {
 
     let (marking_goodput, marking) = run(true);
     let (dropping_goodput, dropping) = run(false);
-    // Measured at 4.0-4.7ms mean delay for marking and 7.7ms for dropping, 0.78-0.97s and 1.67s
-    // past the marking threshold, and about 32 drops when dropping. Without a CE response the
-    // marking run drops about 35 packets, at 7.6ms and 1.64s.
-    assert!(marking.marked > 0, "seed {SEED:?}");
-    assert_eq!(marking.dropped, 0, "seed {SEED:?}");
-    assert!(dropping.dropped > 0, "seed {SEED:?}");
+    // Over seeds 0-6999: 3.6-5.3ms mean delay for marking and 6.9-8.4ms for dropping, 0.68-1.13s
+    // and 1.46-1.80s past the marking threshold, and 24-38 drops when dropping. Without a CE
+    // response this seed's marking run drops 35 packets, at 7.4ms and 1.59s.
+    //
+    // The marking run drops one packet on 1% of those seeds, never more. The first probe after
+    // Startup grows inflight exponentially, and its first mark comes back 1.5 RTTs after the
+    // queue crosses half full: a full RTT plus the marked packet's own queueing. BBR answers that
+    // first marked ACK, but the queue can reach the buffer's edge just before it.
+    assert!(marking.marked > 0, "seed {SEED}");
+    assert!(marking.dropped <= 1, "seed {SEED}");
+    assert!(dropping.dropped > 0, "seed {SEED}");
     assert!(
         marking.mean_delay() * 4 < dropping.mean_delay() * 3,
-        "seed {SEED:?}"
+        "seed {SEED}"
     );
     assert!(
         marking.congested * 4 < dropping.congested * 3,
-        "seed {SEED:?}"
+        "seed {SEED}"
     );
-    assert!(marking_goodput > 0.9 * dropping_goodput, "seed {SEED:?}");
+    assert!(marking_goodput > 0.9 * dropping_goodput, "seed {SEED}");
 }
 
 /// A BBR upload learns a 2 MB/s bottleneck at a 50ms RTT, then the connection idles on
@@ -6764,12 +6761,11 @@ fn bbr_marking_versus_dropping() {
 fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
     const BPS_LIMIT: u64 = 2_000_000;
     const BURST: usize = 250_000;
+    const SEED: u64 = 1;
 
     let _guard = subscribe();
+    entropy::reseed(SEED);
     let mut transport = TransportConfig::default();
-    let mut bbr = congestion::Bbr3Config::default();
-    bbr.probe_rng_seed([1; 16]);
-    transport.congestion_controller_factory(Arc::new(bbr));
     // Only the sender pings. A ping from the receiver would reset the sender's keep-alive timer,
     // leaving its controller nothing to sample during the idle.
     transport.keep_alive_interval(Some(Duration::from_secs(10)));
@@ -6803,7 +6799,7 @@ fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
     // burst takes 720ms.
     assert!(
         min_pacing * 10 >= learned * 9,
-        "paced at {min_pacing} B/s after learning {learned} B/s"
+        "paced at {min_pacing} B/s after learning {learned} B/s, seed {SEED}"
     );
 }
 
