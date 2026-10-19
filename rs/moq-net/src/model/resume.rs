@@ -1098,6 +1098,7 @@ impl Recover {
 				return None;
 			}
 			let mut group = copy.track.peek_group(self.sequence)?;
+			lend_head(&self.handoff, self.sequence, &copy.track, &group);
 			group.start_at(index);
 			(group.index() == index).then(|| Replacement {
 				group,
