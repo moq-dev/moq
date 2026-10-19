@@ -41,7 +41,9 @@ Checkpoint, 2026-10-19, against `main` at `2e1ec2ebf`:
 - Four closed linked issues still have explicitly planned or in-flight
   work. Their closure alone was not treated as evidence to retire a quest.
   Open implementation PRs were not treated as merged work.
-- `quest check` passes for the remaining 437 documents, as does
+- Final validation includes `main` at `f37d19b73` (#5920), whose completed
+  auth-refresh quest and updated clock-migration plan were rechecked.
+  `quest check` passes for the remaining 436 documents, as does
   `git diff --check`. The full `just check` exit was not captured; its
   attempted capture run was rejected because another suite was running.
 
