@@ -679,3 +679,21 @@ async fn a_pcr_pid_switch_places_each_side_on_its_own_timebase() {
 	assert_eq!(got, [placed(before, 0), placed(after, 0)]);
 	assert_eq!(imported.stats().unplaced, 0);
 }
+
+/// Whole PES held for a timestamp count against the staging unit bound as sections do, so a
+/// flood of tiny ones refuses the import long before their bookkeeping outgrows the byte bound.
+#[test]
+fn tiny_whole_pes_held_for_a_timestamp_are_bounded_by_count() {
+	let units = moq_net::group::MAX_GROUP_FRAMES / 2;
+	let mut feed = Feed::new(0x06, KLVA);
+	feed.pcr(1_000 * MS);
+	for _ in 0..=units {
+		feed.data(pes_with(0xbd, 0x80, 0x00, &[], 0, b""));
+	}
+	let mut imported = start(false);
+	let err = imported.import.decode(&feed.bytes()).expect_err("the flood is refused");
+	assert!(
+		err.to_string().contains("whole PES while waiting for a timestamp"),
+		"{err:#}"
+	);
+}

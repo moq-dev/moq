@@ -890,7 +890,9 @@ impl<E: catalog::Catalog> Import<E> {
 		};
 		let data = &pes.data[..pes.data_len.unwrap_or(pes.data.len()).min(pes.data.len())];
 		let mut retained = Retained::new(self.staging.clone());
-		retained.grow(header.len() + data.len(), 0)?;
+		// A whole PES is held as a unit until placed, so tiny ones count against the unit bound
+		// as sections do, not the byte bound alone.
+		retained.grow(header.len() + data.len(), usize::from(span.is_some()))?;
 		let mut pending = Pending {
 			retained,
 			pts,
@@ -1476,7 +1478,9 @@ impl Retained {
 		);
 		if !reserve(&self.staging.units, units, STAGING_UNITS_MAX) {
 			self.staging.bytes.fetch_sub(bytes, Ordering::Relaxed);
-			anyhow::bail!("TS staging exceeds {STAGING_UNITS_MAX} sections while waiting for a timestamp");
+			anyhow::bail!(
+				"TS staging exceeds {STAGING_UNITS_MAX} sections and whole PES while waiting for a timestamp"
+			);
 		}
 		self.bytes += bytes;
 		self.units += units;
@@ -7581,7 +7585,7 @@ pub(super) mod test {
 		let err = import
 			.decode(&packet(true, (super::STAGING_UNITS_MAX % 16) as u8, 0, &CUE))
 			.unwrap_err();
-		assert!(err.to_string().contains("sections while waiting for a timestamp"));
+		assert!(err.to_string().contains("whole PES while waiting for a timestamp"));
 		assert_eq!(import.sections[&0x21].held.len(), super::STAGING_UNITS_MAX);
 		assert_eq!(
 			import.staging.bytes.load(super::Ordering::Relaxed),
