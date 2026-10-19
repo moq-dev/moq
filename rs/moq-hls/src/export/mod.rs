@@ -2525,6 +2525,139 @@ mod tests {
 		drop((import, catalog));
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn a_live_fmp4_import_serves_its_listed_segments() {
+		live_fmp4_segments(None, false).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_live_fmp4_import_serves_segments_over_lite06() {
+		live_fmp4_segments(Some("moq-lite-06"), false).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_live_fmp4_import_serves_segments_over_lite07() {
+		live_fmp4_segments(Some("moq-lite-07-wip"), false).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_live_fmp4_import_serves_segments_after_timeline_declarations() {
+		live_fmp4_segments(None, true).await;
+	}
+
+	async fn live_fmp4_segments(version: Option<&str>, late: bool) {
+		use moq_mux::container::fmp4::mp4_atom::{self, DecodeMaybe, Encode};
+		// Reuse the A/V descriptors; opaque samples exercise timeline discovery and FETCH,
+		// without involving a codec decoder.
+		let mut fixture =
+			std::io::Cursor::new(include_bytes!("../../../moq-mux/src/container/fmp4/test_data/bbb.mp4").as_slice());
+		let mut init = Vec::new();
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut fixture).unwrap() {
+			let complete = matches!(atom, mp4_atom::Any::Moov(_));
+			atom.encode(&mut init).unwrap();
+			if complete {
+				break;
+			}
+		}
+		let origin = produce_origin();
+		let remote = version.map(|_| produce_origin());
+		let _sessions = if let Some(version) = version {
+			let version: moq_net::Version = version.parse().unwrap();
+			let mut config = moq_net::transport::memory::Config::default();
+			config.protocol = Some(version.alpn().to_string());
+			let (client_transport, server_transport) = moq_net::transport::memory::pair(config);
+			let client = moq_net::Client::new()
+				.with_versions(version.into())
+				.with_publisher(origin.consume());
+			let server = moq_net::Server::new()
+				.with_versions(version.into())
+				.with_subscriber(remote.as_ref().unwrap().clone());
+			Some(tokio::join!(
+				async {
+					let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
+					tokio::spawn(moq_net::time::run(driver));
+					session
+				},
+				async {
+					let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
+					tokio::spawn(moq_net::time::run(driver));
+					session
+				}
+			))
+		} else {
+			None
+		};
+		let mut broadcast = origin.create_broadcast("live").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		settle().await;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve());
+		import.decode(&init).unwrap();
+		let snapshot = catalog.snapshot();
+		let video_muxer =
+			moq_mux::container::fmp4::Muxer::video(snapshot.video.renditions.values().next().unwrap()).unwrap();
+		let audio_muxer =
+			moq_mux::container::fmp4::Muxer::audio(snapshot.audio.renditions.values().next().unwrap()).unwrap();
+		let consuming = remote.as_ref().unwrap_or(&origin);
+		consuming.consume().routed("live").await.unwrap();
+		let source = crate::resolved(consuming, "live").await;
+		let broadcaster = (!late).then(|| Broadcaster::new(source.clone(), Config::default()));
+		for i in 0..20u64 {
+			let fragment = video_muxer
+				.fragment(i as u32, &[vp8_frame(i * 1_000_000, i % 2 == 0)])
+				.unwrap();
+			import.decode(&fragment).unwrap();
+			let mut sample = frame(i * 1_000_000, true);
+			sample.duration = Some(moq_net::Timestamp::from_secs(1).unwrap());
+			let audio = audio_muxer.fragment(i as u32, &[sample]).unwrap();
+			let mut audio = std::io::Cursor::new(audio.as_ref());
+			let mut fragment = Vec::new();
+			while let Some(mut atom) = mp4_atom::Any::decode_maybe(&mut audio).unwrap() {
+				if let mp4_atom::Any::Moof(moof) = &mut atom {
+					moof.traf[0].tfhd.track_id = 2;
+				}
+				atom.encode(&mut fragment).unwrap();
+			}
+			import.decode(&fragment).unwrap();
+			settle().await;
+		}
+		let broadcaster = broadcaster.unwrap_or_else(|| Broadcaster::new(source, Config::default()));
+		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
+			.await
+			.unwrap();
+		for (kind, name) in [
+			(
+				Kind::Video,
+				catalog.snapshot().video.renditions.into_keys().next().unwrap(),
+			),
+			(
+				Kind::Audio,
+				catalog.snapshot().audio.renditions.into_keys().next().unwrap(),
+			),
+		] {
+			let rendition = broadcaster.rendition(kind, &name).unwrap();
+			tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None, None))
+				.await
+				.unwrap()
+				.unwrap()
+				.unwrap();
+			let rows = rendition.snapshot().segments;
+			assert!(rows.len() >= 2, "multiple completed segments are listed");
+			for row in rows {
+				assert!(!row.gap, "{kind:?} segment {} has a timeline", row.segment);
+				let media = rendition.segment(&row.tag, row.segment).await.unwrap();
+				assert!(media.is_some(), "listed segment {} must have media", row.segment);
+			}
+			let mut cursor = rendition.segments();
+			let segment = tokio::time::timeout(Duration::from_secs(5), cursor.next())
+				.await
+				.expect("a live recording produces a media segment")
+				.unwrap();
+			assert!(segment.is_some(), "the live cursor has media");
+		}
+		drop((import, catalog));
+	}
+
 	// A finished broadcast renders a static presentation, offset to its first listed segment.
 	#[tokio::test]
 	async fn dash_manifest_turns_static_when_finished() {
