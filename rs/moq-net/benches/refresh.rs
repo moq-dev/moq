@@ -1,9 +1,14 @@
-//! A join judged by the track's refresh ratio, then the group it asked for: swept over
-//! tracks and subscribers per track. The judgment reads only the joined track's newest
-//! group, so a cost that grows with the other tracks or the joined track's audience
-//! shows up as a slope.
+//! A join judged by the track's refresh ratio and the demand it raises: swept over tracks
+//! and subscribers per track. The judgment reads only the joined track's newest group, so
+//! a cost that grows with the other tracks or the joined track's audience shows up as a
+//! slope. The group answering each join is written outside the timed section.
 //!
 //! Run with `cargo bench -p moq-net --bench refresh`.
+
+// Custom timings measure the real time the work took, not the ambient clock.
+#![allow(clippy::disallowed_methods)]
+
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -38,12 +43,19 @@ fn join(c: &mut Criterion) {
 			refreshable(track);
 			let mut latest = 0;
 			group.bench_function(BenchmarkId::new(format!("{tracks}x"), subscribers), |b| {
-				b.iter(|| {
-					let joined = track.subscribe(None);
-					assert_eq!(demand.wanted(), Some(latest + 1));
-					drop(joined);
-					refreshable(track);
-					latest += 1;
+				b.iter_custom(|iterations| {
+					let mut elapsed = Duration::ZERO;
+					for _ in 0..iterations {
+						let start = Instant::now();
+						let joined = track.subscribe(None);
+						let wanted = demand.wanted();
+						elapsed += start.elapsed();
+						assert_eq!(wanted, Some(latest + 1));
+						drop(joined);
+						refreshable(track);
+						latest += 1;
+					}
+					elapsed
 				})
 			});
 		}
