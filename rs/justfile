@@ -341,15 +341,10 @@ fuzz target *args:
 # `--no-report` skips cargo-llvm-cov's own cleanup, so clean first or stale
 # profiles from an earlier run merge into the report.
 
-# Report a crate's test coverage: a per-file table, plus lcov and HTML under target/coverage/<crate>.
+# Report native workspace or one crate's coverage under target/coverage/<crate>.
 [env("MBX_DISABLE", "1")]
-coverage crate:
-    cargo llvm-cov clean --workspace
-    bash sh/rs/nextest.sh cargo llvm-cov nextest --locked -p {{ crate }} --no-report
-    cargo llvm-cov report -p {{ crate }}
-    mkdir -p target/coverage/{{ crate }}
-    cargo llvm-cov report -p {{ crate }} --lcov --output-path target/coverage/{{ crate }}/lcov.info
-    cargo llvm-cov report -p {{ crate }} --html --output-dir target/coverage/{{ crate }}
+coverage crate="workspace":
+    bash sh/rs/coverage.sh '{{ crate }}'
 
 # Build the default workspace members.
 build:
