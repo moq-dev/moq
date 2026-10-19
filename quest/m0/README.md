@@ -75,7 +75,7 @@ the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
 have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 (#5389) and Windows tests (#5339).
 
-Hygiene (decided 2026-10-19): nine audits sit at the end of this list.
+Hygiene (decided 2026-10-19): ten audits sit at the end of this list.
 Each recurs once per major release: its PR adds the next run to the following
 milestone, gated from m2 onward on the [release cut](/quest/m2/release/cut.md).
 Each fixes what is small and safe and plans the rest.
@@ -103,4 +103,5 @@ Each fixes what is small and safe and plans the rest.
 - [Documentation audit](/quest/m0/audit-docs.md) - stale pages, examples, links, and undocumented exports are fixed or planned
 - [Dependency and alternatives audit](/quest/m0/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
 - [Artifact size audit](/quest/m0/audit-size.md) - binary, FFI, WASM, and bundle growth since the last run is explained, fixed, or planned
+- [Simplification audit](/quest/m0/audit-simplify.md) - overbuilt code and APIs are collapsed, merged, or narrowed into a net simpler whole
 - [Quest tree audit](/quest/m0/audit-quests.md) - the tree agrees with itself and with main

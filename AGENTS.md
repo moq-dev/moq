@@ -44,7 +44,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Question whether functionality is needed at all before adding it.
 - Deleting code is better than adding code.
 - Suggest follow up sessions and quests when finished, interactively prompting the user.
-- Prefer the simple solution.
+- Prefer the net simpler result: reuse what exists, or narrow the scope, when that makes the implementation or API simpler overall. Say what was dropped.
 - Say it once, in the fewest words that hold up.
 - Prefer a quest over a GitHub issue for work needing durable scope.
 - Use interactive prompts when possible.
