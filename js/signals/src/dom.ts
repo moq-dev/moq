@@ -76,15 +76,18 @@ interface ArrayElement extends Array<Element> {}
 export function render(effect: Effect, parent: Node, element: Element | ((effect: Effect) => Element)) {
 	const e = typeof element === "function" ? element(effect) : element;
 	if (e === undefined || e === null) return;
+	if (Array.isArray(e)) {
+		for (const child of e) render(effect, parent, child);
+		return;
+	}
+	if (e instanceof DocumentFragment) {
+		render(effect, parent, Array.from(e.childNodes));
+		return;
+	}
 
 	let node: Node;
 	if (e instanceof Node) {
 		node = e;
-	} else if (Array.isArray(e)) {
-		node = document.createDocumentFragment();
-		for (const child of e) {
-			render(effect, node, child);
-		}
 	} else if (typeof e === "number" || typeof e === "boolean" || typeof e === "string") {
 		node = document.createTextNode(e.toString());
 	} else {
