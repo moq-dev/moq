@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Track demand reports the wanted group (#REFRESH\_PR)
+### Track demand reports the wanted group (#5930)
 
 `Track.Demand.used` and `unused()` are gone.
 `demand.wanted` is a `Getter<number | undefined>`: `undefined` while nobody subscribes, otherwise the group subscribers want next.

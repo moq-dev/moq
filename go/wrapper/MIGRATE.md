@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Track demand reports the wanted group (#REFRESH\_PR)
+### Track demand reports the wanted group (#5930)
 
 `TrackDemand.IsUsed`, `Used`, and `Unused` are gone.
 `Wanted()` returns nil while nobody subscribes, otherwise the group subscribers want next, and `WantedChanged(ctx)` waits for it to change (the first call returns at once).

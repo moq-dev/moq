@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Track demand reports the wanted group (#REFRESH\_PR)
+### Track demand reports the wanted group (#5930)
 
 `track::Demand::used`, `unused`, `is_used`, `poll_used`, and `poll_unused` are gone.
 `wanted()` returns `None` while nobody consumes the track and `Some(n)` while consumers want group `n` or later; open a group whenever `n` passes your largest.

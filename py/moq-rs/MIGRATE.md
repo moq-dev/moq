@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Track demand reports the wanted group (#REFRESH\_PR)
+### Track demand reports the wanted group (#5930)
 
 `TrackDemand.is_used()`, `used()`, and `unused()` are gone.
 `wanted()` returns `None` while nobody subscribes, otherwise the group subscribers want next, and `await wanted_changed()` waits for it to change (the first call returns at once).

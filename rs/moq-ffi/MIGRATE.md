@@ -5,7 +5,7 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-### Track demand reports the wanted group (#REFRESH\_PR)
+### Track demand reports the wanted group (#5930)
 
 `MoqTrackDemand::is_used`, `used`, and `unused` are gone.
 `wanted()` returns null while nobody subscribes, otherwise the group subscribers want next, and `wanted_changed()` waits for it to change (the first call returns at once).
