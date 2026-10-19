@@ -418,8 +418,8 @@ impl TrackInner {
 		ordered.pending = None;
 		match result {
 			Ok(frame) => Poll::Ready(Ok(frame)),
-			// The subscription's max delay gave up on the group, so move on like an empty one.
-			Err(moq_net::Error::Old) => Poll::Ready(Ok(None)),
+			// The group expired, here or at a hop that reset it, so move on like an empty one.
+			Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => Poll::Ready(Ok(None)),
 			Err(err) => Poll::Ready(Err(err.into())),
 		}
 	}
