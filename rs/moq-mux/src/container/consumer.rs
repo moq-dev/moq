@@ -72,8 +72,8 @@ pub(crate) enum Item {
 /// it ends at the furthest point read, and reads as nothing before the first item.
 /// Empty groups (zero objects) mean nothing. A group whose timestamps fall below the live
 /// edge earlier groups reached is malformed and aborts the track. A payload that fails to
-/// decode ends the reader with that error, even one found while looking ahead; only a
-/// transport abort or eviction of a group reads as a gap.
+/// decode ends the reader with that error, even one found while looking ahead, and it reads as
+/// finished from then on; only a transport abort or eviction of a group reads as a gap.
 pub struct Consumer<F: Container> {
 	track: moq_net::track::Subscriber,
 
@@ -120,6 +120,10 @@ pub struct Consumer<F: Container> {
 
 	// The group the last event came from.
 	group: u64,
+
+	// An error ended the reader, which reads as finished from then on: a decode error has
+	// already consumed the frame it came from, so reading on would skip it.
+	failed: bool,
 }
 
 /// Two adjacent groups are timeline-contiguous when the next start is within this slack
@@ -192,6 +196,7 @@ impl<F: Container> Consumer<F> {
 			gap: false,
 			next: None,
 			group: 0,
+			failed: false,
 		}
 	}
 
@@ -220,7 +225,7 @@ impl<F: Container> Consumer<F> {
 	/// automatically. It will skip groups that are too far behind to maintain the
 	/// configured max delay.
 	///
-	/// Returns `None` when the track has ended. See [`Read`] for the items between frames;
+	/// Returns `None` when the track has ended, and after an error. See [`Read`] for the items between frames;
 	/// an undeclared forward timestamp jump is not a gap, since nothing says media is missing.
 	pub async fn read(&mut self) -> Result<Option<Read>, F::Error> {
 		kio::wait(|waiter| self.poll_read(waiter)).await
@@ -257,8 +262,12 @@ impl<F: Container> Consumer<F> {
 		if let Some(read) = self.next.take() {
 			return Poll::Ready(Ok(Some(Item::Read(read))));
 		}
+		if self.failed {
+			return Poll::Ready(Ok(None));
+		}
 		let edge = self.edge;
-		let read = match ready!(self.poll_event(waiter))? {
+		let event = ready!(self.poll_event(waiter)).inspect_err(|_| self.failed = true)?;
+		let read = match event {
 			Some(Event::Frame(frame)) => Read::Frame {
 				group: self.group,
 				frame,
@@ -2574,6 +2583,9 @@ mod tests {
 
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
+		// The reader stays ended rather than resuming past the malformed object.
+		let read = consumer.read().await;
+		assert!(matches!(read, Ok(None)), "{read:?}");
 	}
 
 	/// A malformed object mid-group, found while looking ahead past a blocked group, ends the
@@ -2603,6 +2615,9 @@ mod tests {
 				.is_ok_and(|read| matches!(read, Err(crate::Error::UnknownFormat(_)))),
 			"the lookahead's decode error ends the reader"
 		);
+		// The reader stays ended rather than resuming with the group's later frames.
+		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
+		assert!(matches!(read, Ok(Ok(None))), "{read:?}");
 	}
 
 	// ---- Frame Decoding ----
