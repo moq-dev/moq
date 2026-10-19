@@ -23,8 +23,10 @@ authorize a breaking release cut or version bumps outside that process.
 Complete against packages installed from their registries in smoke, keeping
 every MoQ package at latest. Do not pin an older publisher, skip these cells,
 or suppress catalog errors. Direct archive validation and invalid media
-remain strict. Remove the `catalog-archive` compatibility exception only
-after measuring that its released JS reader accepts current catalogs.
+remain strict. The 2026-10-19 wire-compat remeasurement verified that
+released `@moq/hang` 0.5.3 accepts current catalogs and removed the
+`catalog-archive` exception. The registry-installed smoke matrix remains
+this quest's acceptance check.
 
 The maintainer requested fixes or quests for the investigated failures on
 2026-10-15. Publication is tracked separately from the completed parser fix,

@@ -18,8 +18,12 @@ Verified 2026-10-19:
 - npm publishes `@moq/publish` 0.5.3 and `@moq/hang` 0.5.3 from release
   commit `0eff2f63ce7bea8451bec698ba01cdebc5f73120`. They contain the
   unset-clock and tolerant-parser changes. `@moq/net` is now 0.4.4.
+- `just test wire-compat --remeasure` passed against moq-cli 0.14.7,
+  moq-relay 0.17.7, hang 0.21.16, and `@moq/hang` 0.5.3. It removed the
+  `catalog-archive` exception and refreshed the existing unpublished
+  lite-07-wip exception; stable lite-01 through lite-06 cells passed.
 
 Remaining work: tell the draft-22 testers that the fixes are published,
 and post release notices on #5407 and #5413. No further release cut or
-version bump is needed. Reporter notifications require maintainer approval.
+version bump is needed. Reporter notices have not been sent.
 The testers' rerun is welcome but does not gate completion.
