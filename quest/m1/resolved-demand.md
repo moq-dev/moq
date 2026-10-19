@@ -10,6 +10,8 @@ with a floor at 5 or with no floor at all, gets nothing below 10. The relay
 does send the wider max age upstream in SUBSCRIBE_UPDATE, but the upstream
 cursor never re-offers the cached groups it already skipped as stale. The
 reader silently starts later than it asked, and only through a warm relay.
+Groups the upstream already reported dropped stay out of scope here (see
+[Drop set](/quest/m1/drop-set.md)).
 
 An archive resuming at its last stored frame through a relay that a viewer
 already warmed hits this, as does any reader with a wider max age than the
@@ -62,74 +64,14 @@ with no wire change.
   at the same max age when a stale verdict loses its edge: the newer group
   that made an older one stale is aborted or evicted, and `TrackState::is_stale`
   revalidates the edge, so a cold cursor would serve the older group.
-- **On lite-07, a widening outranks a reported drop**, decided by the
-  maintainer on 2026-10-19. lite-07 brings SUBSCRIBE_DROP back
-  ([SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md)),
-  and a publisher reports a stale skip with it, so a re-offer alone would
-  still lose a group already reported. These rules hold only on a lite-07
-  hop, which is unpublished and free to change. Released lite-05 and lite-06
-  peers treat a flushed drop as final, so on those versions a group already
-  reported dropped stays dropped, as today, and the re-offer covers only stale
-  skips not yet reported.
-  - SUBSCRIBE_UPDATE stays incremental and never resets, since a reset races
-    in-flight, out-of-order data. A widening obliges the publisher to serve
-    the newly covered groups it still holds and never delivered on this
-    subscription, including ones it skipped as stale or reported in
-    SUBSCRIBE_DROP ("if we grow, we want that data"). Nothing delivered goes
-    out twice.
-  - A shrink stops serving what it removed without sending drops for it.
-  - Data wins over a drop. A drop rides the subscribe stream and groups their
-    own streams, so either can land first. A drop means "not coming under the
-    old terms": a group arriving after its drop is accepted, and a drop never
-    removes a group that already arrived.
-  - **A relay never forwards a stale verdict; each reader judges its own.** A
-    warm relay that forwards a stored stale drop would fail a newly widened
-    reader before the upstream re-offer arrives. Scoping the drop by the
-    budget it was judged under does not hold without a new field: the
-    widening SUBSCRIBE_UPDATE and the drop cross on one bidi stream with no
-    acknowledgement, so the relay cannot tell which budget a drop arriving
-    after its update was judged under. Instead the drop says it is a
-    staleness verdict through its existing Error Code (OLD). The relay
-    accounts it in its upstream tail but does not record it as a track drop,
-    and each downstream cursor judges the missing group against its own
-    budget, which `TrackState::drifted` already does for a group the track
-    never received. A reader no wider than the upstream budget sees the
-    group go stale under its own budget and gets its own drop, as from a
-    cold relay. A wider reader waits for the re-offer, or for a drop the
-    upstream sends under the new terms for a group it no longer holds.
-    Drops for any other reason (a cut, a group never produced) do not depend
-    on the budget and are forwarded as today. No new wire field.
-  - An evicted group comes back only through a separate past-range request
-    (subscribe ranges on lite-07, FETCH before it), never through the live
-    subscription, and arrivals are deduped by sequence.
-
-  Code that changes, gated to lite-07 hops:
-  - The Rust lite publisher's `TrackRun::served`
-    (`rs/moq-net/src/lite/publisher.rs`) holds served and dropped sequences
-    in one set and refuses any group in it. Split dropped from served and
-    gate only on served; `a_cut_dropped_then_recreated_is_not_served` keeps
-    its rule on lite-05 and lite-06. Do the same for `#reported` in
-    `js/net/src/track.ts`, whose `#tryRecvGroup` closes any group already
-    reported.
-  - A widening re-reports, under the new terms, the newly covered sequences
-    the publisher cannot serve.
-  - On the model side, an arrival already clears its drop (the insert path in
-    `rs/moq-net/src/model/track.rs`, `#undrop` in JS). `TrackState::drop_groups`
-    and JS `#drop` record the whole range, though, so a drop landing after its
-    group marks a cached group dropped and the relay's cursor forwards it.
-    Both must skip sequences already cached and keep OLD drops out of the
-    track's drops.
-  - The subscribers' SUBSCRIBE_DROP handling (`rs/moq-net/src/lite/subscriber.rs`,
-    `js/net/src/lite/subscriber.ts`) only accounts the tail, which must keep
-    accepting a later stream for an accounted sequence.
-
-  Draft wording is in scope: `drafts/draft-lcurley-moq-lite.md` states, for
-  lite-07's SUBSCRIBE_DROP, that a drop holds only under the terms in effect
-  when sent, that a widening re-offers held groups and re-drops the rest,
-  that a later group wins over its drop, and that a relay does not forward an
-  OLD drop. Whichever of this and
-  [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md)
-  lands second writes these rules into the restored message.
+- **Drops are final for now**, decided by the maintainer on 2026-10-19. A
+  widening re-offers only groups this cursor never reported in
+  SUBSCRIBE_DROP; a reported group stays dropped, as today. That leaves a
+  known warm/cold gap: on lite-05 and lite-06 the publisher reports a stale
+  skip as soon as it gives it up, so a group already reported is not
+  re-offered, while a cold relay would serve it. Closing that gap needs
+  per-cursor judgement of missing sequences, planned in
+  [Drop set](/quest/m1/drop-set.md).
 - **Cost, accepted.** Groups below a newcomer's floor that the wider budget
   covers also come upstream, and the relay drops them locally. Bounded by the
   max age and the cache.
@@ -160,30 +102,17 @@ a re-offered group is never delivered twice to one subscriber; and a widen,
 shrink, evict, widen sequence at the relay gets the evicted groups back
 through the range miss fill, not a re-offer; and at the same max age, aborting
 or evicting the group that made an older one stale re-offers the older one,
-as a cold relay would serve it. On lite-07:
-- A widened reader receives a stale group whose SUBSCRIBE_DROP was flushed
-  before the widening SUBSCRIBE_UPDATE, and the same with the update first.
-- A group arriving after its drop is accepted, and a drop arriving after its
-  group leaves it served.
-- At a warm relay holding an OLD drop, a newly widened reader gets the
-  re-offered group and never the drop, while a reader no wider than the
-  upstream budget still gets its own drop. Check what the reader receives,
-  not only the tail accounting.
-- A shrink sends no drops.
-
-Mixed versions: through a lite-06 hop, a group already reported dropped stays
-dropped for the reader, with no session error, and a lite-07 hop never sends
-a re-offered group onto a lite-06 hop after reporting it. Cover the
+as a cold relay would serve it; and a stale group already reported in
+SUBSCRIBE_DROP stays dropped after a widening, never served after its drop.
+Cover the
 warm-relay case in `js/net` too.
 
 Public API: none. Wire: no encoding change. A publisher now re-offers
-cached groups when a SUBSCRIBE_UPDATE widens the max age or a stale verdict
-loses its edge. On lite-07 that includes groups it reported in
-SUBSCRIBE_DROP, with the draft wording above; lite-05 and lite-06 keep a
-reported drop final.
+cached groups it never reported dropped when a SUBSCRIBE_UPDATE widens the
+max age or a stale verdict loses its edge.
 
 ## Related
 
 - [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - #5929 lands its serving half, including the re-offer this extends
 - [Archive producer](/quest/m1/archive/producer.md) - its resume floor crosses relays that viewers may have warmed
-- [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md) - restores the lite-07 drop whose widening and relay rules this sets
+- [Drop set](/quest/m1/drop-set.md) - closes the gap this leaves for groups already reported dropped
