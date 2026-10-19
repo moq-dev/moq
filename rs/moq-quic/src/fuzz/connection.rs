@@ -3,22 +3,24 @@
 //! Built on the public `Endpoint` and `Connection` API rather than the test harness, so
 //! it compiles on both sides of a rewrite of either. The network is a pair of FIFO
 //! queues the ops drop, duplicate, reorder, corrupt, and inject into; time only moves
-//! when an op says so.
+//! when an op says so. Both sides run [`Plaintext`] crypto, so the handshake is cheap and
+//! a corrupted or injected packet reaches the frame layer instead of failing to decrypt.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::{Ipv6Addr, SocketAddr},
-    sync::{Arc, LazyLock},
+    sync::Arc,
 };
 
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::{Bytes, BytesMut};
-use rustls::{RootCertStore, client::WebPkiServerVerifier, pki_types::PrivateKeyDer};
 
+use super::plaintext::{Clear, Plaintext, TAG_LEN};
 use crate::{
-    ClientConfig, Connection, ConnectionHandle, Credit, DatagramEvent, Dir, Duration, Endpoint,
-    EndpointConfig, Event, Instant, ReadError, ServerConfig, Side, StreamId,
-    crypto::rustls::{QuicClientConfig, QuicServerConfig, configured_provider},
+    ClientConfig, Connection, ConnectionHandle, Credit, DEFAULT_SUPPORTED_VERSIONS, DatagramEvent,
+    Dir, Duration, Endpoint, EndpointConfig, Event, FixedLengthConnectionIdParser, Instant,
+    PartialDecode, ReadError, ServerConfig, Side, StreamId,
+    frame::{self, Frame},
 };
 
 /// The connection ID length both endpoints issue, which a captured packet needs to parse.
@@ -32,35 +34,6 @@ const ROUNDS: usize = 32;
 
 /// The largest single write, so a long op sequence stays fast to run.
 const MAX_WRITE: usize = 16 * 1024;
-
-struct Configs {
-    server: Arc<ServerConfig>,
-    client: ClientConfig,
-}
-
-/// Built once per process: generating a certificate costs more than a handshake.
-static CONFIGS: LazyLock<Configs> = LazyLock::new(|| {
-    let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let cert = certified.cert.der().clone();
-    let key = PrivateKeyDer::Pkcs8(certified.signing_key.serialize_der().into());
-
-    let server = QuicServerConfig::inner(vec![cert.clone()], key).unwrap();
-    let server = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server).unwrap()));
-
-    let mut roots = RootCertStore::empty();
-    roots.add(cert).unwrap();
-    let verifier =
-        WebPkiServerVerifier::builder_with_provider(Arc::new(roots), configured_provider())
-            .build()
-            .unwrap();
-    let client = QuicClientConfig::try_from(QuicClientConfig::inner(verifier)).unwrap();
-    let client = ClientConfig::new(Arc::new(client));
-
-    Configs {
-        server: Arc::new(server),
-        client,
-    }
-});
 
 /// Which endpoint an op acts on, or which one's inbound queue it touches.
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -207,13 +180,19 @@ struct Peer {
     datagrams_sent: Vec<usize>,
     /// The sequence numbers of the datagrams this side received.
     datagrams_received: HashSet<u64>,
+    /// Streams a tampered packet toward this side carried data for, whose reads go unchecked.
+    forged_streams: HashSet<StreamId>,
+    /// Payloads of the datagrams a tampered packet toward this side carried.
+    forged_datagrams: HashSet<Bytes>,
 }
 
 impl Peer {
     fn new(side: Side, port: u16) -> Self {
-        let server = side.is_server().then(|| CONFIGS.server.clone());
-        // A fixed seed per side keeps connection IDs and tokens stable across runs; TLS
-        // still draws its own randomness.
+        let server = side
+            .is_server()
+            .then(|| Arc::new(ServerConfig::with_crypto(Arc::new(Plaintext))));
+        // A fixed seed per side keeps connection IDs and packet number skips stable across
+        // runs; the reset and token keys still draw their own randomness.
         let mut endpoint = EndpointConfig::default();
         endpoint.rng_seed(Some([side as u8; 32]));
         Self {
@@ -229,11 +208,52 @@ impl Peer {
             held: Vec::new(),
             datagrams_sent: Vec::new(),
             datagrams_received: HashSet::new(),
+            forged_streams: HashSet::new(),
+            forged_datagrams: HashSet::new(),
         }
     }
 
     fn conn(&mut self) -> Option<&mut Connection> {
         self.conn.as_mut().map(|(_, conn)| conn)
+    }
+
+    /// Record the streams and datagrams a tampered datagram toward this side carries.
+    ///
+    /// Decodes it the way the endpoint and connection would, coalesced packets and all,
+    /// so a frame they accept is never missed. Over-counting only skips a check.
+    fn taint(&mut self, datagram: &[u8]) {
+        let parser = FixedLengthConnectionIdParser::new(CID_LEN);
+        let mut rest = Some(BytesMut::from(datagram));
+        while let Some(data) = rest.take() {
+            let Ok((partial, next)) =
+                PartialDecode::new(data, &parser, DEFAULT_SUPPORTED_VERSIONS, true)
+            else {
+                return;
+            };
+            rest = next;
+
+            let Ok(packet) = partial.finish(Some(&Clear)) else {
+                continue;
+            };
+            let Some(len) = packet.payload.len().checked_sub(TAG_LEN) else {
+                continue;
+            };
+            let Ok(frames) = frame::Iter::new(packet.payload.freeze().slice(..len)) else {
+                continue;
+            };
+            for frame in frames {
+                match frame {
+                    Ok(Frame::Stream(stream)) => {
+                        self.forged_streams.insert(stream.id);
+                    }
+                    Ok(Frame::Datagram(datagram)) => {
+                        self.forged_datagrams.insert(datagram.data);
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        }
     }
 }
 
@@ -263,7 +283,7 @@ impl Pair {
             .endpoint
             .connect(
                 pair.now,
-                CONFIGS.client.clone(),
+                ClientConfig::new(Arc::new(Plaintext)),
                 pair.server.addr,
                 "localhost",
             )
@@ -416,6 +436,9 @@ impl Pair {
                 Event::Connected => peer.connected = true,
                 Event::DatagramReceived => {
                     while let Some(datagram) = conn.datagrams().recv() {
+                        if peer.forged_datagrams.contains(&datagram) {
+                            continue;
+                        }
                         let seq = check_datagram(&datagram, &other.datagrams_sent);
                         assert!(
                             peer.datagrams_received.insert(seq),
@@ -616,15 +639,20 @@ impl Pair {
                 }
             }
             Op::Corrupt { to, offset, xor } => {
-                if let Some(front) = self.peer(to).inbound.front_mut()
+                let peer = self.peer(to);
+                if let Some(front) = peer.inbound.front_mut()
                     && !front.is_empty()
                 {
                     let offset = offset as usize % front.len();
                     front[offset] ^= xor;
+                    let front = front.clone();
+                    peer.taint(&front);
                 }
             }
             Op::Inject { to, data } => {
-                self.peer(to).inbound.push_back(BytesMut::from(&data[..]));
+                let peer = self.peer(to);
+                peer.taint(&data);
+                peer.inbound.push_back(BytesMut::from(&data[..]));
             }
             Op::Tick => self.tick(),
             Op::Advance { millis } => {
@@ -704,7 +732,8 @@ fn send_stream(peer: &mut Peer, index: u8) -> Option<(StreamId, &mut Connection)
     Some((id, peer.conn()?))
 }
 
-/// Read up to `max` bytes from a stream in order, checking each against what was sent.
+/// Read up to `max` bytes from a stream in order, checking each against what was sent,
+/// unless a tampered packet carried data for it.
 fn read(
     peer: &mut Peer,
     sent: &HashMap<(Side, StreamId), Sent>,
@@ -713,6 +742,7 @@ fn read(
     hold: bool,
 ) {
     let writer = !peer.side;
+    let forged = peer.forged_streams.contains(&id);
     let Some((_, conn)) = &mut peer.conn else {
         return;
     };
@@ -731,26 +761,30 @@ fn read(
                     "ordered read skipped or repeated data"
                 );
                 let end = chunk.offset + chunk.bytes.len() as u64;
-                let written = sent.get(&(writer, id)).map_or(0, |sent| sent.len);
-                assert!(end <= written, "read past what was written");
-                for (i, &byte) in chunk.bytes.iter().enumerate() {
-                    let offset = chunk.offset + i as u64;
-                    assert_eq!(byte, stream_byte(writer, id, offset), "corrupt stream data");
+                if !forged {
+                    let written = sent.get(&(writer, id)).map_or(0, |sent| sent.len);
+                    assert!(end <= written, "read past what was written");
+                    for (i, &byte) in chunk.bytes.iter().enumerate() {
+                        let offset = chunk.offset + i as u64;
+                        assert_eq!(byte, stream_byte(writer, id, offset), "corrupt stream data");
+                    }
                 }
                 *offset = end;
                 budget -= chunk.bytes.len();
             }
             Ok(None) => {
                 let sent = sent.get(&(writer, id));
-                assert!(
-                    sent.is_some_and(|sent| sent.fin),
-                    "finished a stream never finished"
-                );
-                assert_eq!(
-                    sent.map(|sent| sent.len),
-                    Some(*offset),
-                    "finished before all data arrived"
-                );
+                if !forged {
+                    assert!(
+                        sent.is_some_and(|sent| sent.fin),
+                        "finished a stream never finished"
+                    );
+                    assert_eq!(
+                        sent.map(|sent| sent.len),
+                        Some(*offset),
+                        "finished before all data arrived"
+                    );
+                }
                 break;
             }
             Err(ReadError::Blocked | ReadError::Reset(_)) => break,
@@ -794,7 +828,8 @@ fn check_datagram(datagram: &Bytes, sent: &[usize]) -> u64 {
 /// Handshake, apply every op the input decodes to, then drain and check.
 ///
 /// Nothing may panic, and every byte a stream or datagram delivers must be one that was
-/// written, at the offset it was written to.
+/// written, at the offset it was written to, except on the streams and datagrams a
+/// corrupted or injected packet carried.
 pub fn connection(data: &[u8]) -> bool {
     let mut pair = Pair::new();
     if !pair.handshake() {
@@ -850,6 +885,8 @@ pub(super) fn datagrams() -> Vec<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
+
     use super::*;
 
     /// A lossless exchange delivers everything, so the checks in `read` have something to
@@ -879,5 +916,108 @@ mod tests {
 
         let id = pair.server.recv[0];
         assert_eq!(pair.server.read[&id], 5000);
+    }
+
+    /// An injected 1-RTT packet decrypts, so its frames reach the server, and the checks
+    /// skip the datagram and stream it carried instead of calling them corrupt.
+    #[test]
+    fn injected_packet_reaches_frames() {
+        let mut pair = Pair::new();
+        assert!(pair.handshake());
+
+        // Every packet toward the server after its Initial carries the CID it routes by. The
+        // handshake's burst leaves the pacer empty, so give the ping time to go out.
+        pair.apply(Op::Ping { who: Who::Client });
+        pair.apply(Op::Advance { millis: 100 });
+        let ping = pair
+            .server
+            .inbound
+            .back()
+            .expect("the ping sent nothing")
+            .clone();
+        let parser = FixedLengthConnectionIdParser::new(CID_LEN);
+        let (ping, _) = PartialDecode::new(ping, &parser, DEFAULT_SUPPORTED_VERSIONS, true)
+            .expect("the ping did not decode");
+        let dcid = ping.dst_cid();
+
+        // A 4-byte packet number far past the client's, a DATAGRAM too short to carry a
+        // sequence number, then a finished STREAM on the client's first bidi stream.
+        let mut packet = vec![0x40 | 0x03];
+        packet.extend_from_slice(&dcid);
+        packet.extend_from_slice(&1000u32.to_be_bytes());
+        packet.extend_from_slice(&[0x31, 0x02, 0xff, 0xff]);
+        packet.extend_from_slice(&[0x0b, 0x00, 0x03, b'b', b'a', b'd']);
+        packet.extend_from_slice(&[0; TAG_LEN]);
+
+        pair.apply(Op::Inject {
+            to: Who::Server,
+            data: packet,
+        });
+        pair.drain();
+
+        assert_eq!(pair.server.read.get(&StreamId(0)), Some(&3));
+    }
+
+    /// Corrupted packets decrypt and deliver mangled frames, which the checks must skip
+    /// rather than report, while every untouched stream and datagram stays checked.
+    #[test]
+    fn corruption_never_trips_the_checks() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut tainted = 0;
+        for _ in 0..64 {
+            let mut pair = Pair::new();
+            assert!(pair.handshake());
+            for _ in 0..200 {
+                let who = if rng.random_bool(0.5) {
+                    Who::Client
+                } else {
+                    Who::Server
+                };
+                let stream = rng.random();
+                pair.apply(match rng.random_range(0..10) {
+                    0 => Op::Open {
+                        who,
+                        uni: rng.random_bool(0.5),
+                    },
+                    1 => Op::Accept {
+                        who,
+                        uni: rng.random_bool(0.5),
+                    },
+                    2 => Op::Write {
+                        who,
+                        stream,
+                        len: rng.random_range(0..3000),
+                    },
+                    3 => Op::Finish { who, stream },
+                    4 => Op::Datagram {
+                        who,
+                        len: rng.random_range(0..200),
+                        priority: 0,
+                    },
+                    5 => Op::Read {
+                        who,
+                        stream,
+                        max: rng.random(),
+                        hold: false,
+                    },
+                    6 => Op::Corrupt {
+                        to: who,
+                        offset: rng.random(),
+                        xor: rng.random_range(1..=255),
+                    },
+                    7 => Op::Duplicate { to: who },
+                    8 => Op::Tick,
+                    _ => Op::Deliver {
+                        to: who,
+                        count: rng.random_range(0..4),
+                    },
+                });
+            }
+            pair.drain();
+            if !pair.client.forged_streams.is_empty() || !pair.server.forged_streams.is_empty() {
+                tainted += 1;
+            }
+        }
+        assert!(tainted > 0, "no corrupted packet carried stream data");
     }
 }
