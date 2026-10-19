@@ -80,9 +80,9 @@ Recommended directions (the implementer settles the shape):
 
 Sessions: capping them is out of scope. A session costs a handshake, auth, and
 the per-session limits above, and a count cap would be a constant that only
-throws. Admission control (per-token or per-address rate, or a cap derived
-from memory) is a separate concern; plan it as its own quest if a drill shows
-sessions are the cheapest remaining abuse.
+throws. Admission control (per-token or per-address session caps) belongs to
+the deployment's auth server, which already refuses a connect with a 401 or
+403 ([relay auth](/doc/bin/relay/auth.md)); this repo needs nothing more.
 
 Reproduce first. A mock-time sim test (or a `just` drill against a real relay)
 with a subscriber that withholds stream credit, or drains below the media rate
@@ -92,6 +92,10 @@ opens) and pool-billed bytes over time: on main they grow with time; done,
 they plateau. Sweep tracks by groups per track, per the fan-out benchmark
 rule, so a cost that grows with the table shows up as a slope. Cover lite and
 moq-transport, and scenario 5 still receives the latest group.
+Include a benign withholder: a peer bounded by
+[Bound incomplete messages](/quest/m1/quic/receive-memory.md) withholds credit
+by design under memory pressure, so two relays running both quests must still
+plateau and keep the live edge.
 
 Done looks like: those measurements plateau on both protocols and every
 scenario above, the regression tests fail on main and run in CI, the JS
@@ -101,7 +105,7 @@ none on the wire; possibly a relay default).
 
 ## Related
 
-- [Bound incomplete messages](/quest/m1/quic/receive-memory.md) - the ingress counterpart, bounded by QUIC connection credit
+- [Bound incomplete messages](/quest/m1/quic/receive-memory.md) - the ingress counterpart: a receiver withholds QUIC credit to bound what it holds, and this quest bounds what the sender holds while it does
 - [Rust request credit](/quest/m1/rs-request-credit.md) - requests fail fast without stream credit; publisher group streams are left to this quest
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - how a publisher names a group it gave up on
 - [Scope track priority](/quest/m1/track-priority-scope.md) - who gets the next stream across subscriptions and tenants
