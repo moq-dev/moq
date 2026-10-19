@@ -10,6 +10,9 @@
 //! finish, so it panics rather than hang, unless a task awaits [`idle`], which
 //! completes at exactly that point.
 //!
+//! A task poll that makes more than 4096 ready kio polls panics with the caller's
+//! source location, so a loop that forgets to yield fails instead of starving its siblings.
+//!
 //! Caller-driven state machines take time from their caller:
 //! [`drive`](crate::drive) polls one with the simulated instant, and [`attach`]
 //! keeps a [`Deadlines`] queue in step.
@@ -182,7 +185,8 @@ impl Drop for Enter {
 /// # Panics
 ///
 /// When called inside another `run`, and when every task is parked with no timer
-/// armed and none awaits [`idle`], which is a deadlock.
+/// armed and none awaits [`idle`], which is a deadlock. Also when one root poll
+/// exceeds the ready kio poll limit, or a detached task panics.
 pub fn run<F: IntoFuture>(future: F) -> F::Output {
 	static RUNS: AtomicU64 = AtomicU64::new(0);
 	let runtime = Rc::new(Runtime {
