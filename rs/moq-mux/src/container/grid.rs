@@ -17,9 +17,10 @@ use std::ops::Range;
 /// The spacing of the grid, in microseconds of the catalog clock.
 pub(crate) const GRID_MICROS: u64 = 1_000_000;
 
-/// The most empty cells one step of the timeline fills. A longer step between two frames (or two
-/// [`advance`](Grid::advance)s) starts a new watch instead, as a break does, so a source that leaps
-/// hours ahead cannot open a group for every second it skipped.
+/// The most empty cells the grid fills at once. A longer step between two frames (or two
+/// [`advance`](Grid::advance)s) starts a new watch instead, as a break does, and a start after a
+/// longer run of frames that start nothing fills only the cells just before it, so neither a source
+/// that leaps hours ahead nor an endless GOP opens a group for every second it passed.
 const FILL_MAX: u64 = 60;
 
 /// The cell of the grid `timestamp` falls in.
@@ -105,10 +106,12 @@ impl Grid {
 		at
 	}
 
-	/// Claim every cell before `at` that was watched whole and holds no group yet.
+	/// Claim every cell before `at` that was watched whole and holds no group yet, up to
+	/// [`FILL_MAX`] of them: a producer that watched fewer claims a suffix of what one running longer
+	/// does.
 	fn empty(&mut self, at: u64) -> Range<u64> {
 		let origin = self.origin.expect("a reached grid has an origin");
-		let from = self.last.map_or(origin, |last| last.max(origin)) + 1;
+		let from = (self.last.map_or(origin, |last| last.max(origin)) + 1).max(at.saturating_sub(FILL_MAX));
 		if from >= at {
 			return at..at;
 		}
@@ -179,6 +182,22 @@ mod tests {
 		grid.place(at(10_000), true, false);
 		grid.place(at(11_000), true, false);
 		assert_eq!(grid.place(at(3_600_000), true, true), opens(3_600, 3_600..3_600));
+	}
+
+	#[test]
+	fn a_start_after_a_long_run_without_one_fills_at_most_the_bound() {
+		let run = |from: u64| {
+			let mut grid = Grid::default();
+			let mut open = false;
+			for second in from..1_000 {
+				let start = second <= 11;
+				open |= matches!(grid.place(at(second * 1_000), start, open), Place::Open { .. });
+			}
+			grid.place(at(1_000_000), true, open)
+		};
+		assert_eq!(run(10), opens(1_000, 940..1_000));
+		assert_eq!(run(900), opens(1_000, 940..1_000));
+		assert_eq!(run(980), opens(1_000, 981..1_000));
 	}
 
 	#[test]

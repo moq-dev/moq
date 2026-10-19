@@ -162,11 +162,13 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// Whether the service identity (TSID/service_id/PMT PID) has been captured from
 	/// the PAT into the catalog service record yet (set once; the PAT is stable).
 	identity_recorded: bool,
-	/// Latest video PTS, or audio's in a program without video: the media clock used to
+	/// Latest video PTS, or audio's until video has one: the media clock used to
 	/// timestamp private sections, which carry no PES PTS of their own.
 	/// SPTS scope: one clock for the whole input. Under MPTS every program's video
 	/// advances it, so a cue could be stamped with another program's PTS.
 	last_pts: Option<Timestamp>,
+	/// Whether video has set `last_pts` since the last timebase break.
+	video_clock: bool,
 	/// The first PES's PTS on the catalog clock since the last timebase break: the section clock
 	/// until `last_pts` starts, so a cue ahead of the first picture lands on the media timeline,
 	/// not at zero.
@@ -227,6 +229,7 @@ impl<E: catalog::Catalog> Import<E> {
 			si,
 			identity_recorded: false,
 			last_pts: None,
+			video_clock: false,
 			start_pts: None,
 			program: None,
 		}
@@ -748,10 +751,10 @@ impl<E: catalog::Catalog> Import<E> {
 
 		let is_video = matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock);
 		let is_clock = matches!(stream, Stream::Clock);
-		// Audio keeps the clock of a program with no video, whose data tracks would otherwise
-		// stamp every section where the import started and never pass a second.
+		// Audio keeps the clock until video brings a PTS, else the data tracks of a program with no
+		// video, or a silent one, would stamp every section where the import started.
 		let keeps_clock =
-			is_video || (matches!(stream, Stream::Aac(_) | Stream::Opus(_) | Stream::Legacy(_)) && !self.has_video());
+			is_video || (matches!(stream, Stream::Aac(_) | Stream::Opus(_) | Stream::Legacy(_)) && !self.video_clock);
 		// Verbatim streams with no cadence (SCTE-35, DVB subtitles) are left ungraded
 		// rather than watched against an invented one.
 		if pes.pts.is_some() && !matches!(stream, Stream::Verbatim(_) | Stream::Ignored) {
@@ -785,6 +788,7 @@ impl<E: catalog::Catalog> Import<E> {
 		// frame must be timestamped with this frame's PTS ("now"), not the
 		// previous one's.
 		if keeps_clock && pts.is_some() {
+			self.video_clock |= is_video;
 			self.last_pts = on_clock(pts, offset)?;
 			self.advance_data()?;
 		}
@@ -823,13 +827,6 @@ impl<E: catalog::Catalog> Import<E> {
 			self.flush(pid)?;
 		}
 		Ok(())
-	}
-
-	/// Whether the program has a video stream, decoded or kept only for its clock.
-	fn has_video(&self) -> bool {
-		self.streams
-			.values()
-			.any(|stream| matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock))
 	}
 
 	/// Carry the media clock to the data tracks, which with aligned groups group on its grid
@@ -899,7 +896,10 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		};
 
-		let batched = self.has_video();
+		let batched = self
+			.streams
+			.values()
+			.any(|stream| matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock));
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
@@ -994,6 +994,7 @@ impl<E: catalog::Catalog> Import<E> {
 			section.discontinuity(self.published)?;
 		}
 		self.last_pts = None;
+		self.video_clock = false;
 		self.start_pts = None;
 		self.held_edge = None;
 		self.published = false;
@@ -7182,11 +7183,19 @@ pub(super) mod test {
 		}
 	}
 
-	/// On a shared epoch's timebase, audio keeps the clock of a program with no video: every cue
-	/// after the second the import started in publishes at the PTS of the audio before it, in a
-	/// group a second.
+	/// On a shared epoch's timebase, audio keeps the clock until video brings a PTS: in a program
+	/// with no video, and in one whose video sends nothing, every cue after the second the import
+	/// started in publishes at the PTS of the audio before it, in a group a second.
 	#[tokio::test(start_paused = true)]
-	async fn an_aligned_audio_only_program_publishes_its_cues() {
+	async fn an_aligned_program_without_video_pts_publishes_its_cues() {
+		for video in [&[][..], &[(StreamType::H264, 0x0050)]] {
+			audio_clocked_cues(video).await;
+		}
+	}
+
+	/// Import an aligned program of MP2 audio, a SCTE-35 PID and `video`, which sends nothing, and
+	/// check its cues land as [`an_aligned_program_without_video_pts_publishes_its_cues`] says.
+	async fn audio_clocked_cues(video: &[(StreamType, u16)]) {
 		const CUE_PID: u16 = 0x0021;
 		let epoch = epoch_time();
 		crate::clock::fake_host_wall(epoch + Duration::from_secs(600));
@@ -7202,13 +7211,12 @@ pub(super) mod test {
 			.unwrap();
 		timebase.align_groups();
 		let mut import = super::Import::new(broadcast, timebase.reserve());
-		let mut bytes = synth_pmt(
-			&[
-				(StreamType::Mpeg1Audio, PCR_PID),
-				(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
-			],
-			true,
-		);
+		let mut streams = vec![
+			(StreamType::Mpeg1Audio, PCR_PID),
+			(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
+		];
+		streams.extend_from_slice(video);
+		let mut bytes = synth_pmt(&streams, true);
 		// A cue every seven 144 ms steps, after the audio PES whose first frame it follows.
 		let mut cues = Vec::new();
 		for i in 0..50 {
@@ -7232,7 +7240,7 @@ pub(super) mod test {
 		let expected: Vec<Timestamp> = cues.iter().filter_map(|fill| audio.get(fill).copied()).collect();
 		assert!(
 			expected.len() >= 6,
-			"the audio published from its second second: {audio:?}"
+			"{video:?}: the audio published from its second second: {audio:?}"
 		);
 		let name = snapshot.ext.mpegts.tracks.keys().next().unwrap();
 		let published: Vec<Timestamp> = read_track(&consumer, name, crate::container::Kind::Data)
@@ -7240,7 +7248,7 @@ pub(super) mod test {
 			.into_iter()
 			.map(|frame| frame.timestamp)
 			.collect();
-		assert_eq!(published, expected);
+		assert_eq!(published, expected, "{video:?}");
 		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(3600));
 		let mut track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 		let mut sequences = Vec::new();
@@ -7249,7 +7257,7 @@ pub(super) mod test {
 		}
 		assert!(
 			sequences.len() >= 6 && sequences.windows(2).all(|pair| pair[1] == pair[0] + 1),
-			"{sequences:?}"
+			"{video:?}: {sequences:?}"
 		);
 	}
 
