@@ -344,6 +344,8 @@ impl<F: Container> Consumer<F> {
 
 		'read: loop {
 			self.poll_malformed(waiter)?;
+			// A known malformed group ends the reader now, even with current frames still readable.
+			self.take_lookahead_error()?;
 
 			// Return the next frame from the current group if possible.
 			// If the current group is finished or errored, advance to the next group.
@@ -473,15 +475,8 @@ impl<F: Container> Consumer<F> {
 				}
 			}
 
-			// Fail on a decode error the lookahead found, before a skip drops its group.
-			if let Some(err) = self.pending.iter_mut().find_map(|group| group.error.take()) {
-				tracing::warn!(
-					track = self.track.name(),
-					error = ?err,
-					"group payload failed to decode; ending the reader"
-				);
-				return Poll::Ready(Err(err));
-			}
+			// Fail on a decode error the scans above found, before a skip drops its group.
+			self.take_lookahead_error()?;
 
 			// Walk the cursor over missing sequences below the first arrived group.
 			// Groups race on independent QUIC streams (newer ones at higher priority),
@@ -643,6 +638,19 @@ impl<F: Container> Consumer<F> {
 			}
 		}
 
+		Ok(())
+	}
+
+	// Return a decode error the lookahead kept in any buffered group.
+	fn take_lookahead_error(&mut self) -> Result<(), F::Error> {
+		if let Some(err) = self.pending.iter_mut().find_map(|group| group.error.take()) {
+			tracing::warn!(
+				track = self.track.name(),
+				error = ?err,
+				"group payload failed to decode; ending the reader"
+			);
+			return Err(err);
+		}
 		Ok(())
 	}
 
@@ -2643,6 +2651,31 @@ mod tests {
 		// The reader stays ended rather than resuming with the group's later frames.
 		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
 		assert!(matches!(read, Ok(Ok(None))), "{read:?}");
+	}
+
+	/// A malformed head of a later group ends the reader as soon as the lookahead finds it, even
+	/// while the current group still has frames ready to read.
+	#[tokio::test]
+	async fn a_decode_error_in_a_later_group_ends_the_reader_before_current_frames() {
+		tokio::time::pause();
+		let track = track_producer("test", timed());
+		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
+
+		let mut current = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_failing(&mut current, Some(0));
+		write_failing(&mut current, Some(10_000));
+		write_failing(&mut current, Some(20_000));
+		let first = consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(first.timestamp, ts(0));
+
+		let mut later = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		write_failing(&mut later, None);
+		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
+		assert!(
+			matches!(read, Ok(Err(crate::Error::UnknownFormat(_)))),
+			"the later group's decode error comes before the current group's frames, got {read:?}"
+		);
 	}
 
 	// ---- Frame Decoding ----
