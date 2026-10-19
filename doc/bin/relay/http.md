@@ -25,6 +25,10 @@ curl http://localhost:4443/fetch/demo/bbb.hang/catalog.json
 `moq announced` and `moq fetch` answer the same questions over MoQ; see
 [Inspect a relay](/bin/inspect).
 
+With [stats](/concept/stats) enabled, `/fetch` and `/announced` count as requests
+on the token's tier and root. Fetched payload counts against its broadcast path;
+neither endpoint counts as a connected session.
+
 GET routes on the public router, including ones an embedder merges in, get a
 wildcard CORS origin unless the route sets its own. Tokens sent over plain HTTP
 are visible on the wire, so use HTTPS in production.
@@ -38,8 +42,8 @@ listen = "127.0.0.1:9101"
 
 ### GET /metrics
 
-Prometheus text: bytes, frames, groups, subscriptions, viewers, and sessions
-split by `tier` and `role`, plus accept-loop counters per TCP listener. Traffic
+Prometheus text: bytes, frames, groups, announces, subscriptions, viewers, requests,
+and sessions split by `tier` and `role`, plus accept-loop counters per TCP listener. Traffic
 counters accumulate for the node's lifetime and leave out the stats feed's own
 traffic. Host CPU and memory belong to a node exporter.
 
@@ -50,6 +54,10 @@ A few worth alerting on:
 - `moq_relay_sessions_refused_total`, by `reason`. A rise in `unavailable`
   points at the auth server; a rise in `refused` at the credentials clients
   present. Each attempt counts, so a client that retries is counted again.
+- `moq_relay_sessions_failed_total`, by `tier` and `kind` (`idle_timeout`,
+  `transport`, `application`, `expired`): admitted sessions that ended
+  abnormally. A clean close is not a failure. Reported only while
+  [stats](/bin/relay/config#stats) are enabled.
 - `moq_relay_stale_bytes_total` and friends: content dropped for drifting past
   a subscriber's latency budget.
 - `moq_relay_draining_sessions`: sessions sent a GOAWAY during a
@@ -60,7 +68,11 @@ A few worth alerting on:
   certificate reload) exits the relay instead.
 
 With `--runtime-io-uring`, each QUIC worker also reports `moq_relay_uring_*`
-counters under a `worker` label. A dead worker shows stuck zeros rather than
+counters under a `worker` label. Datagrams per enter and the SQE/CQE
+histograms show whether syscalls carry useful work. Compare turns and
+queue-pressure enters with throughput: flushing deferred work can remove
+empty busy turns, so enters/turn alone does not grade efficiency. The
+histograms include empty enters. A dead worker shows stuck zeros rather than
 disappearing.
 
 ### GET /sessions

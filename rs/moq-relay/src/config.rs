@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::{auth, cache, cluster, internal, stats, web};
@@ -80,6 +81,16 @@ pub struct Config {
 	#[serde(default)]
 	pub web: web::Config,
 
+	/// Automatic certificates from an ACME directory. Disabled unless `acme.domains` is set.
+	#[usage(flatten)]
+	#[serde(default)]
+	pub acme: crate::acme::Config,
+
+	/// Optional public STUN Binding listener for application-selected ICE servers.
+	#[usage(flatten)]
+	#[serde(default)]
+	pub stun: crate::stun::Config,
+
 	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
 	#[usage(flatten)]
 	#[serde(default)]
@@ -148,6 +159,8 @@ impl Default for Config {
 			cluster: Default::default(),
 			auth: Default::default(),
 			web: Default::default(),
+			acme: Default::default(),
+			stun: Default::default(),
 			stats: Default::default(),
 			cache: Default::default(),
 			internal: Default::default(),
@@ -355,6 +368,10 @@ impl Config {
 	pub(crate) fn resolve(&mut self) -> anyhow::Result<()> {
 		let deprecated = self.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+		// Here rather than at an endpoint, since io_uring workers and lazily built
+		// dial clients would otherwise check `[quic]` late or never. `[peer.quic]`
+		// is checked by `Cluster::new`, which embedders call directly.
+		self.quic.validate().context("invalid [quic]")?;
 
 		self.quic
 			.max_streams
@@ -371,10 +388,36 @@ mod tests {
 	use crate::test_env::EnvGuard;
 
 	#[test]
+	fn stun_binding_merges_file_environment_and_cli() {
+		let _env = EnvGuard::clear(&["MOQ_STUN_BIND"]);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("stun.toml");
+		std::fs::write(&path, "[stun]\nbind = \"127.0.0.1:3478\"\n").unwrap();
+		let file = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
+		assert_eq!(file.stun.bind, Some("127.0.0.1:3478".parse().unwrap()));
+		let cli = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-relay"),
+			path.into(),
+			"--stun-bind=127.0.0.1:3479".into(),
+		])
+		.unwrap();
+		assert_eq!(cli.stun.bind, Some("127.0.0.1:3479".parse().unwrap()));
+		// SAFETY: EnvGuard holds the shared lock until this variable is restored.
+		unsafe {
+			std::env::set_var("MOQ_STUN_BIND", "[::1]:3478");
+		}
+		let config = Config::parse_and_merge(["moq-relay"]).unwrap();
+		assert_eq!(config.stun.bind, Some("[::1]:3478".parse().unwrap()));
+		assert!(toml::from_str::<Config>("[stun]\nrate = 10").is_err());
+	}
+
+	#[test]
 	fn session_limits_merge_without_crossing_peer_policy() {
 		let _env = EnvGuard::clear(&[
 			"MOQ_SESSION_ANNOUNCES",
 			"MOQ_SESSION_SUBSCRIPTIONS",
+			"MOQ_SESSION_FETCHES",
+			"MOQ_PEER_FETCHES",
 			"MOQ_PEER_ANNOUNCES",
 			"MOQ_PEER_SUBSCRIPTIONS",
 		]);
@@ -382,7 +425,7 @@ mod tests {
 		let path = dir.path().join("limits.toml");
 		std::fs::write(
 			&path,
-			"[session]\nannounces = 7\nsubscriptions = 8\n[peer]\nannounces = 90\nsubscriptions = 91\n",
+			"[session]\nannounces = 7\nsubscriptions = 8\nfetches = 9\n[peer]\nannounces = 90\nsubscriptions = 91\nfetches = 92\n",
 		)
 		.unwrap();
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
@@ -390,17 +433,79 @@ mod tests {
 		assert_eq!(config.session.resolve().subscriptions, 8);
 		assert_eq!(config.peer.resolve().announces, 90);
 		assert_eq!(config.peer.resolve().subscriptions, 91);
+		assert_eq!(config.session.resolve().fetches, 9);
+		assert_eq!(config.peer.resolve().fetches, 92);
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-relay"),
 			path.into(),
 			"--session-announces=0".into(),
 			"--peer-subscriptions=1000".into(),
+			"--session-fetches=0".into(),
+			"--peer-fetches=2000".into(),
 		])
 		.unwrap();
 		assert_eq!(config.session.resolve().announces, 0);
 		assert_eq!(config.session.resolve().subscriptions, 8);
 		assert_eq!(config.peer.resolve().announces, 90);
 		assert_eq!(config.peer.resolve().subscriptions, 1000);
+		assert_eq!(config.session.resolve().fetches, 0);
+		assert_eq!(config.peer.resolve().fetches, 2000);
+	}
+
+	/// `[peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.
+	#[test]
+	fn peer_quic_table_merges_with_flags() {
+		let _env = EnvGuard::clear(&[
+			"MOQ_QUIC_MAX_STREAMS",
+			"MOQ_PEER_QUIC_MAX_STREAMS",
+			"MOQ_PEER_QUIC_RECEIVE_WINDOW",
+			"MOQ_PEER_QUIC_SEND_WINDOW",
+		]);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("peer-quic.toml");
+		std::fs::write(
+			&path,
+			"[quic]\nmax_streams = 4\n[peer.quic]\nmax_streams = 64\nsend_window = 1000\n",
+		)
+		.unwrap();
+		let config = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-relay"),
+			path.into(),
+			"--peer-quic-receive-window=2000".into(),
+		])
+		.unwrap();
+		assert_eq!(config.quic.max_streams, Some(4));
+		assert_eq!(config.peer.quic.max_streams.get(), 64);
+		assert_eq!(config.peer.quic.receive_window.get(), 2000);
+		assert_eq!(config.peer.quic.send_window.get(), 1000);
+
+		assert!(toml::from_str::<Config>("[peer]\nmax_streams = 64\n").is_err());
+	}
+
+	/// A zero peer stream limit or window would wedge the connection, so it never parses.
+	#[test]
+	fn zero_peer_quic_limits_are_refused() {
+		let _env = EnvGuard::clear(&[
+			"MOQ_PEER_QUIC_MAX_STREAMS",
+			"MOQ_PEER_QUIC_RECEIVE_WINDOW",
+			"MOQ_PEER_QUIC_SEND_WINDOW",
+		]);
+		for key in ["max_streams", "receive_window", "send_window"] {
+			assert!(
+				toml::from_str::<Config>(&format!("[peer.quic]\n{key} = 0\n")).is_err(),
+				"{key}"
+			);
+		}
+		for flag in [
+			"--peer-quic-max-streams=0",
+			"--peer-quic-receive-window=0",
+			"--peer-quic-send-window=0",
+		] {
+			assert!(
+				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), flag.into()]).is_err(),
+				"{flag} must be refused"
+			);
+		}
 	}
 
 	#[cfg(not(feature = "iroh"))]
@@ -1313,12 +1418,12 @@ uid = [1001]
 			},
 			Case {
 				name: "declared-default-true-false-from-file",
-				toml: "[runtime]\npin = false\n",
+				toml: "[web]\nws = false\n",
 				env: &[],
 				cli: &[],
-				key: "runtime.pin",
-				check: |config| assert!(!config.runtime.pin, "file false must beat a declared true default"),
-				source: "pin",
+				key: "web.ws",
+				check: |config| assert!(!config.web.ws, "file false must beat a declared true default"),
+				source: "ws",
 			},
 			Case {
 				name: "optional-with-default-from-file",
@@ -1532,7 +1637,7 @@ uid = [1001]
 			"cannot be combined",
 		);
 
-		#[cfg(feature = "noq")]
+		#[cfg(feature = "quic")]
 		{
 			let path = dir.join("typed.toml");
 			std::fs::write(&path, "[listen]\nload_balancer = { id = \"ab\", nonce = 8 }\n").unwrap();

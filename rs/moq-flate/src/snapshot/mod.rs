@@ -12,6 +12,8 @@
 //! there is no window to share across a single-frame group.
 
 use crate::Compression;
+#[cfg(test)]
+use futures::FutureExt;
 
 pub mod consumer;
 pub mod producer;
@@ -42,6 +44,41 @@ mod test {
 
 	use super::*;
 
+	/// Refused before a replacement group is published, so the last value stays readable.
+	#[test]
+	fn a_timed_track_refuses_a_bare_publish() {
+		let (mut producer, track) = producer_on(false, timed());
+		let at = moq_net::Timestamp::from_millis(100).unwrap();
+		producer
+			.update(moq_net::Timed::<Bytes>::from(&b"keep"[..]).at(at))
+			.unwrap();
+		assert!(matches!(
+			producer.update(&b"bare"[..]),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+		producer.finish().unwrap();
+		assert_eq!(drain(consume(track, false)), vec![Bytes::from_static(b"keep")]);
+	}
+
+	#[test]
+	fn a_bare_publish_stays_untimed() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("untimed", moq_net::track::Info::default())
+			.unwrap();
+		let mut groups = track.subscribe(None);
+		let mut producer = Producer::new(track, Config::default());
+		producer.update(&b"payload"[..]).unwrap();
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected an untimed group");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected an untimed frame");
+		};
+		assert_eq!(frame.timestamp, None);
+	}
+
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
@@ -58,9 +95,13 @@ mod test {
 	}
 
 	fn producer(compression: bool) -> (Producer, moq_net::track::Subscriber) {
+		producer_on(compression, moq_net::track::Info::default())
+	}
+
+	fn producer_on(compression: bool, info: moq_net::track::Info) -> (Producer, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", info)
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, cfg(compression)), consumer)
@@ -120,7 +161,7 @@ mod test {
 	/// on the wire rather than the payload handed in.
 	#[test]
 	fn a_stamped_update_writes_its_capture_time() {
-		let (mut producer, track) = producer(true);
+		let (mut producer, track) = producer_on(true, timed());
 		let mut groups = producer.consume();
 		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
 		let payload = Bytes::from(vec![7u8; 4096]);
@@ -143,13 +184,16 @@ mod test {
 
 	#[test]
 	fn one_group_per_update() {
-		let (mut producer, track) = producer(false);
+		let (mut producer, mut track) = producer(false);
 		producer.update(&b"first"[..]).unwrap();
 		producer.update(&b"second"[..]).unwrap();
 		producer.finish().unwrap();
 
 		// Two updates => two groups. A consumer that joins after both only sees the latest.
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 		assert_eq!(drain(consume(track, false)), vec![Bytes::from_static(b"second")]);
 	}
 

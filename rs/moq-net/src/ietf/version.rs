@@ -80,6 +80,7 @@ mod tests {
 	#[test]
 	fn draft21_matches_draft20_on_the_wire() {
 		let properties = Properties {
+			dynamic_groups: false,
 			max_cache_duration: None,
 			timescale: Some(Timescale::new(90_000).unwrap()),
 			priority: Some(64),
@@ -87,6 +88,7 @@ mod tests {
 		};
 
 		let subscribe = Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("broadcast"),
 			track_name: "video".into(),
@@ -99,7 +101,9 @@ mod tests {
 			}),
 			properties_wanted: false,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
+			authorization_token: None,
 		};
 
 		let subscribe_ok = SubscribeOk {
@@ -161,6 +165,7 @@ mod tests {
 	#[test]
 	fn draft22_changes_only_the_location_filter() {
 		let subscribe = Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("broadcast"),
 			track_name: "video".into(),
@@ -170,7 +175,9 @@ mod tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
+			authorization_token: None,
 		};
 
 		// Draft-20 spells Next Object as a Length of 2 and two zero fields; draft-22 as type 0x05.

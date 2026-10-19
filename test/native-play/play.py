@@ -1,4 +1,4 @@
-"""Observe real native playback without connecting to the desktop sound server."""
+"""Observe real native playback on the private null sink that test/lib/pulse.py runs."""
 
 import argparse
 import array
@@ -17,60 +17,22 @@ def run():
     parser.add_argument("--url", required=True)
     parser.add_argument("--moq", required=True)
     args = parser.parse_args()
+    # pulse.py has pointed this process tree at a private server; nothing here reaches the host's.
+    if not os.environ.get("PULSE_SERVER"):
+        raise RuntimeError("run under test/lib/pulse.py")
     root = Path(os.environ["MOQ_TEST_RUN"])
-    runtime = root / "pulse"
-    runtime.mkdir(mode=0o700)
-    socket = runtime / "native"
-    config_home = root / "config"
-    config_home.mkdir(mode=0o700)
-    # Only this process tree sees these settings. No host configuration or device is used.
-    env = os.environ | {
-        "XDG_RUNTIME_DIR": str(runtime),
-        "XDG_CONFIG_HOME": str(config_home),
-        "PULSE_COOKIE": str(runtime / "cookie"),
-        "PULSE_RUNTIME_PATH": str(runtime),
-        "PULSE_SERVER": f"unix:{socket}",
-        "DISPLAY": "",
-        "WAYLAND_DISPLAY": "",
-    }
-    config = root / "alsa.conf"
-    config.write_text(f'pcm.!default {{ type pulse server "unix:{socket}" }}\n')
-    env["ALSA_CONFIG_PATH"] = str(config)
     children = []
     try:
-        pulse = subprocess.Popen(
-            [
-                "pulseaudio", "--daemonize=no", "--use-pid-file=no", "--exit-idle-time=-1",
-                "--log-level=info", "--log-target=stderr", "-n",
-                f"--load=module-native-protocol-unix socket={socket} auth-anonymous=1",
-                "--load=module-null-sink sink_name=moq-null rate=48000 channels=2",
-            ], env=env, stderr=subprocess.PIPE,
-        )
-        children.append(pulse)
-        assert pulse.stderr is not None
-        with selectors.DefaultSelector() as ready, (root / "pulse.log").open("wb") as log:
-            ready.register(pulse.stderr, selectors.EVENT_READ)
-            deadline = time.monotonic() + 30
-            pending = b""
-            while b"Daemon startup complete" not in pending:
-                if not ready.select(max(0, deadline - time.monotonic())):
-                    raise RuntimeError("private audio server did not start")
-                chunk = os.read(pulse.stderr.fileno(), 65536)
-                if not chunk:
-                    raise RuntimeError("private audio server exited during startup")
-                log.write(chunk)
-                pending = (pending + chunk)[-65536:]
-
         with (root / "player.log").open("wb") as player_log, (root / "monitor.log").open("wb") as monitor_log:
             monitor = subprocess.Popen(
                 ["parec", "--raw", "--format=float32le", "--rate=48000", "--channels=2",
                  "--latency-msec=20", "--device=moq-null.monitor"],
-                env=env, stdout=subprocess.PIPE, stderr=monitor_log,
+                stdout=subprocess.PIPE, stderr=monitor_log,
             )
             children.append(monitor)
             player = subprocess.Popen(
                 [args.moq, "--connect", args.url, "--broadcast", "tone.hang", "play", "--no-video"],
-                env=env, stdout=player_log, stderr=player_log,
+                stdout=player_log, stderr=player_log,
             )
             children.append(player)
             assert monitor.stdout is not None

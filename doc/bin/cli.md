@@ -19,6 +19,7 @@ Docker; see [Install](/setup/install).
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Pull a remote HLS playlist. |
 | `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
+| `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
 | `export` | `hls --listen` | Serve the broadcast as HLS over HTTP. |
@@ -62,7 +63,8 @@ each session can publish or subscribe to, including stats; see the relay's
 [statistics configuration](/bin/relay/config#stats).
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
-one; every flag is documented there.
+one; every flag is documented there. Flags renamed between releases are listed in
+[MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md).
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)
@@ -83,9 +85,17 @@ to the wall time the first frame arrived. A timeline that rewinds, such as a
 restarted encoder or a looping file wrapping to the top, ends the import with
 an error; run it again to publish anew. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
+MPEG-TS timestamps run on across their 33-bit wrap (every 26.5 hours), each
+taking the wrap that lands it nearest the clock, so media that gets more than
+13.25 hours ahead of it (a jump that far, or a long file read faster than real
+time) reads as a rewind.
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
-and subtitle PIDs through as tracks. It takes one program: a multi-program
+and subtitle PIDs through as tracks. SCTE-35 cues wait for a media timestamp;
+input ending or declaring a clock break before that timestamp is refused.
+PES and untimed section staging share a bounded budget, so a source that never
+supplies a PES boundary or clock fails rather than retaining bytes indefinitely.
+It takes one program: a multi-program
 stream is refused until `--program` picks one, or `--program all` publishes
 each as its own broadcast (`event.hang` becomes `event/1.hang`,
 `event/2.hang`). A damaged packet is dropped on its own PID, so video freezes
@@ -95,6 +105,24 @@ publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
 program aboard, for what demultiplexing cannot carry, such as a scrambled
 service; `export ts --passthrough` writes it back out. FLV covers H.264 + AAC.
+
+`import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
+re-encoding. RTP rides the RTSP connection, so run it on the camera's network
+and the camera needs no inbound port. Credentials go in the URL
+(`rtsp://user:pass@camera/stream`), which other local users can read from the
+process list. Audio nothing in the stack plays, such as G.711, is skipped with
+a warning, and the broadcast goes on video-only. It reconnects with backoff,
+including when the camera sends no media for 10 seconds or no keyframe for 30,
+until a fatal error (refused access, or no stream it can publish), and
+each RTSP session is a new broadcast with its own catalog, since the session's
+RTP time restarts; a camera whose clock jumps mid-session is restarted the same
+way. Embed [`moq-rtsp`](https://docs.rs/moq-rtsp) for your own supervision,
+such as two of a camera's URLs as renditions of one broadcast.
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast camera.hang \
+    import rtsp --connect rtsp://admin:secret@192.168.1.64/stream1
+```
 
 ## Export
 
@@ -127,8 +155,11 @@ Other video waits for its first keyframe.
 MPEG-TS export pads to the source's constant mux rate when the catalog
 recorded one, or to `--mux-rate`, on a constant-rate schedule an IRD or groomer
 can lock to. Each frame goes out as early as the receiver's buffers admit, up
-to `--delay` ahead of its decode time on the output's clock, so the output trails the source by twice
-the delay; a frame that cannot arrive in time at the rate fails the export.
+to `--delay` ahead of its decode time and no further than its decoder buffer
+holds. That send-ahead comes out of the delay, so the output trails a TS source
+by `--delay`. A frame that cannot arrive in time at the rate fails the export,
+as does video whose HRD declares a longer buffer delay than `--delay`; the
+error names the `--delay` it needs.
 
 ## Play
 
@@ -136,11 +167,14 @@ the delay; a frame that cannot arrive in time at the rate fails the export.
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
 moq ... play --no-video             # audio only, without a window
+moq ... play --no-video --metrics play.ndjson   # log what the speaker played
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
-available, and Opus, PCM, and AAC-LC audio in software. The opt-in `vpx`
-feature adds software VP8 and VP9 through the build host's libvpx. The log
+available, and Opus, PCM, and AAC-LC audio in software. The opt-in `openh264`
+feature adds software H.264, which a host without a hardware decoder needs, and
+the opt-in `vpx` feature adds software VP8 and VP9 through the build host's
+libvpx. The log
 names the decoder each track opened.
 
 Playback starts at the newest group and trails the live edge by `--delay`. The
@@ -148,7 +182,11 @@ default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 [algorithm](/concept/audio-jitter) as the browser player. A duration fixes the
 delay and is also how long a stalled group is waited on before it is skipped.
 Each role follows the catalog, switching rendition when the publisher retires
-the one playing.
+the one playing. With `--no-video`, `--metrics <PATH>` writes a JSON line every
+250 ms with the playhead, the delay, and every gap and stall the speaker hit, in
+the schema the
+[audio quality harness](https://github.com/moq-dev/moq/tree/main/test/audio-quality)
+reduces to underruns, skips, and silence.
 
 The broadcast's announcement is its online signal, followed until the window
 closes. Playback starts when the name is announced. A
@@ -161,7 +199,7 @@ Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
 
 ```bash
-cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
+cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
 ```
 
 `moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
@@ -172,19 +210,28 @@ cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
 moq --connect https://relay.example.com/anon --broadcast cam.hang import capture
 moq ... import capture --display --system-audio          # share a screen with its sound (macOS)
 moq ... import capture --window 39193 --no-audio         # one window (macOS, Windows, X11)
+moq ... import capture --window --no-audio               # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
 ```
 
-Video goes through the platform hardware encoder with an H.264 software
-fallback, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
+Video goes through the platform hardware encoder, with an H.264 software
+fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
 backends. The camera opens only while someone is watching, and `--bitrate` is a
 ceiling that backends with live bitrate control lower to fit the connection.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.
 
-Requires the `capture` feature. On Linux the microphone needs the ALSA
-headers, and `--display` and `pipewire:` cameras also need the `pipewire`
+On Wayland, bare `--window` asks the system portal to choose one window;
+there is no window id to look up or supply. An explicit `--window <id>` still
+selects a native window, including XWayland windows through their X11 ids.
+The portal may reuse its grant when capture reopens within the same process;
+a new process shows the picker again. Bare `--window` requires a Linux build
+with `pipewire`; other builds require an explicit window id.
+
+Requires the `capture` feature, plus `openh264` on a host without a hardware
+encoder. On Linux the microphone needs the ALSA
+headers, and Portal screen/window capture and `pipewire:` cameras also need the `pipewire`
 feature (links libpipewire).
 
 ## Transcode
@@ -204,7 +251,7 @@ largest rendition this host can decode, so a software-only host transcodes
 from H.264 rather than a larger H.265 or AV1 one. When the source changes
 resolution, rungs are resolved again: one that no longer fits finishes, and
 one whose size changed comes back under a new name (`video/360p.2`). Requires
-the `transcode` feature.
+the `transcode` feature, plus `openh264` on a host without a hardware encoder.
 
 ## Announced
 
@@ -244,11 +291,13 @@ moq --connect https://relay.example.com/anon --broadcast event-replay.hang impor
 
 `export archive` records one broadcast with
 [moq-archive](https://docs.rs/moq-archive), cutting each track into 2-10 s
-spans at group boundaries. A store that already holds the recording is
+spans at group boundaries. An [untimed](/concept/moq-lite#subscriptions) track,
+as every track is over moq-lite before 05 and moq-transport 14-16, is stored
+one group per span and replays untimed. A store that already holds the recording is
 continued, unless the source now announces another
 [epoch](/concept/moq-lite#publisher-epochs): that is a restart, so the export
 fails; record it under a new prefix. `--retention 1h` keeps only the last
-hour, a DVR.
+hour, a DVR, which refuses an untimed track since it has no time to measure.
 
 `import archive` republishes a recording as live tracks, fetching spans on
 request. It ends where the recording ends; `--follow 2s` keeps polling a
@@ -274,8 +323,8 @@ moq --connect https://relay.example.com/anon \
 
 Each run of `moq` announces a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), kept across reconnects.
-The RTMP, SRT, and WHIP ingests mint one per connection instead, and
-`import ts --program all` one per program.
+The RTMP, SRT, and WHIP ingests mint one per connection instead, `import
+rtsp` one per RTSP session, and `import ts --program all` one per program.
 
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
@@ -287,12 +336,29 @@ or a better one.
 
 On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
 `uuidgen -7` prints) are one publisher: relays fail over between them
-mid-group, so they must produce identical tracks with aligned groups, which no
-importer guarantees yet. Only `import fmp4`, `flv`, `hls`, and `ts` (one
-program, or `--passthrough`) accept it. The RTMP, SRT, and WHIP ingests and
-`import ts --program all` refuse it because they mint their own, and `import
+mid-group, so they must produce identical tracks with aligned groups. Each
+derives its catalog clock from the epoch's wall time, so fed one stream they
+publish the same clock and timestamps wherever each started, without reading
+anything from the other; group numbering is not aligned yet. PTS zero is the
+epoch's time, and for `ts` one 33-bit wrap before it. The wall mapping is
+therefore off by the source clock's reading at the epoch's time: for a TS
+program clock, anywhere within 13.25 hours. Each process picks a TS timestamp's
+wrap from its own clock, so near either end of that range, processes whose host
+clocks or delivery differ by more than the distance left can put one timestamp
+in adjacent wraps, 26.5 hours apart, and one later reads its media as a rewind.
+FLV's millisecond timestamps are not unwrapped, so redundant `flv` imports stop
+matching at its 49.7-day wrap: the incumbent rewinds and exits, and one started
+after it publishes timestamps near zero. A host whose clock reads before the
+epoch's time cannot place an `fmp4`, `flv`, or `hls` import on it, and exits 1.
+Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
+accept it. The RTMP, SRT, RTSP, and WHIP ingests
+and `import ts --program all` refuse it because they mint their own, and `import
 avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
-timestamps or bytes come from the instance rather than the input.
+timestamps or bytes come from the instance rather than the input. Each that
+accepts it announces once its catalog names a servable track, so a standby
+started ahead of its feed is never asked for tracks it cannot serve yet. Input
+that ends before then, such as an empty input or a PMT or header that
+configures no track, exits 1 without announcing.
 
 ## Cluster
 
@@ -309,7 +375,11 @@ moq --cluster-lan --cluster-lan-secret /etc/moq/cluster.key import capture
 MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
-so it needs no `--connect`.
+so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
+`--cluster-connect-api`) share `--connect-bind` with `--connect`, and each binds
+it, while LAN dials take an ephemeral port. So a fixed `--connect-bind` port with
+both `--connect` and a WAN cluster peer is refused at startup: use port 0, or drop
+`--connect` (unset `MOQ_CONNECT` if it supplies the URL).
 
 ## Auth
 
@@ -338,14 +408,17 @@ may fall behind the live edge before *this* consumer skips it. Raising
 At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
 subscriber still catching up can drain it; Ctrl-C ends that early.
 
-`export ts`, `export flv`, and `export mkv` take `--delay` (default 500 ms)
-instead, like an SRT receiver's
-latency: each frame is muxed that long after its decode time, all tracks in
-decode order, so two exporters of one broadcast emit the same order. A frame
-arriving after its deadline is dropped, and video resumes at its next
-keyframe. The delay also bounds how stale a group may get, so `--delay 0` writes each
-frame as soon as it is read and drops none as late, but still skips a stalled
-group once a newer one is ready.
+`export ts`, `export flv`, and `export mkv` take `--delay` instead, like an SRT
+receiver's latency, all tracks in decode order, so two exporters of one broadcast
+emit the same order. FLV and MKV mux each frame that long after its decode time
+(default 500 ms). TS output runs that far behind the source (default 1 s): the
+send-ahead that fills a receiver's buffers comes out of the same budget, and 1 s
+fits a broadcast-sized CPB. A source that sends no track ahead of its decode
+time, as RTMP and browser publishers do, trails by the video's send-ahead on
+top. A frame arriving after its deadline is dropped, and video resumes at its
+next keyframe. The delay also bounds how stale a group may get, so `--delay 0`
+writes each frame as soon as it is read and drops none as late, but still skips
+a stalled group once a newer one is ready.
 FLV and MKV reject their former `--max-delay` spelling with a migration
 message. The output follows the source's clock within what ISO/IEC 13818-1
 allows a TS PCR. A source further off fails the export, naming its rate, once
@@ -362,7 +435,9 @@ continuity error, and the rest carry on. It takes neither `--linger`,
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same
-stream. A replacement (a restarted publisher, under a new
+stream. A return that cannot be read yet, such as one still routed through a
+dead session, keeps it waiting for the next announcement; if the linger runs
+out first, it exits 1 with that error. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. `--linger` also bounds a mid-stream stitch from the replacement

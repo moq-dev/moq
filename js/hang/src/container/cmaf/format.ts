@@ -1,3 +1,4 @@
+import type { Micro } from "@moq/clock";
 import type { Time } from "@moq/net";
 import type { Format as ContainerFormat } from "../format";
 import type { Frame } from "../types";
@@ -16,9 +17,9 @@ export class Format implements ContainerFormat {
 	decode(payload: Uint8Array, timestamp: Time.Timestamp | undefined): Frame[] {
 		return decodeDataSegment(payload, this.#init, timestamp).map((s) => ({
 			payload: s.data,
-			timestamp: s.timestamp as Time.Micro,
+			timestamp: s.timestamp as Micro,
 			keyframe: s.keyframe,
-			duration: s.duration as Time.Micro,
+			duration: s.duration as Micro,
 		}));
 	}
 }

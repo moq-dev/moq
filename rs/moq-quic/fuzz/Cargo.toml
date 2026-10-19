@@ -1,0 +1,67 @@
+# The libFuzzer harness for moq-quic. `just rs fuzz <target>` drives it, and
+# nightly.yml runs every target for five minutes.
+#
+# A workspace member so it shares the root lockfile, which is the only thing that
+# keeps its resolve from drifting when a sibling it depends on is bumped. It is
+# excluded from every gate that means "all of it" instead: libFuzzer needs a nightly
+# toolchain and sanitizer flags, so nothing in `check` or `test` may compile it.
+#
+# The target bodies live in `moq-quic`'s hidden `fuzz` module, not here: the frame
+# decoder and stream state are private, and sharing the bodies is what lets the
+# crate's own tests replay the corpus on stable.
+[package]
+name = "moq-quic-fuzz"
+version = "0.0.0"
+license = "MIT OR Apache-2.0"
+publish = false
+edition = "2024"
+autobins = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[[bin]]
+name = "packet"
+path = "fuzz_targets/packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "params"
+path = "fuzz_targets/params.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "streamid"
+path = "fuzz_targets/streamid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "streams"
+path = "fuzz_targets/streams.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame"
+path = "fuzz_targets/frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connection"
+path = "fuzz_targets/connection.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+moq-quic = { workspace = true, features = ["fuzz"] }

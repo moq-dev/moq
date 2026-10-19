@@ -19,13 +19,9 @@ Guidance:
   opt-level 3 with per-package overrides, and compare against building
   everything at "s".
 - Measure what the bindings actually do: publish and subscribe throughput
-  through moq-ffi on the [payload harness](/quest/m1/ffi-bytes.md), plus
+  through moq-ffi on the [binding benchmark](/bench/README.md), plus
   audio and video encode and decode. Wire the benchmark into CI, at least
   nightly.
 - If it's adopted, use a named profile (for example `[profile.ffi]`,
   inheriting release) that every binding build path selects, so the relay
   and self-builders keep opt-level 3.
-
-## Required
-
-- [Payload bytes](/quest/m1/ffi-bytes.md) - the per-wrapper benchmark harness this measures with

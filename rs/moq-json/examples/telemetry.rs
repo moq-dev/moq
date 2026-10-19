@@ -88,7 +88,9 @@ fn wire_bytes(config: snapshot::Config, ticks: u64) -> usize {
 	let mut producer = Producer::<Value>::new(track, config);
 
 	for tick in 0..ticks {
-		producer.update(&telemetry(tick)).unwrap();
+		producer
+			.update(moq_net::Timed::from(&telemetry(tick)).at(moq_net::Timestamp::now()))
+			.unwrap();
 	}
 	producer.finish().unwrap();
 
@@ -124,7 +126,9 @@ fn verify(producer_config: snapshot::Config, ticks: u64) {
 
 	for tick in 0..ticks {
 		let expected = telemetry(tick);
-		producer.update(&expected).unwrap();
+		producer
+			.update(moq_net::Timed::from(&expected).at(moq_net::Timestamp::now()))
+			.unwrap();
 		// The producer emits exactly one frame per update, so the live consumer yields exactly one
 		// reconstructed value: it must match the input byte-for-byte after decompression + patching.
 		match consumer.poll_next(&waiter) {
@@ -158,7 +162,9 @@ fn verify_late_joiner(producer_config: snapshot::Config, ticks: u64) -> usize {
 	let consumer = track.subscribe(None);
 	let mut producer = Producer::<Value>::new(track, producer_config.clone());
 	for tick in 0..ticks {
-		producer.update(&telemetry(tick)).unwrap();
+		producer
+			.update(moq_net::Timed::from(&telemetry(tick)).at(moq_net::Timestamp::now()))
+			.unwrap();
 	}
 	producer.finish().unwrap();
 

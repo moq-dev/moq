@@ -1,5 +1,6 @@
 mod av1;
 mod codec;
+mod color;
 mod h264;
 mod h265;
 mod projection;
@@ -7,6 +8,7 @@ mod vp9;
 
 pub use av1::*;
 pub use codec::*;
+pub use color::*;
 pub use h264::*;
 pub use h265::*;
 pub use projection::*;
@@ -129,16 +131,18 @@ impl Video {
 		self.ranked().filter(|(_, config)| config.enabled)
 	}
 
-	/// Iterate the renditions best first: enabled, then largest picture, then highest bitrate.
+	/// Iterate the renditions best first: enabled, then highest [preference](VideoConfig::preference),
+	/// then largest picture, then highest bitrate.
 	///
 	/// A consumer that carries one rendition takes the first it supports, so the
-	/// picture doesn't depend on how the tracks are named. Unknown dimensions or
+	/// picture doesn't depend on how the tracks are named, and a lower preference
+	/// is taken only when nothing preferred is supported. Unknown dimensions or
 	/// bitrate rank below known ones, and exact ties keep name order.
 	pub fn ranked(&self) -> impl Iterator<Item = (&String, &VideoConfig)> {
 		let mut ranked: Vec<_> = self.renditions.iter().collect();
 		ranked.sort_by_key(|(_, config)| {
 			let area = u64::from(config.coded_width.unwrap_or(0)) * u64::from(config.coded_height.unwrap_or(0));
-			std::cmp::Reverse((config.enabled, area, config.bitrate))
+			std::cmp::Reverse((config.enabled, config.preference, area, config.bitrate))
 		});
 		ranked.into_iter()
 	}
@@ -226,10 +230,11 @@ pub struct VideoConfig {
 	pub coded_width: Option<u32>,
 	pub coded_height: Option<u32>,
 
-	/// The display aspect ratio of the media.
+	/// The aspect ratio the whole picture is displayed at, as WebCodecs'
+	/// `VideoDecoderConfig.displayAspectWidth` / `displayAspectHeight`.
 	///
-	/// This allows you to stretch/shrink pixels of the video.
-	/// If not provided, the display aspect ratio is 1:1
+	/// Absent means the decoded picture's own shape. A publisher with non-square
+	/// samples sets the picture's aspect here, never the sample aspect.
 	///
 	/// The `displayRatio*` aliases decode catalogs from publishers predating the
 	/// rename to `displayAspect*`; the current name is what we emit.
@@ -238,8 +243,13 @@ pub struct VideoConfig {
 	#[serde(alias = "displayRatioHeight")]
 	pub display_aspect_height: Option<u32>,
 
-	// TODO color space
-	/// The maximum bitrate of the video track, if known. It only rises.
+	/// The colour the decoded pixels carry, so a renderer need not guess or reparse the bitstream.
+	///
+	/// Live state, not identity: a publisher may fill it in once the bitstream reveals it.
+	#[serde(default)]
+	pub color: Option<Color>,
+
+	/// The maximum bitrate of the video track, if known.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 
@@ -251,7 +261,13 @@ pub struct VideoConfig {
 	)]
 	pub enabled: bool,
 
-	/// The maximum frame rate of the video track, if known. It only rises.
+	/// Higher is preferred: a consumer selects among the highest preference it can decode,
+	/// then by picture and bitrate within it. A compatibility transcode is `-1` so only a
+	/// consumer that can't decode the source pulls it. Only written when nonzero.
+	#[serde(default, skip_serializing_if = "is_zero")]
+	pub preference: i32,
+
+	/// The maximum frame rate of the video track, if known.
 	#[serde(default)]
 	pub framerate: Option<f64>,
 
@@ -321,8 +337,10 @@ impl VideoConfig {
 			coded_height: None,
 			display_aspect_width: None,
 			display_aspect_height: None,
+			color: None,
 			bitrate: None,
 			enabled: true,
+			preference: 0,
 			framerate: None,
 			optimize_for_latency: None,
 			container: Container::default(),
@@ -331,6 +349,10 @@ impl VideoConfig {
 			delay: None,
 		}
 	}
+}
+
+fn is_zero(value: &i32) -> bool {
+	*value == 0
 }
 
 #[cfg(test)]
@@ -469,6 +491,46 @@ mod test {
 
 		let decoded: VideoConfig = serde_json::from_value(encoded).expect("failed to decode");
 		assert!(!decoded.enabled);
+	}
+
+	#[test]
+	fn preference_is_written_only_when_nonzero() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		let encoded = serde_json::to_value(&config).expect("failed to encode");
+		assert!(encoded.get("preference").is_none());
+
+		config.preference = -1;
+		let encoded = serde_json::to_value(&config).expect("failed to encode");
+		assert_eq!(encoded["preference"], -1);
+
+		let decoded: VideoConfig = serde_json::from_value(encoded).expect("failed to decode");
+		assert_eq!(decoded.preference, -1);
+	}
+
+	#[test]
+	fn ranked_orders_by_preference_before_picture() {
+		let mut source = VideoConfig::new(VideoCodec::VP8);
+		source.coded_width = Some(640);
+		source.coded_height = Some(360);
+		source.bitrate = Some(500_000);
+
+		let mut fallback = VideoConfig::new(VideoCodec::VP8);
+		fallback.coded_width = Some(1920);
+		fallback.coded_height = Some(1080);
+		fallback.bitrate = Some(6_000_000);
+		fallback.preference = -1;
+
+		let mut video = Video::default();
+		video.insert("a", fallback).unwrap();
+		video.insert("b", source).unwrap();
+
+		let names: Vec<_> = video.ranked().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["b", "a"]);
+
+		// A disabled source ranks last whatever its preference.
+		video.renditions.get_mut("b").unwrap().enabled = false;
+		let names: Vec<_> = video.ranked().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["a", "b"]);
 	}
 
 	#[test]

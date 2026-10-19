@@ -9,6 +9,9 @@
 //!
 //! Run `cargo bench -p moq-stats --bench aggregate` and compare the table across revisions.
 
+// Custom timings measure the real time the work took, not the ambient clock.
+#![allow(clippy::disallowed_methods)]
+
 use std::time::{Duration, Instant};
 
 use moq_net::{Epoch, origin};
@@ -69,7 +72,9 @@ impl Node {
 		for traffic in self.frame.values_mut() {
 			traffic.bytes += bytes;
 		}
-		self.traffic.update(&self.frame).unwrap();
+		self.traffic
+			.update(moq_net::Timed::from(&self.frame).at(moq_net::Timestamp::now()))
+			.unwrap();
 	}
 }
 

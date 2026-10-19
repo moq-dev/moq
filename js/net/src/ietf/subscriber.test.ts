@@ -1,4 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
@@ -8,17 +9,23 @@ import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Milli, Timescale, Timestamp } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { Connection } from "./connection.ts";
 import { ObjectDatagram } from "./datagram.ts";
-import { encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
+import { EndOfTrackProperties, encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
+import { Parameters } from "./parameters.ts";
 import type { Properties } from "./properties.ts";
-import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
+import {
+	PublishNamespace,
+	PublishNamespaceCancel,
+	PublishNamespaceOk,
+	PublishNamespaceUpdate,
+} from "./publish_namespace.ts";
 import { MaxRequestId, RequestError, RequestOk } from "./request.ts";
-import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
+import { Subscribe, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
@@ -679,6 +686,85 @@ test("a PUBLISH_NAMESPACE update that starts looping back is detached", async ()
 });
 
 /**
+ * Draft-16 renews a PUBLISH_NAMESPACE with a REQUEST_UPDATE naming it, answered by the
+ * update's own Request ID. One repeating a token is refused that way too, and cancels the
+ * advertisement, which outlives its stream on that draft.
+ */
+test("a draft-16 PUBLISH_NAMESPACE update is answered by its own Request ID", async () => {
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+	const session = new NativeSession(pair.server, version, true);
+	const subscriber = new Subscriber({ session });
+
+	const request = await Stream.open(pair.server, { version });
+	const handler = subscriber.runPublishNamespace(
+		new PublishNamespace({ requestId: 1n, trackNamespace: Path.from("theirs") }),
+		request,
+	);
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	expect((await RequestOk.decode(peer.reader, version)).requestId).toBe(1n);
+
+	await peer.writer.u53(PublishNamespaceUpdate.id);
+	await new PublishNamespaceUpdate({ requestId: 3n, namespaceRequestId: 1n, update: {} }).encode(
+		peer.writer,
+		version,
+	);
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	expect((await RequestOk.decode(peer.reader, version)).requestId).toBe(3n);
+
+	// Two identical AUTHORIZATION TOKENs.
+	const body = [5, 1, 2, 0x03, 3, 0x03, 0x00, 0xaa, 0, 3, 0x03, 0x00, 0xaa];
+	await peer.writer.u53(PublishNamespaceUpdate.id);
+	await peer.writer.u16(body.length);
+	for (const byte of body) await peer.writer.u8(byte);
+	expect(await peer.reader.u53()).toBe(RequestError.id);
+	expect((await RequestError.decode(peer.reader, version)).requestId).toBe(5n);
+	expect(await peer.reader.u53()).toBe(PublishNamespaceCancel.id);
+	expect((await PublishNamespaceCancel.decode(peer.reader, version)).requestId).toBe(1n);
+
+	await handler;
+});
+
+// Drafts 14 and 15 have no update for an advertisement. One routed onto it changes nothing
+// and leaves it standing, and draft 15 still answers it with a REQUEST_ERROR naming the update.
+test("a legacy update on a PUBLISH_NAMESPACE is refused and the advertisement stands", async () => {
+	for (const [version, alpn] of [
+		[Version.DRAFT_14, ALPN.DRAFT_14],
+		[Version.DRAFT_15, ALPN.DRAFT_15],
+	] as const) {
+		const pair = createMockTransportPair(alpn);
+		const session = new NativeSession(pair.server, version, true);
+		const subscriber = new Subscriber({ session });
+		const announced = subscriber.announced();
+
+		const request = await Stream.open(pair.server, { version });
+		const handler = subscriber.runPublishNamespace(
+			new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("theirs") }),
+			request,
+		);
+		const peer = await nextStream(pair.client);
+		if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
+		expect(await peer.reader.u53()).toBe(version === Version.DRAFT_14 ? PublishNamespaceOk.id : RequestOk.id);
+		await peer.reader.read(await peer.reader.u16());
+		expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "start" });
+
+		await peer.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 0n, ownRequestId: 2n }).encode(peer.writer, version);
+		if (version === Version.DRAFT_15) {
+			expect(await peer.reader.u53()).toBe(RequestError.id);
+			expect((await RequestError.decode(peer.reader, version)).requestId).toBe(2n);
+		}
+
+		// Only the withdrawal ends the advertisement.
+		peer.close();
+		await handler;
+		expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
+	}
+});
+
+/**
  * REQUEST_UPDATE keeps an omitted parameter, so an explicit ROUTE_COST of 0 lands on the
  * path already held without disturbing the announcement. Consumers hear `update` with the
  * new cost; the stream ending is what retracts it.
@@ -1044,6 +1130,48 @@ test("an object without a Timestamp on a TIMESCALE track is malformed", async ()
 	stop.mockRestore();
 });
 
+test("a draft-14 END_OF_TRACK carrying properties ends the subscription as unsupported", async () => {
+	// Delta 0, one unknown integer property, an empty payload, then END_OF_TRACK: standalone,
+	// and after a one-byte object.
+	const marker = [0, 2, 0x20, 7, 0, 4];
+	for (const wire of [marker, [0, 0, 1, 42, ...marker]]) {
+		const { subscriber, track } = await subscribeTrack({ version: Version.DRAFT_14 });
+		const reader = new Reader(undefined, new Uint8Array(wire), Version.DRAFT_14);
+		const stop = spyOn(reader, "stop");
+
+		await subscriber.handleGroup(stampedGroup(0), reader);
+
+		const err = stop.mock.calls[0][0];
+		expect(err).toBeInstanceOf(EndOfTrackProperties);
+		expect(track.closed.peek()).toBe(err as EndOfTrackProperties);
+		// The group before a trailing marker completes.
+		if (wire !== marker) {
+			const group = await track.ordered().nextGroup();
+			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([42]));
+			expect(await group?.closed).toBeNull();
+		}
+		stop.mockRestore();
+	}
+});
+
+test("a compact END_OF_TRACK at object 5 with properties is subgroup 5, refused without ending the track", async () => {
+	// Draft 14 allows the properties and draft 15 refuses them, but the subgroup is refused first.
+	for (const version of [Version.DRAFT_14, Version.DRAFT_19]) {
+		const { subscriber, track } = await subscribeTrack({ version });
+		const header = stampedGroup(0);
+		header.flags.hasSubgroupObject = true;
+		// Object ID 5, one unknown integer property, an empty payload, then END_OF_TRACK.
+		const reader = new Reader(undefined, new Uint8Array([5, 2, 0x20, 7, 0, 4]), version);
+		const stop = spyOn(reader, "stop");
+
+		await subscriber.handleGroup(header, reader);
+
+		expect((stop.mock.calls[0][0] as Error).message).toBe("subgroups are not supported");
+		expect(track.closed.peek()).toBeUndefined();
+		stop.mockRestore();
+	}
+});
+
 test("older peer without priority property inherits wire priority 128", async () => {
 	const { subscriber, track } = await subscribeTrack();
 	expect((await track.info()).priority).toBe(0xff - 128);
@@ -1076,6 +1204,27 @@ test("an info-only lookup waits for SUBSCRIBE_OK instead of abandoning", async (
 		properties: { priority: 37 },
 	}).encode(peer.writer, VERSION);
 	expect((await info).priority).toBe(0xff - 37);
+});
+
+test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing SUBSCRIBE stream");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(peer.reader, VERSION);
+
+	await peer.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({
+		requestId: request.requestId,
+		trackAlias: ALIAS,
+		largest: { groupId: 7n, objectId: 3n },
+	}).encode(peer.writer, VERSION);
+	// Only the group carries over, since Object IDs are not frame ordinals.
+	expect(await track.largest()).toEqual({ group: 7, frame: 0 });
+	track.close();
 });
 
 test.each(["acceptance", "timeout"])("returning demand preserves pending setup until %s", async (outcome) => {
@@ -1150,7 +1299,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 	} else {
 		jest.advanceTimersByTime(4_000);
 		expect(await info).toBeInstanceOf(Error);
-		expect(((await info) as Error).message).toContain("subscribe timed out after 10000ms");
+		expect(((await info) as Error).message).toContain("request timed out after 10000ms");
 	}
 	expect(opening).toHaveBeenCalledTimes(1);
 });
@@ -1499,7 +1648,6 @@ test.each([Version.DRAFT_14, Version.DRAFT_16])("draft %s drops a subgroup that 
 		flags: groupFlags(true),
 	});
 	await subscriber.handleGroup(partial, new Reader(undefined, encodeObjects([2, 0]), version));
-	expect(track.latest()).toBeUndefined();
 	expect(track.closed.peek()).toBeUndefined();
 	expect(warning).not.toHaveBeenCalled();
 
@@ -2007,4 +2155,113 @@ test("an announce consumer closed while waiting on request-ID credit takes no ID
 
 	session.close();
 	void running;
+});
+
+/** Answer the next SUBSCRIBE_NAMESPACE with REQUEST_OK, carrying `activeCount` when given. */
+async function answerCounted(transport: WebTransport, activeCount: number | undefined): Promise<Stream> {
+	const stream = await nextStream(transport);
+	if (!stream) throw new Error("no SUBSCRIBE_NAMESPACE was sent");
+	await stream.reader.u53();
+	await SubscribeNamespace.decode(stream.reader, VERSION);
+	const parameters = new Parameters();
+	parameters.activeCount = activeCount;
+	await stream.writer.u53(RequestOk.id);
+	await new RequestOk({ requestId: undefined, parameters }).encode(stream.writer, VERSION);
+	return stream;
+}
+
+const sessionClosed = (pair: ReturnType<typeof createMockTransportPair>) =>
+	Promise.race([
+		pair.server.closed,
+		new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
+	]);
+
+/** The session closes with PROTOCOL_VIOLATION, not a clean code. */
+async function violationClosed(pair: ReturnType<typeof createMockTransportPair>) {
+	expect((await sessionClosed(pair)).closeCode).toBe(new ProtocolViolation("").code);
+}
+
+const yieldTask = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** MoQ Active Count: the consumer syncs once the counted NAMESPACEs are read. */
+test("counted NAMESPACEs sync", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, activeCount: true });
+
+	const announced = subscriber.announced();
+	const subscription = await answerCounted(pair.client, 2);
+	await inlineNamespace(subscription, Path.from("a"));
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("a"), kind: "start" });
+	const b = announced.next();
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(false);
+
+	await inlineNamespace(subscription, Path.from("b"));
+	expect(await b).toMatchObject({ prefix: Path.from("b"), kind: "start" });
+	await yieldTask();
+	// Still handling the last of them.
+	expect(announced.synced.peek()).toBe(false);
+	void announced.next();
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(true);
+	announced.close();
+});
+
+/** Without MoQ Active Count, REQUEST_OK is the best boundary there is. */
+test("an uncounted answer syncs on the OK", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+
+	const announced = subscriber.announced();
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(false);
+	await acceptSubscribeNamespace(pair.client);
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(true);
+	announced.close();
+});
+
+/** A count the negotiation did not promise, or a missing one it did, breaks the extension. */
+test("an ACTIVE_COUNT that does not match the negotiation closes the session", async () => {
+	for (const [negotiated, count] of [
+		[true, undefined],
+		[false, 0],
+	] as const) {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const session = new NativeSession(pair.server, VERSION, true);
+		const subscriber = new Subscriber({ session, quic: pair.server, activeCount: negotiated });
+		const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+		onTestFinished(() => warn.mockRestore());
+
+		subscriber.announced();
+		await answerCounted(pair.client, count);
+		await violationClosed(pair);
+	}
+});
+
+/** A counted set cut short, by a NAMESPACE_DONE or the stream ending, is the peer's fault. */
+test.each(["done", "fin"] as const)("a counted set cut short by %s closes the session", async (cut) => {
+	{
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const session = new NativeSession(pair.server, VERSION, true);
+		const subscriber = new Subscriber({ session, quic: pair.server, activeCount: true });
+		const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+		onTestFinished(() => warn.mockRestore());
+
+		subscriber.announced();
+		const subscription = await answerCounted(pair.client, 2);
+		await inlineNamespace(subscription, Path.from("a"));
+		if (cut === "done") {
+			// The type alone is the violation, so the session may close before the rest is written.
+			await subscription.writer.u53(SubscribeNamespaceEntryDone.id);
+			await new SubscribeNamespaceEntryDone({ suffix: Path.from("a") })
+				.encode(subscription.writer, VERSION)
+				.catch(() => undefined);
+		} else {
+			subscription.writer.close();
+		}
+		await violationClosed(pair);
+	}
 });

@@ -105,6 +105,10 @@ pub enum Error {
 	#[error("quic {0} must be non-zero and fit a QUIC varint")]
 	WindowRange(&'static str),
 
+	/// A QUIC stream limit is zero or past the 2^60 a peer accepts.
+	#[error("quic max_streams must be between 1 and 2^60")]
+	StreamsRange,
+
 	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
 	ConnectFailed,
@@ -191,11 +195,11 @@ pub enum Error {
 	#[error("{0}")]
 	Reconnect(String),
 
-	/// The connection was stopped locally, by closing it or dropping the last handle.
+	/// The connection or listener was stopped locally, by closing it or dropping the last handle.
 	///
 	/// Not a failure: it is what a caller asked for. Distinct from [`Self::Reconnect`]
 	/// so a status watcher can tell an expected teardown from a connection that gave up.
-	#[error("connection stopped")]
+	#[error("stopped locally")]
 	Stopped,
 
 	/// A task serving this connection panicked. The panic itself is logged.
@@ -206,10 +210,10 @@ pub enum Error {
 	#[error(transparent)]
 	Tls(Arc<crate::tls::Error>),
 
-	/// The noq backend failed.
-	#[cfg(feature = "noq")]
+	/// The QUIC backend failed.
+	#[cfg(feature = "quic")]
 	#[error(transparent)]
-	Noq(Arc<crate::noq::Error>),
+	Quic(Arc<crate::quic::Error>),
 
 	/// The Iroh backend failed.
 	#[cfg(feature = "iroh")]
@@ -230,6 +234,11 @@ pub enum Error {
 	#[cfg(all(feature = "uds", unix))]
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
+
+	/// The WebRTC data channel transport failed.
+	#[cfg(feature = "webrtc")]
+	#[error(transparent)]
+	WebRtc(Arc<crate::webrtc::Error>),
 }
 
 impl Error {
@@ -238,15 +247,24 @@ impl Error {
 		match self {
 			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.is_terminal() && websocket.is_terminal(),
+			Self::MoqNet(err) => matches!(
+				moq_net::SessionError::from(err),
+				moq_net::SessionError::Unauthorized
+					| moq_net::SessionError::Expired
+					| moq_net::SessionError::ProtocolViolation
+					| moq_net::SessionError::KeyValueFormatting
+					| moq_net::SessionError::InvalidRequestId
+			),
 			Self::Tls(err) => err.is_terminal(),
 			Self::NoBackend(_)
 			| Self::Deprecated(_)
 			| Self::IdleTimeoutRange
 			| Self::WindowRange(_)
+			| Self::StreamsRange
 			| Self::QlogUnsupported
 			| Self::Connect(_) => true,
-			#[cfg(feature = "noq")]
-			Self::Noq(err) => err.is_terminal(),
+			#[cfg(feature = "quic")]
+			Self::Quic(err) => err.is_terminal(),
 			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.is_terminal(),
 			#[cfg(feature = "tcp")]
@@ -278,8 +296,8 @@ impl Error {
 			Self::MoqNet(
 				moq_net::Error::Unauthorized | moq_net::Error::Session(moq_net::SessionError::Unauthorized),
 			) => Some(crate::ConnectError::Unauthorized),
-			#[cfg(feature = "noq")]
-			Self::Noq(err) => err.connect_error(),
+			#[cfg(feature = "quic")]
+			Self::Quic(err) => err.connect_error(),
 			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.connect_error().or_else(|| websocket.connect_error()),
 			#[cfg(feature = "websocket")]
@@ -290,7 +308,9 @@ impl Error {
 
 	/// True if the server rejected us for auth reasons, so retrying won't help without new credentials.
 	pub fn is_auth(&self) -> bool {
-		self.connect_error().is_some_and(|err| err.is_auth())
+		// Expiry has no HTTP status, so it has no `ConnectError` to report.
+		matches!(self, Self::MoqNet(err) if moq_net::SessionError::from(err) == moq_net::SessionError::Expired)
+			|| self.connect_error().is_some_and(|err| err.is_auth())
 	}
 
 	/// The HTTP status a server answered a connection attempt with, if it answered with one at all.
@@ -311,8 +331,8 @@ impl Error {
 				_ => None,
 			},
 
-			#[cfg(feature = "noq")]
-			Self::Noq(err) => err.status(),
+			#[cfg(feature = "quic")]
+			Self::Quic(err) => err.status(),
 			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.status(),
 			_ => None,
@@ -341,14 +361,14 @@ impl From<crate::tls::Error> for Error {
 	}
 }
 
-#[cfg(feature = "noq")]
-impl From<crate::noq::Error> for Error {
-	fn from(err: crate::noq::Error) -> Self {
+#[cfg(feature = "quic")]
+impl From<crate::quic::Error> for Error {
+	fn from(err: crate::quic::Error) -> Self {
 		if let Some(err) = err.connect_error() {
 			return Self::Connect(err);
 		}
 
-		Self::Noq(Arc::new(err))
+		Self::Quic(Arc::new(err))
 	}
 }
 
@@ -381,6 +401,13 @@ impl From<crate::tcp::Error> for Error {
 impl From<crate::unix::Error> for Error {
 	fn from(err: crate::unix::Error) -> Self {
 		Self::Unix(Arc::new(err))
+	}
+}
+
+#[cfg(feature = "webrtc")]
+impl From<crate::webrtc::Error> for Error {
+	fn from(err: crate::webrtc::Error) -> Self {
+		Self::WebRtc(Arc::new(err))
 	}
 }
 
@@ -418,6 +445,15 @@ mod tests {
 		// A root file can be briefly absent or empty while it rotates, so rereading it may succeed.
 		assert!(!Error::Tls(Arc::new(crate::tls::Error::EmptyRoots("roots.pem".into()))).is_terminal());
 		assert!(!Error::Tls(Arc::new(crate::tls::Error::Open(std::io::ErrorKind::NotFound.into()))).is_terminal());
+	}
+
+	/// Redialing with the same expired credentials cannot succeed; the caller must refresh them.
+	#[test]
+	fn expired_credentials_are_terminal() {
+		assert!(Error::MoqNet(moq_net::Error::Expired).is_terminal());
+		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_terminal());
+		assert!(Error::MoqNet(moq_net::Error::Expired).is_auth());
+		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_auth());
 	}
 
 	/// Every raced address building the same malformed request is as terminal as one address doing so.

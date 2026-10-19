@@ -9,7 +9,6 @@ use std::time::{Duration, SystemTime};
 use bytes::Bytes;
 use hang::catalog::{Archive, AudioConfig, Clock, Reference, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
-use moq_mux::timeline::Entry;
 use sha2::{Digest, Sha256};
 
 use super::playlist::{Segment, Snapshot};
@@ -211,6 +210,7 @@ fn normalize_video(config: &VideoConfig) -> VideoConfig {
 	config.delay = None;
 	config.label = None;
 	config.enabled = true;
+	config.preference = 0;
 	// Publishers estimate it and republish once it settles. The rendition keeps the fMP4
 	// timescale it was built with, and the framerate is refreshed in place like the bitrate.
 	config.framerate = None;
@@ -245,6 +245,8 @@ pub struct Rendition {
 	/// [`refresh`](Self::refresh). A disabled rendition keeps its window and media playlist but
 	/// is left out of the master playlist and the DASH manifest.
 	enabled: AtomicBool,
+	/// Whether this rendition follows its durable timeline from the beginning.
+	history: AtomicBool,
 	/// Coded width, for the master playlist `RESOLUTION` (video only).
 	pub width: Option<u32>,
 	/// Coded height, for the master playlist `RESOLUTION` (video only).
@@ -306,18 +308,16 @@ impl Rendition {
 		self.bitrate().unwrap_or(default_bandwidth(self.kind))
 	}
 
-	/// Take the advertised bitrate, framerate, and `enabled` flag from a catalog update that
-	/// [`matches`](Self::matches_video) this rendition (audio passes no framerate). Returns whether
-	/// the rendition was enabled or disabled, which changes what the master playlist lists.
+	/// Update mutable catalog metadata without resetting the rendition.
 	///
 	/// The publisher's estimator republishes the catalog whenever its measured bitrate moves, so
 	/// this is the common update by far: rebuilding the rendition for it would reset the playlist
 	/// window, the cached init segment, and `EXT-X-MEDIA-SEQUENCE` several times a minute. A
 	/// disable keeps all three too, so a rendition that re-enables resumes where it was.
-	pub(crate) fn refresh(&self, bitrate: Option<u64>, framerate: Option<f64>, enabled: bool) -> bool {
+	pub(crate) fn refresh(&self, bitrate: Option<u64>, framerate: Option<f64>, enabled: bool) {
 		*self.bitrate.write().expect("bitrate lock poisoned") = bitrate;
 		*self.framerate.write().expect("framerate lock poisoned") = framerate;
-		self.enabled.swap(enabled, Ordering::Relaxed) != enabled
+		self.enabled.store(enabled, Ordering::Relaxed);
 	}
 
 	/// Whether the catalog enables this rendition, so the master playlist and DASH manifest
@@ -354,6 +354,7 @@ impl Rendition {
 			bitrate: RwLock::new(config.bitrate),
 			framerate: RwLock::new(config.framerate),
 			enabled: AtomicBool::new(config.enabled),
+			history: AtomicBool::new(false),
 			width: config.coded_width,
 			height: config.coded_height,
 			codec: config.codec.to_string(),
@@ -385,6 +386,7 @@ impl Rendition {
 			bitrate: RwLock::new(config.bitrate),
 			framerate: RwLock::new(None),
 			enabled: AtomicBool::new(config.enabled),
+			history: AtomicBool::new(false),
 			width: None,
 			height: None,
 			codec: config.codec.to_string(),
@@ -406,6 +408,7 @@ impl Rendition {
 	///
 	/// A rendition the catalog indexes no timeline for resolves nothing but the reference's rows.
 	pub(crate) fn watch(&self, history: bool) {
+		self.history.store(history, Ordering::Relaxed);
 		let track = self.track_name();
 		if !self.section.timelines.contains_key(track) {
 			self.spans.end();
@@ -423,29 +426,11 @@ impl Rendition {
 
 	/// Feed one reference timeline record into this rendition's window as a segment. With no
 	/// `window`, only source timeline pops trim it.
-	pub(crate) fn push(
-		&self,
-		index: u64,
-		entry: &Entry,
-		reference: &segments::Reference,
-		discontinuity: u64,
-		window: Option<Duration>,
-	) {
+	pub(crate) fn push(&self, row: segments::Row, window: Option<Duration>) {
 		if !self.media.admits(&self.live) {
 			return;
 		}
-		let row = segments::Row {
-			index,
-			segment: entry.sequence,
-			reference: reference.clone(),
-			frames: entry.start..entry.end,
-			keyframe: entry.keyframe,
-			duration: entry.duration,
-			pts: entry.pts,
-			end: entry.end_time(),
-			discontinuity,
-		};
-		let starts = self.is(reference) && row.starts_sync();
+		let starts = self.is(&row.reference) && row.starts_sync();
 		let resets = self.live.push(row, window);
 		if starts {
 			self.latch(resets);
@@ -487,9 +472,9 @@ impl Rendition {
 		reference.0 == self.kind && reference.1 == self.name && reference.2 == self.track_name()
 	}
 
-	/// Remove source timeline records in `range` from this rendition's window.
-	pub(crate) fn pop(&self, range: std::ops::Range<u64>) {
-		self.live.pop(range);
+	/// Retire the playlist prefix through this shared media sequence.
+	pub(crate) fn retire(&self, through: u64) {
+		self.live.retire(through);
 		self.trim();
 	}
 
@@ -592,20 +577,48 @@ impl Rendition {
 			.then(|| super::render_media(&self.snapshot_as(run.generation), &init.hash, query))
 	}
 
+	/// Render a clip playlist over a durable timeline's media time.
+	///
+	/// The requested start is widened to the preceding independently decodable segment. The
+	/// playlist grows while `range.end` is ahead of the live edge and becomes VOD once covered.
+	pub(crate) fn range_playlist(&self, range: super::Range, query: Option<&str>) -> Result<Option<String>> {
+		self.check_range()?;
+		let run = self.run();
+		let Some(init) = self.built_init(&run) else {
+			return Ok(None);
+		};
+		let snapshot = self.snapshot_range(range, run.generation)?;
+		Ok((!snapshot.segments.is_empty()).then(|| super::render_media(&snapshot, &init.hash, query)))
+	}
+
 	/// Wait until the media playlist is servable, then render it: at least one segment is
 	/// listed and the `EXT-X-MAP` init segment it names is built, so a player never loads a
 	/// map that 404s. `None` when the init cannot be built yet.
 	///
 	/// Waits without bound for the first segment; bounding it is the caller's policy. `query`
 	/// propagates exactly as in [`media_playlist`](Self::media_playlist).
-	pub async fn playlist(&self, query: Option<&str>) -> Result<Option<String>> {
+	///
+	/// A `range` lists only the segments covering that media time, and needs a durable timeline
+	/// exported with [`Config::history`](super::Config::history). Its start widens to the
+	/// preceding sync point, and the playlist ends with `EXT-X-ENDLIST` once media covers its
+	/// end. A range the timeline cannot fully serve fails with
+	/// [`RangeNotDurable`](crate::Error::RangeNotDurable) or
+	/// [`RangeUnavailable`](crate::Error::RangeUnavailable) rather than listing a partial clip.
+	pub async fn playlist(&self, range: Option<super::Range>, query: Option<&str>) -> Result<Option<String>> {
+		// Refuse an unsupported range up front rather than wait for media it can never list.
+		if range.is_some() {
+			self.check_range()?;
+		}
 		self.playable().await;
 		// An inline-codec init needs a keyframe group fetched first. init() caches, so the
 		// player's follow-up GET of the init is free.
 		if self.init().await?.is_none() {
 			return Ok(None);
 		}
-		Ok(self.media_playlist(query))
+		match range {
+			Some(range) => self.range_playlist(range, query),
+			None => Ok(self.media_playlist(query)),
+		}
 	}
 
 	/// Snapshot the media playlist from the current timeline window.
@@ -618,10 +631,87 @@ impl Rendition {
 	fn snapshot_as(&self, generation: Option<Arc<str>>) -> Snapshot {
 		self.media.sync(&self.live);
 		let window = self.live.window();
+		// A failed timeline ends this playlist at its last resolvable segment.
+		let failed = window.segments.last().is_some_and(|row| self.is_failed(row));
+		// An ended reference ends the playlist only once this rendition resolved every row, so a
+		// slower timeline's tail is listed before `EXT-X-ENDLIST` stops players polling.
+		let complete = self.resolved(&window.segments).count() == window.segments.len();
+		let finished = (window.ended && complete) || failed;
+		self.snapshot_from_window(window, finished, generation)
+	}
 
+	/// Whether this rendition can serve range playlists: a durable timeline followed from its start.
+	fn check_range(&self) -> Result<()> {
+		if !super::durable(&self.section) {
+			return Err(crate::Error::RangeNotDurable);
+		}
+		// Without its own timeline every listed segment would be a gap.
+		if !self.section.timelines.contains_key(self.track_name()) {
+			return Err(crate::Error::RangeUnavailable("rendition has no timeline".into()));
+		}
+		if !self.history.load(Ordering::Relaxed) {
+			return Err(crate::Error::RangeUnavailable(
+				"range playlists require Config::history".into(),
+			));
+		}
+		Ok(())
+	}
+
+	pub(super) fn snapshot_range(&self, range: super::Range, generation: Option<Arc<str>>) -> Result<Snapshot> {
+		self.media.sync(&self.live);
+		let mut window = self.live.window();
+		let Some(first) = window.segments.first() else {
+			if window.ended {
+				return Err(crate::Error::RangeUnavailable("the recording is empty".into()));
+			}
+			return Ok(self.snapshot_from_window(window, false, generation));
+		};
+		if range.start < Duration::from(first.pts) {
+			return Err(crate::Error::RangeUnavailable("start is before retained media".into()));
+		}
+
+		let first_overlap = window.segments.iter().position(|row| row.end > range.start);
+		let Some(first_overlap) = first_overlap else {
+			if window.ended {
+				return Err(crate::Error::RangeUnavailable("start is after the recording".into()));
+			}
+			window.segments.clear();
+			return Ok(self.snapshot_from_window(window, false, generation));
+		};
+		let start = window.segments[..=first_overlap]
+			.iter()
+			.rposition(segments::Row::starts)
+			.ok_or_else(|| crate::Error::RangeUnavailable("no retained sync point precedes start".into()))?;
+		let reference_covered = window.segments.iter().any(|row| row.end >= range.end);
+		if window.ended && !reference_covered {
+			return Err(crate::Error::RangeUnavailable("end is after the recording".into()));
+		}
+		window.segments = window
+			.segments
+			.into_iter()
+			.skip(start)
+			.take_while(|row| Duration::from(row.pts) < range.end)
+			.collect();
+		window.sequence = window.segments.first().map_or(window.sequence, |row| row.segment);
+		window.discontinuity = window
+			.segments
+			.first()
+			.map_or(window.discontinuity, |row| row.discontinuity);
+		// A failed timeline can never list the rest of the range, so refuse the partial clip.
+		if window.segments.last().is_some_and(|row| self.is_failed(row)) {
+			return Err(crate::Error::RangeUnavailable(
+				"timeline failed within the range".into(),
+			));
+		}
+		let resolved = self.resolved(&window.segments).count();
+		let covered =
+			resolved == window.segments.len() && window.segments.last().is_some_and(|row| row.end >= range.end);
+		Ok(self.snapshot_from_window(window, covered, generation))
+	}
+
+	fn snapshot_from_window(&self, window: segments::Window, finished: bool, generation: Option<Arc<str>>) -> Snapshot {
 		// HLS requires EXT-X-TARGETDURATION to be at least every EXTINF, rounded up to whole
-		// seconds. The catalog's `durationMax` is only the ceiling a record is split at, far above a
-		// typical GOP, and a target that large would push every player's live edge back by it.
+		// seconds. The catalog duration is nominal, while actual records can be longer.
 		let target_duration = window
 			.segments
 			.iter()
@@ -629,11 +719,9 @@ impl Rendition {
 			.max()
 			.unwrap_or(0)
 			.max(1);
-
 		let program_date_time = window.segments.first().and_then(|first| self.wall_clock(first.pts));
-
-		let mut previous: Option<u64> = None;
-		let segments: Vec<Segment> = self
+		let mut previous = None;
+		let segments = self
 			.resolved(&window.segments)
 			.map(|(s, content)| {
 				let discontinuity = previous.replace(s.discontinuity).is_some_and(|p| p != s.discontinuity);
@@ -646,17 +734,12 @@ impl Rendition {
 				}
 			})
 			.collect();
-		// A failed timeline ends this playlist at its last resolvable segment.
-		let failed = window.segments.last().is_some_and(|row| self.is_failed(row));
-		// An ended reference ends the playlist only once this rendition resolved every row, so a
-		// slower timeline's tail is listed before `EXT-X-ENDLIST` stops players polling.
-		let complete = segments.len() == window.segments.len();
-
 		Snapshot {
 			target_duration,
 			media_sequence: window.sequence,
+			discontinuity_sequence: window.discontinuity,
 			segments,
-			finished: (window.ended && complete) || failed,
+			finished,
 			program_date_time,
 			generation,
 		}
@@ -738,53 +821,63 @@ impl Rendition {
 
 	/// This rendition's DASH representation: its master-level metadata plus its track's
 	/// timeline as `(t, d)` pairs in the timeline's own timescale (the record values
-	/// verbatim, so `$Time$` addressing resolves exactly). `None` until the init is known, as
+	/// verbatim, so `$Time$` addressing resolves exactly). Empty until the init is known, as
 	/// for [`media_playlist`](Self::media_playlist).
-	pub(crate) fn representation(&self) -> Option<mpd::Representation> {
+	pub(crate) fn representations(&self) -> Vec<mpd::Representation> {
 		// Read the run before the rows (see `restart`).
 		let run = self.run();
-		let init = self.built_init(&run)?;
+		let Some(init) = self.built_init(&run) else {
+			return Vec::new();
+		};
 		self.media.sync(&self.live);
 		let window = self.live.window();
 		let timescale = self.timescale();
-		// Static only once every row resolved here, like the playlist's `EXT-X-ENDLIST`.
 		let complete = self.resolved(&window.segments).count() == window.segments.len();
-		let segments = self
-			.resolved(&window.segments)
-			.filter(|(_, content)| *content != Content::Gap)
-			.filter_map(|(row, _)| {
-				let t = row.pts.as_scale(timescale) as u64;
-				let span = row.end.saturating_sub(row.pts.into());
-				let d = (span.as_nanos() * timescale.as_u64() as u128 / 1_000_000_000) as u64;
-				// A zero-duration record (the terminal segment when the publisher couldn't
-				// bound its final sample) would sit exactly at the presentation end, so a
-				// conforming player would never request it; advertising it in a
-				// SegmentTimeline is contradictory timing, so leave it out. (HLS still lists
-				// it as EXTINF:0, which players fetch by URL rather than by timing.)
-				(d > 0).then_some((t, d))
-			})
-			.collect();
+		let ended = (window.ended && complete) || window.segments.last().is_some_and(|row| self.is_failed(row));
+		let mut periods = std::collections::BTreeMap::<moq_net::Timestamp, (String, Vec<(u64, u64)>)>::new();
+		for (row, content) in self.resolved(&window.segments) {
+			if content == Content::Gap {
+				continue;
+			}
+			let t = row.pts.as_scale(timescale) as u64;
+			let span = row.end.saturating_sub(row.pts.into());
+			let d = (span.as_nanos() * timescale.as_u64() as u128 / 1_000_000_000) as u64;
+			// A zero-duration terminal record sits at the presentation end and cannot be
+			// requested by DASH timing. HLS still serves it by its source-addressed URL.
+			if d == 0 {
+				continue;
+			}
+			periods
+				.entry(row.period)
+				.or_insert_with(|| (segments::tag(&row.reference), Vec::new()))
+				.1
+				.push((t, d));
+		}
 		let (framerate, sample_rate, channel_count) = match &self.config {
 			Config::Video(_) => (self.framerate(), None, None),
 			Config::Audio(config) => (None, Some(config.sample_rate), Some(config.channel_count)),
 		};
-		Some(mpd::Representation {
-			name: self.name.clone(),
-			kind: self.kind,
-			bandwidth: self.bandwidth(),
-			codec: self.codec.clone(),
-			width: self.width,
-			height: self.height,
-			framerate,
-			sample_rate,
-			channel_count,
-			timescale: self.section.timescale.max(1),
-			segments,
-			ended: (window.ended && complete) || window.segments.last().is_some_and(|row| self.is_failed(row)),
-			tag: listed_tag(&window.segments),
-			init: init.hash.clone(),
-			generation: run.generation,
-		})
+		periods
+			.into_iter()
+			.map(|(period, (tag, segments))| mpd::Representation {
+				name: self.name.clone(),
+				kind: self.kind,
+				bandwidth: self.bandwidth(),
+				codec: self.codec.clone(),
+				width: self.width,
+				height: self.height,
+				framerate,
+				sample_rate,
+				channel_count,
+				timescale: self.section.timescale.max(1),
+				segments,
+				ended,
+				period,
+				tag,
+				init: init.hash.clone(),
+				generation: run.generation.clone(),
+			})
+			.collect()
 	}
 
 	/// Fetch and transmux the segment of the reference tagged `tag` whose timeline `pts` is
@@ -1044,8 +1137,8 @@ impl Rendition {
 	}
 }
 
-/// The tag of the reference numbering `rows`, empty when none are listed. A reference switch
-/// clears every row, so the listed rows share one.
+/// The first retained reference tag, used by number-only test helpers for a single reference.
+#[cfg(test)]
 fn listed_tag(rows: &[segments::Row]) -> String {
 	rows.first()
 		.map(|row| segments::tag(&row.reference))
@@ -1203,10 +1296,9 @@ fn is_cache_miss(err: &moq_net::Error) -> bool {
 
 /// True if the bound publisher is gone, so a listed segment can never be served.
 ///
-/// A disconnect that crossed a session arrives as `Error::Session(SessionError::Cancel)`;
-/// locally it is [`moq_net::Error::Dropped`]. The bound broadcast being closed is the
-/// condition: matching a session cancel alone would 404 a clean close while the publisher
-/// is still live.
+/// An application dropping its producer, or a local cancellation, leaves the track
+/// unservable. A session-scoped cancellation alone can leave its publisher live,
+/// so it only counts once the bound broadcast closed.
 fn is_gone_publisher(err: &moq_net::Error, broadcast: &moq_net::broadcast::Consumer) -> bool {
 	broadcast.is_closed() || matches!(err, moq_net::Error::Dropped | moq_net::Error::Cancel)
 }

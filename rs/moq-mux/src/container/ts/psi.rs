@@ -36,22 +36,22 @@ pub(super) fn encode_pat(pat: &mpeg2ts::ts::payload::Pat) -> anyhow::Result<byte
 	finish_section(section)
 }
 
-/// Encode a PMT, rejecting descriptor or table lengths that MPEG-TS cannot represent.
-pub(super) fn encode_pmt(pmt: &mpeg2ts::ts::payload::Pmt) -> anyhow::Result<bytes::Bytes> {
+/// Encode a PMT at `version`, rejecting descriptor or table lengths that MPEG-TS cannot represent.
+pub(super) fn encode_pmt(pmt: &Pmt, version: mpeg2ts::ts::VersionNumber) -> anyhow::Result<bytes::Bytes> {
 	let mut section = vec![PMT_TABLE_ID, 0xb0, 0];
-	section.extend_from_slice(&pmt.program_num.to_be_bytes());
-	section.extend_from_slice(&[0xc1 | (pmt.version_number.as_u8() << 1), 0, 0]);
+	section.extend_from_slice(&pmt.program_number.to_be_bytes());
+	section.extend_from_slice(&[0xc1 | (version.as_u8() << 1), 0, 0]);
 	section.extend_from_slice(&(0xe000 | pmt.pcr_pid.map_or(0x1fff, |pid| pid.as_u16())).to_be_bytes());
 	encode_descriptors(&mut section, &pmt.program_info)?;
-	for stream in &pmt.es_info {
-		section.push(stream.stream_type as u8);
-		section.extend_from_slice(&(0xe000 | stream.elementary_pid.as_u16()).to_be_bytes());
+	for stream in &pmt.streams {
+		section.push(stream.stream_type);
+		section.extend_from_slice(&(0xe000 | stream.pid.as_u16()).to_be_bytes());
 		encode_descriptors(&mut section, &stream.descriptors)?;
 	}
 	finish_section(section)
 }
 
-fn encode_descriptors(out: &mut Vec<u8>, descriptors: &[mpeg2ts::ts::Descriptor]) -> anyhow::Result<()> {
+fn encode_descriptors(out: &mut Vec<u8>, descriptors: &[Descriptor]) -> anyhow::Result<()> {
 	let length = descriptors
 		.iter()
 		.map(|descriptor| 2 + descriptor.data.len())
@@ -270,8 +270,7 @@ fn descriptors(mut data: &[u8]) -> Option<Vec<Descriptor>> {
 	Some(out)
 }
 
-/// The start of a PES packet: its header, and the payload bytes that follow it in this
-/// TS packet.
+/// A complete PES header and the payload bytes that follow it.
 pub(super) struct PesStart<'a> {
 	pub stream_id: u8,
 	/// Raw 90 kHz.
@@ -285,33 +284,57 @@ pub(super) struct PesStart<'a> {
 }
 
 impl<'a> PesStart<'a> {
-	/// Parse the PES header at the start of a payload-unit-start packet's payload.
+	/// The next header boundary needed before parsing, capped by the 8-bit optional length.
+	pub fn header_len(payload: &[u8]) -> anyhow::Result<usize> {
+		let prefix = payload.len().min(3);
+		anyhow::ensure!(
+			payload[..prefix] == [0, 0, 1][..prefix],
+			"missing PES start code prefix"
+		);
+		if payload.len() < 6 {
+			return Ok(6);
+		}
+		if matches!(payload[3], 0xbc | 0xbe | 0xbf | 0xf0 | 0xf1 | 0xf2 | 0xf8 | 0xff) {
+			return Ok(6);
+		}
+		if payload.len() < 9 {
+			return Ok(9);
+		}
+		anyhow::ensure!(payload[6] & 0xc0 == 0x80, "unexpected PES header marker bits");
+		anyhow::ensure!(payload[6] & 0x30 == 0, "scrambled PES is not supported");
+		anyhow::ensure!(payload[7] & 0xc0 != 0x40, "PES DTS without a PTS");
+		let len = usize::from(payload[8]);
+		let packet_len = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
+		anyhow::ensure!(
+			packet_len == 0 || packet_len >= 3 + len,
+			"PES packet length shorter than its header"
+		);
+		Ok(9 + len)
+	}
+
+	/// Parse a complete clear PES header and its following payload.
 	///
 	/// Optional fields this demux has no use for (ESCR, ES rate, trick mode, copy info, the
-	/// PES CRC, extensions, stuffing) are skipped by `PES_header_data_length`. A payload that
-	/// is not a PES header at all is an error, as it was when an external reader parsed it.
+	/// PES CRC, extensions, stuffing) are skipped by `PES_header_data_length`. Incomplete headers
+	/// must be assembled before parsing; malformed headers are refused.
 	pub fn parse(payload: &'a [u8]) -> anyhow::Result<Self> {
-		anyhow::ensure!(payload.len() >= 6, "PES header truncated");
-		anyhow::ensure!(payload[..3] == [0, 0, 1], "missing PES start code prefix");
+		let header_len = Self::header_len(payload)?;
+		anyhow::ensure!(payload.len() >= header_len, "PES header truncated");
 		let stream_id = payload[3];
 		let packet_len = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
 
 		// Streams that carry no optional header (ISO/IEC 13818-1 table 2-21).
-		if matches!(stream_id, 0xbc | 0xbe | 0xbf | 0xf0 | 0xf1 | 0xf2 | 0xf8 | 0xff) {
+		if header_len == 6 {
 			return Ok(Self {
 				stream_id,
 				pts: None,
 				dts: None,
-				data_len: Some(packet_len).filter(|&len| len != 0),
+				data_len: Some(packet_len),
 				data: &payload[6..],
 			});
 		}
 
-		anyhow::ensure!(payload.len() >= 9, "PES header truncated");
-		anyhow::ensure!(payload[6] & 0xc0 == 0x80, "unexpected PES header marker bits");
-		anyhow::ensure!(payload[6] & 0x30 == 0, "scrambled PES is not supported");
 		let (pts_flag, dts_flag) = (payload[7] & 0x80 != 0, payload[7] & 0x40 != 0);
-		anyhow::ensure!(pts_flag || !dts_flag, "PES DTS without a PTS");
 		let header_len = usize::from(payload[8]);
 		let optional = payload.get(9..9 + header_len).context("PES header truncated")?;
 		let data_len = match packet_len {
@@ -374,34 +397,49 @@ mod test {
 
 	#[test]
 	fn pmt_encoding_rejects_unrepresentable_lengths() {
-		use mpeg2ts::ts::payload::Pmt;
-		use mpeg2ts::ts::{Descriptor, VersionNumber};
-		let mut pmt = Pmt {
-			program_num: 1,
-			pcr_pid: None,
-			version_number: VersionNumber::default(),
-			program_info: vec![Descriptor {
-				tag: 0x80,
-				data: vec![0; 256],
-			}],
-			es_info: Vec::new(),
+		let descriptor = |tag, len| Descriptor {
+			tag,
+			data: bytes::Bytes::from(vec![0; len]),
 		};
-		assert!(encode_pmt(&pmt).unwrap_err().to_string().contains("255 bytes"));
-		pmt.program_info = vec![
-			Descriptor {
-				tag: 0x80,
-				data: vec![0; 250]
-			};
-			4
-		];
-		let section = encode_pmt(&pmt).unwrap();
+		let mut pmt = Pmt {
+			program_number: 1,
+			pcr_pid: None,
+			program_info: vec![descriptor(0x80, 256)],
+			streams: Vec::new(),
+		};
+		let version = mpeg2ts::ts::VersionNumber::default();
+		assert!(encode_pmt(&pmt, version).unwrap_err().to_string().contains("255 bytes"));
+		pmt.program_info = vec![descriptor(0x80, 250); 4];
+		let section = encode_pmt(&pmt, version).unwrap();
 		assert!(crc_ok(&section));
 		assert_eq!(section.len(), 1024);
-		pmt.program_info.push(Descriptor {
-			tag: 0x81,
-			data: Vec::new(),
-		});
-		assert!(encode_pmt(&pmt).unwrap_err().to_string().contains("1021 bytes"));
+		pmt.program_info.push(descriptor(0x81, 0));
+		assert!(
+			encode_pmt(&pmt, version)
+				.unwrap_err()
+				.to_string()
+				.contains("1021 bytes")
+		);
+	}
+
+	/// The encoder writes the raw stream_type, so a byte no codec claims survives a round trip.
+	#[test]
+	fn pmt_encoding_round_trips_unnamed_stream_types() {
+		let pmt = Pmt {
+			program_number: 9,
+			pcr_pid: Some(Pid::new(0x100).unwrap()),
+			program_info: Vec::new(),
+			streams: vec![Es {
+				stream_type: 0x99,
+				pid: Pid::new(0x104).unwrap(),
+				descriptors: vec![Descriptor {
+					tag: 0x05,
+					data: bytes::Bytes::from_static(b"TEST"),
+				}],
+			}],
+		};
+		let section = encode_pmt(&pmt, mpeg2ts::ts::VersionNumber::default()).unwrap();
+		assert_eq!(Pmt::parse(&section), Some(pmt));
 	}
 
 	#[test]

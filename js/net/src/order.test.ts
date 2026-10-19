@@ -6,6 +6,7 @@
 // streams stay in flight and ranked against each other.
 
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { accept, connect, type Established } from "./connection/index.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -15,7 +16,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { sendOrder } from "./priority.ts";
 import type { SendStream } from "./stream.ts";
-import { Milli, Timescale } from "./time.ts";
+import { Timescale } from "./time.ts";
 import type { Order, Producer as TrackProducer, Subscriber as TrackSubscriber } from "./track.ts";
 import { wireOf } from "./wire.ts";
 

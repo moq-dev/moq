@@ -4,8 +4,8 @@
 
 A frame payload returned to a binding (`read_frame`, `recv_datagram`, decoded
 media) reaches the host without a copy, through a Rust-owned buffer the host
-releases, in every generator of [moq-dev/uniffi](/quest/m1/uniffi-fork.md).
-Proven on the [payload benchmark](/quest/m1/ffi-bytes.md).
+releases, in every generator of [moq-dev/uniffi](/quest/m2/uniffi-fork.md).
+Proven on the [binding benchmark](/bench/README.md).
 
 ## Plan
 
@@ -25,4 +25,4 @@ Public API: returned payload types may change per language. Wire: none.
 
 ## Required
 
-- [Payload bytes](/quest/m1/ffi-bytes.md) - the numbers that justify it, and the harness
+- [Payload bytes](/quest/m2/ffi-bytes.md) - the numbers that justify it

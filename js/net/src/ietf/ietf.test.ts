@@ -891,12 +891,11 @@ test("GoAway v17: with timeout", async () => {
 	expect(decoded.timeout).toBe(5000n);
 });
 
-test("GoAway v18: appends the required Request ID", async () => {
-	const msg = new GoAway.GoAway({ newSessionUri: "moqt://relay.example/", timeout: 5000n });
+test("GoAway v18: carries the Request ID", async () => {
+	const msg = new GoAway.GoAway({ newSessionUri: "moqt://relay.example/", timeout: 5000n, requestId: 1n });
 
 	// Draft-18 (#1559) requires a trailing Request ID on the control stream, so
-	// the v18 body must be exactly one varint longer than the v17 body. This
-	// locks byte-level parity with the Rust encoder.
+	// the v18 body is exactly one varint longer than the v17 body, as in Rust.
 	const encoded17 = await encodeVersioned(msg, Version.DRAFT_17);
 	const encoded18 = await encodeVersioned(msg, Version.DRAFT_18);
 	expect(encoded18.byteLength).toBe(encoded17.byteLength + 1);
@@ -904,6 +903,7 @@ test("GoAway v18: appends the required Request ID", async () => {
 	const decoded = await decodeVersioned(encoded18, GoAway.GoAway.decode, Version.DRAFT_18);
 	expect(decoded.newSessionUri).toBe("moqt://relay.example/");
 	expect(decoded.timeout).toBe(5000n);
+	expect(decoded.requestId).toBe(1n);
 });
 
 test("GoAway v19: round trip without the Request ID", async () => {
@@ -1012,6 +1012,29 @@ test("SubscribeUpdate drafts 14 to 16 round-trip the target separately from the 
 		const again = await encodeVersioned(decoded, version);
 		expect(Array.from(again)).toEqual(Array.from(encoded));
 	}
+});
+
+// Draft 14 lifts SUBSCRIBER_PRIORITY and FORWARD into fixed fields; every other
+// parameter still rides the list rather than being dropped.
+test("SubscribeUpdate v14: keeps parameters beside the fixed fields", async () => {
+	const parameters = new Parameters();
+	parameters.subscriberPriority = 5;
+	parameters.forward = false;
+	parameters.vars.set(0x02n, 1000n); // DELIVERY_TIMEOUT
+	const msg = new Subscribe.SubscribeUpdate({ requestId: 4n, ownRequestId: 10n, parameters });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const reader = new Reader(undefined, encoded, Version.DRAFT_14);
+	await reader.u16();
+	for (let i = 0; i < 5; i++) await reader.u62(); // own, target, start group, start object, end group
+	expect(await reader.u8()).toBe(5);
+	expect(await reader.bool()).toBe(false);
+	expect(await reader.u53()).toBe(1);
+
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_14);
+	expect(decoded.parameters.subscriberPriority).toBe(5);
+	expect(decoded.parameters.forward).toBe(false);
+	expect(decoded.parameters.vars.get(0x02n)).toBe(1000n);
 });
 
 test("SubscribeUpdate v17: round trip with requiredRequestIdDelta", async () => {
@@ -1804,6 +1827,29 @@ test("Frame: END_OF_GROUP is accepted whether or not the header marks the end", 
 	expect(empty.endOfTrack).toBe(false);
 });
 
+test("Frame flags draft-14 END_OF_TRACK properties", async () => {
+	const flags: GroupFlags = {
+		hasExtensions: true,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: false,
+		hasPriority: true,
+		firstObject: true,
+	};
+	// Object ID delta 0, one unknown integer property, zero payload length, END_OF_TRACK.
+	const wire = new Uint8Array([0, 2, 0x20, 7, 0, 4]);
+	const reader = new Reader(undefined, wire, Version.DRAFT_14);
+	const frame = await reader.decode((c) => Frame.decode(c, flags, undefined));
+	expect(frame.endOfTrack).toBe(true);
+	expect(frame.hasProperties).toBe(true);
+
+	// From draft 15, no status object may carry properties at all.
+	for (const status of [3, 4]) {
+		const later = new Reader(undefined, new Uint8Array([0, 2, 0x20, 7, 0, status]), Version.DRAFT_15);
+		await expect(later.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(ProtocolViolation);
+	}
+});
+
 test("Frame decodes objects split at every byte", async () => {
 	const flags: GroupFlags = {
 		hasExtensions: true,
@@ -1855,6 +1901,34 @@ test("Frame rejects a property that runs past its block", async () => {
 	await expect(reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI))).rejects.toThrow(
 		"message is shorter than its fields",
 	);
+});
+
+test("Frame reads only the current LOC Timestamp ID on every draft", async () => {
+	const flags: GroupFlags = {
+		hasExtensions: true,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: true,
+		hasPriority: true,
+		firstObject: true,
+	};
+	for (const version of [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+		Version.DRAFT_20,
+		Version.DRAFT_21,
+		Version.DRAFT_22,
+	] as const) {
+		for (const id of [0x06, 0x10]) {
+			const reader = new Reader(undefined, new Uint8Array([0, 2, id, 42, 1, 0xaa]), version);
+			const frame = await reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI));
+			expect(frame.timestamp?.value).toBe(id === 0x10 ? 42 : undefined);
+		}
+	}
 });
 
 // A fetch stream's first object is the only one carrying absolute ids, so a wrong flag byte

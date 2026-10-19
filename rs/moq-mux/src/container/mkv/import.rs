@@ -4,7 +4,7 @@ use std::io::Cursor;
 
 use crate::Result;
 use bytes::{Buf, Bytes, BytesMut};
-use hang::catalog::{AAC, AudioCodec, AudioConfig, H264, H265, VP9, VideoCodec, VideoConfig};
+use hang::catalog::{AAC, AudioCodec, AudioConfig, H265, VP9, VideoCodec, VideoConfig};
 use moq_net::Timestamp;
 use mp4_atom::Atom;
 use webm_iterable::WebmIterator;
@@ -621,7 +621,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			let sequence = match &track.track {
-				Media::Text(text) => sequence.max(text.track().latest().map_or(0, |latest| latest + 1)),
+				Media::Text(text) => sequence.max(text.next_sequence()),
 				_ => sequence,
 			};
 			track.track.seek(sequence)?;
@@ -708,8 +708,94 @@ fn build_video_config(
 	if config.coded_height.is_none() {
 		config.coded_height = height;
 	}
+	// The codec config outranks the Colour element a muxer added, which only fills its gaps.
+	let colour = video_children
+		.and_then(|cs| {
+			cs.iter().find_map(|c| match c {
+				MatroskaSpec::Colour(Master::Full(colour)) => Some(colour),
+				_ => None,
+			})
+		})
+		.map(|colour| matroska_color(colour))
+		.transpose()?
+		.flatten();
+	crate::codec::color::fill(&mut config.color, colour.as_ref(), "Colour");
 
 	Ok(config)
+}
+
+/// The colour a Matroska `Colour` element signals. Its code points are H.273's, `Range` counts 0
+/// as unspecified, 1 as limited, and 2 as full, and a partial mastering display is dropped. A code
+/// point past 255 or a light level past 65535 has no representation, so it is refused.
+pub(super) fn matroska_color(children: &[MatroskaSpec]) -> Result<Option<hang::catalog::Color>> {
+	use hang::catalog::{Chromaticity, Color, ContentLight, Mastering};
+
+	let (mut primaries, mut transfer, mut matrix, mut full_range) = (2, 2, 2, None);
+	let (mut max_cll, mut max_fall) = (None, None);
+	let mut mastering = None;
+	let code = |value: u64| u8::try_from(value).map_err(|_| Error::InvalidColour("code point"));
+	let light = |value: u64| u16::try_from(value).map_err(|_| Error::InvalidColour("light level"));
+	for child in children {
+		match child {
+			MatroskaSpec::Primaries(v) => primaries = code(*v)?,
+			MatroskaSpec::TransferCharacteristics(v) => transfer = code(*v)?,
+			MatroskaSpec::MatrixCoefficients(v) => matrix = code(*v)?,
+			MatroskaSpec::Range(1) => full_range = Some(false),
+			MatroskaSpec::Range(2) => full_range = Some(true),
+			MatroskaSpec::MaxCLL(v) => max_cll = Some(light(*v)?),
+			MatroskaSpec::MaxFALL(v) => max_fall = Some(light(*v)?),
+			MatroskaSpec::MasteringMetadata(Master::Full(fields)) => {
+				// Red, green, blue, and white x and y, then the max and min luminance.
+				let mut v = [None; 10];
+				for field in fields {
+					let (i, value) = match field {
+						MatroskaSpec::PrimaryRChromaticityX(x) => (0, x),
+						MatroskaSpec::PrimaryRChromaticityY(x) => (1, x),
+						MatroskaSpec::PrimaryGChromaticityX(x) => (2, x),
+						MatroskaSpec::PrimaryGChromaticityY(x) => (3, x),
+						MatroskaSpec::PrimaryBChromaticityX(x) => (4, x),
+						MatroskaSpec::PrimaryBChromaticityY(x) => (5, x),
+						MatroskaSpec::WhitePointChromaticityX(x) => (6, x),
+						MatroskaSpec::WhitePointChromaticityY(x) => (7, x),
+						MatroskaSpec::LuminanceMax(x) => (8, x),
+						MatroskaSpec::LuminanceMin(x) => (9, x),
+						_ => continue,
+					};
+					// Chromaticities lie in 0..=1 and luminances are nonnegative (Matroska's ranges).
+					let valid = match i {
+						0..=7 => (0.0..=1.0).contains(value),
+						_ => value.is_finite() && *value >= 0.0,
+					};
+					if !valid {
+						return Err(Error::InvalidColour("mastering value").into());
+					}
+					v[i] = Some(*value);
+				}
+				let xy = |i: usize| Some(Chromaticity { x: v[i]?, y: v[i + 1]? });
+				mastering = (|| {
+					Some(Mastering {
+						red: xy(0)?,
+						green: xy(2)?,
+						blue: xy(4)?,
+						white: xy(6)?,
+						max_luminance: v[8]?,
+						min_luminance: v[9]?,
+					})
+				})();
+			}
+			_ => {}
+		}
+	}
+
+	let mut color = crate::codec::color::cicp(primaries, transfer, matrix, full_range).unwrap_or_default();
+	color.mastering = mastering;
+	if max_cll.is_some() || max_fall.is_some() {
+		color.content_light = Some(ContentLight {
+			max_cll: max_cll.unwrap_or(0),
+			max_fall: max_fall.unwrap_or(0),
+		});
+	}
+	Ok((color != Color::default()).then_some(color))
 }
 
 fn build_audio_config(
@@ -742,7 +828,7 @@ fn build_audio_config(
 					}
 					config
 				}
-				None => AudioConfig::new(AudioCodec::Opus, 48_000, channels),
+				None => crate::codec::opus::Config::new(48_000, channels).into(),
 			};
 			config.description = codec_private.cloned();
 			Ok(config)
@@ -813,18 +899,7 @@ fn build_h264_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 		codec_id: "V_MPEG4/ISO/AVC",
 		purpose: "AVCDecoderConfigurationRecord",
 	})?;
-	let avcc = crate::codec::h264::Avcc::parse(avcc_bytes)?;
-
-	let mut config = VideoConfig::new(H264 {
-		profile: avcc.profile,
-		constraints: avcc.constraints,
-		level: avcc.level,
-		inline: false,
-	});
-	config.description = Some(avcc_bytes.clone());
-	config.coded_width = avcc.coded_width;
-	config.coded_height = avcc.coded_height;
-	Ok(config)
+	crate::codec::h264::config(avcc_bytes)
 }
 
 fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
@@ -848,6 +923,7 @@ fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 		constraint_flags: hvcc.general_constraint_indicator_flags,
 	});
 	config.description = Some(description.freeze());
+	crate::codec::h265::apply_hvcc_sps(&hvcc, &mut config)?;
 	Ok(config)
 }
 
@@ -863,6 +939,7 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	av1c.encode_body(&mut description)?;
 
 	let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av1c));
+	config.color = crate::codec::av1::color(&av1c.config_obus);
 	config.description = Some(description.freeze());
 	Ok(config)
 }
@@ -889,15 +966,11 @@ fn cue_payload(
 		settings = lines.next().unwrap_or_default();
 		id = lines.next().unwrap_or_default();
 		if let Some(comments) = lines.next().filter(|value| !value.is_empty()) {
-			if !comments.starts_with("NOTE") || comments.contains("-->") {
-				return Err(Error::InvalidSubtitle("invalid cue comments").into());
-			}
-			output.push_str(comments.trim_end_matches('\n'));
-			output.push_str("\n\n");
+			crate::container::text::comments(&mut output, comments).map_err(Error::InvalidSubtitle)?;
 		}
 	}
 	let body = match header {
-		Some(_) => crate::container::text::rebase(body, start, end).map_err(Error::InvalidSubtitle)?,
+		Some(_) => crate::container::text::rebase(body, start..end, Timestamp::ZERO).map_err(Error::InvalidSubtitle)?,
 		// SRT is plain text, where a literal `-->` is valid but would end a WebVTT cue.
 		None => body.replace("-->", "--&gt;"),
 	};

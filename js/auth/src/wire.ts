@@ -8,14 +8,18 @@
  * @module
  */
 
-import { Pattern, Patterns } from "@moq/pattern";
+import { Pattern } from "@moq/pattern";
+import type * as z from "@zod/mini";
+import { type AccessSchema, normalizeAccess } from "./access.ts";
+
+type AccessInput = z.input<typeof AccessSchema>;
 
 /** One grant in whichever encoding it arrived: legacy `put`/`get` prefix lists, or patterns. */
 type WireGrants = {
 	put?: string | string[];
 	get?: string | string[];
-	publish?: string[];
-	subscribe?: string[];
+	publish?: AccessInput;
+	subscribe?: AccessInput;
 };
 
 /**
@@ -28,15 +32,20 @@ type WireGrants = {
 export function decodeGrants<T extends WireGrants>(
 	wire: T,
 	ctx: { issues: unknown[] },
-): Omit<T, "put" | "get"> & { publish?: string[]; subscribe?: string[] } {
-	const { put, get, ...rest } = wire;
-	if (put === undefined && get === undefined) return rest;
+): Omit<T, "put" | "get" | "publish" | "subscribe"> & { publish?: AccessInput; subscribe?: AccessInput } {
+	const { put, get, publish, subscribe, ...rest } = wire;
+	const modern = {
+		...rest,
+		...(publish !== undefined && { publish }),
+		...(subscribe !== undefined && { subscribe }),
+	};
+	if (put === undefined && get === undefined) return modern;
 
 	const fail = (message: string) => {
 		ctx.issues.push({ code: "custom", message, input: wire });
-		return rest;
+		return modern;
 	};
-	if (rest.publish !== undefined || rest.subscribe !== undefined) {
+	if (publish !== undefined || subscribe !== undefined) {
 		return fail("mixes the legacy put/get fields with publish/subscribe");
 	}
 
@@ -56,27 +65,29 @@ export function decodeGrants<T extends WireGrants>(
  * `moq-token` reader agrees on what they grant. Anything a prefix can't say is written
  * as `publish`/`subscribe`, which an older reader refuses rather than misreads.
  */
-export function encodeGrants<T extends { publish?: string[]; subscribe?: string[] }>(
+export function encodeGrants<T extends { publish?: AccessInput; subscribe?: AccessInput }>(
 	grants: T,
 ): Omit<T, "publish" | "subscribe"> & WireGrants {
 	const { publish, subscribe, ...rest } = grants;
-	const prefixes = (texts: string[] | undefined) => {
+	const pub = publish === undefined ? undefined : normalizeAccess(publish);
+	const sub = subscribe === undefined ? undefined : normalizeAccess(subscribe);
+	const prefixes = (access: typeof pub) => {
+		if (access?.rate !== undefined) return undefined;
 		const out: string[] = [];
-		for (const pattern of new Patterns((texts ?? []).map((text) => Pattern.parse(text)))) {
+		for (const pattern of access?.path ?? []) {
 			const prefix = pattern.asPrefix();
 			if (prefix === undefined) return undefined;
 			out.push(prefix);
 		}
 		return out;
 	};
-
-	const put = prefixes(publish);
-	const get = prefixes(subscribe);
+	const put = prefixes(pub);
+	const get = prefixes(sub);
 	if (put === undefined || get === undefined) {
 		return {
 			...rest,
-			...(publish?.length && { publish }),
-			...(subscribe?.length && { subscribe }),
+			...((pub?.path.size || pub?.rate !== undefined) && { publish: pub.toJSON() }),
+			...((sub?.path.size || sub?.rate !== undefined) && { subscribe: sub.toJSON() }),
 		};
 	}
 	return { ...rest, ...(put.length && { put }), ...(get.length && { get }) };

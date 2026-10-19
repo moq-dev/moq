@@ -1,4 +1,5 @@
 import { afterEach, expect, jest, mock, spyOn, test } from "bun:test";
+import { Milli, Nano } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import type * as Announce from "./announce.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
@@ -21,7 +22,7 @@ import { createMockTransportPair, textFrame } from "./mock.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { Milli, Timescale, Timestamp } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
@@ -328,9 +329,10 @@ test("integration: lite applies initial and updated group bounds", async () => {
 			maxDelay: Milli(REPLAY_LATENCY_MS),
 			groups: { start: { included: UPDATED_GROUP }, end: { excluded: UPDATED_END_GROUP } },
 		});
-		expect((await withTimeout(pending, UPDATE_TIMEOUT_MS, "updated group bound timed out"))?.sequence).toBe(
-			UPDATED_GROUP,
-		);
+		expect(
+			(await withTimeout(pending, Nano.fromMilli(Milli(UPDATE_TIMEOUT_MS)), "updated group bound timed out"))
+				?.sequence,
+		).toBe(UPDATED_GROUP);
 
 		const capped = subscriber.nextGroup();
 		expect(await Promise.race([capped, sleep(PENDING_ASSERT_MS).then(() => "pending")])).toBe("pending");
@@ -367,9 +369,9 @@ test("integration: lite refuses an empty requested range on open and on update",
 			maxDelay: Milli(REPLAY_LATENCY_MS),
 			groups: { start: { included: 2 }, end: { excluded: 2 } },
 		});
-		await expect(withTimeout(empty.recvGroup(), TIMEOUT_MS, "empty open never settled")).rejects.toThrow(
-			"empty subscription range cannot be encoded",
-		);
+		await expect(
+			withTimeout(empty.recvGroup(), Nano.fromMilli(Milli(TIMEOUT_MS)), "empty open never settled"),
+		).rejects.toThrow("empty subscription range cannot be encoded");
 		empty.close();
 
 		// A live subscription whose demand later collapses to nothing fails the same way.
@@ -384,9 +386,9 @@ test("integration: lite refuses an empty requested range on open and on update",
 			maxDelay: Milli(REPLAY_LATENCY_MS),
 			groups: { start: { included: 3 }, end: { excluded: 3 } },
 		});
-		await expect(withTimeout(live.nextGroup(), TIMEOUT_MS, "empty update never settled")).rejects.toThrow(
-			"empty subscription range cannot be encoded",
-		);
+		await expect(
+			withTimeout(live.nextGroup(), Nano.fromMilli(Milli(TIMEOUT_MS)), "empty update never settled"),
+		).rejects.toThrow("empty subscription range cannot be encoded");
 		live.close();
 	} finally {
 		remote.close();
@@ -437,7 +439,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		expect(requests).toBe(1);
 
 		track.close();
-		await withTimeout(demand.unused(), 1000, "demand outlived the reader");
+		await withTimeout(demand.unused(), Nano.fromMilli(Milli(1000)), "demand outlived the reader");
 		expect(edges).toEqual([true, false]);
 
 		dispose();
@@ -499,7 +501,7 @@ test("integration: lite draft-06 announce lifecycle", async () => {
 async function announcedUntil(announced: Announce.Consumer, until: string) {
 	const seen: string[] = [];
 	while (!seen.includes(until)) {
-		const entry = await withTimeout(announced.next(), 1000, `waiting for ${until}`);
+		const entry = await withTimeout(announced.next(), Nano.fromMilli(Milli(1000)), `waiting for ${until}`);
 		if (!entry) throw new Error("announcements ended");
 		seen.push(entry.prefix);
 	}
@@ -744,7 +746,11 @@ for (const [name, protocol, version] of [
 			expect(await track.readString()).toBe("group");
 
 			producer.insertDatagram(7, timed ? Timestamp.fromMillis(1234) : undefined, enc.encode("dgram"));
-			const datagram = await withTimeout(datagrams.recvDatagram(), 1000, "no datagram arrived");
+			const datagram = await withTimeout(
+				datagrams.recvDatagram(),
+				Nano.fromMilli(Milli(1000)),
+				"no datagram arrived",
+			);
 			expect(datagram?.sequence).toBe(7);
 			expect(dec.decode(datagram?.payload)).toBe("dgram");
 			// Drafts 14-16 cannot declare TIMESCALE, so their datagrams arrive untimed.
@@ -899,7 +905,7 @@ test("integration: subscribing to an unserved broadcast is refused as NotFound",
 	broadcast.close();
 
 	const track = remote.track("video").subscribe();
-	const err = await withTimeout(Promise.resolve(track.closed), 1000, "track never closed");
+	const err = await withTimeout(Promise.resolve(track.closed), Nano.fromMilli(Milli(1000)), "track never closed");
 	expect(err).toBeInstanceOf(StreamError);
 	expect((err as StreamError).code).toBe(StreamCode.NotFound);
 
@@ -925,7 +931,11 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 
 	const remote = wireOf(client).consume(path);
 	const track = remote.track("video").subscribe();
-	const { value: request } = await withTimeout(dynamic.requested().next(), 1000, "the cheaper route was never asked");
+	const { value: request } = await withTimeout(
+		dynamic.requested().next(),
+		Nano.fromMilli(Milli(1000)),
+		"the cheaper route was never asked",
+	);
 	expect(request?.path).toBe(path);
 
 	track.close();
@@ -1948,13 +1958,13 @@ async function runRepublishCycle(protocol: string, version?: number) {
 		// A dead consumer left in place would still satisfy `!== undefined`, so wait for the swap.
 		const active = await withTimeout(
 			waitFor(watched.active, (b) => b !== undefined && b !== previous),
-			1000,
+			Nano.fromMilli(Milli(1000)),
 			`generation ${generation} never came online`,
 		);
 		if (!active) throw new Error("expected an active broadcast");
 		const frame = withTimeout(
 			active.track("audio").subscribe().ordered().readString(),
-			1000,
+			Nano.fromMilli(Milli(1000)),
 			`generation ${generation} never served a frame`,
 		);
 		expect(await frame).toBe(payload);
@@ -1966,7 +1976,7 @@ async function runRepublishCycle(protocol: string, version?: number) {
 		await serving;
 		await withTimeout(
 			waitFor(watched.active, (b) => b === undefined),
-			1000,
+			Nano.fromMilli(Milli(1000)),
 			`generation ${generation} never ended`,
 		);
 		expect(watched.closed.peek()).toBeUndefined();
@@ -2757,7 +2767,11 @@ async function runSessionDeath(
 	if (local) client.close();
 	else pair.server.close({ closeCode: DEATH, reason: "killed" });
 	const groupEnd = Promise.resolve(group.closed);
-	const closed = await withTimeout(Promise.resolve(track.closed), 2000, "the track never ended");
+	const closed = await withTimeout(
+		Promise.resolve(track.closed),
+		Nano.fromMilli(Milli(2000)),
+		"the track never ended",
+	);
 
 	broadcast.close();
 	await serving;
@@ -2765,7 +2779,7 @@ async function runSessionDeath(
 	client.abort();
 	server.abort();
 	origin.close();
-	return [closed, await withTimeout(groupEnd, 2000, "the group never ended")];
+	return [closed, await withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended")];
 }
 
 for (const [name, protocol, version] of [
@@ -2817,7 +2831,11 @@ test("integration: lite draft-05 ends a track with the publisher's reset", async
 
 	const reset = StreamCode(70);
 	for (const producer of served) producer.close(new StreamError(reset));
-	const closed = await withTimeout(Promise.resolve(track.closed), 2000, "the track never ended");
+	const closed = await withTimeout(
+		Promise.resolve(track.closed),
+		Nano.fromMilli(Milli(2000)),
+		"the track never ended",
+	);
 	expect(closed).toBeInstanceOf(StreamError);
 	expect((closed as StreamError).code).toBe(reset);
 

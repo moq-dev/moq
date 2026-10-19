@@ -48,6 +48,36 @@ pub struct Frame {
 	pub payload: Bytes,
 }
 
+/// A frame with the relay metadata its group keeps beside it, read only by wire egress.
+#[cfg(feature = "async")]
+#[derive(Clone, Debug)]
+// private: passthrough
+pub(crate) struct Object {
+	pub frame: Frame,
+	pub fields: Option<Arc<super::object::Fields>>,
+}
+
+#[cfg(feature = "async")]
+impl std::ops::Deref for Object {
+	type Target = Frame;
+	fn deref(&self) -> &Self::Target {
+		&self.frame
+	}
+}
+
+/// A streamed frame's private header, alongside the unchanged public header.
+// private: passthrough
+pub(crate) struct Header {
+	pub info: Info,
+	pub fields: Option<Arc<super::object::Fields>>,
+}
+
+impl From<Info> for Header {
+	fn from(info: Info) -> Self {
+		Self { info, fields: None }
+	}
+}
+
 /// A reusable batch of frames, filled by [`group::Consumer::poll_read_frames`] and drained
 /// by [`group::Producer::write_frames`].
 ///
@@ -140,6 +170,7 @@ impl<const N: usize> Buffer<N> {
 /// bytes received. Each frame returns its share once it completes or aborts.
 #[derive(Clone)]
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
+// pending: /quest/m1/public-model/ingest.md
 pub(crate) struct Budget(Arc<AtomicUsize>);
 
 impl Budget {
@@ -148,13 +179,14 @@ impl Budget {
 	const DEFAULT: usize = 16 * 1024 * 1024;
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/ingest.md
 	pub(crate) fn new(bytes: usize) -> Self {
 		Self(Arc::new(AtomicUsize::new(bytes)))
 	}
 
 	/// Take `size` bytes of the budget, or `None` if that is more than remains.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn reserve(&self, size: usize) -> Option<Reservation> {
+	pub(super) fn reserve(&self, size: usize) -> Option<Reservation> {
 		self.0
 			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(size))
 			.ok()?;
@@ -173,7 +205,7 @@ impl Default for Budget {
 
 /// A frame's share of a [`Budget`], returned on drop.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
-pub(crate) struct Reservation {
+pub(super) struct Reservation {
 	budget: Budget,
 	size: usize,
 }
@@ -193,7 +225,7 @@ impl Drop for Reservation {
 /// guaranteed by the exclusive borrow of the parent group); `written` provides
 /// happens-before for cross-thread reads.
 #[derive(Clone)]
-pub(crate) struct FrameBuf(Arc<FrameBufInner>);
+pub(super) struct FrameBuf(Arc<FrameBufInner>);
 
 struct FrameBufInner {
 	size: usize,
@@ -271,13 +303,13 @@ impl FrameBuf {
 	///
 	/// The oversized-frame guard lives in [`group::Producer`], which rejects a declared
 	/// size larger than the group's byte budget before calling this.
-	pub(crate) fn new(size: usize) -> Self {
+	pub(super) fn new(size: usize) -> Self {
 		Self::with_growth(size, false)
 	}
 
 	/// A buffer for a frame of `size` bytes that allocates only as bytes arrive.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn growing(size: usize) -> Self {
+	pub(super) fn growing(size: usize) -> Self {
 		Self::with_growth(size, true)
 	}
 
@@ -291,11 +323,11 @@ impl FrameBuf {
 	}
 
 	/// The frame's declared size.
-	pub(crate) fn size(&self) -> usize {
+	pub(super) fn size(&self) -> usize {
 		self.0.size
 	}
 
-	pub(crate) fn written(&self, ord: Ordering) -> usize {
+	pub(super) fn written(&self, ord: Ordering) -> usize {
 		self.0.written.load(ord)
 	}
 
@@ -386,7 +418,7 @@ impl FrameBuf {
 
 	/// Heap bytes the buffer currently holds for the payload.
 	#[cfg(test)]
-	pub(crate) fn allocated(&self) -> usize {
+	pub(super) fn allocated(&self) -> usize {
 		match self.0.storage.get() {
 			Some(FrameStorage::Shared(bytes)) => bytes.len(),
 			Some(FrameStorage::Fixed(segment)) => segment.capacity,
@@ -498,7 +530,7 @@ impl std::ops::Deref for Producer<'_> {
 }
 
 impl<'a> Producer<'a> {
-	pub(crate) fn new(group: &'a mut group::Producer, buf: FrameBuf, info: Info) -> Self {
+	pub(super) fn new(group: &'a mut group::Producer, buf: FrameBuf, info: Info) -> Self {
 		Self(Raw {
 			group,
 			buf,
@@ -509,7 +541,7 @@ impl<'a> Producer<'a> {
 	}
 
 	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
-	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
+	pub(super) fn with_meter(mut self, meter: stats::Meter) -> Self {
 		self.0.stats = meter;
 		self
 	}
@@ -555,6 +587,7 @@ impl<'a> Producer<'a> {
 ///
 /// Holds the frame's share of the session's [`Budget`], if it got one, until then.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
+// pending: /quest/m1/public-model/ingest.md
 pub(crate) struct ProducerOwned {
 	raw: Raw<group::Producer>,
 	_reserved: Option<Reservation>,
@@ -570,7 +603,7 @@ impl std::ops::Deref for ProducerOwned {
 
 impl ProducerOwned {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Reservation>) -> Self {
+	pub(super) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Reservation>) -> Self {
 		Self {
 			raw: Raw {
 				group,
@@ -585,7 +618,7 @@ impl ProducerOwned {
 
 	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
+	pub(super) fn with_meter(mut self, meter: stats::Meter) -> Self {
 		self.raw.stats = meter;
 		self
 	}
@@ -605,12 +638,14 @@ impl ProducerOwned {
 	///
 	/// `coding::Reader::poll_read_frame` owns the pairing and is the only caller.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: tuning
 	pub(crate) fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		self.raw.write(chunk)
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: tuning
 	pub(crate) fn notify(&self) {
 		self.raw.group.frame_notify();
 	}
@@ -629,7 +664,7 @@ impl ProducerOwned {
 
 	/// Heap bytes the frame's buffer currently holds for the payload.
 	#[cfg(test)]
-	pub(crate) fn allocated(&self) -> usize {
+	pub(super) fn allocated(&self) -> usize {
 		self.raw.buf.allocated()
 	}
 }
@@ -637,14 +672,14 @@ impl ProducerOwned {
 /// The source of a [`Consumer`]'s payload: a finished frame (whole) or the in-flight
 /// tail (streamed).
 #[derive(Clone)]
-pub(crate) enum Source {
+pub(super) enum Source {
 	Complete(Bytes),
 	Partial(FrameBuf),
 }
 
 /// Subscriber expiry state carried across the group-to-frame handoff.
 #[derive(Clone)]
-pub(crate) struct Expiry {
+pub(super) struct Expiry {
 	policy: Arc<dyn group::Expiry>,
 	stale_stats: stats::Meter,
 	stale_counted: Arc<AtomicBool>,
@@ -653,7 +688,7 @@ pub(crate) struct Expiry {
 }
 
 impl Expiry {
-	pub(crate) fn new(
+	pub(super) fn new(
 		policy: Arc<dyn group::Expiry>,
 		stale_stats: stats::Meter,
 		stale_counted: Arc<AtomicBool>,
@@ -667,7 +702,7 @@ impl Expiry {
 		}
 	}
 
-	pub(crate) fn for_frame(mut self, tail: Range<usize>, count_payload: bool) -> Self {
+	pub(super) fn for_frame(mut self, tail: Range<usize>, count_payload: bool) -> Self {
 		self.tail = tail;
 		self.count_payload = count_payload;
 		self
@@ -684,6 +719,9 @@ pub struct Consumer {
 	// The group's channel, used to park while a partial frame fills.
 	state: kio::Consumer<GroupState>,
 	info: Info,
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) fields: Option<Arc<super::object::Fields>>,
 	source: Source,
 	// Byte offset consumed so far.
 	read_idx: usize,
@@ -707,10 +745,12 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
-	pub(crate) fn new(state: kio::Consumer<GroupState>, info: Info, source: Source) -> Self {
+	pub(super) fn new(state: kio::Consumer<GroupState>, header: impl Into<Header>, source: Source) -> Self {
+		let header = header.into();
 		Self {
 			state,
-			info,
+			info: header.info,
+			fields: header.fields,
 			source,
 			read_idx: 0,
 			stats: stats::Meter::default(),
@@ -721,7 +761,7 @@ impl Consumer {
 	}
 
 	/// Carry this frame across a front's route changes; see [`super::resume`].
-	pub(crate) fn with_recover(mut self, recover: super::resume::Recover, index: u64) -> Self {
+	pub(super) fn with_recover(mut self, recover: super::resume::Recover, index: u64) -> Self {
 		self.recover = Some(Box::new((recover, index)));
 		self
 	}
@@ -739,6 +779,10 @@ impl Consumer {
 			if self.expired {
 				return res;
 			}
+			// Read to its end: no route is needed for it any more.
+			if matches!(res, Poll::Ready(Ok(_))) && self.read_idx >= self.size() {
+				self.recover = None;
+			}
 			let Some(recover) = self.recover.as_mut() else {
 				return res;
 			};
@@ -750,6 +794,9 @@ impl Consumer {
 			let (recover, index) = &mut **recover;
 			if !recover.wants(failed.as_ref(), waiter) {
 				return res;
+			}
+			if self.state.read().sparse() {
+				return Poll::Ready(Err(Error::Unsupported));
 			}
 			let mut replacement = match recover.poll(*index, failed.as_ref(), waiter) {
 				Poll::Ready(Ok(group)) => group,
@@ -772,6 +819,11 @@ impl Consumer {
 					};
 				}
 			};
+			// This copy was dense through its frame, so the replacement's must be the same
+			// Object ID: a copy that begins past a gap holds different content there.
+			if frame.fields.as_ref().is_some_and(|fields| fields.id != *index) {
+				return Poll::Ready(Err(Error::Unsupported));
+			}
 			// Same name, same content: a different size is the routes disagreeing.
 			if frame.info.size != self.info.size {
 				return Poll::Ready(Err(Error::ProtocolViolation));
@@ -784,12 +836,12 @@ impl Consumer {
 
 	/// Attach an egress meter so read-out chunks bump `bytes`. Used only for frames
 	/// read directly from the group (whose bytes weren't counted at a batch fill).
-	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
+	pub(super) fn with_meter(mut self, meter: stats::Meter) -> Self {
 		self.stats = meter;
 		self
 	}
 
-	pub(crate) fn with_expiry(mut self, expiry: Expiry) -> Self {
+	pub(super) fn with_expiry(mut self, expiry: Expiry) -> Self {
 		self.expiry = Some(expiry);
 		self
 	}

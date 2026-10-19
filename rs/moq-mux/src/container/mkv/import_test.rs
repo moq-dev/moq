@@ -189,6 +189,59 @@ fn run(data: &[u8]) -> crate::catalog::hang::Catalog {
 }
 
 #[test]
+fn codec_private_resolves_display_aspect() {
+	use crate::codec::{h264, h265};
+	use bytes::Bytes;
+	for (avc, hevc, expected) in [
+		(h264::fixtures::SPS_IPB, h265::fixtures::SPS_NVENC, (None, None)),
+		(
+			h264::fixtures::SPS_ANAMORPHIC,
+			h265::fixtures::SPS_ANAMORPHIC,
+			(Some(16), Some(9)),
+		),
+	] {
+		let avcc = h264::build_avcc(&[Bytes::from_static(avc)], &[Bytes::from_static(h264::fixtures::PPS)]).unwrap();
+		let hvcc = h265::build_hvcc(
+			&[Bytes::from_static(h265::fixtures::VPS)],
+			&[Bytes::from_static(hevc)],
+			&[Bytes::from_static(h265::fixtures::PPS)],
+		)
+		.unwrap();
+		for (codec_id, private) in [("V_MPEG4/ISO/AVC", avcc), ("V_MPEGH/ISO/HEVC", hvcc)] {
+			let (width, height) = match expected {
+				(None, None) if codec_id == "V_MPEG4/ISO/AVC" => (64, 64),
+				(None, None) => (1280, 720),
+				_ => (1440, 1080),
+			};
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(vec![
+					MatroskaSpec::TrackNumber(1),
+					MatroskaSpec::TrackUID(1),
+					MatroskaSpec::TrackType(1),
+					MatroskaSpec::CodecID(codec_id.into()),
+					MatroskaSpec::CodecPrivate(private.to_vec()),
+					MatroskaSpec::Video(Master::Full(vec![
+						MatroskaSpec::PixelWidth(width),
+						MatroskaSpec::PixelHeight(height),
+					])),
+				]))])
+				.segment_end()
+				.build();
+			let catalog = run(&data);
+			let config = catalog.video.renditions.values().next().unwrap();
+			assert_eq!(
+				(config.display_aspect_width, config.display_aspect_height),
+				expected,
+				"{codec_id}"
+			);
+		}
+	}
+}
+
+#[test]
 fn test_flac_catalog() {
 	let data = MkvBuilder::new()
 		.header("webm")
@@ -308,19 +361,29 @@ fn test_vp9_opus_catalog() {
 #[test]
 fn test_opus_catalog_rate_is_decoder_rate() {
 	// A 44.1 kHz input rate is informational; the catalog still reports the decoder's 48 kHz.
-	let data = MkvBuilder::new()
-		.header("webm")
-		.segment_start()
-		.info(1_000_000)
-		.tracks(vec![track_entry_audio_opus(1, 44100.0, 2)])
-		.cluster(0, || vec![simple_block(1, 0, true, b"opus")])
-		.segment_end()
-		.build();
+	for header in [true, false] {
+		let MatroskaSpec::TrackEntry(Master::Full(mut fields)) = track_entry_audio_opus(1, 44100.0, 2) else {
+			unreachable!()
+		};
+		if !header {
+			fields.retain(|field| !matches!(field, MatroskaSpec::CodecPrivate(_)));
+		}
+		let data = MkvBuilder::new()
+			.header("webm")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(fields))])
+			.cluster(0, || vec![simple_block(1, 0, true, b"opus")])
+			.segment_end()
+			.build();
 
-	let catalog = run(&data);
-	let a = catalog.audio.renditions.values().next().unwrap();
-	assert_eq!(a.sample_rate, 48000);
-	assert_eq!(a.channel_count, 2);
+		let catalog = run(&data);
+		let a = catalog.audio.renditions.values().next().unwrap();
+		assert_eq!(a.sample_rate, 48000);
+		assert_eq!(a.channel_count, 2);
+		assert_eq!(a.description.is_some(), header);
+		assert_eq!(a.warmup, Some(std::time::Duration::from_millis(80)));
+	}
 }
 
 #[test]
@@ -1095,4 +1158,82 @@ fn subtitle_codec_state_is_refused() {
 		matches!(result, Err(crate::Error::Mkv(super::Error::InvalidSubtitle(_)))),
 		"{result:?}"
 	);
+}
+
+/// The SPS outranks the Colour element, which still fills what the SPS leaves unsaid: here the
+/// static HDR metadata.
+#[test]
+fn sps_color_outranks_colour_which_fills_its_gaps() {
+	use crate::codec::h264::fixtures::{PPS, SPS_BT709};
+
+	let hdr = crate::codec::color::test::hdr10();
+	let mut container = crate::codec::color::cicp(9, 16, 9, Some(true)).unwrap();
+	container.mastering = hdr.mastering;
+	container.content_light = hdr.content_light;
+	let colour = super::export::matroska_colour(&container).unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(
+		&[bytes::Bytes::from_static(SPS_BT709)],
+		&[bytes::Bytes::from_static(PPS)],
+	)
+	.unwrap();
+	let entry = MatroskaSpec::TrackEntry(Master::Full(vec![
+		MatroskaSpec::TrackNumber(1),
+		MatroskaSpec::TrackUID(1),
+		MatroskaSpec::TrackType(1),
+		MatroskaSpec::CodecID("V_MPEG4/ISO/AVC".to_string()),
+		MatroskaSpec::CodecPrivate(avcc.to_vec()),
+		MatroskaSpec::Video(Master::Full(vec![
+			MatroskaSpec::PixelWidth(64),
+			MatroskaSpec::PixelHeight(64),
+			colour,
+		])),
+	]));
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![entry])
+		.segment_end()
+		.build();
+
+	let catalog = run(&data);
+	let color = catalog.video.renditions.values().next().unwrap().color.clone().unwrap();
+	assert_eq!(
+		(color.primaries, color.transfer, color.matrix, color.range),
+		(Some(1), Some(1), Some(1), Some(hang::catalog::Range::Limited))
+	);
+	assert_eq!(
+		(color.mastering, color.content_light),
+		(hdr.mastering, hdr.content_light)
+	);
+}
+
+/// Every catalog colour field survives a Matroska Colour element.
+#[test]
+fn colour_element_round_trips() {
+	let hdr = crate::codec::color::test::hdr10();
+	let mut color = crate::codec::color::cicp(9, 18, 9, Some(true)).unwrap();
+	color.mastering = hdr.mastering;
+	color.content_light = hdr.content_light;
+	let MatroskaSpec::Colour(Master::Full(children)) = super::export::matroska_colour(&color).unwrap() else {
+		panic!("expected a full Colour element");
+	};
+	assert_eq!(super::import::matroska_color(&children).unwrap(), Some(color));
+	assert_eq!(super::export::matroska_colour(&hang::catalog::Color::default()), None);
+}
+
+/// A Colour value with no catalog representation is refused rather than clamped or dropped.
+#[test]
+fn unrepresentable_colour_is_refused() {
+	for child in [
+		MatroskaSpec::MaxCLL(70_000),
+		MatroskaSpec::MaxFALL(65_536),
+		MatroskaSpec::Primaries(300),
+		MatroskaSpec::MasteringMetadata(Master::Full(vec![MatroskaSpec::LuminanceMax(f64::NAN)])),
+		MatroskaSpec::MasteringMetadata(Master::Full(vec![MatroskaSpec::LuminanceMin(-1.0)])),
+		MatroskaSpec::MasteringMetadata(Master::Full(vec![MatroskaSpec::PrimaryRChromaticityX(1.5)])),
+	] {
+		assert!(super::import::matroska_color(&[child]).is_err());
+	}
 }

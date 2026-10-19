@@ -10,6 +10,7 @@ import {
 	MissedTickBehavior,
 	Nano,
 	now,
+	origin,
 	Second,
 	sleep,
 	sleepUntil,
@@ -60,6 +61,7 @@ test("manual reads and wall corrections share a clock without inventing elapsed 
 	clock.advance(ns(Milli(1)));
 	expect<number>(clock.now()).toBe(6_000_000);
 	expect<number>(clock.wall()).toBe(Manual.WALL_START + 1001);
+	expect<number>(origin()).toBe(Manual.WALL_START + 1000 - 5);
 });
 
 test("many small advances move wall time by their combined duration", () => {
@@ -121,11 +123,11 @@ test("a sleep stays on its creation clock and abort releases it", async () => {
 	await first.advanceAsync(Nano(10));
 	await pending;
 	const abort = new AbortController();
-	const cancelled = sleep(Nano(100), abort.signal).catch((error: unknown) => error);
+	const cancelled = sleep(Nano(100), { signal: abort.signal }).catch((error: unknown) => error);
 	abort.abort();
 	expect(await cancelled).toHaveProperty("name", "AbortError");
 	await second.advanceAsync(Nano(100));
-	await expect(sleep(Nano.zero, abort.signal)).rejects.toHaveProperty("name", "AbortError");
+	await expect(sleep(Nano.zero, { signal: abort.signal })).rejects.toHaveProperty("name", "AbortError");
 });
 
 test("timeouts prefer ready work, propagate rejection, and expire on the manual deadline", async () => {
@@ -188,6 +190,19 @@ test("an interval cancels pending ticks, refuses concurrent ticks and stays clos
 	await expect(ticks.tick()).rejects.toHaveProperty("name", "AbortError");
 });
 
+test("the host clock counts from the performance time origin", () => {
+	const host = performance;
+	const before = host.now();
+	const at = Nano.toMilli(Instant.durationSince(now(), Instant.zero));
+	expect(at).toBeGreaterThanOrEqual(before);
+	expect(at).toBeLessThanOrEqual(host.now());
+	expect<number>(origin()).toBe(host.timeOrigin);
+});
+
+test("an unreferenced sleep still completes on the host", async () => {
+	await sleep(Nano.fromMilli(Milli(1)), { ref: false });
+});
+
 test("manual installation leaves the host's own timers real", async () => {
 	manual();
 	await hostTimeout(0);
@@ -204,7 +219,7 @@ test("many cancelled and live timers retain deadline and arming order", async ()
 		aborts.push(abort);
 		const at = 1 + ((index * 73) % 17);
 		if (index % 3 !== 0) expected.push({ at, index });
-		return sleepUntil(Instant(at), abort.signal).then(
+		return sleepUntil(Instant(at), { signal: abort.signal }).then(
 			() => {
 				fired.push(index);
 			},

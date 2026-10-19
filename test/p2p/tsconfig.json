@@ -1,0 +1,5 @@
+{
+	"extends": "../../js/tsconfig.json",
+	"compilerOptions": { "types": ["bun", "vite/client"], "noEmit": true },
+	"include": ["transport.browser.ts", "src"]
+}

@@ -28,10 +28,12 @@ const KINDS: RequestKind[] = [
 const CONDITIONS: RequestCondition[] = [
 	"internal",
 	"unauthorized",
+	"expired",
 	"timeout",
 	"not_supported",
 	"does_not_exist",
 	"invalid_range",
+	"invalid_filter",
 	"invalid_joining_request_id",
 	"uninterested",
 	"malformed_track",
@@ -213,4 +215,13 @@ test("stream reset codes are shared only where the draft agrees", () => {
 	expect(sharedStreamCode(StreamCode.TooFarBehind, Version.DRAFT_17)).toBe(true);
 	expect(sharedStreamCode(StreamCode.MalformedTrack, Version.DRAFT_15)).toBe(false);
 	expect(sharedStreamCode(StreamCode.MalformedTrack, Version.DRAFT_16)).toBe(true);
+});
+
+test("INVALID_FILTER is registered from draft 19", () => {
+	for (const version of ALL) {
+		expect(toRequestCode("invalid_filter", "subscribe", version)).toBe(version >= Version.DRAFT_19 ? 0x36 : 0);
+		expect(fromRequestCode(0x36, "fetch", version)).toBe(
+			version >= Version.DRAFT_19 ? "invalid_filter" : undefined,
+		);
+	}
 });

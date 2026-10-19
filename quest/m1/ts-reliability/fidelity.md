@@ -24,8 +24,8 @@ Audit findings to reproduce and scope:
   identity together. A name must never identify different content after a
   restart or PID reuse.
 - MPEG-1/2 video is handled as a clock stream and its payload discarded.
-  Unknown stream-type bytes can import as opaque but fail export's closed
-  enum conversion. A known stream type is not proof of supported carriage.
+  Unknown stream-type bytes survive opaque carriage and export. A known
+  stream type is not proof of supported carriage.
 - SI ingest recognizes fixed DVB PIDs. ATSC PSIP, CAT/conditional access,
   dynamically signalled tables, descriptors and private sections need
   explicit profile decisions. Packet passthrough can retain mechanisms the
@@ -33,8 +33,9 @@ Audit findings to reproduce and scope:
 - Section export requires video, leaving audio-only programs with sections
   unsupported. Keep opaque SCTE-35 fidelity separate from the later typed
   browser cue API; basic carriage should not depend on that API existing.
-- Private PES loses optional header semantics today; its timing/header
-  contract belongs to the existing planning quest linked below.
+- Private PES loses optional header semantics today; the
+  [whole-PES quests](/quest/m1/ts-reliability/pes-import.md) carry it
+  byte-exact.
 
 The maintainer decides whether a supported profile handles live PMT changes
 in place with fresh track identities, replaces the broadcast, or initially
@@ -51,6 +52,6 @@ section/PES bytes only where the settled contract actually promises that.
 
 ## Related
 
-- [PES timing and headers](/quest/m1/plan-ts-pes-untimed.md) - separate placement, decode and presentation semantics
+- [Whole-PES import](/quest/m1/ts-reliability/pes-import.md) - private PES keeps its header bytes and source placement
 - [Automated validation](/test/ts/README.md) - profile declarations link to executable evidence
 - [Typed SCTE-35](/quest/m3/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - application cue APIs follow basic opaque carriage

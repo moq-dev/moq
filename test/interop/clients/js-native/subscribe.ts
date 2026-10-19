@@ -13,6 +13,7 @@
  * @module
  */
 import { parseArgs } from "node:util";
+import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
@@ -28,7 +29,7 @@ install();
 // subscribers. A relay drops a superseded group (RESET_STREAM Old) rather than
 // finish sending it, e.g. a cached group a fresh one lands right behind, so a
 // subscriber has to move on to the next group instead of failing.
-const MAX_DELAY = Moq.Time.Milli(1000);
+const MAX_DELAY = Milli(1000);
 
 const { positionals, values } = parseArgs({
 	allowPositionals: true,

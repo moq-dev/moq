@@ -18,16 +18,17 @@ media, and request-accept children, and the remaining children PR straight to
   hand-porting concurrent moq-ffi changes onto a separate line branch.
 - The bindings still break once per release, not once per merge: binding
   releases (moq-ffi and the Python, Go, Swift, Kotlin, Dart, and C++
-  packages) wait until [Codecs](/quest/m1/ffi-shape/codec.md) merges
+  packages) wait until the codec namespace reshape merges
   (confirmed as a hard release gate in the 2026-10-10 audit), joining the
   named error fields and the broadcast-epoch renames (`connects()`,
   `reanchor()`) already on `main`. Codecs ranks first below for that reason.
   Dart is published (`moq` 0.1.0, `moq_ffi` 0.4.x), so
   its renames get the same upgrade notes as the others.
-- The C++ package (#4079) landed first, so #4519 ported `cpp/moq` (including
-  the hand-kept `moq::` aliases `just cpp check` audits), `cpp/obs`, and the
-  C++ interop client. C++ stays a flat `moq::` namespace with `Media*` type
-  names until [unprefixed names](/quest/m1/cpp-generated-shape.md) lands.
+- The C++ package (#4079) landed first, so #4519 ported `cpp/moq`, `cpp/obs`,
+  and the C++ interop client. C++ is one flat `moq::` namespace of the
+  generated types, with moq-ffi's `Moq` prefix stripped (`moq::MediaTrackConsumer`):
+  uniffi-bindgen-cpp renders one namespace per crate, so a `media::` namespace
+  would need the generator to map a name prefix to a namespace.
 
 Settled shape:
 
@@ -36,7 +37,8 @@ Settled shape:
   binding never sees that split (catalog, import producers, container
   consumers); `json`, `flate`, `audio`, and `video` own their producers and
   consumers. `flate` holds the opaque snapshot and stream tracks, named after
-  the `moq-flate` crate.
+  the `moq-flate` crate, until
+  [One compressed track per name](/quest/m1/compress/migrate.md) deletes it.
 - A layer reuses the net noun it decodes, and its namespace tells them apart:
   `media.TrackConsumer` and `media.GroupConsumer` read what
   `media.TrackProducer` writes, a level above the raw `TrackConsumer` and
@@ -51,7 +53,7 @@ Settled shape:
   `video.Producer(broadcast, catalog, config)` for Rust's
   `encode::Producer`, and the codec-only `video.Encoder(config)` for
   `encode::Encoder` (decided 2026-10-06, see
-  [Codecs](/quest/m1/ffi-shape/codec.md)).
+  the codec namespace reshape).
 - UniFFI 0.32 allows one namespace per crate, so moq-ffi groups by type and
   the wrappers supply real namespaces in each language's idiom: Python
   submodules, Go subpackages (`moq.dev/moq/json`, aliased on import next to
@@ -81,11 +83,9 @@ Settled shape:
 
 Each child reshapes one group end to end: moq-ffi, all five wrappers, the
 C++ package and `cpp/obs`, the `doc/lib` samples per the cross-package table,
-and its entries in the Unreleased section of `doc/setup/upgrade.md`. Each
+and its entries under `## Unreleased` in each affected package's `MIGRATE.md`. Each
 runs `just test interop --all`.
 
 ## Required
 
-- [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video producers, codec-only encoders, and decoders move under their own namespaces, named as in Rust; binding releases wait for it
 - [Stream importer name](/quest/m1/ffi-shape/stream-producer-name.md) - the maintainer settles `media.ContainerStreamProducer`'s name before the binding release
-- [Layers guide](/quest/m1/ffi-shape/layers-guide.md) - a `doc/lib` page maps each Rust layer to every binding's module, once Codecs adds `audio` and `video`

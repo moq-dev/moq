@@ -121,11 +121,12 @@ async fn replay<S: ObjectStore>(
 ) -> Result<Resume> {
 	// Every object opens with a checkpoint. The newest one's offset bounds what is still retained,
 	// so walk back until a checkpoint restates from there. The writer prunes by the same rule.
+	let timed = store.get_info(timeline).await?.timescale.is_some();
 	let mut objects = VecDeque::new();
 	let mut checkpoints = VecDeque::new();
 	let mut needed = None;
 	for segment in segments.rev() {
-		let object = store.get_segments(timeline, segment).await?;
+		let object = store.get_segments(timeline, segment, timed).await?;
 		let (offset, start) = checkpoint(&object)?;
 		let needed = *needed.get_or_insert(offset);
 		objects.push_front(object);

@@ -3,6 +3,7 @@
  *
  * @module
  */
+import { Instant, now } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { FrameTooLarge, GroupTooLarge, ProtocolViolation, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { hooks, type ReadGroupFrame } from "./internal.ts";
@@ -68,10 +69,15 @@ class GroupState {
 	timestamp?: Timestamp;
 	// The newest frame's timestamp: where a reader that has taken every frame sits.
 	latest?: Timestamp;
-	// When the group joined the track this mirror belongs to, at this hop, in
-	// `performance.now()` milliseconds: the wall clock a superseded predecessor ages from.
-	// Per track, since one group can join several.
-	arrived = 0;
+	// Accepted below the track's eviction watermark, where nothing proves where it starts,
+	// so this mirror drives no media-time expiry.
+	unverified = false;
+	// When the group joined the track this mirror belongs to, at this hop: the wall clock a
+	// superseded predecessor ages from. Per track, since one group can join several.
+	arrived = Instant.zero;
+	// Called with the frame count on every write, synchronously: a track's largest must not
+	// trail a write that already returned, as a batched `total` notification would.
+	progress = new Set<(total: number) => void>();
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
@@ -94,6 +100,7 @@ function appendFrame(state: GroupState, frame: Frame) {
 	});
 
 	state.total.update((total) => total + 1);
+	for (const fn of state.progress) fn(state.total.peek());
 }
 
 let makeDemand: (sequence: number, used: Getter<boolean>, state: GroupState) => Demand;
@@ -157,7 +164,11 @@ export class Producer {
 
 	// When the group was created or last written. Retention ages a group from this,
 	// not from its creation, so a group still being filled is never reclaimed.
-	#activity = performance.now();
+	#activity = now();
+
+	// The tracks this group joined before its first frame, each checking that frame's
+	// timestamp against its neighbors' starts.
+	#admits?: ((start: Timestamp) => () => void)[];
 
 	constructor(sequence: number) {
 		this.#state = new GroupState(sequence);
@@ -166,6 +177,12 @@ export class Producer {
 	}
 
 	static {
+		hooks.groupProgress = (group, fn) => {
+			const state = group.#state;
+			fn(state.total.peek());
+			state.progress.add(fn);
+			return () => state.progress.delete(fn);
+		};
 		hooks.bindGroupTimed = (group, timed) => {
 			const state = group.#state;
 			if (state.timed === timed) return;
@@ -174,6 +191,11 @@ export class Producer {
 			for (const frame of state.frames.peek()) checkTimed(timed, frame);
 			state.timed = timed;
 		};
+		hooks.admitGroupStart = (group, admit) => {
+			group.#admits ??= [];
+			group.#admits.push(admit);
+		};
+		hooks.groupStart = (group) => (group.#state.total.peek() > 0 ? group.#state.timestamp : undefined);
 		hooks.limitGroup = (group, frames) => {
 			// A closed group takes no more frames, but one already past the cap still
 			// contradicts the end.
@@ -185,11 +207,11 @@ export class Producer {
 	}
 
 	/**
-	 * When the group was created or last written, in `performance.now()` milliseconds.
+	 * When the group was created or last written, on the installed clock.
 	 *
 	 * @internal Idle cache eviction only.
 	 */
-	get activity(): number {
+	get activity(): Instant {
 		return this.#activity;
 	}
 
@@ -206,6 +228,7 @@ export class Producer {
 		return makeConsumer(this.#state);
 	}
 
+	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * Create an independent read handle that receives every frame written here.
 	 *
@@ -265,6 +288,13 @@ export class Producer {
 		if (this.#limit !== undefined && this.#state.total.peek() >= this.#limit) {
 			throw new Error(`frame ${this.#state.total.peek()} is past the track's end`);
 		}
+		// Frame 0 must fit between its neighbors in every track it joined, checked before
+		// any of them records it, so a refusal leaves the group and its tracks as they were.
+		let commits: (() => void)[] | undefined;
+		if (this.#admits && frame.timestamp !== undefined && this.#state.total.peek() === 0) {
+			const start = frame.timestamp;
+			commits = this.#admits.map((admit) => admit(start));
+		}
 		if (
 			this.#state.total.peek() >= MAX_GROUP_FRAMES ||
 			this.#state.cacheBytes + frame.payload.byteLength > MAX_GROUP_CACHE_BYTES
@@ -282,8 +312,12 @@ export class Producer {
 			throw err;
 		}
 
-		this.#activity = performance.now();
+		this.#activity = now();
 		appendFrame(this.#state, frame);
+		if (commits) {
+			this.#admits = undefined;
+			for (const commit of commits) commit();
+		}
 
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
@@ -430,8 +464,11 @@ export class Consumer {
 
 	static {
 		makeConsumer = (state) => new Consumer(state);
-		hooks.groupTimestamp = (group) => group.#state.timestamp;
-		hooks.groupLatest = (group) => group.#state.latest;
+		hooks.groupTimestamp = (group) => (group.#state.unverified ? undefined : group.#state.timestamp);
+		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
+		hooks.unverifyGroup = (group) => {
+			group.#state.unverified = true;
+		};
 		hooks.groupArrived = (group) => group.#state.arrived;
 		hooks.arriveGroup = (group, at) => {
 			group.#state.arrived = at;
@@ -439,6 +476,7 @@ export class Consumer {
 		hooks.expireGroup = (group, expiry) => {
 			group.#expiry = expiry;
 		};
+		hooks.groupExpired = (group) => group.#ended;
 		hooks.guardGroup = (group, operation) => group.#guard(operation);
 		hooks.readGroupFrame = (group, from) => group.#readFramePosition(true, from);
 		hooks.evictGroup = (group) => {

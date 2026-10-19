@@ -7,6 +7,14 @@
 
 use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
 
+mod cell;
+pub(crate) use cell::SendCell;
+
+/// Prove a future's native Send bound here rather than inside every caller's future.
+pub(crate) fn sendable<F: Future + kio::MaybeSend>(future: F) -> impl Future<Output = F::Output> + kio::MaybeSend {
+	future
+}
+
 #[cfg(not(target_family = "wasm"))]
 pub(crate) type MaybeSendBox<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(target_family = "wasm")]
@@ -46,11 +54,15 @@ fn future_task(mut task: MaybeSendBox<'static, ()>) -> MaybeSendTask {
 /// The building block for racing "watchdog" futures whose clean completion should
 /// not end the race (only their failure should).
 #[cfg(feature = "async")]
-pub(crate) async fn err_only<E>(fut: impl Future<Output = Result<(), E>>) -> E {
-	match fut.await {
-		Err(err) => err,
-		Ok(()) => std::future::pending().await,
-	}
+pub(crate) fn err_only<E>(
+	fut: impl Future<Output = Result<(), E>> + kio::MaybeSend,
+) -> impl Future<Output = E> + kio::MaybeSend {
+	sendable(async move {
+		if let Err(err) = fut.await {
+			return err;
+		}
+		std::future::pending().await
+	})
 }
 
 /// Cloneable handle for submitting futures to a driver-owned [`TaskSet`].

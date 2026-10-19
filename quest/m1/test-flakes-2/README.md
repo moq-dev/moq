@@ -3,9 +3,9 @@
 ## Goal
 
 A second round after [#4286](https://github.com/moq-dev/moq/pull/4286):
-tests that pass alone but have failed under a loaded `just check` pass
-reliably, each fixed at its cause, never by raising a timeout or adding a
-retry.
+tests that pass alone but have failed under a loaded `just check`, or
+intermittently in CI or interop, pass reliably, each fixed at its cause,
+never by raising a timeout or adding a retry.
 
 ## Plan
 
@@ -23,6 +23,9 @@ Rules every child keeps:
   timer before a real socket delivers. Where real sockets fight the paused
   clock, make the timers mockable or move the test off real sockets.
 
+Added 2026-10-15 (maintainer): three flakes seen while landing that day's
+merge batch, ranked by how likely each hides a product bug.
+
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did. moq-tokio's
 `a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
@@ -32,15 +35,14 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [TS decoded content](/quest/m1/test-flakes-2/ts-video-content.md) - CI's TS compliance decoded-content checks fail only on real loss, and the exporter names every frame it drops
-- [WebTransport close release](/quest/m1/test-flakes-2/interop-close-release.md) - a compatible published adapter contains the acknowledged-close fix
-- [Interop close code](/quest/m1/test-flakes-2/interop-close-code.md) - adopt that release so the browser reliably sees `unauthorized` for a refused session
-- [Handshake ACK](/quest/m1/test-flakes-2/handshake-ack.md) - the impaired cluster drill's connect survives a lost handshake ACK
+- [TS MP2 join hole](/quest/m1/test-flakes-2/ts-mp2-join-hole.md) - the TS export skips no MPEG-1 audio group right after its live join, fixed at the cause
 - [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
-- [uring teardown close](/quest/m1/test-flakes-2/uring-teardown-close.md) - moq-uring's published-close teardown test holds under load, fixed at its cause
-- [Auth serve signals](/quest/m1/test-flakes-2/auth-serve-signals.md) - moq-cli's auth serve signal tests hold under load
-- [Export exit tests](/quest/m1/test-flakes-2/export-failure-exit.md) - moq-cli's failed-export and interrupted-publisher exit tests hold under load
-- [FFI shutdown](/quest/m1/test-flakes-2/ffi-shutdown.md) - moq-ffi's graceful shutdown tests hold under load
+- [Relay burst drill](/quest/m1/test-flakes-2/relay-burst-impaired.md) - the impaired transport-peer burst drill never aborts its subscription while the link is up
+- [BBR marking seed](/quest/m1/test-flakes-2/bbr-marking-seed.md) - the BBR marking test seeds its probe schedule, replays a failing seed, and its rare drop is fixed at the cause
+- [gst redial port](/quest/m1/test-flakes-2/gst-redial-port.md) - the moq-gst redial tests never lose their relay's port to `AddrInUse`
+- [js/net local close](/quest/m1/test-flakes-2/js-local-close.md) - the draft-17 locally closed track test holds under load
+- [WASM refused track](/quest/m1/test-flakes-2/wasm-refused-track.md) - the refused-track case passes and fails on its refusal, not a timeout
+- [Drill shaper failure](/quest/m1/test-flakes-2/drill-shaper-failure.md) - a drill whose shaper stopped says so directly
 
 ## Related
 

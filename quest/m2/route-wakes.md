@@ -67,8 +67,8 @@ Decisions:
   (2026-09-30)
 
 Decided 2026-10-13: coordinate the index with the per-origin route model and
-per-track active/standby selection. Routing contracts settles identity and
-filtered candidate views first. Do not build a second route table per track or
+per-track active/standby selection. Routes and announces records identity
+and the filtered candidate views. Do not build a second route table per track or
 turn one origin metric update into per-broadcast mutations. Whichever
 implementation lands first preserves these operation-count tests for the next.
 
@@ -80,11 +80,7 @@ served root is withdrawn.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [Routing contracts](/quest/m1/cluster-routing/contracts.md) - the identity and selection views the index serves
-
 ## Related
 
-- [Front deadlines](/quest/m2/front-deadline-index.md) - each spurious wake also pays that per-track poll and deadline scan
+- [Routes and announces](/quest/m1/cluster-routing/routes.md) - the identity and selection views the index serves
 - [Front parking](/quest/m2/origin-front-parks.md) - replaces the `routed_broadcast` watch loop this wakes

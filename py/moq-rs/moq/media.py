@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, cast
 
@@ -22,10 +22,8 @@ from moq_ffi import (
     MoqContainerFormat as ContainerFormat,
 )
 from moq_ffi import (
-    MoqContainerInit as ContainerInit,
-)
-from moq_ffi import MoqDimensions as Dimensions
-from moq_ffi import (
+    MoqContainerInit,
+    MoqContainerStreamInit,
     MoqError,
     MoqMediaCatalogConsumer,
     MoqMediaCatalogProducer,
@@ -35,11 +33,14 @@ from moq_ffi import (
     MoqMediaGroupConfig,
     MoqMediaGroupConsumer,
     MoqMediaTarget,
+    MoqMediaTimebase,
     MoqMediaTrackConfig,
     MoqMediaTrackConsumer,
     MoqMediaTrackProducer,
     MoqMediaTrackStreamProducer,
+    MoqRendition,
 )
+from moq_ffi import MoqDimensions as Dimensions
 from moq_ffi import MoqVideo as Video
 from moq_ffi import MoqVideoFormat as VideoFormat
 from moq_ffi import MoqVideoHint as VideoHint
@@ -55,6 +56,38 @@ from ._records import Frame, Subscription, _from_us, _subscription, _to_us
 from .publish import BroadcastProducer, TrackDemand, TrackRequest
 from .subscribe import BroadcastConsumer
 from .types import FetchGroupOptions
+
+
+class Timebase:
+    """Share one source's timestamp offset without keeping its broadcast open."""
+
+    def __init__(self, broadcast: BroadcastProducer) -> None:
+        self._inner = MoqMediaTimebase(broadcast._inner)
+
+
+@dataclass(frozen=True)
+class ContainerInit:
+    """A container format, its leading bytes, and an optional shared source timebase."""
+
+    format: ContainerFormat
+    data: bytes
+    timebase: Timebase | None = field(default=None, kw_only=True)
+
+    def _ffi(self) -> MoqContainerInit:
+        return MoqContainerInit(
+            format=self.format, data=self.data, timebase=self.timebase._inner if self.timebase else None
+        )
+
+
+@dataclass(frozen=True)
+class ContainerStreamInit:
+    """A byte-stream container format and an optional shared source timebase."""
+
+    format: ContainerFormat
+    timebase: Timebase | None = field(default=None, kw_only=True)
+
+    def _ffi(self) -> MoqContainerStreamInit:
+        return MoqContainerStreamInit(format=self.format, timebase=self.timebase._inner if self.timebase else None)
 
 
 @dataclass(frozen=True)
@@ -100,6 +133,10 @@ class CatalogProducer:
     def __init__(self, broadcast: BroadcastProducer) -> None:
         self._inner = MoqMediaCatalogProducer(broadcast._inner)
 
+    def now(self) -> timedelta:
+        """Read the broadcast clock, fixing it for subsequent media producers."""
+        return _from_us(self._inner.now())
+
     def set_video_properties(self, properties: VideoProperties) -> None:
         """Replace the video properties shared by every rendition."""
         self._inner.set_video_properties(properties)
@@ -137,7 +174,7 @@ class TrackProducer:
         """A watch-only handle to whether this media track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def write_frame(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> None:
+    def write_frame(self, payload: bytes, timestamp: timedelta) -> None:
         """Write one encoded frame with a presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
@@ -186,7 +223,7 @@ class ContainerProducer:
     """
 
     def __init__(self, broadcast: BroadcastProducer, init: ContainerInit) -> None:
-        self._inner = MoqMediaContainerProducer(broadcast._inner, init)
+        self._inner = MoqMediaContainerProducer(broadcast._inner, init._ffi())
 
     def write(self, payload: bytes) -> None:
         """Write a whole chunk of container bytes."""
@@ -213,8 +250,8 @@ class ContainerProducer:
 class ContainerStreamProducer:
     """Publish a container fed by a raw byte stream, which recovers its own framing."""
 
-    def __init__(self, broadcast: BroadcastProducer, format: ContainerFormat) -> None:
-        self._inner = MoqMediaContainerStreamProducer(broadcast._inner, format)
+    def __init__(self, broadcast: BroadcastProducer, init: ContainerStreamInit) -> None:
+        self._inner = MoqMediaContainerStreamProducer(broadcast._inner, init._ffi())
 
     def write(self, payload: bytes) -> None:
         """Push raw container bytes; chunk boundaries don't matter."""
@@ -255,6 +292,14 @@ class TrackStreamProducer:
         self._inner.finish()
 
 
+def _rendition(id: str, rendition: Video | Audio) -> MoqRendition:
+    if isinstance(rendition, Video):
+        return cast(MoqRendition, MoqRendition.VIDEO(id=id, config=rendition))
+    if isinstance(rendition, Audio):
+        return cast(MoqRendition, MoqRendition.AUDIO(id=id, config=rendition))
+    raise TypeError(f"expected a catalog Video or Audio rendition, got {type(rendition).__name__}")
+
+
 class TrackConsumer:
     """Async-iterable stream of decoded :class:`MediaFrame` in decode order.
 
@@ -264,10 +309,15 @@ class TrackConsumer:
 
     @classmethod
     async def subscribe(
-        cls, broadcast: BroadcastConsumer, name: str, container: Container, *, subscription: Subscription | None = None
+        cls,
+        broadcast: BroadcastConsumer,
+        id: str,
+        rendition: Video | Audio,
+        *,
+        subscription: Subscription | None = None,
     ) -> TrackConsumer:
-        """Subscribe to a media track and decode its container."""
-        config = MoqMediaTrackConfig(name=name, container=container, subscription=_subscription(subscription))
+        """Subscribe to the catalog rendition ``id`` and decode its container, following its broadcast and track."""
+        config = MoqMediaTrackConfig(rendition=_rendition(id, rendition), subscription=_subscription(subscription))
         return cls(await MoqMediaTrackConsumer.subscribe(broadcast._inner, config))
 
     def __init__(self, inner: MoqMediaTrackConsumer) -> None:
@@ -323,14 +373,14 @@ class GroupConsumer:
     async def fetch(
         cls,
         broadcast: BroadcastConsumer,
-        name: str,
+        id: str,
+        rendition: Video | Audio,
         sequence: int,
-        container: Container,
         *,
         options: FetchGroupOptions | None = None,
     ) -> GroupConsumer:
-        """Fetch and decode exactly one media group."""
-        config = MoqMediaGroupConfig(name=name, sequence=sequence, container=container, options=options)
+        """Fetch and decode one group of the catalog rendition ``id``, following its broadcast and track."""
+        config = MoqMediaGroupConfig(rendition=_rendition(id, rendition), sequence=sequence, options=options)
         return cls._from_inner(await MoqMediaGroupConsumer.fetch(broadcast._inner, config))
 
     @property
@@ -430,5 +480,7 @@ __all__ = [
     "AudioInit",
     "VideoInit",
     "ContainerInit",
+    "ContainerStreamInit",
+    "Timebase",
     "catalog",
 ]

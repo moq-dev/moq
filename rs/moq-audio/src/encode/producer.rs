@@ -1,7 +1,5 @@
 //! Encode raw PCM and publish it as a moq audio track.
 
-use std::time::Instant;
-
 use bytes::Bytes;
 
 use moq_mux::catalog::hang::CatalogExt;
@@ -442,7 +440,7 @@ impl<E: CatalogExt> Producer<E> {
 		if self.grouped >= self.group_samples {
 			self.track.cut(None)?;
 		}
-		self.track.flush(timestamp, Instant::now())?;
+		self.track.flush(timestamp, moq_net::time::now())?;
 		Ok(())
 	}
 
@@ -468,7 +466,7 @@ impl<E: CatalogExt> Producer<E> {
 				keyframe: false,
 				duration: None,
 			})?;
-			track.flush(timestamp, Instant::now())?;
+			track.flush(timestamp, moq_net::time::now())?;
 		}
 
 		track.cut(Some(terminal.end))?;
@@ -559,6 +557,16 @@ impl<E: CatalogExt> Producer<E> {
 
 #[cfg(test)]
 mod tests {
+	async fn decoded_frame(consumer: &mut crate::decode::Consumer) -> Result<Option<Frame>, Error> {
+		loop {
+			match consumer.read().await? {
+				Some(crate::decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
+				Some(crate::decode::Read::End { .. }) => {}
+				None => return Ok(None),
+			}
+		}
+	}
+
 	use std::time::Duration;
 
 	use super::*;
@@ -633,7 +641,9 @@ mod tests {
 				},
 				..Options::default()
 			};
-			let decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+			let mut decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+			// Every packet counts here; the consumer's warmup tests cover trimming.
+			decoder_config.warmup = None;
 
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -659,7 +669,7 @@ mod tests {
 			producer.finish().unwrap();
 
 			let mut decoded = Vec::new();
-			while let Some(frame) = audio.read().await.unwrap() {
+			while let Some(frame) = decoded_frame(&mut audio).await.unwrap() {
 				let pcm = Format::F32.as_interleaved_f32(&frame.data, 1).unwrap();
 				decoded.extend_from_slice(&pcm);
 			}
@@ -811,7 +821,9 @@ mod tests {
 			settings: Settings::new(48_000, Layout::Mono),
 			..Options::default()
 		};
-		let decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+		let mut decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+		// Every packet counts here; the consumer's warmup tests cover trimming.
+		decoder_config.warmup = None;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -830,7 +842,10 @@ mod tests {
 		.unwrap();
 
 		producer.write(&full_frame(0)).unwrap();
-		let first = audio.read().await.unwrap().expect("first packet before the reanchor");
+		let first = decoded_frame(&mut audio)
+			.await
+			.unwrap()
+			.expect("first packet before the reanchor");
 		assert_eq!(first.data.len() / size_of::<f32>(), 960 - 312);
 
 		producer.reanchor();
@@ -838,7 +853,7 @@ mod tests {
 		producer.finish().unwrap();
 
 		let mut resumed_frames = 0;
-		while let Some(frame) = audio.read().await.unwrap() {
+		while let Some(frame) = decoded_frame(&mut audio).await.unwrap() {
 			if frame.timestamp.as_micros() >= 1_000_000 {
 				resumed_frames += frame.data.len() / size_of::<f32>();
 			}
@@ -863,7 +878,9 @@ mod tests {
 			},
 			..Options::default()
 		};
-		let decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+		let mut decoder_config = Encoder::new(&options.settings).unwrap().catalog();
+		// Every packet counts here; the consumer's warmup tests cover trimming.
+		decoder_config.warmup = None;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -877,7 +894,7 @@ mod tests {
 		let mut entered_dtx = false;
 		for index in 0..100 {
 			producer.write(&pcm_frame(&silence, index * 20_000)).unwrap();
-			let consumed = consumer.read().await.unwrap().expect("one decoded frame");
+			let consumed = decoded_frame(&mut consumer).await.unwrap().expect("one decoded frame");
 			assert_eq!(producer.activity(), consumed.activity);
 			if consumed.activity.is_dtx() {
 				entered_dtx = true;
@@ -893,7 +910,7 @@ mod tests {
 			})
 			.collect();
 		producer.write(&pcm_frame(&active, 2_000_000)).unwrap();
-		let consumed = consumer.read().await.unwrap().expect("one decoded frame");
+		let consumed = decoded_frame(&mut consumer).await.unwrap().expect("one decoded frame");
 		assert_eq!(producer.activity(), Activity::Active);
 		assert_eq!(consumed.activity, Activity::Active);
 	}
@@ -1275,5 +1292,29 @@ mod tests {
 
 		let second = Producer::new(&mut broadcast, catalog, Input::default(), &Options::default()).unwrap();
 		assert_eq!(second.track_name(), "1.opus");
+	}
+
+	/// The rendition a producer publishes is the encoder's own catalog, so neither can drift.
+	#[tokio::test]
+	async fn publishes_the_encoder_catalog() {
+		for codec in [crate::encode::Codec::Opus, crate::encode::Codec::Pcm] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let options = Options {
+				track: Some("audio".into()),
+				settings: Settings {
+					codec,
+					..Settings::default()
+				},
+				..Options::default()
+			};
+			let _producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
+			let published = catalog.snapshot().audio.renditions.remove("audio").unwrap();
+			assert_eq!(
+				published,
+				Encoder::new(&options.settings).unwrap().catalog(),
+				"{codec:?}"
+			);
+		}
 	}
 }

@@ -6,6 +6,9 @@
 // 44100 is never a valid decoder config. Chrome hides this by ignoring the configured rate; Safari
 // trusts it and fails every decode.
 
+/** The decoder pre-roll in milliseconds a joining Opus viewer discards, per RFC 7845 section 4.6. */
+export const WARMUP = 80;
+
 /** Full-band Opus: its highest rate, and the one to use when the source rate is unknown. */
 export const DEFAULT_SAMPLE_RATE = 48_000;
 

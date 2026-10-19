@@ -1,4 +1,5 @@
 import * as base64 from "@hexagon/base64";
+import { wall } from "@moq/clock";
 import * as z from "@zod/mini";
 import * as jose from "jose";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
@@ -184,7 +185,7 @@ function parse(jwk: string): Key {
  * `iat` is written only when the claims carry one, so an unset field stays off the
  * wire rather than being stamped with the current time.
  */
-async function sign(key: Key, claims: Claims): Promise<string> {
+async function sign(key: Key, claims: z.input<typeof ClaimsSchema>): Promise<string> {
 	ensureOperationSupported(key, "sign");
 
 	// Scope-check and sign what the schema parsed, never the raw input: an untyped
@@ -230,7 +231,7 @@ async function verify(key: PublicKey | SymmetricKey, token: string): Promise<Cla
 	} catch (error) {
 		throw new Error(`Failed to parse token claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
-	const now = Date.now() / 1000;
+	const now = wall() / 1000;
 	if (claims.exp !== undefined && claims.exp <= now) throw new Error("Token has expired");
 	if (claims.nbf !== undefined && claims.nbf > now) throw new Error("Token is not yet valid");
 	ensureClaimsWithinScope(key, claims);

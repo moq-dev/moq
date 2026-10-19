@@ -24,13 +24,15 @@ impl Args {
 		match self.command {
 			// A container runs `moq` as PID 1, where a signal without a handler is
 			// dropped. Only `serve` races one: `sign` and `verify` block on stdin, so a
-			// handler would swallow the signal that used to end them. `biased` installs
-			// the handlers before `serve` logs that it is listening.
-			Command::Serve(serve) => tokio::select! {
-				biased;
-				res = crate::shutdown_signal() => res?,
-				res = serve.run() => res?,
-			},
+			// handler would swallow the signal that used to end them. The handlers are
+			// installed before `serve` logs that it is listening.
+			Command::Serve(serve) => {
+				let mut signals = crate::Signals::new()?;
+				tokio::select! {
+					() = signals.recv() => {}
+					res = serve.run() => res?,
+				}
+			}
 			Command::Generate {
 				algorithm,
 				id,
@@ -467,9 +469,7 @@ impl Serve {
 				}
 			}
 		}
-		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
-			Permissions::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
-		};
+		let rules = |publish: &[Pattern], subscribe: &[Pattern]| Permissions::new(publish.to_vec(), subscribe.to_vec());
 		if self.key_set.is_some() && (self.key.is_some() || self.key_dir.is_some()) {
 			anyhow::bail!("--key-set conflicts with --key and --key-dir");
 		}

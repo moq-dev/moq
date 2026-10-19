@@ -34,11 +34,23 @@ PORT="${WASM_PORT:-}"
 
 # Cargo profile for the relay. Debug compiles faster, which is what a test
 # fixture wants; the workload is three connections and a few hundred KiB.
+BASELINE=
+UNIFFI=
 PROFILE="${WASM_PROFILE:-debug}"
 RELAY="${RELAY_BIN:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --baseline)
+            BASELINE=true
+            export MOQ_TEST_KEEP=1
+            shift
+            ;;
+        --uniffi)
+            # moq-ffi over ubrn's wasm2 player, as a third backend. See README.md.
+            UNIFFI=true
+            shift
+            ;;
         --timeout)
             if [[ $# -lt 2 || -z "${2:-}" || "$2" == -* ]]; then
                 echo "error: --timeout requires a value" >&2
@@ -94,6 +106,11 @@ command -v wasm-bindgen >/dev/null 2>&1 || {
 echo "building @moq/wasm..."
 (cd "$WORKSPACE" && just js wasm)
 
+if [[ -n $UNIFFI ]]; then
+    echo "building moq-ffi over ubrn (UniFFI 0.31 pin, scratch checkout)..."
+    "$WASM_DIR/uniffi/build.sh"
+fi
+
 echo "building moq-relay ($PROFILE)..."
 flag=()
 [[ "$PROFILE" == "debug" ]] || flag=(--profile "$PROFILE")
@@ -112,11 +129,26 @@ bunx playwright install chromium
 # binding can compile, run, and still publish typings that name the wrong class.
 echo "type-checking against js/wasm/dist/moq.d.ts..."
 bunx tsc --noEmit
+# The generated TypeScript opts out with @ts-nocheck, so this checks what callers see.
+[[ -z $UNIFFI ]] || bunx tsc --noEmit -p uniffi/tsconfig.json
 
 echo "bundling the harness page..."
 rm -rf dist
-bun build src/main.ts --outdir dist --target browser >/dev/null
-cp index.html dist/index.html
+driver=driver.ts
+if [[ -n $BASELINE ]]; then
+    bun test baseline/fixture.test.ts
+    bun build baseline/publisher.ts baseline/consumer.ts --outdir dist --target browser >/dev/null
+    bun build ../../js/net/src/index.ts --outfile dist/net.js --target browser --minify >/dev/null
+    driver=baseline/driver.ts
+    if [[ -n $UNIFFI ]]; then
+        bun build uniffi/dist/index.ts --outfile dist/uniffi.js --target browser --minify >/dev/null
+        export MOQ_WASM_UNIFFI=1
+    fi
+else
+    bun build src/main.ts --outdir dist --target browser >/dev/null
+    cp index.html dist/index.html
+fi
+[[ -z $UNIFFI ]] || bun build uniffi/cases.ts --outfile dist/uniffi-cases.js --target browser >/dev/null
 
 # ── relays ──────────────────────────────────────────────────────────────────
 # One reservation per flavour rather than a span from a fixed base: a span means
@@ -164,8 +196,13 @@ printf '[%s]\n' "$(
 # in `wait`, where a trap can run: bash defers a trap until a foreground child
 # returns, which would leave Chromium behind for as long as the driver hangs.
 status=0
-harness_spawn driver - bun driver.ts --relays "$HARNESS_RUN/relays.json" --timeout "$TIMEOUT"
+harness_spawn driver - bun "$driver" --relays "$HARNESS_RUN/relays.json" --timeout "$TIMEOUT"
 harness_wait "$HARNESS_PID" || status=$?
+
+if [[ $status -eq 0 && -n $UNIFFI ]]; then
+    harness_spawn uniffi - bun uniffi/driver.ts --relays "$HARNESS_RUN/relays.json"
+    harness_wait "$HARNESS_PID" || status=$?
+fi
 
 if [[ $status -ne 0 ]]; then
     for flavour in "${FLAVOURS[@]}"; do

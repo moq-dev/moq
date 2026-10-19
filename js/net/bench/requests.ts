@@ -1,9 +1,23 @@
 /** Sweep request restart and cancellation over independent origin and waiter dimensions. */
 import { Producer as Broadcast } from "../src/broadcast";
 import * as Epoch from "../src/epoch";
+import { NativeSession } from "../src/ietf/adapter";
+import { Publisher as IetfPublisher } from "../src/ietf/publisher";
+import { RequestOk } from "../src/ietf/request";
+import {
+	SubscribeNamespace,
+	SubscribeNamespaceEntry,
+	SubscribeNamespaceEntryDone,
+} from "../src/ietf/subscribe_namespace";
+import { ALPN, Version } from "../src/ietf/version";
+import { createMockTransportPair } from "../src/mock";
 import { Producer } from "../src/origin";
 import * as Path from "../src/path";
+import { Stream } from "../src/stream";
 import { wireOf } from "../src/wire";
+
+// Keep protocol diagnostics out of the measured CSV on stdout.
+console.debug = console.error;
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 console.log("touched,routes,followers,update_us");
@@ -247,4 +261,84 @@ for (const survivor of [false, true])
 			active.sort((a, b) => a - b);
 			settled.sort((a, b) => a - b);
 			console.log(`${survivor},${routes},${cancelled},${active[3].toFixed(2)},${settled[3].toFixed(2)}`);
+		}
+
+// Prefix updates withdraw the old set and replay the new set. Sweep both the
+// namespaces per prefix and the concurrent requesting peers, including wire encoding.
+console.log("namespace_update,draft,namespaces,subscribers,update_us");
+for (const [version, alpn] of [
+	[Version.DRAFT_18, ALPN.DRAFT_18],
+	[Version.DRAFT_21, ALPN.DRAFT_21],
+] as const)
+	for (const namespaces of [1, 32, 128])
+		for (const subscribers of [1, 8]) {
+			const origin = new Producer();
+			const sources = [];
+			for (const prefix of ["a", "b"])
+				for (let i = 0; i < namespaces; i++) {
+					const source = origin.createBroadcast(Path.from(`${prefix}/${i}`));
+					source.announce();
+					sources.push(source);
+				}
+			const peers = await Promise.all(
+				Array.from({ length: subscribers }, async () => {
+					const pair = createMockTransportPair(alpn);
+					const pub = new IetfPublisher({
+						quic: pair.server,
+						session: new NativeSession(pair.server, version, false),
+						publish: origin.consume(),
+						requiresSolicitation: true,
+					});
+					const client = await Stream.open(pair.client, { version });
+					const server = await Stream.accept(pair.server, version);
+					if (!server) throw new Error("missing namespace stream");
+					const running = pub.runSubscribeNamespace(
+						new SubscribeNamespace({ requestId: 0n, namespace: Path.from("a") }),
+						server,
+					);
+					if ((await client.reader.u53()) !== RequestOk.id) throw new Error("missing initial OK");
+					await RequestOk.decode(client.reader, version);
+					for (let i = 0; i < namespaces; i++) {
+						if ((await client.reader.u53()) !== SubscribeNamespaceEntry.id)
+							throw new Error("missing initial namespace");
+						await SubscribeNamespaceEntry.decode(client.reader, version);
+					}
+					return { client, running };
+				}),
+			);
+			const samples: number[] = [];
+			try {
+				for (let round = 0; round < 7; round++) {
+					const start = performance.now();
+					await Promise.all(
+						peers.map(async ({ client }) => {
+							await client.writer.write(
+								Uint8Array.from([0x02, 0, 6, (round + 1) * 2, 1, 0x34, 1, 1, round % 2 ? 97 : 98]),
+							);
+							for (let i = 0; i < namespaces; i++) {
+								if ((await client.reader.u53()) !== SubscribeNamespaceEntryDone.id)
+									throw new Error("missing old withdrawal");
+								await SubscribeNamespaceEntryDone.decode(client.reader, version);
+							}
+							if ((await client.reader.u53()) !== RequestOk.id) throw new Error("missing update OK");
+							await RequestOk.decode(client.reader, version);
+							for (let i = 0; i < namespaces; i++) {
+								if ((await client.reader.u53()) !== SubscribeNamespaceEntry.id)
+									throw new Error("missing replay namespace");
+								await SubscribeNamespaceEntry.decode(client.reader, version);
+							}
+						}),
+					);
+					if (round > 1) samples.push((performance.now() - start) * 1000);
+				}
+				samples.sort((a, b) => a - b);
+				console.log(
+					`namespace_update,${version === Version.DRAFT_18 ? 18 : 21},${namespaces},${subscribers},${samples[2].toFixed(2)}`,
+				);
+			} finally {
+				for (const peer of peers) peer.client.close();
+				await Promise.all(peers.map((peer) => peer.running));
+				for (const source of sources) source.close();
+				origin.close();
+			}
 		}

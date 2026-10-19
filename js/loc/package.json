@@ -19,6 +19,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
+		"@moq/clock": "workspace:^",
 		"@moq/net": "workspace:^"
 	},
 	"devDependencies": {

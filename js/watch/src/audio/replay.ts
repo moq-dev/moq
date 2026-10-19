@@ -15,6 +15,8 @@
  *
  * @internal Test support, not part of the player.
  */
+
+import { Manual, type Micro, Milli, Nano, type Second } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { Group, Time, Track } from "@moq/net";
@@ -34,7 +36,7 @@ export const QUANTUM = 128;
  * The replay's own subscription passes every recorded group through: the recorder's relay already
  * applied a wire max delay, so only the consumer's decisions are made again.
  */
-const WIRE_MAX_DELAY = Time.Milli(Number.MAX_SAFE_INTEGER);
+const WIRE_MAX_DELAY = Milli(Number.MAX_SAFE_INTEGER);
 
 /** Any non-empty payload: an empty one is the legacy container's end marker. */
 const PAYLOAD = new Uint8Array(1);
@@ -86,12 +88,12 @@ export interface Quantum {
 
 /** The two rings behind the calls the decoder and the worklet make on them. */
 interface Ring {
-	insert(timestamp: Time.Micro, data: Float32Array[]): void;
+	insert(timestamp: Micro, data: Float32Array[]): void;
 	read(output: Float32Array[]): number;
 	reset(): void;
 	setLatency(samples: number): void;
 	readonly stalled: boolean;
-	readonly timestamp: Time.Micro;
+	readonly timestamp: Micro;
 }
 
 /** The shared ring, sized and grown the way `SharedAudioBuffer` sizes and grows it. */
@@ -116,7 +118,7 @@ function shared(rate: number, latency: number): Ring {
 }
 
 /** Samples as the milliseconds `PostAudioBuffer` posts to the worklet. */
-const millis = (rate: number, samples: number) => Time.Milli.fromSecond((samples / rate) as Time.Second);
+const millis = (rate: number, samples: number) => Milli.fromSecond((samples / rate) as Second);
 
 /** The postMessage ring, sized the way `PostAudioBuffer` asks the worklet to size it. */
 function post(rate: number, latency: number): Ring {
@@ -136,7 +138,7 @@ function post(rate: number, latency: number): Ring {
 }
 
 /** A trace's media timestamp as the container carries it. */
-const micros = (ms: number) => Math.round(ms * 1000) as Time.Micro;
+const micros = (ms: number) => Math.round(ms * 1000) as Micro;
 
 /**
  * Samples each frame carries, by its timestamp: the trace's typical frame, the median spacing.
@@ -145,14 +147,14 @@ const micros = (ms: number) => Math.round(ms * 1000) as Time.Micro;
  * frames tile the timeline exactly despite rounding. Any wider spacing is a frame that never
  * arrived, which stays missing audio rather than stretching the frame before it.
  */
-function frameSamples(trace: Arrival[], rate: number): { spans: Map<Time.Micro, number>; typical: number } {
+function frameSamples(trace: Arrival[], rate: number): { spans: Map<Micro, number>; typical: number } {
 	const starts = [...new Set(trace.map((a) => a.timestamp))].sort((a, b) => a - b);
 	const sample = (ms: number) => Math.round((ms * rate) / 1000);
 	const gaps = starts.slice(1).map((next, i) => sample(next) - sample(starts[i]));
 	const typical = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
 	if (typical === undefined) throw new Error("a trace needs two frames");
 
-	const spans = new Map<Time.Micro, number>();
+	const spans = new Map<Micro, number>();
 	starts.forEach((start, i) => {
 		const gap = gaps[i];
 		const tiles = gap !== undefined && Math.abs(gap - typical) * 2 <= typical;
@@ -203,13 +205,13 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	// The decoder's "auto" target. A recorded frame has no payload to read an Opus duration from,
 	// so a codec without a constant one takes the trace's typical spacing.
 	const signals = new Effect();
-	const frame = frameDuration(config) ?? Time.Milli((typical * 1000) / rate);
+	const frame = frameDuration(config) ?? Milli((typical * 1000) / rate);
 	const playout = signals.computed((effect) =>
 		target({
 			measured: effect.get(consumer.spread),
-			advertised: config.jitter !== undefined ? Time.Milli(config.jitter) : undefined,
+			advertised: config.jitter !== undefined ? Milli(config.jitter) : undefined,
 			frame,
-			delay: config.delay !== undefined ? Time.Milli(config.delay) : undefined,
+			delay: config.delay !== undefined ? Milli(config.delay) : undefined,
 		}),
 	);
 	signals.cleanup(sync.register(playout));
@@ -234,7 +236,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			if (next.kind !== "frame") continue;
 
 			const { timestamp, arrival } = next.frame;
-			const media = Time.Milli.fromMicro(timestamp);
+			const media = Milli.fromMicro(timestamp);
 			const late = sync.received(media, "audio", arrival);
 			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
 			const length = samples.get(timestamp);
@@ -250,11 +252,13 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const output = new Float32Array(QUANTUM);
 	let next = 0;
 
-	// The consumer stamps each arrival on the monotonic clock, which the estimator measures, so it
-	// reads the trace's clock instead until the replay finishes.
+	// The consumer stamps each arrival on the monotonic clock, which the estimator measures, so a
+	// manual clock reads the trace's time instead until the replay finishes.
+	const manual = new Manual();
+	const moveTo = (ms: number) => manual.advance(Nano(Nano.fromMilli(Milli(ms)) - manual.now()));
 	let clock = first.at;
-	const monotonic = performance.now;
-	performance.now = () => clock;
+	moveTo(clock);
+	const restore = manual.install();
 
 	try {
 		for (let n = 1; first.at + (n - 1) * step <= end; n++) {
@@ -269,6 +273,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 					if (next > stamped) await settle();
 					stamped = next;
 					clock = arrival.at;
+					moveTo(clock);
 				}
 				let group = groups.get(arrival.group);
 				if (!group) {
@@ -289,6 +294,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			}
 			if (next > stamped) await settle();
 			clock = now;
+			moveTo(clock);
 			if (options.decodeAfter !== undefined && now >= options.decodeAfter) {
 				delivery.resolve();
 				await settle();
@@ -309,7 +315,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				at: now,
 				output,
 				stalled: ring.stalled,
-				timestamp: Time.Milli.fromMicro(ring.timestamp),
+				timestamp: Milli.fromMicro(ring.timestamp),
 				delay,
 			};
 		}
@@ -320,6 +326,6 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		await decode;
 		signals.close();
 		sync.close();
-		performance.now = monotonic;
+		restore();
 	}
 }

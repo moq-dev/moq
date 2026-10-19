@@ -17,7 +17,7 @@ the mesh runs lite-07.
   hidden routes only when it asks, and the forced `with_hidden(true)` on the
   outbound dial in the same file. `connection::authorize` no longer exists on
   `main`; only `release` still has that shape.
-- Replace `rs/moq-relay/tests/hidden_cluster.rs` with a lite-07 mesh test that
+- Replace `rs/moq-relay/tests/integration/hidden_cluster.rs` with a lite-07 mesh test that
   still sees a `.`-prefixed hidden broadcast.
 
 ## Required

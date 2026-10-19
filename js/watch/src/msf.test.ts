@@ -30,6 +30,26 @@ test("copies delay onto the hang rendition", () => {
 	expect(toHang(catalog).audio?.renditions.audio?.delay).toBe(u53(80));
 });
 
+test.each(["loc", "legacy"])("derives 80 ms Opus decoder warmup from %s MSF audio", (packaging) => {
+	for (const samplerate of [8000, 48000]) {
+		const catalog: Msf.Catalog = {
+			tracks: [{ name: "audio", packaging, role: "audio", codec: "opus", samplerate, delay: 3, jitter: 4 }],
+		};
+		const audio = toHang(catalog).audio?.renditions.audio;
+		expect(audio?.warmup).toBe(u53(80));
+		expect(audio?.sampleRate).toBe(u53(samplerate));
+		expect(audio?.delay).toBe(u53(3));
+		expect(audio?.jitter).toBe(u53(4));
+	}
+});
+
+test.each(["mp4a.40.2", "flac", "future-audio"])("keeps MSF decoder warmup absent for %s", (codec) => {
+	const audio = toHang({ tracks: [{ name: "audio", packaging: "loc", role: "audio", codec }] }).audio?.renditions
+		.audio;
+	expect(audio?.codec).toBe(codec);
+	expect(audio?.warmup).toBeUndefined();
+});
+
 test("rounds a fractional MSF delay up, and drops zero", () => {
 	const catalog: Msf.Catalog = {
 		tracks: [

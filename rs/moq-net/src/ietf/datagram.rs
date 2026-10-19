@@ -1,8 +1,8 @@
 //! OBJECT_DATAGRAM: one Object carried in a QUIC datagram (draft-14 section 10.3.1 through
 //! draft-20 section 11.3.1).
 //!
-//! The model counterpart is [`crate::Datagram`], a single-frame group, so only an Object at
-//! ID 0 maps onto it. The Type is a set of flags on every draft; draft-14 lacks the
+//! Public [`crate::Datagram`] writers emit Object ID 0; private relay metadata preserves
+//! other IDs, properties, and status. The Type is a set of flags; draft-14 lacks the
 //! DEFAULT_PRIORITY bit and a status with an omitted Object ID.
 
 use bytes::Bytes;

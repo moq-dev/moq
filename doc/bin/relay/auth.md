@@ -28,7 +28,7 @@ token, the declared role, and the verified client certificate. Nothing is
 parsed on the server's behalf: the `jwt` query parameter is a convention of
 `moq auth serve`, not of the relay. The grant answers with `publish` and
 `subscribe` pattern unions and optionally a `root` alias, read-only `mounts`,
-`expires`, a `revalidate` cadence, a stats `tier`, and `peer` / `upstream` to
+`expires`, a `revalidate` cadence, a stats `tier` and `label`, and `peer` / `upstream` to
 mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
@@ -52,10 +52,12 @@ flowing. A wider grant brings those paths back within the admitted root and
 SETUP role. A one-shot HTTP `/fetch` ends on a narrower grant instead. A
 changed `root`, `mounts`, `peer`, or `upstream`, or a 401 or 403, ends that
 credential's grant, which closes the session unless an
-[in-band](#in-band-renewal) credential still holds it. A changed `tier` keeps
-the session and moves its stats from then on. Any other failure retries with backoff and the session lives
+[in-band](#in-band-renewal) credential still holds it. A changed `tier` or
+`label` keeps the session and moves its later stats. Any other failure retries with backoff and the session lives
 until `expires`, so an outage always has the bound the server chose. A grant
-with `revalidate` must set `expires` for that reason.
+with `revalidate` must set `expires` for that reason. A session that
+reaches `expires` closes as `Expired` rather than `Unauthorized`, which also
+stops the reconnect loop: refresh the token, then reconnect with the new URL.
 
 **End.** Every close reports `end` with the reason, the duration, and the
 bytes sent and received.
@@ -143,8 +145,18 @@ if its first credential expired earlier, after its attached grants stop. Each
 attached JWT counts against its own `--limit-token` cap until the connection
 ends. The initial credential remains responsible for the connection's stats tier.
 Certificate sessions cannot renew a certificate in band, and public rules
-cannot verify a presented token; both refuse it as unsupported. A burst of
-tokens past the session's pending-verification bound is refused. On moq-lite, an
+cannot verify a presented token; both refuse it as unsupported. A moq-transport
+`AUTHORIZATION TOKEN` on a `SUBSCRIBE` or `PUBLISH_NAMESPACE` is verified the
+same way on any draft, but its grant authorizes only that request and ends with
+it; it never joins the union. A `PUBLISH_NAMESPACE` grant must cover the whole
+namespace: `room/**`, not just `room`. A session verifies at most
+`verifications` tokens at once (`--auth-verifications`, default 128), counting
+checks still running past the admission timeout. Later tokens wait their turn
+rather than being refused. A waiting token the peer withdraws never reaches the
+auth server. The ten-second admission timeout counts from a token's arrival, so
+one that times out while waiting is refused without being sent. A sent check
+always runs to completion, so the connection's `end` stays its last request and
+`--limit-token` counts stay exact. On moq-lite, an
 auth server that cannot answer, by timeout or outage, refuses a token as a
 transient error, and `Connection::auth()` presents it again on its reconnect
 backoff. On moq-transport the refusal is final and the token ends. Retrying
@@ -167,6 +179,24 @@ everything. Put application data somewhere other than the token.
 
 Tokens and key scopes from the older `moq-token` format still work: each `put`
 and `get` prefix `p` reads as the subtree `p/**`.
+
+`publish` and `subscribe` can also carry an optional bitrate cap in bits per
+second, for example `{"path":"alice/**","rate":8000000}`. Omit `rate` for
+uncapped access; zero, fractional, and inexact JSON integers are refused.
+Key scopes bound paths and refuse a bitrate cap. Capped tokens and auth-server
+grants always use the object form so older readers refuse them in full.
+
+The relay currently refuses every capped grant because its transports cannot
+enforce it yet, including a cap introduced at revalidation or in-band renewal.
+HTTP `/fetch` and `/announced` always refuse caps: a request has no connection
+to meter. An embedder running its own gateway must enforce the cap or refuse
+the grant before forwarding media.
+
+Caps describe a per-connection limit, so N connections can spend N times the
+rate. Pair them with a short expiry and a per-token session limit for a budget,
+remembering that the auth server's session counts are approximate across
+restarts. Account for keyframe bursts and leave headroom above the encoder
+bitrate when choosing a limit.
 
 ### Path matching
 

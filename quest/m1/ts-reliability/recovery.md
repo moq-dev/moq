@@ -9,6 +9,16 @@ missing dependency chains are not presented as independently decodable.
 
 ## Plan
 
+[#5713](https://github.com/moq-dev/moq/pull/5713) settled the cold-join
+start: an export begins on a whole group, and `ts::stats::Export` counts
+`trimmed`, `gaps` and `dropped`. Its paused-clock regressions
+(`a_start_group_cut_short_starts_at_the_next`, `a_join_drops_its_group_whole`)
+already cover a start group cut before output, so this quest does not repeat
+them. Extend the evidence to loss after output began and to decoded output,
+and check each fault schedule against what the export reported: a hole the
+oracle accepts must show in those counters, or for a track that delivers
+nothing, in its stream row's `units` and `quiet`.
+
 Test content loss separately from IP packet loss. QUIC may retransmit IP
 loss; a netem percentage does not establish that any MoQ object was omitted.
 Keep the real network impairment arm for transport and pacing evidence, and
@@ -19,6 +29,14 @@ that miss release, one stalled/missing track, and resumed delivery. Put loss
 around PAT/PMT or catalog acquisition, codec configuration and recovery
 points, audio/video skew, PCR/PTS wrap and declared clock discontinuity.
 Choose fixtures from declared supported profiles, not an unbounded matrix.
+
+The raw passthrough lane already has the packet/position and release-schedule
+oracle (`rs/moq-mux/src/container/ts/oracle.rs`, `test/ts/passthrough.py`)
+with skipped-group, cut-group and late-object regressions in `release_test.rs`;
+extend it rather than build a second harness. Assert there that each omission
+shows in the release's counters: `dropped` counts late objects, and the
+skipped and cut groups need the `gaps` count
+[#5849](https://github.com/moq-dev/moq/pull/5849) adds to `Release::stats`.
 
 Use mocked time for the Rust scheduling regressions. Integration captures
 record exactly which content was delivered, omitted or late, so the oracle
@@ -43,5 +61,4 @@ and measured release timing as separate checks.
 ## Related
 
 - [Automated validation](/test/ts/README.md) - shared graders, profiles and known-bad controls
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims after a gap
 - [Gradual recovery](/quest/m2/intra-refresh/README.md) - recovery counts and per-group warmup

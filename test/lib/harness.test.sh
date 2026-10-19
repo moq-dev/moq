@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Independent shells must reserve different ports even with private temp roots.
+# Independent shells must reserve different ports even with private temp roots,
+# and a relative MOQ_TEST_RUNS must survive a harness changing directory.
 set -euo pipefail
 
 lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -49,4 +50,13 @@ MOQ_TEST_PORTS="$scratch/ports-link" bash -euo pipefail -c '
         [[ "$status" == 2 ]]
     fi
 ' bash "$lib"
+# A relative root must still name the same directory after the harness changes directory.
+(cd "$scratch" && MOQ_TEST_RUNS=relative bash -euo pipefail -c '
+    source "$1/harness.sh"
+    harness_begin relative >&2
+    [[ "$HARNESS_RUN" == "$2"/relative/relative-* ]] || {
+        echo "FAIL: relative MOQ_TEST_RUNS gave run directory $HARNESS_RUN" >&2
+        exit 1
+    }
+' bash "$lib" "$(cd "$scratch" && pwd)")
 echo "cross-shell port reservations passed"

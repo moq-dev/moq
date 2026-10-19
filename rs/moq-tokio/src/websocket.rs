@@ -154,7 +154,9 @@ where
 		.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
 	// A vanished peer sends no FIN. Ping and timeout bound the same stale-session
 	// lifetime that QUIC's idle timeout bounds on the native path.
-	let mut upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::ws::KeepAlive::default());
+	let mut upgraded = qmux::ws::Upgraded::new(socket)
+		.with_keep_alive(qmux::ws::KeepAlive::default())
+		.with_session_config(crate::qmux_config());
 	if let Some(stats) = &options.socket_stats {
 		upgraded = upgraded.with_socket_stats(stats.clone());
 	}
@@ -182,7 +184,7 @@ fn won_key(url: &Url) -> Result<(String, u16)> {
 }
 
 /// Forget that WebSocket won for `url`, giving QUIC its head start again.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 pub(crate) fn forget(url: &Url) {
 	if let Ok(key) = won_key(url) {
 		WEBSOCKET_WON.lock().unwrap().remove(&key);
@@ -190,13 +192,13 @@ pub(crate) fn forget(url: &Url) {
 }
 
 /// Record that WebSocket won for `url`, as a fallback dial that lands does.
-#[cfg(all(test, feature = "noq"))]
+#[cfg(all(test, feature = "quic"))]
 pub(crate) fn remember(url: &Url) {
 	WEBSOCKET_WON.lock().unwrap().insert(won_key(url).unwrap());
 }
 
 /// Whether the next dial to `url` skips QUIC's head start.
-#[cfg(all(test, feature = "noq"))]
+#[cfg(all(test, feature = "quic"))]
 pub(crate) fn won(url: &Url) -> bool {
 	won_key(url).is_ok_and(|key| WEBSOCKET_WON.lock().unwrap().contains(&key))
 }
@@ -337,7 +339,7 @@ pub struct Resolved {
 
 /// The fallback arm of the QUIC-vs-WebSocket race, so only compiled when there is a
 /// QUIC dial to race against. A WebSocket-only build calls [`connect`] directly.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 pub(crate) async fn race_handle(
 	config: &Config,
 	tls: &rustls::ClientConfig,
@@ -455,6 +457,7 @@ pub(crate) async fn connect(
 				.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 				.with_connector(connector)
 				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline; TCP backs off retransmits too far for QUIC's 10s
+				.with_session_config(crate::qmux_config())
 				.connect(url.as_str())
 				.await
 				.map_err(Error::connect)?
@@ -513,7 +516,9 @@ async fn connect_tls_override(
 		.headers()
 		.get(http::header::SEC_WEBSOCKET_PROTOCOL)
 		.and_then(|value| value.to_str().ok());
-	let upgraded = qmux::ws::Upgraded::new(websocket).with_keep_alive(qmux::ws::KeepAlive::default());
+	let upgraded = qmux::ws::Upgraded::new(websocket)
+		.with_keep_alive(qmux::ws::KeepAlive::default())
+		.with_session_config(crate::qmux_config());
 	Ok(match negotiated {
 		Some(protocol) => upgraded.with_alpn(protocol).connect(),
 		None => upgraded.connect(),
@@ -719,7 +724,9 @@ impl Listener {
 				.unwrap()
 				.take()
 				.expect("successful upgrade selected a protocol");
-			let upgraded = qmux::ws::Upgraded::new(websocket).with_keep_alive(qmux::ws::KeepAlive::default());
+			let upgraded = qmux::ws::Upgraded::new(websocket)
+				.with_keep_alive(qmux::ws::KeepAlive::default())
+				.with_session_config(crate::qmux_config());
 			let session = match &protocol {
 				Some(protocol) => upgraded.with_alpn(protocol).accept(),
 				None => upgraded.accept(),

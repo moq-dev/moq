@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -63,6 +63,7 @@ struct State {
 	session: Session,
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Option<moq_mux::catalog::Producer>,
+	wall: std::sync::Arc<super::wall::Wall>,
 	/// Whether this publication's single EOS message already went out. One per publication, not per
 	/// entry to PLAYING: a finished publication is terminal here, so there is nothing to announce twice.
 	eos_delivered: bool,
@@ -442,8 +443,10 @@ impl ElementImpl for MoqSink {
 				gst::warning!(CAT, "refusing a pad: the publication has ended");
 				return None;
 			}
-			if let Some(catalog) = control.live.as_ref().and_then(|state| state.catalog.as_ref()) {
-				pad.lifecycle().media.reserve(catalog);
+			if let Some(state) = control.live.as_ref()
+				&& let Some(catalog) = state.catalog.as_ref()
+			{
+				pad.lifecycle().media.reserve(catalog, state.wall.clone());
 			}
 			control.admissions.insert(pad.clone());
 		}
@@ -580,16 +583,20 @@ impl MoqSink {
 				gst::StateChangeError
 			})?;
 		let completion = session.completion();
+		let wall = super::wall::Wall::new(&catalog);
 		let updates = {
 			let mut control = self.control.lock().unwrap();
 			control.live = Some(State {
 				session,
 				broadcast,
 				catalog: Some(catalog),
+				wall,
 				eos_delivered: false,
 			});
 			let pads = self.pads_locked(&control);
-			let catalog = control.live.as_ref().unwrap().catalog.as_ref().unwrap();
+			let state = control.live.as_ref().unwrap();
+			let catalog = state.catalog.as_ref().unwrap();
+			let wall = &state.wall;
 			pads.into_iter()
 				.map(|pad| {
 					let changes = {
@@ -597,7 +604,7 @@ impl MoqSink {
 						let changes = lifecycle.reset();
 						lifecycle.completion = Some(completion.clone());
 						if !lifecycle.releasing {
-							lifecycle.media.reserve(catalog);
+							lifecycle.media.reserve(catalog, wall.clone());
 						}
 						changes
 					};
@@ -654,6 +661,7 @@ impl MoqSink {
 			],
 		);
 		let _rt = RUNTIME.enter();
+		state.wall.finish();
 		if let Some(mut catalog) = state.catalog.take()
 			&& let Err(err) = catalog.finish().context("finalize catalog")
 			&& failure.is_none()
@@ -681,6 +689,16 @@ impl MoqSink {
 		// Only subtitles use this: a cue needs an explicit end, unlike a media frame.
 		let duration = buffer.duration();
 		let current_running_time = self.obj().current_running_time();
+		// Preroll has a frozen running time before the pipeline starts its clock.
+		let reference_running_time = current_running_time.or_else(|| {
+			(self.obj().current_state() != gst::State::Playing)
+				.then(|| self.obj().start_time())
+				.flatten()
+		});
+		let sample = super::wall::Sample {
+			running: reference_running_time,
+			wall: std::time::SystemTime::now(),
+		};
 		let map = buffer.map_readable().map_err(|_| {
 			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
 			gst::FlowError::Error
@@ -707,9 +725,12 @@ impl MoqSink {
 			if lifecycle.media.is_failed() {
 				return Ok(gst::FlowSuccess::Ok);
 			}
-			let outcome = lifecycle
-				.media
-				.push_buffer(data, pts, duration, current_running_time, Instant::now());
+			let outcome = lifecycle.media.place_wall(&buffer, sample).and_then(|()| {
+				lifecycle
+					.media
+					.push_buffer(data, pts, duration, current_running_time, moq_net::time::now())
+					.map_err(anyhow::Error::msg)
+			});
 			let changes = match &outcome {
 				Ok(PushOutcome::Failed(reason)) => Some(lifecycle.fail(reason.clone())),
 				_ => None,
@@ -867,7 +888,7 @@ impl MoqSink {
 					if !lifecycle.releasing {
 						lifecycle.ended = false;
 						if let Some(catalog) = &state.catalog {
-							lifecycle.media.reserve(catalog);
+							lifecycle.media.reserve(catalog, state.wall.clone());
 						}
 					}
 				}
@@ -893,7 +914,7 @@ impl MoqSink {
 									lifecycle.media.flush();
 									let catalog = state.catalog.as_ref();
 									if let Some(catalog) = catalog {
-										lifecycle.media.reserve(catalog);
+										lifecycle.media.reserve(catalog, state.wall.clone());
 									}
 									let caps = lifecycle.media.resumable_caps();
 									caps.zip(catalog).and_then(|(caps, catalog)| {
@@ -1010,6 +1031,7 @@ impl MoqSink {
 				updates.push(PadUpdate { pad, changes });
 			}
 		}
+		state.wall.finish();
 		if let Some(mut catalog) = state.catalog.take()
 			&& let Err(err) = catalog.finish().context("finalize catalog")
 			&& failure.is_none()
@@ -1131,6 +1153,7 @@ fn observe_caps(
 	lifecycle: &mut PadLifecycle,
 	caps: &gst::Caps,
 ) -> (Option<Notifications>, bool) {
+	lifecycle.media.reserve(catalog, state.wall.clone());
 	let requested = lifecycle.requested().map(str::to_owned);
 	let mut options = ProducerOptions::new(caps)
 		.with_container(lifecycle.container().into())
@@ -1178,6 +1201,26 @@ mod tests {
 		}
 
 		fn start(&self) -> moq_mux::catalog::Consumer {
+			let consumer = self.start_unplaced();
+			let control = self.0.imp().control.lock().unwrap();
+			control
+				.live
+				.as_ref()
+				.unwrap()
+				.wall
+				.place(
+					&gst::Buffer::new(),
+					Duration::ZERO,
+					super::super::wall::Sample {
+						running: Some(gst::ClockTime::ZERO),
+						wall: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
+					},
+				)
+				.unwrap();
+			consumer
+		}
+
+		fn start_unplaced(&self) -> moq_mux::catalog::Consumer {
 			self.0.set_state(gst::State::Paused).unwrap();
 			let broadcast = self
 				.0
@@ -1235,6 +1278,94 @@ mod tests {
 	) -> std::task::Poll<moq_mux::Result<Option<moq_mux::catalog::hang::Catalog>>> {
 		use moq_mux::catalog::Stream;
 		catalog.poll_next(&moq_net::kio::Waiter::noop())
+	}
+
+	#[test]
+	fn reference_metadata_places_the_broadcast_wall_clock() {
+		let run = CatalogRun::new();
+		let pad = run.pad("audio");
+		let mut catalog = run.start_unplaced();
+		assert!(negotiate(&pad, &opus_caps()));
+		assert!(
+			next_catalog(&mut catalog).is_pending(),
+			"CAPS must wait for the wall clock"
+		);
+		assert!(pad.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
+		let mut buffer = gst::Buffer::from_slice([0xf8, 0xff, 0xfe]);
+		let buffer_mut = buffer.get_mut().unwrap();
+		buffer_mut.set_pts(gst::ClockTime::from_seconds(3));
+		gst::ReferenceTimestampMeta::add(
+			buffer_mut,
+			&gst::Caps::builder("timestamp/x-unix").build(),
+			gst::ClockTime::from_seconds(1_735_689_603),
+			None,
+		);
+		assert_eq!(pad.chain(buffer), Ok(gst::FlowSuccess::Ok));
+		let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
+			panic!("first catalog")
+		};
+		assert_eq!(
+			first.clock.unwrap().wall.as_micros(),
+			((1_735_689_600 - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128,
+		);
+	}
+
+	#[test]
+	fn pads_keep_one_wall_clock_and_verbatim_running_times_each_run() {
+		let run = CatalogRun::new();
+		let video = run.pad("video");
+		let audio = run.pad("audio");
+		for zero in [1_735_689_600u64, 1_735_689_660] {
+			let _catalog = run.start_unplaced();
+			assert!(negotiate(&video, &h264_caps()));
+			assert!(negotiate(&audio, &opus_caps()));
+			for (pad, origin, pts, payload, reference) in [
+				(&video, 10, 13, super::super::pad::h264_keyframe_au(), zero + 3),
+				(&audio, 100, 105, Bytes::from_static(&[0xf8, 0xff, 0xfe]), zero + 500),
+			] {
+				let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
+				segment.set_start(gst::ClockTime::from_seconds(origin));
+				assert!(pad.send_event(gst::event::Segment::new(&segment)));
+				let mut buffer = gst::Buffer::from_slice(payload);
+				let b = buffer.get_mut().unwrap();
+				b.set_pts(gst::ClockTime::from_seconds(pts));
+				gst::ReferenceTimestampMeta::add(
+					b,
+					&gst::Caps::builder("timestamp/x-unix").build(),
+					gst::ClockTime::from_seconds(reference),
+					None,
+				);
+				assert_eq!(pad.chain(buffer), Ok(gst::FlowSuccess::Ok));
+			}
+			let (broadcast, clock) = {
+				let control = run.0.imp().control.lock().unwrap();
+				let state = control.live.as_ref().unwrap();
+				(
+					state.broadcast.consume(),
+					state.catalog.as_ref().unwrap().snapshot().clock.unwrap(),
+				)
+			};
+			assert_eq!(
+				clock.wall.as_micros(),
+				((zero - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128
+			);
+			for (name, kind, expected) in [
+				("video", moq_mux::container::Kind::Video, 3),
+				("audio", moq_mux::container::Kind::Audio, 5),
+			] {
+				let subscriber = futures::executor::block_on(broadcast.track(name).unwrap().subscribe(None)).unwrap();
+				let mut consumer =
+					moq_mux::container::Consumer::new(subscriber, moq_mux::catalog::hang::Container::Legacy(kind));
+				let std::task::Poll::Ready(Ok(Some(read))) = consumer.poll_read(&moq_net::kio::Waiter::noop()) else {
+					panic!("published media frame")
+				};
+				let moq_mux::container::Read::Frame { frame, .. } = read else {
+					panic!("media frame")
+				};
+				assert_eq!(frame.timestamp.as_micros(), expected * 1_000_000, "{name}");
+			}
+			run.0.set_state(gst::State::Null).unwrap();
+		}
 	}
 
 	#[test]
@@ -1589,7 +1720,7 @@ mod tests {
 		let segment = gst::FormattedSegment::<gst::ClockTime>::new();
 		pad.lifecycle().media.observe_segment(segment.upcast());
 		sink.set_state(gst::State::Playing).unwrap();
-		let anchor = Instant::now();
+		let anchor = moq_net::time::now();
 		for (pts, arrival) in [(0, 0), (20, 120), (40, 6_000), (60, 6_020)] {
 			if pts == 40 {
 				sink.set_state(gst::State::Paused).unwrap();

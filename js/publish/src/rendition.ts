@@ -19,13 +19,18 @@ export class Rendition<Config> {
 
 	/**
 	 * The catalog entry for this rendition, written by its producer (usually an encoder).
-	 * `undefined` omits it from the catalog (e.g. while disabled).
+	 * `undefined` omits it from the catalog (e.g. while disabled). Changing a field a decoder must
+	 * reinitialize for (codec, description, container, sample rate, channel count, or display aspect)
+	 * ends the current track and serves the rendition under a fresh catalog `track` name, so a name
+	 * always means the same content. Every other field updates the current track in place. The
+	 * broadcast owns `broadcast` and `track`, so a config setting either is refused.
 	 */
 	readonly config = new Signal<Config | undefined>(undefined);
 
 	/**
 	 * The live track producer while a subscriber is attached, `undefined` otherwise.
-	 * Producers should encode only while this is set (the demand gate).
+	 * Producers should encode only while this is set (the demand gate), and only media matching
+	 * the current {@link config}: a new identity swaps in a new track.
 	 */
 	readonly track: Getter<Moq.Track.Producer | undefined>;
 

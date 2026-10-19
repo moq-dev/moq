@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 //! # moq-net: Media over QUIC networking layer
 //!
 //! `moq-net` is the networking layer for Media over QUIC: real-time pub/sub with built-in
@@ -74,8 +76,6 @@
 //! instant.
 
 #![warn(missing_docs)]
-// Proving receive futures are Send traverses the shared origin/broadcast/track types.
-#![recursion_limit = "256"]
 // The browser transport is `!Send`, so on wasm the shared state behind these `Arc`s is
 // too and clippy suggests `Rc`. The same code is genuinely cross-thread on native, so
 // `Arc` stays and the lint is unactionable here.

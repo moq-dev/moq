@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Micro, Milli, Nano, type Second } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Data, InitPost, InitShared, Latency, Reset, State, Truncate } from "./render";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
@@ -13,20 +13,20 @@ import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
  */
 class Backpressure {
 	#enabled: boolean;
-	#headroom: Time.Micro;
-	#waiters: Array<{ timestamp: Time.Micro; resolve: () => void }> = [];
+	#headroom: Micro;
+	#waiters: Array<{ timestamp: Micro; resolve: () => void }> = [];
 
-	constructor(enabled: boolean, headroom: Time.Micro) {
+	constructor(enabled: boolean, headroom: Micro) {
 		this.#enabled = enabled;
 		this.#headroom = headroom;
 	}
 
 	// Move the gate as the floor changes (e.g. "auto" tracking the measured arrival spread).
-	setHeadroom(headroom: Time.Micro): void {
+	setHeadroom(headroom: Micro): void {
 		this.#headroom = headroom;
 	}
 
-	wait(timestamp: Time.Micro, playhead: Time.Micro, signal: AbortSignal): Promise<void> {
+	wait(timestamp: Micro, playhead: Micro, signal: AbortSignal): Promise<void> {
 		if (!this.#enabled || signal.aborted) return Promise.resolve();
 		if (playhead >= ((timestamp - this.#headroom) | 0)) return Promise.resolve();
 		return new Promise((resolve) => {
@@ -49,7 +49,7 @@ class Backpressure {
 
 	// Resolve every waiter the playhead has reached. Thresholds are recomputed live so a changed
 	// headroom takes effect on queued waiters too.
-	advance(playhead: Time.Micro): void {
+	advance(playhead: Micro): void {
 		if (this.#waiters.length === 0) return;
 		this.#waiters = this.#waiters.filter(({ timestamp, resolve }) => {
 			if (playhead < ((timestamp - this.#headroom) | 0)) return true;
@@ -71,9 +71,9 @@ class Backpressure {
 	}
 }
 
-/** Convert a sample count to a Time.Micro duration at the given sample rate. */
-function samplesToMicro(samples: number, rate: number): Time.Micro {
-	return Time.Micro.fromSecond((samples / rate) as Time.Second);
+/** Convert a sample count to a Micro duration at the given sample rate. */
+function samplesToMicro(samples: number, rate: number): Micro {
+	return Micro.fromSecond((samples / rate) as Second);
 }
 
 /**
@@ -90,7 +90,7 @@ export interface AudioBuffer {
 	readonly channels: number;
 
 	/** Insert audio samples at the given timestamp. Handles out-of-order writes. */
-	insert(timestamp: Time.Micro, data: Float32Array[]): void;
+	insert(timestamp: Micro, data: Float32Array[]): void;
 
 	/** Update the target latency in samples. */
 	setLatency(samples: number): void;
@@ -105,7 +105,7 @@ export interface AudioBuffer {
 	 * but the previous track's write-ahead tail would otherwise play once the new audio runs out.
 	 * Unlike `reset()` this keeps playing, so there's no gap at the handover.
 	 */
-	truncate(timestamp: Time.Micro): void;
+	truncate(timestamp: Micro): void;
 
 	/**
 	 * Resolve once the playhead is near enough to decode a frame at `timestamp`. In buffered mode this
@@ -114,10 +114,10 @@ export interface AudioBuffer {
 	 * far ahead of the floor-sized ring. Resolves immediately when not buffered (the ring bounds itself).
 	 * Resolves early, releasing the wait, once `signal` aborts.
 	 */
-	wait(timestamp: Time.Micro, signal: AbortSignal): Promise<void>;
+	wait(timestamp: Micro, signal: AbortSignal): Promise<void>;
 
 	/** Current playback timestamp (derived from reader position). */
-	readonly timestamp: Getter<Time.Micro>;
+	readonly timestamp: Getter<Micro>;
 
 	/** Whether the buffer is stalled (waiting to fill). */
 	readonly stalled: Getter<boolean>;
@@ -167,8 +167,8 @@ class SharedAudioBuffer implements AudioBuffer {
 	#worklet: AudioWorkletNode;
 	#ring: SharedRingBuffer;
 
-	readonly #timestamp = new Signal<Time.Micro>(0 as Time.Micro);
-	readonly timestamp: Getter<Time.Micro> = this.#timestamp;
+	readonly #timestamp = new Signal<Micro>(0 as Micro);
+	readonly timestamp: Getter<Micro> = this.#timestamp;
 
 	readonly #stalled = new Signal<boolean>(true);
 	readonly stalled: Getter<boolean> = this.#stalled;
@@ -198,19 +198,22 @@ class SharedAudioBuffer implements AudioBuffer {
 		worklet.port.postMessage(msg);
 
 		// Poll the shared control array and reflect it into signals.
-		this.#signals.interval(() => {
-			const stalled = this.#ring.stalled;
-			this.#timestamp.set(this.#ring.timestamp);
-			this.#stalled.set(stalled);
-			this.#underruns.set(this.#ring.underruns);
-			// While stalled the playhead is parked, so release the decode loop to refill the floor;
-			// once playing, hold it to ~the floor ahead.
-			if (stalled) this.#backpressure.flush();
-			else this.#backpressure.advance(this.#ring.timestamp);
-		}, 50);
+		this.#signals.interval(
+			() => {
+				const stalled = this.#ring.stalled;
+				this.#timestamp.set(this.#ring.timestamp);
+				this.#stalled.set(stalled);
+				this.#underruns.set(this.#ring.underruns);
+				// While stalled the playhead is parked, so release the decode loop to refill the floor;
+				// once playing, hold it to ~the floor ahead.
+				if (stalled) this.#backpressure.flush();
+				else this.#backpressure.advance(this.#ring.timestamp);
+			},
+			Nano.fromMilli(Milli(50)),
+		);
 	}
 
-	insert(timestamp: Time.Micro, data: Float32Array[]): void {
+	insert(timestamp: Micro, data: Float32Array[]): void {
 		this.#ring.insert(timestamp, data);
 	}
 
@@ -231,7 +234,7 @@ class SharedAudioBuffer implements AudioBuffer {
 		}
 	}
 
-	truncate(timestamp: Time.Micro): void {
+	truncate(timestamp: Micro): void {
 		this.#ring.truncate(timestamp);
 	}
 
@@ -240,7 +243,7 @@ class SharedAudioBuffer implements AudioBuffer {
 		this.#backpressure.flush(); // the old timeline is gone; let the decode loop re-anchor
 	}
 
-	wait(timestamp: Time.Micro, signal: AbortSignal): Promise<void> {
+	wait(timestamp: Micro, signal: AbortSignal): Promise<void> {
 		// Stalled = still filling the floor (bootstrap, an underrun the reader re-stalled on, or an
 		// explicit reset): let frames through so the ring refills to the floor. This is the single
 		// re-buffer path; the ring un-stalls itself on the insert that reaches the floor, so the
@@ -261,8 +264,8 @@ class PostAudioBuffer implements AudioBuffer {
 	readonly channels: number;
 	#worklet: AudioWorkletNode;
 
-	readonly #timestamp = new Signal<Time.Micro>(0 as Time.Micro);
-	readonly timestamp: Getter<Time.Micro> = this.#timestamp;
+	readonly #timestamp = new Signal<Micro>(0 as Micro);
+	readonly timestamp: Getter<Micro> = this.#timestamp;
 
 	readonly #stalled = new Signal<boolean>(true);
 	readonly stalled: Getter<boolean> = this.#stalled;
@@ -282,7 +285,7 @@ class PostAudioBuffer implements AudioBuffer {
 
 		this.#backpressure = new Backpressure(buffered, samplesToMicro(latencySamples, rate));
 
-		const latency = Time.Milli.fromSecond((latencySamples / rate) as Time.Second);
+		const latency = Milli.fromSecond((latencySamples / rate) as Second);
 		const msg: InitPost = { type: "init-post", channels, rate, latency, buffered };
 		worklet.port.postMessage(msg);
 
@@ -303,7 +306,7 @@ class PostAudioBuffer implements AudioBuffer {
 		worklet.port.start();
 	}
 
-	insert(timestamp: Time.Micro, data: Float32Array[]): void {
+	insert(timestamp: Micro, data: Float32Array[]): void {
 		const msg: Data = { type: "data", data, timestamp };
 		// Transfer the ArrayBuffers to avoid a copy. This is why samples can be dropped
 		// under load: the main thread loses access until the worklet drains the message queue.
@@ -316,12 +319,12 @@ class PostAudioBuffer implements AudioBuffer {
 	setLatency(samples: number): void {
 		this.#backpressure.setHeadroom(samplesToMicro(samples, this.rate));
 
-		const latency = Time.Milli.fromSecond((samples / this.rate) as Time.Second);
+		const latency = Milli.fromSecond((samples / this.rate) as Second);
 		const msg: Latency = { type: "latency", latency };
 		this.#worklet.port.postMessage(msg);
 	}
 
-	truncate(timestamp: Time.Micro): void {
+	truncate(timestamp: Micro): void {
 		const msg: Truncate = { type: "truncate", timestamp };
 		this.#worklet.port.postMessage(msg);
 	}
@@ -332,7 +335,7 @@ class PostAudioBuffer implements AudioBuffer {
 		this.#backpressure.flush(); // the old timeline is gone; let the decode loop re-anchor
 	}
 
-	wait(timestamp: Time.Micro, signal: AbortSignal): Promise<void> {
+	wait(timestamp: Micro, signal: AbortSignal): Promise<void> {
 		// Stalled = still filling the floor (bootstrap, an underrun the reader re-stalled on, or an
 		// explicit reset): let frames through so the ring refills to the floor. See SharedAudioBuffer.
 		if (this.#stalled.peek()) return Promise.resolve();

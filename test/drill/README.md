@@ -158,6 +158,9 @@ that stop detecting their recovery failures fail CI. `just check` also runs
 `--apply-only` whenever Rust or this directory changes, so a patch that no longer
 applies fails the PR that moved its code rather than the next nightly.
 
+Pull requests do not run the mutations: the drills' sockets still run on the host
+clock, so load can change the outcome.
+
 `sensitivity.sh` removes one recovery behavior at a time and requires the drill
 covering it to fail. Each mutation is a patch under `mutations/`, applied to a
 disposable copy of the tree; the checkout it runs from is never modified.

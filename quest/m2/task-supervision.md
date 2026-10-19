@@ -26,7 +26,3 @@ relay and the CLI already do.
 
 Public API: `Listener::accept`'s signature in moq-tokio (and
 `Server::serve_*`'s result). Wire: none.
-
-## Related
-
-- [Binding panic supervision](/quest/m1/ffi-panic-supervision.md) - the moq-c and moq-ffi tasks, ahead of this

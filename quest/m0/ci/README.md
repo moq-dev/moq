@@ -4,9 +4,10 @@
 
 Pull requests get a CI verdict without queueing behind the hosted runner
 limits, and every job spends its minutes on the work its diff selected rather
-than on setup, cold caches, or repeated builds. Coverage does not shrink: work
-moves to the merge queue, to nightly, or to a shared artifact, and anything
-dropped from a pull request still gates the merge or runs nightly.
+than on setup, cold caches, or repeated builds. Concurrent local agents share
+expensive-command capacity, and retained tests earn their cost through useful
+regression signal. Valuable checks stay gated or move to an appropriate queue
+or nightly run; measured low-value redundancy may be retired.
 
 ## Plan
 
@@ -50,12 +51,21 @@ Decisions (maintainer, 2026-10-13):
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
   spare-desktop runner, its cache server, and the cache release it waited on.
 
-Measure each change against the numbers above and record the result in its PR.
+Decided 2026-10-15: local CPU admission, test-cost reductions, and setup
+reductions are all m0. `quest gate` owns generic command admission; repositories
+adopt it through their entrypoints. Agents remain concurrent. Selective test
+retirement is allowed with evidence and an explicit coverage tradeoff, replacing
+the earlier blanket no-shrink constraint. Check/Test remain on PRs and the queue.
+
+Measure each change against a current baseline and record the result in its PR.
+The historical samples locate candidates; they are not controlled benchmarks.
 
 ## Required
 
+- [Pin Quest's gate](/quest/m0/ci/quest-gate-pin.md) - make shared command admission available
+- [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
 - [Require platform gates](/quest/m0/ci/platform-queue.md) - activate the consolidated platform checks in the main and release rulesets after the workflow lands
 - [mbx on R2](/quest/m0/ci/mbx-r2.md) - Rust builds on every OS read an R2 cache that only `main` writes, escaping the 10 GB Actions cache
 - [Nix cache](/quest/m0/ci/nix-cache.md) - `nix.moq.dev` on R2 replaces Cachix for CI and releases
-- [Nightly finishes](/quest/m0/ci/nightly-split.md) - every Nightly step runs within its timeout
-- [FFI artifact reuse](/quest/m0/ci/ffi-reuse.md) - identical FFI release builds are built once and shared across the language packages
+- [TS path filter](/quest/m0/ci/ts-path-filter.md) - TS validation runs whenever a crate it builds changes, checked against `cargo metadata`
+- [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the first `moq-ffi-v*` tag that runs `Release FFI`, and a `Shipping sizes` run; verify the wrappers and size keys

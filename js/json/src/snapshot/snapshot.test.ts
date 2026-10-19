@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { DEFAULT_MAX_GROUP_BYTES, Encoder } from "./encoder.ts";
@@ -8,7 +9,7 @@ type Value = Record<string, unknown>;
 
 // These tests inspect complete finished timelines, so request a replay window
 // instead of the transport's live-edge default.
-const REPLAY_LATENCY = Time.Milli(30_000);
+const REPLAY_LATENCY = Milli(30_000);
 
 // Reconstruct every state a consumer yields from `next()`, in order.
 async function drain(track: Track.Subscriber): Promise<Value[]> {
@@ -186,7 +187,7 @@ test("next skips the groups the max delay abandons", async () => {
 	producer.finish();
 
 	expect(await drain(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
-	expect(await drain(track.subscribe({ maxDelay: Time.Milli(500) }))).toEqual([{ n: 2 }, { n: 3 }]);
+	expect(await drain(track.subscribe({ maxDelay: Milli(500) }))).toEqual([{ n: 2 }, { n: 3 }]);
 	// The default of zero keeps only the newest group.
 	expect(await drain(track.subscribe())).toEqual([{ n: 3 }]);
 });

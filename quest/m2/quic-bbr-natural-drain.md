@@ -8,7 +8,8 @@ ProbeRTT, recognizing bandwidth growth within a round, and precautionary
 bandwidth probing. Reduce demonstrated frame deadline interference without
 stale minimum RTT, persistent queues, or unfairness. Application limitation
 alone is not evidence that the path drained, and Google parity is not
-assumed to be an improvement.
+assumed to be an improvement. Grade them, and BBR's response to random
+loss, on a 10 % random-loss media profile as well.
 
 ## Plan
 
@@ -17,7 +18,8 @@ one study, since both reuse the same media profiles, harness, and baseline.
 
 ### Natural drains
 
-Use the corrected released fork as baseline. ProbeRTT targets half the
+Use `moq-quic`'s BBR3, which carries the released fork's corrections, as
+baseline. ProbeRTT targets half the
 estimated BDP, floored at the minimum pipe window; entering the mode need
 not withhold useful bytes. First locate actual cwnd stalls and deadline
 misses using steady low-rate traffic, 30-fps frames with keyframes, and gaps
@@ -29,7 +31,8 @@ natural-drain credit. [QUICHE BBR3](https://github.com/google/quiche/blob/535a27
 postpones RTT aging across zero-inflight idle intervals; its
 [tests](https://github.com/google/quiche/blob/535a2730e77d47e0dc03746555cc9c34b17bc9e9/quiche/quic/core/congestion_control/bbr3_simulator_test.cc#L1724)
 cover restart behavior. These source defaults are not deployment evidence.
-Noq's Linux-style idle-restart suppression is narrower.
+In the 2026-09-21 audit, noq's Linux-style idle-restart suppression was
+narrower.
 
 A candidate credits sustained low inflight, a completed sampled round, and
 fresh RTT evidence toward ProbeRTT. Determine the predicate experimentally;
@@ -58,7 +61,9 @@ restart from idle resets the gain to 1.0.
 
 The 2026-09-21 audit compared noq-proto 1.3.0 / upstream `1a26a8b` with
 Google Linux BBRv3 `90210de4` and Google QUICHE `535a2730`. Recheck current
-upstream sources before testing. Use QUICHE's actual `bbr3_sender.cc` with
+upstream sources before testing. The audit describes noq; `moq-quic`'s BBR3
+was ported from it (#4921), so recheck each difference against `moq-quic`.
+Use QUICHE's actual `bbr3_sender.cc` with
 its shared `bbr2_*` model; the older BBR2 sender is not a substitute for its
 BBR3 state machine.
 
@@ -81,10 +86,30 @@ pinned code and configurations. Keep transport differences and QUICHE flags
 explicit and compare each algorithm change separately. A simulation result
 is not an end-to-end network measurement.
 
-## Required
+### Random loss
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
+Moved from the finished T-STD export epic (2026-10-16), whose nightly
+stays at 1 %.
+`just test ts --hrd --loss <percent>` drops that share of the relay's
+datagrams to the subscriber at random through `moq-shaper`, 25 ms each way,
+and grades the export with T-STD, PCR accuracy and `holes.py`. Measured on a
+loaded host (rerun before deciding):
+
+| Clip | Loss | Result |
+|---|---:|---|
+| default (low media rate) | 10 % | passes |
+| `--hrd` (9 Mb/s video, 10 Mb/s mux) | 1 %, 3 % | passes, no holes |
+| `--hrd` | 5 %, 7 %, 10 % | groups evicted `Old`, export fails |
+| `--hrd`, `LOSS_THRESH` 20 % (experiment) | 10 % | T-STD and PCR pass; 1.56 s of video misses the 1 s delay |
+| `--hrd`, CUBIC | 10 % | no output |
+
+BBRv3 takes a round with more than 2 % loss (`LOSS_THRESH`) as congestion
+and cuts its inflight bound, so random loss above it holds the leg below the
+media rate. Decide whether and how BBR should tell random loss from
+congestion without giving up fairness against loss-based flows, and how that
+interacts with the precautionary probe stop under Google differences.
 
 ## Related
 
-- [Discover media headroom](/quest/m2/quic-probe.md) - preserving an estimate and discovering spare capacity are separate problems
+- [TS validation](/test/ts/README.md) - the `--loss` rig, `holes.py` and the full measurements
+- [Native probing](/quest/m2/probe/native.md) - preserving an estimate and discovering spare capacity are separate problems

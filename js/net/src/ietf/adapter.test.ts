@@ -7,7 +7,7 @@ import { ControlStreamAdapter } from "./adapter.ts";
 import { toRequestCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
 import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceDone } from "./publish_namespace.ts";
-import { initialMaxRequestId, MaxRequestId, RequestError } from "./request.ts";
+import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW, RequestError } from "./request.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
@@ -616,7 +616,7 @@ test("draft 16 accepts reordered native and control IDs but never reuses them", 
 
 // Draft 16 remembers a skipped stretch as one run, so a jump costs nothing per skipped ID.
 test("draft 16 tracks a jump across a production window as one run", async () => {
-	const window = 220_000n;
+	const window = REQUEST_WINDOW;
 	const { adapter, peer } = await windowed(Version.DRAFT_16, ALPN.DRAFT_16, window, false);
 	const top = 2n * (window - 1n);
 	try {

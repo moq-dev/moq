@@ -107,6 +107,9 @@ TIMESTAMP Object Property {
 The absolute presentation timestamp of the object, expressed in the track's Timescale.
 Any value (including 0) is valid.
 
+A receiver MUST read TIMESTAMP only from Type `0x10`, independently of the moq-transport version.
+Type `0x06` MUST NOT be interpreted as a Timestamp.
+
 Each Timestamp is absolute, not delta-encoded against a previous object: {{moqt}} does not guarantee delivery of every object, and a delta would be corrupted by any missing predecessor.
 
 On a track that declares a TIMESCALE, a publisher MUST attach TIMESTAMP to every object with a payload, including an empty one.
@@ -162,6 +165,7 @@ An earlier version of this document requested its own code points (`0x915C0` and
 ## moq-timestamp-02
 {:numbered="false"}
 
+- Read TIMESTAMP only from Type `0x10`, independently of the moq-transport version.
 - Replaced the wall-clock arrival-time fallback with untimed tracks: a track without TIMESCALE has no media time, and a relay forwards it untimed. A relay MAY drop one of its groups once a later group arrived longer ago than the threshold.
 - On a track with TIMESCALE, a publisher MUST attach TIMESTAMP to every object with a payload, and a receiver treats one without it as malformed.
 - A receiver ignores an object-scope TIMESCALE, and no longer reads a bare TIMESTAMP on a track without TIMESCALE as microseconds.

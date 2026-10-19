@@ -1,14 +1,14 @@
+import { Milli } from "@moq/clock";
 import type * as Container from "@moq/hang/container";
-import { Time } from "@moq/net";
 
 /** One received frame, or a gap where media will never arrive, in delivery order. */
 export type Arrival =
 	| {
 			kind: "frame";
 			/** Media presentation time in milliseconds. */
-			timestamp: Time.Milli;
+			timestamp: Milli;
 			/** Monotonic transport ingress time in milliseconds. */
-			arrival: Time.Milli;
+			arrival: Milli;
 			/** Whether ingress missed the playback deadline. */
 			late: boolean;
 	  }
@@ -19,17 +19,17 @@ export type Arrival =
 	| {
 			kind: "gap";
 			/** The furthest presentation point received before the gap, in milliseconds. */
-			timestamp: Time.Milli;
+			timestamp: Milli;
 			/** How long until media resumes, in milliseconds. */
-			duration: Time.Milli;
+			duration: Milli;
 	  };
 
 /** The arrival entry for a container read's gap. */
 export function gap(read: Extract<Container.Read, { kind: "gap" }>): Arrival {
 	return {
 		kind: "gap",
-		timestamp: Time.Milli.fromMicro(read.timestamp),
-		duration: Time.Milli.fromMicro(read.duration),
+		timestamp: Milli.fromMicro(read.timestamp),
+		duration: Milli.fromMicro(read.duration),
 	};
 }
 

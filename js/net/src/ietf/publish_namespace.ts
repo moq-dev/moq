@@ -5,7 +5,7 @@ import * as Cluster from "./cluster.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
-import { MalformedAuthToken } from "./token.ts";
+import { MalformedAuthToken, tokenIntoRequest } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // In draft-14, ANNOUNCE is renamed to PUBLISH_NAMESPACE
@@ -20,14 +20,19 @@ export class PublishNamespace {
 	 * appear on the wire at all. */
 	cluster?: Cluster.Advert;
 
+	/** The AUTHORIZATION TOKEN to send, a value agreed out of band. Decoding leaves it unset. */
+	token?: Uint8Array;
+
 	constructor({
 		requestId,
 		trackNamespace,
 		cluster,
-	}: { requestId: bigint; trackNamespace: Path.Valid; cluster?: Cluster.Advert }) {
+		token,
+	}: { requestId: bigint; trackNamespace: Path.Valid; cluster?: Cluster.Advert; token?: Uint8Array }) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
 		this.cluster = cluster;
+		this.token = token;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -37,6 +42,7 @@ export class PublishNamespace {
 		}
 		await Namespace.encode(w, this.trackNamespace);
 		const params = this.cluster ? Cluster.intoParams(this.cluster) : new Parameters();
+		if (this.token) tokenIntoRequest(params, this.token, version);
 		await params.encode(w, version);
 	}
 
@@ -84,20 +90,44 @@ export class PublishNamespaceUpdate {
 
 	/** The update's own Request ID; every REQUEST_UPDATE consumes one. */
 	requestId: bigint;
+	/** Draft-16 only: the PUBLISH_NAMESPACE this updates, which later drafts name by stream. */
+	namespaceRequestId?: bigint;
 	update: Cluster.Update;
+	/** A new AUTHORIZATION TOKEN, renewing the request's. Decoding leaves it unset. */
+	token?: Uint8Array;
 
-	constructor({ requestId, update }: { requestId: bigint; update: Cluster.Update }) {
+	constructor({
+		requestId,
+		namespaceRequestId,
+		update,
+		token,
+	}: {
+		requestId: bigint;
+		namespaceRequestId?: bigint;
+		update: Cluster.Update;
+		token?: Uint8Array;
+	}) {
 		this.requestId = requestId;
+		this.namespaceRequestId = namespaceRequestId;
 		this.update = update;
+		this.token = token;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		PublishNamespaceUpdate.#modern(version);
+		PublishNamespaceUpdate.#supported(version);
 		await w.u62(this.requestId);
+		if (version === Version.DRAFT_16) {
+			if (this.namespaceRequestId === undefined) {
+				throw new Error("a draft-16 REQUEST_UPDATE names its PUBLISH_NAMESPACE");
+			}
+			await w.u62(this.namespaceRequestId);
+		}
 		if (version === Version.DRAFT_17) {
 			await w.u62(0n); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
-		await Cluster.updateIntoParams(this.update).encode(w, version);
+		const params = Cluster.updateIntoParams(this.update);
+		if (this.token) tokenIntoRequest(params, this.token, version);
+		await params.encode(w, version);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -128,20 +158,21 @@ export class PublishNamespaceUpdate {
 		}
 	}
 
-	static #modern(version: IetfVersion) {
-		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			throw new Error("REQUEST_UPDATE on PUBLISH_NAMESPACE requires draft-17+");
+	static #supported(version: IetfVersion) {
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+			throw new Error("REQUEST_UPDATE on PUBLISH_NAMESPACE requires draft-16+");
 		}
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceUpdate> {
-		PublishNamespaceUpdate.#modern(version);
+		PublishNamespaceUpdate.#supported(version);
 		const requestId = await r.u62();
+		const namespaceRequestId = version === Version.DRAFT_16 ? await r.u62() : undefined;
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
 		const params = await Parameters.decode(r, version, "publish-namespace");
-		return new PublishNamespaceUpdate({ requestId, update: Cluster.updateFromParams(params) });
+		return new PublishNamespaceUpdate({ requestId, namespaceRequestId, update: Cluster.updateFromParams(params) });
 	}
 }
 

@@ -179,4 +179,17 @@ pub struct ConnectionStats {
     pub frame_rx: FrameStats,
     /// Statistics related to the current transmission path
     pub path: PathStats,
+    /// Connection-level receive flow control
+    pub credit: CreditStats,
+}
+
+/// Connection-level receive flow control, from the receiver's side
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CreditStats {
+    /// Bytes read with [`Chunks::hold()`](crate::Chunks::hold) whose credit is not released yet
+    pub held: u64,
+    /// Bytes the peer may still send before it needs more credit, including credit not yet
+    /// advertised
+    pub available: u64,
 }

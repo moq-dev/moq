@@ -47,6 +47,19 @@ func (s *Session) Connects() uint64 {
 	return s.inner.Connects()
 }
 
+// Failure reports why a client session is reconnecting: the error that ended
+// the last connection or failed the latest redial, or nil once a connection
+// lands. A redial that keeps failing never changes Status, so poll this while it
+// reports ConnectionStatusDisconnected to show the reason. Giving up for good
+// returns from Closed instead. A server-accepted session always returns nil.
+func (s *Session) Failure() error {
+	failure := s.inner.Failure()
+	if failure == nil || *failure == nil {
+		return nil
+	}
+	return *failure
+}
+
 // Stats snapshots the current connection statistics.
 func (s *Session) Stats() ConnectionStats {
 	return connectionStatsFromFFI(s.inner.Stats())
@@ -65,15 +78,12 @@ type Bandwidth struct {
 	inner *ffi.MoqBandwidth
 }
 
-// Reserve claims up to maxBps for track. maxBps is a ceiling, not a
-// measurement: reserve the most the track can ever send. Drop the reservation
-// to hand the room back.
-func (b *Bandwidth) Reserve(track *TrackProducer, maxBps uint64) (*Reservation, error) {
-	inner, err := b.inner.Reserve(track.inner, maxBps)
-	if err != nil {
-		return nil, err
-	}
-	return &Reservation{inner: inner}, nil
+// Reserve claims up to maxBps for the track demand watches; every track
+// producer hands out its Demand. maxBps is a ceiling, not a measurement:
+// reserve the most the track can ever send. Drop the reservation to hand the
+// room back.
+func (b *Bandwidth) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
+	return &Reservation{inner: b.inner.Reserve(demand.inner, maxBps)}
 }
 
 // Reservation is one track's standing claim on a Bandwidth.
@@ -104,7 +114,10 @@ func (s *Session) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: s.inner.Consume()}
 }
 
-// Shutdown drains finished tracks within one second, returning any delivery error.
+// Shutdown drains finished tracks within one second, returning any drain error.
+// Explicit moq-lite-07-wip waits for the peer to receive finished tails; older Lite
+// versions, including the default lite-06, wait only for transport ACKs.
+// IETF also waits for transport ACKs.
 // Cancelling ctx aborts the session immediately.
 func (s *Session) Shutdown(ctx context.Context) error {
 	return bridge.CallErr(ctx, s.abort, s.inner.Shutdown)
@@ -119,3 +132,26 @@ func (s *Session) abort() {
 func (s *Session) Cancel(code uint32) {
 	s.inner.Cancel(code)
 }
+
+// RecvBandwidth holds receive-estimate demand until its consumer is closed.
+func (s *Session) RecvBandwidth() *BandwidthConsumer {
+	inner := s.inner.RecvBandwidth()
+	if inner == nil {
+		return nil
+	}
+	return &BandwidthConsumer{inner: *inner}
+}
+
+// BandwidthConsumer owns a bandwidth estimate, in bits per second.
+type BandwidthConsumer struct{ inner *ffi.MoqBandwidthConsumer }
+
+// Peek reads the current estimate, or nil while unavailable.
+func (b *BandwidthConsumer) Peek() *uint64 { return b.inner.Peek() }
+
+// Changed waits for the estimate to change, or its producer to close.
+func (b *BandwidthConsumer) Changed(ctx context.Context) (*uint64, error) {
+	return bridge.Call(ctx, b.inner.Cancel, b.inner.Changed)
+}
+
+// Close releases this consumer's demand, including a pending wait.
+func (b *BandwidthConsumer) Close() { b.inner.Cancel() }

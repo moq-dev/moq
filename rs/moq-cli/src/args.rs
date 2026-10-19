@@ -439,6 +439,14 @@ pub struct MoqSide {
 	/// restarted publisher replace the old broadcast instead of resuming into it.
 	/// Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
 	/// accept it, since the other publishers' tracks differ between instances.
+	///
+	/// The epoch's wall time also fixes the catalog clock, so publishers of one stream
+	/// agree on it and on every timestamp wherever each started: PTS zero is the epoch's
+	/// time, and for `ts` one 33-bit wrap (about 26.5 hours) before it. The wall mapping is
+	/// then off by the source clock's reading at the epoch's time, which for a TS program
+	/// clock is anywhere within half a wrap. Near either end of that range, processes whose
+	/// clocks or delivery differ can place one timestamp a wrap apart, and redundant `flv`
+	/// imports stop matching at FLV's 49.7-day millisecond wrap.
 	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
 	pub epoch: Option<hang::moq_net::Epoch>,
 
@@ -549,6 +557,15 @@ impl MoqSide {
 		anyhow::ensure!(
 			self.client.url.is_some() || self.serves() || self.cluster_dials(),
 			"a MoQ side is required: pass --connect <url> to dial a relay, a --listen option to self-host, --cluster-lan to mesh over the LAN, or --cluster-connect to join a cluster"
+		);
+		// The `--connect` client and the cluster's WAN dials each bind
+		// `--connect-bind` for QUIC, so a fixed port would collide halfway through startup.
+		#[cfg(feature = "quic")]
+		anyhow::ensure!(
+			!(self.client.url.is_some()
+				&& self.cluster_dials()
+				&& self.client.bind.is_some_and(|bind| bind.port() != 0)),
+			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-connect-api, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
 		);
 		#[cfg(feature = "cluster-lan")]
 		{
@@ -781,6 +798,8 @@ pub enum ImportSource {
 	Rtmp(crate::rtmp::Args),
 	/// SRT: pull a remote stream (`--connect`) or accept incoming publishes (`--listen`).
 	Srt(crate::srt::ImportArgs),
+	/// RTSP: pull an IP camera's stream (`--connect`), reconnecting on failure.
+	Rtsp(crate::rtsp::ImportArgs),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
 	Rtc(crate::rtc::Args),
 	/// Replay a recording from an object store, serving its groups on demand.
@@ -816,6 +835,7 @@ impl ImportSource {
 				Some("`import ts --program all` mints an epoch per program")
 			}
 			Self::Rtmp(_) | Self::Srt(_) => Some("the RTMP and SRT imports mint an epoch per connection"),
+			Self::Rtsp(_) => Some("`import rtsp` mints an epoch per RTSP session, since each restarts its RTP time"),
 			Self::Rtc(rtc) if rtc.listen.is_some() => Some("the WHIP listener mints an epoch per connection"),
 			Self::Rtc(_) => Some("`import rtc --connect` timestamps frames from its own RTP session"),
 			Self::Avc3 => Some("`import avc3` timestamps frames from their arrival on stdin"),
@@ -1052,7 +1072,8 @@ impl ExportSink {
 /// A stdout sink's format and the options that apply to it.
 pub struct Stdout {
 	pub format: SubscribeFormat,
-	/// The staleness budget, also used as the TS/FLV/MKV release delay.
+	/// The staleness budget, also the FLV/MKV release delay and how far behind the source `ts`
+	/// runs (`--delay`).
 	pub max_delay: Duration,
 	pub linger: Duration,
 	/// Follow a replacement as a program switch (`ts` only).
@@ -1152,10 +1173,11 @@ pub struct BufferedFragmented {
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Transport {
-	/// How long after its decode time each frame is written (e.g. `500ms`), like an SRT
-	/// receiver's latency. A frame that arrives later than this is dropped, and a stalled
-	/// group is skipped once it falls half this behind the newest content.
-	#[usage(long, default = "500ms")]
+	/// How far behind the source the output runs (e.g. `2s`), like an SRT receiver's latency,
+	/// including how far ahead of its decode time each frame is sent. A frame that arrives
+	/// later than this is dropped, and a stalled group is skipped once it falls half this
+	/// behind the newest content.
+	#[usage(long, default = "1s")]
 	pub delay: crate::duration::Duration,
 
 	/// How long to wait for the same publisher instance to come back once it ends (e.g. `10s`),
@@ -1193,13 +1215,13 @@ pub struct Transport {
 
 impl Transport {
 	fn deprecated(&self) -> moq_tokio::cli::Deprecated {
-		const HOLDS: &str = "it also holds every frame that long after its decode time";
+		const BEHIND: &str = "it also sets how far behind the source the output runs";
 		let mut found = moq_tokio::cli::Deprecated::default();
 		if self.max_age.is_some() {
-			found.changed("--max-age", None, "--delay", HOLDS);
+			found.changed("--max-age", None, "--delay", BEHIND);
 		}
 		if self.latency_max.is_some() {
-			found.changed("--latency-max", None, "--delay", HOLDS);
+			found.changed("--latency-max", None, "--delay", BEHIND);
 		}
 		found
 	}
@@ -1280,7 +1302,7 @@ mod tests {
 			};
 			export.sink.stdout().unwrap().max_delay
 		};
-		assert_eq!(stdout(&[]), Duration::from_millis(500));
+		assert_eq!(stdout(&[]), Duration::from_secs(1));
 		assert_eq!(stdout(&["--delay", "2s"]), Duration::from_secs(2));
 		for old in ["--max-age", "--latency-max"] {
 			let Err(err) = parse(&[old, "1s"]) else {
@@ -1567,6 +1589,7 @@ mod tests {
 			&["import", "rtmp", "--listen", "[::]:1935"][..],
 			&["import", "rtmp", "--connect", "rtmp://example.com/live/key"],
 			&["import", "srt", "--connect", "srt://example.com:9000"],
+			&["import", "rtsp", "--connect", "rtsp://example.com/stream"],
 			&["import", "rtc", "--listen", "[::]:8080"],
 			&["import", "rtc", "--connect", "https://example.com/whep"],
 			&["import", "ts", "--program", "all"],
@@ -2311,6 +2334,51 @@ mod tests {
 			.unserved()
 			.expect("a listener reads it");
 		parse(&[]).unserved().expect("nothing to refuse");
+	}
+
+	/// `--connect` and a WAN cluster peer each bind `--connect-bind` for QUIC, so a
+	/// fixed port is refused before anything binds; port 0 or either side alone is
+	/// fine, and a build without QUIC binds nothing to collide.
+	#[test]
+	fn a_fixed_connect_bind_serves_one_dialer() {
+		let parse = |flags: &[&str]| {
+			let args = ["moq"].iter().chain(flags).chain(&["import", "ts"]).copied();
+			Invocation::try_parse_from(args).expect("parse")
+		};
+		for peer in [
+			["--cluster-connect", "https://relay.example"],
+			["--cluster-connect-api", "https://api.example/peers"],
+		] {
+			let both = [
+				&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:4443"][..],
+				&peer,
+			]
+			.concat();
+			let result = parse(&both).moq.validate();
+			if cfg!(feature = "quic") {
+				let err = result.unwrap_err().to_string();
+				assert!(err.contains("--connect-bind") && err.contains(peer[0]), "{err}");
+			} else {
+				result.expect("without QUIC nothing binds the fixed port");
+			}
+
+			let ephemeral = [
+				&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:0"][..],
+				&peer,
+			]
+			.concat();
+			parse(&ephemeral).moq.validate().expect("an ephemeral bind serves both");
+
+			let cluster_only = [&["--connect-bind", "127.0.0.1:4443"][..], &peer].concat();
+			parse(&cluster_only)
+				.moq
+				.validate()
+				.expect("the cluster alone owns a fixed bind");
+		}
+		parse(&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:4443"])
+			.moq
+			.validate()
+			.expect("--connect alone owns a fixed bind");
 	}
 
 	/// `--cluster-connect` / `--cluster-connect-api` attach the process as a

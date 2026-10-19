@@ -4,6 +4,7 @@ use moq_net::PathOwned;
 
 use super::{Catalog, CatalogExt};
 use crate::Result;
+use crate::catalog::CatalogFormat;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
@@ -17,9 +18,12 @@ use crate::Result;
 /// catalog, taken from the track's [`broadcast::Info::path`](moq_net::broadcast::Info::path).
 /// A catalog that misuses that reference is rejected outright (see [`Self::poll_next`]).
 pub struct Consumer<E: CatalogExt = ()> {
-	inner: moq_json::snapshot::Consumer<Catalog<E>>,
-	/// Path of the broadcast serving this catalog, which every rendition's `broadcast`
-	/// reference resolves against.
+	// Decoded in two steps, so a catalog needing a newer reader fails with a typed error.
+	inner: moq_json::snapshot::Consumer<serde_json::Value>,
+	_ext: std::marker::PhantomData<E>,
+	format: CatalogFormat,
+	/// Path of the broadcast serving this catalog, which rendition references and the
+	/// echo prefix resolve against.
 	base: PathOwned,
 }
 
@@ -27,8 +31,10 @@ impl<E: CatalogExt> Consumer<E> {
 	/// Create a new catalog consumer from a MoQ track subscriber (uncompressed `catalog.json`).
 	pub fn new(track: moq_net::track::Subscriber) -> Self {
 		Self {
+			format: CatalogFormat::Hang,
 			base: track.broadcast().path.clone(),
 			inner: moq_json::snapshot::Consumer::new(track, moq_json::snapshot::consumer::Config::default()),
+			_ext: std::marker::PhantomData,
 		}
 	}
 
@@ -39,22 +45,29 @@ impl<E: CatalogExt> Consumer<E> {
 		let mut config = moq_json::snapshot::consumer::Config::default();
 		config.compression = moq_json::Compression::Deflate;
 		Self {
+			format: CatalogFormat::HangZ,
 			base: track.broadcast().path.clone(),
 			inner: moq_json::snapshot::Consumer::new(track, config),
+			_ext: std::marker::PhantomData,
 		}
+	}
+
+	pub(crate) fn format(&self) -> CatalogFormat {
+		self.format
 	}
 
 	/// Poll for the next catalog update.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
-	/// `broadcast` reference walks above the root. Such a reference names no broadcast, and the
+	/// `broadcast` reference or echo prefix walks above the root. Such a reference names no broadcast, and the
 	/// root is the consumer's authorized subtree, so it is an attempt to reference content the
 	/// consumer cannot name. The whole catalog is rejected rather than the one rendition: a
 	/// publisher that emits one has a bug (or is hostile), and silently serving the rest hides
 	/// that from the operator while the missing rendition surfaces much later as a track that
 	/// never fills.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		let catalog = ready!(self.inner.poll_next(waiter))?;
+		let value = ready!(self.inner.poll_next(waiter))?;
+		let catalog = value.map(Catalog::from_value).transpose()?;
 		if let Some(catalog) = catalog.as_ref() {
 			catalog.check_renditions()?;
 			check_resolvable(&self.base, catalog)?;
@@ -80,10 +93,10 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 	}
 }
 
-/// Reject the catalog if any track's `broadcast` reference walks above the root.
+/// Reject the catalog if a track reference or echo prefix walks above the root.
 ///
-/// Every section carrying a `broadcast` reference must be chained here; a section left out
-/// silently exempts its tracks from the containment check.
+/// Every section carrying a relative broadcast path must be included here; a section left out
+/// silently exempts its paths from the containment check.
 fn check_resolvable<E: CatalogExt>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
 	let video = catalog.video.renditions.iter();
 	let audio = catalog.audio.renditions.iter();
@@ -108,6 +121,11 @@ fn check_resolvable<E: CatalogExt>(base: &PathOwned, catalog: &Catalog<E>) -> Re
 		}
 	}
 
+	if let Some(echo) = &catalog.echo
+		&& base.try_resolve(&echo.path).is_none()
+	{
+		return Err(crate::Error::EscapingBroadcast(echo.path.to_string()));
+	}
 	Ok(())
 }
 
@@ -246,6 +264,42 @@ mod test {
 			.renditions
 			.insert("sibling".to_string(), referencing(reference));
 		publish_catalog_served(published).await
+	}
+
+	fn soliciting(reference: &str) -> Catalog {
+		let (mut catalog, _) = catalog_payload("here");
+		catalog.echo = Some(hang::catalog::Echo::new(
+			moq_net::path::Relative::new(reference).into_owned(),
+		));
+		catalog
+	}
+
+	#[tokio::test]
+	async fn echo_prefix_is_checked_before_the_native_reader_yields() {
+		for reference in ["viewers", "../viewers", ""] {
+			assert!(publish_catalog(soliciting(reference)).unwrap().unwrap().echo.is_some());
+		}
+		for reference in ["../../viewers", "../../../elsewhere"] {
+			let result = publish_catalog(soliciting(reference));
+			assert!(
+				matches!(result, Err(crate::Error::EscapingBroadcast(_))),
+				"{reference}: {result:?}"
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn echo_prefix_is_checked_against_the_dynamic_served_path() {
+		assert!(
+			publish_catalog_served(soliciting("../viewers"))
+				.await
+				.unwrap()
+				.unwrap()
+				.echo
+				.is_some()
+		);
+		let result = publish_catalog_served(soliciting("../../../elsewhere")).await;
+		assert!(matches!(result, Err(crate::Error::EscapingBroadcast(_))), "{result:?}");
 	}
 
 	#[test]
@@ -398,6 +452,22 @@ mod test {
 		group.finish().expect("catalog group should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), catalog);
+	}
+
+	#[test]
+	fn a_newer_version_is_a_typed_refusal() {
+		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut consumer: Consumer = Consumer::new(track.subscribe(None));
+		let mut group = track.append_group().expect("catalog group should append");
+		group
+			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5}"#)
+			.expect("catalog frame should write");
+		group.finish().expect("catalog group should finish");
+
+		assert!(matches!(
+			consumer.poll_next(&kio::Waiter::noop()),
+			Poll::Ready(Err(crate::Error::Hang(hang::Error::UnsupportedVersion(5))))
+		));
 	}
 
 	#[test]

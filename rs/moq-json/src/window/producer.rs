@@ -3,6 +3,7 @@
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
+use moq_net::Timed;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -66,12 +67,12 @@ impl<T> Producer<T> {
 		self.inner.lock().unwrap().encoder.range()
 	}
 
-	/// Drop `count` records from the front of the window.
+	/// Drop records from the front at `count`'s timestamp, or untimed when absent.
 	///
 	/// A no-op when the window is already empty, and clamped to what it holds, so a caller can trim
 	/// unconditionally.
-	pub fn pop(&mut self, count: u64) -> Result<()> {
-		self.inner.lock().unwrap().pop(count)
+	pub fn pop(&mut self, count: impl Into<Timed<u64>>) -> Result<()> {
+		self.inner.lock().unwrap().pop(count.into())
 	}
 
 	/// Finish the open group, leaving the next edit to open a replacement with a header.
@@ -101,9 +102,12 @@ impl<T: Serialize> Producer<T> {
 		Ok(Self::with_encoder(track, Encoder::resume(config, checkpoint)?))
 	}
 
-	/// Append one record to the back of the window.
-	pub fn push(&mut self, value: &T) -> Result<()> {
-		self.inner.lock().unwrap().push(value)
+	/// Append a record at its timestamp, or untimed when absent.
+	pub fn push<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> Result<()>
+	where
+		T: 'a,
+	{
+		self.inner.lock().unwrap().push(value.into())
 	}
 }
 
@@ -119,17 +123,17 @@ struct Inner<T> {
 }
 
 impl<T> Inner<T> {
-	fn pop(&mut self, count: u64) -> Result<()> {
+	fn pop(&mut self, count: Timed<u64>) -> Result<()> {
 		self.ensure_open()?;
 		let Inner { track, encoder, .. } = self;
 
-		let Some(frame) = encoder.pop(count)? else {
+		let Some(frame) = encoder.pop(count.value)? else {
 			return Ok(());
 		};
 
 		// A failed write drops the frame uncommitted. The pop is discarded, and the next edit opens a
 		// new group because the attempted frame advanced the group-local compression state.
-		track.write(&frame)?;
+		track.write(count.at, &frame)?;
 		frame.commit();
 
 		Ok(())
@@ -163,12 +167,12 @@ impl<T> Inner<T> {
 }
 
 impl<T: Serialize> Inner<T> {
-	fn push(&mut self, value: &T) -> Result<()> {
+	fn push(&mut self, value: Timed<&T>) -> Result<()> {
 		self.ensure_open()?;
 		let Inner { track, encoder, .. } = self;
 
-		let frame = encoder.push(value)?;
-		track.write(&frame)?;
+		let frame = encoder.push(value.value)?;
+		track.write(value.at, &frame)?;
 		frame.commit();
 
 		Ok(())
@@ -185,22 +189,28 @@ struct Track {
 
 impl Track {
 	/// Write one encoded frame, rolling a group when it is a header.
-	fn write(&mut self, encoded: &Encoded) -> Result<()> {
+	fn write(&mut self, timestamp: Option<moq_net::Timestamp>, encoded: &Encoded) -> Result<()> {
+		// Check before touching a group: a header publishes a new group before its frame is
+		// written, so a mismatch found by `write_frame` would leave an empty newest group behind.
+		if timestamp.is_some() != self.inner.info().timescale.is_some() {
+			return Err(moq_net::Error::TimestampMismatch.into());
+		}
+
 		match encoded.keyframe {
-			true => self.write_header(encoded.payload.clone()),
-			false => self.write_op(encoded.payload.clone()),
+			true => self.write_header(timestamp, encoded.payload.clone()),
+			false => self.write_op(timestamp, encoded.payload.clone()),
 		}
 	}
 
 	/// Close the open group and write the header as the first frame of a new one.
-	fn write_header(&mut self, payload: bytes::Bytes) -> Result<()> {
+	fn write_header(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
 		// The previous group is complete; no more frames will be appended to it.
 		if let Some(group) = self.group.take() {
 			group.finish()?;
 		}
 
 		let mut group = self.inner.append_group()?;
-		if let Err(err) = group.write_frame(moq_net::Timestamp::now(), payload) {
+		if let Err(err) = group.write_frame(timestamp, payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't
 			// close the track. Dropping the handle does NOT close the group, so leaving it would strand
 			// any subscriber that advanced into it with nothing to read and no end.
@@ -213,11 +223,11 @@ impl Track {
 	}
 
 	/// Append an op to the group the last header opened.
-	fn write_op(&mut self, payload: bytes::Bytes) -> Result<()> {
+	fn write_op(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
 		self.group
 			.as_mut()
 			.expect("the encoder only emits an op after a header opened a group")
-			.write_frame(moq_net::Timestamp::now(), payload)?;
+			.write_frame(timestamp, payload)?;
 		Ok(())
 	}
 

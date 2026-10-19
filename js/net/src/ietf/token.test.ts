@@ -2,8 +2,16 @@ import { expect, test } from "bun:test";
 import { ProtocolViolation, SessionCode } from "../error.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
-import { SetupOption, SetupOptions } from "./parameters.ts";
-import { TOKEN_OUT_OF_BAND, type Token, tokenFromRequest, tokenFromSetup, tokenIntoSetup } from "./token.ts";
+import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
+import {
+	AUTHORIZATION_TOKEN,
+	TOKEN_OUT_OF_BAND,
+	type Token,
+	tokenFromRequest,
+	tokenFromSetup,
+	tokenIntoRequest,
+	tokenIntoSetup,
+} from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 const VERSIONS: IetfVersion[] = [
@@ -87,6 +95,17 @@ test("USE_VALUE round trips on every draft", async () => {
 		const params = new SetupOptions();
 		tokenIntoSetup(params, TOKEN, version);
 		expect(tokenFromSetup(await received(params, version), version)).toEqual(TOKEN);
+	}
+});
+
+test("a request carries an out-of-band token by value on every draft", () => {
+	const value = new Uint8Array([0x6a, 0x77, 0x74]);
+	for (const version of VERSIONS) {
+		const params = new Parameters();
+		tokenIntoRequest(params, value, version);
+		const raw = params.bytes.get(AUTHORIZATION_TOKEN);
+		expect(raw).toBeDefined();
+		expect(tokenFromRequest(raw ?? new Uint8Array(), version)).toEqual({ kind: TOKEN_OUT_OF_BAND, value });
 	}
 });
 

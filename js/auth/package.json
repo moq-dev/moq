@@ -24,6 +24,7 @@
 	},
 	"dependencies": {
 		"@hexagon/base64": "^2.0.4",
+		"@moq/clock": "workspace:^",
 		"@moq/pattern": "workspace:^",
 		"@zod/mini": "^4.6.5",
 		"commander": "^15.0.0",

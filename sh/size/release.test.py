@@ -45,6 +45,17 @@ class Release(unittest.TestCase):
                 "release/swift-ffi-package/MoqFFI.xcframework.zip",
             ])
 
+    def test_shared_native_artifacts_keep_history_keys(self):
+        with tempfile.TemporaryDirectory() as old, tempfile.TemporaryDirectory() as shared:
+            fixture(old, "0.4.12")
+            fixture(shared, "0.4.12")
+            for path in Path(shared).glob("go-lib-*"):
+                path.rename(path.with_name(path.name.replace("go-lib-", "default-lib-", 1)))
+            extra = Path(shared) / "default-lib-aarch64-apple-ios/libmoq_ffi.a"
+            extra.parent.mkdir()
+            extra.write_bytes(b"already counted in the Swift package")
+            self.assertEqual(sizes(old), sizes(shared))
+
     def test_duplicate_and_missing_artifacts_refused(self):
         with tempfile.TemporaryDirectory() as root:
             fixture(root, "0.4.12")

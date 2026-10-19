@@ -1,8 +1,8 @@
 //! Hand-written HLS media playlist generation.
 //!
-//! Rendered purely from timeline records: each record is one complete aligned segment
-//! (numbered by the broadcast's shared segment sequence, so renditions cut at the same
-//! boundaries) carrying its own duration. URIs are relative to the media playlist
+//! Each reference record defines one complete aligned segment with its own duration.
+//! URLs carry the source reference and record number, and that number is the segment's
+//! `EXT-X-MEDIA-SEQUENCE`, so every edge derives it alone. URIs are relative to the media playlist
 //! (`/<broadcast>/<kind>/<rendition>/media.m3u8`), so they resolve against the rendition
 //! directory.
 
@@ -23,6 +23,8 @@ pub(crate) struct Snapshot {
 	pub target_duration: u64,
 	/// `EXT-X-MEDIA-SEQUENCE` of the first listed segment.
 	pub media_sequence: u64,
+	/// `EXT-X-DISCONTINUITY-SEQUENCE` of the first listed segment.
+	pub discontinuity_sequence: u64,
 	/// Listed segments, oldest first.
 	pub segments: Vec<Segment>,
 	/// Whether the broadcast ended (`EXT-X-ENDLIST`).
@@ -36,7 +38,7 @@ pub(crate) struct Snapshot {
 
 /// One listed segment.
 pub(crate) struct Segment {
-	/// The aligned segment number; the URI is `seg/{tag}.{segment}.m4s`.
+	/// The source segment number; the URI is `seg/{tag}.{segment}.m4s`.
 	pub segment: u64,
 	/// The [`tag`](super::segments::tag) of the reference numbering the segment.
 	pub tag: String,
@@ -74,6 +76,9 @@ pub(crate) fn render_media(snapshot: &Snapshot, init: &str, query: Option<&str>)
 	let _ = writeln!(out, "#EXT-X-VERSION:{version}");
 	let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", snapshot.target_duration);
 	let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{}", snapshot.media_sequence);
+	if snapshot.discontinuity_sequence > 0 {
+		let _ = writeln!(out, "#EXT-X-DISCONTINUITY-SEQUENCE:{}", snapshot.discontinuity_sequence);
+	}
 	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.{init}.mp4{suffix}\"");
 
 	for (index, segment) in snapshot.segments.iter().enumerate() {
@@ -114,6 +119,7 @@ mod tests {
 		let snapshot = Snapshot {
 			target_duration: 2,
 			media_sequence: 10,
+			discontinuity_sequence: 0,
 			segments: vec![
 				Segment {
 					segment: 10,
@@ -157,6 +163,7 @@ mod tests {
 		let snapshot = Snapshot {
 			target_duration: 2,
 			media_sequence: 0,
+			discontinuity_sequence: 0,
 			segments: vec![Segment {
 				segment: 0,
 				tag: "ab12cd34".into(),
@@ -179,6 +186,7 @@ mod tests {
 		let snapshot = Snapshot {
 			target_duration: 4,
 			media_sequence: 0,
+			discontinuity_sequence: 0,
 			segments: vec![Segment {
 				segment: 0,
 				tag: "ab12cd34".into(),

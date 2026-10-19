@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 //! Headless multi-participant rooms over MoQ.
 //!
 //! A room is a path prefix. There is no service and no storage: joining is

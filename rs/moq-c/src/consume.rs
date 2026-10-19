@@ -19,7 +19,7 @@ struct ConsumeCatalog {
 	/// The origin `broadcast` was resolved through, if any. A rendition may name a sibling
 	/// broadcast, and only an origin can fetch one; a broadcast handed over without one (a
 	/// local producer) leaves such a rendition unresolvable rather than silently wrong.
-	origin: Option<moq_net::origin::Consumer>,
+	origin: Option<crate::origin::Consumer>,
 
 	// Carries the untyped `Extra` extension so application catalog sections survive
 	// into `moq_catalog_section_*` instead of being dropped on parse.
@@ -34,6 +34,30 @@ struct ConsumeCatalog {
 	sections: Vec<(String, String)>,
 }
 
+impl ConsumeCatalog {
+	fn rendition<C: Clone>(&self, name: &str, config: &C) -> Rendition<C> {
+		Rendition {
+			broadcast: self.broadcast.clone(),
+			config: config.clone(),
+			name: name.to_string(),
+			driver: self
+				.origin
+				.as_ref()
+				.map(|origin| origin.driver.clone())
+				.unwrap_or_default(),
+		}
+	}
+}
+
+/// A catalog rendition to decode: the broadcast and track serving it, and the owner whose panic
+/// ends the decode.
+pub struct Rendition<C> {
+	pub broadcast: moq_net::broadcast::Consumer,
+	pub config: C,
+	pub name: String,
+	pub driver: crate::ffi::Background,
+}
+
 /// A broadcast handed to C, plus the origin cursor that named it.
 ///
 /// The origin is what lets a catalog rendition reference a sibling broadcast: only an origin
@@ -43,7 +67,7 @@ struct ConsumeCatalog {
 #[derive(Clone)]
 struct ConsumeBroadcast {
 	broadcast: moq_net::broadcast::Consumer,
-	origin: Option<moq_net::origin::Consumer>,
+	origin: Option<crate::origin::Consumer>,
 }
 
 /// The broadcast serving a rendition, honoring its catalog `broadcast` reference.
@@ -54,7 +78,7 @@ struct ConsumeBroadcast {
 /// task, never under the state lock, so `origin` is cloned out rather than borrowed.
 async fn resolve(
 	broadcast: moq_net::broadcast::Consumer,
-	origin: Option<moq_net::origin::Consumer>,
+	origin: Option<crate::origin::Consumer>,
 	reference: Option<moq_net::path::RelativeOwned>,
 ) -> Result<moq_net::broadcast::Consumer, Error> {
 	let Some(reference) = reference.filter(|reference| !reference.is_empty()) else {
@@ -62,8 +86,11 @@ async fn resolve(
 	};
 
 	let origin = origin.ok_or_else(|| Error::UnresolvableBroadcast(reference.as_str().to_string()))?;
-	let source = moq_mux::Source::new(origin, broadcast);
-	Ok(source.resolve(Some(&reference.borrow())).await?)
+	let source = moq_mux::Source::new(origin.inner, broadcast);
+	origin
+		.driver
+		.watch(async { Ok(source.resolve(Some(&reference.borrow())).await?) })
+		.await
 }
 
 /// A spawned task entry: `close` signals shutdown, `callback` delivers status.
@@ -144,15 +171,23 @@ impl Consume {
 	pub fn start(
 		&mut self,
 		broadcast: moq_net::broadcast::Consumer,
-		origin: Option<moq_net::origin::Consumer>,
+		origin: Option<crate::origin::Consumer>,
 	) -> Result<Id, Error> {
 		self.broadcast.insert(ConsumeBroadcast { broadcast, origin })
+	}
+
+	/// Whether the caller still holds `id` as a handle to `broadcast`.
+	pub fn holds(&self, id: Id, broadcast: &moq_net::broadcast::Consumer) -> bool {
+		self.broadcast
+			.get(id)
+			.is_some_and(|held| held.broadcast.is_clone(broadcast))
 	}
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let ConsumeBroadcast { broadcast, origin } =
 			self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
 
+		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
 			close: Some(channel.0),
@@ -163,13 +198,13 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task
 		// to keep this entrypoint non-blocking.
 		tokio::spawn(async move {
-			let res = async move {
+			let res = crate::ffi::run(driver.watch(async move {
 				let catalog = broadcast
 					.track(hang::catalog::Catalog::DEFAULT_NAME)?
 					.subscribe(hang::catalog::Catalog::default_subscription())
 					.await?;
 				Self::run_catalog(on_catalog, broadcast.clone(), origin, catalog.into(), channel.1).await
-			}
+			}))
 			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
@@ -186,7 +221,7 @@ impl Consume {
 	async fn run_catalog(
 		callback: OnStatus,
 		broadcast: moq_net::broadcast::Consumer,
-		origin: Option<moq_net::origin::Consumer>,
+		origin: Option<crate::origin::Consumer>,
 		mut catalog: moq_mux::catalog::hang::Consumer<moq_mux::catalog::hang::Extra>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
@@ -434,6 +469,7 @@ impl Consume {
 		let reference = config.broadcast.clone();
 		let broadcast = consume.broadcast.clone();
 		let origin = consume.origin.clone();
+		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -444,7 +480,7 @@ impl Consume {
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
-			let res = async move {
+			let res = crate::ffi::run(driver.watch(async move {
 				let broadcast = resolve(broadcast, origin, reference).await?;
 				let track = broadcast
 					.track(&name)?
@@ -456,7 +492,7 @@ impl Consume {
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container);
 				Self::run_track(on_frame, track, channel.1).await
-			}
+			}))
 			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
@@ -493,6 +529,7 @@ impl Consume {
 		let reference = config.broadcast.clone();
 		let broadcast = consume.broadcast.clone();
 		let origin = consume.origin.clone();
+		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -503,7 +540,7 @@ impl Consume {
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
-			let res = async move {
+			let res = crate::ffi::run(driver.watch(async move {
 				let broadcast = resolve(broadcast, origin, reference).await?;
 				let track = broadcast
 					.track(&name)?
@@ -515,7 +552,7 @@ impl Consume {
 					.await?;
 				let track = moq_mux::container::Consumer::new(track, container);
 				Self::run_track(on_frame, track, channel.1).await
-			}
+			}))
 			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
@@ -607,12 +644,13 @@ impl Consume {
 		subscription: Option<moq_net::track::Subscription>,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let broadcast = self
-			.broadcast
-			.get(broadcast)
-			.ok_or(Error::BroadcastNotFound)?
-			.broadcast
-			.clone();
+		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let driver = context
+			.origin
+			.as_ref()
+			.map(|origin| origin.driver.clone())
+			.unwrap_or_default();
+		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
 		let channel = oneshot::channel();
@@ -626,11 +664,11 @@ impl Consume {
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
-			let res = async move {
+			let res = crate::ffi::run(driver.watch(async move {
 				let mut track = broadcast.track(&name)?.subscribe(subscription.clone()).await?.ordered();
 				Self::apply_raw_subscription(&mut track, subscription);
 				Self::run_raw(on_frame, track, channel.1, updates).await
-			}
+			}))
 			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
@@ -646,12 +684,35 @@ impl Consume {
 
 	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
 		let subscription = subscription.unwrap_or_default();
-		let start = subscription.start.map(|start| start.group).or_else(|| track.latest());
+		// Reads start where the lowest range does. Without a floor of its own (the oldest
+		// range, the default) a raw reader joins at the latest group.
+		let latest = match track.poll_largest(&kio::Waiter::noop()) {
+			std::task::Poll::Ready(Some(position)) => Some(position.group),
+			_ => None,
+		};
+		let start = subscription
+			.ranges
+			.iter()
+			.map(|range| match range.start {
+				moq_net::track::Anchor::Absolute(start) => Some(start.group),
+				moq_net::track::Anchor::Relative(u64::MAX) => latest,
+				moq_net::track::Anchor::Relative(back) => latest.map(|latest| latest.saturating_sub(back)),
+			})
+			.min()
+			.flatten();
+		// They stop past the last absolute end; an open or relative one follows the live edge.
+		let end = subscription
+			.ranges
+			.iter()
+			.map(|range| match range.end {
+				Some(moq_net::track::Anchor::Absolute(end)) => Some(end),
+				_ => None,
+			})
+			.collect::<Option<Vec<_>>>()
+			.map(|ends| ends.into_iter().max().unwrap_or_default());
 		track.set_groups((
 			start.map_or(Bound::Unbounded, Bound::Included),
-			subscription
-				.end
-				.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
+			end.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
 		));
 		// A closed track makes the update meaningless; the reader already sees the close.
 		let _ = track.update(subscription);
@@ -795,12 +856,13 @@ impl Consume {
 	/// `on_datagram` is called with a datagram ID for each datagram in arrival order;
 	/// each must be released with [`Self::datagram_close`].
 	pub fn datagram_track(&mut self, broadcast: Id, name: &str, on_datagram: OnStatus) -> Result<Id, Error> {
-		let broadcast = self
-			.broadcast
-			.get(broadcast)
-			.ok_or(Error::BroadcastNotFound)?
-			.broadcast
-			.clone();
+		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let driver = context
+			.origin
+			.as_ref()
+			.map(|origin| origin.driver.clone())
+			.unwrap_or_default();
+		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
 		let channel = oneshot::channel();
@@ -812,10 +874,10 @@ impl Consume {
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
-			let res = async move {
+			let res = crate::ffi::run(driver.watch(async move {
 				let track = broadcast.track(&name)?.subscribe(None).await?;
 				Self::run_datagrams(on_datagram, track, channel.1).await
-			}
+			}))
 			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
@@ -886,14 +948,8 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Look up a video rendition by catalog index, returning the
-	/// (broadcast, config, name) tuple needed to subscribe, mirroring
-	/// the index-based selection in `video`.
-	pub fn video_rendition(
-		&self,
-		catalog: Id,
-		index: usize,
-	) -> Result<(moq_net::broadcast::Consumer, hang::catalog::VideoConfig, String), Error> {
+	/// Look up a video rendition by catalog index, mirroring the index-based selection in `video`.
+	pub fn video_rendition(&self, catalog: Id, index: usize) -> Result<Rendition<hang::catalog::VideoConfig>, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let (name, config) = consume
 			.catalog
@@ -902,7 +958,7 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
-		Ok((consume.broadcast.clone(), config.clone(), name.clone()))
+		Ok(consume.rendition(name, config))
 	}
 
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
@@ -917,12 +973,13 @@ impl Consume {
 		config: moq_json::snapshot::consumer::Config,
 		on_value: OnStatus,
 	) -> Result<Id, Error> {
-		let broadcast = self
-			.broadcast
-			.get(broadcast)
-			.ok_or(Error::BroadcastNotFound)?
-			.broadcast
-			.clone();
+		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let driver = context
+			.origin
+			.as_ref()
+			.map(|origin| origin.driver.clone())
+			.unwrap_or_default();
+		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
 		let channel = oneshot::channel();
@@ -934,11 +991,11 @@ impl Consume {
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
-			let res = async move {
+			let res = crate::ffi::run(driver.watch(async move {
 				let track = broadcast.track(&name)?.subscribe(None).await?;
 				let consumer = moq_json::snapshot::Consumer::<serde_json::Value>::new(track, config);
 				Self::run_json_snapshot(on_value, consumer, channel.1).await
-			}
+			}))
 			.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
@@ -986,12 +1043,13 @@ impl Consume {
 		config: moq_json::stream::Config,
 		on_value: OnStatus,
 	) -> Result<Id, Error> {
-		let broadcast = self
-			.broadcast
-			.get(broadcast)
-			.ok_or(Error::BroadcastNotFound)?
-			.broadcast
-			.clone();
+		let context = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let driver = context
+			.origin
+			.as_ref()
+			.map(|origin| origin.driver.clone())
+			.unwrap_or_default();
+		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
 		let channel = oneshot::channel();
@@ -1003,11 +1061,11 @@ impl Consume {
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
-			let res = async move {
+			let res = crate::ffi::run(driver.watch(async move {
 				let track = broadcast.track(&name)?.subscribe(None).await?;
 				let consumer = moq_json::stream::Consumer::<serde_json::Value>::new(track, config);
 				Self::run_json_stream(on_value, consumer, channel.1).await
-			}
+			}))
 			.await;
 
 			let entry = State::lock().consume.json_task.remove(id).flatten();
@@ -1072,14 +1130,8 @@ impl Consume {
 		self.json_value.remove(value).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
-	/// Look up an audio rendition by catalog index, returning the
-	/// (broadcast, config, name) tuple needed to subscribe, mirroring
-	/// the index-based selection in `audio`.
-	pub fn audio_rendition(
-		&self,
-		catalog: Id,
-		index: usize,
-	) -> Result<(moq_net::broadcast::Consumer, hang::catalog::AudioConfig, String), Error> {
+	/// Look up an audio rendition by catalog index, mirroring the index-based selection in `audio`.
+	pub fn audio_rendition(&self, catalog: Id, index: usize) -> Result<Rendition<hang::catalog::AudioConfig>, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let (name, config) = consume
 			.catalog
@@ -1088,6 +1140,44 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
-		Ok((consume.broadcast.clone(), config.clone(), name.clone()))
+		Ok(consume.rendition(name, config))
+	}
+}
+
+#[cfg(test)]
+mod supervision_tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn a_decoded_rendition_watches_the_origin_that_named_it() {
+		let (origin, driver, trigger) = crate::ffi::panicking_origin();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default();
+		catalog.audio.renditions.insert(
+			"audio".into(),
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+		);
+		let mut consume = Consume::default();
+		let id = consume
+			.catalog
+			.insert(ConsumeCatalog {
+				broadcast: broadcast.consume(),
+				origin: Some(crate::origin::Consumer {
+					inner: origin.consume(),
+					driver: driver.clone(),
+				}),
+				catalog,
+				audio_codec: Vec::new(),
+				video_codec: Vec::new(),
+				sections: Vec::new(),
+			})
+			.unwrap();
+		let rendition = consume.audio_rendition(id, 0).unwrap();
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(driver.finished().await, Err(Error::Panic)));
+		let result = rendition.driver.check();
+		assert!(matches!(result, Err(Error::Panic)), "{result:?}");
 	}
 }

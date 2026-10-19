@@ -19,9 +19,13 @@ on:
       - "rs/moq-relay/**"
       - "rs/moq-loc/**"
       - "rs/moq-json/**"
+      # The lossy-path step's transport and shaper.
+      - "rs/moq-quic/**"
+      - "rs/moq-shaper/**"
       # Workspace dependencies of moq-net, moq-tokio and moq-mux on the TS path.
       - "rs/kio/**"
       - "rs/moq-flate/**"
+      - "rs/moq-ice/**"
       - "rs/moq-msf/**"
       - "rs/moq-pattern/**"
       - "rs/moq-sock/**"
@@ -52,11 +56,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
@@ -82,6 +81,41 @@ jobs:
       - name: TS compliance
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      - name: TS fragmented PES headers
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --fragment-pes
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # `import/export ts --passthrough`: from its first packet the capture is the source's
+      # packets in place, and every compliance check grades it as it grades that interval of
+      # the source. The generated clip fails the T-STD model on its own; the capture must too.
+      - name: TS passthrough
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same over a hardware encoder's capture the T-STD model passes, with a dirty start
+      # the importer acquires past.
+      - name: TS passthrough of a broadcast capture
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts-passthrough-capture
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same over a whole MPTS: two programs on their own PCR PIDs, whose recovery points
+      # rarely line up.
+      - name: TS passthrough of an MPTS
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --mpts
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
@@ -134,11 +168,11 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
-      # The same round-trip over an open-GOP clip: every leading picture after a
-      # recovery point must come back, in decode order.
+      # The same round-trip over an open-GOP clip: recovery-group orphans are trimmed,
+      # continuous leading pictures stay in decode order, and all shape checks gate.
       - name: TS open GOP
         if: ${{ !cancelled() }}
-        run: nix develop --command just test ts --open-gop
+        run: nix develop --command just test ts --open-gop --strict
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
@@ -175,9 +209,25 @@ jobs:
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      # 1% random loss and 25 ms each way on the subscriber's leg (moq-dev/moq#4613), through
+      # moq-shaper: QUIC retransmission must keep the export T-STD compliant with no media lost.
+      # `--hrd`, since `--headroom` still loses audio just after the join at 1%.
+      - name: TS lossy path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --hrd --loss 1 --duration 120
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # The passthrough over the same path: retransmission must leave no packet missing or moved.
+      - name: TS passthrough lossy path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --passthrough --loss 1 --duration 120
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
       - name: Upload failure artifacts
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ts-failure
           path: ${{ runner.temp }}/moq-test-runs

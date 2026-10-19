@@ -1,3 +1,4 @@
+import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { hasRangeFilters, isDraft20 } from "./filter.ts";
 import * as Message from "./message.ts";
@@ -39,9 +40,19 @@ export class Fetch {
 	static id = 0x16;
 
 	requestId: bigint;
+	/** Whether the decoded request carried Range Filters. */
+	rangeFilters: boolean;
+	/** The decoded standalone namespace, absent for a joining fetch. */
+	trackNamespace?: Path.Valid;
 
-	constructor({ requestId }: { requestId: bigint }) {
+	constructor({
+		requestId,
+		rangeFilters = false,
+		trackNamespace,
+	}: { requestId: bigint; rangeFilters?: boolean; trackNamespace?: Path.Valid }) {
 		this.requestId = requestId;
+		this.rangeFilters = rangeFilters;
+		this.trackNamespace = trackNamespace;
 	}
 
 	async #encode(_w: Writer): Promise<void> {
@@ -67,16 +78,15 @@ export class Fetch {
 			await r.u8(); // group_order
 		}
 
+		let trackNamespace: Path.Valid | undefined;
 		if (isDraft20(version)) {
 			// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
-			await Namespace.decode(r);
-			await r.string();
+			trackNamespace = (await Namespace.decodeTrack(r)).namespace;
 		} else {
 			const fetchType = await r.u53();
 			switch (fetchType) {
 				case 0x1: // Standalone: namespace, name, start and end Locations
-					await Namespace.decode(r);
-					await r.string();
+					trackNamespace = (await Namespace.decodeTrack(r)).namespace;
 					for (let i = 0; i < 4; i++) await r.u62();
 					break;
 				case 0x2: // Relative Joining: subscription, group offset
@@ -97,7 +107,7 @@ export class Fetch {
 			throw new Error("TRACK_PROPERTY_FILTER is not allowed on FETCH");
 		}
 
-		return new Fetch({ requestId });
+		return new Fetch({ requestId, rangeFilters: params.rangeFilters, trackNamespace });
 	}
 }
 

@@ -30,7 +30,7 @@ class SelectTest(unittest.TestCase):
     def test_nextest_launcher_selects_workspace(self):
         for action in ("check", "check-test", "lint", "test"):
             with self.subTest(action=action):
-                self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz",
+                self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz",
                               self.selected("sh/rs/nextest.sh", action=action))
         selected = self.selected("sh/rs/nextest.sh")
         for recipe in ("tokio-features --all", "net-features", "wasm", "uring-check", "media-features --all"):
@@ -85,7 +85,8 @@ class RecipeTest(unittest.TestCase):
                 (scratch / "benches/unexecuted.rs").write_text(
                     'compile_error!("nextest must not compile a benchmark it never runs");\nfn main() {}\n'
                 )
-                env = dict(os.environ, BASH_ENV=os.devnull, TMPDIR="/tmp")
+                env = dict(os.environ, BASH_ENV=os.devnull, TMPDIR="/tmp",
+                           NEXTEST_PROFILE="default")
                 result = subprocess.run(
                     ["just", "rs", "test", "--manifest-path", str(scratch / "Cargo.toml")],
                     cwd=ROOT, env=env, capture_output=True, text=True,
@@ -127,7 +128,7 @@ class FeatureTest(unittest.TestCase):
 
 CARGO_STUB = r"""#!/bin/bash
 printf '%s\n' "$*" >> "$FEATURE_CALLS"
-if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features noq' ]]; then
+if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features quic' ]]; then
  echo 'a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature' >&2
  exit 1
 fi

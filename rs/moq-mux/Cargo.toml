@@ -21,6 +21,7 @@ h264-parser = { version = "0.4.2" }
 hang = { workspace = true }
 kio = { workspace = true }
 memchr = "2"
+moq-clock = { workspace = true }
 moq-flate = { workspace = true }
 moq-json = { workspace = true }
 moq-loc = { workspace = true }
@@ -29,6 +30,7 @@ moq-net = { workspace = true }
 mp4-atom = { version = "0.16.2", features = ["tokio", "bytes", "serde"] }
 mpeg2ts = "0.6.0"
 num_enum = { workspace = true }
+roxmltree = "0.21.1"
 scuffle-av1 = { version = "0.1.4" }
 scuffle-h265 = { version = "0.2.2" }
 serde = { workspace = true }
@@ -38,12 +40,12 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 tracing = { workspace = true }
 url = { workspace = true }
-web-async = { workspace = true }
 webm-iterable = "0.7"
 
 [dev-dependencies]
 criterion = { workspace = true }
 futures = { workspace = true }
+moq-clock = { workspace = true, features = ["sim"] }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
 
@@ -57,4 +59,12 @@ harness = false
 
 [[bench]]
 name = "export"
+harness = false
+
+[[bench]]
+name = "jitter"
+harness = false
+
+[[bench]]
+name = "containers"
 harness = false

@@ -38,7 +38,13 @@ pub struct Settings {
 	web: Web,
 
 	#[usage(flatten)]
+	acme: Acme,
+
+	#[usage(flatten)]
 	stats: Stats,
+
+	#[usage(flatten)]
+	stun: Stun,
 
 	#[usage(flatten)]
 	cache: Cache,
@@ -132,6 +138,9 @@ struct Auth {
 		parse = "list_by_comma"
 	)]
 	public_publish: Option<Vec<String>>,
+
+	#[usage(env = "MOQ_AUTH_VERIFICATIONS", cli("--auth-verifications"))]
+	verifications: Option<usize>,
 }
 
 #[derive(usage::Config)]
@@ -168,6 +177,25 @@ struct WebHttps {
 
 	#[usage(env = "MOQ_WEB_HTTPS_ROOT", cli("--web-https-root"), parse = "list_by_comma")]
 	root: Option<Vec<String>>,
+}
+
+#[derive(usage::Config)]
+#[usage(prefix = "acme")]
+struct Acme {
+	#[usage(env = "MOQ_ACME_DOMAINS", cli("--acme-domains"), parse = "list_by_comma")]
+	domains: Option<Vec<String>>,
+
+	#[usage(env = "MOQ_ACME_CONTACT", cli("--acme-contact"), parse = "list_by_comma")]
+	contact: Option<Vec<String>>,
+
+	#[usage(env = "MOQ_ACME_DIR", cli("--acme-dir"))]
+	dir: Option<String>,
+
+	#[usage(env = "MOQ_ACME_DIRECTORY", cli("--acme-directory"))]
+	directory: Option<String>,
+
+	#[usage(env = "MOQ_ACME_TIMEOUT", cli("--acme-timeout"))]
+	timeout: Option<String>,
 }
 
 #[derive(usage::Config)]
@@ -219,6 +247,8 @@ struct Session {
 	announces: Option<usize>,
 	#[usage(env = "MOQ_SESSION_SUBSCRIPTIONS", cli("--session-subscriptions"))]
 	subscriptions: Option<usize>,
+	#[usage(env = "MOQ_SESSION_FETCHES", cli("--session-fetches"))]
+	fetches: Option<usize>,
 }
 
 #[derive(usage::Config)]
@@ -228,4 +258,26 @@ struct Peer {
 	announces: Option<usize>,
 	#[usage(env = "MOQ_PEER_SUBSCRIPTIONS", cli("--peer-subscriptions"))]
 	subscriptions: Option<usize>,
+	#[usage(env = "MOQ_PEER_FETCHES", cli("--peer-fetches"))]
+	fetches: Option<usize>,
+	#[usage(flatten)]
+	quic: PeerQuic,
+}
+
+#[derive(usage::Config)]
+#[usage(prefix = "peer.quic")]
+struct PeerQuic {
+	#[usage(env = "MOQ_PEER_QUIC_MAX_STREAMS", cli("--peer-quic-max-streams"))]
+	max_streams: Option<u64>,
+	#[usage(env = "MOQ_PEER_QUIC_RECEIVE_WINDOW", cli("--peer-quic-receive-window"))]
+	receive_window: Option<u64>,
+	#[usage(env = "MOQ_PEER_QUIC_SEND_WINDOW", cli("--peer-quic-send-window"))]
+	send_window: Option<u64>,
+}
+
+#[derive(usage::Config)]
+#[usage(prefix = "stun")]
+struct Stun {
+	#[usage(env = "MOQ_STUN_BIND", cli("--stun-bind"))]
+	bind: Option<String>,
 }

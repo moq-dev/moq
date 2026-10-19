@@ -3,8 +3,9 @@
 use std::fmt;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use moq_net::time::Instant;
 use rand::RngExt;
 
 use moq_mux::catalog::hang::CatalogExt;
@@ -1187,9 +1188,8 @@ impl Supervisor {
 	}
 }
 
-/// A dropped or closed track is the normal end of a publish; any other cause is
-/// a real abort (e.g. a transport reset) worth surfacing rather than treating as
-/// a clean exit.
+/// An application dropping or closing its producer ends publishing normally;
+/// a specific abort (such as a transport reset) stays visible in diagnostics.
 fn log_track_ended(err: moq_net::Error) {
 	if matches!(err, moq_net::Error::Dropped | moq_net::Error::Closed) {
 		tracing::debug!("audio track no longer announced; stopping capture");
@@ -2108,7 +2108,7 @@ mod tests {
 	/// the broadcast clock's own correlation, so the published timestamp is exactly that
 	/// instant however late the read happens.
 	mod clock {
-		use std::time::{Duration, Instant, SystemTime};
+		use std::time::{Duration, SystemTime};
 
 		use super::*;
 
@@ -2441,21 +2441,21 @@ mod tests {
 			for samples in [&first, &second] {
 				let mut track = fixture.subscribe().await;
 				live.push(fixture.deliver(samples, &mut track, &live).await);
-				// The rendition, and with it the archive, registers once the input is discovered.
-				if timeline.is_none() {
+				drop(track);
+				wait_for(&mut fixture.publication, Status::Waiting).await;
+				// The second run's first group closes the unhinted timeline's first record.
+				if timeline.is_none() && live.len() > 1 {
 					let section = fixture
 						.catalog
 						.snapshot()
 						.archive
-						.expect("the audio track enrolls an archive");
+						.expect("the audio track declares its archive after the run closes");
 					timeline = Some(
 						moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section, "audio")
 							.await
 							.unwrap(),
 					);
 				}
-				drop(track);
-				wait_for(&mut fixture.publication, Status::Waiting).await;
 				// Idle past the minimum segment, so each run is archived as its own record.
 				tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
 			}

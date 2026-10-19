@@ -111,8 +111,7 @@ export class Publish {
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (Draft17 only)
 		}
-		const trackNamespace = await Namespace.decode(r);
-		const trackName = await r.string();
+		const { namespace: trackNamespace, name: trackName } = await Namespace.decodeTrack(r);
 		const trackAlias = await r.u62();
 
 		if (version === Version.DRAFT_14) {

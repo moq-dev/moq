@@ -37,6 +37,8 @@
 //! the encoder, which keeps a frame that never reached the wire from desyncing the stream.
 
 pub mod consumer;
+#[cfg(test)]
+use futures::FutureExt;
 mod decoder;
 mod encoder;
 pub mod producer;
@@ -56,6 +58,87 @@ mod test {
 	use super::encoder::MAX_DELTA_FRAMES;
 	use super::*;
 	use crate::Compression;
+
+	#[test]
+	fn editing_keeps_the_callers_timestamp_on_commit_and_drop() {
+		let (mut producer, _) = producer_on(cfg(100), timed());
+		let mut groups = producer.consume();
+		let first = moq_net::Timestamp::from_millis(100).unwrap();
+		let second = moq_net::Timestamp::from_millis(200).unwrap();
+		producer.modify(Some(first)).unwrap()["n"] = json!(1);
+		let mut edit = producer.modify(Some(second)).unwrap();
+		edit["n"] = json!(2);
+		edit.commit().unwrap();
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected the edited snapshot");
+		};
+		for at in [first, second] {
+			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+				panic!("expected the edited value");
+			};
+			assert_eq!(frame.timestamp, Some(at));
+		}
+	}
+
+	#[test]
+	fn a_missing_edit_timestamp_is_refused_on_a_timed_track() {
+		let (mut producer, _) = producer_on(cfg(0), timed());
+		let mut edit = producer.modify(None).unwrap();
+		edit["n"] = json!(1);
+		assert!(matches!(
+			edit.commit(),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+		let at = moq_net::Timestamp::from_millis(100).unwrap();
+		producer.mutate(Some(at), |value| value["n"] = json!(2)).unwrap();
+		let waiter = kio::Waiter::noop();
+		let mut groups = producer.consume();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected the subsequent explicit publish");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected a timed frame");
+		};
+		assert_eq!(frame.timestamp, Some(at));
+	}
+
+	/// Refused before a replacement group is published, so the last value stays readable.
+	#[test]
+	fn a_timed_track_refuses_a_bare_publish() {
+		for delta_ratio in [0, 100] {
+			let (mut producer, track) = producer_on(cfg(delta_ratio), timed());
+			let at = moq_net::Timestamp::from_millis(100).unwrap();
+			producer
+				.update(moq_net::Timed::from(&json!({ "n": 1 })).at(at))
+				.unwrap();
+			assert!(matches!(
+				producer.update(&json!({ "n": 2 })),
+				Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+			));
+			producer.finish().unwrap();
+			assert_eq!(drain(track), vec![json!({ "n": 1 })], "delta_ratio={delta_ratio}");
+		}
+	}
+
+	#[test]
+	fn a_bare_publish_stays_untimed() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("untimed", moq_net::track::Info::default())
+			.unwrap();
+		let mut groups = track.subscribe(None);
+		let mut producer = Producer::new(track, Config::default());
+		producer.update(&json!({ "n": 1 })).unwrap();
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected an untimed group");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected an untimed frame");
+		};
+		assert_eq!(frame.timestamp, None);
+	}
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
@@ -87,9 +170,13 @@ mod test {
 	}
 
 	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Subscriber) {
+		producer_on(config, moq_net::track::Info::default())
+	}
+
+	fn producer_on(config: Config, info: moq_net::track::Info) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", info)
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
@@ -188,7 +275,7 @@ mod test {
 
 	#[test]
 	fn a_cut_makes_the_next_update_a_snapshot_group() {
-		let (mut producer, track) = producer(cfg(100));
+		let (mut producer, mut track) = producer(cfg(100));
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
 		producer.cut().unwrap();
@@ -198,13 +285,16 @@ mod test {
 		// The ratio would have kept every update in one group; the cut rolled it anyway. A consumer
 		// joining at the new group reads the whole value from its first frame, with none of the deltas
 		// that preceded the cut.
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 1, "b": 3 }));
 	}
 
 	#[test]
 	fn a_cut_republishes_an_unchanged_value() {
-		let (mut producer, track) = producer(cfg(100));
+		let (mut producer, mut track) = producer(cfg(100));
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.cut().unwrap();
 
@@ -213,32 +303,41 @@ mod test {
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.finish().unwrap();
 
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 		assert_eq!(drain(track), vec![json!({ "a": 1 })]);
 	}
 
 	#[test]
 	fn a_cut_opens_no_replacement_group() {
-		let (mut producer, track) = producer(cfg(100));
+		let (mut producer, mut track) = producer(cfg(100));
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.cut().unwrap();
 		producer.finish().unwrap();
 
 		// Cutting closes the open group and stops there: no empty group for a consumer to advance into
 		// and wait on.
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		assert_eq!(drain(track), vec![json!({ "a": 1 })]);
 	}
 
 	#[test]
 	fn a_cut_is_idempotent() {
-		let (mut producer, track) = producer(cfg(100));
+		let (mut producer, mut track) = producer(cfg(100));
 
 		// Nothing published yet, so there is no group to cut.
 		producer.cut().unwrap();
 		producer.cut().unwrap();
 		producer.update(&json!({ "a": 1 })).unwrap();
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 
 		// And a repeated cut rolls once, not once per call.
 		producer.cut().unwrap();
@@ -246,13 +345,16 @@ mod test {
 		producer.update(&json!({ "a": 2 })).unwrap();
 		producer.finish().unwrap();
 
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 		assert_eq!(drain(track), vec![json!({ "a": 2 })]);
 	}
 
 	#[test]
 	fn a_cut_is_inert_without_deltas() {
-		let (mut producer, track) = producer(cfg(0));
+		let (mut producer, mut track) = producer(cfg(0));
 		producer.update(&json!({ "a": 1 })).unwrap();
 
 		// With deltas off every frame already closes its own group, so there is never one to cut.
@@ -260,20 +362,26 @@ mod test {
 		producer.update(&json!({ "a": 2 })).unwrap();
 		producer.finish().unwrap();
 
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 		assert_eq!(drain(track), vec![json!({ "a": 2 })]);
 	}
 
 	#[test]
 	fn deltas_off_snapshot_per_group() {
-		let (mut producer, track) = producer(cfg(0));
+		let (mut producer, mut track) = producer(cfg(0));
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.update(&json!({ "a": 2 })).unwrap();
 		producer.finish().unwrap();
 
 		// Two updates => two groups, each a full snapshot. A consumer that joins after both
 		// exist only sees the latest, like the existing catalog consumer.
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 		assert_eq!(drain(track), vec![json!({ "a": 2 })]);
 	}
 
@@ -312,7 +420,7 @@ mod test {
 
 	#[test]
 	fn unchanged_value_writes_nothing() {
-		let (mut producer, track) = producer(Config::default());
+		let (mut producer, mut track) = producer(Config::default());
 		assert_eq!(producer.update(&json!({ "a": 1 })).unwrap(), Some(7));
 		assert_eq!(
 			producer.update(&json!({ "a": 1 })).unwrap(),
@@ -321,7 +429,10 @@ mod test {
 		);
 		producer.finish().unwrap();
 
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		assert_eq!(drain(track), vec![json!({ "a": 1 })]);
 	}
 
@@ -329,7 +440,7 @@ mod test {
 	/// size is the encoded frame.
 	#[test]
 	fn a_stamped_update_writes_its_capture_time() {
-		let (mut producer, _track) = producer(cfg(100));
+		let (mut producer, _track) = producer_on(cfg(100), timed());
 		let mut groups = producer.consume();
 		let first = moq_net::Timestamp::from_millis(1_000).unwrap();
 		let second = moq_net::Timestamp::from_millis(2_000).unwrap();
@@ -353,14 +464,17 @@ mod test {
 
 	#[test]
 	fn deltas_share_one_group() {
-		let (mut producer, track) = producer(cfg(100));
+		let (mut producer, mut track) = producer(cfg(100));
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 3 })).unwrap();
 		producer.finish().unwrap();
 
 		// All updates fit in a single group as snapshot + deltas.
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		let values = drain(track);
 		assert_eq!(values.last().unwrap(), &json!({ "a": 1, "b": 3 }));
 	}
@@ -371,14 +485,17 @@ mod test {
 		// checks the deltas already written, so the delta that tips the group over budget still lands
 		// (a one-frame overshoot): group 0 takes two deltas (14 bytes) before the fourth update rolls
 		// group 1. (Still distinct from 0, which disables deltas entirely.)
-		let (mut producer, track) = producer(cfg(1));
+		let (mut producer, mut track) = producer(cfg(1));
 		producer.update(&json!({ "a": 1 })).unwrap(); // snapshot, group 0
 		producer.update(&json!({ "a": 2 })).unwrap(); // delta, group 0 (deltas = 7)
 		producer.update(&json!({ "a": 3 })).unwrap(); // delta, group 0 (deltas = 14, now over budget)
 		producer.update(&json!({ "a": 4 })).unwrap(); // budget already exceeded, rolls group 1
 		producer.finish().unwrap();
 
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 	}
 
 	#[test]
@@ -388,32 +505,38 @@ mod test {
 		// `ratio = 8` budgets 56 bytes of deltas. The gate checks the deltas already written, so the
 		// group keeps filling until the accumulated deltas first exceed 56 (nine deltas = 63 bytes) and
 		// the next update rolls (a one-frame overshoot past the 56-byte budget).
-		let (mut producer, track) = producer(cfg(8));
+		let (mut producer, mut track) = producer(cfg(8));
 		for n in 0..=10 {
 			producer.update(&json!({ "n": n })).unwrap();
 		}
 		producer.finish().unwrap();
 
 		// Group 0 carries the snapshot plus 9 deltas (10 frames); the 10th delta opens group 1.
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 		assert_eq!(drain(track).last().unwrap(), &json!({ "n": 10 }));
 	}
 
 	#[test]
 	fn array_change_is_delta() {
-		let (mut producer, track) = producer(cfg(100));
+		let (mut producer, mut track) = producer(cfg(100));
 		producer.update(&json!({ "list": [1, 2] })).unwrap();
 		producer.update(&json!({ "list": [1, 2, 3] })).unwrap();
 		producer.finish().unwrap();
 
 		// The array is replaced wholesale in a delta, so it stays in the same group.
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		assert_eq!(drain(track).last().unwrap(), &json!({ "list": [1, 2, 3] }));
 	}
 
 	#[test]
 	fn frame_cap_rolls_snapshot() {
-		let (mut producer, track) = producer(cfg(1_000_000));
+		let (mut producer, mut track) = producer(cfg(1_000_000));
 		// First update is the snapshot (frame 0); then MAX_DELTA_FRAMES - 1 deltas fill the group.
 		for i in 0..=MAX_DELTA_FRAMES {
 			producer.update(&json!({ "n": i })).unwrap();
@@ -421,7 +544,10 @@ mod test {
 		producer.finish().unwrap();
 
 		// The frame cap forced exactly one extra snapshot group despite the huge ratio.
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 		assert_eq!(drain(track).last().unwrap(), &json!({ "n": MAX_DELTA_FRAMES }));
 	}
 
@@ -455,17 +581,36 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, Config::default());
 		producer.update(&Doc { count: 1 }).unwrap();
 
-		assert!(matches!(producer.modify(), Err(crate::Error::Json(_))));
+		assert!(matches!(producer.modify(None), Err(crate::Error::Json(_))));
 
 		// The refused edit published nothing after the original value.
 		producer.finish().unwrap();
 		assert_eq!(drain(consumer), vec![json!({ "count": "1", "other": 1 })]);
+	}
+
+	/// An end declared ahead of the live edge still admits the edit below it, and refuses the one
+	/// that would cross it.
+	#[test]
+	fn modify_admits_an_edit_below_a_declared_end() {
+		let mut track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", moq_net::track::Info::default())
+			.unwrap();
+		let mut producer = Producer::<Value>::new(track.clone(), cfg(0));
+		producer.update(&json!({ "a": 1 })).unwrap();
+		track.finish_at(moq_net::track::Position::group(2)).unwrap();
+
+		producer.modify(None).unwrap()["a"] = json!(2);
+		assert!(matches!(
+			producer.modify(None),
+			Err(crate::Error::Net(moq_net::Error::Closed))
+		));
 	}
 
 	#[test]
@@ -481,19 +626,19 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, Config::default());
 
 		// First owner sets its field.
-		producer.modify().unwrap().video = Some("v1".to_string());
+		producer.modify(None).unwrap().video = Some("v1".to_string());
 
 		// Second owner starts from the latest value and adds its own field without clobbering.
-		producer.modify().unwrap().scte35 = Some(42);
+		producer.modify(None).unwrap().scte35 = Some(42);
 
 		// Locking without mutating publishes nothing (the guard stays clean).
-		let _ = producer.modify().unwrap();
+		let _ = producer.modify(None).unwrap();
 
 		producer.finish().unwrap();
 
@@ -525,20 +670,27 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let consumer = track.subscribe(None);
+		let mut consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, cfg(0));
 
-		producer.mutate(|doc| doc.video = Some("v1".to_string())).unwrap();
+		producer.mutate(None, |doc| doc.video = Some("v1".to_string())).unwrap();
 
 		// The second owner starts from the latest value and adds its own field without clobbering.
-		producer.mutate(|doc| doc.scte35 = Some(42)).unwrap();
+		producer.mutate(None, |doc| doc.scte35 = Some(42)).unwrap();
 
 		// A closure that changes nothing publishes nothing: deltas are off, so each publish would
 		// otherwise open a group of its own.
-		producer.mutate(|_| {}).unwrap();
-		assert_eq!(consumer.latest(), Some(1));
+		producer.mutate(None, |_| {}).unwrap();
+		assert_eq!(
+			consumer
+				.largest()
+				.now_or_never()
+				.flatten()
+				.map(|position| position.group),
+			Some(1)
+		);
 
 		producer.finish().unwrap();
 
@@ -564,7 +716,7 @@ mod test {
 		producer.update(&json!({ "keep": true })).unwrap();
 
 		assert!(matches!(
-			producer.mutate(|value| {
+			producer.mutate(None, |value| {
 				*value = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
 			}),
 			Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
@@ -573,14 +725,17 @@ mod test {
 
 	#[test]
 	fn a_dropped_edit_publishes_a_snapshot_then_a_delta() {
-		let (mut producer, track) = producer(cfg(100));
+		let (mut producer, mut track) = producer(cfg(100));
 
-		*producer.modify().unwrap() = json!({ "a": 1, "b": 1 });
-		*producer.modify().unwrap() = json!({ "a": 1, "b": 2 });
+		*producer.modify(None).unwrap() = json!({ "a": 1, "b": 1 });
+		*producer.modify(None).unwrap() = json!({ "a": 1, "b": 2 });
 		producer.finish().unwrap();
 
 		// The ratio keeps both edits in one group: a snapshot plus a merge-patch delta.
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 1, "b": 2 }));
 	}
 
@@ -591,7 +746,7 @@ mod test {
 		producer.finish().unwrap();
 
 		assert!(matches!(
-			producer.modify(),
+			producer.modify(None),
 			Err(crate::Error::Net(moq_net::Error::Closed))
 		));
 		assert_eq!(drain(track), vec![json!({ "a": 1 })]);
@@ -603,12 +758,12 @@ mod test {
 		producer.update(&json!({ "keep": true })).unwrap();
 		let mut subscriber = track.ordered();
 
-		*producer.modify().unwrap() = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
+		*producer.modify(None).unwrap() = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
 
 		// The publisher learns the cause at its next edit. The consumer drains the snapshot
 		// that finished, then learns it from the aborted track.
 		assert!(matches!(
-			producer.modify(),
+			producer.modify(None),
 			Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
 		));
 		assert!(matches!(
@@ -626,7 +781,7 @@ mod test {
 		let (mut producer, track) = producer(cfg(0));
 		producer.update(&json!({ "keep": true })).unwrap();
 
-		let mut guard = producer.modify().unwrap();
+		let mut guard = producer.modify(None).unwrap();
 		*guard = json!({ "big": "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1) });
 		assert!(matches!(
 			guard.commit(),
@@ -634,27 +789,31 @@ mod test {
 		));
 
 		// The caller got the error, so the track stays usable for a smaller value.
-		*producer.modify().unwrap() = json!({ "keep": false });
+		*producer.modify(None).unwrap() = json!({ "keep": false });
 		producer.finish().unwrap();
 		assert_eq!(drain(track).last().unwrap(), &json!({ "keep": false }));
 	}
 
 	#[test]
 	fn a_panicking_edit_does_not_publish() {
-		let (mut producer, track) = producer(cfg(0));
+		let (mut producer, mut track) = producer(cfg(0));
 		producer.update(&json!({ "a": 1 })).unwrap();
 
 		let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-			let mut guard = producer.modify().unwrap();
+			let mut guard = producer.modify(None).unwrap();
 			*guard = json!({ "a": 2 });
 			panic!("torn edit");
 		}));
 		assert!(panicked.is_err());
 
 		// A discarded edit is not a publish failure, so the track is still open for the next one.
-		*producer.modify().unwrap() = json!({ "a": 3 });
+		*producer.modify(None).unwrap() = json!({ "a": 3 });
 		producer.finish().unwrap();
-		assert_eq!(track.latest(), Some(1), "the torn edit took a group");
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1),
+			"the torn edit took a group"
+		);
 		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 3 }));
 	}
 
@@ -673,16 +832,16 @@ mod test {
 		// Every frame is rejected, so each publish fails and the encoder resynchronizes.
 		let mut producer = Producer::<Doc>::new(rejecting_track(), Config::default());
 
-		let mut guard = producer.modify().unwrap();
+		let mut guard = producer.modify(Some(late())).unwrap();
 		guard.video = Some("v1".to_string());
 		assert!(guard.commit().is_err());
 
-		let mut guard = producer.modify().unwrap();
+		let mut guard = producer.modify(Some(late())).unwrap();
 		guard.scte35 = Some(42);
 		assert!(guard.commit().is_err());
 
 		// The editing baseline still carries the composed value.
-		let guard = producer.modify().unwrap();
+		let guard = producer.modify(Some(late())).unwrap();
 		assert_eq!(
 			guard.video,
 			Some("v1".to_string()),
@@ -717,6 +876,12 @@ mod test {
 			.unwrap()
 	}
 
+	/// A time [`rejecting_track`] can't hold: it matches the timed track, so the publish gets as
+	/// far as the group before the conversion fails.
+	fn late() -> moq_net::Timestamp {
+		moq_net::Timestamp::from_millis(10_000).unwrap()
+	}
+
 	/// `append_group` publishes the group before the frame is written, and a rejected frame does not
 	/// close the track. Dropping the handle does not close the group either, so without an explicit
 	/// close a subscriber that advanced into it waits there forever.
@@ -726,7 +891,10 @@ mod test {
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track, cfg(0));
 
-		assert!(matches!(producer.update(&json!({ "a": 1 })), Err(crate::Error::Net(_))));
+		assert!(matches!(
+			producer.update(moq_net::Timed::from(&json!({ "a": 1 })).at(late())),
+			Err(crate::Error::Net(_))
+		));
 
 		let waiter = kio::Waiter::noop();
 		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
@@ -747,18 +915,25 @@ mod test {
 
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let consumer = track.subscribe(None);
+		let mut consumer = track.subscribe(None);
 		let mut producer = Producer::<Doc>::new(track, cfg(0));
 
-		let mut guard = producer.modify().unwrap();
+		let mut guard = producer.modify(None).unwrap();
 		guard.a = 1;
 		guard.commit().unwrap();
 
 		// The drop that follows `commit` must not publish a second group.
 		producer.finish().unwrap();
-		assert_eq!(consumer.latest(), Some(0));
+		assert_eq!(
+			consumer
+				.largest()
+				.now_or_never()
+				.flatten()
+				.map(|position| position.group),
+			Some(0)
+		);
 	}
 
 	#[test]
@@ -766,7 +941,7 @@ mod test {
 		// A tight ratio fills group 0 with a couple of deltas, then forces a later update into a new
 		// snapshot group (the gate overshoots the budget by one delta before rolling).
 		let (mut producer, track) = producer(cfg(1));
-		let observer = producer.consume();
+		let mut observer = producer.consume();
 		let mut consumer = Consumer::<Value>::new(track, consumer::Config::default());
 		let waiter = kio::Waiter::noop();
 
@@ -780,7 +955,14 @@ mod test {
 		producer.update(&json!({ "a": 3 })).unwrap(); // delta in group 0 (deltas = 14, now over budget)
 		producer.update(&json!({ "a": 4 })).unwrap(); // budget already exceeded, rolls group 1
 		producer.finish().unwrap();
-		assert_eq!(observer.latest(), Some(1));
+		assert_eq!(
+			observer
+				.largest()
+				.now_or_never()
+				.flatten()
+				.map(|position| position.group),
+			Some(1)
+		);
 
 		// The consumer jumps to the newest group and never yields a stale value.
 		let mut last = None;
@@ -826,14 +1008,17 @@ mod test {
 	fn late_joiner_collapses_backlog_to_latest() {
 		// A whole group's worth of snapshot + deltas is buffered before the consumer reads. It should
 		// apply them all but yield only the latest value once, not replay every superseded state.
-		let (mut producer, track) = producer(cfg(100));
+		let (mut producer, mut track) = producer(cfg(100));
 		for n in 0..=20 {
 			producer.update(&json!({ "n": n })).unwrap();
 		}
 		producer.finish().unwrap();
 
 		// One group (ratio is generous), so a single poll drains the backlog into one yield.
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		let values = drain(track);
 		assert_eq!(
 			values,
@@ -845,13 +1030,16 @@ mod test {
 	#[test]
 	fn compressed_late_joiner_collapses_backlog_to_latest() {
 		// Same collapse, exercising the lazy decoder replaying the group's slices to warm its window.
-		let (mut producer, track) = producer(cfg_deflate(100));
+		let (mut producer, mut track) = producer(cfg_deflate(100));
 		for n in 0..=20 {
 			producer.update(&json!({ "n": n })).unwrap();
 		}
 		producer.finish().unwrap();
 
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		let values = drain_with(deflate_consumer(track));
 		assert_eq!(
 			values,
@@ -862,27 +1050,33 @@ mod test {
 
 	#[test]
 	fn compressed_snapshot_per_group_roundtrips() {
-		let (mut producer, track) = producer(cfg_deflate(0));
+		let (mut producer, mut track) = producer(cfg_deflate(0));
 		producer.update(&json!({ "a": 1 })).unwrap();
 		producer.update(&json!({ "a": 2 })).unwrap();
 		producer.finish().unwrap();
 
 		// Deltas disabled: one compressed snapshot per group, latest reconstructs identically.
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 		let values = drain_with(deflate_consumer(track));
 		assert_eq!(values, vec![json!({ "a": 2 })]);
 	}
 
 	#[test]
 	fn compressed_deltas_share_one_group() {
-		let (mut producer, track) = producer(cfg_deflate(100));
+		let (mut producer, mut track) = producer(cfg_deflate(100));
 		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
 		producer.update(&json!({ "a": 1, "b": 3 })).unwrap();
 		producer.finish().unwrap();
 
 		// Snapshot + deltas in one group, each frame decompressed against the shared window.
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		let values = drain_with(deflate_consumer(track));
 		assert_eq!(values.last().unwrap(), &json!({ "a": 1, "b": 3 }));
 	}
@@ -907,14 +1101,19 @@ mod test {
 		// distinct updates must therefore roll at least one group, and a late joiner must still rebuild
 		// the final value across the compressed group boundary (per-group decoder reset). Guards against
 		// the budget regressing to raw lengths.
-		let (mut producer, track) = producer(cfg_deflate(2));
+		let (mut producer, mut track) = producer(cfg_deflate(2));
 		for n in 0..=40 {
 			producer.update(&json!({ "n": n })).unwrap();
 		}
 		producer.finish().unwrap();
 
 		assert!(
-			track.latest().unwrap() > 0,
+			track
+				.largest()
+				.now_or_never()
+				.flatten()
+				.map(|position| position.group)
+				.unwrap() > 0,
 			"a tight ratio should roll at least one compressed group"
 		);
 		assert_eq!(drain_with(deflate_consumer(track)).last().unwrap(), &json!({ "n": 40 }));

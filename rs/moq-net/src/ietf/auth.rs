@@ -197,21 +197,23 @@ impl Message for AuthError {
 /// The REQUEST_ERROR codes AUTH_ERROR carries.
 const UNAUTHORIZED: u64 = 0x1;
 const NOT_SUPPORTED: u64 = 0x3;
+const EXPIRED_AUTH_TOKEN: u64 = 0x5;
 
 /// The AUTH_ERROR code for a refusal. The public API speaks session codes, and the
-/// only distinction this registry carries is unsupported versus unauthorized.
+/// actionable distinctions this registry carries are unsupported, expired, and unauthorized.
 fn to_code(code: SessionError) -> u64 {
 	match code {
 		SessionError::Version | SessionError::Unsupported => NOT_SUPPORTED,
+		SessionError::Expired => EXPIRED_AUTH_TOKEN,
 		_ => UNAUTHORIZED,
 	}
 }
 
-/// Read an AUTH_ERROR code. NOT_SUPPORTED means the acceptor could not tell the grant,
-/// not that it refused one; every other code is a refusal.
+/// Read an AUTH_ERROR code, preserving expiration so the presenter can refresh.
 fn from_code(code: u64) -> Error {
 	match code {
 		NOT_SUPPORTED => Error::Unsupported,
+		EXPIRED_AUTH_TOKEN => Error::Expired,
 		_ => Error::Session(SessionError::Unauthorized),
 	}
 }
@@ -234,7 +236,7 @@ pub(super) fn peer_grant(
 /// the tokens as unsupported.
 #[cfg(feature = "async")]
 pub(super) async fn run_present<S>(
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	session: S,
 	control: Control,
 	handle: Handle,
@@ -286,7 +288,7 @@ where
 			}
 
 			match &err {
-				Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::Session(_) => {
+				Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::IdleTimeout | Error::Session(_) => {
 					tracing::debug!(%err, "auth token ended")
 				}
 				err => tracing::warn!(%err, "auth token ended"),
@@ -300,7 +302,7 @@ where
 /// One token's Auth request.
 #[cfg(feature = "async")]
 struct Present<S: crate::transport::poll::Session> {
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	session: S,
 	control: Control,
 	handle: Handle,
@@ -423,7 +425,7 @@ async fn read_message<S: crate::transport::poll::Session>(
 /// otherwise the default grant for the connection's own credential.
 #[derive(Clone)]
 pub(super) struct Serve {
-	pub runtime: crate::time::Clock,
+	pub runtime: crate::time::Deadlines,
 	pub handle: Handle,
 	/// What the peer's connection credential earns by default.
 	pub peer_grant: Grant,
@@ -465,7 +467,12 @@ impl Serve {
 			Ok(()) => Error::Cancel,
 			Err(err) => {
 				match &err {
-					Error::Cancel | Error::Unsupported | Error::Stream(_) | Error::Session(_) | Error::Transport(_) => {
+					Error::Cancel
+					| Error::Unsupported
+					| Error::Stream(_)
+					| Error::Session(_)
+					| Error::Transport(_)
+					| Error::IdleTimeout => {
 						tracing::debug!(%err, "auth request ended")
 					}
 					err => tracing::warn!(%err, "auth request error"),
@@ -486,7 +493,7 @@ impl Serve {
 /// the default acceptor's grant into the outbox as it changes.
 #[cfg(feature = "async")]
 async fn serve_issue<S: crate::transport::poll::Session>(
-	runtime: &crate::time::Clock,
+	runtime: &crate::time::Deadlines,
 	issue: &kio::Shared<Issue>,
 	mut default: Option<&mut crate::auth::DefaultGrant>,
 	stream: &mut Stream<S, Version>,
@@ -761,5 +768,7 @@ mod tests {
 			Error::Session(SessionError::Unauthorized)
 		));
 		assert_eq!(to_code(SessionError::Unauthorized), UNAUTHORIZED);
+		assert!(matches!(from_code(EXPIRED_AUTH_TOKEN), Error::Expired));
+		assert_eq!(to_code(SessionError::Expired), EXPIRED_AUTH_TOKEN);
 	}
 }

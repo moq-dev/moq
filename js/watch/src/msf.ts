@@ -1,5 +1,6 @@
 import type * as Catalog from "@moq/hang/catalog";
 import { u53 } from "@moq/hang/catalog";
+import * as Util from "@moq/hang/util";
 import type * as Msf from "@moq/msf";
 import { Path } from "@moq/net";
 import { base64ToBytes } from "./base64";
@@ -92,6 +93,8 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 		sampleRate: u53(track.samplerate ?? DEFAULT_SAMPLE_RATE),
 		numberOfChannels: u53(channels),
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
+		// MSF cannot advertise decoder warmup, so derive Opus's seek pre-roll.
+		warmup: track.codec === "opus" ? u53(Util.Opus.WARMUP) : undefined,
 		jitter: track.jitter != null ? u53(track.jitter) : undefined,
 		delay: track.delay != null ? delayMillis(track.delay) : undefined,
 	};

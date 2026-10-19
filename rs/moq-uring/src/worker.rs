@@ -119,6 +119,7 @@ impl Worker {
 			.setup_single_issuer()
 			.setup_defer_taskrun()
 			.setup_coop_taskrun()
+			.setup_taskrun_flag()
 			.setup_cqsize(CQ_ENTRIES)
 			.build(SQ_ENTRIES)
 			.map_err(|err| match err.raw_os_error() {
@@ -179,6 +180,7 @@ impl Worker {
 		let mut future = std::pin::pin!(future);
 		let waker = self.shared.unpark.waker();
 		loop {
+			self.shared.metrics.turns.add(1);
 			// Adopt tasks spawned since the last turn (spawning wakes us).
 			let spawns = std::mem::take(&mut *self.shared.spawns.borrow_mut());
 			for task in spawns {
@@ -200,18 +202,28 @@ impl Worker {
 		}
 	}
 
-	/// Submit staged SQEs and dispatch every pending completion.
+	/// Dispatch completions, carrying parked submissions into the wait enter.
 	fn pump(&mut self) -> Result<(), Error> {
-		self.pump_inner(None)
+		let notified = self.shared.unpark.word.load(Ordering::Acquire) == crate::park::NOTIFIED;
+		let full = !notified && !self.futex_armed && self.shared.ring.borrow_mut().submission().is_full();
+		if full {
+			self.shared.metrics.sq_full_enters.add(1);
+		}
+		// A notified turn will not park. Otherwise its SQEs can ride the
+		// parked enter, unless the futex wait would have no slot left.
+		if notified || full {
+			self.submit()?;
+		}
+		self.reap(None)
 	}
 
-	/// Pump submission and completion batches until `deadline`.
+	/// Submit and reap completions only while the teardown budget remains.
 	fn pump_until(&mut self, deadline: Instant) -> Result<(), Error> {
-		self.pump_inner(Some(deadline))
+		self.submit()?;
+		self.reap(Some(deadline))
 	}
 
-	fn pump_inner(&mut self, deadline: Option<Instant>) -> Result<(), Error> {
-		self.submit()?;
+	fn reap(&mut self, deadline: Option<Instant>) -> Result<(), Error> {
 		loop {
 			if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
 				return Ok(());
@@ -257,16 +269,22 @@ impl Worker {
 
 	fn submit(&mut self) -> Result<(), Error> {
 		let mut ring = self.shared.ring.borrow_mut();
-		if ring.submission().is_empty() {
-			return Ok(());
-		}
-		self.shared.metrics.enters.add(1);
-		match ring.submit() {
-			// A partial submit leaves the rest staged for the next pump.
-			Ok(count) => {
-				self.shared.metrics.submissions.add(count as u64);
-				Ok(())
+		{
+			let sq = ring.submission();
+			// Busy turns must flush deferred task work even without new SQEs.
+			if sq.is_empty() && !sq.taskrun() && !sq.cq_overflow() {
+				return Ok(());
 			}
+		}
+		let before = ring.completion().len();
+		let result = ring.submit();
+		self.shared.metrics.entered(
+			result.as_ref().map_or(0, |count| *count),
+			ring.completion().len().saturating_sub(before),
+		);
+		match result {
+			// A partial submit leaves the rest staged for the next pump.
+			Ok(_) => Ok(()),
 			// A signal interrupted the enter before it consumed anything. The
 			// next worker turn retries the same staged SQEs.
 			Err(err) if err.raw_os_error() == Some(libc::EINTR) => Ok(()),
@@ -284,14 +302,19 @@ impl Worker {
 			if ring.submission().is_empty() {
 				return Ok(());
 			}
-			self.shared.metrics.enters.add(1);
-			match ring.submit() {
+			let before = ring.completion().len();
+			let result = ring.submit();
+			self.shared.metrics.entered(
+				result.as_ref().map_or(0, |count| *count),
+				ring.completion().len().saturating_sub(before),
+			);
+			match result {
 				// Keep submitting after partial progress. Returning zero while SQEs
 				// remain would otherwise spin forever.
 				Ok(0) => {
 					return Err(std::io::Error::other("io_uring teardown submission made no progress").into());
 				}
-				Ok(count) => self.shared.metrics.submissions.add(count as u64),
+				Ok(_) => {}
 				Err(err) => retry_teardown_submit(&mut interruptions, err)?,
 			}
 		}
@@ -313,12 +336,16 @@ impl Worker {
 				let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
 					break;
 				};
-				let ring = self.shared.ring.borrow_mut();
+				let mut ring = self.shared.ring.borrow_mut();
 				let wait = remaining.min(std::time::Duration::from_millis(50));
 				let ts = types::Timespec::from(wait);
 				let args = types::SubmitArgs::new().timespec(&ts);
-				self.shared.metrics.enters.add(1);
-				let _ = ring.submitter().submit_with_args(1, &args);
+				let before = ring.completion().len();
+				let result = ring.submitter().submit_with_args(1, &args);
+				self.shared.metrics.entered(
+					result.as_ref().map_or(0, |count| *count),
+					ring.completion().len().saturating_sub(before),
+				);
 			}
 		}
 		if !self.shared.ops.borrow().is_empty() {
@@ -410,12 +437,12 @@ impl Worker {
 
 		let deadline = self.shared.timers.borrow().next();
 		self.shared.metrics.parks.add(1);
-		self.shared.metrics.enters.add(1);
 		let result = {
 			let mut ring = self.shared.ring.borrow_mut();
 			let to_submit = ring.submission().len() as u32;
+			let before = ring.completion().len();
 			let submitter = ring.submitter();
-			match deadline {
+			let result = match deadline {
 				None => submitter.submit_and_wait(1),
 				Some(at) => {
 					// Zero timeout SQEs: the earliest userspace deadline rides
@@ -427,15 +454,17 @@ impl Worker {
 					// the call, and EXT_ARG matches its type.
 					unsafe { submitter.enter(to_submit, 1, flags.bits(), Some(&args)) }
 				}
-			}
+			};
+			self.shared.metrics.entered(
+				result.as_ref().map_or(0, |count| *count),
+				ring.completion().len().saturating_sub(before),
+			);
+			result
 		};
 		unpark.word.store(RUNNING, Ordering::Release);
 
 		match result {
-			Ok(count) => {
-				self.shared.metrics.submissions.add(count as u64);
-				Ok(())
-			}
+			Ok(_) => Ok(()),
 			Err(err)
 				if matches!(
 					err.raw_os_error(),
@@ -563,6 +592,7 @@ pub(crate) struct Owner {
 	/// Held directly: a timer on a dropped worker still has to exist, since
 	/// the driver that owns it is torn down by the same drop that would need
 	/// it.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	timers: Rc<RefCell<timer::Heap>>,
 }
 
@@ -586,6 +616,7 @@ impl Owner {
 	}
 
 	/// Run a `!Send` future on the worker, or drop it if the worker is gone.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
 		if let Some(handle) = self.handle() {
 			handle.spawn(future);
@@ -593,11 +624,13 @@ impl Owner {
 	}
 
 	/// A disarmed timer on the worker.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn timer(&self) -> crate::Timer {
 		crate::Timer::from_heap(self.timers.clone())
 	}
 
 	/// A timer that expires after `duration`.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn after(&self, duration: Duration) -> crate::Timer {
 		let mut timer = self.timer();
 		timer.set(Instant::now().checked_add(duration));
@@ -623,8 +656,10 @@ impl Handle {
 		let mut timer = self.timer();
 		kio::wait(|waiter| {
 			loop {
-				match driver.poll(Instant::now(), waiter) {
-					Ok(at) => timer.set(at),
+				// Sampled together, so time the poll spends is not added to its deadline.
+				let (now, host) = (moq_net::time::now(), Instant::now());
+				match driver.poll(now, waiter) {
+					Ok(at) => timer.set(at.map(|at| host + at.saturating_duration_since(now))),
 					Err(err) => return Poll::Ready(err),
 				}
 				if timer.poll(waiter).is_pending() {
@@ -724,10 +759,103 @@ mod tests {
 	}
 
 	#[test]
+	fn a_parked_turn_enters_once() {
+		let Some(mut worker) = worker() else { return };
+		let key = worker.shared.insert(Op::Cancel);
+		worker
+			.shared
+			.push(&opcode::Nop::new().build().user_data(key))
+			.expect("stage NOP");
+		let mut timer = worker.handle().timer();
+		timer.set(Some(Instant::now()));
+		worker.pump().expect("pump");
+		worker.maybe_park().expect("park");
+		assert_eq!(
+			worker.handle().metrics().snapshot().enters,
+			1,
+			"the parked enter carries the staged SQE"
+		);
+	}
+
+	#[test]
+	fn a_full_queue_forces_one_pressure_enter() {
+		let Some(mut worker) = worker() else { return };
+		for _ in 0..SQ_ENTRIES {
+			let key = worker.shared.insert(Op::Cancel);
+			worker
+				.shared
+				.push(&opcode::Nop::new().build().user_data(key))
+				.expect("stage NOP");
+		}
+		worker.pump().expect("full pump");
+		let snapshot = worker.handle().metrics().snapshot();
+		assert_eq!(snapshot.sq_full_enters, 1);
+		assert_eq!(snapshot.enters, 1);
+		assert_eq!(snapshot.sqes.sum, u64::from(SQ_ENTRIES));
+		assert_eq!(snapshot.sqes.count(), snapshot.enters);
+		assert_eq!(snapshot.cqes.count(), snapshot.enters);
+	}
+
+	#[test]
+	fn an_armed_futex_carries_a_full_queue_in_the_parked_enter() {
+		let Some(mut worker) = worker() else { return };
+		let mut timer = worker.handle().timer();
+		timer.set(Some(Instant::now()));
+		worker.maybe_park().expect("arm futex");
+		assert!(worker.futex_armed);
+		let before = worker.handle().metrics().snapshot();
+		for _ in 0..SQ_ENTRIES {
+			let key = worker.shared.insert(Op::Cancel);
+			worker
+				.shared
+				.push(&opcode::Nop::new().build().user_data(key))
+				.expect("stage NOP");
+		}
+		worker.pump().expect("full pump");
+		worker.maybe_park().expect("park with armed futex");
+		let after = worker.handle().metrics().snapshot();
+		assert_eq!(after.enters - before.enters, 1);
+		assert_eq!(after.sq_full_enters - before.sq_full_enters, 0);
+	}
+
+	#[test]
+	fn a_notified_turn_flushes_deferred_completions_without_sqes() {
+		let Some(mut worker) = worker() else { return };
+		let handle = worker.handle();
+		let sock = handle
+			.udp(
+				std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"),
+				udp::Config::default(),
+			)
+			.expect("socket");
+		let peer = std::net::UdpSocket::bind("127.0.0.1:0").expect("peer");
+		// Arm the receive before the peer sends, so completion happens outside
+		// the submit syscall and is deferred to a later GETEVENTS enter.
+		worker.shared.ring.borrow_mut().submit().expect("arm receive");
+		peer.send_to(b"deferred", sock.local_addr().expect("addr"))
+			.expect("send");
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !worker.shared.ring.borrow_mut().submission().taskrun() {
+			assert!(Instant::now() < deadline, "the kernel did not flag deferred task work");
+			std::thread::yield_now();
+		}
+		assert!(worker.shared.ring.borrow_mut().submission().is_empty());
+		// A continuously self-waking future never parks. Its next pump must
+		// dispatch the receive even though there is nothing new to submit.
+		worker.shared.unpark.unpark();
+		worker.pump().expect("notified pump");
+		let Poll::Ready(Ok(packet)) = sock.poll_recv(&kio::Waiter::noop()) else {
+			panic!("one busy turn must publish the receive");
+		};
+		assert_eq!(packet.payload(), b"deferred");
+	}
+
+	#[test]
 	fn ready_future() {
 		let Some(mut worker) = worker() else { return };
 		let value = worker.block_on(async { 7 }).unwrap();
 		assert_eq!(value, 7);
+		assert_eq!(worker.handle().metrics().snapshot().turns, 1);
 	}
 
 	#[test]
@@ -809,9 +937,10 @@ mod tests {
 		let sock = handle.udp(bind(), udp::Config::default()).expect("socket");
 		let shared = sock.downgrade();
 		let to = sock.local_addr().expect("addr");
-		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
+		tx.resize(1200, 0);
 		drop(worker);
 
 		// Every path a retained handle can reach fails instead of pending on
@@ -822,7 +951,6 @@ mod tests {
 		assert!(
 			tx.send(udp::Transmit {
 				to,
-				len: 1200,
 				segment: 1200,
 				ecn: None,
 			})
@@ -967,10 +1095,10 @@ mod tests {
 			held.push(tx);
 		}
 		assert_eq!(held.len(), usize::from(ceiling));
-		for tx in held.drain(..) {
+		for mut tx in held.drain(..) {
+			tx.resize(1200, 0);
 			tx.send(udp::Transmit {
 				to,
-				len: 1200,
 				segment: 1200,
 				ecn: None,
 			})
@@ -1084,12 +1212,12 @@ mod tests {
 			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
 			.expect("socket");
 		let to = sock.local_addr().expect("addr");
-		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
+		tx.resize(64 * 1024, 0);
 		tx.send(udp::Transmit {
 			to,
-			len: 64 * 1024,
 			segment: 1000,
 			ecn: None,
 		})
@@ -1112,17 +1240,77 @@ mod tests {
 			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
 			.expect("socket");
 		let to = sock.local_addr().expect("addr");
-		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
+		tx.resize(64 * 1024, 0);
 		let err = tx
 			.send(udp::Transmit {
 				to,
-				len: 64 * 1024,
 				segment: 1,
 				ecn: None,
 			})
 			.expect_err("65536 datagrams from one buffer");
+		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+		drop(worker);
+	}
+
+	#[test]
+	fn a_resized_checkout_comes_back_pool_sized() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		let config = udp::Config {
+			tx_buffers_max: 1,
+			tx_buffer_len: 2048,
+			..Default::default()
+		};
+		let sock = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+		let acquire = || {
+			let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+				panic!("no tx buffer");
+			};
+			tx
+		};
+
+		let mut tx = acquire();
+		assert_eq!(tx.capacity(), 2048);
+		tx.shrink_to_fit();
+		drop(tx);
+		let mut tx = acquire();
+		assert_eq!((tx.len(), tx.capacity()), (0, 2048));
+		tx.resize(8192, 7);
+		drop(tx);
+		let tx = acquire();
+		assert_eq!((tx.len(), tx.capacity()), (0, 2048));
+		drop(tx);
+		drop(worker);
+	}
+
+	#[test]
+	fn buffer_grown_past_the_pool_is_rejected() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		let config = udp::Config {
+			tx_buffer_len: 2048,
+			..Default::default()
+		};
+		let sock = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+		let to = sock.local_addr().expect("addr");
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("no tx buffer");
+		};
+		tx.resize(4096, 0);
+		let err = tx
+			.send(udp::Transmit {
+				to,
+				segment: 1024,
+				ecn: None,
+			})
+			.expect_err("4096 bytes from a 2048 byte buffer");
 		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 		drop(worker);
 	}
@@ -1138,15 +1326,15 @@ mod tests {
 			)
 			.expect("socket");
 		let to = sock.local_addr().expect("addr");
-		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
+		tx.resize(60_000, 0);
 		// `UDP_SEGMENT` is a u16: without validation this would truncate to a
 		// one-byte stride instead of one segment.
 		let err = tx
 			.send(udp::Transmit {
 				to,
-				len: 60_000,
 				segment: usize::from(u16::MAX) + 2,
 				ecn: None,
 			})
@@ -1187,10 +1375,9 @@ mod tests {
 			let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 				panic!("the socket failed after a rejected train");
 			};
-			tx[..2 * 1200].fill(7);
+			tx.resize(2 * 1200, 7);
 			tx.send(udp::Transmit {
 				to,
-				len: 2 * 1200,
 				segment: 1200,
 				ecn: None,
 			})
@@ -1237,10 +1424,9 @@ mod tests {
 		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
-		tx[..4 * 1200].fill(7);
+		tx.resize(4 * 1200, 7);
 		tx.send(udp::Transmit {
 			to,
-			len: 4 * 1200,
 			segment: 1200,
 			ecn: None,
 		})
@@ -1314,16 +1500,16 @@ mod tests {
 			.expect("socket");
 		let to = sock.local_addr().expect("addr");
 
-		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
+		tx.resize(1200, 0);
 		// The pool is one buffer deep and that one is checked out.
 		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
 		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
 		assert_eq!(metrics.snapshot().tx_stalls, 1);
 		tx.send(udp::Transmit {
 			to,
-			len: 1200,
 			segment: 1200,
 			ecn: None,
 		})

@@ -188,7 +188,8 @@ offers only the cell's version, and JavaScript checks the negotiated version.
 The relay is anonymous here, since released binaries may predate AUTH; the
 default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
-publishers feed current readers, through both relay sources. Rust exports must
+publishers feed current readers, through both relay sources. Each reader is its
+own lane, `media-rust` and `media-js-native-node`. Rust exports must
 decode to a video frame through ffmpeg. The JS reader is
 `compat/client.ts`, not the interop subscriber, whose API follows the
 checkout. One copy runs against each package set, using only API both have,
@@ -200,7 +201,8 @@ so a broken reader cannot make compatibility failures ambiguous.
 
 Each `moq-net` library states whether a draft has FETCH (lite-05 onward
 today). A draft without it in both is logged and its FETCH lanes skipped; one
-the release supports and the checkout dropped fails. Both Rust versions FETCH the group the
+the release supports and the checkout dropped fails, unless a planned break covers
+the `fetch-capability` cell for that version. Both Rust versions FETCH the group the
 publisher's own compat client observed and compare every frame's exact
 payload. JS publishers write one group after that subscriber's demand, and the
 opposite-source Rust CLI FETCHes it by the same observed ID.
@@ -210,18 +212,38 @@ skipped, then lists each failing cell before it fails.
 Checkout-only versions are logged and omitted. Removing a released version
 fails before sessions start. A maintainer-approved break belongs in
 `compat/planned-breaks.json` with its reason and the exact affected release
-versions. Keyed by a protocol name it drops that version; with `cells` it
-skips only the named lanes, optionally narrowed to versions, a relay source,
-or a publisher source. Every skipped cell is logged with the break's name.
-Entries become errors once an affected release changes or no longer offers a
-listed version, forcing removal or a fresh review. Future WIP drafts receive
-no automatic exception.
+versions. Keyed by a protocol name it skips every cell of that version, and
+excuses the checkout removing it; with `cells` it skips only the named lanes,
+optionally narrowed to versions, a relay source, or a publisher source. Every
+skipped cell is logged with the break's name. Entries become errors once an
+affected release changes or no longer offers a listed version, forcing a
+re-measure. Future WIP drafts receive no automatic exception.
+
+`just test wire-compat --remeasure` is that re-measure, run after each release
+publishes (see `CONTRIBUTING.md`). It runs the cells planned breaks cover
+without letting them fail the run, then rewrites `compat/planned-breaks.json`:
+a break with a failing cell is re-pinned to the releases just measured, and one
+with none is deleted. It prints each break's failing cells. Review the diff and
+refresh each reason before committing.
 
 ## Media QA
 
 The matrix asks "did bytes arrive and did a pixel light up". That passes on a
 frozen picture, on silence, and on audio a second out of step, so
 `just test media` measures the media itself, browser to browser.
+Use `just test media --media-engines chromium,firefox,webkit` to run each pinned
+Playwright player against a Chromium publisher. The harness installs the requested
+engines and runs the same lifecycle cases, content tolerances, and five negative
+controls per engine. A missing runtime or required API fails that engine by name.
+Firefox and WebKit players explicitly use WebSocket; Chromium keeps normal
+transport selection. This does not measure Firefox's QUIC path.
+
+The capability report names the engine version and separately lists missing
+publisher and player APIs. Firefox 157 in Playwright 1.64 exposes WebTransport and
+WebCodecs but lacks `MediaStreamTrackProcessor`, so it can play this fixture but
+cannot publish it. Capabilities are measured on every run rather than assumed
+from an engine name. Playwright WebKit is not Safari; Safari device/transport
+bugs and real Firefox transport negotiation still require manual evidence.
 
 The publisher is a fixture, not a fake camera: a canvas painting a frame counter
 as black/white blocks, and a tone stepping through a fixed frequency table. Both
@@ -233,7 +255,7 @@ samples, not that a machine played them.
 
 Each run covers, against a real local relay:
 
-- **capabilities** - probes every platform API the player needs, and fails
+- **capabilities** - probes native APIs separately for the publisher and player, and fails
   naming what is missing rather than skipping a case.
 - **cold start** - the publisher reports when it is announced and encoding, then
   a fresh page joins. No reload, unlike the matrix driver: a subscriber that
@@ -241,9 +263,12 @@ Each run covers, against a real local relay:
 - **user gesture** - Chromium is launched with
   `--autoplay-policy=document-user-activation-required`, which applies to
   top-level Web Audio contexts. The fixture and player graphs must be suspended
-  before either page is clicked, then both must carry audio afterwards. Harness
-  state probes use CDP with `userGesture: false`: Playwright's usual page reads
-  themselves grant activation and would invalidate this assertion.
+  before either page is clicked, then both must carry audio afterwards. Firefox
+  is launched with its Web Audio autoplay block enabled. Playwright's usual page
+  reads grant activation and would invalidate this assertion, so the player logs
+  each sample to the console and the harness never evaluates in a player page
+  before its click. The Chromium fixture is read over CDP with
+  `userGesture: false`, and capability probes run in a separate page.
 - **capture permission** - the camera case uses a fake device for deterministic
   input, while Playwright denies and then grants permissions. Both source errors
   must be visible; neither a full nor a microphone-only denial may announce a
@@ -257,6 +282,11 @@ Each run covers, against a real local relay:
   within 1.5s of the fixture's painted frame within 2s, both bounds about twice
   the worst seen in looped runs under CPU load. A rejoin and a reattach cross
   the same demand gap, so they must reach live the same way.
+- **codec identity and coded-size changes** - an AVC-to-VP8 change keeps the
+  broadcast and rendition ID while moving to a fresh track. Playback must keep
+  advancing and in sync through the change. A VP8 resize doubles the presented
+  dimensions on the same track. The pixels carry a source generation, so old
+  pictures cannot reappear after the new generation starts presenting.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
@@ -270,6 +300,11 @@ boundary and the canvas holding a frame up to one frame old.
 Each window opens once the player's audio buffer has filled and plays. Until
 then the player holds its first decoded frame, silent, for its sync delay, which
 rises past 400ms under load; that is startup, not a gap in playback.
+
+Run a focused lifecycle case with `just test media --media-cases rename`.
+It uses the same real fixture, player and content oracles while leaving cold-start
+grading and the unrelated negative controls to the default full run. A focused
+pass makes no claim about those omitted checks.
 
 The run ends with negative controls. Each injects a defect and names the
 assertion that has to catch it, and passes only by failing there:

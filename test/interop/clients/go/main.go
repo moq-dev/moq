@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"moq.dev/moq"
+	moqaudio "moq.dev/moq/audio"
 	moqmedia "moq.dev/moq/media"
 )
 
@@ -47,7 +48,7 @@ const (
 )
 
 // publishTone feeds the encoder a real-time tone until ctx is cancelled.
-func publishTone(ctx context.Context, audio *moq.AudioProducer) {
+func publishTone(ctx context.Context, audio *moqaudio.Producer) {
 	ticker := time.NewTicker(audioBatchUs * time.Microsecond)
 	defer ticker.Stop()
 
@@ -64,7 +65,7 @@ func publishTone(ctx context.Context, audio *moq.AudioProducer) {
 			sample := math.Sin(2 * math.Pi * audioToneHz * float64(phase+i) / audioRate)
 			binary.LittleEndian.PutUint32(data[i*4:], math.Float32bits(float32(sample)))
 		}
-		if err := audio.Write(moq.AudioFrame{TimestampUs: timestampUs, Data: data}); err != nil {
+		if err := audio.Write(moqaudio.Frame{Timestamp: time.Duration(timestampUs) * time.Microsecond, Data: data}); err != nil {
 			fmt.Fprintf(os.Stderr, "tone: %v\n", err)
 			return
 		}
@@ -87,17 +88,22 @@ func publish(ctx context.Context, url, broadcast string) error {
 	}
 	defer producer.Close()
 
+	catalog, err := moqmedia.NewCatalogProducer(producer)
+	if err != nil {
+		return err
+	}
 	media, err := moqmedia.NewVideoTrackStreamProducer(producer, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatAvc3, Data: nil})
 	if err != nil {
 		return err
 	}
-	audio, err := producer.EncodeAudio(audioTrack, moq.AudioEncoderInput{
+	audio, err := moqaudio.NewProducer(catalog, moqaudio.EncoderInput{
 		Format:     moq.AudioSampleFormatF32,
 		SampleRate: audioRate,
 		Channels:   1,
-	}, moq.AudioEncoderOutput{
-		Codec:           moq.OpusAudioCodec(),
-		FrameDurationUs: audioFrameDurationUs,
+	}, moqaudio.EncoderOutput{
+		Codec:         moq.OpusAudioCodec(),
+		Track:         func() *string { track := audioTrack; return &track }(),
+		FrameDuration: audioFrameDurationUs * time.Microsecond,
 	}, nil)
 	if err != nil {
 		return err
@@ -196,13 +202,13 @@ func subscribe(ctx context.Context, url, broadcast string, timeout time.Duration
 		return err
 	}
 
-	var name string
+	var id string
 	var video moqmedia.Video
-	for name, video = range catalog.Video {
+	for id, video = range catalog.Video {
 		break
 	}
 
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Name: name, Container: video.Container, Subscription: &moq.Subscription{MaxDelay: maxDelay}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: maxDelay}})
 	if err != nil {
 		return err
 	}

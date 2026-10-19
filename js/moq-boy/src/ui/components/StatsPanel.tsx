@@ -1,3 +1,4 @@
+import { Milli } from "@moq/clock";
 import { createAccessor } from "@moq/signals/solid";
 import { For, Show } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
@@ -11,7 +12,7 @@ export default function StatsPanel() {
 
 	const onJitterInput = (e: Event) => {
 		const el = e.currentTarget as HTMLInputElement;
-		game.delay.set(Number.parseInt(el.value, 10) as import("@moq/net").Time.Milli);
+		game.delay.set(Milli(Number.parseInt(el.value, 10)));
 	};
 
 	const location = () => ctx.status()?.location;

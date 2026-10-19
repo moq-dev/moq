@@ -86,7 +86,6 @@ Open, to settle before starting (moved from the
 
 ## Required
 
-- [Schema](/quest/m2/stats/schema.md) - the `echo` section and feedback snapshot
 - [Rust reporters](/quest/m2/stats/rust.md) - the viewers that report and
   the CLI it wires
 

@@ -12,8 +12,8 @@
  * @module
  */
 
+import { Milli, Nano } from "@moq/clock";
 import * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
 import type { Fault, FixtureState } from "./contract";
@@ -24,7 +24,7 @@ import * as Pattern from "./pattern";
 const MAX_BITRATE = 1_000_000;
 
 /** Short GOP so a late subscriber tunes in quickly and a rejoin is not dominated by keyframe wait. */
-const KEYFRAME_INTERVAL = Time.Milli(KEYFRAME_INTERVAL_MS);
+const KEYFRAME_INTERVAL = Milli(KEYFRAME_INTERVAL_MS);
 
 /** How far ahead the tone table is scheduled on the audio clock. */
 const SCHEDULE_AHEAD = 2; // seconds
@@ -52,11 +52,15 @@ export class Fixture {
 	readonly #audioState = new Signal<AudioContextState>("suspended");
 	readonly #videoEnabled = new Signal(true);
 	#timer: number | undefined;
+	readonly #canvas: HTMLCanvasElement;
+	readonly #video: Publish.Video.Encoder;
+	#generation = 0;
 
 	constructor(host: HTMLElement, url: string, name: string, fault: Fault) {
 		this.host = host;
 
 		const canvas = document.createElement("canvas");
+		this.#canvas = canvas;
 		canvas.width = Pattern.WIDTH;
 		canvas.height = Pattern.HEIGHT;
 		host.appendChild(canvas);
@@ -100,9 +104,21 @@ export class Fixture {
 			broadcast,
 			capture,
 			enabled: this.#videoEnabled,
-			config: { frameRate: Pattern.FPS, keyframeInterval: KEYFRAME_INTERVAL, maxBitrate: MAX_BITRATE },
+			config: {
+				codec: "avc1",
+				frameRate: Pattern.FPS,
+				keyframeInterval: KEYFRAME_INTERVAL,
+				maxBitrate: MAX_BITRATE,
+			},
 		});
+		this.#video = video;
 		this.#signals.cleanup(() => video.close());
+
+		// Mark the codec change only once the probe has published it. Marking on request would paint the
+		// new generation into pictures the old codec still encodes onto the old track.
+		this.#signals.run((effect) => {
+			if (this.#generation === 0 && effect.get(video.out.catalog)?.codec.startsWith("vp8")) this.#generation = 1;
+		});
 
 		// Handed the source at page load, before any gesture, like a pre-granted microphone. Readiness
 		// then requires an audio catalog after the click, which covers the capture resuming its own
@@ -182,7 +198,7 @@ export class Fixture {
 		};
 
 		schedule();
-		this.#signals.interval(schedule, (SCHEDULE_AHEAD * 1000) / 4);
+		this.#signals.interval(schedule, Nano.fromMilli(Milli((SCHEDULE_AHEAD * 1000) / 4)));
 	}
 
 	// Paint and request capture per pattern tick. Capture and encoding can finish later. The counter
@@ -198,7 +214,7 @@ export class Fixture {
 			if (frameId === painted) return;
 			painted = frameId;
 
-			Pattern.paint(ctx, fault === "frozen-video" ? 0 : frameId);
+			Pattern.paint(ctx, fault === "frozen-video" ? 0 : frameId, this.#generation);
 			track.requestFrame();
 			this.#frameId.set(frameId);
 		};
@@ -215,6 +231,18 @@ export class Fixture {
 	/** Enable or disable the video rendition, which stays in the catalog either way. */
 	setVideo(enabled: boolean): void {
 		this.#videoEnabled.set(enabled);
+	}
+
+	/** Switch codecs on the existing rendition, marking pictures once the catalog advertises VP8. */
+	changeVideoCodec(): void {
+		this.#video.config.update((config) => ({ ...config, codec: "vp8" }));
+	}
+
+	/** Grow past the accepted coded-size ceiling without changing the VP8 codec. */
+	resizeVideo(): void {
+		this.#generation = 2;
+		this.#canvas.width = Pattern.WIDTH * 2;
+		this.#canvas.height = Pattern.HEIGHT * 2;
 	}
 
 	/** Stop publishing and release the capture, audio graph, and session. */

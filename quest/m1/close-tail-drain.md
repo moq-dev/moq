@@ -20,7 +20,7 @@ Found while reworking the in-memory transport (#5530). Facts at 813a92b48:
   `:931-942`) does the same, and `ietf::session::start` aborts again after
   the race in each of its two arms, drafts 14-16 (`:371-374`) and drafts 17+
   (`:588-591`).
-- Real QUIC keeps that data readable: noq's `poll_accept` hands out
+- Real QUIC keeps that data readable: moq-tokio's `quic::driver` `poll_accept` hands out
   already-received streams before the connection error, and reads return
   buffered chunks and the FIN, reporting `ConnectionLost` only when blocked.
   moq-uring's raw QUIC follows the same order, but its WebTransport layer
@@ -34,7 +34,7 @@ Found while reworking the in-memory transport (#5530). Facts at 813a92b48:
   and IETF the receiver throws away a tail its transport already holds.
   lite-07 already avoids this at the protocol level: the closer waits for the
   subscriber's Subscribe-stream FIN (`drafts/draft-lcurley-moq-lite.md`).
-- The test mock (`rs/moq-net/tests/support/mock.rs`) hid it: its FIN counts as
+- The test mock (`rs/moq-net/tests/integration/support/mock.rs`) hid it: its FIN counts as
   acked only once the reading application stops or drops the stream.
   `older_lite_close_keeps_ack_drain` never checks what the reader got.
 
@@ -71,13 +71,12 @@ Decided (maintainer, 2026-10-14):
 The receiver drain also needs moq-uring WebTransport to classify and hand
 out its pending uni streams before reporting the connection error, with a
 regression for a tail stream and CONNECTION_CLOSE arriving in the same poll.
-Check the other `poll_accept_uni` adapters (such as `rs/moq-ffi` and the
-noq WebTransport path) for the same ordering.
+Check the other `poll_accept_uni` adapters (such as `rs/moq-ffi` and
+moq-tokio's `quic::web` path) for the same ordering.
 
 Public API: none. Wire: none.
 
 ## Related
 
-- [Publisher linger](/quest/m1/publisher-linger.md) - keeps a finished broadcast servable so subscribers can drain it, a layer above this
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - groups cut short by a session close
 - [QUIC ack hook](/quest/m2/quic-ack-hook.md) - a FIN/ack hook in the QUIC layer

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { Time } from "@moq/net";
+import type { Micro } from "@moq/clock";
 import { Timeline } from "./timeline";
 
-// Time.Micro is branded, so a bare number literal isn't assignable to it.
-const micro = (value: number): Time.Micro => value as Time.Micro;
+// Micro is branded, so a bare number literal isn't assignable to it.
+const micro = (value: number): Micro => value as Micro;
 
 const ZERO = micro(1_000_000);
 

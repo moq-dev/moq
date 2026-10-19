@@ -1,8 +1,10 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { Milli, Nano } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { type Grant, type Issued, Unsupported } from "./auth.ts";
+import type { AuthSession } from "./auth_session.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
-import { SessionCode, SessionError, StreamCode, toStreamCode } from "./error.ts";
+import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { AuthMessage as IetfAuthMessage, IetfAuthWire } from "./ietf/auth.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as IetfMessage from "./ietf/message.ts";
@@ -61,46 +63,6 @@ async function connect(opts: { publish?: OriginProducer; serverPublish?: OriginP
 
 // Every case runs on moq-lite-07-wip and on moq-transport with the MoQ Auth extension.
 describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
-	test("pending application tokens have a per-session bound", async () => {
-		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
-		try {
-			const requests = server.auth.requests();
-			const setup = await requests.next();
-			if (!setup) throw new Error("setup token missing");
-			setup.accept(grant(["a"], []));
-			let refused!: () => void;
-			const overflow = new Promise<void>((resolve) => {
-				refused = resolve;
-			});
-			const pending = Array.from({ length: 129 }, (_, index) =>
-				client.auth.add(`token-${index}`).then(
-					(token) => ({ token }),
-					(err: unknown) => {
-						refused();
-						return { err };
-					},
-				),
-			);
-			await withTimeout(overflow, 1000, "pending token bound did not refuse overflow");
-			for (let index = 0; index < 128; index++) {
-				const request = await requests.next();
-				if (!request) throw new Error("pending token missing");
-				request.accept(grant(["a"], []));
-			}
-			const results = await Promise.all(pending);
-			const errors = results.flatMap((result) => ("err" in result ? [result.err] : []));
-			expect(errors).toHaveLength(1);
-			// moq-transport's AUTH_ERROR registry only distinguishes unsupported from unauthorized.
-			expect((errors[0] as SessionError).code).toBe(
-				protocol === Lite.ALPN_07_WIP ? SessionCode.TooManyRequests : SessionCode.Unauthorized,
-			);
-			for (const result of results) if ("token" in result) result.token.close();
-		} finally {
-			client.abort();
-			server.abort();
-		}
-	});
-
 	test("both sides learn their default grant", async () => {
 		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 
@@ -286,7 +248,13 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 
 			issued.close();
 			// A regression leaves `closed` pending, so bound the wait rather than hang the runner.
-			expect(await withTimeout(Promise.resolve(issued.closed), 1000, "the grant stream never closed")).toBeNull();
+			expect(
+				await withTimeout(
+					Promise.resolve(issued.closed),
+					Nano.fromMilli(Milli(1000)),
+					"the grant stream never closed",
+				),
+			).toBeNull();
 		} finally {
 			client.abort();
 			server.abort();
@@ -400,12 +368,48 @@ test("lite-07 carries literal and wildcard grants exactly", async () => {
 	server.abort();
 });
 
-test.each([Lite.ALPN_05, Lite.ALPN_06, Ietf.ALPN.DRAFT_16])("%s has no grant", async (protocol) => {
+// moq-transport keeps the token for the requests that name it, with no grant of its own.
+test.each([
+	[Lite.ALPN_05, false],
+	[Lite.ALPN_06, false],
+	[Ietf.ALPN.DRAFT_16, true],
+])("%s has no grant, keeping a token for requests: %p", async (protocol, kept) => {
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 	expect(client.auth.grant.peek()).toBeUndefined();
-	await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
+	if (kept) {
+		const token = await client.auth.add("token");
+		expect(token.grant.peek()).toBeUndefined();
+		expect(client.auth.grant.peek()).toBeUndefined();
+		// A request carries the bytes as added, whatever the caller does with its buffer after.
+		const bytes = new TextEncoder().encode("bytes");
+		const copied = await client.auth.add(bytes);
+		bytes.fill(0);
+		expect((client.auth as AuthSession).carried(copied)).toEqual(new TextEncoder().encode("bytes"));
+		// The token ends with its session, like any other.
+		client.abort();
+		expect(await token.closed).toBeInstanceOf(Error);
+	} else {
+		await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
+	}
 	client.abort();
 	server.abort();
+});
+
+// With MoQ Auth negotiated, a reset AUTH stream fails the token rather than keeping it for
+// requests: only a peer whose SETUP omitted the extension leaves tokens to requests.
+test("a reset AUTH stream fails the token on moq-transport", async () => {
+	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Ietf.ALPN.DRAFT_22 });
+	await waitFor(client.auth.grant, (g) => g !== undefined);
+	const read = spyOn(IetfAuthWire.prototype, "read").mockRejectedValue(
+		new StreamError(StreamCode.Cancel, { message: "reset" }),
+	);
+	try {
+		await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
+	} finally {
+		read.mockRestore();
+		client.abort();
+		server.abort();
+	}
 });
 
 // lite-07 presents the connection's credential on an Auth Stream right away; lite-06 never
@@ -497,7 +501,7 @@ test("withdrawn queued tokens are pruned before the next application decision", 
 		if (!setup) throw new Error("setup token missing");
 		setup.accept(grant(["a"], []));
 		const wire = new LiteAuthWire(transport, Lite.Version.DRAFT_07);
-		for (let index = 0; index < 128; index++) {
+		for (let index = 0; index < 3; index++) {
 			const stream = await wire.present(new TextEncoder().encode("withdrawn"));
 			await stream.writer.close();
 			await stream.reader.closed;
@@ -537,9 +541,10 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH 
 			await waitFor(pair.client.auth.grant, (g) => g !== undefined);
 			await waitFor(pair.server.auth.grant, (g) => g !== undefined);
 			await streams[0]?.writer.u53(0);
-			expect((await withTimeout(pair.transport.closed, 100, "second AUTH did not close")).closeCode).toBe(
-				SessionCode.ProtocolViolation,
-			);
+			expect(
+				(await withTimeout(pair.transport.closed, Nano.fromMilli(Milli(100)), "second AUTH did not close"))
+					.closeCode,
+			).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			spy.mockRestore();
 			pair?.client.abort();
@@ -563,9 +568,10 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH 
 		});
 		const added = pair.client.auth.add("bad").catch(() => undefined);
 		try {
-			expect((await withTimeout(pair.transport.closed, 100, "malformed AUTH did not close")).closeCode).toBe(
-				SessionCode.ProtocolViolation,
-			);
+			expect(
+				(await withTimeout(pair.transport.closed, Nano.fromMilli(Milli(100)), "malformed AUTH did not close"))
+					.closeCode,
+			).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			spy.mockRestore();
 			pair.client.abort();
@@ -619,9 +625,15 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH 
 					if (lite) await LiteMessage.encode(stream.writer, body, { id });
 					else await IetfMessage.encode(stream.writer, body, id);
 				}
-				expect((await withTimeout(pair.transport.closed, 100, "malformed AUTH did not close")).closeCode).toBe(
-					SessionCode.ProtocolViolation,
-				);
+				expect(
+					(
+						await withTimeout(
+							pair.transport.closed,
+							Nano.fromMilli(Milli(100)),
+							"malformed AUTH did not close",
+						)
+					).closeCode,
+				).toBe(SessionCode.ProtocolViolation);
 			} finally {
 				spy.mockRestore();
 				pair?.client.abort();
@@ -651,7 +663,13 @@ describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH request IDs %s", (
 				const added = (client ? pair.client : pair.server).auth.add("bad ID").catch(() => undefined);
 				try {
 					expect(
-						(await withTimeout(pair.transport.closed, 100, "invalid AUTH ID left session open")).closeCode,
+						(
+							await withTimeout(
+								pair.transport.closed,
+								Nano.fromMilli(Milli(100)),
+								"invalid AUTH ID left session open",
+							)
+						).closeCode,
 					).toBe(SessionCode.InvalidRequestId);
 				} finally {
 					spy.mockRestore();
@@ -681,7 +699,13 @@ for (const [protocol, version] of [
 				trackName: "video",
 			}).encode(writer, version);
 			expect(
-				(await withTimeout(pair.transport.closed, 100, "cross-request reuse left session open")).closeCode,
+				(
+					await withTimeout(
+						pair.transport.closed,
+						Nano.fromMilli(Milli(100)),
+						"cross-request reuse left session open",
+					)
+				).closeCode,
 			).toBe(SessionCode.InvalidRequestId);
 		} finally {
 			pair.client.abort();

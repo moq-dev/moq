@@ -7,11 +7,12 @@
 //! - TCP via the `tcp://` (plaintext) and `tls://` schemes (qmux; requires `tcp` feature)
 //! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; requires `uds` feature, unix-only)
 //! - Iroh P2P (requires `iroh` feature)
+//! - A WebRTC data channel with a browser peer, signaled by the caller (qmux; requires `webrtc` feature)
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting
 //! connections. The `mdns` feature finds peers to connect to on the local network.
 //!
-//! With `default-features = false`, the `noq` backend must be paired
+//! With `default-features = false`, the `quic` backend must be paired
 //! with the `aws-lc-rs` or `ring` crypto-provider feature. Every other subset
 //! compiles, including no transport at all: such a build cannot connect to
 //! anything, though a crypto provider on its own is still enough to configure TLS
@@ -22,7 +23,7 @@
 
 // The protocol crates need a compiled provider for reset and retry-token keys. A rustls provider
 // installed at runtime cannot supply constructors removed by their compile-time feature gates.
-#[cfg(all(feature = "noq", not(any(feature = "aws-lc-rs", feature = "ring"))))]
+#[cfg(all(feature = "quic", not(any(feature = "aws-lc-rs", feature = "ring"))))]
 compile_error!("a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature");
 
 mod abort;
@@ -34,18 +35,16 @@ pub mod connect;
 pub mod connection;
 pub mod crypto;
 mod error;
-#[cfg(any(feature = "noq", feature = "tcp", feature = "websocket"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "websocket"))]
 pub mod failover;
 #[cfg(feature = "jemalloc")]
 pub mod jemalloc;
 pub mod listen;
 mod log;
-#[cfg(feature = "noq")]
-pub mod noq;
 pub mod origin;
 pub mod panic;
 pub mod quic;
-#[cfg(any(feature = "noq", feature = "tcp", feature = "websocket"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "websocket"))]
 mod resolve;
 #[cfg(feature = "_transport")]
 pub mod server;
@@ -60,18 +59,33 @@ pub mod unix;
 pub mod worker;
 // Resolving a `host:port` bind string is a QUIC-listener concern; the stream
 // listeners take a `SocketAddr`/path straight from their config.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 mod util;
 #[cfg(feature = "watch")]
 pub mod watch;
+#[cfg(feature = "webrtc")]
+pub mod webrtc;
 #[cfg(feature = "websocket")]
 pub mod websocket;
+
+/// Session settings for every qmux transport (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC).
+///
+/// moq-lite holds a stream open per subscription, so a qmux session grants the same
+/// stream count as QUIC rather than qmux's default of 100, past which a peer's opens
+/// wait on credit forever.
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+fn qmux_config() -> qmux::Config {
+	let mut config = qmux::Config::default();
+	config.max_streams_bidi = quic::DEFAULT_MAX_STREAMS;
+	config.max_streams_uni = quic::DEFAULT_MAX_STREAMS;
+	config
+}
 
 // Enumerated rather than globbed, so the root surface is a deliberate list and a
 // new `pub` item in these modules doesn't silently join it.
 pub use client::Client;
 pub use connect::{Addrs, ConnectError};
-pub use connection::{Auth, Backoff, Connection, Redirect, Status};
+pub use connection::{Backoff, Connection, Redirect, Status};
 pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
 #[cfg(feature = "_transport")]

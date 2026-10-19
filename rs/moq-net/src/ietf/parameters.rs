@@ -17,6 +17,8 @@ pub enum ParameterVarInt {
 	/// Removed in draft-17; only used in draft-14/15/16.
 	MaxRequestId = 2,
 	MaxAuthTokenCacheSize = 4,
+	/// MAX_REQUEST_UPDATES, added in draft-19.
+	MaxRequestUpdates = super::request_update::OPTION,
 	/// HOP_ID, from the MoQ Cluster extension.
 	HopId = super::cluster::HOP_ID,
 	/// RELAY_COST, from the MoQ Cluster extension.
@@ -87,7 +89,13 @@ impl Decode<Version> for Parameters {
 			// Unknown SETUP options may repeat, including GREASE; their values still
 			// have to be well-formed Key-Value-Pairs (draft-21 section 9.1).
 			if kind % 2 == 0 {
-				let kind = ParameterVarInt::from(kind);
+				let kind = match ParameterVarInt::from(kind) {
+					// Undefined before draft 19, so there an unknown option that may repeat.
+					ParameterVarInt::MaxRequestUpdates if !super::request_update::supported(version) => {
+						ParameterVarInt::Unknown(kind)
+					}
+					kind => kind,
+				};
 				if !matches!(kind, ParameterVarInt::Unknown(_)) && params.get_varint(kind).is_some() {
 					return Err(DecodeError::Duplicate);
 				}
@@ -610,6 +618,22 @@ macro_rules! decode_params {
 mod tests {
 	use super::super::Filter;
 	use super::*;
+
+	/// Before draft 19, 0x08 is an unknown SETUP option, so a peer may repeat it.
+	#[test]
+	fn max_request_updates_is_unknown_before_draft_19() {
+		// Draft 18: no count prefix, delta-encoded types, so the repeat is a delta of 0.
+		let block = [0x08, 0x01, 0x00, 0x02];
+		let mut r = Decoder::new(&block, Version::Draft18.into());
+		let params = Parameters::decode(&mut r, Version::Draft18).expect("a repeated unknown option is legal");
+		assert_eq!(params.get_varint(ParameterVarInt::MaxRequestUpdates), None);
+
+		let mut r = Decoder::new(&block, Version::Draft19.into());
+		assert!(matches!(
+			Parameters::decode(&mut r, Version::Draft19),
+			Err(DecodeError::Duplicate)
+		));
+	}
 
 	#[test]
 	fn setup_allows_repeated_unknown_options() {
@@ -1276,7 +1300,9 @@ mod tests {
 			0x3E, 0x06, // and again
 		];
 		let mut r = Decoder::new(&block, Version::Draft14.into());
-		Parameters::skip_request(&mut r).unwrap();
+		let tokens = Parameters::skip_request(&mut r).unwrap();
+		assert_eq!(tokens.len(), 2);
+		assert_eq!(tokens[1].0.kind, 1);
 		assert!(r.is_empty());
 	}
 

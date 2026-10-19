@@ -36,15 +36,15 @@ typealias StreamConfig = uniffi.moq.MoqJsonStreamConfig
  *
  * The `@Serializable` type is encoded with [MoqJson]. Pass an already-encoded
  * `String` to serialize with another library: the member overload takes it
- * unchanged.
+ * unchanged. [timestampUs] is on the broadcast clock; null is untimed.
  */
-inline fun <reified T> SnapshotProducer.update(value: T) {
-    update(MoqJson.encodeToString(serializer<T>(), value))
+inline fun <reified T> SnapshotProducer.update(value: T, timestampUs: ULong? = null) {
+    update(MoqJson.encodeToString(serializer<T>(), value), timestampUs)
 }
 
-/** Append [value] to a JSON stream track as one record, encoded with [MoqJson]. */
-inline fun <reified T> StreamProducer.append(value: T) {
-    append(MoqJson.encodeToString(serializer<T>(), value))
+/** Append [value] at [timestampUs] on the broadcast clock; null is untimed. */
+inline fun <reified T> StreamProducer.append(value: T, timestampUs: ULong? = null) {
+    append(MoqJson.encodeToString(serializer<T>(), value), timestampUs)
 }
 
 /**

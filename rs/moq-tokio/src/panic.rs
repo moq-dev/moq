@@ -1,12 +1,11 @@
-//! Panic isolation for tasks that serve a single session.
+//! Panic isolation for tasks with an independent owner.
 //!
-//! A panic unwinds only the task it happens in, so a task serving one session
-//! ends that session and nothing else. [`isolate`] is how such a task observes
-//! it: logged as an error in the current span and counted for [`count`].
+//! A session or binding object can end without ending the process. [`isolate`]
+//! reports its task panic to that owner, logging it in the current span and
+//! counting it for [`count`].
 //!
-//! A task the process cannot serve without (an origin driver, an accept loop) is
-//! never isolated. Running on without it is a process that looks healthy and
-//! serves nothing, so its panic has to end the process instead.
+//! Process-wide tasks that have no independent owner, such as the standalone
+//! origin helper, abort instead of leaving a healthy-looking process that serves nothing.
 
 use std::{
 	any::Any,
@@ -19,7 +18,7 @@ use futures::FutureExt;
 
 static COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Run one session's task, ending it on a panic instead of unwinding past it.
+/// Run one owned task, returning its panic to the owner instead of unwinding past it.
 ///
 /// Returns `None` once the panic is logged and counted.
 pub async fn isolate<F: Future>(task: F) -> Option<F::Output> {
@@ -27,7 +26,7 @@ pub async fn isolate<F: Future>(task: F) -> Option<F::Output> {
 		Ok(output) => Some(output),
 		Err(payload) => {
 			COUNT.fetch_add(1, Ordering::Relaxed);
-			tracing::error!(panic = message(payload.as_ref()), "session task panicked");
+			tracing::error!(panic = message(payload.as_ref()), "owned task panicked");
 			None
 		}
 	}

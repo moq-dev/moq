@@ -20,6 +20,10 @@ software profiles below; it does not certify a hardware IRD or every TS layout.
 - `open-gop.py` checks the coded access units and leading pictures of open GOPs.
 - `overhead.py` counts the packets a capture spends on clocks and audio framing
   against its source.
+- `holes.py` finds media missing from a generated clip's capture, from its
+  timestamps against the source's.
+- `passthrough.py` places every packet of an `export ts --passthrough` capture
+  at its source position and compares the compliance verdicts.
 
 ## Running
 
@@ -33,13 +37,23 @@ just test ts --strict           # also fail on broadcast-shape warnings
 just test ts --with-eit         # add a synthetic EPG first, report which SI survived
 just test ts --live             # grade PCR release timing off the live pipe
 just test ts --pair             # two exporters of one broadcast, grade table anchoring
-just test ts --open-gop         # open-GOP clip; its leading pictures must survive
+just test ts --open-gop         # open-GOP clip; orphan leading pictures are trimmed
 just test ts --hrd              # 1080p video filling a broadcast-sized 9 Mbit CPB
 just test ts --headroom         # the same with four audio PIDs, muxed above the video's Rx
 just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
 just test ts --full             # the same with two audio PIDs, filling its multiplex with no nulls
-just test ts --delay 1s         # pass the exporter's --delay
+just test ts --fragment-pes    # legal headers split across packets, with FFmpeg/TSDuck grading
+just test ts --delay 2s         # pass the exporter's --delay
+just test ts --hrd --loss 1     # drop 1% of the relay's datagrams to the subscriber
+just test ts --passthrough      # carry the multiplex whole, grade it packet by packet
+just test ts --passthrough --mpts # the same with two programs on their own clocks
+just test ts-passthrough-capture # the same over an in-repo capture the T-STD model passes
 ```
+
+`--fragment-pes` shifts generated audio/video PES bursts into their following
+null slots after splitting the header. It cycles through header-byte boundaries,
+preserves packet count, PCR positions, payload bytes, and PID continuity, then
+runs the same independent decode/content and transport checks as the default arm.
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
 subscriber's stdout goes straight into `pcr-timing.py` instead of a capture file.
@@ -71,6 +85,8 @@ moq --connect http://localhost:4443 --broadcast live.hang export ts > sub.ts
 
 Requirements: `tsp`, `tsanalyze` and `tstables` (TSDuck) and `python3` for every mode; the
 round-trip modes also need `cargo`, `ffmpeg`, `ffprobe`, `curl`, and `timeout`.
+`just test ts-tstd` also needs `ffmpeg` (with libx264) and `ffprobe` for its generated
+references.
 
 ## Checks
 
@@ -94,6 +110,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
 | `service-descriptors` | shape | an SDT naming the service is present |
 | `tstd` | hard | the supported elementary-stream T-STD models: no TB, MB, EB or B overflow, no access unit incomplete at its decoding time (see [T-STD](#t-std)) |
+| `system-buffers` | hard | each program's TBsys and Bsys: neither overflows, and TBsys empties at least once a second (see [T-STD](#t-std)) |
 
 Every timing check reads the stream's own PCR, so a PCR emitted on the wrong
 clock rate stays internally consistent and passes them all. `duration-fidelity`
@@ -145,9 +162,27 @@ Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
 draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size
 unset, so that size is borrowed rather than specified. A stream with no parameters
 at all is refused by name rather than skipped, which fails the check: MPEG-1/2
-video, DVB E-AC-3, and HEVC beyond Main/Main 10. The PSI system buffer is not implemented. Sections and private data
+video, DVB E-AC-3, and HEVC beyond Main/Main 10. Sections and private data
 (SCTE-35, teletext) are listed as not graded; passing elementary-stream buffers
-does not establish conformance for them. A signalled PCR discontinuity starts fresh buffers, since the timestamps
+does not establish conformance for them.
+
+`system-buffers` runs each program's PIDs 0-3 and PMT through one TBsys (512 B at
+Rxsys = 1 Mb/s) and on into one Bsys (1,536 B, emptied at Rsys = max(80 kb/s,
+transport rate / 500)), on the program's PCR, as 2.4.2.3 specifies: a packet's
+bytes enter Bsys as they leave TBsys, and a duplicate (2.4.3.3, the same bytes
+but for a refreshed PCR or OPCR) enters TBsys but not Bsys. Each program is
+followed through the PAT and its PMTs, as a receiver would: its packets on the PMT
+PID then in force count, timed on the PCR PID then in force, and both buffers keep
+their bytes when either PID moves, until a complete PAT drops the program. Across a
+PCR PID move the last PCR on the old PID and the first on the new are the program's
+successive PCRs, so unless the move signals a discontinuity they must increase and lie
+within 0.1 s (2.7.2). Rsys drains Bsys at the transport rate each pair
+of PCRs gives, so a rate change takes effect where it happens. A system packet on a
+stretch of the PCR PID with fewer than two PCRs fails, since nothing checked it;
+a program declaring no PCR (0x1FFF) has no clock to model. The
+exporter paces its tables against both buffers only when it pads to a
+multiplex rate. Unpadded output makes no system-buffer claim: its tables go out
+as muxed. A signalled PCR discontinuity starts fresh buffers, since the timestamps
 on either side of it are on different clocks.
 
 Every packet on an elementary stream's PID enters TB, including adaptation-only
@@ -192,8 +227,11 @@ changes:
 | delivered at 4x | TB and B overflow, audio held over 1 s |
 | delivered at 15x (a burst) | TB and B overflow, audio held over 1 s |
 
-No restamp can overflow the video MB: it holds the level's whole CPB less the
-declared one, about 3.6 MB, more than the 4 s capture carries.
+No restamp of the Kyrion capture can overflow its video MB: it holds the level's
+whole CPB less the declared one, about 3.6 MB, more than the 4 s capture carries.
+An 8 s FFmpeg AVC Baseline@2.0 clip has no declared NAL HRD, so its MB uses the
+much smaller level defaults. It passes as encoded; restamping only its PCRs at
+4x overflows MB (and TB), closing the separate MB negative-control gap.
 
 The packet layouts a capture cannot be edited into are built synthetically: a
 10 Mb/s single-video stream carrying the Kyrion SPS, one access unit per PES, with
@@ -206,6 +244,14 @@ a PCR packet between them. Each case fails without the handling it names:
 | four adaptation-only packets after an access unit | TB overflow |
 | an access unit's first packet sent twice | pass |
 | the PMT declares a PCR PID that carries no PCR | `pcr-presence` fails |
+| a PAT and three PMT copies back to back | TBsys overflow |
+| ten PMT copies, each arriving as TBsys passes the last on | Bsys overflow |
+| PMT copies at Rxsys for 1.5 s, one packet ahead | TBsys not emptied within 1 s, Bsys overflow |
+| six PMT copies sent twice, the second with a refreshed OPCR | pass |
+| the PAT moves the PMT, then ten PMT copies on its new PID | Bsys overflow |
+
+A tables-only stream fills Bsys at 100 Mb/s and sends three more PMT copies once
+its rate falls to 25 Mb/s, where Rsys is 80 kb/s rather than 200: Bsys overflow.
 
 Synthetic MPEG audio streams pack several 576-byte frames per PES, so frames end
 partway through packets, and the last is cut off by the end of the capture:
@@ -215,9 +261,16 @@ partway through packets, and the last is cut off by the end of the capture:
 | four frames per PES, the first decoded 0.3 ms after its last byte leaves TB, before the rest of that packet has | pass |
 | seven frames per PES, the first decoded as B passes its size partway through a packet | B overflow |
 
-The ffmpeg clip `run.sh` generates is not a positive control: its muxer sends
-audio 0.7 s ahead by default (`-muxdelay`), which overflows the 3,584-byte ADTS
-buffer, and even at 0.1 s a four-packet audio burst overflows TB.
+A generated AVC/AAC reference also passes: stereo 48 kHz AAC at 128 kb/s,
+`-muxdelay 0.1 -muxpreload 0.1 -pes_payload_size 0`, in a 2 Mb/s TS. The short
+lead keeps the 3,584-byte AAC buffer below capacity, and the mux rate keeps
+audio packet bursts within the TB drain. Every elementary stream must have
+access units to grade; the builder also checks that AAC is actually present.
+
+The 10 Mb/s FFmpeg clip `run.sh` generates remains unsuitable as a positive
+control: its default 0.7 s audio lead overflows B, and even at 0.1 s a
+four-packet audio burst at that transport rate overflows TB. These references
+close the named MB/AAC gaps, not every codec, buffer or packet layout.
 
 ### Gate
 
@@ -249,7 +302,16 @@ From a pipe, `pcr-rate` also grades the PCR clock's rate against the arrival
 clock, as the least-squares slope over each time base after the start-up third:
 within 30 ppm (`--rate-ppm`), the tolerance ISO 13818-1 2.4.2.1 gives a system
 clock. `release` cannot see a clock running at a steady wrong rate, which keeps
-its intervals and only adds to the drift.
+its intervals and only adds to the drift. At 30 ppm a 77 s window moves only
+2.3 ms, so the fit excludes two arrival effects that are not the clock. Reads only
+ever land late, so it fits the least-delayed PCR in each second, the floor that
+scheduling and pipe delay sit on; a live control's mean read delay wandered by
+2.4 ms while that floor held within 0.7 ms. And it breaks wherever that floor
+steps by more than the `release` tolerance from one second to the next, pooling
+the runs either side: a stall the sender caught up from leaves a standing lag,
+which a single line reads as a rate (70 ms mid-sample is over 1,000 ppm), though
+it is the bounded lag `release` already grades. A clock off rate moves the floor
+by microseconds a second, so it never steps and stays measured.
 
 ```bash
 # live: every domain, reading the exporter directly
@@ -277,6 +339,7 @@ are laid over the PCRs.
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) (`--live` only) |
 | `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 100, TR 101 290 V1.4.1), within one time base |
 | `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
+| `pcr-rate` | hard | the PCR rate fitted against each second's least-delayed read stays within `--rate-ppm` (default 30), after excluding the first third, separating declared time bases and breaking where that floor steps by more than `--release-ms` (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
 | `pcr-schedule` | shape | share of PCR intervals whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |
 
@@ -287,12 +350,22 @@ grades both through TSDuck's `tsanalyze`, which also catches a payload-less
 packet advancing the counter. A pipe cannot go through TSDuck first without
 rebuffering the arrivals `release` stamps.
 
+Live runs write `pcr-timing.json` beside `timing.out`. Failures retain their run;
+set `MOQ_TEST_KEEP=1` to retain passing controls too. The JSON report keeps the
+graded PID's raw `[packet_index, unwrapped_pcr_ticks, arrival_seconds, pid]` samples,
+the indices that begin new time bases, wrap count, and grading parameters. PCR ticks
+are at 27 MHz; arrivals use the reader's `time.monotonic()` clock and are upper
+bounds on when the exporter released those bytes. These preserve the inputs to
+the rate, release and byte-position checks so their verdicts can be replayed.
+Arrival delays alone do not establish whether a source clock, exporter, pipe or
+reader caused the discrepancy.
+
 Accumulated drift has two shapes and only one is a defect, so the check bounds
 the total and reports the rate over the tail of the sample beside it. A sender
 that buffers builds a standing lag once and then runs at the media rate: the lag
 is a constant offset no receiver can see, and it cannot grow past the latency
 budget the sender is allowed to hold, so set `--drift-ms` to that budget
-(`export ts --delay`, 500 ms by default). A pipe that is not running at the
+(`export ts --delay`, 1 s by default). A pipe that is not running at the
 media rate never stops accumulating and so breaches any fixed bound given a long
 enough sample. The tail rate is what tells the two apart, and it needs a sample
 longer than the lag takes to build: measured against the grid-sliced exporter,
@@ -368,7 +441,7 @@ outgrow a 6 kB slot, so the exporter has to spread each over the slots before it
 DTS; CI runs that too (`just test ts --bitrate 2000000`). `--hrd` goes further: a
 1080p encode with a 9 Mbit NAL HRD kept near full by noise, the shape of a
 contribution encoder's output, which sends pictures most of a second ahead of their
-decode time and loads the decoder buffer past 60 % at the default delay (the recipe
+decode time and fills the decoder buffer to its declared size at the default delay (the recipe
 moq-dev/moq#4645 graded with; CI runs it too). Every other clip muxes at or below the
 video's Rx, where its transport buffer cannot fill. `--headroom` puts that video
 beside three MPEG-1 Layer II PIDs and an AC-3 one in a 12.5 Mb/s multiplex, above
@@ -439,12 +512,18 @@ Controls run in PR CI; the real pair runs nightly and on manual TS validation.
 
 ## Open GOP (`open-gop.py`)
 
+`just test harness` also runs the actual JS container and player against generated
+open-GOP access units with Chromium's software WebCodecs decoder forced. It
+checks a join, continuous GOPs, and a later delivery hole; disabling the trim
+reproduces `EncodingError` instead of silently accepting orphan references.
+
 Broadcast contribution encoders commonly send open GOP: after the first IDR, each
 keyframe is a non-IDR I picture flagged by a recovery-point SEI, and the B pictures
 that follow it in decode order but are presented before it (its leading pictures)
 reference the previous GOP. Only a viewer that already holds that GOP can decode
-them. Dropping them is right at a tune-in, which the transport cannot see, so the
-round-trip has to hand every one of them on, in decode order.
+them. The consumer trims the recovery group's orphan leading pictures at a join
+or after a delivery gap. Continuous groups keep every picture in decode order.
+A declared end is a fresh encoder boundary, not a delivery gap.
 
 `--open-gop` swaps the generated clip for an x264 `open-gop=1` encode whose 24-frame
 GOP and fixed B placement put three leading pictures behind every recovery point,
@@ -463,8 +542,8 @@ rebase.
 | Check | Severity | What it verifies |
 |---|---|---|
 | `fixture` | hard | the source has at least two non-IDR recovery points with leading pictures |
-| `decode-order` | hard | the capture is one contiguous run of the source's access units from a random-access point, with DTS strictly increasing |
-| `leading-pictures` | hard | every leading picture in that run is there and keeps the presentation offset the source gave it |
+| `decode-order` | hard | each delivered segment starts at a random-access point, omits only its orphan leading pictures, and keeps DTS strictly increasing |
+| `leading-pictures` | hard | every continuous leading picture is kept with its source presentation offset; recovery-group orphans are absent |
 | `random-access-indicator` | shape | the exporter flags exactly the random-access access units |
 | `recovery-point-sei` | shape | each recovery point keeps its SEI |
 | `dts-before-pts` | shape | no access unit is stamped to decode after it presents |
@@ -484,6 +563,99 @@ runs `overhead.py` on the source and capture before the compliance report.
 It counts the packets on each audio PID and the PCR-only packets on each PID,
 scaling the capture's counts by how much of the source's elementary stream on the
 PID it carries, and fails when their total exceeds the source's.
+
+## Lossy path (`--loss`)
+
+`--loss <percent>` puts [`moq-shaper`](../../rs/moq-shaper/README.md) between the
+relay and the subscriber: it drops that share of the relay's datagrams at random
+and delays each direction 25 ms, the path moq-dev/moq#4613 built with `netem` in
+two network namespaces. The shaper needs no privileges and leaves the host's
+network alone. `TSC_SEED` (default 1) fixes which datagrams are dropped, not when
+the rest arrive. The run prints the shaper's counters beside the exporter's
+`dropped` (missed their deadline), `trimmed` (before the output began) and `gaps`
+(skipped upstream), and fails if the shaper never dropped anything.
+
+QUIC retransmits what the path drops, so a lossy path is not by itself an
+omission of MoQ content, and every compliance check grades only the access units
+that arrived: a capture missing most of its video still passes them. The generated
+clips the decoded-content comparison does not cover (`--hrd`, `--headroom`,
+`--leak`, `--full`) go through `holes.py` instead, which reads the capture's
+timestamps against the source's, independently of what the exporter reports. Each
+stream of a generated clip keeps one frame step, so a capture's step past one and
+a half of its source's is a hole. The export keeps the source's timestamps, so every source stream
+must also be in the capture and end within half a frame of the source's. It may
+start up to 3 s late: the subscriber joins at the relay's latest group once the
+catalog is out, which skips the first 1-2 s on a clean path. Omitting MoQ content
+on purpose belongs to the [recovery tests](/quest/m1/ts-reliability/recovery.md).
+
+```bash
+./holes.py capture.ts source.ts
+```
+
+Measured on 2026-10-16 with about 30 other test runs sharing a 24-core host, so
+timing is perturbed; nightly is the reference:
+
+| Clip | Loss | Duration | Result |
+|---|---:|---:|---|
+| default (H.264/AAC, low media rate) | 10 % | 40 s | passes, decoded content intact |
+| `--hrd` (9 Mb/s video, 10 Mb/s mux) | 1 %, 3 % | 40 s, and 120 s at 3 % | passes, no holes |
+| `--headroom` (12.5 Mb/s, four audio PIDs) | 1 % | 120 s, two seeds | T-STD passes; 0.2-0.4 s of MP2 holes in the first half second after the join |
+| `--headroom` | 3 % | 120 s | T-STD passes; video stops 27 s in, AC-3 19 s in |
+| `--hrd` | 5 %, 7 %, 10 % | 40-60 s | export fails: groups evicted `Old`, then a false clock-drift refusal |
+
+The ceiling is the congestion controller, not the export. The default `delay`
+family is BBRv3, which takes a round with more than 2 % loss
+(`LOSS_THRESH`) as congestion and cuts its inflight bound, so random loss above
+that holds the subscriber's leg below the media rate, and the relay ages groups
+out while they wait. CUBIC (`loss`) fared worse at 10 %: no output at all. With
+`LOSS_THRESH` raised to 20 % as an experiment only, `--hrd --loss 10` passed T-STD
+and PCR accuracy, though 1.56 s of video still missed the 1 s delay. The 10 %
+case belongs to the [BBR media study](/quest/m2/quic-bbr-natural-drain.md).
+
+## Passthrough (`--passthrough`, `passthrough.py`)
+
+`--passthrough` publishes with `import ts --passthrough` and captures with
+`export ts --passthrough`, so the capture should be the source's own packets.
+`passthrough.py` grades it against the source alone:
+
+- The admitted interval is the source from the capture's first packet to the
+  end. What comes before it is the acquisition prefix, which the importer
+  withholds until its first group, plus whatever the export joined after; the
+  grader reports its size and does not count it as loss.
+- Every captured packet must be the source packet at its exact position in that
+  interval, null packets, tables, unknown PIDs and adaptation bytes included.
+  A position is only claimed for a run of 16 matching packets, so a duplicated
+  null or table packet fails rather than passing as an identical later one.
+  Packets the capture skips are gaps, reported by position and PID.
+- On a complete capture, every `compliance.py` check (TSDuck's structure, the
+  T-STD and system buffer models) must give the capture the verdict it gives
+  the admitted interval. The export carries whatever the source is, so a source
+  that fails a check must fail it the same way: the generated clip's AAC
+  overflows its T-STD buffer on its own, and the Kyrion capture CI also runs
+  passes. `decode.py` then compares the generated clip's decoded content.
+
+`--mpts` generates two programs with their own PCR PIDs and keyframes every 25
+and 40 frames, so the importer's groups, which open on program 1's random
+access points, mostly open mid-GOP for program 2. The capture is still the
+source in place: a group boundary promises no immediate decode for every
+program, and passthrough neither inserts tables nor extracts a program.
+
+A gap fails the run, `--loss` included, since QUIC retransmits what the path
+drops. To grade a capture from a path that loses content, run the grader with
+`--loss-ok`: gaps are reported and the checks run on the capture alone, since a
+gap can take part of a PES or the next table with it.
+
+```bash
+./passthrough.py source.ts capture.ts [--loss-ok]
+```
+
+Release timing is the Rust tests' job
+(`rs/moq-mux/src/container/ts/release_test.rs`, on a paused clock), with the
+packet and schedule oracle in `oracle.rs` and the fixtures it cannot get from a
+capture in `fixture.rs`. On a loaded host, `--passthrough --loss 5` left 77 % of
+the packets missing in 30 gaps with one object counted late; the rest were
+groups the relay aged out, the congestion ceiling described under
+[Lossy path](#lossy-path---loss).
 
 ## EIT fixtures
 
@@ -596,6 +768,13 @@ the same access unit: AAC overlap and perceptual-noise state differ between a
 cold decoder and a decoder that saw earlier frames. No arbitrary warmup samples
 are discarded. PES boundaries and TS packetization may change.
 
+The suffix is the exporter's to choose, and it starts on a whole group: a join
+whose first group is cut short before anything of it went out starts at the next
+one. Anything lost after that fails. When it does, the harness prints what the
+exporter reported: the `TS export release clock` counts (`dropped` late,
+`trimmed` before the output began, `gaps` skipped upstream) and each loss it
+logged.
+
 `just test ts-controls` exercises unchanged input, remuxing with new timestamps
 and PES sizes, timestamp quantization, and a cold join. Negative controls require
 the intended failure for missing audio, changed pictures, changed audio, a lost
@@ -617,18 +796,21 @@ The round-trip rig explicitly negotiates `moq-lite-07-wip` on the relay,
 publisher and subscribers. Its publisher epochs allow acquisition to continue
 when a session is replaced. Production defaults remain unchanged: Lite-06
 cannot prove publisher identity across session replacement and must refuse a
-pending acquisition. `rs/moq-net/tests/catalog_acquisition.rs` covers both
+pending acquisition. `rs/moq-net/tests/integration/catalog_acquisition.rs` covers both
 outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
 
 [`.github/workflows/ts.yml`](../../.github/workflows/ts.yml) is independent of
 browser interop. Relevant mux, Hang, CLI, transport, harness and toolchain PRs run
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
-open-GOP, EIT, and T-STD controls. Each step runs even after another test fails.
+open-GOP, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
-Nightly and manual runs also invoke `just test ts --pair` and
-`just test ts --live --duration 120`. The pair exercises late-joining subscribers;
-the live window distinguishes ongoing clock drift from initial buffer filling.
+Nightly and manual runs also invoke `just test ts --pair`,
+`just test ts --live --duration 120`, `just test ts --hrd --loss 1 --duration 120`
+and `just test ts --passthrough --loss 1 --duration 120`.
+The pair exercises late-joining subscribers; the live window distinguishes ongoing
+clock drift from initial buffer filling; the lossy paths prove T-STD and media
+continuity through QUIC retransmission.
 These are actual test invocations, not optional tools installed on a runner.
 
 Failed runs retain source/capture files, process logs and statuses, tool versions,

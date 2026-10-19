@@ -3,13 +3,15 @@
  *
  * @module
  */
+
+import { Milli, Nano } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
-import * as Time from "../time.ts";
 import { Follow } from "../util/observed.ts";
+import { after } from "../util/timer.ts";
 import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import {
@@ -24,12 +26,12 @@ import type { Established as EstablishedType } from "./established.ts";
 import type { Extensions as ExtensionsType } from "./extensions.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { GoawayProps, Redirect as RedirectType } from "./goaway.ts";
-import { Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
+import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
 
 /** How long an unreferenced shared connection lingers before it actually closes. */
-const LINGER_MS = Time.Milli(2000);
+const LINGER_MS = Milli(2000);
 
 /** Options for {@link Connection}. */
 export interface ConnectionProps {
@@ -46,7 +48,7 @@ export interface ConnectionProps {
 	 * everything it discovered are still warm when the new owner asks for them. The longest
 	 * linger requested by any handle sharing the connection wins.
 	 */
-	linger?: Time.Milli;
+	linger?: Milli;
 
 	/**
 	 * Share a pooled transport keyed on the URL. By default, options specific to this
@@ -279,44 +281,20 @@ export class Connection {
 		const producer = new Announce.Producer();
 		const consumer = producer.consume();
 
-		// Closing the consumer closes the shared state, so stop appending after that.
-		let closed = false;
-		void consumer.closed.then(() => {
-			closed = true;
-		});
-
 		// A child of this handle's scope rather than a standalone Effect it merely cleans up
 		// after: the disposer run() hands back also drops itself from the parent, so opening
 		// and closing announcement streams repeatedly does not pile up dead pumps that live
 		// until the whole handle closes.
 		const stop = this.#signals.run((effect) => {
 			const origin = effect.get(this.#origin);
-			if (!origin) return;
-
-			const upstream = origin.announced(scope, options);
-			effect.cleanup(() => upstream.close());
-
-			// Track what this origin announced so a URL switch retracts it; the last
-			// event rides along for the retraction.
-			const active = new Map<Path.Valid, Announce.Announce>();
-
-			effect.spawn(async () => {
-				try {
-					for (;;) {
-						const entry = await effect.race(upstream.next());
-						if (!entry) break;
-						if (entry.kind === "end") active.delete(entry.prefix);
-						else active.set(entry.prefix, entry);
-						producer.append(entry);
-					}
-				} finally {
-					if (!closed) {
-						for (const entry of active.values()) {
-							producer.append({ ...entry, kind: "end" });
-						}
-					}
-				}
-			});
+			if (!origin) {
+				// Like a reconnecting loop's origin: behind while enabled with nothing to deliver.
+				if (effect.get(this.enabled)) producer.behind();
+				else producer.synced();
+				return;
+			}
+			// A URL switch retracts what the old origin announced.
+			pumpAnnounced(effect, origin.announced(scope, options), producer);
 		});
 
 		void consumer.closed.then(stop);
@@ -427,15 +405,15 @@ interface Entry {
 	origin: Origin.Producer;
 	connection: Reload;
 	refs: number;
-	linger: Time.Milli;
-	timer?: ReturnType<typeof setTimeout>;
+	linger: Milli;
+	timer?: () => void;
 }
 
 /** The process-wide pool backing {@link Connection}. */
 const pool = new Map<string, Entry>();
 
 /** Take a reference on the shared entry for `key`, creating it on first use. */
-function acquire(key: string, linger?: Time.Milli): Entry & { release: () => void } {
+function acquire(key: string, linger?: Milli): Entry & { release: () => void } {
 	let entry = pool.get(key);
 	if (!entry) {
 		const origin = new Origin.Producer();
@@ -472,10 +450,10 @@ function acquire(key: string, linger?: Time.Milli): Entry & { release: () => voi
 	}
 
 	const taken = entry;
-	taken.linger = Time.Milli(Math.max(taken.linger, linger ?? LINGER_MS));
+	taken.linger = Milli(Math.max(taken.linger, linger ?? LINGER_MS));
 	taken.refs += 1;
 	if (taken.timer !== undefined) {
-		clearTimeout(taken.timer);
+		taken.timer();
 		taken.timer = undefined;
 	}
 
@@ -489,14 +467,16 @@ function acquire(key: string, linger?: Time.Milli): Entry & { release: () => voi
 			taken.refs -= 1;
 			if (taken.refs > 0) return;
 
-			taken.timer = setTimeout(() => {
-				if (pool.get(taken.key) === taken) pool.delete(taken.key);
-				taken.connection.close();
-				taken.origin.close();
-			}, taken.linger);
-
 			// Don't hold a Node process open for a connection nobody is using.
-			(taken.timer as { unref?: () => void }).unref?.();
+			taken.timer = after(
+				Nano.fromMilli(taken.linger),
+				() => {
+					if (pool.get(taken.key) === taken) pool.delete(taken.key);
+					taken.connection.close();
+					taken.origin.close();
+				},
+				{ ref: false },
+			);
 		},
 	};
 }
@@ -512,7 +492,7 @@ export function resetShared(): void {
 	const entries = [...pool.values()];
 	pool.clear();
 	for (const entry of entries) {
-		if (entry.timer !== undefined) clearTimeout(entry.timer);
+		entry.timer?.();
 		entry.connection.close();
 		entry.origin.close();
 	}

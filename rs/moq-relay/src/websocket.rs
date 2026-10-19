@@ -2,7 +2,7 @@ use futures::{Sink, Stream};
 use qmux::ws::tungstenite;
 use std::{
 	pin::Pin,
-	sync::{Arc, atomic::Ordering},
+	sync::Arc,
 	task::{Context, Poll},
 };
 
@@ -66,24 +66,26 @@ pub(crate) async fn serve_ws(
 	options.timeout = state.timeout;
 
 	Ok(ws.on_upgrade(async move |socket| {
-		let id = state.conn_id.fetch_add(1, Ordering::Relaxed);
 		// Axum hides its Tungstenite socket to avoid exposing its dependency version.
 		let socket = WebSocketAdapter::new(socket);
 		let handshake = moq_tokio::websocket::accept(socket, options);
 		let Some(request) = state.shutdown.until_deadline(handshake).await else {
 			return;
 		};
-		match request {
-			Ok(request) => {
-				let _ = crate::connection::Connection::new(request, state.cluster.clone(), state.auth.clone())
-					.with_id(id)
-					.with_shutdown(state.shutdown.clone())
-					.with_sessions(state.sessions.clone())
-					.run()
-					.await;
+		let request = match request {
+			Ok(request) => request,
+			Err(err) => {
+				tracing::debug!(%err, "failed to accept WebSocket SETUP");
+				return;
 			}
-			Err(err) => tracing::debug!(%err, id, "failed to accept WebSocket SETUP"),
-		}
+		};
+		// Numbered like a QUIC accept, so its `conn{id=...}` never reuses a QUIC one's id.
+		crate::connection::Connection::new(request, state.cluster.clone(), state.auth.clone())
+			.with_id(state.cluster.next_connection_id())
+			.with_shutdown(state.shutdown.clone())
+			.with_sessions(state.sessions.clone())
+			.run()
+			.await;
 	}))
 }
 
@@ -274,7 +276,11 @@ mod tests {
 	use super::*;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};
 	use futures::SinkExt;
-	use std::{io, sync::atomic::AtomicBool, time::Duration};
+	use std::{
+		io,
+		sync::atomic::{AtomicBool, Ordering},
+		time::Duration,
+	};
 	use tokio::sync::mpsc;
 	// Brings `qmux::Session::protocol` and `::closed` into scope.
 	use web_transport_trait::Session as _;

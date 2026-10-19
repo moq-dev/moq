@@ -11,8 +11,7 @@ real QUIC are tested deterministically with no sockets.
 
 Decided 2026-10-10: the in-memory session comes first
 ([the relay seam](/quest/m1/time/relay-seam.md)); simulated UDP follows.
-`moq-quic` already takes `moq_clock::Instant` after the
-[switch](/quest/m1/quic/fork/switch.md), so this is a datagram link plus a
+`moq-quic` already takes `moq_clock::Instant`, so this is a datagram link plus a
 driver. Start from moq-shaper's in-memory `UdpSocket` (`rs/moq-shaper/src/mem.rs`).
 BBR's controller-level `Sim` in `bbr3/mod.rs` stays separate unless this
 replaces it cleanly.

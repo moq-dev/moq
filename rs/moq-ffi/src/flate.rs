@@ -67,10 +67,15 @@ impl MoqFlateSnapshotProducer {
 	}
 
 	/// Publish a new payload, superseding the last.
-	pub fn update(&self, payload: Vec<u8>) -> Result<(), MoqError> {
+	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
+	#[uniffi::method(default(timestamp_us = None))]
+	pub fn update(&self, payload: Vec<u8>, timestamp_us: Option<u64>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		guard.as_mut().ok_or(MoqError::Closed)?.update(payload)?;
+		guard.as_mut().ok_or(MoqError::Closed)?.update(moq_net::Timed {
+			value: payload.into(),
+			at: timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?,
+		})?;
 		Ok(())
 	}
 
@@ -114,10 +119,15 @@ impl MoqFlateStreamProducer {
 	}
 
 	/// Append one payload to the log.
-	pub fn append(&self, payload: Vec<u8>) -> Result<(), MoqError> {
+	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
+	#[uniffi::method(default(timestamp_us = None))]
+	pub fn append(&self, payload: Vec<u8>, timestamp_us: Option<u64>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
-		guard.as_mut().ok_or(MoqError::Closed)?.append(payload)?;
+		guard.as_mut().ok_or(MoqError::Closed)?.append(moq_net::Timed {
+			value: payload.into(),
+			at: timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?,
+		})?;
 		Ok(())
 	}
 

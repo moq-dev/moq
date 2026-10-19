@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Group, Error as NetError, Time, Track } from "@moq/net";
 import { Consumer, Producer, Rolled } from "./index.ts";
 
@@ -83,7 +84,7 @@ test("a second group is reported while the first is still open", async () => {
 
 	// Ask for a replay window, so the first group is delivered rather than skipped by the
 	// subscriber's default max delay budget once a newer group exists.
-	const consumer = new Consumer<Rec>({ track: track.subscribe({ maxDelay: Time.Milli(30_000) }) });
+	const consumer = new Consumer<Rec>({ track: track.subscribe({ maxDelay: Milli(30_000) }) });
 	expect((await consumer.next())?.value).toEqual({ n: 0 });
 	await expect(consumer.next()).rejects.toThrow(Rolled);
 

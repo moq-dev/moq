@@ -2,36 +2,107 @@
 	{
 		"name": "empty group header",
 		"first": true,
-		"frame": "{\"offset\":0,\"records\":[]}"
+		"frame": "{\"offset\":0,\"records\":[]}",
+		"events": []
 	},
 	{
 		"name": "group header from zero",
 		"first": true,
-		"frame": "{\"offset\":0,\"records\":[{\"n\":0},{\"n\":1}]}"
+		"frame": "{\"offset\":0,\"records\":[{\"n\":0},{\"n\":1}]}",
+		"events": [
+			{
+				"push": {
+					"index": 0,
+					"value": {
+						"n": 0
+					}
+				}
+			},
+			{
+				"push": {
+					"index": 1,
+					"value": {
+						"n": 1
+					}
+				}
+			}
+		]
 	},
 	{
 		"name": "group header with a non-zero offset",
 		"first": true,
-		"frame": "{\"offset\":7,\"records\":[{\"n\":7}]}"
+		"frame": "{\"offset\":7,\"records\":[{\"n\":7}]}",
+		"events": [
+			{
+				"push": {
+					"index": 7,
+					"value": {
+						"n": 7
+					}
+				}
+			}
+		]
 	},
 	{
 		"name": "group header with a bounded checkpoint",
 		"first": true,
-		"frame": "{\"offset\":0,\"start\":1,\"records\":[{\"n\":1}]}"
+		"frame": "{\"offset\":0,\"start\":1,\"records\":[{\"n\":1}]}",
+		"events": [
+			{
+				"skip": {
+					"start": 0,
+					"end": 1
+				}
+			},
+			{
+				"push": {
+					"index": 1,
+					"value": {
+						"n": 1
+					}
+				}
+			}
+		]
 	},
 	{
 		"name": "push",
 		"first": false,
-		"frame": "{\"push\":{\"n\":2}}"
+		"frame": "{\"push\":{\"n\":2}}",
+		"events": [
+			{
+				"push": {
+					"index": 3,
+					"value": {
+						"n": 2
+					}
+				}
+			}
+		]
 	},
 	{
 		"name": "pop one",
 		"first": false,
-		"frame": "{\"pop\":1}"
+		"frame": "{\"pop\":1}",
+		"events": [
+			{
+				"pop": {
+					"start": 0,
+					"end": 1
+				}
+			}
+		]
 	},
 	{
 		"name": "pop several",
 		"first": false,
-		"frame": "{\"pop\":3}"
+		"frame": "{\"pop\":3}",
+		"events": [
+			{
+				"pop": {
+					"start": 0,
+					"end": 3
+				}
+			}
+		]
 	}
 ]

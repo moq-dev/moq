@@ -8,9 +8,6 @@
 //! `moq-boy`, which pauses its emulator on `track::Producer::used()` /
 //! `unused()`.
 
-#[cfg(feature = "capture")]
-use std::time::Instant;
-
 use moq_mux::catalog::hang::CatalogExt;
 #[cfg(feature = "capture")]
 use moq_mux::rate;
@@ -45,12 +42,14 @@ fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::Vi
 	hint.coded_height = rendition.coded_height;
 	hint.display_aspect_width = rendition.display_aspect_width;
 	hint.display_aspect_height = rendition.display_aspect_height;
+	hint.color = rendition.color;
 	hint.framerate = rendition.framerate;
 	hint.bitrate = rendition.bitrate;
 	hint.optimize_for_latency = rendition.optimize_for_latency;
 	// Authoritative for both the catalog entry and the wire, so dropping it would silently
 	// downgrade a caller's selection to the default.
 	hint.container = rendition.container;
+	hint.preference = rendition.preference;
 	hint
 }
 
@@ -83,8 +82,11 @@ pub struct Producer<E: CatalogExt = ()> {
 }
 
 impl<E: CatalogExt> Producer<E> {
-	/// Publish a track carrying `rendition` into `broadcast`, registering it in
-	/// `catalog`. The frames fed to [`publish`](Self::publish) must be in that
+	/// Publish a track carrying `rendition` into `broadcast`, registering it under
+	/// `reserved`, a [`catalog::Producer::reserve`](moq_mux::catalog::Producer::reserve)
+	/// that carries any per-track hint such as the encoder's GOP duration
+	/// ([`Reserved::with_timeline_hint`](moq_mux::catalog::Reserved::with_timeline_hint)).
+	/// The frames fed to [`publish`](Self::publish) must be in that
 	/// codec's framing, which is what the [`Encoder`](super::Encoder) the
 	/// rendition was probed from emits.
 	///
@@ -96,7 +98,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// catalog instead of correcting it.
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer<E>,
+		reserved: moq_mux::catalog::Reserved<E>,
 		rendition: hang::catalog::VideoConfig,
 	) -> Result<Self, Error> {
 		let suffix = match &rendition.codec {
@@ -108,27 +110,27 @@ impl<E: CatalogExt> Producer<E> {
 				)));
 			}
 		};
-		let track = broadcast.unique_track(suffix, catalog.track_info(hang::catalog::PRIORITY.video))?;
-		Self::with_track(track, catalog, rendition)
+		let track = broadcast.unique_track(suffix, reserved.track_info(hang::catalog::PRIORITY.video))?;
+		Self::with_track(track, reserved, rendition)
 	}
 
-	/// Publish `rendition` on an existing track, registering it in `catalog`.
+	/// Publish `rendition` on an existing track, registering it under `reserved`.
 	///
 	/// Use this when the caller owns the track name. [`new`](Self::new) derives a
 	/// unique name from the codec instead.
 	pub fn with_track(
 		track: moq_net::track::Producer,
-		catalog: moq_mux::catalog::Producer<E>,
+		reserved: moq_mux::catalog::Reserved<E>,
 		rendition: hang::catalog::VideoConfig,
 	) -> Result<Self, Error> {
 		let codecs = match &rendition.codec {
 			hang::catalog::VideoCodec::H264(_) => Codecs::H264 {
 				split: moq_mux::codec::h264::Split::new(),
-				import: moq_mux::codec::h264::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,
+				import: moq_mux::codec::h264::Import::new(track, reserved, rendition_hint(rendition))?,
 			},
 			hang::catalog::VideoCodec::H265(_) => Codecs::H265 {
 				split: moq_mux::codec::h265::Split::new(),
-				import: moq_mux::codec::h265::Import::new(track, catalog.reserve(), rendition_hint(rendition))?,
+				import: moq_mux::codec::h265::Import::new(track, reserved, rendition_hint(rendition))?,
 			},
 			// Unreachable via `Config::probe`, which only encodes what `Codec` covers.
 			other => {
@@ -164,13 +166,13 @@ impl<E: CatalogExt> Producer<E> {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
-					import.flush(frame.timestamp, std::time::Instant::now())?;
+					import.flush(frame.timestamp, moq_net::time::now())?;
 				}
 				Codecs::H265 { split, import } => {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
-					import.flush(frame.timestamp, std::time::Instant::now())?;
+					import.flush(frame.timestamp, moq_net::time::now())?;
 				}
 			}
 		}
@@ -421,7 +423,8 @@ impl<E: CatalogExt> Driver<E> {
 			let (rendition, mut sink) = probe_config.probe_sink().await?;
 			// Learned here so a caller finds out before the first viewer, not on its first cut.
 			learn(&requests, refusal(&mut sink).await?);
-			Ok::<_, Error>(rendition)
+			// The encoder is built from the same defaults, so the probe's GOP is the one it emits.
+			Ok::<_, Error>((rendition, probe_config.gop.duration(probe_config.framerate)))
 		};
 		// Every wait below races the controls closing, so an abandoned publish never holds a camera
 		// or a permission prompt open for an owner that is gone.
@@ -434,8 +437,8 @@ impl<E: CatalogExt> Driver<E> {
 			}
 			rendition = rendition => rendition,
 		};
-		let rendition = match rendition {
-			Ok(rendition) => rendition,
+		let (rendition, gop) = match rendition {
+			Ok(probed) => probed,
 			Err(err) => {
 				// A track that already ended has nobody left to tell.
 				let _ = track.abort(moq_net::Error::Transport(err.to_string()));
@@ -443,7 +446,7 @@ impl<E: CatalogExt> Driver<E> {
 			}
 		};
 
-		let mut producer = Producer::with_track(track, catalog, rendition)?;
+		let mut producer = Producer::with_track(track, catalog.reserve().with_timeline_hint(gop), rendition)?;
 		let demand = producer.demand();
 
 		let result = tokio::select! {
@@ -561,7 +564,7 @@ async fn apply_estimate(
 		return;
 	};
 
-	let Some(bitrate) = control.update(estimate, Instant::now()) else {
+	let Some(bitrate) = control.update(estimate, moq_net::time::now()) else {
 		return;
 	};
 
@@ -602,9 +605,8 @@ fn learn(requests: &kio::ProducerWeak<Requests>, refused: Option<&'static str>) 
 	requests.count
 }
 
-/// A dropped or closed track is the normal end of a publish; any other cause is
-/// a real abort (e.g. a transport reset) worth surfacing rather than treating as
-/// a clean exit.
+/// An application dropping or closing its producer ends publishing normally;
+/// a specific abort (such as a transport reset) stays visible in diagnostics.
 #[cfg(feature = "capture")]
 fn log_track_ended(err: moq_net::Error) {
 	if matches!(err, moq_net::Error::Dropped | moq_net::Error::Closed) {
@@ -812,7 +814,14 @@ mod tests {
 		config.codec = codec;
 		config.kind = kind;
 
-		let mut producer = Producer::new(broadcast, catalog.clone(), config.probe().await.unwrap()).unwrap();
+		let mut producer = Producer::new(
+			broadcast,
+			catalog
+				.reserve()
+				.with_timeline_hint(config.gop.duration(config.framerate)),
+			config.probe().await.unwrap(),
+		)
+		.unwrap();
 		let advertised = rendition(&catalog).expect("the rendition publishes before any frame").1;
 
 		let mut encoder = Encoder::new(&config).unwrap();
@@ -878,7 +887,14 @@ mod tests {
 
 		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		config.kind = encoder::Kind::Software;
-		let mut producer = Producer::with_track(track, catalog, config.probe().await.unwrap()).unwrap();
+		let mut producer = Producer::with_track(
+			track,
+			catalog
+				.reserve()
+				.with_timeline_hint(config.gop.duration(config.framerate)),
+			config.probe().await.unwrap(),
+		)
+		.unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 
@@ -903,7 +919,14 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let mut initial = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 		initial.kind = encoder::Kind::Software;
-		let mut producer = Producer::new(broadcast, catalog.clone(), initial.probe().await.unwrap()).unwrap();
+		let mut producer = Producer::new(
+			broadcast,
+			catalog
+				.reserve()
+				.with_timeline_hint(initial.gop.duration(initial.framerate)),
+			initial.probe().await.unwrap(),
+		)
+		.unwrap();
 
 		for (timestamp, config) in [
 			(0, initial),
@@ -925,14 +948,15 @@ mod tests {
 		assert_eq!(rendition.coded_height, Some(360));
 	}
 
-	/// Regression: a caller's container selection has to survive the config -> hint conversion.
+	/// Regression: a caller's container and preference have to survive the config -> hint conversion.
 	///
 	/// [`VideoHint::container`](moq_mux::catalog::VideoHint::container) is authoritative for both the
 	/// track writer and the published rendition, so a conversion that drops it silently downgrades
-	/// the caller's selection to Legacy while the catalog still claims whatever it defaulted to.
+	/// the caller's selection to Legacy while the catalog still claims whatever it defaulted to. A
+	/// dropped preference would turn a compatibility transcode into a peer of its source.
 	#[tokio::test]
 	#[cfg(feature = "openh264")]
-	async fn a_selected_container_survives_the_rendition_hint() {
+	async fn a_selected_container_and_preference_survive_the_rendition_hint() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
@@ -941,11 +965,13 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let mut selected = config.probe().await.unwrap();
 		selected.container = hang::catalog::Container::Loc;
+		selected.preference = -1;
 
-		let _producer = Producer::new(broadcast, catalog.clone(), selected).unwrap();
+		let _producer = Producer::new(broadcast, catalog.reserve(), selected).unwrap();
 
 		let (_, published) = rendition(&catalog).expect("the rendition publishes before any frame");
 		assert_eq!(published.container, hang::catalog::Container::Loc);
+		assert_eq!(published.preference, -1);
 	}
 
 	/// Regression: the rendition has to reach the wire before anything is encoded.
@@ -966,7 +992,14 @@ mod tests {
 		config.bitrate = Some(moq_net::bandwidth::Rate::from_mbps(6));
 		// Software (openh264) so the test is deterministic and never touches a hardware backend.
 		config.kind = encoder::Kind::Software;
-		let _producer = Producer::new(broadcast, catalog, config.probe().await.unwrap()).unwrap();
+		let _producer = Producer::new(
+			broadcast,
+			catalog
+				.reserve()
+				.with_timeline_hint(config.gop.duration(config.framerate)),
+			config.probe().await.unwrap(),
+		)
+		.unwrap();
 
 		// Published, not merely staged: this reads the catalog track a subscriber would.
 		let mut stream = moq_mux::catalog::Consumer::<()>::new(&consumer, moq_mux::catalog::CatalogFormat::Hang)
@@ -1007,7 +1040,14 @@ mod tests {
 			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let mut subscriber = track.subscribe(None);
-		let mut producer = Producer::with_track(track, catalog, config.probe().await.unwrap()).unwrap();
+		let mut producer = Producer::with_track(
+			track,
+			catalog
+				.reserve()
+				.with_timeline_hint(config.gop.duration(config.framerate)),
+			config.probe().await.unwrap(),
+		)
+		.unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		let surface = crate::Surface::rgba(&rgba, crate::Size::new(320, 240)).unwrap();
@@ -1087,10 +1127,15 @@ mod tests {
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
 			async fn start(behind: Duration, wall: SystemTime) -> Self {
+				// The capture stream counts on the host clock and the broadcast on moq-clock; the
+				// loop correlates the two, so each epoch is the same moment on its own clock.
 				let epoch = Instant::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
-				let clock = moq_mux::Clock::at(epoch, wall).unwrap();
+				let start = moq_net::time::now()
+					.checked_sub(behind)
+					.expect("a monotonic clock that far back");
+				let clock = moq_mux::Clock::at(start, wall).unwrap();
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let consumer = broadcast.consume();
 				let config = moq_mux::catalog::Config::default()
@@ -1106,7 +1151,14 @@ mod tests {
 
 				let mut probe = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 				probe.kind = encoder::Kind::Software;
-				let mut producer = Producer::with_track(track, catalog.clone(), probe.probe().await.unwrap()).unwrap();
+				let mut producer = Producer::with_track(
+					track,
+					catalog
+						.reserve()
+						.with_timeline_hint(probe.gop.duration(probe.framerate)),
+					probe.probe().await.unwrap(),
+				)
+				.unwrap();
 				let demand = producer.demand();
 
 				let (opens, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1644,7 +1696,14 @@ mod tests {
 			let _subscriber = track.subscribe(None);
 			let mut rendition = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
 			rendition.kind = encoder::Kind::Software;
-			let mut producer = Producer::with_track(track, catalog.clone(), rendition.probe().await.unwrap()).unwrap();
+			let mut producer = Producer::with_track(
+				track,
+				catalog
+					.reserve()
+					.with_timeline_hint(rendition.gop.duration(rendition.framerate)),
+				rendition.probe().await.unwrap(),
+			)
+			.unwrap();
 			let demand = producer.demand();
 
 			let (camera, stream) = camera();

@@ -17,8 +17,7 @@ use crate::catalog::msf::Error;
 /// hang types: MSF tracks become renditions, and the catalog's root sections become the
 /// extension `E`.
 pub struct Consumer<E: CatalogExt = ()> {
-	/// Access to the underlying track consumer.
-	pub track: moq_net::track::Ordered,
+	track: moq_net::track::Ordered,
 	group: Option<moq_net::group::Consumer>,
 	_ext: PhantomData<E>,
 }
@@ -333,6 +332,10 @@ fn audio_config_from_msf(track: &moq_msf::Track) -> Result<Option<AudioConfig>> 
 	};
 
 	let mut config = AudioConfig::new(codec, sample_rate, channel_count);
+	// MSF cannot advertise decoder warmup, so derive Opus's seek pre-roll.
+	if matches!(config.codec, AudioCodec::Opus) {
+		config.warmup = Some(crate::codec::opus::WARMUP);
+	}
 	config.bitrate = track.bitrate;
 	config.description = legacy_description(track)?;
 	config.container = container;
@@ -665,6 +668,22 @@ mod test {
 			catalog.audio.renditions["audio0"].delay,
 			Some(std::time::Duration::from_millis(80))
 		);
+	}
+
+	#[test]
+	fn opus_msf_warmup_is_derived_without_changing_other_codecs() {
+		for packaging in [moq_msf::Packaging::Legacy, moq_msf::Packaging::Loc] {
+			for (codec, warmup) in [("opus", Some(80)), ("mp4a.40.2", None)] {
+				let mut track = audio_track("audio0", packaging.clone());
+				track.codec = Some(codec.into());
+				let catalog = from_msf::<()>(&moq_msf::Catalog::new(vec![track]), &moq_net::Path::empty()).unwrap();
+				assert_eq!(
+					catalog.audio.renditions["audio0"].warmup,
+					warmup.map(std::time::Duration::from_millis),
+					"{codec} {packaging:?}"
+				);
+			}
+		}
 	}
 
 	#[test]

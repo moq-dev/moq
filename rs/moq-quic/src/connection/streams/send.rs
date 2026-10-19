@@ -1,14 +1,16 @@
 use bytes::Bytes;
 use thiserror::Error;
 
-use crate::{VarInt, connection::send_buffer::SendBuffer, frame};
+use super::{ClosedStream, schedule::Slot};
+use crate::{StreamId, VarInt, connection::send_buffer::SendBuffer, frame};
 
 #[derive(Debug)]
 pub(super) struct Send {
     pub(super) max_data: u64,
     pub(super) state: SendState,
     pub(super) pending: SendBuffer,
-    pub(super) priority: i32,
+    pub(super) priority: i64,
+    pub(super) slot: Slot,
     /// Whether a frame containing a FIN bit must be transmitted, even if we don't have any new data
     pub(super) fin_pending: bool,
     /// Whether this stream is in the `connection_blocked` list of `Streams`
@@ -19,6 +21,8 @@ pub(super) struct Send {
     pub(super) data_blocked_limit: Option<u64>,
     /// The reason the peer wants us to stop, if `STOP_SENDING` was received
     pub(super) stop_reason: Option<VarInt>,
+    /// The lowest offset a [`SendStream::acked`](super::SendStream::acked) call is waiting for
+    pub(super) notify: Option<u64>,
 }
 
 impl Send {
@@ -28,16 +32,18 @@ impl Send {
             state: SendState::Ready,
             pending: SendBuffer::new(),
             priority: 0,
+            slot: Slot::default(),
             fin_pending: false,
             connection_blocked: false,
             data_blocked_limit: None,
             stop_reason: None,
+            notify: None,
         })
     }
 
     /// Whether the stream has been reset
     pub(super) fn is_reset(&self) -> bool {
-        matches!(self.state, SendState::ResetSent)
+        matches!(self.state, SendState::ResetSent { .. })
     }
 
     pub(super) fn finish(&mut self) -> Result<(), FinishError> {
@@ -89,13 +95,128 @@ impl Send {
     }
 
     /// Update stream state due to a reset sent by the local application
-    pub(super) fn reset(&mut self) {
+    ///
+    /// Data below `reliable_size` is still delivered; everything after it is abandoned. Returns
+    /// the Reliable Size of the reset to send now, or `None` while a peer without RESET_STREAM_AT
+    /// (`!at`) still has data below `reliable_size` to acknowledge, after which
+    /// [`take_held_reset`](Self::take_held_reset) releases it.
+    pub(super) fn reset(
+        &mut self,
+        error_code: VarInt,
+        reliable_size: u64,
+        at: bool,
+    ) -> Option<u64> {
         use SendState::*;
-        if let DataSent { .. } | Ready = self.state {
-            self.state = ResetSent;
-            self.pending.discard();
-            self.fin_pending = false;
+        let (DataSent { .. } | Ready) = self.state else {
+            return None;
+        };
+        debug_assert!(reliable_size <= self.pending.offset());
+        let final_size = self.pending.offset();
+        self.pending.truncate(reliable_size);
+        self.fin_pending = false;
+        let send = at || self.pending.is_fully_acked();
+        self.state = ResetSent {
+            final_size,
+            reliable_size,
+            error_code,
+            held: !send,
+            acked: None,
+        };
+        send.then_some(reliable_size)
+    }
+
+    /// Release a held RESET_STREAM once all the data it holds for has been acknowledged, returning
+    /// its Reliable Size
+    pub(super) fn take_held_reset(&mut self) -> Option<u64> {
+        let SendState::ResetSent {
+            held,
+            reliable_size,
+            ..
+        } = &mut self.state
+        else {
+            return None;
+        };
+        if !*held || !self.pending.is_fully_acked() {
+            return None;
         }
+        *held = false;
+        Some(*reliable_size)
+    }
+
+    /// The Reliable Size this stream's reset delivers, if it was reset
+    pub(super) fn reliable_size(&self) -> Option<u64> {
+        match self.state {
+            SendState::ResetSent { reliable_size, .. } => Some(reliable_size),
+            _ => None,
+        }
+    }
+
+    /// Abandon the data a reset still delivers, returning the Reliable Size of 0 for the reset to
+    /// send now
+    ///
+    /// For a peer that sent STOP_SENDING, which will not read it. This releases a held
+    /// RESET_STREAM, and replaces a RESET_STREAM_AT whose data is still unacknowledged.
+    pub(super) fn abandon_reliable(&mut self) -> Option<u64> {
+        let SendState::ResetSent {
+            reliable_size,
+            held,
+            ..
+        } = &mut self.state
+        else {
+            return None;
+        };
+        if self.pending.is_fully_acked() {
+            return None;
+        }
+        *reliable_size = 0;
+        *held = false;
+        self.pending.truncate(0);
+        Some(0)
+    }
+
+    /// The frame announcing this stream's reset, if it was reset
+    ///
+    /// It carries a Reliable Size only when the peer accepts RESET_STREAM_AT (`at`).
+    pub(super) fn reset_frame(&self, id: StreamId, at: bool) -> Option<frame::ResetStream> {
+        let SendState::ResetSent {
+            final_size,
+            reliable_size,
+            error_code,
+            ..
+        } = self.state
+        else {
+            return None;
+        };
+        Some(frame::ResetStream {
+            id,
+            error_code,
+            final_offset: VarInt::try_from(final_size).expect("impossibly large offset"),
+            // A zero Reliable Size is a plain RESET_STREAM, which any peer accepts
+            reliable_size: (at && reliable_size > 0)
+                .then(|| VarInt::try_from(reliable_size).expect("impossibly large offset")),
+        })
+    }
+
+    /// Handle acknowledgement of a reset frame sent while the Reliable Size was `reliable_size`
+    ///
+    /// Returns whether the current reset and all data below its Reliable Size have been
+    /// acknowledged
+    pub(super) fn reset_acked(&mut self, reliable_size: u64) -> bool {
+        let SendState::ResetSent { acked, .. } = &mut self.state else {
+            return false;
+        };
+        // Sizes only shrink, so the smallest one acknowledged is the latest
+        *acked = Some(acked.map_or(reliable_size, |acked| acked.min(reliable_size)));
+        self.is_reset_acked() && self.pending.is_fully_acked()
+    }
+
+    /// Whether the peer acknowledged a reset carrying the current Reliable Size, rather than one
+    /// that STOP_SENDING has since shrunk
+    fn is_reset_acked(&self) -> bool {
+        matches!(
+            self.state,
+            SendState::ResetSent { reliable_size, acked, .. } if acked == Some(reliable_size)
+        )
     }
 
     /// Handle STOP_SENDING
@@ -111,7 +232,8 @@ impl Send {
         }
     }
 
-    /// Returns whether the stream has been finished and all data has been acknowledged by the peer
+    /// Returns whether the stream has been finished or reset, and all data it still owes the peer
+    /// has been acknowledged
     pub(super) fn ack(&mut self, frame: frame::StreamMeta) -> bool {
         self.pending.ack(frame.offsets);
         match &mut self.state {
@@ -119,8 +241,44 @@ impl Send {
                 *finish_acked |= frame.fin;
                 *finish_acked && self.pending.is_fully_acked()
             }
-            _ => false,
+            SendState::ResetSent { .. } => self.is_reset_acked() && self.pending.is_fully_acked(),
+            SendState::Ready => false,
         }
+    }
+
+    /// Whether the peer acknowledged everything before `offset`, noting to report it if not
+    pub(super) fn acked(&mut self, offset: u64) -> Result<bool, ClosedStream> {
+        // A reset cuts the buffer short, so only an unreset stream knows how much was written
+        assert!(
+            self.is_reset() || offset <= self.pending.offset(),
+            "acked past the data written"
+        );
+        // An acknowledgment no longer means the peer reads the data, and a reset dropped the rest
+        if self.stop_reason.is_some() || offset > self.pending.offset() {
+            return Err(ClosedStream::default());
+        }
+        if offset <= self.pending.acked() {
+            return Ok(true);
+        }
+        self.notify = Some(self.notify.map_or(offset, |notify| notify.min(offset)));
+        Ok(false)
+    }
+
+    /// The acknowledged prefix to report once it reaches the offset a waiter is waiting for
+    pub(super) fn take_acked(&mut self) -> Option<u64> {
+        let acked = self.pending.acked();
+        if self.notify.is_none_or(|notify| acked < notify) {
+            return None;
+        }
+        self.notify = None;
+        Some(acked)
+    }
+
+    /// The acknowledged prefix to report to every waiter after a reset or STOP_SENDING, which may
+    /// fail any of them
+    pub(super) fn take_waiting(&mut self) -> Option<u64> {
+        self.notify.take()?;
+        Some(self.pending.acked())
     }
 
     /// Handle increase to stream-level flow control limit
@@ -289,8 +447,18 @@ pub(super) enum SendState {
     Ready,
     /// Stream was finished; now sending retransmits only
     DataSent { finish_acked: bool },
-    /// Sent RESET
-    ResetSent,
+    /// Reset by the application, while data below `reliable_size` is still delivered
+    ///
+    /// The peer gets RESET_STREAM_AT, or, without it, a RESET_STREAM `held` until it has
+    /// acknowledged that data.
+    ResetSent {
+        final_size: u64,
+        reliable_size: u64,
+        error_code: VarInt,
+        held: bool,
+        /// The smallest Reliable Size an acknowledged reset frame carried
+        acked: Option<u64>,
+    },
 }
 
 /// Reasons why attempting to finish a stream might fail

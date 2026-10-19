@@ -5,7 +5,7 @@
 Two crates linked into one library can each export a type with the same
 name, and a type in one can take the other's: `media.GroupConsumer(group:
 GroupConsumer)` generates and runs in Kotlin, Swift, Python, Go, Dart, C++,
-and C from [moq-dev/uniffi](/quest/m1/uniffi-fork.md).
+and C from [moq-dev/uniffi](/quest/m2/uniffi-fork.md).
 
 ## Plan
 
@@ -30,4 +30,4 @@ Public API: none in moq until the crate split is re-decided. Wire: none.
 
 ## Required
 
-- [Hard fork](/quest/m1/uniffi-fork.md) - the repository the fix lands in
+- [Hard fork](/quest/m2/uniffi-fork.md) - the repository the fix lands in

@@ -23,7 +23,7 @@
 //! See `test/drill/README.md` for the recipe, the sensitivity proof that each
 //! drill fails when its recovery behavior is removed, and the loom/fuzz cases
 //! covering the primitives underneath.
-#![cfg(all(feature = "noq", feature = "websocket"))]
+#![cfg(all(feature = "quic", feature = "websocket"))]
 
 use std::time::Duration;
 
@@ -485,19 +485,20 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	// a moq publisher (`write_frame` is synchronous, and a reader that falls too
 	// far behind is shed rather than waited for), so an unread backlog is what
 	// backpressure looks like from here.
+	let mut behind = None;
 	let backlog = tokio::time::timeout(TIMEOUT, async {
-		loop {
-			match reader.track.latest() {
-				Some(latest) if latest >= first + STALL_GROUPS as u64 => return latest - first,
-				_ => tokio::time::sleep(Duration::from_millis(10)).await,
+		while let Some(largest) = reader.track.largest().await {
+			behind = Some(largest.group - first);
+			if largest.group >= first + STALL_GROUPS as u64 {
+				return largest.group - first;
 			}
 		}
+		panic!("the stalled reader ended before its backlog queued");
 	})
 	.await
 	.unwrap_or_else(|_| {
 		panic!(
-			"the stalled reader is only {:?} groups behind: nothing was queued, so there is no backlog to cancel under",
-			reader.track.latest().map(|latest| latest - first)
+			"the stalled reader is only {behind:?} groups behind: nothing was queued, so there is no backlog to cancel under"
 		)
 	});
 	println!("fault activated: cancelling with {backlog} unread groups queued");
@@ -714,23 +715,20 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let (_, payload) = read_group(&mut reader, "before the interrupt").await;
 	assert_eq!(payload, b"original", "delivery is broken before the drill even starts");
 
-	// The interrupt: the session goes first, so the relay loses the publisher
-	// with no finish and no unannounce, which is what a crashed publisher looks
-	// like. Dropping the broadcast while the session was still up would send a
-	// clean unannounce instead and never reach the crash path. The rest goes
-	// after, including the subscriber's handles, so nothing local keeps the dead
-	// broadcast alive for the assertions below.
+	// Dropping the connection cancels its task asynchronously. Keep the broadcast
+	// alive until the relay withdraws it, so a clean unannounce cannot race the
+	// session loss and satisfy the assertion without testing crash recovery.
 	drop(first_session);
 	drop(reader);
-	drop(track);
-	drop(broadcast);
-	drop(first);
 
 	// Terminal result: the name stops being announced. Nothing told the relay
 	// the broadcast ended, so this is the proof that losing the publisher's
 	// session withdraws what it announced rather than parking subscribers on it.
 	expect_announce(&mut announced, "live", false, "the interrupted publisher").await;
 	println!("fault activated: the interrupted publisher's broadcast was withdrawn");
+	drop(track);
+	drop(broadcast);
+	drop(first);
 
 	// Restore: the same name, a new publisher, different content.
 	let second = moq_tokio::origin::spawn();

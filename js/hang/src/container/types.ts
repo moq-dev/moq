@@ -1,11 +1,11 @@
-import { Time } from "@moq/net";
+import { type Micro, Milli } from "@moq/clock";
 
 /** A decoded media frame: codec payload plus its presentation timestamp and keyframe flag. */
 export interface Frame {
 	/** The codec bitstream payload. */
 	payload: Uint8Array;
 	/** Presentation timestamp in microseconds. */
-	timestamp: Time.Micro;
+	timestamp: Micro;
 	/** Whether this frame opens a group, or is a video keyframe. Audio carries it only on a group start. */
 	keyframe: boolean;
 
@@ -14,21 +14,21 @@ export interface Frame {
 	// The consumer adds it to `timestamp` to learn how far a group has presented,
 	// so it can advance to a newer group as soon as the gap is covered instead of
 	// waiting out the max delay budget.
-	duration?: Time.Micro;
+	duration?: Micro;
 }
 
 /** A media frame carrying its local transport ingress time. */
 export interface ReceivedFrame extends Frame {
 	/** Monotonic ingress time in milliseconds, before reordering or decoder backpressure. */
-	arrival: Time.Milli;
+	arrival: Milli;
 }
 
 /** A contiguous span of buffered media, in milliseconds. */
 export interface BufferedRange {
 	/** Start of the range in milliseconds. */
-	start: Time.Milli;
+	start: Milli;
 	/** End of the range in milliseconds. */
-	end: Time.Milli;
+	end: Milli;
 }
 
 /** An ordered list of buffered time ranges. */
@@ -45,7 +45,7 @@ export function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): Buffe
 	for (const range of all) {
 		const last = result.at(-1);
 		if (last && last.end >= range.start) {
-			last.end = Time.Milli.max(last.end, range.end);
+			last.end = Milli(Math.max(last.end, range.end));
 		} else {
 			result.push({ ...range });
 		}

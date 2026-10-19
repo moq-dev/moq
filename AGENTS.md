@@ -17,6 +17,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused.
 - Reproduce bugs before fixing them. Land each fix with a regression test that fails without it, when one is easy.
 - Unit tests mock time instead of depending on wall-clock timing or sleeps.
+- Impair a network with bufferbloat (a rate limit below the media bitrate, behind a deep but finite queue), whose overflow drops packets too. Random loss may prove correctness, such as retransmits happening, but never gates acceptance or performance.
 - Keep the PR focused. No unrelated refactors, formatting churn, or drive-by changes; split when in doubt.
 - Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn.
 - Propose a course change, even suggest abandoning a PR, rather than finish a half-solution.
@@ -58,17 +59,20 @@ The API is the most important thing to get right.
 A bad shape costs a breaking change in every language, and the surface is huge.
 
 - Report the public API and wire impact of every change, in the PR description and whenever asked.
+- A breaking change adds an entry under `## Unreleased` in each affected package's `MIGRATE.md` saying how to migrate.
 - Keep things private until a consumer needs them. Scrutinize every new exported item.
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` instead.
 - Let the type system make misuse unrepresentable
 - A broadcast, track, or group name always means the same content. MoQ has no ETag-style invalidation, so a publisher that reuses a name for different content (such as restarting group numbers) is a bug; publish a new broadcast instead of working around it.
 - Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
 - Avoid 4+ args; use a struct or object.
+- Prefer nesting related API, configuration, and structured output fields under their shared role.
 - Name by role, not today's implementation.
 - When a name or shape feels awkward, propose alternatives with a recommendation instead of shipping it.
 - Short names under a module namespace (`encode::Config`, not `EncoderConfig`). Mirror names across Rust, JS, and the bindings.
 - Document every exported symbol in one plain line, the way you'd say it out loud.
 - Prefer refactoring and simplification; many APIs have not been published yet.
+- The `moq-net` API and moq-lite take priority over moq-transport. Map moq-transport onto them, not the reverse, and skip any of its features or MUSTs that add cost without a real behavioral benefit.
 
 MoQ is split into many layers as part of the public API.
 The boundary between packages is extremely important to keep things modular and reusable.
@@ -81,6 +85,7 @@ Wire changes should be backwards compatible for any *published* drafts/versions.
 
 Before starting, `git fetch origin` and set the upstream to the base branch.
 Pass PR bodies to `gh` on stdin (`--body-file -`); never write to a directory other agents share.
+Keep scratch files in your worktree's `.scratch/`, not `target/`: build output may live outside the checkout and gets wiped.
 
 Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.

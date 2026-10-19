@@ -18,6 +18,10 @@ impl MoqTrackDemand {
 	pub(crate) fn new(inner: moq_net::track::Demand) -> Arc<Self> {
 		Arc::new(Self { inner })
 	}
+
+	pub(crate) fn inner(&self) -> &moq_net::track::Demand {
+		&self.inner
+	}
 }
 
 #[uniffi::export]

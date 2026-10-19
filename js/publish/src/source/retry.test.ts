@@ -126,6 +126,21 @@ function install<T extends EventTarget>(media: T): T & Disposable {
 	});
 }
 
+function installOrientation(type: OrientationType): { orientation: ScreenOrientation } & Disposable {
+	const original = Object.getOwnPropertyDescriptor(globalThis, "screen");
+	const orientation = new EventTarget() as ScreenOrientation;
+	Object.defineProperty(orientation, "type", { configurable: true, value: type });
+	Object.defineProperty(globalThis, "screen", { configurable: true, value: { orientation } });
+
+	return {
+		orientation,
+		[Symbol.dispose]() {
+			if (original) Object.defineProperty(globalThis, "screen", original);
+			else Reflect.deleteProperty(globalThis, "screen");
+		},
+	};
+}
+
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
 async function settle(times = 20): Promise<void> {
 	for (let i = 0; i < times; i++) await flush();
@@ -444,6 +459,38 @@ test("a camera re-opens when its track dies", async () => {
 	await settle();
 
 	expect(published(camera.out.source.peek())).toBe(media.latest());
+
+	camera.close();
+});
+
+test("a camera reports the turn a portrait screen needs", async () => {
+	using _media = install(new FakeMediaDevices());
+	using display = installOrientation("portrait-primary");
+	const turn = (type: OrientationType) => {
+		Object.defineProperty(display.orientation, "type", { configurable: true, value: type });
+		display.orientation.dispatchEvent(new Event("change"));
+	};
+
+	const enabled = new Signal(true);
+	const camera = new Camera({ enabled });
+	await settle();
+	expect(camera.out.orientation.peek()).toBe(90);
+
+	turn("portrait-secondary");
+	await settle();
+	expect(camera.out.orientation.peek()).toBe(270);
+
+	turn("landscape-primary");
+	await settle();
+	expect(camera.out.orientation.peek()).toBe(0);
+
+	turn("portrait-primary");
+	await settle();
+	expect(camera.out.orientation.peek()).toBe(90);
+
+	enabled.set(false);
+	await settle();
+	expect(camera.out.orientation.peek()).toBe(0);
 
 	camera.close();
 });

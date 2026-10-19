@@ -1,11 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Group, Error as NetError, Time, Track } from "@moq/net";
 import { DEFAULT_MAX_FRAME_SIZE } from "../codec.ts";
 import { Consumer, Producer, Rolled } from "./index.ts";
 
 // Ask for a replay window, so the superseded first group is delivered rather than skipped by the
 // subscriber's default max delay budget. A rolled log is exactly the case where both groups matter.
-const REPLAY_LATENCY = Time.Milli(30_000);
+const REPLAY_LATENCY = Milli(30_000);
 
 const payloads = (count: number) => Array.from({ length: count }, (_, n) => new Uint8Array(8).fill(n));
 

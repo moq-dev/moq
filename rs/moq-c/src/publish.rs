@@ -24,9 +24,10 @@ struct TrackRequest {
 	request: moq_net::track::Request,
 }
 
-/// A request a handler pulled, before it has a handle.
+/// A request a handler pulled, before it has a handle. A track request is boxed: it is
+/// several times the size of a group request.
 enum Request {
-	Track(TrackRequest),
+	Track(Box<TrackRequest>),
 	Group(moq_net::group::Request),
 }
 
@@ -44,10 +45,23 @@ enum Dynamic {
 /// Caller-authored configs are tracked separately so removing one cannot retire an importer's
 /// rendition with the same name.
 struct Broadcast {
+	driver: crate::ffi::Background,
 	producer: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer<Extra>,
 	video: BTreeMap<String, hang::catalog::VideoConfig>,
 	audio: BTreeMap<String, hang::catalog::AudioConfig>,
+}
+
+// Legacy C data methods stamp writes on one fixed broadcast clock without retaining
+// another catalog handle after a failed stream retires its listing.
+struct Data<T> {
+	producer: T,
+	clock: moq_mux::Clock,
+}
+
+struct Container {
+	inner: import::Container<Extra>,
+	driver: crate::ffi::Background,
 }
 
 #[derive(Default)]
@@ -62,7 +76,7 @@ pub struct Publish {
 	/// Container importers, fed whole chunks. A separate space from `media` because a
 	/// container publishes several tracks and carries its own timing, so it takes no
 	/// per-frame timestamp.
-	containers: NonZeroSlab<import::Container<Extra>>,
+	containers: NonZeroSlab<Container>,
 
 	/// Raw track producers (no media/container/catalog framing).
 	tracks: NonZeroSlab<moq_net::track::Producer>,
@@ -72,16 +86,16 @@ pub struct Publish {
 
 	/// JSON snapshot producers (lossy latest-value tracks), each advertised in its broadcast's
 	/// catalog for as long as it lives.
-	json_snapshot: NonZeroSlab<moq_mux::json::Snapshot<serde_json::Value, Extra>>,
+	json_snapshot: NonZeroSlab<Data<moq_mux::json::Snapshot<serde_json::Value, Extra>>>,
 
 	/// JSON stream producers (lossless append-log tracks), advertised the same way.
-	json_stream: NonZeroSlab<moq_mux::json::Stream<serde_json::Value, Extra>>,
+	json_stream: NonZeroSlab<Data<moq_mux::json::Stream<serde_json::Value, Extra>>>,
 
 	/// Binary snapshot producers (lossy latest-value tracks of opaque bytes), advertised the same way.
-	binary_snapshot: NonZeroSlab<moq_mux::binary::Snapshot<Extra>>,
+	binary_snapshot: NonZeroSlab<Data<moq_mux::binary::Snapshot<Extra>>>,
 
 	/// Binary stream producers (lossless append-log tracks of opaque bytes), advertised the same way.
-	binary_stream: NonZeroSlab<moq_mux::binary::Stream<Extra>>,
+	binary_stream: NonZeroSlab<Data<moq_mux::binary::Stream<Extra>>>,
 
 	/// Demand watchers. Close signals shutdown; the task delivers a final callback, then removes itself.
 	demand: NonZeroSlab<Option<TaskEntry>>,
@@ -98,14 +112,30 @@ pub struct Publish {
 }
 
 impl Publish {
+	fn broadcast(&self, id: Id) -> Result<&Broadcast, Error> {
+		let broadcast = self.broadcasts.get(id).ok_or(Error::BroadcastNotFound)?;
+		broadcast.driver.check()?;
+		Ok(broadcast)
+	}
+
+	fn broadcast_mut(&mut self, id: Id) -> Result<&mut Broadcast, Error> {
+		let broadcast = self.broadcasts.get_mut(id).ok_or(Error::BroadcastNotFound)?;
+		broadcast.driver.check()?;
+		Ok(broadcast)
+	}
+
 	/// Store an origin-created broadcast producer, attaching the catalog track
 	/// every moq-c broadcast carries.
-	pub fn create(&mut self, mut broadcast: moq_net::broadcast::Producer) -> Result<Id, Error> {
+	pub fn create(
+		&mut self,
+		(mut broadcast, driver): (moq_net::broadcast::Producer, crate::ffi::Background),
+	) -> Result<Id, Error> {
 		let config = moq_mux::catalog::Config::default()
 			.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::catalog::hang::Extra>::default());
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 
 		let id = self.broadcasts.insert(Broadcast {
+			driver,
 			producer: broadcast,
 			catalog,
 			video: BTreeMap::new(),
@@ -117,26 +147,30 @@ impl Publish {
 	/// Advertise the broadcast's exact path as a route. Announcing again re-prices
 	/// in place. Until announced, the broadcast is invisible and unroutable.
 	pub fn announce(&mut self, broadcast: Id, route: moq_net::origin::Route) -> Result<(), Error> {
-		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
-		broadcast.producer.announce(route)?;
+		let broadcast = self.broadcast_mut(broadcast)?;
+		let result = broadcast.producer.announce(route);
+		broadcast.driver.check()?;
+		result?;
 		Ok(())
 	}
 
 	/// Retract the broadcast's exact-path advertisement, if any.
 	pub fn unannounce(&mut self, broadcast: Id) -> Result<(), Error> {
-		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let broadcast = self.broadcast_mut(broadcast)?;
 		broadcast.producer.unannounce();
 		Ok(())
 	}
 
 	/// The broadcast's track producer.
 	pub(crate) fn producer(&mut self, id: Id) -> Result<&mut moq_net::broadcast::Producer, Error> {
-		Ok(&mut self.broadcasts.get_mut(id).ok_or(Error::BroadcastNotFound)?.producer)
+		let broadcast = self.broadcast_mut(id)?;
+		Ok(&mut broadcast.producer)
 	}
 
 	/// The broadcast's catalog producer.
 	fn catalog(&mut self, id: Id) -> Result<&mut moq_mux::catalog::Producer<Extra>, Error> {
-		Ok(&mut self.broadcasts.get_mut(id).ok_or(Error::BroadcastNotFound)?.catalog)
+		let broadcast = self.broadcast_mut(id)?;
+		Ok(&mut broadcast.catalog)
 	}
 
 	/// The broadcast's current catalog, as consumers would receive it next.
@@ -158,34 +192,39 @@ impl Publish {
 		),
 		Error,
 	> {
-		let broadcast = self.broadcasts.get_mut(id).ok_or(Error::BroadcastNotFound)?;
+		let broadcast = self.broadcast_mut(id)?;
 		Ok((&mut broadcast.producer, &mut broadcast.catalog))
 	}
 
 	/// End the broadcast for good and release it, finalizing the catalog stream.
 	pub fn close(&mut self, broadcast: Id) -> Result<(), Error> {
 		let Broadcast {
+			driver,
 			producer,
 			mut catalog,
 			video,
 			audio,
 			..
 		} = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
-		// Retire caller-authored entries while the catalog track is still open.
-		{
-			let mut guard = catalog.modify()?;
-			for name in video.keys() {
-				guard.video.renditions.remove(name);
+		let result = (|| {
+			// Retire caller-authored entries while the catalog track is still open.
+			{
+				let mut guard = catalog.modify()?;
+				for name in video.keys() {
+					guard.video.renditions.remove(name);
+				}
+				for name in audio.keys() {
+					guard.audio.renditions.remove(name);
+				}
+				guard.commit()?;
 			}
-			for name in audio.keys() {
-				guard.audio.renditions.remove(name);
-			}
-			guard.commit()?;
-		}
-		// Close the broadcast first so it ends even if finalizing the catalog fails.
-		producer.close();
-		catalog.finish()?;
-		Ok(())
+			// Close the broadcast first so it ends even if finalizing the catalog fails.
+			producer.close();
+			catalog.finish()?;
+			Ok(())
+		})();
+		driver.check()?;
+		result
 	}
 
 	pub fn audio(&mut self, broadcast: Id, init: import::AudioInit) -> Result<Id, Error> {
@@ -193,7 +232,7 @@ impl Publish {
 			producer: broadcast,
 			catalog,
 			..
-		} = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast.reserve_track(name)?;
@@ -208,7 +247,7 @@ impl Publish {
 			producer: broadcast,
 			catalog,
 			..
-		} = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
 		let name = broadcast.unique_name(&format!(".{}", init.format));
 		let request = broadcast.reserve_track(name)?;
@@ -222,9 +261,14 @@ impl Publish {
 		let Broadcast {
 			producer: broadcast,
 			catalog,
+			driver,
 			..
-		} = self.broadcasts.get(broadcast).ok_or(Error::BroadcastNotFound)?;
+		} = self.broadcast(broadcast)?;
 		let container = import::Container::new(broadcast.clone(), catalog.reserve(), &init)?;
+		let container = Container {
+			inner: container,
+			driver: driver.clone(),
+		};
 		let id = self.containers.insert(container)?;
 		Ok(id)
 	}
@@ -239,7 +283,7 @@ impl Publish {
 	/// unless their caller explicitly identifies the frame as encoder output.
 	pub fn media_flush(&mut self, media: Id, timestamp: hang::container::Timestamp) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
-		track.flush(timestamp, std::time::Instant::now())?;
+		track.flush(timestamp, moq_net::time::now())?;
 		Ok(())
 	}
 
@@ -284,28 +328,34 @@ impl Publish {
 	/// No timestamp: a container carries its tracks' timing itself.
 	pub fn container_write(&mut self, container: Id, data: &[u8]) -> Result<(), Error> {
 		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
-		container.decode(data)?;
-		Ok(())
+		container.driver.check()?;
+		let result = container.inner.decode(data);
+		container.driver.check()?;
+		Ok(result?)
 	}
 
 	/// Declare that the next chunk starts a new segment, rolling a group on every track.
 	pub fn container_cut(&mut self, container: Id) -> Result<(), Error> {
 		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
-		container.cut();
-		Ok(())
+		container.driver.check()?;
+		container.inner.cut();
+		container.driver.check()
 	}
 
 	/// Start a new segment and number its groups `sequence`.
 	pub fn container_seek(&mut self, container: Id, sequence: u64) -> Result<(), Error> {
 		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
-		container.seek(sequence)?;
-		Ok(())
+		container.driver.check()?;
+		let result = container.inner.seek(sequence);
+		container.driver.check()?;
+		Ok(result?)
 	}
 
 	pub fn container_finish(&mut self, container: Id) -> Result<(), Error> {
 		let mut container = self.containers.remove(container).ok_or(Error::MediaNotFound)?;
-		container.finish()?;
-		Ok(())
+		let result = container.inner.finish();
+		container.driver.check()?;
+		Ok(result?)
 	}
 
 	/// Insert or replace a caller-authored video rendition in the broadcast's catalog.
@@ -313,7 +363,7 @@ impl Publish {
 	/// Errors if a media importer owns the name, since it publishes and retires its own rendition.
 	/// The catalog is republished automatically.
 	pub fn video_config(&mut self, broadcast: Id, name: &str, config: hang::catalog::VideoConfig) -> Result<(), Error> {
-		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let broadcast = self.broadcast_mut(broadcast)?;
 		if !broadcast.video.contains_key(name) && broadcast.catalog.is_claimed::<hang::catalog::VideoConfig>(name) {
 			return Err(Error::Hang(hang::Error::Duplicate(name.to_string())));
 		}
@@ -328,7 +378,7 @@ impl Publish {
 	///
 	/// Same rules as [`Self::video_config`].
 	pub fn audio_config(&mut self, broadcast: Id, name: &str, config: hang::catalog::AudioConfig) -> Result<(), Error> {
-		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let broadcast = self.broadcast_mut(broadcast)?;
 		if !broadcast.audio.contains_key(name) && broadcast.catalog.is_claimed::<hang::catalog::AudioConfig>(name) {
 			return Err(Error::Hang(hang::Error::Duplicate(name.to_string())));
 		}
@@ -345,7 +395,7 @@ impl Publish {
 	/// the handle is what retires the entry, and the importer holds its own. The catalog is
 	/// republished automatically.
 	pub fn video_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
-		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let broadcast = self.broadcast_mut(broadcast)?;
 		if broadcast.video.remove(name).is_some() {
 			let mut catalog = broadcast.catalog.modify()?;
 			catalog.video.renditions.remove(name);
@@ -358,7 +408,7 @@ impl Publish {
 	///
 	/// Same rules as [`Self::video_remove`].
 	pub fn audio_remove(&mut self, broadcast: Id, name: &str) -> Result<(), Error> {
-		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let broadcast = self.broadcast_mut(broadcast)?;
 		if broadcast.audio.remove(name).is_some() {
 			let mut catalog = broadcast.catalog.modify()?;
 			catalog.audio.renditions.remove(name);
@@ -435,7 +485,7 @@ impl Publish {
 		}))?;
 
 		tokio::spawn(async move {
-			let res = Self::run_demand(on_demand, demand, channel.1).await;
+			let res = crate::ffi::run(Self::run_demand(on_demand, demand, channel.1)).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -456,8 +506,8 @@ impl Publish {
 		// Neither handle exposes the current state, only the level-triggered waits, and exactly
 		// one of them is ready at any instant: racing them is the read. Close is ignored until
 		// that seed is delivered, so a watcher closed before its first poll still reports USED
-		// or UNUSED before the terminal. A dropped track is its end, not a failure; the watcher
-		// does not keep it alive and reports the close as clean.
+		// or UNUSED before the terminal. An application dropping its producer ends the watcher; it
+		// does not keep the track alive and reports the close as clean.
 		let mut used = tokio::select! {
 			res = demand.used() => match res {
 				Ok(()) => true,
@@ -518,14 +568,15 @@ impl Publish {
 	/// Without a live handler an unknown track name is refused, as before.
 	pub fn dynamic(&mut self, broadcast: Id, on_request: OnStatus) -> Result<Id, Error> {
 		let dynamic = self.producer(broadcast)?.dynamic();
-		self.spawn_dynamic(Dynamic::Broadcast(dynamic, broadcast), on_request)
+		let driver = self.broadcast(broadcast)?.driver.clone();
+		self.spawn_dynamic(Dynamic::Broadcast(dynamic, broadcast), on_request, driver)
 	}
 
 	/// Serve fetches of uncached groups on a raw track, delivering each as a group-request
 	/// handle via `on_group`.
 	pub fn track_dynamic(&mut self, track: Id, on_group: OnStatus) -> Result<Id, Error> {
 		let dynamic = self.tracks.get(track).ok_or(Error::TrackNotFound)?.dynamic();
-		self.spawn_dynamic(Dynamic::Track(dynamic), on_group)
+		self.spawn_dynamic(Dynamic::Track(dynamic), on_group, Default::default())
 	}
 
 	/// Serve fetches of uncached groups on a track that has not been accepted yet.
@@ -539,10 +590,15 @@ impl Publish {
 			.ok_or(Error::NotFound)?
 			.request
 			.dynamic();
-		self.spawn_dynamic(Dynamic::Track(dynamic), on_group)
+		self.spawn_dynamic(Dynamic::Track(dynamic), on_group, Default::default())
 	}
 
-	fn spawn_dynamic(&mut self, dynamic: Dynamic, callback: OnStatus) -> Result<Id, Error> {
+	fn spawn_dynamic(
+		&mut self,
+		dynamic: Dynamic,
+		callback: OnStatus,
+		driver: crate::ffi::Background,
+	) -> Result<Id, Error> {
 		let channel = oneshot::channel();
 		let id = self.dynamic.insert(Some(TaskEntry {
 			close: Some(channel.0),
@@ -550,7 +606,7 @@ impl Publish {
 		}))?;
 
 		tokio::spawn(async move {
-			let res = Self::run_dynamic(callback, dynamic, channel.1).await;
+			let res = crate::ffi::run(driver.watch(Self::run_dynamic(callback, dynamic, channel.1))).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -577,12 +633,12 @@ impl Publish {
 				res = kio::wait(|waiter| match &mut dynamic {
 					Dynamic::Broadcast(dynamic, broadcast) => dynamic
 						.poll_requested_track(waiter)
-						.map_ok(|request| Request::Track(TrackRequest { broadcast: *broadcast, request })),
+						.map_ok(|request| Request::Track(Box::new(TrackRequest { broadcast: *broadcast, request }))),
 					Dynamic::Track(dynamic) => dynamic.poll_requested_group(waiter).map_ok(Request::Group),
 				}) => res,
 			};
 
-			// A finished broadcast or track is the end of the requests, not a failure.
+			// A finished broadcast or track, or its application dropping the producer, ends requests.
 			let request = match res {
 				Ok(request) => request,
 				Err(moq_net::Error::Closed | moq_net::Error::Dropped) => return Ok(()),
@@ -592,7 +648,7 @@ impl Publish {
 			// Hold the lock only to buffer the request; release it before the callback.
 			let mut state = State::lock();
 			let id = match request {
-				Request::Track(request) => state.publish.track_request.insert(request)?,
+				Request::Track(request) => state.publish.track_request.insert(*request)?,
 				Request::Group(request) => state.publish.group_request.insert(request)?,
 			};
 			drop(state);
@@ -768,13 +824,17 @@ impl Publish {
 		broadcast: Id,
 		name: &str,
 		publish: impl FnOnce(&moq_mux::catalog::Producer<Extra>, moq_net::track::Producer) -> moq_mux::Result<T>,
-	) -> Result<T, Error> {
-		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::BroadcastNotFound)?;
+	) -> Result<Data<T>, Error> {
+		let broadcast = self.broadcast_mut(broadcast)?;
 		let track = broadcast.producer.create_track(
 			name,
 			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 		)?;
-		Ok(publish(&broadcast.catalog, track)?)
+		let producer = publish(&broadcast.catalog, track)?;
+		Ok(Data {
+			producer,
+			clock: broadcast.catalog.clock(),
+		})
 	}
 
 	/// Create a JSON snapshot track (lossy latest-value) on a broadcast, advertised in its catalog.
@@ -790,14 +850,16 @@ impl Publish {
 	/// Publish a new value to a JSON snapshot track. A no-op if unchanged.
 	pub fn json_snapshot_update(&mut self, json: Id, value: serde_json::Value) -> Result<(), Error> {
 		let producer = self.json_snapshot.get_mut(json).ok_or(Error::TrackNotFound)?;
-		producer.update(&value)?;
+		producer
+			.producer
+			.update(moq_net::Timed::from(&value).at(producer.clock.now()))?;
 		Ok(())
 	}
 
 	/// Finish a JSON snapshot track and retire its catalog entry. No more values can be published.
 	pub fn json_snapshot_finish(&mut self, json: Id) -> Result<(), Error> {
 		let producer = self.json_snapshot.remove(json).ok_or(Error::TrackNotFound)?;
-		producer.finish()?;
+		producer.producer.finish()?;
 		Ok(())
 	}
 
@@ -813,14 +875,16 @@ impl Publish {
 	/// Append one record to a JSON stream track.
 	pub fn json_stream_append(&mut self, stream: Id, value: serde_json::Value) -> Result<(), Error> {
 		let producer = self.json_stream.get_mut(stream).ok_or(Error::TrackNotFound)?;
-		producer.append(&value)?;
+		producer
+			.producer
+			.append(moq_net::Timed::from(&value).at(producer.clock.now()))?;
 		Ok(())
 	}
 
 	/// Finish a JSON stream track and retire its catalog entry. No more records can be appended.
 	pub fn json_stream_finish(&mut self, stream: Id) -> Result<(), Error> {
 		let producer = self.json_stream.remove(stream).ok_or(Error::TrackNotFound)?;
-		producer.finish()?;
+		producer.producer.finish()?;
 		Ok(())
 	}
 
@@ -834,14 +898,16 @@ impl Publish {
 	/// Publish a new payload to a binary snapshot track, superseding the last.
 	pub fn binary_snapshot_update(&mut self, binary: Id, payload: &[u8]) -> Result<(), Error> {
 		let producer = self.binary_snapshot.get_mut(binary).ok_or(Error::TrackNotFound)?;
-		producer.update(bytes::Bytes::copy_from_slice(payload))?;
+		producer
+			.producer
+			.update(moq_net::Timed::from(bytes::Bytes::copy_from_slice(payload)).at(producer.clock.now()))?;
 		Ok(())
 	}
 
 	/// Finish a binary snapshot track and retire its catalog entry.
 	pub fn binary_snapshot_finish(&mut self, binary: Id) -> Result<(), Error> {
 		let producer = self.binary_snapshot.remove(binary).ok_or(Error::TrackNotFound)?;
-		producer.finish()?;
+		producer.producer.finish()?;
 		Ok(())
 	}
 
@@ -855,14 +921,16 @@ impl Publish {
 	/// Append one payload to a binary stream track.
 	pub fn binary_stream_append(&mut self, stream: Id, payload: &[u8]) -> Result<(), Error> {
 		let producer = self.binary_stream.get_mut(stream).ok_or(Error::TrackNotFound)?;
-		producer.append(bytes::Bytes::copy_from_slice(payload))?;
+		producer
+			.producer
+			.append(moq_net::Timed::from(bytes::Bytes::copy_from_slice(payload)).at(producer.clock.now()))?;
 		Ok(())
 	}
 
 	/// Finish a binary stream track and retire its catalog entry.
 	pub fn binary_stream_finish(&mut self, stream: Id) -> Result<(), Error> {
 		let producer = self.binary_stream.remove(stream).ok_or(Error::TrackNotFound)?;
-		producer.finish()?;
+		producer.producer.finish()?;
 		Ok(())
 	}
 
@@ -885,5 +953,34 @@ impl Publish {
 		let group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
 		group.abort(moq_net::Error::App(error_code))?;
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod supervision_tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn a_container_importer_keeps_the_origin_failure_after_other_owners_are_released() {
+		let (origin, completion, trigger) = crate::ffi::panicking_origin();
+		let mut publish = Publish::default();
+		let broadcast = publish
+			.create((origin.create_broadcast("retained").unwrap(), completion.clone()))
+			.unwrap();
+		let container = publish
+			.container(
+				broadcast,
+				import::ContainerInit::new(import::ContainerFormat::Ts, bytes::Bytes::new()),
+			)
+			.unwrap();
+		publish.broadcasts.remove(broadcast).unwrap();
+		drop(origin);
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(completion.finished().await, Err(Error::Panic)));
+		drop(completion);
+		assert!(matches!(publish.container_cut(container), Err(Error::Panic)));
+		assert!(matches!(publish.container_finish(container), Err(Error::Panic)));
 	}
 }

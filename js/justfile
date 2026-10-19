@@ -34,10 +34,10 @@ check-changed list:
 workers:
     ../sh/js/workers.sh
 
-# Auto-fix lint and formatting issues.
+# Auto-fix lint and formatting issues in workspaces, harnesses, docs and demos.
 fix:
     bun install
-    bun biome check --write
+    bun biome check --write . ../bench/browser ../test ../doc ../demo
 
 # Run all unit tests.
 test:
@@ -47,7 +47,7 @@ test:
 test-changed list:
     python3 ../sh/js/workspace.py test '{{ list }}'
 
-# Run one net benchmark: broadcasts, forward, requests, reader, frames, track, interests, observed, varint, lite-varint, or request-ids.
+# Run one net benchmark: broadcasts, forward, requests, reader, frames, track, interests, observed, varint, lite-varint, priority, or request-ids.
 bench name:
     bun install --frozen-lockfile
     bun net/bench/{{ name }}.ts
@@ -101,3 +101,18 @@ arrivals-bench:
 clock-bench:
     bun install --frozen-lockfile
     bun clock/bench/timers.ts
+
+# Sweep decoder count against PCM callback size during audio warmup.
+audio-warmup-bench:
+    bun install --frozen-lockfile
+    bun watch/bench/warmup.ts
+
+# Sweep data-channel qmux stream count and payload size.
+p2p-bench:
+    bun install --frozen-lockfile
+    bun p2p/bench/transport.ts
+
+# Sweep E2EE frame size against writes in flight through the WebCrypto pump.
+e2ee-bench:
+    bun install --frozen-lockfile
+    bun e2ee/bench/pump.ts

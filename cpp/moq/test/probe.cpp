@@ -99,6 +99,19 @@ Coroutine read_one(std::shared_ptr<moq::TrackConsumer> consumer, std::optional<m
 } // namespace
 
 int main() {
+    auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
+    auto timebase_other = ok(moq::BroadcastProducer::init(), "timebase other");
+    auto timebase = ok(moq::MediaTimebase::init(timebase_owner), "timebase");
+    auto foreign_chunks = moq::MediaContainerProducer::init(timebase_other, {moq::ContainerFormat::kFmp4, {}, timebase});
+    CHECK(!foreign_chunks);
+    CHECK(std::holds_alternative<moq::Error::kCodec>(foreign_chunks.error().get_variant()));
+    auto foreign_stream = moq::MediaContainerStreamProducer::init(timebase_other, {moq::ContainerFormat::kFmp4, timebase});
+    CHECK(!foreign_stream);
+    CHECK(std::holds_alternative<moq::Error::kCodec>(foreign_stream.error().get_variant()));
+    ok(timebase_owner->close(), "close timebase owner");
+    CHECK(!moq::MediaTimebase::init(timebase_owner));
+    ok(timebase_other->close(), "close timebase other");
+
     // A synchronous error is a returned value, not an exception.
     auto unbound = ok(moq::Server::init({}), "server init");
     auto fingerprints = unbound->cert_fingerprints();
@@ -119,7 +132,9 @@ int main() {
     // Publisher: a server whose origin serves one broadcast with one track.
     auto origin = moq::OriginProducer::init({});
     auto broadcast = ok(origin->create_broadcast("probe"), "create_broadcast");
-    auto track = ok(broadcast->publish_track("data", std::nullopt), "publish_track");
+    moq::TrackInfo info;
+    info.timescale = 1000000;
+    auto track = ok(broadcast->publish_track("data", info), "publish_track");
     ok(broadcast->announce({}), "announce");
 
     moq::ServerConfig server_config;

@@ -10,6 +10,7 @@
 //! which keeps the listeners, workers, and shutdown joins. `main.rs` is a thin
 //! wrapper over the two.
 
+pub mod acme;
 pub mod auth;
 pub mod cache;
 pub mod cluster;
@@ -30,6 +31,7 @@ pub mod session;
 mod settings;
 pub mod shutdown;
 pub mod stats;
+pub mod stun;
 #[cfg(test)]
 mod test_env;
 #[cfg(feature = "test-support")]

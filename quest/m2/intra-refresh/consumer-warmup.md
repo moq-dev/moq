@@ -7,8 +7,8 @@ picture its decoder has not fully recovered. Every group it transcodes,
 whether fetched on demand for a rung or read live after a skip, is preceded
 by enough earlier groups decoded as history that its first picture is clean.
 Players stay live with stripes instead, via the browser
-[dual decoder](/quest/m2/intra-refresh/dual-decoder.md) and the
-[native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md).
+[dual decoder](/quest/m2/intra-refresh/dual-decoder.md) and the native
+`moq_video::decode::Consumer` pair.
 Renditions without `warmup` behave exactly as today.
 
 ## Plan
@@ -56,8 +56,3 @@ The fix is history rather than a withhold rule:
 ## Required
 
 - [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - K derives from `warmup`, which must be a safe upper bound
-
-## Related
-
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims frames stamped before the keyframe, the other tune-in case
-- [Native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md) - the player path, which shows stripes instead

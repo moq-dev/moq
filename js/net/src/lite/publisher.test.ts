@@ -1,4 +1,5 @@
 import { expect, jest, mock, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -11,13 +12,19 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
-import { Milli, Timescale, Timestamp } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
 import { Publisher } from "./publisher.ts";
-import { decodeSubscribeResponse, Subscribe, type SubscribeEnd, SubscribeUpdate } from "./subscribe.ts";
+import {
+	decodeSubscribeResponse,
+	decodeSubscribeResponseMaybe,
+	Subscribe,
+	type SubscribeEnd,
+	SubscribeUpdate,
+} from "./subscribe.ts";
 import { Track as TrackMessage } from "./track.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
@@ -198,7 +205,7 @@ async function subscribeEnd(sequences: number[], version: Version = Version.DRAF
 	// track ending rather than resolving a subscribe against an already-closed one.
 	for (const sequence of sequences) {
 		const group = new GroupProducer(sequence);
-		group.writeFrame(textFrame("hello"));
+		group.writeFrame(textFrame("hello", Timestamp.fromMillis(sequence)));
 		group.close();
 		track.writeGroup(group);
 
@@ -634,9 +641,10 @@ async function servedSubscription(
 		serving,
 		parked: gate.parked,
 		release: gate.release,
+		// Stamped by sequence, so a group served out of order still starts in order.
 		serve(sequence: number) {
 			const group = new GroupProducer(sequence);
-			for (const frame of frames) group.writeFrame(textFrame(frame));
+			for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(sequence)));
 			group.close();
 			track.writeGroup(group);
 		},
@@ -692,6 +700,105 @@ test("lite draft-05: a late-arriving older group is still served", async () => {
 		// Group 2 lands after group 3 was already served.
 		sub.serve(2);
 		expect(await sub.servedSequence()).toBe(2);
+	} finally {
+		await sub.close();
+	}
+});
+
+// The SUBSCRIBE_DROP ranges, inclusive, a subscribe stream carried up to its FIN.
+async function drops(reader: Reader, version: Version): Promise<[number, number][]> {
+	const ranges: [number, number][] = [];
+	for (;;) {
+		const resp = await decodeSubscribeResponseMaybe(reader, version);
+		if (!resp) return ranges;
+		if ("drop" in resp) ranges.push([resp.drop.start, resp.drop.end]);
+	}
+}
+
+// A cut group is dropped as soon as the publisher gives it up, and the end sweep does not
+// name it again.
+test("lite draft-06: a cut group is dropped early, once", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
+	try {
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
+
+		const cut = new GroupProducer(1);
+		sub.track.writeGroup(cut);
+		cut.close(new Error("cut"));
+		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
+
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+		sub.track.close();
+		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A cut this subscription already dropped stays dropped: the subscriber accounted for it, so
+// a group the publisher re-creates under it afterwards is not served.
+test("lite draft-06: a cut dropped then re-created is not served", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
+	try {
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
+
+		const cut = new GroupProducer(1);
+		sub.track.writeGroup(cut);
+		cut.close(new Error("cut"));
+		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
+
+		sub.serve(1);
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+		sub.track.close();
+		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// An update that lowers the start below SUBSCRIBE_START asks for those groups too, so the
+// end sweep drops them, as the Rust publisher does.
+test("lite draft-06: an update lowering the start is swept at the end", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 5 });
+	try {
+		sub.serve(5);
+		expect(await sub.servedSequence()).toBe(5);
+		await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
+		await flush();
+		sub.track.close();
+		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([[2, 4]]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// A raised floor sends no early drop: a later update may lower it again, and the
+// subscriber cannot take back a drop for the groups that reopens.
+test("lite draft-06: a raised floor is not dropped early", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
+	try {
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+		await replayUpdate({ priority: 0, startGroup: 5 }).encode(sub.client.writer, Version.DRAFT_06);
+		await flush();
+		await replayUpdate({ priority: 0, startGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
+		await flush();
+		for (const sequence of [1, 2, 3, 4]) {
+			sub.serve(sequence);
+			expect(await sub.servedSequence()).toBe(sequence);
+		}
+		sub.track.close();
+		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
 	} finally {
 		await sub.close();
 	}
@@ -2043,6 +2150,54 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 	} finally {
 		resets.mockRestore();
 		group.close();
+		publisher.close();
+		client.close();
+		broadcast.close();
+		origin.close();
+	}
+});
+
+// A FIN would tell the requester the prefix it got is the whole group.
+test("lite draft-07: a fetch whose budget gives up partway resets as too old", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("live"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
+	// Left open, so the fetch is still serving when the track runs on.
+	const open = new GroupProducer(0);
+	open.writeFrame(frame(0));
+	track.writeGroup(open);
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_07);
+	if (!server) throw new Error("publisher never accepted the fetch stream");
+
+	const resets = spyOn(Writer.prototype, "reset");
+	try {
+		const msg = new Fetch({
+			broadcast: Path.from("live"),
+			track: "video",
+			priority: 0,
+			maxDelay: Milli(500),
+			group: 0,
+		});
+		const serving = publisher.runFetch(msg, server);
+		// The first frame is on the wire before the track runs a second past its successor.
+		await client.reader.u8();
+		for (const ms of [1000, 2000]) {
+			const group = new GroupProducer(ms / 1000);
+			group.writeFrame(frame(ms));
+			group.close();
+			track.writeGroup(group);
+		}
+		await serving;
+
+		expect(resets.mock.calls.map(([reason]) => toStreamCode(reason as Error))).toContain(StreamCode.Old);
+	} finally {
+		resets.mockRestore();
+		open.close();
 		publisher.close();
 		client.close();
 		broadcast.close();

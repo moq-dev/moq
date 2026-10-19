@@ -13,6 +13,7 @@ import (
 	"context"
 	stdjson "encoding/json"
 	"iter"
+	"time"
 
 	"moq.dev/moq"
 	ffi "moq.dev/moq-ffi/moq"
@@ -76,13 +77,18 @@ func NewSnapshotProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProdu
 	return &SnapshotProducer{inner: inner}, nil
 }
 
-// Update publishes value as a JSON snapshot or delta. It is a no-op when unchanged.
-func (p *SnapshotProducer) Update(value any) error {
+// Update publishes value at timestamp on the broadcast clock; nil is untimed.
+// It is a no-op when unchanged.
+func (p *SnapshotProducer) Update(value any, timestamp *time.Duration) error {
 	encoded, err := stdjson.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return p.inner.Update(string(encoded))
+	at, err := bridge.OptionalDuration(timestamp, "timestamp")
+	if err != nil {
+		return err
+	}
+	return p.inner.Update(string(encoded), at)
 }
 
 // Demand returns a watch-only handle to whether the track has subscribers.
@@ -119,13 +125,17 @@ func NewStreamProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProduce
 	return &StreamProducer{inner: inner}, nil
 }
 
-// Append adds one JSON record to the log.
-func (p *StreamProducer) Append(value any) error {
+// Append adds one JSON record at timestamp on the broadcast clock; nil is untimed.
+func (p *StreamProducer) Append(value any, timestamp *time.Duration) error {
 	encoded, err := stdjson.Marshal(value)
 	if err != nil {
 		return err
 	}
-	return p.inner.Append(string(encoded))
+	at, err := bridge.OptionalDuration(timestamp, "timestamp")
+	if err != nil {
+		return err
+	}
+	return p.inner.Append(string(encoded), at)
 }
 
 // Demand returns a watch-only handle to whether the track has subscribers.

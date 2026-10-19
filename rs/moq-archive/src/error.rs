@@ -26,9 +26,12 @@ pub enum Error {
 	#[error("priority {existing} does not match {intended}")]
 	Priority { existing: u8, intended: u8 },
 
-	/// An existing `.info` has a different timescale.
-	#[error("timescale {existing} does not match {intended}")]
-	TimescaleMismatch { existing: u64, intended: u64 },
+	/// An existing `.info` has a different timescale, `None` when untimed.
+	#[error("timescale {existing:?} does not match {intended:?}")]
+	TimescaleMismatch {
+		existing: Option<u64>,
+		intended: Option<u64>,
+	},
 
 	/// An existing `.info` was recorded from another publisher instance: the source
 	/// restarted, so the caller starts a new prefix.
@@ -94,9 +97,14 @@ pub enum Error {
 	#[error("track already enrolled: {0}")]
 	Enrolled(String),
 
-	/// The track is untimed, and a recording needs a timestamp on every frame.
+	/// The track is untimed, so a DVR has no content time to measure its retention by.
 	#[error("untimed track: {0}")]
 	Untimed(String),
+
+	/// A frame's timestamp does not match its track: missing on a timed track, or present on an
+	/// untimed one.
+	#[error("frame timing does not match the track")]
+	Timing,
 
 	/// The source broadcast or one of its tracks failed.
 	#[error("source: {0}")]

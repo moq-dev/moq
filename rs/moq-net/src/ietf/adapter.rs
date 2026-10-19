@@ -96,9 +96,9 @@ impl<T> Default for Queue<T> {
 struct QueueWriter<T>(Queue<T>);
 
 impl<T> QueueWriter<T> {
-	/// Enqueue a message, dropped silently if the reader already closed its side.
-	fn push(&self, item: T) {
-		let _ = self.0.push(item);
+	/// Enqueue a message, returning false if the reader already closed its side.
+	fn push(&self, item: T) -> bool {
+		self.0.push(item)
 	}
 }
 
@@ -364,6 +364,7 @@ impl VirtualSendStream {
 
 impl crate::transport::poll::SendStream for VirtualSendStream {
 	type Error = crate::Error;
+	type Group = crate::transport::poll::Ungrouped;
 
 	fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		let len = buf.len();
@@ -378,7 +379,11 @@ impl crate::transport::poll::SendStream for VirtualSendStream {
 		Poll::Ready(self.push(chunk).map(|()| len))
 	}
 
-	fn set_priority(&mut self, _order: i32) {}
+	fn set_priority(&mut self, _order: i64) {}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match *group {}
+	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		// Flush any remaining buffered data (e.g. if registration never completed).
@@ -406,6 +411,7 @@ pub enum AdapterSend<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
 	type Error = crate::Error;
+	type Group = <S::SendStream as crate::transport::poll::SendStream>::Group;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		match self {
@@ -421,10 +427,18 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 		}
 	}
 
-	fn set_priority(&mut self, order: i32) {
+	fn set_priority(&mut self, order: i64) {
 		match self {
 			Self::Real(s) => s.set_priority(order),
 			Self::Virtual(s) => s.set_priority(order),
+		}
+	}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match self {
+			Self::Real(s) => s.set_group(group),
+			// Rides the control stream, which no group schedules.
+			Self::Virtual(_) => {}
 		}
 	}
 
@@ -691,9 +705,11 @@ impl Shared {
 	}
 
 	/// Deliver a message to an open virtual stream, dropping it if the stream is gone.
-	fn push(&self, request_id: RequestId, raw: Bytes) {
-		if let Some(tx) = self.streams.lock().unwrap().get(&request_id) {
-			tx.push(raw);
+	/// Returns whether a stream took it.
+	fn push(&self, request_id: RequestId, raw: Bytes) -> bool {
+		match self.streams.lock().unwrap().get(&request_id) {
+			Some(tx) => tx.push(raw),
+			None => false,
 		}
 	}
 
@@ -737,7 +753,11 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 	/// Open a real (non-virtual) bidi stream, bypassing control stream multiplexing.
 	/// Used for v16 SubscribeNamespace which moved to its own bidi stream.
 	pub async fn open_native_bi(&mut self) -> Result<(AdapterSend<S>, AdapterRecv<S>), crate::Error> {
-		let (send, recv) = self.inner.open_bi().await.map_err(|_| crate::Error::Closed)?;
+		let (send, recv) = self
+			.inner
+			.open_bi(Default::default())
+			.await
+			.map_err(|_| crate::Error::Closed)?;
 		Ok((AdapterSend::Real(send), AdapterRecv::Real(recv)))
 	}
 
@@ -791,6 +811,7 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		let msg = crate::ietf::GoAway {
 			new_session_uri: std::borrow::Cow::Borrowed(uri),
 			timeout: timeout_ms,
+			request_id: None,
 		};
 
 		// The size prefix is a u16 on a stream shared with every other request, so the
@@ -808,6 +829,35 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		if !self.shared.control.push(raw.into()) {
 			tracing::debug!("control stream closed; goaway not sent");
 		}
+	}
+
+	/// Refuse an update no request here can apply, naming its own Request ID. Draft 14
+	/// answers no update.
+	fn refuse_update(&self, request_id: RequestId) {
+		if self.version == Version::Draft14 {
+			return;
+		}
+		let mut raw = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut raw, self.version.into());
+		let msg = ietf::RequestError {
+			request_id: Some(request_id),
+			error_code: super::error::request::to_code(
+				&crate::Error::Unsupported,
+				super::error::request::Kind::Subscribe,
+				self.version,
+			),
+			reason_phrase: "update not supported".into(),
+			retry_interval: 0,
+		};
+		if let Err(err) = w
+			.varint(ietf::RequestError::ID)
+			.and_then(|()| crate::coding::Encode::encode(&msg, &mut w, self.version))
+		{
+			tracing::warn!(%err, "failed to encode REQUEST_ERROR");
+			return;
+		}
+		// A closed control stream means the session is ending; there is no one to answer.
+		let _ = self.shared.control.push(raw.into());
 	}
 
 	/// Queue a MAX_REQUEST_ID granting the peer room up to `max`.
@@ -858,12 +908,18 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 					let permit = self.control.accept(request_id)?;
 					self.shared.open_incoming(request_id, raw, permit)?
 				}
-				Route::Response(request_id) => self.shared.push(request_id, raw),
+				Route::Response(request_id) => {
+					self.shared.push(request_id, raw);
+				}
 				Route::FollowUp { own, target } => {
 					// SUBSCRIBE_UPDATE takes a request ID of its own (draft-14 section 9.1),
 					// done as soon as it is delivered, so it is granted straight back.
 					drop(self.control.accept(own)?);
-					self.shared.push(target, raw)
+					// An update whose request is gone, or rides a stream of its own like draft 16's
+					// SUBSCRIBE_NAMESPACE, is still owed its one answer.
+					if !self.shared.push(target, raw) {
+						self.refuse_update(own);
+					}
 				}
 				Route::CloseStream(request_id) => self.shared.close(request_id, raw),
 				Route::MaxRequestId(max) => self.control.max_request_id(max),
@@ -1141,14 +1197,23 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 	fn poll_open_bi(
 		&mut self,
 		_cx: &mut Context<'_>,
+		// Rides the control stream, which no group schedules.
+		_: crate::transport::poll::SendOptions<'_, <Self::SendStream as crate::transport::poll::SendStream>::Group>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let (send, recv) = self.shared.open_outgoing(self.version);
 		Poll::Ready(Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))))
 	}
 
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		self.inner
-			.poll_open_uni(cx)
+			.poll_open_uni(cx, options)
 			.map(|r| r.map(AdapterSend::Real).map_err(|_| crate::Error::Closed))
 	}
 
@@ -1158,10 +1223,21 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 			.map(|r| r.map(AdapterRecv::Real).map_err(|_| crate::Error::Closed))
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+	fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as crate::transport::poll::SendStream>::Group> {
+		self.inner.send_group(priority)
+	}
+
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> Result<(), Self::Error> {
 		self.inner
-			.poll_send_datagram(cx, payload)
-			.map(|r| r.map_err(|_| crate::Error::Closed))
+			.send_datagram(payload, options)
+			.map_err(|_| crate::Error::Closed)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -1336,19 +1412,22 @@ mod tests {
 	/// Drafts 14 and 15 name the subscription in the second field; draft 16 names
 	/// the existing request there. The first field is the update's own Request ID,
 	/// so a body that carries only that ID cannot tell the two apart.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_subscribe_update_reaches_its_target() {
 		let update_id = RequestId(10);
 		let target_id = RequestId(4);
 
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let update = ietf::SubscribeUpdate {
+				new_group: None,
 				request_id: update_id,
 				subscription_request_id: Some(target_id),
 				start_location: ietf::Location { group: 1, object: 2 },
 				end_group: 100,
-				subscriber_priority: 200,
-				forward: false,
+				subscriber_priority: Some(200),
+				forward: Some(false),
+				filter: Some(ietf::Filter::NextObject),
+				authorization_token: None,
 			};
 			let body = encode_body(&update, version);
 			let raw = encode_raw(ietf::SubscribeUpdate::ID, &body, version);
@@ -1427,7 +1506,7 @@ mod tests {
 		assert_eq!(r.rest(), b"hello");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_recv_stream_reads_initial_then_followup() {
 		let initial = Bytes::from_static(b"initial");
 		let follow = Queue::new();
@@ -1450,7 +1529,7 @@ mod tests {
 		assert_eq!(result, None);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_recv_stream_partial_reads() {
 		let initial = Bytes::from_static(b"hello world");
 		let mut stream = detached_recv(initial, Queue::new());
@@ -1468,7 +1547,7 @@ mod tests {
 		assert_eq!(&buf[..n], b"d");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_send_stream_errors_once_control_closes() {
 		// The adapter closes the control queue when its run() exits; writes must
 		// fail fast instead of buffering into a queue nobody drains.
@@ -1488,7 +1567,7 @@ mod tests {
 		assert!(!follow.push(Bytes::from_static(b"late")));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_send_stream_writes_to_channel() {
 		let control = Queue::new();
 		let mut stream = VirtualSendStream::new(control.clone());
@@ -1519,6 +1598,7 @@ mod tests {
 			request_id,
 			track_namespace: crate::Path::new(namespace),
 			cluster: None,
+			authorization_token: None,
 		}
 	}
 
@@ -1621,7 +1701,7 @@ mod tests {
 		assert!(matches!(route, Route::CloseStream(RequestId(42))));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_publish_namespace_done_closes_only_inbound() {
 		// The peer withdraws the advertisement it made, so its own stream closes and
 		// ours keeps running.
@@ -1647,7 +1727,7 @@ mod tests {
 		assert!(ours.read_chunk(usize::MAX).now_or_never().is_none());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_publish_namespace_cancel_closes_only_outbound() {
 		// The peer rejects the advertisement we made, so ours closes and the one it
 		// sent us keeps running.
@@ -1707,7 +1787,7 @@ mod tests {
 		.unwrap()
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_duplicate_publish_namespace_keeps_the_first() {
 		// The peer advertises the same namespace twice. The session refuses the second, so
 		// the first still owns the name and its withdrawal must reach the first's stream.
@@ -1733,7 +1813,7 @@ mod tests {
 		assert!(matches!(done(&shared, "cluster/ns", version), Route::Ignore));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_withdrawal_releases_the_namespace() {
 		// A namespace the peer withdraws must be advertisable again on a new request.
 		let version = Version::Draft14;
@@ -1755,7 +1835,7 @@ mod tests {
 		));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_local_withdrawal_releases_the_namespace() {
 		// We withdraw our own advertisement by dropping the request that carried it, so a
 		// later CANCEL must name the re-advertisement rather than the request that is gone.
@@ -1773,7 +1853,7 @@ mod tests {
 		));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn surviving_duplicate_remains_reachable_after_owner_closes() {
 		for version in [Version::Draft14, Version::Draft15] {
 			let shared = Arc::new(Shared::default());
@@ -1849,7 +1929,7 @@ mod tests {
 		}
 		script.extend_from_slice(then);
 		let mut session = ScriptedSession::new(script);
-		let (_, recv) = session.open_bi().await.unwrap();
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		// We are the server, so the client's request IDs are even.
 		let control = Control::new(None, false).with_window(window, false, VERSION);
 		let adapter = ControlStreamAdapter::new(session, control, VERSION);
@@ -1860,7 +1940,7 @@ mod tests {
 
 	/// A request ID at the MAX_REQUEST_ID we advertised closes the session with the
 	/// draft's TOO_MANY_REQUESTS, before the request is queued.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_request_past_the_window_closes_the_session() {
 		let (adapter, reader, writer, _) = windowed(1, &[0, 2], &[]).await;
 		let (_, goaway) = crate::goaway::Handle::new(true);
@@ -1872,16 +1952,19 @@ mod tests {
 	}
 
 	/// An update's own request ID counts against the window, not the subscription it targets.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_update_past_the_window_closes_the_session() {
 		const VERSION: Version = Version::Draft14;
 		let update = ietf::SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(4),
 			subscription_request_id: Some(RequestId(0)),
 			start_location: ietf::Location { group: 0, object: 0 },
 			end_group: 0,
-			subscriber_priority: 1,
-			forward: true,
+			subscriber_priority: Some(1),
+			forward: Some(true),
+			filter: Some(ietf::Filter::NextObject),
+			authorization_token: None,
 		};
 		let update = encode_raw(ietf::SubscribeUpdate::ID, &encode_body(&update, VERSION), VERSION);
 		// The target is in the window and the update's own ID is past it.
@@ -1894,8 +1977,46 @@ mod tests {
 		);
 	}
 
+	/// An update aimed at no open request, such as draft 16's SUBSCRIBE_NAMESPACE riding a
+	/// stream of its own, still gets its one answer on drafts 15 and 16: a REQUEST_ERROR
+	/// naming the update. Draft 14 answers no update.
+	#[moq_clock::test]
+	async fn an_unroutable_update_is_refused() {
+		use crate::lite::test_transport::{Log, ScriptedSession, SinkSend};
+		use crate::transport::poll::Session as _;
+
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			// Own Request ID 2, aimed at request 0, which nothing here holds. Draft 14 carries
+			// its fixed start, end group, priority and forward before the parameters.
+			let body: &[u8] = match version {
+				Version::Draft14 => &[2, 0, 0, 0, 0, 128, 1, 0],
+				_ => &[2, 0, 0],
+			};
+			let script = encode_raw(ietf::SubscribeUpdate::ID, &Bytes::copy_from_slice(body), version);
+			let mut session = ScriptedSession::new(script.to_vec());
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, false), version);
+			let log = Log::default();
+			let writer = Writer::new(SinkSend::new(log.clone()), version);
+			let (_, goaway) = crate::goaway::Handle::new(true);
+			let mut run = std::pin::pin!(adapter.run(Reader::new(recv, version), writer, goaway));
+			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}");
+
+			let written = log.writes.lock().unwrap().clone();
+			match version {
+				Version::Draft14 => assert!(written.is_empty(), "{version}: {written:?}"),
+				// [type, length (2), Request ID, NOT_SUPPORTED, ...]
+				_ => assert_eq!(
+					(written[0], written[3], written[4]),
+					(ietf::RequestError::ID as u8, 2, 0x3),
+					"{version}: {written:?}"
+				),
+			}
+		}
+	}
+
 	/// Requests that end are granted back with MAX_REQUEST_ID, once half the window has.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn retired_requests_are_granted_back() {
 		use crate::transport::poll::Session as _;
 
@@ -1934,7 +2055,7 @@ mod tests {
 		assert!(weak.upgrade().is_none());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn receive_drop_before_registration_releases_namespace() {
 		for version in [Version::Draft14, Version::Draft15] {
 			let shared = Arc::new(Shared::default());

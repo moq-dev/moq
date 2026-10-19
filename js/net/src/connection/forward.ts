@@ -3,13 +3,15 @@
  *
  * @module
  */
+
+import { Milli, Nano } from "@moq/clock";
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { type Route, routesEqual } from "../hop.ts";
 import { coveringPrefixes } from "../internal.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import * as Path from "../path.ts";
-import * as Time from "../time.ts";
+import { after } from "../util/timer.ts";
 import { wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 
@@ -18,14 +20,14 @@ export const DISCOVERY_REMOVED =
 	"the discovery option is removed: a session asks only about watched prefixes and turns blind if the relay refuses";
 
 /** How long an announce request outlives its last watcher, so a watcher torn down and rebuilt reuses it. */
-const LINGER = Time.Milli(2000);
+const LINGER = Milli(2000);
 
 /** One announce request open on the session, and the routes it currently reports. */
 interface Interest {
 	readonly announced: Announce.Consumer;
 	readonly reported: Set<Path.Valid>;
 	/** The pending close, set while nothing at or beneath the prefix is watched. */
-	linger?: ReturnType<typeof setTimeout>;
+	linger?: () => void;
 	/** Closed on purpose, so its end is not a discovery failure. */
 	closing: boolean;
 	/** Narrower requests nothing watches any more, kept open until this one goes. */
@@ -51,8 +53,8 @@ interface Reported {
  * watches (`announced(scope)` and `request(path, { announced: true })`) that no open request
  * already covers, and closes {@link LINGER} after nothing at or beneath its prefix is watched.
  * A narrower watch rides an open broader request, and a narrower request already open stays
- * open until the broader one covering it goes, so neither takes the other's routes over:
- * nothing tells when a fresh request has caught up. A route both report is inserted once and
+ * open until the broader one covering it goes, so neither takes the other's routes over
+ * before it has synced, which not every version can tell. A route both report is inserted once and
  * driven by its first reporter; if it changes hands anyway (a request failing), it restarts
  * unless one epoch proves both requests saw one instance.
  *
@@ -162,6 +164,16 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		};
 		interests.set(prefix, interest);
 
+		// The origin's readers under the prefix wait on this request's initial set. Released
+		// once the session stream has synced, which it reports only after the last of those
+		// events is reported here.
+		const snapshot = originWire.snapshot(prefix);
+		const synced = interest.announced.synced.subscribe((synced) => {
+			if (synced) snapshot();
+		});
+		// A request with no initial set to wait for is synced before the listener exists.
+		if (interest.announced.synced.peek()) snapshot();
+
 		void (async () => {
 			let failure: unknown;
 			try {
@@ -174,9 +186,12 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				// The session died mid-stream, or the peer refused or reset the request.
 				failure = err;
 			} finally {
+				synced();
+				snapshot();
 				for (const reported of [...interest.reported]) unreport(interest, reported);
+
 				interest.announced.close();
-				clearTimeout(interest.linger);
+				interest.linger?.();
 				if (interests.get(prefix) === interest) interests.delete(prefix);
 				if (!dead && !interest.closing) downgrade(failure);
 				// What this request held now settles on its own, unless it is watched again.
@@ -196,7 +211,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	/**
 	 * Settle a request nothing beneath it watches any more. A broader open request that is
 	 * still needed holds it until that one goes, so the broader never takes its routes over
-	 * before it has caught up; otherwise it lingers out.
+	 * before it has synced; otherwise it lingers out.
 	 */
 	const release = (prefix: Path.Valid, interest: Interest) => {
 		for (const above of coveringPrefixes(prefix)) {
@@ -206,14 +221,14 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			holder.held.set(prefix, interest);
 			return;
 		}
-		clearTimeout(interest.linger);
-		interest.linger = setTimeout(() => {
+		interest.linger?.();
+		interest.linger = after(Nano.fromMilli(LINGER), () => {
 			// Forgotten now rather than once its stream winds down, so a watch arriving
 			// meanwhile opens a fresh request instead of reviving this one.
 			interests.delete(prefix);
 			interest.closing = true;
 			interest.announced.close();
-		}, LINGER);
+		});
 	};
 
 	const unsubscribe = originWire.interests((prefix, want) => {
@@ -237,7 +252,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			if (!interest) continue;
 			covered = true;
 			if (beneath.has(above)) {
-				clearTimeout(interest.linger);
+				interest.linger?.();
 				interest.linger = undefined;
 			} else {
 				release(above, interest);

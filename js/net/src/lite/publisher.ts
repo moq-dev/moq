@@ -1,5 +1,7 @@
+import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import { Gate } from "../auth_gate.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
@@ -7,15 +9,16 @@ import * as DatagramStream from "../datagram_stream.ts";
 import { error, NotFound, ProtocolViolation, reason, StreamCode, StreamError, unauthorized } from "../error.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
-import { finalSequence, hiddenBelow, hooks, presented } from "../internal.ts";
+import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
-import { Milli, type Timescale, Timestamp } from "../time.ts";
+import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
+import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -27,6 +30,7 @@ import {
 	encodeSubscribeResponse,
 	exclusiveGroupEnd,
 	type Subscribe,
+	SubscribeDrop,
 	SubscribeEnd,
 	SubscribeOk,
 	SubscribeStart,
@@ -300,12 +304,6 @@ class SubscriptionControls {
 	}
 }
 
-// A microtask is too short: decoding one framed update crosses several awaits, each of which
-// can requeue behind the serving continuation. A task boundary lets the decoder finish whatever
-// the transport already delivered before the next group pop. Updates are rare, so groups do not
-// pay this scheduling cost on the normal path.
-const yieldToControls = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-
 // Register both readiness sources in the same turn after the caller observed neither ready.
 // The winner disposes both registrations, so an idle subscription accumulates nothing no
 // matter how many times it wakes.
@@ -355,7 +353,7 @@ function carriesMaxDelay(version: Version): boolean {
 function positionCursor(track: track.Subscriber, version: Version, startGroup: number | undefined) {
 	if (resolvesStart(version) || startGroup !== undefined) return;
 
-	const latest = track.latest();
+	const latest = hooks.latestSequence(track);
 	if (latest !== undefined) hooks.replaceGroups(track, { start: { included: latest } });
 }
 
@@ -384,6 +382,7 @@ export class Publisher {
 
 	// Subscriptions and open TRACK streams the peer holds live on this session.
 	#interests: Interests;
+	#fetches: Slots;
 
 	// The one writer for the outbound datagram stream (getWriter locks it), acquired once at
 	// construction when this version + transport carry datagrams, released in close(). Its
@@ -400,6 +399,8 @@ export class Publisher {
 	// withdraws what it no longer covers. Undefined until the peer answers, and forever on a
 	// version without AUTH, which allows everything.
 	#grant?: Getter<Grant | undefined>;
+	// Holds every incoming request to that grant from dispatch to its end.
+	#gate: Gate;
 
 	// Resolves once the tokens this session presented at setup are answered, so nothing is
 	// announced before the grant it would be checked against.
@@ -435,7 +436,9 @@ export class Publisher {
 	) {
 		this.#quic = quic;
 		this.#interests = new Interests(new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" }));
+		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = auth?.grant;
+		this.#gate = new Gate(auth?.grant);
 		this.#ready = auth?.ready ?? Promise.resolve();
 		this.version = version;
 		this.hop = hop;
@@ -481,7 +484,12 @@ export class Publisher {
 
 		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
 		// there must not restart.
-		const onWire = (route: Route): Route => (hasRouteCost(this.version) ? route : { ...route, cost: Cost.zero });
+		// moq-lite carries no per-request auth, so a swap alone sends nothing.
+		const onWire = (route: Route): Route => ({
+			...route,
+			cost: hasRouteCost(this.version) ? route.cost : Cost.zero,
+			auth: undefined,
+		});
 
 		const announce = async (suffix: Path.Valid, route: Route) => {
 			console.debug(`announce: broadcast=${suffix} active=true epoch=${route.epoch}`);
@@ -677,7 +685,7 @@ export class Publisher {
 		// broadcast resolves is never missed.
 		const revoked = unauthorized(msg.broadcast);
 		let serving: track.Subscriber | undefined;
-		const watch = this.#watch(msg.broadcast, () => {
+		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`publish revoked: broadcast=${msg.broadcast} track=${msg.track}`);
 			serving?.close(revoked);
 			stream.abort(revoked);
@@ -690,19 +698,6 @@ export class Publisher {
 			watch.dispose();
 			interest.release();
 		}
-	}
-
-	// Watch whether our grant still lets us publish `broadcast`, calling `onRevoke` once
-	// it does not. Arm it before the request's first check.
-	#watch(broadcast: Path.Valid, onRevoke: () => void): { revoked: () => boolean; dispose: () => void } {
-		let revoked = false;
-		const dispose =
-			this.#grant?.subscribe(() => {
-				if (revoked || !this.#denied(broadcast)) return;
-				revoked = true;
-				onRevoke();
-			}) ?? (() => {});
-		return { revoked: () => revoked || this.#denied(broadcast), dispose };
 	}
 
 	async #serveSubscribe(
@@ -855,25 +850,30 @@ export class Publisher {
 	 * @internal
 	 */
 	async runFetch(msg: Fetch, stream: Stream) {
-		if (!supportsTrackStream(this.version)) {
-			stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
-			return;
-		}
-		// Like a subscription, the fetch holds its watch until the last frame: a group can stay
-		// open as long as its track, so a check at accept alone would keep serving after a shrink.
-		const revoked = unauthorized(msg.broadcast);
-		let fetched: group.Consumer | undefined;
-		const watch = this.#watch(msg.broadcast, () => {
-			console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
-			fetched?.close(revoked);
-			stream.abort(revoked);
-		});
+		this.#fetches.acquire();
 		try {
-			await this.#serveFetch(msg, stream, watch, (group) => {
-				fetched = group;
+			if (!supportsTrackStream(this.version)) {
+				stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
+				return;
+			}
+			// Like a subscription, the fetch holds its watch until the last frame: a group can stay
+			// open as long as its track, so a check at accept alone would keep serving after a shrink.
+			const revoked = unauthorized(msg.broadcast);
+			let fetched: group.Consumer | undefined;
+			const watch = this.#gate.watch(msg.broadcast, () => {
+				console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+				fetched?.close(revoked);
+				stream.abort(revoked);
 			});
+			try {
+				await this.#serveFetch(msg, stream, watch, (group) => {
+					fetched = group;
+				});
+			} finally {
+				watch.dispose();
+			}
 		} finally {
-			watch.dispose();
+			this.#fetches.release();
 		}
 	}
 
@@ -889,16 +889,19 @@ export class Publisher {
 		}
 
 		// A normal request FIN is not a cancellation: FETCH has no more request bytes.
+		const left = new AbortController();
+		void stream.reader.closed.catch(() => left.abort());
+		void stream.writer.closed.catch(() => left.abort());
+		// The lookups hold the broadcast and track only until the track info answers.
 		const hold = new AbortController();
-		void stream.reader.closed.catch(() => hold.abort());
-		void stream.writer.closed.catch(() => hold.abort());
+		const holding = AbortSignal.any([left.signal, hold.signal]);
 		try {
 			let front: broadcast.Consumer | undefined;
 			try {
 				front =
 					this.#publish &&
 					(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-						(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, hold.signal)));
+						(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, holding)));
 			} catch (err: unknown) {
 				stream.writer.reset(error(err));
 				return;
@@ -923,11 +926,16 @@ export class Publisher {
 				// come off the same front, so the metadata and the frames are one generation.
 				let info: TrackInfoMessage;
 				try {
-					info = await this.#resolveTrackInfo(front, msg.track, hold.signal, true);
+					info = await this.#resolveTrackInfo(front, msg.track, holding, true);
 				} finally {
 					hold.abort();
 				}
-				group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
+				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
+				group = await wireOf(front).fetchGroup(msg.track, msg.group, {
+					priority: msg.priority,
+					maxDelay: msg.maxDelay,
+					signal: left.signal,
+				});
 				serving(group);
 				// Revoked while the group resolved: the watch already reset the stream.
 				if (watch.revoked()) {
@@ -939,6 +947,10 @@ export class Publisher {
 					start: msg.startFrame,
 					end: msg.endFrame,
 				});
+				// A budget giving up on a drained group ends its read cleanly, but a FIN would
+				// tell the requester the group is whole.
+				if (hooks.groupExpired(group))
+					throw new StreamError(StreamCode.Old, { message: "fetch exceeded its max delay" });
 				console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
 				stream.close();
 				group.close();
@@ -978,12 +990,32 @@ export class Publisher {
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
 		let startSent = false;
+		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
+		let startSequence: number | undefined;
 		let endSent = false;
 
 		// Lite-07+ counts the group streams in SUBSCRIBE_END, so it goes out only once every
 		// served group has opened its stream or given up, and a cap holding groups back
 		// delays it until they are released.
 		const countStreams = hasStreamCount(this.version);
+
+		// Lite-05 and lite-06 name every sequence below the end that this subscription never
+		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
+		// for a group that will not come. The sequences served or dropped. A gap that never
+		// arrived stays until the end sweep names it: this side cannot tell when the
+		// subscriber stopped waiting for it. Undefined on other versions.
+		const served: Run[] | undefined = emitRange && !countStreams ? [] : undefined;
+		// Drop whatever part of `[start, end)` this subscription has not been served or dropped yet.
+		const drop = async (start: number, end: number): Promise<boolean> => {
+			if (!served) return true;
+			for (const gap of runGaps(served, start, end)) {
+				insertRun(served, gap.start, gap.end);
+				const msg = new SubscribeDrop({ start: gap.start, end: gap.end - 1, error: 0 });
+				if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
+					return false;
+			}
+			return true;
+		};
 		let streams = 0;
 		const opening = new Set<Promise<unknown>>();
 
@@ -996,7 +1028,7 @@ export class Publisher {
 		// stream FIN says where it stops.
 		const boundary = () => {
 			const end = track.end();
-			return end ? finalSequence(end) : (track.latest() ?? -1) + 1;
+			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1) + 1;
 		};
 
 		// Before lite-07, SUBSCRIBE_END names that boundary, which a cap can hold groups back
@@ -1050,21 +1082,36 @@ export class Publisher {
 							// `positionCursor` pins an unfloored pre-06 SUBSCRIBE to the latest
 							// group, so an update that drops a named floor re-pins there too. On
 							// an empty track the next group is the latest, whatever its sequence.
+							const requested = bounds.startGroup;
 							const start =
 								update.startGroup === undefined &&
-								bounds.startGroup !== undefined &&
+								requested !== undefined &&
 								!resolvesStart(this.version)
-									? (track.latest() ?? 0)
+									? (hooks.latestSequence(track) ?? 0)
 									: update.startGroup;
 							hooks.replaceGroups(track, {
 								start: start === undefined ? undefined : { included: start },
 								end: update.endGroup === undefined ? undefined : { included: update.endGroup },
 							});
+							// Lite-06 encodes an absent start as no floor, so it drops back to 0.
+							const floor = start ?? (resolvesStart(this.version) ? 0 : undefined);
+							// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it.
+							if (floor !== undefined && startSequence !== undefined) {
+								// A lowered floor owes the groups it newly asks for, so the end sweep covers them.
+								// A raised one sends no early drop: the subscriber already stops owing below
+								// its floor, and a later update may lower it again to reopen those groups.
+								startSequence = Math.min(startSequence, floor);
+							}
 							bounds.startGroup = update.startGroup;
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
-							await yieldToControls();
+							// A microtask is too short: decoding one framed update crosses several
+							// awaits, each of which can requeue behind the serving continuation. A
+							// task boundary lets the decoder finish whatever the transport already
+							// delivered before the next group pop. Updates are rare, so groups do
+							// not pay this scheduling cost on the normal path.
+							await nextTask();
 							continue;
 						}
 					}
@@ -1073,11 +1120,14 @@ export class Publisher {
 				// Exactly-once arrival-order serving. This synchronous package-internal pop
 				// and frameRange call are the operation's linearization point.
 				// Popping or filtering a group removes the subscriber's view of its edge.
-				const largest = !startSent && hasLargest(this.version) ? track.largest() : undefined;
-				const recv = hooks.tryRecvGroup(track);
+				const largest = !startSent && hasLargest(this.version) ? hooks.bufferedLargest(track) : undefined;
+				const recv = hooks.tryRecvGroup(track, startSent);
 				switch (recv.kind) {
 					case "error":
 						throw recv.error;
+					case "drop":
+						if (!(await drop(recv.start, recv.end))) return false;
+						continue;
 					case "idle":
 						// A start past everything the track has (a subscriber resuming just after
 						// what it holds) is answered at once with the largest position, on
@@ -1091,6 +1141,7 @@ export class Publisher {
 									(bounds.startGroup === largest.group && startFrame > largest.frame))
 							) {
 								startSent = true;
+								startSequence = bounds.startGroup;
 								hooks.replaceGroups(track, {
 									start: { included: bounds.startGroup },
 									end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
@@ -1122,6 +1173,13 @@ export class Publisher {
 						await waitForSubscription(controls, track);
 						continue;
 					case "done": {
+						// Name every sequence from the start to the end this subscription never
+						// got. A cap below the end bounds what the subscriber is owed, as on its side.
+						if (startSequence !== undefined) {
+							const end =
+								bounds.endGroup === undefined ? boundary() : Math.min(boundary(), bounds.endGroup + 1);
+							if (!(await drop(startSequence, end))) return false;
+						}
 						if (!endSent) {
 							if (!(await sendEnd())) return false;
 							continue;
@@ -1143,6 +1201,7 @@ export class Publisher {
 
 				if (emitRange && !startSent) {
 					startSent = true;
+					startSequence = group.sequence;
 					// SUBSCRIBE_START names the first group served now. A later group at or
 					// above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
@@ -1165,6 +1224,7 @@ export class Publisher {
 					)
 						return false;
 				}
+				if (served) insertRun(served, group.sequence, group.sequence + 1);
 
 				const options: RunGroup = {
 					sub,
@@ -1211,7 +1271,7 @@ export class Publisher {
 		hold.signal.addEventListener("abort", () => interest.release(), { once: true });
 		// Armed before the first check and held until the answer is acknowledged, so a grant
 		// that shrinks while the answer is blocked on flow control resets it, never sends it.
-		const watch = this.#watch(msg.broadcast, () => {
+		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`track info revoked: broadcast=${msg.broadcast} track=${msg.track}`);
 			hold.abort();
 			stream.writer.reset(unauthorized(msg.broadcast));
@@ -1252,12 +1312,6 @@ export class Publisher {
 		} finally {
 			watch.dispose();
 		}
-	}
-
-	// Whether our grant excludes publishing this broadcast. No grant yet allows it.
-	#denied(broadcast: Path.Valid): boolean {
-		const grant = this.#grant?.peek();
-		return grant !== undefined && !grant.publish.matches(broadcast);
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
@@ -1401,7 +1455,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async #openGroup(options: RunGroup): Promise<Writer | undefined> {
-		const { group, priority, unsubscribed } = options;
+		const { group, priority, unsubscribed, start } = options;
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
 			// track (and a newer group within it) win the link when there isn't room for both.
@@ -1412,7 +1466,7 @@ export class Publisher {
 			// Failing here drops the group and lets the next one compete for the next slot.
 			const stream = await Writer.tryOpen(this.#quic, {
 				version: this.version,
-				sendOrder: priority.rank(group.sequence),
+				sendOrder: priority.rank(group.sequence, start),
 				cancel: unsubscribed,
 				waitUntilAvailable: false,
 			});
@@ -1439,7 +1493,7 @@ export class Publisher {
 		try {
 			// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
 			// follows it too rather than keeping a stale rank until it finishes.
-			priority.add(stream, group.sequence);
+			priority.add(stream, group.sequence, startFrame);
 
 			await hooks.guardGroup(group, async () => {
 				await stream.u53(0); // stream type
@@ -1515,7 +1569,7 @@ export class Publisher {
 		}
 
 		let lastSent: Probe | undefined;
-		let lastSentTime: number | undefined;
+		let lastSentTime: Instant | undefined;
 
 		// Whether a metric moved enough to be worth another report. Gaining or
 		// losing a value always counts; both unknown never does.
@@ -1540,15 +1594,16 @@ export class Publisher {
 
 		try {
 			for (;;) {
-				let timer: ReturnType<typeof setTimeout> | undefined;
-				const timeout = new Promise<"timeout">((resolve) => {
-					timer = setTimeout(() => resolve("timeout"), PROBE_INTERVAL);
-				});
+				const timer = new AbortController();
+				const timeout = sleep(Nano.fromMilli(Milli(PROBE_INTERVAL)), { signal: timer.signal }).then(
+					() => "timeout" as const,
+					() => "timeout" as const,
+				);
 				let result: "timeout" | Error | null;
 				try {
 					result = await race([timeout, ended]);
 				} finally {
-					clearTimeout(timer);
+					timer.abort();
 				}
 				if (result instanceof Error) throw result;
 				if (result !== "timeout") break;
@@ -1580,7 +1635,7 @@ export class Publisher {
 				if (lastSent === undefined || lastSentTime === undefined) {
 					shouldSend = true;
 				} else {
-					const elapsed = performance.now() - lastSentTime;
+					const elapsed = Nano.toMilli(Instant.durationSince(now(), lastSentTime));
 					// The bitrate threshold decays to zero as the last report ages: a
 					// stale estimate is worth refreshing for a smaller move.
 					const t = Math.max(PROBE_INTERVAL, Math.min(PROBE_MAX_AGE, elapsed));
@@ -1595,7 +1650,7 @@ export class Publisher {
 				if (shouldSend) {
 					await report.encode(stream.writer, this.version);
 					lastSent = report;
-					lastSentTime = performance.now();
+					lastSentTime = now();
 				}
 			}
 		} catch (err: unknown) {

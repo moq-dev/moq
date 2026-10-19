@@ -10,10 +10,10 @@
 //!
 //! Segment boundaries come from one reference rendition's records, numbered by record sequence,
 //! so edges that share the choice agree without the publisher cutting for HLS. The first choice
-//! is the first video rendition, or the first audio one when there is no video. A video choice
-//! sticks while that rendition stays in the catalog: a newer rendition that sorts earlier must
-//! not rewind `EXT-X-MEDIA-SEQUENCE`. An audio choice switches to video once a video rendition
-//! has a timeline. Every other rendition resolves each segment against its own timeline.
+//! is the first enabled video rendition, or enabled audio when there is no video. A video
+//! choice sticks while it stays enabled with a timeline; audio yields to enabled video. A
+//! handoff continues past the last advertised record sequence, starting a DASH period. Every
+//! other rendition resolves each segment against its own timeline.
 //! An inline-parameter-set codec with no catalog `description` GETs one keyframe
 //! group on the first playlist render to build its init, then caches it.
 //!
@@ -48,6 +48,28 @@ use rand::RngExt;
 pub(crate) use playlist::render_media;
 pub use rendition::{Kind, Rendition};
 use segments::Reference;
+
+type TimelineWatchers =
+	Arc<Mutex<std::collections::BTreeMap<segments::ReferenceKey, (Reference, tokio::task::JoinHandle<()>)>>>;
+
+/// A half-open media-time range for an HLS playlist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Range {
+	/// The first requested media time.
+	start: Duration,
+	/// The first media time outside the request.
+	end: Duration,
+}
+
+impl Range {
+	/// Build a non-empty media-time range.
+	pub fn new(start: Duration, end: Duration) -> crate::Result<Self> {
+		if start >= end {
+			return Err(crate::Error::RangeUnavailable("start must be before end".into()));
+		}
+		Ok(Self { start, end })
+	}
+}
 
 /// Backoff bounds for the initial catalog subscription.
 ///
@@ -90,6 +112,8 @@ pub struct Config {
 	/// Durable history reads retained timeline groups from the beginning, including records older
 	/// than the checkpoint a live join receives. Live playlists keep their bounded join. A
 	/// recording whose start was pruned by retention is refused with [`crate::Error::HistoryPruned`].
+	/// Across reference changes, retention retires a common playlist prefix so remaining
+	/// segments keep their HLS sequence positions.
 	pub history: bool,
 }
 
@@ -114,10 +138,9 @@ pub struct Broadcaster {
 	/// renditions themselves (see [`renditions::Producer::clear`]). Set once, right after
 	/// construction.
 	watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
-	/// The reference rendition's timeline watcher, spawned by the catalog watcher once the
-	/// catalog advertises it. On drop it is aborted only when no cursor still needs its records
-	/// (see `Drop`).
-	timeline_watcher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+	/// Reference timeline readers. History mode retains past references to follow their pops.
+	/// On drop they are aborted only when no recording cursor still needs their records.
+	timeline_watchers: TimelineWatchers,
 }
 
 impl Broadcaster {
@@ -125,16 +148,16 @@ impl Broadcaster {
 	pub fn new(source: moq_mux::Source, config: Config) -> Arc<Self> {
 		let broadcast = source.broadcast();
 		let renditions = renditions::Producer::new(config.window);
-		let timeline_watcher = Arc::new(Mutex::new(None));
+		let timeline_watchers = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
 		let broadcaster = Arc::new(Self {
 			broadcast,
 			renditions: renditions.clone(),
 			watcher: Mutex::new(None),
-			timeline_watcher: timeline_watcher.clone(),
+			timeline_watchers: timeline_watchers.clone(),
 		});
 		// The watcher owns its own producer clone; the `Broadcaster`'s `Drop` aborts it so the
 		// standing catalog subscription stops when nobody's serving from this broadcaster.
-		let watcher = tokio::spawn(watch_catalog(source, renditions, timeline_watcher, config.history));
+		let watcher = tokio::spawn(watch_catalog(source, renditions, timeline_watchers, config.history));
 		*broadcaster.watcher.lock().unwrap() = Some(watcher);
 		broadcaster
 	}
@@ -269,12 +292,10 @@ impl Broadcaster {
 			}
 			// Without its init there is nothing to name in `initialization`; the serve path
 			// builds every init before rendering (see `build_inits`).
-			let Some(representation) = rendition.representation() else {
-				continue;
-			};
+			let representations = rendition.representations();
 			match rendition.kind {
-				Kind::Video => video.push(representation),
-				Kind::Audio => audio.push(representation),
+				Kind::Video => video.extend(representations),
+				Kind::Audio => audio.extend(representations),
 			}
 		}
 
@@ -306,7 +327,7 @@ impl Broadcaster {
 
 	/// Build every rendition's init segment, so the manifest can name each by its hash. A
 	/// rendition whose init can't be built yet is left out of the render.
-	#[cfg(feature = "server")]
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) async fn build_inits(&self) {
 		for rendition in self.renditions.snapshot() {
 			if let Err(err) = rendition.init().await {
@@ -346,8 +367,10 @@ impl Drop for Broadcaster {
 		// Release the map either way: a surviving `renditions::Consumer` would otherwise pin
 		// every `Rendition` forever.
 		self.renditions.clear();
-		if !held && let Some(watcher) = self.timeline_watcher.lock().unwrap().take() {
-			watcher.abort();
+		if !held {
+			for (_, (_, watcher)) in std::mem::take(&mut *self.timeline_watchers.lock().unwrap()) {
+				watcher.abort();
+			}
 		}
 	}
 }
@@ -355,7 +378,7 @@ impl Drop for Broadcaster {
 async fn watch_catalog(
 	source: moq_mux::Source,
 	renditions: renditions::Producer,
-	timeline_watcher: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+	timeline_watchers: TimelineWatchers,
 	history: bool,
 ) {
 	// The source's catalog broadcast, so the catalog, the timeline subscription, and the closed
@@ -392,14 +415,24 @@ async fn watch_catalog(
 				}
 				renditions.sync(&source, &catalog);
 
-				// Keep the reference while it stays. Replacing it renumbers every segment.
+				// Keep an enabled reference, preserving every row already advertised on a handoff.
 				let next = self::reference(&catalog, reference.as_ref());
 				if next != reference {
-					if let Some(watcher) = timeline_watcher.lock().unwrap().take() {
-						watcher.abort();
-						renditions.fanout().skip();
+					let mut watchers = timeline_watchers.lock().unwrap();
+					renditions.fanout().select(next.clone());
+					if !unbound {
+						for (_, (_, watcher)) in std::mem::take(&mut *watchers) {
+							watcher.abort();
+						}
 					}
+					// History rows stay listed until their original timeline pops them, so retain
+					// those readers after a handoff. Selection suppresses their pushes and finish.
+					// A reselected reference gets a fresh reader: the retained one consumed records
+					// while unselected, and only a replay restates them.
 					if let (Some(next), Some(archive)) = (&next, catalog.archive.clone()) {
+						if let Some((_, watcher)) = watchers.remove(next.as_ref()) {
+							watcher.abort();
+						}
 						let watcher = tokio::spawn(watch_timeline(
 							broadcast.clone(),
 							archive,
@@ -407,7 +440,7 @@ async fn watch_catalog(
 							renditions.fanout(),
 							unbound,
 						));
-						*timeline_watcher.lock().unwrap() = Some(watcher);
+						watchers.insert(next.as_ref().clone(), (next.clone(), watcher));
 					}
 					reference = next;
 				}
@@ -420,19 +453,21 @@ async fn watch_catalog(
 		}
 	}
 
-	// The source is done (or errored): let recording cursors finish.
+	// The source is done (or errored): let recording cursors finish. With every rendition
+	// disabled, no reference watcher is left to end the windows.
+	if reference.is_none() {
+		renditions.fanout().finish(None);
+	}
 	renditions.close();
 }
 
 /// The rendition every segment boundary comes from, with the track its timeline indexes.
 ///
-/// The first choice is the first video rendition with a timeline, or the first audio one when
-/// the broadcast has no video. Renditions are ordered by ID, so edges choosing together pick
-/// the same one. A video `current` stays while it is still a rendition with a timeline: a newer
-/// rendition that sorts earlier must not take over, or `EXT-X-MEDIA-SEQUENCE` rewinds. An audio
-/// `current` stays only while no video rendition has a timeline, since video segments cut on
-/// audio records would mostly be gaps; that switch, like a reference that leaves, rewinds. So
-/// does a `current` whose track changed, since the new track's records are another numbering.
+/// The first choice is the first enabled video rendition with a timeline, falling back to
+/// enabled audio. Keep an enabled video choice while its timeline stays indexed, so a newly
+/// added rendition cannot take it over. Audio yields once enabled video becomes available.
+/// A handoff resumes at the replacement's first record numbered past the last advertised one,
+/// and starts a DASH period.
 fn reference(catalog: &moq_mux::catalog::hang::Catalog, current: Option<&Reference>) -> Option<Reference> {
 	use hang::catalog::Reference as _;
 
@@ -442,13 +477,24 @@ fn reference(catalog: &moq_mux::catalog::hang::Catalog, current: Option<&Referen
 		.video
 		.renditions
 		.iter()
+		.filter(|(_, config)| config.enabled)
 		.map(|(id, config)| (Kind::Video, id, config.track(id)))
 		.find(|(_, _, track)| indexed(track));
 	if let Some(current) = current {
 		let (kind, id, _) = current.as_ref();
 		let track = match kind {
-			Kind::Video => catalog.video.renditions.get(id).map(|config| config.track(id)),
-			Kind::Audio if video.is_none() => catalog.audio.renditions.get(id).map(|config| config.track(id)),
+			Kind::Video => catalog
+				.video
+				.renditions
+				.get(id)
+				.filter(|config| config.enabled)
+				.map(|config| config.track(id)),
+			Kind::Audio if video.is_none() => catalog
+				.audio
+				.renditions
+				.get(id)
+				.filter(|config| config.enabled)
+				.map(|config| config.track(id)),
 			Kind::Audio => None,
 		};
 		if let Some(track) = track.filter(indexed) {
@@ -460,6 +506,7 @@ fn reference(catalog: &moq_mux::catalog::hang::Catalog, current: Option<&Referen
 			.audio
 			.renditions
 			.iter()
+			.filter(|(_, config)| config.enabled)
 			.map(|(id, config)| (Kind::Audio, id, config.track(id)))
 			.find(|(_, _, track)| indexed(track))
 	};
@@ -488,12 +535,18 @@ async fn watch_timeline(
 	// A failed timeline is never retried: the origin already rides out transient source
 	// failures, so an error here is final. It ends every playlist like a clean finish
 	// (`EXT-X-ENDLIST`), since a window left live would freeze players with no signal.
-	if let Err(err) = watch(&broadcast, &section, &reference, &renditions, history).await {
-		tracing::error!(track = %reference.2, %err, "timeline failed; ending every playlist");
+	let result = watch(&broadcast, &section, &reference, &renditions, history).await;
+	// A superseded watcher cannot finish the newly selected reference's windows.
+	if renditions.finish(Some(&reference)) {
+		if let Err(err) = result {
+			tracing::error!(track = %reference.2, %err, "timeline failed; ending every playlist");
+		}
+	} else if let Err(err) = result {
+		// A retained history reader can no longer report pops, so its rows can't be trusted to
+		// stay fetchable.
+		tracing::error!(track = %reference.2, %err, "past reference timeline failed; retiring its segments");
+		renditions.pop(0..u64::MAX, &reference);
 	}
-	// Recording cursors drain what is listed and end instead of parking.
-	renditions.end_windows();
-	renditions.close_windows();
 }
 
 async fn watch(
@@ -507,7 +560,7 @@ async fn watch(
 	if history {
 		return history::read(broadcast, section, track, |edit| match edit {
 			history::Edit::Push { index, entry } => renditions.push(index, entry, reference),
-			history::Edit::Pop(range) => renditions.pop(range),
+			history::Edit::Pop(range) => renditions.pop(range, reference),
 		})
 		.await;
 	}
@@ -515,8 +568,8 @@ async fn watch(
 	while let Some(event) = timeline.next().await? {
 		match event {
 			moq_mux::timeline::Event::Push { index, entry } => renditions.push(index, entry, reference),
-			moq_mux::timeline::Event::Pop(range) => renditions.pop(range),
-			moq_mux::timeline::Event::Skip(_) => renditions.skip(),
+			moq_mux::timeline::Event::Pop(range) => renditions.pop(range, reference),
+			moq_mux::timeline::Event::Skip(_) => renditions.skip(Some(reference)),
 			_ => unreachable!("unknown timeline event"),
 		}
 	}
@@ -639,7 +692,13 @@ mod tests {
 
 	impl CatalogTestExt for moq_mux::catalog::Producer {
 		fn enroll_test(&self, track: &str) -> moq_mux::Result<moq_mux::timeline::Recorder> {
-			let recorder = self.timeline().track(track, moq_mux::timeline::Config::default())?;
+			let duration = Duration::from_secs(2);
+			let recorder = self.timeline().track(
+				track,
+				moq_mux::timeline::Config::default()
+					.with_duration_min(duration)
+					.with_duration_hint(duration),
+			)?;
 			let section = self.timeline().section();
 			let mut producer = self.clone();
 			let mut catalog = producer.modify()?;
@@ -665,9 +724,10 @@ mod tests {
 	fn archive(tracks: &[&str]) -> hang::catalog::Archive {
 		let mut archive = hang::catalog::Archive::new();
 		for track in tracks {
-			archive
-				.timelines
-				.insert(track.to_string(), hang::timeline::default_name(track));
+			archive.timelines.insert(
+				track.to_string(),
+				hang::catalog::Timeline::new(hang::timeline::default_name(track), 4_000),
+			);
 		}
 		archive
 	}
@@ -753,6 +813,50 @@ mod tests {
 		catalog.video.renditions.insert("video0".to_string(), video_config());
 		catalog.audio.renditions.insert("audio0".to_string(), audio);
 		catalog
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn audio_renditions_follow_catalog_quality_order() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = moq_mux::Source::new(produce_origin().consume(), broadcast.consume());
+		let names = ["a", "b", "c", "d", "e", "f", "g"];
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		catalog.archive = Some(archive(&names));
+		for (name, rate, channels, bitrate) in [
+			("a", 48_000, 2, None),
+			("b", 48_000, 1, Some(64_000)),
+			("c", 16_000, 1, Some(128_000)),
+			("d", 48_000, 2, Some(64_000)),
+			("e", 48_000, 2, Some(64_000)),
+			("f", 44_100, 2, Some(64_000)),
+			("g", 16_000, 1, None),
+		] {
+			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, rate, channels);
+			config.bitrate = bitrate;
+			catalog.audio.renditions.insert(name.to_string(), config);
+		}
+		let renditions = renditions::Producer::new(Config::default().window);
+		renditions.sync(&source, &catalog);
+		assert!(
+			!renditions.any_held_externally(),
+			"ranking must not count as a recording consumer"
+		);
+		let listed = || {
+			renditions
+				.snapshot()
+				.iter()
+				.map(|rendition| rendition.name.clone())
+				.collect::<Vec<_>>()
+		};
+		assert_eq!(listed(), ["c", "d", "e", "b", "f", "a", "g"]);
+		catalog.audio.renditions.get_mut("c").unwrap().enabled = false;
+		renditions.sync(&source, &catalog);
+		assert_eq!(listed(), ["d", "e", "b", "f", "a", "g", "c"]);
+		catalog.audio.renditions.get_mut("g").unwrap().bitrate = Some(256_000);
+		renditions.sync(&source, &catalog);
+		assert_eq!(listed(), ["g", "d", "e", "b", "f", "a", "c"]);
+		renditions.clear();
+		assert!(listed().is_empty());
 	}
 
 	/// The next rendition event, or `None` if the set is quiet.
@@ -1112,6 +1216,654 @@ mod tests {
 		assert_eq!(sequence(&rendition), before, "the media sequence did not reset");
 
 		drop((media, registration, broadcast));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn disabled_reference_handoff_continues_the_source_media_sequence() {
+		handoff(false).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn history_reference_handoff_preserves_the_retained_window() {
+		handoff(true).await;
+	}
+
+	async fn handoff(history: bool) {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let reserved = catalog.reserve();
+		let mut first = catalog.test_video("video0");
+		first.set(video_config()).unwrap();
+		let mut sibling = catalog.test_video("video1");
+		sibling.set(video_config()).unwrap();
+		drop(reserved);
+		let media = |name: &str| {
+			let track = broadcast.create_track(name, timed()).unwrap();
+			catalog
+				.media_producer(
+					track,
+					moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+				)
+				.unwrap()
+		};
+		let mut first_media = media("video0");
+		let mut sibling_media = media("video1");
+		for at in [0, 2, 4, 6] {
+			first_media.write(vp8_frame(at * 1_000_000, true)).unwrap();
+		}
+		// Aligned groups number the same records, so the sibling continues at the 6s boundary.
+		for at in [0, 2, 4, 6, 8] {
+			sibling_media.write(vp8_frame(at * 1_000_000, true)).unwrap();
+		}
+		if history {
+			catalog
+				.mutate(|catalog| {
+					catalog.archive.as_mut().unwrap().store = Some("https://example.com/recording/".parse().unwrap())
+				})
+				.unwrap();
+		}
+		let config = Config {
+			window: Duration::from_secs(4),
+			history,
+		};
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, config);
+		broadcaster.advertised().await;
+		let first_rendition = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		let sibling_rendition = broadcaster.rendition(Kind::Video, "video1").unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while first_rendition.snapshot().segments.last().is_none_or(|s| s.segment < 2) {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.unwrap();
+		let old = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		let new = segments::tag(&(Kind::Video, "video1".into(), "video1".into()));
+		let before = first_rendition.snapshot();
+		let mut cursor = sibling_rendition.segments();
+		// History lists the whole timeline; the live window starts at 2s.
+		for segment in u64::from(!history)..=2 {
+			assert_eq!(cursor.next().await.unwrap().unwrap().segment, segment);
+		}
+		let bytes = first_rendition.segment(&old, 2).await.unwrap().unwrap();
+		let mut disabled = video_config();
+		disabled.enabled = false;
+		first.set(disabled).unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while sibling_rendition
+				.snapshot()
+				.segments
+				.last()
+				.is_none_or(|s| s.tag != new)
+			{
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the enabled sibling takes over the reference");
+		let after = sibling_rendition.snapshot();
+		assert_eq!(
+			cursor.next().await.unwrap().unwrap().segment,
+			3,
+			"the recorder advances once into the new reference"
+		);
+		assert_eq!(after.media_sequence, before.media_sequence + u64::from(!history));
+		assert_eq!(after.segments.last().unwrap().segment, 3, "the next source record");
+		assert!(after.segments.iter().any(|s| s.tag == old));
+		assert!(after.segments.iter().all(|s| !s.discontinuity));
+		assert_eq!(first_rendition.segment(&old, 2).await.unwrap().unwrap(), bytes);
+		let mpd = broadcaster.manifest(None).unwrap();
+		assert_eq!(mpd.matches("<Period ").count(), 2, "{mpd}");
+		assert!(mpd.contains("start=\"PT6.000S\""), "{mpd}");
+		assert!(
+			mpd.contains(&format!("{old}.t$Time$")) && mpd.contains(&format!("{new}.t$Time$")),
+			"{mpd}"
+		);
+		for at in [10, 12, 14] {
+			sibling_media.write(vp8_frame(at * 1_000_000, true)).unwrap();
+		}
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while sibling_rendition
+				.snapshot()
+				.segments
+				.last()
+				.is_none_or(|s| s.segment < 6)
+			{
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.unwrap();
+		let advanced = sibling_rendition.snapshot();
+		assert_eq!(advanced.media_sequence, advanced.segments[0].segment);
+		assert!(!advanced.finished);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn unaligned_reference_handoff_marks_the_gap_without_reusing_urls() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		catalog
+			.mutate(|catalog| {
+				for name in ["video0", "video1"] {
+					catalog.video.renditions.insert(name.into(), video_config());
+				}
+				catalog.archive = Some(archive(&["video0", "video1"]));
+			})
+			.unwrap();
+		let timeline = |name: &str| {
+			moq_mux::timeline::Producer::new(
+				broadcast
+					.create_track(hang::timeline::default_name(name), moq_mux::timeline::Producer::info())
+					.unwrap(),
+			)
+		};
+		let mut old = timeline("video0");
+		let mut new = timeline("video1");
+		old.push(&span(0, 0, 2_000, 0)).unwrap();
+		old.push(&span(1, 2_000, 1_000, 1)).unwrap();
+		for sequence in 0..3 {
+			new.push(&gop(sequence)).unwrap();
+		}
+		let broadcaster = Broadcaster::new(
+			crate::resolved(&origin, "live").await,
+			Config {
+				window: Duration::from_secs(4),
+				..Default::default()
+			},
+		);
+		broadcaster.advertised().await;
+		let first = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		let sibling = broadcaster.rendition(Kind::Video, "video1").unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while sibling
+				.snapshot()
+				.segments
+				.last()
+				.is_none_or(|segment| segment.segment < 1)
+			{
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.unwrap();
+		let before = sibling.snapshot();
+		let content = first.listed_content(1).unwrap();
+		let old_tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		let new_tag = segments::tag(&(Kind::Video, "video1".into(), "video1".into()));
+		catalog
+			.mutate(|catalog| catalog.video.renditions.get_mut("video0").unwrap().enabled = false)
+			.unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while sibling
+				.snapshot()
+				.segments
+				.last()
+				.is_none_or(|segment| segment.tag != new_tag)
+			{
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the next replacement boundary advances beyond the unaligned tail");
+		let after = sibling.snapshot();
+		assert_eq!(after.media_sequence, before.media_sequence + 1);
+		assert_eq!(after.segments.len(), 2);
+		assert_eq!(after.segments[0].tag, old_tag);
+		assert_eq!(
+			after.segments[0].duration,
+			Duration::from_secs(1),
+			"the old 2s..3s URL keeps its advertised span"
+		);
+		assert_eq!(first.listed_content(1).unwrap(), content);
+		assert_eq!(after.segments[1].segment, 2);
+		assert!(after.segments[1].discontinuity);
+		assert!(!after.finished);
+		broadcaster.build_inits().await;
+		let playlist = sibling.media_playlist(None).unwrap();
+		assert_eq!(playlist.matches("#EXT-X-DISCONTINUITY\n").count(), 1, "{playlist}");
+		let mpd = broadcaster.manifest(None).unwrap();
+		assert_eq!(
+			mpd.matches("<Period ").count(),
+			1,
+			"the old period has only a gap on the enabled sibling: {mpd}"
+		);
+		assert!(
+			mpd.contains("start=\"PT4.000S\"") && mpd.contains("presentationTimeOffset=\"4000\""),
+			"{mpd}"
+		);
+		new.push(&gop(3)).unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while sibling
+				.snapshot()
+				.segments
+				.first()
+				.is_none_or(|segment| segment.tag != new_tag)
+			{
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.unwrap();
+		let advanced = sibling.media_playlist(None).unwrap();
+		assert!(advanced.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1\n"), "{advanced}");
+		assert!(
+			!advanced.contains("#EXT-X-DISCONTINUITY\n"),
+			"the boundary tag retired with the prefix"
+		);
+	}
+
+	// An edge that saw the handoff and one that started after it derive the same media sequence
+	// from the source, so their playlists agree once the old reference's rows leave the window.
+	#[tokio::test(start_paused = true)]
+	async fn edges_before_and_after_an_aligned_handoff_agree_on_the_playlist() {
+		edges_around_a_handoff(2_000).await;
+	}
+
+	// The replacement numbers its 1s records ahead of the old 2s ones: the edge that saw the
+	// handoff drops its advertised rows rather than renumbering the replacement's.
+	#[tokio::test(start_paused = true)]
+	async fn edges_before_and_after_a_handoff_ahead_agree_on_the_media_sequence() {
+		edges_around_a_handoff(1_000).await;
+	}
+
+	/// The old reference cuts 2s records through 6s; the replacement cuts `span_ms` records.
+	async fn edges_around_a_handoff(span_ms: u64) {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		catalog
+			.mutate(|catalog| {
+				for name in ["video0", "video1"] {
+					catalog.video.renditions.insert(name.into(), video_config());
+				}
+				catalog.archive = Some(archive(&["video0", "video1"]));
+			})
+			.unwrap();
+		let timeline = |name: &str| {
+			moq_mux::timeline::Producer::new(
+				broadcast
+					.create_track(hang::timeline::default_name(name), moq_mux::timeline::Producer::info())
+					.unwrap(),
+			)
+		};
+		let mut old = timeline("video0");
+		let mut new = timeline("video1");
+		let record = |sequence: u64| span(sequence, sequence * span_ms, span_ms, sequence);
+		for sequence in 0..3 {
+			old.push(&gop(sequence)).unwrap();
+		}
+		// The sibling's timeline runs past the old reference's last record, so that record resolves.
+		let mut next = 0;
+		while next * span_ms < 8_000 {
+			new.push(&record(next)).unwrap();
+			next += 1;
+		}
+		let resumed = 6_000 / span_ms;
+		let config = Config {
+			window: Duration::from_secs(4),
+			..Default::default()
+		};
+		let old_tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		let new_tag = segments::tag(&(Kind::Video, "video1".into(), "video1".into()));
+		let listing = |snapshot: &playlist::Snapshot| -> Vec<(String, u64)> {
+			snapshot
+				.segments
+				.iter()
+				.map(|segment| (segment.tag.clone(), segment.segment))
+				.collect()
+		};
+
+		let saw = Broadcaster::new(crate::resolved(&origin, "live").await, config.clone());
+		saw.advertised().await;
+		let saw_video1 = saw.rendition(Kind::Video, "video1").unwrap();
+		listed_under(&saw_video1, &old_tag, 2).await;
+		catalog
+			.mutate(|catalog| catalog.video.renditions.get_mut("video0").unwrap().enabled = false)
+			.unwrap();
+		let handed = listed_under(&saw_video1, &new_tag, next - 1).await;
+		assert_eq!(handed.segments[0].segment, handed.media_sequence);
+		let resumed_at = handed.segments.iter().position(|s| s.tag == new_tag).unwrap();
+		assert_eq!(handed.segments[resumed_at].segment, resumed);
+		if resumed == 3 {
+			assert_eq!(
+				listing(&handed)[..resumed_at],
+				[(old_tag.clone(), 2)],
+				"the advertised row stays"
+			);
+			assert!(!handed.segments[resumed_at].discontinuity);
+		} else {
+			assert_eq!(resumed_at, 0, "positions 3..6 are skipped, so the old rows go");
+		}
+
+		let after = Broadcaster::new(crate::resolved(&origin, "live").await, config);
+		after.advertised().await;
+		let after_video1 = after.rendition(Kind::Video, "video1").unwrap();
+		let joined = listed_under(&after_video1, &new_tag, next - 1).await;
+		assert_eq!(joined.segments[0].segment, joined.media_sequence);
+		// Every segment number both edges list names the same playlist position.
+		for segment in &joined.segments {
+			if let Some(offset) = handed.segments.iter().position(|s| s.segment == segment.segment) {
+				assert_eq!(handed.media_sequence + offset as u64, segment.segment);
+			}
+		}
+
+		while next * span_ms < 12_000 {
+			new.push(&record(next)).unwrap();
+			next += 1;
+		}
+		let followed = listed_under(&saw_video1, &new_tag, next - 1).await;
+		let joined = listed_under(&after_video1, &new_tag, next - 1).await;
+		assert_eq!(listing(&followed), listing(&joined));
+		assert_eq!(
+			followed.media_sequence, joined.media_sequence,
+			"one numbering on every edge"
+		);
+		if resumed == 3 {
+			saw.build_inits().await;
+			after.build_inits().await;
+			let saw_playlist = saw_video1.media_playlist(None).unwrap();
+			assert!(saw_playlist.contains("#EXT-X-MEDIA-SEQUENCE:4\n"), "{saw_playlist}");
+			assert_eq!(saw_playlist, after_video1.media_playlist(None).unwrap());
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn history_handoff_keeps_following_the_original_sources_retention() {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		catalog
+			.mutate(|catalog| {
+				for name in ["video0", "video1"] {
+					catalog.video.renditions.insert(name.into(), video_config());
+				}
+				let mut section = archive(&["video0", "video1"]);
+				section.store = Some("https://example.com/recording/".parse().unwrap());
+				catalog.archive = Some(section);
+			})
+			.unwrap();
+		let timeline = |name: &str| {
+			moq_mux::timeline::Producer::new(
+				broadcast
+					.create_track(hang::timeline::default_name(name), moq_mux::timeline::Producer::info())
+					.unwrap(),
+			)
+		};
+		let mut old = timeline("video0");
+		let mut new = timeline("video1");
+		for sequence in 0..3 {
+			old.push(&gop(sequence)).unwrap();
+		}
+		for sequence in 0..4 {
+			new.push(&gop(sequence)).unwrap();
+		}
+		let broadcaster = Broadcaster::new(
+			crate::resolved(&origin, "live").await,
+			Config {
+				history: true,
+				..Default::default()
+			},
+		);
+		let rendition = loop {
+			if let Some(rendition) = broadcaster.rendition(Kind::Video, "video1") {
+				break rendition;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		};
+		let next_tag = segments::tag(&(Kind::Video, "video1".into(), "video1".into()));
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while rendition
+				.snapshot()
+				.segments
+				.last()
+				.is_none_or(|segment| segment.segment < 2)
+			{
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.unwrap();
+		catalog
+			.mutate(|catalog| catalog.video.renditions.get_mut("video0").unwrap().enabled = false)
+			.unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while rendition
+				.snapshot()
+				.segments
+				.last()
+				.is_none_or(|segment| segment.tag != next_tag)
+			{
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.unwrap();
+		old.pop(1).unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while rendition.snapshot().media_sequence != 1 {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("past reference still trims its retained history");
+		new.pop(2).unwrap();
+		settle().await;
+		let snapshot = rendition.snapshot();
+		assert_eq!(snapshot.media_sequence, 1);
+		assert_eq!(
+			snapshot.segments.len(),
+			3,
+			"new-source pops do not remove old-source rows"
+		);
+		old.finish().unwrap();
+		new.push(&gop(4)).unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while rendition
+				.snapshot()
+				.segments
+				.last()
+				.is_none_or(|segment| segment.segment < 4)
+			{
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("past reference completion cannot end the new reference");
+		assert!(!rendition.snapshot().finished);
+		new.pop(2).unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while rendition.snapshot().media_sequence != 4 {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("retention retires a whole playlist prefix without changing any remaining segment position");
+		assert_eq!(rendition.snapshot().segments.len(), 1);
+	}
+
+	/// A durable broadcast advertising `video0` and `video1`, so history mode follows retention.
+	async fn durable_pair() -> (
+		moq_net::origin::Producer,
+		moq_net::broadcast::Producer,
+		moq_mux::catalog::Producer,
+	) {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		catalog
+			.mutate(|catalog| {
+				for name in ["video0", "video1"] {
+					catalog.video.renditions.insert(name.into(), video_config());
+				}
+				let mut section = archive(&["video0", "video1"]);
+				section.store = Some("https://example.com/recording/".parse().unwrap());
+				catalog.archive = Some(section);
+			})
+			.unwrap();
+		(origin, broadcast, catalog)
+	}
+
+	fn timeline_track(
+		broadcast: &moq_net::broadcast::Producer,
+		name: &str,
+	) -> (moq_net::track::Producer, moq_mux::timeline::Producer) {
+		let track = broadcast
+			.create_track(hang::timeline::default_name(name), moq_mux::timeline::Producer::info())
+			.unwrap();
+		(track.clone(), moq_mux::timeline::Producer::new(track))
+	}
+
+	async fn history_export(origin: &moq_net::origin::Producer) -> Arc<Broadcaster> {
+		let config = Config {
+			history: true,
+			..Default::default()
+		};
+		let broadcaster = Broadcaster::new(crate::resolved(origin, "live").await, config);
+		broadcaster.advertised().await;
+		broadcaster
+	}
+
+	// The retained reader of a reference consumed its records while another was selected, so
+	// reselecting the reference replays its timeline instead of skipping past them.
+	#[tokio::test(start_paused = true)]
+	async fn a_reselected_history_reference_replays_its_timeline() {
+		let (origin, broadcast, mut catalog) = durable_pair().await;
+		let (_old_track, mut old) = timeline_track(&broadcast, "video0");
+		let (_new_track, mut new) = timeline_track(&broadcast, "video1");
+		for sequence in 0..3 {
+			old.push(&gop(sequence)).unwrap();
+			new.push(&gop(sequence)).unwrap();
+		}
+		let broadcaster = history_export(&origin).await;
+		let video0 = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		let video1 = broadcaster.rendition(Kind::Video, "video1").unwrap();
+		let old_tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		let new_tag = segments::tag(&(Kind::Video, "video1".into(), "video1".into()));
+		listed_under(&video0, &old_tag, 2).await;
+		catalog
+			.mutate(|catalog| catalog.video.renditions.get_mut("video0").unwrap().enabled = false)
+			.unwrap();
+		new.push(&gop(3)).unwrap();
+		listed_under(&video1, &new_tag, 3).await;
+		old.push(&gop(3)).unwrap();
+		old.push(&gop(4)).unwrap();
+		settle().await;
+		catalog
+			.mutate(|catalog| {
+				catalog.video.renditions.get_mut("video0").unwrap().enabled = true;
+				catalog.video.renditions.get_mut("video1").unwrap().enabled = false;
+			})
+			.unwrap();
+		let snapshot = listed_under(&video0, &old_tag, 4).await;
+		assert_eq!(numbers(&snapshot), [0, 1, 2, 3, 4], "history survives both handoffs");
+		assert!(snapshot.segments.iter().all(|segment| !segment.discontinuity));
+	}
+
+	// A failed past reference can no longer report its pops, so its rows retire rather than
+	// staying listed after their media may be gone.
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_past_history_reference_retires_its_rows() {
+		let (origin, broadcast, mut catalog) = durable_pair().await;
+		let (old_track, mut old) = timeline_track(&broadcast, "video0");
+		let (_new_track, mut new) = timeline_track(&broadcast, "video1");
+		for sequence in 0..4 {
+			if sequence < 3 {
+				old.push(&gop(sequence)).unwrap();
+			}
+			new.push(&gop(sequence)).unwrap();
+		}
+		let broadcaster = history_export(&origin).await;
+		let video1 = broadcaster.rendition(Kind::Video, "video1").unwrap();
+		let old_tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		let new_tag = segments::tag(&(Kind::Video, "video1".into(), "video1".into()));
+		listed_under(&video1, &old_tag, 2).await;
+		catalog
+			.mutate(|catalog| catalog.video.renditions.get_mut("video0").unwrap().enabled = false)
+			.unwrap();
+		assert_eq!(numbers(&listed_under(&video1, &new_tag, 3).await), [0, 1, 2, 3]);
+		cut(old_track, old);
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while video1.snapshot().media_sequence != 3 {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the failed reference's rows retire");
+		let snapshot = video1.snapshot();
+		assert_eq!(numbers(&snapshot), [3]);
+		assert!(!snapshot.finished, "the selected reference goes on");
+	}
+
+	// With every rendition disabled no reference watcher is left, so the source ending must
+	// still end every playlist and recording cursor.
+	#[tokio::test(start_paused = true)]
+	async fn a_source_ending_with_every_rendition_disabled_ends_the_playlists() {
+		let (origin, broadcast, mut catalog) = durable_pair().await;
+		let (_video0_track, mut video0) = timeline_track(&broadcast, "video0");
+		let (_video1_track, mut video1) = timeline_track(&broadcast, "video1");
+		for sequence in 0..4 {
+			video0.push(&gop(sequence)).unwrap();
+			video1.push(&gop(sequence)).unwrap();
+		}
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&rendition, &tag, 3).await;
+		catalog
+			.mutate(|catalog| {
+				for config in catalog.video.renditions.values_mut() {
+					config.enabled = false;
+				}
+			})
+			.unwrap();
+		settle().await;
+		catalog.finish().unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while !rendition.snapshot().finished {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the playlist ends with the source");
+		let mut cursor = rendition.segments();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while cursor.next().await.unwrap().is_some() {}
+		})
+		.await
+		.expect("the recording cursor ends");
+	}
+
+	/// Wait until `rendition` lists segment `segment` (or later) under the reference `tag`.
+	async fn listed_under(rendition: &Rendition, tag: &str, segment: u64) -> playlist::Snapshot {
+		tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				let snapshot = rendition.snapshot();
+				if snapshot
+					.segments
+					.last()
+					.is_some_and(|last| last.tag == tag && last.segment >= segment)
+				{
+					return snapshot;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("segment {segment} never listed"))
 	}
 
 	/// The text between `start` and the next `end` in `haystack`.
@@ -1605,7 +2357,7 @@ mod tests {
 		// PTS zero at exactly the moq epoch, so every timestamp maps to a fixed string.
 		let wall = UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
 		let config = moq_mux::catalog::Config::default()
-			.with_clock(moq_mux::Clock::at(std::time::Instant::now(), wall).expect("a representable wall"));
+			.with_clock(moq_mux::Clock::at(moq_net::time::now(), wall).expect("a representable wall"));
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 
 		let reserved = catalog.reserve();
@@ -1662,7 +2414,15 @@ mod tests {
 		// Write the catalog track directly: a moq-mux catalog producer always advertises its clock,
 		// as a publisher on a host whose wall clock is set does.
 		let timelines = moq_mux::timeline::Timelines::new(&broadcast);
-		let recorder = timelines.track("video0", moq_mux::timeline::Config::default()).unwrap();
+		let duration = Duration::from_secs(2);
+		let recorder = timelines
+			.track(
+				"video0",
+				moq_mux::timeline::Config::default()
+					.with_duration_min(duration)
+					.with_duration_hint(duration),
+			)
+			.unwrap();
 		let mut snapshot = moq_mux::catalog::hang::Catalog::<()>::default();
 		snapshot.video.renditions.insert("video0".to_string(), video_config());
 		snapshot.archive = Some(timelines.section());
@@ -1674,7 +2434,9 @@ mod tests {
 				.unwrap(),
 			json,
 		);
-		catalog.update(&snapshot).unwrap();
+		catalog
+			.update(moq_net::Timed::from(&snapshot).at(moq_net::Timestamp::now()))
+			.unwrap();
 
 		let track = broadcast.create_track("video0", timed()).unwrap();
 		let mut media = moq_mux::container::Producer::new(
@@ -1748,7 +2510,7 @@ mod tests {
 			.next()
 			.expect("a video rendition");
 		let rendition = broadcaster.rendition(Kind::Video, &video).expect("video discovered");
-		let playlist = tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None))
+		let playlist = tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None, None))
 			.await
 			.expect("a listed segment")
 			.unwrap()
@@ -1965,9 +2727,8 @@ mod tests {
 		drop((audio, registration, broadcast));
 	}
 
-	// The catalog's durationMax is the record split ceiling, far above a GOP, so the exporter
-	// derives EXT-X-TARGETDURATION from the segments it has: a playlist whose EXTINF exceeds its
-	// target duration is invalid, and one far above them delays every player.
+	// The declared duration is nominal, so the exporter derives EXT-X-TARGETDURATION from the
+	// segments it has. A playlist whose EXTINF exceeds its target duration is invalid.
 	#[tokio::test]
 	async fn target_duration_follows_the_observed_segments() {
 		let origin = produce_origin();
@@ -2519,7 +3280,7 @@ mod tests {
 			"the replacement is never requested"
 		);
 		let recorder = catalog.enroll_test("video0").unwrap();
-		fanout.skip();
+		fanout.skip(None);
 		let mut new_media = moq_net::broadcast::Info::new().produce();
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
 		tokio::time::sleep(Duration::from_secs(1)).await;
@@ -3124,6 +3885,13 @@ mod tests {
 
 		let reference = test.listed("video0", 6).await;
 		assert!(!reference.finished, "the other renditions go on");
+
+		// A range the failed timeline can never finish is refused, not frozen as a partial clip.
+		let range = Range::new(Duration::ZERO, Duration::from_secs(12)).unwrap();
+		assert!(matches!(
+			test.rendition("video1").snapshot_range(range, None),
+			Err(crate::Error::RangeUnavailable(_))
+		));
 	}
 
 	// A failed reference timeline is not retried. Every playlist ends (`EXT-X-ENDLIST`) instead
@@ -3147,11 +3915,27 @@ mod tests {
 		assert_eq!(numbers(&pending), [0, 1, 2]);
 		assert!(!pending.finished, "a pending tail holds back EXT-X-ENDLIST");
 		// DASH alike: the manifest turns static only once every representation ended.
-		assert!(test.rendition("video0").representation().unwrap().ended);
-		assert!(!test.rendition("video1").representation().unwrap().ended);
+		assert!(test.rendition("video0").representations().first().unwrap().ended);
+		assert!(!test.rendition("video1").representations().first().unwrap().ended);
 		video1.push(&gop(4)).unwrap();
 		assert_eq!(numbers(&test.finished("video1").await), [0, 1, 2, 3]);
 		test.drain("video0").await;
+	}
+
+	// A range over a recording that ended without media is refused rather than reported missing.
+	#[tokio::test(start_paused = true)]
+	async fn a_range_over_an_empty_ended_recording_is_refused() {
+		let test = Timelines::new();
+		let (track, video0) = test.publish("video0");
+		let (_track, _video1) = test.publish("video1");
+		cut(track, video0);
+		assert!(test.finished("video1").await.segments.is_empty());
+
+		let range = Range::new(Duration::ZERO, Duration::from_secs(2)).unwrap();
+		assert!(matches!(
+			test.rendition("video1").snapshot_range(range, None),
+			Err(crate::Error::RangeUnavailable(_))
+		));
 	}
 
 	// A rendition running far ahead of a stalled reference keeps the records its listed segments
@@ -3312,6 +4096,51 @@ mod tests {
 		drop((media, earlier_media, video0, added, broadcast));
 	}
 
+	#[tokio::test]
+	#[ignore = "performance measurement; run by the nightly Rust benchmarks"]
+	async fn benchmark_reference_handoff_fanout() {
+		for count in [2, 8, 32] {
+			for retained in [16, 64, 256] {
+				let names: Vec<_> = (0..count).map(|index| format!("video{index:02}")).collect();
+				let mut catalog = moq_mux::catalog::hang::Catalog::default();
+				for name in &names {
+					catalog.video.renditions.insert(name.clone(), video_config());
+				}
+				catalog.archive = Some(archive(&names.iter().map(String::as_str).collect::<Vec<_>>()));
+				let broadcast = moq_net::broadcast::Info::new().produce();
+				let source = moq_mux::Source::new(produce_origin().consume(), broadcast.consume());
+				let renditions = renditions::Producer::new(Duration::from_secs(retained * 2));
+				renditions.sync(&source, &catalog);
+				let fanout = renditions.fanout();
+				let reference = |index: usize| Arc::new((Kind::Video, names[index].clone(), names[index].clone()));
+				let refs = [reference(0), reference(1)];
+				let entry = |sequence, at| {
+					let mut record = gop(sequence);
+					record.pts = Some(at * 2_000);
+					moq_mux::timeline::Entry::decode(record, moq_net::Timescale::MILLI).unwrap()
+				};
+				for at in 0..retained {
+					fanout.push(at, entry(at, at), &refs[0]);
+				}
+				// Aligned references share record numbers, so every handoff continues seamlessly.
+				let started = moq_net::time::now();
+				for at in retained..retained + 1_024 {
+					let reference = &refs[(at % 2) as usize];
+					fanout.select(Some(reference.clone()));
+					fanout.push(at, entry(at, at), reference);
+				}
+				let elapsed = started.elapsed();
+				for rendition in renditions.snapshot() {
+					assert!(rendition.is_playable());
+				}
+				println!(
+					"hls handoff renditions={count} retained={retained} ns_per_push={}",
+					elapsed.as_nanos() / 1_024
+				);
+			}
+		}
+	}
+
 	// A video reference sticks while it stays listed with a timeline, and falls back to the
 	// first choice once it leaves. An audio reference yields once video has a timeline.
 	#[test]
@@ -3349,6 +4178,27 @@ mod tests {
 			reference(&catalog(&["v"], &["a", "b"]), first.as_ref()),
 			Some(video("v"))
 		);
+	}
+
+	#[test]
+	fn disabled_references_yield_only_to_enabled_indexed_renditions() {
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		let mut disabled = video_config();
+		disabled.enabled = false;
+		catalog.video.renditions.insert("a".into(), disabled);
+		catalog.video.renditions.insert("b".into(), video_config());
+		catalog.archive = Some(archive(&["a", "b", "audio"]));
+		let previous = Arc::new((Kind::Video, "a".into(), "a".into()));
+		assert_eq!(reference(&catalog, Some(&previous)).unwrap().1, "b");
+		catalog.video.renditions.get_mut("b").unwrap().enabled = false;
+		assert!(reference(&catalog, Some(&previous)).is_none());
+		catalog.audio.renditions.insert(
+			"audio".into(),
+			hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+		);
+		assert_eq!(reference(&catalog, Some(&previous)).unwrap().0, Kind::Audio);
+		catalog.audio.renditions.get_mut("audio").unwrap().enabled = false;
+		assert!(reference(&catalog, None).is_none());
 	}
 
 	// Timelines are keyed by the indexed track's name, so a rendition whose ID differs from its
@@ -3402,7 +4252,7 @@ mod tests {
 
 		// Switch the reference the way `watch_catalog` does.
 		test.watcher.abort();
-		test.renditions.fanout().skip();
+		test.renditions.fanout().skip(None);
 		test.watcher = tokio::spawn(watch_timeline(
 			test.broadcast.consume(),
 			archive(&["video0", "video1"]),
@@ -3449,7 +4299,7 @@ mod tests {
 		assert!(before.segments.iter().all(|s| s.tag == old));
 
 		test.watcher.abort();
-		test.renditions.fanout().skip();
+		test.renditions.fanout().skip(None);
 		test.watcher = tokio::spawn(watch_timeline(
 			test.broadcast.consume(),
 			archive(&["main", "video-b", "audio0"]),
@@ -3759,7 +4609,7 @@ mod tests {
 		video0.push(&split(3, 40, 40, 0..1)).unwrap();
 		test.listed("video0", 3).await;
 		assert_eq!(advertised(&test.renditions), ["video0"]);
-		test.renditions.fanout().skip();
+		test.renditions.fanout().skip(None);
 		video0.push(&split(4, 80, 40, 1..2)).unwrap();
 		let window = test.listed("video0", 4).await;
 		assert_eq!(numbers(&window), [4], "the skip cleared the window");

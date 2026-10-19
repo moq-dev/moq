@@ -28,8 +28,14 @@ default-filter = "not kind(bench)"
 # hosted CI's locked-memory limit and uses the host's hard limit locally.
 # Several invocations still share that user-wide budget; see rs/moq-uring/README.md.
 [[profile.default.overrides]]
-filter = "package(moq-uring) | binary_id(moq-relay::runtime_uring) | (binary_id(moq-relay::embed) & test(/uring/))"
+filter = "package(moq-uring) | (binary_id(moq-relay::integration) & (test(/^runtime_uring::/) | test(/^embed::.*uring/)))"
 test-group = "io-uring"
+
+# The binding benchmark runs many `MOQ_BENCH_SECONDS` budgets back to back, so its
+# length scales with the budget. It guards each round against a wedge itself.
+[[profile.default.overrides]]
+filter = "package(moq-ffi) & test(=bench::benchmark_ffi)"
+slow-timeout = { period = "60s" }
 
 [test-groups]
 io-uring = { max-threads = 4 }

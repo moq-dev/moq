@@ -191,10 +191,11 @@ impl<T: ObjectStore> Store<T> {
 		Ok(key)
 	}
 
-	/// Fetch and decode the object at `segments/<segment>`.
-	pub async fn get_segments(&self, track: &str, segment: u64) -> Result<Object> {
+	/// Fetch and decode the object at `segments/<segment>`, whose frames store timestamps when
+	/// `timed`, as the track's `.info` says.
+	pub async fn get_segments(&self, track: &str, segment: u64, timed: bool) -> Result<Object> {
 		let path = self.path(&Key::segments(track, segment)?)?;
-		Object::decode(self.get_bytes(&path).await?)
+		Object::decode(self.get_bytes(&path).await?, timed)
 	}
 
 	/// Each recorded track's timeline track, found by listing the track directories a [`Writer`]
@@ -370,7 +371,7 @@ mod tests {
 
 	fn frame(timestamp: u64, payload: &'static [u8]) -> Frame {
 		Frame {
-			timestamp,
+			timestamp: Some(timestamp),
 			payload: Bytes::from_static(payload),
 		}
 	}
@@ -407,7 +408,7 @@ mod tests {
 	#[tokio::test]
 	async fn info_create_get_and_idempotent_retry() {
 		let store = memory();
-		let info = Info::new(1, 1_000).unwrap();
+		let info = Info::new(1, Some(1_000)).unwrap();
 		store.put_info("catalog.json", &info).await.unwrap();
 		assert_eq!(store.get_info("catalog.json").await.unwrap(), info);
 
@@ -433,7 +434,7 @@ mod tests {
 	#[tokio::test]
 	async fn malformed_or_unsupported_existing_info_is_refused_and_kept() {
 		let store = memory();
-		let info = Info::new(0, 1_000).unwrap();
+		let info = Info::new(0, Some(1_000)).unwrap();
 		for (track, existing, check) in [
 			(
 				"v1",
@@ -457,22 +458,28 @@ mod tests {
 	#[tokio::test]
 	async fn info_property_mismatch_is_a_hard_error() {
 		let store = memory();
-		store.put_info("video", &Info::new(0, 1_000).unwrap()).await.unwrap();
+		store
+			.put_info("video", &Info::new(0, Some(1_000)).unwrap())
+			.await
+			.unwrap();
 		assert!(matches!(
-			store.put_info("video", &Info::new(1, 1_000).unwrap()).await,
+			store.put_info("video", &Info::new(1, Some(1_000)).unwrap()).await,
 			Err(Error::Priority {
 				existing: 0,
 				intended: 1
 			})
 		));
 		assert!(matches!(
-			store.put_info("video", &Info::new(0, 2_000).unwrap()).await,
+			store.put_info("video", &Info::new(0, Some(2_000)).unwrap()).await,
 			Err(Error::TimescaleMismatch {
-				existing: 1000,
-				intended: 2000
+				existing: Some(1000),
+				intended: Some(2000)
 			})
 		));
-		assert_eq!(store.get_info("video").await.unwrap(), Info::new(0, 1_000).unwrap());
+		assert_eq!(
+			store.get_info("video").await.unwrap(),
+			Info::new(0, Some(1_000)).unwrap()
+		);
 	}
 
 	#[tokio::test]
@@ -485,7 +492,7 @@ mod tests {
 			store.path(&key).unwrap().as_ref(),
 			"rec/video/segments/0000000000000000003"
 		);
-		assert_eq!(store.get_segments("video", 3).await.unwrap(), object);
+		assert_eq!(store.get_segments("video", 3, true).await.unwrap(), object);
 		store.put_segments("video", 3, &object).await.unwrap();
 
 		let other = Object::new(vec![Group {
@@ -503,10 +510,10 @@ mod tests {
 		let store = memory();
 		let object = one_group(0, b"tl");
 		store.put_segments("timeline.z", 0, &object).await.unwrap();
-		assert_eq!(store.get_segments("timeline.z", 0).await.unwrap(), object);
+		assert_eq!(store.get_segments("timeline.z", 0, true).await.unwrap(), object);
 		store.delete(&Key::segments("timeline.z", 0).unwrap()).await.unwrap();
 		assert!(matches!(
-			store.get_segments("timeline.z", 0).await,
+			store.get_segments("timeline.z", 0, true).await,
 			Err(Error::NotFound(_))
 		));
 	}
@@ -514,7 +521,7 @@ mod tests {
 	#[tokio::test]
 	async fn listing_names_every_object() {
 		let store = memory();
-		store.put_info("video", &Info::new(0, 1).unwrap()).await.unwrap();
+		store.put_info("video", &Info::new(0, Some(1)).unwrap()).await.unwrap();
 		store.put_segments("video", 1, &one_group(1, b"a")).await.unwrap();
 		store.put_segments("video", 3, &one_group(3, b"b")).await.unwrap();
 		store.put_segments("timeline.z", 2, &one_group(0, b"t")).await.unwrap();
@@ -559,7 +566,10 @@ mod tests {
 	#[tokio::test]
 	async fn percent_encoded_track_listing() {
 		let store = memory();
-		store.put_info("catalog.json", &Info::new(0, 1).unwrap()).await.unwrap();
+		store
+			.put_info("catalog.json", &Info::new(0, Some(1)).unwrap())
+			.await
+			.unwrap();
 		let locations = names(&store, &Query::new()).await;
 		assert!(locations.contains(&format!("{}/.info", encode_track("catalog.json").unwrap())));
 	}
@@ -567,9 +577,12 @@ mod tests {
 	#[tokio::test]
 	async fn listing_query_is_recording_relative() {
 		let store = memory();
-		store.put_info("video", &Info::new(0, 1).unwrap()).await.unwrap();
+		store.put_info("video", &Info::new(0, Some(1)).unwrap()).await.unwrap();
 		store.put_segments("video", 1, &one_group(1, b"a")).await.unwrap();
-		store.put_info("video-alt", &Info::new(0, 1).unwrap()).await.unwrap();
+		store
+			.put_info("video-alt", &Info::new(0, Some(1)).unwrap())
+			.await
+			.unwrap();
 
 		let query = Query::track("video").unwrap();
 		let paths = names(&store, &query).await;
@@ -589,7 +602,7 @@ mod tests {
 	#[tokio::test]
 	async fn paginated_recording_prefix_excludes_siblings() {
 		let store = memory();
-		store.put_info("video", &Info::new(0, 1).unwrap()).await.unwrap();
+		store.put_info("video", &Info::new(0, Some(1)).unwrap()).await.unwrap();
 		store
 			.inner()
 			.put(
@@ -808,7 +821,10 @@ mod tests {
 	#[tokio::test]
 	async fn empty_prefix_lists_the_whole_store() {
 		let store = Store::new(Mock::memory(), "");
-		store.put_info("catalog.json", &Info::new(0, 1).unwrap()).await.unwrap();
+		store
+			.put_info("catalog.json", &Info::new(0, Some(1)).unwrap())
+			.await
+			.unwrap();
 		store.put_segments("video", 4, &one_group(4, b"a")).await.unwrap();
 		assert_eq!(store.paginated_prefix(None), None);
 
@@ -852,7 +868,7 @@ mod tests {
 		let store = memory();
 		let object = one_group(ID_MAX, b"z");
 		store.put_segments("t", ID_MAX, &object).await.unwrap();
-		assert_eq!(store.get_segments("t", ID_MAX).await.unwrap(), object);
+		assert_eq!(store.get_segments("t", ID_MAX, true).await.unwrap(), object);
 	}
 
 	#[tokio::test]
@@ -860,11 +876,11 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let inner = object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap();
 		let store = Store::new(inner, Path::from("rec"));
-		let info = Info::new(3, 90_000).unwrap();
+		let info = Info::new(3, Some(90_000)).unwrap();
 		store.put_info("audio", &info).await.unwrap();
 		let object = two_groups();
 		store.put_segments("audio", 0, &object).await.unwrap();
 		assert_eq!(store.get_info("audio").await.unwrap(), info);
-		assert_eq!(store.get_segments("audio", 0).await.unwrap(), object);
+		assert_eq!(store.get_segments("audio", 0, true).await.unwrap(), object);
 	}
 }

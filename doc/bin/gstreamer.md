@@ -69,12 +69,18 @@ reports `failed` on an answer redialing can't change, such as a rejected token.
 Each run from `READY` publishes under a fresh
 [publisher epoch](/concept/moq-lite#publisher-epochs), so on moq-lite 07 (opt-in)
 viewers switch to a restarted pipeline at once instead of stalling on the old
-one; reconnects within a run keep it. The first catalog waits for every requested
-pad to negotiate its rendition, including any codec config carried in its first
-buffers. A linked pad that never negotiates holds back the whole catalog until
+one; reconnects within a run keep it. The first catalog waits for a timed buffer
+to place the shared wall clock and for every requested pad to negotiate its
+rendition, including any codec config carried in its first buffers. A linked pad
+that never negotiates holds back the whole catalog until
 it is released, reaches EOS, or fails; a flush or new stream after that EOS
 holds it back again. Opaque data pads are not listed. Later
 catalog updates do not wait for newly requested pads.
+
+All pads share one media timeline on one wall clock. The first timed buffer places
+it using UNIX or NTP reference timestamp metadata; other clock domains use the
+pipeline running time and local wall clock. Delayed buffers keep their media
+time. Pauses and flushes keep this mapping; starting a new run chooses a new one.
 
 `connection-stats` is null while disconnected. While connected it is a
 structure of the transport counters the active backend has (RTT, send and
@@ -96,8 +102,8 @@ default, for file, demuxed, and network media: their arrival reflects the disk
 or the network, not the original encoder, and a GStreamer segment cannot tell
 the two apart. Text and opaque pads refuse it.
 
-After a pause, flush, or changed TIME segment, the next media buffer starts a new
-timeline epoch and resets the handoff baseline. The pause does not inflate
+After a pause, flush, or changed TIME segment, the next media buffer resets
+the handoff measurement baseline. The pause does not inflate
 advertised jitter, and previously measured maxima remain. Resumed timestamps
 must continue forward on the broadcast media clock.
 
@@ -118,10 +124,18 @@ restarts, it switches to the new broadcast on the same pads, kept by rendition
 name, so a pipeline linked by name keeps playing. A format change keeps its pad
 too, with new caps downstream must accept. The new run's first catalog must list
 every returning rendition; one it omits gets EOS instead of keeping its old pad.
+Within each run, the first media frame fixes one timestamp reference and segment
+base for every pad. Audio and video keep their relative broadcast timing, even
+when their tracks use different timescales or arrive at different times. Frames
+before that reference keep an earlier PTS for downstream to clip. A new broadcast
+chooses a fresh reference on the same pads; playback does not require a wall clock.
 A rendition that leaves the catalog
 gets EOS once its track ends. A broadcast that ends or loses its publisher holds
 its pads without EOS until it is announced again, so the pipeline does not end
-on its own; losing the relay connection posts an error. Properties: `url`,
+on its own. Losing the relay connection also holds the pads: `moqsrc` redials
+without a retry deadline and resumes when the broadcast returns. A refused
+connection, refused path or catalog, or malformed protocol input or catalog posts
+an error. Properties: `url`,
 `broadcast`, `tls-disable-verify`.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.

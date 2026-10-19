@@ -1,4 +1,5 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, test } from "bun:test";
+import { Manual, Nano, Second } from "@moq/clock";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -64,7 +65,7 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 				accept({ url, transport: pair.server, publish: source.consume() }),
 			]);
 			const announced = destination.announced();
-			let timer: ReturnType<typeof spyOn<typeof globalThis, "setTimeout">> | undefined;
+			let restore: (() => void) | undefined;
 			try {
 				expect((await announced.next())?.kind).toBe("start");
 				fin.enable();
@@ -72,23 +73,18 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 				void pair.server.closed.then(() => {
 					closed = true;
 				});
-				let expire: (() => void) | undefined;
-				if (outcome === "timeout") {
-					const original = globalThis.setTimeout;
-					timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
-						if (ms !== 1000) return original(fn, ms);
-						expire = fn;
-						return 0 as unknown as ReturnType<typeof setTimeout>;
-					}) as typeof setTimeout);
-				}
+				// Only the close's own deadline is armed on the manual clock.
+				const clock = new Manual();
+				if (outcome === "timeout") restore = clock.install();
 				const closing = server.close();
 				await fin.reached;
 				expect(closed).toBe(false);
 				expect((await announced.next())?.kind).toBe("end");
 				if (outcome === "timeout") {
-					expect(expire).toBeDefined();
-					expire?.();
-					await expect(closing).rejects.toThrow("session close timed out");
+					// bun's `rejects` blocks on a pending promise, so catch first and advance.
+					const timedOut = closing.catch((err: unknown) => err);
+					await clock.advanceAsync(Nano.fromSecond(Second(1)));
+					expect(await timedOut).toHaveProperty("message", "session close timed out");
 				} else {
 					fin.release();
 					await closing;
@@ -96,7 +92,7 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 				await pair.server.closed;
 				expect(closed).toBe(true);
 			} finally {
-				timer?.mockRestore();
+				restore?.();
 				fin.release();
 				client.abort();
 				server.abort();

@@ -7,16 +7,16 @@ An open-GOP recovery point is a non-IDR I picture flagged by a recovery-point SE
 pictures that follow it in decode order but are presented before it, its leading
 pictures, reference the previous GOP, so only a viewer that already holds that GOP can
 decode them. A viewer playing continuously needs every one of them, in decode order.
-Dropping them is right only at a tune-in, which the transport cannot see, so the
-round-trip has to hand them all on.
+A join or delivery gap trims that recovery group's orphan leading pictures.
+Every continuous group keeps all of them.
 
 Access units are matched by their slice data. That makes the comparison indifferent to
 the parameter sets and delimiters the round-trip may re-insert and to the timestamp
-rebase, and exact about order: the capture must be one contiguous run of the source's
-access units, starting at a random-access point.
+rebase, and exact about order: each delivered segment starts at a random-access
+point and omits only that recovery group's leading pictures.
 
 Hard checks: the source is open GOP with leading pictures (else nothing here is tested),
-the capture is that contiguous run with DTS strictly increasing, and every captured
+the capture follows that delivery rule with DTS strictly increasing, and every captured
 picture keeps the presentation offset the source gave it, which is what makes a leading
 picture leading. Shape checks, reported and failing only under `--strict`: whether each
 exported random-access point carries the random_access_indicator and keeps its
@@ -199,6 +199,30 @@ def leading(units):
     return out
 
 
+def align(source, captured, leads):
+    """Match every AU, omitting leading pictures only at a join or a later RAP after lost media."""
+    for start in [i for i, unit in enumerate(source) if captured and unit.key == captured[0].key and is_rap(unit)]:
+        position = start
+        omitted = set(leads.get(start, []))
+        indices = []
+        recoveries = {0: start}
+        for index, unit in enumerate(captured):
+            while position in omitted:
+                position += 1
+            if position >= len(source) or source[position].key != unit.key:
+                resume = next((i for i in range(position + 1, len(source)) if source[i].key == unit.key and is_rap(source[i])), None)
+                if resume is None:
+                    break
+                position = resume
+                omitted = set(leads.get(resume, []))
+                recoveries[index] = resume
+            indices.append(position)
+            position += 1
+        else:
+            return indices, recoveries
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description="Grade open-GOP leading pictures across a TS round-trip.")
     ap.add_argument("source", help="TS that was published")
@@ -223,76 +247,53 @@ def main():
         f"{sum(len(src_leading[i]) for i in open_rps)} leading picture(s)",
     )
 
-    # Where the capture starts in the source. Frames can repeat in principle, so take the
-    # first candidate the whole run agrees with rather than the first match on one key.
-    starts = [i for i, unit in enumerate(src) if cap and unit.key == cap[0].key]
-    start = next((i for i in starts if [u.key for u in src[i : i + len(cap)]] == [u.key for u in cap]), None)
-    if start is None:
-        detail = "the capture's first AU is not in the source"
-        if starts:
-            s, prefix = starts[0], 0
-            while prefix < len(cap) and s + prefix < len(src) and src[s + prefix].key == cap[prefix].key:
-                prefix += 1
-            want = s + prefix
-            kind = (
-                "a leading picture"
-                if any(want in lead for lead in src_leading.values())
-                else "a random-access point"
-                if want < len(src) and is_rap(src[want])
-                else "a picture"
-            )
-            detail = (
-                f"capture AU {prefix} of {len(cap)} departs from the source; "
-                f"source AU {want} ({kind}) is missing or moved"
-            )
-        check("decode-order", HARD, False, detail)
+    matched = align(src, cap, src_leading)
+    if matched is None:
+        check("decode-order", HARD, False, "capture differs from source beyond orphan leading pictures at delivery breaks")
     else:
+        indices, recoveries = matched
         backwards = [i for i in range(1, len(cap)) if delta(cap[i].dts, cap[i - 1].dts) <= 0]
-        ok = is_rap(src[start]) and not backwards
-        detail = f"{len(cap)} AUs, source AUs {start}..{start + len(cap) - 1} in order"
-        if not is_rap(src[start]):
-            detail += f"; but starts at source AU {start}, which is not a random-access point"
+        detail = f"{len(cap)} AUs in source order, {len(recoveries)} delivery recovery group(s)"
         if backwards:
             detail += f"; DTS does not advance at {len(backwards)} AU(s), first at {backwards[0]}"
-        check("decode-order", HARD, ok, detail)
+        check("decode-order", HARD, not backwards, detail)
 
-    if start is not None:
-        # Leading pictures are defined by presentation offset, so check the offset of every
-        # captured picture rather than only counting the ones that still come out leading.
-        moved = [
-            i
-            for i in range(len(cap))
-            if abs(delta(cap[i].pts, cap[0].pts) - delta(src[start + i].pts, src[start].pts)) > PTS_TOLERANCE
-        ]
-        # Keyed on the source's random-access points, so an exporter that strips the SEI
-        # fails the SEI check below rather than hiding its leading pictures from this one.
+        # A delivery break may rebase the schedule, but every retained picture
+        # keeps its source PTS offset within that delivered segment.
+        moved = []
+        anchor = 0
+        for i, original in enumerate(indices):
+            if i in recoveries:
+                anchor = i
+            if abs(delta(cap[i].pts, cap[anchor].pts) - delta(src[original].pts, src[indices[anchor]].pts)) > PTS_TOLERANCE:
+                moved.append(i)
+        positions = {original: i for i, original in enumerate(indices)}
+        recovery_groups = set(recoveries.values())
         kept = {
-            i - start: [j - start for j in lead if j < start + len(cap)]
-            for i, lead in src_leading.items()
-            if lead and start <= i < start + len(cap)
+            positions[rap]: [positions[j] for j in lead if j in positions]
+            for rap, lead in src_leading.items()
+            if rap in positions and rap not in recovery_groups
         }
-        # A capture cut short can end inside a GOP; only a leading picture it reached is owed.
-        owed = sum(len(lead) for lead in kept.values())
+        owed = sum(sum(j <= indices[-1] for j in src_leading[indices[i]]) for i in kept)
         found = sum(1 for i, lead in kept.items() for j in lead if delta(cap[j].pts, cap[i].pts) < 0)
-        # Only a recovery point with a captured leading picture tests anything.
-        crossed = len([i for i, lead in kept.items() if lead and not src[start + i].idr])
+        crossed = sum(bool(lead) and not src[indices[i]].idr for i, lead in kept.items())
         ok = not moved and found == owed and crossed >= MIN_RECOVERY_POINTS
-        detail = f"{found}/{owed} leading picture(s) across {crossed} recovery point(s)"
+        detail = f"{found}/{owed} continuous leading picture(s) across {crossed} recovery point(s); {len(recoveries)} orphan sets trimmed"
         if moved:
-            detail += f"; {len(moved)} AU(s) presented away from the source's offset, first at {moved[0]}"
+            detail += f"; {len(moved)} AU(s) presented away from the source offset, first at {moved[0]}"
         if crossed < MIN_RECOVERY_POINTS:
-            detail += f"; the capture reaches leading pictures at fewer than {MIN_RECOVERY_POINTS} recovery points"
+            detail += f"; fewer than {MIN_RECOVERY_POINTS} continuous recovery points"
         check("leading-pictures", HARD, ok, detail)
 
-        raps = [i for i in range(len(cap)) if is_rap(src[start + i])]
+        raps = [i for i in range(len(cap)) if is_rap(src[indices[i]])]
         flagged = [i for i in raps if cap[i].rai]
-        stray = [i for i in range(len(cap)) if cap[i].rai and not is_rap(src[start + i])]
+        stray = [i for i in range(len(cap)) if cap[i].rai and not is_rap(src[indices[i]])]
         detail = f"{len(flagged)}/{len(raps)} random-access AU(s) flagged"
         if stray:
             detail += f"; {len(stray)} non-random-access AU(s) flagged too"
         check("random-access-indicator", SHAPE, len(flagged) == len(raps) and not stray, detail)
 
-        rps = [i for i in raps if src[start + i].recovery]
+        rps = [i for i in raps if src[indices[i]].recovery]
         survived = [i for i in rps if cap[i].recovery]
         check("recovery-point-sei", SHAPE, len(survived) == len(rps), f"{len(survived)}/{len(rps)} kept the SEI")
 

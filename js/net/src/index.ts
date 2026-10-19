@@ -1,6 +1,6 @@
 /**
  * MoQ networking layer for browsers: connect to a relay, then publish and consume
- * broadcasts, tracks, groups, and frames over WebTransport (or a WebSocket fallback).
+ * broadcasts, tracks, groups, and frames over WebTransport, its WebSocket fallback, or a supplied transport.
  *
  * @module
  */
@@ -20,7 +20,7 @@ export { Connection } from "./connection/index.ts";
 /** Publisher instance identities, carried in broadcast paths as UUIDv7 epochs. */
 export * as Epoch from "./epoch.ts";
 export { SessionCode, StreamCode } from "./error.ts";
-/** Session and stream errors, each carrying a code from its own registry. */
+/** Session, stream, and local request errors. */
 export * as Error from "./errors.ts";
 /** Group role handles and frame helpers. */
 export * as Group from "./group.ts";
@@ -28,7 +28,7 @@ export * as Group from "./group.ts";
 export * as Origin from "./origin.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. Path patterns are re-exported from `@moq/pattern`. */
 export * as Path from "./path.ts";
-/** Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions. */
+/** Presentation timestamps and their timescales; duration units live in `@moq/clock`. */
 export * as Time from "./time.ts";
 export type { Timed } from "./timed.ts";
 /** Track role handles. */

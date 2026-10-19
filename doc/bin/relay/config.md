@@ -56,14 +56,14 @@ Transport tuning, applied to accepted and dialed connections alike.
 ```toml
 [quic]
 congestion_control = "delay"         # "delay" (BBR, the default) or "loss" (CUBIC).
-max_streams = 10000                  # Concurrent streams per connection, bidi and uni. Default.
+max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 67108864            # Whole-connection window, in bytes. Default (64 MiB).
-stream_receive_window = 8388608      # Per-stream window. Omit for the backend default.
-send_window = 33554432               # Unacknowledged outgoing data. Omit for the backend default.
+stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
+send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 ```
 
@@ -89,42 +89,64 @@ certificate, route hop, or cluster-looking URL alone does not select peer caps.
 [session]
 announces = 1000                     # Simultaneous broadcasts or namespaces.
 subscriptions = 1000                # Simultaneously held subscriptions.
+fetches = 10000                      # Independent simultaneous FETCH requests.
 
 [peer]
 announces = 100000
 subscriptions = 10000
+fetches = 10000
+
+[peer.quic]
+max_streams = 100000                 # Concurrent QUIC streams per direction.
+receive_window = 671088640           # Connection-wide receive window (640 MiB).
+send_window = 671088640              # Unacknowledged outgoing data (640 MiB).
 ```
 
+`[peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
+any other `[quic]` key is refused. They replace the `[quic]` values for a
+peer's QUIC connection once its grant is known, before the SETUP reply. Links
+the relay dials get them from the handshake on. A link carrying a whole cluster is then
+not throttled by `[quic]` limits sized for one viewer, for example
+`--peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
+their transport's own limits.
+
 These are the defaults. For example, `--peer-subscriptions=50000` raises the
-subscription cap on cluster links. Size peer caps for the combined traffic
-they carry, and use session peak counters to check headroom. Exceeding a cap
-closes the session with `TOO_MANY_REQUESTS`; reconnecting with the same load
-will exceed it again. Zero admits no entries of that kind, not unlimited
+subscription cap on cluster links. `--session-fetches` and `--peer-fetches`
+set the independent FETCH caps; concurrent callers of the same group each
+hold a slot. Size peer caps for the combined traffic they carry, and use
+session peak counters to check announcement and subscription headroom.
+Exceeding a cap closes the session with `TOO_MANY_REQUESTS`; reconnecting with
+the same load will exceed it again. Zero admits no entries of that kind, not unlimited
 entries. On moq-transport drafts 14 to 16 these caps also size the request
 window, so very small values can prevent other requests from progressing.
 
 ## \[runtime]
 
 By default one work-stealing runtime serves every connection off one UDP
-socket. On Linux, QUIC can instead run on pinned single-threaded workers, each
-with its own socket on the listen address (`SO_REUSEPORT`), so a connection is
-handled start to finish by one thread and its packets never cross cores.
+socket. On Linux, QUIC can instead run on single-threaded workers, each with
+its own socket on the listen address (`SO_REUSEPORT`), so a connection is
+handled start to finish by one worker thread and its packets never cross
+threads. `pin = true` also keeps that thread on one core.
 
 ```toml
 [runtime]
 workers = 8                          # Single-threaded QUIC workers. Omit for the shared runtime.
-pin = true                           # Pin each worker to a core. Default.
+pin = false                          # Pin each worker to a core. Off by default.
 io_uring = false                     # Drive them with io_uring instead of tokio.
 ```
 
 Packets are steered by connection ID, so a client that migrates stays with its
-worker. `workers` needs the `noq` feature. Every worker and the TLS stream
+worker. `workers` needs the `quic` feature. Every worker and the TLS stream
 listener serve one shared identity, generated or file-backed, so a certificate
 rotation reaches them together and `/certificate.sha256` stays accurate.
 
+Pinning is off by default because every relay pins its workers to the same
+first cores, so two relays on one host, or one limited to fewer CPUs than the
+host has, would crowd onto them. Turn it on for a host the relay has to itself.
+
 `io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
-shares the same reloadable TLS identity, serves moq-lite only, and refuses
-`mtu_discovery`. A setting the build or host cannot deliver refuses to
+shares the same reloadable TLS identity, serves every configured version
+like the shared runtime, and refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
 start rather than being ignored. If io\_uring workers fail to start naming
 `RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 
@@ -136,7 +158,7 @@ listen = "[::]:4443"                 # HTTP: fingerprint, announced, fetch, heal
 
 [web.https]
 listen = "[::]:443"                  # HTTPS plus the WebSocket fallback.
-cert = "cert.pem"                    # cert, key, and root need listen.
+cert = "cert.pem"                    # cert, key, and root need listen. Omit cert and key with [acme].
 key = "key.pem"
 
 [internal]
@@ -150,6 +172,62 @@ keep the connection open; a WebSocket upgrade hands its lifetime to MoQ.
 
 See [HTTP endpoints](/bin/relay/http).
 
+## \[acme]
+
+The relay provisions and renews a publicly trusted certificate itself, for QUIC
+and HTTPS alike (Unix only, where the key can be kept owner-only):
+
+```toml
+[acme]
+domains = ["relay.example.com"]      # Enables ACME. No wildcards.
+contact = ["mailto:ops@example.com"] # Optional account contact.
+dir = "/var/lib/moq-relay/acme"      # Required: account key and certificate, kept owner-only.
+# directory = "https://acme-staging-v02.api.letsencrypt.org/directory"  # Default: Let's Encrypt production.
+# timeout = "5m"                     # How long the first issuance may take before startup fails.
+```
+
+Validation is TLS-ALPN-01 only: the directory connects to TCP port 443 of each
+domain, so `web.https.listen` is required and must be reachable there, directly
+or forwarded. `[acme]` cannot be combined with `listen.tls.cert`, `key`, or
+`generate`, or with `web.https.cert` and `key`.
+
+With no usable certificate in `dir` (missing, expired, missing a domain, or
+from another directory), startup answers only the challenge until one is
+issued; QUIC, the other routes, and readiness wait for it, and startup fails
+with the ACME error once `timeout` runs out. It also fails after 3 failed
+validations within an hour, counting earlier starts recorded in `dir`, so a
+restart loop stops short of Let's Encrypt's limit of 5 per hostname per hour. Renewal runs in the background
+well before expiry and reaches every listener on its next handshake. A failed
+renewal keeps the current certificate serving and retries.
+
+## \[stun]
+
+Applications can use the relay as an explicitly selected STUN server for WebRTC
+ICE. The listener has its own UDP port and is disabled unless configured:
+
+```toml
+[stun]
+bind = "[::]:3478"                  # Or --stun-bind / MOQ_STUN_BIND.
+```
+
+List `stun:relay.example.com:3478` in the application's ICE servers. Clients
+never infer a STUN server from their relay session. This provides Binding
+responses with the sender's mapped address, without TURN relaying or ICE
+signaling. It is plain STUN over UDP, so it needs no TLS certificate;
+`stuns:` (STUN over TLS) is not served.
+
+The private limits are 10 requests/second per source IP with a burst of 20,
+and 1000/second globally with a burst of 2000. The source table retains at most
+4096 IPs; an idle entry can be replaced once its two-second bucket has refilled.
+Excess, malformed, unsupported, and non-Binding datagrams receive no reply.
+The internal `/metrics` endpoint reports `moq_relay_stun_replies_total` and
+`moq_relay_stun_dropped_total` with `reason` values `source`, `global`,
+`capacity`, `invalid`, and `io`, only when this listener is configured.
+`io` counts replies that could not be sent; `moq_relay_stun_io_errors_total`
+also counts asynchronous peer errors reported while receiving. Peer network
+errors and interrupted calls leave the listener running; other local socket
+failures stop the relay.
+
 ## \[auth]
 
 ```toml
@@ -160,6 +238,7 @@ url = "http://127.0.0.1:4440/"       # An auth server asked once per session eve
 # public = "anon/**"                 # Or a static anonymous grant rooted at /, publish and subscribe alike.
 # public_subscribe = ["anon/**", "demo/**"]   # Or split them; patterns, `foo/**` for a subtree.
 # public_publish = ["anon/**"]
+verifications = 128                  # In-band tokens one session verifies at once; later ones wait.
 ```
 
 See [Authentication](/bin/relay/auth).
@@ -237,7 +316,7 @@ relay dials and LAN peers it admits), which is what makes billing per customer o
 Each run, and each group returning after its linger, announces under a fresh
 [epoch](/concept/moq-lite#publisher-epochs), so a restart is a new broadcast at
 the same path. Each group's totals count everything since its epoch began, so
-billing reads those; per-path traffic and per-root sessions are for
+billing reads those; per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
 [Stats](/concept/stats) describes the paths, tracks, and encodings; read them

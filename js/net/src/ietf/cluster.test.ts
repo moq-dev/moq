@@ -283,10 +283,25 @@ test("Cluster: every malformed PUBLISH_NAMESPACE update is a protocol violation"
 		await expect(PublishNamespaceUpdate.decode(reader(bytes), VERSION)).rejects.toThrow(ProtocolViolation);
 	}
 
-	// The message did not exist before draft-17.
+	// The message did not exist before draft-16.
 	await expect(
-		PublishNamespaceUpdate.decode(reader(new Uint8Array([0, 0]), Version.DRAFT_16), Version.DRAFT_16),
+		PublishNamespaceUpdate.decode(reader(new Uint8Array([0, 0]), Version.DRAFT_15), Version.DRAFT_15),
 	).rejects.toThrow(ProtocolViolation);
+});
+
+test("Cluster: a draft-16 PUBLISH_NAMESPACE update names the advertisement", async () => {
+	const version = Version.DRAFT_16;
+	const update = new PublishNamespaceUpdate({ requestId: 2n, namespaceRequestId: 0n, update: {} });
+	const decoded = await PublishNamespaceUpdate.decode(reader(await encode(update, version), version), version);
+	expect(decoded.requestId).toBe(2n);
+	expect(decoded.namespaceRequestId).toBe(0n);
+
+	// A repeated token refuses the update, keyed by its own Request ID.
+	const tokens = [2, 0x03, 3, 0x03, 0x00, 0xaa, 0, 3, 0x03, 0x00, 0xaa];
+	const body = [2, 0, ...tokens];
+	const repeated = PublishNamespaceUpdate.decode(reader(new Uint8Array([0, body.length, ...body]), version), version);
+	await expect(repeated).rejects.toThrow(MalformedAuthToken);
+	await expect(repeated).rejects.toMatchObject({ requestId: 2n });
 });
 
 test("Cluster: a reset while decoding an update stays stream-local", async () => {

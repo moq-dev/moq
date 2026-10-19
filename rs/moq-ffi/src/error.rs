@@ -67,6 +67,8 @@ pub enum MoqProtocolKind {
 	Unknown,
 	/// The session exceeded its announcement or subscription cap.
 	TooManyRequests,
+	/// The authorization token expired and can be refreshed. Session 0x18.
+	Expired,
 }
 
 /// A protocol failure a peer sent (or this side will send): scope, verbatim code, kind,
@@ -118,6 +120,7 @@ fn session_kind(err: &moq_net::SessionError) -> MoqProtocolKind {
 		moq_net::SessionError::Cancel => MoqProtocolKind::Cancel,
 		moq_net::SessionError::Internal => MoqProtocolKind::Internal,
 		moq_net::SessionError::Unauthorized => MoqProtocolKind::Unauthorized,
+		moq_net::SessionError::Expired => MoqProtocolKind::Expired,
 		moq_net::SessionError::ProtocolViolation => MoqProtocolKind::ProtocolViolation,
 		moq_net::SessionError::KeyValueFormatting => MoqProtocolKind::KeyValueFormatting,
 		moq_net::SessionError::GoawayTimeout => MoqProtocolKind::GoawayTimeout,
@@ -201,7 +204,7 @@ pub enum MoqError {
 	#[error("log level: {reason}")]
 	LogLevel { reason: String },
 
-	// Only the native path spawns onto a runtime, so only it can fail to join.
+	/// An owned native task panicked; cancellation is reported separately.
 	#[cfg(not(target_arch = "wasm32"))]
 	#[error("task: {reason}")]
 	Task { reason: String },
@@ -242,6 +245,10 @@ pub enum MoqError {
 
 	#[error("forbidden")]
 	Forbidden,
+
+	/// The authorization token expired; refresh it before retrying.
+	#[error("authorization token expired")]
+	Expired,
 
 	/// The requested track or group is not available.
 	#[error("not found")]
@@ -289,16 +296,24 @@ pub enum MoqError {
 	/// A configuration record held a value the constructor cannot use.
 	#[error("config: {reason}")]
 	Config { reason: String },
+
+	/// A catalog needs a newer moq-hang draft than this build reads; upgrade to read it.
+	#[error("unsupported catalog version {version}")]
+	UnsupportedCatalog { version: u64 },
 }
 
 impl From<moq_net::Error> for MoqError {
 	fn from(err: moq_net::Error) -> Self {
 		match err {
 			moq_net::Error::Transport(message) => Self::Transport { reason: message },
+			moq_net::Error::IdleTimeout => Self::Transport {
+				reason: "transport idle timeout".into(),
+			},
 			moq_net::Error::NotFound | moq_net::Error::NotFetchable => Self::NotFound,
 			moq_net::Error::Closed | moq_net::Error::GoingAway | moq_net::Error::SessionClosed => Self::Closed,
 			moq_net::Error::Cancel => Self::Cancelled,
 			moq_net::Error::Unauthorized => Self::Unauthorized,
+			moq_net::Error::Expired => Self::Expired,
 			moq_net::Error::Unsupported | moq_net::Error::Version => Self::Unsupported,
 			moq_net::Error::Session(err) => Self::Protocol {
 				details: MoqProtocolError::from_session(&err),
@@ -335,6 +350,7 @@ impl From<hang::Error> for MoqError {
 	fn from(err: hang::Error) -> Self {
 		match err {
 			hang::Error::Moq(err) => err.into(),
+			hang::Error::UnsupportedVersion(version) => Self::UnsupportedCatalog { version },
 			err => Self::Media {
 				reason: err.to_string(),
 			},
@@ -433,6 +449,15 @@ mod tests {
 	}
 
 	#[test]
+	fn unsupported_catalog_survives_the_mux() {
+		let error = moq_mux::Error::Hang(hang::Error::UnsupportedVersion(5));
+		assert!(matches!(
+			MoqError::from(error),
+			MoqError::UnsupportedCatalog { version: 5 }
+		));
+	}
+
+	#[test]
 	fn protocol_codes_survive_container_errors() {
 		let error = moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::Moq(
 			moq_net::StreamError::Unknown(31).into(),
@@ -475,6 +500,22 @@ mod tests {
 				assert_eq!(protocol.scope, MoqErrorScope::Session);
 				assert_eq!(protocol.code, 0x2);
 				assert_eq!(protocol.kind, MoqProtocolKind::Unauthorized);
+			}
+			other => panic!("expected Protocol, got {other}"),
+		}
+	}
+
+	/// A refused request carries no session code, so it must not claim the session expired.
+	#[test]
+	fn expired_request_is_not_a_session_close() {
+		assert!(matches!(MoqError::from(moq_net::Error::Expired), MoqError::Expired));
+
+		let err = MoqError::from(moq_net::Error::from(moq_net::SessionError::Expired));
+		match err {
+			MoqError::Protocol { details } => {
+				assert_eq!(details.scope, MoqErrorScope::Session);
+				assert_eq!(details.code, 0x18);
+				assert_eq!(details.kind, MoqProtocolKind::Expired);
 			}
 			other => panic!("expected Protocol, got {other}"),
 		}

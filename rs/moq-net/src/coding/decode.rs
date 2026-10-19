@@ -104,6 +104,11 @@ pub enum DecodeError {
 	/// another, which rejects the request rather than closing the session.
 	#[error("malformed authorization token")]
 	MalformedAuthToken,
+
+	/// A request carries more than one distinct `AUTHORIZATION TOKEN`, which this
+	/// implementation refuses as unsupported rather than closing the session.
+	#[error("multiple authorization tokens")]
+	MultipleAuthTokens,
 }
 
 impl DecodeError {

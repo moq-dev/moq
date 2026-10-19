@@ -53,10 +53,16 @@ mod encoder;
 mod op;
 mod producer;
 
+#[cfg(test)]
+mod properties;
+
 pub use consumer::Consumer;
 pub use decoder::{ConsumerConfig, Decoder, Event, Group};
 pub use encoder::{Checkpoint, Encoded, Encoder, Pending, ProducerConfig};
 pub use producer::Producer;
+
+#[cfg(test)]
+use futures::FutureExt;
 
 #[cfg(test)]
 mod test {
@@ -66,15 +72,89 @@ mod test {
 
 	use super::*;
 
+	#[test]
+	fn pushes_and_pops_keep_the_callers_timestamps() {
+		let (mut producer, mut groups) = producer_on(ProducerConfig::default(), timed());
+		let first = moq_net::Timestamp::from_millis(100).unwrap();
+		let second = moq_net::Timestamp::from_millis(200).unwrap();
+		producer
+			.push(moq_net::Timed::from(&json!({ "n": 1 })).at(first))
+			.unwrap();
+		producer.pop(moq_net::Timed::from(1u64).at(second)).unwrap();
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected the window group");
+		};
+		for at in [first, second] {
+			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+				panic!("expected the timestamped window edit");
+			};
+			assert_eq!(frame.timestamp, Some(at));
+		}
+	}
+
+	/// Refused before the header's group is published, so the window carries on cleanly.
+	#[test]
+	fn a_timed_track_refuses_a_bare_publish() {
+		let (mut producer, mut track) = producer_on(ProducerConfig::default(), timed());
+		assert!(matches!(
+			producer.push(&json!({ "n": 0 })),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			None,
+			"a refused header published a group"
+		);
+		let at = moq_net::Timestamp::from_millis(100).unwrap();
+		producer.push(moq_net::Timed::from(&rec(1)).at(at)).unwrap();
+		producer.push(moq_net::Timed::from(&rec(2)).at(at)).unwrap();
+		producer.finish().unwrap();
+		let pushed: Vec<_> = drain(&mut consumer(track, false))
+			.into_iter()
+			.filter_map(|event| match event {
+				Event::Push { value, .. } => Some(value),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(pushed, vec![rec(1), rec(2)]);
+	}
+
+	#[test]
+	fn a_bare_publish_stays_untimed() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("untimed", moq_net::track::Info::default())
+			.unwrap();
+		let mut groups = track.subscribe(None);
+		let mut producer = Producer::new(track, ProducerConfig::default());
+		producer.push(&json!({ "n": 1 })).unwrap();
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected an untimed group");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected an untimed frame");
+		};
+		assert_eq!(frame.timestamp, None);
+	}
+
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
 	fn producer(config: ProducerConfig) -> (Producer<Value>, moq_net::track::Subscriber) {
+		producer_on(config, moq_net::track::Info::default())
+	}
+
+	fn producer_on(
+		config: ProducerConfig,
+		info: moq_net::track::Info,
+	) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", info)
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
@@ -366,7 +446,7 @@ mod test {
 	fn a_fresh_consumer_adopts_the_offset_without_skipping_history() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default().with_op_ratio(0));
 
@@ -375,7 +455,13 @@ mod test {
 		}
 		producer.pop(3).unwrap();
 		let mut subscriber = producer.consume();
-		subscriber.set_groups(subscriber.latest().unwrap()..);
+		let largest = subscriber
+			.largest()
+			.now_or_never()
+			.flatten()
+			.map(|position| position.group)
+			.unwrap();
+		subscriber.set_groups(largest..);
 		let mut fresh = consumer(subscriber, false);
 		producer.finish().unwrap();
 
@@ -526,12 +612,15 @@ mod test {
 
 	#[test]
 	fn an_empty_pop_writes_nothing() {
-		let (mut producer, track) = producer(ProducerConfig::default());
+		let (mut producer, mut track) = producer(ProducerConfig::default());
 		producer.pop(5).unwrap();
 		producer.finish().unwrap();
 
 		// Nothing was ever pushed, so there is nothing to drop and no group to publish.
-		assert_eq!(track.latest(), None);
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			None
+		);
 	}
 
 	#[test]
@@ -540,7 +629,9 @@ mod test {
 		let mut subscriber = track.subscribe(None).ordered();
 		let mut producer = Producer::<Value>::new(track, ProducerConfig::default());
 
-		assert!(producer.push(&rec(1)).is_err());
+		// Too late for the timescale, so the header group is published before the write fails.
+		let late = moq_net::Timestamp::from_millis(10_000).unwrap();
+		assert!(producer.push(moq_net::Timed::from(&rec(1)).at(late)).is_err());
 		assert_eq!(producer.range(), 0..0);
 		assert!(producer.window().is_empty());
 
@@ -553,13 +644,17 @@ mod test {
 
 	#[test]
 	fn the_handle_remains_usable_after_finish() {
-		let (mut producer, track) = producer(ProducerConfig::default());
+		let (mut producer, mut track) = producer(ProducerConfig::default());
 		producer.push(&rec(1)).unwrap();
 		producer.finish().unwrap();
 
 		assert_eq!(producer.window(), vec![rec(1)]);
 		assert_eq!(producer.range(), 0..1);
-		assert_eq!(producer.consume().latest(), track.latest());
+		let mut mirror = producer.consume();
+		assert_eq!(
+			mirror.largest().now_or_never().flatten().map(|position| position.group),
+			track.largest().now_or_never().flatten().map(|position| position.group)
+		);
 		producer.finish().unwrap();
 		assert!(matches!(
 			producer.push(&rec(2)),
@@ -661,7 +756,7 @@ mod test {
 	fn cut_finishes_the_group_and_the_next_edit_restates() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
 		let replay = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30));
 		let mut groups = track.subscribe(replay);

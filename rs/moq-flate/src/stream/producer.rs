@@ -54,7 +54,9 @@ impl Producer {
 	/// A payload that might not fit in what is left of the group's budget is refused with
 	/// [`moq_net::Error::GroupTooLarge`] before anything is written, leaving the log intact. The
 	/// budget covers the whole log, so once it is spent every append is refused; a publisher with
-	/// more to say opens a new track.
+	/// more to say opens a new track. A timestamp whose presence doesn't match the track's timescale
+	/// is refused with [`moq_net::Error::TimestampMismatch`] the same way, so a corrected append
+	/// carries on.
 	///
 	/// Any other payload that cannot be written ends the track: a log missing a record is not the
 	/// lossless log this mode promises, so the failure is surfaced rather than papered over with a
@@ -94,13 +96,19 @@ const _: () = assert!(moq_net::group::MAX_CACHE_BYTES <= crate::DEFAULT_MAX_FRAM
 
 impl Inner {
 	fn append(&mut self, payload: Timed<Bytes>) -> Result<usize> {
-		let timestamp = payload.at.unwrap_or_else(moq_net::Timestamp::now);
+		let timestamp = payload.at;
 		let payload = payload.value;
 
 		// A closed track refuses every append, so say so before the budget: `GroupTooLarge` promises
 		// the log is still writable.
 		if let Poll::Ready(err) = self.track.poll_closed(&kio::Waiter::noop()) {
 			return Err(err.into());
+		}
+
+		// A timestamp that doesn't match the track is refused before anything changes: found by
+		// `write_frame`, it would be a hole that ends the whole log.
+		if timestamp.is_some() != self.track.info().timescale.is_some() {
+			return Err(moq_net::Error::TimestampMismatch.into());
 		}
 
 		// Check before compressing: encoding advances the window, so a payload refused afterwards
