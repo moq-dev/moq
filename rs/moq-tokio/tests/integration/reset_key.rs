@@ -117,8 +117,9 @@ fn restart(reset_key: bool) -> Result<driver::ConnectionError, tokio::time::erro
 		let mut send = conn.open_uni(Default::default()).await.expect("open");
 		send.write_all(&[0; 64]).await.expect("write");
 		send.finish().expect("finish");
-		// Far below the client's 30s idle timeout, and ample for a loopback round trip.
-		tokio::time::timeout(Duration::from_secs(5), conn.closed()).await
+		// Far below the client's 30s idle timeout, and ample for a loopback round
+		// trip; the keyless arm waits all of it.
+		tokio::time::timeout(Duration::from_secs(1), conn.closed()).await
 	})
 }
 
@@ -126,4 +127,12 @@ fn restart(reset_key: bool) -> Result<driver::ConnectionError, tokio::time::erro
 fn a_restarted_server_resets_its_predecessors_connections() {
 	let closed = restart(true);
 	assert!(matches!(closed, Ok(driver::ConnectionError::Reset)), "{closed:?}");
+}
+
+/// The control: a random key per process drops the old connection IDs as invalid,
+/// so no reset comes and the client is left to wait out its idle timeout.
+#[test]
+fn a_restarted_server_without_the_key_leaves_peers_waiting() {
+	let closed = restart(false);
+	assert!(closed.is_err(), "{closed:?}");
 }
