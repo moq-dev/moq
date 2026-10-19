@@ -5,7 +5,7 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-### `MoqTrackInfo` gains `compress`
+### `MoqTrackInfo` gains `compress` (#5928)
 
 It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.
 

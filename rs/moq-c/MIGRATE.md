@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `moq_track_info` gains `compress`
+### `moq_track_info` gains `compress` (#5928)
 
 The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
 
