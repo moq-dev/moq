@@ -24,10 +24,10 @@ and the JSON producers take a final `*time.Duration` timestamp argument (`nil` f
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.Now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
-Share `media.NewTimebase(broadcast)` through container init records when several imports
-use one source timeline. `NewContainerStreamProducer` takes `ContainerStreamInit`;
-omitting its timebase keeps an independent offset. Timebases belong to one broadcast
+Share `media.NewTimebase(broadcast)` through `ContainerInit` when several imports use one
+source timeline; omitting it keeps an independent offset. Timebases belong to one broadcast
 and do not keep it open; release the handle with `Close` on the calling goroutine.
+`NewContainerProducer` takes chunks split anywhere, so a raw byte stream needs no other importer.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
 `media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
 fetches and decodes one past group.

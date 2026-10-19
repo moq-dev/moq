@@ -12,9 +12,6 @@ typedef TrackStreamProducer = MoqMediaTrackStreamProducer;
 /// The write side of a container, which publishes each track it describes.
 typedef ContainerProducer = MoqMediaContainerProducer;
 
-/// The write side of a container fed a raw byte stream.
-typedef ContainerStreamProducer = MoqMediaContainerStreamProducer;
-
 /// The read side of a media track: yields frames with codec metadata in decode order.
 typedef TrackConsumer = MoqMediaTrackConsumer;
 
@@ -59,9 +56,6 @@ typedef ContainerFormat = MoqContainerFormat;
 
 /// A shared source timestamp offset that does not keep its broadcast open.
 typedef Timebase = MoqMediaTimebase;
-
-/// A byte-stream container format and an optional shared source timebase.
-typedef ContainerStreamInit = MoqContainerStreamInit;
 
 /// A container format, its leading bytes, and an optional shared source timebase.
 typedef ContainerInit = MoqContainerInit;
