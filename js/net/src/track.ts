@@ -1525,8 +1525,10 @@ export class Subscriber {
 	#delivered = new Delivered();
 	// Whether a resumed reader has read groups, so a datagram read keeps copies they still need.
 	#groupsRead = false;
-	// What {@link largest} last reported.
+	// What {@link largest} last reported, and whether it ended: moving the bounds afterwards
+	// does not bring it back.
 	#largestSeen?: Location;
+	#largestDone = false;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
 	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
@@ -1893,9 +1895,11 @@ export class Subscriber {
 	 * pending read, which reports the largest once it is within them and newer than the last report.
 	 */
 	async largest(): Promise<Location | undefined> {
+		if (this.#largestDone) return undefined;
 		if (this.#resume) {
 			const largest = await this.#resume.largest(this.#largestSeen);
 			if (largest) this.#largestSeen = largest;
+			else this.#largestDone = true;
 			return largest;
 		}
 		for (;;) {
@@ -1908,7 +1912,10 @@ export class Subscriber {
 				this.#largestSeen = within;
 				return within;
 			}
-			if (this.#state.closed.peek() !== undefined || this.#state.largestEnded.peek()) return undefined;
+			if (this.#state.closed.peek() !== undefined || this.#state.largestEnded.peek()) {
+				this.#largestDone = true;
+				return undefined;
+			}
 			await Signal.race(this.#state.largest, this.#state.closed, this.#state.largestEnded, this.#cursor);
 		}
 	}

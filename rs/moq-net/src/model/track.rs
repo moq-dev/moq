@@ -4475,6 +4475,8 @@ pub struct Subscriber {
 #[derive(Default)]
 struct Reported {
 	position: Option<Position>,
+	// The stream ended: moving the bounds afterwards does not bring it back.
+	ended: bool,
 	// The task that last polled, woken when the bounds move. One is enough: polling
 	// takes `&mut self`.
 	waker: Option<std::task::Waker>,
@@ -5641,12 +5643,18 @@ impl Subscriber {
 	/// Moving the bounds wakes a parked poll, which reports the largest once it is within
 	/// them and newer than the last report.
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		if self.largest.ended {
+			return Poll::Ready(None);
+		}
 		let bounds = self.bounds();
 		let poll = self.poll_largest_within(bounds, waiter);
 		// Only a parked poll waits on the bounds; a finished one is not woken by them.
 		match poll {
 			Poll::Pending => self.largest.park(waiter.waker()),
-			Poll::Ready(_) => self.largest.waker = None,
+			Poll::Ready(next) => {
+				self.largest.waker = None;
+				self.largest.ended = next.is_none();
+			}
 		}
 		poll
 	}
@@ -6501,6 +6509,26 @@ mod test {
 		assert!(
 			reader.poll_largest(&noop).is_pending(),
 			"a floor below the largest leaves it where it was"
+		);
+	}
+
+	/// Once the stream ended, widening the bounds over a largest it never reported does not
+	/// bring it back.
+	#[test]
+	fn largest_stays_ended_when_the_bounds_widen() {
+		let producer = track_producer("test", Info::default());
+		framed(&producer, 5, 1).finish().unwrap();
+		producer.finish().unwrap();
+		let noop = kio::Waiter::noop();
+
+		let mut reader = producer.subscribe(replay());
+		reader.set_groups(..3);
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(None));
+		reader.set_groups(..);
+		assert_eq!(
+			reader.poll_largest(&noop),
+			Poll::Ready(None),
+			"the stream already ended"
 		);
 	}
 

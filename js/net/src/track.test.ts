@@ -1990,6 +1990,19 @@ test("largest follows the bounds as they move", async () => {
 	producer.close();
 });
 
+// Once the stream ended, widening the bounds over a largest it never reported does not bring
+// it back.
+test("largest stays ended when the bounds widen", async () => {
+	const producer = new TrackProducer("test").accept({});
+	framedGroup(producer, 5, 1).close();
+	producer.close();
+
+	const reader = producer.subscribe().withGroups({ end: { excluded: 3 } });
+	expect(await reader.largest()).toBeUndefined();
+	reader.setGroups({});
+	expect(await reader.largest()).toBeUndefined();
+});
+
 // A reader that starts at the largest group while it is still empty is at the live edge: it
 // gets that group, which ends with nothing, then the next one.
 test("a live-edge reader starts on an empty largest group", async () => {
