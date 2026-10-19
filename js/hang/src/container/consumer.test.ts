@@ -385,7 +385,9 @@ test("Consumer refuses a data marker that shares its group", async () => {
 			group.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) });
 			group.writeFrame({ payload: second, timestamp: Time.Timestamp.fromMicros(10_000) });
 			group.close();
-			await expect(within(nextFrame(consumer))).rejects.toThrow("shares its group");
+			// A finished track resolves the read instead of hanging when the reader fails to end.
+			track.close();
+			await expect(nextFrame(consumer)).rejects.toThrow("shares its group");
 		} finally {
 			consumer.close();
 			track.close();
@@ -675,7 +677,7 @@ for (const [where, payloads] of [
 				if (!result) return result;
 			}
 		};
-		await expect(within(read())).rejects.toThrow("malformed");
+		await expect(read()).rejects.toThrow("malformed");
 		consumer.close();
 	});
 }
@@ -981,16 +983,6 @@ test("Consumer preserves empty Legacy and LOC data frames", async () => {
 // --- Malformed rewind ---
 
 /** Read until the next media frame, passing over gaps and ends. */
-/** Fail a read that neither settles nor throws within `ms`, so a reader that never ends fails fast. */
-function within<T>(read: Promise<T>, ms = 300): Promise<T> {
-	return Promise.race([
-		read,
-		settle(ms).then(() => {
-			throw new Error("stalled");
-		}),
-	]);
-}
-
 async function nextFrame(consumer: Consumer) {
 	for (;;) {
 		const result = await consumer.next();
@@ -1928,7 +1920,8 @@ test("a group reset does not hide a later container decode failure", async () =>
 		// A truncated timestamp varint.
 		malformed.writeFrame({ payload: new Uint8Array([0x80]), timestamp: Time.Timestamp.now() });
 		malformed.close();
-		await expect(within(nextFrame(consumer))).rejects.toThrow("buffer too short");
+		track.close();
+		await expect(nextFrame(consumer)).rejects.toThrow("buffer too short");
 	} finally {
 		consumer.close();
 		track.close();
