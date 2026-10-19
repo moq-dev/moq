@@ -304,6 +304,12 @@ class SubscriptionControls {
 	}
 }
 
+// The later of two locations, either of which may be unknown.
+function newer(a: track.Location | undefined, b: track.Location | undefined): track.Location | undefined {
+	if (!a || !b) return a ?? b;
+	return b.group > a.group || (b.group === a.group && b.frame > a.frame) ? b : a;
+}
+
 // Register both readiness sources in the same turn after the caller observed neither ready.
 // The winner disposes both registrations, so an idle subscription accumulates nothing no
 // matter how many times it wakes.
@@ -1116,7 +1122,12 @@ export class Publisher {
 				// Exactly-once arrival-order serving. This synchronous package-internal pop
 				// and frameRange call are the operation's linearization point.
 				// Popping or filtering a group removes the subscriber's view of its edge.
-				const largest = !startSent && hasLargest(this.version) ? hooks.bufferedLargest(track) : undefined;
+				// A relay can hold just the first group of a backlog its source already
+				// answered past, so the source's largest says where the live feed is.
+				const largest =
+					!startSent && hasLargest(this.version)
+						? newer(hooks.bufferedLargest(track), hooks.peekLargest(track))
+						: undefined;
 				const recv = hooks.tryRecvGroup(track, startSent);
 				switch (recv.kind) {
 					case "error":
