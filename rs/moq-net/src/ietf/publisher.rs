@@ -1184,8 +1184,8 @@ where
 					};
 
 					let order = msg.group_order.to_order();
-					// A NEW_GROUP_REQUEST here asks nothing more: subscribing is itself a join,
-					// which the track's refresh ratio judges.
+					// A live SUBSCRIBE's NEW_GROUP_REQUEST asks nothing more: subscribing is itself
+					// a join, which the track's refresh ratio judges.
 					let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
 					// A range that resolves without the live edge has a fixed start, which is no
 					// join: bound the subscription before subscribing so the ratio never judges it.
@@ -1251,6 +1251,12 @@ where
 					let mut track_serve =
 						TrackServe::new(self.session.clone(), track, request_id, self.version, range, timescale)
 							.ranked(self.priority.clone());
+					// A fixed start is no join, so its NEW_GROUP_REQUEST asks as an update's would.
+					if fixed.start.is_some()
+						&& let Some(value) = msg.new_group
+					{
+						track_serve.request_new_group(value);
+					}
 
 					// Draft-20 replaced joining FETCH with subscription fills. Older drafts save
 					// the same boundary used by the subscription so the two streams never overlap.
@@ -6858,6 +6864,31 @@ mod serve_tests {
 		let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
 		serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !h.log.trail().is_empty()).await;
 		assert_eq!(h.track.demand().wanted(), Some(0));
+	}
+
+	/// An absolute SUBSCRIBE carrying NEW_GROUP_REQUEST asks as an update would: past a group
+	/// the track holds, it is a join under the ratio.
+	#[moq_clock::test]
+	async fn an_absolute_subscribe_with_a_new_group_request_joins() {
+		let version = Version::Draft22;
+		for (value, wanted) in [(0, 5), (5, 5), (4, 0)] {
+			let h = serve_track(version, crate::track::Info::timed().with_refresh(1));
+			let _group = refresh_group(&h);
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let msg = ietf::Subscribe {
+				new_group: Some(value),
+				..subscribe(
+					Filter::Absolute {
+						start: Location { group: 4, object: 0 },
+						end: None,
+					},
+					None,
+				)
+			};
+			let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+			serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !h.log.trail().is_empty()).await;
+			assert_eq!(h.track.demand().wanted(), Some(wanted), "{value}");
+		}
 	}
 
 	/// An update's NEW_GROUP_REQUEST is a join on a track opted in to refresh, answered with
