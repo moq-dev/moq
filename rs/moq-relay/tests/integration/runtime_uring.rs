@@ -809,6 +809,96 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	}
 }
 
+/// A moq-transport SETUP credential reaches the decider on both ring transports.
+#[cfg(feature = "quic")]
+#[tokio::test]
+async fn uring_forwards_the_setup_token() {
+	use moq_tokio::quic::{driver, web};
+
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let mut config = uring_config(&cert, &key);
+	config.auth.public.clear();
+	let mut relay = Relay::load(config).await.unwrap();
+	let addr = relay.addr().unwrap();
+	let mut admissions = relay.admissions().expect("embedded auth");
+	let token = moq_auth::Token {
+		kind: moq_auth::Token::OUT_OF_BAND,
+		value: vec![0x00, 0xff, 0x80, b'x'],
+	};
+	let expected = token.clone();
+	let deciding = tokio::spawn(async move {
+		for transport in [moq_auth::Transport::Quic, moq_auth::Transport::WebTransport] {
+			let admission = tokio::time::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+			assert_eq!(admission.request.token, Some(expected.clone()));
+			assert_eq!(admission.request.transport, transport);
+			if transport == moq_auth::Transport::WebTransport {
+				assert_eq!(admission.request.path, "/room");
+				assert_eq!(admission.request.query.as_deref(), Some("source=setup"));
+			} else {
+				assert_eq!(admission.request.path, "/");
+				assert!(admission.request.query.is_none());
+			}
+			let all: moq_auth::Patterns = [moq_auth::Pattern::all()].into_iter().collect();
+			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all)));
+		}
+	});
+	let running = tokio::spawn(relay.run());
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(true);
+	let tls = config.tls.build().unwrap();
+	let client = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+	for webtransport in [false, true] {
+		let mut tls = tls.clone();
+		tls.alpn_protocols = vec![if webtransport {
+			b"h3".to_vec()
+		} else {
+			b"moqt-16".to_vec()
+		}];
+		let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+		let conn = client
+			.connect_with(
+				driver::ClientConfig::new(std::sync::Arc::new(crypto)),
+				addr,
+				"localhost",
+			)
+			.unwrap()
+			.await
+			.unwrap();
+		let session = if webtransport {
+			let url: url::Url = format!("https://{addr}/room?source=setup").parse().unwrap();
+			let request = web::proto::ConnectRequest::new(url).with_protocol("moqt-16".to_string());
+			web::Session::connect(conn, request).await.unwrap()
+		} else {
+			web::Session::raw(conn)
+		};
+		// Draft-16 CLIENT_SETUP: AUTHORIZATION TOKEN (3), USE_VALUE (3), Token Type 0.
+		let encoded = [&[0x03, 0x00][..], &token.value].concat();
+		let params = [&[0x01, 0x03, encoded.len() as u8][..], &encoded].concat();
+		let setup = [&[0x20][..], &(params.len() as u16).to_be_bytes(), &params].concat();
+		let (mut send, mut recv) = session.open_bi(Default::default()).await.unwrap();
+		send.write_all(&setup).await.unwrap();
+		let mut reply = [0u8; 1];
+		assert_eq!(
+			tokio::time::timeout(TIMEOUT, recv.read(&mut reply))
+				.await
+				.unwrap()
+				.unwrap(),
+			Some(1),
+			"SERVER_SETUP"
+		);
+	}
+	deciding.await.unwrap();
+	client.close(driver::VarInt::from_u32(0), b"test complete");
+	client.wait_idle().await;
+	running.abort();
+	let _ = running.await;
+}
+
 /// The embedded auth decider receives the same transport facts as the Tokio path.
 #[tokio::test]
 async fn uring_auth_reports_distinct_quic_and_webtransport() {

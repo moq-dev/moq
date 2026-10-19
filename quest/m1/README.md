@@ -94,7 +94,6 @@ lands before the cut.
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence, and the media fixture's cold-start audio-tone flake is fixed at its cause
 - [Handshake deadline covers admission](/quest/m1/handshake-admission-deadline.md) - `listen.timeout` bounds a connection through auth admission on both listeners, replacing the hardcoded admission timeout
-- [Ring SETUP token](/quest/m1/uring-setup-token.md) - the ring forwards a moq-transport SETUP token to the auth decider, as tokio does
 - [Restart reset](/quest/m1/stateless-reset-key.md) - a relay restarted with the same `listen.reset_key` stateless-resets its predecessor's connections, so clients reconnect within an RTT instead of the idle timeout
 - [Drain cleanup](/quest/m1/drain-cleanup.md) - sessions force-closed at the drain deadline record their lease end and bytes before the relay or CLI exits, while unfinished handshakes stay bounded
 - [GOAWAY coverage](/quest/m1/goaway-coverage.md) - every IETF request stream handles GOAWAY, a closed control stream is a violation, and the draft-18 cutoff is honored
@@ -102,7 +101,6 @@ lands before the cut.
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [A stalled subscriber holds bounded state](/quest/m1/egress-held-state.md) - group machines and bytes a credit-withholding downstream makes a publisher hold plateau at what its credit and the latency budget allow, on lite and moq-transport
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
-- [Random-loss audit](/quest/m1/random-loss-audit.md) - every decision random-loss gates drove is kept, reworked, or reverted on shaped paths
 - [Timed-out requests clean up](/quest/m1/legacy-request-timeout-cleanup.md) - on drafts 14-16, Rust and JS send PUBLISH_NAMESPACE_DONE or UNSUBSCRIBE_NAMESPACE for a timed-out request before its local reset
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Resume reorder](/quest/m1/resume-reorder.md) - a group whose stream header arrives after its successor's still resumes on failover; only a dropped or long-gone group fails
