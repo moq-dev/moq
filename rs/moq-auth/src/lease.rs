@@ -117,8 +117,8 @@ pub enum Due {
 #[cfg(feature = "tokio")]
 #[derive(Debug)]
 struct Clock {
-	next: Option<tokio::time::Instant>,
-	expires: Option<tokio::time::Instant>,
+	next: Option<moq_clock::Instant>,
+	expires: Option<moq_clock::Instant>,
 	cadence: Option<Duration>,
 	failures: u32,
 	revision: u64,
@@ -131,7 +131,7 @@ impl Clock {
 			// A cadence too far out to schedule is no scheduled re-check; `expires` still bounds the grant.
 			next: grant
 				.revalidate
-				.and_then(|cadence| tokio::time::Instant::now().checked_add(cadence)),
+				.and_then(|cadence| moq_clock::now().checked_add(cadence)),
 			expires: grant.deadline(),
 			cadence: grant.revalidate,
 			failures: 0,
@@ -209,13 +209,13 @@ impl Producer {
 			};
 			let revalidate = async {
 				match next {
-					Some(at) => tokio::time::sleep_until(at).await,
+					Some(at) => moq_clock::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
 			let expire = async {
 				match expires {
-					Some(at) => tokio::time::sleep_until(at).await,
+					Some(at) => moq_clock::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
@@ -252,7 +252,7 @@ impl Producer {
 		let base = Duration::from_secs(1) * 2u32.saturating_pow(clock.failures.saturating_sub(1).min(16));
 		let base = base.min(clock.cadence.unwrap_or(BACKOFF_MAX)).min(BACKOFF_MAX);
 		let delay = base.mul_f64(rand::rng().random_range(0.75..=1.25));
-		clock.next = Some(tokio::time::Instant::now() + delay);
+		clock.next = Some(moq_clock::now() + delay);
 		clock.revision = clock.revision.wrapping_add(1);
 		drop(clock);
 		self.clock_changed.notify_waiters();

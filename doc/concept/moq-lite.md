@@ -198,7 +198,7 @@ everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. The token belongs to the session that added it, so after a
 reconnect the application adds it again and re-announces. moq-lite has no
-per-request token yet, so there an announcement rides the session's scope.
+per-request token, so there an announcement rides the session's scope.
 
 ## Subscriptions
 

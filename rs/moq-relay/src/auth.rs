@@ -492,10 +492,10 @@ pub struct Lease {
 	/// The live session a re-check re-authorizes in place, once attached.
 	session: Option<moq_net::auth::Handle>,
 	/// When the grant runs out, enforced here whoever drives the lease: a fixed
-	/// grant has no driver, and an auth server's may be mid-outage. Fixed on tokio's
+	/// grant has no driver, and an auth server's may be mid-outage. Fixed on the ambient
 	/// clock when the grant arrives, so re-polling [`ended`](Self::ended) never
 	/// restarts the countdown.
-	expires: Option<tokio::time::Instant>,
+	expires: Option<moq_clock::Instant>,
 	/// The session's stats context, moved to a re-checked tier.
 	stats: moq_net::stats::Session,
 }
@@ -613,7 +613,7 @@ impl Lease {
 		loop {
 			let expire = async {
 				match self.expires {
-					Some(at) => tokio::time::sleep_until(at).await,
+					Some(at) => moq_clock::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
@@ -898,7 +898,7 @@ impl Auth {
 
 	async fn decide(&self, request: Request) -> Result<(lease::Consumer, Grant), Error> {
 		let answer = self.submit(request, None)?;
-		let answered = tokio::time::timeout(ADMIT_TIMEOUT, answer)
+		let answered = moq_clock::timeout(ADMIT_TIMEOUT, answer)
 			.await
 			.map_err(|_| timed_out())?;
 		answered_with(answered)
@@ -1404,39 +1404,37 @@ mod tests {
 
 	/// The session supervisor re-polls `ended` on every nudge; that must not
 	/// restart the countdown to `expires`.
-	#[tokio::test(start_paused = true)]
+	#[moq_clock::test]
 	async fn re_polling_keeps_the_expiry_deadline() {
 		use std::time::Duration;
 
+		let start = moq_clock::now();
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(10));
+		grant.expires = Some(SystemTime::from(moq_clock::wall()) + Duration::from_secs(10));
 		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant));
 		for _ in 0..9 {
-			assert!(
-				tokio::time::timeout(Duration::from_secs(1), lease.ended())
-					.await
-					.is_err()
-			);
+			assert!(moq_clock::timeout(Duration::from_secs(1), lease.ended()).await.is_err());
 		}
-		let reason = tokio::time::timeout(Duration::from_secs(2), lease.ended())
-			.await
-			.expect("expired at the deadline despite re-polling");
-		assert_eq!(reason, lease::Reason::Expired);
+		assert_eq!(lease.ended().await, lease::Reason::Expired);
+		assert_eq!(
+			moq_clock::now(),
+			start + Duration::from_secs(10),
+			"expired at the deadline despite re-polling"
+		);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[moq_clock::test]
 	async fn an_expired_grant_ends_at_once() {
 		use std::time::Duration;
 
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
+		grant.expires = Some(SystemTime::from(moq_clock::wall()) - Duration::from_secs(1));
 		assert!(matches!(grant.validate(), Err(moq_auth::Error::GrantExpired)));
 
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant));
 		assert_eq!(lease.ended().await, lease::Reason::Expired);
-		// A millisecond for Tokio's timer resolution.
-		assert!(start.elapsed() <= Duration::from_millis(1), "no grace after expiry");
+		assert_eq!(moq_clock::now(), start, "no grace after expiry");
 	}
 
 	#[test]
