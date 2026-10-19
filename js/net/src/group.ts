@@ -466,6 +466,7 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.groupTimestamp = (group) => (group.#state.unverified ? undefined : group.#state.timestamp);
 		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
+		hooks.groupFinished = (group) => group.#state.closed.peek() === null;
 		hooks.unverifyGroup = (group) => {
 			group.#state.unverified = true;
 		};

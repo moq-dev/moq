@@ -1970,6 +1970,32 @@ test("largest skips gaps under the cap and waits for the floor", async () => {
 	producer.close();
 });
 
+// A settled track ends the stream past the cap only once the group under the cap stops growing:
+// its frames and its finish still reach a capped reader.
+test("largest under the cap stays open while its group grows", async () => {
+	const producer = new TrackProducer("test").accept({});
+	const open = framedGroup(producer, 2, 1);
+	framedGroup(producer, 5, 1).close();
+	producer.finishAt({ group: 6, frame: 0 });
+
+	const uncapped = producer.subscribe();
+	expect(await uncapped.largest()).toEqual({ group: 5, frame: 0 });
+	expect(await uncapped.largest()).toBeUndefined();
+
+	const reader = producer.subscribe().withGroups({ end: { excluded: 3 } });
+	expect(await reader.largest()).toEqual({ group: 2, frame: 0 });
+	let next = reader.largest();
+	expect(await isPending(next)).toBe(true);
+	open.writeFrame({ payload: enc.encode("x") });
+	expect(await next).toEqual({ group: 2, frame: 1 });
+
+	next = reader.largest();
+	expect(await isPending(next)).toBe(true);
+	open.close();
+	expect(await next).toBeUndefined();
+	producer.close();
+});
+
 // Moving the cap wakes a pending read and reports the largest within the new bounds, lower ones
 // included; bounds that did not move report nothing again.
 test("largest re-reports when the cap moves", async () => {

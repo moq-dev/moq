@@ -658,8 +658,8 @@ struct Largest {
 	open: bool,
 	// The track ended, so no newer position can follow.
 	ended: bool,
-	// Bumped by every write, raising `position` or not: a reader capped below it follows
-	// the groups under its cap.
+	// Bumped by every write and finish, raising `position` or not: a reader capped below it
+	// follows the groups under its cap.
 	revision: u64,
 }
 
@@ -678,6 +678,8 @@ impl Track {
 	/// A group name fixes its content, so no legal write raises the largest past it.
 	pub(super) fn finish_largest(&self, sequence: u64) {
 		let mut largest = self.largest.lock();
+		// A reader capped below the largest may be following this group.
+		largest.revision = largest.revision.wrapping_add(1);
 		if largest.position.is_some_and(|position| position.group == sequence) {
 			largest.open = false;
 		}
