@@ -5249,6 +5249,28 @@ fn server_listen_refuses_bad_config() {
 	);
 }
 
+/// `quic_keylog` reaches the listener, which refuses it without `SSLKEYLOGFILE` rather
+/// than binding and logging nothing.
+#[test]
+fn server_keylog_requires_sslkeylogfile() {
+	// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
+	unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+	let bind = "127.0.0.1:0";
+	let generate = [moq_str("localhost")];
+	let mut config: moq_server_config = unsafe { std::mem::zeroed() };
+	config.bind = bind.as_ptr() as *const c_char;
+	config.bind_len = bind.len();
+	config.tls_generate = generate.as_ptr();
+	config.tls_generate_len = generate.len();
+	config.quic_keylog = true;
+	assert_eq!(
+		unsafe { moq_server_listen(&config, Some(ignore_callback), std::ptr::null_mut()) },
+		MOQ_ERROR_INVALID_CONFIG
+	);
+	let msg = unsafe { std::ffi::CStr::from_ptr(moq_error()) }.to_str().unwrap();
+	assert!(msg.contains("SSLKEYLOGFILE"), "{msg}");
+}
+
 /// Subscribe to `name` on `consume` as a raw track and return the payloads of its first `count`
 /// frames.
 fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {

@@ -7,7 +7,7 @@ How to update your OBS setup for each breaking change, newest first.
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
-Turn on **TLS key log** in the advanced settings as well to capture them; without `SSLKEYLOGFILE` the stream stops.
+Turn on **TLS key log** in the output's advanced settings or the MoQ Source's properties as well to capture them; without `SSLKEYLOGFILE` the stream stops or the source does not connect.
 
 ### The video bitrate follows the bandwidth estimate (#5845)
 

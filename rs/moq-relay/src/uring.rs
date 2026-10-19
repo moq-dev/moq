@@ -120,6 +120,8 @@ impl Workers {
 	///
 	/// Shares one served identity with every member; stream listeners are served separately.
 	pub fn bind(server: moq_tokio::server::Config, config: moq_tokio::worker::Config) -> anyhow::Result<Self> {
+		// Before any TLS loads or socket binds, so a bad `[quic]` has no side effects.
+		server.quic.validate()?;
 		let listen = &server.listen;
 		let quic = &server.quic;
 		let tls = match server.tls {
@@ -894,6 +896,23 @@ mod tests {
 			);
 			assert_eq!(uring, (Some(tokio.0), Some(tokio.1), Some(tokio.2)));
 		}
+	}
+
+	/// A direct `bind` validates `[quic]` too, so a key log nobody can read back fails
+	/// instead of binding and logging nothing.
+	#[test]
+	#[allow(clippy::field_reassign_with_default)]
+	fn bind_refuses_a_keylog_without_sslkeylogfile() {
+		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
+		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		let mut server = moq_tokio::server::Config::default();
+		server.quic.keylog = Some(true);
+		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
+			.expect_err("a keylog without SSLKEYLOGFILE must be refused");
+		assert!(
+			matches!(err.downcast_ref(), Some(moq_tokio::Error::KeylogUnset)),
+			"{err:#}"
+		);
 	}
 
 	/// An auth decision still pending at the drain deadline is abandoned then,
