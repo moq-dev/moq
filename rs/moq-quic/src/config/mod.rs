@@ -100,6 +100,11 @@ impl EndpointConfig {
     /// connection IDs it can't validate instead of resetting them. Set
     /// [`cid_generator`](Self::cid_generator) afterwards to use another generator; it must accept
     /// the predecessor's IDs for the reset to reach them.
+    ///
+    /// Lowers [`min_reset_interval`](Self::min_reset_interval) to 1ms too, since a restart leaves
+    /// every peer waiting on a reset at once: 1000 a second resets 2,000 connections in 2s, where
+    /// 20ms takes 40s. A reset is always smaller than the packet that drew it, so this never
+    /// amplifies, and the limit still caps what a flood of spoofed packets can reflect.
     #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
     pub fn reset_secret(&mut self, secret: &[u8]) -> &mut Self {
         #[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
@@ -127,6 +132,7 @@ impl EndpointConfig {
         let cid_key = u64::from_le_bytes(cid_key);
         self.connection_id_generator_factory =
             Arc::new(move || Box::new(HashedConnectionIdGenerator::from_key(cid_key)));
+        self.min_reset_interval = Duration::from_millis(1);
         self
     }
 
@@ -177,7 +183,7 @@ impl EndpointConfig {
 
     /// Minimum interval between outgoing stateless reset packets
     ///
-    /// Defaults to 20ms. Limits the impact of attacks which flood an endpoint with garbage packets,
+    /// Defaults to 20ms, or 1ms after [`reset_secret`](Self::reset_secret). Limits the impact of attacks which flood an endpoint with garbage packets,
     /// e.g. [ISAKMP/IKE amplification]. Larger values provide a stronger defense, but may delay
     /// detection of some error conditions by clients. Using a [`ConnectionIdGenerator`] with a low
     /// rate of false positives in [`validate`](ConnectionIdGenerator::validate) reduces the risk

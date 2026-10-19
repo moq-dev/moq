@@ -611,6 +611,43 @@ fn reset_secret_must_match() {
     assert!(!restarted_server_resets(b"other secret"));
 }
 
+/// After a restart every peer's next packet draws a reset at once, so a reset secret answers
+/// 1000 connections a second, still dropping a packet that arrives within 1ms of the last reset
+#[test]
+fn reset_secret_resets_connections_each_millisecond() {
+    let _guard = subscribe();
+    let mut config = EndpointConfig::default();
+    config.reset_secret(b"secret");
+    let mut cids = (config.connection_id_generator_factory)();
+    let mut endpoint = Endpoint::new(Arc::new(config), Some(Arc::new(server_config())), true);
+
+    let interval = Duration::from_millis(1);
+    let start = Instant::now();
+    let mut buf = Vec::new();
+    for i in 0..2_000u16 {
+        let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1024 + i);
+        let mut packet = vec![0x40];
+        packet.extend_from_slice(&cids.generate_cid());
+        packet.resize(100, 0);
+
+        let now = start + interval * u32::from(i);
+        let event = endpoint.handle(now, remote, None, None, packet[..].into(), &mut buf);
+        assert!(
+            matches!(event, Some(DatagramEvent::Response(_))),
+            "connection {i} was not reset"
+        );
+        let event = endpoint.handle(
+            now + interval / 2,
+            remote,
+            None,
+            None,
+            packet[..].into(),
+            &mut buf,
+        );
+        assert!(event.is_none(), "connection {i} was reset twice within 1ms");
+    }
+}
+
 /// The client reads CONNECTION_CLOSE after the server forgets the connection.
 /// The client's reply triggers a reset before the application polls.
 #[test]
