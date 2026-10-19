@@ -248,9 +248,10 @@ export const hooks: {
 	endTrack: (producer: Producer, end: Location) => void;
 	// pending: /quest/m1/public-model/deferred.md
 	/**
-	 * Declare the first group a wire subscription's live feed serves (SUBSCRIBE_START) for the
-	 * floor its SUBSCRIBE requested: while the demand keeps that floor, a pending tail owes
-	 * nothing below it. Mirrors the Rust `start_at`; assigned by `track.ts`.
+	 * Declare the first group a wire subscription's live feed serves (lite SUBSCRIBE_START, or
+	 * IETF SUBSCRIBE_OK's Largest) for the floor its SUBSCRIBE requested: while the demand keeps
+	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
+	 * `track.ts`.
 	 */
 	startTrack: (producer: Producer, served: { start: number; requested?: number }) => void;
 	// pending: /quest/m1/public-model/ingest.md

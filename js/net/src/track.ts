@@ -672,8 +672,8 @@ export class Producer {
 	// may deliver in any order: readers wait for a hole below it to fill, or for the track
 	// to close, rather than end at the boundary with groups still to arrive.
 	#tailPending = false;
-	// The first group the wire subscription's live feed serves (SUBSCRIBE_START), and the floor
-	// the SUBSCRIBE it answered requested.
+	// The first group the wire subscription's live feed serves (see `hooks.startTrack`), and
+	// the floor the SUBSCRIBE it answered requested.
 	#served?: { start: number; requested?: number };
 	// The sequences the live feed delivered, as a group or a datagram: what a pending tail is
 	// judged by. Eviction never touches it. A gap folds away a subscription's grace after a
@@ -727,6 +727,8 @@ export class Producer {
 				return next;
 			});
 		}
+		// A pending tail owes nothing the publisher gave up.
+		this.#arrive(start, end);
 	}
 
 	// A publisher may re-create a group it cut; the sequence is no longer given up.
@@ -1344,10 +1346,10 @@ export class Producer {
 		this.#owe();
 	}
 
-	// Record that the live feed delivered `sequence`, then fold the gaps that aged out.
-	#arrive(sequence: number): void {
+	// Record that the live feed accounted for `[start, end)`, then fold the gaps that aged out.
+	#arrive(start: number, end = start + 1): void {
 		const at = now();
-		this.#arrivals.account(sequence, sequence + 1, at);
+		this.#arrivals.account(start, end, at);
 		// Only a gap folds, so an in-order feed never reads the subscription.
 		if (this.#arrivals.hasGaps()) this.#arrivals.expire(at, this.#grace());
 		this.#owe();
@@ -1370,7 +1372,7 @@ export class Producer {
 	// no live group or datagram delivered, in a gap younger than the grace. Judged by the
 	// arrivals, not the cache, so an evicted group or a datagram counts as delivered.
 	//
-	// The feed starts at SUBSCRIBE_START while the demand keeps the floor its SUBSCRIBE asked
+	// The feed starts at the declared start while the demand keeps the floor its SUBSCRIBE asked
 	// for, since an update gets no fresh START: a moved floor stands on its own, and moving
 	// back restores the START. Without either, the first arrival stands in for it.
 	#owes(final: number): boolean {

@@ -2948,3 +2948,22 @@ test("a datagram fills its sequence in a pending tail", async () => {
 	expect(await reader.recvGroup()).toBeUndefined();
 	producer.close();
 });
+
+// SUBSCRIBE_DROP says the publisher gave the range up, so the tail owes nothing there: readers
+// end at the boundary, and a later abort cut nothing off.
+for (const abort of [false, true]) {
+	test(`a dropped range ends a pending tail cleanly${abort ? " despite a later abort" : ""}`, async () => {
+		const { producer, reader, write } = pendingTail(3);
+		write(2);
+		expect((await reader.recvGroup())?.sequence).toBe(2);
+		const next = reader.recvGroup();
+		expect(await settled(next)).toBe(false);
+
+		hooks.dropTrackGroups(producer, 0, 2);
+		if (abort) producer.close(new Error("dropped"));
+		expect(await next).toBeUndefined();
+		if (abort) expect(await reader.closed).toBeNull();
+		else expect(reader.closed.peek()).toBeUndefined();
+		producer.close();
+	});
+}

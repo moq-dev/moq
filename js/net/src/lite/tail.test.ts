@@ -91,6 +91,9 @@ async function readAll(group: GroupConsumer | undefined): Promise<string[]> {
 	}
 }
 
+/** Let every pending microtask run, so a parked read gets a turn without a timer. */
+const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 /** Whether `promise` settles within `ms`. */
 async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -205,7 +208,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const held = reader.recvGroup().finally(() => (ended = true));
 			expect(await ordered.readString()).toBe("1.0");
 			expect(await ordered.readString()).toBeUndefined();
-			await new Promise((resolve) => realTimeout(resolve, 0));
+			await settle();
 			expect(ended).toBe(false);
 			expect(reader.closed.peek()).toBeUndefined();
 			expect(reader.end()).toEqual({ group: 2, frame: 0 });
@@ -235,10 +238,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(await reader.finished()).toEqual({ group: 2, frame: 0 });
 
 		expect((await reader.recvGroup())?.sequence).toBe(1);
-		let ended = false;
-		const held = reader.recvGroup().finally(() => (ended = true));
-		await new Promise((resolve) => setTimeout(resolve, 0));
-		expect(ended).toBe(false);
+		// Asked before group 0 lands: a reader that ended early returns nothing.
+		const held = reader.recvGroup();
 
 		const low = groupStream(subscriber, 0);
 		low.write("0.0");

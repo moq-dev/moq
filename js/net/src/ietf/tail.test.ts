@@ -52,7 +52,7 @@ function groupStream(subscriber: Subscriber, groupId: number, flags = FLAGS) {
 }
 
 /** A subscriber with one track subscribed and answered; the test plays the publisher. */
-async function subscribed() {
+async function subscribed(largest?: number) {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
@@ -66,7 +66,11 @@ async function subscribed() {
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
 	const request = await Subscribe.decode(peer.reader, VERSION);
 	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
+	await new SubscribeOk({
+		requestId: request.requestId,
+		trackAlias: ALIAS,
+		largest: largest === undefined ? undefined : { groupId: BigInt(largest), objectId: 0n },
+	}).encode(peer.writer, VERSION);
 
 	return {
 		subscriber,
@@ -219,6 +223,34 @@ test("a compact stream starting at object 5 is subgroup 5, refused without a gro
 	group.write(object("6.0"));
 	group.finish();
 	expect((await reader.recvGroup())?.sequence).toBe(6);
+});
+
+// A live join starts at the publisher's Largest, and QUIC does not order streams, so the
+// groups from there up to END_OF_TRACK are owed even when a higher one lands first.
+test("a reader holds for groups from SUBSCRIBE_OK's Largest that land after a higher one", async () => {
+	const { subscriber, reader, done } = await subscribed(3);
+	const high = groupStream(subscriber, 5);
+	high.write(object("5.0"));
+	high.finish();
+	await high.handled;
+	const end = groupStream(subscriber, 6);
+	end.write(END_OF_TRACK);
+	end.finish();
+	expect(await reader.finished()).toEqual({ group: 6, frame: 0 });
+	expect(await readAll(await reader.recvGroup())).toEqual(["5.0"]);
+
+	// Asked before the lower groups land: a reader that ended early returns nothing.
+	const held = reader.recvGroup();
+	for (const sequence of [3, 4]) {
+		const low = groupStream(subscriber, sequence);
+		low.write(object(`${sequence}.0`));
+		low.finish();
+	}
+	expect(await readAll(await held)).toEqual(["3.0"]);
+	expect(await readAll(await reader.recvGroup())).toEqual(["4.0"]);
+	expect(await reader.recvGroup()).toBeUndefined();
+	await done(TRACK_ENDED, 4n);
+	expect(await reader.closed).toBeNull();
 });
 
 test("a group at or past the END_OF_TRACK aborts the track", async () => {
