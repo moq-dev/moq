@@ -2,6 +2,7 @@ import { Milli } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
+import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
@@ -189,6 +190,7 @@ export class Subscriber {
 	// Our grant (MoQ Auth): a subscription it stops covering is cancelled. Undefined until
 	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
+	#auth?: AuthSession;
 
 	/** Marks this subscriber's deliberate local session close. @internal */
 	close() {
@@ -209,6 +211,7 @@ export class Subscriber {
 		solicit,
 		goaway,
 		grant,
+		auth,
 		limits = LIMITS,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
@@ -227,6 +230,7 @@ export class Subscriber {
 		goaway?: GetPromise<Drain>;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we subscribe to. */
 		grant?: Getter<Grant | undefined>;
+		auth?: AuthSession;
 		/** How many live requests the peer may hold. */
 		limits?: Limits;
 	}) {
@@ -239,6 +243,7 @@ export class Subscriber {
 		this.#solicit = solicit;
 		this.#goaway = goaway;
 		this.#grant = grant;
+		this.#auth = auth;
 		// A draining peer usually stops publishing namespaces, so reprice from the signal
 		// itself. Waiting for another message would leave the route primary until close.
 		void goaway?.then(() => this.#drainAnnounced());
@@ -691,6 +696,12 @@ export class Subscriber {
 
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request, valid?: AbortSignal) {
 		const refused = unauthorized(broadcast);
+		try {
+			await this.#auth?.ready(broadcast, "subscribe", valid);
+		} catch (err) {
+			request.reject(error(err));
+			return;
+		}
 		if (this.#denied(broadcast)) {
 			request.reject(refused);
 			return;

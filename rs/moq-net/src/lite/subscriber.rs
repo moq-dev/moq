@@ -5493,6 +5493,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
+		ready!(self.gate.poll_ready(waiter));
 		if !matches!(self.state, TrackRunState::Finish(_)) && self.gate.poll_denied(waiter).is_ready() {
 			self.revoke();
 			return Poll::Ready(());
@@ -6232,6 +6233,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 /// is implicit from the request.
 struct FetchServeRun<S: crate::transport::poll::Session> {
 	validity: crate::model::broadcast::RequestValidity,
+	gate: crate::auth::Gate,
 	serve: TrackServe<S>,
 	session: S,
 	timescale: Option<Timescale>,
@@ -6282,6 +6284,7 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 		let group = request.sequence();
 		Self {
 			validity: serve.validity.start(),
+			gate: serve.gate(),
 			serve,
 			session,
 			timescale,
@@ -6365,6 +6368,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 
 			match &mut self.state {
 				FetchRunState::Open { request } => {
+					ready!(self.gate.poll_ready(waiter));
 					let mut stream = match ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,

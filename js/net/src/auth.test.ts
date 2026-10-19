@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { type Grant, type Issued, Unsupported } from "./auth.ts";
 import type { AuthSession } from "./auth_session.ts";
@@ -238,6 +238,67 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		// What the session enforced is not revoked by its end.
 		expect((client.auth as AuthSession).scope.peek()?.publish.size).toBeGreaterThan(0);
 		server.abort();
+	});
+
+	test("a request waits for its token and survives union renewal", async () => {
+		const clock = new Manual();
+		const restore = clock.install();
+		const logged = spyOn(console, "debug");
+		const origin = new OriginProducer();
+		const broadcast = origin.createBroadcast(Path.from("room/x"));
+		broadcast.announce();
+		const published = broadcast.createTrack("video");
+		published.appendGroup().writeFrame({ payload: new Uint8Array([1]) });
+		const { client, server } = await connect({ serverPublish: origin, protocol });
+		const requests = server.auth.requests();
+		await (client.auth as AuthSession).ready(Path.from("room/x"), "subscribe");
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		const initial = setup.accept(grant([], []));
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		const adding = client.auth.add("first");
+		try {
+			const unanswered = await requests.next();
+			if (!unanswered) throw new Error("missing token");
+			const track = wireOf(client).consume(Path.from("room/x")).track("video").subscribe();
+			await nextTask();
+			expect(track.closed.peek()).toBeUndefined();
+			clock.advance(Nano.fromMilli(Milli(7)));
+			const firstGrant = unanswered.accept(grant([], ["room"]));
+			const first = await adding;
+			expect(await track.recvGroup()).toBeDefined();
+			expect(
+				logged.mock.calls.filter(([line]) => String(line).startsWith("request waited for authorization:")),
+			).toEqual([["request waited for authorization: path=room/x waited=7ms"]]);
+			const renewing = client.auth.add("renewal");
+			const renewal = await requests.next();
+			if (!renewal) throw new Error("missing renewal");
+			broadcast
+				.createTrack("audio")
+				.appendGroup()
+				.writeFrame({ payload: new Uint8Array([3]) });
+			const covered = wireOf(client).consume(Path.from("room/x")).track("audio").subscribe();
+			expect(await covered.recvGroup()).toBeDefined();
+			covered.close();
+			const renewedGrant = renewal.accept(grant([], ["room"]));
+			const renewed = await renewing;
+			first.close();
+			await nextTask();
+			expect(track.closed.peek()).toBeUndefined();
+			published.appendGroup().writeFrame({ payload: new Uint8Array([2]) });
+			expect(await track.recvGroup()).toBeDefined();
+			track.close();
+			renewed.close();
+			firstGrant.close();
+			renewedGrant.close();
+		} finally {
+			initial.close();
+			client.abort();
+			server.abort();
+			await adding.catch(() => void 0);
+			logged.mockRestore();
+			restore();
+		}
 	});
 
 	test("a session's close is not a revocation of its subscriptions", async () => {

@@ -1,6 +1,9 @@
 //! Tokens and grant watches that follow a reconnecting connection.
 
-use std::task::{Poll, ready};
+use std::{
+	sync::{Arc, Mutex},
+	task::{Poll, ready},
+};
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -32,10 +35,23 @@ impl Handle {
 		let connection = self.connection.clone();
 		let pacing = self.pacing;
 		let token = token.into();
+		let replay = Arc::new(Replay {
+			bytes: token,
+			opening: Mutex::new(None),
+		});
+		{
+			let state = connection.read();
+			let mut tokens = state.tokens.lock().unwrap();
+			tokens.retain(|token| token.strong_count() > 0);
+			if let Some(session) = &state.session {
+				replay.queue(session, state.connects);
+			}
+			tokens.push(Arc::downgrade(&replay));
+		}
 		let (answered, answer) = tokio::sync::oneshot::channel();
 		let task = AbortOnDrop::new(tokio::spawn(async move {
 			let mut answered = Some(answered);
-			if let Err(err) = present(connection, pacing, token, &producer, &mut answered).await {
+			if let Err(err) = present(connection, pacing, replay, &producer, &mut answered).await {
 				if let Some(answered) = answered.take() {
 					let _ = answered.send(Err(err.clone()));
 				}
@@ -48,6 +64,38 @@ impl Handle {
 		answer.await.map_err(|_| Error::from(moq_net::Error::Cancel))??;
 		Ok(Auth { _task: task, state })
 	}
+}
+
+type Opening = futures::future::BoxFuture<'static, moq_net::Result<auth::Auth>>;
+
+/// Registration shared with session publication, while the task owns its token's life.
+pub(super) struct Replay {
+	bytes: Bytes,
+	opening: Mutex<Option<(u64, Opening)>>,
+}
+
+impl Replay {
+	fn queue(&self, session: &moq_net::Session, connects: u64) {
+		let handle = session.auth();
+		let bytes = self.bytes.clone();
+		let mut opening = async move { handle.add(bytes).await }.boxed();
+		// The first poll registers the token synchronously, before the session can be
+		// observed. The replay task replaces this noop waker when it takes the future.
+		if let Some(result) = opening.as_mut().now_or_never() {
+			opening = futures::future::ready(result).boxed();
+		}
+		*self.opening.lock().unwrap() = Some((connects, opening));
+	}
+}
+
+pub(super) fn replay(state: &State, session: &moq_net::Session, connects: u64) {
+	state.tokens.lock().unwrap().retain(|token| {
+		let Some(token) = token.upgrade() else {
+			return false;
+		};
+		token.queue(session, connects);
+		true
+	});
 }
 
 /// A presented token; dropping it withdraws it from live and draining sessions.
@@ -193,7 +241,7 @@ fn transient(err: &moq_net::Error) -> bool {
 async fn present(
 	connection: kio::Consumer<State>,
 	pacing: Pacing,
-	bytes: Bytes,
+	replay: Arc<Replay>,
 	producer: &kio::Producer<Granted>,
 	answered: &mut Option<tokio::sync::oneshot::Sender<crate::Result<()>>>,
 ) -> crate::Result<()> {
@@ -213,12 +261,22 @@ async fn present(
 		}
 		let handle = session.auth();
 		let mut delay = None;
+		let mut queued = replay
+			.opening
+			.lock()
+			.unwrap()
+			.take()
+			.filter(|(queued, _)| *queued == connects)
+			.map(|(_, opening)| opening);
 		let token = loop {
 			let attempt = async {
 				if let Some(delay) = delay {
 					tokio::time::sleep(delay).await;
 				}
-				handle.add(bytes.clone()).await
+				match queued.take() {
+					Some(opening) => opening.await,
+					None => handle.add(replay.bytes.clone()).await,
+				}
 			};
 			let result = tokio::select! {
 				biased;
@@ -357,7 +415,44 @@ mod tests {
 	fn attach(connection: &kio::Producer<State>, session: &moq_net::Session) {
 		let mut state = connection.write().ok().expect("connection observed");
 		state.connects += 1;
+		replay(&state, session, state.connects);
 		state.session = Some(session.clone());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn replay_is_registered_before_the_session_is_published() {
+		let connection = kio::Producer::<State>::default();
+		let auth = retained(&connection);
+		let mut first = pair().await;
+		attach(&connection, &first.client);
+		let (token, _issued) = tokio::join!(auth.add("replay"), async {
+			first.requests.recv().await.unwrap().accept(auth::Grant::all())
+		});
+		let token = token.unwrap();
+		let mut second = pair().await;
+		let connects = {
+			let state = connection.read();
+			let connects = state.connects + 1;
+			replay(&state, &second.client, connects);
+			connects
+		};
+		// The task still observes the first session. The second token reaches the peer
+		// before publication only if queueing it already polled add's registration.
+		let request = tokio::time::timeout(std::time::Duration::from_secs(1), second.requests.recv())
+			.await
+			.expect("token was not queued before publication")
+			.unwrap();
+		assert_eq!(request.token().as_ref(), b"replay");
+		{
+			let mut state = connection.write().ok().expect("connection observed");
+			state.connects = connects;
+			state.session = Some(second.client.clone());
+		}
+		let _issued = request.accept(auth::Grant::all());
+		let mut watch = token.grant();
+		while watch.peek().is_none() {
+			watch.changed().await.unwrap();
+		}
 	}
 
 	#[tokio::test(start_paused = true)]

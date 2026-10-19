@@ -563,6 +563,7 @@ Either endpoint can open an Auth Stream (0x7) to present a token and learn what 
 The opener sends a single AUTH message and keeps its side open for as long as the token applies.
 Each endpoint SHOULD open one Auth Stream with an empty token right after the session starts, so both learn what the credential the connection already presented (the request URI, a client certificate, or nothing) allows.
 The acceptor replies with an AUTH_OK carrying the grant, or an AUTH_ERROR refusing the token.
+The grant MUST join the acceptor's scope before it sends AUTH_OK.
 It MAY send further AUTH_OK messages to replace the grant, such as with a lowered expiry, and MAY send an AUTH_ERROR after an AUTH_OK to revoke it; the latest AUTH_OK is the token's grant.
 After an AUTH_ERROR the acceptor closes its side of the stream.
 The opener withdraws a token by closing or resetting its side of the stream, and the acceptor then closes its own.
@@ -571,7 +572,13 @@ A grant names the paths the opener may publish to the acceptor and subscribe to 
 An endpoint's scope is the union of the grants of its open Auth Streams, and a stream that ends removes its grant from the union.
 When the union shrinks, an endpoint SHOULD withdraw its announcements and cancel its subscriptions that the union no longer covers, keeping the session and everything still covered.
 An endpoint that cancels a subscription, or refuses or stops serving a request, because the union does not cover it resets the stream with UNAUTHORIZED.
-An endpoint that announces a broadcast outside the union once its own setup tokens are answered SHOULD close the session with UNAUTHORIZED, rather than wait for a subscription that will never come.
+The acceptor judges each request against the union when it reads the request.
+A presenter MUST NOT send a request outside its known union while any non-empty token it presented remains unanswered; an unknown union covers no paths for this rule.
+Once those tokens are answered, it sends the request if the union covers it, or refuses it locally.
+An empty token does not hold requests: the connection credential is judged before the session serves requests.
+The same wait applies before closing the session for announcing a broadcast outside the union.
+An endpoint that announces a broadcast outside the settled union SHOULD close the session with UNAUTHORIZED, rather than wait for a subscription that will never come.
+To renew a token without interrupting requests the new grant still covers, the presenter waits for the new token's AUTH_OK before withdrawing the old token.
 
 An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, MUST send AUTH_ERROR with NOT_SUPPORTED and close its side of the stream.
 This applies before or after an AUTH_OK, including when a grant exceeds the message size limit.
@@ -1635,6 +1642,7 @@ The `Message Length` describes the payload size on the wire.
 - A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
 - Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
+- Required scope widening before AUTH_OK and presenter-side waiting for unanswered non-empty tokens before sending an uncovered request or rejecting a publication; renewal waits for AUTH_OK before withdrawing the old token.
 
 ## moq-lite-06
 

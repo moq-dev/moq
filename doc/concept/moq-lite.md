@@ -179,7 +179,12 @@ to a prefix. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
-union of every open token's grant. A token the peer has no verifier for, or
+union of every open token's grant. A request outside the known union waits
+while a non-empty token already presented is unanswered, then proceeds or
+fails against the settled union; a covered request does not wait. Each wait
+logs its path and duration. To renew without interrupting live requests the
+new grant still covers, await the new token's acceptance before dropping the
+old one. A token the peer has no verifier for, or
 whose grant is too large to send, fails with `Unsupported` and ends only that
 token; the session and its other grants stay up. A relay with an
 [auth server](/bin/relay/auth#in-band-renewal) verifies these tokens through it,

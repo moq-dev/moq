@@ -2518,7 +2518,7 @@ where
 			Some(live) => crate::auth::Gate::announced(auth, path, direction, live),
 			None => crate::auth::Gate::new(auth, path, direction),
 		};
-		if !gate.allows() {
+		if gate.guard(async { Ok(()) }).await.is_err() {
 			request.reject(Error::Unauthorized);
 			return;
 		}

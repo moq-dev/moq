@@ -1,4 +1,4 @@
-import { wall } from "@moq/clock";
+import { Instant, Nano, now, wall } from "@moq/clock";
 import { type Dispose, type Getter, Once, Signal } from "@moq/signals";
 import {
 	type Auth,
@@ -298,6 +298,7 @@ export class AuthSession implements Handle {
 	#replied = false;
 	#tokens = new Set<Presented>();
 	#setupPending = new Signal(0);
+	#pending = new Signal(0);
 	#acceptor: "undecided" | "default" | RequestQueue = "undecided";
 	#closed = false;
 
@@ -374,6 +375,41 @@ export class AuthSession implements Handle {
 		while (this.#setupPending.peek() > 0) await this.#setupPending.changed();
 	}
 
+	/** Wait for presented tokens that might admit this path, without delaying a covered path. */
+	async ready(path: Path.Valid, direction: "publish" | "subscribe", signal?: AbortSignal): Promise<void> {
+		let started: Instant | undefined;
+		try {
+			while (this.#pending.peek() > 0 && !this.#union.peek()?.[direction].matches(path)) {
+				started ??= now();
+				signal?.throwIfAborted();
+				await new Promise<void>((resolve, reject) => {
+					const cleanup = () => {
+						pending();
+						grant();
+						signal?.removeEventListener("abort", abort);
+					};
+					const done = () => {
+						cleanup();
+						resolve();
+					};
+					const abort = () => {
+						cleanup();
+						reject(signal?.reason);
+					};
+					const pending = this.#pending.changed(done);
+					const grant = this.#union.changed(done);
+					signal?.addEventListener("abort", abort, { once: true });
+				});
+			}
+		} finally {
+			if (started !== undefined) {
+				console.debug(
+					`request waited for authorization: path=${path} waited=${Nano.toMilli(Instant.durationSince(now(), started))}ms`,
+				);
+			}
+		}
+	}
+
 	/** Answer one of the peer's token streams, for the life of its token. */
 	async serve(stream: Stream): Promise<void> {
 		const wire = this.#wire;
@@ -417,6 +453,7 @@ export class AuthSession implements Handle {
 	close() {
 		if (this.#closed) return;
 		this.#closed = true;
+		this.#pending.set(0);
 		for (const token of this.#tokens) token.end(new Error("session closed"));
 		this.#tokens.clear();
 		this.#recompute();
@@ -427,6 +464,7 @@ export class AuthSession implements Handle {
 		const presented = new Presented(token, setup);
 		this.#track(presented);
 		if (setup) this.#setupPending.update((n) => n + 1);
+		if (token.byteLength > 0) this.#pending.update((n) => n + 1);
 		void this.#run(wire, presented);
 		return presented;
 	}
@@ -507,6 +545,7 @@ export class AuthSession implements Handle {
 		const unanswered = !token.isAnswered;
 		token.end(result);
 		if (unanswered && token.setup) this.#setupPending.update((n) => n - 1);
+		if (unanswered && token.token.byteLength > 0 && !this.#closed) this.#pending.update((n) => n - 1);
 		this.#tokens.delete(token);
 		// Closed before the union shrinks, so the scope never reads it as a revocation.
 		if (closed) this.close();
@@ -517,6 +556,7 @@ export class AuthSession implements Handle {
 		if (token.isAnswered) return;
 		token.answer();
 		if (token.setup) this.#setupPending.update((n) => n - 1);
+		if (token.token.byteLength > 0 && !this.#closed) this.#pending.update((n) => n - 1);
 	}
 
 	#recompute() {
@@ -550,12 +590,14 @@ export async function enforceGrant({
 	advertised,
 	grant,
 	setupAnswered,
+	auth,
 }: {
 	quic: WebTransport;
 	/** The broadcasts this side publishes, undefined once the origin ends. */
 	advertised: Getter<ReadonlyMap<Path.Valid, unknown> | undefined>;
 	grant: Getter<Grant | undefined>;
 	setupAnswered: Promise<void>;
+	auth?: AuthSession;
 }): Promise<void> {
 	const closed = quic.closed.then(
 		() => "closed" as const,
@@ -589,6 +631,11 @@ export async function enforceGrant({
 			for (const path of table.keys()) {
 				if (live.has(path)) continue;
 				if (!current.publish.matches(path)) {
+					await auth?.ready(path, "publish");
+					if (grant.peek()?.publish.matches(path)) {
+						live.add(path);
+						continue;
+					}
 					console.error(`publishing outside our grant; closing the session: broadcast=${path}`);
 					quic.close({
 						closeCode: SessionCode.Unauthorized,

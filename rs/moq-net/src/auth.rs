@@ -601,6 +601,25 @@ impl Handle {
 		Poll::Ready(())
 	}
 
+	/// Wait only when a token already presented might widen the grant for this path.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	fn poll_presented(&self, direction: Direction, path: &str, waiter: &kio::Waiter) -> Poll<()> {
+		let _ = ready_or!(self.state.poll(waiter, |state| {
+			let (granted, _) = state.parts(direction);
+			if granted.is_some_and(|grant| grant.matches(path))
+				|| !state
+					.tokens
+					.values()
+					.any(|slot| !slot.token.is_empty() && slot.answered.is_none() && !slot.withdrawn)
+			{
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}));
+		Poll::Ready(())
+	}
+
 	/// Authorize the peer's connection credential for `grant` on this session, in the
 	/// session's own paths. Calling it again re-authorizes, narrower or wider, replacing the
 	/// last grant. The session's origin handles still bound it, so it never grants more than
@@ -1619,6 +1638,20 @@ pub(crate) struct Gate {
 	part: Part,
 	/// Whether the scope allowed the path at the last permit.
 	within_limit: bool,
+	admitted: bool,
+	waiting: Option<Waiting>,
+}
+
+/// Log the whole wait once, including when its request is cancelled.
+struct Waiting {
+	path: crate::PathOwned,
+	started: Instant,
+}
+
+impl Drop for Waiting {
+	fn drop(&mut self) {
+		tracing::debug!(path = %self.path, waited = ?self.started.elapsed(), "request waited for authorization");
+	}
 }
 
 /// Which part of a [`Permit`] a [`Gate`] watches.
@@ -1643,6 +1676,8 @@ impl Gate {
 			epoch: 0,
 			part: Part::Both,
 			within_limit,
+			admitted: false,
+			waiting: None,
 		}
 	}
 
@@ -1704,11 +1739,34 @@ impl Gate {
 		self.handle.poll_setup_answered(waiter)
 	}
 
+	/// Settle tokens that might admit this request before its first wire operation.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.admitted {
+			return Poll::Ready(());
+		}
+		if self
+			.handle
+			.poll_presented(self.direction, self.path.as_str(), waiter)
+			.is_pending()
+		{
+			self.waiting.get_or_insert_with(|| Waiting {
+				path: self.path.clone(),
+				started: Instant::now(),
+			});
+			return Poll::Pending;
+		}
+		drop(self.waiting.take());
+		self.admitted = true;
+		Poll::Ready(())
+	}
+
 	/// Resolve one operation under this gate without dropping the handler's refusal path.
 	#[cfg(feature = "async")]
 	pub(crate) async fn guard<T>(&mut self, operation: impl std::future::Future<Output = Result<T>>) -> Result<T> {
 		let mut operation = std::pin::pin!(operation);
 		kio::wait(|waiter| {
+			std::task::ready!(self.poll_ready(waiter));
 			if self.poll_denied(waiter).is_ready() {
 				return Poll::Ready(Err(Error::Unauthorized));
 			}
@@ -1807,6 +1865,7 @@ pub(crate) struct Enforce {
 	/// Every broadcast admitted so far, still announced.
 	live: std::collections::HashSet<crate::PathOwned>,
 	setup: bool,
+	pending: Option<Gate>,
 }
 
 impl Enforce {
@@ -1827,11 +1886,19 @@ impl Enforce {
 			self.permit = union.map(|grant| grant.publish);
 		}
 		// No grant yet (the peer never answered with one): nothing to check against.
-		let Some(permit) = &self.permit else {
+		if self.permit.is_none() {
 			return Poll::Pending;
-		};
+		}
 
 		loop {
+			if let Some(gate) = &mut self.pending {
+				std::task::ready!(gate.poll_ready(waiter));
+				let gate = self.pending.take().expect("pending publication");
+				if !handle.within_grant(Direction::Publish, gate.path.as_str()) {
+					return Poll::Ready(Some(gate.path));
+				}
+				self.live.insert(gate.path);
+			}
 			let Some(event) = ready_or!(announced.poll_next(waiter)) else {
 				return Poll::Ready(None);
 			};
@@ -1839,8 +1906,9 @@ impl Enforce {
 				crate::announce::Event::Start(update) | crate::announce::Event::Update(update)
 					if !self.live.contains(&update.prefix) =>
 				{
-					if !permit.matches(update.prefix.as_str()) {
-						return Poll::Ready(Some(update.prefix));
+					if !handle.within_grant(Direction::Publish, update.prefix.as_str()) {
+						self.pending = Some(Gate::new(handle.clone(), update.prefix, Direction::Publish));
+						continue;
 					}
 					self.live.insert(update.prefix);
 				}
@@ -1856,6 +1924,57 @@ impl Enforce {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[moq_clock::test]
+	async fn a_request_waits_for_an_unanswered_token() {
+		let handle = Handle::new(true);
+		let setup = handle.present(Bytes::new(), true).unwrap();
+		handle.granted(setup.presented.id, Grant::default());
+		let token = handle.present(Bytes::from_static(b"new"), false).unwrap();
+		let mut gate = Gate::new(
+			handle.clone(),
+			crate::Path::new("room").to_owned(),
+			Direction::Subscribe,
+		);
+		let mut operation = std::pin::pin!(gate.guard(async { Ok(()) }));
+		let waiter = kio::Waiter::noop();
+		assert!(
+			waiter.poll_future(operation.as_mut()).is_pending(),
+			"request refused before token answered"
+		);
+		handle.granted(token.presented.id, Grant::all());
+		assert!(matches!(waiter.poll_future(operation.as_mut()), Poll::Ready(Ok(()))));
+	}
+
+	#[test]
+	fn an_empty_token_never_holds_a_request() {
+		let handle = Handle::new(true);
+		let _setup = handle.present(Bytes::new(), true).unwrap();
+		let mut gate = Gate::new(handle, crate::Path::new("room").to_owned(), Direction::Subscribe);
+		assert!(gate.poll_ready(&kio::Waiter::noop()).is_ready());
+	}
+
+	#[test]
+	fn a_covered_request_never_waits_for_an_unanswered_token() {
+		let handle = Handle::new(true);
+		let first = handle.present(Bytes::from_static(b"first"), false).unwrap();
+		handle.granted(first.presented.id, Grant::all());
+		let _unanswered = handle.present(Bytes::from_static(b"renewal"), false).unwrap();
+		let mut gate = Gate::new(handle, crate::Path::new("room").to_owned(), Direction::Subscribe);
+		assert!(gate.poll_ready(&kio::Waiter::noop()).is_ready());
+	}
+
+	#[test]
+	fn an_auth_ok_is_queued_after_its_scope_widens() {
+		let handle = Handle::new(true);
+		handle.authorize(&Grant::default());
+		let serving = Serving::new(handle.clone());
+		let request = Request::new(Bytes::from_static(b"token"), serving.issue.clone());
+		let _issued = request.accept(Grant::all());
+		let issue = serving.issue.read();
+		assert!(matches!(issue.outbox.front(), Some(Reply::Grant(_))));
+		assert!(handle.within_limit(Direction::Subscribe, "room"));
+	}
 
 	/// A queued request token keeps its request's slot, so the peer's request credit bounds
 	/// how many wait; answering it gives the slot back.
