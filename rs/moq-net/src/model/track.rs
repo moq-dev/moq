@@ -1631,6 +1631,8 @@ impl TrackState {
 	pub(super) fn charge_debt(&mut self) {
 		let written = self.cache.take_written();
 		let pool = self.cache.pool().clone();
+		// Held heads go first: they are a failed copy's frames that no track can evict.
+		pool.reclaim_held();
 		match pool.accrue(written) {
 			Some(mut accrued) => {
 				if self.oldest_is_stale(&pool) {
@@ -3664,6 +3666,26 @@ impl Consumer {
 				Poll::Pending => Poll::Pending,
 			}
 		})
+	}
+
+	/// Lend `head` to the cached copies of group `sequence`; see
+	/// [`group::Producer::adopt_head`].
+	pub(super) fn adopt_head(&self, sequence: u64, head: &group::Head) {
+		let copies: Vec<group::Producer> = self.with_state(|state| {
+			let Some(state) = state else {
+				return Vec::new();
+			};
+			let state = state.read();
+			state
+				.lookup
+				.get(&sequence)
+				.map_or_else(Vec::new, |slot| slot.copies().cloned().collect())
+		});
+		// With the track lock released (lock order is track then group): adopting settles
+		// the group's cache debt.
+		for group in copies {
+			group.adopt_head(head);
+		}
 	}
 
 	/// [`Self::poll_group`], except a newer group is no verdict: QUIC does not order
@@ -11956,6 +11978,38 @@ mod test {
 		// Steady state hovers within about one group of capacity: a victim smaller
 		// than the outstanding debt is never evicted, so the excess stays bounded.
 		assert!(pool.used() <= 24 * unit, "usage hovers near capacity: {}", pool.used());
+	}
+
+	/// A capacity shrink reclaims a failed group's held head before any cached group, even
+	/// in a pool with no idle window and once the failed copy's track is gone.
+	#[test]
+	fn a_shrink_reclaims_held_heads_first() {
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(1 << 40));
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let failed = Producer::new(broadcast.clone(), "failed", Info::timed());
+		let mut group = failed.append_group().unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from(vec![0u8; 1_000]))
+			.unwrap();
+		let handoff = group.consume().handoff();
+		group.abort(crate::Error::Cancel).unwrap();
+		drop(failed);
+		assert!(handoff.head().is_some(), "held for a successor route");
+
+		let mut producer = Producer::new(broadcast, "live", Info::timed());
+		finished_group(&mut producer, 1_000);
+		// Room for the cached group, not the held head beside it.
+		pool.resize(pool.used() - 1);
+		finished_group(&mut producer, 1_000);
+
+		assert!(
+			handoff.head().is_none(),
+			"the shrink left a stalled resumer's head held"
+		);
+		assert!(producer.consume().peek_group(0).is_some(), "a cached group went first");
 	}
 
 	/// One write pays at most twice what it produced, so a capacity shrink (or one

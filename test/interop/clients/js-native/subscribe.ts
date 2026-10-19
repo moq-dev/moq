@@ -66,7 +66,7 @@ async function video(bc: Moq.Broadcast.Consumer): Promise<[string, Catalog.Video
 async function run(): Promise<void> {
 	const origin = new Moq.Origin.Producer();
 	// The grant arrives over AUTH, which only the work-in-progress moq-lite-07 carries and no
-	// client offers by default. The WebSocket fallback cannot offer it, so it stays off.
+	// client offers by default. It is offered over WebTransport alone, so the fallback stays off.
 	const connection = await Moq.Connection.connect({
 		url: new URL(url as string),
 		consume: origin,

@@ -122,6 +122,7 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 			Some(moq_tokio::quic::CongestionControl::from_str(family).map_err(Error::InvalidConfig)?);
 	}
 	out.quic.qlog = unsafe { ffi::parse_str_optional(config.quic_qlog, config.quic_qlog_len)? }.map(Into::into);
+	out.quic.keylog = Some(config.quic_keylog);
 
 	Ok(out)
 }

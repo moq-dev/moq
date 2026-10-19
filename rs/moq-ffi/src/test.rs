@@ -4106,6 +4106,39 @@ async fn raw_read_frame_skips_empty_then_populated_groups() {
 	assert_eq!(frame.timestamp_us, Some(2_000));
 }
 
+/// A group a hop reset as expired is skipped like an empty one, as a locally expired
+/// group is (`test_a_pending_timer_waits_for_advance` in py covers that).
+#[tokio::test]
+async fn raw_read_frame_skips_a_group_reset_as_old() {
+	let broadcast = moq_net::broadcast::Info::default().produce();
+	let track = broadcast
+		.create_track(
+			"status",
+			Some(moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)),
+		)
+		.unwrap();
+	let consumer = MoqTrackConsumer::new(track.subscribe(None), crate::ffi::Background::default());
+
+	let expired = track.append_group().unwrap();
+	// The read holds the group when the reset lands, as one arriving over the wire does.
+	let read = spawn_parked(async move { consumer.read_frame().await }).await;
+	expired
+		.abort(moq_net::Error::Stream(moq_net::StreamError::Old))
+		.unwrap();
+	let mut later = track.append_group().unwrap();
+	later
+		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"later".as_slice())
+		.unwrap();
+
+	let frame = tokio::time::timeout(TIMEOUT, read)
+		.await
+		.expect("timed out skipping the expired group")
+		.expect("read task panicked")
+		.unwrap()
+		.expect("expected the later group's first frame");
+	assert_eq!(frame.payload, b"later");
+}
+
 /// A foreign cancel only stops polling a read; uniffi drops it later, at `rust_future_free`.
 /// Until then the cancelled read must not take the frame the next read is waiting for.
 #[tokio::test]
@@ -4947,6 +4980,7 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(defaults.quic.mtu_discovery, None);
 	assert_eq!(defaults.quic.congestion_control, None);
 	assert_eq!(defaults.quic.qlog, None);
+	assert_eq!(defaults.quic.keylog, None);
 
 	assert!(MoqClient::new(defaults).is_ok());
 }
@@ -4988,6 +5022,86 @@ async fn client_new_validates_the_connection_knobs() {
 		..Default::default()
 	};
 	assert_eq!(client(MoqClientTls::default(), qlog).is_ok(), moq_qlog_supported());
+}
+
+/// `quic.keylog` reaches the backend: refused without `SSLKEYLOGFILE`, and writing the client's
+/// session secrets once it names a file.
+#[tokio::test]
+async fn client_keylog_writes_session_keys() {
+	let keylog = MoqQuicConfig {
+		keylog: Some(true),
+		..Default::default()
+	};
+	let client = |quic: MoqQuicConfig, fingerprints: Vec<String>| {
+		MoqClient::new(MoqClientConfig {
+			tls: MoqClientTls {
+				host_name: Some("localhost".into()),
+				fingerprints,
+				..Default::default()
+			},
+			quic,
+			websocket: MoqWebSocketConfig {
+				enabled: Some(false),
+				delay_us: None,
+			},
+			..Default::default()
+		})
+	};
+
+	// SAFETY: nextest runs each test in its own process, and nothing has spawned a thread that
+	// reads the environment yet.
+	unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+	assert!(matches!(
+		client(keylog.clone(), Vec::new()),
+		Err(MoqError::Config { .. })
+	));
+
+	let path = std::env::temp_dir().join(format!("moq-ffi-keylog-{}.log", std::process::id()));
+	let _ = std::fs::remove_file(&path);
+	// SAFETY: as above.
+	unsafe { std::env::set_var("SSLKEYLOGFILE", &path) };
+
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept()
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+		request.accept(None, None).await.expect("handshake failed")
+	});
+
+	let client = client(keylog, server.cert_fingerprints().unwrap()).unwrap();
+	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("server accept timed out")
+		.expect("server accept task panicked");
+
+	let log = std::fs::read_to_string(&path).unwrap_or_default();
+	let _ = std::fs::remove_file(&path);
+	assert!(
+		log.lines().any(|line| line.starts_with("CLIENT_TRAFFIC_SECRET_0 ")),
+		"quic.keylog wrote no session keys: {log:?}"
+	);
+
+	session.cancel(0);
+	server_session.cancel(0);
+	client.cancel();
+	server.cancel();
 }
 
 /// Every connection knob set at once still dials, so none of them is refused or misapplied.
@@ -5034,6 +5148,7 @@ async fn client_connects_with_every_knob_set() {
 			mtu_discovery: Some(true),
 			congestion_control: Some(MoqCongestionControl::Loss),
 			qlog: None,
+			keylog: Some(false),
 		},
 		websocket: MoqWebSocketConfig {
 			enabled: Some(false),

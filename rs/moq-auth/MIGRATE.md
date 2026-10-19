@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Typed admission refusals
+### Typed admission refusals (#5996)
 
 `Error::Refused` now carries a `Refusal`; construct `Error::Refused(Refusal::default())` for an unattributed refusal and match `Error::Refused(refusal)` to read `reason`, `root`, and `tier`.
 HTTP auth servers can return that JSON shape with 403; legacy plain-text 401/403 still refuses without attribution.

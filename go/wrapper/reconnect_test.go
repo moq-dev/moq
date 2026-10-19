@@ -2,6 +2,7 @@ package moq_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -144,6 +145,23 @@ func TestServerCloseReleasesPort(t *testing.T) {
 		t.Fatalf("rebind %s: %v", addr, err)
 	}
 	defer func() { _ = second.Close() }()
+}
+
+// The keylog opt-in reaches the native server, which refuses it without SSLKEYLOGFILE.
+func TestListenKeylogRequiresSSLKEYLOGFILE(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), reconnectTimeout)
+	defer cancel()
+	t.Setenv("SSLKEYLOGFILE", "")
+
+	server, err := moq.Listen(ctx, "127.0.0.1:0", moq.WithTLSGenerate("localhost"), moq.WithServerQUICKeylog(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = server.Close()
+
+	if _, err := moq.Listen(ctx, "127.0.0.1:0", moq.WithTLSGenerate("localhost"), moq.WithServerQUICKeylog(true)); !errors.Is(err, moq.ErrConfig) {
+		t.Fatalf("keylog without SSLKEYLOGFILE: got %v, want ErrConfig", err)
+	}
 }
 
 // A Go worker survives a relay restart the way a moq-c worker does: the session
@@ -314,6 +332,7 @@ func TestDialConnectionOptions(t *testing.T) {
 		moq.WithQUICGSO(false),
 		moq.WithQUICMTUDiscovery(true),
 		moq.WithQUICCongestionControl(moq.CongestionControlLoss),
+		moq.WithQUICKeylog(false),
 		moq.WithWebSocketEnabled(false),
 	)
 	if err != nil {
