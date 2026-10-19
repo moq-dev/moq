@@ -8,13 +8,19 @@ ProbeRTT, recognizing bandwidth growth within a round, and precautionary
 bandwidth probing. Reduce demonstrated frame deadline interference without
 stale minimum RTT, persistent queues, or unfairness. Application limitation
 alone is not evidence that the path drained, and Google parity is not
-assumed to be an improvement. Grade them, and BBR's response to random
-loss, on a 10 % random-loss media profile as well.
+assumed to be an improvement. Acceptance and performance verdicts use
+bufferbloat: a rate below the media bitrate behind a deep but finite queue
+whose overflow drops packets. Random loss may check correctness, but never
+grades media quality or performance.
 
 ## Plan
 
 Decided in the 2026-09-30 audit: the Google BBR comparison merged here as
 one study, since both reuse the same media profiles, harness, and baseline.
+
+The random-loss audit decides whether this study survives before it starts,
+as the maintainer decided on 2026-10-17. The measurements below preserve
+its historical motivation; they are not acceptance criteria.
 
 ### Natural drains
 
@@ -86,10 +92,9 @@ pinned code and configurations. Keep transport differences and QUICHE flags
 explicit and compare each algorithm change separately. A simulation result
 is not an end-to-end network measurement.
 
-### Random loss
+### Historical random-loss observations
 
-Moved from the finished T-STD export epic (2026-10-16), whose nightly
-stays at 1 %.
+Moved from the finished T-STD export epic (2026-10-16).
 `just test ts --hrd --loss <percent>` drops that share of the relay's
 datagrams to the subscriber at random through `moq-shaper`, 25 ms each way,
 and grades the export with T-STD, PCR accuracy and `holes.py`. Measured on a
@@ -105,9 +110,13 @@ loaded host (rerun before deciding):
 
 BBRv3 takes a round with more than 2 % loss (`LOSS_THRESH`) as congestion
 and cuts its inflight bound, so random loss above it holds the leg below the
-media rate. Decide whether and how BBR should tell random loss from
-congestion without giving up fairness against loss-based flows, and how that
-interacts with the precautionary probe stop under Google differences.
+media rate. Re-judge those observations on bufferbloat before proposing
+any change to the congestion response or precautionary probe stop. A
+random-loss quality result alone cannot justify weakening either.
+
+## Required
+
+- [Random-loss audit](/quest/m1/random-loss-audit.md) - decides whether this study survives and records its bufferbloat verdict
 
 ## Related
 
