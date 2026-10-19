@@ -46,6 +46,8 @@ Audit evidence (2026-10-19, incomplete):
   ([39266265648](https://github.com/moq-dev/moq/actions/runs/39266265648))
   reports a successful Rust bench job but retains no `bench-rust` artifact.
   It took 39m50s, so new coverage must not extend that leg.
+  The JS job was cancelled at one hour after the interests benchmark stopped
+  printing output; the test-cost audit is investigating that root cause.
 - Both nights retain binding reports. Single-run signals needing paired
   reproduction include Kotlin 1 KiB, 4 publishers x 4 subscribers CPU:
   79.08 to 122.73 ms/MB (+55.2%); Dart small-frame throughput/CPU changes
@@ -59,6 +61,13 @@ Audit evidence (2026-10-19, incomplete):
   Chromium 153.0.8010.12 versus 156.0.8078.4. They cannot establish a JS
   performance regression. Run the browser harness in paired full mode
   with the same browser before drawing conclusions.
+- Local verification: `just check`, the six nightly/inventory tests, six
+  benchmark-report tests, and `quest check` passed. Supplemental compilation
+  completed in 10m58s, including the full CLI binary's fat LTO, but the
+  optional fixture run was stopped during jitter under shared-host load.
+  It did not complete or produce a validated report. The new io_uring group
+  was not run locally. Revalidate both groups in Nightly before relying on
+  their measurements.
 - Still required before completing this run: restore comparable Rust/JS
   history, reproduce the binding candidates, audit unbenchmarked hot and
   fan-out paths, and record the resulting baselines. Keep this quest in
