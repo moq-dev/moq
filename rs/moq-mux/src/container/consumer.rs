@@ -262,11 +262,8 @@ impl<F: Container> Consumer<F> {
 		if let Some(read) = self.next.take() {
 			return Poll::Ready(Ok(Some(Item::Read(read))));
 		}
-		if self.failed {
-			return Poll::Ready(Ok(None));
-		}
 		let edge = self.edge;
-		let event = ready!(self.poll_event(waiter)).inspect_err(|_| self.failed = true)?;
+		let event = ready!(self.poll_event(waiter))?;
 		let read = match event {
 			Some(Event::Frame(frame)) => Read::Frame {
 				group: self.group,
@@ -293,6 +290,15 @@ impl<F: Container> Consumer<F> {
 
 	/// Read media or a clean group boundary without waiting for a successor group.
 	pub(crate) fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
+		if self.failed {
+			return Poll::Ready(Ok(None));
+		}
+		let event = ready!(self.poll_event_inner(waiter));
+		self.failed = event.is_err();
+		Poll::Ready(event)
+	}
+
+	fn poll_event_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
 
@@ -2586,6 +2592,25 @@ mod tests {
 		// The reader stays ended rather than resuming past the malformed object.
 		let read = consumer.read().await;
 		assert!(matches!(read, Ok(None)), "{read:?}");
+	}
+
+	/// The exporter path reads events directly, and it stays ended after an error too.
+	#[tokio::test]
+	async fn a_decode_error_ends_the_event_reader() {
+		tokio::time::pause();
+		let track = track_producer("test", timed());
+		let mut consumer = Consumer::new(track.subscribe(None), FailingDecode);
+
+		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_failing(&mut group, None);
+		write_failing(&mut group, Some(0));
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		let event = kio::wait(|waiter| consumer.poll_event(waiter)).await;
+		assert!(matches!(event, Err(crate::Error::UnknownFormat(_))));
+		let event = kio::wait(|waiter| consumer.poll_event(waiter)).await;
+		assert!(matches!(event, Ok(None)), "the event reader resumed after an error");
 	}
 
 	/// A malformed object mid-group, found while looking ahead past a blocked group, ends the

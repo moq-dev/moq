@@ -120,7 +120,7 @@ export class Consumer {
 	// Endpoints and later frames can overlap the next group without moving this floor.
 	#start?: { group: number; timestamp: Micro };
 	#floor?: Micro;
-	// A group below the previous group start aborts the track.
+	// The first error that aborted the track: a decode failure or a group below the previous group start.
 	#error?: Error;
 
 	// Wake up the consumer when a new frame is available.
@@ -471,7 +471,9 @@ export class Consumer {
 		return true;
 	}
 
+	// Groups decode in parallel, so a later failure must not replace the one the track closed with.
 	#abort(error: Error): void {
+		if (this.#error) return;
 		this.#error = error;
 		this.#finish(error);
 		this.#track.close(error);

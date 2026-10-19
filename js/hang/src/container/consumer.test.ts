@@ -682,6 +682,31 @@ for (const [where, payloads] of [
 	});
 }
 
+// Groups decode in parallel, so a later group's failure must not replace the error the reader ended with.
+test("Consumer keeps the first of several decode errors", async () => {
+	const failingFormat: ContainerFormat = {
+		decode(frame: Uint8Array): Frame[] {
+			throw new Error(`malformed ${frame[0]}`);
+		},
+	};
+
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: failingFormat, maxDelay: 500 as Milli });
+
+	for (const sequence of [0, 1]) {
+		const group = new Group.Producer(sequence);
+		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Time.Timestamp.now() });
+		group.close();
+		track.writeGroup(group);
+	}
+	track.close();
+	await settle();
+
+	await expect(consumer.next()).rejects.toThrow("malformed 0");
+	await expect(consumer.next()).rejects.toThrow("malformed 0");
+	consumer.close();
+});
+
 // A transport reset is loss: frames decoded before it are kept and the cut tail reads as a gap.
 test("Consumer keeps frames decoded before a group reset (truncated GoP)", async () => {
 	const track = new Track.Producer("test");
