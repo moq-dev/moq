@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Duplicate keys are refused
+
+Every decoder refuses a frame in which a JSON object repeats a key with `Error::DuplicateKey`, where stream and window decoders used to keep the last copy and snapshots returned `Error::Json`.
+Match `DuplicateKey` wherever you handle `Error::Json` for a malformed frame, and fix any publisher that writes a repeated key.
+
 ### Demand is read through `demand()`
 
 Call `producer.demand().is_used()` instead of `producer.is_used()`.

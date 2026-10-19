@@ -18,6 +18,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { type Stream, Writer } from "./stream.ts";
 import { withTimeout } from "./util/timeout.ts";
+import { nextTask } from "./util/yield.ts";
 import { wireOf } from "./wire.ts";
 
 const url = new URL("https://localhost:4443/test");
@@ -234,6 +235,34 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		const closed = client.auth.grant.peek();
 		expect(closed?.publish.size).toBe(0);
 		expect(closed?.subscribe.size).toBe(0);
+		// What the session enforced is not revoked by its end.
+		expect((client.auth as AuthSession).scope.peek()?.publish.size).toBeGreaterThan(0);
+		server.abort();
+	});
+
+	test("a session's close is not a revocation of its subscriptions", async () => {
+		const origin = new OriginProducer();
+		const broadcast = origin.createBroadcast(Path.from("room/x"));
+		broadcast.announce();
+		broadcast
+			.createTrack("video")
+			.appendGroup()
+			.writeFrame({ payload: new Uint8Array([1]) });
+
+		const { client, server } = await connect({ serverPublish: origin, protocol });
+		await waitFor(client.auth.grant, (g) => g !== undefined && g.subscribe.size > 0);
+		const track = wireOf(client).consume(Path.from("room/x")).track("video").subscribe();
+		expect(await track.recvGroup()).toBeDefined();
+
+		// The grant drops as the session closes, which can land before the transport's close
+		// reaches the subscription; force that order.
+		(client.auth as AuthSession).close();
+		expect(client.auth.grant.peek()?.subscribe.size).toBe(0);
+		await nextTask();
+		expect(track.closed.peek()).toBeUndefined();
+
+		client.abort();
+		expect(await track.closed).toBeNull();
 		server.abort();
 	});
 
