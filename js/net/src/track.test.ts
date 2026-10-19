@@ -1,6 +1,6 @@
 import { expect, setSystemTime, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
-import { ProtocolViolation, TimestampMismatch, TooFarBehind } from "./error.ts";
+import { ProtocolViolation, StreamCode, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -777,11 +777,12 @@ test("a stamped successor expires a group stalled before its first frame", async
 test("real time reads a live stream without truncating it", async () => {
 	// 2s GOPs produced one at a time and read as they arrive, at the default (zero)
 	// budget. Taking the live edge must not shorten the group the reader is already on,
-	// so every frame of every group arrives and each group *ends* at its boundary.
+	// so every frame of every group arrives.
 	//
-	// The reader is always a little behind the edge (that is what reading live means),
-	// and it is parked at its group's end when the next one opens, because a group's
-	// close and the next group's first frame are separate events.
+	// The reader is parked at its group's end when the next one opens, because a group's
+	// close and the next group's first frame are separate events. A zero budget gives up
+	// there, and the group fails with Old since its producer never closed it, but only
+	// after the reader took every frame.
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(60_000) });
 	const track = producer.subscribe();
 
@@ -800,8 +801,12 @@ test("real time reads a live stream without truncating it", async () => {
 		while (reading.tryReadFrame()) frames++;
 		read.push([sequence, frames]);
 
-		// Parked at the end of the current group, with no close yet.
-		const end = reading.readFrame();
+		// Parked at the end of the current group, with no close yet. Settled now, since it
+		// fails before anything awaits it.
+		const end = reading.readFrame().then(
+			() => undefined,
+			(err: unknown) => err,
+		);
 
 		// The next keyframe opens its group. The verdict is taken in this window, before
 		// the previous group's close lands: give the parked read a real turn to run.
@@ -811,7 +816,7 @@ test("real time reads a live stream without truncating it", async () => {
 		open.close();
 		next.writeFrame({ payload: enc.encode("tail"), timestamp: Timestamp.fromMillis(n * 2000 + 1900) });
 
-		await expect(end).resolves.toBeUndefined();
+		expect(await end).toMatchObject({ code: StreamCode.Old });
 
 		reading = await track.recvGroup();
 		open = next;
@@ -871,11 +876,9 @@ test("a handed-out group still expires while its first frame is stalled", async 
 		clock.set(11_000);
 		producer.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(1000) });
 
-		// It ends rather than fails: the reader took every frame the group ever had
-		// (none), so nothing was truncated. What it was waiting for was the producer,
-		// and a group abandoned where its reader stands looks like one that ended there.
-		await expect(pending).resolves.toBeUndefined();
-		expect(await closed).toBeNull();
+		// The producer never closed it, so even an empty prefix is not the group.
+		await expect(pending).rejects.toMatchObject({ code: StreamCode.Old });
+		expect(await closed).toMatchObject({ code: StreamCode.Old });
 	} finally {
 		clock.restore();
 	}
@@ -899,7 +902,7 @@ test("committing track info wakes a group newly outside the retention window", a
 	await settle();
 	producer.accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
 
-	await expect(waiting).resolves.toBeUndefined();
+	await expect(waiting).rejects.toMatchObject({ code: StreamCode.Old });
 });
 
 test("a handed-out frame cancels its in-flight operation when it expires", async () => {
@@ -1101,16 +1104,19 @@ test("a parked read wakes at its wall deadline", async () => {
 			// The successor never presents a frame, so media time never bounds the held group.
 			producer.appendGroup();
 			let woken = false;
-			const read = group.readFrame().then((frame) => {
-				woken = true;
-				return frame;
-			});
+			const read = group.readFrame().then(
+				() => undefined,
+				(err: unknown) => {
+					woken = true;
+					return err;
+				},
+			);
 			await Promise.resolve();
 
 			await clock.advance(10_900);
 			expect(woken).toBe(false);
 			await clock.advance(11_000);
-			expect(await read).toBeUndefined();
+			expect(await read).toMatchObject({ code: StreamCode.Old });
 		} finally {
 			producer.close();
 			clock.restore();

@@ -458,9 +458,6 @@ export const hooks: {
 	/** Carry a handed-out group across its logical track's route changes. */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
 	// pending: /quest/m1/public-model/serve.md
-	/** Whether a drift budget gave up on a drained group, which reads as a clean end. */
-	groupExpired: (group: GroupConsumer) => boolean;
-	// pending: /quest/m1/public-model/serve.md
 	/** Start a group operation unless the handed-out group has expired, and stop it if the group expires mid-flight. */
 	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
 	// pending: /quest/m1/public-model/serve.md
@@ -596,9 +593,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupExpired: () => {
 		throw new Error("group.ts not loaded");
 	},
 	guardGroup: () => {

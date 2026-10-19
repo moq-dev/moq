@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Signal } from "@moq/signals";
-import { FrameTooLarge, GroupTooLarge } from "./error.ts";
+import { FrameTooLarge, GroupTooLarge, StreamCode, StreamError } from "./error.ts";
 import { MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
 import { hooks, type Replacement } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -342,4 +342,26 @@ test("a stalled group whose copy then fails asks again with the failure", async 
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	producer.close(new Error("route failed"));
 	await expect(read).rejects.toBe(verdict);
+});
+
+test("a drained unfinished group fails with Old when its budget gives up", async () => {
+	const { producer, consumer } = pair(0);
+	producer.writeFrame(textFrame("a"));
+	const expired = new Signal(false);
+	hooks.expireGroup(consumer, { expired: () => expired.peek(), changed: [expired] });
+
+	expect(await consumer.readString()).toBe("a");
+	const pending = consumer.readFrame();
+	expired.set(true);
+
+	// The producer never finished the group, so a clean end would pass the prefix off as whole.
+	const err = await pending.then(
+		() => undefined,
+		(e: unknown) => e,
+	);
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.Old);
+	await expect(consumer.readFrame()).rejects.toBe(err);
+	expect(consumer.done).toBe(true);
+	expect(await consumer.closed).toBe(err as StreamError);
 });

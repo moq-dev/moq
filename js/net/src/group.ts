@@ -5,7 +5,15 @@
  */
 import { Instant, now } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
-import { FrameTooLarge, GroupTooLarge, ProtocolViolation, TimestampMismatch, TooFarBehind } from "./error.ts";
+import {
+	FrameTooLarge,
+	GroupTooLarge,
+	ProtocolViolation,
+	StreamCode,
+	StreamError,
+	TimestampMismatch,
+	TooFarBehind,
+} from "./error.ts";
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
 import type { Timestamp } from "./time.ts";
 
@@ -461,11 +469,7 @@ export class Consumer {
 	#attempt?: Attempt;
 	// The frame a replacement copy resumes at: frames below it were read from an earlier copy.
 	#skip = 0;
-	// Sticky verdicts, set once. `#ended` is a drained group the budget gave up on,
-	// which is indistinguishable from one that ended: nothing was lost, so it reads as
-	// the end of the group. `#terminal` is a failure, including a budget that gave up
-	// while content was still unread.
-	#ended = false;
+	// Sticky failure, set once, including a budget that gave up on the group.
 	#terminal?: Error;
 	#verdict = new Once<Error | null>();
 	#closed?: CombinedClosed;
@@ -497,7 +501,7 @@ export class Consumer {
 
 	// Whether a failure of the copy being read may still be continued from another route.
 	#recovers(failed: Error): boolean {
-		return !this.#terminal && !this.#ended && this.#recover?.wants(failed) === true;
+		return !this.#terminal && this.#recover?.wants(failed) === true;
 	}
 
 	static {
@@ -521,7 +525,6 @@ export class Consumer {
 			if (group.#closed?.peek() instanceof Error && group.#verdict.peek() === undefined)
 				group.#closed = undefined;
 		};
-		hooks.groupExpired = (group) => group.#ended;
 		hooks.guardGroup = (group, operation) => group.#guard(operation);
 		hooks.readGroupFrame = (group, from) => group.#readFramePosition(true, from);
 		hooks.evictGroup = (group) => {
@@ -534,27 +537,24 @@ export class Consumer {
 	// that has stalled while the live edge moved on, not a reader slower than the wire.
 	// Returns true if a verdict was just reached, so the caller re-checks.
 	//
-	// `unread` is for a caller that still holds content the reader has not seen (a
-	// publisher part-way through writing a frame): giving up there is a truncation, so
-	// it fails rather than ending.
-	#expire(unread = false): boolean {
-		if (this.#terminal || this.#ended) return false;
+	// A reader that took every frame still fails with Old: the producer never finished
+	// the group, so a clean end would pass the prefix off as the whole group.
+	#expire(): boolean {
+		if (this.#terminal) return false;
 		if (this.#state.closed.peek() instanceof Error) return false;
 		if (!this.#expiry?.expired()) return false;
 
-		if (unread) {
-			this.#terminal = new Error("group exceeded the subscription max delay budget");
-		} else {
-			this.#ended = true;
-		}
-		if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal ?? null);
+		this.#terminal = new StreamError(StreamCode.Old, {
+			message: "group exceeded the subscription max delay budget",
+		});
+		if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
 		return true;
 	}
 
 	// Takes a thunk rather than a started promise, so a group already past its budget
 	// never begins the write: an abandoned write would reject later with no handler.
 	#guard<T>(operation: () => Promise<T>): Promise<T> {
-		this.#expire(true);
+		this.#expire();
 		if (this.#terminal) return Promise.reject(this.#terminal);
 		const expiry = this.#expiry;
 		if (!expiry) return operation();
@@ -569,7 +569,7 @@ export class Consumer {
 				fn();
 			};
 			const check = () => {
-				this.#expire(true);
+				this.#expire();
 				if (this.#terminal) {
 					const error = this.#terminal;
 					finish(() => reject(error));
@@ -591,8 +591,8 @@ export class Consumer {
 			// Unread content is going away either way. If the budget had already given up
 			// on this group that is the more specific reason, so ask it first; otherwise
 			// the reader simply lagged behind the cache.
-			this.#expire(true);
-			if (!this.#terminal && !this.#ended) {
+			this.#expire();
+			if (!this.#terminal) {
 				this.#terminal = new TooFarBehind();
 				if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
 			}
@@ -720,14 +720,12 @@ export class Consumer {
 
 	/** True once no further frames can be read: the group has closed and every buffered frame is read. */
 	get done(): boolean {
-		return (
-			this.#terminal !== undefined || this.#ended || (this.#state.frames.peek().length === 0 && this.#settled())
-		);
+		return this.#terminal !== undefined || (this.#state.frames.peek().length === 0 && this.#settled());
 	}
 
 	/** True once the group has been closed, regardless of whether buffered frames remain unread. Synchronous complement to the {@link closed} promise. */
 	get isClosed(): boolean {
-		return this.#terminal !== undefined || this.#ended || this.#settled();
+		return this.#terminal !== undefined || this.#settled();
 	}
 
 	// Whether the copy being read ended, for good: a failure recovery may continue is not an end.
@@ -754,7 +752,7 @@ export class Consumer {
 	 * end-of-group: check {@link done} to tell "no frame buffered yet" from "finished".
 	 */
 	tryReadFrame(): Frame | undefined {
-		if (this.#terminal || this.#ended) return undefined;
+		if (this.#terminal) return undefined;
 		const read = this.#readBufferedFrame();
 		read?.complete();
 		return read?.frame;
@@ -762,7 +760,7 @@ export class Consumer {
 
 	/** Like {@link tryReadFrame} but also reports the frame's sequence number within the group. */
 	tryReadFrameSequence(): ({ sequence: number } & Frame) | undefined {
-		if (this.#terminal || this.#ended) return undefined;
+		if (this.#terminal) return undefined;
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
 		read.complete();
@@ -772,7 +770,7 @@ export class Consumer {
 	/** Resolves once {@link readFrame} would not block. */
 	async readable(): Promise<void> {
 		for (;;) {
-			if (this.#terminal || this.#ended) {
+			if (this.#terminal) {
 				this.#abandon();
 				return;
 			}
@@ -806,10 +804,6 @@ export class Consumer {
 			if (this.#terminal) {
 				this.#abandon();
 				throw this.#terminal;
-			}
-			if (this.#ended) {
-				this.#abandon();
-				return;
 			}
 
 			const read = this.#readBufferedFrame(pending);
