@@ -2,8 +2,8 @@
 
 Experimental Linux io\_uring support for the native MoQ stack: a
 thread-per-core `Worker` that owns a `SINGLE_ISSUER | DEFER_TASKRUN |
-COOP_TASKRUN | TASKRUN_FLAG` ring, a userspace timer heap, a local (`!Send`)
-task set, and the UDP sockets bound through it.
+COOP_TASKRUN | TASKRUN_FLAG` ring, a userspace timer queue on moq-clock, a
+local (`!Send`) task set, and the UDP sockets bound through it.
 
 - **Receive**: one persistent multishot `recvmsg` per socket, fed from a
   registered provided-buffer ring of worst-case-sized buffers (one per
