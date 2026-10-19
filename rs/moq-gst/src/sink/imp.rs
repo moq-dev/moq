@@ -34,6 +34,7 @@ struct Settings {
 	tls_disable_verify: bool,
 	quic_idle_timeout: Option<Duration>,
 	quic_keep_alive: Option<Duration>,
+	quic_keylog: bool,
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -54,6 +55,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 			tls_disable_verify: value.tls_disable_verify,
 			quic_idle_timeout: value.quic_idle_timeout,
 			quic_keep_alive: value.quic_keep_alive,
+			quic_keylog: value.quic_keylog,
 		})
 	}
 }
@@ -199,6 +201,14 @@ impl ObjectImpl for MoqSink {
 					.default_value(quic.keep_alive.map(duration_millis).unwrap_or(0))
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecBoolean::builder("quic-keylog")
+					.nick("QUIC TLS key log")
+					.blurb(
+						"Danger: write TLS session secrets to the file SSLKEYLOGFILE names; without it the start fails",
+					)
+					.default_value(false)
+					.mutable_ready()
+					.build(),
 				// Read-only, served from the live session's status. Each notifies on change.
 				glib::ParamSpecEnum::builder::<ConnectionStatus>("status")
 					.nick("Connection status")
@@ -266,6 +276,7 @@ impl ObjectImpl for MoqSink {
 			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
 			"quic-idle-timeout" => settings.quic_idle_timeout = Some(Duration::from_millis(value.get().unwrap())),
 			"quic-keep-alive" => settings.quic_keep_alive = Some(Duration::from_millis(value.get().unwrap())),
+			"quic-keylog" => settings.quic_keylog = value.get().unwrap(),
 			_ => unreachable!(),
 		}
 	}
@@ -310,6 +321,7 @@ impl ObjectImpl for MoqSink {
 						.map(duration_millis)
 						.unwrap_or(0)
 						.to_value(),
+					"quic-keylog" => settings.quic_keylog.to_value(),
 					_ => unreachable!(),
 				}
 			}
@@ -2105,6 +2117,7 @@ mod tests {
 			"tls-disable-verify",
 			"quic-idle-timeout",
 			"quic-keep-alive",
+			"quic-keylog",
 		] {
 			assert!(
 				spec(&sink, name).flags().contains(gst::PARAM_FLAG_MUTABLE_READY),
@@ -2153,13 +2166,17 @@ mod tests {
 		let quic = super::super::session::quic_config(&resolved).resolve();
 		assert_eq!(quic.idle_timeout, Duration::from_secs(15));
 		assert_eq!(quic.keep_alive, Some(Duration::from_secs(3)));
+		assert!(!sink.property::<bool>("quic-keylog"));
+		assert!(!quic.keylog);
 
 		sink.set_property("quic-keep-alive", 0u64);
 		sink.set_property("quic-idle-timeout", 0u64);
+		sink.set_property("quic-keylog", true);
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let quic = super::super::session::quic_config(&resolved).resolve();
 		assert_eq!(quic.idle_timeout, Duration::ZERO);
 		assert_eq!(quic.keep_alive, None);
+		assert!(quic.keylog);
 	}
 
 	#[test]
