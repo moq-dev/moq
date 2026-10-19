@@ -9,6 +9,41 @@ use std::task::Poll;
 
 use crate::Waiter;
 
+#[cfg(feature = "sim")]
+thread_local! {
+	static READY: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Count ready kio polls until the returned guard drops, panicking if the task spins.
+#[cfg(feature = "sim")]
+#[must_use = "keep the guard until the task poll returns"]
+pub fn scope() -> impl Drop {
+	struct Reset(Option<usize>);
+	impl Drop for Reset {
+		fn drop(&mut self) {
+			READY.set(self.0);
+		}
+	}
+	// Restore even when a spawned task panics and its executor catches the panic.
+	Reset(READY.replace(Some(0)))
+}
+
+#[inline]
+#[cfg_attr(feature = "sim", track_caller)]
+pub(crate) fn ready<T>(value: T) -> Poll<T> {
+	#[cfg(feature = "sim")]
+	{
+		let count = READY.get().map(|count| count + 1);
+		READY.set(count);
+		assert!(
+			count.is_none_or(|count| count <= 4096),
+			"kio Ready poll limit exceeded at {}; add a coop::Budget to the loop",
+			std::panic::Location::caller(),
+		);
+	}
+	Poll::Ready(value)
+}
+
 /// Yields a loop after a fixed number of passes, sized by the loop's cost per pass.
 ///
 /// Keep one per loop and call [`Self::poll_yield`] at the head of each pass.

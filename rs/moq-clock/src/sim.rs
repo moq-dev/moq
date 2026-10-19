@@ -38,6 +38,11 @@ thread_local! {
 
 type Task = Pin<Box<dyn Future<Output = ()>>>;
 
+fn poll<F: Future + ?Sized>(future: Pin<&mut F>, cx: &mut Context<'_>) -> Poll<F::Output> {
+	let _scope = kio::coop::scope();
+	future.poll(cx)
+}
+
 struct Runtime {
 	/// Tells this run from earlier ones on the thread, so a timer finds its own.
 	id: u64,
@@ -213,7 +218,7 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 	// itself cannot starve the root: `FuturesUnordered` yields after one pass.
 	let output = loop {
 		if root.0.swap(false, Ordering::SeqCst)
-			&& let Poll::Ready(output) = future.as_mut().poll(&mut root_cx)
+			&& let Poll::Ready(output) = poll(future.as_mut(), &mut root_cx)
 		{
 			break output;
 		}
@@ -529,10 +534,8 @@ where
 		state.0.borrow_mut().task = Some(cx.waker().clone());
 
 		let running = future.as_mut().expect("task polled after completion");
-		let output = match std::panic::AssertUnwindSafe(running.as_mut())
-			.catch_unwind()
-			.poll_unpin(cx)
-		{
+		let running = std::future::poll_fn(|cx| poll(running.as_mut(), cx));
+		let output = match std::panic::AssertUnwindSafe(running).catch_unwind().poll_unpin(cx) {
 			Poll::Pending => return Poll::Pending,
 			Poll::Ready(output) => output,
 		};
@@ -569,6 +572,71 @@ impl<T> Drop for Cancel<T> {
 mod tests {
 	use super::*;
 	use crate::{Deadline, Deadlines, Elapsed, MissedTickBehavior};
+
+	fn spin() {
+		let producer = kio::Producer::new(());
+		let consumer = producer.consume();
+		let waiter = kio::Waiter::noop();
+		for _ in 0..10_000 {
+			assert!(consumer.poll(&waiter, |_| Poll::Ready(())).is_ready());
+		}
+	}
+
+	#[test]
+	#[should_panic(expected = "kio Ready poll limit")]
+	fn a_spinning_root_fails() {
+		run(async { spin() });
+	}
+
+	#[test]
+	#[should_panic(expected = "kio Ready poll limit")]
+	fn a_spinning_spawned_task_fails() {
+		run(async {
+			drop(spawn(async { spin() }));
+			yield_now().await;
+		});
+	}
+
+	#[crate::test]
+	async fn a_budgeted_loop_lets_a_sibling_run() {
+		let turns = Rc::new(Cell::new(0));
+		let sibling = spawn({
+			let turns = turns.clone();
+			async move {
+				turns.set(turns.get() + 1);
+			}
+		});
+		let producer = kio::Producer::new(());
+		let consumer = producer.consume();
+		let mut budget = kio::coop::Budget::new(32);
+		for _ in 0..10_000 {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
+			assert!(
+				kio::wait(|waiter| consumer.poll(waiter, |_| Poll::Ready(())))
+					.await
+					.is_ok()
+			);
+		}
+		assert_eq!(turns.get(), 1, "the sibling ran before the loop finished");
+		sibling.await.unwrap();
+	}
+
+	#[crate::test]
+	async fn pending_polls_do_not_count_as_work() {
+		let producer = kio::Producer::new(());
+		let consumer = producer.consume();
+		let waiter = kio::Waiter::noop();
+		for _ in 0..10_000 {
+			assert!(consumer.poll(&waiter, |_| Poll::<()>::Pending).is_pending());
+		}
+	}
+
+	#[test]
+	fn a_failed_run_restores_poll_accounting() {
+		assert!(std::panic::catch_unwind(|| run(async { spin() })).is_err());
+		spin();
+		run(async {});
+	}
 
 	fn at(secs: u64) -> Instant {
 		Instant::ZERO + Duration::from_secs(secs)

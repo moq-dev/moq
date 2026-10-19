@@ -2542,7 +2542,9 @@ where
 				})
 				.await?;
 			let mut prior = None;
+			let mut budget = kio::coop::Budget::new(32);
 			for (ordinal, frame) in (group.first..).zip(group.frames) {
+				kio::wait(|waiter| budget.poll_yield(waiter)).await;
 				let object = frame.fields.as_ref().map_or(ordinal, |fields| fields.id);
 				let position = fetch_prior(self.version, prior, object)?;
 				prior = Some(object);
@@ -8962,6 +8964,49 @@ mod serve_tests {
 	async fn standalone_fetch(h: &Serve, start: Location, end: Location, group_order: GroupOrder) -> bytes::Bytes {
 		let fetch_type = fetch_range(h.publisher.version, "video", start, end);
 		run_fetch(h, fetch_type, group_order, true).await
+	}
+
+	#[moq_clock::test]
+	async fn a_cached_standalone_fetch_yields_while_writing() {
+		for version in FETCH_DRAFTS {
+			let h = serve(version);
+			let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+			for _ in 0..256 {
+				group.write_frame(timestamp(), vec![7; 1024]).unwrap();
+			}
+			group.finish().unwrap();
+			settle().await;
+
+			let done = std::rc::Rc::new(std::cell::Cell::new(false));
+			let saw_payload = std::rc::Rc::new(std::cell::Cell::new(false));
+			let sibling = moq_clock::sim::spawn({
+				let done = done.clone();
+				let saw_payload = saw_payload.clone();
+				let log = h.log.clone();
+				async move {
+					while !done.get() {
+						if log.writes.lock().unwrap().len() > 1024 {
+							saw_payload.set(true);
+						}
+						moq_clock::sim::yield_now().await;
+					}
+				}
+			});
+			let wire = standalone_fetch(
+				&h,
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 256 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			done.set(true);
+			sibling.await.unwrap();
+			assert!(wire.len() > 256 * 1024);
+			assert!(
+				saw_payload.get(),
+				"{version}: writing the cached group starved its sibling"
+			);
+		}
 	}
 
 	/// A standalone FETCH of `room/<track>`, spelled as [`standalone_fetch`] describes.

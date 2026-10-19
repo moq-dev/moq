@@ -12,6 +12,10 @@ rust-version.workspace = true
 keywords = ["async", "producer", "consumer", "state", "sync"]
 categories = ["asynchronous", "concurrency"]
 
+[features]
+# Per-task Ready poll accounting for deterministic simulators, never production.
+sim = []
+
 [dependencies]
 smallvec = { version = "1.15", features = ["union"] }
 

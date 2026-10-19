@@ -342,6 +342,7 @@ impl<T: Task<Output = ()>> Tasks<T> {
 	/// such an arm with [`is_empty`](Self::is_empty).
 	/// `waiter` is registered for the next task wake or push; the tasks
 	/// themselves park on their own wakers.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
 		{
 			let mut parent = self.shared.parent.lock().unwrap();
@@ -413,7 +414,7 @@ impl<T: Task<Output = ()>> Tasks<T> {
 		self.scratch = scratch;
 
 		match self.len {
-			0 => Poll::Ready(()),
+			0 => crate::coop::ready(()),
 			_ => Poll::Pending,
 		}
 	}
