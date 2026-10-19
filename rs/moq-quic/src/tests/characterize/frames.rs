@@ -367,10 +367,7 @@ fn stream_final_size_changed() {
     );
 }
 
-/// Today the reader gets all five bytes and then blocks forever: the shrunken final size never
-/// matches what was read, so the stream neither finishes nor errors.
 #[test]
-#[ignore = "bug: /quest/m1/quic/final-size-below-received.md"]
 fn stream_final_size_below_received() {
     let s = id(Side::Client, Dir::Uni, 0);
     let frames = Frames::default().stream(s, 0, b"abcde", false);

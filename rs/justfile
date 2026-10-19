@@ -231,6 +231,7 @@ c-tests:
 # Compile the workspace at the feature extremes.
 features:
     just rs net-features
+    just rs quic-features
     just rs tokio-features --all
     just rs media-features --all
     cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
@@ -250,6 +251,16 @@ features:
 # Compile and test the explicit-time model without async helpers or sessions.
 net-features:
     bash sh/rs/net-features.sh
+
+# Prove moq-quic leaves moq-clock's dev-only runtime to its consumers; a workspace build unifies it back in.
+quic-features:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    graph=$(cargo tree --locked -p moq-quic -e normal --prefix none)
+    if grep -E '^(tokio|web-async) ' <<<"$graph"; then
+        echo "moq-quic must not depend on a native runtime" >&2
+        exit 1
+    fi
 
 # Compile media boundaries (--all isolates every mode) and prove expensive
 # native/render dependencies are absent when their features are excluded.
