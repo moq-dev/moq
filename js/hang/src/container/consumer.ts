@@ -534,7 +534,14 @@ export class Consumer {
 								head.latest - this.#presentedEnd > maxDelay));
 					const elapsed = Instant.durationSince(now(), this.#hole.since) >= Nano.fromMicro(maxDelay);
 					if (startup || empty || contiguous || skipHole || elapsed || ended !== undefined) {
-						if (!contiguous && !empty) this.#lost = true;
+						if (!contiguous && !empty) {
+							this.#lost = true;
+							if (!startup) {
+								console.warn(
+									`skipping missing groups: track=${this.#track.name} ${this.#active} -> ${head.consumer.sequence}`,
+								);
+							}
+						}
 						this.#active = head.consumer.sequence;
 						this.#hole = undefined;
 					}
