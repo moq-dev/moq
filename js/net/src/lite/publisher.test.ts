@@ -1795,6 +1795,61 @@ test("a version without the latency field serves a non-dropping budget", async (
 	}
 });
 
+// A group parked at its tail when the budget gives up resets as too old. A FIN would tell
+// the next hop the frames it already has are the whole group, and it would cache them so.
+test("lite draft-05: a group parked at its tail resets as too old when it expires", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_05);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+	const opened = pair.client.incomingUnidirectionalStreams.getReader();
+	// Left open: its producer never finishes it.
+	const open = new GroupProducer(0);
+
+	try {
+		void publisher.runSubscribe(
+			new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0, maxDelay: 500 }),
+			server,
+		);
+		open.writeFrame(frame(0));
+		track.writeGroup(open);
+
+		const next = await opened.read();
+		if (next.done) throw new Error("publisher never opened the group stream");
+		const stream = new Reader(next.value, undefined, Version.DRAFT_05);
+		await stream.u53(); // stream type
+		await GroupMessage.decode(stream, Version.DRAFT_05);
+		await stream.u62(); // timestamp delta
+		await stream.read(await stream.u53());
+
+		// The track runs a second past group 0's successor while group 0 waits for more.
+		for (const ms of [1000, 2000]) {
+			const group = new GroupProducer(ms / 1000);
+			group.writeFrame(frame(ms));
+			group.close();
+			track.writeGroup(group);
+		}
+
+		const end = await stream.done().then(
+			() => "fin",
+			(err: unknown) => err,
+		);
+		expect(end).toMatchObject({ code: StreamCode.Old });
+	} finally {
+		opened.releaseLock();
+		open.close();
+		publisher.close();
+		client.close();
+		broadcast.close();
+	}
+});
+
 // A group can go stale while its stream is still opening. Serving it must abandon the group
 // without starting a write: an abandoned write rejects once the stream resets, and nothing
 // would handle it (Node exits on the first unhandled rejection).
