@@ -1053,7 +1053,7 @@ impl Recover {
 			// fixes its content. A stall only moves to the serving copy, so two stalled copies
 			// never trade the group back and forth.
 			if failed.is_some()
-				&& let Some(replacement) = self.held(index)
+				&& let Some(replacement) = self.held(frames.clone())
 			{
 				return Poll::Ready(Ok(replacement));
 			}
@@ -1089,9 +1089,9 @@ impl Recover {
 		}
 	}
 
-	/// The group from the newest of the reader's other copies that still holds it unfailed,
-	/// positioned at frame `index`.
-	fn held(&self, index: u64) -> Option<Replacement> {
+	/// The group from the newest of the reader's other copies that still holds `frames` of it
+	/// unfailed, positioned at their end.
+	fn held(&self, frames: std::ops::Range<u64>) -> Option<Replacement> {
 		let reader = self.reader.as_ref()?.upgrade()?;
 		let reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 		reader.copies.iter().rev().find_map(|copy| {
@@ -1099,9 +1099,7 @@ impl Recover {
 				return None;
 			}
 			let mut group = copy.track.peek_group(self.sequence)?;
-			lend_head(&self.handoff, self.sequence, &copy.track, &group);
-			group.start_at(index);
-			(group.index() == index).then(|| Replacement {
+			continues(&self.handoff, self.sequence, &copy.track, &mut group, frames.clone()).then(|| Replacement {
 				group,
 				generation: copy.generation,
 				copy: copy.track.clone(),
@@ -1121,20 +1119,9 @@ impl Recover {
 		// A newer copy's subscription delivered it: continue from there. The copy that
 		// failed delivered it already, so its subscription will not again.
 		let same = generation == self.generation;
-		// The failed copy released the frames before the reader's, so a reader that inflates
-		// takes them from the replacement.
-		let std::ops::Range { start, end: index } = frames;
-		let (handoff, sequence) = (&self.handoff, self.sequence);
-		let continues = |group: &mut group::Consumer| {
-			lend_head(handoff, sequence, serving, group);
-			group.start_at(start);
-			let held = group.index() == start;
-			group.start_at(index);
-			held && group.index() == index
-		};
 		if !same
 			&& let Poll::Ready(Some(mut group)) = serving.poll_group(self.sequence, waiter)
-			&& continues(&mut group)
+			&& continues(&self.handoff, self.sequence, serving, &mut group, frames.clone())
 		{
 			return Poll::Ready(Ok(Replacement {
 				group,
@@ -1147,7 +1134,7 @@ impl Recover {
 		if self.fetch.as_ref().is_none_or(|(asked, _)| *asked != generation) {
 			let options = group::Fetch {
 				max_delay: self.max_delay,
-				frame_start: start,
+				frame_start: frames.start,
 				..Default::default()
 			};
 			self.fetch = Some((generation, Fetch::Pending(serving.fetch_group(self.sequence, options))));
@@ -1161,7 +1148,7 @@ impl Recover {
 			Fetch::Refused(err) => err.clone(),
 			Fetch::Pending(pending) => match ready!(kio::Task::poll(&mut **pending, waiter)) {
 				Ok(mut group) => {
-					if continues(&mut group) {
+					if continues(&self.handoff, self.sequence, serving, &mut group, frames.clone()) {
 						return Poll::Ready(Ok(Replacement {
 							group,
 							generation,
@@ -1222,6 +1209,23 @@ impl Recover {
 		});
 		self.fetch = None;
 	}
+}
+
+/// Whether `copy`'s `group` still holds `frames`, positioning it at their end. The failed
+/// copy released the frames before the reader's, so a reader that inflates takes them from
+/// the replacement.
+fn continues(
+	handoff: &group::Handoff,
+	sequence: u64,
+	copy: &track::Consumer,
+	group: &mut group::Consumer,
+	frames: std::ops::Range<u64>,
+) -> bool {
+	lend_head(handoff, sequence, copy, group);
+	group.start_at(frames.start);
+	let held = group.index() == frames.start;
+	group.start_at(frames.end);
+	held && group.index() == frames.end
 }
 
 /// Lend the head `handoff` holds to `serving`'s copy of group `sequence`, `group`, when that
