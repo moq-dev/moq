@@ -658,16 +658,12 @@ struct Largest {
 	open: bool,
 	// The track ended, so no newer position can follow.
 	ended: bool,
-	// Bumped by every write and finish, raising `position` or not: a reader capped below it
-	// follows the groups under its cap.
-	revision: u64,
 }
 
 impl Track {
 	/// Raise the track's largest location to `position`, waking only its own waiters.
 	pub(super) fn advance_largest(&self, position: Position) {
 		let mut largest = self.largest.lock();
-		largest.revision = largest.revision.wrapping_add(1);
 		if largest.position.is_none_or(|current| position > current) {
 			largest.position = Some(position);
 			largest.open = true;
@@ -678,8 +674,6 @@ impl Track {
 	/// A group name fixes its content, so no legal write raises the largest past it.
 	pub(super) fn finish_largest(&self, sequence: u64) {
 		let mut largest = self.largest.lock();
-		// A reader capped below the largest may be following this group.
-		largest.revision = largest.revision.wrapping_add(1);
 		if largest.position.is_some_and(|position| position.group == sequence) {
 			largest.open = false;
 		}
@@ -698,22 +692,44 @@ impl Track {
 		}
 	}
 
-	/// The largest location, and the revision it was read at.
-	pub(super) fn largest(&self) -> (Option<Position>, u64) {
-		let largest = self.largest.read();
-		(largest.position, largest.revision)
+	/// Poll for a largest location within `bounds` newer than `seen`, recording it there.
+	/// `None` once the track ended with nothing newer.
+	pub(super) fn poll_largest(
+		&self,
+		seen: &mut Option<Position>,
+		bounds: track::Bounds,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<Position>> {
+		let newer = |largest: &Largest| {
+			largest
+				.position
+				.filter(|position| bounds.contains(position.group) && seen.is_none_or(|seen| *position > seen))
+		};
+		let largest = ready!(
+			self.largest
+				.poll(waiter, |largest| match newer(largest).is_some() || largest.ended {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				})
+		);
+		let next = newer(&largest);
+		if next.is_some() {
+			*seen = next;
+		}
+		Poll::Ready(next)
 	}
 
-	/// Ready once a write moves the largest past `revision` (`true`), or the track ended
-	/// without one (`false`).
-	pub(super) fn poll_largest_changed(&self, revision: u64, waiter: &kio::Waiter) -> Poll<bool> {
-		let largest = ready!(self.largest.poll(waiter, |largest| {
-			match largest.revision != revision || largest.ended {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}
-		}));
-		Poll::Ready(largest.revision != revision)
+	/// The largest frame within `bounds` newer than `seen` without waiting, recording it there.
+	pub(super) fn take_largest(&self, seen: &mut Option<Position>, bounds: track::Bounds) -> Option<Position> {
+		let next = self
+			.largest
+			.read()
+			.position
+			.filter(|position| bounds.contains(position.group) && seen.is_none_or(|seen| *position > seen));
+		if next.is_some() {
+			*seen = next;
+		}
+		next
 	}
 
 	/// Open an account against `pool` for the track behind `state`.

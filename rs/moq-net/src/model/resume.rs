@@ -1439,7 +1439,7 @@ mod test {
 		assert_eq!(sub.largest().now_or_never(), Some(None));
 	}
 
-	/// A front's reader reports the largest within its cap on the serving copy.
+	/// A front's reader reports the serving copy's largest only within its cap.
 	#[test]
 	#[cfg(feature = "async")]
 	fn largest_honours_the_cap_on_the_serving_copy() {
@@ -1452,7 +1452,7 @@ mod test {
 			write(&a, sequence);
 		}
 		sub.set_groups(..3);
-		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(2))));
+		assert!(sub.largest().now_or_never().is_none(), "the largest is past the cap");
 		sub.set_groups(..);
 		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(4))));
 	}
