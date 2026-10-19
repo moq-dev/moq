@@ -7974,7 +7974,9 @@ mod tests {
 
 		let mut first = None;
 		let mut front = None;
+		let mut budget = kio::coop::Budget::new(32);
 		for viewer in 0..1000 {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			let session = producer.consume().excluding(Hop::random());
 			let pending = session.request_broadcast("room/alice", None);
 			if viewer == 0 {
