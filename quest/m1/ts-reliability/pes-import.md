@@ -29,22 +29,20 @@ round-trip test first.
   under half a wrap) so a start near the wrap does not split them, shifted onto the catalog clock by the timebase
   offset that shifts the PTS. A PES waits for the next PCR, within the
   existing `Retained` bound; it never spans a PCR discontinuity. The value
-  depends only on the input bytes and the timebase offset, so it adds no
-  disagreement of its own; same-epoch importers agree once the
-  [epoch anchor](/quest/m2/epoch-anchor.md) fixes that offset. A program
+  depends only on the input bytes and the timebase offset. A program
   with no PCR PID cannot place its PES, so its private PES streams are
   refused. The timebase offset is anchored only by a PTS today, so a PES
   also waits for that anchor within the same bound; a program whose PES
   never carry a PTS (data only) is refused and tested, unless the PCR can
-  anchor the timebase without breaking same-epoch agreement.
+  anchor the timebase.
 - **Trailing PES.** A PES that starts after its timebase's last PCR (end of
   input, or a PCR discontinuity before the next PCR) has no PCR on the far
   side. Place it by extrapolating from that timebase's last two PCRs, which
   is still deterministic, rather than hold or drop it. With fewer than two
   PCRs it is dropped and counted in importer health. A PES before the
   first PCR the importer sees is dropped and counted the same way, like
-  anything before acquisition: back-extrapolating would let importers
-  started apart disagree. A new timebase starts with its first PCR, so
+  anything before acquisition; PCRs arrive at least every 100 ms, so this
+  costs little and keeps one placement rule. A new timebase starts with its first PCR, so
   this happens only at startup. Test each case.
 - **Bytes.** The frame is the PES packet as received, start code through
   payload. PTS and DTS are rewritten in place onto the catalog clock modulo

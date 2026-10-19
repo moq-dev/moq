@@ -520,6 +520,10 @@ pub enum Error {
 	#[error("malformed track")]
 	MalformedTrack,
 
+	/// The track requires a moq-transport property this endpoint does not understand.
+	#[error("unsupported extension")]
+	UnsupportedExtension,
+
 	/// The stream was torn down because the session closed. The specific reason travels on
 	/// the session close, not here.
 	#[error("session closed")]
@@ -662,7 +666,8 @@ impl From<&Error> for SessionError {
 			| Error::GroupTooLarge
 			| Error::FrameOpen
 			| Error::TimestampMismatch
-			| Error::MalformedTrack => Self::Internal,
+			| Error::MalformedTrack
+			| Error::UnsupportedExtension => Self::Internal,
 			// A producer dropped without an end is a bug here, so it is never given a meaning.
 			Error::Dropped => Self::Internal,
 		}
@@ -724,6 +729,7 @@ impl From<&Error> for StreamError {
 			// No stream code says so: an unknown stream type, a request only moq-transport
 			// can make, or a fault on our own side.
 			Error::Unsupported
+			| Error::UnsupportedExtension
 			| Error::InvalidRange
 			| Error::InvalidJoiningRequestId
 			| Error::FrameOpen

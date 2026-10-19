@@ -24,8 +24,9 @@ Decided 2026-10-13 by the maintainer: the coordinate the
 legs share is the broadcast's media timeline, each object's timestamp on its
 catalog clock, with a constant mux rate. Two exports of one broadcast
 already read the same objects and timestamps, so this needs no importer
-alignment; [same-epoch importers](/quest/m2/hop-aligned-import.md) extend it
-to legs fed by different importers of one epoch. Every byte a `--sync` leg
+alignment. Legs fed by different importers read different broadcasts
+([distinct epochs](/quest/m0/broadcast-epoch/distinct-importer-epochs.md)),
+so identity across them is a non-goal. Every byte a `--sync` leg
 renders from the objects it has (slot, PCR, table, PES header, continuity
 counter) is a function of those objects, that coordinate, the catalog, and
 the rate, never of what the leg has sent or when it joined. 2022-7 is a differentiator for primary distribution, not
@@ -48,10 +49,22 @@ settles.
   same content would defeat redundant paths.
 - A leg that lacks an access unit cannot know how many packets it fills, so
   no later packet's slot may depend on an earlier access unit's size. A
-  constant rate fixes capacity, not placement. Settle the placement rule
-  before building the scheduler: fixed per-PID reservations on the timeline,
-  a packet plan carried with the objects, or each group re-anchored at a
-  slot derived from its timestamp, with headroom.
+  constant rate fixes capacity, not placement. Decided 2026-10-19 by the
+  maintainer (#5864, built in
+  [#5949](https://github.com/moq-dev/moq/pull/5949)): each PID owns a lane
+  on the rate's grid and each group re-anchors at its lane's first slot
+  from its first unit's release. A group whose first picture opens an
+  H.264 NAL HRD buffering period is released later by the time its lane
+  takes to carry the CPB's empty room (`CpbSize - BitRate *
+  initial_cpb_removal_delay`), never past its own deadline. C.3 bounds the
+  previous group's remaining bits by that room, so a leg holding it has
+  finished it there and a leg that lost it opens at the same slot. Rejected:
+  carrying a packet plan with the objects (it adds to what the importer
+  publishes), and plain headroom (about one group in five overran on
+  broadcast content at any rate). A stream without a NAL HRD or buffering
+  period keeps the plain anchor and counts `overruns`; identity is promised
+  only where the HRD is present. H.265 is
+  [its own quest](/quest/m2/ts-hitless-h265.md).
 - t0ms's
   `two_legs_render_a_skip_the_same_way`
   (`rs/moq-mux/src/container/ts/export_timing_test.rs`) becomes this
@@ -83,7 +96,10 @@ agreement alone.
 
 Public API: `moq export ts --sync`.
 
+## Closes
+
+- [#5864](https://github.com/moq-dev/moq/issues/5864) - a group that began behind the one before it lays apart on a leg that lost that earlier group
+
 ## Related
 
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - packetizes these slots with matching RTP headers for ST 2022-7
-- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - extends the coordinate to legs fed by different importers

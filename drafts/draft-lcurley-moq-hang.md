@@ -74,6 +74,9 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 # Conventions and Definitions
 {::boilerplate bcp14-tagged}
 
+Every JSON frame in this document is UTF-8 JSON {{!RFC8259}}.
+A reader MUST refuse a frame in which an object repeats a member name, rather than pick one of the values.
+
 
 # Terminology
 Hang is built on top of moq-lite [moql] and uses much of the same terminology.
@@ -1320,6 +1323,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- A reader refuses a JSON frame in which an object repeats a member name.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Each archive timeline declares its own fixed nominal record duration, omitted for an untimed track; removed the broadcast-wide duration bound.

@@ -1187,24 +1187,32 @@ pub(crate) mod tests {
 	#[tokio::test]
 	async fn ts_passthrough_crosses_a_relay_through_a_flagged_jump() {
 		const KYRION: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/kyrion_mpeg2av_ac3.ts");
-		// The capture twice, the second copy's clock twenty seconds ahead of the first, its first
-		// PCR flagged as the discontinuity. Inside the track's max age, so the recording keeps
-		// every group.
-		const STEP: u64 = 20 * 90_000;
-		let mut second = KYRION.to_vec();
-		let mut pcrs = second
-			.as_chunks_mut::<188>()
-			.0
-			.iter_mut()
-			.filter(|pkt| pkt[3] & 0x20 != 0 && pkt[4] > 0 && pkt[5] & 0x10 != 0)
-			.peekable();
-		pcrs.peek_mut().expect("a PCR")[5] |= 0x80;
-		for pkt in pcrs {
-			let base = pkt[6..11].iter().fold(0u64, |base, byte| base << 8 | u64::from(*byte)) >> 7;
-			let base = ((base + STEP) & ((1 << 33) - 1)) << 7 | u64::from(pkt[10] & 0x7f);
-			pkt[6..11].copy_from_slice(&base.to_be_bytes()[3..]);
-		}
-		let input = [KYRION, &second].concat();
+		// The capture with its clock `seconds` ahead, its first PCR flagged as a discontinuity
+		// when `flagged`.
+		let shifted = |seconds: u64, flagged: bool| {
+			let mut copy = KYRION.to_vec();
+			let mut pcrs = copy
+				.as_chunks_mut::<188>()
+				.0
+				.iter_mut()
+				.filter(|pkt| pkt[3] & 0x20 != 0 && pkt[4] > 0 && pkt[5] & 0x10 != 0)
+				.peekable();
+			if flagged {
+				pcrs.peek_mut().expect("a PCR")[5] |= 0x80;
+			}
+			for pkt in pcrs {
+				let base = pkt[6..11].iter().fold(0u64, |base, byte| base << 8 | u64::from(*byte)) >> 7;
+				let base = ((base + seconds * 90_000) & ((1 << 33) - 1)) << 7 | u64::from(pkt[10] & 0x7f);
+				pkt[6..11].copy_from_slice(&base.to_be_bytes()[3..]);
+			}
+			copy
+		};
+		// The capture, carried straight on by a copy four seconds ahead so a whole catalog window
+		// follows the first group, then a copy twenty seconds past that one behind a flagged
+		// discontinuity. Inside the track's max age, so the recording keeps every group.
+		let lead = [KYRION, &shifted(4, false)].concat();
+		let second = shifted(24, true);
+		let input = [&lead[..], &second].concat();
 
 		let _env = crate::test_env::EnvGuard::clear(&["MOQ_CONNECT", "MOQ_HOP"]);
 		let _ = moq_tokio::crypto::install_default();
@@ -1263,10 +1271,10 @@ pub(crate) mod tests {
 				.await
 				.unwrap();
 
-			// The catalog names the track once the first group is out, which the first copy holds;
-			// the jump is in the second.
+			// The catalog names the track once a whole window has followed the first group, which
+			// the lead holds; the jump is in the copy after it.
 			const WAIT: Duration = Duration::from_secs(10);
-			decoder.decode_chunk(KYRION).unwrap();
+			decoder.decode_chunk(&lead).unwrap();
 			let consumer = tokio::time::timeout(WAIT, remote.consume().routed_broadcast("pt.hang"))
 				.await
 				.unwrap()

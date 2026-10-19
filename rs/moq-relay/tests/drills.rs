@@ -54,6 +54,8 @@ const TRACK: &str = "drill";
 /// hostile one, and the drills' own budgets (a 2s idle timeout, 10s waits) hold
 /// under it unchanged. The loss is 5% because a drill only sends a few hundred
 /// datagrams, and at 2% that is a drop or two, which barely exercises recovery.
+/// Random loss only proves correctness, which is all a drill asserts; nothing
+/// here judges quality, latency or throughput.
 fn impairment() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		delay: Duration::from_millis(20),
@@ -187,9 +189,14 @@ fn seed(lane: Lane) -> u64 {
 
 impl Drop for Path {
 	fn drop(&mut self) {
-		// A drill that failed before `verify` still reports what the path did.
+		// A drill that failed before `verify` still reports what the path did,
+		// including a shaper that stopped forwarding, which the drill itself
+		// only sees as a client timing out.
 		if let Some(shaper) = &self.shaper {
-			println!("shaper: {}", shaper.stats());
+			match shaper.verify() {
+				Ok(stats) => println!("shaper: {stats}"),
+				Err(err) => println!("shaper: {err:#}"),
+			}
 		}
 	}
 }

@@ -430,6 +430,8 @@ export class SubscribeUpdate {
 			await w.u62(this.ownRequestId);
 			await w.u62(this.requestId);
 			if (version === Version.DRAFT_14) {
+				// Every field is mandatory and the start must not move. Our subscriptions start at
+				// {0, 0} open ended (`joinFilter`), so zeroes repeat their bounds.
 				await w.u62(0n); // start_group
 				await w.u62(0n); // start_object
 				await w.u62(0n); // end_group

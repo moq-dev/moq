@@ -9,6 +9,10 @@ All credit for the code goes to the quinn developers; it stays under quinn's MIT
 Forked from quinn-proto in quinn-rs/quinn `main` at [`7616e6b2`](https://github.com/quinn-rs/quinn/commit/7616e6b2782722f3ce4a1b181ef08817d7f545e4) (2026-10-05).
 That covers every quinn security advisory published through 2026-09-30.
 
+Cherry-picked since the fork point:
+
+- [`48854d48`](https://github.com/quinn-rs/quinn/commit/48854d48635875d259a95973cc0575db8c1792a4): accept non-minimally encoded integer transport parameters, as RFC 9000 section 16 allows.
+
 The fork never merges upstream.
 Upstream fixes are cherry-picked by hand, and the crate keeps quinn's formatting (rustfmt defaults) so the patches apply cleanly.
 Rewrite quinn's crate path and name in the patch before applying it, so its context matches the renamed lines:
@@ -54,7 +58,7 @@ Changes on top of the upstream commit, besides the renames:
 - **BBR3 packet retirement**: per-space packet lookup and round-indexed expiry retire completed snapshots incrementally, preserving the extra ACK batch of metadata for late loss callbacks. The bounded indexes handle sparse packet numbers without walking the live flight. Upstream submission is deferred while quinn#2481 remains open: this fork also carries the packet-space and loss callback adaptations, so a port needs to target that implementation after its shape settles.
 - **Classic ECN for BBR3**, ported from [moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12): CE exits Startup, stops a bandwidth probe, or lowers the short-term model, once per recovery episode, instead of counting as a loss.
 - **Pacer rounding**: a wait shorter than a nanosecond rounds up instead of re-arming the pacing timer at the current instant.
-- **Malformed control input**: `RETIRE_CONNECTION_ID` for a sequence that was never issued (`issued` is a count, so `sequence >= issued`) and a repeated `grease_quic_bit` or `min_ack_delay` transport parameter close the connection. RFC 9000 section 7.4 only says SHOULD for a duplicate parameter; this fork refuses it, as it does every other known parameter.
+- **Malformed control input**: `RETIRE_CONNECTION_ID` for a sequence that was never issued (`issued` is a count, so `sequence >= issued`) and a repeated `grease_quic_bit` or `min_ack_delay` transport parameter close the connection. RFC 9000 section 7.4 only says SHOULD for a duplicate parameter; this fork refuses it, as it does every other known parameter. A STREAM frame whose FIN sets a final size below data already received closes with `FINAL_SIZE_ERROR`, as RFC 9000 section 4.5 requires, where quinn accepts it and leaves the reader blocked forever. Not offered upstream yet.
 - **qlog pacing rate** in bits per second, as qlog defines it.
 - moq-dev/noq's congestion-callback regressions, reworked onto quinn's test harness.
 - [quinn#2724](https://github.com/quinn-rs/quinn/pull/2724) (`moq_sock::udp`): when the kernel rejects a GSO batch with `EIO` or `EINVAL`, the socket halts GSO and resends the batch as individual datagrams instead of dropping it.
@@ -75,6 +79,7 @@ Changes on top of the upstream commit, besides the renames:
 - **Fuzzing** runs through the hidden `fuzz` module behind a `fuzz` feature, with one-line shims in [`fuzz/`](fuzz/README.md): upstream's `packet`, `params`, `streamid`, and `streams` targets, plus `frame` and a connection op sequence. Upstream's `cfg(fuzzing)` `fuzzing` module and `arbitrary` feature are gone, so its fuzz patches port by hand.
 - **Draining endpoint event**: `EndpointEvent::is_draining` fires once per connection when it stops being active, before the drained event, so the driver's `Endpoint::wait_all_draining` can end a shutdown without sitting out every closing period.
 - **Late stream limits**: peer transport parameters that raise a stream limit after an open was refused emit `StreamEvent::Available`, as `MAX_STREAMS` does. A server accepted before the rest of a multi-packet ClientHello (a post-quantum key share is enough) otherwise leaves a 0.5-RTT `open_uni` parked until the idle timeout. Not offered upstream yet.
+- **Stream credit on stop**: `RecvStream::stop` on a stream whose final size is already known (finished or reset) frees it and queues `MAX_STREAMS` at once, as reading the reset does, instead of leaving the credit until the next packet arrives. Not offered upstream yet; quinn `main` has the same gap.
 - **Connection limits** (`Limits`, `Connection::set_limits`, and the drivers' `set_limits`): one validated call changes a live connection's stream limit and windows, refusing values a peer would reject and changing nothing then. moq-tokio and moq-uring re-export the type, so both runtimes check limits the same way. Not offered upstream: it only bundles quinn's existing setters.
 
 Recheck the BBR3 changes when cherry-picking quinn#2481 updates, or if it merges.

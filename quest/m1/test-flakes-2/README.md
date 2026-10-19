@@ -35,13 +35,8 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [TS MP2 join hole](/quest/m1/test-flakes-2/ts-mp2-join-hole.md) - the TS export skips no MPEG-1 audio group right after its live join, fixed at the cause
-- [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 - [Relay burst drill](/quest/m1/test-flakes-2/relay-burst-impaired.md) - the impaired transport-peer burst drill never aborts its subscription while the link is up
-- [gst redial port](/quest/m1/test-flakes-2/gst-redial-port.md) - the moq-gst redial tests never lose their relay's port to `AddrInUse`
-- [js/net local close](/quest/m1/test-flakes-2/js-local-close.md) - the draft-17 locally closed track test holds under load
 - [WASM refused track](/quest/m1/test-flakes-2/wasm-refused-track.md) - the refused-track case passes and fails on its refusal, not a timeout
-- [Drill shaper failure](/quest/m1/test-flakes-2/drill-shaper-failure.md) - a drill whose shaper stopped says so directly
 
 ## Related
 

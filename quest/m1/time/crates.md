@@ -17,12 +17,14 @@ Follow the real-I/O rule in [the line's README](/quest/m1/time/README.md):
 a migrated test with no real socket, process, or device uses the sim (or paused
 tokio until it can); one that needs real I/O waits on events, never on paused
 tokio, which auto-advances to a timer before the OS event arrives, and never
-on a fixed sleep. moq-relay's integration tests move onto the sim in
-[the relay seam](/quest/m1/time/relay-seam.md), not here.
+on a fixed sleep. moq-relay's in-memory integration tests
+(`tests/integration/connection.rs`) move onto the sim with
+[the runtime trait](/quest/m2/runtime-trait.md), not here.
 
-The targeted moq-auth grant conversion belongs to
-[auth refresh](/quest/m1/test-flakes-2/auth-refresh-mock-time.md); reuse that
-change rather than implementing a second migration. It need not wait here.
+moq-auth's `Grant` and lease clock, and moq-relay's lease, credential, and
+admission timers, already run on moq-clock (`Grant::deadline` returns a
+`moq_clock::Instant`); build on that rather than migrating them again. What
+remains in moq-auth is its JWT claim checks (`claims.rs`, `key.rs`) and `serve`.
 
 Fix mixed clocks first: anything that reads std time but waits on tokio time
 (a backoff's stability window, a gate computed with std `Instant` and slept
