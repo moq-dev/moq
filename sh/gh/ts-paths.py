@@ -44,12 +44,8 @@ def main() -> None:
     workspace_root = json.loads(cargo("metadata", "--locked", "--no-deps", "--format-version", "1"))["workspace_root"]
     built = built_dirs(tree, workspace_root)
 
-    # Every `dir/**` filter on a crate directory; other filters are the harness's own inputs.
-    filtered = {
-        path
-        for path in re.findall(r'^\s+- "([^"*]+)/\*\*"$', WORKFLOW.read_text(), re.MULTILINE)
-        if (ROOT / path / "Cargo.toml").is_file()
-    }
+    # Every `rs/<dir>/**` filter, even one whose crate is gone; other filters are the harness's own inputs.
+    filtered = set(re.findall(r'^\s+- "(rs/[^"*]+)/\*\*"$', WORKFLOW.read_text(), re.MULTILINE))
 
     missing, extra = sorted(built - filtered), sorted(filtered - built)
     for path in missing:
