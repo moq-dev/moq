@@ -215,14 +215,42 @@ pub(super) struct Head {
 /// nothing, and the frames go with the last reader holding this.
 pub(super) struct Handoff {
 	state: kio::ConsumerWeak<GroupState>,
-	salvaged: Mutex<Option<Arc<Head>>>,
+	salvaged: Mutex<Option<Salvage>>,
+}
+
+/// A failed copy's head, billed to its pool while held; see [`cache::Track::hold`].
+struct Salvage {
+	head: Arc<Head>,
+	bill: cache::Bill,
 }
 
 impl Handoff {
 	/// The copy's head, if it holds any frames, or held them when it failed.
 	pub(super) fn head(&self) -> Option<Arc<Head>> {
-		let salvaged = self.salvaged.lock().unwrap_or_else(PoisonError::into_inner).clone();
+		let salvaged = self.salvaged.lock().unwrap_or_else(PoisonError::into_inner);
+		let salvaged = salvaged.as_ref().map(|salvage| salvage.head.clone());
 		salvaged.or_else(|| self.state.read().head().map(Arc::new))
+	}
+
+	/// Drop the held head once the pool's idle window passed, returning whether none is
+	/// held any more.
+	pub(super) fn expire(&self) -> bool {
+		let mut salvaged = self.salvaged.lock().unwrap_or_else(PoisonError::into_inner);
+		if salvaged.as_ref().is_some_and(|salvage| salvage.bill.expired()) {
+			*salvaged = None;
+		}
+		salvaged.is_none()
+	}
+}
+
+impl Head {
+	/// Roughly what holding it costs: payloads, fields, and their slots.
+	fn bytes(&self) -> u64 {
+		let payload: u64 = self.frames.iter().map(|frame| frame.payload.len() as u64).sum();
+		let fields: u64 = self.objects.iter().flatten().map(|fields| fields.heap()).sum();
+		let slots = self.frames.len() * size_of::<Frame>()
+			+ self.objects.len() * size_of::<Option<Arc<super::object::Fields>>>();
+		payload + fields + slots as u64
 	}
 }
 
@@ -561,18 +589,15 @@ impl GroupState {
 			true => self.handoff.lock().unwrap_or_else(PoisonError::into_inner).upgrade(),
 			false => None,
 		};
-		if let Some(handoff) = handoff {
-			let head = Head {
-				start: self.offset,
-				first_object: self.first_object(),
-				frames: std::mem::take(&mut self.frames).into(),
-				objects: self
-					.relay
-					.as_mut()
-					.map_or_else(Vec::new, |relay| std::mem::take(&mut relay.objects).into()),
-			};
-			*handoff.salvaged.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(head));
-		}
+		let head = handoff.as_ref().map(|_| Head {
+			start: self.offset,
+			first_object: self.first_object(),
+			frames: std::mem::take(&mut self.frames).into(),
+			objects: self
+				.relay
+				.as_mut()
+				.map_or_else(Vec::new, |relay| std::mem::take(&mut relay.objects).into()),
+		});
 		self.frames = VecDeque::new();
 		self.partial = None;
 		self.cache = 0;
@@ -582,6 +607,19 @@ impl GroupState {
 			relay.objects = VecDeque::new();
 			relay.bytes = size_of::<Relay>() as u64 + relay.end_object.as_ref().map_or(0, |fields| fields.heap());
 			self.charge.add(relay.bytes);
+		}
+		// Billed once the group's own charge is gone, so the head only takes its place.
+		if let (Some(handoff), Some(head)) = (handoff, head)
+			&& let Some(bill) = self
+				.charge
+				.account()
+				.and_then(|track| track.hold(&handoff, head.bytes()))
+		{
+			let salvage = Salvage {
+				head: Arc::new(head),
+				bill,
+			};
+			*handoff.salvaged.lock().unwrap_or_else(PoisonError::into_inner) = Some(salvage);
 		}
 	}
 }
@@ -3081,7 +3119,7 @@ mod test {
 
 			producer.clone().abort(err.clone()).unwrap();
 			assert!(producer.state.read().frames.is_empty(), "{err}: released");
-			assert_eq!(pool.used(), 0, "{err}: uncharged");
+			assert_eq!(pool.used() > 0, kept, "{err}: billed only while held");
 			let head = handoff.head();
 			assert_eq!(head.is_some(), kept, "{err}");
 			if let Some(head) = head {
@@ -3089,8 +3127,41 @@ mod test {
 				let held = Arc::downgrade(&head);
 				drop((head, handoff));
 				assert!(held.upgrade().is_none(), "freed with the last resumer");
+				assert_eq!(pool.used(), 0, "unbilled with it");
 			}
 		}
+	}
+
+	/// A resuming reader that stops polling holds a failed copy's head no longer than an
+	/// idle group stays cached.
+	#[test]
+	fn a_held_head_expires_with_the_pool_window() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
+		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
+		producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
+		let handoff = producer.consume().handoff();
+		producer.clone().abort(Error::Cancel).unwrap();
+		drop(producer);
+		assert!(handoff.head().is_some());
+
+		pool.step(std::time::Duration::from_secs(2));
+		pool.sweep();
+		assert!(handoff.head().is_none(), "the sweep drops a held head past the window");
+		assert_eq!(pool.used(), 0);
+	}
+
+	/// A failed copy's head is held only while the pool has room for it.
+	#[test]
+	fn a_full_pool_holds_no_head() {
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(1));
+		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
+		producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
+		let handoff = producer.consume().handoff();
+		producer.clone().abort(Error::Cancel).unwrap();
+		assert!(handoff.head().is_none());
+		assert_eq!(pool.used(), 0);
 	}
 
 	/// An adopted head leads the fields and the wire header, whether the header was set

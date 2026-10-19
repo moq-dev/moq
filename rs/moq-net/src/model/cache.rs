@@ -646,6 +646,10 @@ pub(super) struct Track {
 	// Here rather than on the track state so a frame write advances it without the track
 	// lock, and wakes only the readers following it.
 	largest: kio::Shared<Largest>,
+
+	// Hand-offs holding a failed group's head for a successor route, which the sweep
+	// expires like idle groups. Only filled while the pool sweeps.
+	held: Mutex<Vec<Weak<group::Handoff>>>,
 }
 
 /// The greatest location a track has written or its source reported, followed by the track
@@ -739,6 +743,7 @@ impl Track {
 			wakes: Default::default(),
 			aborts: OnceLock::new(),
 			largest: Default::default(),
+			held: Mutex::default(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -801,6 +806,39 @@ impl Track {
 		}
 	}
 
+	/// Bill `bytes` of a failed group's head while `handoff` holds it for a successor route.
+	///
+	/// Readers that stop polling can hold a hand-off indefinitely, so the head is billed
+	/// like cached content and bounded the same way: `None` when it would take the pool past
+	/// its capacity, and the sweep drops it once the pool's idle window passes.
+	pub(super) fn hold(self: &Arc<Self>, handoff: &Arc<group::Handoff>, bytes: u64) -> Option<Bill> {
+		if self
+			.pool
+			.capacity()
+			.is_some_and(|capacity| self.pool.used().saturating_add(bytes) > capacity)
+		{
+			return None;
+		}
+		if self.sweep.get().is_some() {
+			self.held
+				.lock()
+				.unwrap_or_else(PoisonError::into_inner)
+				.push(Arc::downgrade(handoff));
+		}
+		self.pool.add(bytes);
+		Some(Bill {
+			track: self.clone(),
+			bytes,
+			at: self.pool.now(),
+		})
+	}
+
+	/// Drop the held heads past the pool's idle window, forgetting the hand-offs done with.
+	fn expire_held(&self) {
+		let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+		held.retain(|handoff| handoff.upgrade().is_some_and(|handoff| !handoff.expire()));
+	}
+
 	/// Take everything written since the last call, to be turned into eviction debt.
 	pub(super) fn take_written(&self) -> u64 {
 		self.written.swap(0, Ordering::Relaxed)
@@ -823,6 +861,7 @@ impl Track {
 
 	/// Settle from [`Pool::sweep`], dating activity and expiring every idle candidate.
 	pub(super) fn sweep(&self) {
+		self.expire_held();
 		self.settle_inner(None, true);
 	}
 
@@ -908,6 +947,28 @@ impl Drop for Track {
 			let address = std::ptr::from_ref::<Self>(self) as usize;
 			self.pool.inner.wall.lock().due.remove(&(at, address));
 		}
+	}
+}
+
+/// The bytes a held head of a failed group bills to its track's pool, released on drop.
+pub(super) struct Bill {
+	track: Arc<Track>,
+	bytes: u64,
+	// The coarse tick it was billed at.
+	at: u64,
+}
+
+impl Bill {
+	/// Whether the pool's idle window passed since it was billed.
+	pub(super) fn expired(&self) -> bool {
+		let pool = &self.track.pool;
+		pool.now().saturating_sub(self.at) >= pool.expiry_ticks()
+	}
+}
+
+impl Drop for Bill {
+	fn drop(&mut self) {
+		self.track.pool.sub(self.bytes);
 	}
 }
 
@@ -1075,6 +1136,11 @@ impl Charge {
 			track.pool.access_refresh(prev, target);
 		}
 		Some(target >> ACCESS_SHIFT)
+	}
+
+	/// The track account this charge bills, unless it is detached.
+	pub(super) fn account(&self) -> Option<&Arc<Track>> {
+		self.track.as_ref()
 	}
 
 	/// Release everything this charge holds: bytes, overhead, and the access
