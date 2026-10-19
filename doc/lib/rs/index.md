@@ -77,10 +77,10 @@ let mut broadcast = origin.publish("my-stream.hang", Default::default())?;
 // each requested path for the application to accept or reject.
 ```
 
-The session and the origin work run concurrently (`tokio::select!` or
-`spawn`), since the announcement loop is live. Before exiting,
-`session.close().await` delivers what was already queued, then `Client::close`
-sends the QUIC close. Runnable examples:
+The connection and origin helpers spawn their drivers. Watch
+`session.closed()` alongside the announcement loop to handle a connection
+that gives up. Before exiting, `session.close().await` delivers what was
+already queued, then `Client::close` sends the QUIC close. Runnable examples:
 [`rs/hang/examples/video.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs)
 (publish) and
 [`subscribe.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs).
