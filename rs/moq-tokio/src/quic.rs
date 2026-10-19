@@ -94,9 +94,11 @@ pub enum CongestionControl {
 	/// for loss, which keeps queues short and the send rate steady enough for an encoder
 	/// to track.
 	Delay,
+	/// No congestion control and no pacing, for tests and controlled links.
+	None,
 }
 
-/// Parses the same spellings the CLI and TOML accept (`loss`, `delay`), case-insensitively.
+/// Parses the same spellings the CLI and TOML accept (`loss`, `delay`, `none`), case-insensitively.
 impl std::str::FromStr for CongestionControl {
 	type Err = String;
 
@@ -832,6 +834,16 @@ mod tests {
 		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
 		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
 		assert_eq!(quic.keylog, Some(true));
+	}
+
+	/// `none` is spelled the same on the CLI, in TOML, and through `FromStr`.
+	#[test]
+	fn congestion_control_none_parses() {
+		let quic = parse(&["--quic-congestion-control", "none"]);
+		assert_eq!(quic.congestion_control, Some(CongestionControl::None));
+		let quic: Config = toml::from_str(r#"congestion_control = "none""#).expect("parse");
+		assert_eq!(quic.congestion_control, Some(CongestionControl::None));
+		assert_eq!("NONE".parse(), Ok(CongestionControl::None));
 	}
 
 	/// Every old role-prefixed spelling parses into a hidden field and is reported,
