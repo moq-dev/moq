@@ -924,13 +924,14 @@ impl Recover {
 		}
 	}
 
-	/// Poll for the serving route's copy of the group, positioned at frame `index`.
+	/// Poll for the serving route's copy of the group, holding `frames` and positioned at
+	/// their end. A reader that inflates a compressed group needs it from frame 0.
 	///
 	/// `failed` is the error the current copy ended with, if it did; a stall is `None`.
 	/// Returns the copy's error when nothing can continue the group.
 	pub(super) fn poll(
 		&mut self,
-		index: u64,
+		frames: std::ops::Range<u64>,
 		failed: Option<&Error>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Replacement>> {
@@ -967,7 +968,7 @@ impl Recover {
 			if generation == self.generation && failed.is_none() {
 				return Poll::Pending;
 			}
-			let res = self.poll_serving(generation, &serving, index, failed, waiter);
+			let res = self.poll_serving(generation, &serving, frames.clone(), failed, waiter);
 			// The serving route failed too, and no front is left to replace it.
 			if let (Poll::Pending, Some(err)) = (&res, failed)
 				&& (closed || end.is_some())
@@ -993,16 +994,24 @@ impl Recover {
 		&mut self,
 		generation: u64,
 		serving: &track::Consumer,
-		index: u64,
+		frames: std::ops::Range<u64>,
 		failed: Option<&Error>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Replacement>> {
 		// A newer copy's subscription delivered it: continue from there. The copy that
 		// failed delivered it already, so its subscription will not again.
 		let same = generation == self.generation;
-		if !same && let Poll::Ready(Some(mut group)) = serving.poll_group(self.sequence, waiter) {
+		// The failed copy released the frames before the reader's, so a reader that inflates
+		// takes them from the replacement.
+		let std::ops::Range { start, end: index } = frames;
+		let continues = |group: &mut group::Consumer| {
+			group.start_at(start);
+			let held = group.index() == start;
 			group.start_at(index);
-			if group.index() == index {
+			held && group.index() == index
+		};
+		if !same && let Poll::Ready(Some(mut group)) = serving.poll_group(self.sequence, waiter) {
+			if continues(&mut group) {
 				return Poll::Ready(Ok(Replacement {
 					group,
 					generation,
@@ -1015,7 +1024,7 @@ impl Recover {
 		if self.fetch.as_ref().is_none_or(|(asked, _)| *asked != generation) {
 			let options = group::Fetch {
 				max_delay: self.max_delay,
-				frame_start: index,
+				frame_start: start,
 				..Default::default()
 			};
 			self.fetch = Some((generation, Fetch::Pending(serving.fetch_group(self.sequence, options))));
@@ -1029,8 +1038,7 @@ impl Recover {
 			Fetch::Refused(err) => err.clone(),
 			Fetch::Pending(pending) => match ready!(kio::Task::poll(&mut **pending, waiter)) {
 				Ok(mut group) => {
-					group.start_at(index);
-					if group.index() == index {
+					if continues(&mut group) {
 						return Poll::Ready(Ok(Replacement {
 							group,
 							generation,
@@ -1872,6 +1880,7 @@ mod test {
 				status: None,
 				properties: Default::default(),
 			})),
+			deflated: None,
 		};
 		let routes = Producer::new();
 		let front = logical(&routes);
@@ -2258,6 +2267,7 @@ mod test {
 						id: 6,
 						properties: Default::default(),
 					})),
+					inflated: None,
 				},
 				&crate::frame::Budget::default(),
 			)
@@ -2280,6 +2290,7 @@ mod test {
 						id: 8,
 						properties: Default::default(),
 					})),
+					inflated: None,
 				},
 				&crate::frame::Budget::default(),
 			)
@@ -2327,6 +2338,7 @@ mod test {
 							id,
 							properties: Default::default(),
 						})),
+						inflated: None,
 					},
 					&crate::frame::Budget::default(),
 				)

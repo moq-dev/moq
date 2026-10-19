@@ -57,11 +57,19 @@ pub(crate) struct Wire {
 pub(crate) struct Stored {
 	pub datagram: Datagram,
 	pub wire: Option<std::sync::Arc<Wire>>,
+	/// On a compressed track, the payload as its own DEFLATE stream: a datagram is a
+	/// one-frame group, so it compresses with a fresh window. Kept beside the inflated
+	/// `datagram.payload`, since both are small and short-lived.
+	pub deflated: Option<Bytes>,
 }
 
 impl From<Datagram> for Stored {
 	fn from(datagram: Datagram) -> Self {
-		Self { datagram, wire: None }
+		Self {
+			datagram,
+			wire: None,
+			deflated: None,
+		}
 	}
 }
 

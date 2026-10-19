@@ -14,13 +14,15 @@
 //! bounds group sequences.
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
+use super::flate;
+use bytes::Bytes;
 use crate::cache;
 use crate::frame::{self, Frame, FrameBuf};
 use crate::{Cap, Timescale, stats, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::ops::{Bound, RangeBounds};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Poll, ready};
 
@@ -130,6 +132,11 @@ pub(super) struct Partial {
 	buf: FrameBuf,
 	// How much of `buf` has been charged to the cache so far.
 	charged: u64,
+	// A received DEFLATE slice's inflated size, on a compressed group.
+	inflated: Option<u64>,
+	// Plain bytes a local producer streams into a compressed group: compressed when the
+	// frame commits, so no reader sees them, and uncharged until then.
+	scratch: bool,
 }
 
 /// Shared group state. Model-visible so [`frame`] handles can observe the abort flag
@@ -137,10 +144,13 @@ pub(super) struct Partial {
 #[derive(Default)]
 pub(super) struct GroupState {
 	// Completed frames, each a contiguous payload. `offset` is the first frame this
-	// handle holds, raised by [`Producer::start_at`].
+	// handle holds, raised by [`Producer::start_at`]. A compressed group stores DEFLATE
+	// slices here.
 	pub(super) frames: VecDeque<Frame>,
 	// IETF relay state, boxed so a group that never carries any pays one pointer.
 	relay: Option<Box<Relay>>,
+	// Compressed-track state, boxed so a plain group pays one pointer.
+	flate: Option<Box<Flate>>,
 
 	// The single in-flight frame, if one is open.
 	pub(super) partial: Option<Partial>,
@@ -200,6 +210,99 @@ struct Relay {
 	objects: VecDeque<Option<Arc<super::object::Fields>>>,
 	// Heap charged for this box, its fields, and the terminal object.
 	bytes: u64,
+}
+
+/// What a compressed group keeps beside its stored DEFLATE slices.
+struct Flate {
+	// Each completed frame's inflated size, at the same local index as `frames`.
+	sizes: VecDeque<u64>,
+	// The inflated size of every frame admitted so far, held to the budget a plain
+	// group's bytes are, so a declaration is refused before anything inflates.
+	inflated: u64,
+	// Compresses a local producer's frames, created by its first write. A received group
+	// stores what arrived and never recompresses.
+	encoder: Option<flate::Encoder>,
+	// The inflated copy every plain reader shares, built on first demand. Behind its own
+	// lock because readers build it, and they only hold the group's read guard.
+	plain: Mutex<Plain>,
+}
+
+struct Plain {
+	// Inflates the stored slices in order. Dropped once a finished group is fully inflated.
+	decoder: Option<flate::Decoder>,
+	// Inflated frames, from the group's first.
+	frames: VecDeque<Bytes>,
+	// The first failure, sticky: every later frame builds on the one that failed.
+	err: Option<Error>,
+	bill: cache::Bill,
+}
+
+impl Flate {
+	fn new(bill: cache::Bill) -> Self {
+		Self {
+			sizes: VecDeque::new(),
+			inflated: 0,
+			encoder: None,
+			plain: Mutex::new(Plain {
+				decoder: None,
+				frames: VecDeque::new(),
+				err: None,
+				bill,
+			}),
+		}
+	}
+
+	/// Record a completed local frame's inflated size.
+	fn push(&mut self, size: u64) {
+		self.sizes.push_back(size);
+		self.inflated += size;
+	}
+
+	/// Compress a locally written frame, returning its stored slice.
+	fn deflate(&mut self, payload: &[u8]) -> Bytes {
+		self.encoder.get_or_insert_with(flate::Encoder::new).frame(payload)
+	}
+
+	/// The inflated frame at local index `local`, inflating the stored slices up to it.
+	///
+	/// `stored` holds the completed slices from the group's frame 0. `fin` is the local
+	/// frame count once the group finished, so the decoder can go after the last frame.
+	fn plain(&self, stored: &VecDeque<Frame>, local: usize, fin: Option<usize>) -> Result<Bytes> {
+		let mut plain = self.plain.lock().unwrap_or_else(PoisonError::into_inner);
+		if let Some(err) = &plain.err {
+			return Err(err.clone());
+		}
+		while plain.frames.len() <= local {
+			let index = plain.frames.len();
+			let size = usize::try_from(self.sizes[index]).map_err(|_| Error::FrameTooLarge)?;
+			let decoder = plain.decoder.get_or_insert_with(flate::Decoder::new);
+			match decoder.frame(&stored[index].payload, size) {
+				Ok(frame) => {
+					plain.bill.add(frame.len() as u64);
+					plain.frames.push_back(frame);
+				}
+				Err(err) => {
+					plain.err = Some(err.clone());
+					plain.decoder = None;
+					return Err(err);
+				}
+			}
+		}
+		if fin == Some(plain.frames.len()) {
+			plain.decoder = None;
+		}
+		Ok(plain.frames[local].clone())
+	}
+
+	/// Drop everything but how the group is read.
+	fn release(&mut self) {
+		self.sizes = VecDeque::new();
+		self.encoder = None;
+		let plain = self.plain.get_mut().unwrap_or_else(PoisonError::into_inner);
+		plain.decoder = None;
+		plain.frames = VecDeque::new();
+		plain.bill.clear();
+	}
 }
 
 /// The IETF header state that cannot be inferred from a plain frame list.
@@ -312,9 +415,32 @@ impl GroupState {
 		}
 	}
 
+	/// Refuse admitting `extra` more inflated bytes past the group budget, on a compressed
+	/// group. The declaration is checked like a plain frame's size, before anything inflates.
+	fn inflated_overflow(&self, extra: u64) -> bool {
+		self.flate
+			.as_ref()
+			.is_some_and(|flate| flate.inflated.saturating_add(extra) > MAX_CACHE_BYTES)
+	}
+
+	/// The inflated frame at local index `local` of a compressed group, from the copy
+	/// every plain reader shares.
+	///
+	/// [`Error::Lagged`] when the group started past frame 0: its first slice builds on
+	/// frames it never held.
+	fn plain(&self, flate: &Flate, local: usize) -> Result<Bytes> {
+		if self.offset != 0 {
+			return Err(Error::Lagged);
+		}
+		flate.plain(&self.frames, local, self.fin)
+	}
+
 	/// Resolve the source for the frame at `index`: a completed frame (whole) or the
 	/// in-flight tail (streamed). Used by [`Consumer::poll_next_frame`].
-	fn poll_frame_source(&self, index: usize) -> Poll<Result<Option<(frame::Header, frame::Source)>>> {
+	///
+	/// A compressed group hands a plain reader each frame whole once it completes and
+	/// inflates, and a `raw` one the stored slice, streaming one that is still arriving.
+	fn poll_frame_source(&self, index: usize, raw: bool) -> Poll<Result<Option<(frame::Header, frame::Source)>>> {
 		if index < self.offset {
 			return Poll::Ready(Err(Error::Lagged));
 		}
@@ -323,20 +449,28 @@ impl GroupState {
 			// A frame read is a cache access: stamp it so expiry and the eviction
 			// walk spare a group a consumer is actively draining.
 			self.charge.refresh();
+			let (payload, inflated) = match &self.flate {
+				Some(flate) if raw => (f.payload.clone(), Some(flate.sizes[local])),
+				Some(flate) => (self.plain(flate, local)?, None),
+				None => (f.payload.clone(), None),
+			};
 			let info = frame::Info {
-				size: f.payload.len() as u64,
+				size: payload.len() as u64,
 				timestamp: f.timestamp,
 			};
 			return Poll::Ready(Ok(Some((
 				frame::Header {
 					info,
 					fields: self.fields(local),
+					inflated,
 				},
-				frame::Source::Complete(f.payload.clone()),
+				frame::Source::Complete(payload),
 			))));
 		}
 		if local == self.frames.len()
 			&& let Some(p) = &self.partial
+			&& !p.scratch
+			&& (raw || self.flate.is_none())
 		{
 			self.charge.refresh();
 			let info = frame::Info {
@@ -347,6 +481,7 @@ impl GroupState {
 				frame::Header {
 					info,
 					fields: p.fields.clone(),
+					inflated: p.inflated,
 				},
 				frame::Source::Partial(p.buf.clone()),
 			))));
@@ -478,6 +613,8 @@ impl GroupState {
 	/// Returns the coarse tick it stamped, like [`cache::Charge::add`].
 	fn charge_partial(&mut self) -> Option<u64> {
 		let written = match &mut self.partial {
+			// Scratch is charged as the slice it commits as.
+			Some(partial) if partial.scratch => 0,
 			Some(partial) => {
 				let written = partial.buf.written(Ordering::Acquire) as u64;
 				written - std::mem::replace(&mut partial.charged, written)
@@ -499,6 +636,9 @@ impl GroupState {
 		self.partial = None;
 		self.cache = 0;
 		self.charge.clear();
+		if let Some(flate) = &mut self.flate {
+			flate.release();
+		}
 		// The header state and terminal object outlive the frames.
 		if let Some(relay) = &mut self.relay {
 			relay.objects = VecDeque::new();
@@ -703,7 +843,13 @@ impl Producer {
 		let state = kio::Producer::<GroupState>::default();
 		let charge = cache.charge();
 		let access = charge.access();
-		state.write().ok().expect("a new group is open").charge = charge;
+		{
+			let mut state = state.write().ok().expect("a new group is open");
+			if track.compress {
+				state.flate = Some(Box::new(Flate::new(charge.bill())));
+			}
+			state.charge = charge;
+		}
 		let alive = Arc::new(Alive {
 			info,
 			state: state.clone(),
@@ -739,6 +885,14 @@ impl Producer {
 	/// The parent track's timescale, or `None` when it declared no timeline.
 	pub fn timescale(&self) -> Option<Timescale> {
 		self.track.timescale
+	}
+
+	/// Whether the parent track compresses, so a received frame arrives as a stored slice
+	/// with its inflated size ([`frame::Header::inflated`]).
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/ingest.md
+	pub(crate) fn compressed(&self) -> bool {
+		self.track.compress
 	}
 
 	/// The track to check this group's start against, while frame 0 may still be unwritten.
@@ -815,14 +969,22 @@ impl Producer {
 		state.admit(next_index)?;
 		let origin = state.check_start(neighbors.as_ref(), timestamp)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
+		let inflated = payload.len() as u64;
+		let payload = match &mut state.flate {
+			Some(flate) => flate.deflate(&payload),
+			None => payload,
+		};
 		let size = payload.len() as u64;
-		if state.would_overflow(1, size) {
+		if state.would_overflow(1, size) || state.inflated_overflow(inflated) {
 			return Err(self.abort_too_large(state));
 		}
 		state.cache += size;
 		let slots = state.reserve_frame();
 		let now = state.charge.add(size + slots);
 		state.frames.push_back(Frame { timestamp, payload });
+		if let Some(flate) = &mut state.flate {
+			flate.push(inflated);
+		}
 		state.next_index = next_index;
 		state.committed = state.next_index;
 		state.stamp(timestamp);
@@ -893,15 +1055,29 @@ impl Producer {
 			)?,
 			None => state.origin,
 		};
-		if state.would_overflow(count, bytes) {
+		// A compressed group stores slices, compressed aside so a refused batch is untouched.
+		let mut deflated = arrayvec::ArrayVec::<Bytes, N>::new();
+		if let Some(flate) = &mut state.flate {
+			deflated.extend(frames.filled().iter().map(|frame| flate.deflate(&frame.payload)));
+		}
+		let stored = match state.flate.is_some() {
+			true => deflated.iter().map(|slice| slice.len() as u64).sum(),
+			false => bytes,
+		};
+		if state.would_overflow(count, stored) || state.inflated_overflow(bytes) {
 			return Err(self.abort_too_large(state));
 		}
 
 		// The last frame's tick, reused below so settling does not re-read the clock.
 		let mut now = None;
 		let mut latest = None;
+		let mut deflated = deflated.into_iter();
 		for mut frame in frames.drain() {
 			frame.timestamp = on_track(frame.timestamp, self.track.timescale).expect("timestamp scale checked above");
+			if let Some(flate) = &mut state.flate {
+				flate.push(frame.payload.len() as u64);
+				frame.payload = deflated.next().expect("one slice per frame");
+			}
 			let size = frame.payload.len() as u64;
 			state.cache += size;
 			let slots = state.reserve_frame();
@@ -982,9 +1158,16 @@ impl Producer {
 	fn open_frame(&mut self, header: frame::Header, buf: &FrameBuf) -> Result<frame::Info> {
 		let frame = header.info;
 		let timestamp = on_track(frame.timestamp, self.track.timescale)?;
-		if frame.size > MAX_CACHE_BYTES {
+		if frame.size > MAX_CACHE_BYTES || header.inflated.is_some_and(|inflated| inflated > MAX_CACHE_BYTES) {
 			return Err(Error::FrameTooLarge);
 		}
+		// Only a compressed group takes a stored slice, and every frame a local producer
+		// streams into one is plain until it commits.
+		if header.inflated.is_some() && !self.track.compress {
+			return Err(Error::ProtocolViolation);
+		}
+		let scratch = self.track.compress && header.inflated.is_none();
+		let inflated = header.inflated.unwrap_or(frame.size);
 
 		let track = self.first_frame_track();
 		let track = track.as_ref().map(|track| track.read());
@@ -1005,8 +1188,11 @@ impl Producer {
 		// Only one frame is ever in flight, so the declared size is the most the cache
 		// can grow by before the next check.
 		let metadata_bytes = header.fields.as_ref().map_or(0, |fields| fields.heap());
-		if state.would_overflow(1, frame.size.saturating_add(metadata_bytes)) {
+		if state.would_overflow(1, frame.size.saturating_add(metadata_bytes)) || state.inflated_overflow(inflated) {
 			return Err(self.abort_too_large(state));
+		}
+		if let (Some(flate), Some(inflated)) = (&mut state.flate, header.inflated) {
+			flate.inflated += inflated;
 		}
 		let now = state.charge.record_write();
 		state.partial = Some(Partial {
@@ -1014,6 +1200,8 @@ impl Producer {
 			fields: header.fields,
 			buf: buf.clone(),
 			charged: 0,
+			inflated: header.inflated,
+			scratch,
 		});
 		if metadata_bytes > 0 {
 			state.relay().bytes += metadata_bytes;
@@ -1081,8 +1269,26 @@ impl Producer {
 		// that arrives and completes in one turn never reaches [`Self::frame_notify`].
 		// Without this, a group whose payload streamed in across an idle gap would expire
 		// the instant it finished.
-		let now = state.charge_partial();
-		if let Some(fields) = state.partial.take().and_then(|partial| partial.fields) {
+		let mut now = state.charge_partial();
+		let partial = state.partial.take();
+		let mut frame = frame;
+		if partial.as_ref().is_some_and(|partial| partial.scratch) {
+			let flate = state.flate.as_mut().expect("scratch only opens on a compressed group");
+			let inflated = frame.payload.len() as u64;
+			frame.payload = flate.deflate(&frame.payload);
+			flate.push(inflated);
+			let size = frame.payload.len() as u64;
+			// The frame already counts against the group's frames.
+			if state.would_overflow(0, size) {
+				return Err(self.abort_too_large(state));
+			}
+			state.cache += size;
+			now = state.charge.add(size);
+		} else if let (Some(flate), Some(inflated)) = (&mut state.flate, partial.as_ref().and_then(|p| p.inflated)) {
+			// Admitted against the budget when it opened.
+			flate.sizes.push_back(inflated);
+		}
+		if let Some(fields) = partial.and_then(|partial| partial.fields) {
 			// The slot was reserved and charged by `charge_partial` above.
 			let len = state.frames.len();
 			let objects = &mut state.relay().objects;
@@ -1150,6 +1356,10 @@ impl Producer {
 			return Err(Error::FrameOpen);
 		}
 		state.fin = Some(state.next_index);
+		// No frame follows to compress.
+		if let Some(flate) = &mut state.flate {
+			flate.encoder = None;
+		}
 		// A finished group can no longer raise the track's largest, which may end its stream.
 		self.cache.finish_largest(self.sequence);
 		Ok(())
@@ -1378,6 +1588,7 @@ impl Producer {
 				index: 0,
 				end: None,
 				prefetch: Prefetch::default(),
+				raw: false,
 				cache: self.cache.clone(),
 				access: self.alive.access.clone(),
 				refreshed: self.cache.pool().now(),
@@ -1553,12 +1764,19 @@ struct Prefetch {
 	frames: [MaybeUninit<Frame>; Self::CAP],
 	// Relay metadata for `frames`, allocated by the first batch that carries any.
 	fields: Option<Box<[Option<Arc<super::object::Fields>>; Self::CAP]>>,
+	// Inflated sizes for `frames`, filled only by a batch of a compressed group's stored slices.
+	inflated: Option<Box<[u64; Self::CAP]>>,
 	pos: usize,
 	len: usize,
 }
 
 impl Prefetch {
 	const CAP: usize = 8;
+
+	/// The inflated size of the stored slice [`Self::pop`] just returned.
+	fn take_inflated(&self) -> Option<u64> {
+		self.inflated.as_ref()?.get(self.pos.checked_sub(1)?).copied()
+	}
 
 	/// Take the next buffered frame, or `None` if the batch is drained.
 	fn pop(&mut self) -> Option<Frame> {
@@ -1578,13 +1796,44 @@ impl Prefetch {
 
 	/// Refill with up to `budget` of the completed frames from `local` on. Must be
 	/// drained first (`pop` returned `None`).
-	fn fill(&mut self, state: &GroupState, local: usize, budget: usize) {
+	///
+	/// A compressed group fills inflated frames, or with `raw` its stored slices and their
+	/// inflated sizes. A frame that fails to inflate ends the batch, failing it if first.
+	fn fill(&mut self, state: &GroupState, local: usize, budget: usize, raw: bool) -> Result<()> {
 		debug_assert_eq!(self.pos, self.len, "fill on a non-empty batch would leak frames");
 		self.pos = 0;
 		self.len = 0;
-		for frame in state.frames.range(local..).take(budget.min(Self::CAP)) {
-			self.frames[self.len].write(frame.clone());
-			self.len += 1;
+		let frames = state.frames.range(local..).take(budget.min(Self::CAP));
+		match &state.flate {
+			Some(flate) if !raw => {
+				for frame in frames {
+					let payload = match state.plain(flate, local + self.len) {
+						Ok(payload) => payload,
+						Err(err) if self.len == 0 => return Err(err),
+						Err(_) => break,
+					};
+					self.frames[self.len].write(Frame {
+						timestamp: frame.timestamp,
+						payload,
+					});
+					self.len += 1;
+				}
+			}
+			_ => {
+				for frame in frames {
+					self.frames[self.len].write(frame.clone());
+					self.len += 1;
+				}
+			}
+		}
+		match &state.flate {
+			Some(flate) if raw => {
+				let inflated = self.inflated.get_or_insert_default();
+				for (slot, size) in inflated.iter_mut().zip(flate.sizes.range(local..local + self.len)) {
+					*slot = *size;
+				}
+			}
+			_ => self.inflated = None,
 		}
 		// Plain frames never reach the metadata table, so they skip this entirely.
 		if local < state.objects() {
@@ -1595,6 +1844,7 @@ impl Prefetch {
 		} else if let Some(fields) = &mut self.fields {
 			fields.fill(None);
 		}
+		Ok(())
 	}
 
 	/// `(frame count, total payload bytes)` of the buffered, not-yet-taken frames.
@@ -1614,6 +1864,7 @@ impl Default for Prefetch {
 		Self {
 			frames: [const { MaybeUninit::uninit() }; Self::CAP],
 			fields: None,
+			inflated: None,
 			pos: 0,
 			len: 0,
 		}
@@ -1693,6 +1944,9 @@ struct Cursor {
 	// A batch of completed frames drained ahead under one lock (whole-frame reads only).
 	prefetch: Prefetch,
 
+	// Read a compressed group's stored slices rather than its inflated copy.
+	raw: bool,
+
 	// Record prefetched reads without entering the group's state on every frame.
 	cache: Arc<cache::Track>,
 	access: Arc<cache::Access>,
@@ -1708,6 +1962,7 @@ impl Clone for Cursor {
 			index: self.index,
 			end: self.end,
 			prefetch: Prefetch::default(),
+			raw: self.raw,
 			cache: self.cache.clone(),
 			access: self.access.clone(),
 			refreshed: self.refreshed,
@@ -1757,6 +2012,17 @@ impl Consumer {
 	// private: passthrough
 	pub(crate) fn wire(&self) -> Option<Wire> {
 		self.cursor.state.read().wire().cloned()
+	}
+
+	/// Read a compressed group's stored DEFLATE slices instead of plain frames, with each
+	/// frame's inflated size beside it ([`frame::Object::inflated`],
+	/// [`frame::Consumer::inflated`]), for egress that carries compression. A no-op on a
+	/// plain group.
+	// private: passthrough
+	pub(crate) fn compressed(mut self) -> Self {
+		self.cursor.raw = true;
+		self.cursor.prefetch = Prefetch::default();
+		self
 	}
 
 	/// The index of the first frame the group holds (see [`Producer::start_at`]).
@@ -1864,19 +2130,26 @@ impl Consumer {
 			if self.cursor.state.read().sparse() {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
-			let replacement = match recover.poll(self.cursor.index as u64, failed.as_ref(), waiter) {
+			// A plain read of a compressed group inflates from frame 0.
+			let index = self.cursor.index as u64;
+			let start = match !self.cursor.raw && self.cursor.state.read().flate.is_some() {
+				true => 0,
+				false => index,
+			};
+			let replacement = match recover.poll(start..index, failed.as_ref(), waiter) {
 				Poll::Ready(Ok(group)) => group,
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => return Poll::Pending,
 			};
 			// Same frames by index, so only the channel changes; read progress and the
 			// cap stay this cursor's.
-			let (index, end) = (self.cursor.index, self.cursor.end);
+			let (index, end, raw) = (self.cursor.index, self.cursor.end, self.cursor.raw);
 			recover.adopt(&replacement);
 			self.expiry = self.expiry.as_ref().map(|expiry| expiry.for_track(&replacement.copy));
 			self.cursor = replacement.group.cursor;
 			self.cursor.index = index;
 			self.cursor.end = end;
+			self.cursor.raw = raw;
 			self.adopted = true;
 		}
 	}
@@ -2100,6 +2373,7 @@ impl Consumer {
 		Poll::Ready(Ok(frame.map(|frame| frame::Object {
 			frame,
 			fields: self.cursor.prefetch.take_fields(),
+			inflated: self.cursor.prefetch.take_inflated(),
 		})))
 	}
 
@@ -2314,6 +2588,7 @@ impl Cursor {
 			let header = frame::Header {
 				info,
 				fields: self.prefetch.take_fields(),
+				inflated: self.prefetch.take_inflated(),
 			};
 			let frame = frame::Consumer::new(self.state.clone(), header, source);
 			return Poll::Ready(Ok(Some(match expiry {
@@ -2322,8 +2597,8 @@ impl Cursor {
 			})));
 		}
 
-		let index = self.index;
-		let Some((info, source)) = ready!(self.poll(waiter, |state| state.poll_frame_source(index))?) else {
+		let (index, raw) = (self.index, self.raw);
+		let Some((info, source)) = ready!(self.poll(waiter, |state| state.poll_frame_source(index, raw))?) else {
 			return Poll::Ready(Ok(None));
 		};
 
@@ -2357,6 +2632,7 @@ impl Cursor {
 		// come from the shared state then, not from a batch drained under the old cap.
 		let budget = self.end.map_or(usize::MAX, |end| end.saturating_sub(index));
 		let prefetch = &mut self.prefetch;
+		let raw = self.raw;
 		let res = self.state.poll(waiter, |state| {
 			if index < state.offset {
 				return Poll::Ready(Err(Error::Lagged));
@@ -2366,7 +2642,7 @@ impl Cursor {
 			// out-of-bounds start. `fill` always resets the batch, so an empty range
 			// leaves `len == 0` and the terminal checks below resolve abort/fin/pending.
 			let local = (index - state.offset).min(state.frames.len());
-			prefetch.fill(state, local, budget);
+			prefetch.fill(state, local, budget, raw)?;
 			if prefetch.len > 0 {
 				// One stamp covers the whole batch: frames popped from the prefetch
 				// don't re-stamp until the next refill, which `CAP` bounds.
@@ -2497,6 +2773,7 @@ mod test {
 					id: id * 10,
 					properties: Default::default(),
 				})),
+				inflated: None,
 			};
 			let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
 			frame.write(Bytes::from_static(b"f")).unwrap();

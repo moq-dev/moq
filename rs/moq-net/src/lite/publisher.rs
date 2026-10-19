@@ -1872,7 +1872,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 
 	fn poll(
 		&mut self,
-		_: &Shared<S>,
+		shared: &Shared<S>,
 		writer: &mut Writer<S::SendStream, Version>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
@@ -1883,6 +1883,8 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 			priority: info.priority,
 			max_age: info.max_age,
 			timescale: info.timescale,
+			// An older peer is served the frames inflated.
+			compress: info.compress && shared.version.has_compression(),
 		})?;
 		Poll::Ready(Ok(ControlFlow::Break(())))
 	}
@@ -2087,7 +2089,7 @@ enum FetchServe {
 		prev_ts: u64,
 		frame: Option<frame::Consumer>,
 		chunk: Option<bytes::Bytes>,
-		batch: Box<frame::Buffer>,
+		batch: Box<Objects>,
 		batch_pos: usize,
 	},
 }
@@ -2154,6 +2156,10 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 
 					// Matches the timescale TRACK_INFO declared for the track.
 					let timescale = shared.version.wire_timescale(group.timescale());
+					// And its compression, which a lite-07 peer receives as stored.
+					if shared.version.has_compression() {
+						group = group.compressed();
+					}
 
 					*self = Self::Serve {
 						group,
@@ -2161,7 +2167,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 						prev_ts: 0,
 						frame: None,
 						chunk: None,
-						batch: Box::new(frame::Buffer::new()),
+						batch: Box::default(),
 						batch_pos: 0,
 					};
 				}
@@ -2188,23 +2194,24 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 								None => *frame = None,
 							}
 						} else if *batch_pos < batch.len() {
-							let batched = &mut batch.filled_mut()[*batch_pos];
+							let batched = &mut batch[*batch_pos];
 							buffer_frame_info(
 								writer,
-								batched.timestamp,
-								batched.payload.len() as u64,
+								batched.frame.timestamp,
+								batched.inflated,
+								batched.frame.payload.len() as u64,
 								*timescale,
 								prev_ts,
 								&shared.runtime,
 							)?;
-							let payload = std::mem::take(&mut batched.payload);
+							let payload = std::mem::take(&mut batched.frame.payload);
 							if !payload.is_empty() {
 								*chunk = Some(payload);
 							}
 							*batch_pos += 1;
 							group.keep_alive();
 						} else {
-							match group.poll_read_frames(waiter, batch) {
+							match group.poll_read_objects(waiter, batch) {
 								Poll::Ready(Ok(count)) if count > 0 => {
 									*batch_pos = 0;
 									return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -2218,6 +2225,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 									buffer_frame_info(
 										writer,
 										next.timestamp,
+										next.inflated,
 										next.size,
 										*timescale,
 										prev_ts,
@@ -2961,6 +2969,7 @@ mod announce_test {
 fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	timestamp: Option<crate::Timestamp>,
+	inflated: Option<u64>,
 	size: u64,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
@@ -2968,6 +2977,10 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 ) -> Result<(), Error> {
 	if let Some(timescale) = timescale {
 		buffer_zigzag_delta(writer, wire_timestamp(timestamp, timescale, runtime)?, prev_ts)?;
+	}
+	// Only a compressed group read in its stored form has one, and only on lite-07.
+	if let Some(inflated) = inflated {
+		writer.buffer_varint(inflated)?;
 	}
 	writer.buffer_varint(size)?;
 	Ok(())
@@ -3007,6 +3020,9 @@ fn buffer_zigzag_delta<W: crate::transport::poll::SendStream>(
 	Ok(())
 }
 
+/// A batch of frames read for egress, each with what the wire needs beside it.
+type Objects = arrayvec::ArrayVec<frame::Object, 8>;
+
 /// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
 /// best-effort datagram to forward, the track declaring its exclusive final sequence, or
 /// the track finishing (the live edge having reached that boundary).
@@ -3016,7 +3032,7 @@ fn buffer_zigzag_delta<W: crate::transport::poll::SendStream>(
 #[allow(clippy::large_enum_variant)]
 enum Recv {
 	Group(group::Consumer),
-	Datagram(crate::Datagram),
+	Datagram(crate::model::datagram::Stored),
 	Boundary(u64),
 	Finished,
 }
@@ -3055,7 +3071,7 @@ fn poll_recv_next(
 			Poll::Pending => {}
 		}
 		if datagrams {
-			match track.poll_recv_datagram(waiter)? {
+			match track.poll_recv_stored_datagram(waiter)? {
 				Poll::Ready(Some(datagram)) => return Poll::Ready(Ok(Recv::Datagram(datagram))),
 				// Datagram side finished but groups are still paused/pending: keep waiting on groups.
 				Poll::Ready(None) => {}
@@ -3236,7 +3252,7 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
 	/// transport's datagram limit or the send fails (congestion / no capacity right now).
 	/// Returns whether it was handed to the transport.
-	fn serve_datagram(&mut self, datagram: crate::Datagram) -> bool {
+	fn serve_datagram(&mut self, datagram: crate::model::datagram::Stored) -> bool {
 		let Ok(timestamp) = self
 			.timescale
 			.map(|timescale| wire_timestamp(datagram.timestamp, timescale, &self.runtime))
@@ -3244,11 +3260,20 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		else {
 			return false;
 		};
+		let sequence = datagram.sequence;
+		// A lite-07 peer takes a compressed track's datagram as stored, others inflated.
+		let (payload, inflated) = match datagram.deflated {
+			Some(deflated) if self.version.has_compression() => {
+				(deflated, Some(datagram.datagram.payload.len() as u64))
+			}
+			_ => (datagram.datagram.payload, None),
+		};
 		let body = lite::Datagram {
 			subscribe: self.id,
-			sequence: datagram.sequence,
+			sequence,
 			timestamp,
-			payload: datagram.payload,
+			inflated,
+			payload,
 		};
 		// has_datagrams is checked before this runs, and the timescale is set wherever the
 		// version needs a timestamp, so encoding never hits a version guard.
@@ -3259,7 +3284,7 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		let max = self.session.max_datagram_size();
 		if body.len() > max {
 			tracing::debug!(
-				sequence = datagram.sequence,
+				sequence,
 				size = body.len(),
 				max,
 				"dropping datagram larger than the transport limit"
@@ -3268,7 +3293,7 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		}
 
 		// The run loop may not have served a group since the last SUBSCRIBE_UPDATE.
-		let priority = crate::priority::in_group(datagram.sequence, 0, self.steer_current().order);
+		let priority = crate::priority::in_group(sequence, 0, self.steer_current().order);
 		let options = SendOptions {
 			group: self.group.as_ref(),
 			priority,
@@ -3499,7 +3524,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				Poll::Pending => {
 					self.first = Some(group);
 					if self.datagrams
-						&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_datagram(waiter)?
+						&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_stored_datagram(waiter)?
 					{
 						self.serve_datagram(datagram);
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -3622,7 +3647,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	}
 
 	/// Send a datagram, recording its sequence once it went out.
-	fn serve_datagram(&mut self, datagram: crate::Datagram) {
+	fn serve_datagram(&mut self, datagram: crate::model::datagram::Stored) {
 		let sequence = datagram.sequence;
 		if self.ctx.serve_datagram(datagram) {
 			self.mark_served(sequence);
@@ -3791,7 +3816,7 @@ enum GroupState<S: crate::transport::poll::Session> {
 		writer: Writer<S::SendStream, Version>,
 		frame: Option<frame::Consumer>,
 		chunk: Option<bytes::Bytes>,
-		batch: Box<frame::Buffer>,
+		batch: Box<Objects>,
 		batch_pos: usize,
 	},
 	/// Every frame is written and the FIN sent: wait for the acknowledgement so a
@@ -3811,6 +3836,11 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		group: group::Consumer,
 	) -> Self {
 		ctx.opens.pending.fetch_add(1, Ordering::Relaxed);
+		// A lite-07 peer receives a compressed group as stored, others inflated.
+		let group = match ctx.version.has_compression() {
+			true => group.compressed(),
+			false => group,
+		};
 		Self {
 			ctx,
 			rank,
@@ -3919,7 +3949,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						writer,
 						frame: None,
 						chunk: None,
-						batch: Box::new(frame::Buffer::new()),
+						batch: Box::default(),
 						batch_pos: 0,
 					};
 				}
@@ -3980,11 +4010,12 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									Poll::Pending => return Poll::Pending,
 								}
 							} else if *batch_pos < batch.len() {
-								let batched = &mut batch.filled_mut()[*batch_pos];
+								let batched = &mut batch[*batch_pos];
 								let buffered = buffer_frame_info(
 									writer,
-									batched.timestamp,
-									batched.payload.len() as u64,
+									batched.frame.timestamp,
+									batched.inflated,
+									batched.frame.payload.len() as u64,
 									self.ctx.timescale,
 									&mut self.prev_ts,
 									&self.ctx.runtime,
@@ -3992,14 +4023,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								if let Err(err) = buffered {
 									break 'serve Err(err);
 								}
-								let payload = std::mem::take(&mut batched.payload);
+								let payload = std::mem::take(&mut batched.frame.payload);
 								if !payload.is_empty() {
 									*chunk = Some(payload);
 								}
 								*batch_pos += 1;
 								self.group.keep_alive();
 							} else {
-								match self.group.poll_read_frames(waiter, batch) {
+								match self.group.poll_read_objects(waiter, batch) {
 									Poll::Ready(Ok(count)) if count > 0 => {
 										*batch_pos = 0;
 										continue;
@@ -4014,6 +4045,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										let buffered = buffer_frame_info(
 											writer,
 											next.timestamp,
+											next.inflated,
 											next.size,
 											self.ctx.timescale,
 											&mut self.prev_ts,

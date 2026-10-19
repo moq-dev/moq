@@ -137,6 +137,15 @@ pub struct Info {
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	/// Higher is more urgent. Defaults to 127, the midpoint.
 	pub priority: u8,
+	/// Whether frames are DEFLATE compressed per group, so later frames compress against
+	/// earlier ones in the same group. Defaults to `false`.
+	///
+	/// Writers and readers see plain frames either way: the producer compresses each
+	/// frame as it is written and the cache stores the compressed form. A moq-lite-07 peer
+	/// receives the compressed bytes and the flag; every other session receives the
+	/// frames inflated, from one inflated copy per group shared by every plain reader.
+	/// Worth it for small, repetitive payloads like JSON; wasted on media.
+	pub compress: bool,
 	/// Whether the original publisher starts a group on a moq-transport NEW_GROUP_REQUEST
 	/// (DYNAMIC_GROUPS), as learned from an upstream moq-transport session.
 	///
@@ -153,6 +162,7 @@ impl Default for Info {
 			timescale: None,
 			max_age: None,
 			priority: DEFAULT_PRIORITY,
+			compress: false,
 			dynamic_groups: false,
 		}
 	}
@@ -178,6 +188,12 @@ impl Info {
 	/// Set the publisher's tie-break priority, returning `self` for chaining.
 	pub fn with_priority(mut self, priority: u8) -> Self {
 		self.priority = priority;
+		self
+	}
+
+	/// Set whether frames are DEFLATE compressed per group, returning `self` for chaining.
+	pub fn with_compress(mut self, compress: bool) -> Self {
+		self.compress = compress;
 		self
 	}
 }
@@ -2318,14 +2334,17 @@ impl Producer {
 		state.advance(sequence);
 		state.cache.finish_largest(sequence);
 		meter.datagram(payload.len() as u64);
-		state.push_datagram(
-			Datagram {
+		// A datagram is its own group, so it compresses alone.
+		let deflated = state.info.as_ref().unwrap().compress.then(|| super::flate::Encoder::new().frame(&payload));
+		state.push_datagram(super::datagram::Stored {
+			datagram: Datagram {
 				sequence,
 				timestamp,
 				payload,
-			}
-			.into(),
-		);
+			},
+			wire: None,
+			deflated,
+		});
 		let cache = state.cache.clone();
 		drop(state);
 		cache.settle(None);
@@ -2360,7 +2379,12 @@ impl Producer {
 		}
 		let meter = self.stats.meter();
 		let mut state = self.modify()?;
-		let timescale = state.info.as_ref().unwrap().timescale;
+		let info = state.info.as_ref().unwrap();
+		let timescale = info.timescale;
+		if info.compress && datagram.deflated.is_none() {
+			// A datagram is its own group, so it compresses alone.
+			datagram.deflated = Some(super::flate::Encoder::new().frame(&datagram.payload));
+		}
 		if !datagram
 			.wire
 			.as_ref()
@@ -2379,6 +2403,38 @@ impl Producer {
 		drop(state);
 		cache.settle(None);
 		Ok(())
+	}
+
+	/// Insert a received datagram of a compressed track: `deflated` is its payload as its
+	/// own DEFLATE stream, which must inflate to exactly `size` bytes. Kept as it arrived,
+	/// beside the inflated payload.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) fn insert_deflated_datagram(
+		&mut self,
+		sequence: u64,
+		timestamp: Option<Timestamp>,
+		deflated: bytes::Bytes,
+		size: u64,
+	) -> Result<()> {
+		if !self.info.compress {
+			return Err(Error::ProtocolViolation);
+		}
+		// Refused before inflating, like an oversized plain payload.
+		let size = usize::try_from(size)
+			.ok()
+			.filter(|size| *size <= super::datagram::MAX_DATAGRAM_PAYLOAD)
+			.ok_or(Error::FrameTooLarge)?;
+		let payload = super::flate::Decoder::new().frame(&deflated, size)?;
+		self.insert_wire_datagram(super::datagram::Stored {
+			datagram: Datagram {
+				sequence,
+				timestamp,
+				payload,
+			},
+			wire: None,
+			deflated: Some(deflated),
+		})
 	}
 
 	/// Create a group with a single frame, at the given presentation timestamp.
@@ -5294,6 +5350,18 @@ impl Subscriber {
 	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
 	/// is aborted, or `Poll::Pending` when none is buffered yet.
 	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
+		self.poll_recv_stored_datagram(waiter)
+			.map(|res| res.map(|datagram| datagram.map(|datagram| datagram.datagram)))
+	}
+
+	/// [`Self::poll_recv_datagram`], keeping what is stored beside the payload: a compressed
+	/// track's DEFLATE slice.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) fn poll_recv_stored_datagram(
+		&mut self,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<super::datagram::Stored>>> {
 		loop {
 			let Some(datagram) = ready!(self.poll_recv_wire_datagram(waiter))? else {
 				return Poll::Ready(Ok(None));
@@ -5305,7 +5373,7 @@ impl Subscriber {
 			{
 				continue;
 			}
-			return Poll::Ready(Ok(Some(datagram.datagram)));
+			return Poll::Ready(Ok(Some(datagram)));
 		}
 	}
 
@@ -6758,12 +6826,17 @@ mod test {
 			sequence: d.sequence,
 			timestamp: Some(d.timestamp.unwrap().value()),
 			payload: d.payload.clone(),
+			inflated: None,
 		}
 		.encode_bytes(version)
 		.unwrap();
 
 		// Subscriber decodes the body and writes it downstream, preserving the sequence.
-		let wire = lite::Datagram::decode(body, version, |_| true).unwrap();
+		let wire = lite::Datagram::decode(body, version, |_| lite::Format {
+			timed: true,
+			compressed: false,
+		})
+		.unwrap();
 		let mut downstream = track_producer("test", Info::timed());
 		let mut downstream_dg = downstream.subscribe(None);
 		downstream

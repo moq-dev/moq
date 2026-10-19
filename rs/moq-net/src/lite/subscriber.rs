@@ -506,8 +506,12 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// The group path already writes to a producer under this lock.
 		let mut subscribes = self.subscribes.lock();
 		// An unknown subscription's datagram is dropped below, however it parses.
-		let dg = lite::Datagram::decode(payload, self.version, |id| {
-			subscribes.get(&id).is_some_and(|entry| entry.timescale.is_some())
+		let dg = lite::Datagram::decode(payload, self.version, |id| match subscribes.get(&id) {
+			Some(entry) => lite::Format {
+				timed: entry.timescale.is_some(),
+				compressed: entry.producer.info().compress,
+			},
+			None => lite::Format::default(),
 		})?;
 		let Some(entry) = subscribes.get_mut(&dg.subscribe) else {
 			// Unknown or already-closed subscription: drop the datagram.
@@ -528,7 +532,12 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// A datagram says where the live feed is as well as a group does. Inserted first, so
 		// the copy goes live with it already showing.
 		let live = entry.producer.is_live();
-		entry.producer.insert_datagram(dg.sequence, timestamp, dg.payload)?;
+		match dg.inflated {
+			Some(size) => entry
+				.producer
+				.insert_deflated_datagram(dg.sequence, timestamp, dg.payload, size)?,
+			None => entry.producer.insert_datagram(dg.sequence, timestamp, dg.payload)?,
+		}
 		if !live {
 			entry.producer.set_live(Some(Position::group(dg.sequence)));
 		}
@@ -1014,9 +1023,15 @@ enum IngestPhase {
 	/// Reading the timestamp delta (skipped without a timescale). Stream end here
 	/// means the group has no more frames.
 	Timing,
+	/// Reading a compressed Track's inflated size (lite-07), or skipped. Stream end here
+	/// also ends the group on an untimed Track, where nothing precedes it.
+	Inflated { timestamp: Option<Timestamp> },
 	/// Reading the frame size. Stream end here also ends the group (pre-lite-05,
 	/// where there is no timing prefix to act as the sentinel).
-	Size { timestamp: Option<Timestamp> },
+	Size {
+		timestamp: Option<Timestamp>,
+		inflated: Option<u64>,
+	},
 	/// Streaming the frame payload.
 	Payload { frame: frame::ProducerOwned },
 }
@@ -1045,7 +1060,7 @@ impl FrameIngest {
 			match &mut self.phase {
 				IngestPhase::Timing => {
 					let Some(scale) = self.timescale else {
-						self.phase = IngestPhase::Size { timestamp: None };
+						self.phase = IngestPhase::Inflated { timestamp: None };
 						continue;
 					};
 					// The timestamp delta doubles as the per-frame sentinel.
@@ -1058,11 +1073,29 @@ impl FrameIngest {
 					self.prev_ts = next;
 					let timestamp = Timestamp::new(next, scale)
 						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-					self.phase = IngestPhase::Size {
+					self.phase = IngestPhase::Inflated {
 						timestamp: Some(timestamp),
 					};
 				}
-				IngestPhase::Size { timestamp } => {
+				IngestPhase::Inflated { timestamp } => {
+					let timestamp = *timestamp;
+					// Only a compressed Track carries it, and only lite-07 can mark one.
+					if !group.compressed() {
+						self.phase = IngestPhase::Size {
+							timestamp,
+							inflated: None,
+						};
+						continue;
+					}
+					let Some(inflated) = ready!(reader.poll_varint_maybe(&mut cx))? else {
+						return Poll::Ready(Ok(()));
+					};
+					self.phase = IngestPhase::Size {
+						timestamp,
+						inflated: Some(inflated),
+					};
+				}
+				IngestPhase::Size { timestamp, inflated } => {
 					let Some(size) = ready!(reader.poll_varint_maybe(&mut cx))? else {
 						return Poll::Ready(Ok(()));
 					};
@@ -1070,10 +1103,16 @@ impl FrameIngest {
 					// oversized `size` and allocates up front only within the budget, so
 					// no pre-check is needed. No wire timestamp (pre-lite-05) means an
 					// untimed frame.
+					// A compressed frame stores the slice as it arrives, its inflated size
+					// checked against the same limits before anything inflates.
 					let frame = group.create_frame_owned(
-						frame::Info {
-							size,
-							timestamp: *timestamp,
+						frame::Header {
+							info: frame::Info {
+								size,
+								timestamp: *timestamp,
+							},
+							fields: None,
+							inflated: *inflated,
 						},
 						&self.budget,
 					)?;
@@ -2666,6 +2705,7 @@ mod tests {
 				sequence,
 				timestamp: Some(sequence),
 				payload: bytes::Bytes::from_static(b"x"),
+				inflated: None,
 			}
 			.encode_bytes(VERSION)
 			.unwrap()
@@ -5662,7 +5702,8 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					let model = track::Info::default()
 						.with_timescale(info.timescale)
 						.with_max_age(info.max_age)
-						.with_priority(info.priority);
+						.with_priority(info.priority)
+						.with_compress(info.compress);
 					return Poll::Ready(Ok((model, HeldTrack(stream))));
 				}
 			}

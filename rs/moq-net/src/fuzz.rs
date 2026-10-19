@@ -49,6 +49,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 				timestamp: None,
 			},
 			fields,
+			inflated: None,
 		};
 		let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
 		frame.write(payload.clone()).unwrap();
@@ -146,10 +147,12 @@ where
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	// The body doesn't say whether it carries a timestamp, so try both readings.
+	// The body doesn't say whether it carries a timestamp or an inflated size, so try
+	// every reading.
 	let mut any = false;
-	for timed in [true, false] {
-		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
+	for (timed, compressed) in [(true, false), (false, false), (true, true), (false, true)] {
+		let format = lite::Format { timed, compressed };
+		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| format) else {
 			continue;
 		};
 		any = true;
@@ -158,7 +161,7 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 			continue;
 		};
 
-		let echo = lite::Datagram::decode(first, version, |_| timed).expect("could not decode our own encoding");
+		let echo = lite::Datagram::decode(first, version, |_| format).expect("could not decode our own encoding");
 		assert_eq!(echo, decoded, "datagram did not survive a round trip");
 	}
 	any
@@ -431,6 +434,7 @@ impl LiteSample {
 				subscribe: 3,
 				sequence: 1_234,
 				timestamp: Some(1_234_567_890),
+				inflated: None,
 				payload: bytes::Bytes::new(),
 			}
 			.encode(w, version)
@@ -463,7 +467,10 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| lite::Format {
+				timed: true,
+				compressed: false,
+			})
 				.map(|_| 1)
 				.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
@@ -627,6 +634,7 @@ impl Default for Messages {
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
 				timescale: Some(crate::Timescale::MICRO),
+				compress: false,
 			},
 			lite_group: lite::Group {
 				subscribe: 7,

@@ -1024,6 +1024,14 @@ impl Charge {
 		self.access.clone()
 	}
 
+	/// A [`Bill`] against this charge's account, detached when the charge is.
+	pub(super) fn bill(&self) -> Bill {
+		Bill {
+			track: self.track.clone(),
+			bytes: 0,
+		}
+	}
+
 	/// Tick of the group's last cache access.
 	pub(super) fn accessed(&self) -> u64 {
 		self.access.get()
@@ -1092,6 +1100,39 @@ impl Charge {
 }
 
 impl Drop for Charge {
+	fn drop(&mut self) {
+		self.clear();
+	}
+}
+
+/// Bytes a group keeps beside its cached frames, billed to the same pool and account as
+/// its [`Charge`] but reachable outside the group's write lock: a compressed group's
+/// inflated copy, which its readers build. Released on [`Self::clear`] or drop.
+#[derive(Default)]
+pub(super) struct Bill {
+	track: Option<Arc<Track>>,
+	bytes: u64,
+}
+
+impl Bill {
+	/// Bill `n` more bytes.
+	pub(super) fn add(&mut self, n: u64) {
+		if let Some(track) = &self.track {
+			track.pool.add(n);
+			track.written.fetch_add(n, Ordering::Relaxed);
+			self.bytes += n;
+		}
+	}
+
+	/// Release every billed byte.
+	pub(super) fn clear(&mut self) {
+		if let Some(track) = &self.track {
+			track.pool.sub(std::mem::take(&mut self.bytes));
+		}
+	}
+}
+
+impl Drop for Bill {
 	fn drop(&mut self) {
 		self.clear();
 	}
