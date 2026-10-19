@@ -5465,7 +5465,8 @@ mod group_priority_test {
 
 	/// Drive `serve` beside a sibling that only counts its turns, until `done`, checking every
 	/// poll stays under `most` by `progress` and leaves the sibling its turn.
-	fn serve_beside_a_sibling(
+	/// Each task-set pass returns to the executor so its children's yields reach the task.
+	async fn serve_beside_a_sibling(
 		mut serve: TrackServe<SinkSession>,
 		mut produce: impl FnMut() -> bool + 'static,
 		progress: impl Fn() -> usize,
@@ -5492,22 +5493,26 @@ mod group_priority_test {
 			serve.poll(waiter).map(|res| res.expect("serve"))
 		}));
 
-		let owner = kio::Waiter::noop();
 		let mut polls = 0;
-		while progress() < done {
+		kio::wait(|owner| {
+			if progress() >= done {
+				return Poll::Ready(());
+			}
 			let before = progress();
-			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			assert!(tasks.poll(owner).is_pending(), "the serve never ends");
 			polls += 1;
 			let made = progress() - before;
 			assert!(made <= most, "one poll made {made} progress");
 			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
 			assert!(polls <= 2 * done as u64, "the serve stalled");
-		}
+			Poll::Pending
+		})
+		.await;
 	}
 
 	/// A track that always has another group ready yields within its budget.
-	#[test]
-	fn a_busy_track_yields_to_its_siblings() {
+	#[moq_clock::test]
+	async fn a_busy_track_yields_to_its_siblings() {
 		/// `TrackServe`'s passes per poll; each starts at most one group.
 		const BUDGET: usize = 32;
 		const GROUPS: u64 = 10_000;
@@ -5550,7 +5555,8 @@ mod group_priority_test {
 			|| opened.load(Ordering::Relaxed) as usize,
 			BUDGET,
 			GROUPS as usize,
-		);
+		)
+		.await;
 	}
 
 	/// On a transport with send groups, a subscription opens one at its priority and its
@@ -5687,7 +5693,8 @@ mod group_priority_test {
 			|| log.writes.lock().unwrap().len(),
 			2 * (BUDGET + 1) * 2 * PAYLOAD,
 			FRAMES * PAYLOAD,
-		);
+		)
+		.await;
 	}
 
 	/// Serve one group at `version` with `timescale` and return the header plus what follows it.

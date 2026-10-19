@@ -4861,17 +4861,21 @@ mod serve_group_test {
 		// A frame's header takes well under a payload more, and a poll may also flush what
 		// the last one buffered.
 		let most = 2 * (BUDGET + 1) * 2 * PAYLOAD;
-		let owner = kio::Waiter::noop();
 		let mut polls = 0;
-		while log.writes.lock().unwrap().len() < FRAMES * PAYLOAD {
+		kio::wait(|owner| {
+			if log.writes.lock().unwrap().len() >= FRAMES * PAYLOAD {
+				return Poll::Ready(());
+			}
 			let before = log.writes.lock().unwrap().len();
-			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			assert!(tasks.poll(owner).is_pending(), "the serve never ends");
 			polls += 1;
 			let wrote = log.writes.lock().unwrap().len() - before;
 			assert!(wrote <= most, "one poll wrote {wrote} bytes");
 			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
 			assert!(polls <= FRAMES as u64, "the serve stalled");
-		}
+			Poll::Pending
+		})
+		.await;
 	}
 
 	/// SUBSCRIBE_END counts the group streams opened, not the groups below the end: a
@@ -6651,10 +6655,12 @@ mod tests {
 		let mut tasks: kio::Tasks<Task> = kio::Tasks::new();
 
 		// The producer appends a batch of ready groups on each of its turns.
+		// Keep the track open after the producer task finishes its last batch.
+		let producer = track.clone();
 		let mut appended = 0;
 		tasks.push(Box::new(move |waiter: &kio::Waiter| {
 			for _ in 0..BATCH.min(GROUPS - appended) {
-				let mut group = track.create_group(group::Info { sequence: appended }).unwrap();
+				let mut group = producer.create_group(group::Info { sequence: appended }).unwrap();
 				group
 					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
 					.unwrap();
@@ -6681,17 +6687,21 @@ mod tests {
 			serve.poll(waiter).map(|res| res.expect("serve"))
 		}));
 
-		let owner = kio::Waiter::noop();
 		let mut polls = 0;
-		while opens.opened.load(Ordering::Relaxed) < GROUPS {
+		kio::wait(|owner| {
+			if opens.opened.load(Ordering::Relaxed) >= GROUPS {
+				return Poll::Ready(());
+			}
 			let before = opens.opened.load(Ordering::Relaxed);
-			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			assert!(tasks.poll(owner).is_pending(), "the serve never ends");
 			polls += 1;
 			let served = opens.opened.load(Ordering::Relaxed) - before;
 			assert!(served <= BUDGET, "one poll served {served} groups");
 			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
 			assert!(polls <= 2 * GROUPS, "the serve stalled");
-		}
+			Poll::Pending
+		})
+		.await;
 		assert!(
 			session.log.resets().is_empty(),
 			"a group was reset: {:?}",
