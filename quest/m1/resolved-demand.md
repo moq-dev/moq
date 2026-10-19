@@ -52,7 +52,11 @@ with no wire change.
   [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929) adds for a
   widened range (a group outside the ranges is parked and re-offered when they
   widen); land after it and reuse that path rather than a second one. Only
-  groups this cursor never delivered come back.
+  groups this cursor never delivered come back, keeping #5929's rule that
+  nothing already served goes out twice; a group already delivered and since
+  evicted downstream is a cache miss, which the relay fills upstream by range
+  per [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) (a miss below
+  the cache becomes a range request), not a re-offer.
 - **Cost, accepted.** Groups below a newcomer's floor that the wider budget
   covers also come upstream, and the relay drops them locally. Bounded by the
   max age and the cache.
@@ -79,7 +83,9 @@ floor below the copy's start and with none, gets the groups upstream still
 caches (fails on `main`); the same through a cold relay gives the same
 answer; a late group below the copy's start still reaches the no-floor
 reader; a reader joining with the same max age sends no SUBSCRIBE_UPDATE; and
-a re-offered group is never delivered twice to one subscriber. Cover the
+a re-offered group is never delivered twice to one subscriber; and a widen,
+shrink, evict, widen sequence at the relay gets the evicted groups back
+through the range miss fill, not a re-offer. Cover the
 warm-relay case in `js/net` too.
 
 Public API: none. Wire: no encoding change; a publisher now re-offers
