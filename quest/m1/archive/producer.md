@@ -2,8 +2,8 @@
 
 ## Goal
 
-`archive::Producer` takes one SUBSCRIBE_ALL prefix subscription and stores
-every track of every matching broadcast into an `object_store::ObjectStore`,
+`archive::Producer` takes a path prefix and stores every track of every
+broadcast under it into an `object_store::ObjectStore`,
 each broadcast under its own key prefix. It holds what the publisher's cache
 stops serving: a lost group becomes a gap and never stalls the archive. An
 optional DVR mode prunes old objects. It replaces `moq_archive::Writer` and
@@ -14,11 +14,15 @@ its timelines and recovery machinery.
 Decided by the maintainer on 2026-10-17 (see the
 [epic](/quest/m1/archive/README.md)):
 
-- **Input.** One prefix subscription records every broadcast under it as it
-  appears. The application maps each broadcast (path and epoch) to its key
-  prefix, so a different epoch is a different prefix and the producer stores
-  no epoch. Rejected: one producer per broadcast fed by per-broadcast
-  requests, since SUBSCRIBE_ALL is prefix-scoped.
+- **Input.** One producer records every broadcast under a prefix as it
+  appears: ANNOUNCE finds each broadcast, [TRACKS](/quest/m1/archive/tracks.md)
+  lists its tracks, and each track records through its own SUBSCRIBE
+  (decided 2026-10-19, replacing one SUBSCRIBE_ALL). The application maps
+  each broadcast (path and epoch) to its key prefix, so a different epoch is
+  a different prefix and the producer stores no epoch. Open since discovery
+  became per broadcast: keep the prefix input, or take one broadcast and leave
+  the ANNOUNCE loop to the host. Recommended: keep the prefix, so every host
+  does not repeat that loop.
 - **Ordering.** Each track records through an ascending subscription with max
   delay = min(the publisher's max age from TRACK_INFO, a configured cap). A
   group still missing at the cap is skipped and stays absent from the store,
@@ -65,8 +69,8 @@ Decided by the maintainer on 2026-10-17 (see the
   appended frames. A completed group yields no more frames, so this is the
   same rule whether or not the restart landed mid-group; if the source has
   dropped the rest, the stored frames are all the archive holds of it. The
-  start is per track: each track subscribes through the `track::Consumer`
-  SUBSCRIBE_ALL yields, with its own floor. Rejected: resuming after the
+  start is per track: each track's SUBSCRIBE carries its own floor.
+  Rejected: resuming after the
   last stored group (loses a split or open group's tail) and re-recording the
   last group from frame 0 (fails once the source has dropped its head).
 - **DVR mode** stays in the crate, for hosts without bucket lifecycle rules:
@@ -94,7 +98,7 @@ and the timeline-driven types. Wire: none.
 
 ## Required
 
-- [SUBSCRIBE_ALL](/quest/m1/archive/subscribe-all.md) - the prefix subscription it records
+- [TRACKS](/quest/m1/archive/tracks.md) - how it learns each broadcast's tracks
 
 ## Related
 

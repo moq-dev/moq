@@ -28,7 +28,7 @@ Decided by the maintainer on 2026-10-17 (see the
   permits. Advertising the source's bound would expire every archived group
   older than it relative to the newest.
 - Serve through `broadcast::Dynamic` and `track::Dynamic`. Create every listed
-  track up front, so a SUBSCRIBE_ALL on the served broadcast sees them all.
+  track up front, so TRACKS on the served broadcast lists them all.
 - The archived catalog is an ordinary track, so a reader sees its newest
   stored group, not a union of every rendition recorded. A rendition removed
   before the archive ends is therefore not listed at the end; the replay-catalog
