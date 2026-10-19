@@ -64,11 +64,12 @@ impl Budget {
 	/// The yield refills the budget for the next poll. Call it only where `Pending` goes
 	/// straight up to the task: a caller that reads `Pending` as "nothing now" would
 	/// mistake the yield for an answer.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_yield(&mut self, waiter: &Waiter) -> Poll<()> {
 		match self.left.checked_sub(1) {
 			Some(left) => {
 				self.left = left;
-				Poll::Ready(())
+				ready(())
 			}
 			None => {
 				self.left = self.passes;
