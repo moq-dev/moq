@@ -74,17 +74,25 @@ Decided by the maintainer on 2026-10-17 (see the
   (timestamp age measures a group against the newest one), so the consumer
   advertises its own retention instead. Rejected: properties only in each
   object's header.
-- **Completion markers.** When a track ends cleanly, at its declared end
-  (`track::Subscriber::poll_finished`) with every frame below it stored, the
-  producer writes a small `<prefix>/<track>/.end` holding that exclusive end
-  as a `Position` (group and frame), the shape `track::Producer::finish_at`
-  takes, so a mid-group end survives. Once the broadcast's listing has ended
-  with the instance and every track it listed has its `.end`, the producer
-  writes `<prefix>/.end`, which says no track will be added. A track that
-  ends with an error gets no marker, and neither does its broadcast. The
-  consumer finishes on reading a marker and otherwise treats the archive as
-  live. A crashed producer leaves no marker, so its archive reads as still
-  growing. A resume skips a track that already has its `.end`, and DVR
+- **Completion markers**, decided by the maintainer on 2026-10-19 ("record
+  the error"). Once a track has ended, its ordered groups and its datagrams
+  (`poll_recv_datagram`) both having reached their end so no received
+  datagram is lost, and every frame and datagram it delivered is stored, the
+  producer writes a small `<prefix>/<track>/end` recording how it ended: a clean end at its declared exclusive `Position`
+  (`track::Subscriber::poll_finished`; group and frame, the shape
+  `track::Producer::finish_at` takes, so a mid-group end survives), or the
+  stream error code it ended with (`StreamError::to_code`). Once the
+  broadcast's listing has ended with the instance and every track it listed
+  has a marker, clean or errored, the producer writes `<prefix>/.end`, which
+  says no track will be added. The names are chosen for the consumer's
+  refresh: a track's `end` sorts after its zero-padded numeric keys, so
+  the track's `StartAfter` LIST reaches it with no extra request, and it can
+  never be an object key; the broadcast's `.end` sits beside the track
+  segments, where the delimiter LIST that finds added tracks sees it, and
+  no canonical track name starts with `.`. The consumer ends each track as
+  its marker says and otherwise treats the archive as live. Only a crash, or a producer
+  stopped before the end, leaves no marker, so its archive reads as still
+  growing. A resume skips a track that already has its `end`, and DVR
   pruning never deletes a marker.
 - **Bounded flush** (folded from the idle-flush quest): an object holding a
   frame is stored within a bounded wall-clock delay of that frame's arrival,
@@ -125,8 +133,11 @@ starting with `.` round-tripping as one segment,
 DVR pruning with grace, a track added mid-recording, two broadcasts under
 the prefix landing under their own key prefixes, a track interleaving groups
 and datagrams stored with each sequence's form, a clean end writing each
-track's `.end` (including a mid-group end) and then the broadcast's, and a
-track ending with an error or a producer stopped mid-recording writing no
+track's `end` (including a mid-group end) and then the broadcast's
+`.end`, a track whose groups and datagrams interleave and end at once
+storing every received datagram before its `end`, a
+track ending with an error writing an error marker while its broadcast
+still gets `.end`, and a producer stopped mid-recording writing no
 marker.
 
 Public API: `archive::Producer` and its config replace `Writer`, `Control`,

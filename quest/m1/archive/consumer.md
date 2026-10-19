@@ -38,12 +38,18 @@ Decided by the maintainer on 2026-10-17 (see the
 - Each stored sequence replays in its recorded form: a group as a group, a
   datagram as a datagram (`track::Producer::insert_datagram`), so the replay
   keeps the source's lossy, uncached datagram contract.
-- A track's `.end` finishes it, mirroring `moq_archive::Reader::finish`
-  today: refreshing stops, the track is finished at the recorded end
-  (`track::Producer::finish_at`), and committed groups stay servable. The
-  broadcast's `.end` stops the search for added tracks. Without markers the
+- A track's `end`, reached by its `StartAfter` refresh since it sorts after
+  every object key, ends it as recorded. A clean end mirrors
+  `moq_archive::Reader::finish` today: refreshing stops, the track is
+  finished at the recorded end (`track::Producer::finish_at`), and
+  committed groups stay servable. An error end serves the stored groups and
+  then aborts the track with the recorded code (`StreamError::from_code`),
+  failing loud as the source did rather than reading as live. The
+  broadcast's `.end`, seen by the delimiter LIST, stops the search for
+  added tracks. Without markers the
   archive is live and followed through refresh, which is how a producer
-  that crashed reads. This replaces the caller-driven `Reader::finish`.
+  that crashed or was stopped reads. This replaces the caller-driven
+  `Reader::finish`.
 
 Guidance:
 
@@ -67,8 +73,9 @@ refresh (including two tracks where a new key sorts before the other track's
 cursor, and a track added mid-recording), history older than the source's max
 age still served, an untimed track, an interleaved group and datagram track
 replayed in its original forms, a completed archive whose replay ends at
-each track's recorded end (including mid-group), a growing archive with no
-markers staying open, and an empty or unrecognized prefix refused loudly.
+each track's recorded end (including mid-group), an errored track
+replaying its stored groups and then the recorded error, a growing archive
+with no markers staying open, and an empty or unrecognized prefix refused loudly.
 
 Public API: `archive::Consumer` replaces `Reader`. Wire: none.
 
