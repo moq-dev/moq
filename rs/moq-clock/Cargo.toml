@@ -51,8 +51,8 @@ moq-clock = { path = ".", default-features = false, features = ["sim"] }
 
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dev-dependencies]
 # Match the wasm-bindgen CLI schema used by the browser runner.
-wasm-bindgen = "=0.2.127"
-wasm-bindgen-test = "=0.3.77"
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-test = "=0.3.79"
 
 [target.'cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))'.dev-dependencies]
 # Test the installed manual clock, which needs tokio's runtime and so is native only.
