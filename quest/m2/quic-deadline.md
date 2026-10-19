@@ -47,7 +47,8 @@ Implement in `moq-quic`.
 Measure on bufferbloat: a rate below the media bitrate behind a deep but
 finite queue whose overflow demonstrably drops packets, with competing
 loss-based traffic if needed to fill it. Random loss may prove recovery
-correctness, but never grades latency or throughput. Report delivery latency p95 and p99, bytes
+correctness, but never grades latency or throughput. Report delivery latency
+p95 and p99, bytes
 retransmitted past their deadline (must be zero), spurious resets under
 reordering, and probe overhead versus the default PTO. A proactive probe that
 raises loss or latency under any profile stays off by default.

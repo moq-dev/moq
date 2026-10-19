@@ -586,7 +586,10 @@ rather than let it grow with the queue. Nothing bounds how much it sheds.
 
 The generated clips go through `holes.py --shed`, which matches the capture's
 frames to the source's by presentation timestamp, since the export derives each
-picture's decode timestamp and a group cut short moves it. Of each source group,
+picture's decode timestamp and a group cut short moves it. Verbatim MP2, AC-3
+and E-AC-3 timestamps are compared after their exact legacy microsecond wire
+conversion back to 90 kHz, rather than allowing an arbitrary timestamp error.
+Of each source group,
 the capture keeps a prefix in decode order (all, part, or none) and never resumes
 mid-group, so it also joins on a sync frame, and a frame reordered, repeated, or
 not in the source fails. The source's last group must arrive whole: a stall, or a latency grown

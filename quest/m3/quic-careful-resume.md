@@ -32,7 +32,8 @@ Measure time to the encoder's target rate after a reconnect on bufferbloat:
 a rate below the media bitrate behind a deep but finite queue, with actual
 overflow drops, plus loss and latency during the jump. Include competing
 loss-based traffic when BBR alone does not fill the queue. Random loss may
-prove fallback correctness, but never grades the jump's performance. Ship it on by default
+prove fallback correctness, but never grades the jump's performance.
+Ship it on by default
 only when the jump never makes the first second worse than slow start.
 
 ## Related
