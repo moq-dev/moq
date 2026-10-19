@@ -259,6 +259,11 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				}
 			};
 
+			// Demand can come back without the `used` branch seeing it, when the
+			// select picked this item instead. A returning viewer keeps the session
+			// rather than missing the next group while a new one attaches.
+			leaving &= !demand.is_used();
+
 			match item {
 				Some(Item::Group(sequence)) => {
 					if retiring || leaving {
@@ -324,6 +329,8 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 						write(&mut output, &active, encoder.flush().await?)?;
 						output.finish()?;
 					}
+					// Or during the flush.
+					leaving &= !demand.is_used();
 					if retiring || leaving {
 						break 'session;
 					}
