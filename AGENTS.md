@@ -20,7 +20,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Impair a network with bufferbloat (a rate limit below the media bitrate, behind a deep but finite queue), whose overflow drops packets too. Random loss may prove correctness, such as retransmits happening, but never gates acceptance or performance.
 - Keep the PR focused. No unrelated refactors, formatting churn, or drive-by changes; split when in doubt.
 - Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn.
-- Propose a course change, even suggest abandoning a PR, rather than finish a half-solution.
+- Land the ideal implementation now rather than a partial one plus follow-ups; split off only work that is independently landable. If the ideal is out of reach, propose a course change, even abandoning the PR.
 - Be adversarial: attack your own approach, reports, reviews, and other PRs as hard as anyone else's, and argue for the best approach over the first one that works.
 - When a decision is the maintainer's (API shape, naming, scope), ask with 2-3 options and a recommendation.
 - All tests need to be wired into CI, at least a nightly.

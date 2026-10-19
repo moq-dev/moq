@@ -15,9 +15,10 @@ and this paragraph; the rest of its Plan is rewritten with what this run
 learned: baselines, results, and what to check first. A successor placed in m2
 also lists the [release cut](/quest/m2/release/cut.md) under `Required`, so it
 waits for the release in flight to ship. Only `/quest-delete` ends the
-recurrence. Small, safe fixes (no public API change, no open decision) land in
-the run's PR, one commit each; everything else becomes a follow-up through
-`/quest-plan`.
+recurrence. Fixes land in the run's PR, one commit each, rather than as follow-ups.
+Only a change that needs a maintainer decision (public API, scope) or is
+independently landable and too large to review alongside the rest becomes a
+follow-up through `/quest-plan`.
 
 Starting points (2026-10-19): there are 54 `[[bench]]` targets across 14 crates
 (counted from `rs/*/Cargo.toml`) and 27 JS bench files. Nightly stores their history with

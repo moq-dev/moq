@@ -78,7 +78,7 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 Hygiene (decided 2026-10-19): ten audits sit at the end of this list.
 Each recurs once per major release: its PR adds the next run to the following
 milestone, gated from m2 onward on the [release cut](/quest/m2/release/cut.md).
-Each fixes what is small and safe and plans the rest.
+Each lands its fixes in its own PR and plans only what needs a decision.
 
 ## Required
 
