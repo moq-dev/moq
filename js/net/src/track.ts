@@ -443,7 +443,8 @@ class TrackState {
 	// Set once {@link largest} can no longer advance while the track stays open.
 	largestEnded = new Signal(false);
 	// Bumped by a write or finish that leaves {@link largest} where it was: a reader capped below it
-	// follows the groups under its cap.
+	// follows the groups under its cap. One signal shared with every sink, so a bump costs the
+	// same however many subscribe.
 	written = new Signal(0);
 
 	constructor(subscription?: Subscription) {
@@ -833,6 +834,7 @@ export class Producer {
 		if (info) sink.info.set(info);
 		sink.largest.set(this.#state.largest.peek());
 		sink.largestEnded.set(this.#state.largestEnded.peek());
+		sink.written = this.#state.written;
 
 		const closed = this.#state.closed.peek();
 		if (closed === undefined) {
@@ -1031,7 +1033,7 @@ export class Producer {
 		if (!largest) return;
 		const current = this.#state.largest.peek();
 		if (current && !after(largest, current)) {
-			for (const state of [this.#state, ...this.#sinks]) state.written.update((n) => n + 1);
+			this.#state.written.update((n) => n + 1);
 			return;
 		}
 		this.#largestOpen = true;
@@ -1410,7 +1412,7 @@ export class Producer {
 	#finishLargest(sequence: number): void {
 		if (this.#state.largest.peek()?.group === sequence) this.#largestOpen = false;
 		// A reader capped below the largest may be following this group.
-		for (const state of [this.#state, ...this.#sinks]) state.written.update((n) => n + 1);
+		this.#state.written.update((n) => n + 1);
 		this.#endLargest();
 	}
 
@@ -1782,12 +1784,15 @@ export class Subscriber {
 			if (this.#state.closed.peek() !== undefined) return undefined;
 			// The track's settled end does not end a group under the cap that can still grow.
 			if (this.#state.largestEnded.peek() && !growing) return undefined;
+			// Only a reader capped below the largest follows writes that leave it in place.
+			const largest = this.#state.largest.peek();
+			const capped = bounds.end !== undefined && largest !== undefined && largest.group >= bounds.end;
 			await Signal.race(
 				this.#state.largest,
-				this.#state.written,
 				this.#state.closed,
 				this.#state.largestEnded,
 				this.#cursor,
+				...(capped ? [this.#state.written] : []),
 			);
 		}
 	}
