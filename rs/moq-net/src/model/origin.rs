@@ -3331,7 +3331,13 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						&& let Some(accepted) = &mut io.accepted
 					{
 						while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
-						if accepted.subscription().is_none() {
+						if let Some(subscription) = accepted.subscription() {
+							// The query's hold must follow demand too, or its initial budget
+							// keeps a later, shorter aggregate from reaching the publisher.
+							if let Some(held) = &mut io.held {
+								let _ = held.update(subscription);
+							}
+						} else {
 							io.held = None;
 						}
 					}

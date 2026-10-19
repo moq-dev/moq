@@ -14,7 +14,7 @@ fn origin(hop: u64) -> origin::Producer {
 	origin
 }
 
-async fn budget(track: &mut track::Producer, millis: u64) {
+async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
 	moq_clock::timeout(Duration::from_secs(5), async {
 		loop {
 			if track
@@ -27,7 +27,7 @@ async fn budget(track: &mut track::Producer, millis: u64) {
 		}
 	})
 	.await
-	.expect("budget did not reach the publisher");
+	.unwrap_or_else(|_| panic!("{version}: wanted {millis}ms, publisher has {:?}", track.subscription()));
 }
 
 #[moq_clock::test]
@@ -56,16 +56,17 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		let cache = remote.track("catalog").unwrap();
 		let prefs = |millis| track::Subscription::default().with_max_delay(Duration::from_millis(millis));
 		let mut short = cache.subscribe(prefs(250)).await.unwrap();
-		budget(&mut source, 250).await;
+		budget(&mut source, 250, version).await;
 		let tolerant = cache.subscribe(prefs(2000)).await.unwrap();
-		budget(&mut source, 2000).await;
+		budget(&mut source, 2000, version).await;
 		short.update(prefs(10)).unwrap();
+		// Drive the logical cursor so its serving copy observes the new preferences.
+		let mut snapshot = short.recv_group().await.unwrap().unwrap();
 		// Dropping the tolerant subscriber exposes the updated shorter budget, across both hops.
 		drop(tolerant);
-		budget(&mut source, 10).await;
+		budget(&mut source, 10, version).await;
 		// A quiet catalog survives far longer than the budget because it has no successor.
 		moq_clock::sleep(Duration::from_secs(1)).await;
-		let mut snapshot = short.recv_group().await.unwrap().unwrap();
 		assert_eq!(snapshot.sequence, 0, "{version}");
 		assert_eq!(
 			snapshot.read_frame().await.unwrap().unwrap().payload,
