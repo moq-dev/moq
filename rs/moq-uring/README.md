@@ -15,9 +15,10 @@ local (`!Send`) task set, and the UDP sockets bound through it.
 - **Send**: `sendmsg` with an explicit `UDP_SEGMENT` control message per call,
   staged in a fixed pool of buffers owned by id and released on completion
   (the shape a later `SENDMSG_ZC` needs).
-- **Timers**: a heap the worker sweeps; the earliest deadline rides
-  `io_uring_enter` as an absolute timeout. Zero timeout SQEs. The worker's
-  `Handle::run` drives MoQ with the worker clock and a single timer.
+- **Timers**: a `moq_clock::Deadlines` queue the worker advances once per
+  turn, from its one clock read; the earliest deadline rides `io_uring_enter`
+  as an absolute timeout. Zero timeout SQEs. The queue is the worker's ambient
+  clock, and `Handle::run` drives MoQ with it and a single timer.
 - **Parking**: a futex word per worker. Remote wakes are an atomic store, plus
   one `futex(2)` wake only while the worker is actually parked (a `FUTEX_WAIT`
   SQE armed on the word).

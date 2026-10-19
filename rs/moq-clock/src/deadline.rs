@@ -1,5 +1,5 @@
 use std::{
-	cell::RefCell,
+	cell::{Cell, RefCell},
 	collections::BTreeMap,
 	marker::PhantomData,
 	sync::{
@@ -15,6 +15,8 @@ use crate::Instant;
 thread_local! {
 	/// The queue [`Deadlines::enter`] made this thread's ambient clock.
 	static ENTERED: RefCell<Option<Deadlines>> = const { RefCell::new(None) };
+	/// How many [`Entered`] guards are live on this thread, so each knows whether it is the innermost.
+	static DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
 /// A deadline queue for caller-driven code, advanced only by the instants it is handed.
@@ -145,25 +147,41 @@ impl Deadlines {
 	/// reading of the host clock, so nothing it runs reads the host clock again.
 	pub fn enter(&self) -> Entered {
 		let previous = ENTERED.with(|entered| entered.replace(Some(self.clone())));
+		let depth = DEPTH.with(|depth| {
+			depth.set(depth.get() + 1);
+			depth.get()
+		});
 		Entered {
 			previous,
+			depth,
 			thread: PhantomData,
 		}
 	}
 }
 
 /// Keeps a [`Deadlines`] queue the thread's ambient clock; dropping it restores the one before.
+///
+/// Guards must drop in reverse order of entering: dropping one while a later
+/// guard is still live panics.
 #[must_use = "the queue stops being the ambient clock when this drops"]
 pub struct Entered {
 	previous: Option<Deadlines>,
+	/// How many guards were live on this thread once this one entered.
+	depth: usize,
 	/// Restores the thread it was entered on.
 	thread: PhantomData<*const ()>,
 }
 
 impl Drop for Entered {
 	fn drop(&mut self) {
+		let innermost = DEPTH.with(|depth| depth.get()) == self.depth;
+		// Restoring out of order would bring back a queue whose guard already dropped.
+		if !innermost && !std::thread::panicking() {
+			panic!("an Entered guard dropped while a later one is still live");
+		}
 		let previous = self.previous.take();
 		ENTERED.with(|entered| *entered.borrow_mut() = previous);
+		DEPTH.with(|depth| depth.set(self.depth - 1));
 	}
 }
 
@@ -659,5 +677,17 @@ mod tests {
 		})
 		.join()
 		.unwrap();
+	}
+
+	/// Dropping an outer guard while an inner one is live refuses, rather than let
+	/// the inner guard's drop bring the outer queue back.
+	#[test]
+	#[should_panic(expected = "an Entered guard dropped while a later one is still live")]
+	fn entered_guards_drop_in_order() {
+		let outer = Deadlines::new(Instant::ZERO);
+		let inner = Deadlines::new(Instant::ZERO);
+		let outer = outer.enter();
+		let _inner = inner.enter();
+		drop(outer);
 	}
 }
