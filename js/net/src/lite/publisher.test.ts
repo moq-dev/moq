@@ -1391,6 +1391,77 @@ test("lite draft-07: subscribe end precedes a failed stream open", async () => {
 	}
 });
 
+test("blocked DROP responses stop opening later groups", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_07);
+	if (!server) throw new Error("missing subscribe stream");
+	const opens = spyOn(pair.server, "createUnidirectionalStream").mockImplementation(async () => {
+		throw new Error("no stream credit");
+	});
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let blocked!: () => void;
+	const waiting = new Promise<void>((resolve) => {
+		blocked = resolve;
+	});
+	const write = server.writer.write.bind(server.writer);
+	let held = false;
+	const writes = spyOn(server.writer, "write").mockImplementation(async (chunk) => {
+		if (!held && chunk.length === 1 && chunk[0] === 2) {
+			held = true;
+			blocked();
+			await gate;
+		}
+		await write(chunk);
+	});
+	const append = (sequence: number) => {
+		const group = new GroupProducer(sequence);
+		group.writeFrame(textFrame("frame"));
+		group.close();
+		track.writeGroup(group);
+	};
+	for (let sequence = 0; sequence < 8; sequence++) append(sequence);
+	const serving = publisher.runSubscribe(
+		replaySubscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+		server,
+	);
+	try {
+		expect("start" in (await decodeSubscribeResponse(client.reader, Version.DRAFT_07))).toBe(true);
+		await waiting;
+		expect(opens).toHaveBeenCalledTimes(8);
+		for (let sequence = 8; sequence < 72; sequence++) append(sequence);
+		// One executor turn drains pending signal notifications without advancing time.
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(opens).toHaveBeenCalledTimes(8);
+		release();
+		track.close();
+		let dropped = 0;
+		for (;;) {
+			const response = await decodeSubscribeResponseMaybe(client.reader, Version.DRAFT_07);
+			if (!response) break;
+			if ("drop" in response) dropped += response.drop.end - response.drop.start + 1;
+		}
+		expect(dropped).toBe(72);
+		expect(opens).toHaveBeenCalledTimes(72);
+		client.writer.close();
+		await serving;
+	} finally {
+		release();
+		writes.mockRestore();
+		opens.mockRestore();
+		publisher.close();
+		client.close();
+		broadcast.close();
+	}
+});
+
 /** One group stream the publisher put on the wire. */
 type Served = { sequence: number; frameStart: number; payloads: string[] };
 
