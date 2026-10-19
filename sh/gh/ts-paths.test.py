@@ -1,4 +1,4 @@
-"""Parse cargo tree output into workspace crate directories on POSIX and Windows hosts."""
+"""Map cargo tree output to workspace crate directories whatever the checkout path looks like."""
 
 import importlib.util
 from pathlib import Path
@@ -9,21 +9,37 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
+def metadata(root: str, sep: str) -> dict:
+    return {
+        "workspace_root": root,
+        "packages": [
+            {"name": name, "version": version, "manifest_path": sep.join([root, "rs", name, "Cargo.toml"])}
+            for name, version in (("moq-cli", "0.1.0"), ("moq-lite", "0.2.0"), ("moq-macro", "0.1.0"), ("moq-unused", "0.1.0"))
+        ],
+    }
+
+
 class BuiltDirsTest(unittest.TestCase):
+    def check(self, root: str, sep: str):
+        tree = "".join(f"{line}\n" for line in (
+            f"moq-cli v0.1.0 ({sep.join([root, 'rs', 'moq-cli'])})",
+            f"moq-lite v0.2.0 ({sep.join([root, 'rs', 'moq-lite'])}) (*)",
+            f"moq-macro v0.1.0 ({sep.join([root, 'rs', 'moq-macro'])}) (proc-macro)",
+            "moq-lite v0.1.0",
+            "serde v1.0.0",
+            "serde_derive v1.0.0 (proc-macro)",
+            "forked v0.1.0 (https://github.com/example/forked#abc123)",
+        ))
+        self.assertEqual(module.built_dirs(tree, metadata(root, sep)), {"rs/moq-cli", "rs/moq-lite", "rs/moq-macro"})
+
     def test_posix(self):
-        tree = (
-            "moq-cli v0.1.0 (/repo/rs/moq-cli)\n"
-            "moq-lite v0.2.0 (/repo/rs/moq-lite) (*)\n"
-            "moq-macro v0.1.0 (/repo/rs/moq-macro) (proc-macro)\n"
-            "serde v1.0.0\n"
-            "serde_derive v1.0.0 (proc-macro)\n"
-            "forked v0.1.0 (https://github.com/example/forked#abc123)\n"
-        )
-        self.assertEqual(module.built_dirs(tree, "/repo"), {"rs/moq-cli", "rs/moq-lite", "rs/moq-macro"})
+        self.check("/repo", "/")
 
     def test_windows(self):
-        tree = "moq-cli v0.1.0 (C:\\repo\\rs\\moq-cli)\nmoq-lite v0.2.0 (C:\\repo\\rs\\moq-lite) (*)\nserde v1.0.0\n"
-        self.assertEqual(module.built_dirs(tree, "C:\\repo"), {"rs/moq-cli", "rs/moq-lite"})
+        self.check("C:\\repo", "\\")
+
+    def test_parentheses(self):
+        self.check("/repo (copy)", "/")
 
 
 if __name__ == "__main__":

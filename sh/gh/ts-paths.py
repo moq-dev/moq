@@ -19,15 +19,20 @@ HARNESS = ROOT / "test/ts/run.sh"
 TARGET = "x86_64-unknown-linux-gnu"
 
 
-def built_dirs(tree: str, workspace_root: str) -> set[str]:
-    """Workspace-relative directories of the local packages in `cargo tree --format {p}` output.
+def built_dirs(tree: str, metadata: dict) -> set[str]:
+    """Workspace-relative directories of the workspace packages in `cargo tree --format {p}` output.
 
-    Both arguments come from cargo, so they share its path syntax, which is `C:\\...` on Windows
-    even under MSYS or Cygwin.
+    Packages are matched by name and version, never by the printed source path, which can contain
+    spaces or parentheses. Paths come from `cargo metadata --no-deps`, in cargo's own syntax, which
+    is `C:\\...` on Windows even under MSYS or Cygwin.
     """
-    root = workspace_root.replace("\\", "/").rstrip("/") + "/"
-    sources = (source.replace("\\", "/") for source in re.findall(r"^\S+ v\S+ \(([^)]+)\)", tree, re.MULTILINE))
-    return {source.removeprefix(root) for source in sources if source.startswith(root)}
+    root = metadata["workspace_root"].replace("\\", "/").rstrip("/") + "/"
+    members = {
+        (package["name"], f"v{package['version']}"):
+            package["manifest_path"].replace("\\", "/").removeprefix(root).removesuffix("/Cargo.toml")
+        for package in metadata["packages"]
+    }
+    return {members[key] for key in (tuple(line.split()[:2]) for line in tree.splitlines()) if key in members}
 
 
 def cargo(*args: str) -> str:
@@ -41,8 +46,7 @@ def main() -> None:
 
     tree = cargo("tree", "--locked", "--target", TARGET, "--edges", "normal,build", "--prefix", "none",
                  "--format", "{p}", *(arg for p in packages for arg in ("-p", p)))
-    workspace_root = json.loads(cargo("metadata", "--locked", "--no-deps", "--format-version", "1"))["workspace_root"]
-    built = built_dirs(tree, workspace_root)
+    built = built_dirs(tree, json.loads(cargo("metadata", "--locked", "--no-deps", "--format-version", "1")))
 
     # Every `rs/<dir>/**` filter, even one whose crate is gone; other filters are the harness's own inputs.
     filtered = set(re.findall(r'^\s+- "(rs/[^"*]+)/\*\*"$', WORKFLOW.read_text(), re.MULTILINE))
