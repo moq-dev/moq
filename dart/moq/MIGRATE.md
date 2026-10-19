@@ -92,7 +92,7 @@ Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 final audio = media.TrackProducer.audio(broadcast: broadcast, target: media.Named(null), init: init);
 ```
 
-### Container byte streams use `media.ContainerProducer` (#PRNUM)
+### Container byte streams use `media.ContainerProducer` (#5919)
 
 `publishContainerStream` has no separate importer: a container recovers its own framing, so `media.ContainerProducer` takes chunks split anywhere.
 Pass empty `data` and write the stream through it.

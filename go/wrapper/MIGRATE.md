@@ -95,7 +95,7 @@ JSON and opaque data tracks live in `moq.dev/moq/json` and `moq.dev/moq/flate`, 
 audio, err := media.NewAudioTrackProducer(broadcast, media.Named{}, media.AudioInit{Format: media.AudioFormatOpus, Data: opusHead})
 ```
 
-### Container byte streams use `media.NewContainerProducer` (#PRNUM)
+### Container byte streams use `media.NewContainerProducer` (#5919)
 
 `BroadcastProducer.PublishContainerStream` has no separate importer: a container recovers its own framing, so `media.NewContainerProducer` takes chunks split anywhere.
 Leave `Data` empty and write the stream through it.

@@ -106,7 +106,7 @@ Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusHead))
 ```
 
-### Container byte streams use `Media.ContainerProducer` (#PRNUM)
+### Container byte streams use `Media.ContainerProducer` (#5919)
 
 `BroadcastProducer.publishContainerStream` has no separate importer: a container recovers its own framing, so `Media.ContainerProducer` takes chunks split anywhere.
 Pass empty `data` and write the stream through it.

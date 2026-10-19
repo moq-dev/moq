@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Container byte streams use `MediaContainerProducer` (#PRNUM)
+### Container byte streams use `MediaContainerProducer` (#5919)
 
 `moq::MediaContainerStreamProducer` and `moq::ContainerStreamInit` are gone: a container recovers its own framing, so `moq::MediaContainerProducer` takes chunks split anywhere.
 Pass empty `data` and write the stream through it.

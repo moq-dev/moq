@@ -111,7 +111,7 @@ Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 let audio = MoqMediaTrackProducer::audio(&broadcast, MoqMediaTarget::Named { name: None }, init)?;
 ```
 
-### Container byte streams use the container producer (#PRNUM)
+### Container byte streams use the container producer (#5919)
 
 `MoqContainerStreamProducer` (from `publish_container_stream`) has no replacement type: a container recovers its own framing, so `MoqMediaContainerProducer` takes chunks split anywhere.
 Construct it with empty `data` and write the stream through it.

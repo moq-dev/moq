@@ -96,7 +96,7 @@ Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head))
 ```
 
-### Container byte streams use `moq.media.ContainerProducer` (#PRNUM)
+### Container byte streams use `moq.media.ContainerProducer` (#5919)
 
 `BroadcastProducer.publish_container_stream` has no separate importer: a container recovers its own framing, so `moq.media.ContainerProducer` takes chunks split anywhere.
 Pass empty `data` and write the stream through it.

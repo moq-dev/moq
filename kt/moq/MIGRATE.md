@@ -104,7 +104,7 @@ Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusHead))
 ```
 
-### Container byte streams use `ContainerProducer` (#PRNUM)
+### Container byte streams use `ContainerProducer` (#5919)
 
 `BroadcastProducer.publishContainerStream` has no separate importer: a container recovers its own framing, so `dev.moq.media.ContainerProducer` takes chunks split anywhere.
 Pass empty `data` and write the stream through it.
