@@ -14,7 +14,7 @@ back. This is what `moq import` / `export` and the gateways are built on.
 | Format | Import | Export | Notes |
 | --- | --- | --- | --- |
 | fMP4 / CMAF | yes | yes | Audio/video passthrough as `cmaf` or repackaged as `legacy`; `wvtt` subtitles import as timed WebVTT text and `stpp` TTML (IMSC timing profile) as `ttml` documents on the broadcast clock, preserving source language and label when present; other subtitle codecs are skipped. |
-| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 and subtitle PIDs as tracks; service tables round-trip. |
+| MPEG-TS | yes | yes | H.264/H.265; AAC, MP2, AC-3, E-AC-3, Opus up to 7.1; SCTE-35 sections and every other undecoded PES stream (KLV, subtitles, DVB AC-3) as tracks; service tables round-trip. |
 | FLV / RTMP | yes | yes | Legacy H.264 + AAC + MP3, plus enhanced-RTMP HEVC, AV1, VP9, Opus, AC-3, E-AC-3, and multitrack. |
 | Matroska / WebM | yes | yes | Timed SRT and WebVTT subtitles import as WebVTT text renditions, preserving source language and label when present; other subtitle codecs are skipped. |
 | Annex-B (H.264, H.265) | yes | yes | Parameter sets extracted to the catalog or re-injected per keyframe. |
@@ -28,7 +28,7 @@ A `catalog::Timebase` gives renditions on one timestamp base one shared shift. A
 timeline that rewinds ends the import. fMP4 export fixes its track
 set at the init segment, so a new rendition or a changed configuration ends the
 export. The [CLI page](/bin/cli#import) covers these and the MPEG-TS specifics:
-one program per broadcast, damaged packets, and feed checks.
+one program per broadcast, private PES, damaged packets, and feed checks.
 
 Exporters take a catalog stream alongside the source. Choose its encoding and
 rendition selection before exporting; the same stream shape drives every container.

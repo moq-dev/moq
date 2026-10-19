@@ -24,4 +24,3 @@ Wire: extends `draft-lcurley-moq-cluster`, updated in the same PR.
 ## Required
 
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - settles what a cluster link carries
-- [IETF epochs](/quest/m1/ietf-epochs.md) - explicit identity for the seamless-resume guarantee

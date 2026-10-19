@@ -43,6 +43,7 @@ just test ts --headroom         # the same with four audio PIDs, muxed above the
 just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
 just test ts --full             # the same with two audio PIDs, filling its multiplex with no nulls
 just test ts --fragment-pes    # legal headers split across packets, with FFmpeg/TSDuck grading
+just test ts --klv              # KLV and DVB AC-3 carried as whole PES, graded against the source
 just test ts --delay 2s         # pass the exporter's --delay
 just test ts --hrd --rate 7000000 # congest the subscriber's leg below the media rate
 just test ts --loss 1           # drop 1% of the relay's datagrams to the subscriber
@@ -55,6 +56,17 @@ just test ts-passthrough-capture # the same over an in-repo capture the T-STD mo
 null slots after splitting the header. It cycles through header-byte boundaries,
 preserves packet count, PCR positions, payload bytes, and PID continuity, then
 runs the same independent decode/content and transport checks as the default arm.
+
+`--klv` muxes DVB AC-3 beside the AAC, several sync frames a PES, and `klv.py`
+fills null slots with asynchronous KLV (`stream_type` 0x06, `KLVA` registration, no
+PTS) and synchronous KLV (`stream_type` 0x15, `metadata_stream` 0xFC, a PTS per
+picture). The importer decodes none of them, so each PES rides its track whole.
+`klv.py grade` holds each KLV stream in the capture to its source: the same PID,
+`stream_type` and descriptors; every PES from the join to the end, in order and
+byte-equal outside its PTS and DTS, which move by one shift; none out before its
+source placement on the program clock, and none after its PTS; and FFmpeg reading
+each as KLV with the same PES and PTS. `holes.py` and the T-STD model grade the
+AC-3, whose buffer drains each sync frame at its own decode time.
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
 subscriber's stdout goes straight into `pcr-timing.py` instead of a capture file.
@@ -844,7 +856,7 @@ outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
 browser interop. PRs touching a workspace crate `run.sh` builds (kept in sync by
 `sh/gh/ts-paths.py`), the harness, or the toolchain run
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
-open-GOP, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
+open-GOP, KLV (strict), passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
 Nightly and manual runs also invoke `just test ts --pair`,

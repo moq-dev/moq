@@ -19,8 +19,6 @@ typealias TrackProducer = uniffi.moq.MoqMediaTrackProducer
 typealias TrackStreamProducer = uniffi.moq.MoqMediaTrackStreamProducer
 /** The write side of a container, which publishes each track it describes. */
 typealias ContainerProducer = uniffi.moq.MoqMediaContainerProducer
-/** The write side of a container fed a raw byte stream. */
-typealias ContainerStreamProducer = uniffi.moq.MoqMediaContainerStreamProducer
 /** The read side of a media track: yields frames with codec metadata in decode order. */
 typealias TrackConsumer = uniffi.moq.MoqMediaTrackConsumer
 /** A finite fetched media group: yields container-decoded frames until the group ends. */
@@ -49,8 +47,6 @@ typealias AudioInit = uniffi.moq.MoqAudioInit
 typealias VideoInit = uniffi.moq.MoqVideoInit
 /** A shared source timestamp offset that does not keep its broadcast open. */
 typealias Timebase = uniffi.moq.MoqMediaTimebase
-/** A byte-stream container format and an optional shared source timebase. */
-typealias ContainerStreamInit = uniffi.moq.MoqContainerStreamInit
 /** A container format, its leading bytes, and an optional shared source timebase. */
 typealias ContainerInit = uniffi.moq.MoqContainerInit
 /** The catalog description of an audio track: codec, sample rate, channels, whether it is enabled, and container. */

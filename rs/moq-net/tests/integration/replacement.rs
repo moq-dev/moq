@@ -171,6 +171,26 @@ async fn epoch_lite07() {
 		.expect("timed out");
 }
 
+/// moq-transport carries the epoch with the MoQ Epoch extension, from draft-17.
+#[moq_clock::test]
+async fn epoch_ietf() {
+	for version in ["moq-transport-17", "moq-transport-22"] {
+		moq_clock::timeout(TEST_TIMEOUT, replace(version, Some(epoch())))
+			.await
+			.expect("timed out");
+	}
+}
+
+/// Without one, a moq-transport replacement restarts as it does over lite.
+#[moq_clock::test]
+async fn epochless_ietf() {
+	for version in ["moq-transport-22"] {
+		moq_clock::timeout(TEST_TIMEOUT, replace(version, None))
+			.await
+			.expect("timed out");
+	}
+}
+
 /// A route change alone is never fatal, but a dead route is: once an epochless replacement
 /// is announced, a subscription on the old instance keeps going while the old publisher
 /// serves it, and its session closing ends that subscription with an error, never cleanly.
