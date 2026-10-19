@@ -73,6 +73,22 @@ copies longer, as above, must not make that worse.
 - Regression test: a datagram-only Rust reader across many swaps, each copy
   holding an unread group, keeps retained copies bounded by its budget.
 
+**Datagrams read before groups.** JS errs the other way. The subscriber's
+`#tryDatagram` in `js/net/src/track.ts` passes `delivered` to
+`Reader.tryDatagram` only once `#groupsRead` is set, and `Reader.#letGo`
+drops every replaced copy when `delivered` is undefined. A `recvDatagram()`
+after a swap but before the first `recvGroup()` therefore lets the old copy go
+with an unread group the new copy lacks, and that group is never delivered.
+Rust keeps it (`datagram_reads_keep_unread_groups_on_a_replaced_copy`).
+
+- Pass `delivered` regardless of `#groupsRead`, so a datagram poll asks
+  `hasUnreadGroup` like a group poll does. The budget rule
+  above then bounds what a reader that never reads groups keeps, in both
+  languages alike.
+- Regression test: port the Rust test to `js/net/src/resume.test.ts`, polling
+  `recvDatagram()` between the swap and the first `recvGroup()`, which must
+  return the old copy's group.
+
 Regression tests in both languages, with mocked time:
 
 - The old copy writes F-1 only after the new copy handed out F and the reader
