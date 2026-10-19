@@ -54,6 +54,8 @@ const TRACK: &str = "drill";
 /// hostile one, and the drills' own budgets (a 2s idle timeout, 10s waits) hold
 /// under it unchanged. The loss is 5% because a drill only sends a few hundred
 /// datagrams, and at 2% that is a drop or two, which barely exercises recovery.
+/// Random loss only proves correctness, which is all a drill asserts; nothing
+/// here judges quality, latency or throughput.
 fn impairment() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		delay: Duration::from_millis(20),

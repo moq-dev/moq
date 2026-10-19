@@ -36,6 +36,40 @@ class Holes(unittest.TestCase):
         self.assertEqual(holes.step([0]), 0)
 
 
+class Shed(unittest.TestCase):
+    # Four groups of 25 frames, each opening on a sync frame, with each P picture decoded ahead
+    # of the B picture it presents after.
+    PTS = [(i + (0 if i % 25 == 0 else 1 if i % 25 % 2 else -1)) * 3600 for i in range(100)]
+    SYNC = [i % 25 == 0 for i in range(100)]
+
+    def grade(self, *lost: range) -> holes.Shed:
+        kept = {t for i, t in enumerate(self.PTS) if not any(i in r for r in lost)}
+        return holes.shed(self.PTS, self.SYNC, kept)
+
+    def test_whole(self):
+        self.assertEqual(self.grade(), holes.Shed(missing=0, mid_group=[], tail=0))
+
+    def test_whole_group(self):
+        self.assertEqual(self.grade(range(25, 50)), holes.Shed(missing=25, mid_group=[], tail=0))
+
+    def test_rest_of_a_group(self):
+        # The rest of a group skipped once it went stale, resuming at the next one.
+        self.assertEqual(self.grade(range(40, 50)), holes.Shed(missing=10, mid_group=[], tail=0))
+
+    def test_late_join(self):
+        # Groups before the first kept frame are the join, not shed.
+        self.assertEqual(self.grade(range(0, 50)), holes.Shed(missing=0, mid_group=[], tail=0))
+
+    def test_resumes_mid_group(self):
+        graded = self.grade(range(40, 45))
+        self.assertEqual(graded.mid_group, self.PTS[45:50])
+
+    def test_lost_tail(self):
+        # Shedding the last group means the export fell behind and never caught up.
+        self.assertEqual(self.grade(range(90, 100)).tail, 10)
+        self.assertEqual(self.grade(range(75, 100)).tail, 25)
+
+
 class Cuts(unittest.TestCase):
     # First PTS, last PTS, last DTS: the last pictures in decode order are B pictures presented before the P.
     SOURCE = (Fraction(1), Fraction(31), Fraction(30) + Fraction(23, 25))
@@ -74,7 +108,7 @@ class Probe(unittest.TestCase):
                 "-c:a", "mp2", "-f", "mpegts", path,
             ], check=True)
             streams = holes.probe(path)
-        _, dts, _ = streams["0x101"]
+        dts = streams["0x101"].dts
         self.assertEqual(holes.holes(dts, holes.step(dts)), [])
 
 if __name__ == "__main__":
