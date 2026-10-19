@@ -371,6 +371,21 @@ impl Subscriber {
 		self.reader().poll_group(ordered, delivered, waiter)
 	}
 
+	/// The lowest next group across copies, without handing it out.
+	pub(super) fn poll_peek_group(
+		&mut self,
+		ordered: bool,
+		delivered: &Delivered,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<u64>>> {
+		let mut reader = self.reader();
+		loop {
+			if let Some(result) = reader.poll_lowest(ordered, delivered, waiter) {
+				return result.map(|result| result.map(|next| next.map(|next| next.sequence)));
+			}
+		}
+	}
+
 	/// Poll for the next datagram in arrival order. `delivered` decides which replaced
 	/// copies still have a group to hand out.
 	pub(super) fn poll_recv_datagram(
@@ -482,6 +497,11 @@ impl Subscriber {
 			None => Poll::Ready(None),
 		}
 	}
+}
+
+struct Candidate {
+	index: usize,
+	sequence: u64,
 }
 
 /// A [`Subscriber`]'s state.
@@ -676,11 +696,44 @@ impl Reader {
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
 	) -> Option<Poll<Result<Option<group::Consumer>>>> {
+		let index = match self.poll_lowest(ordered, delivered, waiter)? {
+			Poll::Ready(Ok(Some(next))) => next.index,
+			Poll::Ready(Ok(None)) => return Some(Poll::Ready(Ok(None))),
+			Poll::Ready(Err(err)) => return Some(Poll::Ready(Err(err))),
+			Poll::Pending => return Some(Poll::Pending),
+		};
+		let Sub::Ready(sub) = &mut self.copies[index].sub else {
+			unreachable!()
+		};
+		let result = match ordered {
+			true => sub.poll_next_group(waiter),
+			false => sub.poll_recv_group(waiter),
+		};
+		if let Poll::Ready(Ok(Some(group))) = result
+			&& Self::deliverable(&self.copies[index], group.sequence, delivered)
+		{
+			self.observe(index, group.sequence);
+			let group = self.hand_out(index, group);
+			return Some(Poll::Ready(Ok(Some(group))));
+		}
+		// A producer may evict or replace the candidate between peeking and taking it.
+		None
+	}
+
+	/// Choose without consuming a candidate, so a newer copy cannot overtake a lower
+	/// group still buffered on an older one. A tie favors the newer copy, which bounds
+	/// the copies it replaced when it hands that group out.
+	fn poll_lowest(
+		&mut self,
+		ordered: bool,
+		delivered: &Delivered,
+		waiter: &kio::Waiter,
+	) -> Option<Poll<Result<Option<Candidate>>>> {
 		self.sync(waiter);
 		self.groups_read = true;
 		let groups = self.groups;
-		// The serving copy first: it is the one that keeps delivering.
-		for index in (0..self.copies.len()).rev() {
+		let mut lowest: Option<Candidate> = None;
+		for index in 0..self.copies.len() {
 			let copy = &mut self.copies[index];
 			if copy.done.is_some() {
 				continue;
@@ -695,19 +748,24 @@ impl Reader {
 					}
 					Poll::Ready(Ok(sub)) => sub,
 				};
-				let res = match ordered {
-					true => sub.poll_next_group(waiter),
-					false => sub.poll_recv_group(waiter),
-				};
+				let res = sub.poll_peek_group(ordered, waiter);
 				match res {
 					Poll::Pending => break,
-					Poll::Ready(Ok(Some(group))) => {
-						if !Self::deliverable(&self.copies[index], group.sequence, delivered) {
+					Poll::Ready(Ok(Some(sequence))) => {
+						if !Self::deliverable(&self.copies[index], sequence, delivered) {
+							let Sub::Ready(sub) = &mut self.copies[index].sub else {
+								unreachable!()
+							};
+							let _ = match ordered {
+								true => sub.poll_next_group(waiter),
+								false => sub.poll_recv_group(waiter),
+							};
 							continue;
 						}
-						self.observe(index, group.sequence);
-						let group = self.hand_out(index, group);
-						return Some(Poll::Ready(Ok(Some(group))));
+						if lowest.as_ref().is_none_or(|lowest| sequence <= lowest.sequence) {
+							lowest = Some(Candidate { index, sequence });
+						}
+						break;
 					}
 					// Drained: the track ended as the copy did, which is not cleanly when
 					// its session went away short of the declared end.
@@ -724,6 +782,9 @@ impl Reader {
 					}
 				}
 			}
+		}
+		if let Some(lowest) = lowest {
+			return Some(Poll::Ready(Ok(Some(lowest))));
 		}
 		self.let_go(delivered);
 		self.poll_end(waiter, |copy| copy.done.clone())
@@ -1732,6 +1793,50 @@ mod test {
 			};
 			sequences.push(group.sequence);
 		}
+	}
+
+	/// A replaced copy is bounded only once the new copy delivers its first group: a group
+	/// buffered on it must be read before a later group on the serving copy.
+	#[test]
+	fn sequence_reads_take_a_replaced_copys_lower_buffered_group() {
+		replaced_copy_reads_lowest(true);
+	}
+
+	#[test]
+	fn arrival_reads_take_a_replaced_copys_lower_buffered_group() {
+		replaced_copy_reads_lowest(false);
+	}
+
+	fn replaced_copy_reads_lowest(ordered: bool) {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, ordered), [0]);
+		write(&a, 1);
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 2);
+		assert_eq!(drain(&mut sub, ordered), [1, 2]);
+	}
+
+	#[test]
+	fn arrival_reads_still_deliver_a_lower_group_that_arrives_later() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 2);
+		assert_eq!(drain(&mut sub, false), [2]);
+		write(&b, 1);
+		assert_eq!(drain(&mut sub, false), [1]);
 	}
 
 	/// A replaced copy is bounded only once the new copy delivers its first group: a group

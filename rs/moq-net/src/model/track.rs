@@ -4901,7 +4901,7 @@ impl Cursor {
 		aborts.register(waiter);
 	}
 
-	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+	fn poll_recv_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.resolve_floor();
 		if let Some(aborts) = &self.aborts {
 			// A sequence may name both a live group and its fetched head. Only the
@@ -4931,16 +4931,13 @@ impl Cursor {
 		loop {
 			// Re-offer the lowest parked group back inside the cap once it rises,
 			// ahead of the arrival cursor: it is the oldest thing still owed.
-			let consumer = match self.parked.keys().next().copied() {
+			let (consumer, next_index) = match self.parked.keys().next().copied() {
 				Some(sequence) if super::subscription::before_end(sequence, self.end_sequence) => {
-					let group = self.parked.remove(&sequence).expect("just looked it up");
-					self.aborts
-						.as_ref()
-						.expect("parked groups are watched")
-						.remove(sequence);
-					// A re-offer is a delivery: stamp it like a fresh hand-out.
-					group.cache_refresh();
-					group
+					let group = self.parked.get(&sequence).expect("just looked it up").clone();
+					if take {
+						group.cache_refresh();
+					}
+					(group, None)
 				}
 				_ => {
 					let Some((producer, found_index)) =
@@ -4955,30 +4952,47 @@ impl Cursor {
 					};
 					let consumer = producer.consume();
 					// Stamp with the track guard released, so delivery never nests the
-					// group's state lock under the track's.
-					consumer.cache_refresh();
-					self.index = found_index + 1;
+					// group's state lock under the track's. Peeking is not an access.
+					if take {
+						consumer.cache_refresh();
+					}
 
 					// The first group to arrive resolves a relative floor, which may land
 					// above it.
 					if self.floor_pending && self.resolve_floor() && consumer.sequence < self.min_sequence {
+						self.index = found_index + 1;
 						continue;
 					}
 
 					// Park a group beyond the cap instead of dropping it, and keep scanning
 					// so an in-range group that arrived behind it still flows.
 					if !super::subscription::before_end(consumer.sequence, self.end_sequence) {
+						self.index = found_index + 1;
 						self.park(consumer, waiter);
 
 						continue;
 					}
-					consumer
+					(consumer, Some(found_index + 1))
 				}
 			};
 
 			// Drop a group the drift budget has given up on and keep scanning, so one
 			// poll walks a whole backlog off rather than handing it out group by group.
-			if ready!(self.poll_stale(&consumer, drift, waiter))? {
+			let stale = ready!(self.poll_stale(&consumer, drift, waiter))?;
+			// A peek discards what cannot be delivered, but keeps its candidate at the
+			// same cursor position until the reader chooses this copy.
+			if take || stale {
+				if let Some(index) = next_index {
+					self.index = index;
+				} else {
+					self.parked.remove(&consumer.sequence);
+					self.aborts
+						.as_ref()
+						.expect("parked groups are watched")
+						.remove(consumer.sequence);
+				}
+			}
+			if stale {
 				self.stale.add(consumer.content());
 				if let Some(drops) = &mut self.drops
 					&& let Some(end) = consumer.sequence.checked_add(1)
@@ -4987,7 +5001,7 @@ impl Cursor {
 				}
 				continue;
 			}
-			return Poll::Ready(Ok(Some(self.with_expiry(consumer))));
+			return Poll::Ready(Ok(Some(if take { self.with_expiry(consumer) } else { consumer })));
 		}
 	}
 
@@ -5023,7 +5037,7 @@ impl Cursor {
 
 	/// The lowest servable group past the last one returned, walking off everything the
 	/// drift budget has convicted on the way.
-	fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+	fn poll_next_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let Some(next) = self.next_sequence else {
 			return Poll::Ready(Ok(None));
 		};
@@ -5064,15 +5078,19 @@ impl Cursor {
 			// A conviction the budget walked back: the group is handed over after all,
 			// so it must never reach the stale count.
 			self.seek_pending.remove(&group.sequence);
-			break self.with_expiry(group);
+			break group;
 		};
 
-		self.next_sequence = group.sequence.checked_add(1);
-		// The delivery commits everything the seek stepped over to reach this group.
-		self.commit_seek_stale(self.next_sequence.unwrap_or(u64::MAX));
-		// Delivery is a cache access, same as the arrival-order path.
-		group.cache_refresh();
-		Poll::Ready(Ok(Some(group)))
+		Poll::Ready(Ok(Some(if take {
+			self.next_sequence = group.sequence.checked_add(1);
+			// The delivery commits everything the seek stepped over to reach this group.
+			self.commit_seek_stale(self.next_sequence.unwrap_or(u64::MAX));
+			// Delivery is a cache access, same as the arrival-order path.
+			group.cache_refresh();
+			self.with_expiry(group)
+		} else {
+			group
+		})))
 	}
 
 	/// Count the sequence path's convictions below `committed` into [`Self::stale`],
@@ -5185,6 +5203,8 @@ impl Subscriber {
 	/// edge and writes the rest off; raise it to read history. [`Self::set_groups`] and
 	/// [`Subscription::ranges`] are filters, not exemptions: backfill needs a budget that
 	/// covers it. [`Consumer::fetch_group`] is the way to ask for one old group outright.
+	/// Across same-epoch route copies, the lowest next buffered group is delivered
+	/// first; a lower group that arrives later is still delivered in arrival order.
 	/// The budget remains attached to a returned group: if it stalls while newer data
 	/// advances, its pending frame read ends with [`Error::Old`].
 	///
@@ -5209,8 +5229,8 @@ impl Subscriber {
 		let res = match &mut self.inner {
 			Inner::Plain(cursor) => loop {
 				let res = match ordered {
-					true => cursor.poll_next_group(waiter),
-					false => cursor.poll_recv_group(waiter),
+					true => cursor.poll_next_group(true, waiter),
+					false => cursor.poll_recv_group(true, waiter),
 				};
 				match res {
 					Poll::Ready(Ok(Some(group))) if self.delivered.contains(group.sequence) => continue,
@@ -5224,6 +5244,30 @@ impl Subscriber {
 		}
 		self.count_stale(&meter);
 		res.map(|res| res.map(|group| group.map(|group| group.with_meter(meter))))
+	}
+
+	/// The next group's sequence without handing it out or advancing past it.
+	pub(super) fn poll_peek_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => loop {
+				let group = ready!(match ordered {
+					true => cursor.poll_next_group(false, waiter),
+					false => cursor.poll_recv_group(false, waiter),
+				})?;
+				let Some(group) = group else {
+					return Poll::Ready(Ok(None));
+				};
+				if !self.delivered.contains(group.sequence) {
+					return Poll::Ready(Ok(Some(group.sequence)));
+				}
+				// A replay advances only this copy's cursor, as an ordinary read would.
+				ready!(match ordered {
+					true => cursor.poll_next_group(true, waiter),
+					false => cursor.poll_recv_group(true, waiter),
+				})?;
+			},
+			Inner::Resume(resume, _) => resume.poll_peek_group(ordered, &self.delivered, waiter),
+		}
 	}
 
 	/// Record `sequence` as handed out. An ordered read never goes back, and any reader
@@ -10412,6 +10456,41 @@ mod test {
 			.expect("would have errored")
 			.expect("track should not be closed");
 		assert_eq!(group.sequence, 5);
+	}
+
+	#[test]
+	fn peeking_keeps_each_orders_cursor_and_rechecks_bounds() {
+		for ordered in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			let mut subscriber = producer.subscribe(replay());
+			for sequence in [2, 1] {
+				producer
+					.create_group(group::Info { sequence })
+					.unwrap()
+					.finish()
+					.unwrap();
+			}
+			let waiter = kio::Waiter::noop();
+			let first = if ordered { 1 } else { 2 };
+			for _ in 0..2 {
+				assert_eq!(
+					subscriber.poll_peek_group(ordered, &waiter).map(Result::unwrap),
+					Poll::Ready(Some(first))
+				);
+			}
+			let Poll::Ready(Ok(Some(group))) = subscriber.poll_group(ordered, &waiter) else {
+				panic!("the peeked group is still available");
+			};
+			assert_eq!(group.sequence, first);
+			let second = if ordered { 2 } else { 1 };
+			subscriber.set_groups(..0);
+			assert!(subscriber.poll_peek_group(ordered, &waiter).is_pending());
+			subscriber.set_groups(..);
+			assert_eq!(
+				subscriber.poll_peek_group(ordered, &waiter).map(Result::unwrap),
+				Poll::Ready(Some(second))
+			);
+		}
 	}
 
 	#[test]

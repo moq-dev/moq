@@ -1298,10 +1298,24 @@ const RESUME_OVERLAP: [(usize, usize, usize); 12] = [
 struct ResumeOverlap {
 	_producer: origin::Producer,
 	_generations: Vec<(broadcast::Producer, track::Producer)>,
-	readers: Vec<track::Subscriber>,
+	readers: Vec<ResumeReader>,
 }
 
-async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> ResumeOverlap {
+enum ResumeReader {
+	Arrival(track::Subscriber),
+	Sequence(track::Ordered),
+}
+
+impl ResumeReader {
+	fn poll_group(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Option<moq_net::group::Consumer>>> {
+		match self {
+			Self::Arrival(reader) => reader.poll_recv_group(waiter),
+			Self::Sequence(reader) => reader.poll_next_group(waiter),
+		}
+	}
+}
+
+async fn resume_overlap(readers: usize, retained: usize, routes: usize, ordered: bool) -> ResumeOverlap {
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
 	let epoch = Epoch::mint();
@@ -1359,10 +1373,17 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> Resum
 	for subscriber in &mut subscribers {
 		subscriber.set_groups(..);
 	}
+	let readers = subscribers
+		.into_iter()
+		.map(|subscriber| match ordered {
+			true => ResumeReader::Sequence(subscriber.ordered()),
+			false => ResumeReader::Arrival(subscriber),
+		})
+		.collect();
 	ResumeOverlap {
 		_producer: producer,
 		_generations: generations,
-		readers: subscribers,
+		readers,
 	}
 }
 
@@ -1372,31 +1393,33 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> Resum
 fn bench_resume_overlap(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/resume_overlap");
 	group.sample_size(10);
-	for (readers, retained, routes) in RESUME_OVERLAP {
-		group.throughput(Throughput::Elements((readers * retained) as u64));
-		group.bench_function(
-			BenchmarkId::from_parameter(format!("{readers}r_{retained}g_{routes}c")),
-			|b| {
-				let runtime = tokio::runtime::Builder::new_current_thread()
-					.enable_all()
-					.build()
-					.unwrap();
-				let waiter = kio::Waiter::noop();
-				b.iter_batched_ref(
-					|| runtime.block_on(resume_overlap(readers, retained, routes)),
-					|rig| {
-						for reader in &mut rig.readers {
-							let mut delivered = 0;
-							while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {
-								delivered += 1;
+	for (order, ordered) in [("arrival", false), ("sequence", true)] {
+		for (readers, retained, routes) in RESUME_OVERLAP {
+			group.throughput(Throughput::Elements((readers * retained) as u64));
+			group.bench_function(
+				BenchmarkId::new(order, format!("{readers}r_{retained}g_{routes}c")),
+				|b| {
+					let runtime = tokio::runtime::Builder::new_current_thread()
+						.enable_all()
+						.build()
+						.unwrap();
+					let waiter = kio::Waiter::noop();
+					b.iter_batched_ref(
+						|| runtime.block_on(resume_overlap(readers, retained, routes, ordered)),
+						|rig| {
+							for reader in &mut rig.readers {
+								let mut delivered = 0;
+								while let Poll::Ready(Ok(Some(_))) = reader.poll_group(&waiter) {
+									delivered += 1;
+								}
+								assert_eq!(delivered, retained, "every group once");
 							}
-							assert_eq!(delivered, retained, "every group once");
-						}
-					},
-					BatchSize::PerIteration,
-				);
-			},
-		);
+						},
+						BatchSize::PerIteration,
+					);
+				},
+			);
+		}
 	}
 	group.finish();
 }
