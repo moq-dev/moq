@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `CongestionControl` gained `none` (#5926)
+
+`CongestionControl.none` runs no congestion control and no pacing, for tests and controlled links.
+An exhaustive `switch` needs one more case.
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

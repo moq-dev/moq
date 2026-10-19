@@ -90,7 +90,6 @@ lands before the cut.
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [moq-ffi reports why a first dial fails](/quest/m1/ffi-first-dial-failure.md) - OBS names the reason while the first dial retries, as moq-c already can
 - [Typed refusal reason](/quest/m1/refusal-reason.md) - an auth server's 403 names the reason (including `expired`) and the root and tier, so the relay's session outcomes count and attribute refusals
-- [JS track handover](/quest/m1/js-group-handover.md) - a JS track subscription resumes across a route swap from the first frame it lacks, so `test/drain` passes at zero latency budget
 - [Scope track priority](/quest/m1/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
@@ -101,7 +100,6 @@ lands before the cut.
 - [Drain cleanup](/quest/m1/drain-cleanup.md) - sessions force-closed at the drain deadline record their lease end and bytes before the relay or CLI exits, while unfinished handshakes stay bounded
 - [GOAWAY coverage](/quest/m1/goaway-coverage.md) - every IETF request stream handles GOAWAY, a closed control stream is a violation, and the draft-18 cutoff is honored
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
-- [Decode errors end the reader](/quest/m1/decode-errors.md) - a container decode error fails the reader in Rust and JS instead of reading as loss
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [A stalled subscriber holds bounded state](/quest/m1/egress-held-state.md) - group machines and bytes a credit-withholding downstream makes a publisher hold plateau at what its credit and the latency budget allow, on lite and moq-transport
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
@@ -110,6 +108,12 @@ lands before the cut.
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Resume reorder](/quest/m1/resume-reorder.md) - a group whose stream header arrives after its successor's still resumes on failover; only a dropped or long-gone group fails
 - [SUBSCRIBE_OK names where delivery starts](/quest/m1/subscribe-ok-start.md) - a warm relay names the same start group as a cold one instead of groups it skipped as stale
+- [Rust resumed reads](/quest/m1/resume-ordered.md) - a Rust reader takes the lowest group across route copies in both orders, as JS does
+- [Resumed close](/quest/m1/resume-closed.md) - a resumed JS track keeps its declared end across copies, and its `closed` and `largest()` settle on a clean end
+- [Resumed in-flight groups](/quest/m1/resume-in-flight.md) - a replaced route copy stays while a group below its bound is in flight or it backs a handed-out group late, and no longer than the reader's budget
+- [Resumed forks](/quest/m1/resume-fork.md) - a fork of a resumed JS subscriber follows route swaps like its parent
+- [Recovered group readiness](/quest/m1/resume-readable.md) - a recovered JS group's `readable()` ignores frames its replacement replays
+- [Resumed datagrams](/quest/m1/resume-datagrams.md) - a resumed track skips only datagrams it already delivered, not every lower sequence
 - [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [HLS export drains after End](/quest/m1/hls-export-end-drain.md) - a cleanly ended broadcast still exports its retained segments
