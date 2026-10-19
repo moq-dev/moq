@@ -69,7 +69,7 @@ case "$1" in
         ;;
     # Measured Cargo bench targets, all in the bench profile.
     rust-bench)
-        # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
+        # Fuzz exposes moq-net's codec benches, and moq-quic's plaintext crypto below.
         criterion net --no-fail-fast -p moq-net --features fuzz --bench '*'
         # Measure the optional thread-CPU clock as well as the normal elapsed time.
         SESSION_CPU=1 criterion net-cpu -p moq-net --bench session -- session_delivery_group_cost_cpu
@@ -78,7 +78,7 @@ case "$1" in
         # One invocation unifies this release build instead of rebuilding shared crates
         # independently for each target. Keep the explicit targets: '*' would add coverage.
         criterion shared --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
-            -p moq-quic --features moq-stats/bench \
+            -p moq-quic --features moq-stats/bench,moq-quic/fuzz \
             --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
             --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
             --bench chunk_interleaving --bench worker_turns \
