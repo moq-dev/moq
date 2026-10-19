@@ -143,6 +143,22 @@ test("a join wants past a datagram after the newest group", () => {
 	subscriber.close();
 });
 
+test("a datagram never overtakes a pending refresh", () => {
+	const producer = new TrackProducer("test").accept({ refresh: 1 });
+	refreshGroup(producer, 4);
+	const subscriber = producer.subscribe();
+	expect(producer.demand().wanted.peek()).toBe(1);
+
+	expect(producer.appendDatagram(undefined, enc.encode("dgram"))).toBe(1);
+	expect(producer.demand().wanted.peek()).toBe(2);
+
+	// Group 2 answers it, and later datagrams ask for nothing.
+	refreshGroup(producer, 0);
+	producer.appendDatagram(undefined, enc.encode("dgram"));
+	expect(producer.demand().wanted.peek()).toBe(2);
+	subscriber.close();
+});
+
 test("joins coalesce until the wanted group lands", () => {
 	const producer = new TrackProducer("test").accept({ refresh: 1 });
 	refreshGroup(producer, 4);

@@ -645,9 +645,9 @@ pub(crate) struct FetchOutcome {
 }
 
 impl TrackState {
-	/// A consumer joined at the live edge: ask for the next free sequence when the newest
-	/// group's bytes after its first frame exceed [`Info::refresh`] times that frame. A
-	/// datagram past that group already took the sequence after it.
+	/// A consumer joined at the live edge: ask for a group past every sequence written when
+	/// the newest group's bytes after its first frame exceed [`Info::refresh`] times that
+	/// frame.
 	///
 	/// Joins while the request is pending ask for the same group, so they coalesce until
 	/// the publisher creates it. A join under the ratio reads the current group and asks
@@ -669,10 +669,9 @@ impl TrackState {
 		{
 			return;
 		}
-		let next = state.edge();
 		let subscriptions = state.subscriptions.clone();
 		drop(state);
-		let mut wakes = subscriptions.lock().want(next);
+		let mut wakes = subscriptions.lock().refresh();
 		wakes.wake();
 	}
 
@@ -1475,10 +1474,15 @@ impl TrackState {
 
 	/// Record a written sequence, here and in the name's shared namespace. It raises the
 	/// largest too, so a later group below it never changes it, even one below a reached end.
-	fn advance(&mut self, sequence: u64) {
+	///
+	/// `answers` when it is a group subscribers receive, which answers a pending refresh.
+	fn advance(&mut self, sequence: u64, answers: bool) {
 		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
+		let next = self.sequence.next();
 		self.sequence.advance(sequence);
 		self.cache.advance_largest(Position::group(sequence));
+		let mut wakes = self.subscriptions.lock().wrote(sequence, next, answers);
+		wakes.wake();
 	}
 
 	/// The sequence the next append takes: one past this track's own writes.
@@ -1551,7 +1555,7 @@ impl TrackState {
 			self.evict.push_back((sequence, stamp));
 		}
 
-		self.advance(sequence);
+		self.advance(sequence, visible);
 		// A publisher may re-create a group it cut; the sequence is no longer given up.
 		if visible
 			&& self.drops.contains(&sequence)
@@ -2366,7 +2370,7 @@ impl Producer {
 		{
 			return Err(Error::Closed);
 		}
-		state.advance(sequence);
+		state.advance(sequence, false);
 		state.cache.finish_largest(sequence);
 		meter.datagram(payload.len() as u64);
 		state.push_datagram(
@@ -2422,7 +2426,7 @@ impl Producer {
 		if state.final_sequence().is_some_and(|fin| datagram.sequence >= fin) {
 			return Err(Error::Closed);
 		}
-		state.advance(datagram.sequence);
+		state.advance(datagram.sequence, false);
 		state.cache.finish_largest(datagram.sequence);
 		meter.datagram(datagram.payload.len() as u64);
 		state.push_datagram(datagram);
@@ -3366,14 +3370,15 @@ impl Demand {
 	///
 	/// A publisher opens a group whenever `n` passes its largest. The first consumer of a
 	/// track with no group asks for `Some(0)`, and a join judged by [`Info::refresh`]
-	/// asks for the next free sequence. `n` never goes back, so once a group reaches
-	/// it nothing is pending until another join asks.
+	/// asks for the next free sequence until a group lands there, so a datagram taking it
+	/// moves the ask past. `n` never goes back, so once a group reaches it nothing is
+	/// pending until another join asks.
 	pub fn wanted(&self) -> Option<u64> {
 		if !self.is_used() {
 			return None;
 		}
-		let subscriptions = self.state.read().subscriptions.clone();
-		let wanted = subscriptions.lock().wanted();
+		let (subscriptions, namespace) = self.subscriptions();
+		let wanted = subscriptions.lock().wanted(&namespace);
 		Some(wanted)
 	}
 
@@ -3388,6 +3393,12 @@ impl Demand {
 		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
 	}
 
+	/// The demand aggregate, and the name's sequence namespace a pending refresh reads.
+	fn subscriptions(&self) -> (kio::Lock<Subscriptions>, Sequence) {
+		let state = self.state.read();
+		(state.subscriptions.clone(), state.sequence.clone())
+	}
+
 	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
 		let used = match self.poll_state(waiter) {
@@ -3395,8 +3406,8 @@ impl Demand {
 			DemandState::Active => true,
 			DemandState::Idle => false,
 		};
-		let subscriptions = self.state.read().subscriptions.clone();
-		let wanted = subscriptions.lock().poll_wanted(waiter);
+		let (subscriptions, namespace) = self.subscriptions();
+		let wanted = subscriptions.lock().poll_wanted(&namespace, waiter);
 		let next = used.then_some(wanted);
 		if self.prev == Some(next) {
 			return Poll::Pending;
@@ -12742,6 +12753,26 @@ mod test {
 		assert_eq!(producer.append_datagram(None, &b"dgram"[..]).unwrap(), 1);
 		let _subscriber = producer.subscribe(None);
 		assert_eq!(producer.demand().wanted(), Some(2));
+	}
+
+	/// A datagram taking the sequence a pending refresh asked for moves the ask past it, so
+	/// it still names a group the publisher has to open. The group landing answers it.
+	#[test]
+	fn a_datagram_never_overtakes_a_pending_refresh() {
+		let mut producer = track_producer("test", Info::default().with_refresh(1));
+		let mut demand = producer.demand();
+		refresh_group(&producer, 4);
+		let _subscriber = producer.subscribe(None);
+		assert_eq!(wanted_changed(&mut demand), Some(Some(1)));
+
+		assert_eq!(producer.append_datagram(None, &b"dgram"[..]).unwrap(), 1);
+		assert_eq!(wanted_changed(&mut demand), Some(Some(2)), "the datagram took group 1");
+
+		refresh_group(&producer, 0);
+		assert_eq!(wanted_changed(&mut demand), None, "group 2 answers it");
+		producer.append_datagram(None, &b"dgram"[..]).unwrap();
+		assert_eq!(wanted_changed(&mut demand), None, "nothing is pending");
+		assert_eq!(demand.wanted(), Some(2));
 	}
 
 	/// Joins while a request is pending ask for the same group, so the publisher hears it

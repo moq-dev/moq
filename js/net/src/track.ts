@@ -599,7 +599,8 @@ export class Demand {
 	 * The group subscribers want: `undefined` while nobody subscribes, otherwise the sequence
 	 * the next group should have at least. A publisher opens a group whenever it passes its
 	 * largest. The first subscriber of a track with no group wants `0`, and a join judged by
-	 * {@link Info.refresh} wants the next free sequence. It never goes back. Watch it
+	 * {@link Info.refresh} wants the next free sequence until a group lands there, so a
+	 * datagram taking it moves the ask past. It never goes back. Watch it
 	 * (`effect.get` / `.peek()`) to follow demand.
 	 */
 	get wanted(): Getter<number | undefined> {
@@ -682,8 +683,12 @@ export class Producer {
 
 	// The group subscribers want while any is attached, watched through {@link demand}.
 	#wanted = new Signal<number | undefined>(undefined);
-	// The lowest group they want; raised by a join over the refresh ratio, never lowered.
+	// The lowest group they want while no refresh is pending, never lowered.
 	#floor = 0;
+	// A join over the refresh ratio asked for a group past every sequence written, and none
+	// has landed yet. Read against the namespace rather than stored as a number, so a
+	// datagram taking the next sequence can never leave the ask behind.
+	#refresh = false;
 	#demand: Demand;
 	#largestSeen?: Location;
 	// The largest group's content may still grow: it has not closed cleanly, and it is not a
@@ -843,22 +848,31 @@ export class Producer {
 		return this.#demand;
 	}
 
-	// A subscriber joined at the live edge: ask for the next free sequence when the newest
-	// group's bytes after its first frame exceed the refresh ratio times the first frame. A
-	// datagram past that group already took the sequence after it.
+	// A subscriber joined at the live edge: ask for a group past every sequence written when
+	// the newest group's bytes after its first frame exceed the refresh ratio times the first
+	// frame.
 	#join(): void {
 		const ratio = this.#state.info.peek()?.refresh;
 		const latest = this.#state.latest;
 		if (ratio === undefined || latest === undefined) return;
 		const group = this.#cached.get(latest)?.group;
-		if (group && hooks.overRefresh(group, ratio)) this.#want(this.#received);
+		if (!group || !hooks.overRefresh(group, ratio)) return;
+		this.#refresh = true;
+		this.#reportWanted();
 	}
 
 	// Raise the wanted floor, reporting it while anyone subscribes.
 	#want(group: number): void {
 		if (group <= this.#floor) return;
 		this.#floor = group;
-		if (this.#sinks.size > 0) this.#wanted.set(group);
+		this.#reportWanted();
+	}
+
+	// Report the wanted group while anyone subscribes: the namespace's next free sequence
+	// while a refresh is pending.
+	#reportWanted(): void {
+		const wanted = this.#refresh ? Math.max(this.#sequence.next, this.#floor) : this.#floor;
+		this.#wanted.set(this.#sinks.size > 0 ? wanted : undefined);
 	}
 
 	// Register a downstream sink: seed its info, replay the retained window, and (while
@@ -875,7 +889,7 @@ export class Producer {
 		if (closed === undefined) {
 			if (joinsLive(sink.update.peek())) this.#join();
 			this.#sinks.add(sink);
-			this.#wanted.set(this.#floor);
+			this.#reportWanted();
 
 			// Forward subscription updates from the sink's Subscriber to the producer's own
 			// state, which the wire layer (or the serving application) watches.
@@ -894,7 +908,7 @@ export class Producer {
 				this.#updateSubscription();
 				// Update demand: once the last subscriber leaves, the consumer wire (watching
 				// {@link Demand.wanted}) tears the upstream down instead of downloading to nobody.
-				this.#wanted.set(this.#sinks.size > 0 ? this.#floor : undefined);
+				this.#reportWanted();
 				// A closed track leaves a sink's buffered mirrors readable; they age out
 				// with the cache, so a stale consumer can't pin them.
 				if (this.#state.closed.peek() !== undefined) {
@@ -1180,7 +1194,7 @@ export class Producer {
 		}
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
-		this.#advance(group.sequence);
+		this.#advance(group.sequence, true);
 		this.#arrive(group.sequence);
 		this.#state.latest = Math.max(this.#state.latest ?? 0, group.sequence);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
@@ -1198,12 +1212,21 @@ export class Producer {
 	}
 
 	// Record a written sequence, here and in the name's namespace. It raises the largest too,
-	// at the head of an empty group, so a later group below it never changes it.
-	#advance(sequence: number): void {
+	// at the head of an empty group, so a later group below it never changes it. A group
+	// (`answers`) at or past the namespace's next free sequence answers a pending refresh;
+	// anything else written there moves the sequence it asks for.
+	#advance(sequence: number, answers: boolean): void {
+		const next = this.#sequence.next;
 		this.#received = Math.max(this.#received, sequence + 1);
-		this.#sequence.next = Math.max(this.#sequence.next, sequence + 1);
+		this.#sequence.next = Math.max(next, sequence + 1);
 		this.#advanceLargest({ group: sequence, frame: 0 });
 		this.#endLargest();
+		if (!this.#refresh || sequence < next) return;
+		if (answers) {
+			this.#refresh = false;
+			this.#floor = Math.max(this.#floor, sequence);
+		}
+		this.#reportWanted();
 	}
 
 	// The sequence the next append takes: one past this producer's own writes. The
@@ -1302,7 +1325,7 @@ export class Producer {
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
 	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache).
 	#publishDatagram(datagram: Datagram): void {
-		this.#advance(datagram.sequence);
+		this.#advance(datagram.sequence, false);
 		this.#arrive(datagram.sequence);
 		this.#finishLargest(datagram.sequence);
 		for (const sink of this.#sinks) {
