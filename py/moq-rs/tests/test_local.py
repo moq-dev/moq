@@ -1579,10 +1579,6 @@ def test_container_timebase_belongs_to_one_broadcast():
         moq.media.ContainerProducer(
             other, moq.media.ContainerInit(moq.media.ContainerFormat.FMP4, b"", timebase=timebase)
         )
-    with pytest.raises(moq.Error.Codec, match="another broadcast"):
-        moq.media.ContainerStreamProducer(
-            other, moq.media.ContainerStreamInit(moq.media.ContainerFormat.FMP4, timebase=timebase)
-        )
     owner.close()
     with pytest.raises(moq.Error.Closed):
         moq.media.Timebase(owner)

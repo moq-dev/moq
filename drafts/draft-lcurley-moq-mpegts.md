@@ -93,7 +93,7 @@ What remains is media in a codec-neutral catalog, plus the signaling a demultipl
 | | mpeg2ts packaging | mpegts section |
 |:--------|:--------|:--------|
 | MoQ track | one per program or multiplex | one per elementary stream |
-| Object payload | whole source packets | one media frame, or one verbatim PES payload, PES packet, or section |
+| Object payload | whole source packets | one media frame, PES packet, or section |
 | Packaging | `mpeg2ts` | none defined; media keeps its own |
 | Catalog | `mpeg2ts*` members on each track | one `mpegts` root member |
 | Relay | caches and drops whole objects | drops and prioritizes per elementary stream |
@@ -222,30 +222,24 @@ Descriptors are never parsed, so a consumer MUST re-emit a list in order and MUS
 
 
 # Verbatim Tracks {#verbatim}
-An elementary stream the publisher does not decode rides its own MoQ track, byte-for-byte:
+An elementary stream the publisher does not decode rides its own MoQ track, byte-for-byte.
+A stream of sections is described by a `verbatim` record:
 
 ~~~
 type Verbatim = {
   "streamType": number,
-  "framing": "pes" | "section",
-  "streamId": number | undefined,
+  "framing": "section",
 }
 ~~~
 
-`streamType` is the PMT `stream_type` to re-announce: 0x86 for SCTE-35 {{scte35}}, 0x06 for private PES, 0x05 for private sections.
+`streamType` is the PMT `stream_type` to re-announce: 0x86 for SCTE-35 {{scte35}}, 0x05 for private sections.
 
-`framing` says how the payload is framed, defaulting to `"pes"`.
-With `"pes"` each frame is one complete PES payload, timestamped with its PTS, or 0 if it carried none.
-With `"section"` each frame is one complete section, header and CRC included, timestamped with the media time it arrived at.
-A consumer MUST refuse a catalog that names a `framing` it does not recognize, rather than guess.
-
-`streamId` is the original PES `stream_id`, for example 0xBD (`private_stream_1`) for teletext, DVB subtitles, and DVB AC-3.
-It applies only to `"pes"` framing.
-A publisher SHOULD record it, since strict demultiplexers reject a relabeled PES; a consumer with none falls back to `private_stream_1`.
+`framing` is required, and `"section"` is its only value: each frame is one complete section, header and CRC included, timestamped with the media time it arrived at.
+A consumer MUST refuse a catalog whose `verbatim` record names any other `framing` or none, rather than guess; in particular it MUST NOT read the `"pes"` framing of draft -00, or a record without `framing`, as sections.
 
 Each frame MUST be a keyframe in its own group: a verbatim payload is all-or-nothing.
 
-A track can instead carry each PES whole, header included:
+A stream of PES packets is described by a `pesPacket` record, and carries each PES whole, header included:
 
 ~~~
 type PesPacket = {
@@ -253,12 +247,20 @@ type PesPacket = {
 }
 ~~~
 
-`streamType` is the PMT `stream_type` to re-announce, as for `Verbatim`.
+`streamType` is the PMT `stream_type` to re-announce, as for `Verbatim`: 0x06 for private data such as asynchronous KLV, teletext, DVB subtitles and DVB AC-3, 0x15 for synchronous metadata.
 Each frame MUST be exactly one PES packet, from its start code through its payload, with a `PES_packet_length` that matches the frame, or zero only where {{mpeg2}} lets a video stream leave it unbounded.
 The `stream_id`, the PTS and DTS when present, and every other header field ride in the frame, with the PTS and DTS on the catalog clock; a PES without a PTS carries none.
 The frame's timestamp is the packet's placement: the program clock at its first byte, on the same timeline.
+Each frame MUST be a keyframe in its own group, as for `verbatim`.
 A consumer MUST refuse a frame that is not one well-formed PES packet.
 The record is a member beside `verbatim` rather than a `framing` value, so a consumer that predates it ignores the track instead of refusing the catalog.
+
+A publisher demultiplexing a transport stream places each PES by the PCRs of its program ({{mpeg2}} Section 2.4.2.2): its first byte is interpolated between the reference bytes of the PCRs either side of it, and one past its timebase's last PCR is extrapolated from that timebase's last two.
+A timebase ends at a PCR discontinuity, and at a PMT that moves the `PCR_PID`.
+Each PCR takes the 2^33 multiple of its base that lands it nearest the media's PTS, and the placement moves onto the catalog clock by the same shift as the media, so a PES's timestamp depends only on the input and that shift.
+A PES before the first PCR the publisher reads, or past a lone one, has nothing to place it and is dropped.
+The publisher moves each PTS and DTS by the media's shift modulo 2^33, keeping their prefix and marker bits, and leaves every other byte as received; the PES CRC covers the previous packet's data bytes, not its header, so it stays valid.
+It MUST refuse to carry a stream rather than alter it: one in a program with no PCR, and one whose PES carry a clock the shift does not reach (an ESCR, a `pack_header_field`, or a TREF), PES-level scrambling, a zero `PES_packet_length` on a stream that is not video, or a header whose flagged optional fields overrun its `PES_header_data_length`, which a consumer refuses.
 
 A verbatim or whole-PES track has no codec, dimensions, or decoder configuration, so a publisher MUST NOT describe it as a media rendition and MUST describe it only by its `tracks` entry, and a consumer MUST refuse a catalog that describes one as both.
 Nothing there declares a container, so its frames use hang's `legacy` container ({{hang}}): a varint microsecond timestamp followed by the payload.
@@ -369,7 +371,7 @@ A consumer rebuilding a transport stream:
 - MUST put the PMT on `program.pmtPid` and build the PAT and PMT from `program`.
 - MUST re-emit each track's `descriptors` as its ES-level descriptors, and `programDescriptors` as the PMT's `program_info`.
 - MUST re-emit each `si` entry's sections byte-for-byte on that entry's PID, reading them from its track ({{si-track}}), at least as often as its `interval` when declared.
-- MUST repacketize each verbatim track per its `framing` and `streamType`, using `streamId` when recorded.
+- MUST packetize each `verbatim` frame as one section on its track's PID.
 - MUST packetize each `pesPacket` frame unchanged on its track's PID, its first byte going out no earlier than the frame's timestamp, and SHOULD send it as close to that as the multiplex allows.
 - SHOULD pad the output with null packets to `muxRate` when present, so the rebuilt stream is constant-rate again; a source that exceeds the rate is passed through rather than delayed or dropped.
 
@@ -446,6 +448,7 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 
 - Added the `m2ts` section, a transport stream carried whole, with its mapping onto MSFTS; the comparison uses MSFTS's `mpeg2ts` names.
 - Added the `pesPacket` record: each frame one whole PES packet, timestamped with its placement. A consumer that predates it drops the track rather than refusing the catalog.
+- `verbatim` carries sections only, breaking -00: `framing` is required and `"section"` its only value, and `streamId` is gone. A consumer refuses a -00 catalog with `"pes"` framing or a `verbatim` record without `framing`. A publisher carries an undecoded PES stream as `pesPacket`, and refuses one it cannot carry unaltered.
 - A flagged PCR jump on an `m2ts` track follows hang's discontinuity marker rather than a skipped group sequence.
 - An `m2ts` track's fallback cut falls on whole seconds of a PCR count whose wraps follow the catalog clock, and `randomAccess` and `muxRate` describe the latest two-second window rather than the whole track, so publishers sharing a clock cut and describe the multiplex alike.
 
