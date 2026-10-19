@@ -675,14 +675,31 @@ impl MoqGroupProducer {
 impl MoqGroupProducer {
 	/// Wait until a consumer has this group.
 	pub(crate) async fn used(&self) -> Result<(), MoqError> {
-		let producer = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		Ok(producer.demand().used().await?)
+		let demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
+		Ok(demand.used().await?)
 	}
 }
 
 #[cfg(test)]
 mod metadata_tests {
 	use super::*;
+
+	#[test]
+	fn dropping_a_group_binding_ends_its_unfinished_group() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
+		let group = track.append_group().unwrap();
+		let mut consumer = group.consume();
+		let binding = MoqGroupProducer {
+			sequence: group.sequence,
+			inner: std::sync::Mutex::new(Some(group)),
+		};
+		drop(binding);
+		assert!(matches!(
+			consumer.poll_read_frame(&moq_net::kio::Waiter::noop()),
+			std::task::Poll::Ready(Err(moq_net::Error::Dropped))
+		));
+	}
 
 	#[test]
 	fn untimed_info_round_trips_through_the_binding() {

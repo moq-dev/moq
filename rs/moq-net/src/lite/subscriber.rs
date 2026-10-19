@@ -942,13 +942,13 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						if let Poll::Ready(err) = track.poll_closed(waiter) {
 							break 'serve Err(err);
 						}
-						if let Poll::Ready(err) = group.poll_closed(waiter) {
+						if let Poll::Ready(err) = group.handle().poll_closed(waiter) {
 							break 'serve Err(err);
 						}
 						let res = ingest.poll(&mut self.reader, group, waiter);
 						// Shown once its first frame opens, even mid-payload.
-						if !*shown && group.is_started() {
-							track.reveal_group(group);
+						if !*shown && group.handle().is_started() {
+							track.reveal_group(group.handle());
 							*shown = true;
 						}
 						match res {
@@ -970,7 +970,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						unreachable!()
 					};
 					// A group that ended without a frame shows once it settles.
-					let handle = (!shown).then(|| (*group).clone());
+					let handle = (!shown).then(|| group.handle().clone());
 					let res = match res {
 						Ok(()) => {
 							let _ = group.finish();
@@ -1037,7 +1037,7 @@ impl FrameIngest {
 	fn poll<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
-		group: &mut group::Producer,
+		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
@@ -1086,7 +1086,7 @@ impl FrameIngest {
 						unreachable!()
 					};
 					match failed {
-						None => frame.finish()?,
+						None => group.restore(frame.finish()?),
 						Some(err) => {
 							// Fail the group with the reason, not the Drop fallback's
 							// generic `Dropped`.
@@ -6256,7 +6256,7 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 	},
 	Ingest {
 		stream: Stream<S, Version>,
-		producer: group::Producer,
+		producer: crate::recv::Group,
 		// The accepted request's demand: fetches that joined it but have not yet
 		// picked the group up from the cache.
 		joined: kio::Producer<track::FetchOutcome>,
@@ -6319,7 +6319,10 @@ impl<S: crate::transport::poll::Session> Drop for FetchServeRun<S> {
 				}
 			}
 			FetchRunState::Ingest {
-				mut stream, producer, ..
+				mut stream,
+				producer,
+				ingest: _ingest,
+				..
 			} => {
 				stream.reader.abort(&err);
 				stream.writer.abort(&err);
@@ -6503,7 +6506,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 
 					self.state = FetchRunState::Ingest {
 						stream,
-						producer,
+						producer: crate::recv::Group::new(producer),
 						joined,
 						ingest: Box::new(FrameIngest::new(&self.serve.subscriber, self.timescale)),
 					};
@@ -6519,10 +6522,11 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						// wants the rest (no joined fetch left to pick it up, no reader),
 						// cancel upstream and abort the truncated group, never caching it
 						// as complete. The abort is atomic with a new reader arriving.
-						if joined.poll_unused(waiter).is_pending() || producer.poll_unused(waiter).is_pending() {
+						if joined.poll_unused(waiter).is_pending() || producer.handle().poll_unused(waiter).is_pending()
+						{
 							return Poll::Pending;
 						}
-						if !producer.abort_unused(Error::Cancel) {
+						if !producer.handle().abort_unused(Error::Cancel) {
 							continue;
 						}
 						tracing::debug!(track = %self.serve.name, group = self.group, "fetch abandoned");

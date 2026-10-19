@@ -2495,7 +2495,8 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_group_no_route_continues_wakes_when_an_older_successor_lands() {
 		let mut held = Held::new(&[(4, Some(4000))]);
-		held.group(5).write_frame(ts(4050), b"b".as_ref()).unwrap();
+		let mut edge = held.group(5);
+		edge.write_frame(ts(4050), b"b".as_ref()).unwrap();
 		held.settle();
 		let _newer = held.group(6);
 		assert!(!held.woken(), "a landing above the successor changes nothing");
@@ -2670,7 +2671,7 @@ mod test {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
-		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		let group = a.create_group(group::Info { sequence: 0 }).unwrap();
 		group
 			.set_wire(group::Wire {
 				sparse: false,
@@ -2698,7 +2699,7 @@ mod test {
 			)
 			.unwrap();
 		frame.write(bytes::Bytes::from_static(b"a")).unwrap();
-		frame.finish().unwrap();
+		let group = frame.finish().unwrap();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::MAX);
 		let mut reading = recv(&mut sub);
@@ -2767,8 +2768,9 @@ mod test {
 				)
 				.unwrap();
 			frame.write(bytes::Bytes::from_static(payload)).unwrap();
-			frame.finish().unwrap();
+			group = frame.finish().unwrap();
 		}
+		group.finish().unwrap();
 		b
 	}
 

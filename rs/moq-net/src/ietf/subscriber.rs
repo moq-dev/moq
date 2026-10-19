@@ -182,7 +182,7 @@ impl State {
 				let _ = producer.abort_session(err.clone());
 			}
 			if let Fill::Ready { producer, .. } = &*track.fill.read() {
-				let _ = producer.clone().abort(err.clone());
+				let _ = producer.handle().abort(err.clone());
 			}
 		}
 		for (_, producer) in self.lingering.drain() {
@@ -320,7 +320,7 @@ impl Fill {
 	/// stitched. Finishing rather than aborting, because the head is a valid prefix of the
 	/// group: it starts at the group's first object and has no holes.
 	fn release(&mut self) {
-		if let Fill::Ready { producer, .. } = std::mem::replace(self, Fill::Done) {
+		if let Fill::Ready { mut producer, .. } = std::mem::replace(self, Fill::Done) {
 			let _ = producer.finish();
 		}
 	}
@@ -3975,19 +3975,19 @@ where
 
 		// Guarded: this handler can be dropped at any await below, and a group producer
 		// that dies without a terminal leaves its consumer waiting on nothing.
-		let producer = crate::recv::Group::new(producer);
+		let mut producer = crate::recv::Group::new(producer);
+		let observing = producer.handle().clone();
 
+		let mut ingest = GroupIngest::new(self, &group, timescale, resume.map(|_| start));
 		let res = {
-			let mut ingest = GroupIngest::new(self, &group, timescale, resume.map(|_| start));
-			let mut writing = producer.clone();
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
 				}
-				if let Poll::Ready(err) = producer.poll_closed(waiter) {
+				if let Poll::Ready(err) = observing.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
 				}
-				ingest.poll(stream, &mut writing, waiter)
+				ingest.poll(stream, &mut producer, waiter)
 			})
 			.await
 		};
@@ -4744,7 +4744,7 @@ where
 	async fn recv_fetch_payload(
 		&self,
 		stream: &mut Reader<S::RecvStream, Version>,
-		producer: &mut group::Producer,
+		producer: &mut crate::recv::Group,
 		payload: FetchPayload,
 	) -> Result<Fetched, Error> {
 		let FetchPayload {
@@ -4803,7 +4803,7 @@ where
 			let _ = frame.abort(err.clone());
 			return Err(err);
 		}
-		frame.finish()?;
+		producer.restore(frame.finish()?);
 		Ok(Fetched::Frame)
 	}
 
@@ -5002,7 +5002,7 @@ where
 			let _ = stream.writer.close().await;
 			return;
 		}
-		let demand = producer.clone();
+		let demand = producer.handle();
 		if let Ok(mut state) = slot.write() {
 			*state = GroupFetch::Ready {
 				producer,
@@ -5149,7 +5149,7 @@ where
 			last: None,
 		})?;
 
-		let closed = producer.clone();
+		let closed = producer.handle();
 		let mut producer = crate::recv::Group::new(producer);
 		let res = {
 			let mut receive = std::pin::pin!(crate::util::sendable(self.recv_group_fetch_objects(
@@ -5193,7 +5193,7 @@ where
 	async fn recv_group_fetch_objects(
 		&self,
 		stream: &mut Reader<S::RecvStream, Version>,
-		producer: &mut group::Producer,
+		producer: &mut crate::recv::Group,
 		start: u64,
 		end: Option<u64>,
 		timescale: Option<Timescale>,
@@ -5536,7 +5536,7 @@ impl GroupIngest {
 	fn poll<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
-		group: &mut group::Producer,
+		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Ended, Error>> {
 		let mut cx = waiter.context();
@@ -5594,7 +5594,7 @@ impl GroupIngest {
 							let timestamp = object_time(self.timescale, *timestamp)?;
 							let header = self.header(group, frame::Info { size: 0, timestamp })?;
 							let frame = group.create_frame_owned(header, &self.budget)?;
-							frame.finish()?;
+							group.restore(frame.finish()?);
 						}
 						self.phase = IngestPhase::Delta;
 						continue;
@@ -5627,7 +5627,7 @@ impl GroupIngest {
 						unreachable!()
 					};
 					match failed {
-						None => frame.finish()?,
+						None => group.restore(frame.finish()?),
 						Some(err) => {
 							// Fail the group with the reason, not the Drop fallback's
 							// generic `Dropped`.
@@ -12210,11 +12210,13 @@ mod stitch_tests {
 			// The next relay reads the same objects into its cache, up to the same end.
 			let end = last + u64::from(Filter::is_draft20(version));
 			let mut run = GroupFetchRun::new(version, decoder.rest().to_vec()).await;
-			let mut producer = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+			let mut producer =
+				crate::recv::Group::new(run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap());
 			run.subscriber
 				.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(end), None)
 				.await
 				.unwrap_or_else(|err| panic!("{version}: {err}"));
+			let mut producer = producer.into_inner();
 			producer.finish().unwrap();
 			let mut reader = producer.consume();
 			for id in [6, 8] {
@@ -12337,11 +12339,13 @@ mod stitch_tests {
 				objects.push(99);
 			}
 			let mut run = GroupFetchRun::new(version, objects.clone()).await;
-			let mut producer = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+			let mut producer =
+				crate::recv::Group::new(run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap());
 			run.subscriber
 				.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(9), None)
 				.await
 				.unwrap();
+			let mut producer = producer.into_inner();
 			producer.finish().unwrap();
 			let mut reader = producer.consume();
 			for id in [6, 8] {
@@ -14101,9 +14105,18 @@ mod stitch_tests {
 		async fn recv_objects(&mut self, start: u64, end: Option<u64>) -> Result<(), Error> {
 			let mut group = self.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
 			group.start_at(start).unwrap();
-			self.subscriber
+			let mut group = crate::recv::Group::new(group);
+			match self
+				.subscriber
 				.recv_group_fetch_objects(&mut self.stream, &mut group, start, end, None)
 				.await
+			{
+				Ok(()) => group.finish(),
+				Err(err) => {
+					let _ = group.abort(err.clone());
+					Err(err)
+				}
+			}
 		}
 	}
 }
@@ -14722,7 +14735,7 @@ mod joining_fetch_tests {
 				let GroupFetch::Ready { producer, .. } = &*state else {
 					panic!("accepted slot")
 				};
-				producer.clone()
+				producer.handle()
 			};
 			if stage == FetchStage::Accepted {
 				drop(group);
@@ -15257,7 +15270,7 @@ mod new_group_tests {
 			let state = self.probe.state.lock();
 			let copy = state.subscribes.values().next().unwrap().producer.clone().unwrap();
 			drop(state);
-			copy.create_group(group::Info { sequence }).unwrap();
+			copy.create_group(group::Info { sequence }).unwrap().finish().unwrap();
 		}
 	}
 

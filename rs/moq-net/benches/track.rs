@@ -519,7 +519,7 @@ fn bench_fanout_frame(c: &mut Criterion) {
 					let mut elapsed = Duration::ZERO;
 					for _ in 0..iterations {
 						if written == FRAMES_PER_GROUP {
-							if let Some(open) = open.take() {
+							if let Some(mut open) = open.take() {
 								open.finish().unwrap();
 							}
 							open = Some(fanout.track.append_group().unwrap());
@@ -1175,7 +1175,7 @@ fn bench_parked_abort(c: &mut Criterion) {
 							.map(|sequence| {
 								let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 								group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
-								group.clone().finish().unwrap();
+								group.finish().unwrap();
 								group
 							})
 							.collect();
@@ -1185,7 +1185,7 @@ fn bench_parked_abort(c: &mut Criterion) {
 						(broadcast, track, subscribers, groups)
 					},
 					|(_, _, subscribers, groups)| {
-						groups[retained as usize / 2].clone().abort(Error::Old).unwrap();
+						groups.swap_remove(retained as usize / 2).abort(Error::Old).unwrap();
 						for subscriber in subscribers {
 							let res = subscriber.poll_recv_group(&kio::Waiter::noop());
 							assert!(res.is_pending());

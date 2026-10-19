@@ -64,7 +64,7 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     it).
   - ✅ Make one open frame per group a compile-time guarantee. Drop public
     `Clone` from `group::Producer`; the model and sessions keep a
-    crate-private duplicate. The chunked writer is owned:
+    crate-private non-writing handle. The chunked writer is owned:
     `group::Producer::create_frame(self, info) -> Result<frame::Producer>`
     aborts the group with the error on failure (an oversized frame, a
     timestamp mismatch, or a closed group are bugs or protocol errors),
@@ -72,8 +72,7 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     back, and `frame.group()` gives read access (demand, info, closed)
     while the frame is open. `write_frame(&mut self)` stays for one-shot
     frames. The borrowing `create_frame` and `ProducerOwned` go, with the
-    stale "caller's promise" doc; `FrameOpen` stays only as a backstop for
-    crate-internal duplicates. `track::Producer` keeps `Clone`: several
+    stale "caller's promise" doc. `track::Producer` keeps `Clone`: several
     writers creating groups is legitimate, and `claim_sequence` already
     refuses a duplicate sequence.
     - Dropping `Clone` and the crate-private non-writing handle moved to
