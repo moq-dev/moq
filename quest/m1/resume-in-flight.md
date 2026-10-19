@@ -1,25 +1,32 @@
-# [M] A replaced copy stays while a group below its bound is in flight
+# [M] A replaced copy stays while a group it may still carry is needed
 
 ## Goal
 
-After a same-epoch route swap, a replaced copy bounded below the new copy's
-first group stays subscribed until every group under that bound it may still
-deliver has arrived, been dropped by its publisher, or fallen outside the
-reader's budget. An arrival-order reader then gets a group the old route was
-still sending when the new route took over, in Rust and JS alike.
+After a same-epoch route swap, a replaced copy is let go only once nothing it
+may still carry is needed, in Rust and JS alike:
+
+- A copy bounded below the new copy's first group stays subscribed until every
+  group under that bound it may still deliver has arrived, been dropped by its
+  publisher, or fallen outside the reader's budget. An arrival-order reader then
+  gets a group the old route was still sending when the new route took over.
+- A copy that receives a handed-out group after hand-out backs that group as if
+  it had held it then, so a later failure of the serving copy's group continues
+  from it.
 
 ## Plan
 
-Found by a hosted Codex review of #5836. The new copy handing out group F
-bounds the old copy at F-1, and the old copy is then kept only while a group
-under the bound is *buffered* unread: JS `Reader.#letGo` in
-`js/net/src/resume.ts` asks `hooks.hasUnreadGroup`, and Rust `Reader::let_go`
-in `rs/moq-net/src/model/resume.rs` asks `has_unread_group`. A read before
-F-1's stream header lands finds nothing buffered and lets the copy go, so F-1
-never arrives. Main bounds the old copy at the swap itself and never delivers
-that group in either order, so this completes #5836's handover rather than
-fixing a regression. An ordered reader past F already skips F-1, so only
-arrival order gains.
+Found by hosted Codex reviews of #5836.
+
+**In flight below the bound.** The new copy handing out group F bounds the old
+copy at F-1, and the old copy is then kept only while a group under the bound
+is *buffered* unread: JS `Reader.#letGo` in `js/net/src/resume.ts` asks
+`hooks.hasUnreadGroup`, and Rust `Reader::let_go` in
+`rs/moq-net/src/model/resume.rs` asks `has_unread_group`. A read before F-1's
+stream header lands finds nothing buffered and lets the copy go, so F-1 never
+arrives. Main bounds the old copy at the swap itself and never delivers that
+group in either order, so this completes #5836's handover rather than fixing a
+regression. An ordered reader past F already skips F-1, so only arrival order
+gains.
 
 - Keep a bounded copy while a gap under its bound is still open, using the rule
   [Resume reorder](/quest/m1/resume-reorder.md) settles for a passed group (a
@@ -27,9 +34,26 @@ arrival order gains.
 - The copy goes once its group channel ends, every sequence under the bound has
   arrived or been dropped, or the reader's budget has expired the gap. Never
   wait on a peer past that: relays report what they have.
-- Regression test in both languages, with mocked time: the old copy writes F-1
-  only after the new copy handed out F and the reader polled, and an
-  arrival-order reader still gets F-1. A dropped or expired F-1 lets the copy go.
+
+**Late backups.** A handed-out group leases the other copies holding it as
+backups, but only those holding it at hand-out (JS `Reader.#handOut` via
+`holding`, Rust `Reader::hand_out` via `peek_group`). A replaced copy that gets
+group F afterwards holds no lease, and F is above its F-1 bound, so the next
+poll lets it go. A failure of the serving copy's F then waits for another
+route, though an identical whole copy was there.
+
+- Decide between leasing late arrivals while a handed-out group is out (the
+  reader knows which groups are out and can lease a copy when one lands) and
+  keeping every replaced copy until the groups handed out above its bound end.
+  Prefer whichever keeps one lease rule for both paths.
+
+Regression tests in both languages, with mocked time:
+
+- The old copy writes F-1 only after the new copy handed out F and the reader
+  polled, and an arrival-order reader still gets F-1. A dropped or expired F-1
+  lets the copy go.
+- The old copy finishes F after the new copy handed F out and the reader polled
+  on. The serving copy's F then fails, and the read continues from the old copy.
 
 Public API: behavior only. Wire: none.
 
