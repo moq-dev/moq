@@ -628,7 +628,7 @@ export class Consumer {
 				(replacement) => {
 					started.settled = true;
 					// Abandoned while it was out: nobody reads it.
-					if (abort.signal.aborted) replacement.group.close();
+					if (abort.signal.aborted) replacement.discard();
 					else started.replacement = replacement;
 				},
 				(err: unknown) => {
@@ -653,7 +653,7 @@ export class Consumer {
 		if (!replacement) return true;
 		if (!failed && (this.#state.frames.peek().length > 0 || this.#state.closed.peek() !== undefined)) {
 			// The copy being read delivered or ended meanwhile; keep reading it.
-			replacement.group.close();
+			replacement.discard();
 			return true;
 		}
 		this.#adopt(replacement);
@@ -671,7 +671,7 @@ export class Consumer {
 		if (!attempt) return;
 		this.#attempt = undefined;
 		attempt.abort.abort();
-		attempt.replacement?.group.close();
+		attempt.replacement?.discard();
 	}
 
 	// Read the rest of the group from `replacement`, from the frame this one reached.
@@ -679,7 +679,7 @@ export class Consumer {
 		const next = replacement.group.#state;
 		const index = this.#index();
 		if (next.start > index) {
-			replacement.group.close();
+			replacement.discard();
 			this.#terminal ??= new Error(`group ${this.sequence} cannot resume at frame ${index}`);
 			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
 			return;

@@ -267,6 +267,8 @@ export interface Replacement {
 	readonly expiry: Expiry;
 	/** The group reads this copy from now on. */
 	adopt(): void;
+	/** Nobody reads this copy: close it and give back what it holds. */
+	discard(): void;
 }
 
 /** A datagram read that does not wait. */

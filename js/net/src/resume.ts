@@ -121,6 +121,7 @@ class Source {
 	}
 
 	release(): void {
+		if (this.#holds === 0) throw new Error("route released more often than retained");
 		if (--this.#holds === 0) this.#consumer.close();
 	}
 }
@@ -903,6 +904,7 @@ class Recover implements GroupRecover {
 				this.#copy = copy;
 				copy.lease++;
 			},
+			discard: () => group.close(),
 		};
 	}
 }
@@ -1158,18 +1160,18 @@ export class Front {
 			replace: async (_index, failed, signal) => {
 				// A stalled fetch only moves to another route; a failed one may ask its own again.
 				const next = await this.#fetch(name, sequence, { ...options, signal }, failed ? undefined : current);
-				let adopted = false;
-				void next.group.closed.then(() => {
-					if (!adopted) next.source.release();
-				});
+				// The fetch's hold on its route passes to the group on adoption, or goes with the discard.
 				return {
 					group: next.group,
 					// The route applies the fetch's own budget.
 					expiry: { expired: () => false, changed: [] },
 					adopt: () => {
-						adopted = true;
 						current.release();
 						current = next.source;
+					},
+					discard: () => {
+						next.group.close();
+						next.source.release();
 					},
 				};
 			},

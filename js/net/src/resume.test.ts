@@ -215,6 +215,52 @@ test("waiting for the end of a track whose replacement was refused ends with the
 	close();
 });
 
+test("a fetched group continued from an empty, already-closed copy releases that route once", async () => {
+	const errors: unknown[] = [];
+	const onError = (err: unknown) => errors.push(err);
+	process.on("unhandledRejection", onError);
+	try {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const c = new BroadcastProducer();
+		copy(a);
+		copy(b);
+		copy(c);
+		front.serve(a.consume());
+		// A reader on another track holds each route's broadcast too.
+		const sub = front.consumer.track("seq").subscribe();
+
+		// Group 5 is empty: the first route fails it, the next holds it closed.
+		const failing = new GroupProducer(5);
+		a.createTrack("fetch").writeGroup(failing);
+		const group = await front.consumer.track("fetch").fetchGroup(5);
+		const read = group.readFrame();
+		const whole = new GroupProducer(5);
+		b.createTrack("fetch").writeGroup(whole);
+		whole.close();
+		front.serve(b.consume());
+		await settle();
+		failing.close(new StreamError(StreamCode.SessionClosed));
+		expect(await read).toBeUndefined();
+		group.close();
+		await settle();
+
+		// Moving off the route and closing everything gives back every hold, and no more.
+		front.serve(c.consume());
+		await settle();
+		sub.close();
+		front.consumer.close();
+		await settle();
+		a.close();
+		b.close();
+		c.close();
+	} finally {
+		process.off("unhandledRejection", onError);
+	}
+	expect(errors).toEqual([]);
+});
+
 test("a fetched group failing as it is handed out releases its route once", async () => {
 	// The failure lands at each turn around the hand-out, so one lands between the fetch
 	// returning and its recovery being attached.

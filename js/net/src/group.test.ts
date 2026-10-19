@@ -264,6 +264,7 @@ test("a group that ends as its replacement arrives ends rather than adopting it"
 	const replacement = new Producer(0);
 	let resolve: ((value: Replacement) => void) | undefined;
 	let adopted = false;
+	let discarded = false;
 	hooks.recoverGroup(consumer, {
 		changed: route,
 		wants: (failed) => failed !== undefined || route.peek() > 0,
@@ -285,10 +286,14 @@ test("a group that ends as its replacement arrives ends rather than adopting it"
 		adopt: () => {
 			adopted = true;
 		},
+		discard: () => {
+			discarded = true;
+		},
 	});
 	producer.close();
 	expect(await read).toBeUndefined();
 	expect(adopted).toBe(false);
+	expect(discarded).toBe(true);
 });
 
 test("a group recovered twice reads on and settles", async () => {
@@ -304,6 +309,7 @@ test("a group recovered twice reads on and settles", async () => {
 			group: replacements[next++].mirror(),
 			expiry: { expired: () => false, changed: [] },
 			adopt: () => {},
+			discard: () => {},
 		}),
 	});
 	void consumer.closed;
