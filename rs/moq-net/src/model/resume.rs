@@ -1319,6 +1319,42 @@ mod test {
 		);
 	}
 
+	/// A plain reader of a compressed group inflates the replacement's frames from frame 0,
+	/// since the failed copy released the ones it read.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_failed_compressed_group_continues_from_the_replacement() {
+		let info = crate::track::Info::timed().with_compress(true);
+		let compressed = || track::Producer::new(Arc::new(broadcast::Info::default()), "video", info.clone());
+		let routes = Producer::new();
+		let logical = track::Request::new(Arc::new(broadcast::Info::default()), "video")
+			.routes(routes.consume())
+			.accept(info.clone());
+		let a = compressed();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let frames: Vec<Vec<u8>> = (0..3).map(|index| format!("{index}{}", "z".repeat(64)).into()).collect();
+
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), frames[0].clone()).unwrap();
+		open.write_frame(ts(1), frames[1].clone()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading).as_ref(), Some(&frames[0]));
+		assert_eq!(read(&mut reading).as_ref(), Some(&frames[1]));
+
+		let b = compressed();
+		let mut whole = b.create_group(group::Info { sequence: 0 }).unwrap();
+		for (ms, frame) in frames.iter().enumerate() {
+			whole.write_frame(ts(ms as u64), frame.clone()).unwrap();
+		}
+		whole.finish().unwrap();
+		routes.serve(b.consume());
+		open.abort(Error::Cancel).unwrap();
+
+		assert_eq!(read(&mut reading).as_ref(), Some(&frames[2]));
+		assert_eq!(read(&mut reading), None);
+	}
+
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_half_read_frame_continues_from_the_replacement() {

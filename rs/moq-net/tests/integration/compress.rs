@@ -1,0 +1,140 @@
+#![cfg(feature = "async")]
+
+//! A compressed track crosses a relay to every kind of subscriber.
+//!
+//! The publisher hop always speaks moq-lite 07, so the relay caches the DEFLATE slices as
+//! received. A moq-lite 07 subscriber gets them as stored and inflates them itself; every
+//! other version gets the plain frames the relay inflates once for all of them.
+
+use crate::support;
+
+use std::time::Duration;
+
+use moq_net::{Hop, Timestamp, Version};
+use support::harness::{MockConnectOptions, MockPair, connect_mock};
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Every downstream wire: one that carries compression, and ones that do not.
+const VERSIONS: &[&str] = &["moq-lite-07-wip", "moq-lite-06", "moq-lite-03", "moq-transport-17"];
+
+fn compressed() -> moq_net::track::Info {
+	moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_compress(true)
+}
+
+fn produce_origin(hop: u64) -> moq_net::origin::Producer {
+	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
+	support::harness::spawn(driver);
+	producer
+}
+
+/// A repetitive payload, which DEFLATE shrinks, distinct per frame.
+fn payload(frame: u64) -> Vec<u8> {
+	format!("{{\"frame\":{frame},\"pad\":\"{}\"}}", "abc".repeat(200)).into_bytes()
+}
+
+struct Fixture {
+	track: moq_net::track::Producer,
+	subscriber: moq_net::track::Subscriber,
+	_broadcast: moq_net::broadcast::Producer,
+	_hops: Vec<MockPair>,
+	_origins: Vec<moq_net::origin::Producer>,
+}
+
+/// A compressed track published over moq-lite 07 to a relay, and subscribed from the relay
+/// over `downstream`.
+async fn connect(downstream: &str) -> Fixture {
+	let publisher = produce_origin(1);
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let track = broadcast.create_track("data", compressed()).unwrap();
+	broadcast.announce(Default::default()).unwrap();
+
+	let relay = produce_origin(2);
+	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(relay.clone());
+	let upstream = connect_mock(options).await;
+
+	let origin = produce_origin(3);
+	let mut options = MockConnectOptions::new(downstream.parse::<Version>().unwrap());
+	options.server_publish = Some(relay.consume());
+	options.client_subscribe = Some(origin.clone());
+	let downstream = connect_mock(options).await;
+
+	let consumer = origin.consume();
+	consumer.routed("bcast").await.unwrap();
+	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+	let subscriber = remote.track("data").unwrap().subscribe(None).await.unwrap();
+	support::harness::subscribed(&track).await;
+
+	Fixture {
+		track,
+		subscriber,
+		_broadcast: broadcast,
+		_hops: vec![upstream, downstream],
+		_origins: vec![publisher, relay, origin],
+	}
+}
+
+/// Whole and chunked frames on a compressed track read back as written on every version,
+/// and only a moq-lite 07 subscriber learns the track is compressed.
+#[moq_clock::test]
+async fn relay_serves_every_version() {
+	for &version in VERSIONS {
+		moq_clock::timeout(TIMEOUT, async {
+			let mut fixture = connect(version).await;
+			assert_eq!(
+				fixture.subscriber.info().compress,
+				version == "moq-lite-07-wip",
+				"{version}: compression declared"
+			);
+
+			let mut group = fixture.track.append_group().unwrap();
+			group.write_frame(Timestamp::from_millis(0).unwrap(), payload(0)).unwrap();
+			group.write_frame(Timestamp::from_millis(1).unwrap(), payload(1)).unwrap();
+			// A chunked frame is compressed whole once its last chunk lands.
+			let chunked = payload(2);
+			let mut frame = group
+				.create_frame(moq_net::frame::Info {
+					size: chunked.len() as u64,
+					timestamp: Some(Timestamp::from_millis(2).unwrap()),
+				})
+				.unwrap();
+			for chunk in chunked.chunks(100) {
+				frame.write(bytes::Bytes::copy_from_slice(chunk)).unwrap();
+			}
+			frame.finish().unwrap();
+			group.finish().unwrap();
+
+			let mut group = fixture.subscriber.recv_group().await.unwrap().expect("group");
+			for index in 0..3 {
+				let frame = group.read_frame().await.unwrap().expect("frame");
+				assert_eq!(&frame.payload[..], &payload(index)[..], "{version}: frame {index}");
+			}
+			assert!(group.read_frame().await.unwrap().is_none(), "{version}: extra frame");
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}
+
+/// A compressed track's datagrams read back as written, whether the subscriber takes them
+/// compressed or inflated.
+#[moq_clock::test]
+async fn datagrams_serve_every_version() {
+	for &version in &["moq-lite-07-wip", "moq-lite-06"] {
+		moq_clock::timeout(TIMEOUT, async {
+			let mut fixture = connect(version).await;
+			fixture
+				.track
+				.insert_datagram(0, Timestamp::from_millis(0).unwrap(), payload(0))
+				.unwrap();
+			let datagram = fixture.subscriber.recv_datagram().await.unwrap().expect("datagram");
+			assert_eq!(&datagram.payload[..], &payload(0)[..], "{version}");
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}

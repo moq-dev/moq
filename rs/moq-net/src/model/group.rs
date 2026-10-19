@@ -3902,4 +3902,130 @@ mod test {
 		third.write(Bytes::from_static(b"x")).unwrap();
 		assert_eq!(third.allocated(), 1024, "the finished frame did not return its share");
 	}
+
+	/// A repetitive frame DEFLATE shrinks, distinct per index.
+	fn verbose(index: usize) -> Bytes {
+		Bytes::from(format!("{index}:{}", "moq".repeat(300)))
+	}
+
+	fn untimed(size: usize) -> frame::Info {
+		frame::Info {
+			size: size as u64,
+			timestamp: None,
+		}
+	}
+
+	fn compressed_group(pool: &cache::Pool) -> Producer {
+		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		Producer::new(Info::from(0u64), track::Info::default().with_compress(true), cache)
+	}
+
+	fn read_plain(consumer: &mut Consumer) -> Result<Option<Bytes>> {
+		match consumer.poll_read_frame(&kio::Waiter::noop()) {
+			Poll::Ready(res) => res.map(|frame| frame.map(|frame| frame.payload)),
+			Poll::Pending => panic!("the frame is ready"),
+		}
+	}
+
+	/// A compressed group stores DEFLATE slices, hands plain readers the frames as written
+	/// from one shared inflated copy, and hands egress the slices with their sizes.
+	#[test]
+	fn compressed_group_stores_slices_and_inflates_once() {
+		let pool = cache::Pool::unbounded();
+		let mut group = compressed_group(&pool);
+		group.write_frame(None, verbose(0)).unwrap();
+		// A chunked frame is invisible until its last chunk, then compressed whole.
+		let mut frame = group.create_frame(untimed(verbose(1).len())).unwrap();
+		for chunk in verbose(1).chunks(100) {
+			frame.write(Bytes::copy_from_slice(chunk)).unwrap();
+		}
+		frame.finish().unwrap();
+		group.write_frame(None, verbose(2)).unwrap();
+		group.finish().unwrap();
+
+		let plain: usize = (0..3).map(|index| verbose(index).len()).sum();
+		let stored = pool.used();
+		let uncompressed = cache::Pool::unbounded();
+		let mut reference = Producer::new(
+			Info::from(0u64),
+			track::Info::default(),
+			cache::Track::new(uncompressed.clone(), kio::Weak::new()),
+		);
+		for index in 0..3 {
+			reference.write_frame(None, verbose(index)).unwrap();
+		}
+		reference.finish().unwrap();
+		assert!(
+			stored + (plain as u64) / 2 < uncompressed.used(),
+			"slices are stored: {stored} against {}",
+			uncompressed.used()
+		);
+
+		let mut first = group.consume();
+		let mut second = group.consume();
+		for index in 0..3 {
+			assert_eq!(read_plain(&mut first).unwrap().unwrap(), verbose(index), "frame {index}");
+		}
+		let inflated = pool.used();
+		assert!(inflated >= stored + plain as u64, "the inflated copy is billed");
+		for index in 0..3 {
+			assert_eq!(read_plain(&mut second).unwrap().unwrap(), verbose(index), "frame {index}");
+		}
+		assert_eq!(pool.used(), inflated, "a second reader shares the inflated copy");
+		assert!(read_plain(&mut first).unwrap().is_none());
+
+		let mut raw = group.consume().compressed();
+		let mut decoder = flate::Decoder::new();
+		for index in 0..3 {
+			let Poll::Ready(Ok(Some(object))) = raw.poll_read_object(&kio::Waiter::noop()) else {
+				panic!("frame {index} is ready");
+			};
+			let size = object.inflated.expect("a stored slice carries its size");
+			assert_eq!(size, verbose(index).len() as u64);
+			let frame = decoder.frame(&object.frame.payload, size as usize).unwrap();
+			assert_eq!(frame, verbose(index), "slice {index}");
+		}
+
+		drop((first, second, raw));
+		drop(group);
+		assert_eq!(pool.used(), 0, "the inflated copy is released with the group");
+	}
+
+	/// A received slice that inflates to other than its declared size fails the read.
+	#[test]
+	fn a_received_size_mismatch_fails_the_read() {
+		let pool = cache::Pool::unbounded();
+		let mut group = compressed_group(&pool);
+		let slice = flate::Encoder::new().frame(&verbose(0));
+		let header = frame::Header {
+			info: untimed(slice.len()),
+			fields: None,
+			inflated: Some(verbose(0).len() as u64 + 1),
+		};
+		let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
+		frame.write(slice).unwrap();
+		frame.finish().unwrap();
+		group.finish().unwrap();
+
+		assert!(matches!(read_plain(&mut group.consume()), Err(Error::WrongSize)));
+	}
+
+	/// A declared inflated size past the cache budget is refused before anything inflates,
+	/// and only a compressed track takes one.
+	#[test]
+	fn an_inflated_size_is_checked_on_open() {
+		let header = |inflated| frame::Header {
+			info: untimed(1),
+			fields: None,
+			inflated: Some(inflated),
+		};
+		let pool = cache::Pool::unbounded();
+		let res = compressed_group(&pool).create_frame_owned(header(MAX_CACHE_BYTES + 1), &frame::Budget::default());
+		assert!(matches!(res, Err(Error::FrameTooLarge)));
+
+		let res = Info::from(1u64)
+			.produce_untimed()
+			.create_frame_owned(header(1), &frame::Budget::default());
+		assert!(matches!(res, Err(Error::ProtocolViolation)));
+	}
 }
