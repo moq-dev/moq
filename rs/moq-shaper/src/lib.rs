@@ -480,10 +480,11 @@ impl Shaper {
 		})
 	}
 
-	/// Collect the next active link's surviving ingress until its rate bucket must overflow.
+	/// Collect the next active link's ingress until its rate bucket must overflow.
 	///
 	/// Armed after a handshake, this accounts the collected datagrams at one instant,
-	/// regardless of scheduling gaps. The chosen direction needs a fixed rate profile;
+	/// regardless of scheduling gaps. Collected datagrams are never lost, so the
+	/// gate opens on what the sender offers, not on the loss draws. The chosen direction needs a fixed rate profile;
 	/// other flows and the opposite direction keep forwarding. A shared link collects
 	/// all its clients together. Holding enough bytes
 	/// requires transport credit beyond the bucket's burst plus queue allowance.
@@ -955,13 +956,15 @@ struct Parcel {
 	dest: SocketAddr,
 }
 
-/// One direction of one flow, or of every flow on a shared path: the decisions
-/// and the state they depend on.
+/// The seeded decisions for one datagram.
 struct Draw {
+	lose: bool,
 	skip: bool,
 	spread: f64,
 }
 
+/// One direction of one flow, or of every flow on a shared path: the decisions
+/// and the state they depend on.
 struct Link {
 	#[cfg(any(test, feature = "test"))]
 	stream: u64,
@@ -1035,9 +1038,10 @@ impl Link {
 	fn push(&mut self, now: Instant, datagram: Vec<u8>, socket: &Arc<UdpSocket>, dest: SocketAddr, tally: &Tally) {
 		#[cfg(any(test, feature = "test"))]
 		if let Some(state) = self.ingress.selected(self.stream) {
-			let Some(draw) = self.draw(now, tally) else {
-				return;
-			};
+			// Draw as usual so later datagrams see the same seeded stream, but keep
+			// a lost one: the gate holds the acknowledgments a sender needs to replace
+			// it, so a gate waiting on surviving bytes could wait out the connection.
+			let draw = self.draw(now, tally);
 			let packet = ingress::Held {
 				datagram,
 				socket: socket.clone(),
@@ -1085,11 +1089,15 @@ impl Link {
 	/// When a datagram of `size` bytes arriving `now` leaves, and whether it was
 	/// counted as delayed, or `None` when it is dropped.
 	fn treat(&mut self, now: Instant, size: usize, tally: &Tally) -> Option<(Instant, bool)> {
-		let draw = self.draw(now, tally)?;
+		let draw = self.draw(now, tally);
+		if draw.lose {
+			bump(&tally.lost);
+			return None;
+		}
 		self.schedule(now, size, draw, tally)
 	}
 
-	fn draw(&mut self, now: Instant, tally: &Tally) -> Option<Draw> {
+	fn draw(&mut self, now: Instant, tally: &Tally) -> Draw {
 		self.step(now, tally);
 		bump(&tally.packets);
 
@@ -1102,19 +1110,14 @@ impl Link {
 			Jitter::Gaussian => gaussian(&mut self.rng),
 		};
 
-		if lose {
-			bump(&tally.lost);
-			return None;
-		}
-
-		Some(Draw { skip, spread })
+		Draw { lose, skip, spread }
 	}
 
 	fn schedule(
 		&mut self,
 		now: Instant,
 		size: usize,
-		Draw { skip, spread }: Draw,
+		Draw { skip, spread, .. }: Draw,
 		tally: &Tally,
 	) -> Option<(Instant, bool)> {
 		let mut depart = now;
@@ -1212,8 +1215,46 @@ mod tests {
 		assert!(received.try_recv().is_err());
 	}
 
+	/// A gate that waited on surviving bytes never opened when loss took what a
+	/// sender could offer without the acknowledgments the gate holds back.
 	#[tokio::test(start_paused = true)]
-	async fn ingress_preserves_loss_draws_and_cancellation_releases_held_packets() {
+	async fn an_ingress_burst_opens_on_what_the_sender_offers_despite_loss() {
+		let profile = Profile {
+			loss: 1.0,
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let (send, mut received) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &Options::default(), 42, 0, start, send);
+		let burst = link.ingress.arm().unwrap();
+		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
+		let tally = Tally::default();
+		for _ in 0..3 {
+			link.push(start, vec![0; 1000], &socket, LOCALHOST, &tally);
+		}
+		tokio::time::timeout(Duration::from_secs(1), burst.completed())
+			.await
+			.expect("the gate never opened")
+			.unwrap();
+		assert_eq!(tally.lost.load(Ordering::Relaxed), 0);
+		assert_eq!(tally.overflowed.load(Ordering::Relaxed), 1);
+		for _ in 0..2 {
+			assert!(received.try_recv().is_ok());
+		}
+
+		// Past the gate, loss acts again.
+		link.push(start, vec![0; 1000], &socket, LOCALHOST, &tally);
+		assert_eq!(tally.lost.load(Ordering::Relaxed), 1);
+		assert!(received.try_recv().is_err());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn ingress_preserves_draws_and_cancellation_releases_held_packets() {
 		let profile = Profile {
 			loss: 0.25,
 			rate: Some(Rate {
@@ -1239,7 +1280,7 @@ mod tests {
 			plain.push(now, vec![0; 1000], &socket, LOCALHOST, &b);
 		}
 		burst.completed().await.unwrap();
-		assert_eq!(a.lost.load(Ordering::Relaxed), b.lost.load(Ordering::Relaxed));
+		assert!(a.lost.load(Ordering::Relaxed) <= b.lost.load(Ordering::Relaxed));
 		assert_eq!(gated.rng.random::<u64>(), plain.rng.random::<u64>());
 		assert!(a.overflowed.load(Ordering::Relaxed) > 0);
 

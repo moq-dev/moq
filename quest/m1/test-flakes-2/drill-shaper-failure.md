@@ -12,7 +12,3 @@ counters; only `verify()` reports the shaper's error. Surface that error
 when a drill fails. Found while chasing #5796.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Relay burst drill](/quest/m1/test-flakes-2/relay-burst-impaired.md) - another impaired drill failure

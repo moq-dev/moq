@@ -49,5 +49,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Random-loss audit](/quest/m1/random-loss-audit.md) - re-judges what random-loss tests drove, on this harness
-- [Relay burst drill](/quest/m1/test-flakes-2/relay-burst-impaired.md) - owns the impaired burst drill's flake
 - [TS recovery](/quest/m1/ts-reliability/recovery.md) - MoQ content-loss schedules, separate from network impairment

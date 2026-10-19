@@ -62,8 +62,8 @@ impl State {
 		}
 		self.bytes += packet.datagram.len() as u64;
 		self.held.push(packet);
-		// Loss has already acted. Even an initially full bucket cannot fit
-		// these surviving bytes, independent of how ingress was scheduled.
+		// Even an initially full bucket cannot fit these bytes, independent of
+		// how ingress was scheduled.
 		if rate.cost(self.bytes) <= rate.cost(rate.burst) + rate.queue {
 			return None;
 		}
