@@ -91,9 +91,9 @@ uncovered here.
   reader asks for each next group, so the real-time subscription never drops one
   superseded mid-read, which a timer-paced publisher on a loaded runner did.
 - **refuses a track the publisher does not serve** -- the refusal has to
-  surface, as a rejected `subscribe` (lite-06, which looks a track's info up
-  first) or as a track that yields no group (IETF, lite-02). A hang fails on the
-  case timeout.
+  surface as an error, from `subscribe` (lite-06, which looks a track's info up
+  first) or from `recvGroup` (IETF and lite-02 can accept first). A group or a
+  clean end fails, and a hang fails on the case timeout.
 - **free() rejects a pending consume** -- freeing a session closes it, so a
   `consume` still waiting on an unannounced path has to reject. A fresh session
   then has to connect, which a corrupted wasm heap would not.
