@@ -1317,6 +1317,7 @@ where
 							&mut stream,
 							&mut track_serve,
 							&mut request_finished,
+							&mut goaways,
 							fill,
 							request_grant.clone(),
 						)
@@ -1434,6 +1435,7 @@ where
 		stream: &mut Stream<S, Version>,
 		serve: &mut TrackServe<S>,
 		finished: &mut bool,
+		goaways: &mut super::request_stream::Messages<S>,
 		fill: impl std::future::Future<Output = ()>,
 		request_grant: Option<crate::auth::RequestGrant>,
 	) -> Option<Served> {
@@ -1451,7 +1453,6 @@ where
 		// carry no Request ID, so they must go out in the order the updates arrived. The stash is
 		// a FIFO bounded by MAX_REQUEST_UPDATES (counting the one being verified).
 		let mut renewal = request_update::Renewal::<super::request_stream::Update>::default();
-		let mut goaways = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 
 		// What one turn of the loop resolved to.
 		enum Turn {
@@ -6156,6 +6157,7 @@ mod serve_tests {
 		// REQUEST_UPDATE, Request ID 2, no parameters.
 		let mut session = ScriptedSession::new(vec![0x02, 0, 2, 2, 0]);
 		let mut stream = Stream::open(&mut session, version).await.unwrap();
+		let mut goaways = super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 		let mut serving = TrackServe::new(
 			h.session.clone(),
 			h.track.subscribe(None),
@@ -6166,7 +6168,7 @@ mod serve_tests {
 		);
 		let served = h
 			.publisher
-			.run_subscription(&mut stream, &mut serving, &mut false, async {}, None)
+			.run_subscription(&mut stream, &mut serving, &mut false, &mut goaways, async {}, None)
 			.await;
 		assert!(matches!(served, Some(Served::UpdateFailed(_))), "{served:?}");
 		assert!(h.log.closes().is_empty());
@@ -6176,6 +6178,56 @@ mod serve_tests {
 			crate::coding::decode_buf(&mut bytes, version, super::super::request_stream::Framed::decode).unwrap();
 		assert_eq!(id, ietf::RequestError::ID);
 		assert_eq!(body.message::<ietf::RequestError>(version).unwrap().error_code, 0x06);
+	}
+
+	#[moq_clock::test]
+	async fn a_subscription_keeps_its_goaway_count_until_the_final_marker() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let h = serve(version);
+			let mut session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let mut goaways = super::super::request_stream::Messages::new(h.session.clone(), false);
+			{
+				let run = h.publisher.run_subscription(
+					&mut stream,
+					&mut serving,
+					&mut finished,
+					&mut goaways,
+					async {},
+					None,
+				);
+				let mut run = std::pin::pin!(run);
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				h.track.finish().unwrap();
+				assert!(matches!(run.await, Some(Served::Track(Ok(())))), "{version}");
+			}
+			// The same reader now watches cancellation while the final marker waits for credit.
+			session.push(&[0x10, 0, 2, 0, 0]);
+			let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+			assert!(
+				matches!(
+					super::super::request_stream::poll_cancel(
+						&mut stream,
+						&mut finished,
+						&mut goaways,
+						version,
+						&mut cx
+					),
+					Poll::Ready(Err(Error::ProtocolViolation))
+				),
+				"{version}"
+			);
+			assert_eq!(h.log.closes()[0].0, 0x03, "{version}");
+		}
 	}
 
 	fn occurrences(log: &Log, needle: &[u8]) -> usize {
@@ -6246,6 +6298,8 @@ mod serve_tests {
 			let h = serve(version);
 			let mut session = ScriptedSession::per_stream_eof(vec![vec![]]);
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut goaways =
+				super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 			let mut serving = TrackServe::new(
 				h.session.clone(),
 				h.track.subscribe(None),
@@ -6255,11 +6309,14 @@ mod serve_tests {
 				None,
 			);
 			let mut finished = false;
-			let mut run =
-				std::pin::pin!(
-					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None,)
-				);
+			let mut run = std::pin::pin!(h.publisher.run_subscription(
+				&mut stream,
+				&mut serving,
+				&mut finished,
+				&mut goaways,
+				async {},
+				None,
+			));
 			assert_eq!(
 				futures::poll!(run.as_mut()).is_ready(),
 				super::super::request_stream::fin_cancels(version),
@@ -6292,6 +6349,8 @@ mod serve_tests {
 			let h = serve(version);
 			let mut session = ScriptedSession::per_stream_reset(vec![vec![]]);
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut goaways =
+				super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 			let mut serving = TrackServe::new(
 				h.session.clone(),
 				h.track.subscribe(None),
@@ -6301,9 +6360,9 @@ mod serve_tests {
 				None,
 			);
 			let mut finished = false;
-			let run = h
-				.publisher
-				.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None);
+			let run =
+				h.publisher
+					.run_subscription(&mut stream, &mut serving, &mut finished, &mut goaways, async {}, None);
 			assert!(futures::poll!(std::pin::pin!(run)).is_ready(), "{version}");
 		}
 	}
@@ -6377,6 +6436,7 @@ mod serve_tests {
 		let h = serve(version);
 		let mut session = ScriptedSession::per_stream(vec![vec![0x02, 0, 4, 2, 1, 0x20, 10, 0x02, 0, 2, 4, 0]]);
 		let mut stream = Stream::open(&mut session, version).await.unwrap();
+		let mut goaways = super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 		let mut serving = TrackServe::new(
 			h.session.clone(),
 			h.track.subscribe(None),
@@ -6386,11 +6446,14 @@ mod serve_tests {
 			None,
 		);
 		let mut finished = false;
-		let mut run =
-			std::pin::pin!(
-				h.publisher
-					.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None,)
-			);
+		let mut run = std::pin::pin!(h.publisher.run_subscription(
+			&mut stream,
+			&mut serving,
+			&mut finished,
+			&mut goaways,
+			async {},
+			None,
+		));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		assert_eq!(h.track.subscription().unwrap().priority, 245);
 		assert_eq!(occurrences(&session.log, &[0x07, 0, 1, 0]), 2);
@@ -6408,6 +6471,7 @@ mod serve_tests {
 		// subscription's stream past it.
 		let queue = PriorityQueue::default();
 		let _other = queue.insert(Priority::new(100, 1, 0));
+		let mut goaways = super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 		let mut serving = TrackServe::new(
 			h.session.clone(),
 			h.track.subscribe(None),
@@ -6418,11 +6482,14 @@ mod serve_tests {
 		)
 		.ranked(queue);
 		let mut finished = false;
-		let mut run =
-			std::pin::pin!(
-				h.publisher
-					.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None,)
-			);
+		let mut run = std::pin::pin!(h.publisher.run_subscription(
+			&mut stream,
+			&mut serving,
+			&mut finished,
+			&mut goaways,
+			async {},
+			None,
+		));
 
 		// An unfinished group keeps its stream open.
 		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -6448,6 +6515,7 @@ mod serve_tests {
 		// FORWARD=0 asks to pause delivery, which this publisher does not support.
 		let mut session = ScriptedSession::per_stream(vec![vec![0x02, 0, 4, 2, 1, 0x10, 0]]);
 		let mut stream = Stream::open(&mut session, version).await.unwrap();
+		let mut goaways = super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 		let mut serving = TrackServe::new(
 			h.session.clone(),
 			h.track.subscribe(None),
@@ -6459,7 +6527,7 @@ mod serve_tests {
 		let mut finished = false;
 		let served = h
 			.publisher
-			.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+			.run_subscription(&mut stream, &mut serving, &mut finished, &mut goaways, async {}, None)
 			.await;
 		assert!(
 			matches!(served, Some(Served::UpdateFailed(Error::Unsupported))),
@@ -6674,6 +6742,7 @@ mod serve_tests {
 		let h = serve(version);
 		let mut session = ScriptedSession::per_stream(vec![vec![]]);
 		let mut stream = Stream::open(&mut session, version).await.unwrap();
+		let mut goaways = super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 		let mut serving = TrackServe::new(
 			h.session.clone(),
 			h.track.subscribe(None),
@@ -6686,7 +6755,7 @@ mod serve_tests {
 		let mut finished = false;
 		let served = h
 			.publisher
-			.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+			.run_subscription(&mut stream, &mut serving, &mut finished, &mut goaways, async {}, None)
 			.await
 			.expect("the track's error ends the subscription");
 		assert!(matches!(served, Served::Track(Err(Error::Unsupported))), "{served:?}");
@@ -6831,6 +6900,8 @@ mod serve_tests {
 			let h = serve(version);
 			let mut session = ScriptedSession::new(legacy_update(version, 10, true));
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut goaways =
+				super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 			let mut serving = TrackServe::new(
 				h.session.clone(),
 				h.track.subscribe(None),
@@ -6840,11 +6911,14 @@ mod serve_tests {
 				None,
 			);
 			let mut finished = false;
-			let mut run =
-				std::pin::pin!(
-					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None,)
-				);
+			let mut run = std::pin::pin!(h.publisher.run_subscription(
+				&mut stream,
+				&mut serving,
+				&mut finished,
+				&mut goaways,
+				async {},
+				None,
+			));
 			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
 			assert_eq!(h.track.subscription().unwrap().priority, 245, "{version}");
 
@@ -6874,6 +6948,8 @@ mod serve_tests {
 			let h = serve(version);
 			let mut session = ScriptedSession::new(legacy_update(version, 10, false));
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut goaways =
+				super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 			let mut serving = TrackServe::new(
 				h.session.clone(),
 				h.track.subscribe(None),
@@ -6885,7 +6961,7 @@ mod serve_tests {
 			let mut finished = false;
 			let served = h
 				.publisher
-				.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+				.run_subscription(&mut stream, &mut serving, &mut finished, &mut goaways, async {}, None)
 				.await;
 			assert!(
 				matches!(served, Some(Served::UpdateFailed(Error::Unsupported))),
@@ -6996,6 +7072,8 @@ mod serve_tests {
 			);
 			let mut session = ScriptedSession::new(new_group_update(version, 10, 9));
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut goaways =
+				super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 			let mut serving = TrackServe::new(
 				h.session.clone(),
 				h.track.subscribe(None),
@@ -7005,11 +7083,14 @@ mod serve_tests {
 				None,
 			);
 			let mut finished = false;
-			let mut run =
-				std::pin::pin!(
-					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
-				);
+			let mut run = std::pin::pin!(h.publisher.run_subscription(
+				&mut stream,
+				&mut serving,
+				&mut finished,
+				&mut goaways,
+				async {},
+				None
+			));
 			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
 			assert_eq!(h.track.new_group(), Some(NewGroup { value: 9, first: 0 }), "{version}");
 			// Draft 16 names the update it answers; later drafts answer on its own stream.
@@ -7035,6 +7116,8 @@ mod serve_tests {
 			let mut session =
 				ScriptedSession::new([new_group_update(version, 10, 9), new_group_update(version, 12, 0)].concat());
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut goaways =
+				super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 			let mut serving = TrackServe::new(
 				h.session.clone(),
 				h.track.subscribe(None),
@@ -7044,11 +7127,14 @@ mod serve_tests {
 				None,
 			);
 			let mut finished = false;
-			let mut run =
-				std::pin::pin!(
-					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
-				);
+			let mut run = std::pin::pin!(h.publisher.run_subscription(
+				&mut stream,
+				&mut serving,
+				&mut finished,
+				&mut goaways,
+				async {},
+				None
+			));
 			assert!(
 				futures::poll!(run.as_mut()).is_pending(),
 				"{version}: an update ended it"
@@ -7065,6 +7151,8 @@ mod serve_tests {
 			let h = serve(version);
 			let mut session = ScriptedSession::new(new_group_update(version, 10, 9));
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut goaways =
+				super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 			let mut serving = TrackServe::new(
 				h.session.clone(),
 				h.track.subscribe(None),
@@ -7076,7 +7164,7 @@ mod serve_tests {
 			let mut finished = false;
 			let served = h
 				.publisher
-				.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+				.run_subscription(&mut stream, &mut serving, &mut finished, &mut goaways, async {}, None)
 				.await;
 			assert!(
 				matches!(served, Some(Served::UpdateFailed(Error::Unsupported))),
@@ -7146,6 +7234,8 @@ mod serve_tests {
 				let h = serve(version);
 				let mut session = ScriptedSession::per_stream(vec![update_with_tokens(version, &[token])]);
 				let mut stream = Stream::open(&mut session, version).await.unwrap();
+				let mut goaways =
+					super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 				let mut serving = TrackServe::new(
 					h.session.clone(),
 					h.track.subscribe(None),
@@ -7157,7 +7247,7 @@ mod serve_tests {
 				let mut finished = false;
 				let served = h
 					.publisher
-					.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+					.run_subscription(&mut stream, &mut serving, &mut finished, &mut goaways, async {}, None)
 					.await;
 				assert!(
 					matches!(served, Some(Served::Track(Err(_)) | Served::UpdateFailed(_))),
@@ -7240,6 +7330,8 @@ mod serve_tests {
 			let h = serve(version);
 			let mut session = ScriptedSession::per_stream(vec![update_with_tokens(version, &tokens)]);
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut goaways =
+				super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 			let mut serving = TrackServe::new(
 				h.session.clone(),
 				h.track.subscribe(None),
@@ -7249,11 +7341,14 @@ mod serve_tests {
 				None,
 			);
 			let mut finished = false;
-			let mut run =
-				std::pin::pin!(
-					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
-				);
+			let mut run = std::pin::pin!(h.publisher.run_subscription(
+				&mut stream,
+				&mut serving,
+				&mut finished,
+				&mut goaways,
+				async {},
+				None
+			));
 			let mut served = None;
 			for _ in 0..50 {
 				if let std::task::Poll::Ready(done) = futures::poll!(run.as_mut()) {
@@ -7282,6 +7377,8 @@ mod serve_tests {
 			let h = serve(version);
 			let mut session = ScriptedSession::new(vec![0x02, 0, 6, 2, 1, 0x29, 2, 0, 0]);
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut goaways =
+				super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 			let mut serving = TrackServe::new(
 				h.session.clone(),
 				h.track.subscribe(None),
@@ -7292,7 +7389,7 @@ mod serve_tests {
 			);
 			let result = h
 				.publisher
-				.run_subscription(&mut stream, &mut serving, &mut false, async {}, None)
+				.run_subscription(&mut stream, &mut serving, &mut false, &mut goaways, async {}, None)
 				.await;
 			assert!(
 				matches!(result, Some(Served::Track(Err(Error::Decode(_))))),
@@ -7314,6 +7411,8 @@ mod serve_tests {
 			let h = serve(version);
 			let mut session = ScriptedSession::new(Vec::new());
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut goaways =
+				super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 			let mut serving = TrackServe::new(
 				h.session.clone(),
 				h.track.subscribe(None),
@@ -7325,7 +7424,7 @@ mod serve_tests {
 			h.track.clone().abort(Error::Decode(DecodeError::InvalidValue)).unwrap();
 			let result = h
 				.publisher
-				.run_subscription(&mut stream, &mut serving, &mut false, async {}, None)
+				.run_subscription(&mut stream, &mut serving, &mut false, &mut goaways, async {}, None)
 				.await;
 			assert!(
 				matches!(result, Some(Served::Track(Err(Error::Decode(_))))),
@@ -12073,6 +12172,8 @@ mod serve_tests {
 			let h = serve_with_auth(version, auth, Vec::new());
 			let mut session = ScriptedSession::per_stream(vec![update_with_tokens(version, &[TOKEN])]);
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut goaways =
+				super::super::request_stream::Messages::new(h.session.clone(), h.publisher.control.client());
 			let mut serving = TrackServe::new(
 				h.session.clone(),
 				h.track.subscribe(None),
@@ -12082,11 +12183,14 @@ mod serve_tests {
 				None,
 			);
 			let mut finished = false;
-			let mut run =
-				std::pin::pin!(
-					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
-				);
+			let mut run = std::pin::pin!(h.publisher.run_subscription(
+				&mut stream,
+				&mut serving,
+				&mut finished,
+				&mut goaways,
+				async {},
+				None
+			));
 			let mut served = None;
 			for _ in 0..50 {
 				if let std::task::Poll::Ready(done) = futures::poll!(run.as_mut()) {
