@@ -36,9 +36,9 @@ TRACKS' three events (see its Plan) map as follows:
 
 | TRACKS event | Inbound: we answer SUBSCRIBE_TRACKS | Outbound: we send it with FORWARD=0 |
 |---|---|---|
-| Track added, with TRACK_INFO | a PUBLISH, its Track Properties carrying TRACK_INFO as SUBSCRIBE_OK does today | a PUBLISH; TRACK_INFO from its Track Properties |
+| Track added, with TRACK_INFO | a PUBLISH, its Track Properties carrying TRACK_INFO as SUBSCRIBE_OK does today | a PUBLISH, TRACK_INFO from its Track Properties; or a PUBLISH_SKIPPED (PUBLISH_BLOCKED on draft-18), TRACK_INFO from the SUBSCRIBE_OK of a paused SUBSCRIBE we open for it |
 | Caught up | nothing to send: moq-transport has no marker | not needed: the lite side sends CAUGHT_UP for this hop at once, and PUBLISHes arrive as live adds |
-| Track removed | PUBLISH_DONE with TRACK_ENDED on that PUBLISH | PUBLISH_DONE with TRACK_ENDED on the paused PUBLISH; any other status fails the listing |
+| Track removed | PUBLISH_DONE with TRACK_ENDED on that PUBLISH | PUBLISH_DONE with TRACK_ENDED on the held paused PUBLISH or SUBSCRIBE; any other status fails the listing |
 
 - **Caught up has no IETF equivalent, and needs none.** Caught up means
   caught up with this hop (see TRACKS), so a relay answers a lite TRACKS at
@@ -59,6 +59,20 @@ TRACKS' three events (see its Plan) map as follows:
   requests again, which re-issues SUBSCRIBE_TRACKS. Never turn it into a
   removal, which would hide a live track for good. The cost is a
   paused subscription per listed track at both ends, bounded below.
+- **A skipped track is still listed**, decided by the maintainer on
+  2026-10-19. A PUBLISH_SKIPPED (PUBLISH_BLOCKED on draft-18) answering our
+  FORWARD=0 SUBSCRIBE_TRACKS names a track that exists, so it is an add, and
+  its data comes through a direct SUBSCRIBE like any listed track. It carries
+  only the name, with no Track Properties and no stream to end, so open a
+  paused SUBSCRIBE (FORWARD=0) for it and hold that as the entry, as the
+  paused PUBLISH is held for other tracks. Its SUBSCRIBE_OK supplies the
+  TRACK_INFO, so the add goes downstream once it arrives, and its
+  PUBLISH_DONE with TRACK_ENDED is the removal. A refused paused SUBSCRIBE,
+  or one ending with another status, fails the listing loudly, since nothing
+  else would ever say the track ended. That SUBSCRIBE needs the same request
+  credit the upstream may have run short of when it skipped, so an upstream
+  short on capacity fails and retries the listing rather than leave an entry
+  that is never removed.
 - **Prefix, not broadcast.** SUBSCRIBE_TRACKS matches every namespace under
   the prefix, so a listing of one broadcast filters to its exact namespace.
   A session may hold only one SUBSCRIBE_TRACKS per overlapping prefix
@@ -100,7 +114,10 @@ SUBSCRIBE_TRACKS receives a PUBLISH per track, including a later track and a
 later broadcast under the prefix; a lite TRACKS over a moq-transport upstream
 lists its tracks with FORWARD=0, its SUBSCRIBE gets a new track's first
 group, a PUBLISH_DONE with TRACK_ENDED removes the entry, and one with
-another status resets the listing; a moq-transport subscriber gets
+another status resets the listing; a PUBLISH_SKIPPED (PUBLISH_BLOCKED on
+draft-18) lists the track once its paused SUBSCRIBE answers, a direct
+SUBSCRIBE gets its data, a TRACK_ENDED on that paused SUBSCRIBE removes it,
+and a refused paused SUBSCRIBE resets the listing; a moq-transport subscriber gets
 PUBLISH_DONE when a lite track is removed; an unsolicited PUBLISH is refused.
 
 Public API: none beyond the TRACKS hook. Wire: moq-transport support for an
