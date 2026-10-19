@@ -71,7 +71,9 @@ pub(crate) enum Item {
 /// read as [`Read::End`]; nothing is missing. A data track's marker carries no timestamp, so
 /// it ends at the furthest point read, and reads as nothing before the first item.
 /// Empty groups (zero objects) mean nothing. A group whose timestamps fall below the live
-/// edge earlier groups reached is malformed and aborts the track.
+/// edge earlier groups reached is malformed and aborts the track. A payload that fails to
+/// decode ends the reader with that error, even one found while looking ahead; only a
+/// transport abort or eviction of a group reads as a gap.
 pub struct Consumer<F: Container> {
 	track: moq_net::track::Subscriber,
 
@@ -81,7 +83,7 @@ pub struct Consumer<F: Container> {
 	current: u64,
 
 	// Groups that we are monitoring, sorted by sequence ascending.
-	pending: VecDeque<GroupBuffer>,
+	pending: VecDeque<GroupBuffer<F>>,
 
 	// Latches the cursor onto the publisher's first served group when the
 	// subscription names no start. Cleared once a first group is chosen.
@@ -423,7 +425,7 @@ impl<F: Container> Consumer<F> {
 				&& current.sequence <= self.current
 			{
 				match current.poll_min_timestamp(waiter, &self.format) {
-					Poll::Ready(Ok(_)) => current.max_end,
+					Poll::Ready(Some(_)) => current.max_end,
 					_ => None,
 				}
 			} else {
@@ -437,7 +439,7 @@ impl<F: Container> Consumer<F> {
 					continue;
 				}
 
-				if let Poll::Ready(Ok(ts)) = group.poll_min_timestamp(waiter, &self.format) {
+				if let Poll::Ready(Some(ts)) = group.poll_min_timestamp(waiter, &self.format) {
 					next_group = Some((i, std::time::Duration::from(ts)));
 					break;
 				}
@@ -450,15 +452,20 @@ impl<F: Container> Consumer<F> {
 					break;
 				}
 
-				if let Poll::Ready(Ok(ts)) = group.poll_max_timestamp(waiter, &self.format) {
+				if let Poll::Ready(Some(ts)) = group.poll_max_timestamp(waiter, &self.format) {
 					max_timestamp = max_timestamp.max(ts.into());
 					break; // We know older groups won't be newer than this.
 				}
 			}
 
-			// Lookahead drops decode errors, so fail on a malformed group it found before a skip drops it.
-			if self.pending.iter().any(|group| group.malformed) {
-				return Poll::Ready(Err(moq_net::Error::Decode(moq_net::DecodeError::ExpectedEnd).into()));
+			// Fail on a decode error the lookahead found, before a skip drops its group.
+			if let Some(err) = self.pending.iter_mut().find_map(|group| group.error.take()) {
+				tracing::warn!(
+					track = self.track.name(),
+					error = ?err,
+					"group payload failed to decode; ending the reader"
+				);
+				return Poll::Ready(Err(err));
 			}
 
 			// Walk the cursor over missing sequences below the first arrived group.
@@ -527,7 +534,7 @@ impl<F: Container> Consumer<F> {
 				&& let Some(front_sequence) = self.pending.front().map(|g| g.sequence)
 				&& front_sequence > self.current
 			{
-				let _ = self.pending.front_mut().unwrap().buffer_all(waiter, &self.format);
+				let _ = self.pending.front_mut().unwrap().look_all(waiter, &self.format);
 				let front = self.pending.front().unwrap();
 				let next_start = front.min_timestamp.map(std::time::Duration::from).or(front.max_end);
 				// A data marker has no timestamp to show the missing sequences held nothing.
@@ -614,7 +621,7 @@ impl<F: Container> Consumer<F> {
 			if group.group.sequence <= prev_group {
 				continue;
 			}
-			if let Poll::Ready(Ok(min)) = group.poll_min_timestamp(waiter, &self.format)
+			if let Poll::Ready(Some(min)) = group.poll_min_timestamp(waiter, &self.format)
 				&& min.as_micros() < floor.as_micros()
 			{
 				return Err(TimestampRewind { timestamp: min, floor }.into());
@@ -641,7 +648,7 @@ impl<F: Container> Consumer<F> {
 ///
 /// Handles two-phase frame reading (get FrameConsumer, then read all data),
 /// timestamp parsing, and min/max timestamp tracking for age decisions.
-struct GroupBuffer {
+struct GroupBuffer<F: Container> {
 	group: moq_net::group::Consumer,
 
 	// The current frame index within the group.
@@ -660,8 +667,8 @@ struct GroupBuffer {
 	// Whether a marker with no timestamp of its own was read as an end.
 	ended: bool,
 
-	// A data track's marker shared its group, which every later read reports.
-	malformed: bool,
+	// A decode error found while looking ahead, kept for the reader: the frame it consumed is gone.
+	error: Option<F::Error>,
 
 	// Read frames that haven't been consumed yet.
 	buffered: VecDeque<Frame>,
@@ -680,7 +687,7 @@ struct GroupBuffer {
 	max_end: Option<std::time::Duration>,
 }
 
-impl GroupBuffer {
+impl<F: Container> GroupBuffer<F> {
 	fn new(group: moq_net::group::Consumer) -> Self {
 		Self {
 			group,
@@ -689,7 +696,7 @@ impl GroupBuffer {
 			media: false,
 			bare: false,
 			ended: false,
-			malformed: false,
+			error: None,
 			buffered: VecDeque::new(),
 			markers: VecDeque::new(),
 			delivered: 0,
@@ -700,7 +707,7 @@ impl GroupBuffer {
 	}
 
 	/// Poll for the next frame from this group.
-	fn poll_read<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Option<Event>, F::Error>> {
+	fn poll_read(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<Option<Event>, F::Error>> {
 		loop {
 			if self.markers.front().is_some_and(|(index, _)| *index <= self.delivered) {
 				let (index, end) = self.markers.pop_front().unwrap();
@@ -716,13 +723,12 @@ impl GroupBuffer {
 		}
 	}
 
-	// Add one more frame to the buffer if possible.
+	// Add one more frame to the buffer if possible, first returning a decode error the lookahead kept.
 	//
 	// Returns false if the group is finished.
-	fn buffer_once<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
-		let malformed = || moq_net::Error::Decode(moq_net::DecodeError::ExpectedEnd).into();
-		if self.malformed {
-			return Poll::Ready(Err(malformed()));
+	fn buffer_once(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+		if let Some(err) = self.error.take() {
+			return Poll::Ready(Err(err));
 		}
 		let Some(frames) = ready!(format.poll_read(&mut self.group, waiter)?) else {
 			return Poll::Ready(Ok(false));
@@ -731,8 +737,7 @@ impl GroupBuffer {
 		if format.kind() == super::Kind::Data {
 			// A data track's marker is one object with no bytes, alone in its group.
 			if self.bare || (frames.is_empty() && self.media) {
-				self.malformed = true;
-				return Poll::Ready(Err(malformed()));
+				return Poll::Ready(Err(moq_net::Error::Decode(moq_net::DecodeError::ExpectedEnd).into()));
 			}
 			self.bare = frames.is_empty();
 		}
@@ -775,59 +780,58 @@ impl GroupBuffer {
 		Poll::Ready(Ok(true))
 	}
 
-	fn buffer_one<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
-		loop {
-			if !self.buffered.is_empty() {
-				return Poll::Ready(Ok(true));
+	// Buffer one more frame ahead of the cursor. Nothing here hands an error to a caller, so a
+	// decode error is kept for the reader rather than dropped with the frame it consumed; a
+	// transport abort is left for the cursor to find.
+	//
+	// Returns false once this group can buffer nothing more.
+	fn look_once(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<bool> {
+		if self.error.is_some() {
+			return Poll::Ready(false);
+		}
+		match ready!(self.buffer_once(waiter, format)) {
+			Ok(more) => Poll::Ready(more),
+			Err(err) => {
+				if !self.poll_aborted(waiter) {
+					self.error = Some(err);
+				}
+				Poll::Ready(false)
 			}
-			if !ready!(self.buffer_once(waiter, format)?) {
-				return Poll::Ready(Ok(false));
-			}
-			// poll_read returned Some(vec![]): a wire frame decoded to no media
-			// frames, so loop and try again.
 		}
 	}
 
-	fn buffer_all<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<(), F::Error>> {
-		while ready!(self.buffer_once(waiter, format)?) {}
-		Poll::Ready(Ok(()))
+	fn look_all(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<()> {
+		while ready!(self.look_once(waiter, format)) {}
+		Poll::Ready(())
 	}
 
-	/// Poll for the maximum timestamp in this group.
-	fn poll_max_timestamp<F: Container>(
-		&mut self,
-		waiter: &kio::Waiter,
-		format: &F,
-	) -> Poll<Result<Timestamp, F::Error>> {
+	/// Poll for the maximum timestamp in this group, or `None` if it ended without one.
+	fn poll_max_timestamp(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Option<Timestamp>> {
 		// Keep reading more frames just to advance the max timestamp.
-		let _ = self.buffer_all(waiter, format)?;
+		let _ = self.look_all(waiter, format);
 
 		if let Some(max) = self.max_timestamp {
-			return Poll::Ready(Ok(max));
+			return Poll::Ready(Some(max));
 		}
-
-		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			return Poll::Ready(Err(moq_net::Error::Decode(moq_net::DecodeError::Short).into()));
-		}
-
-		Poll::Pending
+		self.poll_ended(waiter)
 	}
 
-	fn poll_min_timestamp<F: Container>(
-		&mut self,
-		waiter: &kio::Waiter,
-		format: &F,
-	) -> Poll<Result<Timestamp, F::Error>> {
-		let _ = self.buffer_one(waiter, format)?;
+	/// Poll for the minimum timestamp in this group, or `None` if it ended without one.
+	fn poll_min_timestamp(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Option<Timestamp>> {
+		// A wire frame can decode to no media frames, so keep going until one is buffered.
+		while self.buffered.is_empty() && matches!(self.look_once(waiter, format), Poll::Ready(true)) {}
 
 		if let Some(min) = self.min_timestamp {
-			return Poll::Ready(Ok(min));
+			return Poll::Ready(Some(min));
 		}
+		self.poll_ended(waiter)
+	}
 
-		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			return Poll::Ready(Err(moq_net::Error::Decode(moq_net::DecodeError::Short).into()));
+	// Ready with no timestamp once the group can no longer produce one: it ended or failed to decode.
+	fn poll_ended(&mut self, waiter: &kio::Waiter) -> Poll<Option<Timestamp>> {
+		if self.error.is_some() || self.group.poll_finished(waiter).is_ready() {
+			return Poll::Ready(None);
 		}
-
 		Poll::Pending
 	}
 
@@ -850,7 +854,7 @@ impl GroupBuffer {
 	}
 }
 
-impl std::ops::Deref for GroupBuffer {
+impl<F: Container> std::ops::Deref for GroupBuffer<F> {
 	type Target = moq_net::group::Consumer;
 
 	fn deref(&self) -> &Self::Target {
@@ -2528,6 +2532,76 @@ mod tests {
 		assert!(
 			matches!(second, Err(crate::Error::UnknownFormat(_))),
 			"decode error must propagate, got {second:?}"
+		);
+	}
+
+	/// Write one FailingDecode frame: a microsecond timestamp, or `None` for a malformed payload.
+	fn write_failing(group: &mut moq_net::group::Producer, micros: Option<u64>) {
+		let payload = match micros {
+			Some(micros) => Bytes::from(micros.to_le_bytes().to_vec()),
+			None => Bytes::from_static(b"FAIL"),
+		};
+		group.write_frame(ts(micros.unwrap_or(0)), payload).unwrap();
+	}
+
+	/// Read until something other than a frame, failing if the reader stalls.
+	async fn read_past_frames(consumer: &mut Consumer<FailingDecode>) -> Result<Option<Read>, crate::Error> {
+		loop {
+			let read = tokio::time::timeout(Duration::from_millis(200), consumer.read())
+				.await
+				.expect("consumer hung");
+			match read {
+				Ok(Some(Read::Frame { .. })) => continue,
+				other => return other,
+			}
+		}
+	}
+
+	/// A malformed object found by the startup lookahead, at the head of the first group, ends the
+	/// reader rather than being consumed and dropped.
+	#[tokio::test]
+	async fn a_decode_error_at_the_head_of_a_group_ends_the_reader() {
+		tokio::time::pause();
+		let track = track_producer("test", timed());
+		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
+
+		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_failing(&mut group, None);
+		write_failing(&mut group, Some(0));
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		let read = read_past_frames(&mut consumer).await;
+		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
+	}
+
+	/// A malformed object mid-group, found while looking ahead past a blocked group, ends the
+	/// reader rather than reading as a shorter group.
+	#[tokio::test]
+	async fn a_decode_error_mid_group_found_by_lookahead_ends_the_reader() {
+		tokio::time::pause();
+		let track = track_producer("test", timed());
+		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
+
+		// The current group stays open, so the reader looks ahead into the next one.
+		let mut slow = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_failing(&mut slow, Some(0));
+		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		write_failing(&mut group, Some(10_000));
+		write_failing(&mut group, None);
+		write_failing(&mut group, Some(20_000));
+		group.finish().unwrap();
+
+		let first = consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(first.timestamp, ts(0));
+		// Lookahead runs while the reader waits on the open group.
+		assert!(
+			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_ok_and(|read| matches!(read, Err(crate::Error::UnknownFormat(_)))),
+			"the lookahead's decode error ends the reader"
 		);
 	}
 

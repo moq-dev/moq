@@ -380,18 +380,15 @@ test("Consumer refuses a data marker that shares its group", async () => {
 	for (const second of [new Uint8Array(), encodeLegacyFrame(10_000 as Micro, new Uint8Array([1]))]) {
 		const track = new Track.Producer("data");
 		const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 500 as Milli });
-		const error = spyOn(console, "error").mockImplementation(() => {});
 		try {
 			const group = track.appendGroup();
 			group.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) });
 			group.writeFrame({ payload: second, timestamp: Time.Timestamp.fromMicros(10_000) });
 			group.close();
-			await settle();
-			expect(error).toHaveBeenCalledWith("spawn error", expect.any(Error));
+			await expect(within(nextFrame(consumer))).rejects.toThrow("shares its group");
 		} finally {
 			consumer.close();
 			track.close();
-			error.mockRestore();
 		}
 	}
 });
@@ -639,40 +636,72 @@ test("Consumer index spans MoQ frames for keyframe detection", async () => {
 	consumer.close();
 });
 
-test("Consumer keeps frames decoded before an error (truncated GoP)", async () => {
-	// 0xFF in the first byte signals the format to throw, simulating a stream
-	// RESET or corrupt frame mid-group. Encoding the trigger in the frame bytes
-	// keeps this deterministic when groups decode in parallel.
-	const truncatingFormat: ContainerFormat = {
-		decode(frame: Uint8Array): Frame[] {
-			if (frame[0] === 0xff) throw new Error("truncated");
-			return [{ payload: frame, timestamp: frame[0] as Micro, keyframe: false }];
-		},
-	};
+// A malformed payload is not loss: the reader ends with the decode error, wherever in the group it
+// sits, instead of reading the rest of the track as if the group were cut short.
+for (const [where, payloads] of [
+	["at the head of a group", [0xff, 0x01]],
+	["mid-group", [0x01, 0xff, 0x02]],
+] as const) {
+	test(`Consumer ends the reader on a decode error ${where}`, async () => {
+		// 0xFF in the first byte signals the format to throw, which keeps this deterministic
+		// when groups decode in parallel.
+		const failingFormat: ContainerFormat = {
+			decode(frame: Uint8Array): Frame[] {
+				if (frame[0] === 0xff) throw new Error("malformed");
+				return [{ payload: frame, timestamp: frame[0] as Micro, keyframe: false }];
+			},
+		};
 
+		const track = new Track.Producer("test");
+		const consumer = new Consumer(replay(track), { format: failingFormat, maxDelay: 500 as Milli });
+
+		const g0 = new Group.Producer(0);
+		for (const byte of payloads)
+			g0.writeFrame({ payload: new Uint8Array([byte]), timestamp: Time.Timestamp.now() });
+		g0.close();
+		track.writeGroup(g0);
+
+		// A later group that decodes cleanly is never reached.
+		const g1 = new Group.Producer(1);
+		g1.writeFrame({ payload: new Uint8Array([0x04]), timestamp: Time.Timestamp.now() });
+		g1.close();
+		track.writeGroup(g1);
+		track.close();
+
+		const read = async () => {
+			for (;;) {
+				const result = await consumer.next();
+				if (result?.kind === "frame" && result.group !== 0) return result;
+				if (!result) return result;
+			}
+		};
+		await expect(within(read())).rejects.toThrow("malformed");
+		consumer.close();
+	});
+}
+
+// A transport reset is loss: frames decoded before it are kept and the cut tail reads as a gap.
+test("Consumer keeps frames decoded before a group reset (truncated GoP)", async () => {
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(replay(track), { format: truncatingFormat, maxDelay: 500 as Milli });
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 500 as Milli });
 
-	// Group.Producer 0: 2 valid frames then a tail-truncating error.
 	const g0 = new Group.Producer(0);
-	g0.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() });
-	g0.writeFrame({ payload: new Uint8Array([0x02]), timestamp: Time.Timestamp.now() });
-	g0.writeFrame({ payload: new Uint8Array([0xff]), timestamp: Time.Timestamp.now() });
-	g0.close();
+	for (const timestamp of [1, 2]) {
+		g0.writeFrame({
+			payload: encodeLegacyFrame(timestamp as Micro, new Uint8Array([1])),
+			timestamp: Time.Timestamp.fromMicros(timestamp),
+		});
+	}
 	track.writeGroup(g0);
+	await settle();
+	g0.close(new NetError.Stream(StreamCode.Cancel));
 
-	// Group.Producer 1 decodes cleanly.
-	const g1 = new Group.Producer(1);
-	g1.writeFrame({ payload: new Uint8Array([0x04]), timestamp: Time.Timestamp.now() });
-	g1.close();
-	track.writeGroup(g1);
-
+	writeGroupWithLegacyFrames(track, 1, [4 as Micro]);
 	track.close();
 
-	const frames = await drainFrames(consumer, 200);
-	// First 2 frames of group 0 survive; group 1 follows.
-	expect(frames.map((f) => f.group)).toEqual([0, 0, 1]);
-	expect(frames.map((f) => f.timestamp as number)).toEqual([1, 2, 4]);
+	const items: string[] = [];
+	for (let read = await consumer.next(); read; read = await consumer.next()) items.push(describe(read));
+	expect(items).toEqual(["1", "2", "gap 2+2", "4"]);
 	consumer.close();
 });
 
@@ -952,6 +981,16 @@ test("Consumer preserves empty Legacy and LOC data frames", async () => {
 // --- Malformed rewind ---
 
 /** Read until the next media frame, passing over gaps and ends. */
+/** Fail a read that neither settles nor throws within `ms`, so a reader that never ends fails fast. */
+function within<T>(read: Promise<T>, ms = 300): Promise<T> {
+	return Promise.race([
+		read,
+		settle(ms).then(() => {
+			throw new Error("stalled");
+		}),
+	]);
+}
+
 async function nextFrame(consumer: Consumer) {
 	for (;;) {
 		const result = await consumer.next();
@@ -1880,7 +1919,6 @@ for (const end of [
 test("a group reset does not hide a later container decode failure", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data") });
-	const error = spyOn(console, "error").mockImplementation(() => {});
 	try {
 		const reset = track.appendGroup();
 		await settle();
@@ -1890,12 +1928,10 @@ test("a group reset does not hide a later container decode failure", async () =>
 		// A truncated timestamp varint.
 		malformed.writeFrame({ payload: new Uint8Array([0x80]), timestamp: Time.Timestamp.now() });
 		malformed.close();
-		await settle();
-		expect(error).toHaveBeenCalledWith("spawn error", expect.any(Error));
+		await expect(within(nextFrame(consumer))).rejects.toThrow("buffer too short");
 	} finally {
 		consumer.close();
 		track.close();
-		error.mockRestore();
 	}
 });
 

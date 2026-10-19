@@ -3,7 +3,7 @@ import * as Moq from "@moq/net";
 import { Effect, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
 import type { Format } from "./format";
 import { Jitter } from "./jitter";
-import type { BufferedRanges, ReceivedFrame } from "./types";
+import type { BufferedRanges, Frame, ReceivedFrame } from "./types";
 
 /** Options for constructing a {@link Consumer}; the obsolete `maxAge` prop is refused. */
 export interface ConsumerProps {
@@ -218,11 +218,19 @@ export class Consumer {
 				group.empty = false;
 				const arrival = Nano.toMilli(Nano(now()));
 
-				const decoded = this.#format.decode(next.payload, next.timestamp);
+				// A malformed payload is not loss, so it ends the reader rather than truncating the group.
+				let decoded: Frame[];
+				try {
+					decoded = this.#format.decode(next.payload, next.timestamp);
+				} catch (err) {
+					this.#abort(err instanceof Error ? err : new Error(String(err)));
+					return;
+				}
 				if (this.#format.kind === "data") {
 					// A data track's marker is one object with no bytes, alone in its group.
 					if (group.bare || (decoded.length === 0 && group.media)) {
-						throw new Error("a data track's discontinuity marker shares its group");
+						this.#abort(new Error("a data track's discontinuity marker shares its group"));
+						return;
 					}
 					group.bare = decoded.length === 0;
 				}
@@ -305,8 +313,8 @@ export class Consumer {
 		} catch (err) {
 			if (this.#error) return;
 			// Stop reading the group but keep already-decoded frames.
-			// A decode error or stream RESET truncates the tail of the GoP;
-			// frames decoded before the error are still valid and playable.
+			// A stream RESET or eviction truncates the tail of the GoP;
+			// frames decoded before it are still valid and playable.
 			// The tail is gone though, so the next group does not continue this one.
 			group.truncated = true;
 			if (!(err instanceof Moq.Error.Stream)) throw err;
@@ -476,6 +484,7 @@ export class Consumer {
 	 * media after an earlier item will never arrive, or an end the publisher declared.
 	 * An unmarked forward timestamp jump is not a gap, since nothing on the wire says media is missing.
 	 * After buffered groups drain, a finished track returns undefined and an aborted track throws.
+	 * A payload that fails to decode throws its error at once; only a reset or evicted group reads as a gap.
 	 */
 	async next(): Promise<Read | undefined> {
 		if (this.#next) {
