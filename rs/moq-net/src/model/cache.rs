@@ -830,17 +830,33 @@ impl Track {
 	/// Have the sweep drop `handoff`'s held head once the pool's idle window passes.
 	pub(super) fn expire_held(&self, handoff: &Arc<group::Handoff>) {
 		if self.sweep.get().is_some() {
-			self.held
-				.lock()
-				.unwrap_or_else(PoisonError::into_inner)
-				.push(Arc::downgrade(handoff));
+			let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+			// Forget the hand-offs done with before growing, so a burst of failed groups whose
+			// heads recovery adopts at once grows the registry no further than the heads held.
+			if held.len() == held.capacity() {
+				Self::prune_held(&mut held);
+			}
+			held.push(Arc::downgrade(handoff));
 		}
 	}
 
 	/// Drop the held heads past the pool's idle window, forgetting the hand-offs done with.
 	fn sweep_held(&self) {
 		let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+		Self::prune_held(&mut held);
+		// Give back what a burst of held heads grew it to, which the pool no longer bills.
+		let len = held.len();
+		held.shrink_to(len * 2);
+	}
+
+	/// Expire the held heads past the window and forget the hand-offs holding none.
+	fn prune_held(held: &mut Vec<Weak<group::Handoff>>) {
 		held.retain(|handoff| handoff.upgrade().is_some_and(|handoff| !handoff.expire()));
+	}
+
+	#[cfg(test)]
+	pub(super) fn held_capacity(&self) -> usize {
+		self.held.lock().unwrap_or_else(PoisonError::into_inner).capacity()
 	}
 
 	/// Take everything written since the last call, to be turned into eviction debt.

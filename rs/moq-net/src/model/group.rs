@@ -3109,6 +3109,36 @@ mod test {
 		assert_eq!(pool.used(), 0);
 	}
 
+	/// The registry the sweep expires held heads from grows with the heads held, not with
+	/// every group that failed, and gives back what a burst grew it to once they expire.
+	#[test]
+	fn the_held_registry_follows_the_heads_held() {
+		const BURST: usize = 64;
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
+		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let fail = |sequence: u64| {
+			let mut producer = Producer::new(Info::from(sequence), track::Info::default(), cache.clone());
+			producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
+			let handoff = producer.consume().handoff();
+			producer.abort(Error::Cancel).unwrap();
+			handoff
+		};
+
+		// Recovery adopts each head as soon as its group fails.
+		for sequence in 0..BURST as u64 {
+			drop(fail(sequence));
+		}
+		assert!(cache.held_capacity() < BURST, "adopted hand-offs pinned the registry");
+
+		// Readers that stop polling hold every head until the window passes.
+		let held: Vec<_> = (0..BURST as u64).map(fail).collect();
+		assert!(cache.held_capacity() >= BURST);
+		pool.step(std::time::Duration::from_secs(2));
+		pool.sweep();
+		assert!(held.iter().all(|handoff| handoff.head().is_none()));
+		assert!(cache.held_capacity() < BURST, "the sweep kept a burst's allocation");
+	}
+
 	/// A failed copy's head is held only while the pool has room for it.
 	#[test]
 	fn a_full_pool_holds_no_head() {
