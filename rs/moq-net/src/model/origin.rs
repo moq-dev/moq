@@ -5502,7 +5502,7 @@ impl Consumer {
 	/// Follow the broadcast at `path`, resolving each publisher instance that serves it.
 	///
 	/// The Rust form of JS `request(path, { announced: true })`. The first
-	/// [`available`](AnnouncedBroadcast::available) resolves the instance serving the path
+	/// [`available`](AnnouncedBroadcast::poll_available) resolves the instance serving the path
 	/// once one is announced, riding out churn as [`Self::routed_broadcast`] does. Each
 	/// later call waits for another instance to take over (an
 	/// [`AnnounceEvent::Restart`]), or for the path to be served again after an
