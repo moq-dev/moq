@@ -561,6 +561,15 @@ impl Key {
 		Ok(claims)
 	}
 
+	/// Verify the signature, claims, and key scope before reading expiry for attribution.
+	#[cfg(feature = "serve")]
+	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
+		let claims: Claims = self.decode(token)?;
+		claims.validate()?;
+		self.validate_scope(&claims)?;
+		Ok(claims)
+	}
+
 	/// Sign the claims with this key, returning the encoded token.
 	pub fn sign(&self, payload: &Claims) -> crate::Result<String> {
 		if !self.operations.contains(&KeyOperation::Sign) {
@@ -611,7 +620,7 @@ impl Key {
 }
 
 /// Refuse claims expired at `now` (`exp <= now`) or not yet valid (`nbf > now`), as `jose` does.
-fn validate_times(claims: &Claims, now: std::time::SystemTime) -> crate::Result<()> {
+pub(crate) fn validate_times(claims: &Claims, now: std::time::SystemTime) -> crate::Result<()> {
 	if claims.expires.is_some_and(|exp| exp <= now) {
 		return Err(crate::Error::TokenExpired);
 	}

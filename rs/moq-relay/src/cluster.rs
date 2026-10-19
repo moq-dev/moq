@@ -1268,7 +1268,7 @@ impl Cluster {
 			self.scope(lease, &request)
 		}
 		.await;
-		result.inspect_err(|err| self.refusals.record(err.into()))
+		result.inspect_err(|err| self.refusals.record_auth(err))
 	}
 
 	/// Network sessions enforce changing grants in AUTH, within a fixed root and SETUP role.
@@ -1282,7 +1282,7 @@ impl Cluster {
 			self.scope_session(lease, &request)
 		}
 		.await;
-		result.inspect_err(|err| self.refusals.record(err.into()))
+		result.inspect_err(|err| self.refusals.record_auth(err))
 	}
 
 	pub(crate) fn scope_session(

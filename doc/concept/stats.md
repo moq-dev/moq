@@ -281,10 +281,13 @@ qmux counter source; unavailable counters are never estimated from payload.
 Readers default missing wire fields to zero for older relays.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
-They never start a session. The relay's own refusals have no resolved label, so
-they count under the empty label on the default tier; an embedder can count one
-it refuses itself with `stats::Handle::refuse`, under the label and tier it
-resolved.
+They never start a session. `expired` counts a verified credential that expired
+before admission. An auth-server or embedded refusal can name a root from a
+verified credential and an optional tier; that root is the refusal's stats label,
+with an absent tier using the default. A refusal without a verified root counts
+under the empty label, never the dialed path. An embedder can also count a refusal
+with `stats::Handle::refuse`, under the label and tier it resolved. Older readers
+ignore `expired`; newer readers default a missing counter to zero.
 
 `sessions_failed` counts admitted sessions that ended abnormally, by kind: a
 subset of `sessions_ended`, so the live count is unchanged. A clean close by

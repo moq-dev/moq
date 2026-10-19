@@ -5,6 +5,12 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Typed admission refusals
+
+`auth::Error::Refused` now carries the shared `moq_auth::Refusal`.
+Pass `auth::Error::Refused(moq_auth::Refusal::default())` to `Admission::refuse` for an unattributed refusal, or set its `reason`, optional verified `root`, and `tier`.
+Match `auth::Error::Refused(refusal)` to inspect it; never use the dialed path as refusal attribution.
+
 ### Cluster dials build from a template (#5674)
 
 `Relay::client()` and `Cluster::with_client` are removed.
