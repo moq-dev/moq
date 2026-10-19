@@ -49,13 +49,15 @@ azure = ["object_store/azure"]
 # it pulls in moq-video + moq-audio capture: on Linux the microphone needs
 # ALSA/libasound at build time through cpal (the camera needs nothing, moq-v4l
 # checks its bindings in), plus binary size. macOS/Windows use OS frameworks, no
-# extra install. H.264 is vendored static (openh264), so no system ffmpeg/libav.
-# Enable with `cargo build -p moq-cli --features capture`, adding `pipewire` for
+# extra install. Encoding prefers the hardware codecs; add `openh264` for the
+# vendored software fallback (no system ffmpeg/libav either way). Enable with
+# `cargo build -p moq-cli --features capture,openh264`, adding `pipewire` for
 # display capture on Linux.
 capture = ["dep:moq-video", "dep:moq-audio", "moq-video/capture", "moq-audio/capture"]
 # Just-in-time transcoding (`moq ... transcode`). Off by default because it pulls
 # in moq-video and its codec dependencies. Enable with
-# `cargo build -p moq-cli --features transcode`.
+# `cargo build -p moq-cli --features transcode`, adding `openh264` for the
+# software fallback a GPU-less host needs.
 transcode = ["dep:moq-transcode", "dep:moq-video"]
 # Native playback (`moq ... play`): decode into a wgpu window and a cpal
 # speaker. Off by default because it pulls both graphics and audio device stacks
@@ -67,6 +69,10 @@ play = ["dep:moq-video", "moq-video/render", "dep:moq-audio", "moq-audio/playbac
 # dependencies, drop it:
 #   cargo build -p moq-cli --no-default-features --features "quic,websocket,capture"
 nvidia = ["moq-video?/nvidia", "moq-transcode?/nvidia"]
+# The vendored OpenH264 software H.264 fallback (C++), opt-in like the moq-video
+# feature it turns on. Only bites when `capture`, `transcode`, or `play` pulls in
+# moq-video.
+openh264 = ["moq-video?/openh264", "moq-transcode?/openh264"]
 # Compatibility aliases for the pre-consolidation names, kept so a manifest that
 # already asks for the old split still resolves. Undocumented on purpose: the
 # feature tables name only `nvidia`.
@@ -124,8 +130,8 @@ moq-rtsp = { workspace = true }
 moq-srt = { workspace = true }
 # Raw qmux listeners are part of the CLI surface. `uds` compiles only on Unix.
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "tcp", "uds"] }
-moq-transcode = { workspace = true, optional = true, features = ["openh264"] }
-moq-video = { workspace = true, optional = true, features = ["openh264"] }
+moq-transcode = { workspace = true, optional = true }
+moq-video = { workspace = true, optional = true }
 object_store = { workspace = true, features = ["fs"] }
 pollster = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["rustls", "json"] }
