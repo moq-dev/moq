@@ -12,6 +12,7 @@ That covers every quinn security advisory published through 2026-09-30.
 Cherry-picked since the fork point:
 
 - [`48854d48`](https://github.com/quinn-rs/quinn/commit/48854d48635875d259a95973cc0575db8c1792a4): accept non-minimally encoded integer transport parameters, as RFC 9000 section 16 allows.
+- [`d3174f1e`](https://github.com/quinn-rs/quinn/commit/d3174f1e77e093ceadfe0edff865fdd92d51a03c): a `wasm32-unknown-unknown` build pulls in ring only through the `ring` feature.
 
 The fork never merges upstream.
 Upstream fixes are cherry-picked by hand, and the crate keeps quinn's formatting (rustfmt defaults) so the patches apply cleanly.
