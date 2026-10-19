@@ -448,6 +448,10 @@ export class Publisher {
 		// Legal requests we can't honor are refused one at a time. A subscription that
 		// forwards nothing is only useful to a subscriber that later turns forwarding on,
 		// and serving a Range Filter unfiltered would deliver objects it excluded.
+		// An instance never comes back, so a request pinned to a gone one is missing, not
+		// worth waiting for.
+		const rendezvous = msg.rendezvous && msg.epoch === undefined;
+
 		const unsupported = !msg.forward
 			? "FORWARD=0 not supported"
 			: msg.rangeFilters
@@ -476,7 +480,7 @@ export class Publisher {
 					stream.abort(cancel);
 					return;
 				}
-				refusal = this.#failed(err, "subscribe", msg.rendezvous);
+				refusal = this.#failed(err, "subscribe", rendezvous);
 			}
 		}
 
@@ -518,7 +522,7 @@ export class Publisher {
 					stream,
 					msg.requestId,
 					SubscribeError.id,
-					this.#failed(err, "subscribe", msg.rendezvous && failed.code === StreamCode.Unroutable),
+					this.#failed(err, "subscribe", rendezvous && failed.code === StreamCode.Unroutable),
 				);
 				return;
 			}

@@ -1179,6 +1179,9 @@ where
 			// releasing what it holds upstream, and only then is the peer told. `acked` holds the
 			// group stream count once SUBSCRIBE_OK is buffered, which decides how.
 			let mut acked: Option<Arc<AtomicU64>> = None;
+			// An instance never comes back, so a request pinned to a gone one is missing, not
+			// worth waiting for.
+			let rendezvous = msg.rendezvous && msg.epoch.is_none();
 			let subscribed = {
 				let serve = async {
 					// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
@@ -1201,7 +1204,7 @@ where
 						Err(err) => {
 							return Ok(Subscribed::Refused(
 								err.to_string(),
-								rendezvous_error(err, msg.rendezvous, false),
+								rendezvous_error(err, rendezvous, false),
 							));
 						}
 					};
@@ -1211,7 +1214,7 @@ where
 						Err(err) => {
 							return Ok(Subscribed::Refused(
 								err.to_string(),
-								rendezvous_error(err, msg.rendezvous, true),
+								rendezvous_error(err, rendezvous, true),
 							));
 						}
 					};
@@ -1231,7 +1234,7 @@ where
 						Err(err) => {
 							return Ok(Subscribed::Refused(
 								err.to_string(),
-								rendezvous_error(err, msg.rendezvous, true),
+								rendezvous_error(err, rendezvous, true),
 							));
 						}
 					};
@@ -7688,6 +7691,53 @@ mod serve_tests {
 					let found = wire.windows(expected.len()).any(|window| window == expected.as_slice());
 					assert_eq!(found, refused, "{version} {name}: request {id:#x}");
 				}
+			}
+		}
+	}
+
+	/// A SUBSCRIBE pinned to a gone instance is refused as missing even when it asks to
+	/// wait: an instance never comes back, so there is nothing to rendezvous with.
+	#[moq_clock::test]
+	async fn a_pinned_request_never_waits_for_its_instance() {
+		for version in [Version::Draft17, Version::Draft20, Version::Draft22] {
+			let stale = crate::Epoch::mint();
+			let pinned = crate::origin::Route::default().with_epoch(crate::Epoch::mint());
+			for (name, route) in [("another epoch", pinned), ("no epoch", crate::origin::Route::default())] {
+				let mut h = serve_route(version, crate::track::Info::timed(), route);
+				publish_groups(&mut h, 0);
+				settle().await;
+				let expected = unroutable(version).await;
+
+				// Built by hand: we never send RENDEZVOUS_TIMEOUT ourselves.
+				let encode = |body: &mut Vec<u8>| -> Result<(), crate::coding::EncodeError> {
+					let w = &mut Encoder::new(body, version.into());
+					RequestId(REQUEST_ID).encode(w, version)?;
+					if version == Version::Draft17 {
+						w.varint(0)?; // required_request_id_delta
+					}
+					super::super::namespace::encode_namespace(w, &crate::Path::new("room"))?;
+					w.string("video")?;
+					encode_params!(w, version,
+						0x04 => 7u64,
+						super::super::epoch::EPOCH_PARAM => Some(stale.clone()),
+					);
+					Ok(())
+				};
+				let mut body = Vec::new();
+				encode(&mut body).unwrap();
+
+				let mark = h.log.writes.lock().unwrap().len();
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				h.publisher
+					.clone()
+					.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, true)
+					.unwrap()
+					.await;
+				let wire = h.log.writes.lock().unwrap()[mark..].to_vec();
+				assert!(
+					wire.windows(expected.len()).any(|window| window == expected.as_slice()),
+					"{version} {name}"
+				);
 			}
 		}
 	}

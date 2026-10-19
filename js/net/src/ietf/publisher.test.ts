@@ -1335,22 +1335,31 @@ test("a request pinned to another epoch is refused DOES_NOT_EXIST", async () => 
 	expect(await refusalCode(await status("room", Epoch.mint()), VERSION)).toBe(missing);
 	expect(await refusalCode(await status("epochless", epoch), VERSION)).toBe(missing);
 
-	const subscribe = requestStream(VERSION);
-	await pub.runSubscribe(
-		new Subscribe({
-			requestId: 7n,
-			trackNamespace: Path.from("room"),
-			trackName: "video",
-			subscriberPriority: 0,
-			epoch: Epoch.mint(),
-		}),
-		subscribe.stream,
-	);
-	const r = subscribe.wire();
-	expect(await r.u53()).toBe(RequestError.id);
-	expect((await RequestError.decode(r, VERSION)).errorCode).toBe(
-		toRequestCode("does_not_exist", "subscribe", VERSION),
-	);
+	// An instance never comes back, so asking to wait for a gone one changes nothing.
+	for (const rendezvous of [false, true]) {
+		for (const [namespace, pinned] of [
+			["room", Epoch.mint()],
+			["epochless", epoch],
+		] as const) {
+			const subscribe = requestStream(VERSION);
+			await pub.runSubscribe(
+				new Subscribe({
+					requestId: 7n,
+					trackNamespace: Path.from(namespace),
+					trackName: "video",
+					subscriberPriority: 0,
+					rendezvous,
+					epoch: pinned,
+				}),
+				subscribe.stream,
+			);
+			const r = subscribe.wire();
+			expect(await r.u53()).toBe(RequestError.id);
+			expect((await RequestError.decode(r, VERSION)).errorCode).toBe(
+				toRequestCode("does_not_exist", "subscribe", VERSION),
+			);
+		}
+	}
 
 	origin.close();
 });
