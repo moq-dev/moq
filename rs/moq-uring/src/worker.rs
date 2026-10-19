@@ -268,7 +268,7 @@ impl Worker {
 					}));
 			}
 			self.shared.metrics.completions.add(self.cqes.len() as u64);
-			if self.cqes.is_empty() || !self.dispatch_batch(deadline, || clock.now()) {
+			if self.cqes.is_empty() || !self.dispatch_batch(deadline, || clock.host_now()) {
 				return Ok(());
 			}
 		}
@@ -1075,7 +1075,10 @@ mod tests {
 
 	#[test]
 	fn dropped_worker_rejects_operations() {
-		let Some((worker, _clock)) = manual() else { return };
+		let Some((worker, clock)) = manual() else { return };
+		// Far past the host's time, which bounds teardown: comparing the two
+		// would end the drain before it dispatched anything.
+		clock.advance(Duration::from_secs(86_400));
 		let handle = worker.handle();
 		let bind = || std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
 		let sock = handle.udp(bind(), udp::Config::default()).expect("socket");
@@ -1138,7 +1141,7 @@ mod tests {
 		}
 		assert_eq!(worker.shared.ring.borrow_mut().submission().len(), SQ_ENTRIES as usize);
 
-		worker.drain_teardown(worker.shared.clock.now());
+		worker.drain_teardown(worker.shared.clock.host_now());
 		assert!(worker.shared.ring.borrow_mut().submission().is_empty());
 	}
 
