@@ -32,14 +32,15 @@ were preserved.
 
 Start by comparing the live tree against these baselines:
 
-- Rust had 407 dead-code/unused suppression attributes, 328 conditional on
-  features or platforms; 400 remain after this run. Keep the conditional
+- Rust had 410 dead-code/unused suppression attributes, 331 conditional on
+  features or platforms; 403 remain after this run. Keep the conditional
   model/session separation, generated settings and NVENC ABI tables, retained
   drop guards, compile-time Send assertions, deserialization rejection
   fixtures, and shared test/benchmark harnesses. Recheck their actual callers
   rather than deleting attributes by count. `cargo shear` found no unused
   dependencies. The wasm-only getrandom dependency selects a backend.
-- Knip 6.42.0 found the JS removals above. Its defaults miss Bun tests, TSX,
+- Knip 6.42.0 found the JS removals above; the scoped final run had no unused
+  JS exports, types, or files. Its defaults miss Bun tests, TSX,
   worklets, shell-launched test clients, and documentation imports, and treat
   MPEG-TS fixtures as TypeScript. Supply those entrypoints explicitly, inspect
   package `exports`, and search the whole tree before removing a finding.
