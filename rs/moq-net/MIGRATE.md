@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### An expired group fails with `Old` even when drained
+### An expired group fails with `Old` even when drained (#5944)
 
 A reader parked at the end of an unfinished group whose max delay gives up now gets `Error::Old`, even after reading every frame, where it used to end cleanly.
 `group::Consumer::finished` reports the same error.
