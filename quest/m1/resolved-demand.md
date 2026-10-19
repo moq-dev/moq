@@ -58,7 +58,10 @@ with no wire change.
   nothing already served goes out twice; a group already delivered and since
   evicted downstream is a cache miss, which the relay fills upstream by range
   per [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) (a miss below
-  the cache becomes a range request), not a re-offer.
+  the cache becomes a range request), not a re-offer. The same re-offer fires
+  at the same max age when a stale verdict loses its edge: the newer group
+  that made an older one stale is aborted or evicted, and `TrackState::is_stale`
+  revalidates the edge, so a cold cursor would serve the older group.
 - **Cost, accepted.** Groups below a newcomer's floor that the wider budget
   covers also come upstream, and the relay drops them locally. Bounded by the
   max age and the cache.
@@ -87,11 +90,14 @@ answer; a late group below the copy's start still reaches the no-floor
 reader; a reader joining with the same max age sends no SUBSCRIBE_UPDATE; and
 a re-offered group is never delivered twice to one subscriber; and a widen,
 shrink, evict, widen sequence at the relay gets the evicted groups back
-through the range miss fill, not a re-offer. Cover the
+through the range miss fill, not a re-offer; and at the same max age, aborting
+or evicting the group that made an older one stale re-offers the older one,
+as a cold relay would serve it. Cover the
 warm-relay case in `js/net` too.
 
 Public API: none. Wire: no encoding change; a publisher now re-offers
-cached groups when a SUBSCRIBE_UPDATE widens the max age.
+cached groups when a SUBSCRIBE_UPDATE widens the max age or a stale verdict
+loses its edge.
 
 ## Related
 
