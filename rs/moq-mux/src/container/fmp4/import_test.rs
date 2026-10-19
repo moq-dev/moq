@@ -2563,8 +2563,9 @@ fn drain_groups(track: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 }
 
 /// The video and audio groups of an fMP4 import on a shared epoch's timebase, fed bbb's
-/// init and then [`PLACED_SEGMENTS`] from segment `from` on, each segment one fragment per track.
-async fn placed_groups(from: usize) -> [Vec<(u64, usize)>; 2] {
+/// init and then [`PLACED_SEGMENTS`] from segment `from` on, each segment `fragments` equal
+/// fragments per track, only the first opening on a video keyframe.
+async fn placed_groups(from: usize, fragments: u64) -> [Vec<(u64, usize)>; 2] {
 	let epoch = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_760_000_000_000);
 	crate::clock::fake_host_wall(epoch + std::time::Duration::from_secs(600));
 	let (init, video, audio) = bbb_init();
@@ -2588,12 +2589,16 @@ async fn placed_groups(from: usize) -> [Vec<(u64, usize)>; 2] {
 	}
 	for (i, segment) in PLACED_SEGMENTS.iter().enumerate().skip(from) {
 		let next = PLACED_SEGMENTS.get(i + 1).map_or(segment + 1_000, |next| *next);
-		let (start, end) = (600_000_000 + segment * 1_000, 600_000_000 + next * 1_000);
+		let at = |part: u64| 600_000_000 + (segment + (next - segment) * part / fragments) * 1_000;
 		fmp4.decode(&styp()).unwrap();
-		for (id, scale) in [video, audio] {
-			let frames = [sample(start, true, Some(end - start))];
-			fmp4.decode(&super::encode_fragment(info(id, scale, i as u32), &frames).unwrap())
-				.unwrap();
+		for part in 0..fragments {
+			let (start, end) = (at(part), at(part + 1));
+			for (id, scale) in [video, audio] {
+				let frames = [sample(start, part == 0 || id != video.0, Some(end - start))];
+				let sequence = (i as u64 * fragments + part) as u32;
+				fmp4.decode(&super::encode_fragment(info(id, scale, sequence), &frames).unwrap())
+					.unwrap();
+			}
 		}
 	}
 	fmp4.finish().unwrap();
@@ -2623,10 +2628,39 @@ async fn importers_sharing_an_epoch_number_segments_alike() {
 		(611, 0),
 		(612, 1),
 	];
-	let first = placed_groups(0).await;
+	assert_joiners_agree(1, expected).await;
+}
+
+/// A late importer that drops a segment's first fragment, joining in that segment's second, drops
+/// the rest of it too, though a later fragment falls in the next second: an importer running
+/// longer keeps that fragment in the segment's group and gives the second an empty group.
+#[tokio::test]
+async fn a_dropped_segment_stays_dropped_across_a_second() {
+	let expected = vec![
+		(601, 4),
+		(602, 0),
+		(603, 2),
+		(604, 4),
+		(605, 0),
+		(606, 2),
+		(607, 2),
+		(608, 0),
+		(609, 2),
+		(610, 2),
+		(611, 0),
+		(612, 2),
+	];
+	assert_joiners_agree(2, expected).await;
+}
+
+/// Import [`PLACED_SEGMENTS`] in `fragments` fragments a segment from the first segment, whose
+/// groups must be `expected` on both tracks, and from every later one, whose groups must end
+/// those.
+async fn assert_joiners_agree(fragments: u64, expected: Vec<(u64, usize)>) {
+	let first = placed_groups(0, fragments).await;
 	assert_eq!(first, [expected.clone(), expected], "video, then audio");
 	for from in 1..PLACED_SEGMENTS.len() - 1 {
-		let joined = placed_groups(from).await;
+		let joined = placed_groups(from, fragments).await;
 		for (track, (first, joined)) in ["video", "audio"].into_iter().zip(first.iter().zip(&joined)) {
 			assert!(!joined.is_empty(), "{track} from segment {from} published nothing");
 			assert!(

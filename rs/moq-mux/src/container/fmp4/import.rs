@@ -1006,7 +1006,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// The keyframe bit no longer decides that: audio flags every sample a sync sample, so
 			// keying off it opened a group (a QUIC stream) per audio fragment.
 			let new_segment = track.segment != Some(self.segment);
-			let mut start_group = track.group.is_none() || new_segment;
+			// On the grid a track holds no group only before its first or after a dropped segment
+			// start, whose later fragments an importer running longer keeps in that segment's
+			// group: none of them is a start, even in the next second.
+			let mut start_group = new_segment || (track.group.is_none() && track.grid.is_none());
 			// A dropped fragment still moves the track into its segment, or the segment's next
 			// fragment would read as a start that an importer which kept this one does not see.
 			track.segment = Some(self.segment);
