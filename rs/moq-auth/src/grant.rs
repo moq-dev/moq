@@ -73,9 +73,12 @@ impl Grant {
 	/// Snapshot the expiry on the ambient clock; one already past is now, and one beyond
 	/// the clock's range is never.
 	pub fn deadline(&self) -> Option<moq_clock::Instant> {
+		// Read the instant first, so a pause between the two reads shortens the grant
+		// instead of extending it.
+		let start = moq_clock::now();
 		let now = SystemTime::from(moq_clock::wall());
 		let remaining = self.expires?.duration_since(now).unwrap_or_default();
-		moq_clock::now().checked_add(remaining)
+		start.checked_add(remaining)
 	}
 
 	/// Refuse a grant that admits nothing, marks a non-peer upstream, asks to be
