@@ -49,32 +49,6 @@ export class MaxRequestId {
 	}
 }
 
-export class RequestsBlocked {
-	static id = 0x1a;
-
-	requestId: bigint;
-
-	constructor({ requestId }: { requestId: bigint }) {
-		this.requestId = requestId;
-	}
-
-	async #encode(w: Writer): Promise<void> {
-		await w.u62(this.requestId);
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async #decode(r: Reader): Promise<RequestsBlocked> {
-		return new RequestsBlocked({ requestId: await r.u62() });
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<RequestsBlocked> {
-		return Message.decode(r, RequestsBlocked.#decode);
-	}
-}
-
 /// REQUEST_OK (0x07 in v15) - Generic success response for any request.
 /// Replaces PublishNamespaceOk, SubscribeNamespaceOk in v15.
 export class RequestOk {

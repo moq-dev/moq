@@ -90,35 +90,6 @@ export class SessionClient {
 	}
 }
 
-export class SessionServer {
-	version: number;
-	extensions: Extensions;
-
-	constructor(version: number, extensions = new Extensions()) {
-		this.version = version;
-		this.extensions = extensions;
-	}
-
-	async #encode(w: Writer) {
-		await w.u53(this.version);
-		await this.extensions.encode(w);
-	}
-
-	static async #decode(r: Reader): Promise<SessionServer> {
-		const version = await r.u53();
-		const extensions = await Extensions.decode(r);
-		return new SessionServer(version, extensions);
-	}
-
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader): Promise<SessionServer> {
-		return Message.decode(r, SessionServer.#decode);
-	}
-}
-
 export class SessionInfo {
 	bitrate: number;
 

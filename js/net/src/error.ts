@@ -324,8 +324,6 @@ export class ProtocolViolation extends Error {
 
 /** Package-internal compatibility names used by the wire implementation. */
 export { Session as SessionError, Stream as StreamError, TooFarBehind as Lagged };
-/** Package-internal compatibility name used by the wire implementation. */
-export type StreamErrorOptions = StreamOptions;
 
 /** The WebTransport-shaped fields a stream reset code arrives in. */
 type StreamErrorLike = { source?: unknown; streamErrorCode?: unknown };
