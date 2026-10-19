@@ -83,7 +83,7 @@ peer connects as the MoQ client and the answering peer accepts.
 key". Two native MoQ endpoints on the same network can exchange media with no
 relay, no DNS, and no certificate authority: the endpoint's key is its address
 and its TLS identity. Build `moq` from source with
-`cargo build -p moq-cli --release --features iroh,play` for native playback;
+`cargo build -p moq-cli --release --features iroh,play,openh264` for native playback;
 published binaries, Docker images, and the Nix package leave iroh out.
 
 ```bash

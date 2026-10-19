@@ -18,8 +18,8 @@
 //!   content as source group N.
 //!
 //! The codec work is `moq-video`: hardware where available (NVDEC + NVENC on
-//! Linux, VideoToolbox on macOS, Media Foundation on Windows), with the default
-//! `openh264` feature providing H.264 software fallback. On an NVIDIA GPU the whole pipeline is
+//! Linux, VideoToolbox on macOS, Media Foundation on Windows), with the opt-in
+//! `openh264` feature providing H.264 software fallback, which a GPU-less host needs. On an NVIDIA GPU the whole pipeline is
 //! GPU-resident: NVDEC decodes and scales in hardware and NVENC encodes the
 //! CUDA frame in place, with no CPU copies. macOS and Windows also resize on
 //! the GPU; set [`Config::resize`]'s output to `Output::Cpu` to decode to CPU
