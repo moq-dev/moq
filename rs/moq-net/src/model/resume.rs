@@ -179,6 +179,7 @@ impl Consumer {
 				datagram: None,
 				groups: (0, Cap::from(..)),
 				groups_read: false,
+				peeked: None,
 			})
 		});
 		// Subscribed to the serving copy at once, so groups it has now are the reader's
@@ -379,9 +380,16 @@ impl Subscriber {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<u64>>> {
 		let mut reader = self.reader();
+		reader.peeked = None;
 		loop {
 			if let Some(result) = reader.poll_lowest(ordered, delivered, waiter) {
-				return result.map(|result| result.map(|next| next.map(|next| next.sequence)));
+				return result.map(|result| {
+					result.map(|next| {
+						let sequence = next.as_ref().map(|next| next.sequence);
+						reader.peeked = next;
+						sequence
+					})
+				});
 			}
 		}
 	}
@@ -500,12 +508,16 @@ impl Subscriber {
 }
 
 struct Candidate {
-	index: usize,
+	generation: u64,
 	sequence: u64,
+	/// A nested reader may sync a route swap before its caller consumes this
+	/// candidate. Keep its exact copy alive until that commit.
+	_lease: Arc<()>,
 }
 
 /// A [`Subscriber`]'s state.
 struct Reader {
+	peeked: Option<Candidate>,
 	this: Weak<Mutex<Reader>>,
 	route: Consumer,
 	/// The reader's own preferences, mirrored into every copy's subscription.
@@ -696,12 +708,20 @@ impl Reader {
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
 	) -> Option<Poll<Result<Option<group::Consumer>>>> {
-		let index = match self.poll_lowest(ordered, delivered, waiter)? {
-			Poll::Ready(Ok(Some(next))) => next.index,
-			Poll::Ready(Ok(None)) => return Some(Poll::Ready(Ok(None))),
-			Poll::Ready(Err(err)) => return Some(Poll::Ready(Err(err))),
-			Poll::Pending => return Some(Poll::Pending),
+		let candidate = match self.peeked.take() {
+			Some(candidate) => candidate,
+			None => match self.poll_lowest(ordered, delivered, waiter)? {
+				Poll::Ready(Ok(Some(next))) => next,
+				Poll::Ready(Ok(None)) => return Some(Poll::Ready(Ok(None))),
+				Poll::Ready(Err(err)) => return Some(Poll::Ready(Err(err))),
+				Poll::Pending => return Some(Poll::Pending),
+			},
 		};
+		let index = self
+			.copies
+			.iter()
+			.position(|copy| copy.generation == candidate.generation)
+			.expect("the candidate's lease retains its copy");
 		let Sub::Ready(sub) = &mut self.copies[index].sub else {
 			unreachable!()
 		};
@@ -709,15 +729,15 @@ impl Reader {
 			true => sub.poll_next_group(waiter),
 			false => sub.poll_recv_group(waiter),
 		};
-		if let Poll::Ready(Ok(Some(group))) = result
-			&& Self::deliverable(&self.copies[index], group.sequence, delivered)
-		{
-			self.observe(index, group.sequence);
-			let group = self.hand_out(index, group);
-			return Some(Poll::Ready(Ok(Some(group))));
-		}
-		// A producer may evict or replace the candidate between peeking and taking it.
-		None
+		// Selection reserves the exact group, so eviction can abort that group but
+		// cannot substitute a later one and advance the logical reader past a gap.
+		let Poll::Ready(Ok(Some(group))) = result else {
+			unreachable!("the peek reserved a group")
+		};
+		assert_eq!(group.sequence, candidate.sequence, "the peek reserved this exact group");
+		self.observe(index, group.sequence);
+		let group = self.hand_out(index, group);
+		Some(Poll::Ready(Ok(Some(group))))
 	}
 
 	/// Choose without consuming a candidate, so a newer copy cannot overtake a lower
@@ -763,7 +783,11 @@ impl Reader {
 							continue;
 						}
 						if lowest.as_ref().is_none_or(|lowest| sequence <= lowest.sequence) {
-							lowest = Some(Candidate { index, sequence });
+							lowest = Some(Candidate {
+								generation: self.copies[index].generation,
+								sequence,
+								_lease: self.copies[index].lease.clone(),
+							});
 						}
 						break;
 					}
@@ -964,6 +988,7 @@ impl Reader {
 	}
 
 	fn raise_start_to(&mut self, start: u64) {
+		self.peeked = None;
 		self.groups.0 = self.groups.0.max(start);
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
@@ -978,6 +1003,7 @@ impl Reader {
 	/// resume point: groups under it were handed out by an earlier route, or never owed.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn start_at(&mut self, start: u64) {
+		self.peeked = None;
 		self.groups.0 = start;
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
@@ -987,6 +1013,7 @@ impl Reader {
 	}
 
 	fn end_at(&mut self, end: Cap) {
+		self.peeked = None;
 		self.groups.1 = end;
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
@@ -1820,6 +1847,44 @@ mod test {
 		routes.serve(b.consume());
 		write(&b, 2);
 		assert_eq!(drain(&mut sub, ordered), [1, 2]);
+	}
+
+	#[test]
+	fn a_reserved_group_survives_eviction_and_nested_route_replacement() {
+		for ordered in [false, true] {
+			for nested in [false, true] {
+				let routes = Producer::new();
+				let inner = logical(&routes);
+				let outer_routes = Producer::new();
+				let outer = logical(&outer_routes);
+				outer_routes.serve(inner.consume());
+				let a = copy();
+				routes.serve(a.consume());
+				let mut sub = subscribe(if nested { &outer } else { &inner }, HOUR);
+				let mut one = a.create_group(group::Info { sequence: 1 }).unwrap();
+				one.write_frame(ts(1), b"x".as_ref()).unwrap();
+				one.finish().unwrap();
+				write(&a, 3);
+				let waiter = kio::Waiter::noop();
+				assert_eq!(
+					sub.poll_peek_group(ordered, &waiter).map(Result::unwrap),
+					Poll::Ready(Some(1))
+				);
+				one.abort(Error::Evicted).unwrap();
+				let b = copy();
+				routes.serve(b.consume());
+				write(&b, 2);
+				let next = match ordered {
+					true => sub.poll_next_group(&waiter),
+					false => sub.poll_recv_group(&waiter),
+				};
+				let Poll::Ready(Ok(Some(group))) = next else {
+					panic!("the reserved group")
+				};
+				assert_eq!(group.sequence, 1, "ordered={ordered}, nested={nested}");
+				assert_eq!(drain(&mut sub, ordered), [2], "ordered={ordered}, nested={nested}");
+			}
+		}
 	}
 
 	#[test]

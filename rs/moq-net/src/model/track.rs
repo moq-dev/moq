@@ -4587,6 +4587,9 @@ struct Cursor {
 	/// `u64::MAX` and no group can follow.
 	/// Used only by that method to skip late arrivals; does not affect `recv_group`.
 	next_sequence: Option<u64>,
+	/// The exact candidate a route-copy selection inspected, including its arrival
+	/// position. Consuming it must not look up a different group after eviction.
+	peeked: Option<Box<Peeked>>,
 	/// Exclusive upper sequence bound for `next_group` and `recv_group`, in the form
 	/// [`Cap::exclusive`] produces. `None` means no cap. Set by `end_at`;
 	/// can be raised, lowered, or unset at any time. Groups at or past the cap stay in
@@ -4618,6 +4621,12 @@ struct Cursor {
 	seek_pending: BTreeMap<u64, stats::Content>,
 	/// The drops a wire publisher forwards, once it first polls for one.
 	drops: Option<Box<DropCursor>>,
+}
+
+struct Peeked {
+	group: group::Consumer,
+	index: Option<usize>,
+	ordered: bool,
 }
 
 /// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
@@ -4728,6 +4737,7 @@ impl Cursor {
 			index: 0,
 			datagram_index,
 			next_sequence: Some(0),
+			peeked: None,
 			end_sequence: None,
 			parked: BTreeMap::new(),
 			aborts: None,
@@ -4902,6 +4912,11 @@ impl Cursor {
 	}
 
 	fn poll_recv_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		if let Some(peeked) = self.peeked.take().filter(|peeked| take && !peeked.ordered) {
+			self.advance_arrival(peeked.group.sequence, peeked.index);
+			peeked.group.cache_refresh();
+			return Poll::Ready(Ok(Some(self.with_expiry(peeked.group))));
+		}
 		self.resolve_floor();
 		if let Some(aborts) = &self.aborts {
 			// A sequence may name both a live group and its fetched head. Only the
@@ -4982,15 +4997,7 @@ impl Cursor {
 			// A peek discards what cannot be delivered, but keeps its candidate at the
 			// same cursor position until the reader chooses this copy.
 			if take || stale {
-				if let Some(index) = next_index {
-					self.index = index;
-				} else {
-					self.parked.remove(&consumer.sequence);
-					self.aborts
-						.as_ref()
-						.expect("parked groups are watched")
-						.remove(consumer.sequence);
-				}
+				self.advance_arrival(consumer.sequence, next_index);
 			}
 			if stale {
 				self.stale.add(consumer.content());
@@ -5001,7 +5008,28 @@ impl Cursor {
 				}
 				continue;
 			}
-			return Poll::Ready(Ok(Some(if take { self.with_expiry(consumer) } else { consumer })));
+			return Poll::Ready(Ok(Some(if take {
+				self.with_expiry(consumer)
+			} else {
+				self.peeked = Some(Box::new(Peeked {
+					group: consumer.clone(),
+					index: next_index,
+					ordered: false,
+				}));
+				consumer
+			})));
+		}
+	}
+
+	fn advance_arrival(&mut self, sequence: u64, index: Option<usize>) {
+		if let Some(index) = index {
+			self.index = index;
+		} else {
+			self.parked.remove(&sequence);
+			self.aborts
+				.as_ref()
+				.expect("parked groups are watched")
+				.remove(sequence);
 		}
 	}
 
@@ -5038,6 +5066,9 @@ impl Cursor {
 	/// The lowest servable group past the last one returned, walking off everything the
 	/// drift budget has convicted on the way.
 	fn poll_next_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		if let Some(peeked) = self.peeked.take().filter(|peeked| take && peeked.ordered) {
+			return Poll::Ready(Ok(Some(self.advance_sequence(peeked.group))));
+		}
 		let Some(next) = self.next_sequence else {
 			return Poll::Ready(Ok(None));
 		};
@@ -5082,15 +5113,23 @@ impl Cursor {
 		};
 
 		Poll::Ready(Ok(Some(if take {
-			self.next_sequence = group.sequence.checked_add(1);
-			// The delivery commits everything the seek stepped over to reach this group.
-			self.commit_seek_stale(self.next_sequence.unwrap_or(u64::MAX));
-			// Delivery is a cache access, same as the arrival-order path.
-			group.cache_refresh();
-			self.with_expiry(group)
+			self.advance_sequence(group)
 		} else {
+			self.peeked = Some(Box::new(Peeked {
+				group: group.clone(),
+				index: None,
+				ordered: true,
+			}));
 			group
 		})))
+	}
+
+	fn advance_sequence(&mut self, group: group::Consumer) -> group::Consumer {
+		self.next_sequence = group.sequence.checked_add(1);
+		// The delivery commits everything the seek stepped over to reach this group.
+		self.commit_seek_stale(self.next_sequence.unwrap_or(u64::MAX));
+		group.cache_refresh();
+		self.with_expiry(group)
 	}
 
 	/// Count the sequence path's convictions below `committed` into [`Self::stale`],
@@ -5246,7 +5285,8 @@ impl Subscriber {
 		res.map(|res| res.map(|group| group.map(|group| group.with_meter(meter))))
 	}
 
-	/// The next group's sequence without handing it out or advancing past it.
+	/// Reserve the next group without advancing past it, so the subsequent read
+	/// takes that exact group even if a producer evicts it meanwhile.
 	pub(super) fn poll_peek_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => loop {
@@ -5534,7 +5574,10 @@ impl Subscriber {
 	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn start_at(&mut self, sequence: u64) {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.min_sequence = sequence,
+			Inner::Plain(cursor) => {
+				cursor.peeked = None;
+				cursor.min_sequence = sequence;
+			}
 			// Assigns, including downward. A front serves every viewer of a path,
 			// and a later SUBSCRIBE_UPDATE can widen the floor; raising only would
 			// leave a finished group below the old floor unread.
@@ -5546,7 +5589,10 @@ impl Subscriber {
 	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn raise_start_to(&mut self, sequence: u64) {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.min_sequence = cursor.min_sequence.max(sequence),
+			Inner::Plain(cursor) => {
+				cursor.peeked = None;
+				cursor.min_sequence = cursor.min_sequence.max(sequence);
+			}
 			Inner::Resume(resume, _) => resume.raise_start_to(sequence),
 		}
 	}
@@ -5568,6 +5614,7 @@ impl Subscriber {
 	pub(crate) fn end_at(&mut self, end: impl Into<Cap>) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
+				cursor.peeked = None;
 				cursor.end_sequence = end.into().exclusive();
 				cursor.update_drift_cap();
 			}
@@ -10456,6 +10503,71 @@ mod test {
 			.expect("would have errored")
 			.expect("track should not be closed");
 		assert_eq!(group.sequence, 5);
+	}
+
+	#[test]
+	fn changed_bounds_invalidate_a_peeked_group() {
+		for ordered in [false, true] {
+			for raise_floor in [false, true] {
+				let producer = track_producer("test", Info::timed());
+				let mut subscriber = producer.subscribe(replay());
+				for sequence in [1, 2] {
+					producer
+						.create_group(group::Info { sequence })
+						.unwrap()
+						.finish()
+						.unwrap();
+				}
+				let waiter = kio::Waiter::noop();
+				assert_eq!(
+					subscriber.poll_peek_group(ordered, &waiter).map(Result::unwrap),
+					Poll::Ready(Some(1))
+				);
+				if raise_floor {
+					subscriber.set_groups(2..);
+					let Poll::Ready(Ok(Some(group))) = subscriber.poll_group(ordered, &waiter) else {
+						panic!("group 2 is inside the new floor");
+					};
+					assert_eq!(group.sequence, 2);
+				} else {
+					subscriber.set_groups(..0);
+					assert!(subscriber.poll_group(ordered, &waiter).is_pending());
+					subscriber.set_groups(..);
+					let Poll::Ready(Ok(Some(group))) = subscriber.poll_group(ordered, &waiter) else {
+						panic!("group 1 was parked, not consumed");
+					};
+					assert_eq!(group.sequence, 1);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn taking_a_peeked_group_does_not_substitute_after_eviction() {
+		for ordered in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			let mut subscriber = producer.subscribe(replay());
+			for sequence in [1, 3] {
+				producer
+					.create_group(group::Info { sequence })
+					.unwrap()
+					.finish()
+					.unwrap();
+			}
+			let waiter = kio::Waiter::noop();
+			assert_eq!(
+				subscriber.poll_peek_group(ordered, &waiter).map(Result::unwrap),
+				Poll::Ready(Some(1))
+			);
+			evict(&producer, 1);
+			let Poll::Ready(Ok(Some(group))) = subscriber.poll_group(ordered, &waiter) else {
+				panic!("the exact reserved group must be returned");
+			};
+			assert_eq!(
+				group.sequence, 1,
+				"ordered={ordered}: eviction must not substitute group 3"
+			);
+		}
 	}
 
 	#[test]
