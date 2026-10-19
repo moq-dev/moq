@@ -279,10 +279,14 @@ impl Refresh {
 			self.pending.push(Box::pin(async move {
 				// Withdrawing the stream cannot cancel the decider's work. Keep its slot
 				// until the decider answers so churn cannot bypass the bound.
-				let remaining = deadline.saturating_duration_since(moq_clock::now());
-				let (result, settling) = match moq_clock::timeout(remaining, &mut answer).await {
-					Ok(answered) => (super::answered_with(answered).map(|(consumer, _)| consumer), None),
-					Err(_) => {
+				let answered = tokio::select! {
+					biased;
+					answered = &mut answer => Some(answered),
+					() = moq_clock::sleep_until(deadline) => None,
+				};
+				let (result, settling) = match answered {
+					Some(answered) => (super::answered_with(answered).map(|(consumer, _)| consumer), None),
+					None => {
 						let settling: Settling = Box::pin(async move {
 							let _ = answer.await;
 						});
