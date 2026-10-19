@@ -227,9 +227,13 @@ struct Salvage {
 impl Handoff {
 	/// The copy's head, if it holds any frames, or held them when it failed.
 	pub(super) fn head(&self) -> Option<Arc<Head>> {
-		let salvaged = self.salvaged.lock().unwrap_or_else(PoisonError::into_inner);
-		let salvaged = salvaged.as_ref().map(|salvage| salvage.head.clone());
-		salvaged.or_else(|| self.state.read().head().map(Arc::new))
+		// The group's lock first, in `release`'s order: under it the frames are either
+		// still in the copy or already moved here, never in neither.
+		let state = self.state.read();
+		let salvaged = (self.salvaged.lock().unwrap_or_else(PoisonError::into_inner))
+			.as_ref()
+			.map(|salvage| salvage.head.clone());
+		salvaged.or_else(|| state.head().map(Arc::new))
 	}
 
 	/// Drop the held head once the pool's idle window passed, returning whether none is
@@ -330,17 +334,21 @@ impl GroupState {
 		!matches!(self.timeline, Timeline::Empty) || self.fin.is_some() || self.abort.is_some()
 	}
 
+	/// The bytes the in-flight frame declared but has not written yet, which its open
+	/// already admitted.
+	fn unwritten(&self) -> u64 {
+		self.partial
+			.as_ref()
+			.map_or(0, |partial| partial.buf.size() as u64 - partial.charged)
+	}
+
 	/// Content still available to a reader of this group.
 	///
 	/// Counts the in-flight frame at its declared size, like [`Self::content_range`]: a
 	/// reader that skips it misses the whole frame, however much has arrived.
 	fn content(&self) -> stats::Content {
-		let unwritten = self
-			.partial
-			.as_ref()
-			.map_or(0, |partial| partial.buf.size() as u64 - partial.charged);
 		stats::Content {
-			bytes: self.cache + unwritten,
+			bytes: self.cache + self.unwritten(),
 			frames: self.next_index.saturating_sub(self.offset) as u64,
 			groups: 1,
 			datagrams: 0,
@@ -610,16 +618,16 @@ impl GroupState {
 		}
 		// Billed once the group's own charge is gone, so the head only takes its place.
 		if let (Some(handoff), Some(head)) = (handoff, head)
-			&& let Some(bill) = self
-				.charge
-				.account()
-				.and_then(|track| track.hold(&handoff, head.bytes()))
+			&& let Some(track) = self.charge.account()
+			&& let Some(bill) = track.hold(head.bytes())
 		{
 			let salvage = Salvage {
 				head: Arc::new(head),
 				bill,
 			};
 			*handoff.salvaged.lock().unwrap_or_else(PoisonError::into_inner) = Some(salvage);
+			// Only once it is held: a sweep finding the hand-off empty forgets it.
+			track.expire_held(&handoff);
 		}
 	}
 }
@@ -928,7 +936,9 @@ impl Producer {
 		let fields = || head.objects.iter().take(count).flatten();
 		let payload: u64 = frames.iter().map(|frame| frame.payload.len() as u64).sum();
 		let metadata: u64 = fields().map(|fields| fields.heap()).sum();
-		if state.would_overflow(count, payload + metadata) {
+		// The in-flight frame's remainder was admitted at its open and is charged as it
+		// streams in, without another check.
+		if state.would_overflow(count, payload + metadata + state.unwritten()) {
 			return;
 		}
 
@@ -3162,6 +3172,34 @@ mod test {
 		producer.clone().abort(Error::Cancel).unwrap();
 		assert!(handoff.head().is_none());
 		assert_eq!(pool.used(), 0);
+	}
+
+	/// The in-flight frame's unwritten remainder counts against the group budget, so an
+	/// adoption cannot take the group past it once the frame finishes streaming.
+	#[test]
+	fn an_open_frame_reserves_its_remainder_from_adoption() {
+		let pool = cache::Pool::unbounded();
+		let cache = cache::Track::new(pool, kio::Weak::new());
+		let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
+		tail.start_at(1).unwrap();
+		let adopter = tail.clone();
+		let _frame = tail
+			.create_frame(frame::Info {
+				size: MAX_CACHE_BYTES - 1,
+				timestamp: None,
+			})
+			.unwrap();
+		let head = Head {
+			start: 0,
+			first_object: true,
+			frames: vec![Frame {
+				timestamp: None,
+				payload: Bytes::from_static(b"ab"),
+			}],
+			objects: Vec::new(),
+		};
+		adopter.adopt_head(&head);
+		assert_eq!(adopter.state.read().offset, 1, "the head does not fit beside the open frame");
 	}
 
 	/// An adopted head leads the fields and the wire header, whether the header was set

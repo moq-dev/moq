@@ -806,24 +806,18 @@ impl Track {
 		}
 	}
 
-	/// Bill `bytes` of a failed group's head while `handoff` holds it for a successor route.
+	/// Bill `bytes` of a failed group's head while a hand-off holds it for a successor route.
 	///
 	/// Readers that stop polling can hold a hand-off indefinitely, so the head is billed
 	/// like cached content and bounded the same way: `None` when it would take the pool past
-	/// its capacity, and the sweep drops it once the pool's idle window passes.
-	pub(super) fn hold(self: &Arc<Self>, handoff: &Arc<group::Handoff>, bytes: u64) -> Option<Bill> {
+	/// its capacity, and [`Self::expire_held`] drops it once the pool's idle window passes.
+	pub(super) fn hold(self: &Arc<Self>, bytes: u64) -> Option<Bill> {
 		if self
 			.pool
 			.capacity()
 			.is_some_and(|capacity| self.pool.used().saturating_add(bytes) > capacity)
 		{
 			return None;
-		}
-		if self.sweep.get().is_some() {
-			self.held
-				.lock()
-				.unwrap_or_else(PoisonError::into_inner)
-				.push(Arc::downgrade(handoff));
 		}
 		self.pool.add(bytes);
 		Some(Bill {
@@ -833,8 +827,18 @@ impl Track {
 		})
 	}
 
+	/// Have the sweep drop `handoff`'s held head once the pool's idle window passes.
+	pub(super) fn expire_held(&self, handoff: &Arc<group::Handoff>) {
+		if self.sweep.get().is_some() {
+			self.held
+				.lock()
+				.unwrap_or_else(PoisonError::into_inner)
+				.push(Arc::downgrade(handoff));
+		}
+	}
+
 	/// Drop the held heads past the pool's idle window, forgetting the hand-offs done with.
-	fn expire_held(&self) {
+	fn sweep_held(&self) {
 		let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
 		held.retain(|handoff| handoff.upgrade().is_some_and(|handoff| !handoff.expire()));
 	}
@@ -861,7 +865,7 @@ impl Track {
 
 	/// Settle from [`Pool::sweep`], dating activity and expiring every idle candidate.
 	pub(super) fn sweep(&self) {
-		self.expire_held();
+		self.sweep_held();
 		self.settle_inner(None, true);
 	}
 
