@@ -15,8 +15,8 @@ means "nobody wants it yet" instead of "nobody ever will".
 This questline adds an AUTH exchange to both wires: one stream per token, a
 grant per token, the union of every accepted token as the session's scope,
 and a loud failure when a publish can never be honored. It ends with extra
-credentials able to travel in band, while the first stays in the CONNECT
-request for every peer, including those that predate the stream. Node-bound peer grants for direct sessions belong to
+credentials able to travel in band, while the first rides SETUP, or the URL
+for peers that predate the SETUP token. Node-bound peer grants for direct sessions belong to
 [P2P](/quest/m2/p2p/peer-grant.md), their only consumer.
 
 ## Plan
@@ -69,8 +69,8 @@ Decisions settled while planning, recorded so review does not relitigate them:
 - **One AUTH stream per token, opened by whoever presents it.** Either side of
   a session may open one; the acceptor answers with the grant that token
   earns. A moq-net session opens one on both sides right after SETUP with an
-  empty token, meaning the credential the connection already presented (URL
-  `?jwt=`, mTLS, or nothing), so a publish-only client learns it may subscribe
+  empty token, meaning the credential the connection already presented (the
+  SETUP token, URL `?jwt=`, mTLS, or nothing), so a publish-only client learns it may subscribe
   to nothing and a relay learns which role its peer will ever play. This is
   also the answer to
   [moq-wg #1854](https://github.com/moq-wg/moq-transport/issues/1854): the
@@ -103,13 +103,16 @@ Decisions settled while planning, recorded so review does not relitigate them:
   authorized work on this session without aborting it or deleting the shared
   origin; this is distinct from attempting a new unauthorized publication.
   Apps that want to decide themselves read the grant instead.
-- **The first token rides CONNECT.** ✅ Decided 2026-10-19 (maintainer,
-  #5972): the connection credential always goes in the CONNECT request, the
-  URL query today and an auth header once browsers allow one, so a session's
-  first requests wait on no AUTH. WebTransport negotiates the moq version in
-  that same request, so a client cannot learn whether the peer speaks AUTH
-  before the token has to be sent anyway. Extra tokens go in band and are
-  simply absent on an old peer. Nothing is refused and nothing is silent.
+- **The first token rides SETUP.** ✅ Decided 2026-10-19 (maintainer,
+  #5972): the connection credential goes in the client's SETUP (a
+  lite-07-wip SETUP parameter, moq-transport's AUTHORIZATION TOKEN option),
+  which the acceptor already reads before serving the session, so it costs
+  no round trip and a session's first requests wait on no AUTH. The URL is
+  fixed before the version is negotiated, so it carries the token as a
+  fallback while any offered version lacks the SETUP token. Extra tokens go
+  in band and are simply absent on an old peer. Nothing is refused and
+  nothing is silent. This replaces the earlier "always in the CONNECT
+  request" decision and its auth-header plan.
 - **Cluster peers keep mTLS.** A relay opens AUTH toward its peer with an empty
   token like any client; AUTH reports the grant actually admitted in each
   direction. The next mTLS scope quest can restrict or refuse it. A v1 endpoint
@@ -147,7 +150,7 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - extra credentials ride
-  AUTH streams: a session starts on what the CONNECT request carried and its
+  AUTH streams: a session starts on the token its SETUP or URL carried and its
   AUTH streams add the rest
 
 ## Related
