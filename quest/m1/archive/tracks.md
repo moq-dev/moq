@@ -10,7 +10,10 @@ delivery stays pull: nothing is ever pushed into a pulled copy. A listing
 never creates a track the publisher serves only on request (an any-name
 `broadcast::Dynamic` handler such as a transcoder). A relay answers many
 downstream TRACKS for a broadcast from one upstream TRACKS. Rust and JS both
-speak it.
+speak it. A listed track's groups reach a late SUBSCRIBE from the cache;
+its datagrams do not, since datagrams are lossy and never cached, so a
+subscriber receives a track's datagrams only from when its SUBSCRIBE takes
+effect.
 
 ## Plan
 
@@ -32,7 +35,11 @@ track" no longer holds:
   still holds, so a track's first groups reach a subscriber that learned of
   the track an RTT late, as long as the publisher retains them (Publisher Max
   Age). A group already past retention is a gap, which the archive records
-  anyway.
+  anyway. Datagrams are outside this: they are never cached
+  (`rs/moq-net/src/model/track.rs`), so any late subscriber misses the ones
+  sent before it, and SUBSCRIBE_ALL's pushed feed missed those sent before
+  it attached too. A datagram track is listed like any other; its datagrams
+  arrive from the SUBSCRIBE on, and its groups still come from the cache.
 - **One mechanism cost more than two.**
   [moq-dev/moq#5931](https://github.com/moq-dev/moq/pull/5931) implemented
   SUBSCRIBE_ALL and found that a relay has to merge pushed feeds into pulled
@@ -178,7 +185,8 @@ request arriving before SYNCED, SYNCED sent the first time the reader's
 queue drains, a cold relay answering SYNCED at once with what it holds and
 the upstream's tracks following as
 live adds, a track added later (a
-SUBSCRIBE from the listing gets its first group from the cache), a track
+SUBSCRIBE from the listing gets its first group from the cache, and its
+datagrams only from the SUBSCRIBE on), a track
 removed and created again under its name (removal sent before the new add),
 add and remove churn collapsing for a stalled reader (including an initial
 track removed before the reader reaches it, with SYNCED still arriving), a

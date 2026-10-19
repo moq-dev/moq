@@ -5,7 +5,9 @@
 `archive::Producer` takes a path prefix and stores every track of every
 broadcast under it into an `object_store::ObjectStore`,
 each broadcast under its own key prefix. It holds what the publisher's cache
-stops serving: a lost group becomes a gap and never stalls the archive. An
+stops serving: a lost group becomes a gap and never stalls the archive.
+Datagrams are lossy and never cached, so a track's datagrams are recorded
+from when its subscription takes effect; earlier ones are not. An
 optional DVR mode prunes old objects. It replaces `moq_archive::Writer` and
 its timelines and recovery machinery.
 
