@@ -19,8 +19,8 @@ recurrence. Small, safe fixes (no public API change, no open decision) land in
 the run's PR, one commit each; everything else becomes a follow-up through
 `/quest-plan`.
 
-Starting points (2026-10-19): there are 59 Criterion targets across 15 crates
-and 27 JS bench files. Nightly stores their history with
+Starting points (2026-10-19): there are 54 `[[bench]]` targets across 14 crates
+(counted from `rs/*/Cargo.toml`) and 27 JS bench files. Nightly stores their history with
 `github-action-benchmark` (`bench/costs`, `bench/rates`), but both
 steps set `fail-on-alert: false`, so regressions go unseen. Compare against
 that history and against the numbers this Plan records. `sh/gh/nightly.sh`
