@@ -1741,12 +1741,6 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
 		loop {
-			// Checked every pass: an update read below may have renamed the request's auth.
-			if let Some(gate) = &mut self.gate
-				&& gate.poll_denied(waiter).is_ready()
-			{
-				return Poll::Ready(Err(Error::Unauthorized));
-			}
 			ready!(self.budget.poll_yield(waiter));
 			// Once answered, the requester's FIN is the normal end, not a cancel.
 			if matches!(self.state, RequestState::Resolve { .. } | RequestState::Serve(_))
@@ -1759,6 +1753,13 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 				// Drop the reply mid-flight: anything half-sent is cancelled rather than
 				// completed for nobody.
 				self.state = RequestState::Finish { finished: false };
+			}
+			// Checked every pass after reading updates, so nothing is served under an auth one
+			// renamed the request to before the gate judges it.
+			if let Some(gate) = &mut self.gate
+				&& gate.poll_denied(waiter).is_ready()
+			{
+				return Poll::Ready(Err(Error::Unauthorized));
 			}
 
 			let stream = self.stream.as_mut().expect("stream present");
@@ -6938,6 +6939,68 @@ mod tests {
 		auth.peer_ended(1);
 		assert!(drive(&mut serve).await, "outlived the token it moved to");
 		assert_eq!(session.log.resets(), vec![crate::StreamError::Unauthorized.to_code()]);
+	}
+
+	/// A SUBSCRIBE_UPDATE renaming a running subscription to a token that already ended stops
+	/// it before another group goes out under that token.
+	#[moq_clock::test]
+	async fn a_rename_to_an_ended_token_serves_nothing_more() {
+		let auth = crate::auth::Handle::new(true);
+		auth.peer_arrived(0).unwrap();
+		auth.peer_granted(
+			0,
+			&crate::auth::Grant {
+				subscribe: crate::Pattern::subtree("room").unwrap().into(),
+				..Default::default()
+			},
+		);
+		auth.peer_arrived(1).unwrap();
+		auth.peer_ended(1);
+		let (mut serve, session, mut dynamic, _broadcast) = named_subscribe(&auth, Some(0)).await;
+		assert!(!drive(&mut serve).await);
+		let mut track = dynamic
+			.requested_track()
+			.now_or_never()
+			.expect("track requested")
+			.unwrap()
+			.accept(crate::track::Info::timed());
+		assert!(!drive(&mut serve).await);
+		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
+			panic!("the subscription is not running");
+		};
+		let opens = run.ctx.opens.clone();
+		let write = |track: &mut crate::track::Producer, sequence| {
+			let mut group = track.create_group(group::Info { sequence }).unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(sequence).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		};
+		write(&mut track, 0);
+		assert!(!drive(&mut serve).await);
+		assert_eq!(
+			opens.opened.load(Ordering::Relaxed),
+			1,
+			"served under the token it named"
+		);
+
+		let update = lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
+			priority: 1,
+			max_delay: Duration::ZERO,
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+			auth: Some(1),
+		};
+		session.push(&update.encode_bytes(Version::Lite07).unwrap());
+		write(&mut track, 1);
+
+		assert!(drive(&mut serve).await, "outlived the ended token it moved to");
+		assert_eq!(session.log.resets(), vec![crate::StreamError::Unauthorized.to_code()]);
+		let started = opens.pending.load(Ordering::Relaxed) + opens.opened.load(Ordering::Relaxed);
+		assert_eq!(started, 1, "a group started under it");
 	}
 
 	/// A subscription that always has another group ready yields within its budget, so a
