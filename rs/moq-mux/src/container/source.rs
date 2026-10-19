@@ -251,10 +251,10 @@ impl ExportSource {
 		})
 	}
 
-	/// Start at the newest group to arrive, the live edge, rather than the oldest one the max
-	/// delay still reaches. The subscription carries the max delay from the start: under a zero
-	/// budget every hop drops each group a newer one supersedes, and raising it later cannot
-	/// recover the groups that follow the edge.
+	/// Start at the newest group, the live edge, rather than the oldest one the max delay still
+	/// reaches. The subscription carries the max delay from the start: under a zero budget every
+	/// hop drops each group a newer one supersedes, and raising it later cannot recover the
+	/// groups that follow the edge.
 	pub fn live(mut self) -> Self {
 		self.live = true;
 		self
@@ -716,39 +716,10 @@ mod tests {
 		use std::time::Duration;
 
 		use crate::container::Container as _;
-		use crate::container::test_util::raw_frame;
-		use moq_net::transport::memory;
+		use crate::container::test_util::{Link, origin, raw_frame};
 
-		let origin = |hop| {
-			let config = moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap());
-			let (producer, driver) = moq_net::origin::Producer::new(config);
-			tokio::spawn(moq_net::time::run(driver));
-			producer
-		};
 		let (publisher, subscriber) = (origin(1), origin(2));
-		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
-		let mut config = memory::Config::default();
-		config.protocol = Some(version.alpn().to_string());
-		let (client_transport, server_transport) = memory::pair(config);
-		let client = moq_net::Client::new()
-			.with_versions(version.into())
-			.with_publisher(publisher.consume());
-		let server = moq_net::Server::new()
-			.with_versions(version.into())
-			.with_subscriber(subscriber.clone());
-		// Each driver runs as soon as its handshake resolves: the accept waits on the client's SETUP.
-		let _sessions = tokio::join!(
-			async {
-				let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
-				tokio::spawn(moq_net::time::run(driver));
-				session
-			},
-			async {
-				let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
-				tokio::spawn(moq_net::time::run(driver));
-				session
-			}
-		);
+		let _link = Link::new(&publisher, &subscriber).await;
 
 		let broadcast = publisher.create_broadcast("room").unwrap();
 		let track = broadcast
@@ -802,6 +773,91 @@ mod tests {
 		let expected: Vec<u128> = (0..8).map(|sequence| sequence * 24_000).collect();
 		assert_eq!(timestamps, expected, "the burst reached the export whole");
 		assert_eq!(export.skips(), 0);
+	}
+
+	/// A live start begins at the publisher's newest group, even when an older group of the
+	/// backlog the budget serves arrives first. Starting at that older group reads it, then
+	/// skips the groups after it once the next PES moves the live edge a budget past them: a
+	/// gap right after the first frame. Behind a relay holding only that first group, the
+	/// relay passes on the newest group its source named.
+	#[tokio::test(start_paused = true)]
+	async fn a_live_start_behind_a_backlog_starts_at_the_newest_group() {
+		use std::time::Duration;
+
+		use crate::container::Container as _;
+		use crate::container::test_util::{Link, origin, raw_frame};
+
+		for relay in [false, true] {
+			let (publisher, subscriber) = (origin(1), origin(3));
+			// SETUP takes the first uni stream; the second is the backlog's oldest group.
+			let (held, _downstream) = match relay {
+				true => {
+					let middle = origin(2);
+					let held = Link::held(&publisher, &middle, 2).await;
+					(held, Some(Link::new(&middle, &subscriber).await))
+				}
+				false => (Link::held(&publisher, &subscriber, 2).await, None),
+			};
+
+			let broadcast = publisher.create_broadcast("room").unwrap();
+			let track = broadcast
+				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap();
+			broadcast.announce(Default::default()).unwrap();
+			let consumer = subscriber.consume();
+			consumer.routed("room").await.unwrap();
+			let remote = consumer.request_broadcast("room", None).await.unwrap();
+			let source = crate::Source::new(consumer, remote);
+
+			// MPEG-1 audio from TS: one 24 ms frame per group, a PES of five written at once.
+			let wire = HangContainer::Legacy(crate::container::Kind::Audio);
+			let pes = |pes: u64| {
+				for sequence in pes * 5..pes * 5 + 5 {
+					let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+					wire.write(&mut group, &[raw_frame(sequence * 24_000, b"audio", true)])
+						.unwrap();
+					group.finish().unwrap();
+				}
+			};
+			// About two seconds of it, so the budget's backlog reaches back about 450 ms.
+			for n in 0..17 {
+				pes(n);
+				tokio::time::sleep(Duration::from_millis(120)).await;
+			}
+
+			let mut export = ExportSource::for_audio(&source, "audio", &audio(None), Duration::from_millis(450))
+				.unwrap()
+				.unwrap()
+				.live();
+			let mut read = async || {
+				tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
+					.await
+					.ok()
+					.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros()))
+			};
+			let mut timestamps = Vec::new();
+			// Only the backlog's oldest group has landed.
+			if let Some(Some(timestamp)) = read().await {
+				timestamps.push(timestamp);
+			}
+			// The next PES moves the live edge on before the rest of the backlog lands.
+			pes(17);
+			tokio::time::sleep(Duration::from_millis(120)).await;
+			pes(18);
+			held.open();
+			while let Some(Some(timestamp)) = read().await {
+				timestamps.push(timestamp);
+			}
+			track.finish().unwrap();
+			while let Some(Some(timestamp)) = read().await {
+				timestamps.push(timestamp);
+			}
+
+			// Group 84 was the newest when the export joined.
+			let expected: Vec<u128> = (84..95).map(|sequence| sequence * 24_000).collect();
+			assert_eq!(timestamps, expected, "relay: {relay}");
+			assert_eq!(export.skips(), 0, "relay: {relay}");
+		}
 	}
 
 	async fn audio_export() -> (moq_net::track::Producer, ExportSource) {

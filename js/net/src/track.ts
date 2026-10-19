@@ -1781,6 +1781,7 @@ export class Subscriber {
 			subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest;
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
 		hooks.peekLargest = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.peekLargest();
 			const state = subscriber.#state;
 			return {
 				largest: state.largest.peek(),

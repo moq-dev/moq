@@ -638,6 +638,12 @@ class Reader implements ResumeSource {
 		return serving && hooks.bufferedLargest(serving.sub);
 	}
 
+	peekLargest(): { largest?: track.Location; ended: boolean } {
+		this.sync();
+		const serving = this.#serving();
+		return serving ? hooks.peekLargest(serving.sub) : { ended: false };
+	}
+
 	async largest(seen: track.Location | undefined): Promise<track.Location | undefined> {
 		for (;;) {
 			this.sync();

@@ -4,6 +4,7 @@ import * as Epoch from "./epoch.ts";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import { Route } from "./hop.ts";
+import { hooks } from "./internal.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
@@ -1114,6 +1115,8 @@ test("the largest follows the serving copy across a swap without moving back, an
 	const sub = front.consumer.track("seq").subscribe();
 	ta.write(3);
 	expect(await sub.largest()).toEqual({ group: 3, frame: 0 });
+	// A publisher serving the track peeks the same edge.
+	expect(hooks.peekLargest(sub).largest).toEqual({ group: 3, frame: 0 });
 
 	// The route fails: its copy's stream ends, the logical track's does not.
 	ta.producer.close(new StreamError(StreamCode.SessionClosed));

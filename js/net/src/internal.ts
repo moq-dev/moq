@@ -300,6 +300,8 @@ export interface ResumeSource {
 	finished(): Promise<Location>;
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
 	bufferedLargest(): Location | undefined;
+	/** The serving copy's largest location now, and whether it can still advance. */
+	peekLargest(): { largest?: Location; ended: boolean };
 	/** The serving copy's largest location once newer than `seen`, or undefined once the logical track ends. */
 	largest(seen: Location | undefined): Promise<Location | undefined>;
 	/** An independent subscriber to the serving copy. */
@@ -404,6 +406,7 @@ export const hooks: {
 	cachedGroup: (subscriber: Subscriber, sequence: number) => GroupConsumer | undefined;
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, sequence: number) => boolean;
+	// private: capability gap
 	/** A subscriber's largest location now, and whether it can still advance. */
 	peekLargest: (subscriber: Subscriber) => { largest?: Location; ended: boolean };
 	/** Wake once a subscriber's largest location or its end may have changed; fires at most once. */
