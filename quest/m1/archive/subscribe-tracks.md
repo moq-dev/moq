@@ -121,7 +121,8 @@ TRACKS' three events (see its Plan) map as follows:
   credit the upstream may have run short of when it skipped, so an upstream
   short on capacity fails and retries the listing rather than leave an entry
   that is never removed.
-- **One SUBSCRIBE_TRACKS per nesting chain, widened in place.**
+- **One SUBSCRIBE_TRACKS per nesting chain, never widened in place.**
+  Decided by the maintainer on 2026-10-19.
   SUBSCRIBE_TRACKS matches every namespace under its prefix, and a session
   may not hold two whose prefixes "share a common prefix" (PREFIX_OVERLAP).
   Read that strictly: two prefixes overlap only when one is a prefix of the
@@ -133,40 +134,36 @@ TRACKS' three events (see its Plan) map as follows:
   forbids siblings outright. Asking for the exact namespace does not avoid
   the rule, since `/a` is a prefix of `/a/b`, so:
   - Siblings get separate SUBSCRIBE_TRACKS requests.
-  - Nested listings share one request at the broader of the two, never a
-    common ancestor nobody listed. TRACKS(`/a`) after TRACKS(`/a/b`) widens
-    the request in place with REQUEST_UPDATE carrying TRACK_NAMESPACE_PREFIX
-    (draft-18 on); the overlap rule checks only other requests, so updating
-    our own is legal. The update leaves existing subscriptions alone
-    (draft-22 section 9.5.2), so the held PUBLISHes stay; the newly covered
-    tracks arrive as PUBLISHes, and PUBLISH_SKIPPED suffixes are read against
-    the updated prefix.
-  - A broader listing over several sibling requests, such as TRACKS(`/a`)
-    over `/a/b` and `/a/c`, folds them. The widened prefix may not overlap
-    another request, so cancel the others first and then widen one. The
-    cancel ends only those requests, and the PUBLISH subscriptions they
-    produced keep their own streams (draft-18 section 6.1), so their entries
-    stay. If the widened request PUBLISHes a track we already hold, keep the
-    held one as the entry and refuse the new one: DUPLICATE_SUBSCRIPTION on
-    draft-18, UNINTERESTED from draft-19.
+  - A nested listing that arrives while a broader request covers it reuses
+    that request and filters locally. TRACKS(`/a/b`) after TRACKS(`/a`)
+    sends nothing.
+  - A broader listing that arrives while nested requests exist cancels them,
+    then opens the broader request. TRACKS(`/a`) over `/a/b` and `/a/c`
+    cancels both and sends SUBSCRIBE_TRACKS(`/a`). The cancel ends only
+    those requests, and the PUBLISH subscriptions they produced keep their
+    own streams (draft-18 section 6.1), so their entries stay. When the new
+    request PUBLISHes a track we already hold, keep the held one as the
+    entry and refuse the new one: DUPLICATE_SUBSCRIPTION on draft-18,
+    UNINTERESTED from draft-19.
+  - A track created and removed between that cancel and the open is missed,
+    which the listing contract allows: a listing reports current state, not
+    history, and a lagging lite reader misses a short-lived track the same
+    way, since a removal for a still-queued add cancels both.
   - Each lite listing filters its request's results to its exact namespace.
-  - A refused update resets every affected listing loudly, so each
-    re-requests. That covers the new one, any whose sibling request was
-    cancelled for the fold, and the one whose request was being widened:
-    a REQUEST_ERROR on the update closes that request's stream (draft-22
-    section 9.5.1 says so for SUBSCRIBE_TRACKS, and the existing publisher
-    already treats an update's REQUEST_ERROR as closing the stream on every
-    draft), so no request survives to keep serving it. The held PUBLISHes
-    keep their own streams and are adopted again when the re-request lists
-    them. Never silently narrow. A request never narrows while a listing under it remains, and is
-    cancelled when the last one closes.
+  - If the broader request is refused, every listing it was meant to serve,
+    the new one and each nested one whose request was cancelled, resets
+    loudly and re-requests. The held PUBLISHes keep their own streams and
+    are adopted again when a re-request lists them. A request never narrows
+    while a listing under it remains, and is cancelled when the last one
+    closes.
   - Cost: the extra tracks held are only those of broadcasts nested under a
     listed one, bounded by the `announces` cap below; past it the listings
     reset as for any other overflow.
-  - Rejected: cancelling the narrow request and sending a broader one, since
-    the peer would PUBLISH the held tracks again, a duplicate on draft-18;
-    and one request per session at the common ancestor, which for `/a/b`
-    and `/c/d` is the root and holds every track the peer has.
+  - Rejected: widening a request in place with REQUEST_UPDATE carrying
+    TRACK_NAMESPACE_PREFIX, which avoids the cancel-to-open gap but needs
+    its own refused-update rules for a gap the listing contract already
+    allows; and one request per session at the common ancestor, which for
+    `/a/b` and `/c/d` is the root and holds every track the peer has.
 - **Push inventory only.** An IETF relay lists the tracks it has been
   PUBLISHed or already holds, not what an upstream would serve on SUBSCRIBE.
   A track served only on request is unlisted, which matches TRACKS' rule.
@@ -215,14 +212,13 @@ pauses it and keeps the entry, a PUBLISH_DONE with TRACK_ENDED removes the entry
 another status resets the listing; a PUBLISH_SKIPPED (PUBLISH_BLOCKED on
 draft-18) lists the track once its paused SUBSCRIBE answers, resuming it
 gets the data, a TRACK_ENDED on that paused SUBSCRIBE removes it,
-and a refused paused SUBSCRIBE resets the listing; TRACKS(`/a/b`) then
-TRACKS(`/a`) on one session widens the one SUBSCRIBE_TRACKS, lists `/a`'s
-tracks, and keeps `/a/b`'s held PUBLISHes, and the reverse order shares it
-unchanged; TRACKS(`/a/b`) and TRACKS(`/a/c`) open two requests and hold no
-track outside them, and a later TRACKS(`/a`) folds both into one, keeping
-every held entry and refusing any duplicate PUBLISH; when widening `/a/b` to
-`/a` is refused after `/a/c` was cancelled, the `/a`, `/a/b`, and `/a/c`
-listings all reset and re-request; a PUBLISH for a track we already
+and a refused paused SUBSCRIBE resets the listing; TRACKS(`/a/b`) after
+TRACKS(`/a`) on one session reuses the `/a` request, sends nothing, and
+lists only `/a/b`'s tracks; TRACKS(`/a/b`) and TRACKS(`/a/c`) open two
+requests and hold no track outside them, and a later TRACKS(`/a`) cancels
+both before opening SUBSCRIBE_TRACKS(`/a`), keeping every held entry and
+refusing any duplicate PUBLISH; when that SUBSCRIBE_TRACKS(`/a`) is refused,
+the `/a`, `/a/b`, and `/a/c` listings all reset and re-request; a PUBLISH for a track we already
 SUBSCRIBEd, established or pending, lists it through that SUBSCRIBE and is
 refused (DUPLICATE_SUBSCRIPTION on draft-18, UNINTERESTED from draft-19),
 leaving one upstream subscription; a moq-transport subscriber resuming our paused
