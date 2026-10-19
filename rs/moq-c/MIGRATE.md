@@ -8,6 +8,11 @@ How to update your code for each breaking change, newest first.
 
 The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
 
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `moq_client_config::quic_keylog` or `moq_server_config::quic_keylog` as well to capture them, each a field appended to its struct; without `SSLKEYLOGFILE` the dial or listen fails.
+
 ### OpenH264 is a build feature (#5771)
 
 The release archives and the CMake build still carry the software H.264 fallback.

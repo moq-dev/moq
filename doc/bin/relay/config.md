@@ -37,6 +37,7 @@ allow.uid = [1001]
 [listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
 auth = false                         # Decline MoQ Auth (draft 17+).
 solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
+epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch (draft 17+).
 ```
 
 `timeout` bounds the whole handshake, transport through MoQ SETUP, so a peer
@@ -65,7 +66,11 @@ receive_window = 67108864            # Whole-connection window, in bytes. Defaul
 stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
 send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
+keylog = false                       # Write TLS secrets to the file SSLKEYLOGFILE names. Default.
 ```
+
+`SSLKEYLOGFILE` alone writes nothing: set `keylog = true` too, and only while
+debugging, since the file decrypts every captured session.
 
 `idle_timeout` is how long a peer that vanished without a close keeps its
 sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
@@ -275,7 +280,8 @@ tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
 extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
-extensions.solicit = false           # Decline MoQ Solicit. Both default to on, as in [listen.extensions].
+extensions.solicit = false           # Decline MoQ Solicit.
+extensions.epoch = false             # Decline MoQ Epoch. All default to on, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only

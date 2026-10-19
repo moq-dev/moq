@@ -130,4 +130,3 @@ setup after the capabilities land.
 - [Routing guide](/quest/m1/routing-guide.md) - concept page and federation setup; P2P extends it in m2
 - [Route wakes](/quest/m2/route-wakes.md) - local work follows affected fronts rather than the whole covered table
 - [Link quality](/quest/m2/link-quality.md) - optional measured link cost, distinct from delivery-health failover
-- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - independent origins serving the same explicit epoch

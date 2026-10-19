@@ -21,7 +21,9 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 	connect_mock(options).await
 }
 
-async fn acquisition(version: &str) {
+/// `carries_epoch`: the wire carries the epoch, as lite-07 and moq-transport with the MoQ
+/// Epoch extension do.
+async fn acquisition(version: &str, carries_epoch: bool) {
 	let version: Version = version.parse().unwrap();
 	let publisher = origin(1);
 	let subscriber = origin(2);
@@ -46,10 +48,9 @@ async fn acquisition(version: &str) {
 	// TRACK_INFO makes the replacement happen during acquisition without sleeps.
 	let _new = link(version, &publisher, &subscriber, 1).await;
 	// An epochless replacement restarts the advertisement; a matching epoch only updates it.
-	let lite07 = version == "moq-lite-07-wip".parse().unwrap();
 	let new_cost = match announced.next().await {
-		Some(moq_net::announce::Event::Update(announce)) if lite07 => announce.route.cost,
-		Some(moq_net::announce::Event::Restart(announce)) if !lite07 => announce.route.cost,
+		Some(moq_net::announce::Event::Update(announce)) if carries_epoch => announce.route.cost,
+		Some(moq_net::announce::Event::Restart(announce)) if !carries_epoch => announce.route.cost,
 		other => panic!("{version}: unexpected route change {other:?}"),
 	};
 	assert!(new_cost < old_cost, "the cheaper session wins the route");
@@ -58,7 +59,7 @@ async fn acquisition(version: &str) {
 	group.write_frame(None, b"catalog".to_vec()).unwrap();
 	group.finish().unwrap();
 	let result = pending.await;
-	if lite07 {
+	if carries_epoch {
 		let mut subscription = result.expect("same epoch must acquire");
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"catalog");
@@ -73,10 +74,12 @@ async fn acquisition(version: &str) {
 
 #[moq_clock::test]
 async fn epochless_replacement_refuses_pending_catalog() {
-	acquisition("moq-lite-06").await;
+	acquisition("moq-lite-06", false).await;
 }
 
 #[moq_clock::test]
 async fn same_epoch_replacement_acquires_pending_catalog() {
-	acquisition("moq-lite-07-wip").await;
+	acquisition("moq-lite-07-wip", true).await;
+	acquisition("moq-transport-17", true).await;
+	acquisition("moq-transport-22", true).await;
 }

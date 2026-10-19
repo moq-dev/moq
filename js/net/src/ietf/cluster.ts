@@ -26,10 +26,8 @@
 
 import { ProtocolViolation, reason } from "../error.ts";
 import { type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
-import type { Reader } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { Parameters, SetupOption, type SetupOptions } from "./parameters.ts";
-import { MalformedAuthToken } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
@@ -202,33 +200,6 @@ function encodeHops(hops: Hop[]): Uint8Array {
 		offset += hop.length;
 	}
 	return value;
-}
-
-/**
- * Read the parameters a negotiated session puts on every advertisement, checked against
- * the list of the message that carries them (PUBLISH_NAMESPACE also allows a token).
- *
- * The parameter block is mandatory there, so a message that ends before it (the base form)
- * or one whose block does not parse is the peer's violation, same as a block that parses but
- * carries no HOP_PATH.
- *
- * @internal
- */
-export async function decodeParams(
-	r: Reader,
-	version: IetfVersion,
-	message: "namespace" | "publish-namespace",
-): Promise<Advert> {
-	let params: Parameters;
-	try {
-		params = await Parameters.decode(r, version, message);
-	} catch (err) {
-		// Keep a violation's own code, such as a request token's, and a refusal of the request alone.
-		if (err instanceof ProtocolViolation || err instanceof MalformedAuthToken) throw err;
-		throw new ProtocolViolation(reason(err), { cause: err });
-	}
-
-	return fromParams(params);
 }
 
 /**

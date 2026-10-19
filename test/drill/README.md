@@ -47,8 +47,10 @@ drill does assert is the half of that behavior worth grading here.
 
 The impaired cluster drills arm a one-shot ingress burst once the origin has subscribed
 to the publisher, since the gate also holds the replies and credit that subscription needs.
-The shaper keeps seeded loss, then collects surviving datagrams on the publisher's
-upstream flow until they exceed the rate bucket's burst and queue allowance. It
+The shaper collects datagrams on the publisher's upstream flow until they exceed
+the rate bucket's burst and queue allowance, exempting them from seeded loss: the
+gate also holds the acknowledgments a sender needs to replace a lost datagram, so
+a gate waiting on survivors could idle the publisher out. It
 accounts that batch at one instant, so scheduling gaps cannot silently drain the
 fault away. Transport credit holds two bucket allowances but remains smaller than
 the application burst. The first burst's newest frame also fills that window, since
@@ -136,6 +138,15 @@ its counts are reported but never required. A profile that silently did nothing
 would turn this lane into a second loopback run that passes for free.
 
 There are no retries: a drill that only passes on loopback is a finding.
+
+Random loss is not how real paths fail, so it may prove correctness but never
+judge quality, latency or throughput; those run on a congested path (see
+`test/ts/README.md`). Every drill here proves correctness: that a resource is
+released, a failure surfaces, a route or publisher comes back, or every group is
+recovered. The cluster drills' 10s bound on each group is a stall check, a third
+of the 30s stalls of #4349, not a latency target. So the impaired lane keeps its
+loss, which is what drops the `MAX_STREAMS` and `MAX_DATA` frames the cluster
+drills' senders wait on.
 
 The same shaper is a binary, for putting in front of a relay from another
 process. It applies one profile both ways, prints the seed at start and the

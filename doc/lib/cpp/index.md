@@ -105,10 +105,10 @@ when its session does.
 `MediaTrackConsumer` reads in decode order. For arrival-order reads, decode each group
 from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
 frames carry container media time as they land.
-Share `moq::MediaTimebase::init(broadcast)` through container init records when several
-imports use one source timeline. `MediaContainerStreamProducer::init` takes
-`ContainerStreamInit`; omitting its timebase keeps an independent offset. A timebase
-belongs to its broadcast and does not keep it open.
+Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several imports
+use one source timeline; omitting it keeps an independent offset. A timebase belongs to
+its broadcast and does not keep it open. `MediaContainerProducer` takes chunks split
+anywhere, so a raw byte stream needs no other importer.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.

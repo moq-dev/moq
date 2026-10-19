@@ -31,7 +31,7 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
   compress by default (maintainer, 2026-10-17: "always useful"): the default
   lives where a track is created: moq-mux's JSON helpers and the docs' JSON
   examples set `compress: true`. `Producer::new(track, config)` keeps
-  wrapping a caller-built track, per [FFI shape](/quest/m1/ffi-shape/README.md),
+  wrapping a caller-built track, per `rs/moq-ffi/AGENTS.md`'s layers,
   and its docs say to set `compress` on that `Info`. Delete `rs/moq-mux/src/binary.rs` and its
   users; opaque bytes are a plain track.
 - Delete `rs/moq-flate`, `js/flate`, `rs/hang/src/catalog/compression.rs`,
