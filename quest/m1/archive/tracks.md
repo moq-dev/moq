@@ -73,11 +73,11 @@ when a track no longer exists"):
   learned this way, since the properties are the same immutable ones.
 - **Caught up.** Mirror ANNOUNCE_OK's `Active Count`: the reply opens with a
   count of the tracks in the initial set, sent first, so the lister knows when
-  it holds every track that existed when it asked; entries past the count are
-  live. A relay answers with the count its one resolved upstream reported, as
-  a SUBSCRIBE waits for its own upstream's SUBSCRIBE_OK, and a relay already
-  holding a caught-up upstream listing answers at once from it. It never
-  waits on any node beyond that route.
+  it holds every track this hop knew when it asked; entries past the count are
+  live. Caught up means caught up with this hop, decided by the maintainer on
+  2026-10-19: a relay answers at once with what it currently holds and never
+  waits on its upstream, since relays never block on peers. A cold relay may
+  report zero; the upstream's tracks then arrive as live adds.
 - **Track removed.** A named event referencing the entry's ID, sent when the
   publisher no longer serves the name (it left the broadcast's track table),
   so a SUBSCRIBE for it would now be refused. A track created again under the
@@ -138,7 +138,9 @@ Guidance:
 - Split the JS half into its own quest if the PR grows too large to review.
 
 Test on mock time, directly and through a relay: tracks present at the
-request and the caught-up count matching them, a track added later (a
+request and the caught-up count matching them, a cold relay answering
+caught up at once with what it holds and the upstream's tracks following as
+live adds, a track added later (a
 SUBSCRIBE from the listing gets its first group from the cache), a track
 removed and created again under its name (a new ID), add and remove churn
 collapsing for a stalled reader, a removal of an unknown ID refused, the

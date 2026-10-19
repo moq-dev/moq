@@ -37,13 +37,14 @@ TRACKS' three events (see its Plan) map as follows:
 | TRACKS event | Inbound: we answer SUBSCRIBE_TRACKS | Outbound: we send it with FORWARD=0 |
 |---|---|---|
 | Track added, with TRACK_INFO | a PUBLISH, its Track Properties carrying TRACK_INFO as SUBSCRIBE_OK does today | a PUBLISH; TRACK_INFO from its Track Properties |
-| Caught up | nothing to send: moq-transport has no marker | gap: SUBSCRIBE_TRACKS_OK is a bare REQUEST_OK, and PUBLISHes arrive on their own streams in no order |
+| Caught up | nothing to send: moq-transport has no marker | not needed: the lite side reports this hop's state at once, and PUBLISHes arrive as live adds |
 | Track removed | PUBLISH_DONE with TRACK_ENDED on that PUBLISH | PUBLISH_DONE on the paused PUBLISH |
 
-- **Caught up has no IETF equivalent.** Outbound, report what is known when
-  SUBSCRIBE_TRACKS_OK arrives (usually nothing), as relays report current
-  state, and every later PUBLISH is a live add. A lister over a moq-transport
-  upstream therefore cannot tell "no tracks" from "not yet"; document it.
+- **Caught up has no IETF equivalent, and needs none.** Caught up means
+  caught up with this hop (see TRACKS), so a relay answers a lite TRACKS at
+  once with what it holds, whatever its upstream speaks, and every PUBLISH the
+  FORWARD=0 SUBSCRIBE_TRACKS brings is a live add. Inbound, nothing stands in
+  for it.
 - **Removal needs the PUBLISH kept.** PUBLISH_DONE is the only removal
   signal, so an outbound PUBLISH is accepted paused (PUBLISH_OK, FORWARD=0)
   and held as the listing entry, while data flows through a separate
