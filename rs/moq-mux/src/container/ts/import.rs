@@ -60,9 +60,10 @@ use moq_net::Timestamp;
 /// clock break or the end of input is extrapolated from the last two. One before the first PCR,
 /// or with no interval to extrapolate from, is dropped and counted in
 /// [`stats::Stream::unplaced`]. A stream whose PES carry a clock only the PTS and DTS of are
-/// rebased (ESCR, a `pack_header_field`, a TREF), PES-level scrambling, or an unbounded non-video
-/// PES is refused rather than altered, as is every such stream in a program with no PCR:
-/// [`stats::Stream::refused`].
+/// rebased (ESCR, a `pack_header_field`, a TREF), PES-level scrambling, an unbounded non-video
+/// PES, or a header export would refuse is refused rather than altered, as is every such stream
+/// in a program with no PCR: [`stats::Stream::refused`]. A PMT that moves the PCR PID ends the
+/// placement timebase, as a clock break does.
 ///
 /// The PAT and every PMT are reassembled the same way, so a table that spans packets or
 /// sits behind a nonzero pointer_field is read whole. A PAT or PMT section whose CRC-32
@@ -482,9 +483,11 @@ impl<E: catalog::Catalog> Import<E> {
 		if self.pcr_pid != pmt.pcr_pid {
 			self.pcr_pid = pmt.pcr_pid;
 			self.health.pcr_pid(pmt.pcr_pid.map(|pid| pid.as_u16()));
-			// A new clock: the intervals straddling the switch measure nothing.
+			// A new clock: the intervals straddling the switch measure nothing, and the whole PES
+			// the old one began are placed on its timebase, never between its PCRs and the new.
 			self.liveness.discontinuity();
 			self.reset_mux_rate()?;
+			self.settle_placement()?;
 		}
 
 		// SCTE-35 is announced by a program-level registration descriptor with
@@ -801,7 +804,7 @@ impl<E: catalog::Catalog> Import<E> {
 		if let Some(stream_type) = whole
 			&& let Some(why) = refusal(&pes, stream_type)
 		{
-			return self.refuse(pid, why);
+			return self.refuse(pid, &why);
 		}
 		if pes.scrambled() {
 			return self.damage(pid, &anyhow::anyhow!("scrambled PES is not supported"));
@@ -1871,19 +1874,15 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 	}
 }
 
-/// Why a whole-PES track cannot carry `pes` unaltered, if it cannot: a clock field only the PTS
-/// and DTS of are rebased, a scrambled payload, or an unbounded PES that is not video, which
-/// export refuses.
-fn refusal(pes: &PesStart, stream_type: u8) -> Option<&'static str> {
-	if let Some(clock) = pes.unrebased_clock() {
-		return Some(clock);
+/// Why a whole-PES track cannot carry `pes` unaltered, if it cannot: a header export refuses
+/// ([`PesStart::whole`]), a clock field only the PTS and DTS of are rebased, or a scrambled
+/// payload.
+fn refusal(pes: &PesStart, stream_type: u8) -> Option<String> {
+	match pes.whole(stream_type) {
+		Err(err) => Some(format!("{err:#}")),
+		Ok(Some(clock)) => Some(clock.to_string()),
+		Ok(None) => pes.scrambled().then(|| "PES-level scrambling".to_string()),
 	}
-	if pes.scrambled() {
-		return Some("PES-level scrambling");
-	}
-	let video =
-		matches!(pes.stream_id, 0xe0..=0xef) || (pes.stream_id == 0xfd && psi::is_video_stream_type(stream_type));
-	(pes.data_len.is_none() && !video).then_some("an unbounded PES on a stream that is not video")
 }
 
 /// The catalog time of the program clock reading `ticks`, an unwrapped 27 MHz count, on a

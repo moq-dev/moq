@@ -503,11 +503,18 @@ async fn dvb_ac3_keeps_its_sync_frames_in_one_pes() {
 	assert_eq!(got, expected);
 }
 
-/// A PES the track cannot carry unaltered refuses its stream: what was already placed stays
-/// published, the track ends with an error and leaves the catalog, and the refusal is counted.
+/// A PES the track cannot carry unaltered, or whose header export refuses, refuses its stream:
+/// what was already placed stays published, the track ends with an error and leaves the catalog,
+/// and the refusal is counted.
 #[tokio::test(start_paused = true)]
 async fn a_pes_with_a_field_no_rebase_reaches_refuses_its_stream() {
-	let cases: [(&str, Vec<u8>); 5] = [
+	let cases: [(&str, Vec<u8>); 8] = [
+		// PES_extension_flag set with no header byte left for the extension.
+		("truncated extension", pes_with(0xbd, 0x80, 0x01, &[], 0, b"ext")),
+		// ES_rate flagged with one of its three bytes inside PES_header_data_length.
+		("overrunning ES_rate", pes_with(0xbd, 0x80, 0x10, &[0x80], 0, b"rate")),
+		// No optional header to carry, but PES_packet_length 0 on a stream that is not video.
+		("unbounded without an optional header", pes_bare(0xbf, b"")),
 		(
 			"ESCR",
 			pes_with(0xbd, 0x80, 0x20, &[0x04, 0x00, 0x04, 0x00, 0x04, 0x01], 0, b"escr"),
@@ -633,4 +640,42 @@ async fn a_clock_break_places_each_side_on_its_own_timebase() {
 	assert_eq!(frames[0].timestamp.as_micros() as u64, placed(before, 0));
 	assert!(frames[1].timestamp > frames[0].timestamp);
 	assert_eq!(&frames[1].payload[..], &feed.pes[1].1[..]);
+}
+
+/// A PMT moving the PCR to another PID ends the placement timebase too: the PES past the old
+/// clock's last PCR is extrapolated on it, never interpolated toward the new clock's first PCR,
+/// and those after the switch are placed by the new clock alone.
+#[tokio::test(start_paused = true)]
+async fn a_pcr_pid_switch_places_each_side_on_its_own_timebase() {
+	const NEW_CLOCK_PID: u16 = 0x1fe;
+	let mut feed = Feed::new(0x06, KLVA);
+	let start = 1_000 * MS;
+	feed.pcr(start).picture(start).pcr(start + 40 * MS).data(klv(1, 8));
+	let before = feed.clock(feed.pes[0].0).unwrap();
+	feed.mux.pmt_with(
+		PMT_PID,
+		1,
+		NEW_CLOCK_PID,
+		&[(0x02, VIDEO_PID, &[]), (0x06, DATA_PID, KLVA)],
+		0,
+	);
+	// A clock far from the old one, so a PES placed across the two lands far from either.
+	let other = 5_000 * MS;
+	feed.pcrs.clear();
+	for i in 0..3 {
+		feed.pcrs.push((feed.mux.out.len() as u64 + 10, other + i * 40 * MS));
+		feed.mux.packet(NEW_CLOCK_PID, Flags::pcr(other + i * 40 * MS));
+		if i == 1 {
+			feed.data(klv(2, 8));
+		}
+	}
+	let after = feed.clock(feed.pes[1].0).unwrap();
+
+	let imported = import(&feed.bytes(), false).unwrap();
+	let (name, _) = imported.entry().unwrap();
+	let (frames, err) = read(&imported.consumer, &name).await;
+	assert!(err.is_none(), "{err:?}");
+	let got: Vec<_> = frames.iter().map(|frame| frame.timestamp.as_micros() as u64).collect();
+	assert_eq!(got, [placed(before, 0), placed(after, 0)]);
+	assert_eq!(imported.stats().unplaced, 0);
 }

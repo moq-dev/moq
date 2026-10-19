@@ -2769,104 +2769,21 @@ impl PesPacket {
 	/// where the `stream_id` has one (ISO 13818-1 2.4.3.6). Only video may leave the
 	/// length zero, unbounded, as 2.4.3.7 permits.
 	fn parse(bytes: &[u8], stream_type: u8) -> anyhow::Result<Self> {
-		anyhow::ensure!(
-			bytes.len() >= PES_PREFIX_LEN && bytes.starts_with(&[0, 0, 1]),
-			"no PES start code"
-		);
-		let stream_id = bytes[3];
-		let length = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
-		if length == 0 {
-			let video =
-				matches!(stream_id, 0xe0..=0xef) || (stream_id == 0xfd && psi::is_video_stream_type(stream_type));
+		// The importer refuses with this same check, so a PES it published never fails here.
+		let pes = psi::PesStart::parse(bytes)?;
+		// The clock fields it refuses ride through unchanged.
+		pes.whole(stream_type)?;
+		if let Some(len) = pes.data_len {
 			anyhow::ensure!(
-				video,
-				"PES_packet_length 0 on stream_id {stream_id:#04x}, which only a video stream may leave unbounded"
-			);
-		} else {
-			anyhow::ensure!(
-				length == bytes.len() - PES_PREFIX_LEN,
-				"PES_packet_length {length} where the frame holds {} bytes after it",
-				bytes.len() - PES_PREFIX_LEN
+				len == pes.data.len(),
+				"PES_packet_length declares {len} payload bytes where the frame holds {}",
+				pes.data.len()
 			);
 		}
-		// program_stream_map, padding, private_stream_2, ECM, EMM, directory, DSM-CC and
-		// H.222.1 type E carry their payload straight after the length.
-		if !psi::has_optional_header(stream_id) {
-			return Ok(Self {
-				pts: None,
-				payload: PES_PREFIX_LEN,
-			});
-		}
-		anyhow::ensure!(
-			bytes.len() >= 9 && bytes[6] & 0xc0 == 0x80,
-			"PES optional header missing or without its '10' marker"
-		);
-		let flags = bytes[7];
-		let payload = 9 + usize::from(bytes[8]);
-		let fields = bytes
-			.get(9..payload)
-			.context("PES_header_data_length runs past the packet")?;
-		let pts_dts = flags >> 6;
-		anyhow::ensure!(pts_dts != 0b01, "PTS_DTS_flags '01' is forbidden");
-		// Each flagged field in order (Table 2-21): PTS, DTS, ESCR, ES_rate, DSM trick mode,
-		// additional_copy_info, previous_PES_CRC; stuffing fills the rest.
-		let mut at = [
-			(0x80, 5),
-			(0x40, 5),
-			(0x20, 6),
-			(0x10, 3),
-			(0x08, 1),
-			(0x04, 1),
-			(0x02, 2),
-		]
-		.iter()
-		.filter(|&&(flag, _)| flags & flag != 0)
-		.map(|&(_, len)| len)
-		.sum::<usize>();
-		if flags & 0x01 != 0 {
-			let read = |at: usize| fields.get(at).copied().context("PES extension runs past its header");
-			let extension = read(at)?;
-			at += 1;
-			// PES_private_data, then pack_header_field behind its own length byte.
-			if extension & 0x80 != 0 {
-				at += 16;
-			}
-			if extension & 0x40 != 0 {
-				at += 1 + usize::from(read(at)?);
-			}
-			// program_packet_sequence_counter and P-STD_buffer.
-			at += 2 * usize::from(extension & 0x20 != 0) + 2 * usize::from(extension & 0x10 != 0);
-			if extension & 0x01 != 0 {
-				at += 1 + usize::from(read(at)? & 0x7f);
-			}
-		}
-		anyhow::ensure!(
-			at <= fields.len(),
-			"PES optional fields need {at} bytes where PES_header_data_length gives {}",
-			fields.len()
-		);
-		// Each clock field opens with its 4-bit prefix, PTS '0010' alone or '0011' beside a DTS
-		// '0001', and sets the marker bit after each of its three parts.
-		let clock = |field: &[u8], prefix: u8| {
-			anyhow::ensure!(
-				field[0] >> 4 == prefix && field[0] & field[2] & field[4] & 1 == 1,
-				"PES clock field without its '{prefix:04b}' prefix or marker bits"
-			);
-			Ok(u64::from((field[0] >> 1) & 7) << 30
-				| u64::from(field[1]) << 22
-				| u64::from(field[2] >> 1) << 15
-				| u64::from(field[3]) << 7
-				| u64::from(field[4] >> 1))
-		};
-		let pts = match pts_dts {
-			0b10 => Some(clock(&fields[..5], 0b0010)?),
-			0b11 => {
-				clock(&fields[5..10], 0b0001)?;
-				Some(clock(&fields[..5], 0b0011)?)
-			}
-			_ => None,
-		};
-		Ok(Self { pts, payload })
+		Ok(Self {
+			pts: pes.pts,
+			payload: pes.header.len(),
+		})
 	}
 }
 

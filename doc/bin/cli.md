@@ -95,7 +95,8 @@ and every other stream it does not decode (KLV, subtitles, DVB AC-3) through as
 tracks. Each such PES goes through whole, at its place on the program clock
 (PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
 is refused with a warning: any in a program with no PCR, and one whose PES carry
-an ESCR, pack header or TREF, are scrambled, or leave a non-video PES unbounded.
+an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
+or have a malformed header.
 SCTE-35 cues and private PES wait for a media timestamp; input ending or
 declaring a clock break before that timestamp is refused, so a program of data
 alone fails.

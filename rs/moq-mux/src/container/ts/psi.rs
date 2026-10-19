@@ -373,43 +373,67 @@ impl PesStart<'_> {
 		self.header.get(6).is_some_and(|flags| flags & 0x30 != 0)
 	}
 
-	/// The clock field in the optional header that a whole-PES track cannot carry, since only
-	/// the PTS and DTS are moved onto the catalog clock: ESCR, a `pack_header_field`, or a TREF
-	/// (ISO 13818-1 2.4.3.7). `None` for a header that carries none of them.
-	pub fn unrebased_clock(&self) -> Option<&'static str> {
-		let header = self.header;
-		let flags = *header.get(7)?;
-		if flags & 0x20 != 0 {
-			return Some("ESCR");
+	/// Check the header as a whole-PES track carries it, on a stream of `stream_type`, and return
+	/// the clock field it carries that only the PTS and DTS of are moved onto the catalog clock:
+	/// ESCR, a `pack_header_field`, or a TREF (ISO 13818-1 2.4.3.7). Refuses an unbounded PES
+	/// that is not video, and a flagged optional field that runs past `PES_header_data_length`.
+	pub fn whole(&self, stream_type: u8) -> anyhow::Result<Option<&'static str>> {
+		let stream_id = self.stream_id;
+		let video = matches!(stream_id, 0xe0..=0xef) || (stream_id == 0xfd && is_video_stream_type(stream_type));
+		anyhow::ensure!(
+			self.header[4..6] != [0, 0] || video,
+			"PES_packet_length 0 on stream_id {stream_id:#04x}, which only a video stream may leave unbounded"
+		);
+		let Some(fields) = self.header.get(9..) else {
+			return Ok(None);
+		};
+		let flags = self.header[7];
+		// Each flagged field in order (Table 2-21): PTS, DTS, ESCR, ES_rate, DSM trick mode,
+		// additional_copy_info, previous_PES_CRC; stuffing fills the rest.
+		let mut at = [
+			(0x80, 5),
+			(0x40, 5),
+			(0x20, 6),
+			(0x10, 3),
+			(0x08, 1),
+			(0x04, 1),
+			(0x02, 2),
+		]
+		.iter()
+		.filter(|&&(flag, _)| flags & flag != 0)
+		.map(|&(_, len)| len)
+		.sum::<usize>();
+		let mut clock = (flags & 0x20 != 0).then_some("ESCR");
+		if flags & 0x01 != 0 {
+			let read = |at: usize| fields.get(at).copied().context("PES extension runs past its header");
+			let extension = read(at)?;
+			at += 1;
+			// PES_private_data, then pack_header_field behind its own length byte.
+			if extension & 0x80 != 0 {
+				at += 16;
+			}
+			if extension & 0x40 != 0 {
+				clock = clock.or(Some("pack_header_field"));
+				at += 1 + usize::from(read(at)?);
+			}
+			// program_packet_sequence_counter and P-STD_buffer.
+			at += 2 * usize::from(extension & 0x20 != 0) + 2 * usize::from(extension & 0x10 != 0);
+			if extension & 0x01 != 0 {
+				let len = usize::from(read(at)? & 0x7f);
+				// A set stream_id_extension_flag with a clear tref_extension_flag says a TREF
+				// follows.
+				if len > 0 && read(at + 1)? & 0x81 == 0x80 {
+					clock = clock.or(Some("TREF"));
+				}
+				at += 1 + len;
+			}
 		}
-		if flags & 0x01 == 0 {
-			return None;
-		}
-		// Skip the PTS, DTS, ESCR, ES rate, trick mode, copy info and CRC to the extension.
-		let skip = match flags >> 6 {
-			0b10 => 5,
-			0b11 => 10,
-			_ => 0,
-		} + usize::from(flags & 0x10 != 0) * 3
-			+ usize::from(flags & 0x08 != 0)
-			+ usize::from(flags & 0x04 != 0)
-			+ usize::from(flags & 0x02 != 0) * 2;
-		let mut at = 9 + skip;
-		let extension = *header.get(at)?;
-		at += 1;
-		if extension & 0x40 != 0 {
-			return Some("pack_header_field");
-		}
-		at += usize::from(extension & 0x80 != 0) * 16
-			+ usize::from(extension & 0x20 != 0) * 2
-			+ usize::from(extension & 0x10 != 0) * 2;
-		if extension & 0x01 == 0 {
-			return None;
-		}
-		// PES_extension_field_length, then stream_id_extension_flag; with it set, a clear
-		// tref_extension_flag says a TREF follows.
-		let field = *header.get(at + 1)?;
-		(field & 0x80 != 0 && field & 0x01 == 0).then_some("TREF")
+		anyhow::ensure!(
+			at <= fields.len(),
+			"PES optional fields need {at} bytes where PES_header_data_length gives {}",
+			fields.len()
+		);
+		Ok(clock)
 	}
 }
 

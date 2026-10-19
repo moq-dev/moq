@@ -116,8 +116,9 @@ pub struct Stream {
 	pub unplaced: u64,
 	/// Times this PID's stream was refused rather than carried altered: a private PES stream
 	/// with a clock field only the PTS and DTS of are rebased (ESCR, a `pack_header_field`, a
-	/// TREF), PES-level scrambling, an unbounded non-video PES, or a program with no PCR to place
-	/// it by. Its track ends and leaves the catalog. Export stays zero.
+	/// TREF), PES-level scrambling, an unbounded non-video PES, a header export refuses, or a
+	/// program with no PCR to place it by. Its track ends and leaves the catalog. Export stays
+	/// zero.
 	pub refused: u64,
 	/// This PID's share of [`Snapshot::continuity_count_error`].
 	pub continuity_count_error: u64,
