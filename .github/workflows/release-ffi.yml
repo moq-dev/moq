@@ -111,7 +111,7 @@ jobs:
           just rs package-ffi --target "$BUILD_TARGET" --version "$BUILD_VERSION" --output dist
 
       - name: Upload lib
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ inputs.language }}-lib-${{ matrix.target }}
           # Only the lib/ contents, so a caller's download is <target>/<libname>.
@@ -157,7 +157,7 @@ jobs:
 
       - name: Download binding metadata
         if: contains(fromJSON(inputs.targets), 'x86_64-unknown-linux-gnu')
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ${{ inputs.language }}-lib-x86_64-unknown-linux-gnu
           path: binding-library
@@ -174,7 +174,7 @@ jobs:
           just rs package-ffi "${args[@]}"
 
       - name: Upload bindings
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ matrix.language }}-bindings
           path: dist/bindings/${{ matrix.language }}/
