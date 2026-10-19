@@ -4481,7 +4481,7 @@ struct Reported {
 }
 
 impl Reported {
-	/// Remember the polling task, to wake when the bounds move.
+	/// Remember the parked task, to wake when the bounds move.
 	fn park(&mut self, waker: &std::task::Waker) {
 		if !self.waker.as_ref().is_some_and(|last| last.will_wake(waker)) {
 			self.waker = Some(waker.clone());
@@ -5641,9 +5641,14 @@ impl Subscriber {
 	/// Moving the bounds wakes a parked poll, which reports the largest once it is within
 	/// them and newer than the last report.
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
-		self.largest.park(waiter.waker());
 		let bounds = self.bounds();
-		self.poll_largest_within(bounds, waiter)
+		let poll = self.poll_largest_within(bounds, waiter);
+		// Only a parked poll waits on the bounds; a finished one is not woken by them.
+		match poll {
+			Poll::Pending => self.largest.park(waiter.waker()),
+			Poll::Ready(_) => self.largest.waker = None,
+		}
+		poll
 	}
 
 	fn poll_largest_within(&mut self, bounds: Bounds, waiter: &kio::Waiter) -> Poll<Option<Position>> {
@@ -6497,6 +6502,22 @@ mod test {
 			reader.poll_largest(&noop).is_pending(),
 			"a floor below the largest leaves it where it was"
 		);
+	}
+
+	/// A poll that reported is not parked, so moving the bounds afterwards does not wake it.
+	#[test]
+	fn largest_wakes_only_a_parked_poll_on_a_bounds_move() {
+		let producer = track_producer("test", Info::default());
+		let _group = framed(&producer, 0, 1);
+		let mut reader = producer.subscribe(replay());
+		let (flag, waiter) = Flag::waiter();
+		assert_eq!(reader.poll_largest(&waiter), Poll::Ready(Some(Position::group(0))));
+		reader.set_groups(..);
+		assert!(!flag.take(), "the finished poll was not woken");
+
+		assert!(reader.poll_largest(&waiter).is_pending());
+		reader.set_groups(..);
+		assert!(flag.take(), "the parked poll was woken");
 	}
 
 	/// Bounds that move while the copy is idle keep the last report, so going live again
