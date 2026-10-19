@@ -42,8 +42,6 @@ Public API: none. Wire: none.
 - [gst redial port](/quest/m1/test-flakes-2/gst-redial-port.md) - the moq-gst redial tests never lose their relay's port to `AddrInUse`
 - [js/net local close](/quest/m1/test-flakes-2/js-local-close.md) - the draft-17 locally closed track test holds under load
 - [WASM refused track](/quest/m1/test-flakes-2/wasm-refused-track.md) - the refused-track case passes and fails on its refusal, not a timeout
-- [Drill shaper failure](/quest/m1/test-flakes-2/drill-shaper-failure.md) - a drill whose shaper stopped says so directly
-
 ## Related
 
 - [Controlled time](/quest/m1/time/README.md) - the systemic fix these rules ask for: every crate on a controlled clock
