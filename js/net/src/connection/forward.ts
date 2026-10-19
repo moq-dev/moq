@@ -167,12 +167,14 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		// The origin's readers under the prefix wait on this request's initial set. Released
 		// once the session stream has synced, which it reports only after the last of those
 		// events is reported here.
-		const snapshot = originWire.snapshot(prefix);
-		const synced = interest.announced.synced.subscribe((synced) => {
-			if (synced) snapshot();
-		});
-		// A request with no initial set to wait for is synced before the listener exists.
-		if (interest.announced.synced.peek()) snapshot();
+		// An already-synced request has no initial set in flight. Registering then
+		// releasing one would wake every unrelated announcement watcher.
+		const snapshot = interest.announced.synced.peek() ? undefined : originWire.snapshot(prefix);
+		const synced = snapshot
+			? interest.announced.synced.subscribe((synced) => {
+					if (synced) snapshot();
+				})
+			: undefined;
 
 		void (async () => {
 			let failure: unknown;
@@ -186,8 +188,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				// The session died mid-stream, or the peer refused or reset the request.
 				failure = err;
 			} finally {
-				synced();
-				snapshot();
+				synced?.();
+				snapshot?.();
 				for (const reported of [...interest.reported]) unreport(interest, reported);
 
 				interest.announced.close();

@@ -661,6 +661,7 @@ test("a session ending before its initial set lands stops holding the watcher", 
 
 test("a request synced as it opens releases the watcher", async () => {
 	const origin = new OriginProducer();
+	const snapshots = spyOn(wireOf(origin), "snapshot");
 	const session = new FakeSession();
 	session.syncedAtOnce = true;
 	forwardAnnounced(session.session, origin);
@@ -670,6 +671,8 @@ test("a request synced as it opens releases the watcher", async () => {
 	await settle();
 	expect(session.requests).toHaveLength(1);
 	expect(watch.synced.peek()).toBe(true);
+	// An empty initial set must not invalidate unrelated watchers' sync state.
+	expect(snapshots).not.toHaveBeenCalled();
 
 	watch.close();
 	session.die();
