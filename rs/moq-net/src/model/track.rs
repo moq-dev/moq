@@ -5662,15 +5662,16 @@ impl Subscriber {
 		kio::wait(|waiter| self.poll_largest(waiter)).await
 	}
 
-	/// The largest location known now, without waiting or moving [`Self::poll_largest`] on:
-	/// past what the cache holds once the source reported a newer one.
+	/// The track's largest location known now, ignoring [`Self::set_groups`], without waiting
+	/// or moving [`Self::poll_largest`] on: past what the cache holds once the source
+	/// reported a newer one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: capability gap
 	pub(crate) fn peek_largest(&mut self) -> Option<Position> {
 		let mut seen = None;
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.state.read().cache.take_largest(&mut seen),
-			Inner::Resume(resume, _) => match resume.poll_largest(&mut seen, &kio::Waiter::noop()) {
+			Inner::Plain(cursor) => cursor.state.read().cache.largest().0,
+			Inner::Resume(resume, _) => match resume.poll_largest(&mut seen, Bounds::default(), &kio::Waiter::noop()) {
 				Poll::Ready(largest) => largest,
 				Poll::Pending => None,
 			},
