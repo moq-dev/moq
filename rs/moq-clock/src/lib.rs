@@ -76,6 +76,10 @@ pub fn now() -> Instant {
 ///
 /// When the host's wall clock reads before 1970.
 pub fn wall() -> Wall {
+	#[cfg(feature = "manual")]
+	if let Some(clock) = deadline::installed() {
+		return clock.wall();
+	}
 	#[cfg(feature = "sim")]
 	if let Some(wall) = sim::wall() {
 		return wall;
@@ -91,6 +95,10 @@ pub fn wall() -> Wall {
 ///
 /// Unlike [`wall`], the wall half does not change after a clock correction.
 pub fn anchor() -> (Instant, Wall) {
+	#[cfg(feature = "manual")]
+	if let Some(clock) = deadline::installed() {
+		return clock.anchor();
+	}
 	#[cfg(feature = "sim")]
 	if let Some(anchor) = sim::anchor() {
 		return anchor;

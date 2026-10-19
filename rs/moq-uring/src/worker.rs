@@ -1019,6 +1019,20 @@ mod tests {
 		assert!(timed_out);
 	}
 
+	/// Wall time on a worker comes from the manual clock it runs on, so it agrees
+	/// with the worker's instants.
+	#[test]
+	fn the_worker_reads_its_manual_clocks_wall_time() {
+		let Some((mut worker, clock)) = manual() else { return };
+		clock.advance(Duration::from_secs(5));
+		let (wall, anchor) = worker
+			.block_on(async { (moq_clock::wall(), moq_clock::anchor()) })
+			.unwrap();
+		assert_eq!(wall, clock.wall(), "the worker read the host's wall time");
+		assert_eq!(anchor.0, clock.now());
+		assert_eq!(anchor.1, clock.wall());
+	}
+
 	/// A timer made between turns counts from the clock, not from the last turn's
 	/// instant, so an idle worker does not hand out deadlines already past.
 	#[test]

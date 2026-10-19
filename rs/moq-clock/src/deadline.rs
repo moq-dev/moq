@@ -38,6 +38,10 @@ struct Queue {
 	/// written under it, so a reader holding the lock sees the instant it moved to.
 	now: AtomicU64,
 	state: Mutex<State>,
+	/// The clock installed where the queue was made, whose wall time it reads
+	/// while entered, so its wall and instants come from one clock.
+	#[cfg(feature = "manual")]
+	installed: Option<crate::Installed>,
 }
 
 struct State {
@@ -65,6 +69,8 @@ impl Deadlines {
 				armed: BTreeMap::new(),
 				owner: kio::WaiterList::new(),
 			}),
+			#[cfg(feature = "manual")]
+			installed: crate::installed::current(),
 		}))
 	}
 
@@ -144,9 +150,10 @@ impl Deadlines {
 	///
 	/// While entered, [`now`](crate::now) reads the instant last handed to
 	/// [`advance`](Self::advance), and [`sleep`](crate::sleep) and the other ambient
-	/// timers arm [`Deadline`]s here. Wall time still comes from the clock the thread
-	/// would otherwise read. For a runtime that advances the queue from its own
-	/// reading of the host clock, so nothing it runs reads the host clock again.
+	/// timers arm [`Deadline`]s here. Wall time comes from the clock installed on the
+	/// runtime the queue was made in, if any, and otherwise from the clock the thread
+	/// would read. For a runtime that advances the queue from its own reading of the
+	/// clock, so nothing it runs reads that clock again.
 	pub fn enter(&self) -> Entered {
 		let previous = ENTERED.with(|entered| entered.replace(Some(self.clone())));
 		let id = NEXT_GUARD.with(|next| next.replace(next.get() + 1));
@@ -203,6 +210,12 @@ impl std::fmt::Debug for Entered {
 /// The instant of the queue entered on this thread, if any.
 pub(crate) fn now() -> Option<Instant> {
 	ENTERED.with(|entered| entered.borrow().as_ref().map(Deadlines::now))
+}
+
+/// The installed clock behind the queue entered on this thread, if any.
+#[cfg(feature = "manual")]
+pub(crate) fn installed() -> Option<crate::Installed> {
+	ENTERED.with(|entered| entered.borrow().as_ref().and_then(|queue| queue.0.installed.clone()))
 }
 
 /// The queue entered on this thread, if any.
