@@ -211,11 +211,6 @@ async fn read_fetch(
 			break;
 		}
 	}
-	// Retention giving up on the group ends its read cleanly, but the prefix is not the
-	// group: answering it would let the requester cache it as whole.
-	if group.latency_expired() {
-		return Err(Error::Old);
-	}
 	// A bounded range can reach the group's end without reading its terminal None, and a
 	// start past the end is already there.
 	let complete = !overshot
