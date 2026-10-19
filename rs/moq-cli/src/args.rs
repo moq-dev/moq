@@ -1210,8 +1210,8 @@ pub struct Transport {
 	pub passthrough: bool,
 
 	/// Render every packet from the broadcast alone, on a fixed lane per PID, so two exports
-	/// of it emit identical TS for the content both receive, continuity counters included:
-	/// a 1+1 (SMPTE ST 2022-7) pair. Needs a constant rate (`--mux-rate`, or the catalog's).
+	/// of it emit identical TS for the content both receive, continuity counters included,
+	/// as the legs of a 1+1 pair must. Needs a constant rate (`--mux-rate`, or the catalog's).
 	#[usage(long, conflicts("--stitch", "--passthrough"))]
 	pub sync: bool,
 
