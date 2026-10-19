@@ -118,17 +118,56 @@ struct RawReader {
 	// current largest rather than only a newer one.
 	edge: moq_net::track::Consumer,
 	track: moq_net::track::Ordered,
+	// An update with a relative range, whose bounds wait for the edge to be live.
+	deferred: Option<moq_net::track::Subscription>,
 }
 
 impl RawReader {
-	fn apply(&mut self, subscription: Option<moq_net::track::Subscription>) {
+	fn new(edge: moq_net::track::Consumer, track: moq_net::track::Ordered) -> Self {
+		Self {
+			edge,
+			track,
+			deferred: None,
+		}
+	}
+
+	/// Apply a subscription update: its wire preferences at once, and its local bounds once
+	/// any relative range has a live edge to count from.
+	fn apply(&mut self, subscription: Option<moq_net::track::Subscription>, waiter: &kio::Waiter) {
 		let subscription = subscription.unwrap_or_default();
+		// A closed track makes the update meaningless; the reader already sees the close.
+		let _ = self.track.update(subscription.clone());
+		let relative = subscription
+			.ranges
+			.iter()
+			.any(|range| matches!(range.start, moq_net::track::Anchor::Relative(_)));
+		match relative {
+			true => {
+				self.deferred = Some(subscription);
+				self.poll_deferred(waiter);
+			}
+			false => {
+				self.deferred = None;
+				self.set_bounds(&subscription, None);
+			}
+		}
+	}
+
+	/// Apply a deferred update's bounds once the edge is live, or the track ended.
+	fn poll_deferred(&mut self, waiter: &kio::Waiter) {
+		let Some(subscription) = &self.deferred else {
+			return;
+		};
+		if let Poll::Ready(largest) = self.edge.clone().poll_largest(waiter) {
+			let subscription = subscription.clone();
+			self.deferred = None;
+			self.set_bounds(&subscription, largest.map(|position| position.group));
+		}
+	}
+
+	fn set_bounds(&mut self, subscription: &moq_net::track::Subscription, latest: Option<u64>) {
 		// Reads start where the lowest range does. Without a floor of its own (the oldest
 		// range, the default) a raw reader joins at the latest group.
-		let latest = match self.edge.clone().poll_largest(&kio::Waiter::noop()) {
-			Poll::Ready(Some(position)) => Some(position.group),
-			_ => None,
-		};
 		let start = subscription
 			.ranges
 			.iter()
@@ -153,8 +192,6 @@ impl RawReader {
 			start.map_or(Bound::Unbounded, Bound::Included),
 			end.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
 		));
-		// A closed track makes the update meaningless; the reader already sees the close.
-		let _ = self.track.update(subscription);
 	}
 }
 
@@ -714,8 +751,9 @@ impl Consume {
 			let res = crate::ffi::run(driver.watch(async move {
 				let edge = broadcast.track(&name)?;
 				let track = edge.subscribe(subscription.clone()).await?.ordered();
-				let mut reader = RawReader { edge, track };
-				reader.apply(subscription);
+				let mut reader = RawReader::new(edge, track);
+				// The task's own polls re-poll a deferred update with their waiter.
+				reader.apply(subscription, &kio::Waiter::noop());
 				Self::run_raw(on_frame, reader, channel.1, updates).await
 			}))
 			.await;
@@ -788,7 +826,8 @@ impl Consume {
 		}
 	}
 
-	/// Poll the close and update channels, applying any subscription updates inline.
+	/// Poll the close and update channels, applying any subscription updates inline, and a
+	/// deferred update once its edge is live.
 	///
 	/// Returns `true` when the task must stop: either the consumer was closed
 	/// (`close` fired) or the update channel was dropped. The caller must then
@@ -808,11 +847,13 @@ impl Consume {
 
 		loop {
 			match updates.poll_recv(&mut cx) {
-				Poll::Ready(Some(subscription)) => reader.apply(subscription),
+				Poll::Ready(Some(subscription)) => reader.apply(subscription, waiter),
 				Poll::Ready(None) => return true,
-				Poll::Pending => return false,
+				Poll::Pending => break,
 			}
 		}
+		reader.poll_deferred(waiter);
+		false
 	}
 
 	pub fn raw_track_update(
