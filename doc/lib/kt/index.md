@@ -19,6 +19,7 @@ x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 `dev.moq.flate.SnapshotProducer` / `StreamProducer` publish opaque bytes with an optional `timestampUs`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 Raw tracks with a `null` timescale are untimed on both publish and receive.
+`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.

@@ -24,6 +24,7 @@ and does not keep it open.
 `MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
+`TrackInfo(compress=True)` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
 `moq.flate.SnapshotProducer` / `StreamProducer` publish opaque payloads; their `update` / `append`
 and the JSON producers accept `timestamp=timedelta(...)` (`None` for untimed).
 Whole-frame media writes require caller time; container imports keep their own timeline handling.

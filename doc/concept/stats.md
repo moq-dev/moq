@@ -211,6 +211,7 @@ stale.
     "subscriptions_started": 6, "subscriptions_ended": 2,
     "fetches": 0,
     "bytes": 1048576, "frames": 900, "groups": 30, "datagrams": 0,
+    "inflated": 0,
     "stale": { "bytes": 0, "frames": 0, "groups": 0, "datagrams": 0 },
     "announced": 1, "announced_closed": 0,
     "broadcasts": 3, "broadcasts_closed": 1,
@@ -228,6 +229,7 @@ stale.
 | `fetches` | One-shot group fetches requested, including ones that found nothing. Their payload counts in `bytes`, `frames`, and `groups`. |
 | `bytes` / `frames` / `groups` | Payload delivered. |
 | `datagrams` | Groups delivered as an unreliable datagram. A subset of `groups`. |
+| `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy. Not part of `bytes`, which counts payload as stored or sent. |
 | `stale` | Payload skipped because it aged past a subscriber's latency budget, with the same four fields. Disjoint from the top-level payload counters. |
 
 The last six fields are legacy spellings of the `*_started` and `*_ended`

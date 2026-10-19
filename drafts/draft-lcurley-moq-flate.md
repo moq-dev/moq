@@ -76,7 +76,7 @@ The compression level is a publisher's choice; any conformant stream decodes.
 
 # Declaring Compression {#declare}
 The transport declares a track compressed, and gives each object's inflated size beside its compressed one.
-{{moql}} does both from moq-lite-07: a flag in TRACK_INFO, and an Inflated Size on each FRAME and datagram.
+{{moql}} does both from moq-lite-07: a Compression codec id in TRACK_INFO, and an Inflated Size on each FRAME and datagram.
 A consumer MUST NOT infer compression from the payload: raw DEFLATE has no magic number, so a wrong guess yields plausible garbage.
 
 A consumer MUST treat an object that inflates to more or less than its declared size as malformed, and abandon the subgroup.

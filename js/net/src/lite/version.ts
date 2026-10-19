@@ -359,7 +359,7 @@ export function hasEpoch(version: Version): boolean {
 }
 
 /**
- * Whether TRACK_INFO carries the compression flag, and a compressed track's FRAME and
+ * Whether TRACK_INFO carries the compression codec, and a compressed track's FRAME and
  * datagram its inflated size. Added in lite-07.
  */
 export function hasCompression(version: Version): boolean {

@@ -1028,7 +1028,7 @@ impl Charge {
 	pub(super) fn bill(&self) -> Bill {
 		Bill {
 			track: self.track.clone(),
-			bytes: 0,
+			bytes: AtomicU64::new(0),
 		}
 	}
 
@@ -1108,26 +1108,34 @@ impl Drop for Charge {
 /// Bytes a group keeps beside its cached frames, billed to the same pool and account as
 /// its [`Charge`] but reachable outside the group's write lock: a compressed group's
 /// inflated copy, which its readers build. Released on [`Self::clear`] or drop.
+///
+/// Its owner serializes the changes; the count is atomic so the eviction walk can size
+/// the group without that owner's lock.
 #[derive(Default)]
 pub(super) struct Bill {
 	track: Option<Arc<Track>>,
-	bytes: u64,
+	bytes: AtomicU64,
 }
 
 impl Bill {
 	/// Bill `n` more bytes.
-	pub(super) fn add(&mut self, n: u64) {
+	pub(super) fn add(&self, n: u64) {
 		if let Some(track) = &self.track {
 			track.pool.add(n);
 			track.written.fetch_add(n, Ordering::Relaxed);
-			self.bytes += n;
+			self.bytes.fetch_add(n, Ordering::Relaxed);
 		}
 	}
 
+	/// Bytes currently billed.
+	pub(super) fn size(&self) -> u64 {
+		self.bytes.load(Ordering::Relaxed)
+	}
+
 	/// Release every billed byte.
-	pub(super) fn clear(&mut self) {
+	pub(super) fn clear(&self) {
 		if let Some(track) = &self.track {
-			track.pool.sub(std::mem::take(&mut self.bytes));
+			track.pool.sub(self.bytes.swap(0, Ordering::Relaxed));
 		}
 	}
 }

@@ -45,7 +45,7 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
   peer that cannot signal compression) reads one inflated copy per group,
   built on first demand, shared across readers, billed to the cache pool, and
   dropped with its group. A thousand old-lite viewers cost one inflate.
-- **Signaling:** lite-07 TrackInfo carries the flag and the frame header the
+- **Signaling:** lite-07 TrackInfo carries the codec id and the frame header the
   size; IETF draft-16+ carries them only
   after both peers advertise a setup parameter
   ([IETF](/quest/m1/compress/ietf.md)), because unknown track properties are

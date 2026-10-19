@@ -22,8 +22,8 @@ use bytes::Bytes;
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::ops::{Bound, RangeBounds};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Poll, ready};
 
 use crate::{Error, IntoBytes, Result, Timestamp};
@@ -222,19 +222,8 @@ struct Flate {
 	// Compresses a local producer's frames, created by its first write. A received group
 	// stores what arrived and never recompresses.
 	encoder: Option<flate::Encoder>,
-	// The inflated copy every plain reader shares, built on first demand. Behind its own
-	// lock because readers build it, and they only hold the group's read guard.
-	plain: Mutex<Plain>,
-}
-
-struct Plain {
-	// Inflates the stored slices in order. Dropped once a finished group is fully inflated.
-	decoder: Option<flate::Decoder>,
-	// Inflated frames, from the group's first.
-	frames: VecDeque<Bytes>,
-	// The first failure, sticky: every later frame builds on the one that failed.
-	err: Option<Error>,
-	bill: cache::Bill,
+	// The inflated copy every plain reader shares, built on first demand.
+	plain: Arc<Plain>,
 }
 
 impl Flate {
@@ -243,11 +232,10 @@ impl Flate {
 			sizes: VecDeque::new(),
 			inflated: 0,
 			encoder: None,
-			plain: Mutex::new(Plain {
-				decoder: None,
-				frames: VecDeque::new(),
-				err: None,
+			plain: Arc::new(Plain {
+				len: AtomicUsize::new(0),
 				bill,
+				state: Mutex::new(PlainState::default()),
 			}),
 		}
 	}
@@ -263,46 +251,134 @@ impl Flate {
 		self.encoder.get_or_insert_with(flate::Encoder::new).frame(payload)
 	}
 
-	/// The inflated frame at local index `local`, inflating the stored slices up to it.
-	///
-	/// `stored` holds the completed slices from the group's frame 0. `fin` is the local
-	/// frame count once the group finished, so the decoder can go after the last frame.
-	fn plain(&self, stored: &VecDeque<Frame>, local: usize, fin: Option<usize>) -> Result<Bytes> {
-		let mut plain = self.plain.lock().unwrap_or_else(PoisonError::into_inner);
-		if let Some(err) = &plain.err {
-			return Err(err.clone());
+	/// Drop everything but how the group is read, failing a late inflater with `err`.
+	fn release(&mut self, err: Error) {
+		self.sizes = VecDeque::new();
+		self.encoder = None;
+		self.plain.release(err);
+	}
+}
+
+/// A compressed group's inflated copy, shared by its plain readers.
+///
+/// A reader takes the slices it needs under the group's guard and inflates them under
+/// only this lock ([`Inflate`]), so a cold read never holds up the group's writer.
+struct Plain {
+	// Frames inflated so far, so a reader under the group's guard takes only the slices
+	// past it without waiting on an inflater.
+	len: AtomicUsize,
+	// The inflated bytes, counted toward the group's eviction size once they exist.
+	// Changed only under `state`.
+	bill: cache::Bill,
+	state: Mutex<PlainState>,
+}
+
+#[derive(Default)]
+struct PlainState {
+	// Inflates the stored slices in order. Dropped once a finished group is fully inflated.
+	decoder: Option<flate::Decoder>,
+	// Inflated frames, from the group's first.
+	frames: VecDeque<Bytes>,
+	// The first failure, sticky: every later frame builds on the one that failed.
+	err: Option<Error>,
+	// Why the group released its frames, failing a late inflater rather than billing past
+	// the release.
+	released: Option<Error>,
+}
+
+impl Plain {
+	fn lock(&self) -> MutexGuard<'_, PlainState> {
+		self.state.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Inflated local frame `local`, or why it is not.
+	fn get(&self, local: usize) -> Result<Bytes> {
+		let state = self.lock();
+		match state.frames.get(local) {
+			Some(frame) => Ok(frame.clone()),
+			None => Err(state
+				.released
+				.clone()
+				.or_else(|| state.err.clone())
+				.unwrap_or(Error::Dropped)),
 		}
-		while plain.frames.len() <= local {
-			let index = plain.frames.len();
-			let size = usize::try_from(self.sizes[index]).map_err(|_| Error::FrameTooLarge)?;
-			let decoder = plain.decoder.get_or_insert_with(flate::Decoder::new);
-			match decoder.frame(&stored[index].payload, size) {
+	}
+
+	fn release(&self, err: Error) {
+		let mut state = self.lock();
+		state.decoder = None;
+		state.frames = VecDeque::new();
+		state.released = Some(err);
+		self.len.store(0, Ordering::Release);
+		self.bill.clear();
+	}
+}
+
+/// The stored slices a plain read of a compressed group inflates once the group's guard
+/// is released.
+struct Inflate {
+	plain: Arc<Plain>,
+	// Local index of the first slice: the copy's inflated length when the read took them.
+	from: usize,
+	// Each slice with its declared inflated size.
+	slices: Vec<(Bytes, u64)>,
+	// The group's frame count once finished, so the decoder drops after the last frame.
+	fin: Option<usize>,
+}
+
+impl Inflate {
+	/// Inflate the slices, skipping any a concurrent reader already did, then read local
+	/// frames back with [`Self::get`]. `meter` counts the bytes this read inflated.
+	///
+	/// Locks per frame, so a release waits on at most one frame's inflation.
+	fn run(&self, meter: &stats::Meter) {
+		for (index, (slice, size)) in (self.from..).zip(&self.slices) {
+			let mut state = self.plain.lock();
+			if state.released.is_some() || state.err.is_some() {
+				break;
+			}
+			if state.frames.len() > index {
+				continue;
+			}
+			let frame = usize::try_from(*size)
+				.map_err(|_| Error::FrameTooLarge)
+				.and_then(|size| state.decoder.get_or_insert_with(flate::Decoder::new).frame(slice, size));
+			match frame {
 				Ok(frame) => {
-					plain.bill.add(frame.len() as u64);
-					plain.frames.push_back(frame);
+					self.plain.bill.add(frame.len() as u64);
+					meter.inflated(frame.len() as u64);
+					state.frames.push_back(frame);
+					self.plain.len.store(state.frames.len(), Ordering::Release);
+					if self.fin == Some(state.frames.len()) {
+						state.decoder = None;
+					}
 				}
 				Err(err) => {
-					plain.err = Some(err.clone());
-					plain.decoder = None;
-					return Err(err);
+					state.err = Some(err);
+					state.decoder = None;
+					break;
 				}
 			}
 		}
-		if fin == Some(plain.frames.len()) {
-			plain.decoder = None;
-		}
-		Ok(plain.frames[local].clone())
 	}
 
-	/// Drop everything but how the group is read.
-	fn release(&mut self) {
-		self.sizes = VecDeque::new();
-		self.encoder = None;
-		let plain = self.plain.get_mut().unwrap_or_else(PoisonError::into_inner);
-		plain.decoder = None;
-		plain.frames = VecDeque::new();
-		plain.bill.clear();
+	/// Inflated local frame `local`, or why it is not.
+	fn get(&self, local: usize) -> Result<Bytes> {
+		self.plain.get(local)
 	}
+}
+
+/// A frame resolved under the group's guard, by [`GroupState::poll_frame_source`].
+enum Source {
+	/// Ready to hand out.
+	Ready(frame::Header, frame::Source),
+	/// A plain read of a compressed group: local frame `local` once `job` inflates it.
+	Inflate {
+		job: Inflate,
+		local: usize,
+		timestamp: Option<Timestamp>,
+		fields: Option<Arc<super::object::Fields>>,
+	},
 }
 
 /// The IETF header state that cannot be inferred from a plain frame list.
@@ -423,24 +499,32 @@ impl GroupState {
 			.is_some_and(|flate| flate.inflated.saturating_add(extra) > MAX_CACHE_BYTES)
 	}
 
-	/// The inflated frame at local index `local` of a compressed group, from the copy
-	/// every plain reader shares.
+	/// The slices a plain read of a compressed group still needs inflated to reach local
+	/// frame `last`, to inflate once the guard is released.
 	///
 	/// [`Error::Lagged`] when the group started past frame 0: its first slice builds on
 	/// frames it never held.
-	fn plain(&self, flate: &Flate, local: usize) -> Result<Bytes> {
+	fn inflate(&self, flate: &Flate, last: usize) -> Result<Inflate> {
 		if self.offset != 0 {
 			return Err(Error::Lagged);
 		}
-		flate.plain(&self.frames, local, self.fin)
+		let from = flate.plain.len.load(Ordering::Acquire).min(last + 1);
+		Ok(Inflate {
+			plain: flate.plain.clone(),
+			from,
+			slices: (from..=last)
+				.map(|local| (self.frames[local].payload.clone(), flate.sizes[local]))
+				.collect(),
+			fin: self.fin,
+		})
 	}
 
 	/// Resolve the source for the frame at `index`: a completed frame (whole) or the
 	/// in-flight tail (streamed). Used by [`Consumer::poll_next_frame`].
 	///
-	/// A compressed group hands a plain reader each frame whole once it completes and
-	/// inflates, and a `raw` one the stored slice, streaming one that is still arriving.
-	fn poll_frame_source(&self, index: usize, raw: bool) -> Poll<Result<Option<(frame::Header, frame::Source)>>> {
+	/// A compressed group hands a plain reader each frame whole once it completes, as the
+	/// slices to inflate, and a `raw` one the stored slice, streaming one still arriving.
+	fn poll_frame_source(&self, index: usize, raw: bool) -> Poll<Result<Option<Source>>> {
 		if index < self.offset {
 			return Poll::Ready(Err(Error::Lagged));
 		}
@@ -449,22 +533,29 @@ impl GroupState {
 			// A frame read is a cache access: stamp it so expiry and the eviction
 			// walk spare a group a consumer is actively draining.
 			self.charge.refresh();
-			let (payload, inflated) = match &self.flate {
-				Some(flate) if raw => (f.payload.clone(), Some(flate.sizes[local])),
-				Some(flate) => (self.plain(flate, local)?, None),
-				None => (f.payload.clone(), None),
+			let inflated = match &self.flate {
+				Some(flate) if !raw => {
+					return Poll::Ready(Ok(Some(Source::Inflate {
+						job: self.inflate(flate, local)?,
+						local,
+						timestamp: f.timestamp,
+						fields: self.fields(local),
+					})));
+				}
+				Some(flate) => Some(flate.sizes[local]),
+				None => None,
 			};
 			let info = frame::Info {
-				size: payload.len() as u64,
+				size: f.payload.len() as u64,
 				timestamp: f.timestamp,
 			};
-			return Poll::Ready(Ok(Some((
+			return Poll::Ready(Ok(Some(Source::Ready(
 				frame::Header {
 					info,
 					fields: self.fields(local),
 					inflated,
 				},
-				frame::Source::Complete(payload),
+				frame::Source::Complete(f.payload.clone()),
 			))));
 		}
 		if local == self.frames.len()
@@ -477,7 +568,7 @@ impl GroupState {
 				size: p.buf.size() as u64,
 				timestamp: p.timestamp,
 			};
-			return Poll::Ready(Ok(Some((
+			return Poll::Ready(Ok(Some(Source::Ready(
 				frame::Header {
 					info,
 					fields: p.fields.clone(),
@@ -637,7 +728,7 @@ impl GroupState {
 		self.cache = 0;
 		self.charge.clear();
 		if let Some(flate) = &mut self.flate {
-			flate.release();
+			flate.release(self.abort.clone().unwrap_or(Error::Dropped));
 		}
 		// The header state and terminal object outlive the frames.
 		if let Some(relay) = &mut self.relay {
@@ -1533,10 +1624,12 @@ impl Producer {
 		}
 	}
 
-	/// The group's full cached footprint (payload plus fixed overhead), used by the
-	/// track to size this group as an eviction victim.
+	/// The group's full cached footprint (payload plus fixed overhead, and a compressed
+	/// group's inflated copy as far as it is built), used by the track to size this group
+	/// as an eviction victim.
 	pub(super) fn cache_size(&self) -> u64 {
-		self.state.read().charge.size()
+		let state = self.state.read();
+		state.charge.size() + state.flate.as_ref().map_or(0, |flate| flate.plain.bill.size())
 	}
 
 	/// Tick of the group's last cache access, driving eviction protection and age
@@ -1797,34 +1890,21 @@ impl Prefetch {
 	/// Refill with up to `budget` of the completed frames from `local` on. Must be
 	/// drained first (`pop` returned `None`).
 	///
-	/// A compressed group fills inflated frames, or with `raw` its stored slices and their
-	/// inflated sizes. A frame that fails to inflate ends the batch, failing it if first.
-	fn fill(&mut self, state: &GroupState, local: usize, budget: usize, raw: bool) -> Result<()> {
+	/// A compressed group fills its stored slices, with `raw` their inflated sizes beside
+	/// them, and otherwise returns the job [`Self::inflate`] runs once the guard is released.
+	fn fill(&mut self, state: &GroupState, local: usize, budget: usize, raw: bool) -> Result<Option<Inflate>> {
 		debug_assert_eq!(self.pos, self.len, "fill on a non-empty batch would leak frames");
 		self.pos = 0;
 		self.len = 0;
-		let frames = state.frames.range(local..).take(budget.min(Self::CAP));
-		match &state.flate {
-			Some(flate) if !raw => {
-				for frame in frames {
-					let payload = match state.plain(flate, local + self.len) {
-						Ok(payload) => payload,
-						Err(err) if self.len == 0 => return Err(err),
-						Err(_) => break,
-					};
-					self.frames[self.len].write(Frame {
-						timestamp: frame.timestamp,
-						payload,
-					});
-					self.len += 1;
-				}
-			}
-			_ => {
-				for frame in frames {
-					self.frames[self.len].write(frame.clone());
-					self.len += 1;
-				}
-			}
+		let count = state.frames.len().saturating_sub(local).min(budget).min(Self::CAP);
+		// Taken before any slot is written, so a refusal leaves the batch empty.
+		let job = match &state.flate {
+			Some(flate) if !raw && count > 0 => Some(state.inflate(flate, local + count - 1)?),
+			_ => None,
+		};
+		for frame in state.frames.range(local..local + count) {
+			self.frames[self.len].write(frame.clone());
+			self.len += 1;
 		}
 		match &state.flate {
 			Some(flate) if raw => {
@@ -1843,6 +1923,27 @@ impl Prefetch {
 			}
 		} else if let Some(fields) = &mut self.fields {
 			fields.fill(None);
+		}
+		Ok(job)
+	}
+
+	/// Replace a filled batch's stored slices, from local frame `local`, with their inflated
+	/// frames. A frame that fails to inflate ends the batch, failing it if first.
+	fn inflate(&mut self, job: &Inflate, local: usize, meter: &stats::Meter) -> Result<()> {
+		job.run(meter);
+		for i in self.pos..self.len {
+			match job.get(local + i) {
+				// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
+				Ok(payload) => unsafe { self.frames[i].assume_init_mut() }.payload = payload,
+				Err(err) => {
+					for slot in &mut self.frames[i..self.len] {
+						// SAFETY: as above, and `len` drops below them right after.
+						unsafe { slot.assume_init_drop() };
+					}
+					self.len = i;
+					return if i == self.pos { Err(err) } else { Ok(()) };
+				}
+			}
 		}
 		Ok(())
 	}
@@ -2598,8 +2699,31 @@ impl Cursor {
 		}
 
 		let (index, raw) = (self.index, self.raw);
-		let Some((info, source)) = ready!(self.poll(waiter, |state| state.poll_frame_source(index, raw))?) else {
+		let Some(source) = ready!(self.poll(waiter, |state| state.poll_frame_source(index, raw))?) else {
 			return Poll::Ready(Ok(None));
+		};
+		// Inflated with the group's guard released.
+		let (info, source) = match source {
+			Source::Ready(info, source) => (info, source),
+			Source::Inflate {
+				job,
+				local,
+				timestamp,
+				fields,
+			} => {
+				job.run(stats);
+				let payload = job.get(local)?;
+				let info = frame::Info {
+					size: payload.len() as u64,
+					timestamp,
+				};
+				let header = frame::Header {
+					info,
+					fields,
+					inflated: None,
+				};
+				(header, frame::Source::Complete(payload))
+			}
 		};
 
 		self.index += 1;
@@ -2642,20 +2766,22 @@ impl Cursor {
 			// out-of-bounds start. `fill` always resets the batch, so an empty range
 			// leaves `len == 0` and the terminal checks below resolve abort/fin/pending.
 			let local = (index - state.offset).min(state.frames.len());
-			prefetch.fill(state, local, budget, raw)?;
+			let job = prefetch.fill(state, local, budget, raw)?;
 			if prefetch.len > 0 {
 				// One stamp covers the whole batch: frames popped from the prefetch
 				// don't re-stamp until the next refill, which `CAP` bounds.
 				state.charge.refresh();
-				return Poll::Ready(Ok(()));
+				return Poll::Ready(Ok(job));
 			}
 			// Nothing completed at `index`: an in-flight tail waits, otherwise resolve
 			// the terminal state (whole-frame reads never stream the partial).
-			state.poll_terminal(index)
+			state.poll_terminal(index).map_ok(|()| None)
 		});
 
 		match ready!(res) {
-			Ok(Ok(())) => {}
+			// Inflated with the group's guard released. Only a group from frame 0 inflates.
+			Ok(Ok(Some(job))) => self.prefetch.inflate(&job, index, stats)?,
+			Ok(Ok(None)) => {}
 			Ok(Err(err)) => return Poll::Ready(Err(err)),
 			Err(state) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
 		}
@@ -3998,6 +4124,82 @@ mod test {
 		drop((first, second, raw));
 		drop(group);
 		assert_eq!(pool.used(), 0, "the inflated copy is released with the group");
+	}
+
+	/// The slices a plain read up to local frame `last` takes under the group's guard.
+	#[cfg(feature = "async")]
+	fn take_slices(group: &Producer, last: usize) -> Inflate {
+		let state = group.state.read();
+		state.inflate(state.flate.as_ref().unwrap(), last).unwrap()
+	}
+
+	/// Plain readers inflate with the group's guard released, into one shared copy: a reader
+	/// that took the same slices skips what another inflated, the bytes count toward the
+	/// group's eviction size and the inflating reader's stats once, and a reader that took
+	/// its slices before a release bills nothing after it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn inflation_is_shared_and_stops_at_release() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let meter = registry.publisher_meter("demo", &stats::Tier::default());
+		let inflated = || {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.find(|(_, role, _)| *role == stats::Role::Publisher)
+				.map_or(0, |(_, _, traffic)| traffic.inflated)
+		};
+		let plain: u64 = (0..3).map(|index| verbose(index).len() as u64).sum();
+		let pool = cache::Pool::unbounded();
+		let write = || {
+			let mut group = compressed_group(&pool);
+			for index in 0..3 {
+				group.write_frame(None, verbose(index)).unwrap();
+			}
+			group.finish().unwrap();
+			group
+		};
+
+		let group = write();
+		let (stored, used) = (group.cache_size(), pool.used());
+		let (first, second) = (take_slices(&group, 2), take_slices(&group, 2));
+		first.run(&meter);
+		assert_eq!(
+			group.cache_size(),
+			stored + plain,
+			"the copy counts toward eviction once built"
+		);
+		assert_eq!(pool.used(), used + plain);
+		second.run(&meter);
+		assert_eq!(group.cache_size(), stored + plain, "the second reader inflates nothing");
+		assert_eq!(second.get(1).unwrap(), verbose(1));
+		assert_eq!(inflated(), plain, "each inflated byte counts once");
+
+		let group = write();
+		let late = take_slices(&group, 1);
+		group.clone().abort(Error::Evicted).unwrap();
+		let used = pool.used();
+		late.run(&meter);
+		assert!(matches!(late.get(0), Err(Error::Evicted)));
+		assert_eq!(pool.used(), used, "a late inflater bills nothing past the release");
+		assert_eq!(inflated(), plain);
+	}
+
+	/// A plain read of a compressed group that started past frame 0 lags on every read,
+	/// never handing out the stored slices it cannot inflate.
+	#[test]
+	fn a_plain_read_past_frame_zero_lags() {
+		let pool = cache::Pool::unbounded();
+		let mut group = compressed_group(&pool);
+		group.start_at(1).unwrap();
+		group.write_frame(None, verbose(1)).unwrap();
+		group.finish().unwrap();
+
+		let mut consumer = group.consume();
+		consumer.set_frames(1..);
+		assert!(matches!(read_plain(&mut consumer), Err(Error::Lagged)));
+		assert!(matches!(read_plain(&mut consumer), Err(Error::Lagged)));
 	}
 
 	/// A received slice that inflates to other than its declared size fails the read.

@@ -1,10 +1,27 @@
 import type * as Epoch from "../epoch.ts";
+import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
 import { hasCompression, hasGroupOrder, Version, wireTimescale } from "./version.ts";
+
+// TRACK_INFO `Compression` codec ids: none, or per-group DEFLATE (draft-lcurley-moq-flate).
+const COMPRESSION_NONE = 0;
+const COMPRESSION_DEFLATE = 1;
+
+async function decodeCompression(r: Reader): Promise<boolean> {
+	const codec = await r.u53();
+	switch (codec) {
+		case COMPRESSION_NONE:
+			return false;
+		case COMPRESSION_DEFLATE:
+			return true;
+		default:
+			throw new ProtocolViolation(`unknown compression: ${codec}`);
+	}
+}
 
 // The Track Stream (0x6) is draft-05+ only.
 function guardTrack(version: Version) {
@@ -115,7 +132,7 @@ export class TrackInfo {
 		const age = this.maxAge === undefined ? undefined : BigInt(this.maxAge);
 		await w.u62(legacy ? (age ?? BigInt(Number.MAX_SAFE_INTEGER)) : age === undefined ? 0n : age + 1n);
 		await w.u53(wireTimescale(version, this.timescale) ?? 0);
-		if (hasCompression(version)) await w.bool(this.compress);
+		if (hasCompression(version)) await w.u53(this.compress ? COMPRESSION_DEFLATE : COMPRESSION_NONE);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<TrackInfo> {
@@ -136,7 +153,7 @@ export class TrackInfo {
 		// Lite-05/06 have no untimed encoding, so zero is malformed there.
 		const scale = await r.u53();
 		const timescale = scale === 0 && !legacy ? undefined : Timescale(scale);
-		const compress = hasCompression(version) ? await r.bool() : false;
+		const compress = hasCompression(version) ? await decodeCompression(r) : false;
 		return new TrackInfo({ priority, maxAge, timescale, compress });
 	}
 

@@ -68,10 +68,16 @@ pub struct TrackInfo {
 	/// Lite07 encodes `None` as zero; Lite05/06 have no untimed encoding, so `None`
 	/// goes out as milliseconds (see [`Version::wire_timescale`]).
 	pub timescale: Option<Timescale>,
-	/// Whether FRAME payloads and datagrams are DEFLATE compressed per group.
-	/// Lite07+ only: an earlier peer is served the frames inflated, so it is never set.
+	/// Whether FRAME payloads and datagrams are DEFLATE compressed per group, the only codec
+	/// the wire's `Compression` id names. Lite07+ only: an earlier peer is served the frames
+	/// inflated, so it is never set.
 	pub compress: bool,
 }
+
+/// TRACK_INFO `Compression`: no codec.
+const COMPRESSION_NONE: u64 = 0;
+/// TRACK_INFO `Compression`: per-group DEFLATE (draft-lcurley-moq-flate).
+const COMPRESSION_DEFLATE: u64 = 1;
 
 impl Message for TrackInfo {
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
@@ -92,9 +98,9 @@ impl Message for TrackInfo {
 			scale => Some(Timescale::new(scale).map_err(|_| DecodeError::InvalidValue)?),
 		};
 		let compress = match version.has_compression() {
-			true => match r.u8()? {
-				0 => false,
-				1 => true,
+			true => match r.varint()? {
+				COMPRESSION_NONE => false,
+				COMPRESSION_DEFLATE => true,
 				_ => return Err(DecodeError::InvalidValue),
 			},
 			false => false,
@@ -124,7 +130,10 @@ impl Message for TrackInfo {
 		w.varint(encoded)?;
 		w.varint(version.wire_timescale(self.timescale).map_or(0, u64::from))?;
 		if version.has_compression() {
-			w.u8(self.compress.into());
+			w.varint(match self.compress {
+				true => COMPRESSION_DEFLATE,
+				false => COMPRESSION_NONE,
+			})?;
 		} else if self.compress {
 			// The frames would arrive compressed with nothing saying so.
 			return Err(EncodeError::Version);
@@ -284,7 +293,7 @@ mod test {
 	}
 
 	#[test]
-	fn lite07_carries_the_compression_flag() {
+	fn lite07_carries_the_compression_codec() {
 		for compress in [false, true] {
 			let info = TrackInfo {
 				compress,
@@ -302,6 +311,7 @@ mod test {
 		.encode_bytes(Version::Lite07)
 		.unwrap()
 		.to_vec();
+		// An unknown codec id, still a one-byte varint.
 		*buf.last_mut().unwrap() = 2;
 		let mut slice = buf.as_slice();
 		assert!(matches!(
