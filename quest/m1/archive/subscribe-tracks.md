@@ -147,9 +147,14 @@ TRACKS' three events (see its Plan) map as follows:
     draft-18, UNINTERESTED from draft-19.
   - Each lite listing filters its request's results to its exact namespace.
   - A refused update resets every affected listing loudly, so each
-    re-requests: the new one, and any whose sibling request was cancelled
-    for the fold, since that request no longer reports adds for it. Never
-    silently narrow. A request never narrows while a listing under it remains, and is
+    re-requests. That covers the new one, any whose sibling request was
+    cancelled for the fold, and the one whose request was being widened:
+    a REQUEST_ERROR on the update closes that request's stream (draft-22
+    section 9.5.1 says so for SUBSCRIBE_TRACKS, and the existing publisher
+    already treats an update's REQUEST_ERROR as closing the stream on every
+    draft), so no request survives to keep serving it. The held PUBLISHes
+    keep their own streams and are adopted again when the re-request lists
+    them. Never silently narrow. A request never narrows while a listing under it remains, and is
     cancelled when the last one closes.
   - Cost: the extra tracks held are only those of broadcasts nested under a
     listed one, bounded by the `announces` cap below; past it the listings
@@ -212,8 +217,8 @@ tracks, and keeps `/a/b`'s held PUBLISHes, and the reverse order shares it
 unchanged; TRACKS(`/a/b`) and TRACKS(`/a/c`) open two requests and hold no
 track outside them, and a later TRACKS(`/a`) folds both into one, keeping
 every held entry and refusing any duplicate PUBLISH; when widening `/a/b` to
-`/a` is refused after `/a/c` was cancelled, the `/a` and `/a/c` listings
-reset and re-request, while `/a/b` keeps its request; on draft-18, a PUBLISH for
+`/a` is refused after `/a/c` was cancelled, the `/a`, `/a/b`, and `/a/c`
+listings all reset and re-request; on draft-18, a PUBLISH for
 a track we already SUBSCRIBEd lists it through that SUBSCRIBE and is refused
 with DUPLICATE_SUBSCRIPTION; a moq-transport subscriber resuming our paused
 PUBLISH gets the groups its filter asks for from the cache; a moq-transport subscriber gets
