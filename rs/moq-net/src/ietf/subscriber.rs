@@ -2640,8 +2640,17 @@ where
 		// Write Subscribe message. The aggregate is read now: a subscriber can join while
 		// the request ID and stream were awaited. Updates follow its priority from here, but
 		// no draft lets one change the order.
+		let max_age_supported = self.peer_setup.get().await.max_age;
 		let aggregate = target.subscription();
 		let priority = aggregate.as_ref().map(|s| s.priority).unwrap_or(0);
+		let max_age = max_age_supported.then(|| {
+			super::max_age::millis(
+				aggregate
+					.as_ref()
+					.map(|s| s.max_delay)
+					.unwrap_or(Duration::from_millis(super::max_age::MAX_MILLIS)),
+			)
+		});
 		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		// Without an Established subscription, a relay includes the request it holds.
 		let new_group = target
@@ -2652,6 +2661,7 @@ where
 			stream
 				.writer
 				.encode(&ietf::Subscribe {
+					max_age,
 					new_group,
 					request_id,
 					track_namespace: broadcast_path.to_owned(),
@@ -2958,6 +2968,8 @@ where
 		// The aggregate request last read, so only a change is considered.
 		let mut asked = None;
 		// The subscriber priority upstream holds, and the one the aggregate now asks for.
+		let mut sent_max_age = max_age;
+		let mut wanted_max_age = max_age;
 		let mut sent_priority = priority;
 		let mut priority = priority;
 		// Draft-14's SUBSCRIBE_UPDATE repeats the bounds it leaves alone, and must not move the
@@ -3011,6 +3023,9 @@ where
 						subscribed = subscription.is_some();
 						if let Some(subscription) = subscription {
 							priority = subscription.priority;
+							if max_age_supported {
+								wanted_max_age = Some(super::max_age::millis(subscription.max_delay));
+							}
 						}
 					}
 					if !subscribed || demand.poll_unused(waiter).is_ready() {
@@ -3039,9 +3054,10 @@ where
 					let update = Update {
 						start_location,
 						priority: (priority != sent_priority).then_some(priority),
+						max_age: wanted_max_age.filter(|_| wanted_max_age != sent_max_age),
 						new_group,
 					};
-					match update.priority.is_some() || update.new_group.is_some() {
+					match update.priority.is_some() || update.max_age.is_some() || update.new_group.is_some() {
 						true => Poll::Ready(End::Update(update)),
 						false => Poll::Pending,
 					}
@@ -3051,10 +3067,14 @@ where
 				match end {
 					End::Update(update) => {
 						let wanted = update.priority;
+						let wanted_age = update.max_age;
 						if let Err(err) = self.write_update(&mut stream.writer, request_id, update).await {
 							tracing::debug!(%err, "failed to update the subscription");
 							let _ = track.clone().abort(err);
 							break false;
+						}
+						if wanted_age.is_some() {
+							sent_max_age = wanted_age;
 						}
 						if let Some(wanted) = wanted {
 							sent_priority = wanted;
@@ -3321,6 +3341,7 @@ where
 		writer.varint(ietf::SubscribeUpdate::ID).await?;
 		writer
 			.encode(&ietf::SubscribeUpdate {
+				max_age: update.max_age,
 				request_id,
 				subscription_request_id: matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 					.then_some(subscription),
@@ -10841,6 +10862,8 @@ struct Update {
 	start_location: ietf::Location,
 	/// The aggregate subscriber priority, in the model's higher-first terms.
 	priority: Option<u8>,
+	/// Subscriber age budget, in milliseconds.
+	max_age: Option<u64>,
 	/// NEW_GROUP_REQUEST.
 	new_group: Option<u64>,
 }
@@ -11642,6 +11665,7 @@ mod stitch_tests {
 			ietf::Fetch::ID
 		} else {
 			ietf::Subscribe {
+				max_age: None,
 				new_group: None,
 				request_id: RequestId(3),
 				track_namespace: Path::new("room"),
@@ -12180,6 +12204,7 @@ mod stitch_tests {
 					version,
 				);
 				let subscribe = ietf::Subscribe {
+					max_age: None,
 					new_group: None,
 					request_id: RequestId(3),
 					track_namespace: Path::new("room"),

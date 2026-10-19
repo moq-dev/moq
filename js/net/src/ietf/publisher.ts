@@ -40,6 +40,7 @@ import { encodeDatagram } from "./datagram.ts";
 import { type RequestKind, requestReason, toRequestCode } from "./error.ts";
 import { type Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
+import { MAX_AGE_PARAMETER } from "./max_age.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
@@ -470,11 +471,8 @@ export class Publisher {
 		const track = wireOf(broadcast).subscribe(msg.trackName, {
 			priority,
 			order,
-			// moq-transport has no subscriber latency parameter. Keep everything the
-			// producer retained and let the receiving subscriber enforce its own budget.
-			// Keep the sentinel encodable if this demand crosses a Lite hop before the
-			// producer's retention bound is known.
-			maxDelay: Milli(Varint.MAX_U53),
+			// An absent budget preserves everything retained by the producer.
+			maxDelay: Milli(msg.maxAge ?? Varint.MAX_U53),
 		});
 
 		let cache: TrackSubscriber | undefined;
@@ -526,7 +524,7 @@ export class Publisher {
 			track.update({
 				priority,
 				order,
-				maxDelay: Milli(Varint.MAX_U53),
+				maxDelay: Milli(msg.maxAge ?? Varint.MAX_U53),
 				groups: {
 					start: range.start ? { included: Number(range.start.group) } : undefined,
 					end: range.end ? { included: Number(range.end.group) } : undefined,
@@ -655,13 +653,20 @@ export class Publisher {
 						params.bytes.size > 0 ||
 						params.rangeFilters ||
 						[...params.vars.keys()].some(
-							(key) => key !== 0x02n && key !== 0x06n && key !== 0x10n && key !== 0x20n,
+							(key) =>
+								key !== MAX_AGE_PARAMETER &&
+								key !== 0x02n &&
+								key !== 0x06n &&
+								key !== 0x10n &&
+								key !== 0x20n,
 						);
 					if (unsupported)
 						throw await refuse("not_supported", "REQUEST_UPDATE parameters not supported", ownRequestId);
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
 						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
+					if (params.maxAge !== undefined)
+						track.update({ ...track.subscription.peek(), maxDelay: Milli(params.maxAge) });
 					if (version === Version.DRAFT_14) continue;
 					await stream.writer.u53(RequestOk.id);
 					await new RequestOk({ requestId: ownRequestId }).encode(stream.writer, version);

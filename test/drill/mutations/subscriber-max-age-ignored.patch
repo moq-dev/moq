@@ -1,0 +1,16 @@
+# drill: ietf_subscriber_max_age_skips_bufferbloat
+# expect: subscriber max age did not reach the publisher
+#
+# Preserve negotiation and decoding, but ignore the requested budget when serving.
+--- a/rs/moq-net/src/ietf/publisher.rs
++++ b/rs/moq-net/src/ietf/publisher.rs
+@@ -1186,9 +1186,6 @@
+ 
+ 					let order = msg.group_order.to_order();
+ 					let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
+-					if let Some(max_age) = msg.max_age {
+-						subscription.max_delay = Duration::from_millis(max_age);
+-					}
+ 					// Set before subscribing, so a relay that has no upstream subscription yet
+ 					// carries it on the SUBSCRIBE it opens, as the draft requires.
+ 					subscription.new_group = msg.new_group.and_then(|value| NewGroup::new(value, None));

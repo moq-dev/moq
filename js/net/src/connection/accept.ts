@@ -172,6 +172,7 @@ async function acceptSetup(
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Extensions.intoSetup(params, wiring.extensions, version);
 	Ietf.hiddenIntoSetup(params);
+	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, version);
 
 	const server = new Ietf.ServerSetup({ version, parameters: params });
@@ -189,6 +190,7 @@ async function acceptSetup(
 		version,
 		solicit: Ietf.solicitFromSetup(client.parameters),
 		hidden: Ietf.hiddenFromSetup(client.parameters),
+		maxAge: Ietf.maxAgeFromSetup(client.parameters),
 		activeCount: Ietf.activeCountFromSetup(client.parameters, version),
 	});
 }
@@ -234,6 +236,7 @@ async function acceptNegotiated(
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
+	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, setupVersion);
 
 	const server = new Ietf.ServerSetup({ version: selectedVersion, parameters: params });
@@ -259,6 +262,7 @@ async function acceptNegotiated(
 			version: selectedVersion as Ietf.IetfVersion,
 			solicit: Ietf.solicitFromSetup(client.parameters),
 			hidden: Ietf.hiddenFromSetup(client.parameters),
+			maxAge: Ietf.maxAgeFromSetup(client.parameters),
 			activeCount: Ietf.activeCountFromSetup(client.parameters, selectedVersion as Ietf.IetfVersion),
 		});
 	} else {

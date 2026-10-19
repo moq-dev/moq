@@ -313,6 +313,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
+	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, setupVersion);
 
 	const client = new Ietf.ClientSetup({
@@ -353,6 +354,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 			version: server.version as Ietf.IetfVersion,
 			solicit: Ietf.solicitFromSetup(server.parameters),
 			hidden: Ietf.hiddenFromSetup(server.parameters),
+			maxAge: Ietf.maxAgeFromSetup(server.parameters),
 			activeCount: Ietf.activeCountFromSetup(server.parameters, server.version as Ietf.IetfVersion),
 		});
 	} else {

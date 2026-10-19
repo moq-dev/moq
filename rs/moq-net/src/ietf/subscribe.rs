@@ -45,6 +45,8 @@ pub struct Subscribe<'a> {
 	/// NEW_GROUP_REQUEST (0x32, draft-15+): the subscriber's largest known Group ID plus
 	/// one, or 0 when it knows none. Never encoded where the draft has no such parameter.
 	pub new_group: Option<u64>,
+	/// Subscriber max age in milliseconds (MoQ Timestamp), if negotiated.
+	pub max_age: Option<u64>,
 }
 
 /// NEW_GROUP_REQUEST (0x32) and DYNAMIC_GROUPS (0x30) arrived in draft-15.
@@ -79,7 +81,10 @@ impl Message for Subscribe<'_> {
 				let forward = r.bool()?;
 				let filter = Filter::decode(r, version)?;
 
-				let tokens = Parameters::skip_request(r)?;
+				decode_params!(r, version,
+					0x03 => tokens: Vec<super::token::RequestToken>,
+					super::max_age::PARAMETER => max_age: Option<u64>,
+				);
 				let authorization_token = super::token::single(tokens)?;
 
 				Ok(Self {
@@ -96,6 +101,7 @@ impl Message for Subscribe<'_> {
 					range_filters: false,
 					authorization_token,
 					new_group: None,
+					max_age: super::max_age::validate(max_age)?,
 				})
 			}
 			_ => {
@@ -117,6 +123,7 @@ impl Message for Subscribe<'_> {
 					0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 					0x32 => new_group: Option<u64> where has_new_group_request(version),
 					0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
+					super::max_age::PARAMETER => max_age: Option<u64>,
 				);
 				let authorization_token = super::token::single(authorization_token)?;
 
@@ -155,6 +162,7 @@ impl Message for Subscribe<'_> {
 					range_filters,
 					authorization_token,
 					new_group,
+					max_age: super::max_age::validate(max_age)?,
 				})
 			}
 		}
@@ -177,6 +185,7 @@ impl Message for Subscribe<'_> {
 				self.filter.encode(w, version)?;
 				encode_params!(w, version,
 					0x03 => self.authorization_token.clone(),
+					super::max_age::PARAMETER => self.max_age,
 				);
 			}
 			_ => {
@@ -200,6 +209,7 @@ impl Message for Subscribe<'_> {
 					0x23 => fill,
 					0x32 => new_group,
 					0x35 => include_properties,
+					super::max_age::PARAMETER => self.max_age,
 				);
 			}
 		}
@@ -412,6 +422,8 @@ pub struct SubscribeUpdate {
 	pub authorization_token: Option<RequestToken>,
 	/// NEW_GROUP_REQUEST (0x32, draft-16+), as on [`Subscribe::new_group`].
 	pub new_group: Option<u64>,
+	/// Subscriber max age in milliseconds (MoQ Timestamp), if negotiated.
+	pub max_age: Option<u64>,
 }
 
 impl Message for SubscribeUpdate {
@@ -430,6 +442,7 @@ impl Message for SubscribeUpdate {
 				w.bool(self.forward.unwrap_or(true));
 				encode_params!(w, version,
 					0x03 => self.authorization_token.clone(),
+					super::max_age::PARAMETER => self.max_age,
 				);
 			}
 			Version::Draft15 | Version::Draft16 => {
@@ -443,6 +456,7 @@ impl Message for SubscribeUpdate {
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter,
 					0x32 => self.new_group.filter(|_| has_new_group_request(version)),
+					super::max_age::PARAMETER => self.max_age,
 				);
 			}
 			_ => {
@@ -461,6 +475,7 @@ impl Message for SubscribeUpdate {
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter,
 					0x32 => self.new_group,
+					super::max_age::PARAMETER => self.max_age,
 				);
 			}
 		}
@@ -477,7 +492,10 @@ impl Message for SubscribeUpdate {
 				let end_group = r.varint()?;
 				let subscriber_priority = Some(r.u8()?);
 				let forward = Some(r.bool()?);
-				let tokens = Parameters::skip_request(r)?;
+				decode_params!(r, version,
+					0x03 => tokens: Vec<super::token::RequestToken>,
+					super::max_age::PARAMETER => max_age: Option<u64>,
+				);
 				let authorization_token = super::token::single(tokens)?;
 
 				Ok(Self {
@@ -490,6 +508,7 @@ impl Message for SubscribeUpdate {
 					filter: None,
 					authorization_token,
 					new_group: None,
+					max_age: super::max_age::validate(max_age)?,
 				})
 			}
 			Version::Draft15 | Version::Draft16 => {
@@ -502,6 +521,7 @@ impl Message for SubscribeUpdate {
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter: Option<Filter>,
 					0x32 => new_group: Option<u64> where has_new_group_request(version),
+					super::max_age::PARAMETER => max_age: Option<u64>,
 				);
 
 				Ok(Self {
@@ -514,6 +534,7 @@ impl Message for SubscribeUpdate {
 					filter,
 					authorization_token: super::token::single(authorization_token)?,
 					new_group,
+					max_age: super::max_age::validate(max_age)?,
 				})
 			}
 			_ => {
@@ -538,6 +559,7 @@ impl Message for SubscribeUpdate {
 					0x28 => _object_property_filter: Vec<Opaque> where has_range_filters(version),
 					0x29 => _track_property_filter: Vec<Opaque> where has_range_filters(version),
 					0x32 => new_group: Option<u64>,
+					super::max_age::PARAMETER => max_age: Option<u64>,
 				);
 
 				Ok(Self {
@@ -550,6 +572,7 @@ impl Message for SubscribeUpdate {
 					filter,
 					authorization_token: super::token::single(authorization_token)?,
 					new_group,
+					max_age: super::max_age::validate(max_age)?,
 				})
 			}
 		}
@@ -573,9 +596,61 @@ mod tests {
 	}
 
 	#[test]
+	fn subscriber_max_age_round_trips() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft20,
+			Version::Draft21,
+			Version::Draft22,
+		] {
+			for max_age in [None, Some(0), Some(250), Some(super::super::max_age::MAX_MILLIS)] {
+				let msg = Subscribe {
+					max_age,
+					request_id: RequestId(0),
+					track_namespace: Path::new("live"),
+					track_name: "catalog".into(),
+					subscriber_priority: 128,
+					group_order: GroupOrder::Descending,
+					filter: Filter::Unfiltered,
+					fill: None,
+					properties_wanted: true,
+					forward: true,
+					rendezvous: false,
+					range_filters: false,
+					authorization_token: None,
+					new_group: None,
+				};
+				let decoded: Subscribe = decode_message(&encode_message(&msg, version), version).unwrap();
+				assert_eq!(decoded.max_age, max_age, "{version}");
+				let update = SubscribeUpdate {
+					max_age,
+					request_id: RequestId(2),
+					subscription_request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+						.then_some(RequestId(0)),
+					start_location: Location { group: 0, object: 0 },
+					end_group: 0,
+					subscriber_priority: None,
+					forward: None,
+					filter: None,
+					authorization_token: None,
+					new_group: None,
+				};
+				let decoded: SubscribeUpdate = decode_message(&encode_message(&update, version), version).unwrap();
+				assert_eq!(decoded.max_age, max_age, "{version}");
+			}
+		}
+	}
+
+	#[test]
 	fn test_subscribe_round_trip() {
 		let msg = Subscribe {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("test"),
 			track_name: "video".into(),
@@ -603,6 +678,7 @@ mod tests {
 	fn test_subscribe_round_trip_v15() {
 		let msg = Subscribe {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("test"),
 			track_name: "video".into(),
@@ -647,6 +723,7 @@ mod tests {
 			let expected = has_new_group_request(version).then_some(7);
 			let subscribe = Subscribe {
 				new_group: Some(7),
+				max_age: None,
 				request_id: RequestId(1),
 				track_namespace: Path::new("test"),
 				track_name: "video".into(),
@@ -665,6 +742,7 @@ mod tests {
 
 			let update = SubscribeUpdate {
 				new_group: Some(7),
+				max_age: None,
 				request_id: RequestId(3),
 				subscription_request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 					.then_some(RequestId(1)),
@@ -753,6 +831,7 @@ mod tests {
 	fn rendezvous_timeout_is_never_sent() {
 		let msg = Subscribe {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("test"),
 			track_name: "video".into(),
@@ -787,6 +866,7 @@ mod tests {
 	fn test_subscribe_nested_namespace() {
 		let msg = Subscribe {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(100),
 			track_namespace: Path::new("conference/room123"),
 			track_name: "audio".into(),
@@ -976,6 +1056,7 @@ mod tests {
 		] {
 			let msg = Subscribe {
 				new_group: None,
+				max_age: None,
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("broadcast"),
 				track_name: "video".into(),
@@ -1037,6 +1118,7 @@ mod tests {
 	fn test_subscribe_update_v15_round_trip() {
 		let msg = SubscribeUpdate {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(10),
 			subscription_request_id: Some(RequestId(5)),
 			start_location: Location { group: 0, object: 0 },
@@ -1060,6 +1142,7 @@ mod tests {
 	fn test_subscribe_update_v14_round_trip() {
 		let msg = SubscribeUpdate {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(10),
 			subscription_request_id: Some(RequestId(5)),
 			start_location: Location { group: 1, object: 2 },
@@ -1127,6 +1210,7 @@ mod tests {
 	fn test_subscribe_v17_round_trip() {
 		let msg = Subscribe {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("test"),
 			track_name: "video".into(),
@@ -1170,6 +1254,7 @@ mod tests {
 	fn test_subscribe_update_v17_round_trip() {
 		let msg = SubscribeUpdate {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(10),
 			subscription_request_id: None,
 			start_location: Location { group: 0, object: 0 },
@@ -1193,6 +1278,7 @@ mod tests {
 	fn test_subscribe_v18_round_trip() {
 		let msg = Subscribe {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("test"),
 			track_name: "video".into(),
@@ -1416,6 +1502,7 @@ mod tests {
 	fn test_subscribe_update_v18_round_trip() {
 		let msg = SubscribeUpdate {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(10),
 			subscription_request_id: None,
 			start_location: Location { group: 0, object: 0 },
@@ -1442,6 +1529,7 @@ mod tests {
 	fn test_subscribe_update_v17_v18_size_differs() {
 		let v17_msg = SubscribeUpdate {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(10),
 			subscription_request_id: None,
 			start_location: Location { group: 0, object: 0 },
@@ -1514,6 +1602,7 @@ mod tests {
 	fn include_properties_is_a_uint8() {
 		let msg = Subscribe {
 			new_group: None,
+			max_age: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("live"),
 			track_name: "video".into(),
@@ -1578,6 +1667,7 @@ mod tests {
 		] {
 			let msg = Subscribe {
 				new_group: None,
+				max_age: None,
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("live"),
 				track_name: "video".into(),

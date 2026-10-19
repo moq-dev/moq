@@ -20,6 +20,9 @@ pub(crate) struct Peer {
 	/// SUBSCRIBE_NAMESPACE, so we may send it.
 	pub hidden: bool,
 
+	/// Whether the peer understands subscriber max age (MoQ Timestamp).
+	pub max_age: bool,
+
 	/// MoQ Auth: whether both sides negotiated the Auth request streams.
 	pub auth: bool,
 
@@ -86,6 +89,7 @@ mod tests {
 			},
 			solicit: None,
 			hidden: false,
+			max_age: false,
 			auth: false,
 			active_count: false,
 		};
@@ -99,6 +103,7 @@ mod tests {
 			},
 			solicit: Some(true),
 			hidden: true,
+			max_age: false,
 			auth: true,
 			active_count: true,
 		});
