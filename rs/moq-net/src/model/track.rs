@@ -645,8 +645,9 @@ pub(crate) struct FetchOutcome {
 }
 
 impl TrackState {
-	/// A consumer joined at the live edge: ask for the group after the newest when the
-	/// newest's bytes after its first frame exceed [`Info::refresh`] times that frame.
+	/// A consumer joined at the live edge: ask for the next free sequence when the newest
+	/// group's bytes after its first frame exceed [`Info::refresh`] times that frame. A
+	/// datagram past that group already took the sequence after it.
 	///
 	/// Joins while the request is pending ask for the same group, so they coalesce until
 	/// the publisher creates it. A join under the ratio reads the current group and asks
@@ -668,9 +669,10 @@ impl TrackState {
 		{
 			return;
 		}
+		let next = state.edge();
 		let subscriptions = state.subscriptions.clone();
 		drop(state);
-		let mut wakes = subscriptions.lock().want(latest.saturating_add(1));
+		let mut wakes = subscriptions.lock().want(next);
 		wakes.wake();
 	}
 
@@ -3362,7 +3364,7 @@ impl Demand {
 	///
 	/// A publisher opens a group whenever `n` passes its largest. The first consumer of a
 	/// track with no group asks for `Some(0)`, and a join judged by [`Info::refresh`]
-	/// asks for the group after the newest. `n` never goes back, so once a group reaches
+	/// asks for the next free sequence. `n` never goes back, so once a group reaches
 	/// it nothing is pending until another join asks.
 	pub fn wanted(&self) -> Option<u64> {
 		if !self.is_used() {
@@ -12675,6 +12677,17 @@ mod test {
 			let _subscriber = producer.subscribe(None);
 			assert_eq!(producer.demand().wanted(), Some(wanted), "{delta} byte delta");
 		}
+	}
+
+	/// A datagram past the newest group took the sequence after it, so a join over the
+	/// ratio wants the next free one rather than one already written.
+	#[test]
+	fn a_join_wants_past_a_later_datagram() {
+		let mut producer = track_producer("test", Info::default().with_refresh(1));
+		refresh_group(&producer, 4);
+		assert_eq!(producer.append_datagram(None, &b"dgram"[..]).unwrap(), 1);
+		let _subscriber = producer.subscribe(None);
+		assert_eq!(producer.demand().wanted(), Some(2));
 	}
 
 	/// Joins while a request is pending ask for the same group, so the publisher hears it

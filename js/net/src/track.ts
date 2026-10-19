@@ -599,7 +599,7 @@ export class Demand {
 	 * The group subscribers want: `undefined` while nobody subscribes, otherwise the sequence
 	 * the next group should have at least. A publisher opens a group whenever it passes its
 	 * largest. The first subscriber of a track with no group wants `0`, and a join judged by
-	 * {@link Info.refresh} wants the group after the newest. It never goes back. Watch it
+	 * {@link Info.refresh} wants the next free sequence. It never goes back. Watch it
 	 * (`effect.get` / `.peek()`) to follow demand.
 	 */
 	get wanted(): Getter<number | undefined> {
@@ -843,14 +843,15 @@ export class Producer {
 		return this.#demand;
 	}
 
-	// A subscriber joined at the live edge: ask for a new group when the newest one's bytes
-	// after its first frame exceed the refresh ratio times the first frame.
+	// A subscriber joined at the live edge: ask for the next free sequence when the newest
+	// group's bytes after its first frame exceed the refresh ratio times the first frame. A
+	// datagram past that group already took the sequence after it.
 	#join(): void {
 		const ratio = this.#state.info.peek()?.refresh;
 		const latest = this.#state.latest;
 		if (ratio === undefined || latest === undefined) return;
 		const group = this.#cached.get(latest)?.group;
-		if (group && hooks.overRefresh(group, ratio)) this.#want(latest + 1);
+		if (group && hooks.overRefresh(group, ratio)) this.#want(this.#received);
 	}
 
 	// Raise the wanted floor, reporting it while anyone subscribes.

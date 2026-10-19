@@ -134,6 +134,15 @@ test("a join over the refresh ratio wants the group after the newest", () => {
 	}
 });
 
+test("a join wants past a datagram after the newest group", () => {
+	const producer = new TrackProducer("test").accept({ refresh: 1 });
+	refreshGroup(producer, 4);
+	expect(producer.appendDatagram(undefined, enc.encode("dgram"))).toBe(1);
+	const subscriber = producer.subscribe();
+	expect(producer.demand().wanted.peek()).toBe(2);
+	subscriber.close();
+});
+
 test("joins coalesce until the wanted group lands", () => {
 	const producer = new TrackProducer("test").accept({ refresh: 1 });
 	refreshGroup(producer, 4);
