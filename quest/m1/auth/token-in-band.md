@@ -23,7 +23,7 @@ already carries the full pattern grant.
   how cluster dial targets keep their per-peer credential, and per-dial
   extras use the session's `auth().add()` once connected. moq-ffi gains a
   `tokens` field on the `MoqClientConfig` record that
-  [FFI shape](/quest/m1/ffi-shape/README.md) (#4697) puts in place of every
+  the FFI shape (#4697) put in place of every
   `MoqClient` setter, mirroring `moq_tokio::connect::Config`, not a new
   `set_tokens` setter (mirrored in the wrappers, and reaching the
   generated C and C++ bindings and OBS through the generated C++) and `js/net`'s `connect`
@@ -90,6 +90,5 @@ Additive. Wire: a lite-07-wip SETUP parameter.
 
 ## Required
 
-- [FFI shape](/quest/m1/ffi-shape/README.md) - puts the `MoqClientConfig` record in place that `tokens` extends, so the wrappers break once
 - [Bindings](/quest/m1/auth/bindings.md) - supplies the client surface the new
   token setters sit beside

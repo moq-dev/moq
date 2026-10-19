@@ -22,13 +22,14 @@ type Resolver<T> = PromiseWithResolvers<T>["resolve"];
  *
  * Kept as two components rather than one joined string: a track name may contain the same
  * separator a broadcast path uses, so `a` + `b/c` and `a/b` + `c` would otherwise compare
- * equal and turn a genuine collision into apparent sharing.
+ * equal and turn a genuine collision into apparent sharing. The publisher instance a
+ * subscription names (MoQ Epoch) is part of it: another instance is other content.
  * @internal
  */
-export type TrackIdentity = { broadcast: string; name: string };
+export type TrackIdentity = { broadcast: string; name: string; epoch?: string };
 
 function sameTrack(a: TrackIdentity, b: TrackIdentity): boolean {
-	return a.broadcast === b.broadcast && a.name === b.name;
+	return a.broadcast === b.broadcast && a.name === b.name && a.epoch === b.epoch;
 }
 
 /**
