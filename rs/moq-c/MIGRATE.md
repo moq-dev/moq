@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Demand reports the wanted group (#5930)
+
+`moq_track_info` gains `refresh` and `refresh_present`, which changes its ABI; a zeroed field leaves refresh off.
+A demand watcher's `on_demand` now repeats `MOQ_DEMAND_USED` whenever the wanted group moves, so treat it as "read the wanted group" rather than an edge.
+Read it with `moq_publish_demand_wanted`, and start a new group (a keyframe) once it passes the largest group written.
+
+```c
+uint64_t group;
+bool present;
+if (moq_publish_demand_wanted(watcher, &group, &present) == 0 && present && group > largest) start_group();
+```
+
 ### OpenH264 is a build feature (#5771)
 
 The release archives and the CMake build still carry the software H.264 fallback.
