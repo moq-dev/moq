@@ -554,15 +554,13 @@ impl Key {
 	/// Scoping the claims to a connection path is a separate step; see
 	/// [`Claims::authorize`].
 	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
-		let claims: Claims = self.decode(token)?;
+		let claims = self.verify_claims(token)?;
 		validate_times(&claims, std::time::SystemTime::now())?;
-		claims.validate()?;
-		self.validate_scope(&claims)?;
 		Ok(claims)
 	}
 
-	/// Verify the signature, claims, and key scope before reading expiry for attribution.
-	#[cfg(feature = "serve")]
+	/// Verify the signature, claims, and key scope but not the times, so an expired
+	/// token's root is still known to be genuine.
 	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
 		let claims: Claims = self.decode(token)?;
 		claims.validate()?;
