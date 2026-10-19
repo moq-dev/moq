@@ -19,11 +19,11 @@ release, with clustering stability and the in-tree QUIC stack first.
   expansion in m1. Keep their correctness, interoperability, memory, and
   performance evidence with them.
 - Defer P2P, watch-worker planning and implementation, AMD Vulkan encode and
-  Intel VA-API/Vulkan import, QoS lag and prefix stats, and active-active
-  same-epoch importers to m2 with their prerequisites. Their possible API
-  breaks do not make them prerequisites of this cut. Existing playback and
-  A/V clock validation remain here. Same-epoch importers require the epoch
-  anchor and raw TS epoch cuts before claiming redundant-import support.
+  Intel VA-API/Vulkan import, and QoS lag and prefix stats to m2 with their
+  prerequisites. Their possible API breaks do not make them prerequisites of
+  this cut. Existing playback and A/V clock validation remain here.
+  Same-epoch importers were dropped (maintainer, 2026-10-19): a redundant
+  ingest pair runs on [distinct epochs](/quest/m0/broadcast-epoch/distinct-importer-epochs.md).
 - Finalized lite-07 is preferred by first-party Rust and JS clients, with
   older-version negotiation fallback. Servers accept it by default. Never
   reuse a published identifier for an incompatible wire change; deferred
@@ -85,6 +85,7 @@ lands before the cut.
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
 - [IETF takeover](/quest/m1/ietf-takeover.md) - carry the shared takeover contract through the negotiated IETF epoch extension
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explain pinned catalogs, lazy jobs, takeover, restart and version compatibility
+- [Redundant ingest guide](/quest/m1/redundant-ingest-guide.md) - a setup page on redundant ingest over multiple routes, for any publisher
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [moq-ffi reports why a first dial fails](/quest/m1/ffi-first-dial-failure.md) - OBS names the reason while the first dial retries, as moq-c already can
 - [Typed refusal reason](/quest/m1/refusal-reason.md) - an auth server's 403 names the reason (including `expired`) and the root and tier, so the relay's session outcomes count and attribute refusals

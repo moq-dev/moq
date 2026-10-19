@@ -24,8 +24,9 @@ Decided 2026-10-13 by the maintainer: the coordinate the
 legs share is the broadcast's media timeline, each object's timestamp on its
 catalog clock, with a constant mux rate. Two exports of one broadcast
 already read the same objects and timestamps, so this needs no importer
-alignment; [same-epoch importers](/quest/m2/hop-aligned-import.md) extend it
-to legs fed by different importers of one epoch. Every byte a `--sync` leg
+alignment. Legs fed by different importers read different broadcasts
+([distinct epochs](/quest/m0/broadcast-epoch/distinct-importer-epochs.md)),
+so identity across them is a non-goal. Every byte a `--sync` leg
 renders from the objects it has (slot, PCR, table, PES header, continuity
 counter) is a function of those objects, that coordinate, the catalog, and
 the rate, never of what the leg has sent or when it joined. 2022-7 is a differentiator for primary distribution, not
@@ -91,4 +92,3 @@ Public API: `moq export ts --sync`.
 ## Related
 
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - packetizes these slots with matching RTP headers for ST 2022-7
-- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - extends the coordinate to legs fed by different importers
