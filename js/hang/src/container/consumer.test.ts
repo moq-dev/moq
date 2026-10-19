@@ -1123,6 +1123,56 @@ test("Consumer throws the first error in delivery order", async () => {
 	consumer.close();
 });
 
+// One payload can decode to several samples (a CMAF fragment). A latency skip that drops the group
+// still checks every sample in it, not only those before the one that made the skip eligible.
+test("Consumer checks a whole decoded batch before a skip drops its group", async () => {
+	const decoded = new Map<number, () => void>();
+	const decodes = (timestamp: number) => new Promise<void>((resolve) => decoded.set(timestamp, resolve));
+	const later = decodes(3_000_000);
+	const rewound = decodes(0);
+	// Each payload is a JSON array of sample timestamps.
+	const batchFormat: ContainerFormat = {
+		decode(frame: Uint8Array): Frame[] {
+			const timestamps = JSON.parse(new TextDecoder().decode(frame)) as number[];
+			for (const timestamp of timestamps) decoded.get(timestamp)?.();
+			return timestamps.map((timestamp) => ({ payload: frame, timestamp: timestamp as Micro, keyframe: true }));
+		},
+	};
+	const write = (sequence: number, timestamps: number[]) => {
+		const group = new Group.Producer(sequence);
+		// Transport stamps follow the sequence, so a lower group may land after a higher one.
+		group.writeFrame({
+			payload: new TextEncoder().encode(JSON.stringify(timestamps)),
+			timestamp: Time.Timestamp.fromMicros(sequence * 1000),
+		});
+		track.writeGroup(group);
+		return group;
+	};
+
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: batchFormat, maxDelay: 500 as Milli });
+
+	write(0, [1_000_000]).close();
+	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(1_000_000 as Micro);
+
+	// The newer group arrives first and stays open, so the older one is the oldest buffered group
+	// and too old to wait for.
+	const newest = write(3, [3_000_000]);
+	await later;
+	// Its first sample is fine; the second rewinds below the delivered group's start.
+	write(2, [2_000_000, 0]).close();
+	// Read only once the skip has dropped it, before the newer group's frame is delivered.
+	await rewound;
+	newest.close();
+	track.close();
+
+	const read = async () => {
+		while (await consumer.next());
+	};
+	await expect(read()).rejects.toThrow("below the previous group start");
+	consumer.close();
+});
+
 test("Consumer aborts a rewind carried by a later arrival", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 30_000 as Milli });

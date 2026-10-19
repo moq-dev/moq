@@ -279,34 +279,38 @@ export class Consumer {
 					if (group.end === undefined || end > group.end) {
 						group.end = end;
 					}
+				}
 
-					this.#updateBuffered();
+				if (decoded.length === 0) continue;
 
-					let skipped = false;
-					if (group.consumer.sequence !== this.#active) {
-						// A non-active group can also be too slow to wait for. This runs even when
-						// the group is the delivery head, because that is exactly the stalled case
-						// (#active sits below every buffered group) where the max delay budget is
-						// what eventually breaks the stall.
-						this.#checkMaxDelay();
+				// Skip and wake only once the whole batch is in its group: a skip that drops this group
+				// checks it for a rewind, which must see every sample one fragment decoded to.
+				this.#updateBuffered();
 
-						// A newer group reaching back to where the stalled active group has
-						// already presented means we can advance now instead of waiting.
-						skipped = this.#tryDurationSkip();
-					}
+				let skipped = false;
+				if (group.consumer.sequence !== this.#active) {
+					// A non-active group can also be too slow to wait for. This runs even when
+					// the group is the delivery head, because that is exactly the stalled case
+					// (#active sits below every buffered group) where the max delay budget is
+					// what eventually breaks the stall.
+					this.#checkMaxDelay();
 
-					// Wake next() for the current delivery head so its frames surface as they
-					// arrive. Gating only on `=== #active` assumed +1 group numbering: with
-					// non-sequential group ids (large jumps between groups) #active lags one group
-					// behind as a stale `+1` phantom, so the real head never matched and its whole
-					// group was held until completion, then flushed in a burst. The earliest
-					// buffered group is the delivery head regardless of id scheme; next()'s
-					// promotion guard advances #active to it. Works for sequential and
-					// non-sequential ids alike.
-					if (skipped || group.consumer.sequence === this.#active || group === this.#groups[0]) {
-						this.#notify?.();
-						this.#notify = undefined;
-					}
+					// A newer group reaching back to where the stalled active group has
+					// already presented means we can advance now instead of waiting.
+					skipped = this.#tryDurationSkip();
+				}
+
+				// Wake next() for the current delivery head so its frames surface as they
+				// arrive. Gating only on `=== #active` assumed +1 group numbering: with
+				// non-sequential group ids (large jumps between groups) #active lags one group
+				// behind as a stale `+1` phantom, so the real head never matched and its whole
+				// group was held until completion, then flushed in a burst. The earliest
+				// buffered group is the delivery head regardless of id scheme; next()'s
+				// promotion guard advances #active to it. Works for sequential and
+				// non-sequential ids alike.
+				if (skipped || group.consumer.sequence === this.#active || group === this.#groups[0]) {
+					this.#notify?.();
+					this.#notify = undefined;
 				}
 			}
 		} catch (err) {
