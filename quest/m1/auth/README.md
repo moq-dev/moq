@@ -95,9 +95,9 @@ Decisions settled while planning, recorded so review does not relitigate them:
   grant type stays pattern-valued.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
   broadcast outside the union aborts the session with `Unauthorized`, naming
-  the path. The check runs against the grants in hand once the tokens the
-  library itself presented at setup are answered; a token the app adds later
-  is the app's to await before publishing what it unlocks. The origin is
+  the path. The check runs against the grants in hand once every token the
+  session presented is answered, setup, replayed, or app-added alike
+  ([request race](/quest/m1/auth/request-race.md)). The origin is
   untouched, so a broadcast shared across sessions (P2P hops, a cluster) is
   refused only where it is refused. Grant shrinkage cancels previously
   authorized work on this session without aborting it or deleting the shared
