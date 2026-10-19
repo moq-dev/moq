@@ -2,15 +2,13 @@
 
 ## Goal
 
-A client's credentials can travel inside the session instead of the URL, and
-several of them can ride one connection. Every client in this repository
-takes tokens as configuration separate from the address, presents each on its
-own AUTH stream at setup, and the relay admits the session on what the URL
-carried and widens it as the streams are answered. Peers without the AUTH
-stream keep working unchanged: the client puts the first token in the URL whenever any
-version it offers has no AUTH stream, so nothing is refused and nothing goes
-silent, and the token leaves the URL for good only once the offered set is
-AUTH-capable.
+Several credentials can ride one connection. Every client in this repository
+takes tokens as configuration separate from the address, puts the first in
+its SETUP (the URL query when the negotiated version has no SETUP token),
+presents each other one on its own AUTH stream at setup, and the relay admits
+the session on that first token and widens it as the streams are answered. Peers without the AUTH stream keep
+working unchanged, so nothing is refused and nothing goes silent, and a
+session's first requests wait on no AUTH.
 
 ## Plan
 
@@ -38,46 +36,57 @@ already carries the full pattern grant.
   its own AUTH stream so the accepted grant union remains live. Keep `?jwt=`
   as the fallback for peers without AUTH. Choose the public credential-source
   API while implementing this quest.
-- Presenting: WebTransport negotiates the moq version as a subprotocol of
-  the CONNECT request that carries the URL, so the client cannot wait to
-  learn whether the peer speaks AUTH. The client copies the first configured
-  token into the URL query whenever any offered version lacks AUTH (every
-  published lite version, since AUTH lands in the wip one), and omits it once every offered version has the
-  stream. A token that went into the URL or the setup option is the
-  connection credential, and the empty-token stream is its one and only
-  stream; every other configured token gets its own AUTH stream on an
-  AUTH-capable session, so no token is ever granted twice. On moq-transport
-  the first token also rides the AUTHORIZATION TOKEN setup option
-  (`ietf::token::into_setup`, `USE_VALUE`, token type 0), which
-  scopes at accept the way the URL does. While the URL also carries it, the
-  auth server sees the same credential twice: `moq auth serve` admits a SETUP
+- Presenting: ✅ Decided 2026-10-19 (maintainer,
+  [#5972](https://github.com/moq-dev/moq/pull/5972)): the first configured
+  token rides SETUP. lite-07-wip gains a SETUP token parameter, filling
+  `server::Handshake::token` the way moq-transport's AUTHORIZATION TOKEN
+  setup option (`ietf::token::into_setup`, `USE_VALUE`, token type 0) already
+  does, so the relay hands it to the auth server at accept. It costs no round
+  trip: the acceptor already reads the client's SETUP before serving, and a
+  lite client sends requests without waiting on the server's SETUP. The
+  version is negotiated (ALPN or the WebTransport subprotocol) before SETUP
+  is written, but the URL is fixed before negotiation, so the client also
+  copies the first token into the URL query while any offered version lacks
+  a SETUP token (every lite version before 07). On raw QUIC and Qmux the
+  query already rides SETUP's `Path`. A dial URL that already carries a
+  credential (a cluster's per-peer `?jwt=`) keeps it as the connection
+  credential instead, and then every configured token gets its own AUTH
+  stream: the client never appends a second `jwt` or sends a different SETUP
+  token. A token that went into the URL or SETUP is the connection
+  credential, and the empty-token stream is its one and only stream; every
+  other configured token gets its own AUTH stream on an AUTH-capable session,
+  so no token is ever granted twice. While the URL also carries it, the auth
+  server sees the same credential twice: `moq auth serve` admits a SETUP
   token equal to the `?jwt=` value and refuses two different ones
-  (`serve::Refusal::TwoTokens`). Never send different values in the two places.
-- The relay admits on the URL, then widens. An anonymous connection today is
-  admitted with the public grant when one is configured and refused
-  otherwise; with this quest a connection with no URL credential and no
-  public grant is held for a short deadline after SETUP for its first
-  accepted AUTH before being refused, so an AUTH-capable client with tokens
-  only in band gets in and a client that never presents anything is still
-  refused. The URL query stays the connect-time credential in the `moq_auth::Request`.
+  (`serve::Refusal::TwoTokens`). Never send different values in the two
+  places. A token in SETUP is bounded by SETUP's Message Length cap and
+  reaches the auth server exactly as a URL token does, so an unauthenticated
+  client gains nothing it could not already send in the URL. Dropped: the
+  earlier "always in the CONNECT request" rule and its auth-header plan.
+- The relay admits on the URL, then widens. An anonymous connection is
+  admitted with the public grant when one is configured and refused at
+  connect otherwise, as today: a client with tokens always carries one in
+  SETUP or the URL, so the relay needs no admission deadline. The URL query
+  and the SETUP token stay the connect-time credentials in the
+  `moq_auth::Request`.
 - A URL credential is still refused at connect when both arms reject it, and
   an in-band refusal is an AUTH_ERROR after connect.
-- Docs: `doc/bin/cli.md`, `doc/bin/relay/auth.md` (the admission deadline and
-  that the URL token is one member of the union), `doc/lib/*` client
+- Docs: `doc/bin/cli.md`, `doc/bin/relay/auth.md` (that the URL token is one
+  member of the union), `doc/lib/*` client
   configuration, and the example invocations carrying `?jwt=` in `doc/`,
   `demo/`, and the READMEs, keeping the URL form documented as the way to
   reach an older relay.
-- Tests: a client with a configured token against an AUTH-capable relay is
-  scoped exactly as the URL variant and the URL carries the token only while
-  an old version is offered; the same client against a lite-05 relay still
+- Spec the SETUP token parameter in `drafts/draft-lcurley-moq-lite.md`'s
+  lite-07-wip SETUP, and update `js/net` beside Rust.
+- Tests: a client with a configured token offering only lite-07 against an
+  AUTH-capable relay is scoped exactly as the URL variant, with the token in
+  SETUP and none in the URL; the same client against a lite-05 relay still
   authenticates through the URL; a moq-transport client offering a draft
   without AUTH, carrying the token in both the URL and the setup option, is
-  admitted by `moq auth serve`; two configured tokens union; a client with
-  in-band tokens only and no public grant is admitted, and one that presents
-  nothing is refused at the deadline; the cross-language harness runs with
-  tokens configured.
+  admitted by `moq auth serve`; two configured tokens union; the
+  cross-language harness runs with tokens configured.
 
-Additive.
+Additive. Wire: a lite-07-wip SETUP parameter.
 
 ## Required
 

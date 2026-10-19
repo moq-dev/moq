@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Grant` reads the ambient clock
+
+`Grant::deadline` returns a `moq_clock::Instant` instead of a `tokio::time::Instant`, and no longer needs the `tokio` feature.
+Wait on it with `moq_clock::sleep_until`, which runs on tokio's clock in production.
+`deadline` and `validate` read wall time from `moq_clock::wall()`, so a test on `moq_clock::sim` or a `moq_clock::Manual` clock decides when a grant expires; stamp `expires` from that clock too.
+
 ### Roles carry `Access` (#5697)
 
 `publish` and `subscribe` on `Claims`, `Permissions`, and `Grant` are `Access`, which holds the path patterns and an optional per-connection `Rate` cap.
