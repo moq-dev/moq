@@ -12,6 +12,7 @@ That covers every quinn security advisory published through 2026-09-30.
 Cherry-picked since the fork point:
 
 - [`48854d48`](https://github.com/quinn-rs/quinn/commit/48854d48635875d259a95973cc0575db8c1792a4): accept non-minimally encoded integer transport parameters, as RFC 9000 section 16 allows.
+- [`38b9f52f`](https://github.com/quinn-rs/quinn/commit/38b9f52fd7b545cc2d3fa81bc2fbaed072fae0f4): drop already-read duplicates when a stream switches from ordered to unordered reads.
 
 The fork never merges upstream.
 Upstream fixes are cherry-picked by hand, and the crate keeps quinn's formatting (rustfmt defaults) so the patches apply cleanly.
@@ -42,10 +43,11 @@ quinn itself, the async layer from the same commit, is the `quic::driver` module
 
 ```sh
 git -C ../quinn format-patch -1 --stdout <sha> -- quinn/src \
-  | sed -E 's#([ab])/quinn/src/lib\.rs#\1/rs/moq-tokio/src/quic/driver/mod.rs#g; s#([ab])/quinn/src/#\1/rs/moq-tokio/src/quic/driver/#g; s/\bcrate::/crate::quic::driver::/g; s/\bproto::/moq_quic::/g; s/\budp::/moq_sock::udp::/g' \
+  | perl -pe 's#([ab])/quinn/src/lib\.rs#$1/rs/moq-tokio/src/quic/driver/mod.rs#g; s#([ab])/quinn/src/#$1/rs/moq-tokio/src/quic/driver/#g; s/\bcrate::/crate::quic::driver::/g; s/\bproto::/moq_quic::/g; s/\budp::/moq_sock::udp::/g' \
   | git am -3
 ```
 
+It runs `perl` because BSD sed, as on macOS, has no `\b` and would silently leave the paths unrewritten.
 The driver is tokio-only: the `Runtime` trait, smol, the `futures-io` impls, and the lock-tracking mutex are dropped, so hunks touching them are skipped.
 moq-tokio's `quic::web` module is `web-transport-moq` from moq-dev/noq at [`e27c0ce0`](https://github.com/moq-dev/noq/commit/e27c0ce00741d81c8620b98e345d4f2c88e0768c), which has no upstream left to track.
 
