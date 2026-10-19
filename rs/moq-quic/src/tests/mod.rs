@@ -3440,6 +3440,48 @@ fn datagram_recv_buffer_overflow() {
     assert_matches!(pair.server_datagrams(server_ch).recv(), None);
 }
 
+/// A datagram of the advertised maximum size is a valid frame, so its queue metadata
+/// overflowing the receive buffer drops it rather than closing the connection.
+#[test]
+fn datagram_of_max_size_keeps_connection() {
+    let _guard = subscribe();
+    const WINDOW: usize = 1000;
+    let server = ServerConfig {
+        transport: Arc::new(TransportConfig {
+            datagram_receive_buffer_size: Some(WINDOW),
+            ..TransportConfig::default()
+        }),
+        ..server_config()
+    };
+    let mut pair = Pair::new(Default::default(), server);
+    let (client_ch, server_ch) = pair.connect();
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+    let max_size = pair
+        .client_conn_mut(client_ch)
+        .datagrams()
+        .max_size()
+        .unwrap();
+    assert_eq!(max_size, WINDOW - Datagram::SIZE_BOUND);
+
+    pair.client_datagrams(client_ch)
+        .send(vec![0xAB; max_size].into(), Default::default())
+        .unwrap();
+    pair.drive();
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+    assert!(!pair.server_conn_mut(server_ch).is_closed());
+
+    const DATA: &[u8] = &[0xCD; 100];
+    pair.client_datagrams(client_ch)
+        .send(DATA.into(), Default::default())
+        .unwrap();
+    pair.drive();
+    assert_matches!(
+        pair.server_conn_mut(server_ch).poll(),
+        Some(Event::DatagramReceived)
+    );
+    assert_eq!(pair.server_datagrams(server_ch).recv().unwrap(), DATA);
+}
+
 #[test]
 fn datagram_larger_than_send_buffer_is_too_large() {
     let _guard = subscribe();
