@@ -4,10 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Lite-07 accounts for groups with SUBSCRIBE_DROP
+### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
 
 `lite::SubscribeEnd` now contains only `group`; remove `streams` from struct literals and stop calling `Version::has_stream_count()`.
-The unpublished `moq-lite-07-wip` wire restores SUBSCRIBE_DROP and removes Stream Count from SUBSCRIBE_END. Update both ends together; published lite versions keep their framing.
+The unpublished `moq-lite-07-wip` wire restores `SUBSCRIBE_DROP` and removes Stream Count from `SUBSCRIBE_END`. Update both ends together; published lite versions keep their framing.
 
 ### An expired group fails with `Old` even when drained (#5944)
 
