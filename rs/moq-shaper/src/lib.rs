@@ -274,13 +274,23 @@ fn unapplied(phases: &[(Profile, u64)], stats: &Stats) -> Vec<&'static str> {
 
 /// `profile` as the run opens and as each of `steps` leaves it, paired with the
 /// datagrams `counts` says that phase treated.
-fn phased(profile: &Profile, steps: &[Step], counts: &BTreeMap<usize, u64>) -> Vec<(Profile, u64)> {
-	let count = |phase: usize| counts.get(&phase).copied().unwrap_or(0);
+///
+/// The datagrams an ingress burst kept from loss pair with a lossless copy of
+/// their phase, since they were no chance for loss to act.
+fn phased(profile: &Profile, steps: &[Step], counts: &BTreeMap<usize, Treated>) -> Vec<(Profile, u64)> {
 	let mut profile = profile.clone();
-	let mut phases = vec![(profile.clone(), count(0))];
-	for (index, step) in steps.iter().enumerate() {
-		step.apply(&mut profile);
-		phases.push((profile.clone(), count(index + 1)));
+	let mut phases = Vec::new();
+	for index in 0..=steps.len() {
+		if index > 0 {
+			steps[index - 1].apply(&mut profile);
+		}
+		let treated = counts.get(&index).copied().unwrap_or_default();
+		let lossless = Profile {
+			loss: 0.0,
+			..profile.clone()
+		};
+		phases.push((profile.clone(), treated.exposed));
+		phases.push((lossless, treated.exempt));
 	}
 	phases
 }
@@ -564,26 +574,12 @@ impl Shaper {
 		}
 
 		let counts = [UP, DOWN].map(|dir| self.tally[dir].phases.lock().unwrap().clone());
-		let exempt = [UP, DOWN].map(|dir| self.tally[dir].exempt.load(Ordering::Relaxed));
 		let phases: Vec<(Profile, u64)> = [
-			(&self.setup.config.up, &self.setup.up, &counts[UP], exempt[UP]),
-			(&self.setup.config.down, &self.setup.down, &counts[DOWN], exempt[DOWN]),
+			(&self.setup.config.up, &self.setup.up, &counts[UP]),
+			(&self.setup.config.down, &self.setup.down, &counts[DOWN]),
 		]
 		.into_iter()
-		.flat_map(|(profile, options, counts, exempt)| {
-			let mut phases = phased(profile, &options.steps, counts);
-			// An ingress burst needs a fixed profile, so the datagrams it kept from
-			// loss all fell in the only phase, and were no chance for loss to act.
-			if exempt > 0 {
-				phases[0].1 -= exempt;
-				let lossless = Profile {
-					loss: 0.0,
-					..phases[0].0.clone()
-				};
-				phases.push((lossless, exempt));
-			}
-			phases
-		})
+		.flat_map(|(profile, options, counts)| phased(profile, &options.steps, counts))
 		.collect();
 		let mut missing: Vec<String> = unapplied(&phases, &stats).into_iter().map(String::from).collect();
 		let batched = self
@@ -658,11 +654,18 @@ struct Tally {
 	delayed: AtomicU64,
 	reordered: AtomicU64,
 	/// Datagrams treated in each phase: 0 before the first step, n after the nth.
-	phases: Mutex<BTreeMap<usize, u64>>,
+	phases: Mutex<BTreeMap<usize, Treated>>,
 	/// Datagrams a batch held past when they would otherwise have left.
 	batched: AtomicU64,
-	/// Datagrams an ingress burst collected, which loss never drops.
-	exempt: AtomicU64,
+}
+
+/// The datagrams one phase treated.
+#[derive(Clone, Copy, Debug, Default)]
+struct Treated {
+	/// Those loss could drop.
+	exposed: u64,
+	/// Those an ingress burst collected, which loss never drops.
+	exempt: u64,
 }
 
 impl Tally {
@@ -1038,8 +1041,8 @@ impl Link {
 	}
 
 	/// Apply every step the run has reached by `now`, in order, and record the
-	/// phase a datagram arriving then sees.
-	fn step(&mut self, now: Instant, tally: &Tally) {
+	/// phase a datagram arriving then sees, and whether loss can drop it.
+	fn step(&mut self, now: Instant, tally: &Tally, exempt: bool) {
 		while let Some(step) = self.steps.get(self.stepped) {
 			// A step past what the clock can hold is one the run never reaches.
 			if self.start.checked_add(step.at).is_none_or(|at| at > now) {
@@ -1049,7 +1052,13 @@ impl Link {
 			self.stepped += 1;
 		}
 		// Applying a step is no evidence it acted, so count the datagrams each phase treated.
-		*tally.phases.lock().unwrap().entry(self.stepped).or_default() += 1;
+		let mut phases = tally.phases.lock().unwrap();
+		let treated = phases.entry(self.stepped).or_default();
+		if exempt {
+			treated.exempt += 1;
+		} else {
+			treated.exposed += 1;
+		}
 	}
 
 	/// Treat a datagram and queue it to leave by `socket` for `dest`.
@@ -1059,8 +1068,7 @@ impl Link {
 			// Draw as usual so later datagrams see the same seeded stream, but keep
 			// a lost one: the gate holds the acknowledgments a sender needs to replace
 			// it, so a gate waiting on surviving bytes could wait out the connection.
-			let draw = self.draw(now, tally);
-			bump(&tally.exempt);
+			let draw = self.draw(now, tally, true);
 			let packet = ingress::Held {
 				datagram,
 				socket: socket.clone(),
@@ -1108,7 +1116,7 @@ impl Link {
 	/// When a datagram of `size` bytes arriving `now` leaves, and whether it was
 	/// counted as delayed, or `None` when it is dropped.
 	fn treat(&mut self, now: Instant, size: usize, tally: &Tally) -> Option<(Instant, bool)> {
-		let draw = self.draw(now, tally);
+		let draw = self.draw(now, tally, false);
 		if draw.lose {
 			bump(&tally.lost);
 			return None;
@@ -1116,8 +1124,8 @@ impl Link {
 		self.schedule(now, size, draw, tally)
 	}
 
-	fn draw(&mut self, now: Instant, tally: &Tally) -> Draw {
-		self.step(now, tally);
+	fn draw(&mut self, now: Instant, tally: &Tally, exempt: bool) -> Draw {
+		self.step(now, tally, exempt);
 		bump(&tally.packets);
 
 		// Every draw happens for every datagram, whatever the profile, so one
@@ -1698,6 +1706,11 @@ mod tests {
 	#[test]
 	fn a_phase_is_charged_only_its_own_traffic() {
 		let ms = Duration::from_millis;
+		let exposed = |counts: [(usize, u64); 2]| {
+			counts
+				.map(|(phase, exposed)| (phase, Treated { exposed, exempt: 0 }))
+				.into()
+		};
 		let lossy = Profile {
 			loss: 0.02,
 			..Default::default()
@@ -1708,7 +1721,7 @@ mod tests {
 			..Default::default()
 		}];
 		// One datagram survived the 2% loss, then the loss stepped off for a thousand.
-		let phases = phased(&lossy, &steps, &BTreeMap::from([(0, 1), (1, 1000)]));
+		let phases = phased(&lossy, &steps, &exposed([(0, 1), (1, 1000)]));
 		let stats = Stats {
 			up: Counters {
 				packets: 1001,
@@ -1719,7 +1732,7 @@ mod tests {
 		assert!(unapplied(&phases, &stats).is_empty());
 
 		// The same thousand under the loss still fail.
-		let phases = phased(&lossy, &steps, &BTreeMap::from([(0, 1000), (1, 1)]));
+		let phases = phased(&lossy, &steps, &exposed([(0, 1000), (1, 1)]));
 		assert_eq!(unapplied(&phases, &stats), ["loss"]);
 	}
 
