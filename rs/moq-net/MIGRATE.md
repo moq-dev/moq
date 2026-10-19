@@ -4,6 +4,24 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Track demand reports the wanted group (#REFRESH\_PR)
+
+`track::Demand::used`, `unused`, `is_used`, `poll_used`, and `poll_unused` are gone.
+`wanted()` returns `None` while nobody consumes the track and `Some(n)` while consumers want group `n` or later; open a group whenever `n` passes your largest.
+`wanted_changed().await` (or `poll_wanted_changed`) returns it at once on the first call, then on each change, and errors once the track closes.
+A clone of a `Demand` watches on its own.
+
+```rust
+// Before
+demand.used().await?;
+demand.unused().await?;
+// After
+while demand.wanted_changed().await?.is_none() {}
+while demand.wanted_changed().await?.is_some() {}
+```
+
+`track::Info::refresh` opts a track in to new groups on join: set it with `Info::with_refresh(ratio)`.
+
 ### Track readers follow `largest()` instead of reading `latest()` (#5725)
 
 `latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.

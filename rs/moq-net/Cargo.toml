@@ -166,11 +166,9 @@ name = "request-ids"
 harness = false
 required-features = ["fuzz"]
 
-# Uses the hidden fuzz module to reach the crate-private NEW_GROUP_REQUEST.
 [[bench]]
-name = "new-group"
+name = "refresh"
 harness = false
-required-features = ["fuzz"]
 
 # Uses the hidden fuzz module to observe source selection without public API.
 [[bench]]

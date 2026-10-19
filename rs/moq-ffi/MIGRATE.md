@@ -5,6 +5,14 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Track demand reports the wanted group (#REFRESH\_PR)
+
+`MoqTrackDemand::is_used`, `used`, and `unused` are gone.
+`wanted()` returns null while nobody subscribes, otherwise the group subscribers want next, and `wanted_changed()` waits for it to change (the first call returns at once).
+Loop on `wanted_changed()` until it returns non-null where you awaited `used()`, and null where you awaited `unused()`.
+`MoqTrackInfo` gains `refresh`, the ratio past which a joining subscriber asks for a new group.
+`MoqGroupDemand` is unchanged.
+
 ### Subscriptions carry group ranges (#5732)
 
 `MoqSubscription::group_start` and `group_end` are replaced by `ranges`, a list of `MoqRange { start, end }` whose ends are `MoqAnchor::Absolute { group, frame }` or `MoqAnchor::Relative { groups }`, and an optional `order`.

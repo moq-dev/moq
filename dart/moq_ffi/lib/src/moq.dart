@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -2636,10 +2638,12 @@ class FfiConverterMoqRoute {
 class MoqTrackInfo {
   final int priority;
   final int? maxAgeUs;
+  final int? refresh;
   final int? timescale;
   MoqTrackInfo({
     this.priority = 127,
     this.maxAgeUs = null,
+    this.refresh = null,
     this.timescale = null,
   });
 }
@@ -2661,6 +2665,11 @@ class FfiConverterMoqTrackInfo {
     );
     final maxAgeUs = maxAgeUs_lifted.value;
     new_offset += maxAgeUs_lifted.bytesRead;
+    final refresh_lifted = FfiConverterOptionalUInt32.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final refresh = refresh_lifted.value;
+    new_offset += refresh_lifted.bytesRead;
     final timescale_lifted = FfiConverterOptionalUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -2670,6 +2679,7 @@ class FfiConverterMoqTrackInfo {
       MoqTrackInfo(
         priority: priority,
         maxAgeUs: maxAgeUs,
+        refresh: refresh,
         timescale: timescale,
       ),
       new_offset - buf.offsetInBytes,
@@ -2680,6 +2690,7 @@ class FfiConverterMoqTrackInfo {
     final total_length =
         FfiConverterUInt8.allocationSize(value.priority) +
         FfiConverterOptionalUInt64.allocationSize(value.maxAgeUs) +
+        FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
         0;
     final buf = Uint8List(total_length);
@@ -2697,6 +2708,10 @@ class FfiConverterMoqTrackInfo {
       value.maxAgeUs,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalUInt32.write(
+      value.refresh,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     new_offset += FfiConverterOptionalUInt64.write(
       value.timescale,
       Uint8List.view(buf.buffer, new_offset),
@@ -2707,6 +2722,7 @@ class FfiConverterMoqTrackInfo {
   static int allocationSize(MoqTrackInfo value) {
     return FfiConverterUInt8.allocationSize(value.priority) +
         FfiConverterOptionalUInt64.allocationSize(value.maxAgeUs) +
+        FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
         0;
   }
@@ -8463,10 +8479,9 @@ class FfiConverterMoqGroupDemand {
 }
 
 abstract class MoqTrackDemandInterface {
-  bool isUsed();
   String name();
-  Future<void> unused();
-  Future<void> used();
+  int? wanted();
+  Future<int?> wantedChanged();
 }
 
 final _MoqTrackDemandFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -8500,17 +8515,6 @@ class MoqTrackDemand implements MoqTrackDemandInterface {
     rustCall((status) => uniffi_moq_ffi_fn_free_moqtrackdemand(_ptr, status));
   }
 
-  bool isUsed() {
-    return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqtrackdemand_is_used(
-        uniffiClonePointer(),
-        status,
-      ),
-      FfiConverterBool.lift,
-      null,
-    );
-  }
-
   String name() {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqtrackdemand_name(
@@ -8522,25 +8526,26 @@ class MoqTrackDemand implements MoqTrackDemandInterface {
     );
   }
 
-  Future<void> unused() {
-    return uniffiRustCallAsync(
-      () =>
-          uniffi_moq_ffi_fn_method_moqtrackdemand_unused(uniffiClonePointer()),
-      ffi_moq_ffi_rust_future_poll_void,
-      ffi_moq_ffi_rust_future_complete_void,
-      ffi_moq_ffi_rust_future_free_void,
-      (_) {},
-      moqExceptionErrorHandler,
+  int? wanted() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqtrackdemand_wanted(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterOptionalUInt64.lift,
+      null,
     );
   }
 
-  Future<void> used() {
+  Future<int?> wantedChanged() {
     return uniffiRustCallAsync(
-      () => uniffi_moq_ffi_fn_method_moqtrackdemand_used(uniffiClonePointer()),
-      ffi_moq_ffi_rust_future_poll_void,
-      ffi_moq_ffi_rust_future_complete_void,
-      ffi_moq_ffi_rust_future_free_void,
-      (_) {},
+      () => uniffi_moq_ffi_fn_method_moqtrackdemand_wanted_changed(
+        uniffiClonePointer(),
+      ),
+      ffi_moq_ffi_rust_future_poll_rust_buffer,
+      ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_free_rust_buffer,
+      FfiConverterOptionalUInt64.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -15540,14 +15545,6 @@ external void uniffi_moq_ffi_fn_free_moqtrackdemand(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Int8 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
-  assetId: _uniffiAssetId,
-)
-external int uniffi_moq_ffi_fn_method_moqtrackdemand_is_used(
-  Pointer<Void> ptr,
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -15556,13 +15553,16 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqtrackdemand_name(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
-external Pointer<Void> uniffi_moq_ffi_fn_method_moqtrackdemand_unused(
+@Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external RustBuffer uniffi_moq_ffi_fn_method_moqtrackdemand_wanted(
   Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
 );
 
 @Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
-external Pointer<Void> uniffi_moq_ffi_fn_method_moqtrackdemand_used(
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqtrackdemand_wanted_changed(
   Pointer<Void> ptr,
 );
 
@@ -17990,16 +17990,13 @@ external int uniffi_moq_ffi_checksum_method_moqgroupdemand_unused();
 external int uniffi_moq_ffi_checksum_method_moqgroupdemand_used();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqtrackdemand_is_used();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqtrackdemand_name();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqtrackdemand_unused();
+external int uniffi_moq_ffi_checksum_method_moqtrackdemand_wanted();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqtrackdemand_used();
+external int uniffi_moq_ffi_checksum_method_moqtrackdemand_wanted_changed();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqflatesnapshotproducer_finish();
@@ -18652,16 +18649,13 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqgroupdemand_used() != 16710) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackdemand_is_used() != 62559) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
   if (uniffi_moq_ffi_checksum_method_moqtrackdemand_name() != 14603) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackdemand_unused() != 32953) {
+  if (uniffi_moq_ffi_checksum_method_moqtrackdemand_wanted() != 13310) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackdemand_used() != 18944) {
+  if (uniffi_moq_ffi_checksum_method_moqtrackdemand_wanted_changed() != 29509) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqflatesnapshotproducer_finish() !=

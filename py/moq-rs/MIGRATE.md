@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Track demand reports the wanted group (#REFRESH\_PR)
+
+`TrackDemand.is_used()`, `used()`, and `unused()` are gone.
+`wanted()` returns `None` while nobody subscribes, otherwise the group subscribers want next, and `await wanted_changed()` waits for it to change (the first call returns at once).
+Loop on `wanted_changed()` until it returns non-`None` where you awaited `used()`, and `None` where you awaited `unused()`.
+`TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.group_start` and `group_end` are replaced by `ranges`, a list of `Range` whose ends are an `Anchor` (an absolute group and frame, or a count of groups before the latest), and an optional `order`.

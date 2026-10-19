@@ -94,6 +94,14 @@ export interface Info {
 	maxAge?: Milli;
 	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`, higher first). Defaults to `127`. */
 	priority: number;
+	/**
+	 * How many times its first frame a group's later bytes may grow before a joining
+	 * subscriber asks for a new group, or omitted to never ask. A join against a newest group
+	 * whose bytes after its first frame exceed this many times the first frame moves
+	 * {@link Demand.wanted} past it, so a late joiner never downloads much more than a
+	 * snapshot or keyframe. `0` asks on any join after a delta. An integer in `0..2^32`.
+	 */
+	refresh?: number;
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -126,7 +134,15 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 		timescale: info.timescale == null ? undefined : Timescale(info.timescale),
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
 		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
+		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
 	};
+}
+
+function refreshRatio(value: number): number {
+	if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+		throw new RangeError(`refresh must be an integer in 0..2^32: ${value}`);
+	}
+	return value;
 }
 
 /** An explicitly included or excluded group sequence. */
@@ -542,8 +558,13 @@ let ordered_: {
 	recvDatagram(subscriber: Subscriber): Promise<Datagram | undefined>;
 };
 
+// Whether a subscription joins at the live edge rather than resuming from a fixed group.
+function joinsLive(subscription: Subscription | undefined): boolean {
+	return subscription?.groups?.start === undefined && subscription?.groups?.end === undefined;
+}
+
 // Constructs a Demand from within this module; assigned in the class's static block.
-let makeDemand: (name: string, used: Getter<boolean>, state: TrackState) => Demand;
+let makeDemand: (name: string, wanted: Getter<number | undefined>, state: TrackState) => Demand;
 
 /**
  * A watch-only view of a track's subscriber demand, from {@link Producer.demand} or {@link Request.demand}. Mirrors the
@@ -557,29 +578,28 @@ export class Demand {
 	/** The track name. */
 	readonly name: string;
 
-	#used: Getter<boolean>;
+	#wanted: Getter<number | undefined>;
 	#state: TrackState;
 
-	private constructor(name: string, used: Getter<boolean>, state: TrackState) {
+	private constructor(name: string, wanted: Getter<number | undefined>, state: TrackState) {
 		this.name = name;
-		this.#used = used;
+		this.#wanted = wanted;
 		this.#state = state;
 	}
 
 	static {
-		makeDemand = (name, used, state) => new Demand(name, used, state);
+		makeDemand = (name, wanted, state) => new Demand(name, wanted, state);
 	}
 
-	/** Whether the track currently has any subscribers. Watch it (`effect.get` / `.peek()`) to follow demand. */
-	get used(): Getter<boolean> {
-		return this.#used;
-	}
-
-	/** Resolves once the track has no subscribers (or has closed). Await it to react to demand ending. */
-	async unused(): Promise<void> {
-		while (this.#used.peek() && this.#state.closed.peek() === undefined) {
-			await Signal.race(this.#used, this.#state.closed);
-		}
+	/**
+	 * The group subscribers want: `undefined` while nobody subscribes, otherwise the sequence
+	 * the next group should have at least. A publisher opens a group whenever it passes its
+	 * largest. The first subscriber of a track with no group wants `0`, and a join judged by
+	 * {@link Info.refresh} wants the group after the newest. It never goes back. Watch it
+	 * (`effect.get` / `.peek()`) to follow demand.
+	 */
+	get wanted(): Getter<number | undefined> {
+		return this.#wanted;
 	}
 
 	/** Settles once the track closes: `null` on a clean close, or the abort {@link Error}. */
@@ -656,8 +676,10 @@ export class Producer {
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
 
-	// Whether any subscriber is currently attached, watched through {@link demand}.
-	#used = new Signal<boolean>(false);
+	// The group subscribers want while any is attached, watched through {@link demand}.
+	#wanted = new Signal<number | undefined>(undefined);
+	// The lowest group they want; raised by a join over the refresh ratio, never lowered.
+	#floor = 0;
 	#demand: Demand;
 	#largestSeen?: Location;
 	// The largest group's content may still grow: it has not closed cleanly, and it is not a
@@ -666,7 +688,7 @@ export class Producer {
 
 	constructor(name: string) {
 		this.name = name;
-		this.#demand = makeDemand(name, this.#used, this.#state);
+		this.#demand = makeDemand(name, this.#wanted, this.#state);
 	}
 
 	static {
@@ -687,6 +709,8 @@ export class Producer {
 			}
 			if (own.bound && (!previous || previous.sequence < own.bound.sequence)) sequence.bound = own.bound;
 			producer.#sequence = sequence;
+			// A replacement's subscribers want the group past what earlier producers wrote.
+			if (sequence.next > producer.#received) producer.#want(sequence.next);
 			if (producer.#state.closed.peek() !== undefined) return;
 			own.holders--;
 			sequence.holders++;
@@ -796,6 +820,23 @@ export class Producer {
 		return this.#demand;
 	}
 
+	// A subscriber joined at the live edge: ask for a new group when the newest one's bytes
+	// after its first frame exceed the refresh ratio times the first frame.
+	#join(): void {
+		const ratio = this.#state.info.peek()?.refresh;
+		const latest = this.#state.latest;
+		if (ratio === undefined || latest === undefined) return;
+		const group = this.#cached.get(latest)?.group;
+		if (group && hooks.overRefresh(group, ratio)) this.#want(latest + 1);
+	}
+
+	// Raise the wanted floor, reporting it while anyone subscribes.
+	#want(group: number): void {
+		if (group <= this.#floor) return;
+		this.#floor = group;
+		if (this.#sinks.size > 0) this.#wanted.set(group);
+	}
+
 	// Register a downstream sink: seed its info, replay the retained window, and (while
 	// the track is open) mirror future groups into it. A late subscriber to a closed
 	// track still drains the buffered groups before seeing the end.
@@ -808,8 +849,9 @@ export class Producer {
 
 		const closed = this.#state.closed.peek();
 		if (closed === undefined) {
+			if (joinsLive(sink.update.peek())) this.#join();
 			this.#sinks.add(sink);
-			this.#used.set(true);
+			this.#wanted.set(this.#floor);
 
 			// Forward subscription updates from the sink's Subscriber to the producer's own
 			// state, which the wire layer (or the serving application) watches.
@@ -827,8 +869,8 @@ export class Producer {
 				this.#sinks.delete(sink);
 				this.#updateSubscription();
 				// Update demand: once the last subscriber leaves, the consumer wire (watching
-				// {@link Demand.unused}) tears the upstream down instead of downloading to nobody.
-				this.#used.set(this.#sinks.size > 0);
+				// {@link Demand.wanted}) tears the upstream down instead of downloading to nobody.
+				this.#wanted.set(this.#sinks.size > 0 ? this.#floor : undefined);
 				// A closed track leaves a sink's buffered mirrors readable; they age out
 				// with the cache, so a stale consumer can't pin them.
 				if (this.#state.closed.peek() !== undefined) {

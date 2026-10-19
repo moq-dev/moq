@@ -478,7 +478,7 @@ async fn serve_track<T: ObjectStore>(shared: Arc<Shared<T>>, request: track::Req
 
 	let timescale = info.timescale;
 	let dynamic = request.dynamic();
-	let demand = dynamic.demand();
+	let mut demand = dynamic.demand();
 	let _producer = request.accept(info);
 	let mut groups = kio::Tasks::new();
 
@@ -493,9 +493,14 @@ async fn serve_track<T: ObjectStore>(shared: Arc<Shared<T>>, request: track::Req
 				Poll::Pending => break,
 			}
 		}
-		match groups.poll(waiter).is_ready() && demand.poll_unused(waiter).is_ready() {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
+		if groups.poll(waiter).is_pending() {
+			return Poll::Pending;
+		}
+		// Drain the changes so the waiter stays registered, then read where demand settled.
+		while let Poll::Ready(Ok(Some(_))) = demand.poll_wanted_changed(waiter) {}
+		match demand.wanted() {
+			None => Poll::Ready(()),
+			Some(_) => Poll::Pending,
 		}
 	})
 	.await

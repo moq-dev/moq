@@ -2230,7 +2230,8 @@ mod tests {
 			let source = moq_net::broadcast::Info::new().produce();
 			let mut track = source.create_track("video", info.clone()).unwrap();
 			route.requested_broadcast().await.unwrap().accept(&source);
-			track.demand().used().await.unwrap();
+			let mut demand = track.demand();
+			while demand.wanted_changed().await.unwrap().is_none() {}
 			if sequence == 1 {
 				assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
 			}

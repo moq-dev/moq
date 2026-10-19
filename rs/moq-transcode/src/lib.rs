@@ -1248,7 +1248,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_idle_rung_leaves_its_source_unused() {
 		let source = source_catalog(320, 240);
-		let demand = source._track.demand();
+		let mut demand = source._track.demand();
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -1273,21 +1273,29 @@ mod tests {
 			snapshot.video.renditions.contains_key("video/120p")
 		})
 		.await;
-		assert!(!demand.is_used(), "the published ladder holds its source");
+		assert_eq!(demand.wanted(), None, "the published ladder holds its source");
 
 		// A held query is demand, so the rung starts encoding and subscribes to the
 		// source.
 		let rung = consumer.track("video/120p").unwrap();
 		let mut query = rung.query();
 		(&mut query).await.unwrap();
-		tokio::time::timeout(std::time::Duration::from_secs(5), demand.used())
+		let wanted = async {
+			while demand.wanted_changed().await?.is_none() {}
+			moq_net::Result::Ok(())
+		};
+		tokio::time::timeout(std::time::Duration::from_secs(5), wanted)
 			.await
 			.expect("the rung never asked for its source")
 			.unwrap();
 
 		// Its task outlives the viewer, idle until the next one.
 		drop(query);
-		tokio::time::timeout(std::time::Duration::from_secs(5), demand.unused())
+		let unwanted = async {
+			while demand.wanted_changed().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
+		tokio::time::timeout(std::time::Duration::from_secs(5), unwanted)
 			.await
 			.expect("the idle rung kept its source wanted")
 			.unwrap();

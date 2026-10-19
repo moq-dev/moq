@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Track demand reports the wanted group (#REFRESH\_PR)
+
+`Track.Demand.used` and `unused()` are gone.
+`demand.wanted` is a `Getter<number | undefined>`: `undefined` while nobody subscribes, otherwise the group subscribers want next.
+Watch it where you watched `used`, comparing against `undefined`, and wait for it to become `undefined` where you awaited `unused()`.
+`Track.Info.refresh` opts a track in to new groups on join.
+Broadcast and group demand keep `used` and `unused()`.
+
 ### Track readers follow `largest()` instead of reading `latest()` (#5725)
 
 `latest()` on `Track.Subscriber` and `Track.Ordered` is gone, and `Subscriber.largest()` is no longer a synchronous buffered snapshot.

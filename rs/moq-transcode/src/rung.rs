@@ -163,6 +163,12 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 	result
 }
 
+/// Wait until some subscriber wants the track, or none does.
+async fn until_wanted(demand: &mut moq_net::track::Demand, wanted: bool) -> moq_net::Result<()> {
+	while demand.wanted_changed().await?.is_some() != wanted {}
+	Ok(())
+}
+
 /// The live path: wait for demand, attach to the shared decode [`Feed`], and
 /// resize + encode its frames group for group until demand goes away. The
 /// heavy lifting (subscription, decode) is shared with every other active rung
@@ -171,7 +177,7 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 /// Reports whether the track is still open rather than finishing it: [`serve`]
 /// owns that, once the fetches in flight can no longer add a group.
 async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<Ended, Error> {
-	let demand = producer.demand();
+	let mut demand = producer.demand();
 	let mut retire = rung.retire.clone();
 	// Set once the ladder retires this rung. The track is finished at the next
 	// group boundary rather than mid-group, so the last thing a subscriber gets
@@ -184,7 +190,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 		}
 
 		tokio::select! {
-			used = demand.used() => if used.is_err() {
+			wanted = until_wanted(&mut demand, true) => if wanted.is_err() {
 				// The output track closed; nothing more to serve.
 				return Ok(Ended::Closed);
 			},
@@ -219,7 +225,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 		'session: loop {
 			let item = tokio::select! {
 				item = listener.recv() => item,
-				_ = demand.unused() => {
+				_ = until_wanted(&mut demand, false) => {
 					if let Some(output) = current.take() {
 						// Signal downstream that the group is incomplete.
 						output.abort(moq_net::Error::Cancel)?;

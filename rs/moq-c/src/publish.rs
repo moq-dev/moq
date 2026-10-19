@@ -500,53 +500,39 @@ impl Publish {
 
 	pub(crate) async fn run_demand(
 		callback: OnStatus,
-		demand: moq_net::track::Demand,
+		mut demand: moq_net::track::Demand,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// Neither handle exposes the current state, only the level-triggered waits, and exactly
-		// one of them is ready at any instant: racing them is the read. Close is ignored until
-		// that seed is delivered, so a watcher closed before its first poll still reports USED
-		// or UNUSED before the terminal. An application dropping its producer ends the watcher; it
-		// does not keep the track alive and reports the close as clean.
-		let mut used = tokio::select! {
-			res = demand.used() => match res {
-				Ok(()) => true,
-				Err(moq_net::Error::Dropped) => return Ok(()),
-				Err(err) => return Err(err.into()),
-			},
-			res = demand.unused() => match res {
-				Ok(()) => false,
-				Err(moq_net::Error::Dropped) => return Ok(()),
-				Err(err) => return Err(err.into()),
-			},
-		};
-
+		// The first change is the current state. Close is ignored until it is delivered, so a
+		// watcher closed before its first poll still reports USED or UNUSED before the terminal.
+		// An application dropping its producer ends the watcher; it does not keep the track
+		// alive and reports the close as clean.
+		let mut used = None;
 		loop {
-			let state = if used {
+			let next = match used {
+				None => demand.wanted_changed().await,
+				Some(_) => tokio::select! {
+					biased;
+					_ = &mut close => return Ok(()),
+					res = demand.wanted_changed() => res,
+				},
+			};
+			let next = match next {
+				Ok(wanted) => wanted.is_some(),
+				Err(moq_net::Error::Dropped) => return Ok(()),
+				Err(err) => return Err(err.into()),
+			};
+			// A join that only moves the wanted group is no edge here.
+			if used == Some(next) {
+				continue;
+			}
+			used = Some(next);
+			let state = if next {
 				moq_demand::MOQ_DEMAND_USED
 			} else {
 				moq_demand::MOQ_DEMAND_UNUSED
 			};
 			callback.call(state as i32);
-
-			// A flip between the report and this wait resolves it immediately, so no edge is
-			// lost; a double flip collapses into nothing, which is what a level signal means.
-			let flipped = async {
-				if used {
-					demand.unused().await
-				} else {
-					demand.used().await
-				}
-			};
-			tokio::select! {
-				biased;
-				_ = &mut close => return Ok(()),
-				res = flipped => match res {
-					Ok(()) => used = !used,
-					Err(moq_net::Error::Dropped) => return Ok(()),
-					Err(err) => return Err(err.into()),
-				},
-			}
 		}
 	}
 

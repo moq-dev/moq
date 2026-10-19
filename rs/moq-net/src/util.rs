@@ -330,3 +330,15 @@ mod tests {
 		assert_eq!(output, 42);
 	}
 }
+
+/// Ready once nothing wants the track, or it closed; otherwise arm `waiter` for a change.
+pub(crate) fn poll_unwanted(demand: &mut crate::track::Demand, waiter: &kio::Waiter) -> Poll<()> {
+	loop {
+		match demand.poll_wanted_changed(waiter) {
+			Poll::Ready(Ok(Some(_))) => continue,
+			Poll::Ready(_) => return Poll::Ready(()),
+			Poll::Pending if demand.wanted().is_none() => return Poll::Ready(()),
+			Poll::Pending => return Poll::Pending,
+		}
+	}
+}

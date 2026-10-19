@@ -1329,6 +1329,21 @@ impl Producer {
 		self.state.read().charge.size()
 	}
 
+	/// Whether the payload cached after the first frame exceeds `ratio` times the first
+	/// frame: what [`track::Info::refresh`] judges a join by. A group holding no first
+	/// frame (one started past it, or not written yet) has nothing to compare against.
+	pub(super) fn over_refresh(&self, ratio: u32) -> bool {
+		let state = self.state.read();
+		if state.offset != 0 {
+			return false;
+		}
+		let Some(first) = state.frames.front() else {
+			return false;
+		};
+		let first = first.payload.len() as u64;
+		state.cache.saturating_sub(first) > first.saturating_mul(ratio.into())
+	}
+
 	/// Tick of the group's last cache access, driving eviction protection and age
 	/// expiry (see [`cache::Pool::average`]).
 	pub(super) fn cache_accessed(&self) -> u64 {

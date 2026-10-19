@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Track demand reports the wanted group (#REFRESH\_PR)
+
+`TrackDemand.isUsed`, `used()`, and `unused()` are gone.
+`wanted` is nil while nobody subscribes, otherwise the group subscribers want next, and `wantedChanged()` waits for it to change (the first call returns at once).
+Loop on `wantedChanged()` until it returns non-nil where you awaited `used()`, and nil where you awaited `unused()`.
+`TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.groupStart` and `groupEnd` are replaced by `ranges`, a list of `Subscription.Range` whose ends are a `Subscription.Anchor` (`.absolute(group:frame:)` or `.relative(groups:)`), and an optional `order`.

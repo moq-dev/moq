@@ -809,11 +809,15 @@ mod tests {
 			let mut cursor = rendition.segments();
 			let mut next = std::pin::pin!(cursor.next());
 			// Waiting for its first segment, the cursor subscribes before any media exists.
-			let demand = track.demand();
+			let mut demand = track.demand();
+			let wanted = async {
+				while demand.wanted_changed().await?.is_none() {}
+				moq_net::Result::Ok(())
+			};
 			tokio::time::timeout(TIMEOUT, async {
 				tokio::select! {
 					_ = next.as_mut() => panic!("{version}: a segment before any media"),
-					used = demand.used() => used.expect("track open"),
+					wanted = wanted => wanted.expect("track open"),
 				}
 			})
 			.await

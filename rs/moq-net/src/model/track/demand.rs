@@ -1,7 +1,7 @@
 //! Incremental demand, separate from the track's cached content.
 use std::{collections::BTreeMap, sync::Arc, task::Poll, time::Duration};
 
-use super::{NewGroup, Order, Subscription, TrackState, clamp_combined};
+use super::{Order, Subscription, TrackState, clamp_combined};
 
 mod ranges;
 use ranges::Ranges;
@@ -13,23 +13,23 @@ pub(super) struct Subscriptions {
 	max_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
 	descending: usize,
-	/// Only the subscribers holding a request.
-	new_group: BTreeMap<NewGroup, usize>,
+	/// The lowest group consumers want: raised past the newest group by a join over the
+	/// track's refresh ratio, and never lowered. See [`super::Demand::wanted`].
+	wanted: u64,
 	waiters: kio::WaiterList,
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (u8, Duration, Order, Option<NewGroup>);
+type Scalars = (u8, Duration, Order);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		let (priority, max_delay, order, new_group) = self.scalars()?;
+		let (priority, max_delay, order) = self.scalars()?;
 		Some(Subscription {
 			priority,
 			max_delay,
 			ranges: self.ranges.union(),
 			order,
-			new_group,
 		})
 	}
 
@@ -43,20 +43,17 @@ impl Subscriptions {
 				} else {
 					Order::Descending
 				},
-				self.new_group.last_key_value().map(|(new_group, _)| *new_group),
 			)
 		})
 	}
 
-	/// Poll for the aggregate, as `view` sees it, to differ from `prev`.
-	pub(super) fn poll_changed<T: Clone + PartialEq>(
+	pub(super) fn poll_changed(
 		&mut self,
 		bound: Option<Duration>,
-		prev: &mut T,
-		view: impl Fn(Option<Subscription>) -> T,
+		prev: &mut Option<Subscription>,
 		waiter: &kio::Waiter,
-	) -> Poll<T> {
-		let next = view(clamp_combined(self.combined(), bound));
+	) -> Poll<Option<Subscription>> {
+		let next = clamp_combined(self.combined(), bound);
 		if next != *prev {
 			*prev = next.clone();
 			Poll::Ready(next)
@@ -64,6 +61,26 @@ impl Subscriptions {
 			waiter.register(&mut self.waiters);
 			Poll::Pending
 		}
+	}
+
+	/// The lowest group consumers want, whether or not anyone consumes now.
+	pub(super) fn wanted(&self) -> u64 {
+		self.wanted
+	}
+
+	/// [`Self::wanted`], arming `waiter` for its next change.
+	pub(super) fn poll_wanted(&mut self, waiter: &kio::Waiter) -> u64 {
+		waiter.register(&mut self.waiters);
+		self.wanted
+	}
+
+	/// Raise [`Self::wanted`] to `group`, taking the wakes only when it moved.
+	pub(super) fn want(&mut self, group: u64) -> kio::WaiterList {
+		if group <= self.wanted {
+			return Default::default();
+		}
+		self.wanted = group;
+		self.waiters.take()
 	}
 
 	/// Mutate counts under one lock, taking wakes only when the aggregate changes.
@@ -81,9 +98,6 @@ impl Subscriptions {
 				}
 			}
 			self.descending += usize::from(new.order == Order::Descending);
-			if let Some(new_group) = new.new_group {
-				add(&mut self.new_group, new_group);
-			}
 			self.count += 1;
 		}
 		if let Some(old) = old {
@@ -95,9 +109,6 @@ impl Subscriptions {
 				}
 			}
 			self.descending -= usize::from(old.order == Order::Descending);
-			if let Some(new_group) = old.new_group {
-				remove(&mut self.new_group, new_group);
-			}
 			self.count -= 1;
 		}
 		if reshaped || self.scalars() != prev {
@@ -155,29 +166,7 @@ impl Preferences {
 	}
 
 	pub(super) fn update(&self, next: Subscription) -> crate::Result<()> {
-		self.update_with(|_| next)
-	}
-
-	/// Drop a NEW_GROUP_REQUEST that `sequence` answers.
-	pub(super) fn answer_new_group(&self, sequence: u64) {
-		// Checked before taking the write, which wakes this channel's readers.
-		if !self
-			.read()
-			.new_group
-			.is_some_and(|new_group| sequence >= new_group.first)
-		{
-			return;
-		}
-		let _ = self.update_with(|value| Subscription {
-			new_group: value.new_group.filter(|new_group| sequence < new_group.first),
-			..value.clone()
-		});
-	}
-
-	/// Replace the preference with what `next` makes of it, under one write.
-	fn update_with(&self, next: impl FnOnce(&Subscription) -> Subscription) -> crate::Result<()> {
 		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
-		let next = next(&value);
 		if *value == next {
 			return Ok(());
 		}
@@ -276,10 +265,6 @@ mod tests {
 				} else {
 					Order::Descending
 				},
-				new_group: rng
-					.random_bool(0.5)
-					.then(|| NewGroup::new(rng.random_range(0..8), Some(rng.random_range(0..8))))
-					.flatten(),
 			};
 			match (&mut slots[index], rng.random_range(0..3)) {
 				(slot @ None, _) => *slot = Some((producer.subscribe(next.clone()), next)),
@@ -298,16 +283,7 @@ mod tests {
 				expected.add(value);
 			}
 			let expected = expected.finish();
-			assert_eq!(
-				producer.subscription(),
-				super::super::public(expected.clone()),
-				"operation {step}"
-			);
-			assert_eq!(
-				producer.new_group(),
-				super::super::new_group(expected),
-				"operation {step}"
-			);
+			assert_eq!(producer.subscription(), expected, "operation {step}");
 		}
 		drop(slots);
 		assert_eq!(producer.subscription(), None);

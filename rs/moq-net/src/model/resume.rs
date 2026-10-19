@@ -287,12 +287,7 @@ impl Copy {
 	/// What this copy is asked for: the reader's own preferences, from no earlier than
 	/// where it was asked to start, and through no later than where it was replaced.
 	fn wire(&self, reader: &Subscription) -> Subscription {
-		let mut wire = reader.clamped(self.floor, self.end().map(Position::group));
-		// A replaced copy only finishes what it had, so a new group from it never arrives.
-		if self.until.is_some() {
-			wire.new_group = None;
-		}
-		wire
+		reader.clamped(self.floor, self.end().map(Position::group))
 	}
 
 	/// The first group past where this copy was replaced, if any: one replaced before
