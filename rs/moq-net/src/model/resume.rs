@@ -1216,19 +1216,18 @@ mod test {
 			.unwrap()
 	}
 
-	#[cfg(feature = "async")]
 	fn recv(sub: &mut track::Subscriber) -> group::Consumer {
-		sub.recv_group()
-			.now_or_never()
-			.expect("a group")
-			.unwrap()
-			.expect("track ended")
+		let Poll::Ready(group) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+			panic!("a group")
+		};
+		group.unwrap().expect("track ended")
 	}
 
-	#[cfg(feature = "async")]
 	fn read(group: &mut group::Consumer) -> Option<Vec<u8>> {
-		let frame = group.read_frame().now_or_never().expect("a frame").unwrap();
-		frame.map(|frame| frame.payload.to_vec())
+		let Poll::Ready(frame) = group.poll_read_frame(&kio::Waiter::noop()) else {
+			panic!("a frame")
+		};
+		frame.unwrap().map(|frame| frame.payload.to_vec())
 	}
 
 	fn ts(ms: u64) -> Timestamp {
@@ -1238,6 +1237,7 @@ mod test {
 	/// A later stream header is not a verdict on the group held from a failed route.
 	#[moq_clock::test]
 	async fn a_failed_route_waits_for_a_reordered_group_header() {
+		let waiter = kio::Waiter::noop();
 		for arrives in [true, false] {
 			let routes = Producer::new();
 			let logical = logical(&routes);
@@ -1257,15 +1257,13 @@ mod test {
 			routes.serve(b.consume());
 			open.abort(Error::SessionClosed).unwrap();
 			a.abort(Error::SessionClosed).unwrap();
-			assert!(held.read_frame().now_or_never().is_none());
-			dynamic
-				.requested_group()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.reject(Error::NotFound);
+			assert!(held.poll_read_frame(&waiter).is_pending());
+			let Poll::Ready(request) = dynamic.poll_requested_group(&waiter) else {
+				panic!("recovery fetch")
+			};
+			request.unwrap().reject(Error::NotFound);
 			assert!(
-				held.read_frame().now_or_never().is_none(),
+				held.poll_read_frame(&waiter).is_pending(),
 				"the gap is still within grace"
 			);
 
@@ -1278,7 +1276,10 @@ mod test {
 				assert_eq!(read(&mut held), None);
 			} else {
 				moq_clock::sleep(Duration::from_secs(1)).await;
-				assert!(matches!(held.read_frame().now_or_never(), Some(Err(Error::NotFound))));
+				assert!(matches!(
+					held.poll_read_frame(&waiter),
+					Poll::Ready(Err(Error::NotFound))
+				));
 			}
 		}
 	}

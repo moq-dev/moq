@@ -3740,6 +3740,7 @@ impl Consumer {
 
 	/// The live arrivals of the track this handle reads now, without joining its demand.
 	// This batch view avoids per-fetch ledger copies and locks in the session.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: tuning
 	pub(crate) fn arrivals(&self) -> Option<Arrivals> {
 		self.with_state(|state| state.map(|state| Arrivals { state: state.clone() }))
