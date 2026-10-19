@@ -5537,6 +5537,21 @@ impl Subscriber {
 		kio::wait(|waiter| self.poll_largest(waiter)).await
 	}
 
+	/// The largest location known now, without waiting or moving [`Self::poll_largest`] on:
+	/// past what the cache holds once the source reported a newer one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: capability gap
+	pub(crate) fn peek_largest(&mut self) -> Option<Position> {
+		let mut seen = None;
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.state.read().cache.take_largest(&mut seen),
+			Inner::Resume(resume, _) => match resume.poll_largest(&mut seen, &kio::Waiter::noop()) {
+				Poll::Ready(largest) => largest,
+				Poll::Pending => None,
+			},
+		}
+	}
+
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn latest_sequence(&self) -> Option<u64> {
