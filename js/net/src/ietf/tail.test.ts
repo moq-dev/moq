@@ -2,10 +2,10 @@ import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
+import { GRACE } from "../ledger.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
-import { TAIL_GRACE_MS } from "../tail.ts";
 import { NativeSession } from "./adapter.ts";
 import { type GroupFlags, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
@@ -109,7 +109,7 @@ test("a group stream that arrives after PUBLISH_DONE is delivered", async () => 
 	expect(await reader.recvGroup()).toBeUndefined();
 	expect(await reader.closed).toBeNull();
 	// The Stream Count was met, so nothing waited out the grace.
-	expect(performance.now() - started).toBeLessThan(TAIL_GRACE_MS);
+	expect(performance.now() - started).toBeLessThan(GRACE);
 });
 
 test("a group read across PUBLISH_DONE is delivered whole", async () => {
@@ -139,7 +139,7 @@ test("a Stream Count of 0 is a hint, so a late stream within the grace is still 
 	expect(await readAll(await reader.recvGroup())).toEqual(["0.0"]);
 	expect(await reader.recvGroup()).toBeUndefined();
 	expect(await reader.closed).toBeNull();
-	expect(performance.now() - started).toBeGreaterThanOrEqual(TAIL_GRACE_MS - 5);
+	expect(performance.now() - started).toBeGreaterThanOrEqual(GRACE - 5);
 });
 
 test("a PUBLISH_DONE with an error status aborts the track", async () => {
