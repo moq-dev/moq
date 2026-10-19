@@ -3,8 +3,9 @@
 ## Goal
 
 A moq-lite-07 TRACKS request lists the tracks of one broadcast as its
-producer creates them, each with its name and TRACK_INFO, and retracts a
-track that ends. The subscriber then SUBSCRIBEs to each track it wants, so
+producer creates them, each with its name and TRACK_INFO, marks when the
+lister has caught up with every track that existed when it asked, and names
+each track that no longer exists. The subscriber then SUBSCRIBEs to each track it wants, so
 delivery stays pull: nothing is ever pushed into a pulled copy. A listing
 never creates a track the publisher serves only on request (an any-name
 `broadcast::Dynamic` handler such as a transcoder). A relay answers many
@@ -41,7 +42,7 @@ track" no longer holds:
   epochless restart into an old copy. A listing plus ordinary SUBSCRIBEs
   needs none of that.
 
-Scope is one broadcast, decided here with ANNOUNCE in mind. ANNOUNCE already
+Scope is one broadcast, decided by the maintainer on 2026-10-19. ANNOUNCE already
 discovers broadcasts under a prefix, with their epochs and restarts; a
 prefix-scoped TRACKS would duplicate that and need every route handler to
 answer for a whole prefix (#5931's `Lister`). A prefix consumer composes the
@@ -51,6 +52,37 @@ listing is pinned to the instance that answers it and ends with that
 instance, never spliced into the next one. Rejected: a prefix-scoped TRACKS,
 and a `.tracks` track (a track carrying a listing reuses delivery but mixes
 control into the media namespace and needs its own retraction encoding).
+
+Decided by the maintainer on 2026-10-19: TRACKS still gates the lite-07 cut
+([Finalize moq-lite-07](/quest/m1/lite07-finalize.md)), so the archive line
+has its discovery on the published wire.
+
+Listing events, decided by the maintainer on 2026-10-19 ("for TRACKS, you
+should report the TRACK_INFO as well for each track (maybe reuse the message
+entirely?) as well as have an event for knowing when we're caught up, and
+when a track no longer exists"):
+
+- **Track added, with its TRACK_INFO.** Reuse the TRACK_INFO message
+  encoding wholesale: the entry is the track name followed by an embedded,
+  length-prefixed TRACK_INFO, so one decoder serves both streams and any
+  field TRACK_INFO gains (refresh, compress) reaches listings without a second
+  wire change. It fits because TRACK_INFO holds only fixed per-track
+  properties and no name or stream-specific field. What differs is only what
+  wraps it: the name, and an implicit ID assigned per entry, as ANNOUNCE_START
+  assigns Announce IDs. A lister MAY skip the Track Stream for a track it
+  learned this way, since the properties are the same immutable ones.
+- **Caught up.** Mirror ANNOUNCE_OK's `Active Count`: the reply opens with a
+  count of the tracks in the initial set, sent first, so the lister knows when
+  it holds every track that existed when it asked; entries past the count are
+  live. A relay answers with the count its one resolved upstream reported, as
+  a SUBSCRIBE waits for its own upstream's SUBSCRIBE_OK, and a relay already
+  holding a caught-up upstream listing answers at once from it. It never
+  waits on any node beyond that route.
+- **Track removed.** A named event referencing the entry's ID, sent when the
+  publisher no longer serves the name (it left the broadcast's track table),
+  so a SUBSCRIBE for it would now be refused. A track created again under the
+  name gets a new entry and ID. Removing an ID that is not live is a protocol
+  violation, as on the Announce stream.
 
 Costs, accepted:
 
@@ -67,12 +99,9 @@ Costs, accepted:
 
 Guidance:
 
-- Wire: a new lite-07-wip bidi stream. The request names the broadcast path
-  and Epoch. The reply announces each track (name and TRACK_INFO fields) with
-  an implicit ID and retracts it by ID when the track ends, so a late joiner
-  gets the current set and a churning publisher costs bytes, not held state.
-  Reuse the Announce stream's conventions (implicit IDs, an initial-set count)
-  where they fit. The stream ends when the broadcast instance does. Update
+- Wire: a new lite-07-wip bidi stream carrying the three events above. The
+  request names the broadcast path and Epoch. The stream ends when the
+  broadcast instance does. Update
   `drafts/draft-lcurley-moq-lite.md` and its lite-07 changelog, then run
   `just drafts check` and `just test interop --all`. Older versions refuse the
   stream type; no emulation over SUBSCRIBE.
@@ -92,6 +121,13 @@ Guidance:
     relay hold counts against that session's existing `announces` cap, the
     budget for discovery state a peer pushes at us; past it, the relay resets
     the listing rather than holding more. Names keep the existing length caps.
+  - A hostile publisher can churn, adding and removing tracks as fast as it
+    can send. Held state is the live set, never the history, and a
+    downstream cursor reads the current set rather than a log: an add and its
+    removal that a slow reader has not reached collapse to nothing, so churn
+    costs a relay per-event work across its listings of that broadcast (the
+    same fan-out an Announce stream pays) but no backlog. Implicit IDs keep
+    growing, which costs a varint byte now and then, not state.
   - A hostile subscriber can open many TRACKS. Each takes a subscription slot,
     downstream listings of one broadcast share one upstream TRACKS, and a
     downstream reader is a cursor into the shared listing, so a slow or stalled
@@ -102,8 +138,11 @@ Guidance:
 - Split the JS half into its own quest if the PR grows too large to review.
 
 Test on mock time, directly and through a relay: tracks present at the
-request, a track added later (a SUBSCRIBE from the listing gets its first
-group from the cache), a track ending and being retracted, the broadcast
+request and the caught-up count matching them, a track added later (a
+SUBSCRIBE from the listing gets its first group from the cache), a track
+removed and created again under its name (a new ID), add and remove churn
+collapsing for a stalled reader, a removal of an unknown ID refused, the
+broadcast
 ending the listing, a new epoch at the same path not continuing an old
 listing, a dynamic-only track never created, two downstream listings sharing
 one upstream TRACKS, and the `announces` cap resetting an oversized listing.

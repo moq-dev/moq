@@ -15,7 +15,8 @@ instead of refusing it with NOT_SUPPORTED:
   listed track is then SUBSCRIBEd like any other.
 
 An unsolicited inbound PUBLISH stays refused: moq-net never merges a pushed
-track into a pulled copy.
+track into a pulled copy. A FORWARD=0 PUBLISH answering our own
+SUBSCRIBE_TRACKS carries no data, so holding it is not that merge.
 
 ## Plan
 
@@ -29,17 +30,30 @@ maintainer declined.
 FORWARD=0, verified against the draft-18 and draft-22 text (draft-22 sections
 3.1.1, 3.6, 9.8 and 9.20.18): each PUBLISH a SUBSCRIBE_TRACKS produces starts its
 subscription paused, carrying the full track name, Track Properties, and
-LARGEST_OBJECT, and no objects flow until the subscriber resumes it. Gaps to
-handle:
+LARGEST_OBJECT, and no objects flow until the subscriber resumes it.
 
-- **Each PUBLISH is a subscription.** It holds a bidi stream and a request ID
-  at both ends. Recommended: answer each with an error (UNINTERESTED) once
-  the track is recorded, then SUBSCRIBE through the existing path, so a
-  listed track holds no state upstream beyond the listing and joins from the
-  cache like a lite one. Resuming the paused PUBLISH instead starts at the
-  live edge (draft-22 section 9.8), missing the first groups. Both are legal:
-  multiple subscriptions to one track are allowed, and rejecting a PUBLISH
-  leaves the SUBSCRIBE_TRACKS open.
+TRACKS' three events (see its Plan) map as follows:
+
+| TRACKS event | Inbound: we answer SUBSCRIBE_TRACKS | Outbound: we send it with FORWARD=0 |
+|---|---|---|
+| Track added, with TRACK_INFO | a PUBLISH, its Track Properties carrying TRACK_INFO as SUBSCRIBE_OK does today | a PUBLISH; TRACK_INFO from its Track Properties |
+| Caught up | nothing to send: moq-transport has no marker | gap: SUBSCRIBE_TRACKS_OK is a bare REQUEST_OK, and PUBLISHes arrive on their own streams in no order |
+| Track removed | PUBLISH_DONE with TRACK_ENDED on that PUBLISH | PUBLISH_DONE on the paused PUBLISH |
+
+- **Caught up has no IETF equivalent.** Outbound, report what is known when
+  SUBSCRIBE_TRACKS_OK arrives (usually nothing), as relays report current
+  state, and every later PUBLISH is a live add. A lister over a moq-transport
+  upstream therefore cannot tell "no tracks" from "not yet"; document it.
+- **Removal needs the PUBLISH kept.** PUBLISH_DONE is the only removal
+  signal, so an outbound PUBLISH is accepted paused (PUBLISH_OK, FORWARD=0)
+  and held as the listing entry, while data flows through a separate
+  SUBSCRIBE from the existing path, which joins from the cache like a lite
+  one. Multiple subscriptions to one track are allowed. Resuming the paused
+  PUBLISH instead starts at the live edge (draft-22 section 9.8), missing the
+  first groups. TRACK_ENDED means the track is gone; any other status
+  (GOING_AWAY, EXCESSIVE_LOAD) also ends what we know of it, so it removes the
+  entry too, and a later PUBLISH for the name is a new add. The cost is a
+  paused subscription per listed track at both ends, bounded below.
 - **Prefix, not broadcast.** SUBSCRIBE_TRACKS matches every namespace under
   the prefix, so a listing of one broadcast filters to its exact namespace.
   A session may hold only one SUBSCRIBE_TRACKS per overlapping prefix
@@ -48,13 +62,8 @@ handle:
 - **Push inventory only.** An IETF relay lists the tracks it has been
   PUBLISHed or already holds, not what an upstream would serve on SUBSCRIBE.
   A track served only on request is unlisted, which matches TRACKS' rule.
-- **No retraction message.** A track's end arrives as PUBLISH_DONE on its
-  paused subscription, which the recommended rejection gives up. A listed
-  IETF track is retracted when its own SUBSCRIBE ends, or never; say which in
-  the PR.
-- **Properties.** TRACK_INFO comes from PUBLISH's Track Properties the way it
-  comes from SUBSCRIBE_OK today; a property TRACK_INFO needs but PUBLISH lacks
-  takes the same default.
+- **Properties.** A property TRACK_INFO needs but PUBLISH lacks takes the
+  same default it takes from SUBSCRIBE_OK today.
 - **A non-conforming peer** may send objects despite FORWARD=0; stop reading
   them rather than buffer.
 
@@ -64,9 +73,12 @@ Untrusted input:
   per track. Each holds a subscription slot; past the cap, send
   PUBLISH_SKIPPED (draft-20 on) rather than hold more. Drafts 18 and 19 have
   no skip signal, so there the track is simply not published.
-- Outbound, a hostile publisher can PUBLISH without bound. Each track it
-  lists counts against the session's `announces` cap, as on lite, and the
+- Outbound, a hostile publisher can PUBLISH without bound. Each held paused
+  PUBLISH counts against the session's `announces` cap, as a lite listed track
+  does; past it, refuse the PUBLISH (EXCESSIVE_LOAD) rather than hold more. The
   stream and request-ID credit we grant bounds what is in flight.
+- Either way, PUBLISH and PUBLISH_DONE churn costs a stream per add and holds
+  only the live set, as on lite.
 
 Guidance:
 
@@ -79,11 +91,12 @@ Guidance:
 Test on mock time through a relay: a moq-transport subscriber's
 SUBSCRIBE_TRACKS receives a PUBLISH per track, including a later track and a
 later broadcast under the prefix; a lite TRACKS over a moq-transport upstream
-lists its tracks with FORWARD=0 and its SUBSCRIBE gets a new track's first
-group; an unsolicited PUBLISH is refused.
+lists its tracks with FORWARD=0, its SUBSCRIBE gets a new track's first
+group, and a PUBLISH_DONE removes the entry; a moq-transport subscriber gets
+PUBLISH_DONE when a lite track is removed; an unsolicited PUBLISH is refused.
 
 Public API: none beyond the TRACKS hook. Wire: moq-transport support for an
-existing message, and PUBLISH answered with an error.
+existing message, and a FORWARD=0 PUBLISH held paused as a listing entry.
 
 ## Required
 

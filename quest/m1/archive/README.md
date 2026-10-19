@@ -79,7 +79,7 @@ from a host. Each child fixes the stale docs it touches.
 
 ## Required
 
-- [TRACKS](/quest/m1/archive/tracks.md) - a moq-lite-07 request lists a broadcast's tracks with their TRACK_INFO as they appear, for the subscriber to SUBSCRIBE per track, and relays fan it out from one upstream request
+- [TRACKS](/quest/m1/archive/tracks.md) - a moq-lite-07 request lists a broadcast's tracks with their TRACK_INFO, marks when it has caught up, and names removed tracks, for the subscriber to SUBSCRIBE per track, and relays fan it out from one upstream request
 - [Archive producer](/quest/m1/archive/producer.md) - `archive::Producer` stores every matching broadcast as duration-cut per-track objects keyed by group and pts, recording gaps instead of stalling, with an optional DVR mode
 - [Archive consumer](/quest/m1/archive/consumer.md) - `archive::Consumer` serves a stored prefix as a broadcast from its key listing, and `moq export/import archive` use the new pair
 - [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - the root `archive` section is gone; an opt-in per-rendition `hls` field marks each aligned HLS segment's first group and pts and declares its nominal duration
