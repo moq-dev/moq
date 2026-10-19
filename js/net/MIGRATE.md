@@ -4,10 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A reader's `largest()` reports within its `setGroups` bounds
+### `largest()` reports within a reader's `setGroups` bounds
 
-`Track.Subscriber.largest()` and `Track.Ordered.largest()` report the largest location within the bounds set with `setGroups` or `withGroups`, where they used to report the track's.
-Past an exclusive end of `N`, they report the newest cached group below `N`; below the floor, nothing.
+`Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `setGroups` or `withGroups`, where they used to ignore the bounds.
+A largest past the cap or below the floor reports nothing; the cache never stands in for it.
 Moving the bounds reports again within the new ones, even below the last report.
 Unbounded readers and `Track.Producer.largest()` are unchanged.
 To read the track's edge from a capped reader, lift the cap with `setGroups({})` first.

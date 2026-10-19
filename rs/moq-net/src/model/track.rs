@@ -6441,7 +6441,10 @@ mod test {
 
 		let mut floored = producer.subscribe(replay());
 		floored.set_groups(8..);
-		assert!(floored.poll_largest(&noop).is_pending(), "the largest is below the floor");
+		assert!(
+			floored.poll_largest(&noop).is_pending(),
+			"the largest is below the floor"
+		);
 		let _late = framed(&producer, 8, 0);
 		assert_eq!(floored.poll_largest(&noop), Poll::Ready(Some(Position::group(8))));
 	}
@@ -6465,7 +6468,10 @@ mod test {
 		assert!(reader.poll_largest(&waiter).is_pending());
 		reader.set_groups(..2);
 		assert!(flag.take(), "lowering the cap woke the reader");
-		assert!(reader.poll_largest(&noop).is_pending(), "the largest is past the new cap");
+		assert!(
+			reader.poll_largest(&noop).is_pending(),
+			"the largest is past the new cap"
+		);
 
 		reader.set_groups(..);
 		assert_eq!(
@@ -6495,7 +6501,10 @@ mod test {
 
 		producer.set_live(Some(Position::group(5)));
 		producer.report_largest(Position::group(5));
-		assert!(reader.poll_largest(&waiter).is_pending(), "the answer has not shown yet");
+		assert!(
+			reader.poll_largest(&waiter).is_pending(),
+			"the answer has not shown yet"
+		);
 		flag.take();
 
 		let _answer = framed(&producer, 5, 1);

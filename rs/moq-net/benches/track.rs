@@ -45,13 +45,6 @@
 //! on the next one, re-polling whichever reader the write woke: a frame wakes no track
 //! reader, so waking them shows up as a slope over the subscribers.
 //!
-//! `track_largest_finish` finishes one-frame groups while every subscriber is parked on
-//! `poll_largest`, re-polling whichever reader the finish woke, against `none`, which parks
-//! no reader there. A parked reader also waits on the track state for its settled end, which
-//! a finish changes, so each finish wakes every one of them; a reader capped below the
-//! largest re-reads the groups under its cap too. A cost that grows faster than that, or a
-//! wake per write, shows up as a steeper slope.
-//!
 //! `track_fetch_expiry` polls budgeted fetched readers over independent fanout and
 //! retained-history axes, so expiry work that scans either table appears as a slope.
 //!
@@ -552,73 +545,6 @@ fn bench_fanout_frame(c: &mut Criterion) {
 				});
 			},
 		);
-	}
-	group.finish();
-}
-
-fn bench_largest_finish(c: &mut Criterion) {
-	let mut group = c.benchmark_group("track_largest_finish");
-	// `none` parks no reader on `poll_largest`: the finish's cost without any.
-	for readers in ["none", "unbounded", "capped"] {
-		for subscribers in FANOUT {
-			group.bench_with_input(
-				BenchmarkId::new(readers, subscribers),
-				&subscribers,
-				|b, &subscribers| {
-					let mut fanout = Fanout::new(subscribers);
-					let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
-					let waiters: Vec<_> = (0..subscribers)
-						.map(|index| {
-							let fired = Arc::new(Fired {
-								index,
-								queue: queue.clone(),
-							});
-							kio::Waiter::new(futures::task::waker(fired))
-						})
-						.collect();
-					// Group 0 sits under every cap, so a capped reader has a report to follow.
-					let mut first = fanout.track.append_group().unwrap();
-					first.write_frame(Timestamp::ZERO, fanout.payload.clone()).unwrap();
-					first.finish().unwrap();
-					for (subscriber, waiter) in fanout.subscribers.iter_mut().zip(&waiters) {
-						if readers == "none" {
-							break;
-						}
-						if readers == "capped" {
-							subscriber.set_groups(..1);
-						}
-						assert!(matches!(subscriber.poll_largest(waiter), Poll::Ready(Some(_))));
-						assert!(subscriber.poll_largest(waiter).is_pending());
-					}
-					// Only the finish and the re-polls it causes are timed, not the write.
-					b.iter_custom(|iterations| {
-						let mut elapsed = Duration::ZERO;
-						for _ in 0..iterations {
-							let mut group = fanout.track.append_group().unwrap();
-							group.write_frame(Timestamp::ZERO, fanout.payload.clone()).unwrap();
-							// Read the group off, so retention stays what a live reader leaves behind.
-							for subscriber in &mut fanout.subscribers {
-								let noop = kio::Waiter::noop();
-								while subscriber.poll_recv_group(&noop).is_ready() {}
-							}
-							let woken = std::mem::take(&mut *queue.lock().unwrap());
-							for index in woken {
-								while fanout.subscribers[index].poll_largest(&waiters[index]).is_ready() {}
-							}
-							let start = Instant::now();
-							group.finish().unwrap();
-							// A woken reader re-polls, as its task would.
-							let woken = std::mem::take(&mut *queue.lock().unwrap());
-							for index in woken {
-								while fanout.subscribers[index].poll_largest(&waiters[index]).is_ready() {}
-							}
-							elapsed += start.elapsed();
-						}
-						elapsed
-					});
-				},
-			);
-		}
 	}
 	group.finish();
 }
@@ -1278,7 +1204,6 @@ criterion_group!(
 	bench_parked_abort,
 	bench_fanout,
 	bench_fanout_frame,
-	bench_largest_finish,
 	bench_fetch_expiry,
 	bench_parallel_write,
 	bench_aborted_scan,

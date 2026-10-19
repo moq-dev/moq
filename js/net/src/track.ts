@@ -442,10 +442,6 @@ class TrackState {
 	largest = new Signal<Location | undefined>(undefined);
 	// Set once {@link largest} can no longer advance while the track stays open.
 	largestEnded = new Signal(false);
-	// Bumped by a write or finish that leaves {@link largest} where it was: a reader capped below it
-	// follows the groups under its cap. One signal shared with every sink, so a bump costs the
-	// same however many subscribe.
-	written = new Signal(0);
 
 	constructor(subscription?: Subscription) {
 		this.update = new Signal(subscription === undefined ? undefined : subscriptionDefaults(subscription));
@@ -834,7 +830,6 @@ export class Producer {
 		if (info) sink.info.set(info);
 		sink.largest.set(this.#state.largest.peek());
 		sink.largestEnded.set(this.#state.largestEnded.peek());
-		sink.written = this.#state.written;
 
 		const closed = this.#state.closed.peek();
 		if (closed === undefined) {
@@ -1032,10 +1027,7 @@ export class Producer {
 	#advanceLargest(largest: Location | undefined): void {
 		if (!largest) return;
 		const current = this.#state.largest.peek();
-		if (current && !after(largest, current)) {
-			this.#state.written.update((n) => n + 1);
-			return;
-		}
+		if (current && !after(largest, current)) return;
 		this.#largestOpen = true;
 		this.#state.largest.set(largest);
 		for (const sink of this.#sinks) sink.largest.set(largest);
@@ -1411,8 +1403,6 @@ export class Producer {
 	// A group name fixes its content, so no legal write raises the largest past it.
 	#finishLargest(sequence: number): void {
 		if (this.#state.largest.peek()?.group === sequence) this.#largestOpen = false;
-		// A reader capped below the largest may be following this group.
-		this.#state.written.update((n) => n + 1);
 		this.#endLargest();
 	}
 
@@ -1760,17 +1750,18 @@ export class Subscriber {
 	 * The largest location within {@link setGroups}: the current one at first, then each newer
 	 * one (skipping any in between), and `undefined` once the track ends.
 	 *
-	 * While the track's largest is within the bounds, that is its newest group or datagram at
-	 * the newest frame (0 while empty), seeded by the publisher's report, so it can name a frame
-	 * before its group arrives. Past the cap, it is the newest cached group below the cap, so an
-	 * exclusive end of `N` reports group `N - 1` once it arrives, and the stream stays open while
-	 * that group can still grow; below the floor, nothing. Moving the bounds reports again within
-	 * the new ones, even below the last report.
+	 * The largest is the track's newest group or datagram at the newest frame (0 while empty), as
+	 * the publisher reported it and its feed delivered since, so it can name a frame before its
+	 * group arrives. A largest past the cap or below the floor reports nothing: the cache does not
+	 * stand in for it. Moving the bounds reports again within the new ones, even below the last
+	 * report.
 	 */
 	async largest(): Promise<Location | undefined> {
 		for (;;) {
-			const bounds = this.#cursor.peek();
-			const { within, growing } = this.#largestWithin(bounds);
+			const { start, end } = this.#cursor.peek();
+			const largest = this.#state.largest.peek();
+			const within =
+				largest && largest.group >= start && (end === undefined || largest.group < end) ? largest : undefined;
 			const seen = this.#largestSeen;
 			if (this.#largestMoved) {
 				// New bounds report the largest within them again, even one below the last report.
@@ -1781,35 +1772,9 @@ export class Subscriber {
 				this.#largestSeen = within;
 				return within;
 			}
-			if (this.#state.closed.peek() !== undefined) return undefined;
-			// The track's settled end does not end a group under the cap that can still grow.
-			if (this.#state.largestEnded.peek() && !growing) return undefined;
-			// Only a reader capped below the largest follows writes that leave it in place.
-			const largest = this.#state.largest.peek();
-			const capped = bounds.end !== undefined && largest !== undefined && largest.group >= bounds.end;
-			await Signal.race(
-				this.#state.largest,
-				this.#state.closed,
-				this.#state.largestEnded,
-				this.#cursor,
-				...(capped ? [this.#state.written] : []),
-			);
+			if (this.#state.closed.peek() !== undefined || this.#state.largestEnded.peek()) return undefined;
+			await Signal.race(this.#state.largest, this.#state.closed, this.#state.largestEnded, this.#cursor);
 		}
-	}
-
-	// The track's largest within `bounds`; past the cap, the newest cached group below it, and
-	// whether that group can still grow: it has not finished, and an aborted one can be recreated.
-	#largestWithin(bounds: { start: number; end?: number }): { within?: Location; growing: boolean } {
-		const largest = this.#state.largest.peek();
-		if (!largest || largest.group < bounds.start) return { growing: false };
-		if (bounds.end === undefined || largest.group < bounds.end) return { within: largest, growing: false };
-		const timeline = this.#state.timeline;
-		const group = timeline[timelineIndex(timeline, bounds.end) - 1];
-		if (!group || group.sequence < bounds.start) return { growing: false };
-		return {
-			within: { group: group.sequence, frame: Math.max(group.frameCount - 1, 0) },
-			growing: !hooks.groupFinished(group),
-		};
 	}
 
 	// The newest frame buffered for this subscriber, which a wire answer names as its edge:

@@ -330,8 +330,6 @@ export const hooks: {
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
-	/** Whether a group's producer closed cleanly, whatever this consumer has left to read. */
-	groupFinished: (group: GroupConsumer) => boolean;
 	/** Return when a group joined its track at this hop, on the installed clock. */
 	groupArrived: (group: GroupConsumer) => Instant;
 	/** Record when a track's mirror of a group joined that track at this hop. */
@@ -432,9 +430,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupLatest: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupFinished: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupArrived: () => {

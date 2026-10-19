@@ -19,10 +19,11 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - `track::Subscriber::poll_start` (lite publisher): public. A publisher
   reports the resolved start to its peer (SUBSCRIBE_START, SUBSCRIBE_OK).
 - `track::Subscriber::poll_live` (both publishers): remove the need through
-  the public `poll_largest` (#5725). It does not wait out an idle copy the
-  way `poll_live` does: it follows the source's reported largest, which can
-  name a frame the cache does not hold yet, so the publishers still answer
-  with the buffered edge. Decide here whether wire answers move to it, and
+  the public `poll_largest` (#5725). It now waits out an idle copy too
+  (#5924), but it follows the source's reported largest, which can name a
+  frame the cache does not hold yet, so the publishers still answer with the
+  buffered edge. A public live signal is
+  [its own quest](/quest/m1/track-live.md). Decide here whether wire answers move to it, and
   with them `latest_sequence` on `track::{Producer,Consumer,Subscriber}`,
   the private snapshot that replaced the public `latest()` (#5725).
 - **Cursor** (`track::Subscriber::start_at`, `raise_start_to`, `end_at`,
@@ -62,6 +63,11 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     `largest()` reports within both the floor and the cap, so a reader whose
     floor sits above the live edge reports nothing until a group reaches it
     (#5924).
+  - ✅ `largest()` reports only upstream-confirmed state (maintainer,
+    2026-10-19): the source's reported largest and what its live feed
+    delivered since, never a cache-derived stand-in. It waits while the copy
+    is idle, though cached groups are still served, and past the cap it
+    reports nothing rather than the newest cached group below it (#5924).
   - A second public `replace_groups`.
 - **Bounds naming** (decided 2026-10-16 in #5717, changed to "range" by the
   maintainer on 2026-10-19): ✅ the siblings follow:
