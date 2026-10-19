@@ -12,6 +12,7 @@
 //!
 //! A task poll that makes more than 4096 ready kio polls panics with the caller's
 //! source location, so a loop that forgets to yield fails instead of starving its siblings.
+//! Each `kio::Tasks` child poll counts on its own, like a spawned task.
 //!
 //! Caller-driven state machines take time from their caller:
 //! [`drive`](crate::drive) polls one with the simulated instant, and [`attach`]
@@ -640,6 +641,40 @@ mod tests {
 		assert!(std::panic::catch_unwind(|| run(async { spin() })).is_err());
 		spin();
 		run(async {});
+	}
+
+	#[crate::test]
+	async fn a_large_task_set_counts_each_child_alone() {
+		let producer = kio::Producer::new(());
+		let mut tasks = kio::Tasks::new();
+		for _ in 0..10_000 {
+			let consumer = producer.consume();
+			tasks.push(move |waiter: &kio::Waiter| consumer.poll(waiter, |_| Poll::Ready(())).map(drop));
+		}
+		kio::wait(|waiter| tasks.poll(waiter)).await;
+	}
+
+	#[test]
+	#[should_panic(expected = "kio Ready poll limit")]
+	fn a_spinning_task_set_child_fails() {
+		run(async {
+			let mut tasks = kio::Tasks::new();
+			tasks.push(|_: &kio::Waiter| {
+				spin();
+				Poll::Ready(())
+			});
+			kio::wait(|waiter| tasks.poll(waiter)).await;
+		});
+	}
+
+	#[test]
+	fn a_task_set_outside_the_simulator_counts_nothing() {
+		let mut tasks = kio::Tasks::new();
+		tasks.push(|_: &kio::Waiter| {
+			spin();
+			Poll::Ready(())
+		});
+		assert!(tasks.poll(&kio::Waiter::noop()).is_ready());
 	}
 
 	fn at(secs: u64) -> Instant {

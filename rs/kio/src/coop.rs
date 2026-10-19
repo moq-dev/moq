@@ -14,18 +14,29 @@ thread_local! {
 	static READY: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
+/// Restores the enclosing count, even when a spawned task panics and its executor
+/// catches the panic.
+#[cfg(feature = "sim")]
+struct Reset(Option<usize>);
+
+#[cfg(feature = "sim")]
+impl Drop for Reset {
+	fn drop(&mut self) {
+		READY.set(self.0);
+	}
+}
+
 /// Count ready kio polls until the returned guard drops, panicking if the task spins.
 #[cfg(feature = "sim")]
 #[must_use = "keep the guard until the task poll returns"]
 pub fn scope() -> impl Drop {
-	struct Reset(Option<usize>);
-	impl Drop for Reset {
-		fn drop(&mut self) {
-			READY.set(self.0);
-		}
-	}
-	// Restore even when a spawned task panics and its executor catches the panic.
 	Reset(READY.replace(Some(0)))
+}
+
+/// Give a [`Tasks`](crate::Tasks) child's poll its own count, but only inside a counting scope.
+#[cfg(feature = "sim")]
+pub(crate) fn child() -> impl Drop {
+	Reset(READY.replace(READY.get().map(|_| 0)))
 }
 
 #[inline]

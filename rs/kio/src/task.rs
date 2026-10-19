@@ -403,6 +403,10 @@ impl<T: Task<Output = ()>> Tasks<T> {
 					}
 					let cx = Context::from_waker(&self.wakers[index]);
 					let child_waiter = occupant.park.hold(&cx);
+					// Each child is its own task, so a large sweep of finite children is not
+					// one spinning poll.
+					#[cfg(feature = "sim")]
+					let _scope = crate::coop::child();
 					if occupant.task.poll(child_waiter).is_ready() {
 						self.children[index] = None;
 						self.free.push(index);
