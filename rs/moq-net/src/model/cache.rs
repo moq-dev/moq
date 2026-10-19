@@ -164,6 +164,10 @@ struct Inner {
 	wall_micros: AtomicU64,
 	// Tracks with reads parked on a wall-clock deadline, by their earliest one.
 	wall: kio::Lock<WallDeadlines>,
+	// Hand-offs holding a failed group's head for a successor route, oldest first. The
+	// heads sit outside every track's eviction order, so the pool reclaims them itself:
+	// first under capacity pressure, and once its idle window passes.
+	held: Mutex<Vec<Weak<group::Handoff>>>,
 }
 
 /// The pool-wide index of wall-clock deadlines that [`Pool::gc`] fires.
@@ -218,6 +222,7 @@ impl Pool {
 				wall_epoch: OnceLock::new(),
 				wall_micros: AtomicU64::new(0),
 				wall: kio::Lock::default(),
+				held: Mutex::default(),
 			}),
 		}
 	}
@@ -275,8 +280,56 @@ impl Pool {
 			.map(|window| window / 2)
 	}
 
-	/// Expire idle groups across the registered tracks.
+	/// Have the pool drop `handoff`'s held head under capacity pressure, oldest first, or
+	/// once its idle window passes.
+	pub(super) fn hold_head(&self, handoff: &Arc<group::Handoff>) {
+		let mut held = self.inner.held.lock().unwrap_or_else(PoisonError::into_inner);
+		// Forget the hand-offs done with before growing, so a burst of failed groups whose
+		// heads recovery adopts at once grows the registry no further than the heads held.
+		if held.len() == held.capacity() {
+			self.prune_held(&mut held);
+		}
+		held.push(Arc::downgrade(handoff));
+	}
+
+	/// Drop held heads, oldest first, while the pool is over capacity.
+	pub(super) fn reclaim_held(&self) {
+		if self.used() > self.inner.capacity.load(Ordering::Relaxed) {
+			let mut held = self.inner.held.lock().unwrap_or_else(PoisonError::into_inner);
+			self.prune_held(&mut held);
+		}
+	}
+
+	/// Drop the held heads past the idle window, then the oldest while the pool is over
+	/// capacity, and forget the hand-offs holding none.
+	fn prune_held(&self, held: &mut Vec<Weak<group::Handoff>>) {
+		held.retain(|handoff| {
+			let Some(handoff) = handoff.upgrade() else {
+				return false;
+			};
+			let over = self.used() > self.inner.capacity.load(Ordering::Relaxed);
+			!handoff.expire(over)
+		});
+	}
+
+	#[cfg(test)]
+	pub(super) fn held_capacity(&self) -> usize {
+		self.inner
+			.held
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.capacity()
+	}
+
+	/// Expire idle groups and held heads across the registered tracks.
 	pub(super) fn sweep(&self) {
+		{
+			let mut held = self.inner.held.lock().unwrap_or_else(PoisonError::into_inner);
+			self.prune_held(&mut held);
+			// Give back what a burst of held heads grew it to, which the pool no longer bills.
+			let len = held.len();
+			held.shrink_to(len * 2);
+		}
 		// Upgrade outside each track's lock: dropping its last account unregisters it.
 		let tracks: Vec<_> = self
 			.inner
@@ -646,10 +699,6 @@ pub(super) struct Track {
 	// Here rather than on the track state so a frame write advances it without the track
 	// lock, and wakes only the readers following it.
 	largest: kio::Shared<Largest>,
-
-	// Hand-offs holding a failed group's head for a successor route, which the sweep
-	// expires like idle groups. Only filled while the pool sweeps.
-	held: Mutex<Vec<Weak<group::Handoff>>>,
 }
 
 /// The greatest location a track has written or its source reported, followed by the track
@@ -743,7 +792,6 @@ impl Track {
 			wakes: Default::default(),
 			aborts: OnceLock::new(),
 			largest: Default::default(),
-			held: Mutex::default(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -810,7 +858,7 @@ impl Track {
 	///
 	/// Readers that stop polling can hold a hand-off indefinitely, so the head is billed
 	/// like cached content and bounded the same way: `None` when it would take the pool past
-	/// its capacity, and [`Self::expire_held`] drops it once the pool's idle window passes.
+	/// its capacity, and [`Pool::hold_head`] has the pool reclaim it like idle content.
 	pub(super) fn hold(self: &Arc<Self>, bytes: u64) -> Option<Bill> {
 		if self
 			.pool
@@ -825,38 +873,6 @@ impl Track {
 			bytes,
 			at: self.pool.now(),
 		})
-	}
-
-	/// Have the sweep drop `handoff`'s held head once the pool's idle window passes.
-	pub(super) fn expire_held(&self, handoff: &Arc<group::Handoff>) {
-		if self.sweep.get().is_some() {
-			let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
-			// Forget the hand-offs done with before growing, so a burst of failed groups whose
-			// heads recovery adopts at once grows the registry no further than the heads held.
-			if held.len() == held.capacity() {
-				Self::prune_held(&mut held);
-			}
-			held.push(Arc::downgrade(handoff));
-		}
-	}
-
-	/// Drop the held heads past the pool's idle window, forgetting the hand-offs done with.
-	fn sweep_held(&self) {
-		let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
-		Self::prune_held(&mut held);
-		// Give back what a burst of held heads grew it to, which the pool no longer bills.
-		let len = held.len();
-		held.shrink_to(len * 2);
-	}
-
-	/// Expire the held heads past the window and forget the hand-offs holding none.
-	fn prune_held(held: &mut Vec<Weak<group::Handoff>>) {
-		held.retain(|handoff| handoff.upgrade().is_some_and(|handoff| !handoff.expire()));
-	}
-
-	#[cfg(test)]
-	pub(super) fn held_capacity(&self) -> usize {
-		self.held.lock().unwrap_or_else(PoisonError::into_inner).capacity()
 	}
 
 	/// Take everything written since the last call, to be turned into eviction debt.
@@ -881,7 +897,6 @@ impl Track {
 
 	/// Settle from [`Pool::sweep`], dating activity and expiring every idle candidate.
 	pub(super) fn sweep(&self) {
-		self.sweep_held();
 		self.settle_inner(None, true);
 	}
 

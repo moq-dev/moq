@@ -236,11 +236,14 @@ impl Handoff {
 		salvaged.or_else(|| state.head().map(Arc::new))
 	}
 
-	/// Drop the held head once the pool's idle window passed, returning whether none is
-	/// held any more.
-	pub(super) fn expire(&self) -> bool {
+	/// Drop the held head when `reclaim`, or once the pool's idle window passed, returning
+	/// whether none is held any more.
+	pub(super) fn expire(&self, reclaim: bool) -> bool {
 		let mut salvaged = self.salvaged.lock().unwrap_or_else(PoisonError::into_inner);
-		if salvaged.as_ref().is_some_and(|salvage| salvage.bill.expired()) {
+		if salvaged
+			.as_ref()
+			.is_some_and(|salvage| reclaim || salvage.bill.expired())
+		{
 			*salvaged = None;
 		}
 		salvaged.is_none()
@@ -627,7 +630,7 @@ impl GroupState {
 			};
 			*handoff.salvaged.lock().unwrap_or_else(PoisonError::into_inner) = Some(salvage);
 			// Only once it is held: a sweep finding the hand-off empty forgets it.
-			track.expire_held(&handoff);
+			track.pool().hold_head(&handoff);
 		}
 	}
 }
@@ -3128,15 +3131,15 @@ mod test {
 		for sequence in 0..BURST as u64 {
 			drop(fail(sequence));
 		}
-		assert!(cache.held_capacity() < BURST, "adopted hand-offs pinned the registry");
+		assert!(pool.held_capacity() < BURST, "adopted hand-offs pinned the registry");
 
 		// Readers that stop polling hold every head until the window passes.
 		let held: Vec<_> = (0..BURST as u64).map(fail).collect();
-		assert!(cache.held_capacity() >= BURST);
+		assert!(pool.held_capacity() >= BURST);
 		pool.step(std::time::Duration::from_secs(2));
 		pool.sweep();
 		assert!(held.iter().all(|handoff| handoff.head().is_none()));
-		assert!(cache.held_capacity() < BURST, "the sweep kept a burst's allocation");
+		assert!(pool.held_capacity() < BURST, "the sweep kept a burst's allocation");
 	}
 
 	/// A failed copy's head is held only while the pool has room for it.
