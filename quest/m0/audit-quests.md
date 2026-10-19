@@ -22,3 +22,45 @@ follow-up through `/quest-plan`.
 Run `/quest-audit`. After a release cut shifts the milestones, also check
 that the move left no broken links or misplaced quests. Until now, audits ran
 ad hoc (2026-09-30, 10-05, 10-08, 10-10).
+
+Checkpoint, 2026-10-19, against `main` at `2e1ec2ebf`:
+
+- Read all 438 documents: m0, m3, and global structure in the coordinating
+  audit, with parallel reviewers for all 133 m1 and 222 m2 documents.
+  Structural validation found no broken links, cycles, or prerequisites in
+  a later milestone.
+- Retired datagram priority: #5770 (`79005b06d`) and #5872 (`8e3966cd3`)
+  already contain the scheduler, publisher integration, saturation and
+  eviction tests, fan-out benchmarks, and draft updates. Broadcast-domain
+  exposure remains owned by track-priority-scope.
+- Encoded the already-decided timestamp, E2EE naming-design, and BBR audit
+  prerequisites. Corrected stale paths, epoch discovery, accepted refresh
+  recovery behavior, mobile priority, and the landed error, shard, benchmark
+  site, and wire-accounting work. Cut-through and BBR performance judgments
+  now follow the existing bufferbloat policy; historical loss data remains.
+- Four closed linked issues still have explicitly planned or in-flight
+  work. Their closure alone was not treated as evidence to retire a quest.
+  Open implementation PRs were not treated as merged work.
+- `quest check` passes for the remaining 437 documents, as does
+  `git diff --check`. The full `just check` exit was not captured; its
+  attempted capture run was rejected because another suite was running.
+
+This run remains open, with no successor, until the unresolved conflicts are
+settled. The unattended instruction was to skip uncertain choices:
+
+- [Auth issuer](/quest/m1/auth/issuer.md) specifies a shared handle and one
+  live session's grant, but not how independent concurrent sessions select
+  grants and refusals. Existing reconnect code only designates one active
+  generation alongside draining predecessors.
+- [Binding linger](/quest/m1/linger-ffi.md) extends the hand-written C ABI,
+  while [generated C](/quest/m1/c/README.md) freezes it except claim safety.
+- [Catalog HLS](/quest/m1/archive/catalog-hls.md) names `.hls.z` tracks,
+  while [compression migration](/quest/m1/compress/migrate.md) removes `.z`
+  names. Their shared timeline edits need a consistent final name and order.
+- [Priority scope](/quest/m1/track-priority-scope.md) still preserves old
+  archive priority encoding, while [archive](/quest/m1/archive/README.md)
+  replaces the old layout without migration. The ladder also assumes a
+  publisher-priority tiebreak that priority scope still asks to decide.
+- Per-request auth planning is separately owned by
+  [#5972](https://github.com/moq-dev/moq/pull/5972), following the rejection
+  of #5927. Preserve that owner's decisions and reconcile after it lands.
