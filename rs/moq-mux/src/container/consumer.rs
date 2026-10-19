@@ -3556,7 +3556,7 @@ mod tests {
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500)));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
-		let group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		group0.finish().unwrap();
 
 		write_group(&mut track, 1, &[ts(30_000)]);
