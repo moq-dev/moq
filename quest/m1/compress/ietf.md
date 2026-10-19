@@ -6,7 +6,7 @@ Two moq-transport draft-16+ peers that both advertise the compression setup
 parameter exchange a compressed track as compressed bytes, with a track
 property flagging it and an object extension declaring each object's
 inflated size. An IETF peer without the parameter, and draft-14/15, get the
-inflated copy as today after [Core](/quest/m1/compress/core.md). moq-relay
+inflated copy as today. moq-relay
 accepts a compressed track from a negotiated IETF publisher and forwards it
 compressed on lite-07.
 
@@ -31,7 +31,3 @@ reads plain. Run `just test interop --all`.
 
 Public API: none beyond Core. Wire: a new setup parameter, track property,
 and object extension on draft-16+.
-
-## Required
-
-- [Core](/quest/m1/compress/core.md) - the model stores compressed groups and serves the shared inflated copy
