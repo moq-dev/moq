@@ -1386,26 +1386,22 @@ impl Producer {
 
 	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
 		let cut = !matches!(err, Error::Old | Error::Timeout | Error::Evicted);
+		// Cache policy frees the frames, as does an oversized group whichever write found
+		// it; a copy that failed or was given up lends them on.
+		let salvage = cut && !matches!(err, Error::GroupTooLarge);
 		guard.abort = Some(err);
 		self.alive.cut.store(cut, Ordering::Release);
 		self.alive.aborted.store(true, Ordering::Release);
-		// Cache policy frees the frames; a copy that failed or was given up lends them on.
-		guard.release(cut);
+		guard.release(salvage);
 		guard.close();
 		self.cache.aborted(self.sequence, cut);
 	}
 
 	/// Abort a write that would grow the group past its budget, holding the lock already
 	/// taken for that write so nothing else lands in between.
-	fn abort_too_large(&self, mut state: kio::Mut<'_, GroupState>) -> Error {
-		let err = Error::GroupTooLarge;
-		state.abort = Some(err.clone());
-		self.alive.cut.store(true, Ordering::Release);
-		self.alive.aborted.store(true, Ordering::Release);
-		state.release(false);
-		state.close();
-		self.cache.aborted(self.sequence, true);
-		err
+	fn abort_too_large(&self, state: kio::Mut<'_, GroupState>) -> Error {
+		self.commit_abort(state, Error::GroupTooLarge);
+		Error::GroupTooLarge
 	}
 
 	/// Whether the group has been aborted (including pool eviction). The track's
@@ -3062,10 +3058,11 @@ mod test {
 	}
 
 	/// A failed copy moves its frames to the readers that could resume it, so they outlive
-	/// the release only as long as one of those readers does; cache policy keeps nothing.
+	/// the release only as long as one of those readers does; cache policy and an oversized
+	/// group keep nothing.
 	#[test]
 	fn an_abort_hands_the_head_to_its_resumers() {
-		for (err, kept) in [(Error::Cancel, true), (Error::Evicted, false)] {
+		for (err, kept) in [(Error::Cancel, true), (Error::Evicted, false), (Error::GroupTooLarge, false)] {
 			let pool = cache::Pool::unbounded();
 			let cache = cache::Track::new(pool.clone(), kio::Weak::new());
 			let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
