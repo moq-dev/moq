@@ -1,5 +1,6 @@
 //! The track-free half of stream consuming: frame payloads in, records out.
 
+use std::cell::RefCell;
 use std::marker::PhantomData;
 
 use serde::de::DeserializeOwned;
@@ -17,6 +18,8 @@ pub struct Decoder<T> {
 	/// The DEFLATE decoder (one window for the whole log), `Some` while decompressing.
 	flate: Option<moq_flate::Decoder>,
 	compression: bool,
+	/// Reused key buffers for refusing a record that repeats a key.
+	check: RefCell<crate::strict::Scratch>,
 	_marker: PhantomData<fn() -> T>,
 }
 
@@ -26,6 +29,7 @@ impl<T> Decoder<T> {
 		Self {
 			flate: config.compression.is_deflate().then(moq_flate::Decoder::new),
 			compression: config.compression.is_deflate(),
+			check: RefCell::default(),
 			_marker: PhantomData,
 		}
 	}
@@ -39,10 +43,10 @@ impl<T> Decoder<T> {
 impl<T: DeserializeOwned> Decoder<T> {
 	/// Decode the next frame payload back into a record.
 	pub fn decode(&mut self, payload: &[u8]) -> Result<T> {
-		Ok(match self.flate.as_mut() {
-			Some(flate) => serde_json::from_slice(&flate.frame(payload)?)?,
-			None => serde_json::from_slice(payload)?,
-		})
+		let inflated = self.flate.as_mut().map(|flate| flate.frame(payload)).transpose()?;
+		let plain = inflated.as_deref().unwrap_or(payload);
+		crate::strict::check(plain, &self.check)?;
+		Ok(serde_json::from_slice(plain)?)
 	}
 }
 
@@ -130,6 +134,19 @@ mod test {
 		let record = encoder.encode(&json!({ "n": 99 })).unwrap();
 		assert_eq!(decoder.decode(record.payload()).unwrap(), json!({ "n": 99 }));
 		record.commit();
+	}
+
+	#[test]
+	fn duplicate_keys_are_refused() {
+		let vectors = crate::strict::test::vectors();
+		let mut decoder = Decoder::<Value>::new(cfg(false));
+		for payload in &vectors.refused {
+			let err = decoder.decode(payload.as_bytes()).unwrap_err();
+			assert!(matches!(err, crate::Error::DuplicateKey), "{payload}: {err}");
+		}
+		for payload in &vectors.accepted {
+			decoder.decode(payload.as_bytes()).unwrap();
+		}
 	}
 }
 

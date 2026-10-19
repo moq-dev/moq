@@ -215,7 +215,7 @@ export class Connection implements Established {
 			hidden,
 			activeCount,
 			cluster,
-			grant: this.#auth.grant,
+			grant: this.#auth.scope,
 			auth: this.#auth,
 			ready: this.#auth.setupAnswered(),
 		});
@@ -230,7 +230,7 @@ export class Connection implements Established {
 			activeCount,
 			solicit,
 			goaway: this.#goaway,
-			grant: this.#auth.grant,
+			grant: this.#auth.scope,
 		});
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
