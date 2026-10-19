@@ -35,10 +35,10 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 - [Relay burst drill](/quest/m1/test-flakes-2/relay-burst-impaired.md) - the impaired transport-peer burst drill never aborts its subscription while the link is up
 - [BBR marking seed](/quest/m1/test-flakes-2/bbr-marking-seed.md) - the BBR marking test seeds its probe schedule, replays a failing seed, and its rare drop is fixed at the cause
 - [WASM refused track](/quest/m1/test-flakes-2/wasm-refused-track.md) - the refused-track case passes and fails on its refusal, not a timeout
+
 ## Related
 
 - [Controlled time](/quest/m1/time/README.md) - the systemic fix these rules ask for: every crate on a controlled clock
