@@ -171,8 +171,10 @@ moq ... play --no-video --metrics play.ndjson   # log what the speaker played
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
-available, and Opus, PCM, and AAC-LC audio in software. The opt-in `vpx`
-feature adds software VP8 and VP9 through the build host's libvpx. The log
+available, and Opus, PCM, and AAC-LC audio in software. The opt-in `openh264`
+feature adds software H.264, which a host without a hardware decoder needs, and
+the opt-in `vpx` feature adds software VP8 and VP9 through the build host's
+libvpx. The log
 names the decoder each track opened.
 
 Playback starts at the newest group and trails the live edge by `--delay`. The
@@ -197,7 +199,7 @@ Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
 
 ```bash
-cargo install moq-cli --no-default-features --features "quic,websocket,play"
+cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
 ```
 
 `moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
@@ -212,8 +214,8 @@ moq ... import capture --window --no-audio               # system window picker 
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
 ```
 
-Video goes through the platform hardware encoder with an H.264 software
-fallback, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
+Video goes through the platform hardware encoder, with an H.264 software
+fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
 backends. The camera opens only while someone is watching, and `--bitrate` is a
 ceiling that backends with live bitrate control lower to fit the connection.
 `moq devices` prints every source id. On Windows, `display:N` is an
@@ -227,7 +229,8 @@ The portal may reuse its grant when capture reopens within the same process;
 a new process shows the picker again. Bare `--window` requires a Linux build
 with `pipewire`; other builds require an explicit window id.
 
-Requires the `capture` feature. On Linux the microphone needs the ALSA
+Requires the `capture` feature, plus `openh264` on a host without a hardware
+encoder. On Linux the microphone needs the ALSA
 headers, and Portal screen/window capture and `pipewire:` cameras also need the `pipewire`
 feature (links libpipewire).
 
@@ -248,7 +251,7 @@ largest rendition this host can decode, so a software-only host transcodes
 from H.264 rather than a larger H.265 or AV1 one. When the source changes
 resolution, rungs are resolved again: one that no longer fits finishes, and
 one whose size changed comes back under a new name (`video/360p.2`). Requires
-the `transcode` feature.
+the `transcode` feature, plus `openh264` on a host without a hardware encoder.
 
 ## Announced
 

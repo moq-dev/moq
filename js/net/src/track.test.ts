@@ -2752,3 +2752,218 @@ test("an untimed track takes groups in any order", () => {
 		group.close();
 	}
 });
+
+// A received track as a wire subscription leaves it: the feed starts at group 0 and its end is
+// pending, so lower groups may still arrive behind a higher one.
+function pendingTail(end: number, maxDelay = Milli(60_000)) {
+	const producer = new TrackProducer("test");
+	const reader = producer.subscribe({ maxDelay });
+	hooks.startTrack(producer, { start: 0 });
+	hooks.endTrack(producer, { group: end, frame: 0 });
+	const write = (sequence: number) => {
+		const group = new GroupProducer(sequence);
+		group.close();
+		producer.writeGroup(group);
+	};
+	return { producer, reader, write };
+}
+
+/** Whether `read` settled once every pending microtask and timer callback ran. */
+async function settled(read: Promise<unknown>): Promise<boolean> {
+	let done = false;
+	read.then(
+		() => (done = true),
+		() => (done = true),
+	);
+	await settle();
+	return done;
+}
+
+test("a pending tail holds readers at a hole until it fills", async () => {
+	const { producer, reader, write } = pendingTail(3);
+	write(2);
+	expect((await reader.recvGroup())?.sequence).toBe(2);
+	let next = reader.recvGroup();
+	expect(await settled(next)).toBe(false);
+
+	write(0);
+	expect((await next)?.sequence).toBe(0);
+	next = reader.recvGroup();
+	expect(await settled(next)).toBe(false);
+
+	write(1);
+	expect((await next)?.sequence).toBe(1);
+	expect(await reader.recvGroup()).toBeUndefined();
+	expect(reader.closed.peek()).toBeUndefined();
+	producer.close();
+});
+
+test("a pending tail ends readers at the boundary once the track closes", async () => {
+	const { producer, reader, write } = pendingTail(2);
+	write(1);
+	expect((await reader.recvGroup())?.sequence).toBe(1);
+	const next = reader.recvGroup();
+	expect(await settled(next)).toBe(false);
+
+	producer.close();
+	expect(await next).toBeUndefined();
+	expect(await reader.closed).toBeNull();
+});
+
+test("without a declared start, the first arrival stands in for it", async () => {
+	const producer = new TrackProducer("test");
+	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
+	hooks.endTrack(producer, { group: 3, frame: 0 });
+	const group = new GroupProducer(2);
+	group.close();
+	producer.writeGroup(group);
+	expect((await reader.recvGroup())?.sequence).toBe(2);
+	expect(await reader.recvGroup()).toBeUndefined();
+	producer.close();
+});
+
+// SUBSCRIBE_START answers the floor its SUBSCRIBE asked for, so it holds only while the demand
+// keeps that floor: a lowered floor owes the groups it newly asks for.
+test("a pending tail owes from SUBSCRIBE_START while the demand keeps its floor", async () => {
+	const producer = new TrackProducer("test");
+	const reader = producer.subscribe({ maxDelay: Milli(60_000), groups: { start: { included: 1 } } });
+	hooks.startTrack(producer, { start: 3, requested: 1 });
+	hooks.endTrack(producer, { group: 4, frame: 0 });
+	const group = new GroupProducer(3);
+	group.close();
+	producer.writeGroup(group);
+	expect((await reader.recvGroup())?.sequence).toBe(3);
+	expect(await reader.recvGroup()).toBeUndefined();
+
+	const lower = producer.subscribe({ maxDelay: Milli(60_000), groups: { start: { included: 0 } } });
+	expect((await lower.recvGroup())?.sequence).toBe(3);
+	const next = lower.recvGroup();
+	expect(await settled(next)).toBe(false);
+	producer.close();
+	expect(await next).toBeUndefined();
+});
+
+// The wire's end can land after the highest group, with lower groups still owed.
+test("an end after the highest group holds the reader at the hole", async () => {
+	const producer = new TrackProducer("test");
+	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
+	hooks.startTrack(producer, { start: 0 });
+	const high = new GroupProducer(2);
+	high.close();
+	producer.writeGroup(high);
+	expect((await reader.recvGroup())?.sequence).toBe(2);
+	const next = reader.recvGroup();
+
+	hooks.endTrack(producer, { group: 3, frame: 0 });
+	expect(await settled(next)).toBe(false);
+	for (const sequence of [0, 1]) {
+		const low = new GroupProducer(sequence);
+		low.close();
+		producer.writeGroup(low);
+	}
+	expect((await next)?.sequence).toBe(0);
+	expect((await reader.recvGroup())?.sequence).toBe(1);
+	expect(await reader.recvGroup()).toBeUndefined();
+	producer.close();
+});
+
+// A group the tail still owed was cut off, so readers get the abort rather than a clean end
+// without it.
+test("an abort errors a pending tail short of a group", async () => {
+	const { producer, reader, write } = pendingTail(2);
+	write(1);
+	expect((await reader.recvGroup())?.sequence).toBe(1);
+	const next = reader.recvGroup();
+	expect(await settled(next)).toBe(false);
+
+	producer.close(new Error("dropped"));
+	await expect(next).rejects.toThrow("dropped");
+});
+
+test("an abort after a full tail ends cleanly", async () => {
+	const { producer, reader, write } = pendingTail(2);
+	write(1);
+	write(0);
+	producer.close(new Error("dropped"));
+	expect((await reader.recvGroup())?.sequence).toBe(0);
+	expect((await reader.recvGroup())?.sequence).toBe(1);
+	expect(await reader.recvGroup()).toBeUndefined();
+	expect(await reader.closed).toBeNull();
+});
+
+// A gap the grace already gave up on was lost before the abort, not cut off by it, so readers
+// end cleanly. Within the grace, the same abort errors them.
+for (const [waited, clean] of [
+	[500, false],
+	[1000, true],
+] as const) {
+	test(`an abort ${waited}ms after a hole opened ${clean ? "ends" : "errors"} a pending tail`, async () => {
+		const clock = manualTime(0);
+		try {
+			// The subscription's max delay is the grace the hole is waited for.
+			const { producer, reader, write } = pendingTail(3, Milli(1000));
+			write(0);
+			write(2);
+			expect((await reader.recvGroup())?.sequence).toBe(0);
+			expect((await reader.recvGroup())?.sequence).toBe(2);
+			const next = reader.recvGroup();
+			expect(await settled(next)).toBe(false);
+
+			clock.set(waited);
+			producer.close(new Error("dropped"));
+			if (clean) expect(await next).toBeUndefined();
+			else await expect(next).rejects.toThrow("dropped");
+		} finally {
+			clock.restore();
+		}
+	});
+}
+
+// Judged by what arrived, not by the cache, so an evicted group still counts.
+test("an evicted group still fills a pending tail", async () => {
+	const clock = manualTime(0);
+	try {
+		const { producer, reader, write } = pendingTail(3);
+		for (const sequence of [0, 1]) {
+			write(sequence);
+			expect((await reader.recvGroup())?.sequence).toBe(sequence);
+		}
+		clock.set(CACHE_WINDOW_MS + 1000);
+		write(2);
+		// A late subscriber replays only what the cache still holds.
+		expect(producer.subscribe({ maxDelay: Milli(60_000) }).tryRecvGroup()?.sequence).toBe(2);
+		expect((await reader.recvGroup())?.sequence).toBe(2);
+		expect(await reader.recvGroup()).toBeUndefined();
+		producer.close();
+	} finally {
+		clock.restore();
+	}
+});
+
+test("a datagram fills its sequence in a pending tail", async () => {
+	const { producer, reader, write } = pendingTail(2);
+	producer.insertDatagram(0, undefined, enc.encode("x"));
+	write(1);
+	expect((await reader.recvGroup())?.sequence).toBe(1);
+	expect(await reader.recvGroup()).toBeUndefined();
+	producer.close();
+});
+
+// SUBSCRIBE_DROP says the publisher gave the range up, so the tail owes nothing there: readers
+// end at the boundary, and a later abort cut nothing off.
+for (const abort of [false, true]) {
+	test(`a dropped range ends a pending tail cleanly${abort ? " despite a later abort" : ""}`, async () => {
+		const { producer, reader, write } = pendingTail(3);
+		write(2);
+		expect((await reader.recvGroup())?.sequence).toBe(2);
+		const next = reader.recvGroup();
+		expect(await settled(next)).toBe(false);
+
+		hooks.dropTrackGroups(producer, 0, 2);
+		if (abort) producer.close(new Error("dropped"));
+		expect(await next).toBeUndefined();
+		if (abort) expect(await reader.closed).toBeNull();
+		else expect(reader.closed.peek()).toBeUndefined();
+		producer.close();
+	});
+}
