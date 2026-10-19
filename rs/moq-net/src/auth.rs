@@ -1936,14 +1936,14 @@ mod tests {
 			crate::Path::new("room").to_owned(),
 			Direction::Subscribe,
 		);
-		let mut operation = std::pin::pin!(gate.guard(async { Ok(()) }));
 		let waiter = kio::Waiter::noop();
 		assert!(
-			waiter.poll_future(operation.as_mut()).is_pending(),
+			gate.poll_ready(&waiter).is_pending(),
 			"request refused before token answered"
 		);
 		handle.granted(token.presented.id, Grant::all());
-		assert!(matches!(waiter.poll_future(operation.as_mut()), Poll::Ready(Ok(()))));
+		assert!(gate.poll_ready(&waiter).is_ready());
+		assert!(gate.poll_denied(&waiter).is_pending());
 	}
 
 	#[test]
