@@ -138,8 +138,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	unplaced: BTreeMap<u16, u64>,
 	/// Private PES streams refused rather than carried altered, keyed by PID.
 	refused: BTreeMap<u16, u64>,
-	/// Private PES streams refused only for want of a PCR, carried once a PMT names one.
-	unclocked: HashSet<Pid>,
+	/// The `stream_type` of each private PES stream refused only for want of a PCR, routed again
+	/// once a PMT names one or gives the PID another type.
+	unclocked: HashMap<Pid, u8>,
 	/// One program-wide budget for PES payloads and sections awaiting their clock.
 	staging: Arc<Staging>,
 	/// The TR 101 290 checks, and the per-PID continuity state routing reads.
@@ -241,7 +242,7 @@ impl<E: catalog::Catalog> Import<E> {
 			placement: Placement::default(),
 			unplaced: BTreeMap::new(),
 			refused: BTreeMap::new(),
-			unclocked: HashSet::new(),
+			unclocked: HashMap::new(),
 			staging: Arc::default(),
 			health: Health::default(),
 			pcr_pid: None,
@@ -600,14 +601,21 @@ impl<E: catalog::Catalog> Import<E> {
 			self.headers.remove(&pid);
 		}
 		// A private PES stream follows the PMT's PCR_PID: refused while there is none to place
-		// its PES by, and carried again once there is.
+		// its PES by, and routed again once there is, or once the PID carries another type.
 		match self.streams.get(&pid) {
-			Some(Stream::PesPacket(_)) if self.pcr_pid.is_none() => {
+			Some(Stream::PesPacket(stream)) if self.pcr_pid.is_none() => {
+				let carried = stream.stream_type;
 				self.refuse(pid, "the program lost the PCR that placed it")?;
-				self.unclocked.insert(pid);
+				self.unclocked.insert(pid, carried);
 				return Ok(());
 			}
-			Some(Stream::Ignored) if self.pcr_pid.is_some() && self.unclocked.remove(&pid) => {
+			Some(Stream::Ignored)
+				if self
+					.unclocked
+					.get(&pid)
+					.is_some_and(|&refused| self.pcr_pid.is_some() || refused != stream_type) =>
+			{
+				self.unclocked.remove(&pid);
 				self.streams.remove(&pid);
 			}
 			Some(_) => return Ok(()),
@@ -696,7 +704,7 @@ impl<E: catalog::Catalog> Import<E> {
 							"refused a private PES stream in a program with no PCR to place it by"
 						);
 						*self.refused.entry(pid.as_u16()).or_default() += 1;
-						self.unclocked.insert(pid);
+						self.unclocked.insert(pid, stream_type);
 						Stream::Ignored
 					} else {
 						let descriptors = descriptors.to_vec();
@@ -888,8 +896,9 @@ impl<E: catalog::Catalog> Import<E> {
 		// A whole PES keeps its header, and is placed by the PCR before it and the one after.
 		let (header, data_len, span) = match whole {
 			Some(_) => {
-				let generation = self.placement.generation;
-				let Some(mut span) = span.filter(|span| span.generation == generation) else {
+				// A span whose timebase ended while its header assembled was settled with it, or
+				// is dropped as unplaced at release.
+				let Some(span) = span else {
 					// Before the first PCR on this timebase nothing places it. A PTS it carried still
 					// anchored the timebase, so it releases the reservation like a flushed PES would.
 					if pts.is_some() {
@@ -898,10 +907,6 @@ impl<E: catalog::Catalog> Import<E> {
 					*self.unplaced.entry(pid.as_u16()).or_default() += 1;
 					return Ok(());
 				};
-				// A PCR that landed while the header spanned packets is the one after it.
-				if let Some(&after) = self.placement.samples.iter().find(|sample| sample.at > span.at) {
-					span.bracket(generation, after);
-				}
 				let len = pes.data_len.map(|len| pes.header.len() + len);
 				(pes.header, len, Some(span))
 			}
@@ -1033,10 +1038,11 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		let sample = self.placement.pcr(raw, offset + PCR_OFFSET);
 		let generation = self.placement.generation;
-		for pending in self.pending.values_mut() {
-			if let Some(span) = pending.span.as_mut() {
-				span.bracket(generation, sample);
-			}
+		// A PES still assembling its header is bracketed too, so the first PCR past its start
+		// code places it however many arrive before the header is whole.
+		let spans = self.pending.values_mut().filter_map(|pending| pending.span.as_mut());
+		for span in spans.chain(self.headers.values_mut().filter_map(|(span, _)| span.as_mut())) {
+			span.bracket(generation, sample);
 		}
 		for stream in self.streams.values_mut() {
 			if let Stream::PesPacket(stream) = stream {
@@ -1049,10 +1055,9 @@ impl<E: catalog::Catalog> Import<E> {
 	/// End the placement timebase: extrapolate every whole PES begun past its last PCR from its
 	/// last two, and publish what that places.
 	fn settle_placement(&mut self) -> anyhow::Result<()> {
-		for pending in self.pending.values_mut() {
-			if let Some(span) = pending.span.as_mut() {
-				span.settle(&self.placement);
-			}
+		let spans = self.pending.values_mut().filter_map(|pending| pending.span.as_mut());
+		for span in spans.chain(self.headers.values_mut().filter_map(|(span, _)| span.as_mut())) {
+			span.settle(&self.placement);
 		}
 		for stream in self.streams.values_mut() {
 			if let Stream::PesPacket(stream) = stream {
@@ -9344,5 +9349,37 @@ pub(super) mod test {
 		assert_eq!(catalog.audio.renditions.len(), 1, "only the MP2 track");
 		let audio = catalog.audio.renditions.values().next().unwrap();
 		assert_eq!(audio.codec.to_string(), "mp2");
+	}
+
+	/// A PID refused as private PES for want of a PCR routes again when a later PMT gives it a
+	/// type that needs no PCR, though the program still has none.
+	#[test]
+	fn an_unclocked_pid_reassigned_to_a_decoded_type_routes_again() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default()
+				.with_catalog(crate::catalog::hang::Catalog::<crate::container::ts::catalog::Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pid = Pid::new(0x104).unwrap();
+		let pmt = |stream_type| Pmt {
+			program_number: 1,
+			pcr_pid: None,
+			program_info: Vec::new(),
+			streams: vec![Es {
+				stream_type,
+				pid,
+				descriptors: Vec::new(),
+			}],
+		};
+		import.handle_pmt(pmt(0x06)).unwrap();
+		assert!(matches!(import.streams[&pid], super::Stream::Ignored));
+		import.handle_pmt(pmt(0x06)).unwrap();
+		assert_eq!(import.stats().streams[&0x104].refused, 1, "refused once, not per PMT");
+		import.handle_pmt(pmt(StreamType::H264 as u8)).unwrap();
+		assert!(matches!(import.streams[&pid], super::Stream::H264 { .. }));
 	}
 }

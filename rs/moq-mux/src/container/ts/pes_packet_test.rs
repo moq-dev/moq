@@ -723,6 +723,33 @@ async fn a_pes_header_split_by_a_pcr_is_placed_from_its_start_code() {
 	assert_eq!(imported.stats().unplaced, 1, "the PES begun before the first PCR");
 }
 
+/// A header held past more PCRs than the placement keeps is still bracketed by the first one past
+/// its start code. The PCRs run at an uneven rate, so any later pair would place it elsewhere.
+#[tokio::test(start_paused = true)]
+async fn a_pes_header_held_past_several_pcrs_takes_the_first_after_it() {
+	let mut feed = Feed::new(0x06, KLVA);
+	let start = 1_000 * MS;
+	feed.pcr(start).picture(start).pcr(start + 40 * MS);
+	// 9 + 200 header bytes, so the header ends in the PES's second packet.
+	let pes = pes_with(0xbd, 0x80, 0x00, &[], 200, &[1; 8]);
+	let (head, packets) = feed.mux.split(DATA_PID, &pes);
+	feed.pes.push(((feed.mux.out.len() + head) as u64, pes));
+	feed.mux.out.extend_from_slice(&packets[0]);
+	for ticks in [50, 300, 310] {
+		feed.pcr(start + ticks * MS);
+	}
+	feed.mux.out.extend(packets[1..].concat());
+	feed.pcr(start + 320 * MS);
+	let expected = placed(feed.clock(feed.pes[0].0).unwrap(), 0);
+
+	let imported = import(&feed.bytes(), false).unwrap();
+	let (name, _) = imported.entry().unwrap();
+	let (frames, err) = read(&imported.consumer, &name).await;
+	assert!(err.is_none(), "{err:?}");
+	assert_eq!(frames.len(), 1);
+	assert_eq!(frames[0].timestamp.as_micros() as u64, expected);
+}
+
 /// A later PMT that names a PCR carries the private PES stream refused for want of one, and one
 /// that drops the PCR again refuses the stream it carried.
 #[tokio::test(start_paused = true)]
