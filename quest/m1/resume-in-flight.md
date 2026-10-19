@@ -47,6 +47,17 @@ route, though an identical whole copy was there.
   keeping every replaced copy until the groups handed out above its bound end.
   Prefer whichever keeps one lease rule for both paths.
 
+**A clean end with a copy still retained.** When the new copy B reaches clean
+EOF before delivering any group, JS `Reader.#end` (in `js/net/src/resume.ts`)
+and Rust `Reader::poll_end` treat the serving copy's clean end as the track's
+end at once. The old copy A, still unbounded because B never delivered, may yet
+deliver a final group, and that group is lost once `recvGroup()` has returned
+`undefined`.
+
+- Defer the clean end until every retained copy has drained or been bounded,
+  under the same gap rule as above, so the end never cuts off a group a kept
+  copy still carries.
+
 **Bounded retention.** A reader that never reads groups (datagrams only) keeps
 every bounded replaced copy that still has an unread group, since nothing ever
 reads it. Rust `Reader::let_go` does this on main too. A peer that keeps
@@ -69,6 +80,8 @@ Regression tests in both languages, with mocked time:
   lets the copy go.
 - The old copy finishes F after the new copy handed F out and the reader polled
   on. The serving copy's F then fails, and the read continues from the old copy.
+- The new copy ends cleanly before delivering a group, the old copy then writes
+  its last group, and the reader gets that group before the end.
 
 Public API: behavior only. Wire: none.
 
