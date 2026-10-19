@@ -40,15 +40,23 @@ changed for random loss; `LOSS_THRESH` is still 2%):
   `--loss`, a run that fails if the shaper dropped nothing, and
   `passthrough.py --loss-ok`.
 - Decided 2026-10-17 (maintainer): the audit decides whether
-  `quic-bbr-natural-drain.md` and `m3/quic-gcc.md` survive, since their
-  premise rests on random loss.
+  [the BBR study](/quest/m2/quic-bbr-natural-drain.md) and the former
+  `m3/quic-gcc.md` survive, since their premise rests on random loss.
+  The latter was replaced by the approved
+  [realtime uplink line](/quest/m2/quic-realtime/README.md) in #5889.
+  Audit the historical premise and any decisions it carried forward;
+  replacing that quest does not authorize abandoning the later line's
+  approved goals without a maintainer decision.
 - Other quests only list random loss among their measurement inputs:
-  `quic-probe.md` (with noq#811 and noq#476), `quic-sim.md`,
-  `quic-deadline.md` and `quic-careful-resume.md` ("the impaired path
-  profile"), `m3/cut-through/bench.md`, and
-  `m1/ts-reliability/recovery.md`'s network impairment arm. Their goals
-  stand; the audit only moves any acceptance or performance input among
-  them to bufferbloat.
+  the former `quic-probe.md` (with noq#811 and noq#476), now
+  [the probe line](/quest/m2/probe/README.md) after #5863,
+  [QUIC on the sim](/quest/m2/quic-sim.md),
+  [deadlines](/quest/m2/quic-deadline.md),
+  [careful resume](/quest/m3/quic-careful-resume.md) ("the impaired path
+  profile"), [cut-through](/quest/m3/cut-through/bench.md), and
+  [TS recovery](/quest/m1/ts-reliability/recovery.md)'s network impairment
+  arm. Their goals stand; the audit only moves any acceptance or performance
+  input among them to bufferbloat.
 
 Record each verdict (decision, origin PR, keep/rework/revert, evidence) in
 the PR description.
