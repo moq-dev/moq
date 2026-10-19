@@ -18,10 +18,11 @@ timer.
   field. `main` never carried either (checked 2026-10-19 in
   `drafts/draft-lcurley-moq-lite.md`, `rs/moq-net` and `js/net`), so nothing
   needs removing.
-- ✅ Decided 2026-10-19 (maintainer): the first token rides the CONNECT
-  request, the URL query today and an auth header once browsers allow one, so
-  a session's first requests wait on no AUTH. Further tokens join the union
-  through AUTH streams. [Token in band](/quest/m1/auth/token-in-band.md)
+- ✅ Decided 2026-10-19 (maintainer, #5972): the first token always rides the
+  CONNECT request, the URL query today and an auth header once browsers allow
+  one, so a session's first requests wait on no AUTH. "We need to avoid a
+  dumb RTT, and that really means CONNECT is the only option." Further tokens
+  join the union through AUTH streams. [Token in band](/quest/m1/auth/token-in-band.md)
   follows this.
 - ✅ Decided 2026-10-19 (maintainer): moq-transport's per-request
   AUTHORIZATION TOKEN stays acceptor-side as
@@ -45,43 +46,32 @@ timer.
     [Auth outlives its session](/quest/m1/auth/issuer.md) and
     [Token in band](/quest/m1/auth/token-in-band.md). A multi-token client
     is the one that can hit it.
-- Open (maintainer): how a request right behind its token avoids refusal.
-  - (a) The acceptor waits. A request it would refuse while any AUTH from that
-    peer is unanswered is held until those settle, then judged against the
-    union. Zero bytes, zero messages. It does not close the race on lite: the
-    AUTH and the request ride different streams, so a lost AUTH packet lets
-    the request arrive first with nothing pending, and WebTransport hides the
-    stream ordering that could tell the acceptor an earlier stream exists. The
-    presenter must also stop refusing locally and send optimistically. Abuse:
-    a peer presenting AUTH after AUTH keeps "something pending" true forever,
-    so the wait must be on a snapshot of the AUTHs pending when the request
-    arrived. A held request keeps only the peer's own slot, and the
-    acceptor's verifier, not the peer, decides how long it waits.
-  - (b) AUTH_WAIT. A presenter sends it ahead of a request, on the request's
-    own stream, only while one of its AUTHs is unanswered. It carries how many
-    Auth Streams the sender has opened so far, and the acceptor holds the
-    request until it has received that many and each is answered or
-    withdrawn, then judges against the union. Exact, and it saves the one
-    round trip (c) spends, with bytes only on those requests. Abuse: a count
-    the peer never reaches holds only its own request, and a count beyond the
-    bidirectional-stream credit the acceptor ever granted is a
-    PROTOCOL_VIOLATION. Costs a new lite-07-wip message, and adding it after
-    the cut costs lite-08.
-  - (c) The presenter waits (recommended). A request its known union does not
-    cover waits, instead of failing locally, while any non-empty token this
-    side presented is unanswered, then goes out or fails against the settled
-    union. An unknown union covers nothing for this rule, but the empty token
-    never holds a request, since the acceptor judges the CONNECT credential
-    before the session starts. It costs one round trip, and only for the first
-    request relying on a new token, which `add()` already spends; a
-    single-credential session and a renewal spend nothing. No wire change,
-    no acceptor state, and the rule lives in the shared gate, so the
-    moq-transport AUTH extension gets it too. Abuse: an acceptor that never
-    answers holds only our own requests, which it could stall anyway by never
-    answering them.
-- Under (c): spec in lite-07-wip that the acceptor judges a request against
-  the union when it reads it, that its scope includes a grant no later than
-  it sends that AUTH_OK, and that a presenter does not send a request only an
+- ✅ Decided 2026-10-19 (maintainer, #5972): **the presenter waits**, with a
+  log line so we see how often it triggers. "I want to make sure we're not
+  adding dumb RTTs." A request its known union does not cover waits, instead
+  of failing locally, while any non-empty token this side presented is
+  unanswered, then goes out or fails against the settled union. An unknown
+  union covers nothing for this rule, but the empty token never holds a
+  request, since the acceptor judges the CONNECT credential before the session
+  starts. It costs one round trip, only for the first request relying on a new
+  token, which `add()` already spends; a single-credential session and a
+  renewal spend nothing. No wire change and no acceptor state. The rule lives
+  in the shared gate, so the moq-transport AUTH extension gets it too. Abuse:
+  an acceptor that never answers holds only our own requests, which it could
+  stall anyway by never answering them. No timer.
+- Rejected 2026-10-19 (#5972): the acceptor waiting on that peer's unanswered
+  AUTHs, because AUTH and the request ride different streams, so a lost AUTH
+  packet still lets the request arrive first with nothing pending; and an
+  AUTH_WAIT prefix on the request stream, which is exact but a new message to
+  save a round trip nobody has measured. Revisit AUTH_WAIT only if the log
+  below shows the wait firing in practice.
+- Observability: every request that waits on an unanswered token logs once
+  (path and how long it waited), in Rust and `js/net`. Also count it on the
+  session's `stats::Session` counters if that fits without changing the
+  `moq-stats` track shapes; otherwise the log is enough.
+- Spec in lite-07-wip that the acceptor judges a request against the union
+  when it reads it, that its scope includes a grant no later than it sends
+  that AUTH_OK, and that a presenter does not send a request only an
   unanswered token admits. Hold the publish-outside-the-union check to the
   same rule, so it waits on every unanswered token rather than only the setup
   ones. Mirror in `js/net`.
@@ -100,8 +90,7 @@ timer.
 - Docs: renewal and the wait in `doc/concept/moq-lite.md`'s Authorization
   section.
 
-Public API: none. Wire: lite-07-wip draft text only under (c); a new
-lite-07-wip message under (b), which makes this [M].
+Public API: none. Wire: lite-07-wip draft text only, no new bytes.
 
 ## Related
 

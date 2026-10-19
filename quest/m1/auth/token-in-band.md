@@ -36,8 +36,8 @@ already carries the full pattern grant.
   its own AUTH stream so the accepted grant union remains live. Keep `?jwt=`
   as the fallback for peers without AUTH. Choose the public credential-source
   API while implementing this quest.
-- Presenting: ✅ Decided 2026-10-19 (maintainer, closing
-  [#5927](https://github.com/moq-dev/moq/pull/5927)): the client always
+- Presenting: ✅ Decided 2026-10-19 (maintainer,
+  [#5972](https://github.com/moq-dev/moq/pull/5972)): the client always
   copies the first configured token into the CONNECT request, the URL query
   today and an auth header once browsers allow one, whatever versions it
   offers. The acceptor judges it before the session starts, so no request

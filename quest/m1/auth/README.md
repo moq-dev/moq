@@ -104,7 +104,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   origin; this is distinct from attempting a new unauthorized publication.
   Apps that want to decide themselves read the grant instead.
 - **The first token rides CONNECT.** ✅ Decided 2026-10-19 (maintainer,
-  #5927): the connection credential always goes in the CONNECT request, the
+  #5972): the connection credential always goes in the CONNECT request, the
   URL query today and an auth header once browsers allow one, so a session's
   first requests wait on no AUTH. WebTransport negotiates the moq version in
   that same request, so a client cannot learn whether the peer speaks AUTH
