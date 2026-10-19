@@ -7,7 +7,7 @@ How to update your code for each breaking change, newest first.
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
-Set `ConnectOptions.keylog` as well to capture them; without `SSLKEYLOGFILE` the connect fails.
+Set `ConnectOptions.keylog` or `ListenOptions.keylog` as well to capture them; without `SSLKEYLOGFILE` the connect or listen fails.
 
 ### Subscriptions carry group ranges (#5732)
 

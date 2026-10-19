@@ -7,7 +7,7 @@ How to update your code for each breaking change, newest first.
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
-Pass `WithQUICKeylog(true)` to `Dial` as well to capture them; without `SSLKEYLOGFILE` the dial fails.
+Pass `WithQUICKeylog(true)` to `Dial` or `WithServerQUICKeylog(true)` to `Listen` as well to capture them; without `SSLKEYLOGFILE` the dial or listen fails.
 
 ### Subscriptions carry group ranges (#5732)
 

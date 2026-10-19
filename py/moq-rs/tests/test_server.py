@@ -291,6 +291,16 @@ async def test_invalid_config_fails_on_enter():
             pass
 
 
+async def test_server_keylog_requires_sslkeylogfile(monkeypatch):
+    """keylog reaches the native server, which refuses it without SSLKEYLOGFILE."""
+    monkeypatch.delenv("SSLKEYLOGFILE", raising=False)
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], keylog=False):
+        pass
+    with pytest.raises(moq.Error.Config, match="SSLKEYLOGFILE"):  # type: ignore[attr-defined]
+        async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], keylog=True):
+            pass
+
+
 async def test_cert_fingerprints_after_listen():
     """cert_fingerprints() returns hex SHA-256 once the server has bound."""
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:

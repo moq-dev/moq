@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:moq/audio.dart' as moq_audio;
@@ -293,6 +294,26 @@ void main() {
       throwsA(isA<ConfigMoqException>()),
     );
   });
+
+  test(
+    'keylog without SSLKEYLOGFILE fails the listen',
+    () {
+      expect(
+        Server.listen(
+          options: const ListenOptions(
+            bind: '127.0.0.1:0',
+            tlsGenerate: ['localhost'],
+            keylog: true,
+          ),
+        ),
+        throwsA(isA<ConfigMoqException>()),
+      );
+    },
+    // dart:io cannot unset a variable, so a run that inherits one skips.
+    skip: (Platform.environment['SSLKEYLOGFILE'] ?? '').isNotEmpty
+        ? 'SSLKEYLOGFILE is set'
+        : false,
+  );
 
   test('closing a server releases its port', () async {
     final first = await Server.listen(

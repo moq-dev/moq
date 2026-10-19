@@ -7,7 +7,7 @@ How to update your code for each breaking change, newest first.
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
-Pass `keylog=True` to `Client` or `connect` as well to capture them; without `SSLKEYLOGFILE` the client refuses to build.
+Pass `keylog=True` to `Client`, `connect`, or `Server` as well to capture them; without `SSLKEYLOGFILE` the client refuses to build and the server refuses to listen.
 
 ### Subscriptions carry group ranges (#5732)
 

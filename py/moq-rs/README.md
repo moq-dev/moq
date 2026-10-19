@@ -141,7 +141,8 @@ client = moq.Client(
   - `timeout`, `race`, `resolution_delay`. Bound one connect attempt and pace Happy Eyeballs.
   - `reconnect`, `backoff`. Redial with a `Backoff` when the transport drops; `reconnect=False` dials once.
   - `.session`. The established `Session` (or `None` before connecting / after exit).
-- **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), versions=(), max_streams=None, publish=None, consume=None)`**. Async context manager + async iterator of incoming `Request`s.
+- **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), versions=(), max_streams=None, keylog=False, publish=None, consume=None)`**. Async context manager + async iterator of incoming `Request`s.
+  - `keylog`. Write TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` entering the server fails.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
   - `.create_broadcast(path) → BroadcastProducer`. Create an unannounced broadcast, invisible to everyone; `announce()` makes it discoverable and reachable; `close()` ends it.
