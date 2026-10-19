@@ -491,8 +491,9 @@ async fn a_source_without_random_access_groups_every_second() {
 	let imported = import(&data, data.len(), None).await.unwrap();
 	assert!(!imported.section().random_access);
 	let groups = imported.groups();
-	// The first group waits a second for a random access point that never comes.
-	assert_eq!(groups[0][0].micros, 1_000_000 - micros_before_pcr(&data, 1_000_000));
+	// The first group waits for a random access point that never comes. The first PCR sits on a
+	// line, so the first line watched from a PCR before its second is at 2 s.
+	assert_eq!(groups[0][0].micros, 2_000_000 - micros_before_pcr(&data, 2_000_000));
 	for group in &groups {
 		assert_eq!(group.len(), 25, "a second of 40 ms objects");
 	}
@@ -885,24 +886,33 @@ async fn a_joiner_on_a_window_line_describes_the_window_after() {
 	assert_eq!(first.section(), second.section());
 }
 
-/// A joiner whose first PCR is the retransmitted copy of a flagged jump on a line of the grid counts
-/// the jump there as its partner did, so neither cuts on the line after.
+/// A joiner whose first PCR is a flagged jump on a line of the grid that it cannot see as one, the
+/// retransmitted copy of the flagged PCR or a PCR whose flag came in the packet before, waits out
+/// the spacing after it as its partner, which counted the jump there, does.
 #[tokio::test(start_paused = true)]
-async fn a_joiner_on_a_retransmitted_jump_counts_it_against_the_grid() {
+async fn a_joiner_on_a_jump_it_cannot_see_waits_out_the_spacing() {
 	const LINE: u64 = 1_000 * MS;
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	let prefix = mux.out.len();
-	// The placed epoch puts these PCRs one wrap on, so `offset` lands every 25th on a line.
-	let offset = (LINE - WRAP % LINE) % LINE;
-	paced(&mut mux, 0x100, offset, 100, 0, 4);
-	let jump = offset + 11 * LINE;
-	mux.packet(0x100, Flags::pcr(jump).discontinuity());
-	mux.out.extend_from_within(mux.out.len() - 188..);
-	mux.fill(0x101, 4);
-	paced(&mut mux, 0x100, jump + 40 * MS, 250, 0, 4);
-	let data = mux.bytes();
-	import_twice_placed_from(&data, prefix, pcr_at(&data, jump) + 188).await;
+	for retransmitted in [true, false] {
+		let mut mux = Mux::default();
+		program(&mut mux, 0x100);
+		let prefix = mux.out.len();
+		// The placed epoch puts these PCRs one wrap on, so `offset` lands every 25th on a line.
+		let offset = (LINE - WRAP % LINE) % LINE;
+		paced(&mut mux, 0x100, offset, 100, 0, 4);
+		let jump = offset + 11 * LINE;
+		if retransmitted {
+			mux.packet(0x100, Flags::pcr(jump).discontinuity());
+			mux.out.extend_from_within(mux.out.len() - 188..);
+		} else {
+			mux.packet(0x100, Flags::default().discontinuity());
+			mux.packet(0x100, Flags::pcr(jump));
+		}
+		mux.fill(0x101, 4);
+		paced(&mut mux, 0x100, jump + 40 * MS, 250, 0, 4);
+		let data = mux.bytes();
+		let split = pcr_at(&data, jump) + if retransmitted { 188 } else { 0 };
+		import_twice_placed_from(&data, prefix, split).await;
+	}
 }
 
 /// The grid lies on the timeline the epoch places, so it runs on regularly across a PCR wrap that
