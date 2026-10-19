@@ -162,6 +162,7 @@ impl Worker {
 				ops: RefCell::new(slab::Slab::new()),
 				clock,
 				deadlines,
+				turning: std::cell::Cell::new(false),
 				spawns: RefCell::new(Vec::new()),
 				unpark,
 				metrics,
@@ -196,7 +197,7 @@ impl Worker {
 	pub fn block_on<F: Future>(&mut self, future: F) -> Result<F::Output, Error> {
 		let mut future = std::pin::pin!(future);
 		let waker = self.shared.unpark.waker();
-		let _ambient = self.shared.deadlines.enter();
+		let _turn = Turn::enter(&self.shared);
 		loop {
 			self.shared.metrics.turns.add(1);
 			// The turn's one clock read: every timer due by now fires, and
@@ -246,7 +247,7 @@ impl Worker {
 	fn reap(&mut self, deadline: Option<Instant>) -> Result<(), Error> {
 		let clock = self.shared.clock.clone();
 		loop {
-			if deadline.is_some_and(|deadline| clock.now() >= deadline) {
+			if deadline.is_some_and(|deadline| clock.host_now() >= deadline) {
 				return Ok(());
 			}
 			// Copy the completions out so dispatch can borrow the ring (to
@@ -352,10 +353,10 @@ impl Worker {
 				if self.shared.ops.borrow().is_empty() {
 					return;
 				}
-				if clock.now() >= deadline || self.pump_until(deadline).is_err() {
+				if clock.host_now() >= deadline || self.pump_until(deadline).is_err() {
 					break;
 				}
-				let Some(remaining) = deadline.checked_duration_since(clock.now()) else {
+				let Some(remaining) = deadline.checked_duration_since(clock.host_now()) else {
 					break;
 				};
 				let mut ring = self.shared.ring.borrow_mut();
@@ -511,13 +512,37 @@ impl Worker {
 	}
 }
 
+/// A running turn: the worker's queue is the ambient clock and holds the
+/// current instant until this drops.
+struct Turn {
+	shared: Rc<Shared>,
+	_ambient: moq_clock::Entered,
+}
+
+impl Turn {
+	fn enter(shared: &Rc<Shared>) -> Self {
+		shared.turning.set(true);
+		Self {
+			shared: shared.clone(),
+			_ambient: shared.deadlines.enter(),
+		}
+	}
+}
+
+impl Drop for Turn {
+	fn drop(&mut self) {
+		self.shared.turning.set(false);
+	}
+}
+
 impl Drop for Worker {
 	fn drop(&mut self) {
 		// Handles may outlive us; everything they try from here on fails
 		// instead of pending on a loop that will never run again.
 		self.shared.stopped.set(true);
-		// One deadline bounds cancellation staging and draining together.
-		let deadline = self.shared.clock.now() + TEARDOWN_TIMEOUT;
+		// One deadline bounds cancellation staging and draining together. It is
+		// on the host's time, so it passes even on a manual clock.
+		let deadline = self.shared.clock.host_now() + TEARDOWN_TIMEOUT;
 		// The kernel may still write into provided buffers and read send
 		// headers owned by the ops slab. Queue cancels behind every staged
 		// receive and the futex, so partial submissions cannot strand an
@@ -532,7 +557,7 @@ impl Drop for Worker {
 			.collect();
 		let mut cancellation_failed = false;
 		for key in cancel {
-			if self.shared.clock.now() >= deadline {
+			if self.shared.clock.host_now() >= deadline {
 				cancellation_failed = true;
 				break;
 			}
@@ -640,10 +665,12 @@ impl Owner {
 		}
 	}
 
-	/// The instant of the worker's current turn.
+	/// The worker's time: the current turn's instant, or the clock's between turns.
 	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn now(&self) -> Instant {
-		self.deadlines.now()
+		self.shared
+			.upgrade()
+			.map_or_else(|| self.deadlines.now(), |shared| shared.now())
 	}
 
 	/// The worker's core while it is still allocated, torn down or not.
@@ -692,9 +719,9 @@ impl Handle {
 		crate::Timer::from_queue(&self.shared.deadlines, self.shared.metrics.clone())
 	}
 
-	/// The instant of the worker's current turn.
+	/// The worker's time: the current turn's instant, or the clock's between turns.
 	pub(crate) fn now(&self) -> Instant {
-		self.shared.deadlines.now()
+		self.shared.now()
 	}
 
 	/// Run a MoQ driver on this worker's timers and clock, resolving with its
@@ -992,6 +1019,27 @@ mod tests {
 		assert!(timed_out);
 	}
 
+	/// A timer made between turns counts from the clock, not from the last turn's
+	/// instant, so an idle worker does not hand out deadlines already past.
+	#[test]
+	fn a_timer_between_turns_counts_from_the_clock() {
+		let Some((mut worker, clock)) = manual() else { return };
+		let handle = worker.handle();
+		worker.block_on(async {}).unwrap();
+		clock.advance(Duration::from_secs(10));
+		let mut timer = crate::Timer::after(&handle, Duration::from_secs(5));
+
+		clock.advance(Duration::from_secs(4));
+		worker.block_on(async {}).unwrap();
+		assert!(
+			timer.poll(&kio::Waiter::noop()).is_pending(),
+			"fired 5s after the previous turn"
+		);
+		clock.advance(Duration::from_secs(1));
+		worker.block_on(async {}).unwrap();
+		assert!(timer.poll(&kio::Waiter::noop()).is_ready());
+	}
+
 	#[test]
 	fn timer_rearm_and_disarm() {
 		let Some((mut worker, clock)) = manual() else { return };
@@ -1025,8 +1073,6 @@ mod tests {
 		assert_eq!(handle.now(), now + Duration::from_millis(20));
 	}
 
-	/// On a manual clock the teardown deadline never passes, so this waits for
-	/// the kernel's completions however loaded the host is.
 	#[test]
 	fn dropped_worker_rejects_operations() {
 		let Some((worker, _clock)) = manual() else { return };

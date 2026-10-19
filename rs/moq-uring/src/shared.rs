@@ -54,11 +54,13 @@ pub(crate) enum Op {
 pub(crate) struct Shared {
 	pub ring: RefCell<IoUring>,
 	pub ops: RefCell<slab::Slab<Op>>,
-	/// Where the worker's time comes from: read once per turn, and by teardown.
+	/// Where the worker's time comes from: read once per turn, and between turns.
 	pub clock: Clock,
 	/// The worker's timers, at the instant of its current turn. Entered as the
 	/// ambient clock while the worker polls.
 	pub deadlines: moq_clock::Deadlines,
+	/// Whether a turn is running, so `deadlines` already holds its instant.
+	pub turning: Cell<bool>,
 	/// Tasks handed to [`crate::Handle::spawn`], drained by the worker loop.
 	pub spawns: RefCell<Vec<Task>>,
 	pub unpark: std::sync::Arc<Unpark>,
@@ -77,6 +79,15 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+	/// The worker's time: the current turn's instant. Between turns the queue
+	/// still holds the last turn's, so it catches up to the clock first.
+	pub fn now(&self) -> Instant {
+		if !self.turning.get() {
+			self.deadlines.advance(self.clock.now());
+		}
+		self.deadlines.now()
+	}
+
 	/// The error every operation reports once the worker has been dropped.
 	pub fn gone_error() -> io::Error {
 		io::Error::new(io::ErrorKind::NotConnected, "the worker was dropped")
@@ -95,7 +106,7 @@ impl Shared {
 	fn push_inner(&self, entry: &squeue::Entry, deadline: Option<Instant>) -> io::Result<()> {
 		let mut ring = self.ring.borrow_mut();
 		loop {
-			if deadline.is_some_and(|deadline| self.clock.now() >= deadline) {
+			if deadline.is_some_and(|deadline| self.clock.host_now() >= deadline) {
 				return Err(io::Error::new(
 					io::ErrorKind::TimedOut,
 					"io_uring submission deadline elapsed",

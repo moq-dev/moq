@@ -18,8 +18,11 @@ pub(crate) enum Clock {
 	Host(Host),
 	/// A manual clock installed on the tokio runtime the worker was created in,
 	/// so time passes only when the test advances it.
+	///
+	/// The host clock alongside bounds teardown, which must end however long
+	/// the test leaves its clock alone.
 	#[cfg(feature = "manual")]
-	Installed(moq_clock::Installed),
+	Installed(moq_clock::Installed, Host),
 }
 
 /// How the worker waits for its next deadline while parked.
@@ -38,7 +41,7 @@ impl Clock {
 	pub fn new() -> Self {
 		#[cfg(feature = "manual")]
 		if let Some(clock) = moq_clock::Installed::current() {
-			return Self::Installed(clock);
+			return Self::Installed(clock, Host::calibrate());
 		}
 		Self::Host(Host::calibrate())
 	}
@@ -48,7 +51,17 @@ impl Clock {
 		match self {
 			Self::Host(host) => host.now(),
 			#[cfg(feature = "manual")]
-			Self::Installed(clock) => clock.now(),
+			Self::Installed(clock, _) => clock.now(),
+		}
+	}
+
+	/// The host's time, which passes on any clock: for a safety bound that must
+	/// expire even while a manual clock stands still.
+	pub fn host_now(&self) -> Instant {
+		match self {
+			Self::Host(host) => host.now(),
+			#[cfg(feature = "manual")]
+			Self::Installed(_, host) => host.now(),
 		}
 	}
 
@@ -61,7 +74,7 @@ impl Clock {
 				deadline.map_or(Wait::Forever, |at| Wait::Until(host.monotonic(at)))
 			}
 			#[cfg(feature = "manual")]
-			Self::Installed(clock) => {
+			Self::Installed(clock, _) => {
 				use std::future::Future;
 
 				let Some(at) = deadline else {
@@ -141,6 +154,22 @@ mod tests {
 			before <= now + slack && now <= after + slack,
 			"{before:?} <= {now:?} <= {after:?}"
 		);
+	}
+
+	/// The host's time keeps passing while a manual clock stands still, so the
+	/// teardown bound it measures expires.
+	#[cfg(feature = "manual")]
+	#[test]
+	fn host_time_passes_on_a_standing_manual_clock() {
+		let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+		let manual = moq_clock::Manual::new().install(runtime.handle());
+		let _entered = runtime.enter();
+		let clock = Clock::new();
+		let start = clock.host_now();
+		while clock.host_now() == start {
+			std::hint::spin_loop();
+		}
+		assert_eq!(clock.now(), manual.now(), "the manual clock moved");
 	}
 
 	/// A deadline lands the same distance from the calibration point on both clocks.
