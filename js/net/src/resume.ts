@@ -12,9 +12,11 @@
  * handed out. A replaced copy keeps delivering until the new copy delivers its first group, then
  * is bounded just below it (or at the newest group handed out, if later), so a group only the old
  * route got after the switch is not lost. It is kept for unread groups it had and groups still
- * being read, and dropped once neither needs it. A group carries on across the switch through its {@link Recover}: once its
- * copy fails with its route, or stalls while a newer route serves, it continues from the serving
- * route's copy of the same group at the same frame, found in that copy's cache or fetched from it.
+ * being read (from it, or from another copy while it holds them too), and dropped once neither
+ * needs it. A group carries on across the switch through its {@link Recover}: once its copy
+ * stalls while a newer route serves, it continues from the serving route's copy of the same group
+ * at the same frame, found in that copy's cache or fetched from it. Once its copy fails, any other
+ * copy still holding the group continues it first, since a group's name fixes its content.
  *
  * A group is handed out once however many copies deliver it: the reader skips any sequence its
  * subscriber already handed out, the same record that keeps a direct reader from taking a
@@ -212,7 +214,10 @@ interface Copy {
 	datagramsDone?: Error | null;
 	/** The newest datagram handed out before this copy was subscribed, which it may replay. */
 	datagramsSeen?: number;
-	/** Groups handed out from this copy and still read, which keep a replaced copy subscribed. */
+	/**
+	 * Groups still read that came from this copy, or that it held too when handed out, which keep
+	 * a replaced copy subscribed.
+	 */
 	lease: number;
 }
 
@@ -250,7 +255,7 @@ class Reader implements ResumeSource {
 	#newest?: number;
 	/** The newest datagram handed out. */
 	#datagram?: number;
-	/** Bumped when this reader subscribes a new copy, waking its parked reads. */
+	/** Bumped when this reader subscribes a new copy or a copy's last lease ends, waking its parked reads. */
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
 	#closed = false;
@@ -350,9 +355,24 @@ class Reader implements ResumeSource {
 		});
 	}
 
+	/** Wake parked reads, so they look again and let go of what nothing needs. */
+	wake(): void {
+		this.#changed.update((n) => n + 1);
+	}
+
 	/** The reader's copy of the route at `generation`, if it subscribed one. */
 	copy(generation: number): Copy | undefined {
 		return this.#copies.find((copy) => copy.generation === generation);
+	}
+
+	/** The copies other than `except` whose track still holds group `sequence` unfailed, newest first. */
+	holding(sequence: number, except: Copy): Copy[] {
+		const holding: Copy[] = [];
+		for (let index = this.#copies.length - 1; index >= 0; index--) {
+			const copy = this.#copies[index];
+			if (copy !== except && hooks.holdsGroup(copy.sub, sequence)) holding.push(copy);
+		}
+		return holding;
 	}
 
 	/**
@@ -534,7 +554,10 @@ class Reader implements ResumeSource {
 
 	#handOut(copy: Copy, group: GroupConsumer): GroupConsumer {
 		this.#newest = Math.max(this.#newest ?? 0, group.sequence);
-		const recover = new Recover(this, group, copy);
+		// Another copy holding the group is where a failure continues it, so it stays while the
+		// group is read. Only while copies overlap: a passthrough read has none.
+		const backups = this.#copies.length > 1 ? this.holding(group.sequence, copy) : [];
+		const recover = new Recover(this, group, copy, backups);
 		hooks.recoverGroup(group, recover);
 		recover.watch(group);
 		return group;
@@ -741,12 +764,16 @@ class Recover implements GroupRecover {
 	#sequence: number;
 	/** The copy being read, whose subscription this group keeps alive while it is read. */
 	#copy?: Copy;
+	/** Other copies that held the group when it was handed out, kept for a failure to continue from. */
+	#backups: Copy[];
 
-	constructor(reader: Reader, group: GroupConsumer, copy: Copy) {
+	constructor(reader: Reader, group: GroupConsumer, copy: Copy, backups: Copy[] = []) {
 		this.#reader = reader;
 		this.#sequence = group.sequence;
 		this.#copy = copy;
+		this.#backups = backups;
 		copy.lease++;
+		for (const backup of backups) backup.lease++;
 	}
 
 	/**
@@ -758,8 +785,13 @@ class Recover implements GroupRecover {
 	}
 
 	#release(): void {
-		if (this.#copy) this.#copy.lease--;
+		const released = this.#copy ? [this.#copy, ...this.#backups] : this.#backups;
 		this.#copy = undefined;
+		this.#backups = [];
+		let freed = false;
+		for (const copy of released) if (--copy.lease === 0 && copy.replaced) freed = true;
+		// A parked read lets go of a replaced copy nothing needs any more.
+		if (freed) this.#reader.wake();
 	}
 
 	get changed(): Getter<unknown> {
@@ -812,12 +844,20 @@ class Recover implements GroupRecover {
 			const generation = route.generation;
 			const serving = route.source ? reader.copy(generation) : undefined;
 			const waits: Getter<unknown>[] = [route.changed];
+			// A failed group continues from any copy still holding it, newest first: its name fixes
+			// its content. A stall only moves to the serving copy, so two stalled copies never trade
+			// the group back and forth.
+			if (failed) {
+				const held = reader.holding(this.#sequence, current)[0];
+				const cached = held && hooks.cachedGroup(held.sub, this.#sequence);
+				if (cached) return this.#replacement(cached, held);
+			}
 			if (!serving) {
 				// Nothing serves: a failed copy waits for a route, unless none will come.
 				if (failed && route.concluded) throw failed;
 			} else if (generation !== current.generation || failed) {
 				// A newer copy's track caches it: continue from there.
-				if (generation !== current.generation) {
+				if (!failed && generation !== current.generation) {
 					const cached = hooks.cachedGroup(serving.sub, this.#sequence);
 					if (cached) return this.#replacement(cached, serving);
 				}
@@ -956,7 +996,11 @@ export class Front {
 						this.#record(route.name, info, previous as Source);
 						return info;
 					},
-					() => undefined,
+					// Its route failing is no answer; a refusal is the track's.
+					(err: unknown) => {
+						if (routeFailed(err instanceof Error ? err : new Error(String(err)))) return undefined;
+						throw err;
+					},
 				);
 		Promise.all([expected, ask(source, route.name, retired)])
 			.then(
@@ -1005,12 +1049,7 @@ export class Front {
 		let verified = this.#verified.get(source);
 		if (verified?.has(name)) return;
 		const retired = this.#retire.signal;
-		// A copy a reader still reads says what the track is before any fetch does.
-		const served = this.#routes.get(name)?.served;
-		if (!recorded && served && served !== source) {
-			const info = await ask(served, name, retired).catch(() => undefined);
-			if (info) this.#record(name, info, served);
-		}
+		await this.#askServed(name, source, retired);
 		const info = await ask(source, name, retired);
 		// The first answer says what the track is; later sources have to match it.
 		const expected = this.#info.get(name);
@@ -1019,6 +1058,21 @@ export class Front {
 		verified ??= new Set();
 		verified.add(name);
 		this.#verified.set(source, verified);
+	}
+
+	// A copy a reader still reads says what the track is before `source` does: one logical track
+	// has one set of properties. Its route failing is no answer; a refusal is the track's.
+	async #askServed(name: string, source: Source, retired: AbortSignal): Promise<void> {
+		const served = this.#routes.get(name)?.served;
+		if (this.#info.has(name) || !served || served === source) return;
+		let info: track.Info;
+		try {
+			info = await ask(served, name, retired);
+		} catch (err) {
+			if (routeFailed(err instanceof Error ? err : new Error(String(err)))) return;
+			throw err;
+		}
+		this.#record(name, info, served);
 	}
 
 	#record(name: string, info: track.Info, source: Source): void {
@@ -1052,6 +1106,7 @@ export class Front {
 			const retired = this.#retire.signal;
 			let info: track.Info;
 			try {
+				await this.#askServed(name, source, retired);
 				info = await ask(source, name, retired, hold);
 			} catch (err) {
 				// Another route took over before this one answered: ask it instead.

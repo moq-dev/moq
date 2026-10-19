@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
-import { StreamCode, StreamError } from "./error.ts";
+import { NotFound, StreamCode, StreamError } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import { Route } from "./hop.ts";
 import { Producer } from "./origin.ts";
@@ -723,6 +723,54 @@ test.each([true, false])(
 	},
 );
 
+test.each([
+	[true, true],
+	[false, true],
+	[true, false],
+	[false, false],
+])(
+	"a group the serving copy failed continues from a replaced copy that holds it (ordered: %p, failed before handout: %p)",
+	async (ordered, early) => {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe();
+		const view = ordered ? sub.ordered() : undefined;
+		const next = () => (view ? view.nextGroup() : sub.recvGroup());
+		ta.write(0);
+		(await next())?.close();
+		front.serve(b.consume());
+		await settle();
+
+		// Both routes hold group 1: the old one whole, the serving one failing after a frame.
+		ta.write(1, 2);
+		const failing = tb.write(1, 1, false);
+		const fail = () => failing.close(new StreamError(StreamCode.SessionClosed));
+		if (early) fail();
+		const group = await next();
+		if (group?.sequence !== 1) throw new Error("expected group 1");
+		// Reading on must not let go of the replaced copy while the group still needs it.
+		const later = next();
+		await settle();
+		if (!early) fail();
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.1");
+		expect(await group.readFrame()).toBeUndefined();
+
+		group.close();
+		tb.write(2);
+		expect((await later)?.sequence).toBe(2);
+		view?.close();
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	},
+);
+
 test("a fetched group that fails on the route still serving waits for the next route", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -820,6 +868,57 @@ test("a route superseded while its properties are checked stops being asked", as
 	a.close();
 	b.close();
 	c.close();
+});
+
+test("track info waits for the copy being read to say what the track is", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	// a answers what the track is only when told to.
+	const requests = wireOf(a).requested();
+	b.createTrack("seq", { priority: 2 });
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	front.serve(b.consume());
+	const info = front.consumer.track("seq").info();
+	info.catch(() => {});
+	await settle();
+
+	const request = await requests;
+	request?.accept({ priority: 1 });
+	await expect(info).rejects.toThrow("changed its properties");
+	expect((await sub.info()).priority).toBe(1);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("a refusal from the copy being read is the track's answer, for its readers and fetches alike", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	// a refuses the track only when told to.
+	const requests = wireOf(a).requested();
+	const tb = copy(b);
+	tb.write(0);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	front.serve(b.consume());
+	const fetching = front.consumer.track("seq").fetchGroup(0);
+	fetching.catch(() => {});
+	await settle();
+
+	const request = await requests;
+	request?.reject(new NotFound("seq"));
+	await expect(fetching).rejects.toBeInstanceOf(NotFound);
+	await expect(sub.recvGroup()).rejects.toBeInstanceOf(NotFound);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
 });
 
 test("a fetch waits for the copy being read to say what the track is", async () => {

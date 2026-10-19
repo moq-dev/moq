@@ -533,6 +533,8 @@ function binary(value: number): [bigint, number] {
 let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 // A fresh read handle on a group the producer still caches; assigned in its static block.
 let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | undefined;
+// Whether the producer still caches a group that has not failed; assigned in its static block.
+let cachedHolds: (producer: Producer, sequence: number) => boolean;
 
 // The sequence-order cursor lives inside `Subscriber` (it shares the group buffer and the
 // drift anchor with the arrival cursor), so `Ordered` reaches it through this bridge,
@@ -699,6 +701,10 @@ export class Producer {
 		hooks.bindSequence = bindProducerSequence;
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
 		hooks.reportedLargest = (producer, largest) => producer.#advanceLargest(largest);
+		cachedHolds = (producer, sequence) => {
+			const entry = producer.#cached.get(sequence);
+			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
+		};
 		cachedMirror = (producer, sequence) => {
 			const entry = producer.#cached.get(sequence);
 			if (!entry || entry.group.closed.peek() instanceof Error) return undefined;
@@ -1675,6 +1681,10 @@ export class Subscriber {
 		hooks.cachedGroup = (subscriber, sequence) => {
 			const producer = subscriber.#state.producer;
 			return producer && cachedMirror(producer, sequence);
+		};
+		hooks.holdsGroup = (subscriber, sequence) => {
+			const producer = subscriber.#state.producer;
+			return producer !== undefined && cachedHolds(producer, sequence);
 		};
 		hooks.resumeSubscriber = (name, subscription, source) => {
 			const state = new TrackState(subscription);

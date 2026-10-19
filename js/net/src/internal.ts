@@ -392,6 +392,8 @@ export const hooks: {
 	staleAt: (subscriber: Subscriber, sequence: number) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
 	cachedGroup: (subscriber: Subscriber, sequence: number) => GroupConsumer | undefined;
+	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
+	holdsGroup: (subscriber: Subscriber, sequence: number) => boolean;
 	/** A subscriber's largest location now, and whether it can still advance. */
 	peekLargest: (subscriber: Subscriber) => { largest?: Location; ended: boolean };
 	/** Wake once a subscriber's largest location or its end may have changed; fires at most once. */
@@ -527,6 +529,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	cachedGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	holdsGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	peekLargest: () => {
