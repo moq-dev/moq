@@ -32,8 +32,9 @@ With CMake, point `CMAKE_PREFIX_PATH` at the extracted archive, then
 
 From source, `add_subdirectory(rs/moq-c)` in CMake gives the same `moq::c`
 target, and `nix build .#moq-c` produces the release layout. A bare
-`cargo build -p moq-c` leaves `moq.h` in a hashed `OUT_DIR` and writes no
-pkg-config file.
+`cargo build -p moq-c` leaves `moq.h` in a hashed `OUT_DIR`, writes no
+pkg-config file, and omits the OpenH264 software fallback unless given
+`--features openh264`.
 
 ## Connect
 

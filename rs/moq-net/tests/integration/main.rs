@@ -11,6 +11,8 @@ mod announce_to_serve;
 mod auth;
 mod broadcast_close;
 mod catalog_acquisition;
+mod catalog_churn;
+mod catalog_handover;
 mod datagram;
 mod dial_split_horizon;
 mod drained_claim;

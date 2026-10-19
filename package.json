@@ -2,9 +2,9 @@
 	"name": "moq",
 	"version": "0.0.0",
 	"devDependencies": {
-		"@babel/parser": "^8.0.6",
+		"@babel/parser": "^8.0.7",
 		"@biomejs/biome": "^2.5.15",
-		"concurrently": "^10.0.5",
+		"concurrently": "^10.0.6",
 		"markdown-extensions": "^2.0.0",
 		"publint": "^0.3.25",
 		"remark-cli": "^12.0.1",
