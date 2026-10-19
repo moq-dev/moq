@@ -5,12 +5,12 @@
 //! ring (submitting inline when the queue is full), while completions are only
 //! reaped by the worker loop.
 
+use moq_clock::Instant;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::io;
 use std::rc::Rc;
 use std::task::Poll;
-use moq_clock::Instant;
 
 use io_uring::{IoUring, opcode, squeue};
 

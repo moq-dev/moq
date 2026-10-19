@@ -1,10 +1,10 @@
 //! The connection: shared state, the driver task, and the session handle.
 
+use moq_clock::Instant;
 use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll};
-use moq_clock::Instant;
 
 use bytes::Bytes;
 use moq_quic::{ConnectionHandle, Dir, StreamId, VarInt};
@@ -792,8 +792,7 @@ impl Driver {
 			// polling before the set would leave the firing to wake nobody
 			// (fatal on a dial nobody answers, where no ingress ever re-polls
 			// us).
-			self.deadline
-				.set(self.shared.conn.borrow_mut().poll_timeout());
+			self.deadline.set(self.shared.conn.borrow_mut().poll_timeout());
 			if self.deadline.poll(waiter).is_pending() {
 				return Poll::Pending;
 			}

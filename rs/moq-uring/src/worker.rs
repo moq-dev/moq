@@ -9,10 +9,10 @@ use std::time::Duration;
 use io_uring::{EnterFlags, IoUring, opcode, types};
 use moq_clock::Instant;
 
+use crate::clock::{Clock, Wait};
 use crate::metrics::Metrics;
 use crate::park::{FUTEX_BITSET_MATCH_ANY, FUTEX2_PRIVATE, FUTEX2_SIZE_U32, PARKED, RUNNING, Unpark};
 use crate::shared::{Cqe, Op, Shared, Task};
-use crate::clock::{Clock, Wait};
 use crate::{Error, udp};
 
 /// Submission queue depth. The SQ only holds SQEs staged between submits,
@@ -879,7 +879,10 @@ mod tests {
 			.expect("send");
 		let deadline = worker.shared.clock.now() + Duration::from_secs(5);
 		while !worker.shared.ring.borrow_mut().submission().taskrun() {
-			assert!(worker.shared.clock.now() < deadline, "the kernel did not flag deferred task work");
+			assert!(
+				worker.shared.clock.now() < deadline,
+				"the kernel did not flag deferred task work"
+			);
 			std::thread::yield_now();
 		}
 		assert!(worker.shared.ring.borrow_mut().submission().is_empty());

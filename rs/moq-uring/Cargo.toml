@@ -65,9 +65,9 @@ web-transport-trait = { workspace = true }
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = { workspace = true }
 libc = { workspace = true }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs"] }
 # Tests run workers on a manual clock.
 moq-uring = { path = ".", features = ["manual"] }
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs"] }
 nix = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 rustls = "0.23"

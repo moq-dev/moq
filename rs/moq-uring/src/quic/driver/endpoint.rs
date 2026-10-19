@@ -278,10 +278,10 @@ impl Inner {
 			// The socket does not report which local address a datagram
 			// arrived on, so the four-tuple stays half known, exactly as it
 			// does on a platform without `IP_PKTINFO`.
-			let event =
-				self.endpoint
-					.borrow_mut()
-					.handle(self.owner.now(), from, None, ecn, segment, &mut buf);
+			let event = self
+				.endpoint
+				.borrow_mut()
+				.handle(self.owner.now(), from, None, ecn, segment, &mut buf);
 			match event {
 				Some(DatagramEvent::ConnectionEvent(key, event)) => {
 					let conn = self.conns.borrow().get(&key).cloned();
@@ -359,10 +359,7 @@ impl Inner {
 			.handshake
 			.timeout
 			.and_then(|timeout| self.owner.now().checked_add(timeout));
-		let accepted = self
-			.endpoint
-			.borrow_mut()
-			.accept(incoming, self.owner.now(), buf, None);
+		let accepted = self.endpoint.borrow_mut().accept(incoming, self.owner.now(), buf, None);
 		let (key, conn) = match accepted {
 			Ok(accepted) => accepted,
 			Err(err) => {
