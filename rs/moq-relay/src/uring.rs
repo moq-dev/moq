@@ -500,7 +500,11 @@ fn serve_worker(spawn: Spawn) -> bool {
 	let setup = (|| -> anyhow::Result<(moq_uring::Worker, moq_uring::quic::Endpoint)> {
 		let mut config = moq_uring::Config::default();
 		config.metrics = metrics;
-		let worker = moq_uring::Worker::new(config).context("io_uring setup failed")?;
+		// Built inside the shared runtime, so the worker keeps that runtime's clock.
+		let worker = {
+			let _shared = serve.tokio.enter();
+			moq_uring::Worker::new(config).context("io_uring setup failed")?
+		};
 		// The member carries its slot in the steered group, so adopting it is
 		// what makes the endpoint issue connection ids that steer back here.
 		let socket = worker

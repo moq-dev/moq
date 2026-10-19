@@ -574,6 +574,12 @@ impl Handle {
 		Metrics::from_counters(self.shared.metrics.clone())
 	}
 
+	/// Where this worker's time comes from.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	pub(crate) fn clock(&self) -> &Clock {
+		&self.shared.clock
+	}
+
 	/// Run a `!Send` future on this worker until completion.
 	///
 	/// If the worker has already been dropped the future is dropped instead of

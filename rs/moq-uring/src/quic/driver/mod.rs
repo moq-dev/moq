@@ -30,7 +30,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 #[cfg(feature = "qlog")]
 use super::qlog;
 use super::{Congestion, Error, Identity, SEGMENT, Transport, client, server};
-use crate::udp;
+use crate::{clock::Clock, udp};
 
 /// Per-stream flow control credit.
 const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
@@ -113,8 +113,8 @@ pub(crate) fn endpoint_config(shard: Option<moq_sock::shard::Shard>) -> Result<A
 	Ok(Arc::new(config))
 }
 
-/// Dial as `config` says.
-pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::ClientConfig, Error> {
+/// Dial as `config` says, on a worker running on `clock`.
+pub(crate) fn client_config(config: &client::Config, clock: &Clock) -> Result<moq_quic::ClientConfig, Error> {
 	let provider = provider();
 	let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
 		.with_protocol_versions(&[&rustls::version::TLS13])
@@ -158,18 +158,18 @@ pub(crate) fn client_config(config: &client::Config) -> Result<moq_quic::ClientC
 
 	let crypto = QuicClientConfig::try_from(tls).map_err(|err| Error::Tls(err.to_string()))?;
 	let mut client = moq_quic::ClientConfig::new(Arc::new(crypto));
-	let transport = transport_config(&config.transport)?;
+	let transport = transport_config(&config.transport, clock)?;
 	#[cfg(feature = "qlog")]
 	let transport = with_qlog(transport, &config.transport, qlog::Side::Client);
 	client.transport_config(Arc::new(transport));
 	Ok(client)
 }
 
-/// Serve as `config` says.
-pub(crate) fn server_config(config: &server::Config) -> Result<moq_quic::ServerConfig, Error> {
+/// Serve as `config` says, on a worker running on `clock`.
+pub(crate) fn server_config(config: &server::Config, clock: &Clock) -> Result<moq_quic::ServerConfig, Error> {
 	let crypto = QuicServerConfig::try_from(config.tls.clone()).map_err(|err| Error::Tls(err.to_string()))?;
 	let mut server = moq_quic::ServerConfig::with_crypto(Arc::new(crypto));
-	let transport = transport_config(&config.transport)?;
+	let transport = transport_config(&config.transport, clock)?;
 	#[cfg(feature = "qlog")]
 	let transport = with_qlog(transport, &config.transport, qlog::Side::Server);
 	server.transport_config(Arc::new(transport));
@@ -241,7 +241,7 @@ fn with_qlog(
 }
 
 /// The per-connection knobs both roles share.
-fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Error> {
+fn transport_config(config: &Transport, clock: &Clock) -> Result<moq_quic::TransportConfig, Error> {
 	use moq_quic::VarInt;
 
 	let idle = moq_quic::IdleTimeout::try_from(config.idle_timeout)
@@ -275,11 +275,19 @@ fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Err
 	transport.initial_mtu(SEGMENT as u16);
 	transport.min_mtu(SEGMENT as u16);
 	transport.mtu_discovery_config(None);
-	transport.congestion_controller_factory(match config.congestion {
-		Congestion::Loss => Arc::new(moq_quic::congestion::CubicConfig::default())
-			as Arc<dyn moq_quic::congestion::ControllerFactory + Send + Sync>,
+	let congestion: Arc<dyn moq_quic::congestion::ControllerFactory + Send + Sync> = match config.congestion {
+		// A pacer refills only as time passes, which a manual clock does only when
+		// a test advances it, so a paced flight would stall there. A window past
+		// `u32::MAX` turns pacing off, and congestion control with it.
+		_ if clock.is_manual() => {
+			let mut unpaced = moq_quic::congestion::CubicConfig::default();
+			unpaced.initial_window(1 << 40);
+			Arc::new(unpaced)
+		}
+		Congestion::Loss => Arc::new(moq_quic::congestion::CubicConfig::default()),
 		Congestion::Delay => Arc::new(moq_quic::congestion::Bbr3Config::default()),
-	});
+	};
+	transport.congestion_controller_factory(congestion);
 	Ok(transport)
 }
 
@@ -378,7 +386,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
 
 #[cfg(test)]
 mod tests {
-	use super::{CONNECTION_WINDOW, STREAM_WINDOW, Transport, transport_config};
+	use super::{CONNECTION_WINDOW, Clock, STREAM_WINDOW, Transport, transport_config};
 
 	/// moq-quic keeps the windows private, but its `Debug` prints them. The leading
 	/// space keeps `receive_window` from matching `stream_receive_window`, and
@@ -389,7 +397,7 @@ mod tests {
 
 	#[test]
 	fn windows_default_to_the_fixed_credits() {
-		let transport = transport_config(&Transport::default()).expect("defaults");
+		let transport = transport_config(&Transport::default(), &Clock::new()).expect("defaults");
 		assert!(has_window(
 			&transport,
 			"stream_receive_window",
@@ -408,7 +416,7 @@ mod tests {
 			..Default::default()
 		};
 
-		let transport = transport_config(&config).expect("windows");
+		let transport = transport_config(&config, &Clock::new()).expect("windows");
 		assert!(has_window(&transport, "receive_window", 64 << 20));
 		assert!(has_window(&transport, "stream_receive_window", 8 << 20));
 		assert!(has_window(&transport, "send_window", 32 << 20));
@@ -426,7 +434,7 @@ mod tests {
 			..Default::default()
 		};
 
-		let transport = transport_config(&config).expect("max windows");
+		let transport = transport_config(&config, &Clock::new()).expect("max windows");
 		assert!(has_window(&transport, "receive_window", max_varint));
 		assert!(has_window(&transport, "stream_receive_window", max_varint));
 		assert!(has_window(&transport, "send_window", u64::MAX));
@@ -438,14 +446,14 @@ mod tests {
 			receive_window: Some(1u64 << 62),
 			..Default::default()
 		};
-		let err = transport_config(&over).expect_err("past a varint");
+		let err = transport_config(&over, &Clock::new()).expect_err("past a varint");
 		assert!(err.to_string().contains("receive window"), "{err}");
 
 		let over = Transport {
 			stream_receive_window: Some(u64::MAX),
 			..Default::default()
 		};
-		let err = transport_config(&over).expect_err("past a varint");
+		let err = transport_config(&over, &Clock::new()).expect_err("past a varint");
 		assert!(err.to_string().contains("stream receive window"), "{err}");
 	}
 }

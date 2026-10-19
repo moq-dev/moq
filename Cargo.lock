@@ -5071,6 +5071,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "moq-auth 0.2.1",
+ "moq-clock",
  "moq-net",
  "moq-quic",
  "moq-shaper",
