@@ -81,7 +81,7 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 - [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
 
-- [A discarded Retry no longer blocks the genuine one](/quest/m0/retry-after-invalid-retry.md) - one injected or corrupted Retry no longer kills a handshake, on `main` and then `release`
+- [Discarded-Retry backport](/quest/m0/retry-backport.md) - one injected or corrupted Retry no longer kills a handshake on the release line, via a moq-noq 1.3.x patch
 
 - [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then a patch with draft-20+ FETCH and the unset-clock and quiet-edge fixes

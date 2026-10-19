@@ -61,6 +61,11 @@ function union(grants: Iterable<Grant>): Grant {
 	return { publish, subscribe, expires };
 }
 
+// The transport closed under the stream, which ends the whole session rather than one token.
+function transportClosed(err: unknown): boolean {
+	return typeof err === "object" && err !== null && "source" in err && err.source === "session";
+}
+
 /** One token this side presented. */
 class Presented implements Auth {
 	readonly grant = new Signal<Grant | undefined>(undefined);
@@ -285,6 +290,9 @@ export class AuthSession implements Handle {
 	#ended = new Signal(0);
 
 	#union = new Signal<Grant | undefined>(undefined);
+	// The union until the session ends, which is not a revocation: what the session covered
+	// ends with the session's own error, not as unauthorized.
+	#scope = new Signal<Grant | undefined>(undefined);
 	// The peer replied to some token, so the union is known even when empty.
 	#replied = false;
 	#tokens = new Set<Presented>();
@@ -309,6 +317,11 @@ export class AuthSession implements Handle {
 
 	get grant(): Getter<Grant | undefined> {
 		return this.#union;
+	}
+
+	/** The grant this session enforces: {@link grant}, kept as it was once the session ends. */
+	get scope(): Getter<Grant | undefined> {
+		return this.#scope;
 	}
 
 	/** Whether this session exchanges tokens at all. */
@@ -383,7 +396,7 @@ export class AuthSession implements Handle {
 				err instanceof StreamError ||
 				err instanceof SessionError ||
 				err instanceof Unsupported ||
-				(typeof err === "object" && err !== null && "source" in err && err.source === "session")
+				transportClosed(err)
 			)
 				throw err;
 			throw new ProtocolViolation("malformed AUTH", { cause: err });
@@ -451,6 +464,7 @@ export class AuthSession implements Handle {
 
 	async #run(wire: AuthWire, token: Presented) {
 		let result: Error | null = null;
+		let closed = false;
 		try {
 			const { stream, id } = await wire.present(token.token);
 			token.stream = stream;
@@ -467,7 +481,7 @@ export class AuthSession implements Handle {
 						err instanceof StreamError ||
 						err instanceof SessionError ||
 						err instanceof Unsupported ||
-						(typeof err === "object" && err !== null && "source" in err && err.source === "session")
+						transportClosed(err)
 					)
 						throw err;
 					throw new ProtocolViolation("malformed AUTH reply", { cause: err });
@@ -499,6 +513,7 @@ export class AuthSession implements Handle {
 				break;
 			}
 		} catch (err: unknown) {
+			closed = transportClosed(err);
 			if (token.withdrawn) {
 				result = null;
 			} else if (!token.isAnswered && err instanceof StreamError) {
@@ -519,6 +534,8 @@ export class AuthSession implements Handle {
 		token.end(result);
 		if (unanswered && token.setup) this.#setupPending.update((n) => n - 1);
 		this.#tokens.delete(token);
+		// Closed before the union shrinks, so the scope never reads it as a revocation.
+		if (closed) this.close();
 		this.#recompute();
 	}
 
@@ -538,6 +555,7 @@ export class AuthSession implements Handle {
 		if (granted.length === 0 && !this.#replied) return;
 		const next = union(granted);
 		if (!grantsEqual(next, this.#union.peek())) this.#union.set(next);
+		if (!this.#closed && !grantsEqual(next, this.#scope.peek())) this.#scope.set(next);
 	}
 }
 

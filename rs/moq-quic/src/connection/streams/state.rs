@@ -1360,6 +1360,42 @@ mod tests {
         assert_eq!(client.local_max_data - initial_max, MESSAGE_SIZE as u64);
     }
 
+    /// Stopping a stream whose final size is known frees it, so its stream ID credit goes out at
+    /// once instead of waiting for the next packet to arrive.
+    #[test]
+    fn stop_after_reset_issues_stream_credit() {
+        let mut client = StreamsState::new(
+            Side::Client,
+            1u32.into(),
+            1u32.into(),
+            1024 * 1024,
+            (1024 * 1024u32).into(),
+            (1024 * 1024u32).into(),
+        );
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        assert_eq!(
+            client
+                .received_reset(frame::ResetStream {
+                    id,
+                    error_code: 0u32.into(),
+                    final_offset: 0u32.into(),
+                    reliable_size: None,
+                })
+                .unwrap(),
+            ShouldTransmit(false)
+        );
+
+        let mut pending = Retransmits::default();
+        RecvStream {
+            id,
+            state: &mut client,
+            pending: &mut pending,
+        }
+        .stop(0u32.into())
+        .unwrap();
+        assert!(pending.max_stream_id[Dir::Uni as usize]);
+    }
+
     #[test]
     fn reset_flow_control() {
         let mut client = make(Side::Client);

@@ -170,9 +170,10 @@ service. The root `m2ts` section names the one track holding it:
 
 Each frame is a run of whole 188-byte packets in input order, timestamped on
 the multiplex's own PCR clock, which never steps back: a source whose clock
-steps back is a new broadcast. `randomAccess` says whether every group begins
-where a receiver can start decoding, and `muxRate` is the constant multiplex
-rate in bits per second, absent for a variable-rate source. A player has
+steps back is a new broadcast. `randomAccess` says whether every group of the
+latest two-second window began where a receiver can start decoding, and
+`muxRate` is that window's constant multiplex rate in bits per second, absent
+for a variable-rate source. A player has
 nothing to decode here. `moq import ts --passthrough` writes this section (see
 [moq-cli](/bin/cli)); the encoding is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
