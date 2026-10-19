@@ -33,7 +33,7 @@ ignored; its guide says what replaces it.
 These land with the next breaking release.
 
 - **Data-track breaks are an object with no bytes** (#5815). A hang data
-  track (TS verbatim PES, sections, `m2ts`, text) marks a discontinuity with a
+  track (TS private PES, sections, `m2ts`, text) marks a discontinuity with a
   group of one empty object instead of a skipped group. Older consumers fail
   to decode it, so upgrade exporters and players before publishers.
 - **Auth requests name `webtransport`** (#5293). Relays report a WebTransport
@@ -50,8 +50,9 @@ These land with the next breaking release.
   their readers upgraded together.
 - **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
   publisher instance now serves the prefix. lite-06's `ANNOUNCE_RESTART` is
-  named `ANNOUNCE_UPDATE`, as it always meant. On moq-lite 06 and older and
-  moq-transport, a restart is still an end then a start.
+  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport draft 17 and later
+  with the epoch extension advertise another epoch before withdrawing the old
+  one. Elsewhere, a restart is still an end then a start.
 - **Publisher epochs ride the route** (#4942). moq-lite 07 carries the epoch
   after the path in `ANNOUNCE_START`, `TRACK`, `SUBSCRIBE`, and `FETCH`.
   Routes without an epoch no longer resume across routes, so default lite-06

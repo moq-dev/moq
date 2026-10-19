@@ -400,6 +400,7 @@ fn ietf_track_status_interop() {
 				track_namespace: crate::Path::new(namespace),
 				track_name: "video".into(),
 				properties_wanted: wanted,
+				epoch: None,
 			}
 			.encode(&mut w, version)
 			.unwrap();

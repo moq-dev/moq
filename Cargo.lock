@@ -5370,6 +5370,7 @@ dependencies = [
  "moq-quic",
  "moq-sock",
  "moq-tokio",
+ "moq-uring",
  "nix",
  "rcgen 0.14.10",
  "rustc-hash 2.1.3",

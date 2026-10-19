@@ -1,4 +1,5 @@
-import { ProtocolViolation } from "../error.ts";
+import * as Epoch from "../epoch.ts";
+import { ProtocolViolation, reason } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
@@ -29,6 +30,8 @@ export const SetupOption = {
 	Auth: 0x40b60n,
 	/** ACTIVE_COUNT, from the MoQ Active Count extension. See `active_count.ts`. */
 	ActiveCount: 0x40b64n,
+	/** EPOCH, from the MoQ Epoch extension. See `epoch.ts`. */
+	Epoch: 0x40b68n,
 } as const;
 
 // Unknown SETUP options may repeat, including GREASE (draft-21 section 9.1).
@@ -239,6 +242,8 @@ const MSG_PARAM_FILL_PARAMETERS = 0x23n;
 const MSG_PARAM_HOP_PATH = 0x40b57n;
 /// ACTIVE_COUNT, from the MoQ Active Count extension.
 const MSG_PARAM_ACTIVE_COUNT = 0x40b66n;
+/// EPOCH, from the MoQ Epoch extension: a UUIDv7's 16 bytes. See `epoch.ts`.
+const MSG_PARAM_EPOCH = 0x40b69n;
 
 /// Message parameter ids defined in draft-16. A known id on the wrong message is ignored.
 const DRAFT16_MESSAGE_PARAMS: readonly bigint[] = [0x02n, 0x03n, 0x08n, 0x09n, 0x10n, 0x20n, 0x21n, 0x22n, 0x32n];
@@ -286,6 +291,7 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 	const fill = id === MSG_PARAM_FILL_PARAMETERS && draft20(version);
 	const include = id === MSG_PARAM_INCLUDE_PROPERTIES && draft20(version);
 	const newGroup = id === MSG_PARAM_NEW_GROUP_REQUEST && from16;
+	const epoch = id === MSG_PARAM_EPOCH && from17;
 
 	switch (message) {
 		case "subscribe":
@@ -302,7 +308,8 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				fill ||
 				range ||
 				newGroup ||
-				include
+				include ||
+				epoch
 			);
 		case "subscribe-ok":
 			// Draft-14 defines only MAX_CACHE_DURATION here.
@@ -340,7 +347,7 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				(order && (d15 || draft20(version)))
 			);
 		case "publish-namespace":
-			return auth || id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST;
+			return auth || id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST || epoch;
 		case "fetch":
 			return (
 				auth ||
@@ -349,12 +356,13 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				(filter && draft20(version)) ||
 				order ||
 				range ||
-				include
+				include ||
+				epoch
 			);
 		case "request-ok":
 			return expires || largest || id === MSG_PARAM_ACTIVE_COUNT;
 		case "namespace":
-			return id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST;
+			return id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST || epoch;
 	}
 }
 
@@ -412,6 +420,7 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_AUTHORIZATION_TOKEN:
 		case MSG_PARAM_FILL_PARAMETERS:
 		case MSG_PARAM_HOP_PATH:
+		case MSG_PARAM_EPOCH:
 			return "bytes";
 		default:
 			if (MSG_PARAM_REPEATABLE.includes(id)) return "bytes";
@@ -649,6 +658,17 @@ export class Parameters {
 
 	set routeCost(v: bigint) {
 		this.vars.set(MSG_PARAM_ROUTE_COST, v);
+	}
+
+	/** EPOCH (MoQ Epoch): the publisher instance an advertisement or request names. */
+	get epoch(): Epoch.Valid | undefined {
+		const value = this.bytes.get(MSG_PARAM_EPOCH);
+		return value === undefined ? undefined : Epoch.fromBytes(value);
+	}
+
+	set epoch(v: Epoch.Valid | undefined) {
+		if (v === undefined) this.bytes.delete(MSG_PARAM_EPOCH);
+		else this.bytes.set(MSG_PARAM_EPOCH, Epoch.toBytes(v));
 	}
 
 	/** Encode the block, leaving out the varints in `omit`, which the message carries as fixed fields. */
@@ -900,7 +920,16 @@ export class Parameters {
 					break;
 				case "bytes": {
 					const size = await r.u53();
-					params.bytes.set(id, await r.read(size));
+					const value = await r.read(size);
+					// Anything but a UUIDv7's 16 bytes is malformed, so refuse it here rather than on first read.
+					if (id === MSG_PARAM_EPOCH) {
+						try {
+							Epoch.fromBytes(value);
+						} catch (err) {
+							throw new ProtocolViolation(`malformed EPOCH: ${reason(err)}`, { cause: err });
+						}
+					}
+					params.bytes.set(id, value);
 					break;
 				}
 			}

@@ -100,6 +100,15 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      # KLV and DVB AC-3 the importer carries as whole PES: each PES comes back byte-equal
+      # outside its PTS and DTS, at its source placement, and the AC-3 passes the T-STD model.
+      - name: TS private PES
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --klv --strict
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       # `import/export ts --passthrough`: from its first packet the capture is the source's
       # packets in place, and every compliance check grades it as it grades that interval of
       # the source. The generated clip fails the T-STD model on its own; the capture must too.

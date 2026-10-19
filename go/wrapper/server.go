@@ -94,6 +94,7 @@ type serverConfig struct {
 	tlsGenerate    []string
 	versions       []string
 	quicMaxStreams *uint64
+	quicKeylog     *bool
 	publish        *OriginProducer
 	consume        *OriginProducer
 }
@@ -124,6 +125,12 @@ func WithServerVersions(versions ...string) ServerOption {
 // toward this server (default 10,000; 0 is refused).
 func WithServerQUICMaxStreams(maxStreams uint64) ServerOption {
 	return func(c *serverConfig) { c.quicMaxStreams = &maxStreams }
+}
+
+// WithServerQUICKeylog writes TLS session secrets to the file SSLKEYLOGFILE names, for
+// decrypting a capture. Off by default; on without SSLKEYLOGFILE fails Listen.
+func WithServerQUICKeylog(enabled bool) ServerOption {
+	return func(c *serverConfig) { c.quicKeylog = &enabled }
 }
 
 // WithServerPublishOrigin sets the origin whose broadcasts are served to
@@ -166,7 +173,7 @@ func Listen(ctx context.Context, bind string, opts ...ServerOption) (*Server, er
 			Key:      cfg.tlsKey,
 			Generate: cfg.tlsGenerate,
 		},
-		Quic: ffi.MoqQuicConfig{MaxStreams: cfg.quicMaxStreams},
+		Quic: ffi.MoqQuicConfig{MaxStreams: cfg.quicMaxStreams, Keylog: cfg.quicKeylog},
 	}
 	if cfg.publish != nil {
 		config.Publish = &cfg.publish.inner

@@ -42,11 +42,13 @@ ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
 [auth](/draft/moq-auth) to tell each peer what it may publish and subscribe to,
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
-before a `SUBSCRIBE_NAMESPACE` is synced, and
+before a `SUBSCRIBE_NAMESPACE` is synced,
+[epoch](/draft/moq-epoch) to carry [publisher epochs](/concept/moq-lite#publisher-epochs)
+without changing a path, and
 [probe](/draft/moq-probe) for bandwidth estimation. Rust sessions request PROBE
 only while an owned `recv_bandwidth()` consumer is held. Read estimates through
 its `peek()` or `changed()` methods; session statistics do not request PROBE.
-Both libraries offer solicit and auth (draft 17 and later) unless a side's
+Both libraries offer solicit, auth, and epoch (draft 17 and later) unless a side's
 `extensions` setting declines one, which connects it as a peer that does not
 speak that extension. The pooled JavaScript `Connection` has no such setting yet.
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension. It encrypts

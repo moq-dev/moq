@@ -17,6 +17,7 @@ pub mod cluster;
 #[cfg(feature = "async")]
 mod control;
 mod datagram;
+pub(crate) mod epoch;
 pub(crate) mod error;
 mod fetch;
 mod filter;

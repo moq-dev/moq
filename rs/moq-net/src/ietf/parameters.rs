@@ -33,6 +33,8 @@ pub enum ParameterVarInt {
 	ActiveCount = super::active_count::ACTIVE_COUNT,
 	/// Subscriber max age, from the MoQ Timestamp extension.
 	MaxAge = super::max_age::OPTION,
+	/// EPOCH, from the MoQ Epoch extension.
+	Epoch = super::epoch::EPOCH,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }

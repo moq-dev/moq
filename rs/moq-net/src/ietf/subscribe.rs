@@ -11,6 +11,7 @@ use crate::{
 use super::token::RequestToken;
 
 use super::Message;
+use super::epoch;
 use super::namespace::{decode_track, encode_namespace};
 
 use super::Version;
@@ -47,6 +48,9 @@ pub struct Subscribe<'a> {
 	pub new_group: Option<u64>,
 	/// Subscriber max age in milliseconds (MoQ Timestamp), if negotiated.
 	pub max_age: Option<u64>,
+	/// The publisher instance the subscriber expects (MoQ Epoch, draft-17+). Only on a
+	/// session that negotiated it; the session refuses one that arrives otherwise.
+	pub epoch: Option<crate::Epoch>,
 }
 
 /// NEW_GROUP_REQUEST (0x32) and DYNAMIC_GROUPS (0x30) arrived in draft-15.
@@ -102,6 +106,7 @@ impl Message for Subscribe<'_> {
 					authorization_token,
 					new_group: None,
 					max_age: super::max_age::validate(max_age)?,
+					epoch: None,
 				})
 			}
 			_ => {
@@ -123,6 +128,7 @@ impl Message for Subscribe<'_> {
 					0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 					0x32 => new_group: Option<u64> where has_new_group_request(version),
 					0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
+					epoch::EPOCH_PARAM => epoch: Option<crate::Epoch> where epoch::supported(version),
 					super::max_age::PARAMETER => max_age: Option<u64>,
 				);
 				let authorization_token = super::token::single(authorization_token)?;
@@ -163,6 +169,7 @@ impl Message for Subscribe<'_> {
 					authorization_token,
 					new_group,
 					max_age: super::max_age::validate(max_age)?,
+					epoch,
 				})
 			}
 		}
@@ -199,6 +206,8 @@ impl Message for Subscribe<'_> {
 				// parameter, which is a protocol violation.
 				let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
 				let new_group = self.new_group.filter(|_| has_new_group_request(version));
+				// Only a session that negotiated MoQ Epoch names one, and it exists from draft-17.
+				let epoch = self.epoch.clone().filter(|_| epoch::supported(version));
 
 				encode_params!(w, version,
 					0x03 => self.authorization_token.clone(),
@@ -209,6 +218,7 @@ impl Message for Subscribe<'_> {
 					0x23 => fill,
 					0x32 => new_group,
 					0x35 => include_properties,
+					epoch::EPOCH_PARAM => epoch,
 					super::max_age::PARAMETER => self.max_age,
 				);
 			}
@@ -624,6 +634,7 @@ mod tests {
 					range_filters: false,
 					authorization_token: None,
 					new_group: None,
+					epoch: None,
 				};
 				let decoded: Subscribe = decode_message(&encode_message(&msg, version), version).unwrap();
 				assert_eq!(decoded.max_age, max_age, "{version}");
@@ -663,6 +674,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -691,6 +703,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -736,6 +749,7 @@ mod tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
+				epoch: None,
 			};
 			let decoded: Subscribe = decode_message(&encode_message(&subscribe, version), version).unwrap();
 			assert_eq!(decoded.new_group, expected, "{version}: SUBSCRIBE");
@@ -844,6 +858,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
@@ -879,6 +894,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -1069,6 +1085,7 @@ mod tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
+				epoch: None,
 			};
 
 			let encoded = encode_message(&msg, version);
@@ -1223,6 +1240,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -1291,6 +1309,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -1615,6 +1634,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		#[rustfmt::skip]
@@ -1680,6 +1700,7 @@ mod tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
+				epoch: None,
 			};
 			let decoded: Subscribe = decode_message(&encode_message(&msg, version), version).unwrap();
 			assert!(!decoded.forward, "{version}");

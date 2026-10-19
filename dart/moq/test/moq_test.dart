@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:moq/audio.dart' as moq_audio;
@@ -29,16 +30,6 @@ void main() {
         init: moq_media.ContainerInit(
           format: moq_media.ContainerFormat.fmp4,
           data: Uint8List(0),
-          timebase: timebase,
-        ),
-      ),
-      throwsA(isA<CodecMoqException>()),
-    );
-    expect(
-      () => moq_media.ContainerStreamProducer(
-        broadcast: other,
-        init: moq_media.ContainerStreamInit(
-          format: moq_media.ContainerFormat.fmp4,
           timebase: timebase,
         ),
       ),
@@ -245,6 +236,7 @@ void main() {
         gso: false,
         mtuDiscovery: true,
         congestionControl: CongestionControl.loss,
+        keylog: false,
         reconnect: false,
         backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
         websocketEnabled: false,
@@ -292,6 +284,26 @@ void main() {
       throwsA(isA<ConfigMoqException>()),
     );
   });
+
+  test(
+    'keylog without SSLKEYLOGFILE fails the listen',
+    () {
+      expect(
+        Server.listen(
+          options: const ListenOptions(
+            bind: '127.0.0.1:0',
+            tlsGenerate: ['localhost'],
+            keylog: true,
+          ),
+        ),
+        throwsA(isA<ConfigMoqException>()),
+      );
+    },
+    // dart:io cannot unset a variable, so a run that inherits one skips.
+    skip: (Platform.environment['SSLKEYLOGFILE'] ?? '').isNotEmpty
+        ? 'SSLKEYLOGFILE is set'
+        : false,
+  );
 
   test('closing a server releases its port', () async {
     final first = await Server.listen(

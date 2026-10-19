@@ -508,6 +508,44 @@ fn a_request_never_joins_a_retiring_front() {
 	});
 }
 
+/// Read a track whose source already aborted with `read`, racing the front ending it.
+/// A reader that saw no end, then found one set when it went to park, parked on nothing
+/// and never woke, which shows up here as a deadlock. `read` says whether the refusal
+/// surfaced as an error.
+fn refused_track_race(read: fn(&mut moq_net::track::Subscriber) -> bool) {
+	model(move || {
+		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+		let consumer = producer.consume();
+		let source = producer.publish("room", origin::Route::default()).unwrap();
+		let video = source.create_track("video", None).expect("create track");
+		let noop = kio::Waiter::noop();
+		let now = moq_net::time::Instant::now();
+
+		let pending = consumer.request_broadcast("room", None);
+		driver.poll(now, &noop).unwrap();
+		let room = block_on(pending).expect("resolves");
+
+		let subscribing = room.track("video").expect("track").subscribe(None);
+		driver.poll(now, &noop).unwrap();
+		let mut subscriber = block_on(subscribing).expect("subscribe");
+
+		video.abort(Error::NotFound).unwrap();
+		let reader = thread::spawn(move || read(&mut subscriber));
+		driver.poll(now, &noop).unwrap();
+		assert!(reader.join().unwrap(), "a refused track read as an end");
+	});
+}
+
+#[test]
+fn a_group_reader_sees_the_front_end_a_refused_track() {
+	refused_track_race(|subscriber| block_on(subscriber.recv_group()).is_err());
+}
+
+#[test]
+fn a_finished_reader_sees_the_front_end_a_refused_track() {
+	refused_track_race(|subscriber| block_on(subscriber.finished()).is_err());
+}
+
 /// An abort racing the first parking poll must either be observed or wake the cursor.
 #[test]
 fn an_aborted_parked_group_releases_a_finished_track() {

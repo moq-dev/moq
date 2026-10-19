@@ -1126,7 +1126,7 @@ export class Publisher {
 				// answered past, so the source's largest says where the live feed is.
 				const largest =
 					!startSent && hasLargest(this.version)
-						? newer(hooks.bufferedLargest(track), hooks.peekLargest(track))
+						? newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest)
 						: undefined;
 				const recv = hooks.tryRecvGroup(track, startSent);
 				switch (recv.kind) {
