@@ -181,8 +181,8 @@ moq-srt = { version = "0.3.11", path = "rs/moq-srt" }
 moq-stats = { version = "0.2.12", path = "rs/moq-stats" }
 moq-tokio = { version = "0.19.23", path = "rs/moq-tokio", default-features = false }
 # Default features off on moq-transcode and moq-video so each workspace consumer
-# chooses native codecs, OpenH264, and rendering explicitly. Both crates still
-# provide working native plus software defaults when depended on directly.
+# chooses native codecs and rendering explicitly. OpenH264 is opt-in everywhere:
+# each consumer forwards an `openh264` feature that release builds turn on.
 # VAAPI is opt-in everywhere; its decoder is hardware-validated, while its
 # encoder is not yet.
 moq-transcode = { version = "0.1.10", path = "rs/moq-transcode", default-features = false }
@@ -201,7 +201,8 @@ moq-vaapi = "0.1.0"
 # cross-compiled Python, Swift, Kotlin, and Go builds have no use for: adding
 # `features = ["capture"]` to a consumer that ships in those bindings pulls the
 # whole device graph into every one of them. Codec features are independent of
-# that argument, so moq-ffi and moq-c opt NVIDIA, OpenH264, and VAAPI back in.
+# that argument, so moq-ffi and moq-c opt NVIDIA and VAAPI back in (OpenH264
+# through their own `openh264` feature, which release builds enable).
 moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = false }
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
 # Upstream noq-proto, only for iroh's controller factory types.

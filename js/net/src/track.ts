@@ -22,6 +22,7 @@ import {
 	type TrackSequence,
 	type TrackSequences,
 } from "./internal.ts";
+import { grace, Ledger } from "./ledger.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
@@ -430,6 +431,9 @@ class TrackState {
 	 * the Rust `end`.
 	 */
 	end = new Signal<Location | undefined>(undefined);
+	// A wire subscription's pending tail still owes a group below the end, so reaching the
+	// end does not end readers yet. Mirrors the Rust `awaits_tail`.
+	owed = new Signal(false);
 	closed = new Once<Error | null>();
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
@@ -664,6 +668,19 @@ export class Producer {
 	// datagram. An aborted one stays open, since it can be recreated.
 	#largestOpen = false;
 
+	// A wire subscription declared the end ahead of the group streams below it, which QUIC
+	// may deliver in any order: readers wait for a hole below it to fill, or for the track
+	// to close, rather than end at the boundary with groups still to arrive.
+	#tailPending = false;
+	// The first group the wire subscription's live feed serves (see `hooks.startTrack`), and
+	// the floor the SUBSCRIBE it answered requested.
+	#served?: { start: number; requested?: number };
+	// The sequences the live feed delivered, as a group or a datagram: what a pending tail is
+	// judged by. Eviction never touches it. A gap folds away a subscription's grace after a
+	// later arrival opened it, as the session's tail does, so this holds only the gaps still
+	// worth waiting for.
+	#arrivals = new Ledger();
+
 	constructor(name: string) {
 		this.name = name;
 		this.#demand = makeDemand(name, this.#used, this.#state);
@@ -671,6 +688,10 @@ export class Producer {
 
 	static {
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
+		hooks.startTrack = (producer, served) => {
+			producer.#served = served;
+			producer.#owe();
+		};
 		hooks.receiveTrack = (producer) => {
 			producer.#remote = true;
 		};
@@ -706,6 +727,8 @@ export class Producer {
 				return next;
 			});
 		}
+		// A pending tail owes nothing the publisher gave up.
+		this.#arrive(start, end);
 	}
 
 	// A publisher may re-create a group it cut; the sequence is no longer given up.
@@ -853,6 +876,7 @@ export class Producer {
 
 		sink.received.set(this.#received);
 		sink.end.set(this.#state.end.peek());
+		sink.owed.set(this.#state.owed.peek());
 		if (closed !== undefined) {
 			closeTrackState(sink, closed instanceof Error ? closed : undefined);
 		}
@@ -866,6 +890,8 @@ export class Producer {
 		if (combined && retained !== undefined)
 			combined.maxDelay = Milli(Math.min(combined.maxDelay ?? Milli.zero, retained));
 		this.#state.update.set(combined);
+		// The requested floor bounds what a pending tail owes.
+		this.#owe();
 	}
 
 	// Mirror a cached source group into a sink. The mirror fills synchronously as the
@@ -1112,6 +1138,7 @@ export class Producer {
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
 		this.#advance(group.sequence);
+		this.#arrive(group.sequence);
 		this.#state.latest = Math.max(this.#state.latest ?? 0, group.sequence);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
 		// Follow the group's frames as they land, past the head `#advance` already named.
@@ -1233,6 +1260,7 @@ export class Producer {
 	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache).
 	#publishDatagram(datagram: Datagram): void {
 		this.#advance(datagram.sequence);
+		this.#arrive(datagram.sequence);
 		this.#finishLargest(datagram.sequence);
 		for (const sink of this.#sinks) {
 			sink.received.set(this.#received);
@@ -1314,6 +1342,47 @@ export class Producer {
 			}
 			this.#declareEnd(end);
 		}
+		this.#tailPending = true;
+		this.#owe();
+	}
+
+	// Record that the live feed accounted for `[start, end)`, then fold the gaps that aged out.
+	#arrive(start: number, end = start + 1): void {
+		const at = now();
+		this.#arrivals.account(start, end, at);
+		// Only a gap folds, so an in-order feed never reads the subscription.
+		if (this.#arrivals.hasGaps()) this.#arrivals.expire(at, this.#grace());
+		this.#owe();
+	}
+
+	// The grace the session's tail uses, from the max delay the track's subscribers ask for.
+	#grace(): Milli {
+		return grace(this.#state.update.peek()?.maxDelay ?? Milli.zero);
+	}
+
+	// Tell every reader whether the pending tail still owes a group below the end.
+	#owe(): void {
+		if (!this.#tailPending) return;
+		const end = this.#state.end.peek();
+		const owed = end !== undefined && this.#owes(finalSequence(end));
+		for (const state of [this.#state, ...this.#sinks]) state.owed.set(owed);
+	}
+
+	// Whether the pending tail misses a sequence from where the feed starts up to `final`: one
+	// no live group or datagram delivered, in a gap younger than the grace. Judged by the
+	// arrivals, not the cache, so an evicted group or a datagram counts as delivered.
+	//
+	// The feed starts at the declared start while the demand keeps the floor its SUBSCRIBE asked
+	// for, since an update gets no fresh START: a moved floor stands on its own, and moving
+	// back restores the START. Without either, the first arrival stands in for it.
+	#owes(final: number): boolean {
+		if (!this.#tailPending) return false;
+		const groups = this.#state.update.peek()?.groups;
+		const requested = groups?.start === undefined ? undefined : groupBounds(groups).start;
+		const served = this.#served;
+		const floor = served && served.requested === requested ? served.start : (requested ?? this.#arrivals.first());
+		if (floor === undefined) return final > 0;
+		return !this.#arrivals.covers(Math.min(floor, final), final);
 	}
 
 	#declareEnd(end: Location): void {
@@ -1363,6 +1432,8 @@ export class Producer {
 	 */
 	close(abort?: Error) {
 		if (this.#state.closed.peek() !== undefined) return;
+		// A gap past the grace was lost before the abort rather than cut off by it.
+		if (abort && this.#tailPending) this.#arrivals.expire(now(), this.#grace());
 		if (abort && this.#settled()) abort = undefined;
 		if (abort === undefined && this.#state.end.peek() === undefined) {
 			this.#declareEnd({ group: this.#received, frame: 0 });
@@ -1386,13 +1457,15 @@ export class Producer {
 		this.#prune();
 	}
 
-	// Whether the declared end was reached and every cached group below it finished, so
-	// the track already holds everything it promised. Mirrors the Rust `is_settled`.
+	// Whether the declared end was reached, the pending tail owes nothing below it, and every
+	// cached group below it finished, so the track already holds everything it promised. An
+	// abort over a group the tail still owed cut it off, so readers get the error rather than
+	// a clean end without it. Mirrors the Rust `is_settled`.
 	#settled(): boolean {
 		const end = this.#state.end.peek();
 		if (end === undefined) return false;
 		const final = finalSequence(end);
-		if (this.#received < final) return false;
+		if (this.#received < final || this.#owes(final)) return false;
 		return this.#cache.every(({ group }) => group.sequence >= final || group.closed.peek() === null);
 	}
 
@@ -1805,6 +1878,7 @@ export class Subscriber {
 				this.#state.closed,
 				this.#state.end,
 				this.#state.received,
+				this.#state.owed,
 			);
 		}
 	}
@@ -1883,11 +1957,12 @@ export class Subscriber {
 		return group ? { kind: "boundary" } : { kind: "done" };
 	}
 
-	// Reader completion does not settle the tail: missing lower groups and open streams
-	// remain accounted for by the wire layer, and an abort still wins on the next read.
+	// The live edge reached the end, with no hole a wire subscription's pending tail still
+	// owes below it. Reader completion does not settle the tail: open streams remain
+	// accounted for by the wire layer, and an abort still wins on the next read.
 	#complete(): boolean {
 		const end = this.#state.end.peek();
-		return end !== undefined && this.#state.received.peek() >= finalSequence(end);
+		return end !== undefined && this.#state.received.peek() >= finalSequence(end) && !this.#state.owed.peek();
 	}
 
 	// Package-internal readiness half of recvGroup. Each registration fires at most once, and
@@ -1901,6 +1976,7 @@ export class Subscriber {
 			this.#state.closed.changed(fn),
 			this.#state.end.changed(fn),
 			this.#state.received.changed(fn),
+			this.#state.owed.changed(fn),
 		];
 		return () => {
 			for (const close of dispose) close();
@@ -1957,7 +2033,13 @@ export class Subscriber {
 			if (closed instanceof Error) throw closed;
 			if (closed !== undefined || this.#complete()) return undefined;
 
-			await Signal.race(this.#state.datagrams, this.#state.closed, this.#state.end, this.#state.received);
+			await Signal.race(
+				this.#state.datagrams,
+				this.#state.closed,
+				this.#state.end,
+				this.#state.received,
+				this.#state.owed,
+			);
 		}
 	}
 
@@ -2010,6 +2092,7 @@ export class Subscriber {
 				this.#state.closed,
 				this.#state.end,
 				this.#state.received,
+				this.#state.owed,
 			);
 		}
 	}
