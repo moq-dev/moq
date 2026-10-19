@@ -70,10 +70,10 @@ pub(crate) enum Item {
 /// payload, or on a data track one object with no bytes) is the publisher declaring a stop,
 /// read as [`Read::End`]; nothing is missing. A data track's marker carries no timestamp, so
 /// it ends at the furthest point read, and reads as nothing before the first item.
-/// Empty groups (zero objects) mean nothing. A group whose timestamps fall below the live
-/// edge earlier groups reached is malformed and aborts the track. A payload that fails to
-/// decode ends the reader with that error, even one found while looking ahead, and it reads as
-/// finished from then on; only a transport abort or eviction of a group reads as a gap.
+/// Empty groups (zero objects) mean nothing. Errors come in delivery order: a payload that fails
+/// to decode, or a group below an earlier group's start, ends the reader where it sits, and a
+/// failed track once the groups already here drain. A skip returns a malformed group's error
+/// rather than a gap. After an error the reader reads as finished.
 pub struct Consumer<F: Container> {
 	track: moq_net::track::Subscriber,
 
@@ -124,6 +124,9 @@ pub struct Consumer<F: Container> {
 	// An error ended the reader, which reads as finished from then on: a decode error has
 	// already consumed the frame it came from, so reading on would skip it.
 	failed: bool,
+
+	// The track failed, so no group can arrive. Returned once the groups already here drain.
+	track_error: Option<F::Error>,
 }
 
 /// Two adjacent groups are timeline-contiguous when the next start is within this slack
@@ -197,6 +200,7 @@ impl<F: Container> Consumer<F> {
 			next: None,
 			group: 0,
 			failed: false,
+			track_error: None,
 		}
 	}
 
@@ -301,7 +305,7 @@ impl<F: Container> Consumer<F> {
 
 	fn poll_event_inner(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
-		let finished = self.poll_read_finish(waiter)?.is_ready();
+		let finished = self.poll_read_finish(waiter).is_ready();
 
 		// A subscription with no explicit start begins wherever the publisher does:
 		// the lowest sequence it actually serves. Timestamps can't reveal that point
@@ -333,7 +337,7 @@ impl<F: Container> Consumer<F> {
 					false => self.pending.front().expect("a group has a frame").sequence,
 				};
 				// Nothing has been read, so discarding what lies below the start is no gap.
-				self.pending.retain(|group| group.sequence >= start);
+				self.discard(|group| group.sequence < start)?;
 				self.current = start;
 				self.startup = false;
 			}
@@ -347,14 +351,9 @@ impl<F: Container> Consumer<F> {
 		// the cursor keeps the eviction fast path in the read arm below.
 		// poll_aborted registers the waiter on live groups, so a later abort re-polls.
 		let current = self.current;
-		self.pending
-			.retain_mut(|group| group.sequence <= current || !group.buffered.is_empty() || !group.poll_aborted(waiter));
+		self.discard(|group| group.sequence > current && group.buffered.is_empty() && group.poll_aborted(waiter))?;
 
 		'read: loop {
-			self.poll_malformed(waiter)?;
-			// A known malformed group ends the reader now, even with current frames still readable.
-			self.take_lookahead_error()?;
-
 			// Return the next frame from the current group if possible.
 			// If the current group is finished or errored, advance to the next group.
 			if let Some(group) = self.pending.front_mut()
@@ -411,7 +410,8 @@ impl<F: Container> Consumer<F> {
 						);
 						// Whatever the group still held is lost, so this is a skip like any other.
 						self.lose();
-						self.pending.pop_front();
+						let current = self.current;
+						self.discard(|group| group.sequence <= current)?;
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
 						continue 'read;
 					}
@@ -479,9 +479,6 @@ impl<F: Container> Consumer<F> {
 				}
 			}
 
-			// Fail on a decode error the scans above found, before a skip drops its group.
-			self.take_lookahead_error()?;
-
 			// Walk the cursor over missing sequences below the first arrived group.
 			// Groups race on independent QUIC streams (newer ones at higher priority),
 			// so a buffered higher sequence proves nothing: the missing one may be
@@ -531,7 +528,8 @@ impl<F: Container> Consumer<F> {
 					.iter()
 					.take(new_idx)
 					.any(|group| !group.buffered.is_empty());
-				self.pending.drain(0..new_idx);
+				let target = self.pending[new_idx].sequence;
+				self.discard(|group| group.sequence < target)?;
 				if hole || had_marker || discarded {
 					self.lose();
 				}
@@ -565,6 +563,11 @@ impl<F: Container> Consumer<F> {
 			}
 
 			if finished && self.pending.is_empty() {
+				if let Some(err) = self.track_error.take() {
+					// The caller only gets the bare error, with nothing to say which track died.
+					tracing::warn!(track = self.track.name(), error = ?err, "track failed; ending the reader");
+					return Poll::Ready(Err(err));
+				}
 				return Poll::Ready(Ok(None));
 			}
 
@@ -589,24 +592,25 @@ impl<F: Container> Consumer<F> {
 		}
 	}
 
-	// Reads any new groups from the track until we're completely finished.
+	// Reads any new groups from the track until it finished or failed.
 	//
 	// Returns Pending until all groups have been consumed.
-	fn poll_read_finish(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), F::Error>> {
+	fn poll_read_finish(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.track_error.is_some() {
+			return Poll::Ready(());
+		}
 		loop {
-			// The whole track is gone, so there is no group to skip to and the reader ends. Log it
-			// here: the caller only gets the bare error, with nothing to say which track died.
 			let next = match ready!(self.track.poll_recv_group(waiter)) {
 				Ok(next) => next,
 				Err(err) => {
-					tracing::warn!(track = self.track.name(), error = ?err, "track failed; ending the reader");
-					return Poll::Ready(Err(err.into()));
+					self.track_error = Some(err.into());
+					return Poll::Ready(());
 				}
 			};
 
 			let Some(group) = next else {
 				// Track is finished.
-				return Poll::Ready(Ok(()));
+				return Poll::Ready(());
 			};
 
 			let reader = GroupBuffer::new(group);
@@ -624,38 +628,35 @@ impl<F: Container> Consumer<F> {
 		}
 	}
 
-	// A later group with a media timestamp below the latest delivered group's start is malformed:
-	// group starts never go backwards. Markers have no media timestamp, so they are not this check.
-	fn poll_malformed(&mut self, waiter: &kio::Waiter) -> Result<(), F::Error> {
-		let Some((prev_group, floor)) = self.start else {
-			return Ok(());
-		};
-
-		for group in self.pending.iter_mut() {
-			if group.group.sequence <= prev_group {
-				continue;
+	// Drop the pending groups `pick` selects without delivering them. A drop must not hide a
+	// malformed group, so the lowest one holding a fault, or reaching below the start of the
+	// latest delivered group, ends the reader instead.
+	fn discard(&mut self, mut pick: impl FnMut(&mut GroupBuffer<F>) -> bool) -> Result<(), F::Error> {
+		let start = self.start;
+		let mut fault = None;
+		self.pending.retain_mut(|group| {
+			if !pick(group) {
+				return true;
 			}
-			if let Poll::Ready(Some(min)) = group.poll_min_timestamp(waiter, &self.format)
-				&& min.as_micros() < floor.as_micros()
-			{
-				return Err(TimestampRewind { timestamp: min, floor }.into());
+			if fault.is_none() {
+				fault = match (start, group.min_timestamp) {
+					(Some((prev, floor)), Some(min))
+						if group.sequence > prev && min.as_micros() < floor.as_micros() =>
+					{
+						Some(TimestampRewind { timestamp: min, floor }.into())
+					}
+					_ => group.fault.take(),
+				};
 			}
+			false
+		});
+		match fault {
+			Some(err) => {
+				tracing::warn!(track = self.track.name(), error = ?err, "discarded a malformed group; ending the reader");
+				Err(err)
+			}
+			None => Ok(()),
 		}
-
-		Ok(())
-	}
-
-	// Return a decode error the lookahead kept in any buffered group.
-	fn take_lookahead_error(&mut self) -> Result<(), F::Error> {
-		if let Some(err) = self.pending.iter_mut().find_map(|group| group.error.take()) {
-			tracing::warn!(
-				track = self.track.name(),
-				error = ?err,
-				"group payload failed to decode; ending the reader"
-			);
-			return Err(err);
-		}
-		Ok(())
 	}
 
 	/// Set the max delay mid-stream, clamped to the track's retention window like
@@ -702,8 +703,8 @@ struct GroupBuffer<F: Container> {
 	// Whether a marker with no timestamp of its own was read as an end.
 	ended: bool,
 
-	// A decode error found while looking ahead, kept for the reader: the frame it consumed is gone.
-	error: Option<F::Error>,
+	// A decode error found while looking ahead, delivered after the frames buffered before it.
+	fault: Option<F::Error>,
 
 	// Read frames that haven't been consumed yet.
 	buffered: VecDeque<Frame>,
@@ -731,7 +732,7 @@ impl<F: Container> GroupBuffer<F> {
 			media: false,
 			bare: false,
 			ended: false,
-			error: None,
+			fault: None,
 			buffered: VecDeque::new(),
 			markers: VecDeque::new(),
 			delivered: 0,
@@ -762,22 +763,22 @@ impl<F: Container> GroupBuffer<F> {
 	//
 	// Returns false if the group is finished.
 	fn buffer_once(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, Failure<F::Error>>> {
-		if let Some(err) = self.error.take() {
+		if let Some(err) = self.fault.take() {
 			return Poll::Ready(Err(Failure::Decode(err)));
 		}
 		// A read only advances the cursor once it hands a frame to the container, so an error
 		// that leaves it in place is the transport's, while one after it is the payload's: an
 		// abort of the tail behind a malformed frame must not hide that frame.
 		let index = self.group.index();
-		let frames = match ready!(format.poll_read(&mut self.group, waiter)) {
+		let read = ready!(format.poll_read(&mut self.group, waiter));
+		let consumed = self.group.index() != index;
+		self.empty &= !consumed;
+		let frames = match read {
 			Ok(Some(frames)) => frames,
 			Ok(None) => return Poll::Ready(Ok(false)),
-			Err(err) if self.group.index() == index && self.poll_aborted(waiter) => {
-				return Poll::Ready(Err(Failure::Lost(err)));
-			}
+			Err(err) if !consumed && self.poll_aborted(waiter) => return Poll::Ready(Err(Failure::Lost(err))),
 			Err(err) => return Poll::Ready(Err(Failure::Decode(err))),
 		};
-		self.empty = false;
 		if format.kind() == super::Kind::Data {
 			// A data track's marker is one object with no bytes, alone in its group.
 			if self.bare || (frames.is_empty() && self.media) {
@@ -831,13 +832,13 @@ impl<F: Container> GroupBuffer<F> {
 	//
 	// Returns false once this group can buffer nothing more.
 	fn look_once(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<bool> {
-		if self.error.is_some() {
+		if self.fault.is_some() {
 			return Poll::Ready(false);
 		}
 		match ready!(self.buffer_once(waiter, format)) {
 			Ok(more) => Poll::Ready(more),
 			Err(Failure::Decode(err)) => {
-				self.error = Some(err);
+				self.fault = Some(err);
 				Poll::Ready(false)
 			}
 			Err(Failure::Lost(_)) => Poll::Ready(false),
@@ -873,7 +874,7 @@ impl<F: Container> GroupBuffer<F> {
 
 	// Ready with no timestamp once the group can no longer produce one: it ended or failed to decode.
 	fn poll_ended(&mut self, waiter: &kio::Waiter) -> Poll<Option<Timestamp>> {
-		if self.error.is_some() || self.group.poll_finished(waiter).is_ready() {
+		if self.fault.is_some() || self.group.poll_finished(waiter).is_ready() {
 			return Poll::Ready(None);
 		}
 		Poll::Pending
@@ -2160,19 +2161,24 @@ mod tests {
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500)));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
-		write_group(&mut track, 0, &[ts(0)]);
+		write_group(&mut track, 0, &[ts(0), ts(10_000)]);
 		track.abort(moq_net::Error::Cancel).unwrap();
 
-		let result = tokio::time::timeout(Duration::from_millis(500), async {
-			let mut frames = Vec::new();
-			while let Ok(Some(frame)) = consumer.read().await {
-				frames.push(frame);
+		// The groups already here drain before the track's error, as in JS.
+		let mut frames = Vec::new();
+		let end = loop {
+			let read = tokio::time::timeout(Duration::from_millis(500), consumer.read())
+				.await
+				.expect("Consumer should not hang after track error");
+			match read {
+				Ok(Some(Read::Frame { frame, .. })) => frames.push(frame.timestamp),
+				Ok(Some(_)) => continue,
+				other => break other,
 			}
-			frames
-		})
-		.await;
-
-		assert!(result.is_ok(), "Consumer should not hang after track error");
+		};
+		assert_eq!(frames, [ts(0), ts(10_000)]);
+		assert!(end.is_err(), "{end:?}");
+		assert!(matches!(consumer.read().await, Ok(None)));
 	}
 
 	// ---- Gap Recovery ----
@@ -2640,7 +2646,7 @@ mod tests {
 	}
 
 	/// A malformed object mid-group, found while looking ahead past a blocked group, ends the
-	/// reader rather than reading as a shorter group.
+	/// reader at its place rather than reading as a shorter group.
 	#[tokio::test]
 	async fn a_decode_error_mid_group_found_by_lookahead_ends_the_reader() {
 		tokio::time::pause();
@@ -2659,22 +2665,27 @@ mod tests {
 
 		let first = consumer.read_frame().await.unwrap().unwrap();
 		assert_eq!(first.timestamp, ts(0));
-		// Lookahead runs while the reader waits on the open group.
+		// Lookahead finds the error while the reader waits on the open group, which comes first.
 		assert!(
 			tokio::time::timeout(Duration::from_millis(50), consumer.read())
 				.await
-				.is_ok_and(|read| matches!(read, Err(crate::Error::UnknownFormat(_)))),
-			"the lookahead's decode error ends the reader"
+				.is_err()
 		);
+
+		slow.finish().unwrap();
+		let frame = consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(frame.timestamp, ts(10_000));
+		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
+		assert!(matches!(read, Ok(Err(crate::Error::UnknownFormat(_)))), "{read:?}");
 		// The reader stays ended rather than resuming with the group's later frames.
 		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
 		assert!(matches!(read, Ok(Ok(None))), "{read:?}");
 	}
 
-	/// A malformed head of a later group ends the reader as soon as the lookahead finds it, even
-	/// while the current group still has frames ready to read.
+	/// A malformed head of a later group waits for the current group's frames: errors come in
+	/// delivery order, however early the lookahead finds them.
 	#[tokio::test]
-	async fn a_decode_error_in_a_later_group_ends_the_reader_before_current_frames() {
+	async fn a_decode_error_in_a_later_group_waits_for_current_frames() {
 		tokio::time::pause();
 		let track = track_producer("test", timed());
 		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
@@ -2689,11 +2700,72 @@ mod tests {
 
 		let mut later = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 		write_failing(&mut later, None);
-		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
+		later.finish().unwrap();
+		for expected in [10_000, 20_000] {
+			let frame = consumer.read_frame().await.unwrap().unwrap();
+			assert_eq!(frame.timestamp, ts(expected));
+		}
+
+		current.finish().unwrap();
+		let read = read_past_frames(&mut consumer).await;
+		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
+	}
+
+	/// A later group's rewind does not mask an earlier group's decode error: the first in delivery
+	/// order is the one returned.
+	#[tokio::test]
+	async fn a_decode_error_comes_before_a_later_rewind() {
+		tokio::time::pause();
+		let track = track_producer("test", timed());
+		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
+
+		let mut current = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_failing(&mut current, Some(100_000));
+		let first = consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(first.timestamp, ts(100_000));
+
+		let mut malformed = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		write_failing(&mut malformed, Some(110_000));
+		malformed.write_frame(ts(110_000), Bytes::from_static(b"FAIL")).unwrap();
+		malformed.finish().unwrap();
+		// The transport only checks a group's first frame, so the rewind is its second.
+		let mut rewound = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
+		write_failing(&mut rewound, Some(150_000));
+		write_failing(&mut rewound, Some(50_000));
+		rewound.finish().unwrap();
+		// The reader looks ahead into both while it waits on the open group.
 		assert!(
-			matches!(read, Ok(Err(crate::Error::UnknownFormat(_)))),
-			"the later group's decode error comes before the current group's frames, got {read:?}"
+			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+				.await
+				.is_err()
 		);
+
+		current.finish().unwrap();
+		track.finish().unwrap();
+		let read = read_past_frames(&mut consumer).await;
+		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
+	}
+
+	/// A live reader discards the groups below the newest, and a malformed one among them still
+	/// ends the reader.
+	#[tokio::test]
+	async fn a_startup_discard_returns_a_malformed_group() {
+		tokio::time::pause();
+		let track = track_producer("test", timed());
+		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode).live();
+
+		let mut old = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_failing(&mut old, None);
+		old.finish().unwrap();
+		let mut newest = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		write_failing(&mut newest, Some(10_000));
+		newest.finish().unwrap();
+		track.finish().unwrap();
+
+		let read = read_past_frames(&mut consumer).await;
+		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
 	}
 
 	/// A malformed object read from the current group ends the reader even when the group's
@@ -2739,9 +2811,9 @@ mod tests {
 
 		let _ = buffer.look_all(&waiter, &FailingDecode);
 		assert!(
-			matches!(buffer.error, Some(crate::Error::UnknownFormat(_))),
+			matches!(buffer.fault, Some(crate::Error::UnknownFormat(_))),
 			"{:?}",
-			buffer.error
+			buffer.fault
 		);
 	}
 

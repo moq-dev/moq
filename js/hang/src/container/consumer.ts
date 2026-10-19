@@ -60,6 +60,7 @@ interface Group {
 	end?: Micro; // The furthest presentation point so far, i.e. max(timestamp + duration)
 	done?: boolean; // Set when #runGroup finishes reading all frames
 	truncated?: boolean; // The missing tail becomes a gap after the buffered frames are delivered.
+	fault?: Error; // The payload that failed to decode, an error after the buffered frames are delivered.
 }
 
 // Two adjacent groups are treated as timeline-contiguous when the next group's first PTS is within
@@ -120,7 +121,7 @@ export class Consumer {
 	// Endpoints and later frames can overlap the next group without moving this floor.
 	#start?: { group: number; timestamp: Micro };
 	#floor?: Micro;
-	// The first error that aborted the track: a decode failure or a group below the previous group start.
+	// The error that ended the reader, the first in delivery order: a decode failure or a rewind.
 	#error?: Error;
 
 	// Wake up the consumer when a new frame is available.
@@ -218,18 +219,18 @@ export class Consumer {
 				group.empty = false;
 				const arrival = Nano.toMilli(Nano(now()));
 
-				// A malformed payload is not loss, so it ends the reader rather than truncating the group.
+				// A malformed payload is not loss: it ends the reader where it sits, rather than truncating the group.
 				let decoded: Frame[];
 				try {
 					decoded = this.#format.decode(next.payload, next.timestamp);
 				} catch (err) {
-					this.#abort(err instanceof Error ? err : new Error(String(err)));
+					group.fault = err instanceof Error ? err : new Error(String(err));
 					return;
 				}
 				if (this.#format.kind === "data") {
 					// A data track's marker is one object with no bytes, alone in its group.
 					if (group.bare || (decoded.length === 0 && group.media)) {
-						this.#abort(new Error("a data track's discontinuity marker shares its group"));
+						group.fault = new Error("a data track's discontinuity marker shares its group");
 						return;
 					}
 					group.bare = decoded.length === 0;
@@ -280,8 +281,6 @@ export class Consumer {
 					}
 
 					this.#updateBuffered();
-
-					if (!marker && this.#abortIfRewound(group, frame.timestamp)) return;
 
 					let skipped = false;
 					if (group.consumer.sequence !== this.#active) {
@@ -404,9 +403,8 @@ export class Consumer {
 			const adjacent = next?.consumer.sequence === first.consumer.sequence + 1;
 			const continued = (finished && adjacent) || ptsContiguous(first.end ?? this.#presentedEnd, nextStart);
 			if (marker || discarded || first.truncated || !continued) this.#lost = true;
-			first.consumer.close();
-			first.frames.length = 0;
 			skipped++;
+			if (!this.#discard(first)) break;
 		}
 
 		if (skipped) {
@@ -441,37 +439,32 @@ export class Consumer {
 		this.#recordPresented(active);
 		this.#active = next.consumer.sequence;
 
-		active.consumer.close();
-		active.frames.length = 0;
+		this.#discard(active);
 		this.#updateBuffered();
 		return true;
 	}
 
-	// A later group whose media timestamps sit below the latest delivered group start is
-	// malformed. Returns true if the track was aborted.
-	#checkMalformed(): void {
+	// Drop a group without delivering it. A drop must not hide a malformed group, so one holding a
+	// fault, or reaching below the latest delivered group start, ends the reader instead.
+	// Returns false if it did.
+	#discard(group: Group): boolean {
+		group.consumer.close();
+		group.frames.length = 0;
 		const start = this.#start;
-		if (start === undefined) return;
-		for (const group of this.#groups) {
-			if (group.consumer.sequence <= start.group) continue;
-			if (group.minMedia !== undefined && group.minMedia < start.timestamp) {
-				this.#abort(new Error("group timestamp is below the previous group start"));
-				return;
-			}
+		if (
+			start !== undefined &&
+			group.consumer.sequence > start.group &&
+			group.minMedia !== undefined &&
+			group.minMedia < start.timestamp
+		) {
+			this.#abort(new Error("group timestamp is below the previous group start"));
+		} else if (group.fault) {
+			this.#abort(group.fault);
 		}
+		return this.#error === undefined;
 	}
 
-	#abortIfRewound(group: Group, timestamp: Micro): boolean {
-		const start = this.#start;
-		if (start === undefined) return false;
-		if (group.consumer.sequence <= start.group) return false;
-		if (timestamp >= start.timestamp) return false;
-
-		this.#abort(new Error("group timestamp is below the previous group start"));
-		return true;
-	}
-
-	// Groups decode in parallel, so a later failure must not replace the one the track closed with.
+	// The first error ends the reader; nothing after it in delivery order replaces it.
 	#abort(error: Error): void {
 		if (this.#error) return;
 		this.#error = error;
@@ -485,8 +478,10 @@ export class Consumer {
 	 * Returns the next {@link Read} in delivery order, awaiting one if needed: a frame, a gap where
 	 * media after an earlier item will never arrive, or an end the publisher declared.
 	 * An unmarked forward timestamp jump is not a gap, since nothing on the wire says media is missing.
-	 * After buffered groups drain, a finished track returns undefined and an aborted track throws.
-	 * A payload that fails to decode throws its error at once; only a reset or evicted group reads as a gap.
+	 * Errors come in delivery order: a payload that fails to decode throws after the items ahead of it,
+	 * and skipping a malformed group throws rather than reading as a gap. After buffered groups drain,
+	 * a finished track returns undefined and an aborted track throws. Only a reset or evicted group reads
+	 * as a gap.
 	 */
 	async next(): Promise<Read | undefined> {
 		if (this.#next) {
@@ -495,8 +490,6 @@ export class Consumer {
 			return next;
 		}
 		for (;;) {
-			if (this.#error) throw this.#error;
-			this.#checkMalformed();
 			if (this.#error) throw this.#error;
 
 			const ended = this.#closed.peek();
@@ -593,6 +586,10 @@ export class Consumer {
 
 					const group = this.#groups.shift();
 					if (group) {
+						if (group.fault) {
+							this.#abort(group.fault);
+							throw group.fault;
+						}
 						if (group.truncated) this.#lost = true;
 						this.#updateBuffered();
 						// A data track's marker carries no timestamp, so it ends where this reader got to.

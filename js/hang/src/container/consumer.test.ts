@@ -638,8 +638,8 @@ test("Consumer index spans MoQ frames for keyframe detection", async () => {
 	consumer.close();
 });
 
-// A malformed payload is not loss: the reader ends with the decode error, wherever in the group it
-// sits, instead of reading the rest of the track as if the group were cut short.
+// A malformed payload is not loss: the reader ends with the decode error where it sits, after the
+// frames ahead of it, instead of reading the rest of the track as if the group were cut short.
 for (const [where, payloads] of [
 	["at the head of a group", [0xff, 0x01]],
 	["mid-group", [0x01, 0xff, 0x02]],
@@ -670,17 +670,42 @@ for (const [where, payloads] of [
 		track.writeGroup(g1);
 		track.close();
 
+		const frames: number[] = [];
 		const read = async () => {
 			for (;;) {
 				const result = await consumer.next();
-				if (result?.kind === "frame" && result.group !== 0) return result;
 				if (!result) return result;
+				if (result.kind === "frame") frames.push(result.frame.timestamp);
 			}
 		};
 		await expect(read()).rejects.toThrow("malformed");
+		expect(frames).toEqual(payloads.slice(0, payloads.indexOf(0xff)));
 		consumer.close();
 	});
 }
+
+// Errors come in delivery order, so a decode error waits behind the items ahead of it, a gap included.
+test("Consumer delivers everything ahead of a decode error", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 10_000 as Milli });
+
+	writeGroupWithLegacyFrames(track, 0, [0 as Micro]);
+	writeGroupWithLegacyFrames(track, 2, [100_000 as Micro]);
+	const malformed = new Group.Producer(3);
+	// A truncated timestamp varint.
+	malformed.writeFrame({ payload: new Uint8Array([0x80]), timestamp: Time.Timestamp.fromMicros(200_000) });
+	malformed.close();
+	track.writeGroup(malformed);
+	track.close();
+
+	const items: string[] = [];
+	const read = async () => {
+		for (let item = await consumer.next(); item; item = await consumer.next()) items.push(describe(item));
+	};
+	await expect(read()).rejects.toThrow("buffer too short");
+	expect(items).toEqual(["0", "gap 0+100000", "100000"]);
+	consumer.close();
+});
 
 // Groups decode in parallel, so a later group's failure must not replace the error the reader ended with.
 test("Consumer keeps the first of several decode errors", async () => {
@@ -1044,6 +1069,25 @@ test("Consumer aborts a group below the previous group start", async () => {
 	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(10_000_000 as Micro);
 	await expect(nextFrame(consumer)).rejects.toThrow("below the previous group start");
 
+	consumer.close();
+});
+
+// A later group's rewind does not mask an earlier group's decode error.
+test("Consumer throws the first error in delivery order", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 30_000 as Milli });
+
+	writeGroupWithLegacyFrames(track, 0, [10_000_000 as Micro], wallClock);
+	const malformed = new Group.Producer(1);
+	// A truncated timestamp varint.
+	malformed.writeFrame({ payload: new Uint8Array([0x80]), timestamp: wallClock() });
+	malformed.close();
+	track.writeGroup(malformed);
+	writeGroupWithLegacyFrames(track, 2, [0 as Micro, 100_000 as Micro], wallClock);
+	track.close();
+
+	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(10_000_000 as Micro);
+	await expect(nextFrame(consumer)).rejects.toThrow("buffer too short");
 	consumer.close();
 });
 
