@@ -612,8 +612,13 @@ class Reader implements ResumeSource {
 			const end = serving?.sub.end();
 			if (end) return end;
 			const failed = serving?.sub.closed.peek();
-			// A copy that failed is only the end of the track if no front replaces it.
-			if (failed instanceof Error && (this.route.concluded || !routeFailed(failed))) throw failed;
+			// A copy that failed is only the end of the track if no front replaces it, and a
+			// refused replacement leaves the refusal as the answer.
+			if (failed instanceof Error) {
+				if (!routeFailed(failed)) throw failed;
+				if (this.route.refusal) throw this.route.refusal;
+				if (this.route.concluded) throw failed;
+			}
 			if (!serving && this.route.concluded) throw dropped();
 			const closed = this.#shell.closed.peek();
 			if (closed instanceof Error) throw closed;
@@ -1134,7 +1139,6 @@ export class Front {
 	async fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
 		const fetched = await this.#fetch(name, sequence, options);
 		let current = fetched.source;
-		void fetched.group.closed.then(() => current.release());
 		// Carried across route changes like a subscribed group, but by fetching again: a fetch has
 		// no copy of its own to find the rest in.
 		hooks.recoverGroup(fetched.group, {
@@ -1164,6 +1168,9 @@ export class Front {
 				};
 			},
 		});
+		// Only once the group carries its recovery: reading `closed` before then would settle it
+		// on a failure recovery could still continue, releasing the route while it is read.
+		void fetched.group.closed.then(() => current.release());
 		return fetched.group;
 	}
 

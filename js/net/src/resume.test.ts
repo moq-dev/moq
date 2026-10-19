@@ -196,6 +196,75 @@ test("a replacement claiming different track properties is refused once the old 
 	close();
 });
 
+test("waiting for the end of a track whose replacement was refused ends with the refusal", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const old = a.createTrack("seq", { priority: 1 });
+	b.createTrack("seq", { priority: 2 });
+	const sub = active.track("seq").subscribe();
+	expect((await sub.info()).priority).toBe(1);
+	await swap();
+	const finished = sub.finished();
+	finished.catch(() => {});
+
+	// The old copy failing with its route leaves only the refusal.
+	old.close(new StreamError(StreamCode.SessionClosed));
+	await expect(finished).rejects.toThrow("changed its properties");
+
+	sub.close();
+	close();
+});
+
+test("a fetched group failing as it is handed out releases its route once", async () => {
+	// The failure lands at each turn around the hand-out, so one lands between the fetch
+	// returning and its recovery being attached.
+	for (let turns = 0; turns < 24; turns++) {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		front.serve(a.consume());
+		// A reader on another track of the same route holds the route's broadcast too.
+		const sub = front.consumer.track("seq").subscribe();
+		ta.write(0);
+		expect(drain(sub)).toEqual([0]);
+
+		const fa = a.createTrack("fetch");
+		const failing = new GroupProducer(5);
+		fa.writeGroup(failing);
+		failing.writeFrame({ payload: enc.encode("5.0") });
+		const fetching = front.consumer.track("fetch").fetchGroup(5);
+		for (let turn = 0; turn < turns; turn++) await Promise.resolve();
+		failing.close(new StreamError(StreamCode.SessionClosed));
+		await settle();
+
+		// The next route holds the fetched group whole; the old one still feeds the reader a
+		// group the new route never has.
+		const fb = b.createTrack("fetch");
+		const whole = new GroupProducer(5);
+		fb.writeGroup(whole);
+		whole.writeFrame({ payload: enc.encode("5.0") });
+		whole.writeFrame({ payload: enc.encode("5.1") });
+		whole.close();
+		b.createTrack("seq");
+		front.serve(b.consume());
+		const group = await fetching;
+		const frames: string[] = [];
+		for (let frame = await group.readFrame(); frame; frame = await group.readFrame())
+			frames.push(dec.decode(frame.payload));
+		expect(frames).toEqual(["5.0", "5.1"]);
+		group.close();
+		await settle();
+
+		ta.write(1);
+		expect(drain(sub)).toEqual([1]);
+
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 test("datagrams a new copy replays are handed out once", async () => {
 	const { a, b, swap, active, close } = await setup();
 	const ta = copy(a);
