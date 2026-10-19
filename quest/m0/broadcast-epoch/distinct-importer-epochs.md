@@ -3,8 +3,9 @@
 ## Goal
 
 Two importers fed one stream and publishing one path, a redundant ingest
-pair, each mint their own epoch, and every consumer follows a failover
-between them as a marked restart. `moq --epoch` is gone, so only replicas of
+pair, each mint their own epoch, and a consumer that follows restarts (an
+announcement-following player, `moq export ts --stitch`) moves to the
+survivor as a marked restart; any other consumer ends, as on any restart. `moq --epoch` is gone, so only replicas of
 one publisher's bytes (one process announced through several relays or CDNs)
 share an epoch, and same-epoch identity holds by construction. The importer
 and mux machinery that existed only so independent importers agree is

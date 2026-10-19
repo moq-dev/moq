@@ -278,6 +278,9 @@ export const hooks: {
 	// pending: /quest/m1/public-model/serve.md
 	/** The newest frame buffered for a subscriber, which wire answers name; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
+	// private: capability gap
+	/** The track's largest known now, past what is buffered once the source reported newer; assigned by `track.ts`. */
+	peekLargest: (subscriber: Subscriber) => Location | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
 	// pending: /quest/m1/public-model/ingest.md
@@ -382,6 +385,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	bufferedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	peekLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
 	groupProgress: () => {
