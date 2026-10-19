@@ -8067,7 +8067,10 @@ mod test {
 		for (i, (group, waiter)) in held.iter_mut().zip(&waiters).enumerate() {
 			let result = group.poll_read_frame(waiter);
 			if i < 4 {
-				assert!(matches!(result, Poll::Ready(Err(Error::Old))), "read {i} expired: {result:?}");
+				assert!(
+					matches!(result, Poll::Ready(Err(Error::Old))),
+					"read {i} expired: {result:?}"
+				);
 			} else {
 				assert!(result.is_pending(), "read {i} is in budget: {result:?}");
 			}
@@ -8127,7 +8130,10 @@ mod test {
 			"the edge reaching the deadline wakes the read"
 		);
 		let result = next.as_mut().poll(&mut cx);
-		assert!(matches!(result, Poll::Ready(Err(Error::Old))), "the head is stale: {result:?}");
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Old))),
+			"the head is stale: {result:?}"
+		);
 	}
 
 	/// An aborted edge hands the edge to a group between it and the successor, and neither
@@ -8174,7 +8180,10 @@ mod test {
 			"the edge's abort, then a new edge below it, lost the wakeup"
 		);
 		let result = next.as_mut().poll(&mut cx);
-		assert!(matches!(result, Poll::Ready(Err(Error::Old))), "the head is stale: {result:?}");
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Old))),
+			"the head is stale: {result:?}"
+		);
 	}
 
 	/// An aborted successor hands the reach to the next group, which sits below the edge
@@ -8225,7 +8234,10 @@ mod test {
 			"the replacement's first frame bounds the reach"
 		);
 		let result = next.as_mut().poll(&mut cx);
-		assert!(matches!(result, Poll::Ready(Err(Error::Old))), "the head is stale: {result:?}");
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Old))),
+			"the head is stale: {result:?}"
+		);
 	}
 
 	/// An edge's abort hands the edge back to a lower group whose frames already ran past
@@ -8270,7 +8282,10 @@ mod test {
 		edge.abort(Error::Cancel).unwrap();
 		assert!(woken.load(Ordering::SeqCst), "the edge's abort lost its wakeup");
 		let result = next.as_mut().poll(&mut cx);
-		assert!(matches!(result, Poll::Ready(Err(Error::Old))), "the head is stale: {result:?}");
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Old))),
+			"the head is stale: {result:?}"
+		);
 	}
 
 	/// A received group's frames present while it is hidden, so a parked read they wake
@@ -8314,7 +8329,10 @@ mod test {
 		producer.reveal_group(&received);
 		assert!(woken.load(Ordering::SeqCst), "the reveal wakes the expired read");
 		let result = next.as_mut().poll(&mut cx);
-		assert!(matches!(result, Poll::Ready(Err(Error::Old))), "the head is stale: {result:?}");
+		assert!(
+			matches!(result, Poll::Ready(Err(Error::Old))),
+			"the head is stale: {result:?}"
+		);
 	}
 
 	/// A route can declare the end, then land every group's header before its first frame.

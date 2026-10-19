@@ -3592,7 +3592,9 @@ mod test {
 	#[test]
 	fn a_drained_unfinished_group_expires_as_old() {
 		let mut producer = Info { sequence: 0 }.produce();
-		producer.write_frame(crate::Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
+		producer
+			.write_frame(crate::Timestamp::ZERO, Bytes::from_static(b"a"))
+			.unwrap();
 
 		let expired = Arc::new(AtomicBool::new(false));
 		let mut group = producer.consume().with_expiry(Arc::new(Switch(expired.clone())));

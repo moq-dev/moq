@@ -87,10 +87,11 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 	// A reader with no budget to apply sees only what the downstream hop cached.
 	let mut cached = moq_clock::timeout(
 		TIMEOUT,
-		remote
-			.track("data")
-			.unwrap()
-			.subscribe(Subscription::default().with_max_delay(Duration::from_secs(3600)).with_groups(0..)),
+		remote.track("data").unwrap().subscribe(
+			Subscription::default()
+				.with_max_delay(Duration::from_secs(3600))
+				.with_groups(0..),
+		),
 	)
 	.await
 	.expect("subscribe timeout")
