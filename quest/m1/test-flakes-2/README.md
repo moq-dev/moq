@@ -35,7 +35,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [TS MP2 join hole](/quest/m1/test-flakes-2/ts-mp2-join-hole.md) - the TS export skips no MPEG-1 audio group right after its live join, fixed at the cause
 - [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 - [BBR marking seed](/quest/m1/test-flakes-2/bbr-marking-seed.md) - the BBR marking test seeds its probe schedule, replays a failing seed, and its rare drop is fixed at the cause
 - [WASM refused track](/quest/m1/test-flakes-2/wasm-refused-track.md) - the refused-track case passes and fails on its refusal, not a timeout
