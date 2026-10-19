@@ -537,8 +537,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let width = config.coded_width.ok_or(Error::InvalidAspect("missing width"))?;
 			let height = config.coded_height.ok_or(Error::InvalidAspect("missing height"))?;
 			let aspect = crate::codec::video::reduce_aspect(
-				u64::from(width) * u64::from(pasp.h_spacing),
-				u64::from(height) * u64::from(pasp.v_spacing),
+				u128::from(width) * u128::from(pasp.h_spacing),
+				u128::from(height) * u128::from(pasp.v_spacing),
 			)
 			.ok_or(Error::InvalidAspect("invalid or unrepresentable pasp"))?;
 			// Square samples add no catalog field, but can still contradict an SPS.

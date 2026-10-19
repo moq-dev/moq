@@ -713,7 +713,7 @@ fn build_video_config(
 	{
 		let coded = width
 			.zip(height)
-			.and_then(|(w, h)| crate::codec::video::reduce_aspect(w, h));
+			.and_then(|(w, h)| crate::codec::video::reduce_aspect(w.into(), h.into()));
 		if Some(aspect) != coded || config.display_aspect_width.is_some() {
 			crate::codec::video::fill_display_aspect(&mut config, aspect, "Matroska");
 		}
@@ -722,7 +722,11 @@ fn build_video_config(
 	Ok(config)
 }
 
-// Display dimensions are already post-crop; only the pixel-unit defaults subtract the crop.
+/// The whole picture's display aspect, or `None` when the samples are square by default.
+///
+/// `DisplayWidth`/`DisplayHeight` size the picture after `PixelCrop*`, but the catalog carries no
+/// crop and its aspect covers the whole decoded picture. So the cropped sample shape is applied to
+/// the full frame, as FFmpeg does, instead of squeezing the uncropped picture into the cropped ratio.
 fn matroska_aspect(children: &[MatroskaSpec], pixels: (Option<u64>, Option<u64>)) -> Result<Option<(u32, u32)>> {
 	let (mut width, mut height, mut unit) = (None, None, 0);
 	let (mut left, mut right, mut top, mut bottom) = (0, 0, 0, 0);
@@ -738,33 +742,46 @@ fn matroska_aspect(children: &[MatroskaSpec], pixels: (Option<u64>, Option<u64>)
 			_ => {}
 		}
 	}
-	// Without display metadata or cropping, preserve the existing coded-size handling.
-	if unit == 0 && width.is_none() && height.is_none() && (left, right, top, bottom) == (0, 0, 0, 0) {
+	// 0 pixels, 1 centimeters, 2 inches, 3 aspect ratio, 4 unknown; both fields share the unit.
+	if unit > 4 {
+		return Err(Error::InvalidAspect("unknown DisplayUnit").into());
+	}
+	if unit != 0 && (width.is_none() || height.is_none()) {
+		return Err(Error::InvalidAspect("non-pixel DisplayUnit without both display dimensions").into());
+	}
+	// A missing pixel-unit dimension defaults to the cropped size, which keeps samples square.
+	if width.is_none() && height.is_none() {
 		return Ok(None);
 	}
-	let crop = |size: Option<u64>, first: u64, second: u64| {
-		size.and_then(|size| size.checked_sub(first))
-			.and_then(|size| size.checked_sub(second))
-			.ok_or(Error::InvalidAspect("missing or underflowing pixel-unit default"))
-	};
-	let (width, height) = if unit == 0 {
-		(
-			match width {
-				Some(width) => width,
-				None => crop(pixels.0, left, right)?,
-			},
-			match height {
-				Some(height) => height,
-				None => crop(pixels.1, top, bottom)?,
-			},
-		)
+
+	let (shown_width, shown_height) = if (left, right, top, bottom) == (0, 0, 0, 0) {
+		let width = width.or(pixels.0).ok_or(Error::InvalidAspect("missing PixelWidth"))?;
+		let height = height.or(pixels.1).ok_or(Error::InvalidAspect("missing PixelHeight"))?;
+		(u128::from(width), u128::from(height))
 	} else {
+		let frame_width = pixels.0.ok_or(Error::InvalidAspect("missing PixelWidth"))?;
+		let frame_height = pixels.1.ok_or(Error::InvalidAspect("missing PixelHeight"))?;
+		let cropped = |size: u64, first: u64, second: u64| {
+			size.checked_sub(first)
+				.and_then(|size| size.checked_sub(second))
+				.filter(|size| *size > 0)
+				.ok_or(Error::InvalidAspect("crop leaves no picture"))
+		};
+		let cropped_width = cropped(frame_width, left, right)?;
+		let cropped_height = cropped(frame_height, top, bottom)?;
+		// display / cropped is the sample shape; scale the whole frame by it.
+		let scale = |display: u64, frame: u64, cropped_other: u64| {
+			u128::from(display)
+				.checked_mul(u128::from(frame))
+				.and_then(|size| size.checked_mul(u128::from(cropped_other)))
+				.ok_or(Error::InvalidAspect("unrepresentable display dimensions"))
+		};
 		(
-			width.ok_or(Error::InvalidAspect("missing DisplayWidth for non-pixel unit"))?,
-			height.ok_or(Error::InvalidAspect("missing DisplayHeight for non-pixel unit"))?,
+			scale(width.unwrap_or(cropped_width), frame_width, cropped_height)?,
+			scale(height.unwrap_or(cropped_height), frame_height, cropped_width)?,
 		)
 	};
-	let aspect = crate::codec::video::reduce_aspect(width, height)
+	let aspect = crate::codec::video::reduce_aspect(shown_width, shown_height)
 		.ok_or(Error::InvalidAspect("invalid or unrepresentable display dimensions"))?;
 	Ok(Some(aspect))
 }

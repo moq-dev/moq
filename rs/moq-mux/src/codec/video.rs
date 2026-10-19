@@ -38,13 +38,13 @@ pub(super) fn display_aspect(width: u32, height: u32, sample: (u32, u32)) -> Opt
 		return None;
 	}
 	reduce_aspect(
-		u64::from(width) * u64::from(sample_width),
-		u64::from(height) * u64::from(sample_height),
+		u128::from(width) * u128::from(sample_width),
+		u128::from(height) * u128::from(sample_height),
 	)
 }
 
 /// Reduce positive display dimensions to the catalog's integer ratio without truncating.
-pub(crate) fn reduce_aspect(width: u64, height: u64) -> Option<(u32, u32)> {
+pub(crate) fn reduce_aspect(width: u128, height: u128) -> Option<(u32, u32)> {
 	if width == 0 || height == 0 {
 		return None;
 	}
