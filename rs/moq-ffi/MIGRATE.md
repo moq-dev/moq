@@ -124,10 +124,15 @@ Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 let audio = MoqMediaTrackProducer::audio(&broadcast, MoqMediaTarget::Named { name: None }, init)?;
 ```
 
-### Container byte-stream importers take an init record
+### Container byte streams use the container producer (#5919)
 
-`MoqMediaContainerStreamProducer` takes a `MoqContainerStreamInit` holding the format instead of a bare format.
-Its optional `timebase`, also on `MoqContainerInit`, shares one source's offset across container imports; leave it unset for independent offsets.
+`MoqContainerStreamProducer` (from `publish_container_stream`) has no replacement type: a container recovers its own framing, so `MoqMediaContainerProducer` takes chunks split anywhere.
+Construct it with empty `data` and write the stream through it.
+`MoqContainerInit`'s optional `timebase` shares one source's offset across container imports; leave it unset for independent offsets.
+
+```rust
+let stream = MoqMediaContainerProducer::new(&broadcast, MoqContainerInit { format, data: Vec::new(), timebase: None })?;
+```
 
 ### Error payloads are named
 
