@@ -14,12 +14,11 @@ publish. In `@moq/publish` it does not even do that: the catalog track is
 created on the first announce (`js/publish/src/broadcast.ts`), so "never"
 serves nothing.
 
-**Open decision:** delete `announce="never"` (breaking; `MIGRATE.md` entry
-in `js/publish`), keeping `source` and `always`, or keep it and document
-that it is unreachable through a relay. Recommended: delete. A broadcast that
-should stay unlisted uses a `.`-prefixed hidden path, which is left out of
-discovery but still subscribable by name; document that on the `announce`
-attribute either way.
+Decided 2026-10-19 by the maintainer: delete `announce="never"`, keeping
+`source` and `always`. It is a breaking change with a `MIGRATE.md` entry in
+`js/publish`. A broadcast that should stay unlisted uses a `.`-prefixed
+hidden path, which is left out of discovery but still subscribable by name;
+document that on the `announce` attribute.
 
 Public API: `@moq/publish`'s `announce` attribute and property.
 Also check `demo/web` for uses.
