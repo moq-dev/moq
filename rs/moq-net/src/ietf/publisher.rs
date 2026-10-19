@@ -56,10 +56,10 @@ fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Resul
 	if !wanted {
 		return Ok(ietf::Properties::default());
 	}
+	let unknown = info.properties.as_deref().cloned().unwrap_or_default();
 	let block = !matches!(version, Version::Draft14 | Version::Draft15);
 	if block
-		&& info
-			.properties
+		&& unknown
 			.immutable
 			.is_some_and(|ingress| ingress != super::object::encoding(version))
 	{
@@ -73,7 +73,7 @@ fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Resul
 		// Advertised only where an upstream session carries the request back to the
 		// original publisher; a local track has nothing to answer it.
 		dynamic_groups: info.dynamic_groups,
-		unknown: info.properties.clone(),
+		unknown,
 	})
 }
 
@@ -9178,7 +9178,7 @@ mod serve_tests {
 		for version in [Version::Draft16, Version::Draft17, Version::Draft22] {
 			let upstream = unknown_properties(version);
 			let info = track::Info {
-				properties: upstream.unknown.clone(),
+				properties: Some(Arc::new(upstream.unknown.clone())),
 				..track::Info::timed()
 			};
 
@@ -9232,13 +9232,16 @@ mod serve_tests {
 	async fn immutable_track_properties_keep_their_encoding() {
 		// Sealed: OBJECT_DELIVERY_TIMEOUT = 42 and DYNAMIC_GROUPS = 1.
 		let block = [0x0b, 4, 0x02, 42, 0x2e, 1];
-		let upstream =
-			crate::coding::decode_buf(&mut bytes::Bytes::copy_from_slice(&block), Version::Draft22, ietf::Properties::decode)
-				.unwrap();
+		let upstream = crate::coding::decode_buf(
+			&mut bytes::Bytes::copy_from_slice(&block),
+			Version::Draft22,
+			ietf::Properties::decode,
+		)
+		.unwrap();
 		assert!(upstream.dynamic_groups);
 		let info = track::Info {
 			dynamic_groups: true,
-			properties: upstream.unknown.clone(),
+			properties: Some(Arc::new(upstream.unknown.clone())),
 			..track::Info::timed()
 		};
 

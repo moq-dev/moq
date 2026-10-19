@@ -469,7 +469,8 @@ fn accepted_info(properties: &ietf::Properties) -> track::Info {
 		.with_priority(super::priority::from_wire(properties.priority.unwrap_or(128)));
 	// This session carries NEW_GROUP_REQUEST back to the original publisher.
 	info.dynamic_groups = properties.dynamic_groups;
-	info.properties = properties.unknown.clone();
+	info.properties =
+		Some(std::sync::Arc::new(properties.unknown.clone())).filter(|unknown| !unknown.values.is_empty());
 	info
 }
 
@@ -15097,7 +15098,10 @@ mod track_property_tests {
 
 	/// Subscribe to one track through a relay on `version`, whose publisher answers with
 	/// `block` as SUBSCRIBE_OK's Track Properties, returning what the subscriber got.
-	async fn subscribe(version: Version, block: &[u8]) -> (Result<track::Subscriber, Error>, Subscriber<memory::Session>) {
+	async fn subscribe(
+		version: Version,
+		block: &[u8],
+	) -> (Result<track::Subscriber, Error>, Subscriber<memory::Session>) {
 		let (session, mut peer) = memory::pair(memory::Config::default());
 		let (tasks, _task_set) = TaskSet::new();
 		let mut subscriber = Subscriber::new(
@@ -15190,7 +15194,11 @@ mod track_property_tests {
 			];
 			let (subscribed, _probe) = subscribe(version, &block(version, &unknown)).await;
 			let subscriber = subscribed.unwrap_or_else(|err| panic!("{version}: {err}"));
-			let properties = &subscriber.info().properties;
+			let properties = subscriber
+				.info()
+				.properties
+				.clone()
+				.expect("the properties were dropped");
 			assert_eq!(properties.values, unknown, "{version}");
 			assert_eq!(properties.immutable, None, "{version}");
 		}

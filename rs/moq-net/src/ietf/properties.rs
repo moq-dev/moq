@@ -226,7 +226,12 @@ impl Properties {
 				let value = r.slice(len)?;
 				if abs == IMMUTABLE {
 					// A second block would leave the sealed list ambiguous.
-					if properties.unknown.immutable.replace(super::object::encoding(version)).is_some() {
+					if properties
+						.unknown
+						.immutable
+						.replace(super::object::encoding(version))
+						.is_some()
+					{
 						return Err(DecodeError::InvalidValue);
 					}
 					properties.unknown.sealed = sealed(&mut Decoder::new(value, version.into()), &mut dynamic_groups)?;

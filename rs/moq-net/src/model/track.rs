@@ -146,12 +146,13 @@ pub struct Info {
 	// private: passthrough
 	pub(crate) dynamic_groups: bool,
 	/// The moq-transport Track Properties moq-net does not interpret, learned from an
-	/// upstream moq-transport session and forwarded unchanged.
+	/// upstream moq-transport session and forwarded unchanged. `None` when there are none.
 	///
-	/// Relay-only, like [`Self::dynamic_groups`]: moq-lite does not carry them.
+	/// Relay-only, like [`Self::dynamic_groups`]: moq-lite does not carry them. Shared, since
+	/// every group holds a copy of the info.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
-	pub(crate) properties: crate::model::object::TrackProperties,
+	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
 }
 
 impl Default for Info {
@@ -161,7 +162,7 @@ impl Default for Info {
 			max_age: None,
 			priority: DEFAULT_PRIORITY,
 			dynamic_groups: false,
-			properties: Default::default(),
+			properties: None,
 		}
 	}
 }
