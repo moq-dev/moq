@@ -15,15 +15,15 @@
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use super::flate;
-use bytes::Bytes;
 use crate::cache;
 use crate::frame::{self, Frame, FrameBuf};
 use crate::{Cap, Timescale, stats, track};
+use bytes::Bytes;
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::ops::{Bound, RangeBounds};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Poll, ready};
 
 use crate::{Error, IntoBytes, Result, Timestamp};
@@ -3930,6 +3930,7 @@ mod test {
 	/// A compressed group stores DEFLATE slices, hands plain readers the frames as written
 	/// from one shared inflated copy, and hands egress the slices with their sizes.
 	#[test]
+	#[cfg(feature = "async")]
 	fn compressed_group_stores_slices_and_inflates_once() {
 		let pool = cache::Pool::unbounded();
 		let mut group = compressed_group(&pool);
@@ -3964,12 +3965,20 @@ mod test {
 		let mut first = group.consume();
 		let mut second = group.consume();
 		for index in 0..3 {
-			assert_eq!(read_plain(&mut first).unwrap().unwrap(), verbose(index), "frame {index}");
+			assert_eq!(
+				read_plain(&mut first).unwrap().unwrap(),
+				verbose(index),
+				"frame {index}"
+			);
 		}
 		let inflated = pool.used();
 		assert!(inflated >= stored + plain as u64, "the inflated copy is billed");
 		for index in 0..3 {
-			assert_eq!(read_plain(&mut second).unwrap().unwrap(), verbose(index), "frame {index}");
+			assert_eq!(
+				read_plain(&mut second).unwrap().unwrap(),
+				verbose(index),
+				"frame {index}"
+			);
 		}
 		assert_eq!(pool.used(), inflated, "a second reader shares the inflated copy");
 		assert!(read_plain(&mut first).unwrap().is_none());

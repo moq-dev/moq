@@ -2335,7 +2335,12 @@ impl Producer {
 		state.cache.finish_largest(sequence);
 		meter.datagram(payload.len() as u64);
 		// A datagram is its own group, so it compresses alone.
-		let deflated = state.info.as_ref().unwrap().compress.then(|| super::flate::Encoder::new().frame(&payload));
+		let deflated = state
+			.info
+			.as_ref()
+			.unwrap()
+			.compress
+			.then(|| super::flate::Encoder::new().frame(&payload));
 		state.push_datagram(super::datagram::Stored {
 			datagram: Datagram {
 				sequence,

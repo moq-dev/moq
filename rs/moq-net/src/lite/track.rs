@@ -318,7 +318,10 @@ mod test {
 			..info_sample()
 		};
 		for version in [Version::Lite05, Version::Lite06] {
-			assert!(matches!(info.encode_bytes(version), Err(EncodeError::Version)), "{version}");
+			assert!(
+				matches!(info.encode_bytes(version), Err(EncodeError::Version)),
+				"{version}"
+			);
 			let plain = TrackInfo {
 				compress: false,
 				..info_sample()

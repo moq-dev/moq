@@ -92,8 +92,12 @@ async fn relay_serves_every_version() {
 			);
 
 			let mut group = fixture.track.append_group().unwrap();
-			group.write_frame(Timestamp::from_millis(0).unwrap(), payload(0)).unwrap();
-			group.write_frame(Timestamp::from_millis(1).unwrap(), payload(1)).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(0).unwrap(), payload(0))
+				.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(1).unwrap(), payload(1))
+				.unwrap();
 			// A chunked frame is compressed whole once its last chunk lands.
 			let chunked = payload(2);
 			let mut frame = group

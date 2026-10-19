@@ -471,8 +471,8 @@ impl LiteSample {
 				timed: true,
 				compressed: false,
 			})
-				.map(|_| 1)
-				.unwrap(),
+			.map(|_| 1)
+			.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
 		}
 	}

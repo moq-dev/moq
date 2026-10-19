@@ -1010,14 +1010,15 @@ impl Recover {
 			group.start_at(index);
 			held && group.index() == index
 		};
-		if !same && let Poll::Ready(Some(mut group)) = serving.poll_group(self.sequence, waiter) {
-			if continues(&mut group) {
-				return Poll::Ready(Ok(Replacement {
-					group,
-					generation,
-					copy: serving.clone(),
-				}));
-			}
+		if !same
+			&& let Poll::Ready(Some(mut group)) = serving.poll_group(self.sequence, waiter)
+			&& continues(&mut group)
+		{
+			return Poll::Ready(Ok(Replacement {
+				group,
+				generation,
+				copy: serving.clone(),
+			}));
 		}
 
 		// Otherwise ask for the rest. The subscription may still deliver it first.
@@ -1333,7 +1334,9 @@ mod test {
 		let a = compressed();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, Duration::from_secs(10));
-		let frames: Vec<Vec<u8>> = (0..3).map(|index| format!("{index}{}", "z".repeat(64)).into()).collect();
+		let frames: Vec<Vec<u8>> = (0..3)
+			.map(|index| format!("{index}{}", "z".repeat(64)).into())
+			.collect();
 
 		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
 		open.write_frame(ts(0), frames[0].clone()).unwrap();
@@ -2760,7 +2763,7 @@ mod test {
 	fn held_read_preferences_follow_the_reader() {
 		enum Read {
 			Group(Box<group::Consumer>),
-			Frame(crate::frame::Consumer),
+			Frame(Box<crate::frame::Consumer>),
 		}
 		impl Read {
 			fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<()>> {
@@ -2809,7 +2812,7 @@ mod test {
 						let mut frame = group.next_frame().now_or_never().unwrap().unwrap().unwrap();
 						assert_eq!(&frame.read_chunk().now_or_never().unwrap().unwrap().unwrap()[..], b"ab");
 						drop(group);
-						Read::Frame(frame)
+						Read::Frame(Box::new(frame))
 					} else {
 						Read::Group(Box::new(group))
 					};
