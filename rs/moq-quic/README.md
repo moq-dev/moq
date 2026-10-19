@@ -12,6 +12,7 @@ That covers every quinn security advisory published through 2026-09-30.
 Cherry-picked since the fork point:
 
 - [`48854d48`](https://github.com/quinn-rs/quinn/commit/48854d48635875d259a95973cc0575db8c1792a4): accept non-minimally encoded integer transport parameters, as RFC 9000 section 16 allows.
+- [`ecc0dcfd`](https://github.com/quinn-rs/quinn/commit/ecc0dcfdeaec996d276da31d836f965753b66ea4): truncate an application `CONNECTION_CLOSE` reason by the error code's actual width, so a four- or eight-byte code no longer overruns the frame's budget.
 
 The fork never merges upstream.
 Upstream fixes are cherry-picked by hand, and the crate keeps quinn's formatting (rustfmt defaults) so the patches apply cleanly.
