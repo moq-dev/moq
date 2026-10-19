@@ -496,7 +496,10 @@ void report(const char *name)
 // A broadcast published on the relay, the way the MoQ output would publish it.
 class Publisher {
 public:
-	Publisher(TestRelay &relay, const std::string &path, bool video = true, bool audio = true)
+	// Frames start after `start_us`, so a scenario can tell two publishers' frames apart.
+	Publisher(TestRelay &relay, const std::string &path, bool video = true, bool audio = true,
+		  uint64_t start_us = 1'000'000)
+		: timestamp_us(start_us)
 	{
 		broadcast = TestOk(relay.origin->create_broadcast(path), "create_broadcast");
 		if (video) {
@@ -549,8 +552,14 @@ public:
 	std::shared_ptr<moq::MediaTrackProducer> audio;
 
 private:
-	uint64_t timestamp_us = 1'000'000;
+	uint64_t timestamp_us;
 };
+
+// Whether OBS has been handed video and audio from a publisher that started at `start_us`.
+bool PlaysFrom(uint64_t start_us)
+{
+	return g_last_timestamp > start_us * 1000 && g_last_audio_timestamp > start_us * 1000;
+}
 
 // A URL moq-ffi rejects as soon as the connect runs, for a failure with no network in it.
 const char *const BAD_URL = "not a url";
@@ -1055,6 +1064,64 @@ int main()
 		destroySource(source);
 	}
 	report("undecodable rendition");
+
+	// Another publisher instance taking over the path while the source plays, as a GOAWAY
+	// drain's replacement session does, plays without a blank on the same video decoder,
+	// and keeps playing once the old instance ends.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		auto first = std::make_unique<Publisher>(relay, "obs/test");
+		void *source = createSource();
+		CHECK(first->WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		const int blanks = g_blank_calls;
+		const int opens = g_decoder_opens;
+		Publisher second(relay, "obs/test", true, true, 1'000'000'000);
+		CHECK(second.WriteUntil([] { return PlaysFrom(1'000'000'000); }));
+		first.reset();
+		const int frames = g_output_frames;
+		const int audio = g_output_audio;
+		CHECK(second.WriteUntil(
+			[&] { return g_output_frames >= frames + 10 && g_output_audio >= audio + 10; }));
+		CHECK(g_blank_calls == blanks);
+		CHECK(g_decoder_opens == opens);
+		destroySource(source);
+	}
+	report("follows a replacement instance");
+
+	// A publisher that restarts, ending its broadcast before the new instance announces, plays
+	// again once it returns.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		void *source = createSource();
+		{
+			Publisher first(relay, "obs/test");
+			CHECK(first.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		}
+		Publisher second(relay, "obs/test", true, true, 1'000'000'000);
+		CHECK(second.WriteUntil([] { return PlaysFrom(1'000'000'000); }));
+		destroySource(source);
+	}
+	report("follows a publisher restart");
+
+	// The relay dropping the session: the client reconnects, and the broadcast announced over
+	// the new connect is another instance to play.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		relay.DropSessions();
+		CHECK(WaitFor([&] { return relay.Accepted() == 2; }));
+		const int frames = g_output_frames;
+		const int audio = g_output_audio;
+		CHECK(publisher.WriteUntil(
+			[&] { return g_output_frames >= frames + 10 && g_output_audio >= audio + 10; }));
+		destroySource(source);
+	}
+	report("follows a session reconnect");
 
 	// Changing the broadcast drops the old connection and plays the new one.
 	{
