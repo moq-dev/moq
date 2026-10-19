@@ -9464,6 +9464,7 @@ mod serve_tests {
 						ietf::TrackStatus::ID,
 						ietf::Body(track_status("room", true, version).into()),
 						stream,
+						false,
 					)
 					.unwrap()
 					.await;
