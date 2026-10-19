@@ -51,7 +51,6 @@ lands before the cut.
 - [Release builds](/quest/m0/release-link.md) - package artifacts can be built
 - [qmux credit](/quest/m0/qmux-credit.md) - dropped/stopped streams return credit and close is delivered
 
-- [moq-net follows announced instances](/quest/m1/net-announced-follow.md) - the Rust equivalent of JS `request(path, { announced: true })`, replacing the follow loops in moq-ffi and moq-c
 - [Sink restart follow](/quest/m1/sink-restart-follow.md) - moq-cli's server and push sinks follow an epochless `Restart` where their output can mark it, and fail loud otherwise
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
