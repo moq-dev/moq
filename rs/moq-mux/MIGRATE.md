@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Timebase::is_on` is removed
+
+Each source gets its timebase from its own catalog. Remove calls to `is_on`;
+independent importers no longer accept a shared epoch or compare catalog identities.
+
 ### `fmp4::Wire::new` refuses a track that isn't audio or video (#5815)
 
 `container::fmp4::Wire::new` returns `Result<Wire>`, as `Wire::from_init` already did, and refuses any other handler instead of treating it as data.

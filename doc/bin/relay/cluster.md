@@ -45,7 +45,9 @@ re-request on a restart, and a relay drops its copy of the old instance,
 including every path beneath a prefix claim when one of them moves to another
 worker.
 
-Failover routes must carry copies of the same broadcast: a source whose track
+Failover routes must carry copies of one publisher's broadcast. Independent
+importers use distinct epochs and switch as a restart, even when fed one stream.
+A source whose track
 differs in timescale, retention, publisher priority, or group order is refused
 for that track.
 

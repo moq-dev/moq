@@ -55,12 +55,11 @@ Annex-B H.264 and H.265 sources get an `avc3` or `hev1` init from the catalog wh
 `auto` is measured from how late frames arrive instead of derived from RTT.
 Pass `--delay 100ms` to keep the old fixed delay.
 
-### `--hop` is removed; `--epoch` replaces it (#4969)
+### `--hop` is removed (#4969)
 
-A redundant pair shares an epoch, a UUIDv7 such as `uuidgen -7` prints, instead of a Hop ID.
-`--hop` is an unknown flag and `MOQ_HOP` is silently ignored, so remove it: a pair still keyed on `MOQ_HOP` mints an epoch per process and each restart replaces the other's broadcast.
+Remove `--hop` and `MOQ_HOP`: each independent publisher now mints its own epoch.
+Redundant importers switch as a restart; use `export ts --stitch` to follow them.
 A node that pinned its cluster id with `--hop` passes `--cluster-id` instead.
-Give both members the same `MOQ_EPOCH`, such as one `uuidgen -7` value.
 
 ### Settings no listener reads stop startup (#5006)
 
@@ -103,7 +102,7 @@ A renamed flag or environment variable is refused with its replacement named.
 | --- | --- |
 | `moq publish`, `moq subscribe` | `moq import`, `moq export` |
 | `moq token`, the `moq-token` binary | `moq auth` |
-| `--origin` | `--hop`, now `--epoch` |
+| `--origin` | Removed; publishers mint their own epoch |
 | `--name` | `--broadcast` |
 | `--latency-max` | `--max-age` |
 | `--server-bind` | `--listen` |

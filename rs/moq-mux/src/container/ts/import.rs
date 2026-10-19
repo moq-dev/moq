@@ -64,12 +64,7 @@ use moq_net::Timestamp;
 /// The selected container applies only to decoded media renditions. Verbatim tracks in the
 /// `mpegts` catalog section continue to use the legacy Hang container.
 ///
-/// Each PTS takes the era (the whole number of 2^33-tick wraps) that lands it nearest the
-/// catalog clock's reading as its PES starts, so every stream, whichever side of a wrap it
-/// started on, and every importer whose timebase one shared epoch placed
-/// ([`Timebase::place`](crate::catalog::Timebase::place)) publishes the same timestamps. Media
-/// time therefore stays within half a wrap (about 13.25 hours) of that reading: a forward jump,
-/// or a file read faster than real time, that carries it further reads as a rewind.
+/// PTS values follow the program's timestamp history across their 33-bit wrap.
 pub struct Import<E: catalog::Catalog = ()> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
@@ -171,6 +166,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// until video starts `last_pts`, so a cue ahead of the first picture lands on the media
 	/// timeline, not at zero.
 	start_pts: Option<Timestamp>,
+	pts: PtsUnwrap,
 	/// The program number chosen by [`with_program`](Self::with_program). `None` imports the
 	/// multiplex's only program and refuses a PAT that lists more than one.
 	program: Option<u16>,
@@ -228,6 +224,7 @@ impl<E: catalog::Catalog> Import<E> {
 			identity_recorded: false,
 			last_pts: None,
 			start_pts: None,
+			pts: PtsUnwrap::default(),
 			program: None,
 		}
 	}
@@ -751,15 +748,15 @@ impl<E: catalog::Catalog> Import<E> {
 		if pes.pts.is_some() && !matches!(stream, Stream::Verbatim(_) | Stream::Ignored) {
 			self.health.pts(pid.as_u16(), self.liveness.now());
 		}
-		// The first PTS anchors the program, and each takes its era here: against the clock as the
-		// PES starts, rather than at its flush, so the section clock below shares the media's.
+		// Resolve the wrap at PES start so every elementary stream and private section shares
+		// the program timeline, including streams discovered after a wrap.
 		let (pts, offset) = match pes.pts {
 			Some(raw) => {
 				if self.mux_rate_reservation.is_some() {
 					self.hold_media(raw);
 				}
-				let ticks = self.timebase.nearest(raw, PTS_WRAP)?;
-				let offset = self.timebase.offset().expect("the era anchors the timebase");
+				let ticks = self.pts.unwrap(raw);
+				let offset = self.timebase.anchor(Timestamp::from_scale(ticks, 90_000)?)?;
 				if self.start_pts.is_none() {
 					self.start_pts = on_clock(Some(ticks), offset)?;
 				}
@@ -965,6 +962,7 @@ impl<E: catalog::Catalog> Import<E> {
 		for section in self.sections.values_mut() {
 			section.discontinuity(self.published)?;
 		}
+		self.pts.discontinuity();
 		self.last_pts = None;
 		self.start_pts = None;
 		self.held_edge = None;
@@ -1310,7 +1308,7 @@ impl Drop for Retained {
 /// A reassembled PES packet awaiting routing to its codec importer.
 struct Pending {
 	retained: Retained,
-	/// The 90 kHz PTS in its era ([`Timebase::nearest`](crate::catalog::Timebase::nearest)),
+	/// The unwrapped 90 kHz PTS,
 	/// before the offset.
 	pts: Option<u64>,
 	/// The timebase's offset, which the PTS shifts by onto the catalog clock.
@@ -3408,11 +3406,37 @@ fn advance_pts(pts: Option<Timestamp>, samples: u64, sample_rate: u32) -> anyhow
 	Ok(Some(pts.checked_add(advance.convert(pts.scale())?)?))
 }
 
-/// The 90 kHz PTS field: 33 bits.
-const PTS_WRAP: crate::catalog::Wrap = crate::catalog::Wrap {
-	hz: 90_000,
-	period: 1 << 33,
-};
+/// Tracks the wrap-around of the 33-bit, 90 kHz PTS field so timestamps stay
+/// monotonic across the ~26.5 hour wrap period.
+#[derive(Default)]
+struct PtsUnwrap {
+	last: Option<u64>,
+	offset: u64,
+}
+
+impl PtsUnwrap {
+	fn unwrap(&mut self, raw: u64) -> u64 {
+		const WRAP: u64 = 1 << 33;
+		const HALF: i64 = (WRAP / 2) as i64;
+		if let Some(last) = self.last {
+			let diff = raw as i64 - last as i64;
+			if diff < -HALF {
+				self.offset += WRAP;
+			} else if diff > HALF && self.offset >= WRAP {
+				self.offset -= WRAP;
+			}
+		}
+		self.last = Some(raw);
+		self.offset + raw
+	}
+
+	/// The timebase restarted, so the last sample no longer says anything about where the
+	/// next one wraps. The accumulated offset stays: the wraps already survived happened,
+	/// whatever the source does with its clock next.
+	fn discontinuity(&mut self) {
+		self.last = None;
+	}
+}
 
 /// A 90 kHz PTS already in its era, as a [`Timestamp`] on the catalog clock: shifted by the
 /// timebase's `offset`. Returns `None` when the PES carried no PTS.
@@ -6962,48 +6986,6 @@ pub(super) mod test {
 	const STEP: u64 = 12_960;
 	/// The 33-bit PTS field's period.
 	const WRAP: u64 = 1 << 33;
-	/// [`WRAP`] in whole microseconds: a shared epoch places PTS zero this long before its time.
-	pub(in crate::container::ts) const WRAP_MICROS: u64 = 95_443_717_689;
-
-	/// A shared epoch's wall time.
-	pub(in crate::container::ts) fn epoch_time() -> std::time::SystemTime {
-		std::time::SystemTime::UNIX_EPOCH + Duration::from_millis(1_760_000_000_000)
-	}
-
-	/// The root clock a shared epoch at `epoch` places for TS: PTS zero one wrap before it.
-	pub(in crate::container::ts) fn epoch_clock(epoch: std::time::SystemTime) -> hang::catalog::Clock {
-		let zero = epoch - Duration::from_micros(WRAP_MICROS);
-		let unix = zero
-			.duration_since(std::time::SystemTime::UNIX_EPOCH)
-			.unwrap()
-			.as_micros() as u64;
-		let micros = unix - hang::catalog::MOQ_EPOCH_UNIX_MILLIS * 1_000;
-		hang::catalog::Clock::new(Timestamp::from_micros(micros).unwrap()).unwrap()
-	}
-
-	/// A [`two_stream_import`] on a host whose wall clock reads `host`, its clock placed by a
-	/// shared epoch at `epoch`. Retained for a day, so a subscribe reaches every frame.
-	fn epoch_import(
-		epoch: std::time::SystemTime,
-		host: std::time::SystemTime,
-	) -> (moq_net::broadcast::Consumer, crate::catalog::Producer, super::Import) {
-		crate::clock::fake_host_wall(host);
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let config = crate::catalog::Config::default().with_max_age(Duration::from_secs(86_400));
-		let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
-		let timebase = catalog.timebase();
-		timebase
-			.place(Timestamp::ZERO, epoch - Duration::from_micros(WRAP_MICROS))
-			.unwrap();
-		let mut import = super::Import::new(broadcast, timebase.reserve());
-		let pmt = synth_pmt(
-			&[(StreamType::Mpeg1Audio, PCR_PID), (StreamType::Mpeg1Audio, PEER_PID)],
-			false,
-		);
-		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
-		(consumer, catalog, import)
-	}
 
 	/// Step `i` of a shared source whose PCR PID presents at `pts`. The peer presents 8,000 ticks
 	/// earlier, so near a wrap the two streams sit either side of it. Every frame has its own fill.
@@ -7031,70 +7013,6 @@ pub(super) mod test {
 			}
 		}
 		frames
-	}
-
-	/// Importers placed by one epoch publish one timeline wherever each joined the source: one
-	/// from before a wrap, one at it with its streams' first values either side of it, and one
-	/// after it on a host clock 7 ms ahead, taking the source 40 ms late.
-	#[tokio::test(start_paused = true)]
-	async fn importers_sharing_an_epoch_publish_one_timeline_wherever_each_started() {
-		let epoch = epoch_time();
-		let start = epoch + Duration::from_secs(600);
-		let first = WRAP - 10 * STEP;
-		let (consumer, catalog, mut import) = epoch_import(epoch, start);
-		let (mut at_wrap, mut late) = (None, None);
-		for i in 0..30 {
-			let now = start + Duration::from_micros(i * 144_000);
-			if i == 10 {
-				at_wrap = Some(epoch_import(epoch, now));
-			}
-			if i == 20 {
-				late = Some(epoch_import(epoch, now + Duration::from_millis(7)));
-			}
-			let data = source_pes(i, (first + i * STEP) % WRAP);
-			import.decode(&data).unwrap();
-			if let Some((_, _, joined)) = at_wrap.as_mut() {
-				joined.decode(&data).unwrap();
-			}
-			tokio::time::advance(Duration::from_millis(40)).await;
-			if let Some((_, _, joined)) = late.as_mut() {
-				joined.decode(&data).unwrap();
-			}
-			tokio::time::advance(Duration::from_millis(104)).await;
-		}
-		import.finish().unwrap();
-		let all = timeline(&consumer, &catalog).await;
-		assert_eq!(all.len(), 120, "every frame of both streams");
-		let pcr: Vec<i64> = (1..=60).map(|fill| all[&fill]).collect();
-		assert!(
-			pcr.windows(2).all(|w| (71_999..=72_001).contains(&(w[1] - w[0]))),
-			"the first importer runs on through the wrap: {pcr:?}"
-		);
-		assert_eq!(catalog.snapshot().clock, Some(epoch_clock(epoch)));
-
-		let names =
-			|catalog: &crate::catalog::Producer| catalog.snapshot().audio.renditions.into_keys().collect::<Vec<_>>();
-		for (when, joined) in [("at the wrap", at_wrap), ("late", late)] {
-			let (consumer, joined_catalog, mut joined) = joined.unwrap();
-			joined.finish().unwrap();
-			assert_eq!(joined_catalog.snapshot().clock, catalog.snapshot().clock, "{when}");
-			assert_eq!(names(&joined_catalog), names(&catalog), "{when}");
-			let frames = timeline(&consumer, &joined_catalog).await;
-			assert!(frames.len() >= 40, "{when}: {frames:?}");
-			for (fill, micros) in &frames {
-				assert_eq!(
-					all.get(fill),
-					Some(micros),
-					"frame {fill:#x} of the importer joined {when}"
-				);
-			}
-			if when == "at the wrap" {
-				assert!(
-					frames.contains_key(&21) && frames.contains_key(&0x94),
-					"its streams began either side of the wrap"
-				);
-			}
-		}
 	}
 
 	#[test]
@@ -7382,116 +7300,6 @@ pub(super) mod test {
 		assert!(
 			(88_888..=88_889).contains(&apart),
 			"the step's frames sit {apart} µs apart"
-		);
-	}
-
-	/// A flagged jump that carries the source across a wrap leaves importers placed by one epoch
-	/// on one timeline, including one that joined after it and never saw the flag.
-	#[tokio::test(start_paused = true)]
-	async fn importers_sharing_an_epoch_agree_across_a_flagged_jump() {
-		let epoch = epoch_time();
-		let start = epoch + Duration::from_secs(600);
-		// Five minutes short of the wrap, then ten minutes on.
-		let first = WRAP - 300 * 90_000;
-		let jump = 600 * 90_000;
-		let (consumer, catalog, mut import) = epoch_import(epoch, start);
-		let mut joined = None;
-		for i in 0..20 {
-			if i == 15 {
-				joined = Some(epoch_import(epoch, start + Duration::from_micros(i * 144_000)));
-			}
-			let mut data = Vec::new();
-			if i == 10 {
-				data.extend(clock_break_packet(PCR_PID));
-			}
-			let pts = first + i * STEP + if i >= 10 { jump } else { 0 };
-			data.extend(source_pes(i, pts % WRAP));
-			import.decode(&data).unwrap();
-			if let Some((_, _, joined)) = joined.as_mut() {
-				joined.decode(&data).unwrap();
-			}
-			tokio::time::advance(Duration::from_millis(144)).await;
-		}
-		import.finish().unwrap();
-		let all = timeline(&consumer, &catalog).await;
-		let step = all[&21] - all[&19];
-		assert!(
-			(600_143_999..=600_144_001).contains(&step),
-			"the jump adds its step: {step} µs"
-		);
-
-		let (consumer, joined_catalog, mut joined) = joined.unwrap();
-		joined.finish().unwrap();
-		assert_eq!(joined_catalog.snapshot().clock, catalog.snapshot().clock);
-		let frames = timeline(&consumer, &joined_catalog).await;
-		assert!(frames.contains_key(&31), "{frames:?}");
-		for (fill, micros) in &frames {
-			assert_eq!(
-				all.get(fill),
-				Some(micros),
-				"frame {fill:#x} of the importer that joined after the jump"
-			);
-		}
-	}
-
-	/// A flagged jump carrying the source more than half a wrap from the epoch's clock reads as a
-	/// rewind, so every importer of a pair ends alike rather than publishing it a wrap away.
-	#[tokio::test(start_paused = true)]
-	async fn a_jump_past_half_a_wrap_ends_every_importer() {
-		let epoch = epoch_time();
-		let start = epoch + Duration::from_secs(600);
-		let first = epoch_import(epoch, start);
-		let second = epoch_import(epoch, start + Duration::from_millis(7));
-		for (_consumer, _catalog, mut import) in [first, second] {
-			let mut data = Vec::new();
-			for i in 0..5 {
-				data.extend(source_pes(i, 90_000 + i * STEP));
-			}
-			data.extend(clock_break_packet(PCR_PID));
-			data.extend(source_pes(5, 90_000 + 5 * STEP + 14 * 3600 * 90_000));
-			let err = import
-				.decode(&data)
-				.and_then(|()| import.finish())
-				.expect_err("fourteen hours on is a wrap behind the epoch's clock");
-			assert!(is_rewind(&err), "{err:?}");
-		}
-	}
-
-	/// A restart under the same epoch rejoins its timeline: after the importer stopped, one started
-	/// two hours later, the source having run on and wrapped meanwhile, publishes the outage as a
-	/// gap on the same clock.
-	#[tokio::test(start_paused = true)]
-	async fn a_restart_under_the_same_epoch_rejoins_its_timeline() {
-		let epoch = epoch_time();
-		let start = epoch + Duration::from_secs(600);
-		// An hour short of the wrap.
-		let first = WRAP - 3600 * 90_000;
-		let (consumer, catalog, mut import) = epoch_import(epoch, start);
-		for i in 0..5 {
-			import.decode(&source_pes(i, first + i * STEP)).unwrap();
-			tokio::time::advance(Duration::from_millis(144)).await;
-		}
-		import.finish().unwrap();
-		let before = timeline(&consumer, &catalog).await;
-		let clock = catalog.snapshot().clock;
-		drop((consumer, catalog, import));
-
-		let outage = Duration::from_secs(2 * 3600);
-		tokio::time::advance(outage).await;
-		let resumed = start + Duration::from_micros(5 * 144_000) + outage;
-		let (consumer, catalog, mut import) = epoch_import(epoch, resumed);
-		for i in 5..10 {
-			let pts = (first + i * STEP + outage.as_secs() * 90_000) % WRAP;
-			import.decode(&source_pes(i, pts)).unwrap();
-			tokio::time::advance(Duration::from_millis(144)).await;
-		}
-		import.finish().unwrap();
-		let after = timeline(&consumer, &catalog).await;
-		assert_eq!(catalog.snapshot().clock, clock);
-		let gap = after[&11] - before[&1];
-		assert!(
-			(7_200_719_999..=7_200_720_001).contains(&gap),
-			"the outage is a gap of {gap} µs"
 		);
 	}
 
