@@ -20,10 +20,22 @@ already warmed hits this, as does any absolute range start.
 Found while building SUBSCRIBE_ALL
 ([moq-dev/moq#5931](https://github.com/moq-dev/moq/pull/5931)), which
 reproduced it with a throwaway test and fixed it only for listed tracks
-(`listed_demand` in `f074d09e7`): once a subscription's start resolves, its
-demand counts from that start rather than as "oldest", so a lower floor
-changes the union and goes upstream. Generalize that to every subscription,
-or find a narrower shape with the same effect.
+(`listed_demand` in `f074d09e7`) by turning a listed track's demand into an
+absolute floor at its resolved start.
+
+Decided by the maintainer on 2026-10-19, judged on behavior: compare-only. A
+resolved "oldest" start is information about the copy, not a filter.
+
+- **Aggregation.** An "oldest" reader that resolved at S counts as S, so the
+  copy's demand is min(S, every other reader's floor), and a newcomer at
+  F < S sends F upstream.
+- **Delivery.** Nothing filters the existing reader, so a group below S that
+  arrives late still reaches it within its max age.
+
+Rejected: #5931's absolute floor at the resolved start, which drops those
+late groups. The lite draft's SUBSCRIBE_OK already says its group "is not a
+new floor" and that a later group below it is still delivered, which matches
+this, so the draft does not change.
 
 Lands after [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929),
 which makes a lowered floor re-offer cached groups at the publisher (decided
@@ -34,12 +46,6 @@ which is the natural place to learn that a start resolved.
 
 Watch for:
 
-- **The start is not a floor.** The lite draft's SUBSCRIBE_OK says a group
-  below the resolved start that becomes available later is still delivered
-  within max age. Turning every resolved reader into an absolute floor
-  upstream would drop such late groups. Keep that property: one option is to
-  count a resolved start only when comparing against another reader's floor,
-  and send a floor upstream only when one lands below the copy's start.
 - **Every relay changes.** This alters the upstream SUBSCRIBE_UPDATE stream
   of every relayed track. Make sure a reader resolving does not, by itself,
   send an update per subscriber; extend `track_subscriber_churn` in
