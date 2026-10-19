@@ -697,3 +697,67 @@ fn tiny_whole_pes_held_for_a_timestamp_are_bounded_by_count() {
 		"{err:#}"
 	);
 }
+
+/// A PES whose header spans packets is placed from its start code, not from where the header
+/// completes: one begun before the first PCR stays unplaced though a PCR lands mid-header, and
+/// one begun after a PCR is bracketed by the PCR that lands mid-header.
+#[tokio::test(start_paused = true)]
+async fn a_pes_header_split_by_a_pcr_is_placed_from_its_start_code() {
+	let mut feed = Feed::new(0x06, KLVA);
+	let start = 1_000 * MS;
+	// 9 + 200 header bytes, so each header ends in its PES's second packet.
+	let split = |fill: u8| pes_with(0xbd, 0x80, 0x00, &[], 200, &[fill; 8]);
+	feed.data_across(split(1), 1, start);
+	feed.picture(start).pcr(start + 40 * MS);
+	feed.data_across(split(2), 1, start + 80 * MS);
+	feed.pcr(start + 120 * MS);
+	let expected = placed(feed.clock(feed.pes[1].0).unwrap(), 0);
+
+	let imported = import(&feed.bytes(), false).unwrap();
+	let (name, _) = imported.entry().unwrap();
+	let (frames, err) = read(&imported.consumer, &name).await;
+	assert!(err.is_none(), "{err:?}");
+	assert_eq!(frames.len(), 1);
+	assert_eq!(frames[0].timestamp.as_micros() as u64, expected);
+	assert_eq!(&frames[0].payload[..], &feed.pes[1].1[..]);
+	assert_eq!(imported.stats().unplaced, 1, "the PES begun before the first PCR");
+}
+
+/// A later PMT that names a PCR carries the private PES stream refused for want of one, and one
+/// that drops the PCR again refuses the stream it carried.
+#[tokio::test(start_paused = true)]
+async fn a_pmt_naming_or_dropping_the_pcr_reroutes_private_pes() {
+	let streams: &[(u8, u16, &[u8])] = &[(0x02, VIDEO_PID, &[]), (0x06, DATA_PID, KLVA)];
+	let mut feed = Feed::with_pcr(0x06, KLVA, NO_PCR);
+	let start = 1_000 * MS;
+	feed.picture(start).data(klv(0, 8));
+	feed.mux.pmt_with(PMT_PID, 1, CLOCK_PID, streams, 0);
+	feed.pcr(start + 40 * MS)
+		.picture(start + 40 * MS)
+		.data(klv(1, 8))
+		.pcr(start + 80 * MS);
+	let head = feed.bytes();
+	feed.mux.pmt_with(PMT_PID, 1, NO_PCR, streams, 0);
+	feed.picture(start + 80 * MS).data(klv(2, 8));
+
+	let mut imported = start_import(&head);
+	let (name, _) = imported
+		.entry()
+		.expect("the stream is carried once the PMT names a PCR");
+	let reader = {
+		let consumer = imported.consumer.clone();
+		tokio::spawn(async move { read(&consumer, &name).await })
+	};
+	for _ in 0..10 {
+		tokio::task::yield_now().await;
+	}
+	imported.import.decode(&feed.bytes()[head.len()..]).unwrap();
+	imported.import.finish().unwrap();
+
+	let (frames, err) = reader.await.unwrap();
+	assert_eq!(frames.len(), 1, "the PES placed while the PCR was named");
+	assert_eq!(&frames[0].payload[..], &feed.pes[1].1[..]);
+	assert!(err.is_some(), "the track ends with an error once the PCR goes");
+	assert!(imported.entry().is_none(), "the track left the catalog");
+	assert_eq!(imported.stats().refused, 2);
+}

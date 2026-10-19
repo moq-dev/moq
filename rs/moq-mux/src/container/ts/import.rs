@@ -63,7 +63,8 @@ use moq_net::Timestamp;
 /// rebased (ESCR, a `pack_header_field`, a TREF), PES-level scrambling, an unbounded non-video
 /// PES, or a header export would refuse is refused rather than altered, as is every such stream
 /// in a program with no PCR: [`stats::Stream::refused`]. A PMT that moves the PCR PID ends the
-/// placement timebase, as a clock break does.
+/// placement timebase, as a clock break does; one that drops the PCR refuses those streams, and
+/// one that names it again carries them.
 ///
 /// The PAT and every PMT are reassembled the same way, so a table that spans packets or
 /// sits behind a nonzero pointer_field is read whole. A PAT or PMT section whose CRC-32
@@ -126,9 +127,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	liveness: Liveness,
 	/// In-progress PES reassembly, keyed by elementary PID.
 	pending: HashMap<Pid, Pending>,
-	/// Partial clear PES headers, at most 9 + 255 bytes per elementary PID, each with the input
-	/// offset of its start code.
-	headers: HashMap<Pid, (u64, Vec<u8>)>,
+	/// Partial clear PES headers, at most 9 + 255 bytes per elementary PID, each with where its
+	/// start code sits on the program clock ([`Placement::span`]).
+	headers: HashMap<Pid, (Option<Span>, Vec<u8>)>,
 	/// The input offset of the first byte in `scratch`, which places every packet in the input.
 	position: u64,
 	/// The program clock at each input byte, which places whole PES packets.
@@ -137,6 +138,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	unplaced: BTreeMap<u16, u64>,
 	/// Private PES streams refused rather than carried altered, keyed by PID.
 	refused: BTreeMap<u16, u64>,
+	/// Private PES streams refused only for want of a PCR, carried once a PMT names one.
+	unclocked: HashSet<Pid>,
 	/// One program-wide budget for PES payloads and sections awaiting their clock.
 	staging: Arc<Staging>,
 	/// The TR 101 290 checks, and the per-PID continuity state routing reads.
@@ -238,6 +241,7 @@ impl<E: catalog::Catalog> Import<E> {
 			placement: Placement::default(),
 			unplaced: BTreeMap::new(),
 			refused: BTreeMap::new(),
+			unclocked: HashSet::new(),
 			staging: Arc::default(),
 			health: Health::default(),
 			pcr_pid: None,
@@ -548,35 +552,38 @@ impl<E: catalog::Catalog> Import<E> {
 			}
 			// The payload ends the packet, so this is where its start code sits in the input.
 			let at = offset + (TsPacket::SIZE - payload.len()) as u64;
+			// Taken here, not once the header is whole, so a PCR landing before the header's
+			// continuation is the one after it.
+			let span = self.placement.span(at);
 			return match PesStart::header_len(payload) {
 				Ok(len) if payload.len() >= len => match PesStart::parse(payload) {
-					Ok(pes) => self.handle_pes_start(pid, pes, at),
+					Ok(pes) => self.handle_pes_start(pid, pes, span),
 					Err(err) => self.damage(pid, &err),
 				},
-				Ok(_) => self.pes_header(pid, at, payload.to_vec()),
+				Ok(_) => self.pes_header(pid, span, payload.to_vec()),
 				Err(err) => self.damage(pid, &err),
 			};
 		}
-		if let Some((at, mut header)) = self.headers.remove(&pid) {
+		if let Some((span, mut header)) = self.headers.remove(&pid) {
 			header.extend_from_slice(payload);
-			self.pes_header(pid, at, header)
+			self.pes_header(pid, span, header)
 		} else {
 			self.handle_pes_continuation(pid, payload)
 		}
 	}
 
-	/// Continue a PES header split across packets, whose start code sits at input offset `at`.
-	fn pes_header(&mut self, pid: Pid, at: u64, header: Vec<u8>) -> anyhow::Result<()> {
+	/// Continue a PES header split across packets, placed by `span` from its start code.
+	fn pes_header(&mut self, pid: Pid, span: Option<Span>, header: Vec<u8>) -> anyhow::Result<()> {
 		let len = match PesStart::header_len(&header) {
 			Ok(len) => len,
 			Err(err) => return self.damage(pid, &err),
 		};
 		if header.len() < len {
-			self.headers.insert(pid, (at, header));
+			self.headers.insert(pid, (span, header));
 			return Ok(());
 		}
 		match PesStart::parse(&header) {
-			Ok(pes) => self.handle_pes_start(pid, pes, at),
+			Ok(pes) => self.handle_pes_start(pid, pes, span),
 			Err(err) => self.damage(pid, &err),
 		}
 	}
@@ -592,8 +599,19 @@ impl<E: catalog::Catalog> Import<E> {
 			self.pending.remove(&pid);
 			self.headers.remove(&pid);
 		}
-		if self.streams.contains_key(&pid) {
-			return Ok(());
+		// A private PES stream follows the PMT's PCR_PID: refused while there is none to place
+		// its PES by, and carried again once there is.
+		match self.streams.get(&pid) {
+			Some(Stream::PesPacket(_)) if self.pcr_pid.is_none() => {
+				self.refuse(pid, "the program lost the PCR that placed it")?;
+				self.unclocked.insert(pid);
+				return Ok(());
+			}
+			Some(Stream::Ignored) if self.pcr_pid.is_some() && self.unclocked.remove(&pid) => {
+				self.streams.remove(&pid);
+			}
+			Some(_) => return Ok(()),
+			None => {}
 		}
 
 		let stream = match StreamType::from_u8(stream_type).ok() {
@@ -678,6 +696,7 @@ impl<E: catalog::Catalog> Import<E> {
 							"refused a private PES stream in a program with no PCR to place it by"
 						);
 						*self.refused.entry(pid.as_u16()).or_default() += 1;
+						self.unclocked.insert(pid);
 						Stream::Ignored
 					} else {
 						let descriptors = descriptors.to_vec();
@@ -775,6 +794,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Remove a PES route while keeping the counters it accumulated for this importer.
 	fn retire_stream(&mut self, pid: Pid) -> Option<Stream<E>> {
+		self.unclocked.remove(&pid);
 		let stream = self.streams.remove(&pid)?;
 		if let Some(current) = stream.stats() {
 			self.retired_stats
@@ -785,8 +805,8 @@ impl<E: catalog::Catalog> Import<E> {
 		Some(stream)
 	}
 
-	/// Open the PES whose header `pes` begins at input offset `at`.
-	fn handle_pes_start(&mut self, pid: Pid, pes: PesStart, at: u64) -> anyhow::Result<()> {
+	/// Open the PES whose header `pes` begins where `span` says, if any PCR came before it.
+	fn handle_pes_start(&mut self, pid: Pid, pes: PesStart, span: Option<Span>) -> anyhow::Result<()> {
 		// Finish the preceding PES before accepting another header.
 		if self.pending.contains_key(&pid) {
 			self.flush(pid)?;
@@ -868,7 +888,8 @@ impl<E: catalog::Catalog> Import<E> {
 		// A whole PES keeps its header, and is placed by the PCR before it and the one after.
 		let (header, data_len, span) = match whole {
 			Some(_) => {
-				let Some(before) = self.placement.last() else {
+				let generation = self.placement.generation;
+				let Some(mut span) = span.filter(|span| span.generation == generation) else {
 					// Before the first PCR on this timebase nothing places it. A PTS it carried still
 					// anchored the timebase, so it releases the reservation like a flushed PES would.
 					if pts.is_some() {
@@ -877,12 +898,10 @@ impl<E: catalog::Catalog> Import<E> {
 					*self.unplaced.entry(pid.as_u16()).or_default() += 1;
 					return Ok(());
 				};
-				let span = Span {
-					at,
-					before,
-					generation: self.placement.generation,
-					ticks: None,
-				};
+				// A PCR that landed while the header spanned packets is the one after it.
+				if let Some(&after) = self.placement.samples.iter().find(|sample| sample.at > span.at) {
+					span.bracket(generation, after);
+				}
 				let len = pes.data_len.map(|len| pes.header.len() + len);
 				(pes.header, len, Some(span))
 			}
@@ -1967,6 +1986,17 @@ impl Placement {
 	/// The timebase's last PCR.
 	fn last(&self) -> Option<Sample> {
 		self.samples.back().copied()
+	}
+
+	/// A PES whose start code sits at input offset `at`, after the last PCR on this timebase;
+	/// `None` before the first.
+	fn span(&self, at: u64) -> Option<Span> {
+		Some(Span {
+			at,
+			before: self.last()?,
+			generation: self.generation,
+			ticks: None,
+		})
 	}
 
 	/// The program clock at input offset `at`, past the last PCR, at the rate of the interval
