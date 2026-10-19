@@ -315,7 +315,7 @@ function newer(a: track.Location | undefined, b: track.Location | undefined): tr
 function waitForSubscription(
 	controls: SubscriptionControls,
 	subscriber: track.Subscriber,
-	drops: Signal<readonly SubscribeDrop[]>,
+	drops: Signal<number>,
 ): Promise<void> {
 	return new Promise((resolve) => {
 		let settled = false;
@@ -1044,7 +1044,8 @@ export class Publisher {
 
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
-		const drops = new Signal<readonly SubscribeDrop[]>([]);
+		const drops = new Signal(0);
+		const pendingDrops: SubscribeDrop[] = [];
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -1056,10 +1057,8 @@ export class Publisher {
 		});
 		try {
 			for (;;) {
-				const pending = drops.peek();
-				if (pending.length > 0) {
-					drops.set([]);
-					for (const dropped of pending) {
+				if (pendingDrops.length > 0) {
+					for (const dropped of pendingDrops.splice(0)) {
 						if (
 							!(await controls.response(encodeSubscribeResponse(stream, { drop: dropped }, this.version)))
 						)
@@ -1197,7 +1196,7 @@ export class Publisher {
 						const end = await Promise.race([Promise.all(groups).then(() => drained), controls.ended]);
 						if (end instanceof Error) throw end;
 						if (end !== drained) return false;
-						if (drops.peek().length > 0) continue;
+						if (pendingDrops.length > 0) continue;
 						finished = true;
 						return true;
 					}
@@ -1248,14 +1247,8 @@ export class Publisher {
 				const task = opened.then(async (writer) => {
 					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
 					if (emitRange && failed instanceof Error) {
-						drops.update((pending) => [
-							...pending,
-							new SubscribeDrop({
-								start: group.sequence,
-								end: group.sequence,
-								error: 0,
-							}),
-						]);
+						pendingDrops.push(new SubscribeDrop({ start: group.sequence, end: group.sequence, error: 0 }));
+						drops.update((revision) => revision + 1);
 					}
 				});
 				groups.add(task);
