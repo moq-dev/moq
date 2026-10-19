@@ -418,6 +418,8 @@ impl TrackInner {
 		ordered.pending = None;
 		match result {
 			Ok(frame) => Poll::Ready(Ok(frame)),
+			// The subscription's max delay gave up on the group, so move on like an empty one.
+			Err(moq_net::Error::Old) => Poll::Ready(Ok(None)),
 			Err(err) => Poll::Ready(Err(err.into())),
 		}
 	}
