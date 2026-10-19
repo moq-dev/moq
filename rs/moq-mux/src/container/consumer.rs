@@ -75,7 +75,9 @@ pub(crate) enum Item {
 /// failed track once the groups already here drain. A skip returns a malformed group's error
 /// rather than a gap. After an error the reader reads as finished.
 pub struct Consumer<F: Container> {
-	track: moq_net::track::Subscriber,
+	// Dropped once an error ends the reader, releasing the publisher's demand.
+	track: Option<moq_net::track::Subscriber>,
+	name: std::sync::Arc<str>,
 
 	format: F,
 
@@ -120,10 +122,6 @@ pub struct Consumer<F: Container> {
 
 	// The group the last event came from.
 	group: u64,
-
-	// An error ended the reader, which reads as finished from then on: a decode error has
-	// already consumed the frame it came from, so reading on would skip it.
-	failed: bool,
 
 	// The track failed, so no group can arrive. Returned once the groups already here drain.
 	track_error: Option<F::Error>,
@@ -185,7 +183,8 @@ impl<F: Container> Consumer<F> {
 			.max_delay
 			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		Self {
-			track,
+			name: track.name().into(),
+			track: Some(track),
 			format,
 			current: start.unwrap_or(0),
 			pending: VecDeque::new(),
@@ -199,7 +198,6 @@ impl<F: Container> Consumer<F> {
 			gap: false,
 			next: None,
 			group: 0,
-			failed: false,
 			track_error: None,
 		}
 	}
@@ -221,7 +219,7 @@ impl<F: Container> Consumer<F> {
 
 	/// The track's name.
 	pub(crate) fn name(&self) -> &str {
-		self.track.name()
+		&self.name
 	}
 
 	/// Read the next frame from the track.
@@ -295,11 +293,18 @@ impl<F: Container> Consumer<F> {
 
 	/// Read media or a clean group boundary without waiting for a successor group.
 	pub(crate) fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, F::Error>> {
-		if self.failed {
+		// An error ended the reader, which reads as finished from then on: a decode error has
+		// already consumed the frame it came from, so reading on would skip it.
+		if self.track.is_none() {
 			return Poll::Ready(Ok(None));
 		}
 		let event = ready!(self.poll_event_inner(waiter));
-		self.failed = event.is_err();
+		if event.is_err() {
+			// Nothing more is read, so release the subscription and the groups it holds rather
+			// than pin the publisher's demand and cache for as long as the caller keeps this.
+			self.track = None;
+			self.pending.clear();
+		}
 		Poll::Ready(event)
 	}
 
@@ -329,7 +334,7 @@ impl<F: Container> Consumer<F> {
 				let start = match self.newest {
 					true => {
 						let mut start = self.pending.back().expect("a group has a frame").sequence;
-						while let Poll::Ready(Some(largest)) = self.track.poll_largest(waiter) {
+						while let Poll::Ready(Some(largest)) = self.subscriber().poll_largest(waiter) {
 							start = start.max(largest.group);
 						}
 						start
@@ -395,7 +400,7 @@ impl<F: Container> Consumer<F> {
 					// silently dropped.
 					Poll::Ready(Err(Failure::Decode(e))) => {
 						tracing::warn!(
-							track = self.track.name(),
+							track = &*self.name,
 							group = group.group.sequence,
 							error = ?e,
 							"group payload failed to decode; ending the reader"
@@ -409,7 +414,7 @@ impl<F: Container> Consumer<F> {
 						// stepping one-by-one and then blocking on a sequence gap of groups
 						// that will never arrive.
 						tracing::warn!(
-							track = self.track.name(),
+							track = &*self.name,
 							group = group.group.sequence,
 							error = ?e,
 							"current group evicted; skipping to next buffered group"
@@ -571,7 +576,7 @@ impl<F: Container> Consumer<F> {
 			if finished && self.pending.is_empty() {
 				if let Some(err) = self.track_error.take() {
 					// The caller only gets the bare error, with nothing to say which track died.
-					tracing::warn!(track = self.track.name(), error = ?err, "track failed; ending the reader");
+					tracing::warn!(track = &*self.name, error = ?err, "track failed; ending the reader");
 					return Poll::Ready(Err(err));
 				}
 				return Poll::Ready(Ok(None));
@@ -579,6 +584,11 @@ impl<F: Container> Consumer<F> {
 
 			return Poll::Pending;
 		}
+	}
+
+	// The subscription, which only an error ending the reader drops.
+	fn subscriber(&mut self) -> &mut moq_net::track::Subscriber {
+		self.track.as_mut().expect("read only until an error ends the reader")
 	}
 
 	// Media this reader will never deliver: the next item is preceded by a gap.
@@ -606,7 +616,7 @@ impl<F: Container> Consumer<F> {
 			return Poll::Ready(());
 		}
 		loop {
-			let next = match ready!(self.track.poll_recv_group(waiter)) {
+			let next = match ready!(self.subscriber().poll_recv_group(waiter)) {
 				Ok(next) => next,
 				Err(err) => {
 					self.track_error = Some(err.into());
@@ -666,7 +676,7 @@ impl<F: Container> Consumer<F> {
 		});
 		match fault {
 			Some(err) => {
-				tracing::warn!(track = self.track.name(), error = ?err, "discarded a malformed group; ending the reader");
+				tracing::warn!(track = &*self.name, error = ?err, "discarded a malformed group; ending the reader");
 				Err(err)
 			}
 			None => Ok(()),
@@ -677,12 +687,16 @@ impl<F: Container> Consumer<F> {
 	/// [`new`](Self::new). The subscription keeps the requested value verbatim,
 	/// matching [`moq_net::track::Subscription::max_delay`].
 	pub fn set_max_delay(&mut self, max_delay: std::time::Duration) {
-		self.max_delay = max_delay.min(self.track.info().max_age.unwrap_or(std::time::Duration::MAX));
+		// An ended reader has no subscription left to tune.
+		let Some(track) = &mut self.track else {
+			return;
+		};
+		self.max_delay = max_delay.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		// The transport enforces the same budget on the subscription itself, so a
 		// tolerance set here has to reach it: otherwise moq-net skips the very groups
 		// this consumer was told to wait for, before they ever get here.
-		let subscription = self.track.subscription().with_max_delay(max_delay);
-		let _ = self.track.update(subscription);
+		let subscription = track.subscription().with_max_delay(max_delay);
+		let _ = track.update(subscription);
 	}
 }
 
@@ -1082,10 +1096,10 @@ mod tests {
 		let max_delay = Duration::from_millis(250);
 		let subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_delay(max_delay));
 
-		let consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 
 		assert_eq!(consumer.max_delay, max_delay);
-		assert_eq!(consumer.track.subscription().max_delay, max_delay);
+		assert_eq!(consumer.subscriber().subscription().max_delay, max_delay);
 	}
 
 	#[tokio::test]
@@ -2657,6 +2671,28 @@ mod tests {
 		assert!(matches!(event, Err(crate::Error::UnknownFormat(_))));
 		let event = kio::wait(|waiter| consumer.poll_event(waiter)).await;
 		assert!(matches!(event, Ok(None)), "the event reader resumed after an error");
+	}
+
+	/// An error releases the subscription and the groups it holds, so a reader kept after it pins
+	/// neither the publisher's demand nor its cache.
+	#[tokio::test]
+	async fn an_error_releases_the_subscription_and_its_groups() {
+		tokio::time::pause();
+		let track = track_producer("test", timed());
+		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+		let mut consumer = Consumer::new(track.subscribe(subscription), FailingDecode);
+
+		let mut malformed = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		write_failing(&mut malformed, None);
+		malformed.finish().unwrap();
+		let mut later = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		write_failing(&mut later, Some(10_000));
+
+		let read = read_past_frames(&mut consumer).await;
+		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
+		assert!(!track.demand().is_used(), "the ended reader still subscribes");
+		assert!(!malformed.demand().is_used(), "the ended reader still holds its group");
+		assert!(!later.demand().is_used(), "the ended reader still holds a later group");
 	}
 
 	/// A malformed object mid-group, found while looking ahead past a blocked group, ends the

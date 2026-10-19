@@ -472,6 +472,9 @@ export class Consumer {
 		this.#track.close(error);
 		this.#notify?.();
 		this.#notify = undefined;
+		// Nothing more is read, so stop the group tasks and release their groups rather than let a
+		// peer keep them decoding and buffering. After the wake: next() reads a closed effect as closed.
+		this.#signals.close();
 	}
 
 	/**

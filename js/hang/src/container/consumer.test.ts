@@ -732,6 +732,38 @@ test("Consumer keeps the first of several decode errors", async () => {
 	consumer.close();
 });
 
+// An error ends the reader, so nothing keeps reading, decoding, or holding the groups still open.
+test("Consumer releases its open groups when an error ends it", async () => {
+	let resolveOpen!: () => void;
+	const open = new Promise<void>((resolve) => {
+		resolveOpen = resolve;
+	});
+	const failingFormat: ContainerFormat = {
+		decode(frame: Uint8Array): Frame[] {
+			if (frame[0] === 0xff) throw new Error("malformed");
+			if (frame[0] === 0x01) resolveOpen();
+			return [{ payload: frame, timestamp: frame[0] as Micro, keyframe: false }];
+		},
+	};
+
+	const track = new Track.Producer("test");
+	const consumer = new Consumer(replay(track), { format: failingFormat, maxDelay: 500 as Milli });
+
+	const malformed = new Group.Producer(0);
+	malformed.writeFrame({ payload: new Uint8Array([0xff]), timestamp: Time.Timestamp.now() });
+	malformed.close();
+	track.writeGroup(malformed);
+	const later = new Group.Producer(1);
+	later.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() });
+	track.writeGroup(later);
+	await open;
+	expect(later.demand().used.peek()).toBe(true);
+
+	await expect(consumer.next()).rejects.toThrow("malformed");
+	expect(later.demand().used.peek()).toBe(false);
+	consumer.close();
+});
+
 // A transport reset is loss: frames decoded before it are kept and the cut tail reads as a gap.
 test("Consumer keeps frames decoded before a group reset (truncated GoP)", async () => {
 	// Reset only once both frames are decoded: a reset discards whatever is still unread.
