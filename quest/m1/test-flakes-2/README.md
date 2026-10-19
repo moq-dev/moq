@@ -33,10 +33,6 @@ known exception, tracked by [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
 
 Public API: none. Wire: none.
 
-## Required
-
-- [WASM refused track](/quest/m1/test-flakes-2/wasm-refused-track.md) - the refused-track case passes and fails on its refusal, not a timeout
-
 ## Related
 
 - [Controlled time](/quest/m1/time/README.md) - the systemic fix these rules ask for: every crate on a controlled clock
