@@ -16,7 +16,7 @@ arrived, so a capture missing most of its video still passes them.
 Under `--shed` the path was narrower than the media, so losing media is expected and reported,
 but only by whole groups: of each group of the source, from a sync frame to the next, the
 capture keeps a prefix in decode order (all of it, part of it, or none) and never resumes
-mid-group. Frames are matched by presentation timestamp, since the export derives each
+mid-group, so it also joins on a sync frame. Frames are matched by presentation timestamp, since the export derives each
 picture's decode timestamp from the frames around it and a group cut short moves it, and in
 capture order: a frame reordered, repeated, or not in the source fails. The
 source's last group still has to arrive whole, so a stream that stalled, or whose latency grew
@@ -78,10 +78,12 @@ def shed(pts: list[int], sync: list[bool], kept: list[int]) -> Shed:
             joined = True
             if lost:
                 result.mid_group.append(t)
-        elif joined:
+        else:
+            # Before the join too, so a capture that opens mid-group resumes mid-group.
             lost = True
-            result.missing += 1
-            result.tail += 1
+            if joined:
+                result.missing += 1
+                result.tail += 1
     result.unmatched = kept[i:]
     return result
 

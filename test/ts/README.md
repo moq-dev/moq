@@ -588,11 +588,12 @@ The generated clips go through `holes.py --shed`, which matches the capture's
 frames to the source's by presentation timestamp, since the export derives each
 picture's decode timestamp and a group cut short moves it. Of each source group,
 the capture keeps a prefix in decode order (all, part, or none) and never resumes
-mid-group, and a frame reordered, repeated, or not in the source fails. The source's last group must arrive whole: a stall, or a latency grown
+mid-group, so it also joins on a sync frame, and a frame reordered, repeated, or
+not in the source fails. The source's last group must arrive whole: a stall, or a latency grown
 past the exporter's 1 s delay, costs it. The decoded-content comparison owes every
 unit, so it does not run, and `--open-gop`, which owes every leading picture, is
 refused. A passthrough grades its packets in place and reports its gaps
-(`passthrough.py --loss-ok`).
+(`passthrough.py --loss-ok`), but must still end on the source's last packet.
 
 The run fails unless the rate limit held datagrams back and the export shed
 something: a rate above the media's never narrows the path.
@@ -685,7 +686,8 @@ A gap fails the run, `--loss` included, since QUIC retransmits what the path
 drops. A path that loses content, as `--rate` does, runs the grader with
 `--loss-ok`: gaps are reported and the checks run on the capture alone, since a
 gap can take part of a PES or the next table with it, and the source's packets
-in place keep their continuity counters across it.
+in place keep their continuity counters across it. The capture must still end on
+the source's last packet, which a stall or a growing latency loses.
 
 ```bash
 ./passthrough.py source.ts capture.ts [--loss-ok]

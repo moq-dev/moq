@@ -76,6 +76,10 @@ class Shed(unittest.TestCase):
         graded = self.grade(range(40, 45))
         self.assertEqual(graded.mid_group, self.PTS[45:50])
 
+    def test_joins_mid_group(self):
+        # Opening on a frame whose group's sync frame was never captured is as undecodable as resuming there.
+        self.assertEqual(self.grade(range(0, 30)).mid_group, self.PTS[30:50])
+
     def test_lost_tail(self):
         # Shedding the last group means the export fell behind and never caught up.
         self.assertEqual(self.grade(range(90, 100)).tail, 10)

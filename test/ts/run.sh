@@ -809,7 +809,8 @@ echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
 # compliance.py must grade the capture as it grades that interval of the source, whatever the
 # source's own verdict. QUIC retransmits what --loss drops, so a gap fails here as it does under
 # holes.py; passthrough.py says whether packets went missing or were rewritten. A path narrower
-# than the multiplex (--rate) has to shed, so there gaps are reported rather than failed.
+# than the multiplex (--rate) has to shed, so there gaps are reported rather than failed, but
+# the capture must still end on the source's last packet.
 if [[ -n "$PASSTHROUGH" ]]; then
     echo
     if ! python3 "$DIR/passthrough.py" "$SRC_TS" "$SUB_TS" ${RATE:+--loss-ok} --report-json "$HARNESS_RUN/passthrough.json"; then
