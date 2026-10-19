@@ -41,8 +41,8 @@ round-trip test first.
   is still deterministic, rather than hold or drop it. With fewer than two
   PCRs it is dropped and counted in importer health. A PES before the
   first PCR the importer sees is dropped and counted the same way, like
-  anything before acquisition: back-extrapolating would let importers
-  started apart disagree. A new timebase starts with its first PCR, so
+  anything before acquisition; PCRs arrive at least every 100 ms, so this
+  costs little and keeps one placement rule. A new timebase starts with its first PCR, so
   this happens only at startup. Test each case.
 - **Bytes.** The frame is the PES packet as received, start code through
   payload. PTS and DTS are rewritten in place onto the catalog clock modulo
