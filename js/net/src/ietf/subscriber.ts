@@ -982,6 +982,8 @@ export class Subscriber {
 			const update = legacy
 				? new SubscribeUpdate({ requestId, ownRequestId: own, parameters })
 				: new SubscribeUpdate({ requestId: own, parameters });
+			// Counted before writing: the answer can be read before the write's promise resolves.
+			if (!legacy) unanswered.update((count) => count + 1);
 			try {
 				await stream.writer.u53(SubscribeUpdate.id);
 				await update.encode(stream.writer, version);
@@ -990,7 +992,6 @@ export class Subscriber {
 				return;
 			}
 			sent = wanted;
-			if (!legacy) unanswered.update((count) => count + 1);
 			console.debug(`subscribe update: id=${requestId} priority=${wanted}`);
 		}
 	}

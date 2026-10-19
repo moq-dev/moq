@@ -6,7 +6,7 @@ import { expect, test } from "bun:test";
 import { accept, connect, type Established } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
-import { createMockTransportPair } from "./mock.ts";
+import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Timescale } from "./time.ts";
@@ -24,6 +24,7 @@ const HIGH = 200;
 async function session(protocol: string, origin: OriginProducer): Promise<[Established, Established]> {
 	const draft14 = protocol === Ietf.ALPN.DRAFT_14;
 	const pair = createMockTransportPair(draft14 ? "" : protocol);
+	lateAcks(pair.client);
 	return Promise.all([
 		connect({ url, transport: pair.client }),
 		accept({
@@ -33,6 +34,25 @@ async function session(protocol: string, origin: OriginProducer): Promise<[Estab
 			version: draft14 ? Ietf.Version.DRAFT_14 : undefined,
 		}),
 	]);
+}
+
+// Acknowledge each write on the client's bidirectional streams a task late, after the peer
+// can already have answered it, as a real send stream may.
+function lateAcks(transport: MockTransport) {
+	const create = transport.createBidirectionalStream.bind(transport);
+	transport.createBidirectionalStream = async (options) => {
+		const stream = await create(options);
+		const inner = stream.writable.getWriter();
+		const writable = new WritableStream<Uint8Array>({
+			async write(chunk) {
+				await inner.write(chunk);
+				await new Promise((resolve) => setTimeout(resolve, 0));
+			},
+			close: () => inner.close(),
+			abort: (reason) => inner.abort(reason),
+		});
+		return { readable: stream.readable, writable };
+	};
 }
 
 // Resolve once the subscription `track` serves asks for `want`.
