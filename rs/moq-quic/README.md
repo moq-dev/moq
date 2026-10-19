@@ -12,6 +12,7 @@ That covers every quinn security advisory published through 2026-09-30.
 Cherry-picked since the fork point:
 
 - [`48854d48`](https://github.com/quinn-rs/quinn/commit/48854d48635875d259a95973cc0575db8c1792a4): accept non-minimally encoded integer transport parameters, as RFC 9000 section 16 allows.
+- [`0365181f`](https://github.com/quinn-rs/quinn/commit/0365181f2d1ee63606d43b6e858c4f70c5802c08) (moq-tokio's `quic::driver`): an ignored `ECONNRESET` or `EMSGSIZE` receive error counts toward the receive work budget, so a flood of them cannot hold the endpoint task.
 
 The fork never merges upstream.
 Upstream fixes are cherry-picked by hand, and the crate keeps quinn's formatting (rustfmt defaults) so the patches apply cleanly.
