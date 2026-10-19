@@ -43,22 +43,34 @@ class Shed(unittest.TestCase):
     SYNC = [i % 25 == 0 for i in range(100)]
 
     def grade(self, *lost: range) -> holes.Shed:
-        kept = {t for i, t in enumerate(self.PTS) if not any(i in r for r in lost)}
+        kept = [t for i, t in enumerate(self.PTS) if not any(i in r for r in lost)]
         return holes.shed(self.PTS, self.SYNC, kept)
 
     def test_whole(self):
-        self.assertEqual(self.grade(), holes.Shed(missing=0, mid_group=[], tail=0))
+        self.assertEqual(self.grade(), holes.Shed(missing=0, mid_group=[], tail=0, unmatched=[]))
 
     def test_whole_group(self):
-        self.assertEqual(self.grade(range(25, 50)), holes.Shed(missing=25, mid_group=[], tail=0))
+        self.assertEqual(self.grade(range(25, 50)), holes.Shed(missing=25, mid_group=[], tail=0, unmatched=[]))
 
     def test_rest_of_a_group(self):
         # The rest of a group skipped once it went stale, resuming at the next one.
-        self.assertEqual(self.grade(range(40, 50)), holes.Shed(missing=10, mid_group=[], tail=0))
+        self.assertEqual(self.grade(range(40, 50)), holes.Shed(missing=10, mid_group=[], tail=0, unmatched=[]))
 
     def test_late_join(self):
         # Groups before the first kept frame are the join, not shed.
-        self.assertEqual(self.grade(range(0, 50)), holes.Shed(missing=0, mid_group=[], tail=0))
+        self.assertEqual(self.grade(range(0, 50)), holes.Shed(missing=0, mid_group=[], tail=0, unmatched=[]))
+
+    def test_reordered(self):
+        kept = list(self.PTS)
+        kept[30], kept[31] = kept[31], kept[30]
+        self.assertTrue(holes.shed(self.PTS, self.SYNC, kept).unmatched)
+
+    def test_repeated(self):
+        kept = self.PTS[:31] + self.PTS[30:]
+        self.assertTrue(holes.shed(self.PTS, self.SYNC, kept).unmatched)
+
+    def test_not_in_the_source(self):
+        self.assertTrue(holes.shed(self.PTS, self.SYNC, self.PTS + [1000 * 3600]).unmatched)
 
     def test_resumes_mid_group(self):
         graded = self.grade(range(40, 45))

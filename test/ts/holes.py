@@ -17,7 +17,8 @@ Under `--shed` the path was narrower than the media, so losing media is expected
 but only by whole groups: of each group of the source, from a sync frame to the next, the
 capture keeps a prefix in decode order (all of it, part of it, or none) and never resumes
 mid-group. Frames are matched by presentation timestamp, since the export derives each
-picture's decode timestamp from the frames around it and a group cut short moves it. The
+picture's decode timestamp from the frames around it and a group cut short moves it, and in
+capture order: a frame reordered, repeated, or not in the source fails. The
 source's last group still has to arrive whole, so a stream that stalled, or whose latency grew
 past the exporter's delay, fails.
 
@@ -59,17 +60,21 @@ class Shed:
     missing: int  # frames lost
     mid_group: list[int]  # PTS of each frame kept after its group lost an earlier one
     tail: int  # frames of the source's last group lost
+    unmatched: list[int]  # PTS of each captured frame past the last one in the source's order
 
 
-def shed(pts: list[int], sync: list[bool], kept: set[int]) -> Shed:
-    """Grade the capture's `kept` PTS against the source's frames, in decode order with their sync flags."""
-    result = Shed(missing=0, mid_group=[], tail=0)
+def shed(pts: list[int], sync: list[bool], kept: list[int]) -> Shed:
+    """Grade the capture's `kept` PTS, in its order, against the source's frames, in decode order with their sync flags."""
+    result = Shed(missing=0, mid_group=[], tail=0, unmatched=[])
     joined = lost = False
+    i = 0
     for t, starts in zip(pts, sync):
         if starts:
             lost = False
             result.tail = 0
-        if t in kept:
+        # A generated stream's PTS are unique, so matching greedily finds the capture as a subsequence if it is one.
+        if i < len(kept) and kept[i] == t:
+            i += 1
             joined = True
             if lost:
                 result.mid_group.append(t)
@@ -77,6 +82,7 @@ def shed(pts: list[int], sync: list[bool], kept: set[int]) -> Shed:
             lost = True
             result.missing += 1
             result.tail += 1
+    result.unmatched = kept[i:]
     return result
 
 
@@ -161,8 +167,11 @@ def main() -> None:
         span = (f"from {float(got.span[0]):.3f}s to {float(got.span[1]):.3f}s "
                 f"of {float(src.span[0]):.3f}s to {float(src.span[1]):.3f}s")
         if args.shed:
-            graded = shed(src.pts, src.sync, set(got.pts))
+            graded = shed(src.pts, src.sync, got.pts)
             reasons = [f"resumes mid-group at {float(t * base):.3f}s" for t in graded.mid_group[:5]]
+            if graded.unmatched:
+                reasons.append(f"{len(graded.unmatched)} frames from {float(graded.unmatched[0] * base):.3f}s "
+                               "are out of the source's order, repeated, or not in it")
             if graded.tail:
                 reasons.append(f"lost {graded.tail} frames of the source's last group")
             late = got.span[0] - src.span[0]

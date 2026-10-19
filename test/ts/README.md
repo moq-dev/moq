@@ -588,7 +588,7 @@ The generated clips go through `holes.py --shed`, which matches the capture's
 frames to the source's by presentation timestamp, since the export derives each
 picture's decode timestamp and a group cut short moves it. Of each source group,
 the capture keeps a prefix in decode order (all, part, or none) and never resumes
-mid-group. The source's last group must arrive whole: a stall, or a latency grown
+mid-group, and a frame reordered, repeated, or not in the source fails. The source's last group must arrive whole: a stall, or a latency grown
 past the exporter's 1 s delay, costs it. The decoded-content comparison owes every
 unit, so it does not run, and `--open-gop`, which owes every leading picture, is
 refused. A passthrough grades its packets in place and reports its gaps
