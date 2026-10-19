@@ -779,6 +779,10 @@ impl Consumer {
 			if self.expired {
 				return res;
 			}
+			// Read to its end: no route is needed for it any more.
+			if matches!(res, Poll::Ready(Ok(_))) && self.read_idx >= self.size() {
+				self.recover = None;
+			}
 			let Some(recover) = self.recover.as_mut() else {
 				return res;
 			};

@@ -13,16 +13,17 @@ keywords = ["quic", "http3", "webtransport", "media", "video"]
 categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 
 [features]
-# NVIDIA and OpenH264 are on by default, mirroring moq-video: NVDEC -> NVENC is
-# the zero-copy GPU pipeline, while OpenH264 keeps a software H.264 fallback.
-# NVIDIA dlopens its driver and needs nothing on the build host. OpenH264 is
-# vendored C++, so a hardware-only build can disable default features and select
-# `nvidia`. `vaapi` stays opt-in because its bindgen needs libclang; `v4l2`
-# mirrors moq-video's opt-in too, though it costs the build nothing.
-default = ["nvidia", "openh264"]
+# NVIDIA is on by default, mirroring moq-video: NVDEC -> NVENC is the zero-copy
+# GPU pipeline, and it dlopens its driver so it needs nothing on the build host.
+# OpenH264, the software H.264 fallback, is vendored C++ and opt-in like
+# moq-video's: release builds enable it. `vaapi` stays opt-in because its
+# bindgen needs libclang; `v4l2` mirrors moq-video's opt-in too, though it costs
+# the build nothing.
+default = ["nvidia"]
 # NVENC + NVDEC (Linux, dlopen'd at runtime; a no-op elsewhere).
 nvidia = ["moq-video/nvidia"]
 # Software H.264 encode/decode through moq-video's vendored OpenH264 backend.
+# Off by default; enable it in release builds.
 openh264 = ["moq-video/openh264"]
 # Intel/AMD VAAPI hardware encoder (Linux; libva dlopen'd at runtime, but
 # moq-vaapi's bindgen needs libclang at build time).
@@ -45,6 +46,9 @@ tracing = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs", "websocket"] }
+# The tests encode with OpenH264, the one encoder a GPU-less host has, so they
+# turn it on without making it a default of the library.
+moq-video = { path = "../moq-video", features = ["openh264"] }
 # test-util unlocks tokio::time::pause for the deterministic live-feed tests.
 tokio = { workspace = true, features = ["full", "test-util"] }
 url = { workspace = true }
