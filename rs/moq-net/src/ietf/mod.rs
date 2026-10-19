@@ -72,7 +72,7 @@ pub use request::*;
 #[cfg(feature = "async")]
 pub use session::*;
 pub use subscribe::*;
-pub use subscribe_namespace::*; // includes PublishBlocked
+pub use subscribe_namespace::*;
 #[cfg(feature = "async")]
 use subscriber::*;
 pub use track::*;
