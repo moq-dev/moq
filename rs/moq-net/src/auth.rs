@@ -32,7 +32,7 @@
 //! union of subtrees rather than widen it.
 
 use std::{
-	collections::{BTreeMap, VecDeque},
+	collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
 	task::Poll,
 };
 
@@ -159,8 +159,6 @@ pub(crate) struct State {
 	/// The session's scope for the peer: the limit and every issued grant, `None` while the
 	/// limit is.
 	scope: Option<Grant>,
-	/// The peer's AUTH tokens by the ID it numbered them with, for the requests that name one.
-	peer: Peer,
 	/// Bumped whenever the union or the scope changes, so the session's per-stream
 	/// gates can skip re-matching paths on every wakeup.
 	epoch: u64,
@@ -187,6 +185,9 @@ pub(crate) struct Slot {
 	ended: Option<Error>,
 	/// The last [`Auth`] clone dropped: the driver closes the stream.
 	withdrawn: bool,
+	/// Closes once withdrawn, waking only this token's stream rather than every waiter on
+	/// the state.
+	withdrawal: kio::Consumer<()>,
 }
 
 /// Who answers the peer's tokens. Decided once, when the driver first runs.
@@ -208,14 +209,19 @@ enum Acceptor {
 /// The peer numbers its Auth Streams from 0 without a gap, but they arrive in any order, so
 /// an ID is either still in flight, live, or over: the arrival watermark and the few IDs
 /// ahead of it tell the first from the last without remembering every ended ID.
+///
+/// Kept apart from [`State`], which nothing here mutates, so a change to one token wakes
+/// only the [`Changes`] watching it: neither every request nor every other token.
 #[derive(Default)]
 struct Peer {
 	/// Every ID below this one has arrived.
 	arrived: u64,
 	/// IDs that arrived ahead of a lower one still in flight.
-	ahead: std::collections::BTreeSet<u64>,
+	ahead: BTreeSet<u64>,
 	/// The tokens not over yet.
 	live: BTreeMap<u64, Named>,
+	/// Who to tell when a token changes, by its ID, arrived or not: one entry per [`Naming`].
+	watchers: HashMap<u64, Vec<Changes>>,
 }
 
 /// One of the peer's AUTH tokens, as its requests see it.
@@ -227,6 +233,43 @@ struct Named {
 	withdrawn: bool,
 	/// How many admitted requests name it.
 	requests: usize,
+	/// The token's stream, waiting for `requests` to reach 0 once withdrawn.
+	unnamed: kio::WaiterList,
+}
+
+impl Named {
+	/// Count one admitted request in, or out, waking the stream once none is left.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	fn count(&mut self, admitted: bool) {
+		match admitted {
+			true => self.requests += 1,
+			false => {
+				self.requests -= 1;
+				if self.requests == 0 {
+					self.unnamed.wake();
+				}
+			}
+		}
+	}
+}
+
+/// The IDs of the peer's tokens that changed since a request naming them last looked.
+///
+/// Each request, or each announce stream holding many, owns one, so a token's change wakes
+/// only what names it, and tells it which token to re-evaluate.
+#[derive(Clone, Default)]
+pub(crate) struct Changes(kio::Shared<BTreeSet<u64>>);
+
+impl Changes {
+	/// The IDs changed since the last call, once there are any.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn poll(&self, waiter: &kio::Waiter) -> Poll<BTreeSet<u64>> {
+		let mut changed = ready_or!(self.0.poll(waiter, |changed| match changed.is_empty() {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
+		}));
+		Poll::Ready(std::mem::take(&mut *changed))
+	}
 }
 
 /// What a request naming one of the peer's tokens may do right now.
@@ -251,7 +294,32 @@ impl Peer {
 			self.arrived += 1;
 		}
 		self.live.insert(id, Named::default());
+		self.changed(id);
 		true
+	}
+
+	/// Tell everything naming the token `id` that it changed.
+	fn changed(&self, id: u64) {
+		for changes in self.watchers.get(&id).into_iter().flatten() {
+			changes.0.lock().insert(id);
+		}
+	}
+
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	fn watch(&mut self, id: u64, changes: &Changes) {
+		self.watchers.entry(id).or_default().push(changes.clone());
+	}
+
+	fn unwatch(&mut self, id: u64, changes: &Changes) {
+		let Some(watchers) = self.watchers.get_mut(&id) else {
+			return;
+		};
+		if let Some(index) = watchers.iter().position(|other| other.0.same_channel(&changes.0)) {
+			watchers.swap_remove(index);
+		}
+		if watchers.is_empty() {
+			self.watchers.remove(&id);
+		}
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -399,6 +467,8 @@ impl Permit {
 #[derive(Clone)]
 pub struct Handle {
 	state: kio::Shared<State>,
+	/// The peer's AUTH tokens, for the requests that name one.
+	peer: kio::Shared<Peer>,
 }
 
 impl Handle {
@@ -410,6 +480,7 @@ impl Handle {
 				supported,
 				..Default::default()
 			}),
+			peer: Default::default(),
 		}
 	}
 
@@ -423,6 +494,7 @@ impl Handle {
 				requests: true,
 				..Default::default()
 			}),
+			peer: Default::default(),
 		}
 	}
 
@@ -472,6 +544,7 @@ impl Handle {
 		state.next_id += 1;
 		// Without AUTH only a request presents it, so nothing will answer.
 		let answered = (!state.supported).then_some(Ok(()));
+		let withdrawal = kio::Producer::new(());
 		state.tokens.insert(
 			id,
 			Slot {
@@ -483,6 +556,7 @@ impl Handle {
 				answered,
 				ended: None,
 				withdrawn: false,
+				withdrawal: withdrawal.consume(),
 			},
 		);
 		if state.supported {
@@ -492,6 +566,7 @@ impl Handle {
 			presented: std::sync::Arc::new(Presented {
 				state: self.state.clone(),
 				id,
+				_withdrawal: withdrawal,
 			}),
 		})
 	}
@@ -637,11 +712,8 @@ impl Handle {
 	/// Whether the token's handle dropped, so its stream should close.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_withdrawn(&self, id: u64, waiter: &kio::Waiter) -> Poll<()> {
-		let _ = ready_or!(self.state.poll(waiter, |state| match state.tokens.get(&id) {
-			Some(slot) if !slot.withdrawn => Poll::Pending,
-			_ => Poll::Ready(()),
-		}));
-		Poll::Ready(())
+		let withdrawal = self.state.read().tokens.get(&id).map(|slot| slot.withdrawal.clone());
+		withdrawal.map_or(Poll::Ready(()), |withdrawal| withdrawal.poll_closed(waiter))
 	}
 
 	/// Record an AUTH_OK for the token.
@@ -762,7 +834,7 @@ impl Handle {
 	/// [`Error::ProtocolViolation`] for an ID the peer already used.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn peer_arrived(&self, id: u64) -> Result<()> {
-		match self.state.lock().peer.arrive(id) {
+		match self.peer.lock().arrive(id) {
 			true => Ok(()),
 			false => Err(Error::ProtocolViolation),
 		}
@@ -772,42 +844,45 @@ impl Handle {
 	/// it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn peer_granted(&self, id: u64, grant: &Grant) {
-		let mut state = self.state.lock();
-		if let Some(named) = state.peer.live.get_mut(&id)
+		let mut peer = self.peer.lock();
+		if let Some(named) = peer.live.get_mut(&id)
 			&& named.grant.as_ref() != Some(grant)
 		{
 			named.grant = Some(grant.clone());
-			state.epoch += 1;
+			peer.changed(id);
 		}
 	}
 
 	/// The peer closed its side of token `id`'s stream: no request may newly name it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn peer_withdrawn(&self, id: u64) {
-		let mut state = self.state.lock();
-		if let Some(named) = state.peer.live.get_mut(&id) {
+		let mut peer = self.peer.lock();
+		if let Some(named) = peer.live.get_mut(&id) {
 			named.withdrawn = true;
-			state.epoch += 1;
+			peer.changed(id);
 		}
 	}
 
 	/// The peer's token `id` is over, ending every request that still names it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn peer_ended(&self, id: u64) {
-		let mut state = self.state.lock();
-		if state.peer.live.remove(&id).is_some() {
-			state.epoch += 1;
+		let mut peer = self.peer.lock();
+		if let Some(mut named) = peer.live.remove(&id) {
+			named.unnamed.wake();
+			peer.changed(id);
 		}
 	}
 
 	/// Resolve once no admitted request names the peer's token `id`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_peer_unnamed(&self, id: u64, waiter: &kio::Waiter) -> Poll<()> {
-		let _ = ready_or!(self.state.poll(waiter, |state| match state.peer.live.get(&id) {
-			Some(named) if named.requests > 0 => Poll::Pending,
+		match self.peer.lock().live.get_mut(&id) {
+			Some(named) if named.requests > 0 => {
+				named.unnamed.register(waiter);
+				Poll::Pending
+			}
 			_ => Poll::Ready(()),
-		}));
-		Poll::Ready(())
+		}
 	}
 
 	/// The union once it changed since `epoch` last saw it, advancing `epoch`. It
@@ -948,6 +1023,8 @@ pub struct Auth {
 struct Presented {
 	state: kio::Shared<State>,
 	id: u64,
+	/// Dropped with the last clone, closing the slot's `withdrawal`.
+	_withdrawal: kio::Producer<()>,
 }
 
 impl Auth {
@@ -962,7 +1039,7 @@ impl Auth {
 	/// close.
 	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
-		let Presented { state, id } = &*self.presented;
+		let Presented { state, id, .. } = &*self.presented;
 		kio::wait(|waiter| {
 			let state = ready_or!(state.poll(waiter, |state| match state.tokens.get(id) {
 				Some(slot) if slot.ended.is_none() => Poll::Pending,
@@ -976,7 +1053,7 @@ impl Auth {
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		let Presented { state, id } = &*self.presented;
+		let Presented { state, id, .. } = &*self.presented;
 		let state = ready_or!(state.poll(waiter, |state| match state.tokens.get(id) {
 			Some(slot) if slot.answered.is_none() => Poll::Pending,
 			_ => Poll::Ready(()),
@@ -1798,7 +1875,7 @@ pub(crate) struct Gate {
 	part: Part,
 	/// Whether the scope allowed the path at the last permit.
 	within_limit: bool,
-	/// Re-check on the next poll even without a change: the request was just renamed.
+	/// Re-check on the next poll even without a change: the request was just named or renamed.
 	stale: bool,
 }
 
@@ -1841,7 +1918,8 @@ impl Gate {
 	/// the peer [`rename`](Self::rename) it later. `None` is the scope.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn naming(mut self, auth: Option<u64>) -> Self {
-		self.part = Part::Named(Authority::new(self.handle.clone(), auth), Verdict::Waiting);
+		let authority = Authority::new(self.handle.clone(), auth, &Changes::default());
+		self.part = Part::Named(authority, Verdict::Waiting);
 		self.stale = true;
 		self
 	}
@@ -1940,16 +2018,14 @@ impl Gate {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_denied(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			let permit = match std::mem::take(&mut self.stale) {
-				true => {
-					let state = self.handle.state.read();
-					self.epoch = state.epoch;
-					state.permit(self.direction)
-				}
-				false => match self.handle.poll_permit(self.direction, &mut self.epoch, waiter) {
-					Poll::Ready(permit) => permit,
-					Poll::Pending => break,
-				},
+			// A rename, or a change to the token the request names, re-checks it under the
+			// same permit. Not short-circuited, so the token's change always registers.
+			let named = std::mem::take(&mut self.stale)
+				| matches!(&self.part, Part::Named(authority, _) if authority.poll_changed(waiter).is_ready());
+			let permit = match self.handle.poll_permit(self.direction, &mut self.epoch, waiter) {
+				Poll::Ready(permit) => permit,
+				Poll::Pending if named => self.handle.state.read().permit(self.direction),
+				Poll::Pending => break,
 			};
 			let path = self.path.as_str();
 			self.within_limit = permit.within_limit(path);
@@ -1986,11 +2062,13 @@ pub(crate) enum Verdict {
 /// carried.
 ///
 /// Once admitted it counts toward that token, so a token the peer withdraws stays up until
-/// no request names it. Dropping it, or a denial, gives the count back.
+/// no request names it. Dropping it, or a denial, gives the count back. While it lives, a
+/// change to that token lands in its [`Changes`].
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Naming {
 	handle: Handle,
 	id: u64,
+	changes: Changes,
 	counted: bool,
 }
 
@@ -2007,19 +2085,27 @@ pub(crate) enum Limit {
 
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 impl Naming {
-	pub(crate) fn new(handle: Handle, id: u64) -> Self {
+	/// Name the peer's token `id`, telling `changes` whenever it changes.
+	pub(crate) fn new(handle: Handle, id: u64, changes: &Changes) -> Self {
+		handle.peer.lock().watch(id, changes);
 		Self {
 			handle,
 			id,
+			changes: changes.clone(),
 			counted: false,
 		}
+	}
+
+	/// Resolve once the token changed since the last call.
+	pub(crate) fn poll_changed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.changes.poll(waiter).map(drop)
 	}
 
 	/// The patterns the token allows in `direction`, counting the request toward it while it
 	/// is live. A withdrawn token admits only a request already counted.
 	pub(crate) fn limit(&mut self, direction: Direction) -> Limit {
-		let mut state = self.handle.state.lock();
-		let limit = match state.peer.status(self.id) {
+		let mut peer = self.handle.peer.lock();
+		let limit = match peer.status(self.id) {
 			Status::Waiting => Limit::Waiting,
 			Status::Ended => Limit::Ended,
 			Status::Granted(_, true) if !self.counted => Limit::Ended,
@@ -2031,14 +2117,11 @@ impl Naming {
 		};
 		let count = matches!(limit, Limit::Patterns(_));
 		if count != self.counted
-			&& let Some(named) = state.peer.live.get_mut(&self.id)
+			&& let Some(named) = peer.live.get_mut(&self.id)
 		{
-			match count {
-				true => named.requests += 1,
-				false => named.requests -= 1,
-			}
+			named.count(count);
 		}
-		self.counted = count && state.peer.live.contains_key(&self.id);
+		self.counted = count && peer.live.contains_key(&self.id);
 		limit
 	}
 
@@ -2058,9 +2141,9 @@ impl Naming {
 	/// Stop counting toward the token, which a withdrawn one may then end on.
 	fn release(&mut self) {
 		if std::mem::take(&mut self.counted)
-			&& let Some(named) = self.handle.state.lock().peer.live.get_mut(&self.id)
+			&& let Some(named) = self.handle.peer.lock().live.get_mut(&self.id)
 		{
-			named.requests -= 1;
+			named.count(false);
 		}
 	}
 }
@@ -2068,6 +2151,7 @@ impl Naming {
 impl Drop for Naming {
 	fn drop(&mut self) {
 		self.release();
+		self.handle.peer.lock().unwatch(self.id, &self.changes);
 	}
 }
 
@@ -2077,6 +2161,8 @@ impl Drop for Naming {
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Authority {
 	handle: Handle,
+	/// Told when either token it names changes.
+	changes: Changes,
 	/// The token deciding it now, or `None` for the scope.
 	current: Option<Naming>,
 	/// A rename waiting for its token to decide.
@@ -2085,10 +2171,13 @@ pub(crate) struct Authority {
 
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 impl Authority {
-	pub(crate) fn new(handle: Handle, auth: Option<u64>) -> Self {
+	/// Decide by the token `auth`, or the scope with `None`, telling `changes` when a token
+	/// it names changes.
+	pub(crate) fn new(handle: Handle, auth: Option<u64>, changes: &Changes) -> Self {
 		Self {
-			current: auth.map(|id| Naming::new(handle.clone(), id)),
+			current: auth.map(|id| Naming::new(handle.clone(), id, changes)),
 			handle,
+			changes: changes.clone(),
 			next: None,
 		}
 	}
@@ -2097,8 +2186,24 @@ impl Authority {
 	pub(crate) fn rename(&mut self, auth: Option<u64>) {
 		self.next = match auth == self.current.as_ref().map(|naming| naming.id) {
 			true => None,
-			false => Some(auth.map(|id| Naming::new(self.handle.clone(), id))),
+			false => Some(auth.map(|id| Naming::new(self.handle.clone(), id, &self.changes))),
 		};
+	}
+
+	/// Whether it names the peer's token `id`, deciding or renamed to.
+	pub(crate) fn names(&self, id: u64) -> bool {
+		self.ids().any(|named| named == id)
+	}
+
+	/// The peer's tokens it names: the one deciding, and the one it is renamed to.
+	pub(crate) fn ids(&self) -> impl Iterator<Item = u64> + '_ {
+		let next = self.next.as_ref().and_then(Option::as_ref);
+		self.current.iter().chain(next).map(|naming| naming.id)
+	}
+
+	/// Resolve once a token it names changed since the last call.
+	pub(crate) fn poll_changed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.changes.poll(waiter).map(drop)
 	}
 
 	/// Whether the request may go on at `path`, given whether the session's scope allows it:
@@ -3018,7 +3123,8 @@ mod request_token_tests {
 	#[test]
 	fn a_named_token_is_in_flight_live_or_over() {
 		let handle = Handle::new(true);
-		let verdict = |id, path| Naming::new(handle.clone(), id).verdict(Direction::Publish, path);
+		let changes = Changes::default();
+		let verdict = |id, path| Naming::new(handle.clone(), id, &changes).verdict(Direction::Publish, path);
 
 		assert_eq!(verdict(1, "room"), Verdict::Waiting, "not arrived");
 		handle.peer_arrived(1).unwrap();
@@ -3047,13 +3153,14 @@ mod request_token_tests {
 		let handle = Handle::new(true);
 		handle.peer_arrived(0).unwrap();
 		handle.peer_granted(0, &room());
-		let mut named = Naming::new(handle.clone(), 0);
+		let changes = Changes::default();
+		let mut named = Naming::new(handle.clone(), 0, &changes);
 		assert_eq!(named.verdict(Direction::Publish, "room"), Verdict::Admitted);
 
 		handle.peer_withdrawn(0);
 		assert_eq!(named.verdict(Direction::Publish, "room"), Verdict::Admitted);
 		assert_eq!(
-			Naming::new(handle.clone(), 0).verdict(Direction::Publish, "room"),
+			Naming::new(handle.clone(), 0, &changes).verdict(Direction::Publish, "room"),
 			Verdict::Denied,
 			"no request newly names a withdrawn token"
 		);
@@ -3070,7 +3177,7 @@ mod request_token_tests {
 		let handle = Handle::new(true);
 		handle.peer_arrived(0).unwrap();
 		handle.peer_granted(0, &room());
-		let mut authority = Authority::new(handle.clone(), Some(0));
+		let mut authority = Authority::new(handle.clone(), Some(0), &Changes::default());
 		assert_eq!(authority.verdict(Direction::Publish, "room", false), Verdict::Admitted);
 
 		authority.rename(Some(1));
@@ -3091,6 +3198,32 @@ mod request_token_tests {
 			authority.verdict(Direction::Publish, "room", false),
 			Verdict::Denied,
 			"the scope does not cover it"
+		);
+	}
+
+	/// A change to one of the peer's tokens tells only what names it, by ID, so a request
+	/// naming another token never wakes.
+	#[test]
+	fn a_token_change_tells_only_what_names_it() {
+		let handle = Handle::new(true);
+		let waiter = kio::Waiter::noop();
+		let (zero, one) = (Changes::default(), Changes::default());
+		let named = [
+			Naming::new(handle.clone(), 0, &zero),
+			Naming::new(handle.clone(), 1, &one),
+		];
+
+		handle.peer_arrived(0).unwrap();
+		handle.peer_granted(0, &room());
+		assert_eq!(zero.poll(&waiter), Poll::Ready(BTreeSet::from([0])));
+		assert!(one.poll(&waiter).is_pending(), "token 1 did not change");
+
+		drop(named);
+		handle.peer_ended(0);
+		assert!(zero.poll(&waiter).is_pending(), "nothing names token 0 any more");
+		assert!(
+			handle.peer.read().watchers.is_empty(),
+			"a dropped naming stops watching"
 		);
 	}
 

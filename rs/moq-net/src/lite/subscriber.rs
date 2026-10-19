@@ -1,6 +1,6 @@
 use crate::{frame, group, origin, track};
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap},
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
 	sync::{Arc, atomic},
 	task::{Poll, ready},
 	time::Duration,
@@ -1506,6 +1506,10 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						.is_ready()
 					{
 						run.announced.regrant(&self.subscriber);
+					}
+					// A change to one of the peer's tokens re-decides only what names it.
+					while let Poll::Ready(ids) = run.announced.changes.poll(waiter) {
+						run.announced.renamed(&self.subscriber, ids);
 					}
 					loop {
 						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
@@ -4700,6 +4704,11 @@ struct Announced {
 	/// The peer's token each advertisement names (lite-07+), which decides it in place of
 	/// the session's scope. Absent for one under the scope.
 	names: HashMap<PathOwned, crate::auth::Authority>,
+	/// The advertisements that named each of the peer's tokens, so a change to one token
+	/// re-decides only those. Pruned as it is read: an entry may have moved off.
+	by_token: HashMap<u64, HashSet<PathOwned>>,
+	/// The peer's tokens that `names` name and that changed.
+	changes: crate::auth::Changes,
 	/// The session's announce cap, and one slot taken from it per entry in `routes`.
 	slots: crate::session::Slots,
 	held: Vec<crate::session::Slot>,
@@ -4735,6 +4744,8 @@ impl Announced {
 		Self {
 			routes: HashMap::new(),
 			names: HashMap::new(),
+			by_token: HashMap::new(),
+			changes: Default::default(),
 			slots,
 			held: Vec::new(),
 			epochs: HashMap::new(),
@@ -4762,13 +4773,19 @@ impl Announced {
 	/// scope with `None`. A renamed one stays decided by the old token until the new one
 	/// decides.
 	fn name(&mut self, handle: &crate::auth::Handle, path: &PathOwned, auth: Option<u64>) {
-		match self.names.get_mut(path) {
-			Some(authority) => authority.rename(auth),
-			None if auth.is_some() => {
-				self.names
-					.insert(path.clone(), crate::auth::Authority::new(handle.clone(), auth));
+		let authority = match self.names.get_mut(path) {
+			Some(authority) => {
+				authority.rename(auth);
+				authority
 			}
-			None => {}
+			None if auth.is_some() => self
+				.names
+				.entry(path.clone())
+				.or_insert_with(|| crate::auth::Authority::new(handle.clone(), auth, &self.changes)),
+			None => return,
+		};
+		for id in authority.ids() {
+			self.by_token.entry(id).or_default().insert(path.clone());
 		}
 	}
 
@@ -4874,7 +4891,16 @@ impl Announced {
 	/// session from the same peer. Dropping its sources closes their requests.
 	fn withdraw(&mut self, path: &PathOwned) {
 		self.epochs.remove(path);
-		self.names.remove(path);
+		if let Some(authority) = self.names.remove(path) {
+			for id in authority.ids() {
+				if let Some(named) = self.by_token.get_mut(&id) {
+					named.remove(path);
+					if named.is_empty() {
+						self.by_token.remove(&id);
+					}
+				}
+			}
+		}
 		let Some(held) = self.routes.remove(path) else {
 			return;
 		};
@@ -4930,34 +4956,41 @@ impl Announced {
 		}
 	}
 
-	/// Apply a change to the limit or the peer's tokens: hold back every attached route its
-	/// grant no longer covers, closing its sources (tracks in flight end on their own gates,
-	/// with `Unauthorized`), and attach every withheld one it now does.
+	/// Apply a change to the limit: re-decide every advertisement.
 	fn regrant<S: crate::transport::poll::Session>(&mut self, subscriber: &Subscriber<S>) {
-		let direction = crate::auth::Direction::Subscribe;
-		let names = &mut self.names;
-		let changed: Vec<PathOwned> = self
-			.routes
-			.iter()
-			.filter(|(path, held)| {
-				let attached = match held {
-					Held::Attached(_) => true,
-					Held::Withheld(_) => false,
-					Held::Declined => return false,
-				};
-				let scoped = subscriber.auth.within_limit(direction, path.as_str());
-				let admitted = match names.get_mut(*path) {
-					Some(authority) => matches!(
-						authority.verdict(direction, path.as_str(), scoped),
-						crate::auth::Verdict::Admitted
-					),
-					None => scoped,
-				};
-				attached != admitted
-			})
-			.map(|(path, _)| path.clone())
-			.collect();
-		for path in changed {
+		let paths: Vec<PathOwned> = self.routes.keys().cloned().collect();
+		self.redecide(subscriber, paths);
+	}
+
+	/// Apply a change to the peer's tokens `ids`: re-decide only the advertisements naming one.
+	fn renamed<S: crate::transport::poll::Session>(&mut self, subscriber: &Subscriber<S>, ids: BTreeSet<u64>) {
+		let mut paths = Vec::new();
+		for id in ids {
+			let Some(named) = self.by_token.get_mut(&id) else {
+				continue;
+			};
+			named.retain(|path| self.names.get(path).is_some_and(|authority| authority.names(id)));
+			paths.extend(named.iter().cloned());
+			if named.is_empty() {
+				self.by_token.remove(&id);
+			}
+		}
+		self.redecide(subscriber, paths);
+	}
+
+	/// Hold back each attached route in `paths` its grant no longer covers, closing its
+	/// sources (tracks in flight end on their own gates, with `Unauthorized`), and attach each
+	/// withheld one it now does.
+	fn redecide<S: crate::transport::poll::Session>(&mut self, subscriber: &Subscriber<S>, paths: Vec<PathOwned>) {
+		for path in paths {
+			let attached = match self.routes.get(&path) {
+				Some(Held::Attached(_)) => true,
+				Some(Held::Withheld(_)) => false,
+				Some(Held::Declined) | None => continue,
+			};
+			if attached == self.admits(subscriber, &path) {
+				continue;
+			}
 			match self.routes.remove(&path) {
 				Some(Held::Attached(entry)) => {
 					tracing::info!(route = %subscriber.log_path(&path), "announce no longer authorized");

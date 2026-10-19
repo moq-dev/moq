@@ -1014,7 +1014,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 			run.prefix.clone(),
 			crate::auth::Direction::Publish,
 		));
-		run.named = auth.map(|id| crate::auth::Naming::new(self.shared.auth.clone(), id));
+		run.named = auth.map(|id| crate::auth::Naming::new(self.shared.auth.clone(), id, &Default::default()));
 		run.presenter = Some(self.shared.auth.clone());
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
@@ -1093,6 +1093,14 @@ impl AnnounceRun {
 			epoch: 0,
 			session: Default::default(),
 			permit: Default::default(),
+		}
+	}
+
+	/// Resolve once the token the request names changed.
+	fn poll_named(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match &self.named {
+			Some(named) => named.poll_changed(waiter),
+			None => Poll::Pending,
 		}
 	}
 
@@ -1422,10 +1430,14 @@ impl AnnounceRun {
 				}
 			}
 			// A request naming a token still in flight waits for it before announcing anything.
-			let Some(permit) = self.narrow(self.session.clone())? else {
-				return Poll::Pending;
+			self.permit = loop {
+				let changed = self.poll_named(waiter);
+				match self.narrow(self.session.clone())? {
+					Some(permit) => break permit,
+					None if changed.is_ready() => continue,
+					None => return Poll::Pending,
+				}
 			};
-			self.permit = permit;
 			self.init(stream, origin, announced)?;
 			self.phase = AnnouncePhase::Running;
 		}
@@ -1443,12 +1455,17 @@ impl AnnounceRun {
 				return stream.writer.poll_closed(&mut cx);
 			}
 
-			// A grant change applies before the next update, so a route it no longer
-			// covers is withdrawn rather than re-sent.
-			if let Some(auth) = &self.auth
-				&& let Poll::Ready(permit) = auth.poll_permit(&mut self.epoch, waiter)
-			{
-				self.session = permit;
+			// A grant change, or one to the token the request names, applies before the next
+			// update, so a route it no longer covers is withdrawn rather than re-sent. Both
+			// are polled, so each registers.
+			let session = match &self.auth {
+				Some(auth) => auth.poll_permit(&mut self.epoch, waiter),
+				None => Poll::Pending,
+			};
+			if self.poll_named(waiter).is_ready() || session.is_ready() {
+				if let Poll::Ready(permit) = session {
+					self.session = permit;
+				}
 				// Once answered a token never goes back to waiting; were it to, announce nothing.
 				let permit = match self.narrow(self.session.clone())? {
 					Some(permit) => permit,
