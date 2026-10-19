@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `MoqQuicConfig::keylog` to `true` as well to capture them; without `SSLKEYLOGFILE` `MoqClient::new` and `MoqServer::new` fail.
+
 ### OpenH264 is a build feature (#5771)
 
 The published libraries still carry the software H.264 fallback.

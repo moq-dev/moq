@@ -200,8 +200,8 @@ impl Config {
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
 	/// section (the per-connection knobs are symmetric). It honors the knobs its
 	/// transport-config builder exposes (stream limits, idle timeout, keep-alive,
-	/// MTU discovery, congestion control, flow-control windows). It cannot disable
-	/// GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
+	/// MTU discovery, congestion control, flow-control windows), and key logging. It
+	/// cannot disable GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
 	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
@@ -250,6 +250,7 @@ impl Config {
 			Endpoint::builder(iroh::endpoint::presets::N0)
 		}
 		.secret_key(secret_key)
+		.keylog(quic.keylog)
 		.transport_config(transport.build());
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr(addr)?;

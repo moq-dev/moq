@@ -66,7 +66,11 @@ receive_window = 67108864            # Whole-connection window, in bytes. Defaul
 stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
 send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
+keylog = false                       # Write TLS secrets to the file SSLKEYLOGFILE names. Default.
 ```
+
+`SSLKEYLOGFILE` alone writes nothing: set `keylog = true` too, and only while
+debugging, since the file decrypts every captured session.
 
 `idle_timeout` is how long a peer that vanished without a close keeps its
 sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).

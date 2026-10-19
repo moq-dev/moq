@@ -143,6 +143,8 @@ pub struct ResolvedSettings {
 	pub quic_idle_timeout: Option<std::time::Duration>,
 	/// QUIC keep-alive override, including zero to disable it.
 	pub quic_keep_alive: Option<std::time::Duration>,
+	/// Write TLS session secrets to the file `SSLKEYLOGFILE` names.
+	pub quic_keylog: bool,
 }
 
 /// Builds the connect configuration with the sink's TLS and backoff overrides.
@@ -164,6 +166,7 @@ pub(super) fn quic_config(settings: &ResolvedSettings) -> moq_tokio::quic::Confi
 	if let Some(keep_alive) = settings.quic_keep_alive {
 		config.keep_alive = Some(keep_alive);
 	}
+	config.keylog = Some(settings.quic_keylog);
 	config
 }
 
@@ -555,6 +558,7 @@ mod tests {
 			tls_disable_verify: false,
 			quic_idle_timeout: None,
 			quic_keep_alive: None,
+			quic_keylog: false,
 		};
 		let (session, registration, broadcast, _) = Session::start(settings, glib::WeakRef::new()).unwrap();
 		registration.mark_registered();
