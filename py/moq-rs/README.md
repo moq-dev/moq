@@ -184,8 +184,8 @@ client = moq.Client(
   A `Named(name)` target chooses a name; `Named()` derives a unique name from the format.
   `Requested(request)` takes over a pending subscriber request, whose name is already fixed.
 - `media.TrackStreamProducer.video(...)` infers video frame boundaries from a byte stream.
-- `media.ContainerProducer(broadcast, ContainerInit(...))` demuxes complete container chunks;
-  `media.ContainerStreamProducer(broadcast, ContainerStreamInit(...))` recovers framing from a byte stream.
+- `media.ContainerProducer(broadcast, ContainerInit(...))` demuxes a container from chunks split anywhere,
+  so it also takes a raw byte stream.
   Share `media.Timebase(broadcast)` in the init records for containers on one source timeline;
   omitting it gives each container an independent offset. Timebases belong to one broadcast
   and do not keep it open.

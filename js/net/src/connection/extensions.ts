@@ -2,7 +2,7 @@ import * as Ietf from "../ietf/index.ts";
 
 /**
  * The moq-transport extensions a session offers in its SETUP, each on unless set to `false`.
- * Turning one off connects as a peer that does not speak it. moq-lite carries both in its
+ * Turning one off connects as a peer that does not speak it. moq-lite carries them in its
  * core, so this only changes moq-transport sessions.
  */
 export interface Extensions {
@@ -10,6 +10,8 @@ export interface Extensions {
 	auth?: boolean;
 	/** The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than announcing unasked. */
 	solicit?: boolean;
+	/** The MoQ Epoch extension: announcements and requests carry the publisher's epoch, as moq-lite does (draft-17+). */
+	epoch?: boolean;
 }
 
 /** Every extension resolved to whether it is offered. */
@@ -17,11 +19,16 @@ export type Offered = Required<Extensions>;
 
 /** Resolve each unset extension to offered. */
 export function offered(extensions?: Extensions): Offered {
-	return { auth: extensions?.auth ?? true, solicit: extensions?.solicit ?? true };
+	return {
+		auth: extensions?.auth ?? true,
+		solicit: extensions?.solicit ?? true,
+		epoch: extensions?.epoch ?? true,
+	};
 }
 
 /** Write the options for the offered extensions into a SETUP. */
 export function intoSetup(params: Ietf.SetupOptions, extensions: Offered, version: Ietf.IetfVersion) {
 	if (extensions.solicit) Ietf.solicitIntoSetup(params);
 	if (extensions.auth) Ietf.Auth.intoSetup(params, version);
+	if (extensions.epoch) Ietf.Epoch.intoSetup(params, version);
 }

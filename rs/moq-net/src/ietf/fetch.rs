@@ -11,6 +11,7 @@ use crate::{
 };
 
 use super::Message;
+use super::epoch;
 
 use super::Version;
 
@@ -136,6 +137,9 @@ pub struct Fetch<'a> {
 	/// Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES,
 	/// draft-20+). Always `true` before draft-20, which has no way to opt out.
 	pub properties_wanted: bool,
+	/// The publisher instance the requester expects (MoQ Epoch, draft-17+). Only on a
+	/// request that names its track: a joining FETCH takes its subscription's.
+	pub epoch: Option<crate::Epoch>,
 }
 
 impl Message for Fetch<'_> {
@@ -160,9 +164,11 @@ impl Message for Fetch<'_> {
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
 				self.fetch_type.encode(w, version)?;
+				let epoch = self.epoch.clone().filter(|_| epoch::supported(version));
 				encode_params!(w, version,
 					0x20 => self.subscriber_priority,
 					0x22 => group_order,
+					epoch::EPOCH_PARAM => epoch,
 				);
 			}
 			_ => {
@@ -184,6 +190,7 @@ impl Message for Fetch<'_> {
 					0x21 => *filter,
 					0x22 => group_order,
 					0x35 => include_properties,
+					epoch::EPOCH_PARAM => self.epoch.clone(),
 				);
 			}
 		}
@@ -197,7 +204,7 @@ impl Message for Fetch<'_> {
 		}
 
 		// The token decodes but grants nothing: the session's grant is what authorizes the request.
-		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout, properties_wanted) =
+		let (fetch_type, subscriber_priority, group_order, range_filters, fill_timeout, properties_wanted, epoch) =
 			match version {
 				Version::Draft14 => {
 					let subscriber_priority = buf.u8()?;
@@ -211,6 +218,7 @@ impl Message for Fetch<'_> {
 						false,
 						false,
 						true,
+						None,
 					)
 				}
 				Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
@@ -224,6 +232,7 @@ impl Message for Fetch<'_> {
 						0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
 						0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
 						0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
+						epoch::EPOCH_PARAM => epoch: Option<crate::Epoch> where epoch::supported(version),
 					);
 					super::token::single(authorization_token)?;
 					let range_filters = [
@@ -242,6 +251,7 @@ impl Message for Fetch<'_> {
 						range_filters,
 						fill_timeout.is_some(),
 						true,
+						epoch,
 					)
 				}
 				// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
@@ -259,6 +269,7 @@ impl Message for Fetch<'_> {
 						0x27 => priority_filter: Vec<Opaque>,
 						0x28 => object_property_filter: Vec<Opaque>,
 						0x35 => include_properties: Option<bool>,
+						epoch::EPOCH_PARAM => epoch: Option<crate::Epoch>,
 					);
 					super::token::single(authorization_token)?;
 					let range_filters = [
@@ -284,9 +295,19 @@ impl Message for Fetch<'_> {
 						fill_timeout.is_some(),
 						// Defaults to 1, so an absent parameter means the requester wants them.
 						include_properties.unwrap_or(true),
+						epoch,
 					)
 				}
 			};
+
+		// A joining FETCH is served by its subscription's instance; naming one is malformed.
+		if epoch.is_some()
+			&& matches!(
+				fetch_type,
+				FetchType::RelativeJoining { .. } | FetchType::AbsoluteJoining { .. }
+			) {
+			return Err(DecodeError::InvalidValue);
+		}
 
 		Ok(Self {
 			request_id,
@@ -297,6 +318,7 @@ impl Message for Fetch<'_> {
 			range_filters,
 			fill_timeout,
 			properties_wanted,
+			epoch,
 		})
 	}
 }
@@ -699,6 +721,7 @@ mod tests {
 			range_filters: false,
 			fill_timeout: false,
 			properties_wanted: true,
+			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -723,6 +746,7 @@ mod tests {
 			range_filters: false,
 			fill_timeout: false,
 			properties_wanted: true,
+			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -765,6 +789,7 @@ mod tests {
 			range_filters: false,
 			fill_timeout: false,
 			properties_wanted: true,
+			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft16);
@@ -789,6 +814,7 @@ mod tests {
 			range_filters: false,
 			fill_timeout: false,
 			properties_wanted: true,
+			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -867,6 +893,7 @@ mod tests {
 			range_filters: false,
 			fill_timeout: false,
 			properties_wanted: true,
+			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -991,6 +1018,7 @@ mod tests {
 			range_filters: false,
 			fill_timeout: false,
 			properties_wanted: true,
+			epoch: None,
 		};
 
 		#[rustfmt::skip]

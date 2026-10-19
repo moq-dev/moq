@@ -83,14 +83,6 @@ type ContainerInit struct {
 	Timebase *Timebase
 }
 
-// ContainerStreamInit describes a byte-stream container and an optional shared timebase.
-type ContainerStreamInit struct {
-	// Format selects the container parser.
-	Format ContainerFormat
-	// Timebase shares a source offset, or nil for an independent offset.
-	Timebase *Timebase
-}
-
 // MediaFrame is a container-decoded payload, presentation timestamp, and keyframe flag.
 type MediaFrame struct {
 	Payload   []byte
@@ -205,7 +197,7 @@ func NewVideoTrackStreamProducer(broadcast *moq.BroadcastProducer, target Target
 	return &TrackStreamProducer{inner: inner}, nil
 }
 
-// NewContainerProducer imports complete container chunks.
+// NewContainerProducer imports a container from chunks split anywhere, such as a byte stream.
 func NewContainerProducer(broadcast *moq.BroadcastProducer, init ContainerInit) (*ContainerProducer, error) {
 	var timebase **ffi.MoqMediaTimebase
 	if init.Timebase != nil {
@@ -216,19 +208,6 @@ func NewContainerProducer(broadcast *moq.BroadcastProducer, init ContainerInit) 
 		return nil, err
 	}
 	return &ContainerProducer{inner: inner}, nil
-}
-
-// NewContainerStreamProducer imports a container byte stream.
-func NewContainerStreamProducer(broadcast *moq.BroadcastProducer, init ContainerStreamInit) (*ContainerStreamProducer, error) {
-	var timebase **ffi.MoqMediaTimebase
-	if init.Timebase != nil {
-		timebase = &init.Timebase.inner
-	}
-	inner, err := ffi.NewMoqMediaContainerStreamProducer(bridge.BroadcastProducer(broadcast), ffi.MoqContainerStreamInit{Format: init.Format, Timebase: timebase})
-	if err != nil {
-		return nil, err
-	}
-	return &ContainerStreamProducer{inner: inner}, nil
 }
 
 // NewCatalogConsumer subscribes to broadcast's catalog snapshots.
@@ -428,7 +407,7 @@ type ContainerProducer struct {
 	inner *ffi.MoqMediaContainerProducer
 }
 
-// Write pushes a whole chunk of container bytes.
+// Write pushes container bytes; the container recovers its own framing.
 func (c *ContainerProducer) Write(payload []byte) error {
 	return c.inner.Write(payload)
 }
@@ -447,22 +426,6 @@ func (c *ContainerProducer) Seek(sequence uint64) error {
 
 // Finish finishes every track this container publishes.
 func (c *ContainerProducer) Finish() error {
-	return c.inner.Finish()
-}
-
-// ContainerStreamProducer publishes a container fed by a raw byte stream, which
-// recovers its own framing.
-type ContainerStreamProducer struct {
-	inner *ffi.MoqMediaContainerStreamProducer
-}
-
-// Write pushes raw container bytes; chunk boundaries don't matter.
-func (c *ContainerStreamProducer) Write(payload []byte) error {
-	return c.inner.Write(payload)
-}
-
-// Finish finishes every track this container publishes.
-func (c *ContainerStreamProducer) Finish() error {
 	return c.inner.Finish()
 }
 

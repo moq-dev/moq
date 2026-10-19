@@ -26,6 +26,10 @@ pub(crate) struct Peer {
 	/// MoQ Active Count: whether the REQUEST_OK answering SUBSCRIBE_NAMESPACE counts the
 	/// NAMESPACE messages before the subscription is synced, in both directions.
 	pub active_count: bool,
+
+	/// MoQ Epoch: whether both sides offered it, so advertisements and requests carry the
+	/// publisher's epoch in both directions.
+	pub epoch: bool,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -35,9 +39,21 @@ pub(crate) struct Peer {
 /// Solicit), so nothing can go out until it arrives. Cheap to clone; every handle
 /// shares the same slot.
 #[derive(Clone, Default)]
-pub(crate) struct PeerSetup(kio::Shared<Option<Peer>>);
+pub(crate) struct PeerSetup {
+	slot: kio::Shared<Option<Peer>>,
+	/// What we offered, which an extension negotiated by both sides needs as well.
+	declined_epoch: bool,
+}
 
 impl PeerSetup {
+	/// A slot for a session that offered `offered`.
+	pub fn new(offered: crate::setup::Extensions) -> Self {
+		Self {
+			slot: Default::default(),
+			declined_epoch: !offered.epoch,
+		}
+	}
+
 	/// Record what the peer declared. A SETUP carrying no options records the default
 	/// (no extension negotiated, no requirements), which is what unblocks a waiter.
 	///
@@ -45,8 +61,9 @@ impl PeerSetup {
 	/// lifetime while subscription serving re-reads it, so letting a later SETUP
 	/// overwrite the identity would advertise under one exclusion and serve under
 	/// another, which is how a routing loop gets back in.
-	pub fn set(&self, peer: Peer) {
-		let mut slot = self.0.lock();
+	pub fn set(&self, mut peer: Peer) {
+		peer.epoch &= !self.declined_epoch;
+		let mut slot = self.slot.lock();
 		if slot.is_none() {
 			*slot = Some(peer);
 		}
@@ -60,7 +77,7 @@ impl PeerSetup {
 	#[cfg(feature = "async")]
 	pub async fn get(&self) -> Peer {
 		let slot = self
-			.0
+			.slot
 			.wait(|peer| match peer.is_some() {
 				true => std::task::Poll::Ready(()),
 				false => std::task::Poll::Pending,
@@ -88,6 +105,7 @@ mod tests {
 			hidden: false,
 			auth: false,
 			active_count: false,
+			epoch: false,
 		};
 
 		let slot = PeerSetup::default();
@@ -101,8 +119,29 @@ mod tests {
 			hidden: true,
 			auth: true,
 			active_count: true,
+			epoch: true,
 		});
 
 		assert_eq!(slot.get().await, first);
+	}
+
+	/// MoQ Epoch needs both sides: a peer declaring it to a side that declined leaves it off.
+	#[moq_clock::test]
+	async fn epoch_needs_our_offer_too() {
+		let declared = Peer {
+			epoch: true,
+			..Default::default()
+		};
+
+		let offered = PeerSetup::new(crate::setup::Extensions::default());
+		offered.set(declared);
+		assert!(offered.get().await.epoch);
+
+		let declined = PeerSetup::new(crate::setup::Extensions {
+			epoch: false,
+			..Default::default()
+		});
+		declined.set(declared);
+		assert!(!declined.get().await.epoch);
 	}
 }

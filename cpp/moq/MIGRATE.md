@@ -9,6 +9,15 @@ How to update your code for each breaking change, newest first.
 `moq::CongestionControl::kNone` runs no congestion control and no pacing, for tests and controlled links.
 A `switch` without a `default` needs one more case.
 
+### Container byte streams use `MediaContainerProducer` (#5919)
+
+`moq::MediaContainerStreamProducer` and `moq::ContainerStreamInit` are gone: a container recovers its own framing, so `moq::MediaContainerProducer` takes chunks split anywhere.
+Pass empty `data` and write the stream through it.
+
+```cpp
+auto stream = ok(moq::MediaContainerProducer::init(broadcast, {moq::ContainerFormat::kFmp4, {}}));
+```
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription::group_start` and `group_end` are replaced by `ranges`, a list of `Range` whose ends are an `Anchor` (an absolute group and frame, or a count of groups before the latest), and an optional `order`.

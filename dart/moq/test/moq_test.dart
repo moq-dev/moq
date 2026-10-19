@@ -34,16 +34,6 @@ void main() {
       ),
       throwsA(isA<CodecMoqException>()),
     );
-    expect(
-      () => moq_media.ContainerStreamProducer(
-        broadcast: other,
-        init: moq_media.ContainerStreamInit(
-          format: moq_media.ContainerFormat.fmp4,
-          timebase: timebase,
-        ),
-      ),
-      throwsA(isA<CodecMoqException>()),
-    );
     owner.close();
     expect(
       () => moq_media.Timebase(broadcast: owner),

@@ -3,9 +3,11 @@
 //! Nothing is encoded until someone asks, via the two demand paths moq-net
 //! exposes on the output track:
 //!
-//! - A live subscription (`used`) starts a live loop that subscribes to the
-//!   source track (mirroring the aggregate subscription) and transcodes group
-//!   for group until the track goes `unused` again.
+//! - Any demand (`used`), including a fetch, starts a live loop that subscribes
+//!   to the source track (mirroring the aggregate subscription) and transcodes
+//!   group for group until the track goes `unused` again. The group open at
+//!   that point is finished first, so a later reader of that sequence gets the
+//!   whole group rather than an aborted one.
 //! - A fetch of a specific group (`requested_group`) fetches that same group
 //!   from the source and transcodes just that group with a fresh encoder. A
 //!   fetch that starts mid-group is refused: a fresh encode's frames are only
@@ -208,20 +210,40 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 
 		// One listener + encoder per demand session: rate control persists
 		// across groups, while every group still opens with a forced IDR.
-		// Dropping them on unused releases the shared decode (if last) and the
-		// encoder session until someone subscribes again.
+		// Dropping them once demand is gone releases the shared decode (if last)
+		// and the encoder session until someone asks again.
 		let mut listener = rung.feed.listen();
 		let mut encoder = Encoder::default();
 
 		// The output group currently being written, if the feed is mid-group.
 		let mut current: Option<moq_net::group::Producer> = None;
+		// Set while demand is gone but a group is still open. A group name always
+		// means the same content, so the group is finished for whoever reads that
+		// sequence later instead of aborted, and the session ends at its boundary.
+		let mut leaving = false;
 
 		'session: loop {
 			let item = tokio::select! {
 				item = listener.recv() => item,
-				_ = demand.unused() => {
+				unused = demand.unused(), if !leaving => {
+					if unused.is_ok() && current.is_some() {
+						leaving = true;
+						continue;
+					}
+					// Between groups, or the track closed: nothing to finish.
 					if let Some(output) = current.take() {
-						// Signal downstream that the group is incomplete.
+						output.abort(moq_net::Error::Cancel)?;
+					}
+					break 'session;
+				}
+				used = demand.used(), if leaving => {
+					if used.is_ok() {
+						// Back before the group ended: carry on as if never gone.
+						leaving = false;
+						continue;
+					}
+					// The track closed under the group.
+					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
 					}
 					break 'session;
@@ -237,9 +259,15 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				}
 			};
 
+			// Demand can change without the `unused` or `used` branch seeing it,
+			// when the select picked this item instead. A returning viewer keeps
+			// the session rather than missing the next group while a new one
+			// attaches, and a departed one never opens another group.
+			leaving = !demand.is_used();
+
 			match item {
 				Some(Item::Group(sequence)) => {
-					if retiring {
+					if retiring || leaving {
 						// The group we were riding out never ended, so it is
 						// incomplete however long we wait.
 						if let Some(output) = current.take() {
@@ -262,6 +290,11 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					// that cannot cut fails the rung here: its groups could never
 					// mirror the source's, which is what this rung promises.
 					encoder.cut().await?;
+					// Demand can also leave while the codec works above. Nothing is
+					// open yet, so there is nothing to finish.
+					if !demand.is_used() {
+						break 'session;
+					}
 					// Mirror the source sequence so fetches and rendition
 					// switches map 1:1.
 					let info = moq_net::group::Info { sequence };
@@ -282,8 +315,14 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				}
 				Some(Item::Frame(frame)) => {
 					// No open group: attached mid-group, skipped a duplicate, or
-					// recovering from a lag. Wait for the next boundary.
-					let Some(output) = &mut current else { continue };
+					// recovering from a lag. Wait for the next boundary, unless
+					// nobody is left to serve it.
+					let Some(output) = &mut current else {
+						if leaving {
+							break 'session;
+						}
+						continue;
+					};
 
 					// The feed decodes at the source's native size; size this rung's copy
 					// here. Supported GPU paths feed the encoder without touching the
@@ -302,7 +341,9 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 						write(&mut output, &active, encoder.flush().await?)?;
 						output.finish()?;
 					}
-					if retiring {
+					// Or during the flush.
+					leaving = !demand.is_used();
+					if retiring || leaving {
 						break 'session;
 					}
 				}
@@ -312,7 +353,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
 					}
-					if retiring {
+					if retiring || leaving {
 						break 'session;
 					}
 				}

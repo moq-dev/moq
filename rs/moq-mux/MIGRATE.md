@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### TS private PES rides `pesPacket` tracks; `verbatim` is sections only (#5921)
+
+`ts::Framing::Pes` and `ts::Verbatim::stream_id` are gone, and `Verbatim::framing` no longer defaults: a catalog naming `"framing": "pes"`, or a `verbatim` record without `framing`, fails to parse.
+`ts::Import` now publishes every undecoded PES stream as a `ts::PesPacket` track, each frame one whole PES packet placed by the PCR.
+Write a hand-built PES track as `Track { pes_packet: Some(PesPacket::new(stream_type)), .. }` with each frame the whole PES, and a `verbatim` one only for sections, with `Framing::Section`.
+Recordings published with `pes` framing no longer export; import their source again.
+
 ### `fmp4::Wire::new` refuses a track that isn't audio or video (#5815)
 
 `container::fmp4::Wire::new` returns `Result<Wire>`, as `Wire::from_init` already did, and refuses any other handler instead of treating it as data.

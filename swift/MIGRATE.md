@@ -112,10 +112,15 @@ Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusHead))
 ```
 
-### Container byte-stream importers take an init record
+### Container byte streams use `Media.ContainerProducer` (#5919)
 
-`Media.ContainerStreamProducer` takes a `Media.ContainerStreamInit` holding the format instead of a bare format.
-Its optional `timebase`, also on `Media.ContainerInit`, shares one source's offset across container imports.
+`BroadcastProducer.publishContainerStream` has no separate importer: a container recovers its own framing, so `Media.ContainerProducer` takes chunks split anywhere.
+Pass empty `data` and write the stream through it.
+`Media.ContainerInit`'s optional `timebase` shares one source's offset across container imports.
+
+```swift
+let stream = try Media.ContainerProducer(broadcast: broadcast, initData: Media.ContainerInit(format: .fmp4, data: Data()))
+```
 
 ### Timestamps are optional
 
