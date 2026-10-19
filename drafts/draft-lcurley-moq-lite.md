@@ -36,6 +36,14 @@ normative:
 
 informative:
   I-D.lcurley-moq-cluster:
+  moqflate:
+    title: "DEFLATE Compressed Tracks for MoQ"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-flate/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
 
 --- abstract
 
@@ -743,6 +751,7 @@ DATAGRAM Body {
   Subscribe ID (i)
   Group Sequence (i)
   [Timestamp (i)]
+  [Inflated Size (i)]
   Payload (b)
 }
 ~~~
@@ -757,6 +766,10 @@ The absolute sequence number of the group carried by this datagram.
 **Timestamp**:
 The absolute timestamp of the single frame in the group, expressed in the Track's `Timescale`.
 Present only on a timed Track, which the receiver learns from the subscription named by `Subscribe ID`.
+
+**Inflated Size**:
+The size of the payload once inflated.
+Present only on a compressed Track, whose datagram payload is compressed alone, as a stream of its own.
 
 **Payload**:
 The frame payload, extending to the end of the datagram.
@@ -1238,6 +1251,7 @@ TRACK_INFO Message {
   Publisher Priority (8)
   Publisher Max Age (i)
   Timescale (i)
+  [Compressed (8)]
 }
 ~~~
 
@@ -1269,6 +1283,12 @@ See the [Expiration](#expiration) section for more information.
 The number of timestamp units per second for frame timestamps on this Track, or `0` for an untimed Track, whose FRAME messages and datagrams carry no timestamp.
 lite-05 and lite-06 have no untimed encoding: there it MUST be non-zero, and a subscriber that receives 0 MUST reset the stream with a protocol violation.
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
+
+**Compressed**:
+Present from lite-07.
+`1` if each Group of this Track is one DEFLATE stream as specified by {{moqflate}}, its FRAME messages and datagrams carrying an `Inflated Size`, or `0` if not.
+Any other value is a protocol violation.
+A publisher that cannot send this field, on lite-06 and earlier, MUST send the Track's frames inflated instead; a relay inflates each Group once for every such subscriber.
 
 ## SUBSCRIBE_OK {#subscribe-ok}
 A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start position.
@@ -1560,6 +1580,7 @@ The FRAME message is a payload within a group.
 ~~~
 FRAME Message {
   [Timestamp Delta (i)]
+  [Inflated Size (i)]
   Message Length (i)
   Payload (b)
 }
@@ -1576,6 +1597,11 @@ Encoded as a zigzag-mapped variable-length integer:
 Zigzag interleaves non-negative and negative values so small magnitudes of either sign fit in a 1-byte varint.
 The first frame of a group is delta-encoded from `0`, so its `Timestamp Delta` is the zigzag encoding of the absolute timestamp.
 
+**Inflated Size**:
+The size of the payload once inflated.
+Present only on a compressed Track, whose payload is the next slice of the Group's DEFLATE stream.
+A receiver MUST check it against its limits before inflating, and MUST treat a payload that inflates to any other size as malformed.
+
 **Payload**:
 An application-specific payload.
 The `Message Length` describes the payload size on the wire.
@@ -1585,6 +1611,7 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Added `Compressed` to TRACK_INFO and `Inflated Size` to FRAME and datagrams on a compressed Track, whose Groups are DEFLATE streams per draft-lcurley-moq-flate. Earlier versions receive the Track inflated.
 - A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's. Receivers do not check it, since a received timestamp may be a send time.
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 

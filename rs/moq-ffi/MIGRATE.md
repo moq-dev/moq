@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### `MoqTrackInfo` gains `compress`
+
+It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.
+
 ### Subscriptions carry group ranges (#5732)
 
 `MoqSubscription::group_start` and `group_end` are replaced by `ranges`, a list of `MoqRange { start, end }` whose ends are `MoqAnchor::Absolute { group, frame }` or `MoqAnchor::Relative { groups }`, and an optional `order`.

@@ -34,6 +34,7 @@ fn timed_info() -> MoqTrackInfo {
 		priority: 127,
 		max_age_us: None,
 		timescale: Some(1_000_000),
+		compress: false,
 	}
 }
 
@@ -860,6 +861,7 @@ async fn raw_track_datagram_roundtrip() {
 				priority: 0,
 				max_age_us: None,
 				timescale: Some(1_000_000),
+				compress: false,
 			}),
 		)
 		.unwrap();
@@ -890,6 +892,7 @@ async fn raw_track_info_reports_publisher_properties() {
 		priority: 7,
 		max_age_us: Some(2_500_000),
 		timescale: Some(90_000),
+		compress: true,
 	};
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
 	let consumer = track.consume(None).unwrap();
@@ -898,6 +901,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	assert_eq!(got.priority, 7);
 	assert_eq!(got.max_age_us, Some(2_500_000));
 	assert_eq!(got.timescale, Some(90_000));
+	assert!(got.compress);
 }
 
 #[tokio::test]
@@ -961,6 +965,7 @@ async fn data_writes_preserve_optional_timestamps() {
 						priority: 127,
 						max_age_us: None,
 						timescale: timestamp_us.map(|_| 1_000_000),
+						compress: false,
 					}),
 				)
 				.unwrap();

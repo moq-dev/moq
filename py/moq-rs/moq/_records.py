@@ -123,17 +123,21 @@ class TrackInfo:
     ``priority`` defaults to 127, the middle of the range. ``max_age`` is how long the
     publisher caches a non-latest group, ``None`` for no limit. ``timescale`` is ticks
     per second: ``None`` means the track is untimed, on both publish and receive.
+    ``compress`` DEFLATEs each group on the wire to peers that support it; readers
+    always see the original frames.
     """
 
     priority: int = 127
     max_age: timedelta | None = None
     timescale: int | None = None
+    compress: bool = False
 
     def _ffi(self) -> MoqTrackInfo:
         return MoqTrackInfo(
             priority=self.priority,
             max_age_us=_opt_us(self.max_age, "max_age"),
             timescale=self.timescale,
+            compress=self.compress,
         )
 
     @staticmethod
@@ -142,6 +146,7 @@ class TrackInfo:
             priority=info.priority,
             max_age=None if info.max_age_us is None else _from_us(info.max_age_us),
             timescale=info.timescale,
+            compress=info.compress,
         )
 
 

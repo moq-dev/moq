@@ -59,7 +59,8 @@ test("TrackInfo for Rust's default Info matches cross-language wire bytes", asyn
 test("TrackInfo carries an untimed track as zero on lite-07 and milliseconds before", async () => {
 	const info = new TrackInfo({ priority: 1 });
 	const lite07 = await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07);
-	expect(lite07.at(-1)).toBe(0);
+	// The timescale, then the compression flag.
+	expect(lite07.at(-2)).toBe(0);
 	const got = await TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07);
 	expect(got.timescale).toBeUndefined();
 
@@ -72,6 +73,20 @@ test("TrackInfo carries an untimed track as zero on lite-07 and milliseconds bef
 		zero[zero.length - 1] = 0;
 		await expect(TrackInfo.decode(new Reader(undefined, zero, version), version)).rejects.toThrow(RangeError);
 	}
+});
+
+test("TrackInfo carries the compression flag on lite-07 only", async () => {
+	const info = new TrackInfo({ priority: 1, compress: true });
+	const lite07 = await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07);
+	expect(lite07.at(-1)).toBe(1);
+	const got = await TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07);
+	expect(got.compress).toBe(true);
+
+	// Anything but 0 or 1 is malformed.
+	lite07[lite07.length - 1] = 2;
+	await expect(TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
+
+	await expect(bytes((w) => info.encode(w, Version.DRAFT_06), Version.DRAFT_06)).rejects.toThrow();
 });
 
 test("Track request round-trips on draft-05", async () => {

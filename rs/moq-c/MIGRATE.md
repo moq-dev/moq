@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_track_info` gains `compress`
+
+The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
+
 ### Subscriptions carry group ranges (#5732)
 
 `moq_subscription`'s `group_start`, `group_end`, and their `_present` flags are replaced by `ranges` and `ranges_len`, an array of `moq_range` whose ends are `moq_anchor`s, and `order` (`moq_order`), which changes its ABI.

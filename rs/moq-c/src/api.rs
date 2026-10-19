@@ -519,6 +519,10 @@ pub struct moq_track_info {
 	/// Whether `timescale` is set. When false, the default microsecond timescale
 	/// applies, matching the `timestamp_us` units used everywhere else in this ABI.
 	pub timescale_present: bool,
+
+	/// Whether each group is DEFLATE-compressed on the wire to peers that support it.
+	/// Readers always see the original frames.
+	pub compress: bool,
 }
 
 impl TryFrom<&moq_track_info> for moq_net::track::Info {
@@ -536,7 +540,7 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
 		}
-		Ok(out)
+		Ok(out.with_compress(info.compress))
 	}
 }
 
