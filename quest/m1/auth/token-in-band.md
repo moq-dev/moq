@@ -40,7 +40,10 @@ already carries the full pattern grant.
   [#5972](https://github.com/moq-dev/moq/pull/5972)): the client always
   copies the first configured token into the CONNECT request, the URL query
   today and an auth header once browsers allow one, whatever versions it
-  offers. The acceptor judges it before the session starts, so no request
+  offers. A dial URL that already carries a credential (a cluster's per-peer
+  `?jwt=`) keeps it as the connection credential instead, and then every
+  configured token gets its own AUTH stream: the client never appends a
+  second `jwt` or sends a different SETUP token. The acceptor judges it before the session starts, so no request
   waits on an AUTH for it, and WebTransport negotiates the moq version in that
   same request, so the client could not wait to learn whether the peer speaks
   AUTH anyway. A token that went into the URL or the setup option is the
