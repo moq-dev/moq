@@ -16,6 +16,10 @@ It covers:
 - What a switch looks like: players follow the announce `Restart`,
   `moq export ts --stitch` follows as a program switch, and other exports
   end. Starting a backup is a switch too.
+- Each publisher on its own path instead, so the end subscriber subscribes
+  to both and decides whether to switch between, combine, or keep them
+  separate (maintainer: each publisher produces its own stream, and the
+  subscriber chooses).
 - One publisher announced through several relays or CDNs under its own
   epoch, which resumes without a seam when a path fails.
 - Where hitless importer protection lives instead: 2022-7 legs of one
