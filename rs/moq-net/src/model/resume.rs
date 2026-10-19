@@ -1235,6 +1235,54 @@ mod test {
 		Timestamp::from_millis(ms).unwrap()
 	}
 
+	/// A later stream header is not a verdict on the group held from a failed route.
+	#[moq_clock::test]
+	async fn a_failed_route_waits_for_a_reordered_group_header() {
+		for arrives in [true, false] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(1));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"first".as_ref()).unwrap();
+			let mut held = recv(&mut sub);
+			assert_eq!(read(&mut held), Some(b"first".to_vec()));
+
+			let b = copy();
+			let dynamic = b.dynamic();
+			let mut newer = b.receive_group(group::Info { sequence: 1 }).unwrap();
+			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
+			newer.finish().unwrap();
+			routes.serve(b.consume());
+			open.abort(Error::SessionClosed).unwrap();
+			a.abort(Error::SessionClosed).unwrap();
+			assert!(held.read_frame().now_or_never().is_none());
+			dynamic
+				.requested_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.reject(Error::NotFound);
+			assert!(
+				held.read_frame().now_or_never().is_none(),
+				"the gap is still within grace"
+			);
+
+			if arrives {
+				let mut late = b.receive_group(group::Info { sequence: 0 }).unwrap();
+				late.write_frame(ts(0), b"first".as_ref()).unwrap();
+				late.write_frame(ts(1), b"continued".as_ref()).unwrap();
+				late.finish().unwrap();
+				assert_eq!(read(&mut held), Some(b"continued".to_vec()));
+				assert_eq!(read(&mut held), None);
+			} else {
+				moq_clock::sleep(Duration::from_secs(1)).await;
+				assert!(matches!(held.read_frame().now_or_never(), Some(Err(Error::NotFound))));
+			}
+		}
+	}
+
 	#[test]
 	fn a_route_preserves_a_mid_group_end() {
 		let routes = Producer::new();

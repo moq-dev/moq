@@ -1862,6 +1862,7 @@ mod tests {
 		}
 		arrive(&track, &tail, 0, start);
 		arrive(&track, &tail, 2, start);
+		moq_clock::sleep(crate::tail::GRACE / 2).await;
 		arrive(&track, &tail, 4, start + crate::tail::GRACE / 2);
 		let waiter = kio::Waiter::noop();
 		fetches.poll(&sub, start, &waiter);
@@ -1903,6 +1904,28 @@ mod tests {
 		track.abort(Error::Cancel).unwrap();
 		fetches.poll(&sub, start, &waiter);
 		assert!(fetches.held.is_empty(), "closure releases all remaining held groups");
+	}
+
+	#[moq_clock::test]
+	async fn a_feed_drop_polls_only_the_groups_it_excludes() {
+		let start = crate::time::Instant::now();
+		let clock = crate::time::Deadlines::new(start);
+		let tail = kio::Producer::new(Tail::default());
+		let sub = feed_sub(&tail).await;
+		let (track, mut callers, requests) = feed_batch([1, 3, 5]);
+		let mut fetches = FeedFetches::new(&clock);
+		for req in requests {
+			fetches.push(req, track.consume());
+		}
+		let waiter = kio::Waiter::noop();
+		fetches.poll(&sub, start, &waiter);
+		let polled = fetches.polled;
+		track.drop_groups(1..2);
+		fetches.poll(&sub, start, &waiter);
+		assert_eq!(fetches.polled - polled, 1);
+		assert!(!fetches.held.contains_key(&1));
+		assert_eq!(fetches.held.len(), 2);
+		assert!(matches!(callers.remove(0).now_or_never(), Some(Err(Error::NotFound))));
 	}
 
 	#[moq_clock::test]
@@ -1952,7 +1975,7 @@ mod tests {
 		assert!(next.now_or_never().unwrap().is_ok());
 	}
 
-	/// A live arrival on one track must not scale with unrelated held groups or tracks.
+	/// Sweep held fetches, unrelated tracks, and live arrival runs independently.
 	#[moq_clock::test]
 	#[ignore = "release benchmark, run by nightly"]
 	async fn benchmark_feed_fetch_wakes() {
@@ -2020,9 +2043,9 @@ mod tests {
 		}
 
 		const EVENTS: u64 = 128;
-		println!("held,tracks,scan_ns,indexed_ns");
+		println!("held,tracks,runs,scan_ns,indexed_ns");
 		for held in [1, 64, 1024] {
-			for tracks in [1, 8, 32] {
+			for (tracks, runs) in [(1, 1), (8, 1), (32, 1), (1, 64), (1, 1024)] {
 				let mut medians = Vec::new();
 				for indexed in [false, true] {
 					let mut samples = Vec::new();
@@ -2035,6 +2058,9 @@ mod tests {
 							let (track, callers, requests) = feed_batch(1_000_000..1_000_000 + held);
 							let tail = kio::Producer::new(Tail::default());
 							let sub = feed_sub(&tail).await;
+							for sequence in 0..runs {
+								arrive(&track, &tail, sequence * 2, start);
+							}
 							let mut scan = ScanFetches::new(&clock);
 							let mut fetches = FeedFetches::new(&clock);
 							for req in requests {
@@ -2054,7 +2080,7 @@ mod tests {
 						let (track, _callers, tail, sub, scan, fetches) = &mut fixtures[0];
 						#[allow(clippy::disallowed_methods)]
 						let began = std::time::Instant::now();
-						for sequence in 0..EVENTS {
+						for sequence in runs * 2..runs * 2 + EVENTS {
 							arrive(track, tail, sequence, start);
 							if indexed {
 								fetches.poll(sub, start, &waiter);
@@ -2067,7 +2093,7 @@ mod tests {
 					samples.sort_unstable();
 					medians.push(samples[2]);
 				}
-				println!("{held},{tracks},{},{}", medians[0], medians[1]);
+				println!("{held},{tracks},{runs},{},{}", medians[0], medians[1]);
 			}
 		}
 	}
@@ -5762,7 +5788,7 @@ enum ServeMode<S: crate::transport::poll::Session> {
 struct FeedFetches {
 	held: BTreeMap<u64, HeldFetch>,
 	ready: kio::Shared<BTreeSet<u64>>,
-	tail: Option<kio::Consumer<Tail>>,
+	arrivals: Option<track::Arrivals>,
 	/// Only gaps containing a held group arm the earliest fold.
 	fold: crate::time::Deadline,
 	/// An additional track backstop, above one peer's default FETCH allowance.
@@ -5773,7 +5799,6 @@ struct FeedFetches {
 
 struct HeldFetch {
 	req: group::Request,
-	feed: track::Consumer,
 	waiter: kio::Waiter,
 }
 
@@ -5796,7 +5821,7 @@ impl FeedFetches {
 		Self {
 			held: Default::default(),
 			ready: Default::default(),
-			tail: None,
+			arrivals: None,
 			fold: crate::time::Deadline::new(clock),
 			max: crate::session::Limits::default().announces,
 			#[cfg(test)]
@@ -5805,6 +5830,15 @@ impl FeedFetches {
 	}
 
 	fn push(&mut self, req: group::Request, feed: track::Consumer) {
+		let Some(arrivals) = feed.arrivals() else {
+			req.reject(Error::NotFound);
+			return;
+		};
+		if let Some(previous) = &self.arrivals {
+			assert!(previous.same_channel(&arrivals), "held fetches belong to one track");
+		} else {
+			self.arrivals = Some(arrivals);
+		}
 		let sequence = req.sequence();
 		// The last caller may leave and a replacement attempt arrive before the
 		// queued cancellation gets polled. The old attempt owns no callers now.
@@ -5819,7 +5853,7 @@ impl FeedFetches {
 			sequence,
 			ready: self.ready.clone(),
 		})));
-		self.held.insert(sequence, HeldFetch { req, feed, waiter });
+		self.held.insert(sequence, HeldFetch { req, waiter });
 		self.ready.lock().insert(sequence);
 	}
 
@@ -5829,7 +5863,7 @@ impl FeedFetches {
 		now: crate::time::Instant,
 		waiter: &kio::Waiter,
 	) {
-		let Sub::Active(active) = sub else {
+		let Sub::Active(_) = sub else {
 			for (_, held) in std::mem::take(&mut self.held) {
 				held.req.reject(Error::NotFound);
 			}
@@ -5838,23 +5872,20 @@ impl FeedFetches {
 				ready.clear();
 			}
 			drop(ready);
-			self.tail = None;
+			self.arrivals = None;
 			self.fold.set(None);
 			return;
 		};
-		let tail = active.tail.consume();
-		if self.tail.as_ref().is_none_or(|previous| !previous.same_channel(&tail)) {
-			// A replacement upstream has a new ledger. Rebind the held groups once,
-			// instead of leaving their registrations in the old subscription.
+		let Some(arrivals) = &self.arrivals else {
+			return;
+		};
+		// One shared read arms the batch for new gaps, without copying the ledger or
+		// re-polling held groups whose verdict did not change.
+		let arrivals = arrivals.poll(waiter);
+		if arrivals.is_closed() {
 			self.ready.lock().extend(self.held.keys().copied());
-			self.tail = Some(tail.clone());
 		}
-		// Ledger changes can open or move a gap's deadline, but only its accounted
-		// groups register child waiters. A new highest group therefore arms one fold
-		// without re-polling every lower held fetch.
-		let _ = tail.poll(waiter, |_| Poll::<()>::Pending);
-		let tail = tail.read();
-		for (gap, at) in tail.folds() {
+		for (gap, at) in arrivals.folds() {
 			if at <= now {
 				let mut groups = self.held.range(gap).map(|(sequence, _)| *sequence);
 				if let Some(first) = groups.next() {
@@ -5875,6 +5906,7 @@ impl FeedFetches {
 			Poll::Pending => BTreeSet::new(),
 		};
 		let _ = self.ready.poll(waiter, |_| Poll::<()>::Pending);
+		let mut settled = Vec::new();
 		for sequence in ready {
 			let Some(held) = self.held.remove(&sequence) else {
 				continue;
@@ -5884,24 +5916,28 @@ impl FeedFetches {
 				self.polled += 1;
 			}
 			if held.req.demand().poll_unused(&held.waiter).is_ready() {
+				settled.push((held.req, None));
 				continue;
 			}
-			let missing = !tail.covers(sequence..sequence.saturating_add(1));
-			let folds = tail.folds_at(sequence);
-			match held.feed.poll_landed(sequence, &held.waiter) {
-				Poll::Ready(Some(_)) => drop(held.req),
-				Poll::Ready(None) => held.req.reject(Error::NotFound),
-				Poll::Pending if !missing || folds.is_some_and(|at| at <= now) => held.req.reject(Error::NotFound),
+			match arrivals.poll_group(sequence, now, &held.waiter) {
+				Poll::Ready(Some(_)) => settled.push((held.req, None)),
+				Poll::Ready(None) => settled.push((held.req, Some(Error::NotFound))),
 				Poll::Pending => {
-					tail.watch_group(sequence, &held.waiter);
 					self.held.insert(sequence, held);
 				}
 			}
 		}
-		let fold = tail
+		let fold = arrivals
 			.folds()
 			.filter_map(|(gap, at)| self.held.range(gap).next().map(|_| at))
 			.min();
+		// Requests own track producers: releasing one takes the track lock too.
+		drop(arrivals);
+		for (req, err) in settled {
+			if let Some(err) = err {
+				req.reject(err);
+			}
+		}
 		self.fold.set(fold);
 		let _ = self.fold.poll(waiter);
 	}

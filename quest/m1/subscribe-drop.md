@@ -94,7 +94,3 @@ subscribers both settle on SUBSCRIBE_DROP through the relay, so a group the
 publisher skipped or never opened ends the track without waiting out the
 grace. Decided in the 2026-09-30 audit: the case moved here so the basic
 tail interop could land first.
-
-## Related
-
-- [Resume reorder](/quest/m1/resume-reorder.md) - late stream headers are not proof that a group was dropped

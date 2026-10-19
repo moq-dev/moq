@@ -702,6 +702,7 @@ impl TrackState {
 		if groups.is_empty() {
 			return;
 		}
+		self.cache.wakes().arrived(groups.clone());
 		self.drops.insert(groups);
 		self.drops_revision += 1;
 	}
@@ -1743,6 +1744,29 @@ impl TrackState {
 			true => Poll::Ready(None),
 			false => Poll::Pending,
 		}
+	}
+
+	/// A live group, or a verdict from its arrival record, independent of stream order.
+	fn poll_arrival(
+		&self,
+		sequence: u64,
+		now: crate::time::Instant,
+		grace: Duration,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<group::Consumer>> {
+		if let Poll::Ready(group) = self.landing(sequence) {
+			return Poll::Ready(group);
+		}
+		if self.drops.contains(&sequence)
+			|| sequence
+				.checked_add(1)
+				.is_some_and(|end| self.arrivals.covers(sequence..end))
+			|| self.arrivals.folds_at(sequence, grace).is_some_and(|at| at <= now)
+		{
+			return Poll::Ready(None);
+		}
+		self.cache.wakes().watch_arrival(sequence, waiter);
+		Poll::Pending
 	}
 
 	/// Record the declared first sequence of the live feed, replacing any earlier
@@ -3440,6 +3464,62 @@ pub(super) enum DemandState {
 	Closed,
 }
 
+/// A watch-only handle to a track's live arrivals.
+pub(crate) struct Arrivals {
+	state: kio::ConsumerWeak<TrackState>,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+impl Arrivals {
+	/// Whether both handles watch the same track.
+	pub(crate) fn same_channel(&self, other: &Self) -> bool {
+		self.state.same_channel(&other.state)
+	}
+
+	/// Read the ledger and wake its owner when arrivals or terminal bounds change.
+	pub(crate) fn poll(&self, waiter: &kio::Waiter) -> ArrivalRead<'_> {
+		let _ = self.state.poll(waiter, |_| Poll::<()>::Pending);
+		let state = self.state.read();
+		let max_delay = clamp_max_delay(state.subscriptions.lock().max_delay(), state.max_age_bound());
+		ArrivalRead {
+			state,
+			grace: ledger::grace(max_delay),
+		}
+	}
+}
+
+/// A locked arrival ledger, so a batch never copies or re-locks its runs per fetch.
+pub(crate) struct ArrivalRead<'a> {
+	state: kio::Ref<'a, TrackState>,
+	grace: Duration,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+impl ArrivalRead<'_> {
+	/// Whether the live feed can no longer deliver any missing group.
+	pub(crate) fn is_closed(&self) -> bool {
+		self.state.is_closed()
+	}
+
+	/// Gaps that can expire held fetches, including the gap before the first arrival.
+	pub(crate) fn folds(&self) -> impl Iterator<Item = (ops::Range<u64>, crate::time::Instant)> + '_ {
+		self.state.arrivals.folds(self.grace)
+	}
+
+	/// Judge one live group and register only for its own arrival or terminal bound.
+	pub(crate) fn poll_group(
+		&self,
+		sequence: u64,
+		now: crate::time::Instant,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<group::Consumer>> {
+		match self.state.poll_arrival(sequence, now, self.grace, waiter) {
+			Poll::Pending if self.state.is_closed() => Poll::Ready(None),
+			res => res,
+		}
+	}
+}
+
 /// A lazy handle to a single track within a broadcast.
 ///
 /// Obtained from [`broadcast::Consumer::track`]. Holding it sends nothing and is not
@@ -3645,49 +3725,46 @@ impl Consumer {
 		})
 	}
 
-	/// Poll for group `sequence` the way the live feed delivers it: `Some` once it is
-	/// cached, `None` once the feed will not deliver it (it went past it, starts past it,
-	/// or ended), and pending while it still may.
+	/// The live arrivals of the track this handle reads now, without joining its demand.
+	pub(crate) fn arrivals(&self) -> Option<Arrivals> {
+		self.with_state(|state| state.map(|state| Arrivals { state: state.clone() }))
+	}
+
+	/// Poll for a cached group, a terminal disposition, or a gap outliving its grace.
 	// private: test
 	pub(crate) fn poll_group(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Ready(None);
 			};
-			let res = state.poll(waiter, |state| match state.landing(sequence) {
-				Poll::Pending if state.max_sequence.is_some_and(|newest| newest > sequence) => Poll::Ready(None),
-				landed => landed,
+			let res = state.poll(waiter, |state| {
+				let max_delay = clamp_max_delay(state.subscriptions.lock().max_delay(), state.max_age_bound());
+				let grace = ledger::grace(max_delay);
+				let now = state.cache.pool().now_wall();
+				let res = state.poll_arrival(sequence, now, grace, waiter);
+				if res.is_pending() {
+					let Some(at) = state.arrivals.folds_at(sequence, grace) else {
+						// No later arrival yet: only this wait uses the track's change channel.
+						return Poll::Pending;
+					};
+					state.cache.watch_wall(at, waiter);
+				}
+				// A known gap waits on its own arrival and deadline, not unrelated writes.
+				Poll::Ready(res)
 			});
-			match res {
-				Poll::Ready(Ok(group)) => Poll::Ready(group),
+			let res = match res {
+				Poll::Ready(Ok(res)) => res,
 				Poll::Ready(Err(_)) => Poll::Ready(None),
 				Poll::Pending => Poll::Pending,
-			}
-		})
-	}
-
-	/// [`Self::poll_group`], except a newer group is no verdict: QUIC does not order
-	/// streams, so this one may still land behind it. Pending until it is cached, or the
-	/// feed starts past it or ends before it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/deferred.md
-	pub(crate) fn poll_landed(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
-		self.with_state(|weak| {
-			let Some(weak) = weak else {
-				return Poll::Ready(None);
 			};
-			let state = weak.read();
-			if let Poll::Ready(group) = state.landing(sequence) {
-				return Poll::Ready(group);
+			if res.is_pending() && state.poll_closed(waiter).is_ready() {
+				// A cached arrival may have raced closure after the first lookup.
+				return Poll::Ready(match state.read().landing(sequence) {
+					Poll::Ready(group) => group,
+					Poll::Pending => None,
+				});
 			}
-			// Register under the track lock, so an insert cannot slip between the lookup
-			// and its exact-group registration. Closure has a separate channel waiter.
-			state.cache.wakes().watch_arrival(sequence, waiter);
-			drop(state);
-			match weak.poll_closed(waiter) {
-				Poll::Ready(()) => Poll::Ready(None),
-				Poll::Pending => Poll::Pending,
-			}
+			res
 		})
 	}
 
@@ -6027,6 +6104,36 @@ mod test {
 	/// Let `duration` pass on the cache pool `producer`'s groups charge into.
 	fn elapse(producer: &Producer, duration: Duration) {
 		producer.broadcast.pool.step(duration);
+	}
+
+	#[test]
+	fn a_missing_group_uses_the_subscription_grace() {
+		let producer = track_producer("test", Info::default());
+		let budget = Duration::from_millis(50);
+		let _sub = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let feed = producer.consume();
+		let waiter = kio::Waiter::noop();
+		producer
+			.create_group(group::Info { sequence: 1 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		assert!(feed.poll_group(0, &waiter).is_pending());
+		assert!(feed.poll_group(u64::MAX, &waiter).is_pending());
+		elapse(&producer, budget / 2);
+		assert!(feed.poll_group(0, &waiter).is_pending());
+		elapse(&producer, budget / 2);
+		assert!(matches!(feed.poll_group(0, &waiter), Poll::Ready(None)));
+	}
+
+	#[test]
+	fn an_explicit_drop_does_not_wait_for_an_arrival_gap() {
+		let producer = track_producer("test", Info::default());
+		let feed = producer.consume();
+		let waiter = kio::Waiter::noop();
+		assert!(feed.poll_group(1, &waiter).is_pending());
+		producer.drop_groups(1..2);
+		assert!(matches!(feed.poll_group(1, &waiter), Poll::Ready(None)));
 	}
 
 	/// A bounded replay window for tests whose subject requires every buffered group.
