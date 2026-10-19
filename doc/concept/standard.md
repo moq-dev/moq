@@ -99,7 +99,7 @@ choices. They follow the product model.
   namespace prefixes are coalesced internally, so `DUPLICATE_SUBSCRIPTION` and
   `PREFIX_OVERLAP` are never sent.
 
-- **Subscriber max age is negotiated.** The [Timestamp extension](/draft/draft-lcurley-moq-timestamp)
+- **Subscriber max age is negotiated.** The [Timestamp extension](/draft/moq-timestamp)
   carries a subscriber's `max_delay` in `SUBSCRIBE` and `REQUEST_UPDATE` only
   when the peer advertises support. Superseded groups expire against media time
   and the hop's clock; the newest group, including a quiet catalog, survives any
