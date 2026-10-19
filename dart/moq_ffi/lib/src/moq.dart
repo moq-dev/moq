@@ -6737,7 +6737,7 @@ class FfiConverterMoqTransport {
   }
 }
 
-enum MoqCongestionControl { loss, delay }
+enum MoqCongestionControl { loss, delay, none }
 
 class FfiConverterMoqCongestionControl {
   static LiftRetVal<MoqCongestionControl> read(Uint8List buf) {
@@ -6747,6 +6747,8 @@ class FfiConverterMoqCongestionControl {
         return LiftRetVal(MoqCongestionControl.loss, 4);
       case 2:
         return LiftRetVal(MoqCongestionControl.delay, 4);
+      case 3:
+        return LiftRetVal(MoqCongestionControl.none, 4);
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,

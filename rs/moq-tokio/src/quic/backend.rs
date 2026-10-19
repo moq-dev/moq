@@ -88,6 +88,7 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn driver::congestion::
 	match family {
 		CongestionControl::Loss => Arc::new(driver::congestion::CubicConfig::default()),
 		CongestionControl::Delay => Arc::new(driver::congestion::Bbr3Config::default()),
+		CongestionControl::None => Arc::new(driver::congestion::Unlimited),
 	}
 }
 
@@ -1212,6 +1213,9 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<driver::congestion::Bbr3>().is_ok());
+
+		let none = congestion_factory(CongestionControl::None).build(now, mtu);
+		assert!(none.into_any().downcast::<driver::congestion::Unlimited>().is_ok());
 	}
 
 	/// Loopback regression test: with the knob unset, live QUIC connections must run

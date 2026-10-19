@@ -9,6 +9,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.
 
+### `MoqCongestionControl` gained `None` (#5926)
+
+`MoqCongestionControl::None` runs no congestion control and no pacing, for tests and controlled links.
+An exhaustive match needs one more arm.
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

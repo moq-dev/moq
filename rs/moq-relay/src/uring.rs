@@ -418,6 +418,7 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		// Unset means the backend's own default, and live media wants a steady
 		// send rate an encoder can track over CUBIC's sawtooth.
 		Some(moq_tokio::quic::CongestionControl::Delay) | None => moq_uring::quic::Congestion::Delay,
+		Some(moq_tokio::quic::CongestionControl::None) => moq_uring::quic::Congestion::None,
 		// A family added to the tokio stack later, rather than a silent
 		// substitution the operator would never learn about.
 		Some(other) => anyhow::bail!("io_uring workers cannot run the {other:?} congestion controller"),
@@ -507,7 +508,11 @@ fn serve_worker(spawn: Spawn) -> bool {
 	let setup = (|| -> anyhow::Result<(moq_uring::Worker, moq_uring::quic::Endpoint)> {
 		let mut config = moq_uring::Config::default();
 		config.metrics = metrics;
-		let worker = moq_uring::Worker::new(config).context("io_uring setup failed")?;
+		// Built inside the shared runtime, so the worker keeps that runtime's clock.
+		let worker = {
+			let _shared = serve.tokio.enter();
+			moq_uring::Worker::new(config).context("io_uring setup failed")?
+		};
 		// The member carries its slot in the steered group, so adopting it is
 		// what makes the endpoint issue connection ids that steer back here.
 		let socket = worker
