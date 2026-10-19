@@ -462,22 +462,26 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			_ => return Err(Error::MultipleCodecs.into()),
 		};
 
-		let (mut config, colr) = match codec {
+		let (mut config, colr, pasp) = match codec {
 			mp4_atom::Codec::Avc1(avc1) => (
 				self.init_h264(false, &avc1.avcc, &avc1.visual, container)?,
 				avc1.colr.as_ref(),
+				avc1.pasp.as_ref(),
 			),
 			mp4_atom::Codec::Avc3(avc3) => (
 				self.init_h264(true, &avc3.avcc, &avc3.visual, container)?,
 				avc3.colr.as_ref(),
+				avc3.pasp.as_ref(),
 			),
 			mp4_atom::Codec::Hev1(hev1) => (
 				self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
 				hev1.colr.as_ref(),
+				hev1.pasp.as_ref(),
 			),
 			mp4_atom::Codec::Hvc1(hvc1) => (
 				self.init_h265(false, &hvc1.hvcc, &hvc1.visual, container)?,
 				hvc1.colr.as_ref(),
+				hvc1.pasp.as_ref(),
 			),
 			mp4_atom::Codec::Vp08(vp08) => {
 				let mut config = VideoConfig::new(VideoCodec::VP8);
@@ -492,7 +496,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.coded_width = Some(vp08.visual.width as _);
 				config.coded_height = Some(vp08.visual.height as _);
 				config.container = container;
-				(config, vp08.colr.as_ref())
+				(config, vp08.colr.as_ref(), vp08.pasp.as_ref())
 			}
 			mp4_atom::Codec::Vp09(vp09) => {
 				// https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
@@ -513,7 +517,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.coded_width = Some(vp09.visual.width as _);
 				config.coded_height = Some(vp09.visual.height as _);
 				config.container = container;
-				(config, vp09.colr.as_ref())
+				(config, vp09.colr.as_ref(), vp09.pasp.as_ref())
 			}
 			mp4_atom::Codec::Av01(av01) => {
 				let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av01.av1c));
@@ -521,7 +525,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				config.coded_width = Some(av01.visual.width as _);
 				config.coded_height = Some(av01.visual.height as _);
 				config.container = container;
-				(config, av01.colr.as_ref())
+				(config, av01.colr.as_ref(), av01.pasp.as_ref())
 			}
 			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(*unknown).into()),
 			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
@@ -529,6 +533,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// The codec config outranks the colr box a muxer added, which only fills its gaps.
 		let colr = colr.map(super::colr_color).transpose()?.flatten();
 		crate::codec::color::fill(&mut config.color, colr.as_ref(), "colr");
+		if let Some(pasp) = pasp {
+			let width = config.coded_width.ok_or(Error::InvalidAspect("missing width"))?;
+			let height = config.coded_height.ok_or(Error::InvalidAspect("missing height"))?;
+			let aspect = crate::codec::video::reduce_aspect(
+				u128::from(width) * u128::from(pasp.h_spacing),
+				u128::from(height) * u128::from(pasp.v_spacing),
+			)
+			.ok_or(Error::InvalidAspect("invalid or unrepresentable pasp"))?;
+			// Square samples add no catalog field, but can still contradict an SPS.
+			if pasp.h_spacing != pasp.v_spacing || config.display_aspect_width.is_some() {
+				crate::codec::video::fill_display_aspect(&mut config, aspect, "pasp");
+			}
+		}
 
 		Ok(config)
 	}

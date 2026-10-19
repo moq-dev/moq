@@ -42,7 +42,7 @@ deterministic, rather than widen a bound.
   already be past, so it moves onto the mocked clock here too. Hence the
   existing moq-clock crate is used directly, rather than a paused-Tokio
   fallback. This quest owns the targeted moq-auth grant clock conversion;
-  it does not wait for the whole workspace sweep or future relay seam.
+  it does not wait for the whole workspace sweep.
 - `a_fixed_lease_still_expires` moves off real sockets onto
   `memory_sessions()` and `moq_relay::supervise` under the same clock. If no
   other real-socket test proves the tcp and ws paths hand their lease to
@@ -55,4 +55,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Controlled time](/quest/m1/time/README.md) - the systemic fix: every crate on one controlled clock, and relay tests on the sim through [the relay seam](/quest/m1/time/relay-seam.md)
+- [Controlled time](/quest/m1/time/README.md) - the systemic fix: every crate on one controlled clock, and relay tests in memory through `moq_relay::Accepted`
