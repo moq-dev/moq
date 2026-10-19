@@ -448,9 +448,10 @@ export class Consumer {
 		return true;
 	}
 
-	// Drop a group without delivering it. A drop must not hide a malformed group, so one holding a
-	// fault, or reaching below the latest delivered group start, ends the reader instead.
-	// Returns false if it did.
+	// Drop a group without delivering it. A drop must not hide what was already found, so one holding
+	// a fault, or with frames below the latest delivered group start, ends the reader instead. What
+	// its task has not decoded yet stays unchecked: decoding data only to throw it away is work a
+	// peer could force. Returns false if it ended the reader.
 	#discard(group: Group): boolean {
 		group.consumer.close();
 		group.frames.length = 0;
