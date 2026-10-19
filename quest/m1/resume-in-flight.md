@@ -47,6 +47,21 @@ route, though an identical whole copy was there.
   keeping every replaced copy until the groups handed out above its bound end.
   Prefer whichever keeps one lease rule for both paths.
 
+**Bounded retention.** A reader that never reads groups (datagrams only) keeps
+every bounded replaced copy that still has an unread group, since nothing ever
+reads it. Rust `Reader::let_go` does this on main too. A peer that keeps
+migrating the route then leaves one subscription and cache per swap. Keeping
+copies longer, as above, must not make that worse.
+
+- A reader may read groups later (`datagram_reads_keep_unread_groups_on_a_replaced_copy`),
+  so an unread group still keeps its copy. Bound that by what the reader could
+  still take: a copy goes once its unread groups fall outside the reader's
+  budget. Decide what an unbounded budget keeps, for example the unread
+  backlog consolidated into one retained cache instead of one copy per swap,
+  rather than a count cap.
+- Regression test: a datagram-only Rust reader across many swaps, each copy
+  holding an unread group, keeps retained copies bounded by its budget.
+
 Regression tests in both languages, with mocked time:
 
 - The old copy writes F-1 only after the new copy handed out F and the reader
