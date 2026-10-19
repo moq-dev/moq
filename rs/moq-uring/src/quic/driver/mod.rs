@@ -55,15 +55,6 @@ fn ecn_from_quic(ecn: moq_quic::EcnCodepoint) -> udp::Ecn {
 	}
 }
 
-/// Map a moq-quic deadline onto the worker's timers.
-///
-/// moq-quic counts on moq-clock's instants while the worker's timers still take
-/// std's, until the worker becomes a moq-clock backend. A deadline already past
-/// maps to now, which fires at once either way.
-fn to_std(at: moq_clock::Instant) -> std::time::Instant {
-	std::time::Instant::now() + at.saturating_duration_since(moq_clock::Instant::now())
-}
-
 impl From<moq_quic::ConnectionError> for Error {
 	fn from(err: moq_quic::ConnectionError) -> Self {
 		use moq_quic::ConnectionError;
