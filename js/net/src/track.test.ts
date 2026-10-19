@@ -1960,9 +1960,9 @@ test("largest reports only within the bounds", async () => {
 	producer.close();
 });
 
-// Moving the bounds wakes a pending read and reports the largest within the new ones again;
+// Moving the bounds wakes a pending read, which reports the largest once it is within them;
 // bounds that leave it where it was report nothing new.
-test("largest re-reports when the bounds move", async () => {
+test("largest follows the bounds as they move", async () => {
 	const producer = new TrackProducer("test").accept({});
 	for (let sequence = 0; sequence < 6; sequence++) framedGroup(producer, sequence, 1);
 

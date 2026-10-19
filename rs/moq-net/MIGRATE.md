@@ -8,7 +8,7 @@ How to update your code for each breaking change, newest first.
 
 `track::Subscriber::largest()` and `track::Ordered::largest()` (and their `poll_largest`) report the track's largest only while it is within the bounds set with `set_groups`, where they used to ignore the bounds.
 A largest past the cap or below the floor reports nothing; the cache never stands in for it.
-Moving the bounds reports again within the new ones, even below the last report.
+A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
 Every `largest()`, `track::Producer` and `track::Consumer` included, now waits while a relay's copy is idle and reports once its new upstream subscription is live, rather than the largest an ended feed left.
 Cached groups are still served meanwhile.
 To read the track's edge from a capped reader, lift the cap with `set_groups(..)` first.

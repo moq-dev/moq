@@ -4451,8 +4451,6 @@ pub struct Subscriber {
 #[derive(Default)]
 struct Reported {
 	position: Option<Position>,
-	// The bounds moved since, so the next poll reports within the new ones.
-	moved: bool,
 	// The task that last polled, woken when the bounds move. One is enough: polling
 	// takes `&mut self`.
 	waker: Option<std::task::Waker>,
@@ -4466,9 +4464,8 @@ impl Reported {
 		}
 	}
 
-	/// The bounds moved: report within them again, waking a parked poll.
+	/// The bounds moved: wake a parked poll, since the largest may now be within them.
 	fn bounds_moved(&mut self) {
-		self.moved = true;
 		if let Some(waker) = self.waker.take() {
 			waker.wake();
 		}
@@ -5616,27 +5613,12 @@ impl Subscriber {
 	/// The largest is the newest group or datagram at the newest frame (0 while empty), as
 	/// the source reported it and its live feed delivered since, so nothing reports until
 	/// the track's feed is live. A largest past the cap or below the floor reports nothing:
-	/// the cache does not stand in for it. Moving the bounds reports again within the new
-	/// ones, even below the last report.
+	/// the cache does not stand in for it, so a cap moved below the largest stays pending.
+	/// Moving the bounds wakes a parked poll, which reports the largest once it is within
+	/// them and newer than the last report.
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		self.largest.park(waiter.waker());
 		let bounds = self.bounds();
-		if self.largest.moved {
-			// New bounds report the largest within them again, even one below the last report.
-			// Until one is within them, the last report and the move both stand.
-			let last = self.largest.position.take();
-			match self.poll_largest_within(bounds, waiter) {
-				Poll::Pending => {
-					self.largest.position = last;
-					return Poll::Pending;
-				}
-				Poll::Ready(Some(position)) if Some(position) == last => self.largest.moved = false,
-				poll => {
-					self.largest.moved = false;
-					return poll;
-				}
-			}
-		}
 		self.poll_largest_within(bounds, waiter)
 	}
 
@@ -6457,10 +6439,10 @@ mod test {
 		assert_eq!(floored.poll_largest(&noop), Poll::Ready(Some(Position::group(8))));
 	}
 
-	/// Moving the bounds wakes a parked reader and reports the largest within the new ones
-	/// again; bounds that leave it where it was report nothing new.
+	/// Moving the bounds wakes a parked reader, which reports the largest once it is within
+	/// them; bounds that leave it where it was report nothing new.
 	#[test]
-	fn largest_rereports_when_the_bounds_move() {
+	fn largest_follows_the_bounds_as_they_move() {
 		let producer = track_producer("test", Info::default());
 		let noop = kio::Waiter::noop();
 		let _groups: Vec<_> = (0..6).map(|sequence| framed(&producer, sequence, 1)).collect();

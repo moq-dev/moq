@@ -1492,9 +1492,8 @@ export class Subscriber {
 	readonly name: string;
 
 	#state: TrackState;
-	// What {@link largest} last reported, and whether the bounds moved since.
+	// What {@link largest} last reported.
 	#largestSeen?: Location;
-	#largestMoved = false;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
 	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
@@ -1753,8 +1752,8 @@ export class Subscriber {
 	 * The largest is the track's newest group or datagram at the newest frame (0 while empty), as
 	 * the publisher reported it and its feed delivered since, so it can name a frame before its
 	 * group arrives. A largest past the cap or below the floor reports nothing: the cache does not
-	 * stand in for it. Moving the bounds reports again within the new ones, even below the last
-	 * report.
+	 * stand in for it, so a cap moved below the largest stays pending. Moving the bounds wakes a
+	 * pending read, which reports the largest once it is within them and newer than the last report.
 	 */
 	async largest(): Promise<Location | undefined> {
 		for (;;) {
@@ -1763,15 +1762,7 @@ export class Subscriber {
 			const within =
 				largest && largest.group >= start && (end === undefined || largest.group < end) ? largest : undefined;
 			const seen = this.#largestSeen;
-			if (this.#largestMoved) {
-				// New bounds report the largest within them again, even one below the last report.
-				// Until one is within them, the last report and the move both stand.
-				if (within) {
-					this.#largestMoved = false;
-					this.#largestSeen = within;
-					if (!(seen && within.group === seen.group && within.frame === seen.frame)) return within;
-				}
-			} else if (within && (!seen || after(within, seen))) {
+			if (within && (!seen || after(within, seen))) {
 				this.#largestSeen = within;
 				return within;
 			}
@@ -1832,7 +1823,6 @@ export class Subscriber {
 	setGroups(groups: Groups): void {
 		const { start, end } = groupBounds(groups);
 		this.#cursor.update((cursor) => ({ start: Math.max(cursor.start, start), end }));
-		this.#largestMoved = true;
 	}
 
 	// Serving counterpart of setGroups: a named start replaces the floor, matching
@@ -1843,7 +1833,6 @@ export class Subscriber {
 			start: groups.start === undefined ? cursor.start : start,
 			end,
 		}));
-		this.#largestMoved = true;
 	}
 
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
