@@ -41,6 +41,14 @@ pub(crate) struct Peer {
 pub(crate) struct PeerSetup(kio::Shared<Option<Peer>>);
 
 impl PeerSetup {
+	/// A fixture whose peer already sent its SETUP.
+	#[cfg(test)]
+	pub(crate) fn declared(peer: Peer) -> Self {
+		let setup = Self::default();
+		setup.set(peer);
+		setup
+	}
+
 	/// Record what the peer declared. A SETUP carrying no options records the default
 	/// (no extension negotiated, no requirements), which is what unblocks a waiter.
 	///
