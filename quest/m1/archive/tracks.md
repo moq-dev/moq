@@ -108,9 +108,10 @@ when a track no longer exists"):
   2026-10-19: a relay answers at once with what it currently holds and never
   waits on its upstream, since relays never block on peers. A cold relay may
   report zero; the upstream's tracks then arrive as live adds.
-- **Track removed.** Names the track, sent when the publisher no longer
-  serves it (it left the broadcast's track table), so a SUBSCRIBE for it
-  would now be refused. There are no entry IDs: a name is unique among a
+- **Track removed.** Names the track, sent when it leaves the broadcast's
+  track table, the enumerable inventory. A `broadcast::Dynamic` handler may
+  still serve that name on demand, so a later SUBSCRIBE may still succeed;
+  removal promises only that the track is no longer listed. There are no entry IDs: a name is unique among a
   broadcast's live tracks, so the name identifies the entry, and a track
   created again under it is a later add of the same track: within one
   broadcast instance a name always means the same content, so its group
