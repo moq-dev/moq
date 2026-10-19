@@ -255,9 +255,11 @@ pub struct Config {
 	/// File holding the secret the QUIC stateless reset key is derived from.
 	///
 	/// A server restarted with the same file resets its predecessor's connections,
-	/// so peers reconnect at once instead of waiting out their idle timeout. Servers
-	/// sharing it can reset each other's. Unset draws a random key per process.
-	/// Needs at least 32 bytes, ignoring surrounding whitespace.
+	/// so peers reconnect at once instead of waiting out their idle timeout. Every
+	/// holder can reset every other holder's connections, so share it between live
+	/// servers only behind one address that routes by connection ID (QUIC-LB).
+	/// Unset draws a random key per process. Needs at least 32 bytes, ignoring
+	/// surrounding whitespace.
 	#[usage(
 		name = "listen-quic-reset-key",
 		long = "listen-quic-reset-key",

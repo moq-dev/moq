@@ -89,8 +89,12 @@ impl EndpointConfig {
         self
     }
 
-    /// Derive the reset key from `secret` with HKDF-SHA256, so endpoints given the same secret
-    /// reset each other's connections, including a predecessor's after a restart
+    /// Derive the reset key from `secret` with HKDF-SHA256, so an endpoint restarted with the same
+    /// secret resets its predecessor's connections
+    ///
+    /// Every endpoint holding the secret resets every other holder's connections, so RFC 9000
+    /// section 21.11 requires that packets for a live connection only ever reach its owner: share
+    /// it across live endpoints only behind one address that routes by connection ID.
     ///
     /// Also keys a [`HashedConnectionIdGenerator`] from it, since an endpoint drops packets for
     /// connection IDs it can't validate instead of resetting them. Set

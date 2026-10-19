@@ -51,9 +51,10 @@ pub struct Config {
 	/// The secret the stateless reset key is derived from, or `None` for a random
 	/// key per endpoint.
 	///
-	/// Endpoints given the same secret reset each other's connections, so a
-	/// restarted one resets its predecessor's instead of leaving peers to wait out
-	/// their idle timeout.
+	/// A restarted endpoint given the same secret resets its predecessor's
+	/// connections instead of leaving peers to wait out their idle timeout. Live
+	/// endpoints sharing it reset each other's, so only share it behind one
+	/// address that routes by connection ID.
 	pub reset_secret: Option<std::sync::Arc<[u8]>>,
 }
 
