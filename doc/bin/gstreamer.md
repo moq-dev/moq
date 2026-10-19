@@ -61,7 +61,7 @@ Each `sink_%u` request pad is one track. Pad properties: `track` names it
 [LOC](/concept/standard#loc) instead of the legacy hang container,
 `encoder=true` marks it as fed by a local encoder, and
 `track-status`/`track-error` report its lifecycle. Element properties:
-`url`, `broadcast`, `tls-disable-verify`, `quic-idle-timeout`,
+`url`, `broadcast`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
 `sessions`. The sink reconnects for as long as the pipeline runs and only
@@ -136,8 +136,11 @@ on its own. Losing the relay connection also holds the pads: `moqsrc` redials
 without a retry deadline and resumes when the broadcast returns. A refused
 connection, refused path or catalog, or malformed protocol input or catalog posts
 an error. Properties: `url`,
-`broadcast`, `tls-disable-verify`.
+`broadcast`, `tls-disable-verify`, `quic-keylog`.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.
+To decrypt a capture, set `quic-keylog=true` on either element along with
+`SSLKEYLOGFILE`; the variable alone writes nothing, and the flag without it fails
+the start.
 
 `moqsrc` creates source pads only for enabled renditions. Disabling a rendition stops its media and holds its pad idle without EOS; enabling it again resumes on the same pad.
