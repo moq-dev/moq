@@ -49,7 +49,8 @@ Abuse scenarios to cover:
    machines grow with every group published, forever, even after the pool
    frees their bytes.
 2. The same peer with an inert pool (no capacity, no idle window, as a library
-   user may configure): held bytes grow too.
+   user may configure). The pool keeps every group by policy, so judge only
+   what the subscriber adds: held state beyond a no-subscriber baseline.
 3. A peer grants stream credit but withholds byte credit, so opened streams
    pin their groups past the point they are useful.
 4. A lite-03+ peer asks for an enormous max delay so nothing ever expires.
@@ -87,9 +88,12 @@ the deployment's auth server, which already refuses a connect with a 401 or
 Reproduce first. A mock-time sim test (or a `just` drill against a real relay)
 with a subscriber that withholds stream credit, or drains below the media rate
 behind a deep finite queue, while the publisher writes groups across many
-tracks. Measure held serve machines (the publishers already count pending
-opens) and pool-billed bytes over time: on main they grow with time; done,
-they plateau. Sweep tracks by groups per track, per the fan-out benchmark
+tracks. Measure, over time, live serve machines (pending and opened, as a
+gauge) and the bytes they retain outside the pool (batches, chunks, and
+unsent transport data), beside pool-billed bytes compared with a
+no-subscriber baseline. Only lite counts pending opens today; IETF
+`TrackServe` counts streams only after they open, so add the gauge there. On
+main they grow with time; done, they plateau. Sweep tracks by groups per track, per the fan-out benchmark
 rule, so a cost that grows with the table shows up as a slope. Cover lite and
 moq-transport, and scenario 5 still receives the latest group.
 Include a benign withholder: a peer bounded by
