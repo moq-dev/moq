@@ -41,6 +41,10 @@ use crate::container::{Container, Frame};
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// Container display metadata has no valid catalog aspect ratio.
+	#[error("invalid display aspect: {0}")]
+	InvalidAspect(&'static str),
+
 	/// A subtitle sample cannot be reconstructed with valid text and timing.
 	#[error("invalid subtitle: {0}")]
 	InvalidSubtitle(&'static str),

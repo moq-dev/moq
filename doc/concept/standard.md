@@ -33,7 +33,7 @@ subset drops. What a peer actually observes against this implementation:
 - **Refused, not fatal.** A legal request this stack does not serve is rejected on its own and the session stays up: `FORWARD=0`, `SUBSCRIBE_TRACKS`, and the fetch forms above get `NOT_SUPPORTED`. Range Filters get `INVALID_FILTER` on draft 19 and later because the advertised filter limit is zero. On draft 21 and later, namespaces whose first tuple field is exactly `.` or `.session` get `DOES_NOT_EXIST` before application lookup; other dot prefixes still reach the application. Subscription updates accept priority and delivery timeouts; Rust also renews request tokens and relays `NEW_GROUP_REQUEST` (see dynamic groups below). Other supported-but-unimplemented preferences end that subscription; a `TRACK_PROPERTY_FILTER` there closes the session with `PROTOCOL_VIOLATION`, since it belongs only to `SUBSCRIBE_TRACKS`. On draft 18 and later a namespace update may change its prefix; suffixes after the acknowledgement are relative to that new prefix.
 - **Objects and datagrams.** Only subgroup 0 is accepted: a stream for any other subgroup, whether its header gives the ID or takes it from the first Object ID, is stopped and the session stays up. Rust relays preserve Object IDs, gaps, object properties, FIRST\_OBJECT, and END\_OF\_GROUP status objects between moq-transport peers for subgroup 0. Datagrams retain their IDs, properties, priority, and status. Plain Rust readers and moq-lite peers see consecutive frames and normal datagram payloads; JavaScript supports only normal datagrams at Object ID 0. A malformed datagram closes the session; a relayed one the downstream draft cannot carry is dropped. A relayed Timestamp leaves in the units the downstream response declares, and is dropped where it declares none (drafts 14 through 16), as for a plain frame; an immutable one that would change or vanish is refused. Only property 0x10 is read as a Timestamp. Property 0x06 stays opaque and keeps its value regardless of timestamp units; it is dropped across the draft-19 boundary, or refused when immutable, because draft 19 assigns it to SUBGROUP\_DELIVERY\_TIMEOUT. From draft 15, a status object carrying properties is refused, and one relayed from draft 14 leaves without them. Draft 14 allows them, but an END\_OF\_TRACK carrying properties ends the subscription as unsupported, since a track end has nowhere to keep them. A `FETCH` carries the END\_OF\_GROUP object on drafts 14 and 15; later drafts have no FETCH status, so their response ends at the last frame. A group cannot resume across route changes by frame ordinal once Object IDs skip ahead of the ordinals on either route; recovery refuses it instead of splicing different objects.
 - **Dynamic groups.** A Rust relay advertises `DYNAMIC_GROUPS` only where the original publisher did, and carries `NEW_GROUP_REQUEST` (draft 15 and later) back to it: on the `SUBSCRIBE` that opens the upstream subscription, or in a `REQUEST_UPDATE` once it is established. Requests from every subscriber of a track coalesce, so one that names an existing group or that an outstanding request already covers goes no further. A request for 0 goes upstream as 0, unless another subscriber's request past the newest group held answers it too. The next group the relay receives answers every request it held, so new groups never send one again. On drafts 15 and 16, whose `TRACK_STATUS` answer has no room for it, a relay copy first learned from `TRACK_STATUS` (a fetch-only reader) does not advertise it to later subscribers. Local publishers never advertise `DYNAMIC_GROUPS`; on their tracks a `SUBSCRIBE`'s request is ignored and an update carrying one ends the subscription with `UPDATE_FAILED`. moq-lite hops do not carry requests yet.
-- **Priority.** Higher is served first. The IETF default of 128 is this stack's 127, and a track that never sets one is 127.
+- **Priority.** Higher is served first. The IETF default of 128 is this stack's 127, and a track that never sets one is 127. A relay's upstream subscription carries the highest priority its subscribers ask for and updates it as they come and go; its group order stays as the `SUBSCRIBE` asked, since no draft lets an update change it.
 - **Size.** An object extension block larger than 64 KiB ends that subgroup stream. The session stays up. This cap is ours, not the draft's.
 
 Several project drafts extend the IETF wire without breaking it, since `SETUP`
@@ -65,14 +65,19 @@ choices. They follow the product model.
   [publisher epochs](/concept/moq-lite#publisher-epochs) for how that one route
   is chosen.
 
-- **Plain readers leave object properties out.**
+- **Plain readers leave object and track properties out.**
   [Draft 18 §2.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-18.html#section-2.5)
   says a relay that does not understand a property still forwards and caches
-  it. Rust moq-transport relay paths do so; the public API, plain moq-lite, and
+  it. Rust moq-transport relay paths do so, for object properties and for the
+  track properties in `SUBSCRIBE_OK` and `FETCH_OK` from draft 16, and in
+  `TRACK_STATUS_OK` from draft 18; the public API, plain moq-lite, and
   JavaScript [leave other per-object metadata out](/concept/moq-lite#what-moq-lite-leaves-out).
   Immutable property blocks retain their bytes. Forwarding is refused when the
   negotiated drafts use incompatible key or integer encodings, or when the block
-  holds a Timestamp in units the response does not declare.
+  holds a Timestamp in units the response does not declare. Property 0x06 crosses
+  the draft-19 boundary as it does on an object. A track carrying a
+  Mandatory Track Property (0x4000-0x7FFF) is refused with `UNSUPPORTED_EXTENSION`
+  instead, or `NOT_SUPPORTED` before draft 18.
 
 - **`SUBSCRIBE_OK` before an old source answers.** moq-lite 01 through 04 have
   no track stream, so the relay cannot learn from that source whether the track

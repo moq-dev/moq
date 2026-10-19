@@ -541,6 +541,8 @@ fn server_stateless_reset() {
     );
 }
 
+/// A reset answering a locally closed connection drains it without the `ConnectionLost` a local
+/// `close()` never reports
 #[test]
 fn client_stateless_reset() {
     let _guard = subscribe();
@@ -566,13 +568,13 @@ fn client_stateless_reset() {
         (&[0xab; 128][..]).into(),
     );
     info!("resetting");
-    pair.drive();
-    assert_matches!(
-        pair.server_conn_mut(server_ch).poll(),
-        Some(Event::ConnectionLost {
-            reason: ConnectionError::Reset
-        })
-    );
+    // Step without advancing time, so the reset rather than the close timer drains the server
+    pair.drive_server();
+    pair.drive_client();
+    pair.drive_server();
+    let conn = pair.server_conn_mut(server_ch);
+    assert!(conn.is_drained());
+    assert_matches!(conn.poll(), None);
 }
 
 /// The client reads CONNECTION_CLOSE after the server forgets the connection.

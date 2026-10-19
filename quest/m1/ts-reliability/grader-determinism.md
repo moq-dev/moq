@@ -21,7 +21,7 @@ Two sources of run-to-run variance, found by #5810 and #5854:
   repeated timestamp read as a hole; `decode.py` has the same exposure.
 
 Decided 2026-10-17 (maintainer): one quest for the grader, with the CI path
-filter as a separate [m0 quest](/quest/m0/ci/ts-path-filter.md). The harness
+filter as a separate m0 quest. The harness
 never gates on a random-loss percentage (see
 [bufferbloat](/quest/m1/bufferbloat.md)).
 

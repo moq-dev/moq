@@ -278,6 +278,9 @@ export const hooks: {
 	// pending: /quest/m1/public-model/serve.md
 	/** The newest frame buffered for a subscriber, which wire answers name; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
+	// private: capability gap
+	/** The track's largest known now, past what is buffered once the source reported newer; assigned by `track.ts`. */
+	peekLargest: (subscriber: Subscriber) => Location | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
 	// pending: /quest/m1/public-model/ingest.md
@@ -337,9 +340,6 @@ export const hooks: {
 		expiry: { expired: () => boolean; changed: readonly Getter<unknown>[] },
 	) => void;
 	// pending: /quest/m1/public-model/serve.md
-	/** Whether a drift budget gave up on a drained group, which reads as a clean end. */
-	groupExpired: (group: GroupConsumer) => boolean;
-	// pending: /quest/m1/public-model/serve.md
 	/** Start a group operation unless the handed-out group has expired, and stop it if the group expires mid-flight. */
 	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
 	// pending: /quest/m1/public-model/serve.md
@@ -385,6 +385,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	bufferedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	peekLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
 	groupProgress: () => {
@@ -433,9 +436,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupExpired: () => {
 		throw new Error("group.ts not loaded");
 	},
 	guardGroup: () => {
