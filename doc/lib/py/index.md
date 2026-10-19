@@ -134,6 +134,6 @@ A catalog that needs a newer moq-hang draft than this build reads raises `Error.
 
 ## Reference
 
-- API reference: [moq-rs.readthedocs.io](https://moq-rs.readthedocs.io)
+- API source: [py/moq-rs/moq](https://github.com/moq-dev/moq/tree/main/py/moq-rs/moq)
 - Source and examples: [`py/moq-rs`](https://github.com/moq-dev/moq/tree/main/py/moq-rs)
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
