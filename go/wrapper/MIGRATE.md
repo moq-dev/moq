@@ -95,10 +95,15 @@ JSON and opaque data tracks live in `moq.dev/moq/json` and `moq.dev/moq/flate`, 
 audio, err := media.NewAudioTrackProducer(broadcast, media.Named{}, media.AudioInit{Format: media.AudioFormatOpus, Data: opusHead})
 ```
 
-### Container byte-stream importers take an init record
+### Container byte streams use `media.NewContainerProducer` (#PRNUM)
 
-`media.NewContainerStreamProducer` takes a `ContainerStreamInit` holding the format instead of a bare format.
-Its optional `Timebase`, also on `ContainerInit`, shares one source's offset across container imports.
+`BroadcastProducer.PublishContainerStream` has no separate importer: a container recovers its own framing, so `media.NewContainerProducer` takes chunks split anywhere.
+Leave `Data` empty and write the stream through it.
+`ContainerInit`'s optional `Timebase` shares one source's offset across container imports.
+
+```go
+stream, err := media.NewContainerProducer(broadcast, media.ContainerInit{Format: media.ContainerFormatFmp4})
+```
 
 ### Durations are `time.Duration`
 
