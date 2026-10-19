@@ -144,6 +144,9 @@ chrono = "0.4"
 # be driven with synthetic daemon events.
 flume = "0.12"
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+# rustls without a provider, as iroh builds it, so the default test build covers an
+# `http://` dial's certificate fetch with no process default installed.
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
 # A fake STUN server for the WebRTC server-reflexive candidate test.
 stun-types = { workspace = true }
 tempfile = "3"

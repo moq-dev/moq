@@ -76,7 +76,6 @@ stopping and restarting; repeat it with `--passthrough`.
 ## Required
 
 - [Epoch anchor](/quest/m2/epoch-anchor.md) - every importer derives one catalog clock and timestamp era from the epoch
-- [Raw TS cuts on the epoch timeline](/quest/m2/ts-passthrough-epoch-cuts.md) - passthrough groups start where every instance cuts
 
 ## Related
 

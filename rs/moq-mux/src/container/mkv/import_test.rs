@@ -241,6 +241,317 @@ fn codec_private_resolves_display_aspect() {
 	}
 }
 
+fn aspect_file(codec_id: &str, private: Option<Vec<u8>>, extra: Vec<MatroskaSpec>) -> Vec<u8> {
+	let mut video = vec![MatroskaSpec::PixelWidth(1440), MatroskaSpec::PixelHeight(1080)];
+	video.extend(extra);
+	let mut track = vec![
+		MatroskaSpec::TrackNumber(1),
+		MatroskaSpec::TrackUID(1),
+		MatroskaSpec::TrackType(1),
+		MatroskaSpec::CodecID(codec_id.into()),
+		MatroskaSpec::Video(Master::Full(video)),
+	];
+	if let Some(private) = private {
+		track.push(MatroskaSpec::CodecPrivate(private));
+	}
+	MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(track))])
+		.segment_end()
+		.build()
+}
+
+#[test]
+fn container_aspect_display_dimensions_and_crop() {
+	use MatroskaSpec::*;
+	let cases = [
+		(vec![DisplayWidth(1920), DisplayHeight(1080)], (Some(16), Some(9))),
+		(vec![DisplayWidth(1080), DisplayHeight(1080)], (Some(1), Some(1))),
+		(vec![DisplayWidth(1920)], (Some(16), Some(9))),
+		(vec![DisplayHeight(810)], (Some(16), Some(9))),
+		(vec![], (None, None)),
+		(vec![DisplayWidth(2880), DisplayHeight(2160)], (None, None)),
+		// The catalog has no crop, so a crop with default display dimensions keeps square samples
+		// and the whole picture keeps its shape instead of being squeezed into the cropped ratio.
+		(vec![PixelCropRight(360)], (None, None)),
+		(vec![PixelCropLeft(180), PixelCropRight(180)], (None, None)),
+		(vec![PixelCropTop(135), PixelCropBottom(135)], (None, None)),
+		(vec![PixelCropRight(720), PixelCropBottom(540)], (None, None)),
+		(
+			vec![PixelCropRight(360), DisplayWidth(1080), DisplayHeight(1080)],
+			(None, None),
+		),
+		// A 1080x1080 crop displayed at 1440x1080 has 4:3 samples, so the whole 1440x1080 is 16:9.
+		(
+			vec![PixelCropRight(360), DisplayWidth(1440), DisplayHeight(1080)],
+			(Some(16), Some(9)),
+		),
+		(vec![PixelCropRight(360), DisplayWidth(1440)], (Some(16), Some(9))),
+		(
+			vec![PixelCropRight(360), DisplayWidth(1920), DisplayHeight(1080)],
+			(Some(64), Some(27)),
+		),
+	];
+	for (extra, expected) in cases {
+		// AV1 has no SPS aspect; VP9 uses the same container metadata path.
+		for (codec, private) in [("V_AV1", Some(vec![0x81, 0, 0, 0])), ("V_VP9", None)] {
+			let catalog = run(&aspect_file(codec, private, extra.clone()));
+			let config = catalog.video.renditions.values().next().unwrap();
+			assert_eq!(
+				(config.display_aspect_width, config.display_aspect_height),
+				expected,
+				"{codec} {extra:?}"
+			);
+		}
+	}
+	for unit in 1..=4 {
+		let data = aspect_file(
+			"V_VP9",
+			None,
+			vec![DisplayUnit(unit), DisplayWidth(16), DisplayHeight(9)],
+		);
+		let catalog = run(&data);
+		let config = catalog.video.renditions.values().next().unwrap();
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(Some(16), Some(9)),
+			"unit {unit}"
+		);
+	}
+}
+
+fn assert_invalid_aspect(data: &[u8], context: &str) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut import = super::Import::new(broadcast, catalog.reserve());
+	let result = import.decode(data).and_then(|()| import.finish());
+	assert!(
+		matches!(result, Err(crate::Error::Mkv(super::Error::InvalidAspect(_)))),
+		"{context}: {result:?}"
+	);
+}
+
+#[test]
+fn container_aspect_refuses_missing_nonpixel_dimensions() {
+	use MatroskaSpec::*;
+	for unit in 1..=4 {
+		for extra in [vec![], vec![DisplayWidth(16)], vec![DisplayHeight(9)]] {
+			let mut fields = vec![DisplayUnit(unit)];
+			fields.extend(extra);
+			assert_invalid_aspect(&aspect_file("V_VP9", None, fields), &format!("unit {unit}"));
+		}
+	}
+}
+
+#[test]
+fn container_aspect_malformed_track_is_not_skipped() {
+	use MatroskaSpec::*;
+	for reverse in [false, true] {
+		let mut tracks = vec![
+			track_entry_audio_opus(1, 48000.0, 2),
+			TrackEntry(Master::Full(vec![
+				TrackNumber(2),
+				TrackUID(2),
+				TrackType(1),
+				CodecID("V_VP9".into()),
+				Video(Master::Full(vec![
+					PixelWidth(1440),
+					PixelHeight(1080),
+					DisplayUnit(1),
+					DisplayWidth(16),
+				])),
+			])),
+		];
+		if reverse {
+			tracks.reverse();
+		}
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(tracks)
+			.segment_end()
+			.build();
+		assert_invalid_aspect(&data, &format!("reverse {reverse}"));
+	}
+}
+
+#[tokio::test]
+async fn container_aspect_unsupported_video_keeps_audio() {
+	use MatroskaSpec::*;
+	for reverse in [false, true] {
+		let mut tracks = vec![
+			track_entry_audio_opus(1, 48000.0, 2),
+			TrackEntry(Master::Full(vec![
+				TrackNumber(2),
+				TrackUID(2),
+				TrackType(1),
+				CodecID("V_UNKNOWN".into()),
+				Video(Master::Full(vec![PixelWidth(0), PixelHeight(1080)])),
+			])),
+		];
+		if reverse {
+			tracks.reverse();
+		}
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(tracks)
+			.cluster(0, || vec![simple_block(1, 0, true, b"opus")])
+			.segment_end()
+			.build();
+		let catalog = run(&data);
+		assert_eq!(catalog.audio.renditions.len(), 1);
+		assert!(catalog.video.renditions.is_empty());
+		let imported = import_chunked(&data, data.len()).await;
+		assert!(imported.refused.is_none());
+		assert_eq!(imported.published.len(), 1);
+		assert_eq!(imported.published.values().next().unwrap(), &[0]);
+	}
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn container_aspect_matroska_keeps_sps() {
+	use crate::codec::{h264, h265};
+	use bytes::Bytes;
+	let avcc = h264::build_avcc(
+		&[Bytes::from_static(h264::fixtures::SPS_ANAMORPHIC)],
+		&[Bytes::from_static(h264::fixtures::PPS)],
+	)
+	.unwrap();
+	let hvcc = h265::build_hvcc(
+		&[Bytes::from_static(h265::fixtures::VPS)],
+		&[Bytes::from_static(h265::fixtures::SPS_ANAMORPHIC)],
+		&[Bytes::from_static(h265::fixtures::PPS)],
+	)
+	.unwrap();
+	for (codec, private) in [("V_MPEG4/ISO/AVC", avcc), ("V_MPEGH/ISO/HEVC", hvcc)] {
+		let catalog = run(&aspect_file(
+			codec,
+			Some(private.to_vec()),
+			vec![MatroskaSpec::DisplayWidth(1080), MatroskaSpec::DisplayHeight(1080)],
+		));
+		let config = catalog.video.renditions.values().next().unwrap();
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(Some(16), Some(9))
+		);
+	}
+	logs_assert(|lines| {
+		let conflicts = lines
+			.iter()
+			.filter(|line| line.contains("display aspect disagrees") && line.contains("Matroska"))
+			.count();
+		if conflicts == 2 {
+			Ok(())
+		} else {
+			Err(format!("expected two SPS conflicts, got {conflicts}"))
+		}
+	});
+}
+
+#[test]
+fn container_aspect_absent_preserves_pixel_dimensions() {
+	use MatroskaSpec::*;
+	for (fields, expected) in [
+		(vec![], (None, None)),
+		(vec![PixelWidth(0), PixelHeight(1080)], (Some(0), Some(1080))),
+		(vec![PixelWidth(1440)], (Some(1440), None)),
+		(vec![PixelHeight(0)], (None, Some(0))),
+		// A crop with default display dimensions is never read, so it is not validated.
+		(
+			vec![PixelWidth(1440), PixelHeight(1080), PixelCropRight(u64::MAX)],
+			(Some(1440), Some(1080)),
+		),
+	] {
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![TrackEntry(Master::Full(vec![
+				TrackNumber(1),
+				TrackUID(1),
+				TrackType(1),
+				CodecID("V_VP9".into()),
+				Video(Master::Full(fields)),
+			]))])
+			.segment_end()
+			.build();
+		let catalog = run(&data);
+		let config = catalog.video.renditions.values().next().unwrap();
+		assert_eq!((config.coded_width, config.coded_height), expected);
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(None, None)
+		);
+	}
+}
+
+#[test]
+fn container_aspect_uncropped_display_needs_no_pixel_size() {
+	use MatroskaSpec::*;
+	for fields in [
+		vec![DisplayWidth(16), DisplayHeight(9)],
+		vec![PixelWidth(0), PixelHeight(1080), DisplayWidth(16), DisplayHeight(9)],
+		vec![DisplayUnit(1), DisplayWidth(16), DisplayHeight(9)],
+	] {
+		let data = MkvBuilder::new()
+			.header("matroska")
+			.segment_start()
+			.info(1_000_000)
+			.tracks(vec![TrackEntry(Master::Full(vec![
+				TrackNumber(1),
+				TrackUID(1),
+				TrackType(1),
+				CodecID("V_VP9".into()),
+				Video(Master::Full(fields)),
+			]))])
+			.segment_end()
+			.build();
+		let catalog = run(&data);
+		let config = catalog.video.renditions.values().next().unwrap();
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(Some(16), Some(9))
+		);
+	}
+}
+
+#[test]
+fn container_aspect_matroska_rejects_invalid_dimensions() {
+	use MatroskaSpec::*;
+	for fields in [
+		vec![DisplayWidth(0)],
+		vec![DisplayHeight(0)],
+		vec![DisplayWidth(u64::MAX), DisplayHeight(1)],
+		vec![DisplayUnit(5), DisplayWidth(16), DisplayHeight(9)],
+		// A crop read to scale explicit display dimensions must leave a picture.
+		vec![PixelCropRight(1440), DisplayWidth(16)],
+		vec![PixelCropLeft(1), PixelCropRight(u64::MAX), DisplayWidth(16)],
+		vec![PixelCropTop(1081), DisplayHeight(9)],
+		vec![PixelCropBottom(1080), DisplayHeight(9)],
+		vec![
+			DisplayUnit(1),
+			PixelCropRight(u64::MAX),
+			DisplayWidth(16),
+			DisplayHeight(9),
+		],
+	] {
+		assert_invalid_aspect(&aspect_file("V_VP9", None, fields.clone()), &format!("{fields:?}"));
+	}
+	let data = aspect_file("V_VP9", None, vec![DisplayWidth(u64::MAX), DisplayHeight(u64::MAX)]);
+	let catalog = run(&data);
+	let config = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(
+		(config.display_aspect_width, config.display_aspect_height),
+		(Some(1), Some(1))
+	);
+}
+
 #[test]
 fn test_flac_catalog() {
 	let data = MkvBuilder::new()
