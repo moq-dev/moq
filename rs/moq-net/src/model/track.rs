@@ -3657,6 +3657,26 @@ impl Consumer {
 		})
 	}
 
+	/// Lend `head` to the cached copies of group `sequence`; see
+	/// [`group::Producer::adopt_head`].
+	pub(super) fn adopt_head(&self, sequence: u64, head: &group::Head) {
+		let copies: Vec<group::Producer> = self.with_state(|state| {
+			let Some(state) = state else {
+				return Vec::new();
+			};
+			let state = state.read();
+			state
+				.lookup
+				.get(&sequence)
+				.map_or_else(Vec::new, |slot| slot.copies().cloned().collect())
+		});
+		// With the track lock released (lock order is track then group): adopting settles
+		// the group's cache debt.
+		for group in copies {
+			group.adopt_head(head);
+		}
+	}
+
 	/// [`Self::poll_group`], except a newer group is no verdict: QUIC does not order
 	/// streams, so this one may still land behind it. Pending until it is cached, or the
 	/// feed starts past it or ends before it.

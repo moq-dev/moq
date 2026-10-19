@@ -20,8 +20,8 @@ use crate::{Cap, Timescale, stats, track};
 use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::ops::{Bound, RangeBounds};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::task::{Poll, ready};
 
 use crate::{Error, IntoBytes, Result, Timestamp};
@@ -187,6 +187,43 @@ pub(super) struct GroupState {
 	// `Alive::aborted`, so [`Producer::abort`] stays the only writer: anything else
 	// setting this would leave track scans reading a group as live.
 	pub(super) abort: Option<Error>,
+
+	// The readers that could resume this group on another route. A release that is no
+	// cache policy moves the frames to them rather than dropping them.
+	handoff: Mutex<Weak<Handoff>>,
+
+	// Whether an adopted head (see [`Producer::adopt_head`]) begins at the group's first
+	// object, for a wire header that arrives after it.
+	adopted: Option<bool>,
+}
+
+/// The frames a copy of a group holds, from where it starts, which a successor copy of
+/// the same group on another route adopts below where it starts.
+pub(super) struct Head {
+	start: usize,
+	// Whether `start` is the group's first object.
+	first_object: bool,
+	frames: Vec<Frame>,
+	// Relay metadata for `frames`, at the same index; frames past its end carry none.
+	objects: Vec<Option<Arc<super::object::Fields>>>,
+}
+
+/// A copy's [`Head`], shared by every reader that could resume its group elsewhere.
+///
+/// Read from the copy while it holds its frames. Once it fails, its release moves them
+/// here instead, so a plain consumer of the failed copy still reads the abort and pins
+/// nothing, and the frames go with the last reader holding this.
+pub(super) struct Handoff {
+	state: kio::ConsumerWeak<GroupState>,
+	salvaged: Mutex<Option<Arc<Head>>>,
+}
+
+impl Handoff {
+	/// The copy's head, if it holds any frames, or held them when it failed.
+	pub(super) fn head(&self) -> Option<Arc<Head>> {
+		let salvaged = self.salvaged.lock().unwrap_or_else(PoisonError::into_inner).clone();
+		salvaged.or_else(|| self.state.read().head().map(Arc::new))
+	}
 }
 
 /// What an IETF relay keeps beside a group's frames.
@@ -493,8 +530,49 @@ impl GroupState {
 		self.charge.add(written + slots)
 	}
 
+	/// Whether the frames held start at the group's first object.
+	fn first_object(&self) -> bool {
+		self.wire().map_or(self.offset == 0, |wire| wire.first_object)
+	}
+
+	/// The committed frames, for a successor copy to adopt. Sparse Object IDs refuse
+	/// ordinal recovery, so they lend nothing.
+	fn head(&self) -> Option<Head> {
+		if self.frames.is_empty() || self.sparse() {
+			return None;
+		}
+		Some(Head {
+			start: self.offset,
+			first_object: self.first_object(),
+			frames: self.frames.iter().cloned().collect(),
+			objects: self
+				.relay
+				.as_ref()
+				.map_or_else(Vec::new, |relay| relay.objects.iter().cloned().collect()),
+		})
+	}
+
 	/// Drop the cached frames (and any in-flight tail) and release their pool charge.
-	fn release(&mut self) {
+	///
+	/// With `salvage`, the committed frames move to the readers that could resume the
+	/// group elsewhere, if any are left, instead of being dropped.
+	fn release(&mut self, salvage: bool) {
+		let handoff = match salvage && !self.frames.is_empty() && !self.sparse() {
+			true => self.handoff.lock().unwrap_or_else(PoisonError::into_inner).upgrade(),
+			false => None,
+		};
+		if let Some(handoff) = handoff {
+			let head = Head {
+				start: self.offset,
+				first_object: self.first_object(),
+				frames: std::mem::take(&mut self.frames).into(),
+				objects: self
+					.relay
+					.as_mut()
+					.map_or_else(Vec::new, |relay| std::mem::take(&mut relay.objects).into()),
+			};
+			*handoff.salvaged.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(head));
+		}
 		self.frames = VecDeque::new();
 		self.partial = None;
 		self.cache = 0;
@@ -606,7 +684,7 @@ impl Drop for Alive {
 					sequence = self.info.sequence,
 					"group::Producer dropped without finish() or abort()"
 				);
-				state.release();
+				state.release(true);
 			}
 			Err(state) => {
 				if state.fin.is_some() || state.abort.is_some() {
@@ -638,8 +716,15 @@ impl Producer {
 
 	#[cfg(feature = "async")]
 	// private: passthrough
-	pub(crate) fn set_wire(&self, wire: Wire) -> Result<()> {
-		modify(&self.state)?.relay().wire = Some(wire);
+	pub(crate) fn set_wire(&self, mut wire: Wire) -> Result<()> {
+		let mut state = modify(&self.state)?;
+		// A head adopted before the header arrived holds the objects below the stream's.
+		if let Some(first_object) = state.adopted {
+			wire.first_object = first_object;
+			wire.first_id = state.offset as u64;
+			wire.last = wire.last.or((state.next_index as u64).checked_sub(1));
+		}
+		state.relay().wire = Some(wire);
 		Ok(())
 	}
 
@@ -782,6 +867,72 @@ impl Producer {
 		state.next_index = index;
 		state.committed = index;
 		Ok(())
+	}
+
+	/// Adopt the frames of `head` below where this copy starts, so it holds the group
+	/// from `head`'s start, as if this route had delivered them.
+	///
+	/// A no-op unless `head` starts below this copy and reaches it, and the frames fit the
+	/// group's budget. Readers keep their positions, since frames keep their indices. A
+	/// group whose frames build on earlier ones (a compressed group) primes its decoder
+	/// from the adopted frames here.
+	pub(super) fn adopt_head(&self, head: &Head) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		let offset = state.offset;
+		let reaches = head.start.saturating_add(head.frames.len()) >= offset;
+		if state.abort.is_some() || state.sparse() || head.start >= offset || !reaches {
+			return;
+		}
+		let count = offset - head.start;
+		let frames = &head.frames[..count];
+		let fields = || head.objects.iter().take(count).flatten();
+		let payload: u64 = frames.iter().map(|frame| frame.payload.len() as u64).sum();
+		let metadata: u64 = fields().map(|fields| fields.heap()).sum();
+		if state.would_overflow(count, payload + metadata) {
+			return;
+		}
+
+		let before = state.frames.capacity().saturating_sub(FRAME_SLOTS);
+		state.frames.reserve(count);
+		let mut growth = ((state.frames.capacity().saturating_sub(FRAME_SLOTS) - before) * size_of::<Frame>()) as u64;
+		for frame in frames.iter().rev() {
+			state.frames.push_front(frame.clone());
+		}
+		// Keep the fields aligned with the frames: the adopted ones lead.
+		if fields().next().is_some() || state.relay.as_ref().is_some_and(|relay| !relay.objects.is_empty()) {
+			let relay = state.relay();
+			let before = relay.objects.capacity();
+			relay.objects.reserve(count);
+			let slots = ((relay.objects.capacity() - before) * size_of::<Option<Arc<super::object::Fields>>>()) as u64;
+			for index in (0..count).rev() {
+				relay.objects.push_front(head.objects.get(index).cloned().flatten());
+			}
+			relay.bytes += slots + metadata;
+			growth += slots;
+		}
+		state.offset = head.start;
+		state.cache += payload;
+		let start = frames.iter().find_map(|frame| frame.timestamp);
+		state.timeline = match (state.timeline, start) {
+			(Timeline::Timed { latest, .. }, Some(start)) => Timeline::Timed { start, latest },
+			(Timeline::Empty, Some(start)) => Timeline::Timed {
+				start,
+				latest: frames.iter().rev().find_map(|frame| frame.timestamp).unwrap_or(start),
+			},
+			(Timeline::Empty, None) => Timeline::Untimed,
+			(timeline, _) => timeline,
+		};
+		state.adopted = Some(head.first_object);
+		if let Some(wire) = state.wire_mut() {
+			wire.first_object = head.first_object;
+			wire.first_id = head.start as u64;
+			wire.last = wire.last.or(Some(offset as u64 - 1));
+		}
+		let now = state.charge.add(payload + metadata + growth);
+		drop(state);
+		self.cache.settle(now);
 	}
 
 	/// A helper method to write a frame from a single byte buffer.
@@ -1190,7 +1341,8 @@ impl Producer {
 		guard.abort = Some(err);
 		self.alive.cut.store(cut, Ordering::Release);
 		self.alive.aborted.store(true, Ordering::Release);
-		guard.release();
+		// Cache policy frees the frames; a copy that failed or was given up lends them on.
+		guard.release(cut);
 		guard.close();
 		self.cache.aborted(self.sequence, cut);
 	}
@@ -1202,7 +1354,7 @@ impl Producer {
 		state.abort = Some(err.clone());
 		self.alive.cut.store(true, Ordering::Release);
 		self.alive.aborted.store(true, Ordering::Release);
-		state.release();
+		state.release(false);
 		state.close();
 		self.cache.aborted(self.sequence, true);
 		err
@@ -1760,7 +1912,6 @@ impl Consumer {
 	}
 
 	/// The index of the first frame the group holds (see [`Producer::start_at`]).
-	#[cfg(feature = "async")]
 	// private: passthrough
 	pub(crate) fn first_frame(&self) -> u64 {
 		self.cursor.state.read().offset as u64
@@ -1811,6 +1962,22 @@ impl Consumer {
 	pub(super) fn with_expiry(mut self, expiry: Arc<dyn Expiry>) -> Self {
 		self.expiry = Some(expiry);
 		self
+	}
+
+	/// The hand-off of this copy's head, shared by every reader that could resume it
+	/// elsewhere.
+	pub(super) fn handoff(&self) -> Arc<Handoff> {
+		let state = self.cursor.state.read();
+		let mut handoff = state.handoff.lock().unwrap_or_else(PoisonError::into_inner);
+		if let Some(handoff) = handoff.upgrade() {
+			return handoff;
+		}
+		let shared = Arc::new(Handoff {
+			state: self.cursor.state.weak(),
+			salvaged: Mutex::default(),
+		});
+		*handoff = Arc::downgrade(&shared);
+		shared
 	}
 
 	/// Carry this group across a front's route changes; see [`super::resume`].
@@ -2897,6 +3064,117 @@ mod test {
 		let state = producer.state.read();
 		assert!(state.frames.is_empty(), "cached frames should be dropped on abort");
 		assert_eq!(state.cache, 0);
+	}
+
+	/// A failed copy moves its frames to the readers that could resume it, so they outlive
+	/// the release only as long as one of those readers does; cache policy keeps nothing.
+	#[test]
+	fn an_abort_hands_the_head_to_its_resumers() {
+		for (err, kept) in [(Error::Cancel, true), (Error::Evicted, false)] {
+			let pool = cache::Pool::unbounded();
+			let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+			let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
+			producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
+			producer.write_frame(None, Bytes::from_static(b"b")).unwrap();
+			let handoff = producer.consume().handoff();
+			assert_eq!(handoff.head().map(|head| head.frames.len()), Some(2), "read live");
+
+			producer.clone().abort(err.clone()).unwrap();
+			assert!(producer.state.read().frames.is_empty(), "{err}: released");
+			assert_eq!(pool.used(), 0, "{err}: uncharged");
+			let head = handoff.head();
+			assert_eq!(head.is_some(), kept, "{err}");
+			if let Some(head) = head {
+				assert_eq!((head.start, head.first_object, head.frames.len()), (0, true, 2));
+				let held = Arc::downgrade(&head);
+				drop((head, handoff));
+				assert!(held.upgrade().is_none(), "freed with the last resumer");
+			}
+		}
+	}
+
+	/// An adopted head leads the fields and the wire header, whether the header was set
+	/// before the adoption or arrives after it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_adopted_head_keeps_fields_and_the_wire_aligned() {
+		let fields = |id| {
+			Some(Arc::new(super::super::object::Fields {
+				id,
+				properties: Default::default(),
+			}))
+		};
+		let head = Head {
+			start: 0,
+			first_object: true,
+			frames: vec![
+				Frame {
+					timestamp: None,
+					payload: Bytes::from_static(b"a"),
+				},
+				Frame {
+					timestamp: None,
+					payload: Bytes::from_static(b"b"),
+				},
+			],
+			objects: vec![None, fields(1)],
+		};
+		let wire = Wire {
+			sparse: false,
+			first_object: false,
+			first_id: 2,
+			extensions: true,
+			has_end: true,
+			fetchable: true,
+			last: None,
+		};
+		for wired_first in [true, false] {
+			let pool = cache::Pool::unbounded();
+			let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+			let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
+			tail.start_at(2).unwrap();
+			if wired_first {
+				tail.set_wire(wire.clone()).unwrap();
+			}
+			let mut reader = tail.consume();
+			reader.start_at(2);
+			let before = pool.used();
+			tail.adopt_head(&head);
+			assert!(pool.used() >= before + 2, "the adopted frames are charged");
+			if !wired_first {
+				tail.set_wire(wire.clone()).unwrap();
+			}
+			let written = tail.state.read().wire().cloned().unwrap();
+			assert_eq!(
+				(written.first_object, written.first_id, written.last),
+				(true, 0, Some(1))
+			);
+			tail.mark_gap(2, None).unwrap();
+			assert!(tail.state.read().wire().unwrap().fetchable, "no gap below the stream");
+			tail.write_frame(None, Bytes::from_static(b"c")).unwrap();
+			tail.finish().unwrap();
+
+			let waiter = kio::Waiter::noop();
+			let mut whole = tail.consume();
+			let mut read = Vec::new();
+			while let Poll::Ready(Ok(Some(object))) = whole.poll_read_object(&waiter) {
+				read.push((object.frame.payload, object.fields.map(|fields| fields.id)));
+			}
+			assert_eq!(
+				read,
+				[
+					(Bytes::from_static(b"a"), None),
+					(Bytes::from_static(b"b"), Some(1)),
+					(Bytes::from_static(b"c"), None)
+				]
+			);
+			let next = reader.read_frame().now_or_never().unwrap().unwrap();
+			assert_eq!(
+				next.map(|frame| frame.payload),
+				Some(Bytes::from_static(b"c")),
+				"a reader keeps its place"
+			);
+		}
 	}
 
 	#[test]
