@@ -4,17 +4,18 @@
 //! routes their payloads to the codec importers (H.264/H.265/AAC, plus the
 //! legacy MP2/AC-3/E-AC-3 verbatim path), which own their broadcast tracks and
 //! catalog entries. Elementary streams we don't decode are carried verbatim, one
-//! MoQ track per PID, described in the `mpegts` catalog section: PES-framed streams
-//! ride the normal PES reassembly, while section-framed streams (SCTE-35 and
-//! other private sections, which are not PES) are reassembled as sections, as the
-//! PAT and PMT are. TS adds PAT/PMT discovery, PES reassembly, the
+//! MoQ track per PID, described in the `mpegts` catalog section: PES streams ride
+//! the normal PES reassembly and travel as whole PES packets at their placement on
+//! the program clock, while section-framed streams (SCTE-35 and other private
+//! sections, which are not PES) are reassembled as sections, as the PAT and PMT
+//! are. TS adds PAT/PMT discovery, PES reassembly, the
 //! private-section path, and the 90 kHz PTS conversion across its 33-bit wrap. The service
 //! layer is captured too: the identity parsed from the PAT as a
 //! [`Program`](catalog::Program) record in the `mpegts` catalog section, and the
 //! standalone SI PIDs as opaque sections on per-`(PID, table_id)` snapshot tracks
 //! (see [`si`](super::si)), so both survive the round-trip.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -25,6 +26,7 @@ use mpeg2ts::ts::{Pid, TsPacket};
 use super::adts;
 use super::catalog;
 use super::health::{Continuation, Continuity, Health};
+use super::passthrough::{PCR, PCR_OFFSET, Sample, locate};
 use super::psi::{self, PesStart, Pmt};
 use super::stats;
 use crate::catalog::Offset;
@@ -44,11 +46,25 @@ use moq_net::Timestamp;
 /// budget. Exceeding either limit refuses the input instead of retaining more bytes.
 ///
 /// Elementary streams we don't decode are carried verbatim, one MoQ track per
-/// PID, when the catalog `E` carries the [`mpegts`](super::Mpegts) section: PES-framed
-/// streams ride the normal PES reassembly, section-framed streams (SCTE-35, marked
-/// by a program-level 'CUEI' registration descriptor, and other private sections)
-/// are reassembled as sections. With a base `Catalog<()>` they're logged and dropped
-/// instead.
+/// PID, when the catalog `E` carries the [`mpegts`](super::Mpegts) section: section-framed
+/// streams (SCTE-35, marked by a program-level 'CUEI' registration descriptor, and other
+/// private sections) are reassembled as sections, and any other stream travels as whole PES
+/// packets ([`PesPacket`](super::PesPacket)). With a base `Catalog<()>` they're logged and
+/// dropped instead.
+///
+/// A whole PES is timestamped with its placement: the program clock at its first byte,
+/// interpolated between the PCRs either side of it (ISO 13818-1 2.4.2.2) and shifted onto the
+/// catalog clock as the media is. Its PTS and DTS move by the same offset inside its bytes, and
+/// every other byte is kept. So it waits for the PCR after it, and for a PTS on any stream to
+/// anchor the timebase, within the staging bound below; one that starts past the last PCR before a
+/// clock break or the end of input is extrapolated from the last two. One before the first PCR,
+/// or with no interval to extrapolate from, is dropped and counted in
+/// [`stats::Stream::unplaced`]. A stream whose PES carry a clock only the PTS and DTS of are
+/// rebased (ESCR, a `pack_header_field`, a TREF), PES-level scrambling, an unbounded non-video
+/// PES, or a header export would refuse is refused rather than altered, as is every such stream
+/// in a program with no PCR: [`stats::Stream::refused`]. A PMT that moves the PCR PID ends the
+/// placement timebase, as a clock break does; one that drops the PCR refuses those streams, and
+/// one that names it again carries them.
 ///
 /// The PAT and every PMT are reassembled the same way, so a table that spans packets or
 /// sits behind a nonzero pointer_field is read whole. A PAT or PMT section whose CRC-32
@@ -111,8 +127,20 @@ pub struct Import<E: catalog::Catalog = ()> {
 	liveness: Liveness,
 	/// In-progress PES reassembly, keyed by elementary PID.
 	pending: HashMap<Pid, Pending>,
-	/// Partial clear PES headers, at most 9 + 255 bytes per elementary PID.
-	headers: HashMap<Pid, Vec<u8>>,
+	/// Partial clear PES headers, at most 9 + 255 bytes per elementary PID, each with where its
+	/// start code sits on the program clock ([`Placement::span`]).
+	headers: HashMap<Pid, (Option<Span>, Vec<u8>)>,
+	/// The input offset of the first byte in `scratch`, which places every packet in the input.
+	position: u64,
+	/// The program clock at each input byte, which places whole PES packets.
+	placement: Placement,
+	/// Whole PES dropped for want of a clock to place them, keyed by PID.
+	unplaced: BTreeMap<u16, u64>,
+	/// Private PES streams refused rather than carried altered, keyed by PID.
+	refused: BTreeMap<u16, u64>,
+	/// The `stream_type` of each private PES stream refused only for want of a PCR, routed again
+	/// once a PMT names one or gives the PID another type.
+	unclocked: HashMap<Pid, u8>,
 	/// One program-wide budget for PES payloads and sections awaiting their clock.
 	staging: Arc<Staging>,
 	/// The TR 101 290 checks, and the per-PID continuity state routing reads.
@@ -210,6 +238,11 @@ impl<E: catalog::Catalog> Import<E> {
 			liveness: Liveness::default(),
 			pending: HashMap::new(),
 			headers: HashMap::new(),
+			position: 0,
+			placement: Placement::default(),
+			unplaced: BTreeMap::new(),
+			refused: BTreeMap::new(),
+			unclocked: HashMap::new(),
 			staging: Arc::default(),
 			health: Health::default(),
 			pcr_pid: None,
@@ -278,6 +311,7 @@ impl<E: catalog::Catalog> Import<E> {
 		let mut off = 0;
 		while let Some(at) = self.framer.next(&self.scratch, &mut off) {
 			self.health.routed(&self.scratch, at);
+			let offset = self.position + at as u64;
 			let pkt: [u8; TsPacket::SIZE] = self.scratch[at..at + TsPacket::SIZE].try_into().unwrap();
 			let pid = (((pkt[1] & 0x1f) as u16) << 8) | pkt[2] as u16;
 			// Every packet paces the multiplex, null stuffing and retransmissions included.
@@ -318,7 +352,12 @@ impl<E: catalog::Catalog> Import<E> {
 			if self.pcr_pid.is_some_and(|p| p.as_u16() == pid) && pkt[1] & 0x80 == 0 {
 				if discontinuity_indicator(&pkt) {
 					self.timebase_break()?;
+					// The new timebase starts with the PCR the flag rides, if it rides one.
+					if let Some(pcr) = pcr(&pkt) {
+						self.place_pcr(pcr, offset)?;
+					}
 				} else if let Some(pcr) = pcr(&pkt) {
+					self.place_pcr(pcr, offset)?;
 					self.liveness.pcr(pcr);
 					if let Some(now) = self.liveness.now() {
 						self.health.tick(now);
@@ -388,13 +427,14 @@ impl<E: catalog::Catalog> Import<E> {
 				// so PES arrive before their PMT.
 				match self.streams.get(&pid) {
 					None | Some(Stream::Ignored) => {}
-					Some(_) => self.pes_packet(pid, &pkt)?,
+					Some(_) => self.pes_packet(pid, &pkt, offset)?,
 				}
 			}
 		}
 
 		self.health.drained(&self.scratch, off);
 		self.scratch.drain(..off);
+		self.position += off as u64;
 		// Cut the snapshot groups for whatever SI committed in this batch. Batching per
 		// decode call (plus the store's own host-clock debounce) coalesces a junction's
 		// burst of sub-table commits into few groups instead of one per commit.
@@ -448,9 +488,11 @@ impl<E: catalog::Catalog> Import<E> {
 		if self.pcr_pid != pmt.pcr_pid {
 			self.pcr_pid = pmt.pcr_pid;
 			self.health.pcr_pid(pmt.pcr_pid.map(|pid| pid.as_u16()));
-			// A new clock: the intervals straddling the switch measure nothing.
+			// A new clock: the intervals straddling the switch measure nothing, and the whole PES
+			// the old one began are placed on its timebase, never between its PCRs and the new.
 			self.liveness.discontinuity();
 			self.reset_mux_rate()?;
+			self.settle_placement()?;
 		}
 
 		// SCTE-35 is announced by a program-level registration descriptor with
@@ -492,8 +534,9 @@ impl<E: catalog::Catalog> Import<E> {
 		Ok(())
 	}
 
-	/// Route one packet on an elementary stream PID into its PES reassembly.
-	fn pes_packet(&mut self, pid: Pid, pkt: &[u8; TsPacket::SIZE]) -> anyhow::Result<()> {
+	/// Route one packet on an elementary stream PID, at input offset `offset`, into its PES
+	/// reassembly.
+	fn pes_packet(&mut self, pid: Pid, pkt: &[u8; TsPacket::SIZE], offset: u64) -> anyhow::Result<()> {
 		let payload = match payload(pkt) {
 			Payload::None => return Ok(()),
 			Payload::Bytes(payload) => payload,
@@ -508,34 +551,40 @@ impl<E: catalog::Catalog> Import<E> {
 			if self.headers.remove(&pid).is_some() {
 				self.damage(pid, &anyhow::anyhow!("PES header truncated at next start"))?;
 			}
+			// The payload ends the packet, so this is where its start code sits in the input.
+			let at = offset + (TsPacket::SIZE - payload.len()) as u64;
+			// Taken here, not once the header is whole, so a PCR landing before the header's
+			// continuation is the one after it.
+			let span = self.placement.span(at);
 			return match PesStart::header_len(payload) {
 				Ok(len) if payload.len() >= len => match PesStart::parse(payload) {
-					Ok(pes) => self.handle_pes_start(pid, pes),
+					Ok(pes) => self.handle_pes_start(pid, pes, span),
 					Err(err) => self.damage(pid, &err),
 				},
-				Ok(_) => self.pes_header(pid, payload.to_vec()),
+				Ok(_) => self.pes_header(pid, span, payload.to_vec()),
 				Err(err) => self.damage(pid, &err),
 			};
 		}
-		if let Some(mut header) = self.headers.remove(&pid) {
+		if let Some((span, mut header)) = self.headers.remove(&pid) {
 			header.extend_from_slice(payload);
-			self.pes_header(pid, header)
+			self.pes_header(pid, span, header)
 		} else {
 			self.handle_pes_continuation(pid, payload)
 		}
 	}
 
-	fn pes_header(&mut self, pid: Pid, header: Vec<u8>) -> anyhow::Result<()> {
+	/// Continue a PES header split across packets, placed by `span` from its start code.
+	fn pes_header(&mut self, pid: Pid, span: Option<Span>, header: Vec<u8>) -> anyhow::Result<()> {
 		let len = match PesStart::header_len(&header) {
 			Ok(len) => len,
 			Err(err) => return self.damage(pid, &err),
 		};
 		if header.len() < len {
-			self.headers.insert(pid, header);
+			self.headers.insert(pid, (span, header));
 			return Ok(());
 		}
 		match PesStart::parse(&header) {
-			Ok(pes) => self.handle_pes_start(pid, pes),
+			Ok(pes) => self.handle_pes_start(pid, pes, span),
 			Err(err) => self.damage(pid, &err),
 		}
 	}
@@ -551,8 +600,26 @@ impl<E: catalog::Catalog> Import<E> {
 			self.pending.remove(&pid);
 			self.headers.remove(&pid);
 		}
-		if self.streams.contains_key(&pid) {
-			return Ok(());
+		// A private PES stream follows the PMT's PCR_PID: refused while there is none to place
+		// its PES by, and routed again once there is, or once the PID carries another type.
+		match self.streams.get(&pid) {
+			Some(Stream::PesPacket(stream)) if self.pcr_pid.is_none() => {
+				let carried = stream.stream_type;
+				self.refuse(pid, "the program lost the PCR that placed it")?;
+				self.unclocked.insert(pid, carried);
+				return Ok(());
+			}
+			Some(Stream::Ignored)
+				if self
+					.unclocked
+					.get(&pid)
+					.is_some_and(|&refused| self.pcr_pid.is_some() || refused != stream_type) =>
+			{
+				self.unclocked.remove(&pid);
+				self.streams.remove(&pid);
+			}
+			Some(_) => return Ok(()),
+			None => {}
 		}
 
 		let stream = match StreamType::from_u8(stream_type).ok() {
@@ -623,24 +690,36 @@ impl<E: catalog::Catalog> Import<E> {
 				}
 			}
 			Some(StreamType::Mpeg1Video | StreamType::Mpeg2Video) => Stream::Clock,
-			// A codec we don't decode, named or not. Carry it verbatim as PES when the
+			// A codec we don't decode, named or not. Carry it as whole PES packets when the
 			// catalog supports the `mpegts` section. 0x86 is excluded: it's ambiguous (DTS
 			// audio, or a non-conformant SCTE-35 mux without CUEI, which is sections a PES
 			// parse would abort on), so drop it rather than risk PES-parsing sections.
 			_ => {
 				if self.supports_mpegts && stream_type != StreamType::Dts8ChannelLosslessAudio as u8 {
-					let descriptors = descriptors.to_vec();
-					match VerbatimStream::new(
-						self.broadcast.clone(),
-						self.catalog.clone(),
-						pid.as_u16(),
-						stream_type,
-						descriptors,
-					) {
-						Ok(stream) => Stream::Verbatim(Box::new(stream)),
-						Err(err) => {
-							tracing::warn!(?err, pid = pid.as_u16(), "failed to create verbatim stream, dropping");
-							Stream::Ignored
+					if self.pcr_pid.is_none() {
+						// Nothing could place its PES, so no track is advertised.
+						tracing::warn!(
+							stream_type,
+							pid = pid.as_u16(),
+							"refused a private PES stream in a program with no PCR to place it by"
+						);
+						*self.refused.entry(pid.as_u16()).or_default() += 1;
+						self.unclocked.insert(pid, stream_type);
+						Stream::Ignored
+					} else {
+						let descriptors = descriptors.to_vec();
+						match PesPacketStream::new(
+							self.broadcast.clone(),
+							self.catalog.clone(),
+							pid.as_u16(),
+							stream_type,
+							descriptors,
+						) {
+							Ok(stream) => Stream::PesPacket(Box::new(stream)),
+							Err(err) => {
+								tracing::warn!(?err, pid = pid.as_u16(), "failed to create a PES stream, dropping");
+								Stream::Ignored
+							}
 						}
 					}
 				} else {
@@ -723,6 +802,7 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Remove a PES route while keeping the counters it accumulated for this importer.
 	fn retire_stream(&mut self, pid: Pid) -> Option<Stream<E>> {
+		self.unclocked.remove(&pid);
 		let stream = self.streams.remove(&pid)?;
 		if let Some(current) = stream.stats() {
 			self.retired_stats
@@ -733,7 +813,8 @@ impl<E: catalog::Catalog> Import<E> {
 		Some(stream)
 	}
 
-	fn handle_pes_start(&mut self, pid: Pid, pes: PesStart) -> anyhow::Result<()> {
+	/// Open the PES whose header `pes` begins where `span` says, if any PCR came before it.
+	fn handle_pes_start(&mut self, pid: Pid, pes: PesStart, span: Option<Span>) -> anyhow::Result<()> {
 		// Finish the preceding PES before accepting another header.
 		if self.pending.contains_key(&pid) {
 			self.flush(pid)?;
@@ -744,11 +825,25 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		};
 
+		let whole = match stream {
+			Stream::PesPacket(stream) => Some(stream.stream_type),
+			_ => None,
+		};
+		if let Some(stream_type) = whole
+			&& let Some(why) = refusal(&pes, stream_type)
+		{
+			return self.refuse(pid, &why);
+		}
+		if pes.scrambled() {
+			return self.damage(pid, &anyhow::anyhow!("scrambled PES is not supported"));
+		}
+		let stream = &self.streams[&pid];
+
 		let is_video = matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock);
 		let is_clock = matches!(stream, Stream::Clock);
 		// Verbatim streams with no cadence (SCTE-35, DVB subtitles) are left ungraded
 		// rather than watched against an invented one.
-		if pes.pts.is_some() && !matches!(stream, Stream::Verbatim(_) | Stream::Ignored) {
+		if pes.pts.is_some() && !matches!(stream, Stream::PesPacket(_) | Stream::Ignored) {
 			self.health.pts(pid.as_u16(), self.liveness.now());
 		}
 		// The first PTS anchors the program, and each takes its era here: against the clock as the
@@ -783,6 +878,8 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		if pts.is_some() {
 			self.release_sections(offset)?;
+			// A first PTS may have anchored the timebase whole PES were waiting on.
+			self.release_placed()?;
 		}
 
 		if is_clock {
@@ -796,20 +893,42 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		}
 
+		// A whole PES keeps its header, and is placed by the PCR before it and the one after.
+		let (header, data_len, span) = match whole {
+			Some(_) => {
+				// A span whose timebase ended while its header assembled was settled with it, or
+				// is dropped as unplaced at release.
+				let Some(span) = span else {
+					// Before the first PCR on this timebase nothing places it. A PTS it carried still
+					// anchored the timebase, so it releases the reservation like a flushed PES would.
+					if pts.is_some() {
+						self.initial_reservation = None;
+					}
+					*self.unplaced.entry(pid.as_u16()).or_default() += 1;
+					return Ok(());
+				};
+				let len = pes.data_len.map(|len| pes.header.len() + len);
+				(pes.header, len, Some(span))
+			}
+			None => (&[][..], pes.data_len, None),
+		};
 		let data = &pes.data[..pes.data_len.unwrap_or(pes.data.len()).min(pes.data.len())];
 		let mut retained = Retained::new(self.staging.clone());
-		retained.grow(data.len(), 0)?;
+		// A whole PES is held as a unit until placed, so tiny ones count against the unit bound
+		// as sections do, not the byte bound alone.
+		retained.grow(header.len() + data.len(), usize::from(span.is_some()))?;
 		let mut pending = Pending {
 			retained,
 			pts,
 			offset,
 			dts: pes.dts,
-			stream_id: pes.stream_id,
-			data: Vec::with_capacity(data.len()),
-			data_len: pes.data_len,
+			data: Vec::with_capacity(header.len() + data.len()),
+			data_len,
+			span,
 		};
+		pending.data.extend_from_slice(header);
 		pending.data.extend_from_slice(data);
-		let complete = matches!(pes.data_len, Some(len) if pending.data.len() >= len);
+		let complete = matches!(data_len, Some(len) if pending.data.len() >= len);
 		self.pending.insert(pid, pending);
 
 		if complete {
@@ -900,10 +1019,83 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		self.published |= units > 0;
 		self.liveness.delivered(pid.as_u16(), units);
+		if matches!(self.streams.get(&pid), Some(Stream::PesPacket(_))) {
+			self.release_placed()?;
+		}
 
 		// Record the decoded media track's PID + PMT descriptors (language, ...) once
 		// its lazily created track exists, so export can preserve them.
 		self.record_media_track(pid)
+	}
+
+	/// A PCR at input offset `offset`, its packet's, on the program's clock PID: it places every
+	/// whole PES that began since the last, and releases those complete.
+	fn place_pcr(&mut self, raw: u64, offset: u64) -> anyhow::Result<()> {
+		if self.placement.rewinds(raw) {
+			// The clock stepped back without saying so: what it placed so far is placed by the
+			// old timebase, and the new one starts here.
+			self.settle_placement()?;
+		}
+		let sample = self.placement.pcr(raw, offset + PCR_OFFSET);
+		let generation = self.placement.generation;
+		// A PES still assembling its header is bracketed too, so the first PCR past its start
+		// code places it however many arrive before the header is whole.
+		let spans = self.pending.values_mut().filter_map(|pending| pending.span.as_mut());
+		for span in spans.chain(self.headers.values_mut().filter_map(|(span, _)| span.as_mut())) {
+			span.bracket(generation, sample);
+		}
+		for stream in self.streams.values_mut() {
+			if let Stream::PesPacket(stream) = stream {
+				stream.bracket(generation, sample);
+			}
+		}
+		self.release_placed()
+	}
+
+	/// End the placement timebase: extrapolate every whole PES begun past its last PCR from its
+	/// last two, and publish what that places.
+	fn settle_placement(&mut self) -> anyhow::Result<()> {
+		let spans = self.pending.values_mut().filter_map(|pending| pending.span.as_mut());
+		for span in spans.chain(self.headers.values_mut().filter_map(|(span, _)| span.as_mut())) {
+			span.settle(&self.placement);
+		}
+		for stream in self.streams.values_mut() {
+			if let Stream::PesPacket(stream) = stream {
+				stream.settle(&self.placement);
+			}
+		}
+		self.placement.reset();
+		self.release_placed()
+	}
+
+	/// Publish every held whole PES that is placed, once the timebase has its offset.
+	fn release_placed(&mut self) -> anyhow::Result<()> {
+		for (pid, stream) in &mut self.streams {
+			let Stream::PesPacket(stream) = stream else {
+				continue;
+			};
+			let (units, unplaced) = stream.release(&self.timebase, self.placement.generation)?;
+			if unplaced > 0 {
+				*self.unplaced.entry(pid.as_u16()).or_default() += unplaced;
+			}
+			self.published |= units > 0;
+			self.liveness.delivered(pid.as_u16(), units);
+		}
+		Ok(())
+	}
+
+	/// Refuse the private PES stream on `pid` rather than carry it altered: its track ends with an
+	/// error and leaves the catalog, and the PID is dropped from here on.
+	fn refuse(&mut self, pid: Pid, why: &str) -> anyhow::Result<()> {
+		self.pending.remove(&pid);
+		self.headers.remove(&pid);
+		if let Some(stream) = self.retire_stream(pid) {
+			stream.abort(moq_net::Error::Unsupported);
+		}
+		self.streams.insert(pid, Stream::Ignored);
+		*self.refused.entry(pid.as_u16()).or_default() += 1;
+		tracing::warn!(pid = pid.as_u16(), why, "refused a private PES stream");
+		Ok(())
 	}
 
 	/// The packet chain on `pid` was cut: salvage the truncated PES, and treat the bytes
@@ -958,6 +1150,12 @@ impl<E: catalog::Catalog> Import<E> {
 		for pid in self.streams.keys().copied().collect::<Vec<_>>() {
 			self.salvage(pid)?;
 		}
+		// Whole PES the old clock began go out on its timeline, ahead of the marker.
+		self.settle_placement()?;
+		anyhow::ensure!(
+			self.streams.values().all(Stream::placed),
+			"TS private PES reached a clock break without a media timestamp"
+		);
 		for stream in self.streams.values_mut() {
 			stream.desync();
 			stream.discontinuity(self.published)?;
@@ -1143,6 +1341,11 @@ impl<E: catalog::Catalog> Import<E> {
 			self.sections.values().all(|section| section.held.is_empty()),
 			"TS sections reached end of input without a media timestamp"
 		);
+		self.settle_placement()?;
+		anyhow::ensure!(
+			self.streams.values().all(Stream::placed),
+			"TS private PES reached end of input without a media timestamp"
+		);
 		// EOF releases an unmeasured short source as well as its decoder reservations.
 		self.mux_rate_reservation = None;
 		self.initial_reservation = None;
@@ -1185,6 +1388,19 @@ impl<E: catalog::Catalog> Import<E> {
 				.entry(pid)
 				.or_insert_with(|| stats::Stream::new("", stats::Class::Data))
 				.damaged = damaged;
+		}
+		// A stream refused before it had a track has no row of its own either.
+		for (&pid, &unplaced) in &self.unplaced {
+			streams
+				.entry(pid)
+				.or_insert_with(|| stats::Stream::new(".ts", stats::Class::Data))
+				.unplaced = unplaced;
+		}
+		for (&pid, &refused) in &self.refused {
+			streams
+				.entry(pid)
+				.or_insert_with(|| stats::Stream::new(".ts", stats::Class::Data))
+				.refused = refused;
 		}
 		for (pid, stats) in &mut streams {
 			(stats.units, stats.quiet) = self.liveness.stream(*pid);
@@ -1286,7 +1502,9 @@ impl Retained {
 		);
 		if !reserve(&self.staging.units, units, STAGING_UNITS_MAX) {
 			self.staging.bytes.fetch_sub(bytes, Ordering::Relaxed);
-			anyhow::bail!("TS staging exceeds {STAGING_UNITS_MAX} sections while waiting for a timestamp");
+			anyhow::bail!(
+				"TS staging exceeds {STAGING_UNITS_MAX} sections and whole PES while waiting for a timestamp"
+			);
 		}
 		self.bytes += bytes;
 		self.units += units;
@@ -1318,11 +1536,12 @@ struct Pending {
 	/// Raw 90 kHz DTS, still wrapped. Present on reordered (B-frame) video; its distance below
 	/// the PTS, modulo the wrap, is the reorder delay published as the catalog jitter.
 	dts: Option<u64>,
-	/// PES stream_id, preserved for verbatim PES carriage.
-	stream_id: u8,
+	/// The payload, or the whole packet, header included, for a [`PesPacketStream`].
 	data: Vec<u8>,
-	/// Expected payload length for bounded PES, else `None` (unbounded video).
+	/// Expected length of `data` for bounded PES, else `None` (unbounded video).
 	data_len: Option<usize>,
+	/// Where a whole PES sits on the program clock; `None` for every other stream.
+	span: Option<Span>,
 }
 
 impl Pending {
@@ -1333,23 +1552,19 @@ impl Pending {
 			pts: None,
 			offset: Offset::default(),
 			dts: None,
-			stream_id: 0,
 			data: Vec::new(),
 			data_len: None,
+			span: None,
 		}
 	}
 }
 
-/// Create a verbatim track and record it in the `mpegts` catalog section as a
-/// [`Track`](catalog::Track) with a `verbatim` carriage record. Shared by the
-/// section- and PES-framed paths.
+/// Create a track for an undecoded stream and record `entry`, its carriage record, under its
+/// name in the `mpegts` catalog section. Shared by the section and whole-PES paths.
 fn register_verbatim<E: catalog::Catalog>(
 	broadcast: &mut moq_net::broadcast::Producer,
 	catalog: &mut crate::catalog::Producer<E>,
-	pid: u16,
-	stream_type: u8,
-	framing: catalog::Framing,
-	descriptors: Vec<catalog::Descriptor>,
+	entry: catalog::Track,
 ) -> anyhow::Result<crate::container::Producer<crate::catalog::hang::Container>> {
 	// Verbatim payloads ride the legacy container, which normalizes the per-frame
 	// timestamp to microseconds on the wire (see `hang::container::Frame::encode`),
@@ -1377,15 +1592,7 @@ fn register_verbatim<E: catalog::Catalog>(
 		// catalog dropped the section since.
 		anyhow::bail!("catalog extension no longer carries an mpegts section");
 	};
-	mpegts.tracks.insert(
-		name,
-		catalog::Track {
-			pid,
-			descriptors,
-			verbatim: Some(catalog::Verbatim::new(stream_type, framing)),
-			pes_packet: None,
-		},
-	);
+	mpegts.tracks.insert(name, entry);
 	drop(guard);
 
 	Ok(media)
@@ -1439,14 +1646,13 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		stream_type: u8,
 		descriptors: Vec<catalog::Descriptor>,
 	) -> anyhow::Result<Self> {
-		let track = register_verbatim(
-			&mut broadcast,
-			&mut catalog,
+		let entry = catalog::Track {
 			pid,
-			stream_type,
-			catalog::Framing::Section,
 			descriptors,
-		)?;
+			verbatim: Some(catalog::Verbatim::new(stream_type, catalog::Framing::Section)),
+			pes_packet: None,
+		};
+		let track = register_verbatim(&mut broadcast, &mut catalog, entry)?;
 		let entry = VerbatimEntry {
 			name: track.name().to_string(),
 			catalog,
@@ -1562,20 +1768,33 @@ fn adjust_splice(section: &mut [u8], offset: Offset) {
 	section[body..].copy_from_slice(&crc.to_be_bytes());
 }
 
-/// Publishes whole reassembled PES payloads verbatim as frames on a track
-/// described in the `mpegts` catalog section, for elementary streams we don't decode
-/// (DTS audio, private PES, teletext, ...).
+/// Publishes each PES of an elementary stream we don't decode (private data, teletext, DVB
+/// subtitles, DVB AC-3, DTS, ...) whole, as one frame on a track described by a
+/// [`PesPacket`](catalog::PesPacket) record in the `mpegts` catalog section.
 ///
-/// Unlike [`SectionStream`], these ride the normal PES reassembly path, so this
-/// type only stamps each PES payload with its PTS and writes it.
-struct VerbatimStream<E: catalog::Catalog> {
+/// A frame is the packet from its start code through its payload, its PTS and DTS moved onto the
+/// catalog clock and every other byte as received, timestamped with its placement on the program
+/// clock. A PES without a PTS keeps none. See [`Import`] for when one is held, dropped, or refuses
+/// its stream.
+struct PesPacketStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	entry: VerbatimEntry<E>,
-	/// Whether the PES stream_id has been recorded into the catalog yet (once).
-	stream_id_recorded: bool,
+	/// Held for its `Drop`, which clears this track's catalog entry.
+	_entry: VerbatimEntry<E>,
+	/// The PMT `stream_type`, which says whether an unbounded PES is video.
+	stream_type: u8,
+	/// Whole PES waiting for the PCR after them or the timebase's offset, in input order.
+	held: VecDeque<Held>,
 }
 
-impl<E: catalog::Catalog> VerbatimStream<E> {
+/// A whole PES waiting to be placed.
+struct Held {
+	pes: Vec<u8>,
+	span: Span,
+	/// Held for its `Drop`, which returns the bytes to the staging budget.
+	_retained: Retained,
+}
+
+impl<E: catalog::Catalog> PesPacketStream<E> {
 	fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		mut catalog: crate::catalog::Producer<E>,
@@ -1583,54 +1802,82 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		stream_type: u8,
 		descriptors: Vec<catalog::Descriptor>,
 	) -> anyhow::Result<Self> {
-		let track = register_verbatim(
-			&mut broadcast,
-			&mut catalog,
+		let entry = catalog::Track {
 			pid,
-			stream_type,
-			catalog::Framing::Pes,
 			descriptors,
-		)?;
+			verbatim: None,
+			pes_packet: Some(catalog::PesPacket::new(stream_type)),
+		};
+		let track = register_verbatim(&mut broadcast, &mut catalog, entry)?;
 		let entry = VerbatimEntry {
 			name: track.name().to_string(),
 			catalog,
 		};
 		Ok(Self {
 			track,
-			entry,
-			stream_id_recorded: false,
+			_entry: entry,
+			stream_type,
+			held: VecDeque::new(),
 		})
 	}
 
-	/// Publish one reassembled PES payload verbatim, in its own group, stamped with
-	/// its PTS (or the live edge when the PES carried none).
-	fn write(&mut self, pending: Pending) -> anyhow::Result<u64> {
-		// Record the original PES stream_id once, from the first PES, so export
-		// re-emits the stream under its real id (e.g. 0xBD for teletext/DVB AC-3).
-		if !self.stream_id_recorded {
-			let name = self.track.name().to_string();
-			if let Some(mpegts) = self.entry.catalog.modify()?.ext.mpegts_mut()
-				&& let Some(verbatim) = mpegts.tracks.get_mut(&name).and_then(|t| t.verbatim.as_mut())
-			{
-				verbatim.stream_id = Some(pending.stream_id);
-			}
-			self.stream_id_recorded = true;
-		}
+	/// Hold one complete PES until it can be placed: [`Self::release`] publishes it.
+	fn hold(&mut self, pending: Pending) {
+		let span = pending.span.expect("a whole PES is spanned at its start");
+		self.held.push_back(Held {
+			pes: pending.data,
+			span,
+			_retained: pending.retained,
+		});
+	}
 
-		let pts = match on_clock(pending.pts, pending.offset)? {
-			Some(pts) => pts,
-			// No clock of its own, so land on the edge.
-			None => self.track.live_edge().unwrap_or(Timestamp::ZERO),
+	/// The PCR `after` arrived on timebase `generation`: every PES held since the last is
+	/// bracketed.
+	fn bracket(&mut self, generation: u64, after: Sample) {
+		for held in &mut self.held {
+			held.span.bracket(generation, after);
+		}
+	}
+
+	/// The timebase of `placement` ends: extrapolate the PES held past its last PCR.
+	fn settle(&mut self, placement: &Placement) {
+		for held in &mut self.held {
+			held.span.settle(placement);
+		}
+	}
+
+	/// Publish the placed PES at the front, each in its own group, once `timebase` has its
+	/// offset, and drop those no PCR on their own timebase can place: one ended before them, now
+	/// that `generation` is the timebase running. Returns how many went each way.
+	fn release(&mut self, timebase: &crate::catalog::Timebase<E>, generation: u64) -> anyhow::Result<(u64, u64)> {
+		let Some(offset) = timebase.offset() else {
+			return Ok((0, 0));
 		};
-		let frame = crate::container::Frame {
-			timestamp: pts,
-			duration: None,
-			payload: bytes::Bytes::from(pending.data),
-			keyframe: true,
-		};
-		self.track.write(frame)?;
-		self.track.cut(None)?;
-		Ok(1)
+		let (mut published, mut unplaced) = (0, 0);
+		while let Some(held) = self.held.front() {
+			let timestamp = match held.span.ticks {
+				Some(ticks) => placement(timebase, offset, ticks),
+				// Its timebase ended without placing it.
+				None if held.span.generation != generation => None,
+				None => break,
+			};
+			let mut held = self.held.pop_front().expect("a front");
+			let Some(timestamp) = timestamp else {
+				unplaced += 1;
+				continue;
+			};
+			rebase(&mut held.pes, offset);
+			let frame = crate::container::Frame {
+				timestamp,
+				duration: None,
+				payload: bytes::Bytes::from(held.pes),
+				keyframe: true,
+			};
+			self.track.write(frame)?;
+			self.track.cut(None)?;
+			published += 1;
+		}
+		Ok((published, unplaced))
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
@@ -1652,6 +1899,150 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 
 	fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
+	}
+}
+
+/// Why a whole-PES track cannot carry `pes` unaltered, if it cannot: a header export refuses
+/// ([`PesStart::whole`]), a clock field only the PTS and DTS of are rebased, or a scrambled
+/// payload.
+fn refusal(pes: &PesStart, stream_type: u8) -> Option<String> {
+	match pes.whole(stream_type) {
+		Err(err) => Some(format!("{err:#}")),
+		Ok(Some(clock)) => Some(clock.to_string()),
+		Ok(None) => pes.scrambled().then(|| "PES-level scrambling".to_string()),
+	}
+}
+
+/// The catalog time of the program clock reading `ticks`, an unwrapped 27 MHz count, on a
+/// timebase shifted by `offset`: its PCR in the era nearest the clock, floored to microseconds.
+/// `None` for a reading before the broadcast clock's zero.
+fn placement<E: catalog::Catalog>(
+	timebase: &crate::catalog::Timebase<E>,
+	offset: Offset,
+	ticks: u64,
+) -> Option<Timestamp> {
+	let pcr = timebase.unwrap(ticks % PCR.period, PCR)?;
+	let micros = pcr.div_euclid(i128::from(PCR.hz / 1_000_000)) + offset.ticks(1_000_000);
+	Timestamp::from_micros(u64::try_from(micros).ok()?).ok()
+}
+
+/// Move a whole PES's PTS and DTS onto the catalog clock in place, modulo 2^33 as a media PTS
+/// moves, leaving their prefix and marker bits and every other byte as they were. The PES CRC
+/// covers the previous packet's data bytes, not this header, so it stays valid.
+fn rebase(pes: &mut [u8], offset: Offset) {
+	const FIELD: i128 = 1 << 33;
+	if offset == Offset::default() || !psi::has_optional_header(pes[3]) {
+		return;
+	}
+	let fields = match pes[7] >> 6 {
+		0b10 => 1,
+		0b11 => 2,
+		_ => 0,
+	};
+	for field in pes[9..9 + 5 * fields].as_chunks_mut::<5>().0 {
+		let value = (u64::from(field[0] >> 1) & 0x07) << 30
+			| u64::from(field[1]) << 22
+			| u64::from(field[2] >> 1) << 15
+			| u64::from(field[3]) << 7
+			| u64::from(field[4] >> 1);
+		let value = (i128::from(value) + offset.ticks(90_000)).rem_euclid(FIELD) as u64;
+		field[0] = (field[0] & 0xf1) | ((value >> 29) & 0x0e) as u8;
+		field[1] = (value >> 22) as u8;
+		field[2] = (field[2] & 0x01) | ((value >> 14) & 0xfe) as u8;
+		field[3] = (value >> 7) as u8;
+		field[4] = (field[4] & 0x01) | ((value << 1) & 0xfe) as u8;
+	}
+}
+
+/// The program clock at each input byte, from the PCRs of the current timebase, which places
+/// whole PES: a byte is interpolated at the rate between the PCRs either side of it, as
+/// [`Passthrough`](super::Passthrough) times its objects.
+#[derive(Default)]
+struct Placement {
+	/// The last two PCRs of the timebase, newest last, unwrapped from its first.
+	samples: VecDeque<Sample>,
+	/// The last PCR, raw.
+	raw: u64,
+	/// Counts the timebases ended, so a PES never takes a PCR from one it did not start in.
+	generation: u64,
+}
+
+impl Placement {
+	/// A PCR of `raw` 27 MHz ticks whose reference byte sits at input offset `at`.
+	fn pcr(&mut self, raw: u64, at: u64) -> Sample {
+		let ticks = match self.samples.back() {
+			Some(last) => last.ticks + (raw + PCR.period - self.raw) % PCR.period,
+			None => raw,
+		};
+		let sample = Sample { at, ticks };
+		self.samples.push_back(sample);
+		if self.samples.len() > 2 {
+			self.samples.pop_front();
+		}
+		self.raw = raw;
+		sample
+	}
+
+	/// Whether `raw` steps back from the last PCR, modulo the wrap.
+	fn rewinds(&self, raw: u64) -> bool {
+		!self.samples.is_empty() && (raw + PCR.period - self.raw) % PCR.period >= PCR.period / 2
+	}
+
+	/// The timebase's last PCR.
+	fn last(&self) -> Option<Sample> {
+		self.samples.back().copied()
+	}
+
+	/// A PES whose start code sits at input offset `at`, after the last PCR on this timebase;
+	/// `None` before the first.
+	fn span(&self, at: u64) -> Option<Span> {
+		Some(Span {
+			at,
+			before: self.last()?,
+			generation: self.generation,
+			ticks: None,
+		})
+	}
+
+	/// The program clock at input offset `at`, past the last PCR, at the rate of the interval
+	/// before it; `None` without one.
+	fn extrapolate(&self, at: u64) -> Option<u64> {
+		(self.samples.len() == 2).then(|| locate(at, &self.samples))
+	}
+
+	/// End the timebase.
+	fn reset(&mut self) {
+		self.samples.clear();
+		self.generation += 1;
+	}
+}
+
+/// Where a whole PES starts in the input, and the program clock there once known.
+#[derive(Clone, Copy)]
+struct Span {
+	/// The input offset of its start code.
+	at: u64,
+	/// The last PCR before it.
+	before: Sample,
+	/// The [`Placement::generation`] it started in.
+	generation: u64,
+	/// The program clock at its first byte, in its timebase's unwrapped 27 MHz ticks.
+	ticks: Option<u64>,
+}
+
+impl Span {
+	/// Interpolate with `after`, the first PCR past it on its timebase.
+	fn bracket(&mut self, generation: u64, after: Sample) {
+		if self.ticks.is_none() && self.generation == generation {
+			self.ticks = Some(locate(self.at, &VecDeque::from([self.before, after])));
+		}
+	}
+
+	/// Its timebase ended with no PCR after it: extrapolate from the last two.
+	fn settle(&mut self, placement: &Placement) {
+		if self.ticks.is_none() && self.generation == placement.generation {
+			self.ticks = placement.extrapolate(self.at);
+		}
 	}
 }
 
@@ -2061,8 +2452,8 @@ enum Stream<E: catalog::Catalog = ()> {
 	Aac(Box<AacStream<E>>),
 	Opus(Box<OpusStream>),
 	Legacy(Box<LegacyStream<E>>),
-	/// A codec we don't decode, carried verbatim as PES (DTS audio, private PES, ...).
-	Verbatim(Box<VerbatimStream<E>>),
+	/// A codec we don't decode, carried as whole PES (DTS audio, private PES, ...).
+	PesPacket(Box<PesPacketStream<E>>),
 	/// MPEG-1/2 video we don't decode, kept only to advance the media clock.
 	/// `is_video` counts it, so never reuse this variant for audio or data.
 	Clock,
@@ -2129,8 +2520,20 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Aac(stream) => stream.write(pending, batched),
 			Stream::Opus(stream) => stream.write(pending),
 			Stream::Legacy(stream) => stream.write(pending),
-			Stream::Verbatim(stream) => stream.write(pending),
+			// Published once placed: [`Import::release_placed`].
+			Stream::PesPacket(stream) => {
+				stream.hold(pending);
+				Ok(0)
+			}
 			Stream::Clock | Stream::Ignored => Ok(0),
+		}
+	}
+
+	/// Whether nothing waits to be placed on the program clock.
+	fn placed(&self) -> bool {
+		match self {
+			Stream::PesPacket(stream) => stream.held.is_empty(),
+			_ => true,
 		}
 	}
 
@@ -2148,7 +2551,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			// its control header promises is a parse error, and that error would travel up out
 			// of `decode` and end the session. Losing the PES beats losing the broadcast.
 			Stream::Opus(_) => false,
-			Stream::H264 { .. } | Stream::H265 { .. } | Stream::Verbatim(_) => false,
+			Stream::H264 { .. } | Stream::H265 { .. } | Stream::PesPacket(_) => false,
 			Stream::Clock | Stream::Ignored => false,
 		}
 	}
@@ -2162,7 +2565,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H265 { split, .. } => split.reset(),
 			Stream::Aac(stream) => stream.desync(),
 			Stream::Legacy(stream) => stream.desync(),
-			Stream::Opus(_) | Stream::Verbatim(_) | Stream::Clock | Stream::Ignored => {}
+			Stream::Opus(_) | Stream::PesPacket(_) | Stream::Clock | Stream::Ignored => {}
 		}
 	}
 
@@ -2198,7 +2601,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Aac(stream) => stream.discontinuity(published),
 			Stream::Opus(stream) => stream.discontinuity(published),
 			Stream::Legacy(stream) => stream.discontinuity(published),
-			Stream::Verbatim(stream) => stream.discontinuity(published),
+			Stream::PesPacket(stream) => stream.discontinuity(published),
 			Stream::Clock | Stream::Ignored => Ok(()),
 		}
 	}
@@ -2216,7 +2619,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Aac(stream) => stream.seek(sequence),
 			Stream::Opus(stream) => stream.seek(sequence),
 			Stream::Legacy(stream) => stream.seek(sequence),
-			Stream::Verbatim(stream) => stream.seek(sequence),
+			Stream::PesPacket(stream) => stream.seek(sequence),
 			Stream::Clock | Stream::Ignored => Ok(()),
 		}
 	}
@@ -2230,7 +2633,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H264 { import, .. } => import.finish()?,
 			Stream::H265 { import, .. } => import.finish()?,
 			Stream::Opus(stream) => stream.finish()?,
-			Stream::Verbatim(stream) => stream.finish()?,
+			Stream::PesPacket(stream) => stream.finish()?,
 			Stream::Clock | Stream::Ignored => {}
 		}
 		Ok(0)
@@ -2243,7 +2646,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Aac(stream) => stream.abort(err),
 			Stream::Opus(stream) => stream.abort(err),
 			Stream::Legacy(stream) => stream.abort(err),
-			Stream::Verbatim(stream) => stream.abort(err),
+			Stream::PesPacket(stream) => stream.abort(err),
 			Stream::Clock | Stream::Ignored => {}
 		}
 	}
@@ -2257,7 +2660,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H264 { .. } => stats::Stream::new(".avc3", stats::Class::Video),
 			Stream::H265 { .. } => stats::Stream::new(".hev1", stats::Class::Video),
 			Stream::Opus(_) => stats::Stream::new(".opus", stats::Class::Audio),
-			Stream::Verbatim(_) => stats::Stream::new(".ts", stats::Class::Data),
+			Stream::PesPacket(_) => stats::Stream::new(".ts", stats::Class::Data),
 			Stream::Clock => stats::Stream::new("", stats::Class::Video),
 			Stream::Ignored => return None,
 		})
@@ -2272,7 +2675,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Aac(stream) => stream.import.as_ref().map(|i| i.name().to_string()),
 			Stream::Opus(stream) => Some(stream.import.name().to_string()),
 			Stream::Legacy(stream) => stream.import.as_ref().map(|i| i.name().to_string()),
-			Stream::Verbatim(_) | Stream::Clock | Stream::Ignored => None,
+			Stream::PesPacket(_) | Stream::Clock | Stream::Ignored => None,
 		}
 	}
 }
@@ -6140,73 +6543,9 @@ pub(super) mod test {
 		assert_eq!(run(&[p1, p2, p3, p4]), vec![CUE.to_vec()]);
 	}
 
-	// A PES-framed elementary stream we don't decode (private data, stream_type 0x06)
-	// is carried verbatim: cataloged in the `mpegts` section with its PID and framing, and
-	// its PES payload published byte-for-byte.
-	#[tokio::test(start_paused = true)]
-	async fn private_pes_carried_verbatim() {
-		use crate::catalog::hang::{Catalog, Container};
-		use crate::container::Consumer;
-		use crate::container::ts::catalog::{Ext, Framing};
-
-		const VIDEO_PID: u16 = 0x0050;
-		const DATA_PID: u16 = 0x0052;
-
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let catalog = crate::catalog::Producer::new(
-			&mut broadcast,
-			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
-		)
-		.unwrap();
-		let mut import = super::Import::new(broadcast, catalog.reserve());
-
-		let mut bytes = bytes::BytesMut::new();
-		bytes.extend_from_slice(&synth_pmt(
-			&[
-				(StreamType::Mpeg2Video, VIDEO_PID),
-				(StreamType::Mpeg2PacketizedData, DATA_PID),
-			],
-			false,
-		));
-		bytes.extend_from_slice(&pes_packet(VIDEO_PID, 90_000)); // video sets the media clock
-		let payload = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02];
-		bytes.extend_from_slice(&audio_pes_packet(DATA_PID, 0, 90_000, &payload));
-		import.decode(&bytes).unwrap();
-		import.finish().unwrap();
-
-		let snap = catalog.snapshot();
-		assert_eq!(
-			snap.ext.mpegts.tracks.len(),
-			1,
-			"the private PES PID is carried verbatim"
-		);
-		let (name, track) = snap.ext.mpegts.tracks.iter().next().unwrap();
-		let verbatim = track.verbatim.as_ref().expect("a verbatim carriage record");
-		assert_eq!(verbatim.stream_type, 0x06, "recorded the PMT stream_type");
-		assert_eq!(verbatim.framing, Framing::Pes, "private PES is PES-framed");
-		// `audio_pes_packet` uses stream_id 0xC0; it must be captured for faithful re-emit.
-		assert_eq!(verbatim.stream_id, Some(0xC0), "recorded the PES stream_id");
-		assert_eq!(track.pid, DATA_PID, "recorded the original PID");
-
-		let track = consumer
-			.track(name.as_str())
-			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
-			.await
-			.unwrap();
-		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
-		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read_frame())
-			.await
-			.expect("verbatim read timed out")
-			.unwrap()
-			.expect("a published verbatim frame");
-		assert_eq!(&frame.payload[..], &payload[..], "verbatim PES payload round-trips");
-	}
-
-	/// A verbatim-only program retains the PES clock while waiting for rate measurement or EOF.
+	/// A private-data-only program retains the PES clock while waiting for rate measurement or EOF.
 	#[tokio::test]
-	async fn verbatim_only_program_retains_its_pes_clock_until_catalog_release() {
+	async fn private_pes_only_program_retains_its_pes_clock_until_catalog_release() {
 		use crate::catalog::hang::Catalog;
 		use crate::container::ts::catalog::Ext;
 
@@ -6903,7 +7242,9 @@ pub(super) mod test {
 				let mut cc = 0;
 				for part in [&header[..split], &header[split..], &data] {
 					for chunk in part.chunks(183) {
-						import.pes_packet(pid, &pes_fragment(PID, cc == 0, cc, chunk)).unwrap();
+						import
+							.pes_packet(pid, &pes_fragment(PID, cc == 0, cc, chunk), 0)
+							.unwrap();
 						cc += 1;
 					}
 				}
@@ -6931,14 +7272,17 @@ pub(super) mod test {
 		let header = [0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5];
 		for end in ["loss", "start", "eof"] {
 			let mut import = ignored_pes_import();
-			import.pes_packet(pid, &pes_fragment(0x50, true, 0, &header)).unwrap();
-			assert_eq!(import.headers[&pid].len(), 9);
+			import
+				.pes_packet(pid, &pes_fragment(0x50, true, 0, &header), 0)
+				.unwrap();
+			assert_eq!(import.headers[&pid].1.len(), 9);
 			match end {
 				"loss" => import.broken(pid).unwrap(),
 				"start" => import
 					.pes_packet(
 						pid,
 						&pes_fragment(0x50, true, 1, &[0, 0, 1, 0xe0, 0, 0, 0x80, 0, 0, 0xaa]),
+						0,
 					)
 					.unwrap(),
 				_ => import.finish().unwrap(),
@@ -6948,7 +7292,7 @@ pub(super) mod test {
 				assert_eq!(import.pending[&pid].data, [0xaa]);
 			} else {
 				import
-					.pes_packet(pid, &pes_fragment(0x50, false, 1, &[0xff; 5]))
+					.pes_packet(pid, &pes_fragment(0x50, false, 1, &[0xff; 5]), 0)
 					.unwrap();
 				assert!(
 					!import.pending.contains_key(&pid),
@@ -7134,12 +7478,11 @@ pub(super) mod test {
 				let mut import = ignored_pes_import();
 				let header = [0, 0, 1, id, 0, 3];
 				import
-					.pes_packet(pid, &pes_fragment(0x50, true, 0, &header[..split]))
+					.pes_packet(pid, &pes_fragment(0x50, true, 0, &header[..split]), 0)
 					.unwrap();
 				import
-					.pes_packet(pid, &pes_fragment(0x50, false, 1, &header[split..]))
+					.pes_packet(pid, &pes_fragment(0x50, false, 1, &header[split..]), 0)
 					.unwrap();
-				assert_eq!(import.pending[&pid].stream_id, id);
 				assert_eq!(import.pending[&pid].data_len, Some(3));
 				assert_eq!(import.pending[&pid].pts, None);
 			}
@@ -7155,7 +7498,7 @@ pub(super) mod test {
 		let pid = Pid::new(0x50).unwrap();
 		for bad in [&[1][..], &[0, 1][..], &[0, 0, 2][..]] {
 			let mut import = ignored_pes_import();
-			import.pes_packet(pid, &pes_fragment(0x50, true, 0, bad)).unwrap();
+			import.pes_packet(pid, &pes_fragment(0x50, true, 0, bad), 0).unwrap();
 			assert!(import.headers.is_empty());
 			assert!(import.pending.is_empty());
 		}
@@ -7169,6 +7512,7 @@ pub(super) mod test {
 			.pes_packet(
 				pid,
 				&pes_fragment(0x50, true, 0, &[0, 0, 1, 0xe0, 0, 4, 0x80, 0x80, 255]),
+				0,
 			)
 			.unwrap();
 		assert!(import.headers.is_empty());
@@ -7190,7 +7534,7 @@ pub(super) mod test {
 			pes.extend_from_slice(&data);
 			for (cc, chunk) in pes.chunks(183).enumerate() {
 				import
-					.pes_packet(pid, &pes_fragment(0x50, cc == 0, cc as u8, chunk))
+					.pes_packet(pid, &pes_fragment(0x50, cc == 0, cc as u8, chunk), 0)
 					.unwrap();
 			}
 			if end == "eof" {
@@ -7198,7 +7542,9 @@ pub(super) mod test {
 			} else {
 				let mut header = vec![0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5];
 				header.extend_from_slice(&pes_timestamp(2, 180_000));
-				import.pes_packet(pid, &pes_fragment(0x50, true, 1, &header)).unwrap();
+				import
+					.pes_packet(pid, &pes_fragment(0x50, true, 1, &header), 0)
+					.unwrap();
 			}
 			assert_eq!(
 				import.stats().streams[&0x50].units,
@@ -7219,6 +7565,7 @@ pub(super) mod test {
 				.pes_packet(
 					pid,
 					&pes_fragment(pid.as_u16(), true, 0, &[0, 0, 1, 0xe0, 0, 0, 0x80, 0, 0]),
+					0,
 				)
 				.unwrap();
 			import
@@ -7273,7 +7620,7 @@ pub(super) mod test {
 		let err = import
 			.decode(&packet(true, (super::STAGING_UNITS_MAX % 16) as u8, 0, &CUE))
 			.unwrap_err();
-		assert!(err.to_string().contains("sections while waiting for a timestamp"));
+		assert!(err.to_string().contains("whole PES while waiting for a timestamp"));
 		assert_eq!(import.sections[&0x21].held.len(), super::STAGING_UNITS_MAX);
 		assert_eq!(
 			import.staging.bytes.load(super::Ordering::Relaxed),
@@ -7317,13 +7664,13 @@ pub(super) mod test {
 							let pid = Pid::new(raw).unwrap();
 							if fragmented {
 								import
-									.pes_packet(pid, &pes_fragment(raw, true, 0, &header[..1]))
+									.pes_packet(pid, &pes_fragment(raw, true, 0, &header[..1]), 0)
 									.unwrap();
 								import
-									.pes_packet(pid, &pes_fragment(raw, false, 1, &header[1..]))
+									.pes_packet(pid, &pes_fragment(raw, false, 1, &header[1..]), 0)
 									.unwrap();
 							} else {
-								import.pes_packet(pid, &pes_fragment(raw, true, 0, &header)).unwrap();
+								import.pes_packet(pid, &pes_fragment(raw, true, 0, &header), 0).unwrap();
 							}
 							for chunk in data.chunks(184) {
 								import
@@ -8274,22 +8621,6 @@ pub(super) mod test {
 		import_refused(&mux.out);
 	}
 
-	/// A PES-framed stream we carry verbatim refuses a step back like any other.
-	#[tokio::test(start_paused = true)]
-	async fn verbatim_pes_below_the_edge_is_refused() {
-		const DATA_PID: u16 = 0x0052;
-		let mut mux = Mux {
-			out: synth_pmt(&[(StreamType::Mpeg2PacketizedData, DATA_PID)], false),
-			..Default::default()
-		};
-		for pts in [45 * 90_000, 46 * 90_000, 90_000] {
-			let cc = mux.cc(DATA_PID);
-			mux.out
-				.extend_from_slice(&audio_pes_packet(DATA_PID, cc, pts, &[0xDE, 0xAD]));
-		}
-		import_refused(&mux.out);
-	}
-
 	/// A cue takes its time from the video it arrives with, and a B-frame decoded after a
 	/// P-frame presents earlier than it.
 	#[tokio::test(start_paused = true)]
@@ -9018,5 +9349,37 @@ pub(super) mod test {
 		assert_eq!(catalog.audio.renditions.len(), 1, "only the MP2 track");
 		let audio = catalog.audio.renditions.values().next().unwrap();
 		assert_eq!(audio.codec.to_string(), "mp2");
+	}
+
+	/// A PID refused as private PES for want of a PCR routes again when a later PMT gives it a
+	/// type that needs no PCR, though the program still has none.
+	#[test]
+	fn an_unclocked_pid_reassigned_to_a_decoded_type_routes_again() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default()
+				.with_catalog(crate::catalog::hang::Catalog::<crate::container::ts::catalog::Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pid = Pid::new(0x104).unwrap();
+		let pmt = |stream_type| Pmt {
+			program_number: 1,
+			pcr_pid: None,
+			program_info: Vec::new(),
+			streams: vec![Es {
+				stream_type,
+				pid,
+				descriptors: Vec::new(),
+			}],
+		};
+		import.handle_pmt(pmt(0x06)).unwrap();
+		assert!(matches!(import.streams[&pid], super::Stream::Ignored));
+		import.handle_pmt(pmt(0x06)).unwrap();
+		assert_eq!(import.stats().streams[&0x104].refused, 1, "refused once, not per PMT");
+		import.handle_pmt(pmt(StreamType::H264 as u8)).unwrap();
+		assert!(matches!(import.streams[&pid], super::Stream::H264 { .. }));
 	}
 }

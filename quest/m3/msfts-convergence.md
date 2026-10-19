@@ -22,7 +22,7 @@ egress moved to msfts#37 (closed). Two differences remain:
 - **ES units.** MSFTS `es-packets` (draft-gregoire-moq-msfts-02) carry the
   TS packets of one PID. Here decoded media carries access units, and
   undecoded PES carries the whole PES packet at its source placement
-  ([whole-PES import](/quest/m1/ts-reliability/pes-import.md)). Document the
+  ([`pesPacket`](/drafts/draft-lcurley-moq-mpegts.md)). Document the
   mapping between them.
 
 Decided in the 2026-10-11 audit: keep the semantic lane and raw fallback

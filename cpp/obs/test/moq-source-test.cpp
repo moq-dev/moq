@@ -61,6 +61,7 @@ namespace {
 struct Settings {
 	std::string url;
 	std::string broadcast;
+	bool keylog = false;
 };
 
 Settings g_settings;
@@ -178,6 +179,19 @@ void obs_data_set_default_string(obs_data_t *data, const char *name, const char 
 		settings->url = val;
 	else if (strcmp(name, "broadcast") == 0)
 		settings->broadcast = val;
+}
+
+bool obs_data_get_bool(obs_data_t *data, const char *name)
+{
+	auto *settings = reinterpret_cast<Settings *>(data);
+	return settings && strcmp(name, "quic_keylog") == 0 && settings->keylog;
+}
+
+void obs_data_set_default_bool(obs_data_t *, const char *, bool) {}
+
+obs_property_t *obs_properties_add_bool(obs_properties_t *, const char *, const char *)
+{
+	return reinterpret_cast<obs_property_t *>(0x13);
 }
 
 obs_properties_t *obs_properties_create(void)
@@ -433,6 +447,7 @@ void reset(std::string url, std::string broadcast = "obs/test")
 {
 	g_settings.url = std::move(url);
 	g_settings.broadcast = std::move(broadcast);
+	g_settings.keylog = false;
 	g_output_frames = 0;
 	g_output_audio = 0;
 	g_last_timestamp = 0;
@@ -619,6 +634,22 @@ int main()
 {
 	register_moq_source();
 	CHECK(g_registered);
+
+	// The TLS key log is off unless the toggle asks for it, and reaches the dial's QUIC config.
+	{
+		reset("");
+		void *source = createSource();
+		auto *ctx = static_cast<struct moq_source *>(source);
+		CHECK(!ctx->keylog);
+		CHECK(moq_source_client_config(ctx->keylog).quic.keylog != true);
+
+		g_settings.keylog = true;
+		g_info.update(source, settingsData());
+		CHECK(ctx->keylog);
+		CHECK(moq_source_client_config(ctx->keylog).quic.keylog == true);
+		destroySource(source);
+	}
+	report("key log is opt-in");
 
 	// Connect, wait for the announcement, read the catalog, and decode video and
 	// audio from the tracks it names. moq-audio decodes the Opus to planar float at

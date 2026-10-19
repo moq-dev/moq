@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `CongestionControl` gained `CongestionControlNone` (#5926)
+
+`CongestionControlNone` runs no congestion control and no pacing, for tests and controlled links.
+A `switch` that handles every value needs one more case.
+
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Pass `WithQUICKeylog(true)` to `Dial` or `WithServerQUICKeylog(true)` to `Listen` as well to capture them; without `SSLKEYLOGFILE` the dial or listen fails.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.GroupStart` and `GroupEnd` are replaced by `Ranges`, a slice of `Range` whose ends are `AnchorAbsolute` or `AnchorRelative` (an absolute group and frame, or a count of groups before the latest), and an optional `Order`.
@@ -95,10 +105,15 @@ JSON and opaque data tracks live in `moq.dev/moq/json` and `moq.dev/moq/flate`, 
 audio, err := media.NewAudioTrackProducer(broadcast, media.Named{}, media.AudioInit{Format: media.AudioFormatOpus, Data: opusHead})
 ```
 
-### Container byte-stream importers take an init record
+### Container byte streams use `media.NewContainerProducer` (#5919)
 
-`media.NewContainerStreamProducer` takes a `ContainerStreamInit` holding the format instead of a bare format.
-Its optional `Timebase`, also on `ContainerInit`, shares one source's offset across container imports.
+`BroadcastProducer.PublishContainerStream` has no separate importer: a container recovers its own framing, so `media.NewContainerProducer` takes chunks split anywhere.
+Leave `Data` empty and write the stream through it.
+`ContainerInit`'s optional `Timebase` shares one source's offset across container imports.
+
+```go
+stream, err := media.NewContainerProducer(broadcast, media.ContainerInit{Format: media.ContainerFormatFmp4})
+```
 
 ### Durations are `time.Duration`
 

@@ -5,9 +5,9 @@ use std::borrow::Cow;
 use crate::{Path, coding::*, ietf::RequestId};
 
 use super::Message;
-use super::cluster;
 use super::hidden::HIDDEN_PARAM;
 use super::namespace::{decode_namespace, encode_namespace};
+use super::publish_namespace::{AdvertParams, Negotiated};
 
 use super::Version;
 
@@ -271,31 +271,32 @@ impl Message for UnsubscribeNamespace {
 /// Indicates a namespace suffix matching the subscribed prefix is active.
 ///
 /// The base message carries only the suffix. A session that negotiated the MoQ Cluster
-/// extension uses the extended form instead, which appends a Parameters field so the
-/// advertisement can carry its HOP_PATH and ROUTE_COST (see [`cluster`]).
+/// or MoQ Epoch extension uses the extended form instead, which appends one Parameters
+/// field for both, so the advertisement can carry its HOP_PATH and ROUTE_COST (see
+/// [`super::cluster`]) and its EPOCH (see [`super::epoch`]).
 #[derive(Clone, Debug)]
 pub struct Namespace<'a> {
 	pub suffix: Path<'a>,
 
-	/// The MoQ Cluster parameters. `Some` selects the extended form; `None` the base
-	/// one. An endpoint must not append them on a session that did not negotiate.
-	pub cluster: Option<cluster::Advert>,
+	/// The extension parameters. `Some` selects the extended form; `None` the base one.
+	/// An endpoint must not append them on a session that negotiated neither extension.
+	pub params: Option<AdvertParams>,
 }
 
 impl Namespace<'_> {
 	/// Decode the message body, expecting the extended form when the session negotiated
-	/// the MoQ Cluster extension. See [`super::PublishNamespace::decode_body`].
-	pub fn decode_body(r: &mut Decoder<'_>, version: Version, negotiated: bool) -> Result<Self, DecodeError> {
+	/// an extension that defines it. See [`super::PublishNamespace::decode_body`].
+	pub fn decode_body(r: &mut Decoder<'_>, version: Version, negotiated: Negotiated) -> Result<Self, DecodeError> {
 		let suffix = decode_namespace(r)?;
 
 		// The base form has no Parameters field at all, so there is nothing to read
-		// (and nothing to reject) unless the extension is on.
-		let cluster = match negotiated {
-			true => Some(super::publish_namespace::decode_cluster_params(r, version)?),
+		// (and nothing to reject) unless an extension is on.
+		let params = match negotiated.extended() {
+			true => Some(super::publish_namespace::decode_advert_params(r, version, negotiated)?),
 			false => None,
 		};
 
-		Ok(Self { suffix, cluster })
+		Ok(Self { suffix, params })
 	}
 }
 
@@ -304,14 +305,14 @@ impl Message for Namespace<'_> {
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		encode_namespace(w, &self.suffix)?;
-		match &self.cluster {
-			Some(advert) => super::publish_namespace::encode_cluster_params(w, version, Some(advert)),
+		match &self.params {
+			Some(params) => super::publish_namespace::encode_advert_params(w, version, params),
 			None => Ok(()),
 		}
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		Self::decode_body(r, version, false)
+		Self::decode_body(r, version, Negotiated::default())
 	}
 }
 
@@ -367,6 +368,7 @@ impl Message for NamespaceDone<'_> {
 
 #[cfg(test)]
 mod tests {
+	use super::super::cluster;
 	use super::*;
 
 	fn body<M: Message>(msg: &M, version: Version) -> Vec<u8> {
@@ -381,6 +383,39 @@ mod tests {
 		cluster::HopPath::new(crate::Hops::try_from(hops).unwrap())
 	}
 
+	const CLUSTER: Negotiated = Negotiated {
+		cluster: true,
+		epoch: false,
+	};
+	const EPOCH: Negotiated = Negotiated {
+		cluster: false,
+		epoch: true,
+	};
+	const BOTH: Negotiated = Negotiated {
+		cluster: true,
+		epoch: true,
+	};
+
+	fn decode(
+		bytes: Vec<u8>,
+		version: Version,
+		negotiated: Negotiated,
+	) -> Result<(Namespace<'static>, bool), DecodeError> {
+		let mut buf = bytes::Bytes::from(bytes);
+		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, negotiated))?;
+		Ok((decoded, buf.is_empty()))
+	}
+
+	fn clustered(hops: &[u64], cost: u64) -> Option<AdvertParams> {
+		Some(AdvertParams {
+			cluster: Some(cluster::Advert {
+				hops: hop_path(hops),
+				cost,
+			}),
+			epoch: None,
+		})
+	}
+
 	/// The extended NAMESPACE appends a Parameters field carrying the path and cost;
 	/// the base one has no such field at all.
 	#[test]
@@ -388,32 +423,27 @@ mod tests {
 		let version = Version::Draft19;
 		let msg = Namespace {
 			suffix: Path::new("alice.hang"),
-			cluster: Some(cluster::Advert {
-				hops: hop_path(&[7, 9]),
-				cost: 5,
-			}),
+			params: clustered(&[7, 9], 5),
 		};
 
 		let encoded = body(&msg, version);
-		let mut buf = bytes::Bytes::from(encoded.clone());
-		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, true)).unwrap();
-		assert!(buf.is_empty());
+		let (decoded, consumed) = decode(encoded.clone(), version, CLUSTER).unwrap();
+		assert!(consumed);
 		assert_eq!(decoded.suffix.as_str(), "alice.hang");
-		assert_eq!(decoded.cluster, msg.cluster);
+		assert_eq!(decoded.params, msg.params);
 
 		// The base form is strictly shorter, and reading the extended bytes as base
 		// leaves the parameters behind rather than silently absorbing them.
 		let base = Namespace {
 			suffix: Path::new("alice.hang"),
-			cluster: None,
+			params: None,
 		};
 		let base_encoded = body(&base, version);
 		assert!(base_encoded.len() < encoded.len());
 
-		let mut buf = bytes::Bytes::from(encoded);
-		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, false)).unwrap();
-		assert!(decoded.cluster.is_none());
-		assert!(!buf.is_empty(), "the parameters were not consumed");
+		let (decoded, consumed) = decode(encoded, version, Negotiated::default()).unwrap();
+		assert!(decoded.params.is_none());
+		assert!(!consumed, "the parameters were not consumed");
 	}
 
 	/// ROUTE_COST is optional and absent means 0, so a free path sends nothing.
@@ -422,23 +452,90 @@ mod tests {
 		let version = Version::Draft19;
 		let free = Namespace {
 			suffix: Path::new("a"),
-			cluster: Some(cluster::Advert {
-				hops: hop_path(&[7]),
-				cost: 0,
-			}),
+			params: clustered(&[7], 0),
 		};
 		let priced = Namespace {
 			suffix: Path::new("a"),
-			cluster: Some(cluster::Advert {
-				hops: hop_path(&[7]),
-				cost: 1,
-			}),
+			params: clustered(&[7], 1),
 		};
 		assert!(body(&free, version).len() < body(&priced, version).len());
 
-		let mut buf = bytes::Bytes::from(body(&free, version));
-		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, true)).unwrap();
-		assert_eq!(decoded.cluster.unwrap().cost, 0);
+		let (decoded, _) = decode(body(&free, version), version, CLUSTER).unwrap();
+		assert_eq!(decoded.params.unwrap().cluster.unwrap().cost, 0);
+	}
+
+	/// MoQ Epoch alone extends NAMESPACE too: the block is present, empty for a route
+	/// without an epoch, and carries EPOCH for one with.
+	#[test]
+	fn epoch_namespace_round_trips() {
+		let version = Version::Draft22;
+		let epoch = crate::Epoch::mint();
+		for epoch in [None, Some(epoch)] {
+			let msg = Namespace {
+				suffix: Path::new("a"),
+				params: Some(AdvertParams {
+					cluster: None,
+					epoch: epoch.clone(),
+				}),
+			};
+			let (decoded, consumed) = decode(body(&msg, version), version, EPOCH).unwrap();
+			assert!(consumed);
+			assert_eq!(decoded.params, msg.params, "{epoch:?}");
+		}
+	}
+
+	/// With both extensions, one block holds the parameters of both.
+	#[test]
+	fn both_extensions_share_one_block() {
+		let version = Version::Draft22;
+		let mut params = clustered(&[7], 3).unwrap();
+		params.epoch = Some(crate::Epoch::mint());
+		let msg = Namespace {
+			suffix: Path::new("a"),
+			params: Some(params),
+		};
+		let encoded = body(&msg, version);
+		let (decoded, consumed) = decode(encoded.clone(), version, BOTH).unwrap();
+		assert!(consumed);
+		assert_eq!(decoded.params, msg.params);
+
+		// Read as the base form, a single block is all that is left over.
+		let mut suffix = Vec::new();
+		encode_namespace(&mut Encoder::new(&mut suffix, version.into()), &Path::new("a")).unwrap();
+		let mut block = Vec::new();
+		super::super::publish_namespace::encode_advert_params(
+			&mut Encoder::new(&mut block, version.into()),
+			version,
+			msg.params.as_ref().unwrap(),
+		)
+		.unwrap();
+		assert_eq!(encoded, [suffix, block].concat());
+	}
+
+	/// EPOCH on a session that did not negotiate MoQ Epoch is an unknown parameter, and so
+	/// is a malformed one on a session that did.
+	#[test]
+	fn epoch_refused_unless_negotiated_and_well_formed() {
+		let version = Version::Draft22;
+		let msg = Namespace {
+			suffix: Path::new("a"),
+			params: Some(AdvertParams {
+				cluster: clustered(&[7], 0).unwrap().cluster,
+				epoch: Some(crate::Epoch::mint()),
+			}),
+		};
+		assert!(matches!(
+			decode(body(&msg, version), version, CLUSTER),
+			Err(DecodeError::InvalidValue)
+		));
+
+		let mut buf = Vec::new();
+		encode_namespace(&mut Encoder::new(&mut buf, version.into()), &Path::new("a")).unwrap();
+		let w = &mut Encoder::new(&mut buf, version.into());
+		w.varint(1).unwrap();
+		w.varint(super::super::epoch::EPOCH_PARAM).unwrap();
+		w.bytes(&[0; 16]).unwrap();
+		assert!(matches!(decode(buf, version, EPOCH), Err(DecodeError::InvalidValue)));
 	}
 
 	/// A negotiated session that omits HOP_PATH is a protocol violation.
@@ -452,7 +549,7 @@ mod tests {
 
 		let mut bytes = bytes::Bytes::from(buf);
 		assert!(matches!(
-			crate::coding::decode_buf(&mut bytes, version, |r, v| Namespace::decode_body(r, v, true)),
+			crate::coding::decode_buf(&mut bytes, version, |r, v| Namespace::decode_body(r, v, CLUSTER)),
 			Err(DecodeError::InvalidValue)
 		));
 	}
@@ -465,10 +562,13 @@ mod tests {
 		let msg = super::super::PublishNamespace {
 			request_id: RequestId(1),
 			track_namespace: Path::new("a"),
-			cluster: Some(cluster::Advert {
-				hops: hop_path(&[7]),
-				cost: 0,
-			}),
+			params: AdvertParams {
+				cluster: Some(cluster::Advert {
+					hops: hop_path(&[7]),
+					cost: 0,
+				}),
+				epoch: None,
+			},
 			authorization_token: None,
 		};
 
@@ -478,7 +578,9 @@ mod tests {
 		let mut bytes = bytes::Bytes::from(buf);
 		assert!(
 			crate::coding::decode_buf(&mut bytes, version, |r, v| super::super::PublishNamespace::decode_body(
-				r, v, false
+				r,
+				v,
+				Negotiated::default()
 			))
 			.is_err()
 		);

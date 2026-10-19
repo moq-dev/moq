@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `CongestionControl` gained `NONE` (#5926)
+
+`CongestionControl.NONE` runs no congestion control and no pacing, for tests and controlled links.
+An exhaustive `when` needs one more branch.
+
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `QuicConfig.keylog` to `true` as well to capture them; without `SSLKEYLOGFILE` the client or server refuses to build.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.groupStart` and `groupEnd` are replaced by `ranges`, a list of `Range` whose ends are `AnchorAbsolute` or `AnchorRelative` (an absolute group and frame, or a count of groups before the latest), and an optional `order`.
@@ -104,10 +114,15 @@ Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusHead))
 ```
 
-### Container byte-stream importers take an init record
+### Container byte streams use `ContainerProducer` (#5919)
 
-`ContainerStreamProducer` takes a `ContainerStreamInit` holding the format instead of a bare format.
-Its optional `timebase`, also on `ContainerInit`, shares one source's offset across container imports.
+`BroadcastProducer.publishContainerStream` has no separate importer: a container recovers its own framing, so `dev.moq.media.ContainerProducer` takes chunks split anywhere.
+Pass empty `data` and write the stream through it.
+`ContainerInit`'s optional `timebase` shares one source's offset across container imports.
+
+```kotlin
+val stream = ContainerProducer(broadcast, ContainerInit(ContainerFormat.FMP4, byteArrayOf(), null))
+```
 
 ### Timestamps are optional
 

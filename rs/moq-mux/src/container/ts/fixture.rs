@@ -128,6 +128,44 @@ impl Mux {
 		self
 	}
 
+	/// A whole PES on `pid`, split into as many packets as it needs, the last padded with
+	/// adaptation stuffing so the PES ends with it. Returns where its start code sits in the
+	/// first packet, and the packets, numbered on `pid` in order.
+	pub(super) fn split(&mut self, pid: u16, pes: &[u8]) -> (usize, Vec<Vec<u8>>) {
+		let mut start = 4;
+		let mut packets = Vec::new();
+		for (i, chunk) in pes.chunks(184).enumerate() {
+			let cc = self.cc(pid);
+			let pusi = if i == 0 { 0x40 } else { 0 };
+			let mut pkt = vec![0x47, pusi | (pid >> 8) as u8 & 0x1f, pid as u8];
+			if chunk.len() == 184 {
+				pkt.push(0x10 | cc);
+			} else {
+				let field = 183 - chunk.len();
+				pkt.extend_from_slice(&[0x30 | cc, field as u8]);
+				if field > 0 {
+					pkt.push(0x00);
+					pkt.resize(5 + field, 0xff);
+				}
+			}
+			if i == 0 {
+				start = pkt.len();
+			}
+			pkt.extend_from_slice(chunk);
+			packets.push(pkt);
+		}
+		(start, packets)
+	}
+
+	/// A whole PES on `pid`, as [`Self::split`] packetizes it. Returns the input offset of its
+	/// start code.
+	pub(super) fn whole(&mut self, pid: u16, pes: &[u8]) -> u64 {
+		let (start, packets) = self.split(pid, pes);
+		let at = (self.out.len() + start) as u64;
+		self.out.extend(packets.concat());
+		at
+	}
+
 	/// A section on `pid`, split across as many packets as it needs.
 	pub(super) fn section(&mut self, pid: u16, section: &[u8]) -> &mut Self {
 		let mut payload = vec![0u8];
@@ -161,6 +199,22 @@ impl Mux {
 		streams: &[(u8, u16)],
 		info: usize,
 	) -> &mut Self {
+		let streams: Vec<_> = streams
+			.iter()
+			.map(|&(stream_type, es)| (stream_type, es, &[][..]))
+			.collect();
+		self.pmt_with(pid, program, pcr_pid, &streams, info)
+	}
+
+	/// A [`Self::pmt`] whose streams each carry `(stream_type, pid, ES descriptors)`.
+	pub(super) fn pmt_with(
+		&mut self,
+		pid: u16,
+		program: u16,
+		pcr_pid: u16,
+		streams: &[(u8, u16, &[u8])],
+		info: usize,
+	) -> &mut Self {
 		let mut descriptors = Vec::new();
 		while descriptors.len() < info {
 			let len = (info - descriptors.len()).clamp(2, 200) - 2;
@@ -175,8 +229,15 @@ impl Mux {
 			descriptors.len() as u8,
 		];
 		body.extend_from_slice(&descriptors);
-		for &(stream_type, es) in streams {
-			body.extend_from_slice(&[stream_type, 0xe0 | (es >> 8) as u8, es as u8, 0xf0, 0x00]);
+		for &(stream_type, es, info) in streams {
+			body.extend_from_slice(&[
+				stream_type,
+				0xe0 | (es >> 8) as u8,
+				es as u8,
+				0xf0 | (info.len() >> 8) as u8,
+				info.len() as u8,
+			]);
+			body.extend_from_slice(info);
 		}
 		self.section(pid, &psi::section(psi::PMT_TABLE_ID, program, 0, 0, 0, &body))
 	}
