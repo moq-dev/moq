@@ -28,7 +28,3 @@ quests.
 - [Dart on iOS](/quest/m2/dart-ios.md) - the Dart iOS asset proof
 - [iOS capture](/quest/m2/mobile-capture-ios.md) - deliver the selected iOS capture path
 - [Android capture](/quest/m2/mobile-capture-android.md) - deliver the selected Android capture and codec path
-
-## Closes
-
-- [#700](https://github.com/moq-dev/moq/issues/700) - native and mobile support, including the deferred phases
