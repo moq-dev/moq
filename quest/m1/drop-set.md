@@ -141,20 +141,24 @@ unknown again.
 
 Each cursor's disposition record is billed the same way, a fixed per-run
 cost on the same `Pool`, and is settled a run at a time like the shared
-set, so a cursor's state and CPU track its runs, never their span. The pool
-evicts a cursor's oldest run first:
+set, so a cursor's state and CPU track its runs, never their span. The
+floor only rises over a settled prefix: the runs from the floor up to the
+cursor's lowest unknown hole, each delivered or reported to the subscriber.
+It never rises over a hole, since a descending or arrival-order cursor can
+deliver H while a lower G is still unknown, and folding H would silently
+treat G as handled. When the pool evicts a cursor's oldest run:
 
-- An evicted reported run becomes unknown and is judged again from the
-  shared set and locally, as below. Nothing below it is recorded as
-  delivered, since older runs went first, so this never resends a delivered
-  group. A run reported over lite-05 or lite-06 was final on the wire, so
-  it is folded into the floor instead.
-- An evicted delivered run raises the cursor's floor through it, as
-  `forget_below` does today: nothing below the floor is offered again,
-  which keeps a delivered group from going out twice at the cost of no
-  longer re-offering a gap the pool could not remember.
+- A run inside the settled prefix folds into the floor, as `forget_below`
+  does today. Nothing is lost: a delivered group is never sent again, and a
+  reported one was already reported, so folding it only forgoes re-offering
+  it after a widening or edge loss.
+- A run above an unknown hole cannot be dropped without guessing, so the
+  cursor fails instead: the subscription ends with `TooFarBehind` (stream
+  code 0x5, already meaning a reader that fell too far behind and lost
+  content), and the subscriber re-subscribes. The cursor's whole record is
+  released with it.
 
- A cursor judges an unknown missing sequence as it would a
+A cursor judges an unknown missing sequence as it would a
 group never received: locally against its own budget (`TrackState::drifted`),
 and otherwise as a cache miss, which the relay fills upstream by range
 ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)), so no reader
@@ -189,10 +193,12 @@ Test on mock time through a relay:
   while G stayed cached, and delivered H, gets only G after a widening that
   covers all three: G is re-offered and F and H are never resent. The same
   holds when G's convicting edge is lost instead of a widening.
-- A cursor whose disposition record is evicted under pool pressure never
-  resends a delivered group: an evicted reported run is judged again, and
-  an evicted delivered run raises the floor. Through a lite-06 hop, an
-  evicted reported run stays dropped.
+- A cursor whose settled prefix is evicted under pool pressure folds it
+  into the floor and never resends a delivered group or re-offers a folded
+  reported one.
+- A descending cursor that delivered H while a lower G is still unknown,
+  under pool pressure that evicts H's run, ends with `TooFarBehind` instead
+  of skipping G.
 - A flood of fragmented runs stays within the pool, evicting the oldest
   runs first, and a sequence whose run was evicted is judged locally or
   filled by range, never waited on indefinitely.
