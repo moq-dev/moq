@@ -604,16 +604,30 @@ about a round trip queued, so the backlog lands at the relay, which ages groups 
 The loss-based `MOQ_QUIC_CONGESTION_CONTROL=loss` (CUBIC) fills it, latency
 outgrows the delay, and the export refuses the run as a clock drift.
 
-Measured on 2026-10-18 with other test runs sharing the host:
+So the queue's own tail drop runs as a lane of its own: CUBIC behind a 250 ms
+queue, five round trips deep, which it overflows on every sawtooth, while a
+retransmit behind a full queue (about twice 300 ms) still lands inside the 1 s
+delay. A loss-based run fails unless the queue overflowed.
+
+```bash
+MOQ_QUIC_CONGESTION_CONTROL=loss just test ts --hrd --rate 7000000 --queue 250ms
+```
+
+Measured on 2026-10-18 and 2026-10-19 with other test runs sharing the host:
 
 | Run | Queue | Duration | Result |
 |---|---:|---:|---|
 | `--hrd --rate 7000000` | 2 s | 120 s | passes; 37.6 s of video shed in whole groups, none overflowed |
 | `--hrd --rate 7000000` | 150 ms - 1 s | 40-120 s | none overflowed |
-| `--hrd --rate 7000000` | 100 ms | 40-120 s, four runs | 0, 0, 3 and 28 overflowed |
-| `--hrd --rate 7000000` | 50 ms | 120 s | graders pass; 269 overflowed |
+| `--hrd --rate 7000000` | 100 ms | 40-120 s, six runs | 0, 0, 0, 3, 5 and 28 overflowed |
+| `--hrd --rate 7000000` | 75 ms | 60 s, two runs | 70 and 103 overflowed |
+| `--hrd --rate 7000000` | 50 ms | 60-120 s, two runs | graders pass; 111 and 269 overflowed |
+| `--hrd --rate 3500000` | 2 s | 60 s | fails: none overflowed, 56 s of video shed and the last group lost |
 | `--hrd --rate 7000000 --live` | 2 s | 60 s | passes; 99.8 % of PCRs released on time, drift -28 ms |
 | `--passthrough --rate 7000000` | 2 s | 120 s | passes; its gaps leave 463 continuity errors (reported) |
+| `--hrd --rate 7000000`, CUBIC | 250 ms | 120 s, four runs | passes; 423-430 overflowed, 18-42 units missed their deadline, 36.5-39.9 s shed |
+| `--hrd --rate 7000000`, CUBIC | 500 ms | 60-120 s, three runs | passes; 541-625 overflowed, 79-229 units missed their deadline |
+| `--hrd --rate 7000000`, CUBIC | 1 s | 120 s | fails: 919 overflowed, 107 s shed and the last group lost |
 | `--hrd --rate 7000000`, CUBIC | 2 s | 60 s | fails: 918 overflowed, then the clock-drift refusal |
 
 ```bash
@@ -832,7 +846,8 @@ open-GOP, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Eac
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
 Nightly and manual runs also invoke `just test ts --pair`,
-`just test ts --live --duration 120`, `just test ts --hrd --rate 7000000 --duration 120`
+`just test ts --live --duration 120`, `just test ts --hrd --rate 7000000 --duration 120`,
+the same with `--queue 250ms` and `MOQ_QUIC_CONGESTION_CONTROL=loss`,
 and `just test ts --passthrough --rate 7000000 --duration 120`.
 The pair exercises late-joining subscribers; the live window distinguishes ongoing
 clock drift from initial buffer filling; the congested paths judge what the export

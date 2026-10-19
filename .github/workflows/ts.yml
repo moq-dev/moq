@@ -226,7 +226,17 @@ jobs:
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
-      # The passthrough over the same path, under its 10 Mb/s multiplex: what arrives must be the
+      # The same path behind a 250 ms queue, with the relay's loss-based CUBIC: BBRv3 never fills a
+      # queue this deep, CUBIC overflows it every sawtooth. QUIC must recover what the queue drops
+      # inside the export's 1 s delay, and the run fails unless the queue overflowed.
+      - name: TS overflowing path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --hrd --rate 7000000 --queue 250ms --duration 120
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          MOQ_QUIC_CONGESTION_CONTROL: loss
+
+      # The passthrough over the congested path, under its 10 Mb/s multiplex: what arrives must be the
       # source's packets in place.
       - name: TS passthrough congested path
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}

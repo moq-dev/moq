@@ -59,7 +59,7 @@ source "$DIR/process.sh"
 # Captured before the parse below consumes it, so the rerun command carries the
 # source capture, mux rate, EIT fixture, and analyzer thresholds this run used,
 # whether they arrived as flags or as environment overrides.
-RERUN="$(harness_env TSC_DURATION TSC_BITRATE TSC_PORT TSC_PROFILE TSC_SEED)just test ts$(harness_argv "$@")"
+RERUN="$(harness_env TSC_DURATION TSC_BITRATE TSC_PORT TSC_PROFILE TSC_SEED MOQ_QUIC_CONGESTION_CONTROL)just test ts$(harness_argv "$@")"
 
 # Seamless session replacement needs an explicit publisher epoch. Keep this
 # opt-in local to the validation rig; epochless replacement is tested as refusal.
@@ -696,9 +696,11 @@ stop_shaper() {
     }
     # The shaper accepts a silent profile while silence is still likely, and never requires a
     # rate limit to act; a lossy run needs loss, and a congested one a rate limit that held
-    # datagrams back.
-    local counter
-    for counter in ${LOSS:+lost} ${RATE:+throttled}; do
+    # datagrams back. A loss-based sender (MOQ_QUIC_CONGESTION_CONTROL=loss) grows until it
+    # loses, and the queue's tail drop is the only loss here, so its run must overflow too.
+    local counter overflow=""
+    [[ -n "$RATE" && "${MOQ_QUIC_CONGESTION_CONTROL:-}" == loss ]] && overflow=overflowed
+    for counter in ${LOSS:+lost} ${RATE:+throttled} $overflow; do
         if ! python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["down"][sys.argv[2]] == 0)' \
             "$HARNESS_RUN/shaper.json" "$counter"; then
             echo "error: moq-shaper ${counter} none of the relay's datagrams on a path of ${PATH_DESC}" >&2
