@@ -91,8 +91,14 @@ taking the wrap that lands it nearest the clock, so media that gets more than
 time) reads as a rewind.
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
-and subtitle PIDs through as tracks. SCTE-35 cues wait for a media timestamp;
-input ending or declaring a clock break before that timestamp is refused.
+and every other stream it does not decode (KLV, subtitles, DVB AC-3) through as
+tracks. Each such PES goes through whole, at its place on the program clock
+(PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
+is refused with a warning: any in a program with no PCR, and one whose PES carry
+an ESCR, pack header or TREF, are scrambled, or leave a non-video PES unbounded.
+SCTE-35 cues and private PES wait for a media timestamp; input ending or
+declaring a clock break before that timestamp is refused, so a program of data
+alone fails.
 PES and untimed section staging share a bounded budget, so a source that never
 supplies a PES boundary or clock fails rather than retaining bytes indefinitely.
 It takes one program: a multi-program

@@ -848,13 +848,13 @@ pub(crate) mod tests {
 		0x7f, 0xdf, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xad, 0x25, 0xe8, 0x39,
 	];
 
-	/// Payload of an undecoded PES-framed stream (e.g. teletext/DVB AC-3 private data),
-	/// carried verbatim on its own PID with the original PES stream_id.
-	const PES_PAYLOAD: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02];
+	/// A whole PES of an undecoded stream (private_stream_1, no PTS), carried on its own PID.
+	const PES: &[u8] = &[
+		0x00, 0x00, 0x01, 0xBD, 0x00, 0x09, 0x84, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02,
+	];
 
 	const SECTION_PID: u16 = 0x102;
-	const VERBATIM_PES_PID: u16 = 0x104;
-	const VERBATIM_PES_STREAM_ID: u8 = 0xC0;
+	const PES_PID: u16 = 0x104;
 
 	async fn open_export(
 		source: moq_mux::Source,
@@ -882,7 +882,7 @@ pub(crate) mod tests {
 	}
 
 	/// Manufacture a TS feed carrying real video/audio plus one section-framed
-	/// verbatim stream (SCTE-35) and one PES-framed verbatim stream, by importing
+	/// verbatim stream (SCTE-35) and one whole-PES stream, by importing
 	/// `bbb.ts` into a broadcast that also holds the two ancillary tracks and
 	/// re-exporting with the `mpegts` catalog extension.
 	/// Let the origin's driver run the fronts that requests and announcements
@@ -933,15 +933,12 @@ pub(crate) mod tests {
 		section_producer.cut(None).unwrap();
 		section_producer.finish().unwrap();
 
-		// PES-framed verbatim stream (undecoded private data, stream_type 0x06), with
-		// an explicit PES stream_id to round-trip.
+		// Whole-PES stream (undecoded private data, stream_type 0x06).
 		let pes = broadcast
 			.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.text))
 			.unwrap();
-		let mut verbatim = tscat::Verbatim::new(0x06, tscat::Framing::Pes);
-		verbatim.stream_id = Some(VERBATIM_PES_STREAM_ID);
-		let mut pes_track = tscat::Track::new(VERBATIM_PES_PID);
-		pes_track.verbatim = Some(verbatim);
+		let mut pes_track = tscat::Track::new(PES_PID);
+		pes_track.pes_packet = Some(tscat::PesPacket::new(0x06));
 		catalog
 			.modify()
 			.unwrap()
@@ -954,7 +951,7 @@ pub(crate) mod tests {
 			.write(Frame {
 				timestamp: Timestamp::from_millis(1450).unwrap(),
 				duration: None,
-				payload: bytes::Bytes::from_static(PES_PAYLOAD),
+				payload: bytes::Bytes::from_static(PES),
 				keyframe: true,
 			})
 			.unwrap();
@@ -1002,8 +999,7 @@ pub(crate) mod tests {
 
 	/// Full CLI round-trip: a TS feed with undecoded streams goes through `Publish`
 	/// (which selects the `mpegts` catalog) and the subscribe-side catalog stream,
-	/// and the SCTE-35 section and the verbatim PES survive with their PIDs, framing,
-	/// PES stream_id, and byte-exact payloads.
+	/// and the SCTE-35 section and the whole PES survive with their PIDs and every byte.
 	async fn ts_verbatim_round_trip(format: CatalogFormat) {
 		// Paused time auto-advances when the exporter parks, so the `drain` timeouts
 		// fire instantly instead of waiting on the wall clock.
@@ -1070,16 +1066,9 @@ pub(crate) mod tests {
 			.mpegts
 			.tracks
 			.iter()
-			.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x06))
-			.expect("verbatim PES survived the round-trip");
-		assert_eq!(pes.pid, VERBATIM_PES_PID, "verbatim PES PID preserved");
-		let pes_verbatim = pes.verbatim.as_ref().unwrap();
-		assert_eq!(pes_verbatim.framing, tscat::Framing::Pes, "PES framing preserved");
-		assert_eq!(
-			pes_verbatim.stream_id,
-			Some(VERBATIM_PES_STREAM_ID),
-			"PES stream_id preserved"
-		);
+			.find(|(_, t)| t.pes_packet.as_ref().is_some_and(|p| p.stream_type == 0x06))
+			.expect("the PES track survived the round-trip");
+		assert_eq!(pes.pid, PES_PID, "PES PID preserved");
 		let pes_name = pes_name.clone();
 
 		assert_eq!(
@@ -1089,8 +1078,8 @@ pub(crate) mod tests {
 		);
 		assert_eq!(
 			read_frame(&consumer, &pes_name).await,
-			PES_PAYLOAD,
-			"verbatim PES payload round-trips byte-for-byte"
+			PES,
+			"the PES round-trips byte-for-byte"
 		);
 	}
 
