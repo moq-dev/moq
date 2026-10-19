@@ -3649,6 +3649,44 @@ mod tests {
 		request.await.unwrap().expect("the requested route serves it");
 	}
 
+	/// The token index holds only what live advertisements name. A peer that names a token,
+	/// moves off it, and retracts must leave nothing behind, or unique paths grow it forever.
+	#[moq_clock::test]
+	async fn a_retracted_rename_leaves_no_token_index() {
+		let auth = crate::auth::Handle::new(true);
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: SinkSession::new(Default::default()),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			cost: None,
+			peer_hop: Some(crate::Hop::new(777).unwrap()),
+			going_away: Default::default(),
+			auth: auth.clone(),
+		});
+
+		let mut announced = Announced::default();
+		for i in 0..16 {
+			// Renamed twice with no verdict between, so the middle token is dropped unapplied.
+			let path = Path::new(&format!("room/{i}")).to_owned();
+			announced.name(&auth, &path, Some(0));
+			announced.name(&auth, &path, Some(1));
+			announced.name(&auth, &path, None);
+			announced.withdraw(&path);
+
+			// Renamed to the scope, which applies at once and moves it off its token.
+			let path = Path::new(&format!("lobby/{i}")).to_owned();
+			announced.name(&auth, &path, Some(0));
+			announced.name(&auth, &path, None);
+			announced.admits(&subscriber, &path);
+			announced.withdraw(&path);
+		}
+		assert!(announced.by_token.is_empty(), "left {:?}", announced.by_token);
+		assert!(announced.names.is_empty());
+	}
+
 	/// A source minted under a claim goes once nothing holds it: the front that read it
 	/// ended, so the session keeps nothing for the path, and a later request asks the
 	/// route afresh. Withdrawing the claim still closes a source in use at once.
@@ -4703,9 +4741,9 @@ struct Announced {
 	routes: HashMap<PathOwned, Held>,
 	/// The peer's token each advertisement names (lite-07+), which decides it in place of
 	/// the session's scope. Absent for one under the scope.
-	names: HashMap<PathOwned, crate::auth::Authority>,
-	/// The advertisements that named each of the peer's tokens, so a change to one token
-	/// re-decides only those. Pruned as it is read: an entry may have moved off.
+	names: HashMap<PathOwned, Name>,
+	/// The advertisements naming each of the peer's tokens, so a change to one token
+	/// re-decides only those. Holds exactly what `names` names, so it never outgrows them.
 	by_token: HashMap<u64, HashSet<PathOwned>>,
 	/// The peer's tokens that `names` name and that changed.
 	changes: crate::auth::Changes,
@@ -4719,6 +4757,13 @@ struct Announced {
 	/// driver wakes for every group the session carries, so a pass must cost what
 	/// was requested, not every route the peer announced.
 	ready: kio::Queue<PathOwned>,
+}
+
+/// The peer's token an advertisement names, and the tokens it is filed under in
+/// [`Announced::by_token`], so moving off one unfiles it there.
+struct Name {
+	authority: crate::auth::Authority,
+	filed: Vec<u64>,
 }
 
 /// What we made of one advertisement the peer holds.
@@ -4773,19 +4818,41 @@ impl Announced {
 	/// scope with `None`. A renamed one stays decided by the old token until the new one
 	/// decides.
 	fn name(&mut self, handle: &crate::auth::Handle, path: &PathOwned, auth: Option<u64>) {
-		let authority = match self.names.get_mut(path) {
-			Some(authority) => {
-				authority.rename(auth);
-				authority
+		match self.names.get_mut(path) {
+			Some(name) => name.authority.rename(auth),
+			None if auth.is_some() => {
+				let authority = crate::auth::Authority::new(handle.clone(), auth, &self.changes);
+				let filed = Vec::new();
+				self.names.insert(path.clone(), Name { authority, filed });
 			}
-			None if auth.is_some() => self
-				.names
-				.entry(path.clone())
-				.or_insert_with(|| crate::auth::Authority::new(handle.clone(), auth, &self.changes)),
+			None => return,
+		}
+		self.refile(path);
+	}
+
+	/// File the advertisement at `path` under exactly the tokens it names now.
+	fn refile(&mut self, path: &PathOwned) {
+		let (old, new) = match self.names.get_mut(path) {
+			Some(name) => {
+				let new: Vec<u64> = name.authority.ids().collect();
+				(std::mem::replace(&mut name.filed, new.clone()), new)
+			}
 			None => return,
 		};
-		for id in authority.ids() {
+		self.unfile(path, old.iter().filter(|id| !new.contains(id)));
+		for id in new.into_iter().filter(|id| !old.contains(id)) {
 			self.by_token.entry(id).or_default().insert(path.clone());
+		}
+	}
+
+	fn unfile<'a>(&mut self, path: &PathOwned, ids: impl Iterator<Item = &'a u64>) {
+		for id in ids {
+			if let Some(named) = self.by_token.get_mut(id) {
+				named.remove(path);
+				if named.is_empty() {
+					self.by_token.remove(id);
+				}
+			}
 		}
 	}
 
@@ -4794,13 +4861,13 @@ impl Announced {
 	fn admits<S: crate::transport::poll::Session>(&mut self, subscriber: &Subscriber<S>, path: &PathOwned) -> bool {
 		let direction = crate::auth::Direction::Subscribe;
 		let scoped = subscriber.auth.within_limit(direction, path.as_str());
-		match self.names.get_mut(path) {
-			Some(authority) => matches!(
-				authority.verdict(direction, path.as_str(), scoped),
-				crate::auth::Verdict::Admitted
-			),
-			None => scoped,
-		}
+		let Some(name) = self.names.get_mut(path) else {
+			return scoped;
+		};
+		// A verdict may apply a rename, moving the advertisement off its old token.
+		let verdict = name.authority.verdict(direction, path.as_str(), scoped);
+		self.refile(path);
+		matches!(verdict, crate::auth::Verdict::Admitted)
 	}
 
 	/// Hold the route at `path` back until a grant admits it, closing its sources if it was
@@ -4891,15 +4958,8 @@ impl Announced {
 	/// session from the same peer. Dropping its sources closes their requests.
 	fn withdraw(&mut self, path: &PathOwned) {
 		self.epochs.remove(path);
-		if let Some(authority) = self.names.remove(path) {
-			for id in authority.ids() {
-				if let Some(named) = self.by_token.get_mut(&id) {
-					named.remove(path);
-					if named.is_empty() {
-						self.by_token.remove(&id);
-					}
-				}
-			}
+		if let Some(name) = self.names.remove(path) {
+			self.unfile(path, name.filed.iter());
 		}
 		let Some(held) = self.routes.remove(path) else {
 			return;
@@ -4964,17 +5024,12 @@ impl Announced {
 
 	/// Apply a change to the peer's tokens `ids`: re-decide only the advertisements naming one.
 	fn renamed<S: crate::transport::poll::Session>(&mut self, subscriber: &Subscriber<S>, ids: BTreeSet<u64>) {
-		let mut paths = Vec::new();
-		for id in ids {
-			let Some(named) = self.by_token.get_mut(&id) else {
-				continue;
-			};
-			named.retain(|path| self.names.get(path).is_some_and(|authority| authority.names(id)));
-			paths.extend(named.iter().cloned());
-			if named.is_empty() {
-				self.by_token.remove(&id);
-			}
-		}
+		let paths = ids
+			.iter()
+			.filter_map(|id| self.by_token.get(id))
+			.flatten()
+			.cloned()
+			.collect();
 		self.redecide(subscriber, paths);
 	}
 

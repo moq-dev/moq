@@ -2245,11 +2245,6 @@ impl Authority {
 		};
 	}
 
-	/// Whether it names the peer's token `id`, deciding or renamed to.
-	pub(crate) fn names(&self, id: u64) -> bool {
-		self.ids().any(|named| named == id)
-	}
-
 	/// The peer's tokens it names: the one deciding, and the one it is renamed to.
 	pub(crate) fn ids(&self) -> impl Iterator<Item = u64> + '_ {
 		let next = self.next.as_ref().and_then(Option::as_ref);
