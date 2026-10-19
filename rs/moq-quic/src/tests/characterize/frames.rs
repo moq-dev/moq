@@ -247,8 +247,8 @@ fn retire_connection_id_in_use() {
 }
 
 /// A connection closed by its own transport error sends CONNECTION_CLOSE to a CID the server
-/// retired, and the server answers with a stateless reset. Today the reset replaces the unread
-/// close reason with `Reset`, or, once the reason was read, reports a second `ConnectionLost`.
+/// retired, and the server answers with a stateless reset, which must neither replace the unread
+/// close reason with `Reset` nor, once the reason was read, report a second `ConnectionLost`.
 fn stateless_reset_after_local_close(poll_early: bool) {
     let _guard = subscribe();
     let (mut pair, client_ch, server_ch) = connected();
@@ -277,13 +277,11 @@ fn stateless_reset_after_local_close(poll_early: bool) {
 }
 
 #[test]
-#[ignore = "bug: /quest/m1/quic/close-reason-after-reset.md"]
 fn stateless_reset_after_local_close_keeps_reason() {
     stateless_reset_after_local_close(false);
 }
 
 #[test]
-#[ignore = "bug: /quest/m1/quic/close-reason-after-reset.md"]
 fn stateless_reset_after_local_close_is_not_a_second_loss() {
     stateless_reset_after_local_close(true);
 }
@@ -367,10 +365,7 @@ fn stream_final_size_changed() {
     );
 }
 
-/// Today the reader gets all five bytes and then blocks forever: the shrunken final size never
-/// matches what was read, so the stream neither finishes nor errors.
 #[test]
-#[ignore = "bug: /quest/m1/quic/final-size-below-received.md"]
 fn stream_final_size_below_received() {
     let s = id(Side::Client, Dir::Uni, 0);
     let frames = Frames::default().stream(s, 0, b"abcde", false);

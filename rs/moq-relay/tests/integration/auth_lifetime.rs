@@ -1276,30 +1276,18 @@ async fn a_fixed_lease_still_expires() {
 	}
 }
 
-/// A connected `(client, server)` session pair over an in-memory byte stream, so a
+/// A connected `(client, server)` session pair over the in-memory transport, so a
 /// test on Tokio's paused clock never waits on a socket: the clock only advances
-/// once every byte in flight has landed.
+/// once every message in flight has landed.
 async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
-	let config = || {
-		let mut config = qmux::Config::new(qmux::Version::QMux01);
-		config.protocol = qmux::Protocol::Negotiate(moq_net::ALPNS.iter().map(|alpn| alpn.to_string()).collect());
-		config
-	};
-	let stream = |io| qmux::transport::Stream::new(io, qmux::Version::QMux01, config().max_record_size);
-	let (client, server) = tokio::io::duplex(64 * 1024);
-	let (client, server) = tokio::try_join!(
-		qmux::Session::connect(stream(client), config()),
-		qmux::Session::accept(stream(server), config()),
-	)
-	.expect("qmux handshake");
+	let mut config = moq_net::transport::memory::Config::default();
+	config.protocol = Some(crate::memory::newest().alpn().to_string());
+	let (client, server) = moq_net::transport::memory::pair(config);
 
 	let now = moq_net::time::now();
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
-			.connect(
-				now,
-				moq_tokio::transport::Session::new(client, moq_net::transport::Binding::InBand),
-			)
+			.connect(now, client)
 			.await
 			.expect("client handshake");
 		tokio::spawn(moq_net::time::run(driver));
@@ -1307,10 +1295,7 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 	};
 	let server = async {
 		let (session, driver) = moq_net::Server::new()
-			.accept(
-				now,
-				moq_tokio::transport::Session::new(server, moq_net::transport::Binding::InBand),
-			)
+			.accept(now, server)
 			.await
 			.expect("server handshake");
 		tokio::spawn(moq_net::time::run(driver));
