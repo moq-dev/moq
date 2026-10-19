@@ -40,6 +40,13 @@ class Place(unittest.TestCase):
         self.assertEqual((placement.gaps, placement.tail), ([], 40))
         self.assertFalse(placement.complete)
 
+    def test_loss_ok_admits_gaps_but_not_a_lost_tail(self):
+        gapped = passthrough.place(SOURCE, SOURCE[10:60] + SOURCE[90:])
+        self.assertIsNone(passthrough.shortfall(gapped, loss_ok=True))
+        self.assertIsNotNone(passthrough.shortfall(gapped, loss_ok=False))
+        truncated = passthrough.place(SOURCE, SOURCE[10:60] + SOURCE[90:-40])
+        self.assertIsNotNone(passthrough.shortfall(truncated, loss_ok=True))
+
     def test_a_rewritten_packet_fails(self):
         capture = list(SOURCE)
         capture[50] = capture[50][:100] + b"\xff" + capture[50][101:]

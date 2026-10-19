@@ -50,6 +50,7 @@ import {
 	hasFirstObjectBit,
 	ObjectIdGap,
 } from "./object.ts";
+import { Parameters } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -743,6 +744,8 @@ export class Subscriber {
 
 		let stream: Stream;
 		let trackAlias: bigint;
+		// The SUBSCRIBER_PRIORITY the request went out with.
+		let priority: number;
 		const abandoned = new Error("subscribe abandoned before it was accepted");
 		try {
 			// Returning demand keeps the same setup and its original deadline.
@@ -752,6 +755,7 @@ export class Subscriber {
 				if (result !== null) {
 					stream = result.stream;
 					trackAlias = result.alias;
+					priority = result.priority;
 					break;
 				}
 				if (demand.closed.peek() === undefined && demand.used.peek()) continue;
@@ -830,11 +834,13 @@ export class Subscriber {
 			// Terminal conditions settle at most once (PublishDone, track close = local
 			// unsubscribe, a revoked grant); race them once so the demand loop doesn't
 			// re-subscribe each pass.
+			const unanswered = new Signal(0);
 			const done = race([
-				this.#runPublishDone(stream, subscription, broadcast).then(() => publisherEnded),
+				this.#runPublishDone(stream, subscription, broadcast, unanswered).then(() => publisherEnded),
 				producer.closed.then(() => localEnded),
 				revoked,
 			]);
+			const updates = this.#runUpdates(stream, requestId, producer, priority, unanswered, done);
 
 			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
 			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
@@ -858,6 +864,11 @@ export class Subscriber {
 			} else {
 				producer.close();
 			}
+
+			// Closing settled `done`, so an update still being written finishes and nothing starts
+			// another. Its bytes must not interleave with the cancellation, and on drafts 14 and 15
+			// its spent request ID must reach the wire before any later one can.
+			await updates;
 
 			// The publisher already ended the request, so there is nothing to cancel. Sending
 			// UNSUBSCRIBE here would name a request it has already torn down.
@@ -889,12 +900,30 @@ export class Subscriber {
 	 * is only a hint: a peer may send 0 regardless, so 0 waits out the grace. A request
 	 * stream that FINs without PUBLISH_DONE is a protocol violation.
 	 */
-	async #runPublishDone(stream: Stream, subscription: Subscription, broadcast: Path.Valid): Promise<void> {
+	async #runPublishDone(
+		stream: Stream,
+		subscription: Subscription,
+		broadcast: Path.Valid,
+		unanswered: Signal<number>,
+	): Promise<void> {
 		const version = this.#session.version;
-		if (await stream.reader.done()) throw new ProtocolViolation("subscribe stream ended without PUBLISH_DONE");
-		const typeId = await stream.reader.u53();
-		if (typeId !== PublishDone.id) {
-			throw new ProtocolViolation(`unexpected message on a subscription: 0x${typeId.toString(16)}`);
+		// A refused update is followed by PUBLISH_DONE, which ends the subscription, so no
+		// further answer is owed.
+		let refused = false;
+		for (;;) {
+			if (await stream.reader.done()) throw new ProtocolViolation("subscribe stream ended without PUBLISH_DONE");
+			const typeId = await stream.reader.u53();
+			if (typeId === PublishDone.id) break;
+			const answer = (typeId === RequestOk.id || typeId === RequestError.id) && !refused && unanswered.peek() > 0;
+			if (!answer) throw new ProtocolViolation(`unexpected message on a subscription: 0x${typeId.toString(16)}`);
+			if (typeId === RequestOk.id) {
+				await RequestOk.decode(stream.reader, version);
+				unanswered.update((count) => count - 1);
+			} else {
+				const err = await RequestError.decode(stream.reader, version);
+				console.debug(`subscription update refused: ${err.reasonPhrase}`);
+				refused = true;
+			}
 		}
 		const done = await PublishDone.decode(stream.reader, version);
 		// A revocation reads the same as one from a moq-lite peer.
@@ -907,6 +936,72 @@ export class Subscriber {
 		const { tail, track } = subscription;
 		const complete = () => count > 0n && BigInt(tail.streams) >= count;
 		await tail.settle(complete, track.closed);
+	}
+
+	/**
+	 * Follow the aggregate subscriber priority upstream until `done` settles: SUBSCRIBE_UPDATE
+	 * through draft 16, REQUEST_UPDATE after, each under a Request ID of its own. From draft 17
+	 * the answer comes back on this stream, so one update is in flight at a time and changes
+	 * meanwhile coalesce. No draft lets an update change the group order, so it stays as asked.
+	 */
+	async #runUpdates(
+		stream: Stream,
+		requestId: bigint,
+		producer: track.Producer,
+		sent: number,
+		unanswered: Signal<number>,
+		done: Promise<unknown>,
+	): Promise<void> {
+		const version = this.#session.version;
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		const stopped = done.then(
+			() => null,
+			() => null,
+		);
+		const stop = new AbortController();
+		void stopped.then(() => stop.abort());
+
+		for (;;) {
+			const wanted = toWire(producer.subscription.peek()?.priority ?? 0);
+			if (wanted === sent || unanswered.peek() > 0) {
+				const disposes: Dispose[] = [];
+				const wake = new Promise<void>((resolve) => {
+					disposes.push(
+						producer.subscription.changed(() => resolve()),
+						unanswered.changed(() => resolve()),
+					);
+				});
+				await race([wake, stopped]);
+				for (const dispose of disposes) dispose();
+				if (stop.signal.aborted) return;
+				continue;
+			}
+
+			let own: bigint | undefined;
+			try {
+				own = await this.#session.nextRequestId(stop.signal);
+			} catch {
+				return;
+			}
+			if (own === undefined) return;
+
+			const parameters = new Parameters();
+			parameters.subscriberPriority = wanted;
+			const update = legacy
+				? new SubscribeUpdate({ requestId, ownRequestId: own, parameters })
+				: new SubscribeUpdate({ requestId: own, parameters });
+			// Counted before writing: the answer can be read before the write's promise resolves.
+			if (!legacy) unanswered.update((count) => count + 1);
+			try {
+				await stream.writer.u53(SubscribeUpdate.id);
+				await update.encode(stream.writer, version);
+			} catch {
+				// The publisher stopped reading; its responses decide how the track ends.
+				return;
+			}
+			sent = wanted;
+			console.debug(`subscribe update: id=${requestId} priority=${wanted}`);
+		}
 	}
 
 	/**
@@ -941,7 +1036,7 @@ export class Subscriber {
 		subscription: Subscription,
 		requestId: bigint,
 		deadline: Deadline,
-	): Promise<{ stream: Stream; alias: bigint }> {
+	): Promise<{ stream: Stream; alias: bigint; priority: number }> {
 		const version = this.#session.version;
 
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
@@ -964,6 +1059,7 @@ export class Subscriber {
 			requestId,
 			trackNamespace: broadcast,
 			trackName: request.name,
+			// Read now, since a subscriber can join while the stream opened. Updates follow it.
 			subscriberPriority: toWire(request.priority),
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
 			groupOrder: request.subscription.order,
@@ -1046,7 +1142,7 @@ export class Subscriber {
 			throw err;
 		}
 		state.registeredAlias = ok.trackAlias;
-		return { stream: state.stream, alias: ok.trackAlias };
+		return { stream: state.stream, alias: ok.trackAlias, priority: msg.subscriberPriority };
 	}
 
 	/**

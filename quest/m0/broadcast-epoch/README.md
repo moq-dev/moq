@@ -33,8 +33,9 @@ clients that retain objects across broadcasts. The negotiated
 [IETF extension](/quest/m1/ietf-epochs.md) follows in m1, independently of
 this release gate; seamless JS handover stays in m1 too.
 
-Non-goals: pooling, which needs nothing here; a redundant pair shares an
-explicit epoch through `moq --epoch`.
+Non-goals: pooling, which needs nothing here. A redundant ingest pair runs on
+distinct epochs (decided 2026-10-19), so only replicas of one publisher's
+bytes share one.
 Also out of scope: trusting the publisher's clock (a far-future epoch wins
 until its route goes away).
 
@@ -124,6 +125,7 @@ End+Start. The child quests own their focused regressions.
 ## Required
 
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - announcement followers restart replaced siblings; other readers retain pins, with optional epochs and legacy best effort
+- [Distinct importer epochs](/quest/m0/broadcast-epoch/distinct-importer-epochs.md) - `moq --epoch` never ships, a redundant importer pair fails over as a marked restart, and the shared-epoch alignment code is reverted
 
 ## Related
 

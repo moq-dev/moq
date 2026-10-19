@@ -258,6 +258,10 @@ export class ControlStreamAdapter implements Session {
 	// SubscribeNamespace requestIds — for routing 0x08/0x0E entries that lack requestId (v14/v15)
 	#subscribeNamespaces = new Set<bigint>();
 
+	// Our updates' own request IDs on drafts 15 and 16, whose answer names that ID rather than
+	// the request it updated. Nothing waits on it, so it is consumed here.
+	#updates = new Set<bigint>();
+
 	// Incoming stream queue (for acceptBi)
 	#incomingQueue: Stream[] = [];
 	#incomingWaiters: ((stream: Stream | undefined) => void)[] = [];
@@ -393,6 +397,7 @@ export class ControlStreamAdapter implements Session {
 						}
 					} else {
 						spent = this.#updateId(toFlush);
+						if (spent !== undefined && this.version !== Version.DRAFT_14) this.#updates.add(spent);
 					}
 
 					await this.#send(toFlush, spent);
@@ -499,6 +504,8 @@ export class ControlStreamAdapter implements Session {
 				}
 
 				const { route, requestId } = classified;
+				if ((route === Route.Response || route === Route.ErrorResponse) && this.#updates.delete(requestId))
+					continue;
 
 				switch (route) {
 					case Route.NewRequest:
