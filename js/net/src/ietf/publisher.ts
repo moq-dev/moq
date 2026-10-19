@@ -6,6 +6,7 @@ import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import * as DatagramStream from "../datagram_stream.ts";
+import type * as Epoch from "../epoch.ts";
 import {
 	controlTimeout,
 	error,
@@ -48,6 +49,7 @@ import { fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { PublishDone, PublishDoneStatus } from "./publish.ts";
 import {
+	type AdvertParams,
 	PublishNamespace,
 	PublishNamespaceDone,
 	PublishNamespaceOk,
@@ -305,6 +307,10 @@ export class Publisher {
 	// back came from us. `undefined` when nothing negotiated it.
 	#advert?: Cluster.Advert;
 
+	// Whether both SETUPs offered MoQ Epoch: every advertisement names its route's epoch, and
+	// a request may name the one it expects.
+	#epoch: boolean;
+
 	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
 	// shrink withdraws what it no longer covers. Undefined until the peer answers, which
 	// allows everything.
@@ -332,6 +338,7 @@ export class Publisher {
 		hidden = false,
 		activeCount = false,
 		cluster,
+		epoch = false,
 		grant = new Signal<Grant | undefined>(undefined),
 		auth,
 		ready = Promise.resolve(),
@@ -351,6 +358,8 @@ export class Publisher {
 		activeCount?: boolean;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
+		/** Whether both SETUPs offered MoQ Epoch. */
+		epoch?: boolean;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we publish. */
 		grant?: Getter<Grant | undefined>;
 		/** This session's tokens, which a route names for its request to carry. */
@@ -375,6 +384,7 @@ export class Publisher {
 		this.#hidden = hidden;
 		this.#activeCount = activeCount;
 		this.#advert = Cluster.advertise(cluster);
+		this.#epoch = epoch;
 		this.#datagramWriter = DatagramStream.datagramWriter(quic);
 	}
 
@@ -396,6 +406,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		this.#pinned(msg.epoch);
 		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
 			await refuseReserved(stream, this.#session.version);
 			return;
@@ -448,7 +459,7 @@ export class Publisher {
 			refusal = { errorCode: toRequestCode("unauthorized", "subscribe", version), reasonPhrase: "not granted" };
 		} else {
 			try {
-				broadcast = await this.#resolve(name, left.signal);
+				broadcast = await this.#resolve(name, left.signal, msg.epoch);
 			} catch (err: unknown) {
 				// Nobody is left to refuse.
 				if (left.signal.aborted) {
@@ -1258,8 +1269,9 @@ export class Publisher {
 			// be declined.
 			const namespace = async (suffix: Path.Valid, snap: Advertised): Promise<Answer> => {
 				await stream.writer.u53(SubscribeNamespaceEntry.id);
-				const cluster = clusterFor(this.#advert, snap.route);
-				await new SubscribeNamespaceEntry({ suffix, cluster }).encode(stream.writer, version);
+				// Either extension puts the Parameters field on NAMESPACE, even an empty one.
+				const params = this.#advert !== undefined || this.#epoch ? this.#params(snap.route) : undefined;
+				await new SubscribeNamespaceEntry({ suffix, params }).encode(stream.writer, version);
 				return "held";
 			};
 			const target: Target = legacy
@@ -1652,12 +1664,20 @@ export class Publisher {
 	}
 
 	/**
+	 * The extension parameters an advertisement of `route` carries. The epoch is forwarded
+	 * as the route names it, and never invented for one without.
+	 */
+	#params(route: Route): AdvertParams {
+		return { cluster: clusterFor(this.#advert, route), epoch: this.#epoch ? route.epoch : undefined };
+	}
+
+	/**
 	 * Advertise one namespace on its own PUBLISH_NAMESPACE request. A declined request
 	 * is logged and skipped: a peer that wants none of this rejects each one and stays
 	 * connected.
 	 */
 	async #advertise(path: Path.Valid, requests: Requests, route: Route): Promise<Answer> {
-		const cluster = clusterFor(this.#advert, route);
+		const params = this.#params(route);
 		const auth = this.#carry(route.auth);
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) return "dropped";
@@ -1675,7 +1695,7 @@ export class Publisher {
 					const stream = request;
 					await stream.writer.u53(PublishNamespace.id);
 					const token = this.#auth?.carried(auth);
-					const msg = new PublishNamespace({ requestId, trackNamespace: path, cluster, token });
+					const msg = new PublishNamespace({ requestId, trackNamespace: path, params, token });
 					await msg.encode(stream.writer, this.#session.version);
 
 					// Read response (RequestOk and PublishNamespaceOk share 0x07)
@@ -1842,6 +1862,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
+		this.#pinned(msg.epoch);
 		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
 			await refuseReserved(stream, this.#session.version);
 			return;
@@ -1877,7 +1898,7 @@ export class Publisher {
 		try {
 			let answer: TrackStatusOk;
 			try {
-				const broadcast = await this.#resolve(name, hold.signal);
+				const broadcast = await this.#resolve(name, hold.signal, msg.epoch);
 				const info = await wireOf(broadcast).resolveTrackInfo(msg.trackName, hold.signal);
 				const largest = wireOf(broadcast).largest(msg.trackName);
 				answer = new TrackStatusOk({
@@ -1958,6 +1979,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async runFetch(msg: Fetch, stream: Stream) {
+		this.#pinned(msg.epoch);
 		this.#fetches.acquire();
 		try {
 			if (msg.trackNamespace !== undefined && Namespace.reserved(msg.trackNamespace, this.#session.version)) {
@@ -2024,13 +2046,21 @@ export class Publisher {
 	/**
 	 * Resolve the broadcast a request names for serving: a local publish, or else the
 	 * origin's routes and dynamic handlers. Rejects with the abort once `signal` aborts.
+	 *
+	 * A request naming an `epoch` is served only by that instance: one now serving another
+	 * epoch, or none, refuses it as gone rather than answering with other content.
 	 */
-	async #resolve(name: Path.Valid, signal: AbortSignal): Promise<broadcast.Consumer> {
+	async #resolve(name: Path.Valid, signal: AbortSignal, epoch: Epoch.Valid | undefined): Promise<broadcast.Consumer> {
 		const broadcast =
 			this.#publish &&
-			(wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name, undefined, signal)));
+			(wireOf(this.#publish).local(name, epoch) ?? (await wireOf(this.#publish).demand(name, epoch, signal)));
 		if (!broadcast) throw new NotFound(`broadcast ${name}`);
 		return broadcast;
+	}
+
+	/** Break a session whose peer names an epoch it was never told about: MoQ Epoch was not negotiated. */
+	#pinned(epoch: Epoch.Valid | undefined) {
+		if (epoch !== undefined && !this.#epoch) throw new ProtocolViolation("EPOCH without MoQ Epoch");
 	}
 }
 

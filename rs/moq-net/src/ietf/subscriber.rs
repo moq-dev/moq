@@ -158,6 +158,10 @@ struct State {
 	// Each broadcast created by a PUBLISH_NAMESPACE message.
 	broadcasts: HashMap<PathOwned, BroadcastState>,
 
+	// Names each advertisement the peer makes, so one that a newer advertisement of the
+	// same namespace replaced cannot overwrite it.
+	next_advert: u64,
+
 	// Copies nobody subscribes to, kept for the linger with no subscription upstream:
 	// a session ending ends them too.
 	lingering: HashMap<u64, track::Producer>,
@@ -458,13 +462,12 @@ impl Target {
 
 /// The model's info for a track the publisher described (SUBSCRIBE_OK or TRACK_STATUS_OK).
 ///
-/// The copy keeps microsecond timestamps whatever units the publisher declared: each
-/// object converts on receipt.
+/// The copy keeps the units the publisher declared, so it matches a copy of the same
+/// instance that arrived over another route: resuming across routes refuses one whose
+/// metadata differs.
 fn accepted_info(properties: &ietf::Properties) -> track::Info {
-	// Normalized to microseconds, but only for a track that declared a timescale: an
-	// untimed one must not gain a timeline downstream.
 	let mut info = track::Info::default()
-		.with_timescale(properties.timescale.map(|_| Timescale::MICRO))
+		.with_timescale(properties.timescale)
 		.with_max_age(properties.max_cache_duration)
 		.with_priority(super::priority::from_wire(properties.priority.unwrap_or(128)));
 	// This session carries NEW_GROUP_REQUEST back to the original publisher.
@@ -498,10 +501,12 @@ struct TrackState {
 	// stream and the subgroup stream carrying the rest of the group.
 	fill: kio::Producer<Fill>,
 
-	// The broadcast this track was subscribed from. With the track name it forms the full
-	// track name, which is what decides whether a repeated alias is the fatal collision
-	// (one alias, two tracks) or the legal sharing of an alias across subscriptions.
+	// The broadcast this track was subscribed from. With the track name and the instance
+	// it names, it forms the full track name, which is what decides whether a repeated
+	// alias is the fatal collision (one alias, two tracks) or the legal sharing of an alias
+	// across subscriptions.
 	broadcast: PathOwned,
+	epoch: Option<crate::Epoch>,
 
 	// Units for this track's object Timestamps, from the TIMESCALE Track Property in
 	// SUBSCRIBE_OK. `None` until it arrives, and for a track that declares none: its
@@ -546,6 +551,7 @@ impl TrackState {
 			name,
 			alias: None,
 			broadcast,
+			epoch: None,
 			timescale: None,
 			fill,
 			largest: None,
@@ -558,8 +564,15 @@ impl TrackState {
 }
 
 struct BroadcastState {
-	// The route announced into our origin for this namespace, post-charge.
+	// The route announced into our origin for this namespace, post-charge: the newest
+	// live advertisement's.
 	route: crate::origin::Route,
+
+	// Each live advertisement of the namespace with the route it describes, oldest first.
+	// A publisher replacing its instance withdraws one advertisement and makes another, on
+	// separate streams that can arrive in either order: the newest stands until it goes,
+	// and an update to an older one changes nothing.
+	adverts: Vec<(u64, crate::origin::Route)>,
 
 	// The served route: dropping it (and the serve task's clone) retracts the
 	// route and rejects its queued requests. `None` while the session's limit holds
@@ -569,9 +582,6 @@ struct BroadcastState {
 	// Bumped each time the route attaches, so a serve task outlived by a limit that
 	// took the route away and gave it back ends rather than serve beside the new one.
 	generation: u64,
-
-	// active number of PUBLISH_NAMESPACE messages.
-	count: usize,
 
 	// How many of them their own request token authorized. While any is live the
 	// namespace is exempt from the session's limit.
@@ -621,6 +631,31 @@ struct Advertised {
 	route: crate::origin::Route,
 }
 
+impl Advertised {
+	/// The publisher instance the advertisement named (MoQ Epoch), taken as given.
+	fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
+		self.route.epoch = epoch;
+		self
+	}
+}
+
+/// One NAMESPACE a SUBSCRIBE_NAMESPACE stream holds.
+struct Advertisement {
+	/// Names it to [`Subscriber::stop_announce`] and [`Subscriber::update_announce`].
+	id: u64,
+	/// The publisher instance it named, which a repeat must not change.
+	epoch: Option<crate::Epoch>,
+}
+
+/// What a PUBLISH_NAMESPACE stream advertises, kept current across its updates.
+struct Held {
+	/// The MoQ Cluster parameters, which a REQUEST_UPDATE carries only when they change.
+	cluster: Option<cluster::Advert>,
+	/// The MoQ Epoch instance, fixed for the advertisement's life: REQUEST_UPDATE cannot
+	/// carry one.
+	epoch: Option<crate::Epoch>,
+}
+
 /// A joining request may be abandoned before it takes an ID. Once allocated, its
 /// header must still reach the peer so drafts 14/15 never see a missing ID.
 struct JoiningTask {
@@ -665,6 +700,10 @@ impl Drop for JoiningTask {
 pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// Scoped to a minted source on the clone that serves its requests.
 	validity: crate::model::broadcast::RequestValidity,
+	// The publisher instance the minted source was resolved under (MoQ Epoch), named on
+	// every request for it, so the peer refuses rather than answer from another. Scoped
+	// like `validity`, and only ever set on a session that negotiated the extension.
+	epoch: Option<crate::Epoch>,
 	// Arms the track-alias and request-id timeouts.
 	runtime: crate::time::Deadlines,
 	session: S,
@@ -799,6 +838,7 @@ where
 			frames: Default::default(),
 			announces: Default::default(),
 			validity: Default::default(),
+			epoch: None,
 		}
 	}
 
@@ -989,7 +1029,7 @@ where
 			return false;
 		};
 
-		held.broadcast == new.broadcast && held.name == new.name
+		held.broadcast == new.broadcast && held.epoch == new.epoch && held.name == new.name
 	}
 
 	/// Take the origin request back out of a subscription that is still setting up.
@@ -1116,13 +1156,18 @@ where
 		let initial = count.unwrap_or(0);
 		let snapshot = (initial > 0).then_some(snapshot);
 
-		// The extension changes the NAMESPACE encoding, so we can't parse one until
-		// the peer's SETUP says whether it negotiated.
+		// The extensions change the NAMESPACE encoding, so we can't parse one until
+		// the peer's SETUP says whether it negotiated them.
 		let peer = self.peer().await;
+		let negotiated = ietf::Negotiated {
+			cluster: peer.negotiated(),
+			epoch: declared.epoch,
+		};
 
-		// Suffixes live on this stream, so a repeat is recognized as an update to the
-		// advertisement rather than a second one (which would leak the refcount).
-		let mut live: std::collections::HashSet<PathOwned> = std::collections::HashSet::new();
+		// Suffixes live on this stream, with the advertisement each one holds, so a repeat
+		// is recognized as an update to it rather than a second one (which would leak the
+		// refcount).
+		let mut live: HashMap<PathOwned, Advertisement> = HashMap::new();
 
 		// The stream owns every advertisement it carried, so release them however it
 		// ends: a clean close, a decode error, or the peer resetting it. Without this
@@ -1131,10 +1176,17 @@ where
 		// This is what moq-lite already does, where the equivalent map is a local whose
 		// guards drop.
 		let res = self
-			.run_namespace_entries(&mut stream, &prefix, &peer, &mut live, Initial { initial, snapshot })
+			.run_namespace_entries(
+				&mut stream,
+				&prefix,
+				&peer,
+				negotiated,
+				&mut live,
+				Initial { initial, snapshot },
+			)
 			.await;
-		for path in live {
-			let _ = self.stop_announce(path, false);
+		for (path, advert) in live {
+			let _ = self.stop_announce(path, advert.id, false);
 		}
 		res
 	}
@@ -1149,7 +1201,8 @@ where
 		stream: &mut Stream<T, Version>,
 		prefix: &PathOwned,
 		peer: &cluster::Peer,
-		live: &mut std::collections::HashSet<PathOwned>,
+		negotiated: ietf::Negotiated,
+		live: &mut HashMap<PathOwned, Advertisement>,
 		mut initial: Initial,
 	) -> Result<(), Error> {
 		loop {
@@ -1171,13 +1224,22 @@ where
 				// relative to our root -- so the join is too, which is what everything
 				// below wants (`create_broadcast` joins the root itself).
 				ietf::Namespace::ID => {
-					let msg = ietf::Namespace::decode_body(&mut data, self.version, peer.negotiated())?;
+					let msg = ietf::Namespace::decode_body(&mut data, self.version, negotiated)?;
 					if !data.is_empty() {
 						return Err(Error::WrongSize);
 					}
 					initial.initial = initial.initial.saturating_sub(1);
 					let path = prefix.join(&msg.suffix);
-					let Some(advert) = self.route(msg.cluster.as_ref(), peer) else {
+					let params = msg.params.unwrap_or_default();
+					// The epoch names the advertisement's instance for as long as it stands: a
+					// replacement is a NAMESPACE_DONE and a fresh NAMESPACE, never a repeat.
+					if let Some(held) = live.get(&path)
+						&& held.epoch != params.epoch
+					{
+						tracing::warn!(%path, "namespace repeated under another epoch");
+						return Err(Error::ProtocolViolation);
+					}
+					let Some(advert) = self.route(params.cluster.as_ref(), peer) else {
 						// Looped back through us: forwarding it would extend the loop and
 						// subscribing through it would route us back to ourselves.
 						//
@@ -1185,21 +1247,28 @@ where
 						// replacement retracts the route we were holding. Keeping it would
 						// leave subscriptions on a path the peer no longer offers.
 						tracing::debug!(%path, "dropping reflected namespace");
-						if live.remove(&path) {
-							let _ = self.stop_announce(path, false);
+						if let Some(held) = live.remove(&path) {
+							let _ = self.stop_announce(path, held.id, false);
 						}
 						continue;
 					};
+					let advert = advert.with_epoch(params.epoch.clone());
 
-					tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, "namespace");
-					if live.contains(&path) {
+					tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, epoch = ?params.epoch, "namespace");
+					if let Some(held) = live.get(&path) {
 						// A repeat replaces the advertisement atomically; nothing is torn
 						// down merely because an update arrived.
-						self.update_announce(path, advert)?;
+						self.update_announce(path, held.id, advert)?;
 					} else {
 						match self.start_announce(path.clone(), advert, Admit::Session) {
-							Ok(()) => {
-								live.insert(path);
+							Ok(id) => {
+								live.insert(
+									path,
+									Advertisement {
+										id,
+										epoch: params.epoch,
+									},
+								);
 							}
 							// The interest names a pattern's literal head, so the peer
 							// legitimately advertises namespaces beneath it that the
@@ -1217,8 +1286,8 @@ where
 					let msg = ietf::NamespaceDone::decode_msg(&mut data, self.version)?;
 					let path = prefix.join(&msg.suffix);
 					tracing::debug!(%path, "namespace_done");
-					if live.remove(&path) {
-						let _ = self.stop_announce(path, false);
+					if let Some(held) = live.remove(&path) {
+						let _ = self.stop_announce(path, held.id, false);
 					}
 				}
 				_ => {
@@ -1243,6 +1312,7 @@ where
 		body: ietf::Body,
 		stream: Stream<S, Version>,
 		peer: cluster::Peer,
+		epoch: bool,
 		declared: Option<bool>,
 	) -> Result<MaybeSendBox<'static, ()>, Error> {
 		let mut this = self.clone();
@@ -1273,7 +1343,11 @@ where
 			ietf::PublishNamespace::ID => {
 				// A negotiated session that omits HOP_PATH fails the decode here, which
 				// the dispatcher turns into the protocol violation the draft requires.
-				let msg = match ietf::PublishNamespace::decode_body(&mut data, this.version, peer.negotiated()) {
+				let negotiated = ietf::Negotiated {
+					cluster: peer.negotiated(),
+					epoch,
+				};
+				let msg = match ietf::PublishNamespace::decode_body(&mut data, this.version, negotiated) {
 					Err(err) if super::token::refuses_request(&err) => {
 						// Junk after the fields is fatal, which a token refusal must not hide.
 						if !data.is_empty() {
@@ -1422,7 +1496,8 @@ where
 
 		// A path that already contains our own Hop ID looped back. Reject it rather
 		// than attaching a source we would then have to route around.
-		let Some(advert) = self.route(msg.cluster.as_ref(), &peer) else {
+		let epoch = msg.params.epoch.clone();
+		let Some(advert) = self.route(msg.params.cluster.as_ref(), &peer) else {
 			tracing::debug!(%path, "dropping reflected publish_namespace");
 			self.write_error(
 				&mut stream,
@@ -1434,6 +1509,7 @@ where
 			let _ = stream.writer.close().await;
 			return Ok(());
 		};
+		let advert = advert.with_epoch(epoch.clone());
 
 		// Our authorization of the peer (the limit) admits an announce without a token, and
 		// holds back one it does not cover until it does. An AUTHORIZATION TOKEN on the
@@ -1494,13 +1570,13 @@ where
 		// Everything the advertisement does once admitted runs under its grant: one that ends
 		// at any await, the first answer included, drops it right there. `attached` says the
 		// route is up, and `acked` that the OK went out, which decides how the peer is told.
-		let mut attached = false;
+		let mut attached = None;
 		let mut acked = false;
 		let lived = crate::auth::RequestGrant::guard(token_grant.as_ref(), async {
-			if let Err(err) = self.start_announce(path.clone(), advert, admit) {
-				return Ok(Withdraw::Reject(request_id, err.into()));
+			match self.start_announce(path.clone(), advert, admit) {
+				Ok(id) => attached = Some(id),
+				Err(err) => return Ok(Withdraw::Reject(request_id, err.into())),
 			}
-			attached = true;
 			// Buffered whole before its first await, so however this is dropped from here, the
 			// advertisement can still end on the wire.
 			acked = true;
@@ -1512,7 +1588,10 @@ where
 			self.run_publish_namespace_updates(
 				&mut stream,
 				&path,
-				msg.cluster,
+				Held {
+					cluster: msg.params.cluster,
+					epoch,
+				},
 				peer,
 				&mut attached,
 				token_grant.clone(),
@@ -1589,11 +1668,15 @@ where
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		path: &PathOwned,
-		mut held: Option<cluster::Advert>,
+		held: Held,
 		peer: cluster::Peer,
-		attached: &mut bool,
+		attached: &mut Option<u64>,
 		token_grant: Option<crate::auth::RequestGrant>,
 	) -> Result<Withdraw, Error> {
+		let Held {
+			cluster: mut held,
+			epoch,
+		} = held;
 		// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant (MoQ
 		// request-token); its verify is raced against the stream in the loop's single wait
 		// (never a bare await), so a peer ending the announce ends it whatever the acceptor
@@ -1812,25 +1895,27 @@ where
 			let applied: Result<(), Error> = match carries_cluster {
 				true => match self.route(held.as_ref(), &peer) {
 					None => {
-						if std::mem::take(attached) {
+						if let Some(id) = attached.take() {
 							tracing::debug!(%path, "publish_namespace now loops back; detaching");
-							let _ = self.stop_announce(path.clone(), token_grant.is_some());
+							let _ = self.stop_announce(path.clone(), id, token_grant.is_some());
 						}
 						Ok(())
 					}
 					Some(advert) => {
+						// The epoch is the advertisement's for as long as it stands.
+						let advert = advert.with_epoch(epoch.clone());
 						tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, "publish_namespace update");
 						match *attached {
-							true => self.update_announce(path.clone(), advert),
+							Some(id) => self.update_announce(path.clone(), id, advert),
 							// Re-attach: a clean path replaced the reflected one we detached from.
-							false => {
+							None => {
 								// The grant still holds the slot it was admitted with, so reuse it.
 								let admit = match &token_grant {
 									Some(grant) => Admit::Token(grant.hold()),
 									None => Admit::Session,
 								};
 								self.start_announce(path.clone(), advert, admit)
-									.map(|()| *attached = true)
+									.map(|id| *attached = Some(id))
 							}
 						}
 					}
@@ -1876,9 +1961,9 @@ where
 
 	/// Retract an advertisement's route ahead of a withdrawal that waits on the peer, so a peer
 	/// that stops reading cannot keep it routed. `attached` makes it once only.
-	fn release_announce(&mut self, path: &PathOwned, attached: &mut bool, token: bool) -> Result<(), Error> {
-		if std::mem::take(attached) {
-			self.stop_announce(path.clone(), token)?;
+	fn release_announce(&mut self, path: &PathOwned, attached: &mut Option<u64>, token: bool) -> Result<(), Error> {
+		if let Some(id) = attached.take() {
+			self.stop_announce(path.clone(), id, token)?;
 		}
 		Ok(())
 	}
@@ -2097,37 +2182,37 @@ where
 		Ok(())
 	}
 
-	/// Attach the route for one newly advertised namespace, bumping its refcount.
+	/// Attach the route for one newly advertised namespace, returning the id that names
+	/// this advertisement.
 	///
 	/// Pair with [`Self::stop_announce`].
-	fn start_announce(&mut self, path: PathOwned, advert: Advertised, admit: Admit) -> Result<(), Error> {
+	fn start_announce(&mut self, path: PathOwned, advert: Advertised, admit: Admit) -> Result<u64, Error> {
 		let mut state = self.state.lock();
 		let (token, slot) = match admit {
 			Admit::Session => (false, None),
 			Admit::Token(slot) => (true, slot),
 		};
+		let id = state.next_advert;
+		state.next_advert += 1;
 		let existing = state.broadcasts.contains_key(&path);
-		self.attach(&mut state, path.clone(), advert, slot, token)?;
+		self.attach(&mut state, path.clone(), id, advert, slot, token)?;
 		if !existing {
-			return Ok(());
+			return Ok(id);
 		}
 		let Some(entry) = state.broadcasts.get_mut(&path) else {
-			return Ok(());
+			return Ok(id);
 		};
 		// A token stands in for the limit, so a namespace the limit withheld attaches now.
 		let attached = match token {
 			true => self.reattach(&path, entry)?,
 			false => None,
 		};
-		// The path was already attached, so this is one more advertisement for it; only a
-		// freshly created entry starts at one and skips this.
-		entry.count += 1;
 		entry.tokens += usize::from(token);
 		drop(state);
 		if let Some(generation) = attached {
 			self.serve_route(path, generation);
 		}
-		Ok(())
+		Ok(id)
 	}
 
 	/// Attach the route of a namespace the limit withheld, returning the generation
@@ -2146,21 +2231,21 @@ where
 		Ok(Some(entry.generation))
 	}
 
-	/// Apply a changed advertisement to a namespace that is already attached.
+	/// Apply a changed advertisement `id` to a namespace that is already attached.
 	///
 	/// An update replaces the advertisement atomically: the refcount does not move,
 	/// and no subscription is torn down merely because one arrived.
-	fn update_announce(&mut self, path: PathOwned, advert: Advertised) -> Result<(), Error> {
+	fn update_announce(&mut self, path: PathOwned, id: u64, advert: Advertised) -> Result<(), Error> {
 		let mut state = self.state.lock();
 		if !state.broadcasts.contains_key(&path) {
 			return Err(Error::NotFound);
 		}
-		self.attach(&mut state, path, advert, None, false)?;
+		self.attach(&mut state, path, id, advert, None, false)?;
 		Ok(())
 	}
 
-	/// Create or update the announced route for one namespace, leaving the
-	/// refcount to the caller.
+	/// Create the announced route for one namespace, or record advertisement `id` against
+	/// one that exists: added when new, replaced when it repeats.
 	///
 	/// This is the semantic heart of the mapping: a moq-transport namespace IS a
 	/// prefix route, so a PUBLISH_NAMESPACE advertises the whole prefix and paths
@@ -2172,6 +2257,7 @@ where
 		&self,
 		state: &mut State,
 		path: PathOwned,
+		id: u64,
 		advert: Advertised,
 		slot: Option<crate::auth::Hold>,
 		token: bool,
@@ -2186,12 +2272,20 @@ where
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(entry) => {
-				// A repeat is a repricing: update the route in place. In-flight
-				// tracks keep flowing.
 				let entry = entry.into_mut();
-				entry.route = route.clone();
-				if let Some(dynamic) = &entry.dynamic {
-					dynamic.update(route)?;
+				match entry.adverts.iter_mut().find(|(advert, _)| *advert == id) {
+					Some((_, held)) => *held = route,
+					None => entry.adverts.push((id, route)),
+				}
+				// The newest advertisement stands, and an update to an older one changes
+				// nothing. A repeat of the same instance re-prices in place and in-flight
+				// tracks keep flowing; another epoch restarts it.
+				let (newest, route) = entry.adverts.last().expect("just recorded");
+				if *newest == id {
+					entry.route = route.clone();
+					if let Some(dynamic) = &entry.dynamic {
+						dynamic.update(entry.route.clone())?;
+					}
 				}
 				Ok(())
 			}
@@ -2206,10 +2300,10 @@ where
 				if !token && !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str()) {
 					tracing::debug!(route = %self.origin.absolute(&path), "withholding announce outside the limit");
 					entry.insert(BroadcastState {
-						route,
+						route: route.clone(),
+						adverts: vec![(id, route)],
 						dynamic: None,
 						generation: 0,
-						count: 1,
 						tokens: usize::from(token),
 						live: Default::default(),
 						_slot: slot,
@@ -2220,10 +2314,10 @@ where
 				let dynamic = self.origin.dynamic(&path, route.clone())?;
 
 				entry.insert(BroadcastState {
-					route,
+					route: route.clone(),
+					adverts: vec![(id, route)],
 					dynamic: Some(dynamic),
 					generation: 0,
-					count: 1,
 					tokens: usize::from(token),
 					live: Default::default(),
 					_slot: slot,
@@ -2247,22 +2341,35 @@ where
 		})
 	}
 
-	/// Release one advertisement of `path`, closing its sources when it was the last.
+	/// Release advertisement `id` of `path`, closing its sources when it was the last.
 	/// `token` says its own request token authorized it.
-	fn stop_announce(&mut self, path: PathOwned, token: bool) -> Result<(), Error> {
+	fn stop_announce(&mut self, path: PathOwned, id: u64, token: bool) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				let state = entry.get_mut();
-				state.count -= 1;
+				let Some(index) = state.adverts.iter().position(|(advert, _)| *advert == id) else {
+					return Err(Error::NotFound);
+				};
+				state.adverts.remove(index);
 				state.tokens -= usize::from(token);
-				if state.count == 0 {
+				if state.adverts.is_empty() {
 					tracing::debug!(route = %self.origin.absolute(&path), "unannounced");
 					// Dropping the entry retracts the route (its announcement drops) and
 					// closes its sources (its token closes).
 					entry.remove();
-				} else if state.tokens == 0
+					return Ok(());
+				}
+				// The newest went while an older one stands: that one is what remains.
+				let (_, newest) = state.adverts.last().expect("not empty");
+				if *newest != state.route {
+					state.route = newest.clone();
+					if let Some(dynamic) = &state.dynamic {
+						dynamic.update(state.route.clone())?;
+					}
+				}
+				if state.tokens == 0
 					&& state.dynamic.is_some()
 					&& !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str())
 				{
@@ -2369,17 +2476,22 @@ where
 			// The handler exists before the requester sees the source, so a track it asks
 			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
 			let dynamic = source.dynamic();
-			let validity = self
-				.state
-				.lock()
-				.broadcasts
-				.get(&path)
-				.filter(|entry| entry.generation == generation)
-				.and_then(|entry| entry.dynamic.as_ref())
-				.map(|route| crate::model::broadcast::RequestValidity::for_source(route, request.path()))
-				.unwrap_or_else(|| {
-					crate::model::broadcast::RequestValidity::token(Some(kio::Producer::new(()).consume()))
-				});
+			// The source serves the instance the route names now: every request for it names
+			// that epoch, so the peer refuses one that would reach another instance.
+			let (validity, epoch) = {
+				let state = self.state.lock();
+				let entry = state
+					.broadcasts
+					.get(&path)
+					.filter(|entry| entry.generation == generation);
+				let validity = entry
+					.and_then(|entry| entry.dynamic.as_ref())
+					.map(|route| crate::model::broadcast::RequestValidity::for_source(route, request.path()))
+					.unwrap_or_else(|| {
+						crate::model::broadcast::RequestValidity::token(Some(kio::Producer::new(()).consume()))
+					});
+				(validity, entry.and_then(|entry| entry.route.epoch.clone()))
+			};
 			request.accept(&*source);
 
 			// The namespace's token closes the source as it is retracted. If it was
@@ -2398,6 +2510,7 @@ where
 
 			let mut this = self.clone();
 			this.validity = validity;
+			this.epoch = epoch;
 			broadcasts.push(async move {
 				if let Err(err) = this.run_broadcast(requested.borrow(), source, dynamic, route).await {
 					tracing::debug!(%err, "error running broadcast");
@@ -2418,6 +2531,9 @@ where
 			return;
 		}
 		entry.route.cost = crate::origin::Cost::DRAIN;
+		for (_, route) in &mut entry.adverts {
+			route.cost = crate::origin::Cost::DRAIN;
+		}
 		if let Some(dynamic) = &entry.dynamic {
 			let _ = dynamic.update(entry.route.clone());
 		}
@@ -2624,6 +2740,7 @@ where
 						.filter(|start| start.frame != 0),
 					// A resumed copy is the session's to abort from here on.
 					producer: target.producer().cloned(),
+					epoch: self.epoch.clone(),
 					..TrackState::pending(track_name.to_owned(), broadcast_path.to_owned(), fill.clone(), joining)
 				},
 			);
@@ -2658,6 +2775,7 @@ where
 					rendezvous: false,
 					range_filters: false,
 					authorization_token: None,
+					epoch: self.epoch.clone(),
 				})
 				.await
 		}
@@ -3411,6 +3529,8 @@ where
 						range_filters: false,
 						fill_timeout: false,
 						properties_wanted: true,
+						// Served by the subscription it joins, which named the instance.
+						epoch: None,
 					})
 					.await?;
 				Ok::<(), Error>(())
@@ -3577,6 +3697,7 @@ where
 					track_namespace: broadcast_path.to_owned(),
 					track_name: track_name.into(),
 					properties_wanted: true,
+					epoch: self.epoch.clone(),
 				})
 				.await
 		}
@@ -4696,6 +4817,7 @@ where
 					// The copy learned the track before any fetch, from SUBSCRIBE_OK or
 					// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste.
 					properties_wanted: false,
+					epoch: self.epoch.clone(),
 				})
 				.await?;
 			Ok::<_, Error>(())
@@ -5787,7 +5909,7 @@ mod tests {
 		writer
 			.encode(&ietf::Namespace {
 				suffix: crate::Path::new(suffix),
-				cluster: None,
+				params: None,
 			})
 			.await
 			.unwrap();
@@ -5944,7 +6066,7 @@ mod tests {
 					writer
 						.encode(&ietf::Namespace {
 							suffix: crate::Path::new(entry),
-							cluster: None,
+							params: None,
 						})
 						.await
 						.unwrap();
@@ -7282,8 +7404,8 @@ mod tests {
 			advert(&subscriber),
 			advert(&subscriber),
 		);
-		subscriber.start_announce(a.clone(), first, Admit::Session).unwrap();
-		subscriber.start_announce(a.clone(), repeat, Admit::Session).unwrap();
+		let first = subscriber.start_announce(a.clone(), first, Admit::Session).unwrap();
+		let repeat = subscriber.start_announce(a.clone(), repeat, Admit::Session).unwrap();
 		assert!(matches!(
 			subscriber.start_announce(b.clone(), over, Admit::Session),
 			Err(Error::TooManyRequests)
@@ -7296,8 +7418,8 @@ mod tests {
 			)]
 		);
 
-		subscriber.stop_announce(a.clone(), false).unwrap();
-		subscriber.stop_announce(a, false).unwrap();
+		subscriber.stop_announce(a.clone(), first, false).unwrap();
+		subscriber.stop_announce(a, repeat, false).unwrap();
 		subscriber.start_announce(b, last, Admit::Session).unwrap();
 	}
 
@@ -7659,9 +7781,12 @@ mod tests {
 				writer
 					.encode(&ietf::Namespace {
 						suffix: crate::Path::new("x.hang"),
-						cluster: Some(cluster::Advert {
-							hops: hop_path(&[7, 9]),
-							cost,
+						params: Some(ietf::AdvertParams {
+							cluster: Some(cluster::Advert {
+								hops: hop_path(&[7, 9]),
+								cost,
+							}),
+							epoch: None,
 						}),
 					})
 					.await
@@ -7726,10 +7851,10 @@ mod tests {
 
 		let path = crate::Path::new("room/host").to_owned();
 		let advert = subscriber.route(None, &cluster::Peer::default()).expect("route");
-		subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
+		let id = subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
 		settle().await;
 
-		subscriber.stop_announce(path, false).unwrap();
+		subscriber.stop_announce(path, id, false).unwrap();
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
 			"an explicit NAMESPACE_DONE must retract the route",
@@ -7765,7 +7890,7 @@ mod tests {
 				let msg = ietf::PublishNamespace {
 					request_id: RequestId(0),
 					track_namespace: crate::Path::new("room/host"),
-					cluster: None,
+					params: Default::default(),
 					authorization_token: None,
 				};
 				let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -7828,7 +7953,7 @@ mod tests {
 		let msg = ietf::PublishNamespace {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
-			cluster: None,
+			params: Default::default(),
 			authorization_token: None,
 		};
 		subscriber
@@ -7892,7 +8017,7 @@ mod tests {
 			let msg = ietf::PublishNamespace {
 				request_id: RequestId(0),
 				track_namespace: path.borrow(),
-				cluster: None,
+				params: Default::default(),
 				authorization_token: None,
 			};
 			subscriber
@@ -7960,7 +8085,7 @@ mod tests {
 		let msg = ietf::PublishNamespace {
 			request_id: RequestId(0),
 			track_namespace: path.borrow(),
-			cluster: None,
+			params: Default::default(),
 			authorization_token: None,
 		};
 		subscriber
@@ -7991,14 +8116,15 @@ mod tests {
 		let path = crate::Path::new("room/host").to_owned();
 		let peer = cluster::Peer::default();
 
+		let mut ids = Vec::new();
 		for _ in 0..2 {
 			let advert = subscriber.route(None, &peer).expect("route");
-			subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
+			ids.push(subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap());
 		}
 		settle().await;
 
 		// One advertisement's stream dies: the other still holds the source.
-		subscriber.stop_announce(path.clone(), false).unwrap();
+		subscriber.stop_announce(path.clone(), ids[0], false).unwrap();
 		settle().await;
 		assert!(
 			routed_now(&consumer, "room/host").is_some(),
@@ -8006,7 +8132,7 @@ mod tests {
 		);
 
 		// The last owner retracts: the broadcast closes with it.
-		subscriber.stop_announce(path, false).unwrap();
+		subscriber.stop_announce(path, ids[1], false).unwrap();
 		settle().await;
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
@@ -8087,7 +8213,7 @@ mod tests {
 				.with_hops(hop_path(&[7, 9]).hops().clone())
 				.with_cost(4),
 		};
-		subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
+		let id = subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// A new chain and cost: the route updates in place.
@@ -8096,7 +8222,7 @@ mod tests {
 				.with_hops(hop_path(&[7, 11]).hops().clone())
 				.with_cost(2),
 		};
-		subscriber.update_announce(path.clone(), rerouted).unwrap();
+		subscriber.update_announce(path.clone(), id, rerouted).unwrap();
 
 		let route = routed_now(&consumer, "room/host").expect("routed");
 		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
@@ -8105,7 +8231,7 @@ mod tests {
 
 		// One advertisement, so one unannounce detaches it. If the update had bumped the
 		// refcount, this would leave the route stranded.
-		subscriber.stop_announce(path, false).unwrap();
+		subscriber.stop_announce(path, id, false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -8138,7 +8264,7 @@ mod tests {
 				&peer,
 			)
 			.expect("route");
-		subscriber
+		let id = subscriber
 			.start_announce(path.clone(), advertised, Admit::Session)
 			.unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
@@ -8147,7 +8273,7 @@ mod tests {
 		let repriced = subscriber
 			.route(Some(&cluster::Advert { hops, cost: 1 }), &peer)
 			.expect("route");
-		subscriber.update_announce(path.clone(), repriced).unwrap();
+		subscriber.update_announce(path.clone(), id, repriced).unwrap();
 
 		let route = routed_now(&consumer, "room/host").expect("still routed");
 		assert_eq!(
@@ -8157,8 +8283,53 @@ mod tests {
 		);
 
 		// One advertisement, so one unannounce detaches it.
-		subscriber.stop_announce(path, false).unwrap();
+		subscriber.stop_announce(path, id, false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
+	}
+
+	/// MoQ Epoch: a publisher replacing its instance withdraws one advertisement and makes
+	/// another, on separate streams that arrive in either order. The newest advertisement
+	/// stands, so neither the old one's late update nor its withdrawal reverts the route
+	/// to the instance it named.
+	#[moq_clock::test]
+	async fn a_reordered_replacement_keeps_the_new_instance() {
+		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
+		let consumer = origin.consume();
+		let path = crate::Path::new("room/host").to_owned();
+		let peer = cluster::Peer::default();
+		let (old, new) = (crate::Epoch::mint(), crate::Epoch::mint());
+		let advert = |subscriber: &Subscriber<_>, epoch: &crate::Epoch| {
+			subscriber
+				.route(None, &peer)
+				.expect("route")
+				.with_epoch(Some(epoch.clone()))
+		};
+		let epoch_now = || routed_now(&consumer, "room/host").and_then(|route| route.epoch);
+
+		let first = advert(&subscriber, &old);
+		let first = subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
+		assert_eq!(epoch_now(), Some(old.clone()));
+
+		// The replacement's PUBLISH_NAMESPACE beats the old one's PUBLISH_NAMESPACE_DONE.
+		let second = advert(&subscriber, &new);
+		let second = subscriber.start_announce(path.clone(), second, Admit::Session).unwrap();
+		assert_eq!(epoch_now(), Some(new.clone()));
+
+		// A late update to the old advertisement changes nothing.
+		let stale = advert(&subscriber, &old);
+		subscriber.update_announce(path.clone(), first, stale).unwrap();
+		assert_eq!(epoch_now(), Some(new.clone()), "a stale update reverted the instance");
+
+		// Its withdrawal, arriving last, leaves the new instance standing.
+		subscriber.stop_announce(path.clone(), first, false).unwrap();
+		assert_eq!(
+			epoch_now(),
+			Some(new.clone()),
+			"the old withdrawal retracted the new instance"
+		);
+
+		subscriber.stop_announce(path, second, false).unwrap();
+		assert_eq!(routed_now(&consumer, "room/host"), None);
 	}
 
 	/// Two *separate* advertisements for one namespace refcount a single route:
@@ -8178,17 +8349,17 @@ mod tests {
 		let advert = cluster::Advert { hops, cost: 0 };
 
 		let first = subscriber.route(Some(&advert), &peer).expect("route");
-		subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
+		let first = subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		let second = subscriber.route(Some(&advert), &peer).expect("route");
-		subscriber.start_announce(path.clone(), second, Admit::Session).unwrap();
+		let second = subscriber.start_announce(path.clone(), second, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
-		subscriber.stop_announce(path.clone(), false).unwrap();
+		subscriber.stop_announce(path.clone(), first, false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
-		subscriber.stop_announce(path, false).unwrap();
+		subscriber.stop_announce(path, second, false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -8206,18 +8377,18 @@ mod tests {
 
 		// What a PUBLISH_NAMESPACE with no cluster parameters resolves to.
 		let first = subscriber.route(None, &peer).expect("route");
-		subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
+		let first = subscriber.start_announce(path.clone(), first, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The NAMESPACE for the same namespace arrives second.
 		let second = subscriber.route(None, &peer).expect("route");
-		subscriber.start_announce(path.clone(), second, Admit::Session).unwrap();
+		let second = subscriber.start_announce(path.clone(), second, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// Two advertisements, so it takes two unannounces to retract.
-		subscriber.stop_announce(path.clone(), false).unwrap();
+		subscriber.stop_announce(path.clone(), first, false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
-		subscriber.stop_announce(path, false).unwrap();
+		subscriber.stop_announce(path, second, false).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
@@ -8240,7 +8411,7 @@ mod tests {
 			cost: 0,
 		};
 		let advert = subscriber.route(Some(&clean), &peer).expect("route");
-		subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
+		let id = subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
 		assert!(routed_now(&consumer, "room/host").is_some());
 
 		// The peer re-advertises the namespace over a path that now flows through us.
@@ -8254,7 +8425,7 @@ mod tests {
 		);
 
 		// That supersedes the advertisement it repeats, so the old route is retired.
-		subscriber.stop_announce(path, false).unwrap();
+		subscriber.stop_announce(path, id, false).unwrap();
 		assert!(
 			routed_now(&consumer, "room/host").is_none(),
 			"the superseded route must not stay attached"
@@ -8324,7 +8495,8 @@ mod tests {
 
 		let path = crate::Path::new("room/host").to_owned();
 		let advert = subscriber.route(Some(attached), peer).expect("route");
-		subscriber.start_announce(path, advert, Admit::Session).unwrap();
+		let id = subscriber.start_announce(path, advert, Admit::Session).unwrap();
+		assert_eq!(id, 0, "the harness advertisement is the first");
 		assert!(routed_now(&consumer, "room/host").is_some(), "attached to start with");
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
@@ -8401,12 +8573,15 @@ mod tests {
 		let log = subscriber.session.log.clone();
 		// The initial request is already retired; its ID remains permanently spent.
 		assert!(subscriber.control.accept(RequestId(3)).unwrap().is_none());
-		let mut attached = true;
+		let mut attached = Some(0);
 		let err = subscriber
 			.run_publish_namespace_updates(
 				&mut stream,
 				&crate::Path::new("room/host"),
-				Some(clean),
+				Held {
+					cluster: Some(clean),
+					epoch: None,
+				},
 				peer,
 				&mut attached,
 				None,
@@ -8432,12 +8607,15 @@ mod tests {
 		let log = subscriber.session.log.clone();
 
 		let path = crate::Path::new("room/host").to_owned();
-		let mut attached = true;
+		let mut attached = Some(0);
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
-				Some(clean.clone()),
+				Held {
+					cluster: Some(clean.clone()),
+					epoch: None
+				},
 				peer,
 				&mut attached,
 				None,
@@ -8459,7 +8637,7 @@ mod tests {
 			routed_now(&consumer, "room/host").is_none(),
 			"an unusable path must not stay attached"
 		);
-		assert!(!attached, "the caller must not release it a second time");
+		assert!(attached.is_none(), "the caller must not release it a second time");
 		assert_eq!(
 			replies(&log, ietf::RequestOk::ID),
 			1,
@@ -8479,12 +8657,15 @@ mod tests {
 			reflected_harness(self_origin, &peer, &clean, &[looped, clean.clone()]).await;
 
 		let path = crate::Path::new("room/host").to_owned();
-		let mut attached = true;
+		let mut attached = Some(0);
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
-				Some(clean.clone()),
+				Held {
+					cluster: Some(clean.clone()),
+					epoch: None
+				},
 				peer,
 				&mut attached,
 				None,
@@ -8500,7 +8681,7 @@ mod tests {
 			}
 		}
 
-		assert!(attached, "the clean path must re-attach");
+		assert!(attached.is_some(), "the clean path must re-attach");
 		assert!(
 			routed_now(&consumer, "room/host").is_some(),
 			"the namespace is routable again",
@@ -8564,12 +8745,15 @@ mod tests {
 			.unwrap();
 
 		let mut stream = Stream::open(&mut session.clone(), Version::Draft19).await.unwrap();
-		let mut attached = true;
+		let mut attached = Some(0);
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
-				Some(clean.clone()),
+				Held {
+					cluster: Some(clean.clone()),
+					epoch: None
+				},
 				peer,
 				&mut attached,
 				Some(grant),
@@ -8583,7 +8767,7 @@ mod tests {
 			}
 		}
 
-		assert!(attached, "the clean path must re-attach");
+		assert!(attached.is_some(), "the clean path must re-attach");
 		assert!(
 			routed_now(&consumer, "room/host").is_some(),
 			"the namespace is routable again"
@@ -8633,12 +8817,15 @@ mod tests {
 		assert_eq!(routed_now(&consumer, "room/host").expect("routed").cost.value(), 4);
 
 		let path = crate::Path::new("room/host").to_owned();
-		let mut attached = true;
+		let mut attached = Some(0);
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
-				Some(held.clone()),
+				Held {
+					cluster: Some(held.clone()),
+					epoch: None
+				},
 				peer,
 				&mut attached,
 				None,
@@ -8653,7 +8840,7 @@ mod tests {
 		assert_eq!(route.cost.value(), 0, "the explicit 0 replaced the held cost");
 		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
 		assert_eq!(hops, vec![7, 9], "the omitted path kept its value");
-		assert!(attached, "a repricing is not a retraction");
+		assert!(attached.is_some(), "a repricing is not a retraction");
 		assert_eq!(replies(&log, ietf::RequestOk::ID), 1);
 		assert_eq!(replies(&log, ietf::RequestError::ID), 0);
 	}
@@ -8681,13 +8868,16 @@ mod tests {
 		drop(driver);
 
 		let path = crate::Path::new("room/host").to_owned();
-		let mut attached = true;
+		let mut attached = Some(0);
 		let mut result = None;
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
-				Some(clean.clone()),
+				Held {
+					cluster: Some(clean.clone()),
+					epoch: None
+				},
 				peer,
 				&mut attached,
 				None,
@@ -8705,7 +8895,7 @@ mod tests {
 			matches!(result, Some(Ok(Withdraw::Reject(..)))),
 			"a refused update ends the stream cleanly, got {result:?}"
 		);
-		assert!(attached, "the caller releases the route it attached");
+		assert!(attached.is_some(), "the caller releases the route it attached");
 		assert_eq!(
 			replies(&log, ietf::RequestError::ID),
 			0,
@@ -8733,12 +8923,15 @@ mod tests {
 		let log = subscriber.session.log.clone();
 
 		let path = crate::Path::new("room/host").to_owned();
-		let mut attached = true;
+		let mut attached = Some(0);
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
 				&path,
-				Some(clean.clone()),
+				Held {
+					cluster: Some(clean.clone()),
+					epoch: None
+				},
 				peer,
 				&mut attached,
 				None,
@@ -8752,7 +8945,7 @@ mod tests {
 			}
 		}
 
-		assert!(attached, "the advertisement stays attached");
+		assert!(attached.is_some(), "the advertisement stays attached");
 		assert_eq!(replies(&log, ietf::RequestOk::ID), 1, "REQUEST_OK went out");
 		assert_eq!(replies(&log, ietf::RequestError::ID), 0);
 		let route = routed_now(&consumer, "room/host").expect("still routed");
@@ -8778,10 +8971,13 @@ mod tests {
 				.encode(&ietf::PublishNamespace {
 					request_id: RequestId(1),
 					track_namespace: crate::Path::new("room/host"),
-					cluster: Some(cluster::Advert {
-						cost: 0,
-						..clean.clone()
-					}),
+					params: ietf::AdvertParams {
+						cluster: Some(cluster::Advert {
+							cost: 0,
+							..clean.clone()
+						}),
+						epoch: None,
+					},
 					authorization_token: None,
 				})
 				.await
@@ -8794,11 +8990,14 @@ mod tests {
 		std::mem::forget(driver);
 
 		let path = crate::Path::new("room/host").to_owned();
-		let mut attached = true;
+		let mut attached = Some(0);
 		let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 			&mut stream,
 			&path,
-			Some(clean.clone()),
+			Held {
+				cluster: Some(clean.clone()),
+				epoch: None
+			},
 			peer,
 			&mut attached,
 			None,
@@ -8826,19 +9025,19 @@ mod tests {
 		let consumer = origin.consume();
 		let peer = cluster::Peer::default();
 
-		let mut live = std::collections::HashSet::new();
+		let mut live = std::collections::HashMap::new();
 		for path in ["room/a", "room/b"] {
 			let path = crate::Path::new(path).to_owned();
 			let advert = subscriber.route(None, &peer).expect("route");
-			subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
-			live.insert(path);
+			let id = subscriber.start_announce(path.clone(), advert, Admit::Session).unwrap();
+			live.insert(path, id);
 		}
 		assert!(routed_now(&consumer, "room/a").is_some());
 		assert!(routed_now(&consumer, "room/b").is_some());
 
 		// What the stream's exit path does with whatever it still holds.
-		for path in live {
-			subscriber.stop_announce(path, false).unwrap();
+		for (path, id) in live {
+			subscriber.stop_announce(path, id, false).unwrap();
 		}
 
 		assert!(routed_now(&consumer, "room/a").is_none(), "room/a leaked a refcount");
@@ -9044,7 +9243,7 @@ mod tests {
 		ietf::PublishNamespace {
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("room/alice"),
-			cluster: None,
+			params: Default::default(),
 			authorization_token: Some(announce_token()),
 		}
 	}
@@ -9820,7 +10019,7 @@ mod tests {
 			let tokenless = ietf::PublishNamespace {
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("other/alice"),
-				cluster: None,
+				params: Default::default(),
 				authorization_token: None,
 			};
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_stream(
@@ -9870,7 +10069,7 @@ mod tests {
 		};
 		// The announce arrives already routed at cost 4; the update re-routes it to cost 0.
 		let mut initial = token_publish_namespace();
-		initial.cluster = Some(cluster::Advert {
+		initial.params.cluster = Some(cluster::Advert {
 			hops: hop_path(&[7, 9]),
 			cost: 4,
 		});
@@ -9950,7 +10149,7 @@ mod tests {
 		};
 		// The announce arrives routed at cost 4; the buffered updates re-route it.
 		let mut initial = token_publish_namespace();
-		initial.cluster = Some(cluster::Advert {
+		initial.params.cluster = Some(cluster::Advert {
 			hops: hop_path(&[7, 9]),
 			cost: 4,
 		});
@@ -11488,6 +11687,7 @@ mod stitch_tests {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
+				epoch: None,
 			}
 			.encode_msg(&mut Encoder::new(&mut body, egress.into()), egress)
 			.unwrap();
@@ -11507,6 +11707,7 @@ mod stitch_tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
+				epoch: None,
 			}
 			.encode_msg(&mut Encoder::new(&mut body, egress.into()), egress)
 			.unwrap();
@@ -11514,7 +11715,7 @@ mod stitch_tests {
 		};
 		let stream = Stream::open(&mut downstream, egress).await.unwrap();
 		publisher
-			.handle_stream(id, ietf::Body(body.into()), stream)
+			.handle_stream(id, ietf::Body(body.into()), stream, false)
 			.unwrap()
 			.await;
 		let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
@@ -11581,10 +11782,11 @@ mod stitch_tests {
 		}
 	}
 
-	/// A relayed Timestamp leaves in the units the egress declares: the cache holds the
-	/// track in microseconds, whatever the publisher used.
+	/// A relayed Timestamp leaves in the units the publisher declared: the cache holds the
+	/// track on the publisher's grid, so a copy of the same instance over another route
+	/// matches it.
 	#[moq_clock::test]
-	async fn passthrough_converts_relayed_timestamps_to_the_egress_units() {
+	async fn passthrough_keeps_the_publishers_timestamp_units() {
 		let version = Version::Draft22;
 		// Timestamp 42 (ms), then an unknown property that must survive beside it.
 		let properties = [0x10, 42, 0x70, 7];
@@ -11595,11 +11797,8 @@ mod stitch_tests {
 		ietf::GroupHeader::decode(&mut decoder, version).unwrap();
 		assert_eq!(decoder.varint().unwrap(), 0);
 		let relayed = bytes::Bytes::copy_from_slice(decoder.bytes().unwrap());
-		let decoded = super::super::object::read(&relayed, version, Some(Timescale::MICRO)).unwrap();
-		assert_eq!(
-			decoded.timestamp,
-			Some(Timestamp::new(42_000, Timescale::MICRO).unwrap())
-		);
+		let decoded = super::super::object::read(&relayed, version, Some(Timescale::MILLI)).unwrap();
+		assert_eq!(decoded.timestamp, Some(Timestamp::new(42, Timescale::MILLI).unwrap()));
 		assert_eq!(decoded.properties.values.len(), 1);
 	}
 
@@ -12058,6 +12257,7 @@ mod stitch_tests {
 					rendezvous: false,
 					range_filters: false,
 					authorization_token: None,
+					epoch: None,
 				};
 				let mut body = Vec::new();
 				subscribe
@@ -12065,7 +12265,7 @@ mod stitch_tests {
 					.unwrap();
 				let stream = Stream::open(&mut downstream, version).await.unwrap();
 				publisher
-					.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream)
+					.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, false)
 					.unwrap()
 					.await;
 				let sent = downstream.log.datagrams.lock().unwrap();

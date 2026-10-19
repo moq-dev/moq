@@ -310,11 +310,10 @@ enum Advert {
 	/// Nothing: every route loops through the peer or us, or none is announced.
 	#[default]
 	None,
-	/// The namespace, with no routing information: the peer did not negotiate the MoQ
-	/// Cluster extension, so there is nowhere to put a path or a cost.
-	Plain,
-	/// The namespace, with the path it traversed and that path's accumulated cost.
-	Cluster(cluster::Advert),
+	/// The namespace, with the parameters of the extensions the peer negotiated: the path
+	/// it traversed and that path's accumulated cost (MoQ Cluster), and the instance it
+	/// serves (MoQ Epoch). Empty when the peer negotiated neither.
+	Some(ietf::AdvertParams),
 }
 
 impl Advert {
@@ -324,10 +323,10 @@ impl Advert {
 	}
 
 	/// The parameters to put on the wire, as the message structs carry them.
-	fn params(&self) -> Option<cluster::Advert> {
+	fn params(&self) -> ietf::AdvertParams {
 		match self {
-			Self::Cluster(advert) => Some(advert.clone()),
-			_ => None,
+			Self::Some(params) => params.clone(),
+			Self::None => Default::default(),
 		}
 	}
 }
@@ -455,6 +454,9 @@ struct Namespaces<S: crate::transport::poll::Session> {
 	epoch: u64,
 	/// Whether this discovery cursor includes hidden namespaces.
 	hidden: bool,
+	/// Whether the peer negotiated MoQ Epoch, so an advertisement names its route's
+	/// instance.
+	epochs: bool,
 }
 
 impl<S: crate::transport::poll::Session> Namespaces<S> {
@@ -471,6 +473,15 @@ impl<S: crate::transport::poll::Session> Namespaces<S> {
 			gate: None,
 			epoch: 0,
 			hidden: false,
+			epochs: false,
+		}
+	}
+
+	/// What the peer negotiated for an advertisement's parameters.
+	fn negotiated(&self) -> ietf::Negotiated {
+		ietf::Negotiated {
+			cluster: self.peer.negotiated(),
+			epoch: self.epochs,
 		}
 	}
 
@@ -762,32 +773,42 @@ where
 	///
 	/// The origin's announce cursor already filters routes through the peer
 	/// (control-plane split horizon); this only shapes what the wire can carry.
-	fn select(&self, route: &crate::origin::Route, peer: &cluster::Peer) -> Advert {
+	/// `epochs` says the peer negotiated MoQ Epoch, so the route's instance travels too.
+	fn select(&self, route: &crate::origin::Route, peer: &cluster::Peer, epochs: bool) -> Advert {
 		// A route that already passed through us is a reflection. The origin
 		// filters these on receive, so this is defensive.
 		if self.self_origin != crate::Hop::UNKNOWN && route.hops.contains(&self.self_origin) {
 			return Advert::None;
 		}
 
+		// Forwarded unchanged, and never invented for a route that arrived without one.
+		let epoch = route.epoch.clone().filter(|_| epochs);
 		if !peer.negotiated() {
-			return Advert::Plain;
+			return Advert::Some(ietf::AdvertParams { cluster: None, epoch });
 		}
 
 		let cost = route.cost.value();
 		// Our own Hop ID is always the last entry, so the peer reconstructs the full
 		// path. A chain with no room left is a loop in all but name.
 		match cluster::Advert::forward(&route.hops, cost, self.self_origin) {
-			Ok(advert) => Advert::Cluster(advert),
+			Ok(advert) => Advert::Some(ietf::AdvertParams {
+				cluster: Some(advert),
+				epoch,
+			}),
 			Err(_) => Advert::None,
 		}
 	}
 
 	/// Handle an incoming bidi stream dispatched by the session.
+	///
+	/// `epochs` says both sides negotiated MoQ Epoch: a request naming an instance on a
+	/// session that did not breaks the session.
 	pub fn handle_stream(
 		&self,
 		id: u64,
 		body: ietf::Body,
 		stream: Stream<S, Version>,
+		epochs: bool,
 	) -> Result<MaybeSendBox<'static, ()>, Error> {
 		let this = self.clone();
 		let mut data = body.decoder(this.version);
@@ -810,6 +831,9 @@ where
 				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
+				}
+				if msg.epoch.is_some() && !epochs {
+					return Err(Error::ProtocolViolation);
 				}
 				tracing::debug!(message = ?msg, "received subscribe");
 				let gate = crate::auth::Gate::new(
@@ -839,6 +863,9 @@ where
 				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
+				}
+				if msg.epoch.is_some() && !epochs {
+					return Err(Error::ProtocolViolation);
 				}
 				tracing::debug!(message = ?msg, "received fetch");
 				let gate = this.fetch_gate(&msg);
@@ -951,6 +978,9 @@ where
 				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
+				}
+				if msg.epoch.is_some() && !epochs {
+					return Err(Error::ProtocolViolation);
 				}
 				tracing::debug!(message = ?msg, "received track_status");
 				let gate = crate::auth::Gate::new(
@@ -1140,10 +1170,11 @@ where
 					// We just received a subscribe for this exact namespace, so the peer must have
 					// already seen the announcement. `request_broadcast` resolves it immediately, or
 					// falls back to the route covering it (an `origin::Dynamic`), if any.
+					// Pinned to the instance it names, if any: another is refused, never served.
 					let broadcast = match self
 						.serving_origin()
 						.await
-						.request_broadcast(&msg.track_namespace, None)
+						.request_broadcast(&msg.track_namespace, msg.epoch.clone())
 						.await
 					{
 						Ok(broadcast) => broadcast,
@@ -2180,6 +2211,9 @@ where
 				.await;
 		}
 
+		// Pinned to the instance it names, if any: another is refused, never served.
+		let epoch = msg.epoch.clone();
+
 		// Draft-20's LOCATION_FILTER is answered as the standalone range it spells.
 		let fetch_type = match msg.fetch_type {
 			FetchType::Filtered {
@@ -2257,7 +2291,7 @@ where
 				// The peer must have seen the announcement to name this namespace, so this
 				// resolves like a SUBSCRIBE does.
 				let broadcast = match gate
-					.guard(async { self.serving_origin().await.request_broadcast(&namespace, None).await })
+					.guard(async { self.serving_origin().await.request_broadcast(&namespace, epoch).await })
 					.await
 				{
 					Ok(broadcast) => broadcast,
@@ -2700,9 +2734,10 @@ where
 		}
 		let broadcast = match gate
 			.guard(async {
+				// Pinned to the instance it names, if any: another is refused, never served.
 				self.serving_origin()
 					.await
-					.request_broadcast(&msg.track_namespace, None)
+					.request_broadcast(&msg.track_namespace, msg.epoch.clone())
 					.await
 			})
 			.await
@@ -2911,6 +2946,7 @@ where
 		let Some((advert, auth)) = self.offer(ns, suffix, path) else {
 			return Ok(());
 		};
+		let negotiated = ns.negotiated();
 		let Namespaces {
 			target,
 			watched,
@@ -2927,13 +2963,18 @@ where
 		let request = requests.get_mut(suffix);
 		let held_auth = request.as_ref().and_then(|request| request.auth.clone());
 		let unchanged = advert == watch.sent && auth == held_auth;
+		// The epoch names the advertisement's instance for as long as it stands, so another
+		// one withdraws it and advertises afresh (MoQ Epoch). A restart arrives as an end and
+		// a start, so this only guards a change that skipped one.
+		let renamed = wanted && held && advert.params().epoch != watch.sent.params().epoch;
 		// moq-transport renames a request's auth with REQUEST_UPDATE, but cannot name one on
 		// a request that had none, nor drop one, and before draft-17 cannot update a
 		// namespace at all: those withdraw the request and make it again.
-		let restart = held_auth != auth
-			&& (held_auth.is_none()
-				|| auth.is_none()
-				|| matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16));
+		let restart = renamed
+			|| held_auth != auth
+				&& (held_auth.is_none()
+					|| auth.is_none()
+					|| matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16));
 
 		// An update already waiting or in flight carries whatever is current once it goes
 		// out, and its answer brings the loop back here for anything after that.
@@ -2979,7 +3020,7 @@ where
 						self.withdraw_namespace(target, requests, suffix.clone()).await?;
 					}
 					(true, Some(_)) => {
-						tracing::debug!(broadcast = %absolute, "publish_namespace restart for its auth");
+						tracing::debug!(broadcast = %absolute, renamed, "publish_namespace restart");
 						self.withdraw_namespace(target, requests, suffix.clone()).await?;
 						refused = self
 							.advertise_namespace(requests, path, suffix.clone(), advert.params(), auth)
@@ -3003,13 +3044,23 @@ where
 			Target::Inline(stream) => {
 				match (advert.wanted(), held) {
 					(true, _) => {
+						if renamed {
+							tracing::debug!(broadcast = %absolute, "namespace_done for another epoch");
+							stream.writer.varint(ietf::NamespaceDone::ID).await?;
+							stream
+								.writer
+								.encode(&ietf::NamespaceDone {
+									suffix: suffix.as_path(),
+								})
+								.await?;
+						}
 						tracing::debug!(broadcast = %absolute, "namespace");
 						stream.writer.varint(ietf::Namespace::ID).await?;
 						stream
 							.writer
 							.encode(&ietf::Namespace {
 								suffix: suffix.as_path(),
-								cluster: advert.params(),
+								params: negotiated.extended().then(|| advert.params()),
 							})
 							.await?;
 					}
@@ -3050,7 +3101,7 @@ where
 		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
 		path: &crate::PathOwned,
 		suffix: crate::PathOwned,
-		cluster: Option<cluster::Advert>,
+		params: ietf::AdvertParams,
 		auth: Option<crate::auth::Auth>,
 	) -> Result<Refused, Error> {
 		let request_id = self.control.next_request_id(&self.runtime).await?;
@@ -3070,7 +3121,7 @@ where
 			.encode(&ietf::PublishNamespace {
 				request_id,
 				track_namespace: path.as_path(),
-				cluster,
+				params,
 				authorization_token: auth.as_ref().and_then(|auth| self.request_token(auth)),
 			})
 			.await?;
@@ -3144,7 +3195,7 @@ where
 	) -> Option<(Advert, Option<crate::auth::Auth>)> {
 		let watch = ns.watched.get(suffix)?;
 		let advert = match ns.permitted(path) {
-			true => self.select(&watch.route, &ns.peer),
+			true => self.select(&watch.route, &ns.peer, ns.epochs),
 			false => Advert::None,
 		};
 		let auth = match (&ns.target, advert.wanted()) {
@@ -3214,7 +3265,7 @@ where
 			return Ok(());
 		};
 		request.queued = false;
-		let mut update = match (advert.params(), watch.sent.params()) {
+		let mut update = match (advert.params().cluster, watch.sent.params().cluster) {
 			(Some(next), Some(held)) => ietf::PublishNamespaceUpdate::between(request_id, &held, &next),
 			_ => ietf::PublishNamespaceUpdate {
 				request_id,
@@ -3530,7 +3581,8 @@ where
 			.excluding(&peer)
 			.discovery(!self.peer_setup.get().await.hidden || self.origin.includes_hidden());
 
-		let ns = Namespaces::new(peer, Target::Requests(None));
+		let mut ns = Namespaces::new(peer, Target::Requests(None));
+		ns.epochs = self.peer_setup.get().await.epoch;
 		self.run_namespaces(origin.announced(), crate::Path::empty().to_owned(), ns, Vec::new())
 			.await
 	}
@@ -3630,7 +3682,7 @@ where
 				let count = initial
 					.iter()
 					.filter(|update| permit.matches(prefix.join(&update.prefix).as_str()))
-					.filter(|update| self.select(&update.route, &peer).wanted())
+					.filter(|update| self.select(&update.route, &peer, declared.epoch).wanted())
 					.count();
 				(initial, Some(count as u64))
 			}
@@ -3680,6 +3732,7 @@ where
 		let mut ns = Namespaces::new(peer, target);
 		ns.gate = Some(gate);
 		ns.hidden = !declared.hidden || msg.hidden || self.origin.includes_hidden();
+		ns.epochs = declared.epoch;
 		self.run_namespaces(announced, prefix, ns, initial).await
 	}
 
@@ -6047,8 +6100,13 @@ mod serve_tests {
 
 	/// The same, with the track described by `info`.
 	fn serve_track(version: Version, info: crate::track::Info) -> Serve {
+		serve_route(version, info, crate::origin::Route::default())
+	}
+
+	/// The same, with the broadcast announced on `route`.
+	fn serve_route(version: Version, info: crate::track::Info, route: crate::origin::Route) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+		let broadcast = origin.publish("room", route).unwrap();
 		let track = broadcast.create_track("video", info).unwrap();
 
 		let session = ScriptedSession::per_stream(vec![Vec::new()]);
@@ -6184,6 +6242,7 @@ mod serve_tests {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
+				epoch: None,
 			}
 			.encode_msg(&mut Encoder::new(&mut fetch_body, version.into()), version)
 			.unwrap();
@@ -6193,7 +6252,10 @@ mod serve_tests {
 				(ietf::Fetch::ID, bytes::Bytes::from(fetch_body)),
 			] {
 				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
-				let task = h.publisher.handle_stream(id, ietf::Body(body.clone()), stream).unwrap();
+				let task = h
+					.publisher
+					.handle_stream(id, ietf::Body(body.clone()), stream, false)
+					.unwrap();
 				assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 1, "count before polling");
 				drop(task);
 				assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 0, "release a cancelled task");
@@ -6201,14 +6263,17 @@ mod serve_tests {
 				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
 				assert!(
 					h.publisher
-						.handle_stream(id, ietf::Body(bytes::Bytes::new()), stream)
+						.handle_stream(id, ietf::Body(bytes::Bytes::new()), stream, false)
 						.is_err()
 				);
 				assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 0, "release malformed input");
 
 				if id == ietf::Fetch::ID {
 					let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
-					h.publisher.handle_stream(id, ietf::Body(body), stream).unwrap().await;
+					h.publisher
+						.handle_stream(id, ietf::Body(body), stream, false)
+						.unwrap()
+						.await;
 					assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 0, "release a completed fetch");
 				}
 			}
@@ -7059,7 +7124,12 @@ mod serve_tests {
 				let closed = h
 					.publisher
 					.clone()
-					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+					.handle_stream(
+						ietf::TrackStatus::ID,
+						ietf::Body(bytes::Bytes::from(body)),
+						stream,
+						false,
+					)
 					.err();
 				assert!(matches!(closed, Some(Error::WrongSize)), "{version}: {closed:?}");
 			}
@@ -7355,6 +7425,7 @@ mod serve_tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		}
 	}
 
@@ -7463,6 +7534,128 @@ mod serve_tests {
 		}
 	}
 
+	/// The refusal of request [`REQUEST_ID`] as gone, as draft-17 and later frame it.
+	async fn unroutable(version: Version) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		writer.varint(ietf::RequestError::ID).await.unwrap();
+		writer
+			.encode(&ietf::RequestError {
+				request_id: None,
+				error_code: 0x10,
+				reason_phrase: Error::Unroutable.to_string().into(),
+				retry_interval: 0,
+			})
+			.await
+			.unwrap();
+		log.writes.lock().unwrap().clone()
+	}
+
+	/// Each request MoQ Epoch pins to an instance, naming `epoch`, encoded for `version`.
+	fn pinned_requests(version: Version, epoch: &crate::Epoch) -> [(u64, Vec<u8>); 3] {
+		let mut subscribe = subscribe(Filter::NextObject, None);
+		subscribe.epoch = Some(epoch.clone());
+		let fetch = ietf::Fetch {
+			request_id: RequestId(REQUEST_ID),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Ascending,
+			fetch_type: fetch_range(
+				version,
+				"video",
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 1 },
+			),
+			range_filters: false,
+			fill_timeout: false,
+			properties_wanted: true,
+			epoch: Some(epoch.clone()),
+		};
+		let status = ietf::TrackStatus {
+			request_id: RequestId(REQUEST_ID),
+			track_namespace: crate::Path::new("room"),
+			track_name: "video".into(),
+			properties_wanted: true,
+			epoch: Some(epoch.clone()),
+		};
+		let mut bodies: [Vec<u8>; 3] = Default::default();
+		subscribe
+			.encode_msg(&mut Encoder::new(&mut bodies[0], version.into()), version)
+			.unwrap();
+		fetch
+			.encode_msg(&mut Encoder::new(&mut bodies[1], version.into()), version)
+			.unwrap();
+		status
+			.encode_msg(&mut Encoder::new(&mut bodies[2], version.into()), version)
+			.unwrap();
+		let [subscribe, fetch, status] = bodies;
+		[
+			(ietf::Subscribe::ID, subscribe),
+			(ietf::Fetch::ID, fetch),
+			(ietf::TrackStatus::ID, status),
+		]
+	}
+
+	/// MoQ Epoch pins SUBSCRIBE, FETCH and TRACK_STATUS to the instance they name: the
+	/// broadcast under the path now being another instance, or one with no epoch at all,
+	/// refuses them as gone instead of serving another instance's content.
+	#[moq_clock::test]
+	async fn a_request_for_another_instance_is_refused() {
+		for version in [Version::Draft17, Version::Draft20, Version::Draft22] {
+			let served = crate::Epoch::mint();
+			let stale = crate::Epoch::mint();
+			let pinned = crate::origin::Route::default().with_epoch(served.clone());
+			for (name, route, named, refused) in [
+				("another epoch", pinned.clone(), &stale, true),
+				("no epoch", crate::origin::Route::default(), &stale, true),
+				("its epoch", pinned, &served, false),
+			] {
+				let mut h = serve_route(version, crate::track::Info::timed(), route.clone());
+				publish_groups(&mut h, 0);
+				settle().await;
+				let expected = unroutable(version).await;
+				for (id, body) in pinned_requests(version, named) {
+					let mark = h.log.writes.lock().unwrap().len();
+					let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+					let mut task = h
+						.publisher
+						.clone()
+						.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream, true)
+						.unwrap();
+					// A served SUBSCRIBE parks at the live edge, so poll rather than await.
+					for _ in 0..50 {
+						if futures::poll!(task.as_mut()).is_ready() {
+							break;
+						}
+						settle().await;
+					}
+					let wire = h.log.writes.lock().unwrap()[mark..].to_vec();
+					let found = wire.windows(expected.len()).any(|window| window == expected.as_slice());
+					assert_eq!(found, refused, "{version} {name}: request {id:#x}");
+				}
+			}
+		}
+	}
+
+	/// An EPOCH on a request breaks a session that did not negotiate MoQ Epoch: the peer
+	/// cannot have learned an instance it was never told about.
+	#[moq_clock::test]
+	async fn an_epoch_without_the_extension_is_a_violation() {
+		for version in [Version::Draft17, Version::Draft22] {
+			let h = serve(version);
+			for (id, body) in pinned_requests(version, &crate::Epoch::mint()) {
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				let result = h
+					.publisher
+					.clone()
+					.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream, false);
+				assert!(
+					matches!(result, Err(Error::ProtocolViolation)),
+					"{version}: request {id:#x}"
+				);
+			}
+		}
+	}
+
 	const ALL_VERSIONS: [Version; 9] = [
 		Version::Draft14,
 		Version::Draft15,
@@ -7481,6 +7674,7 @@ mod serve_tests {
 			track_namespace: crate::Path::new(namespace),
 			track_name: "video".into(),
 			properties_wanted: wanted,
+			epoch: None,
 		};
 		let mut body = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
@@ -7505,7 +7699,12 @@ mod serve_tests {
 				let body = track_status("room", wanted, version);
 				h.publisher
 					.clone()
-					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+					.handle_stream(
+						ietf::TrackStatus::ID,
+						ietf::Body(bytes::Bytes::from(body)),
+						stream,
+						false,
+					)
 					.unwrap()
 					.await;
 				assert!(h.log.resets().is_empty(), "{version}: the answer was reset");
@@ -7585,7 +7784,12 @@ mod serve_tests {
 			let mut answer = std::pin::pin!(
 				h.publisher
 					.clone()
-					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+					.handle_stream(
+						ietf::TrackStatus::ID,
+						ietf::Body(bytes::Bytes::from(body)),
+						stream,
+						false
+					)
 					.unwrap()
 			);
 			assert!(futures::poll!(answer.as_mut()).is_pending(), "{version}");
@@ -7669,6 +7873,7 @@ mod serve_tests {
 					track_namespace: crate::Path::new("room"),
 					track_name: "video".into(),
 					properties_wanted: true,
+					epoch: None,
 				},
 			));
 			for _ in 0..100 {
@@ -7706,7 +7911,12 @@ mod serve_tests {
 		let mark = h.log.writes.lock().unwrap().len();
 		h.publisher
 			.clone()
-			.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+			.handle_stream(
+				ietf::TrackStatus::ID,
+				ietf::Body(bytes::Bytes::from(body)),
+				stream,
+				false,
+			)
 			.unwrap()
 			.await;
 		refusal_code(&h.log.writes.lock().unwrap()[mark..], version)
@@ -7780,7 +7990,7 @@ mod serve_tests {
 		let mark = h.log.writes.lock().unwrap().len();
 		h.publisher
 			.clone()
-			.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream)
+			.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream, false)
 			.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}"))
 			.await;
 		assert!(h.log.resets().is_empty(), "{version}: refusal was reset");
@@ -7833,6 +8043,7 @@ mod serve_tests {
 								properties_wanted: true,
 								range_filters: true,
 								fill_timeout: false,
+								epoch: None,
 							},
 						)
 						.await
@@ -7895,7 +8106,7 @@ mod serve_tests {
 				let mut serving = std::pin::pin!(
 					h.publisher
 						.clone()
-						.handle_stream(ietf::TrackStatus::ID, ietf::Body(body.into()), stream)
+						.handle_stream(ietf::TrackStatus::ID, ietf::Body(body.into()), stream, false)
 						.unwrap()
 				);
 				let done = futures::poll!(serving.as_mut());
@@ -7923,7 +8134,7 @@ mod serve_tests {
 				.unwrap();
 			h.publisher
 				.clone()
-				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream)
+				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, false)
 				.unwrap_or_else(|e| panic!("{version}: the request was not started: {e}"))
 				.await;
 			assert_eq!(
@@ -8069,7 +8280,7 @@ mod serve_tests {
 			let task = h
 				.publisher
 				.clone()
-				.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream)
+				.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream, false)
 				.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}"));
 			let mut task = std::pin::pin!(task);
 			let mut done = false;
@@ -8123,7 +8334,7 @@ mod serve_tests {
 			assert!(
 				h.publisher
 					.clone()
-					.handle_stream(ietf::SubscribeNamespaceLegacy::ID, body, stream)
+					.handle_stream(ietf::SubscribeNamespaceLegacy::ID, body, stream, false)
 					.is_err(),
 				"{version}: Subscribe Options 0x03 kept the session open"
 			);
@@ -8475,6 +8686,7 @@ mod serve_tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted: true,
+					epoch: None,
 				},
 			)
 			.await?;
@@ -8644,7 +8856,7 @@ mod serve_tests {
 			.unwrap();
 		let mut serving = h
 			.publisher
-			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
+			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream, false)
 			.unwrap();
 		let mut fetching = Box::pin(joining_fetch(&h, 0));
 		assert!(
@@ -8679,7 +8891,7 @@ mod serve_tests {
 			.unwrap();
 		let mut serving = h
 			.publisher
-			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
+			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream, false)
 			.unwrap();
 		match futures::future::select(&mut fetching, &mut serving).await {
 			futures::future::Either::Left((response, _)) => {
@@ -8702,7 +8914,7 @@ mod serve_tests {
 				.unwrap();
 			let serving = h
 				.publisher
-				.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
+				.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream, false)
 				.unwrap();
 			let mut fetching = Box::pin(joining_fetch(&h, 0));
 			assert!(futures::poll!(fetching.as_mut()).is_pending());
@@ -8989,6 +9201,7 @@ mod serve_tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted,
+					epoch: None,
 				},
 			)
 			.await
@@ -9656,6 +9869,7 @@ mod serve_tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted: true,
+					epoch: None,
 				},
 			));
 			// Driven until FETCH_OK is out, so the fetch is parked on uni stream credit.
@@ -9757,6 +9971,7 @@ mod serve_tests {
 						range_filters: false,
 						fill_timeout: false,
 						properties_wanted: true,
+						epoch: None,
 					},
 				));
 				// Driven until FETCH_OK is out, so the fetch is parked on uni stream credit.
@@ -9880,6 +10095,7 @@ mod serve_tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted: true,
+					epoch: None,
 				},
 			));
 			for _ in 0..100 {
@@ -10130,6 +10346,7 @@ mod serve_tests {
 							range_filters: false,
 							fill_timeout: false,
 							properties_wanted: true,
+							epoch: None,
 						},
 					)
 					.await
@@ -10174,6 +10391,7 @@ mod serve_tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted: true,
+					epoch: None,
 				},
 			)
 			.await
@@ -12121,7 +12339,7 @@ mod tests {
 		let local = announced.assert_next_active("from/us");
 		announced.assert_next_wait();
 
-		assert_eq!(publisher.select(&local, &peer), Advert::Plain);
+		assert_eq!(publisher.select(&local, &peer, false), Advert::Some(Default::default()));
 	}
 
 	/// An anonymous chain received from an identified peer keeps the 0 on the wire
@@ -13246,6 +13464,7 @@ mod tests {
 			hidden: false,
 			auth: false,
 			active_count: false,
+			epoch: false,
 		});
 		slot
 	}
@@ -14161,6 +14380,7 @@ mod tests {
 					rendezvous: false,
 					range_filters: false,
 					authorization_token: None,
+					epoch: None,
 				},
 			)
 			.await
@@ -14187,6 +14407,7 @@ mod tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted: true,
+					epoch: None,
 				},
 			)
 			.await
@@ -14516,6 +14737,7 @@ mod range_tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		}
 	}
 

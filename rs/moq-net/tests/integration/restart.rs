@@ -333,7 +333,9 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	let (fresh, mut subscription) = subscribe(&viewer, "live/cam").await;
 	assert!(!fresh.is_clone(&stale), "{version}: joined the old instance's copy");
 	assert_eq!(claim.answered(), 2, "{version}: the old answer was served again");
-	if version == "moq-lite-07-wip".parse().unwrap() {
+	// Every wire here but lite-06 carries the epoch: lite-07, and moq-transport with the
+	// MoQ Epoch extension.
+	if version != "moq-lite-06".parse().unwrap() {
 		assert_eq!(fresh.info().epoch, to, "{version}: resolved under the old epoch");
 	}
 	claim.write(1, "new:0");

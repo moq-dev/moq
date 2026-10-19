@@ -104,6 +104,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		let subscribe_ok = SubscribeOk {
@@ -142,6 +143,7 @@ mod tests {
 			range_filters: false,
 			fill_timeout: false,
 			properties_wanted: false,
+			epoch: None,
 		};
 
 		let group = GroupHeader {
@@ -178,6 +180,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		// Draft-20 spells Next Object as a Length of 2 and two zero fields; draft-22 as type 0x05.
