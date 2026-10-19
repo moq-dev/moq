@@ -107,6 +107,7 @@ lands before the cut.
 - [Bufferbloat harness](/quest/m1/bufferbloat.md) - acceptance and performance checks impair paths with a rate limit and a deep queue, not random loss
 - [Random-loss audit](/quest/m1/random-loss-audit.md) - every decision random-loss gates drove is kept, reworked, or reverted on shaped paths
 - [Timed-out requests clean up](/quest/m1/legacy-request-timeout-cleanup.md) - on drafts 14-16, Rust and JS send PUBLISH_NAMESPACE_DONE or UNSUBSCRIBE_NAMESPACE for a timed-out request before its local reset
+- [Redundancy model](/quest/m1/redundancy-model.md) - decide between same-epoch active-active publishers and epoch switchover before the m2 redundancy work builds on either
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Resume reorder](/quest/m1/resume-reorder.md) - a group whose stream header arrives after its successor's still resumes on failover; only a dropped or long-gone group fails
 - [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops

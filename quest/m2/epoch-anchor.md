@@ -120,6 +120,11 @@ timestamps move from arrival to the epoch's derivation; the `--epoch` docs
 state the accuracy bound. `--epoch` needs no subscribe right (#5412's
 breaking grant for publish-only tokens is dropped). Wire: none.
 
+
+## Required
+
+- [Redundancy model](/quest/m1/redundancy-model.md) - whether a redundant pair stays active-active or fails over by epoch switchover
+
 ## Related
 
 - [Same-epoch importers](/quest/m2/hop-aligned-import.md) - group sequences and the end-to-end pair on this coordinate
