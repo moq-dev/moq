@@ -8,6 +8,11 @@ How to update your code for each breaking change, newest first.
 
 The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
 
+### OpenH264 is a build feature (#5771)
+
+The release archives and the CMake build still carry the software H.264 fallback.
+A bare `cargo build -p moq-c` leaves it out; add `--features openh264` to keep it.
+
 ### Subscriptions carry group ranges (#5732)
 
 `moq_subscription`'s `group_start`, `group_end`, and their `_present` flags are replaced by `ranges` and `ranges_len`, an array of `moq_range` whose ends are `moq_anchor`s, and `order` (`moq_order`), which changes its ABI.

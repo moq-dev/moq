@@ -35,7 +35,8 @@ done < <(env -0)
 shopt -u nocasematch
 
 host=$(rustc -vV | sed -n 's/^host: //p')
-env -i "${hook_env[@]}" cargo build --locked --release --package moq-ffi \
+# The same features as the hook, too.
+env -i "${hook_env[@]}" cargo build --locked --release --package moq-ffi --features openh264 \
     --target "$host" \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 

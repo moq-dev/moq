@@ -241,9 +241,19 @@ export const hooks: {
 	/**
 	 * Declare the end a wire subscription received: repeating it is a no-op, and a mid-group
 	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
-	 * any other second end. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
+	 * any other second end. Readers then hold at a hole below it until the hole fills, folds
+	 * past the grace, or the track closes, since QUIC may deliver a lower group's stream after
+	 * a higher one. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
+	// pending: /quest/m1/public-model/deferred.md
+	/**
+	 * Declare the first group a wire subscription's live feed serves (lite SUBSCRIBE_START, or
+	 * IETF SUBSCRIBE_OK's Largest) for the floor its SUBSCRIBE requested: while the demand keeps
+	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
+	 * `track.ts`.
+	 */
+	startTrack: (producer: Producer, served: { start: number; requested?: number }) => void;
 	// pending: /quest/m1/public-model/ingest.md
 	/**
 	 * Mark a track as a session's copy of a remote one: its groups are never checked for a
@@ -351,6 +361,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	endTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	startTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {

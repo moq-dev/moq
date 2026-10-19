@@ -23,11 +23,12 @@ categories = ["multimedia", "multimedia::video", "multimedia::encoding"]
 # from the default compile (`just check` lints default features only, so the
 # opt-in ones are compiled by nightly's `just rs features` and platform.yml's
 # `just rs macos`).
-# OpenH264 remains the default software fallback, but is optional so a hardware-
-# only consumer does not compile its vendored C++. Workspace consumers opt out
-# at the root manifest (`default-features = false`) and pick per crate, so the
-# relay and the language bindings never build device or rendering stacks.
-default = ["mediacodec", "nvidia", "openh264"]
+# Hardware codecs come first, so OpenH264 (vendored C++, the software fallback)
+# is opt-in: development and CI lint without it, and release builds turn it on
+# explicitly. Workspace consumers opt out at the root manifest
+# (`default-features = false`) and pick per crate, so the relay and the language
+# bindings never build device or rendering stacks.
+default = ["mediacodec", "nvidia"]
 # Native camera and screen capture. Costs the build nothing on any platform:
 # Linux goes through moq-v4l (bindings checked in), macOS and Windows use OS
 # frameworks (Windows display/window capture requires Windows 10 2004+ WGC).
@@ -46,8 +47,8 @@ mediacodec = ["dep:ndk"]
 # this on still links GPU-less and starts driverless, falling back to the next
 # encoder or decoder.
 nvidia = ["dep:ash", "dep:cudarc", "dep:moq-nvenc", "dep:libloading"]
-# Vendored, statically linked software H.264 encode/decode. Enabled by default,
-# but separable from native codecs for hardware-only and minimal builds.
+# Vendored, statically linked software H.264 encode/decode. Off by default:
+# release builds and CI's test jobs enable it; hardware-only builds leave it off.
 openh264 = ["dep:openh264", "dep:openh264-sys2"]
 # Software VP8 and VP9 decode through libvpx, on every platform. Off by default
 # because libvpx comes from the build host: libvpx-native-sys finds it through
@@ -126,7 +127,7 @@ libvpx-native-sys = { version = "5.0.17", optional = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Vendored, statically linked software H.264 fallback (no system dependency).
-# Hardware encoders are preferred, but an OpenH264-enabled build falls back when
+# Hardware encoders are preferred, but an `openh264` build falls back when
 # none is usable (a GPU-less box, or a resolution a hardware encoder rejects).
 openh264 = { version = "0.9.8", optional = true }
 # For the raw `ENCODER_OPTION_BITRATE` set_option: openh264 takes a bitrate only
