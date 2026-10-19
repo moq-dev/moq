@@ -799,6 +799,40 @@ mod test {
 		assert_eq!(group.range(), 0..0);
 	}
 
+	/// A repeated key is refused in a header, in a record, and in the op object itself.
+	#[test]
+	fn duplicate_keys_are_refused() {
+		let vectors = crate::strict::test::vectors();
+		for record in &vectors.refused {
+			let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+			let mut group = decoder.group();
+			let header = format!(r#"{{"offset":0,"records":[{record}]}}"#);
+			let err = group.decode(header.as_bytes()).unwrap_err();
+			assert!(matches!(err, crate::Error::DuplicateKey), "{header}: {err}");
+
+			group.decode(br#"{"offset":0,"records":[]}"#).unwrap();
+			let push = format!(r#"{{"push":{record}}}"#);
+			let err = group.decode(push.as_bytes()).unwrap_err();
+			assert!(matches!(err, crate::Error::DuplicateKey), "{push}: {err}");
+		}
+		for record in &vectors.accepted {
+			let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+			let mut group = decoder.group();
+			group
+				.decode(format!(r#"{{"offset":0,"records":[{record}]}}"#).as_bytes())
+				.unwrap();
+			group.decode(format!(r#"{{"push":{record}}}"#).as_bytes()).unwrap();
+		}
+
+		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
+		let mut group = decoder.group();
+		let err = group.decode(br#"{"offset":0,"offset":0,"records":[]}"#).unwrap_err();
+		assert!(matches!(err, crate::Error::DuplicateKey), "{err}");
+		group.decode(br#"{"offset":0,"records":[]}"#).unwrap();
+		let err = group.decode(br#"{"pop":0,"pop":0}"#).unwrap_err();
+		assert!(matches!(err, crate::Error::DuplicateKey), "{err}");
+	}
+
 	#[test]
 	fn rolling_is_invisible_to_the_consumer() {
 		// The same edits, framed two ways: one group for everything, versus a roll per edit.

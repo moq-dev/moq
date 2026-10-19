@@ -70,7 +70,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
   tail grace
 - [Schedule datagrams by subscription priority](/quest/m1/quic/datagram-priority.md) -
   datagrams join their subscription's send group instead of preempting every stream
-- [A stateless reset keeps a closed connection's reason](/quest/m1/quic/close-reason-after-reset.md) - a reset after a local transport error neither replaces the reason nor reports a second loss
 - [0-RTT streams adopt a raised stream window](/quest/m1/quic/zero-rtt-window-raise.md) - a server's larger stream window reaches the client's 0-RTT streams, so they no longer stall
 
 ## Related
