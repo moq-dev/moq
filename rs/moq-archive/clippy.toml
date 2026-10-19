@@ -15,6 +15,7 @@ disallowed-methods = [
 ]
 
 disallowed-types = [
+    { path = "std::time::SystemTime", reason = "use moq_clock::Wall" },
     { path = "std::time::Instant", reason = "use moq_clock::Instant" },
     { path = "tokio::time::Instant", reason = "use moq_clock::Instant" },
     { path = "tokio::time::Sleep", reason = "use moq_clock::Sleep" },

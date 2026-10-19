@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use moq_clock::Instant;
-
 use url::Url;
 
 use crate::lease::{self, Due, Reason};
