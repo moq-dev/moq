@@ -76,6 +76,8 @@ pub(crate) struct TrackProperties {
 	pub immutable: Option<Encoding>,
 	/// The keys inside Immutable Properties, which egress must not restate as mutable.
 	pub sealed: Vec<u64>,
+	/// Property 0x06 means SUBGROUP_DELIVERY_TIMEOUT on the ingress draft.
+	pub delivery_timeout: bool,
 }
 
 impl TrackProperties {

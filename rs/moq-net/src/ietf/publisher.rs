@@ -56,7 +56,7 @@ fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Resul
 	if !wanted {
 		return Ok(ietf::Properties::default());
 	}
-	let unknown = info.properties.as_deref().cloned().unwrap_or_default();
+	let mut unknown = info.properties.as_deref().cloned().unwrap_or_default();
 	let block = !matches!(version, Version::Draft14 | Version::Draft15);
 	if block
 		&& unknown
@@ -64,6 +64,14 @@ fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Resul
 			.is_some_and(|ingress| ingress != super::object::encoding(version))
 	{
 		return Err(Error::Unsupported);
+	}
+	// Across draft-19, forwarding 0x06 would give it a different meaning, as for object
+	// properties. A mutable one is dropped; a sealed one is refused.
+	if !unknown.values.is_empty() && unknown.delivery_timeout != super::object::has_delivery_timeout(version) {
+		if block && unknown.sealed.contains(&0x06) {
+			return Err(Error::Unsupported);
+		}
+		unknown.values.retain(|property| property.id != 0x06);
 	}
 	Ok(ietf::Properties {
 		max_cache_duration: info.max_age,
@@ -9273,6 +9281,49 @@ mod serve_tests {
 				"{version}"
 			);
 		}
+	}
+
+	/// Draft 19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a track property 0x06 crosses
+	/// that boundary as an object property does: dropped when mutable, refused when sealed.
+	#[test]
+	fn track_property_0x06_does_not_cross_draft_19() {
+		let upstream = |block: &[u8]| {
+			let properties = crate::coding::decode_buf(
+				&mut bytes::Bytes::copy_from_slice(block),
+				Version::Draft18,
+				ietf::Properties::decode,
+			)
+			.unwrap();
+			track::Info {
+				properties: Some(Arc::new(properties.unknown)),
+				..Default::default()
+			}
+		};
+		let ids = |properties: ietf::Properties| properties.unknown.values.iter().map(|p| p.id).collect::<Vec<_>>();
+
+		// 0x06 = 42, 0x3801 = "hi"
+		let mut block = Vec::new();
+		let mut w = Encoder::new(&mut block, Version::Draft18.into());
+		w.varint(0x06).unwrap();
+		w.varint(42).unwrap();
+		w.varint(0x3801 - 0x06).unwrap();
+		w.bytes(b"hi").unwrap();
+		let mutable = upstream(&block);
+		assert_eq!(
+			ids(track_properties(&mutable, true, Version::Draft18).unwrap()),
+			[0x06, 0x3801]
+		);
+		assert_eq!(
+			ids(track_properties(&mutable, true, Version::Draft22).unwrap()),
+			[0x3801]
+		);
+
+		let sealed = upstream(&[0x0b, 2, 0x06, 42]);
+		assert!(track_properties(&sealed, true, Version::Draft18).is_ok());
+		assert!(matches!(
+			track_properties(&sealed, true, Version::Draft22),
+			Err(Error::Unsupported)
+		));
 	}
 
 	/// A range ending inside its group stops at its End Object, which draft 20 counts

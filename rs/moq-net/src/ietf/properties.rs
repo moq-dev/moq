@@ -225,6 +225,9 @@ impl Properties {
 			}
 		}
 
+		// Recorded only beside a value it describes, so a set with nothing to forward stays empty.
+		properties.unknown.delivery_timeout =
+			!properties.unknown.values.is_empty() && super::object::has_delivery_timeout(version);
 		Ok(properties)
 	}
 

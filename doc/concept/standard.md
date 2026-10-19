@@ -74,7 +74,8 @@ choices. They follow the product model.
   JavaScript [leave other per-object metadata out](/concept/moq-lite#what-moq-lite-leaves-out).
   Immutable property blocks retain their bytes. Forwarding is refused when the
   negotiated drafts use incompatible key or integer encodings, or when the block
-  holds a Timestamp in units the response does not declare. A track carrying a
+  holds a Timestamp in units the response does not declare. Property 0x06 crosses
+  the draft-19 boundary as it does on an object. A track carrying a
   Mandatory Track Property (0x4000-0x7FFF) is refused with `UNSUPPORTED_EXTENSION`
   instead, or `NOT_SUPPORTED` before draft 18.
 
