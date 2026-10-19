@@ -288,9 +288,9 @@ impl Reader {
 		// sequence there asks the publisher to rewind the track for everyone
 		// reading it. What a player wants is to skip what it already has.
 		if options.start == Start::Latest
-			&& let Some(live_edge) = track.latest()
+			&& let std::task::Poll::Ready(Some(live_edge)) = subscriber.poll_largest(&moq_net::kio::Waiter::noop())
 		{
-			subscriber.set_groups(live_edge.saturating_sub(lookback)..);
+			subscriber.set_groups(live_edge.group.saturating_sub(lookback)..);
 		}
 		let track = subscriber;
 		// The catalog says how the track is framed, and it is not always the legacy

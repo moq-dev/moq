@@ -524,3 +524,36 @@ fn an_aborted_parked_group_releases_a_finished_track() {
 		aborting.join().unwrap();
 	});
 }
+
+/// A frame written on one group handle racing `finish` on another must never reopen
+/// the finished largest group, or a reader at the declared end waits forever.
+#[test]
+fn a_frame_racing_finish_never_reopens_the_largest() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let mut track = broadcast
+			.create_track("largest", moq_net::track::Info::default())
+			.unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(None, Bytes::from_static(b"a")).unwrap();
+		track.finish().unwrap();
+
+		let finishing = group.clone();
+		let writer = thread::spawn(move || {
+			// Refused once the finish wins; either order must end the stream.
+			let _ = group.write_frame(None, Bytes::from_static(b"b"));
+			group
+		});
+		finishing.finish().unwrap();
+		let _group = writer.join().unwrap();
+
+		let noop = kio::Waiter::noop();
+		loop {
+			match track.poll_largest(&noop) {
+				std::task::Poll::Ready(Some(_)) => continue,
+				std::task::Poll::Ready(None) => break,
+				std::task::Poll::Pending => panic!("a stale frame write reopened the finished largest group"),
+			}
+		}
+	});
+}

@@ -97,7 +97,7 @@ jobs:
 
       - name: Download validated same-run input
         if: inputs.reuse-native
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: cpp-native-${{ matrix.target }}
           path: native-archive
@@ -109,7 +109,7 @@ jobs:
 
       - name: Download shared input for compatibility check
         if: github.event_name == 'workflow_dispatch' && inputs.prebuilt-test
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: default-lib-${{ matrix.target }}
           path: native-library
@@ -152,7 +152,7 @@ jobs:
           just cpp package "${args[@]}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: moq-cpp-${{ matrix.target }}
           path: dist/*
@@ -182,7 +182,7 @@ jobs:
         run: just gh release prev-tag cpp
 
       - name: Download artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: artifacts
           merge-multiple: true
@@ -246,7 +246,7 @@ jobs:
           just obs package --target "$TARGET" --moq-release "$MOQ_RELEASE" --output dist
 
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: obs-moq-${{ matrix.target }}
           path: dist/*
@@ -287,7 +287,7 @@ jobs:
       # Only the obs-moq archives: the moq-cpp-* artifacts from the build job
       # belong to the C++ release, not this one.
       - name: Download artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: artifacts
           pattern: obs-moq-*

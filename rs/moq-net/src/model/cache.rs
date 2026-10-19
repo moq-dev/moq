@@ -41,9 +41,10 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
+use std::task::{Poll, ready};
 use std::time::Duration;
 
-use super::track::{self, TrackState};
+use super::track::{self, Position, TrackState};
 use super::{aborts, expiry, group};
 
 /// Fixed bookkeeping charged per cached group on top of its frame payload bytes.
@@ -641,9 +642,91 @@ pub(super) struct Track {
 	wakes: expiry::Wakes,
 	// Allocated only when a subscriber parks groups behind a serving cap.
 	aborts: OnceLock<Arc<aborts::Aborts>>,
+
+	// Here rather than on the track state so a frame write advances it without the track
+	// lock, and wakes only the readers following it.
+	largest: kio::Shared<Largest>,
+}
+
+/// The greatest location a track has written or its source reported, followed by the track
+/// handles' `largest`: each new group or datagram at its head, then each frame written to it.
+#[derive(Default)]
+struct Largest {
+	position: Option<Position>,
+	// The largest group's content may still grow: no copy of it finished, and it is not a
+	// datagram. An aborted one stays open, since it can be recreated or fetched.
+	open: bool,
+	// The track ended, so no newer position can follow.
+	ended: bool,
 }
 
 impl Track {
+	/// Raise the track's largest location to `position`, waking only its own waiters.
+	pub(super) fn advance_largest(&self, position: Position) {
+		let mut largest = self.largest.lock();
+		if largest.position.is_none_or(|current| position > current) {
+			largest.position = Some(position);
+			largest.open = true;
+		}
+	}
+
+	/// Group `sequence` holds every frame it will have: a copy finished, or it is a datagram.
+	/// A group name fixes its content, so no legal write raises the largest past it.
+	pub(super) fn finish_largest(&self, sequence: u64) {
+		let mut largest = self.largest.lock();
+		if largest.position.is_some_and(|position| position.group == sequence) {
+			largest.open = false;
+		}
+	}
+
+	/// Whether the largest group's content may still grow; see [`Self::finish_largest`].
+	pub(super) fn largest_open(&self) -> bool {
+		self.largest.read().open
+	}
+
+	/// End the largest stream once the track ends: no newer frame can follow.
+	pub(super) fn end_largest(&self) {
+		let mut largest = self.largest.lock();
+		if !largest.ended {
+			largest.ended = true;
+		}
+	}
+
+	/// Poll for a largest location newer than `seen`, recording it there. `None` once the
+	/// track ended with nothing newer.
+	pub(super) fn poll_largest(&self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		let newer = |largest: &Largest| {
+			largest
+				.position
+				.filter(|position| seen.is_none_or(|seen| *position > seen))
+		};
+		let largest = ready!(
+			self.largest
+				.poll(waiter, |largest| match newer(largest).is_some() || largest.ended {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				})
+		);
+		let next = newer(&largest);
+		if next.is_some() {
+			*seen = next;
+		}
+		Poll::Ready(next)
+	}
+
+	/// The largest frame newer than `seen` without waiting, recording it there.
+	pub(super) fn take_largest(&self, seen: &mut Option<Position>) -> Option<Position> {
+		let next = self
+			.largest
+			.read()
+			.position
+			.filter(|position| seen.is_none_or(|seen| *position > seen));
+		if next.is_some() {
+			*seen = next;
+		}
+		next
+	}
+
 	/// Open an account against `pool` for the track behind `state`.
 	pub(super) fn new(pool: Pool, state: kio::Weak<TrackState>) -> Arc<Self> {
 		let track = Arc::new(Self {
@@ -655,6 +738,7 @@ impl Track {
 			sweep: OnceLock::new(),
 			wakes: Default::default(),
 			aborts: OnceLock::new(),
+			largest: Default::default(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);

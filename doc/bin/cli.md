@@ -432,7 +432,9 @@ continuity error, and the rest carry on. It takes neither `--linger`,
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same
-stream. A replacement (a restarted publisher, under a new
+stream. A return that cannot be read yet, such as one still routed through a
+dead session, keeps it waiting for the next announcement; if the linger runs
+out first, it exits 1 with that error. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. `--linger` also bounds a mid-stream stitch from the replacement

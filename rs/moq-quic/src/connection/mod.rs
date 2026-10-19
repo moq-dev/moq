@@ -93,9 +93,8 @@ pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 mod streams;
 pub(crate) use streams::StreamsState;
 pub use streams::{
-    Checkpoint, Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream,
-    SendGroup, SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams,
-    WriteError, Written,
+    Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream, SendGroup,
+    SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
 };
 
 mod timer;
@@ -561,6 +560,20 @@ impl Connection {
             _ => false,
         };
 
+        // A client is `Connected` before the server has its Finished: it may still be queued
+        // behind the pacer, or lost. A close that replaces it leaves the server unable to complete
+        // its handshake, so it only reads an Initial or Handshake close, which carries no
+        // application code (RFC 9000 §10.2.3). So the Handshake packet carries the unacknowledged
+        // Finished instead, and the server reads the 1-RTT close behind it.
+        let finish_first = close
+            && self.side.is_client()
+            && self.highest_space == SpaceId::Data
+            && self.spaces[SpaceId::Handshake].crypto.is_some()
+            && self.spaces[SpaceId::Handshake]
+                .unacked_crypto()
+                .next()
+                .is_some();
+
         // Check whether we need to send an ACK_FREQUENCY frame
         if let Some(config) = &self.config.ack_frequency_config {
             self.spaces[SpaceId::Data].pending.ack_frequency = self
@@ -606,7 +619,9 @@ impl Connection {
 
             // Is there data or a close message to send in this space?
             let can_send = self.space_can_send(space_id, frame_space_1rtt);
-            if can_send.is_empty() && (!close || self.spaces[space_id].crypto.is_none()) {
+            if (can_send.is_empty() && (!close || self.spaces[space_id].crypto.is_none()))
+                || (finish_first && space_id == SpaceId::Initial)
+            {
                 space_idx += 1;
                 continue;
             }
@@ -877,7 +892,30 @@ impl Connection {
                     );
                 }
 
-                if buf.len() + frame::ConnectionClose::SIZE_BOUND <= builder.max_size {
+                // All or nothing: part of the flight would not complete the handshake. A flight
+                // too big for one packet (a large client certificate chain) keeps the plain close.
+                // It must also leave room to coalesce the 1-RTT close, or a one-datagram budget
+                // resends this packet on every poll and never reaches the close. Both spaces share
+                // the negotiated suite, so the 1-RTT tag is as long as this one.
+                // Nothing is dequeued, so a close resent for a lost flight carries it again.
+                let finished = &self.spaces[space_id];
+                let carry_finished = finish_first
+                    && space_id == SpaceId::Handshake
+                    && buf.len()
+                        + finished
+                            .unacked_crypto()
+                            .map(|frame| frame::Crypto::SIZE_BOUND + frame.data.len())
+                            .sum::<usize>()
+                        + MIN_PACKET_SPACE
+                        + builder.tag_len
+                        <= builder.max_size;
+                if carry_finished {
+                    for frame in finished.unacked_crypto() {
+                        trace!("CRYPTO: off {} len {}", frame.offset, frame.data.len());
+                        frame.encode(buf);
+                        self.stats.frame_tx.crypto += 1;
+                    }
+                } else if buf.len() + frame::ConnectionClose::SIZE_BOUND <= builder.max_size {
                     let max_frame_size = builder.max_size - buf.len();
                     match &self.state {
                         State::Closed(state::Closed { reason }) => {

@@ -2469,6 +2469,66 @@ mod tests {
 		}
 	}
 
+	/// Lite-07's SUBSCRIBE_START says where the track is, so a reader knows its largest
+	/// frame before any group arrives. The FIN with no SUBSCRIBE_END then aborts the track,
+	/// and the stream ends with it.
+	#[moq_clock::test]
+	async fn subscribe_start_reports_the_largest() {
+		let version = Version::Lite07;
+		let largest = track::Position { group: 4, frame: 2 };
+		let mut responses = Vec::new();
+		lite::SubscribeResponse::Start(lite::SubscribeStart {
+			group: 4,
+			largest: Some(largest),
+		})
+		.encode(
+			&mut crate::coding::Encoder::new(&mut responses, version.into()),
+			version,
+		)
+		.unwrap();
+		let session = crate::lite::test_transport::ScriptedSession::eof(responses);
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session,
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
+		});
+		let serve = TrackServe {
+			validity: Default::default(),
+			subscriber,
+			path: Path::new("room").to_owned(),
+			epoch: None,
+			name: "video".to_string(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let request = broadcast.reserve_track("video").unwrap();
+		let serving = ServeLoop::new(&serve, request, crate::track::Info::timed(), Some(Timescale::MILLI));
+		let mut reader = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let gate = serve.gate();
+		let mut running = TrackServeRun {
+			serve,
+			state: TrackRunState::Serve(serving),
+			gate,
+		};
+		kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
+
+		assert_eq!(reader.largest().await, Some(largest));
+		assert_eq!(reader.largest().await, None, "the stream ends with the aborted track");
+		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
+	}
+
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
 	async fn check_subscription_fin(version: Version, responses: Vec<u8>, clean: bool) {
 		let session = crate::lite::test_transport::ScriptedSession::eof(responses);
@@ -6034,6 +6094,9 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 										// Where the live feed is, on versions whose answer says.
 										if serve.subscriber.version.has_largest() {
 											self.serving.set_live(start.largest);
+											if let Some(largest) = start.largest {
+												self.serving.report_largest(largest);
+											}
 										}
 										// A START describes the demand the SUBSCRIBE carried.
 										// It applies only while the current start still matches

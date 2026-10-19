@@ -259,9 +259,12 @@ impl<O: Output> Media<O> {
 							)
 							.await?;
 						// Start at the local live edge without asking the shared publisher
-						// subscription to rewind to a cached sequence.
-						if let Some(latest) = track.latest() {
-							subscriber.set_groups(latest..);
+						// subscription to rewind to a cached sequence. Only what is known now: a
+						// track with nothing yet starts wherever its first group lands.
+						if let std::task::Poll::Ready(Some(largest)) =
+							subscriber.poll_largest(&moq_net::kio::Waiter::noop())
+						{
+							subscriber.set_groups(largest.group..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;
 						Ok::<_, anyhow::Error>((moq_mux::container::Consumer::new(subscriber, format), decoder))

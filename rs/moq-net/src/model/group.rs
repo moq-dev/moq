@@ -828,6 +828,7 @@ impl Producer {
 		state.stamp(timestamp);
 		let bound = state.settle(origin);
 		self.alive.checked.store(true, Ordering::Relaxed);
+		self.advance_largest(&state);
 		drop(state);
 		// The group's lock is released first: sharing reads it back through its slot.
 		if let (Some(track), Some(start)) = (&track, bound) {
@@ -914,6 +915,7 @@ impl Producer {
 		let bound = state.settle(origin);
 		if count > 0 {
 			self.alive.checked.store(true, Ordering::Relaxed);
+			self.advance_largest(&state);
 		}
 		drop(state);
 		// The group's lock is released first: sharing reads it back through its slot.
@@ -1089,12 +1091,23 @@ impl Producer {
 		}
 		state.frames.push_back(frame);
 		state.committed = state.next_index;
+		self.advance_largest(&state);
 		drop(state);
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt and age idle content out, reusing the tick above.
 		self.cache.settle(now);
 		Ok(())
+	}
+
+	/// Raise the track's largest to the last frame committed. Called under the group lock,
+	/// as [`Self::finish`] marks it final, so a write on another handle cannot land after a
+	/// finish and reopen a final largest group.
+	fn advance_largest(&self, state: &GroupState) {
+		self.cache.advance_largest(track::Position {
+			group: self.info.sequence,
+			frame: (state.committed - 1) as u64,
+		});
 	}
 
 	/// Fail the group because an in-flight frame couldn't complete (called by
@@ -1137,6 +1150,8 @@ impl Producer {
 			return Err(Error::FrameOpen);
 		}
 		state.fin = Some(state.next_index);
+		// A finished group can no longer raise the track's largest, which may end its stream.
+		self.cache.finish_largest(self.sequence);
 		Ok(())
 	}
 

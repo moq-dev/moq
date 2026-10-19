@@ -507,9 +507,11 @@ impl Served {
 			// PUBLISH_DONE is the only place the subscriber learns why its renewal failed.
 			Self::UpdateFailed(err) if version == Version::Draft14 => Self::Track(Err(err.clone())).status(version),
 			Self::Track(Ok(())) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
-			Self::Track(Err(Error::Unauthorized | Error::Session(crate::SessionError::Unauthorized))) => {
-				(ietf::PublishDoneStatus::Unauthorized, "not granted")
-			}
+			Self::Track(Err(
+				Error::Unauthorized
+				| Error::Session(crate::SessionError::Unauthorized)
+				| Error::Stream(crate::StreamError::Unauthorized),
+			)) => (ietf::PublishDoneStatus::Unauthorized, "not granted"),
 			// PUBLISH_DONE registers no token expiry, and its EXPIRED means the subscription's
 			// own lifetime ran out, so an expired token is reported as no longer granted.
 			Self::Track(Err(Error::Expired | Error::Session(crate::SessionError::Expired))) => {
@@ -4042,7 +4044,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		match range.start {
 			Some(start) => track.start_at(start.group),
 			None => {
-				if let Some(latest) = track.latest() {
+				if let Some(latest) = track.latest_sequence() {
 					track.start_at(latest);
 				}
 			}
@@ -4108,7 +4110,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// Hold the subscriber's NEW_GROUP_REQUEST until a group answers it; the upstream
 	/// session decides whether it goes further. One a held group answers asks nothing.
 	fn request_new_group(&mut self, value: u64) -> Result<(), Error> {
-		let Some(request) = NewGroup::new(value, self.track.latest()) else {
+		let Some(request) = NewGroup::new(value, self.track.latest_sequence()) else {
 			return Ok(());
 		};
 		let mut subscription = self.track.subscription();
@@ -6545,6 +6547,17 @@ mod serve_tests {
 			Served::UpdateFailed(Error::Unauthorized).status(Version::Draft14).0,
 			ietf::PublishDoneStatus::Unauthorized
 		);
+		// A revocation bridged from upstream, however it was received, is still one.
+		for err in [
+			Error::Unauthorized,
+			Error::Session(crate::SessionError::Unauthorized),
+			Error::Stream(crate::StreamError::Unauthorized),
+		] {
+			assert_eq!(
+				Served::Track(Err(err)).status(Version::Draft16).0,
+				ietf::PublishDoneStatus::Unauthorized
+			);
+		}
 	}
 
 	/// Draft-21 §9.5: a failed REQUEST_UPDATE is answered with REQUEST_ERROR, then the
@@ -14266,7 +14279,7 @@ struct LiveEdge {
 
 /// Snapshot the live edge of a track.
 fn live_edge(track: &track::Consumer) -> LiveEdge {
-	let Some(latest) = track.latest() else {
+	let Some(latest) = track.latest_sequence() else {
 		return LiveEdge::default();
 	};
 

@@ -1206,6 +1206,27 @@ test("an info-only lookup waits for SUBSCRIBE_OK instead of abandoning", async (
 	expect((await info).priority).toBe(0xff - 37);
 });
 
+test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing SUBSCRIBE stream");
+	expect(await peer.reader.u53()).toBe(Subscribe.id);
+	const request = await Subscribe.decode(peer.reader, VERSION);
+
+	await peer.writer.u53(SubscribeOk.id);
+	await new SubscribeOk({
+		requestId: request.requestId,
+		trackAlias: ALIAS,
+		largest: { groupId: 7n, objectId: 3n },
+	}).encode(peer.writer, VERSION);
+	// Only the group carries over, since Object IDs are not frame ordinals.
+	expect(await track.largest()).toEqual({ group: 7, frame: 0 });
+	track.close();
+});
+
 test.each(["acceptance", "timeout"])("returning demand preserves pending setup until %s", async (outcome) => {
 	jest.useFakeTimers();
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
@@ -1627,7 +1648,6 @@ test.each([Version.DRAFT_14, Version.DRAFT_16])("draft %s drops a subgroup that 
 		flags: groupFlags(true),
 	});
 	await subscriber.handleGroup(partial, new Reader(undefined, encodeObjects([2, 0]), version));
-	expect(track.latest()).toBeUndefined();
 	expect(track.closed.peek()).toBeUndefined();
 	expect(warning).not.toHaveBeenCalled();
 

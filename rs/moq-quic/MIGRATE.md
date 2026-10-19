@@ -6,6 +6,16 @@ How to update your code for each breaking change, newest first.
 
 Each entry is a change from `quinn-proto`.
 
+### `StreamEvent::Acked` (#5817)
+
+`StreamEvent` gained `Acked { id, offset }`, reported when the answer changes for the lowest offset a `SendStream::acked` call is waiting for: the stream's acknowledged prefix reached it, or `STOP_SENDING` or a reset made it fail.
+An exhaustive `match` needs an arm for it.
+
+```rust
+// After
+StreamEvent::Acked { id, offset } => wake_ack_waiters(id, offset),
+```
+
 ### Streams and datagrams take `SendOptions` (#5770, #5872)
 
 `Streams::open` and `Datagrams::send` take a `SendOptions { group, priority }`,

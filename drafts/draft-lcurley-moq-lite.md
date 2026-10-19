@@ -351,7 +351,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x35  | EVICTED | The group was dropped under memory pressure. Unlike OLD it was still current, so it can be re-fetched. |
 | ------- | ------------- | ----------- |
-|  0x36  | UNROUTABLE | The broadcast is neither announced nor served, so there is no route to it. |
+|  0x36  | UNROUTABLE | The broadcast is neither announced nor served, so there is no route to it, or the route serving it was lost, such as when a relay's upstream session ends. |
 | ------- | ------------- | ----------- |
 |  0x37  | WRONG_SIZE | A frame's payload length disagreed with its declared size. |
 | ------- | ------------- | ----------- |
@@ -366,6 +366,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 
 Note that CANCELLED is 0x1, not 0x0: a stream reset with 0x0 is an INTERNAL_ERROR, not a routine cancellation.
 An endpoint terminating a stream because the session is ending SHOULD use SESSION_CLOSED rather than the session's own code, since the two spaces are disjoint.
+A relay terminating a stream because the upstream session serving it ended SHOULD use UNROUTABLE, since the downstream session is not ending.
 
 ## Handshake
 See the [Session](#session) section for ALPN negotiation and session activation details.
@@ -1600,6 +1601,7 @@ The `Message Length` describes the payload size on the wire.
 - A subscriber MAY cancel by FIN on its Subscribe Stream, and the publisher then FINs without SUBSCRIBE_END.
 - Removed the NO_CAPACITY stream error and its one re-resolution. Every refusal is terminal, including at another route of the same prefix.
 - Assigned 0x3B UNAUTHORIZED in the stream error table: a request reset because the endpoint does not authorize it, or no longer does, distinct from SESSION_CLOSED.
+- A relay resets with UNROUTABLE, rather than INTERNAL_ERROR, a stream served through an upstream session that ended.
 - A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
 - Replaced Warm and Cold Route Cost with one static Route Cost in moq-lite-07-wip; lite-06 retains both fields, reading Warm and writing Cold at saturation.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.

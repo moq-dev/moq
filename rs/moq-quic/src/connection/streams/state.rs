@@ -113,7 +113,7 @@ pub(crate) struct StreamsState {
     /// Streams with outgoing data queued and outgoing datagrams, in the order to send them
     pub(super) pending: Schedule<StreamId, frame::Datagram>,
 
-    events: VecDeque<StreamEvent>,
+    pub(super) events: VecDeque<StreamEvent>,
     /// Streams blocked on connection-level flow control or stream window space
     ///
     /// Streams are only added to this list when a write fails.
@@ -151,9 +151,6 @@ pub(crate) struct StreamsState {
     initial_max_stream_data_bidi_remote: VarInt,
     /// Whether the peer accepts RESET_STREAM_AT
     pub(super) peer_reset_stream_at: bool,
-    /// Bumped when rejected 0-RTT discards our streams and their ids are opened again, so a
-    /// [`Checkpoint`](super::Checkpoint) from before cannot reach the new stream of the same id
-    pub(super) generation: u64,
 
     /// The shrink to be applied to local_max_data when receive_window is shrunk
     receive_window_shrink_debt: u64,
@@ -210,7 +207,6 @@ impl StreamsState {
             initial_max_stream_data_bidi_local: 0u32.into(),
             initial_max_stream_data_bidi_remote: 0u32.into(),
             peer_reset_stream_at: false,
-            generation: 0,
             receive_window_shrink_debt: 0,
             streams_blocked: [false, false],
             open_refused: [false, false],
@@ -278,7 +274,6 @@ impl StreamsState {
             }
         }
 
-        self.generation += 1;
         self.send_streams = 0;
         self.data_sent = 0;
         self.buffered_data = 0;
@@ -425,6 +420,9 @@ impl StreamsState {
         let buffered = stream.pending.buffered();
         let reset = stream.abandon_reliable();
         self.buffered_data -= buffered - stream.pending.buffered();
+        if let Some(offset) = stream.take_waiting() {
+            self.events.push_back(StreamEvent::Acked { id, offset });
+        }
         if !stream.is_pending() {
             self.pending.remove(&mut stream.slot);
         }
@@ -772,6 +770,9 @@ impl StreamsState {
         let buffered = stream.pending.buffered();
         let finished = stream.ack(frame);
         self.buffered_data -= buffered - stream.pending.buffered();
+        if let Some(offset) = stream.take_acked() {
+            self.events.push_back(StreamEvent::Acked { id, offset });
+        }
         if !finished {
             // The stream is unfinished or may still need retransmits
             return stream.take_held_reset();
@@ -2918,7 +2919,7 @@ mod tests {
         stream.write(b"hello world").unwrap();
         let mut buf = Vec::new();
         let sent = stream.state.write_frames(&mut buf, 0..100, true).streams;
-        stream.reset_to(7u32.into(), 4).unwrap();
+        stream.reset_at(4, 7u32.into()).unwrap();
         assert!(pending.reset_stream.is_empty());
         assert_eq!(server.buffered_data, 4);
 
@@ -2960,7 +2961,7 @@ mod tests {
             conn_state: &state,
         };
         stream.write(b"hello world").unwrap();
-        stream.reset_to(7u32.into(), 4).unwrap();
+        stream.reset_at(4, 7u32.into()).unwrap();
         assert_eq!(pending.reset_stream, &[(id, 4)]);
         assert_eq!(server.received_stop_sending(id, 9u32.into()), Some(0));
 
@@ -2991,7 +2992,7 @@ mod tests {
         stream.write(b"hello world").unwrap();
         let mut buf = Vec::new();
         let sent = stream.state.write_frames(&mut buf, 0..100, true).streams;
-        stream.reset_to(7u32.into(), 4).unwrap();
+        stream.reset_at(4, 7u32.into()).unwrap();
 
         server.reset_acked(id, 4);
         assert_eq!(server.received_stop_sending(id, 9u32.into()), Some(0));
@@ -3032,7 +3033,7 @@ mod tests {
                 conn_state: &state,
             };
             stream.write(b"hello world").unwrap();
-            stream.reset_to(7u32.into(), 4).unwrap();
+            stream.reset_at(4, 7u32.into()).unwrap();
             assert_eq!(pending.reset_stream.is_empty(), !reset_stream_at);
 
             assert_eq!(server.received_stop_sending(id, 9u32.into()), Some(0));
@@ -3068,7 +3069,7 @@ mod tests {
         let mut buf = Vec::new();
         let sent = stream.state.write_frames(&mut buf, 0..100, true).streams;
         assert_eq!(sent[0].offsets, 0..11);
-        stream.reset_to(7u32.into(), 4).unwrap();
+        stream.reset_at(4, 7u32.into()).unwrap();
         assert_eq!(server.buffered_data, 4);
 
         // Only the lost prefix is retransmitted, without the FIN of a stream that was never finished
@@ -3107,7 +3108,7 @@ mod tests {
         };
         stream.write(b"hello world").unwrap();
         stream.state.received_stop_sending(id, 9u32.into());
-        stream.reset_to(7u32.into(), 4).unwrap();
+        stream.reset_at(4, 7u32.into()).unwrap();
 
         let send = server.send[&id].as_ref().unwrap();
         let frame = send.reset_frame(id, true).unwrap();

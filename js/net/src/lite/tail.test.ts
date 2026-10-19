@@ -405,3 +405,10 @@ test("lite-07 FIN waits for the skipped and reset final range to settle", async 
 	expect(finished).toBe(true);
 	expect(await reader.closed).toBeNull();
 });
+
+test("draft-07's SUBSCRIBE_START says the largest before any group arrives", async () => {
+	const { reader, respond } = await subscribed(Version.DRAFT_07);
+	await respond({ start: new SubscribeStart(4, { group: 4, frame: 2 }) });
+	expect(await reader.largest()).toEqual({ group: 4, frame: 2 });
+	reader.close();
+});

@@ -3348,7 +3348,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 								Err(Error::Cancel)
 							}
 						};
-						let delivered = copy.latest().is_some();
+						let delivered = copy.latest_sequence().is_some();
 						return Some(Step::Ended(name.clone(), *source, result, delivered));
 					}
 					// Watch the demand edge in whichever direction is unmet. Only `Pending`

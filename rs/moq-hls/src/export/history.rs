@@ -46,7 +46,10 @@ pub(super) async fn read(
 		let finished = head.is_none();
 		// A finished track can have no groups left in cache. Its high-water mark
 		// still tells us which stored groups must be fetched before returning.
-		let end = head.map(|group| group.sequence).or_else(|| track.latest());
+		let end = match head {
+			Some(group) => Some(group.sequence),
+			None => live.largest().await.map(|position| position.group),
+		};
 		while end.is_some_and(|end| next <= end) {
 			let mut group = match track.fetch_group(next, None).await {
 				Ok(group) => group,
