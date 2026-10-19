@@ -2142,9 +2142,11 @@ fn poll_largest(
 	Poll::Ready(cache.take_largest(seen, bounds))
 }
 
-/// Ready once the track's feed is live; see [`TrackState::readable`].
+/// Ready once the track's feed is live, or nothing more can move its largest. A declared
+/// end that is not reached yet does not count: an idle copy's largest is still only what
+/// its ended feed left.
 fn largest_live(state: &TrackState) -> Poll<()> {
-	match state.readable() {
+	match state.feed == Feed::Live || state.sealed || state.abort.is_some() || state.largest_settled() {
 		true => Poll::Ready(()),
 		false => Poll::Pending,
 	}
@@ -6496,6 +6498,30 @@ mod test {
 		);
 		let _next = framed(&producer, 3, 1);
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(3))));
+	}
+
+	/// An idle copy that declared an end it has not reached yet still waits for the live
+	/// feed, while one that finished reports its settled largest.
+	#[test]
+	fn largest_waits_for_an_idle_copy_with_a_future_end() {
+		let mut producer = track_producer("test", Info::default());
+		let noop = kio::Waiter::noop();
+		let _groups: Vec<_> = (0..3).map(|sequence| framed(&producer, sequence, 1)).collect();
+		producer.finish_at(Position::group(10)).unwrap();
+		producer.set_idle();
+
+		let mut reader = producer.subscribe(replay());
+		assert!(reader.poll_largest(&noop).is_pending(), "the copy is idle");
+		producer.set_live(Some(Position::group(5)));
+		let _answer = framed(&producer, 5, 1);
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
+
+		let mut finished = track_producer("test", Info::default());
+		framed(&finished, 0, 1).finish().unwrap();
+		finished.set_idle();
+		finished.finish().unwrap();
+		let mut reader = finished.subscribe(replay());
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(0))));
 	}
 
 	/// An idle copy's largest is what an ended feed left, so nothing reports until the

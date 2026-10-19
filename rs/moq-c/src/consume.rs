@@ -788,6 +788,10 @@ impl Consume {
 					if Self::poll_raw_control(&mut close, &mut updates, &mut reader, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
+					// A group read before deferred bounds apply could sit under the old floor.
+					if reader.deferred.is_some() {
+						return Poll::Pending;
+					}
 					match ready!(reader.track.poll_next_group(waiter))? {
 						Some(group) => Poll::Ready(Ok(RawStep::Item(group))),
 						None => Poll::Ready(Ok(RawStep::End)),
