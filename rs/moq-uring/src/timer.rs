@@ -19,7 +19,9 @@ use crate::metrics::Counters;
 /// Created by [`crate::Handle::timer`].
 pub struct Timer {
 	deadline: Deadline,
-	/// Armed and not yet seen to fire, so a re-arm or drop counts as a cancel.
+	/// Read to tell whether the armed instant was reached.
+	deadlines: Deadlines,
+	/// Armed and not yet counted as fired or cancelled.
 	armed: bool,
 	metrics: Arc<Counters>,
 }
@@ -28,8 +30,23 @@ impl Timer {
 	pub(crate) fn from_queue(deadlines: &Deadlines, metrics: Arc<Counters>) -> Self {
 		Self {
 			deadline: Deadline::new(deadlines),
+			deadlines: deadlines.clone(),
 			armed: false,
 			metrics,
+		}
+	}
+
+	/// Count the armed instant as fired if the queue reached it, else cancelled,
+	/// whether or not a poll saw it fire.
+	fn retire(&mut self) {
+		if !std::mem::take(&mut self.armed) {
+			return;
+		}
+		let reached = self.deadline.deadline().is_some_and(|at| at <= self.deadlines.now());
+		if reached {
+			self.metrics.timers_fired.add(1);
+		} else {
+			self.metrics.timers_cancelled.add(1);
 		}
 	}
 
@@ -40,11 +57,9 @@ impl Timer {
 		if self.deadline.deadline() == at {
 			return;
 		}
-		// A re-arm goes through here too, so the counter reads as timer churn
-		// rather than as loss.
-		if self.armed {
-			self.metrics.timers_cancelled.add(1);
-		}
+		// A re-arm before the deadline counts as a cancel, so the counter reads
+		// as timer churn rather than as loss.
+		self.retire();
 		self.armed = at.is_some();
 		if self.armed {
 			self.metrics.timers_armed.add(1);
@@ -55,8 +70,8 @@ impl Timer {
 	/// Poll for expiration and register for wakeups.
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let poll = self.deadline.poll(waiter);
-		if poll.is_ready() && std::mem::take(&mut self.armed) {
-			self.metrics.timers_fired.add(1);
+		if poll.is_ready() {
+			self.retire();
 		}
 		poll
 	}
@@ -64,9 +79,7 @@ impl Timer {
 
 impl Drop for Timer {
 	fn drop(&mut self) {
-		if self.armed {
-			self.metrics.timers_cancelled.add(1);
-		}
+		self.retire();
 	}
 }
 

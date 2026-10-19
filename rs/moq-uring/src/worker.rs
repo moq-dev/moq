@@ -1729,6 +1729,33 @@ mod tests {
 		assert_eq!(metrics.snapshot().timers_active(), 0);
 	}
 
+	/// A timer whose deadline the worker reached counts as fired even if no poll
+	/// saw it: dropped or re-armed afterwards, it is not a cancel.
+	#[test]
+	fn metrics_count_an_unpolled_expiry_as_fired() {
+		let metrics = Metrics::default();
+		let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+		let clock = moq_clock::Manual::new().install(runtime.handle());
+		let _entered = runtime.enter();
+		let Some(mut worker) = worker_with(Config {
+			metrics: metrics.clone(),
+			..Default::default()
+		}) else {
+			return;
+		};
+		let handle = worker.handle();
+		let mut rearmed = crate::Timer::after(&handle, Duration::from_secs(1));
+		let dropped = crate::Timer::after(&handle, Duration::from_secs(1));
+		clock.advance(Duration::from_secs(1));
+		worker.block_on(async {}).unwrap();
+
+		drop(dropped);
+		rearmed.set(Some(handle.now() + Duration::from_secs(1)));
+		let snap = metrics.snapshot();
+		assert_eq!((snap.timers_armed, snap.timers_cancelled, snap.timers_fired), (3, 0, 2));
+		assert_eq!(snap.timers_active(), 1);
+	}
+
 	/// A remote wake has to find the worker parked, then kick the futex. The park
 	/// word is that observation: a sleep would pass or fail with the load.
 	#[test]
