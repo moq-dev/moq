@@ -99,7 +99,6 @@ remain with their current quests.
 
 ## Required
 
-- [Deterministic grading](/quest/m1/ts-reliability/grader-determinism.md) - the same input gets the same start and the same verdict
 - [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
 - [Whole-PES import](/quest/m1/ts-reliability/pes-import.md) - private PES travels whole at its source placement, a missing PTS stays missing, and the `pes` framing is deleted
 - [Section placement](/quest/m1/ts-reliability/section-placement.md) - sections share the PCR placement clock instead of the video PTS

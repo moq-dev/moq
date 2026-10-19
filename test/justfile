@@ -162,6 +162,7 @@ ts-tstd:
 
 # Prove FFmpeg decode/content and TSDuck structure/PCR assertions reject damaged TS.
 ts-controls:
+    python3 ./ts/decode.test.py
     bash ./ts/controls.sh
 
 # A JS viewer watching a live track through a relay that drains (SIGTERM, after

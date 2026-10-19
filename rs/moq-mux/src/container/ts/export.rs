@@ -3864,6 +3864,104 @@ mod tests {
 		slot, unwrap_pts, verbatim_buffer,
 	};
 
+	/// The same available video/audio backlog must choose the same start in either fill order.
+	#[tokio::test(start_paused = true)]
+	async fn track_fill_observes_every_available_track_before_acquisition() {
+		use crate::catalog::hang::Container;
+		use crate::container::{Kind as MediaKind, Producer};
+
+		for order in [[0, 1], [1, 0]] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let mut publishers = Vec::new();
+			for name in ["video", "audio"] {
+				let track = broadcast.create_track(name, hang::container::track_info(0)).unwrap();
+				publishers.push(Producer::new(track, Container::Legacy(MediaKind::Data)));
+			}
+			let source = crate::source::announced(&broadcast.consume()).await;
+			let mut tracks = Vec::new();
+			for (pid, name, kind) in [
+				(1, "video", Kind::Video(mpeg2ts::es::StreamType::H264)),
+				(2, "audio", Kind::Mp2 { sample_rate: 48_000 }),
+			] {
+				let source = super::ExportSource::for_stream(&source, name, Duration::from_secs(2)).unwrap();
+				let mut track = super::Track::new(source, kind);
+				track.pid = pid;
+				tracks.push(track);
+			}
+			let frame = |at| super::Frame {
+				timestamp: ms(at),
+				duration: None,
+				payload: bytes::Bytes::from_static(b"frame"),
+				keyframe: at % 600 == 0,
+			};
+			let start = moq_clock::now();
+			let mut jitter = super::jitter::Buffer::new(Duration::from_millis(500));
+			jitter.expect([1, 2]);
+			let mut trimmed = 0;
+			for publisher in &mut publishers {
+				publisher.write(frame(0)).unwrap();
+			}
+			// As in Export::poll_next, the first held frame of each track arrives first.
+			kio::wait(|waiter| {
+				for track in &mut tracks {
+					track
+						.fill(
+							"track",
+							waiter,
+							&mut super::Input {
+								waiting_for_header: false,
+								video_start: None,
+								jitter: &mut jitter,
+								trimmed: &mut trimmed,
+							},
+						)
+						.unwrap();
+				}
+				if jitter.len() == 2 {
+					std::task::Poll::Ready(())
+				} else {
+					std::task::Poll::Pending
+				}
+			})
+			.await;
+			for (index, publisher) in publishers.iter_mut().enumerate() {
+				let end = if index == 0 { 1_200 } else { 800 };
+				for at in (40..=end).step_by(40) {
+					publisher.write(frame(at)).unwrap();
+				}
+				publisher.finish().unwrap();
+			}
+			let waiter = kio::Waiter::noop();
+			for index in order {
+				tracks[index]
+					.fill(
+						"track",
+						&waiter,
+						&mut super::Input {
+							waiting_for_header: false,
+							video_start: None,
+							jitter: &mut jitter,
+							trimmed: &mut trimmed,
+						},
+					)
+					.unwrap();
+			}
+			assert!(jitter.poll_next(&waiter).is_pending());
+			// The last available audio frame, including its scheduling lead, anchors both orders.
+			let (decode, key, _) = tracks[1].released.unwrap();
+			assert_eq!(decode.as_micros(), 800_000);
+			assert_eq!(jitter.at(key), Some(start + Duration::from_millis(500)), "{order:?}");
+			tokio::time::advance(Duration::from_millis(500)).await;
+			let video = std::iter::from_fn(|| match jitter.poll_next(&waiter) {
+				std::task::Poll::Ready(ready) => Some(ready),
+				std::task::Poll::Pending => None,
+			})
+			.find(|ready| ready.track == 1)
+			.expect("a video start");
+			assert_eq!(video.item.frame.timestamp.as_micros(), 600_000, "{order:?}");
+		}
+	}
+
 	fn ms(value: u64) -> Timestamp {
 		Timestamp::from_millis(value).unwrap()
 	}
