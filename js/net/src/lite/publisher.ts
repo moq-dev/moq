@@ -1241,8 +1241,7 @@ export class Publisher {
 					start: range.start,
 					end: range.end,
 				};
-				// The FIN waits for every stream to
-				// finish or reset, including one that has not opened yet.
+				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
 				const opened = this.#openGroup(options);
 				const task = opened.then(async (writer) => {
 					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
