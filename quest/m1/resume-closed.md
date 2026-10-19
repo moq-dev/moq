@@ -16,6 +16,8 @@ copies) ends the way a direct one does:
   refused.
 - `largest()` resolves `undefined` once the serving copy ends cleanly at its
   declared end, even while the front stays open for other tracks.
+- `close(abort)` reaches every group already handed out, so a pending frame
+  read rejects with the abort rather than ending cleanly.
 
 ## Plan
 
@@ -51,7 +53,18 @@ neither of which ends the wait, so `largest()` waits on a stream that has ended.
 - Treat a clean end of the serving copy as terminal there, while a copy that
   failed with its route still waits for the next route.
 
-For all three, check whether a direct (non-resumed) `Track.Subscriber` and the
+**An abort reaches the copies** (`Reader.close()`). `Subscriber.close(abort)`
+in `js/net/src/track.ts` calls `this.#resume?.close(abort)`, but
+`Reader.close()` takes no argument and `#drop` clean-closes every copy. A group
+already handed out is backed by a copy rather than the outer buffer, so its
+pending frame read can end with clean EOF instead of the abort a direct
+subscriber gives.
+
+- Take the abort in `Reader.close(abort?)` and close each copy with it, so a
+  handed-out group and its `Recover` end with the same error. A recovery in
+  flight must settle with the abort too, not adopt a replacement.
+
+For all four, check whether a direct (non-resumed) `Track.Subscriber` and the
 Rust `resume::Subscriber` already behave this way, and match them.
 
 Regression tests:
@@ -62,6 +75,8 @@ Regression tests:
   `finished()` resolves with it before B learns it.
 - `largest()` on a finite resumed track resolves `undefined` once its serving
   copy ends cleanly, with the front still open.
+- `close(abort)` on a resumed subscriber with a group handed out and a frame
+  read pending rejects that read with the abort.
 
 Public API: behavior only. Wire: none.
 
