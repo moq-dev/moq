@@ -1165,6 +1165,18 @@ where
 					// A NEW_GROUP_REQUEST here asks nothing more: subscribing is itself a join,
 					// which the track's refresh ratio judges.
 					let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
+					// A range that resolves without the live edge has a fixed start, which is no
+					// join: bound the subscription before subscribing so the ratio never judges it.
+					// From the start of its group, so a relay's copy holds the group's head for
+					// its other readers, as a live join would; the resolved range trims below.
+					let fixed = subscribe_range(&msg, LiveEdge::default(), self.version);
+					if let Some(start) = fixed.start {
+						ServeRange {
+							start: Some(Location { object: 0, ..start }),
+							..fixed
+						}
+						.apply(&mut subscription);
+					}
 
 					// Subscribe before resolving the filter: on a routed broadcast the live edge only
 					// becomes readable once the subscription's demand attaches a route, so the edge
@@ -1190,16 +1202,7 @@ where
 					// cover the group with no gap and no overlap.
 					let edge = live_edge(&cache);
 					let range = subscribe_range(&msg, edge, self.version);
-					subscription.set_bounds(
-						range.start.map(|start| track::Position {
-							group: start.group,
-							frame: start.object,
-						}),
-						range.end.and_then(|end| match end.object {
-							Some(object) => track::Position::after(end.group, object),
-							None => track::Position::after_group(end.group),
-						}),
-					);
+					range.apply(&mut subscription);
 					let _ = track.update(subscription);
 					// A Timestamp goes out wherever the draft can declare its units and the track
 					// has them. A subscriber that opted out of this SUBSCRIBE_OK's properties learns
@@ -6809,6 +6812,25 @@ mod serve_tests {
 				);
 			}
 		}
+	}
+
+	/// An absolute filter has a fixed start, so its SUBSCRIBE is no join even over the ratio.
+	#[moq_clock::test]
+	async fn an_absolute_subscribe_is_no_join() {
+		let version = Version::Draft22;
+		let h = serve_track(version, crate::track::Info::timed().with_refresh(1));
+		let _group = refresh_group(&h);
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		let msg = subscribe(
+			Filter::Absolute {
+				start: Location { group: 4, object: 0 },
+				end: None,
+			},
+			None,
+		);
+		let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+		serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !h.log.trail().is_empty()).await;
+		assert_eq!(h.track.demand().wanted(), Some(0));
 	}
 
 	/// An update's NEW_GROUP_REQUEST is a join on a track opted in to refresh, answered with
@@ -14307,6 +14329,22 @@ struct ServeRange {
 	/// open once the range is exhausted; draft-20 removed the notion of a filter ending
 	/// a subscription.
 	end: Option<EndLocation>,
+}
+
+impl ServeRange {
+	/// Bound `subscription` to this range.
+	fn apply(&self, subscription: &mut Subscription) {
+		subscription.set_bounds(
+			self.start.map(|start| track::Position {
+				group: start.group,
+				frame: start.object,
+			}),
+			self.end.and_then(|end| match end.object {
+				Some(object) => track::Position::after(end.group, object),
+				None => track::Position::after_group(end.group),
+			}),
+		);
+	}
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.
