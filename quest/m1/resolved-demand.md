@@ -48,7 +48,9 @@ with no wire change.
   revisits them. Only an uncommitted conviction can come back.
 - **The fix.** When a subscriber's max age widens, re-offer the cached groups
   at or above its floor that its cursor gave up as stale and that the new
-  budget covers, lowest first. This extends the re-offer
+  budget covers, in the subscription's order: newest first when descending
+  (the default, so congestion sheds backlog rather than the live edge), and
+  lowest first only when ascending. This extends the re-offer
   [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929) adds for a
   widened range (a group outside the ranges is parked and re-offered when they
   widen); land after it and reuse that path rather than a second one. Only
