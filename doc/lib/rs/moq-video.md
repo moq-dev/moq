@@ -21,7 +21,8 @@ ffmpeg, no GStreamer, no system codec to install. `moq import capture` and
 
 Selection is automatic and hardware first. GPU libraries are loaded at
 runtime, so one binary starts anywhere and warns when it falls back to
-software. openh264 is the H.264 fallback and is on by default. H.265 is
+software. openh264 is the H.264 fallback, behind the opt-in `openh264`
+feature (vendored C++); the published bindings and binaries enable it. H.265 is
 hardware-only, AV1 decodes through NVDEC and MediaCodec, and VP8 and VP9
 decode in software through the opt-in `vpx` feature.
 

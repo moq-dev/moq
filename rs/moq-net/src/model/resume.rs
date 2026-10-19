@@ -202,12 +202,19 @@ impl Consumer {
 		Subscriber { reader, subscription }
 	}
 
-	/// Fetch one group from whichever route serves the track.
-	pub(super) fn fetch_group(&self, sequence: u64, options: group::Fetch) -> Fetching {
+	/// Fetch one group from whichever route serves the track. `logical` is the logical
+	/// track's state, which the fetched group holds while it is read.
+	pub(super) fn fetch_group(
+		&self,
+		sequence: u64,
+		options: group::Fetch,
+		logical: kio::Consumer<track::TrackState>,
+	) -> Fetching {
 		Fetching {
 			route: self.clone(),
 			sequence,
 			options,
+			logical,
 			pending: None,
 		}
 	}
@@ -610,6 +617,7 @@ impl Reader {
 			generation: copy.generation,
 			copy: copy.track.clone(),
 			lease: Some(copy.lease.clone()),
+			logical: None,
 			fetch: None,
 		})
 	}
@@ -898,6 +906,10 @@ pub(super) struct Recover {
 	copy: track::Consumer,
 	/// Keeps a replaced copy subscribed while this group is read from it.
 	lease: Option<Arc<()>>,
+	/// A fetch's logical track, held while the group is read. A fetch is no subscription,
+	/// so without it the last subscriber leaving parks the track, dropping the copy that
+	/// still feeds an open group, and the rest of the group never comes.
+	logical: Option<kio::Consumer<track::TrackState>>,
 	/// A fetch of the rest of the group from the serving route, by its generation.
 	fetch: Option<(u64, Fetch)>,
 }
@@ -918,6 +930,7 @@ impl Clone for Recover {
 			generation: self.generation,
 			copy: self.copy.clone(),
 			lease: self.lease.clone(),
+			logical: self.logical.clone(),
 			// A clone reads in parallel, so it asks for itself.
 			fetch: None,
 		}
@@ -1124,6 +1137,7 @@ pub(super) struct Fetching {
 	route: Consumer,
 	sequence: u64,
 	options: group::Fetch,
+	logical: kio::Consumer<track::TrackState>,
 	/// The fetch in flight, and the route generation it went to.
 	pending: Option<(u64, kio::Pending<track::Fetching>)>,
 }
@@ -1172,6 +1186,7 @@ impl kio::Task for Fetching {
 					generation,
 					copy: serving.clone(),
 					lease: None,
+					logical: Some(self.logical.clone()),
 					fetch: None,
 				}))),
 				// The route failed: ask the next one, unless none will come.
@@ -2228,10 +2243,11 @@ mod test {
 		let a = copy();
 		let dynamic = a.dynamic();
 		routes.serve(a.consume());
-		let mut fetching = routes.consume().fetch_group(0, group::Fetch::default());
+		let logical = logical(&routes);
+		let mut fetching = logical.consume().fetch_group(0, None);
 		let wake = Arc::new(Wake::default());
 		let waiter = kio::Waiter::new(wake.clone().into());
-		assert!(kio::Task::poll(&mut fetching, &waiter).is_pending());
+		assert!(kio::Task::poll(&mut *fetching, &waiter).is_pending());
 		let _request = dynamic.requested_group().now_or_never().unwrap().unwrap();
 		wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
 		let b = copy();
@@ -2240,7 +2256,7 @@ mod test {
 		group.finish().unwrap();
 		routes.serve(b.consume());
 		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
-		assert!(matches!(kio::Task::poll(&mut fetching, &waiter), Poll::Ready(Ok(_))));
+		assert!(matches!(kio::Task::poll(&mut *fetching, &waiter), Poll::Ready(Ok(_))));
 	}
 
 	#[test]
@@ -2463,7 +2479,9 @@ mod test {
 		let a = copy();
 		let _open = a.create_group(group::Info { sequence: 0 }).unwrap();
 		routes.serve(a.consume());
-		let mut reading = kio::Pending::new(routes.consume().fetch_group(0, group::Fetch::default()))
+		let mut reading = logical(&routes)
+			.consume()
+			.fetch_group(0, None)
 			.now_or_never()
 			.unwrap()
 			.unwrap();
@@ -2486,7 +2504,9 @@ mod test {
 
 		let mut arriving = a.create_group(group::Info { sequence: 0 }).unwrap();
 		arriving.write_frame(ts(0), b"a".as_ref()).unwrap();
-		let mut fetched = kio::Pending::new(routes.consume().fetch_group(0, group::Fetch::default()))
+		let mut fetched = logical(&routes)
+			.consume()
+			.fetch_group(0, None)
 			.now_or_never()
 			.unwrap()
 			.unwrap();
@@ -2505,6 +2525,28 @@ mod test {
 		assert_eq!(read(&mut fetched), None);
 	}
 
+	/// A fetched frame read to its end no longer holds the logical track, so a caller
+	/// keeping the handle does not stop the track from parking.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_read_frame_releases_the_track() {
+		let routes = Producer::new();
+		let a = copy();
+		routes.serve(a.consume());
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+
+		let logical = logical(&routes);
+		let demand = logical.demand();
+		let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
+		assert!(demand.is_used(), "an open fetched group holds the track");
+		let mut frame = fetched.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		drop(fetched);
+		assert!(demand.is_used(), "an unread frame holds the track");
+		assert_eq!(frame.read_all().now_or_never().unwrap().unwrap(), b"a".as_ref());
+		assert!(!demand.is_used(), "a read frame does not");
+	}
+
 	/// A rerouted fetch keeps its own age budget: the new route is asked with it, and a
 	/// read waiting on that route gives up once the group falls past it there.
 	#[test]
@@ -2518,7 +2560,9 @@ mod test {
 
 		let budget = Duration::from_millis(500);
 		let options = group::Fetch::default().with_max_delay(budget);
-		let mut fetched = kio::Pending::new(routes.consume().fetch_group(0, options))
+		let mut fetched = logical(&routes)
+			.consume()
+			.fetch_group(0, options)
 			.now_or_never()
 			.unwrap()
 			.unwrap();
@@ -2712,12 +2756,13 @@ mod test {
 		let a = copy();
 		let _dynamic = a.dynamic();
 		routes.serve(a.consume());
-		let mut fetching = routes.consume().fetch_group(0, group::Fetch::default());
+		let logical = logical(&routes);
+		let mut fetching = logical.consume().fetch_group(0, None);
 		let waiter = kio::Waiter::noop();
-		assert!(kio::Task::poll(&mut fetching, &waiter).is_pending());
+		assert!(kio::Task::poll(&mut *fetching, &waiter).is_pending());
 		routes.end(Err(Error::Unroutable));
 		assert!(matches!(
-			kio::Task::poll(&mut fetching, &waiter),
+			kio::Task::poll(&mut *fetching, &waiter),
 			Poll::Ready(Err(Error::Unroutable))
 		));
 	}

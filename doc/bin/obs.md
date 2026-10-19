@@ -48,10 +48,11 @@ broadcast with a `.hang` suffix, use a canvas at least as tall as the top rung
 (1080p by default), and a source bitrate above that rung (the Quality profile's
 8 Mbps clears the default 5 Mbps 1080p rung).
 
-Local check before moq.pro (requires a CLI built with the `transcode` feature):
+Local check before moq.pro (requires a CLI built with the `transcode` feature, plus
+`openh264` for the software encoder a GPU-less host needs):
 
 ```bash
-cargo install --locked moq-cli --features transcode
+cargo install --locked moq-cli --features transcode,openh264
 # OBS Go Live to e.g. my-obs.hang on a local relay, then:
 moq --connect http://localhost:4443/anon --broadcast my-obs.hang transcode
 # Watch my-obs.hang/transcode.hang

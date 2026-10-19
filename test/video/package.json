@@ -17,8 +17,8 @@
 	"devDependencies": {
 		"@types/bun": "^1.4.2",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
-		"playwright": "^1.63.0",
+		"playwright": "^1.64.0",
 		"typescript": "7.0.2",
-		"vite": "^8.3.2"
+		"vite": "^8.3.4"
 	}
 }
