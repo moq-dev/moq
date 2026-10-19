@@ -167,6 +167,7 @@ export class Connection implements Established {
 			grant: auth.scope,
 			ready: auth.setupAnswered(),
 			named: (token) => auth.named(token),
+			ended: auth.ended,
 		});
 		this.#subscriber = new Subscriber(
 			this.#quic,

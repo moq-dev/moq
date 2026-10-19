@@ -324,6 +324,57 @@ async fn lite_07_a_named_route_is_held_to_its_token() {
 	.expect("timed out");
 }
 
+/// A lite-07 route whose token is revoked ends with it: a later update to the route, still
+/// naming that token, never falls back to a session scope that covers it, until the route
+/// names another token.
+#[moq_clock::test]
+async fn lite_07_a_route_ends_with_its_revoked_token() {
+	within(async {
+		let publisher = produce_origin(2);
+		let relay = produce_origin(1);
+		let mut pair = connect(Options {
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(relay.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut issued = serve(pair.requests.take().unwrap(), |_| Some(grant(&["b"], &[])));
+		let (_, _setup) = issued.next().await.unwrap();
+		let t1 = pair.client.auth().add("t1").await.expect("t1 granted");
+		let (_, t1_issued) = issued.next().await.unwrap();
+		let served = relay.consume();
+
+		let broadcast = publisher.create_broadcast("b/y").unwrap();
+		broadcast
+			.announce(origin::Route::default().with_auth(t1.clone()))
+			.unwrap();
+		wait_announced(&served, "b/y", true).await;
+
+		t1_issued.revoke(SessionError::Unauthorized, "revoked");
+		wait_announced(&served, "b/y", false).await;
+
+		// A re-price still names the revoked token, so the route stays ended.
+		let repriced = origin::Route::default().with_cost(origin::Cost::new(7)).with_auth(t1);
+		broadcast.announce(repriced).unwrap();
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			futures::FutureExt::now_or_never(served.routed("b/y"))
+				.flatten()
+				.is_none(),
+			"a route outlived its revoked token"
+		);
+
+		let t2 = pair.client.auth().add("t2").await.expect("t2 granted");
+		let (_, _t2_issued) = issued.next().await.unwrap();
+		broadcast.announce(origin::Route::default().with_auth(t2)).unwrap();
+		wait_announced(&served, "b/y", true).await;
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// Renewing a lite-07 route's token keeps it announced: the old token, withdrawn as the
 /// route moves off it, still decides the route until the new one does, and then ends.
 #[moq_clock::test]

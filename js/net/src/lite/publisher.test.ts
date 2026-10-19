@@ -1,7 +1,7 @@
 import { expect, jest, mock, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Signal } from "@moq/signals";
-import type { Grant } from "../auth.ts";
+import type { Auth, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, StreamCode, toStreamCode } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
@@ -1975,6 +1975,66 @@ test("lite draft-06: announces wait for the setup grant", async () => {
 	// ANNOUNCE_OK alone: the grant excludes foo/bar, so it never reaches the wire.
 	const bytes = written.flatMap((chunk) => [...chunk]);
 	expect(new TextDecoder().decode(new Uint8Array(bytes))).not.toContain("foo/bar");
+
+	stream.close();
+	await running;
+	publisher.close();
+	broadcast.close();
+	origin.close();
+	pair.client.close();
+	pair.server.close();
+});
+
+// A route ends with the token it names: once that token is over, the route is retracted, and a
+// re-price still naming it stays off the wire rather than falling back to the session's scope.
+test("lite draft-07: a route ends with the token it names", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const token = {} as Auth;
+	let id: bigint | null = 3n;
+	const ended = new Signal(0);
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume(), {
+		grant: new Signal<Grant | undefined>(undefined),
+		ready: Promise.resolve(),
+		named: (auth) => (auth === token ? id : undefined),
+		ended,
+	});
+	const broadcast = origin.createBroadcast(Path.from("cam"));
+	broadcast.announce({ auth: token });
+
+	const written: Uint8Array[] = [];
+	const stream = new Stream({
+		version: Version.DRAFT_07,
+		readable: new ReadableStream<Uint8Array>(),
+		writable: new WritableStream<Uint8Array>({
+			write(chunk) {
+				written.push(new Uint8Array(chunk));
+			},
+		}),
+	});
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+	const messages = async (from: number): Promise<AnnounceBroadcast[]> => {
+		const bytes = Uint8Array.from(written.slice(from).flatMap((chunk) => [...chunk]));
+		const reader = new Reader(undefined, bytes, Version.DRAFT_07);
+		const out: AnnounceBroadcast[] = [];
+		while (!(await reader.done())) out.push(await decodeAnnounceBroadcast(reader, Version.DRAFT_07));
+		return out;
+	};
+	const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
+	await settle();
+	// ANNOUNCE_OK, then the route naming the token.
+	const announced = written.length;
+	expect(announced).toBeGreaterThan(0);
+
+	id = null;
+	ended.update((n) => n + 1);
+	await settle();
+	expect(await messages(announced)).toMatchObject([{ status: "endedId", id: 0n }]);
+
+	const retracted = written.length;
+	broadcast.announce({ cost: 7n, auth: token });
+	await settle();
+	expect(await messages(retracted)).toEqual([]);
 
 	stream.close();
 	await running;

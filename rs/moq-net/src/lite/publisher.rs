@@ -1067,6 +1067,8 @@ struct Outgoing {
 	cost: crate::origin::Cost,
 	/// The ID of our token the route names (lite-07+), or `None` for the session's scope.
 	auth: Option<u64>,
+	/// The token `auth` names, so the advertisement is retracted once it ends.
+	credential: Option<crate::auth::Auth>,
 }
 
 enum AnnouncePhase {
@@ -1094,6 +1096,33 @@ impl AnnounceRun {
 			session: Default::default(),
 			permit: Default::default(),
 		}
+	}
+
+	/// Retract every advertisement named by a token of ours that ended: it ends with that
+	/// token until the route names another.
+	fn retract_ended<S: crate::transport::poll::Session>(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		origin: &origin::Consumer,
+	) -> Result<(), Error> {
+		let Some(presenter) = &self.presenter else {
+			return Ok(());
+		};
+		let ended: Vec<_> = self
+			.live
+			.iter()
+			.filter(|(_, advertised)| {
+				let credential = advertised.wire.credential.as_ref();
+				credential.is_some_and(|auth| presenter.wire(auth).is_err())
+			})
+			.map(|(suffix, _)| suffix.clone())
+			.collect();
+		for suffix in ended {
+			let absolute = origin.absolute(&suffix);
+			tracing::debug!(route = %absolute, "announce token ended");
+			self.retract(stream, suffix, &absolute)?;
+		}
+		Ok(())
 	}
 
 	/// Resolve once the token the request names changed.
@@ -1195,7 +1224,7 @@ impl AnnounceRun {
 			Some(advertised) if lite::update_supported(self.version) => {
 				tracing::debug!(route = %absolute, "reannounce");
 				advertised.wire = wire.clone();
-				let Outgoing { hops, cost, auth } = wire;
+				let Outgoing { hops, cost, auth, .. } = wire;
 				match advertised.id {
 					Some(id) => {
 						let hops = self.encoder.update(id, hops);
@@ -1249,12 +1278,24 @@ impl AnnounceRun {
 			true => route.cost,
 			false => crate::origin::Cost::UNKNOWN,
 		};
-		// A token of ours that ended leaves the route under the session's scope.
+		// A route named by a token of ours that ended ends with it, never falling back to the
+		// session's scope.
 		let auth = match (&self.presenter, &route.auth) {
-			(Some(presenter), Some(auth)) if self.version.has_auth() => presenter.wire(auth),
+			(Some(presenter), Some(auth)) if self.version.has_auth() => match presenter.wire(auth) {
+				Ok(auth) => auth,
+				Err(_) => {
+					tracing::debug!(route = %absolute, "dropping announce; its token ended");
+					return None;
+				}
+			},
 			_ => None,
 		};
-		Some(Outgoing { hops, cost, auth })
+		Some(Outgoing {
+			hops,
+			cost,
+			auth,
+			credential: route.auth.clone().filter(|_| auth.is_some()),
+		})
 	}
 
 	/// Start advertising `suffix`, recording its announce id.
@@ -1300,7 +1341,7 @@ impl AnnounceRun {
 						wire: wire.clone(),
 					},
 				);
-				let Outgoing { hops, cost, auth } = wire;
+				let Outgoing { hops, cost, auth, .. } = wire;
 				let hops = self.encoder.update(id, hops);
 				stream.writer.buffer(&lite::AnnounceBroadcast::Restart {
 					id,
@@ -1465,6 +1506,7 @@ impl AnnounceRun {
 			if self.poll_named(waiter).is_ready() || session.is_ready() {
 				if let Poll::Ready(permit) = session {
 					self.session = permit;
+					self.retract_ended(stream, origin)?;
 				}
 				// Once answered a token never goes back to waiting; were it to, announce nothing.
 				let permit = match self.narrow(self.session.clone())? {

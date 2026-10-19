@@ -400,8 +400,11 @@ export class Publisher {
 	// withdraws what it no longer covers. Undefined until the peer answers, and forever on a
 	// version without AUTH, which allows everything.
 	#grant?: Getter<Grant | undefined>;
-	// The ID a route's own token goes out under (lite-07+), or undefined for the session's scope.
-	#named?: (auth: Auth | undefined) => bigint | undefined;
+	// The ID a route's own token goes out under (lite-07+), undefined for the session's scope,
+	// or null once that token is over, which ends the route with it.
+	#named?: (auth: Auth | undefined) => bigint | null | undefined;
+	// Bumps whenever one of our tokens is withdrawn or ends, re-checking the routes naming it.
+	#ended?: Getter<number>;
 	// Holds every incoming request to that grant from dispatch to its end.
 	#gate: Gate;
 
@@ -437,7 +440,8 @@ export class Publisher {
 		auth?: {
 			grant: Getter<Grant | undefined>;
 			ready: Promise<void>;
-			named?: (auth: Auth | undefined) => bigint | undefined;
+			named?: (auth: Auth | undefined) => bigint | null | undefined;
+			ended?: Getter<number>;
 		},
 		limits: Limits = LIMITS,
 	) {
@@ -446,6 +450,7 @@ export class Publisher {
 		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = auth?.grant;
 		this.#named = auth?.named;
+		this.#ended = auth?.ended;
 		this.#gate = new Gate(auth?.grant);
 		this.#ready = auth?.ready ?? Promise.resolve();
 		this.version = version;
@@ -490,8 +495,9 @@ export class Publisher {
 			return [...route.hops, this.hop];
 		};
 
-		// The ID of our token a route names on lite-07+, or undefined for the session's scope.
-		const named = (route: Route): bigint | undefined =>
+		// The ID of our token a route names on lite-07+, undefined for the session's scope, or
+		// null once that token is over.
+		const named = (route: Route): bigint | null | undefined =>
 			hasAuth(this.version) ? this.#named?.(route.auth) : undefined;
 
 		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
@@ -513,7 +519,7 @@ export class Publisher {
 					epoch: route.epoch,
 					hops: wireHops(route),
 					cost: route.cost,
-					auth: named(route),
+					auth: named(route) ?? undefined,
 				},
 				this.version,
 			);
@@ -533,7 +539,7 @@ export class Publisher {
 			console.debug(`announce: broadcast=${suffix} update=true`);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "update", id, hops: wireHops(route), cost: route.cost, auth: named(route) },
+				{ status: "update", id, hops: wireHops(route), cost: route.cost, auth: named(route) ?? undefined },
 				this.version,
 			);
 		};
@@ -555,7 +561,7 @@ export class Publisher {
 					epoch: route.epoch,
 					hops: wireHops(route),
 					cost: route.cost,
-					auth: named(route),
+					auth: named(route) ?? undefined,
 				},
 				this.version,
 			);
@@ -584,10 +590,10 @@ export class Publisher {
 		const visible = (table: Advertisements): Map<Path.Valid, Advertised> => {
 			const out = presented(msg.prefix, table, carries);
 			const grant = this.#grant?.peek();
-			if (grant) {
-				for (const suffix of [...out.keys()]) {
-					if (!grant.publish.matches(Path.join(msg.prefix, suffix))) out.delete(suffix);
-				}
+			for (const [suffix, snap] of [...out]) {
+				// A route ends with the token it names, never falling back to the session's scope.
+				if (named(snap.route) === null) out.delete(suffix);
+				else if (grant && !grant.publish.matches(Path.join(msg.prefix, suffix))) out.delete(suffix);
 			}
 			return out;
 		};
@@ -603,9 +609,11 @@ export class Publisher {
 			new Promise<"changed">((resolve) => {
 				const table = this.#advertised.changed(() => resolve("changed"));
 				const grant = this.#grant?.changed(() => resolve("changed"));
+				const ended = this.#ended?.changed(() => resolve("changed"));
 				dispose = () => {
 					table();
 					grant?.();
+					ended?.();
 				};
 			});
 		let changed = arm();

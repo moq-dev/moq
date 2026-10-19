@@ -356,16 +356,20 @@ export class AuthSession implements Handle {
 	}
 
 	/**
-	 * The ID a moq-lite request names `token` by: undefined for none, for one another session
-	 * issued, or for one withdrawn or ended, leaving the request under the session's scope.
+	 * The ID a moq-lite request names `token` by: undefined for none or for one another session
+	 * issued, leaving the request under the session's scope. Null once `token` is withdrawn or
+	 * ended: what names it ends with it, rather than falling back to the scope.
 	 */
-	named(token: Auth | undefined): bigint | undefined {
-		if (!(token instanceof Presented) || !this.#issued.has(token) || token.withdrawn || token.ended)
-			return undefined;
+	named(token: Auth | undefined): bigint | null | undefined {
+		if (!(token instanceof Presented) || !this.#issued.has(token)) return undefined;
+		if (token.withdrawn || token.ended) return null;
 		return token.id;
 	}
 
-	/** Bumps whenever one of this session's tokens ends, so a request carrying it drops it. */
+	/**
+	 * Bumps whenever one of this session's tokens is withdrawn or ends, so a request carrying
+	 * or naming it drops it.
+	 */
 	get ended(): Getter<number> {
 		return this.#ended;
 	}
@@ -458,6 +462,7 @@ export class AuthSession implements Handle {
 	#withdraw(token: Presented) {
 		token.grant.set(undefined);
 		this.#recompute();
+		this.#ended.update((n) => n + 1);
 		if (token.stream) this.#wire?.withdraw(token.stream);
 		else if (token.isAnswered) token.end(null);
 	}

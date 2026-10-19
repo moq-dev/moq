@@ -627,18 +627,21 @@ impl Handle {
 	}
 
 	/// The ID a moq-lite request names `auth` by, or `None` when the request goes out unnamed
-	/// under the session's scope: `auth` came from another handle, its stream has not opened,
-	/// or it was withdrawn or ended.
+	/// under the session's scope: `auth` came from another handle, or its stream has not
+	/// opened.
+	///
+	/// # Errors
+	///
+	/// [`Error::Unauthorized`] once `auth` ended: what names it ends with it, rather than
+	/// falling back to the scope, until the application names another.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn wire(&self, auth: &Auth) -> Option<u64> {
+	pub(crate) fn wire(&self, auth: &Auth) -> Result<Option<u64>> {
 		if !auth.presented.state.same_channel(&self.state) {
-			return None;
+			return Ok(None);
 		}
-		let state = self.state.read();
-		let slot = state.tokens.get(&auth.presented.id)?;
-		match slot.ended.is_none() && !slot.withdrawn {
-			true => slot.wire,
-			false => None,
+		match self.state.read().tokens.get(&auth.presented.id) {
+			Some(slot) if slot.ended.is_none() && !slot.withdrawn => Ok(slot.wire),
+			_ => Err(Error::Unauthorized),
 		}
 	}
 

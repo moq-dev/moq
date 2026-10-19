@@ -591,6 +591,7 @@ A named ANNOUNCE_REQUEST receives only the routes its token's grant covers.
 An announcement outside its token's grant is withheld rather than closing the session.
 SUBSCRIBE_UPDATE, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART replace the request's `Auth`; the previous token keeps deciding the request until the new one is answered.
 A withdrawn token keeps deciding the requests that already name it, so an opener renews a token by presenting the new one, naming it, and then withdrawing the old one.
+An announcement ends with the token it names: once that token ends, the sender retracts it rather than moving it to its scope (`Auth` 0), and announces it again only under another token.
 
 ### Goaway
 Either endpoint can open a Goaway Stream (0x5) to initiate a graceful session shutdown.
