@@ -17,13 +17,14 @@ pub(super) fn fin_cancels(version: Version) -> bool {
 pub(super) fn poll_cancel<S: crate::transport::poll::Session>(
 	stream: &mut Stream<S, Version>,
 	finished: &mut bool,
+	messages: &mut Messages<S>,
 	version: Version,
 	cx: &mut Context<'_>,
 ) -> Poll<Result<(), Error>> {
 	if !*finished {
 		let closed = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => poll_legacy_end(stream, version, cx),
-			_ => stream.reader.poll_closed(cx),
+			_ => messages.poll_end(&mut stream.reader, cx),
 		};
 		match closed {
 			Poll::Ready(Ok(())) if !fin_cancels(version) => *finished = true,
@@ -204,6 +205,84 @@ impl GoAways {
 		}
 		Ok(())
 	}
+	pub fn poll_next<R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut crate::coding::Reader<R, Version>,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<Option<Framed>, Error>> {
+		loop {
+			match ready!(reader.poll_decode_maybe::<Next<Framed>>(cx))? {
+				Some(Next::GoAway { redirect }) => self.receive(redirect)?,
+				Some(Next::Message(message)) => return Poll::Ready(Ok(Some(message))),
+				None => return Poll::Ready(Ok(None)),
+			}
+		}
+	}
+}
+
+/// The messages on one request stream, keeping GOAWAY validation across response phases.
+pub(super) struct Messages<S> {
+	session: S,
+	goaways: GoAways,
+}
+
+impl<S: crate::transport::poll::Session> Messages<S> {
+	pub fn new(session: S, client: bool) -> Self {
+		Self {
+			session,
+			goaways: GoAways::new(client),
+		}
+	}
+
+	pub fn failed(&mut self, err: Error) -> Error {
+		if super::subscriber::is_protocol_violation(&err) {
+			self.session.close(
+				super::error::to_session_code(&crate::SessionError::from(&err)),
+				&err.to_string(),
+			);
+		}
+		err
+	}
+
+	pub fn receive(&mut self, redirect: bool) -> Result<(), Error> {
+		self.goaways.receive(redirect).map_err(|err| self.failed(err))
+	}
+
+	/// Read complete frames, consuming at most one GOAWAY without ending the request.
+	pub fn poll_next<R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut crate::coding::Reader<R, Version>,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<Option<Framed>, Error>> {
+		self.goaways.poll_next(reader, cx).map_err(|err| self.failed(err))
+	}
+
+	pub async fn next<R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut crate::coding::Reader<R, Version>,
+	) -> Result<Option<Framed>, Error> {
+		std::future::poll_fn(|cx| self.poll_next(reader, cx)).await
+	}
+
+	pub async fn message<R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut crate::coding::Reader<R, Version>,
+	) -> Result<Framed, Error> {
+		self.next(reader)
+			.await?
+			.ok_or_else(|| self.failed(Error::ProtocolViolation))
+	}
+
+	pub fn poll_end<R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut crate::coding::Reader<R, Version>,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<(), Error>> {
+		match ready!(self.poll_next(reader, cx))? {
+			None => Poll::Ready(Ok(())),
+			Some(_) => Poll::Ready(Err(self.failed(Error::UnexpectedMessage))),
+		}
+	}
 }
 
 /// Refuse a modern request with its complete REQUEST_ERROR, then finish the response.
@@ -224,7 +303,8 @@ pub(super) struct Update {
 	/// The first Request ID: the update's own on drafts 14-16, which their answer names.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
-	/// Why the update is refused, which fails the subscription: [`Error::Unsupported`], a
+	/// Why the update is refused, which fails the subscription: [`Error::GoingAway`],
+	/// [`Error::Unsupported`], a
 	/// [`DecodeError::MalformedAuthToken`] for tokens that repeat, or a
 	/// [`DecodeError::MultipleAuthTokens`] for more than one token.
 	pub(super) refused: Option<Error>,
@@ -396,6 +476,60 @@ impl Decode<Version> for NamespaceUpdate {
 mod tests {
 	use super::*;
 
+	#[moq_clock::test]
+	async fn request_messages_keep_goaway_state_across_response_phases() {
+		use crate::lite::test_transport::ScriptedSession;
+		for version in [Version::Draft18, Version::Draft19, Version::Draft21, Version::Draft22] {
+			// GOAWAY, REQUEST_OK, then another GOAWAY on the same stream.
+			let script = vec![0x10, 0, 2, 0, 0, 0x07, 0, 0, 0x10, 0, 2, 0, 0];
+			let mut session = ScriptedSession::eof(script);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut messages = Messages::new(session.clone(), true);
+			assert_eq!(messages.message(&mut stream.reader).await.unwrap().0, 0x07);
+			assert!(matches!(
+				messages.message(&mut stream.reader).await,
+				Err(Error::ProtocolViolation)
+			));
+			assert_eq!(session.log.closes()[0].0, 0x03, "{version}");
+		}
+	}
+
+	#[moq_clock::test]
+	async fn a_goaway_does_not_cancel_a_pending_request() {
+		use crate::lite::test_transport::ScriptedSession;
+		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+			let mut session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut messages = Messages::new(session.clone(), false);
+			let mut finished = false;
+			assert!(
+				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+					&mut stream,
+					&mut finished,
+					&mut messages,
+					version,
+					cx,
+				)))
+				.is_pending(),
+				"{version}"
+			);
+			assert!(session.log.closes().is_empty());
+			// A second GOAWAY is still session-fatal while the response is pending.
+			session.push(&[0x10, 0, 2, 0, 0]);
+			assert!(matches!(
+				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+					&mut stream,
+					&mut finished,
+					&mut messages,
+					version,
+					cx,
+				))),
+				Poll::Ready(Err(Error::ProtocolViolation))
+			));
+			assert_eq!(session.log.closes()[0].0, 0x03);
+		}
+	}
+
 	/// On drafts 14-16 an update aimed at a request that applies none, such as a FETCH or
 	/// SUBSCRIBE_NAMESPACE, keeps the request open. Drafts 15 and 16 refuse it with a
 	/// REQUEST_ERROR naming the update, and a later cancellation still ends the request.
@@ -415,10 +549,12 @@ mod tests {
 			let mut session = ScriptedSession::new(update);
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
 			let mut finished = false;
+			let mut messages = Messages::new(session.clone(), false);
 
 			let polled = futures::poll!(std::future::poll_fn(|cx| poll_cancel(
 				&mut stream,
 				&mut finished,
+				&mut messages,
 				version,
 				cx
 			)));
@@ -440,6 +576,7 @@ mod tests {
 			let polled = futures::poll!(std::future::poll_fn(|cx| poll_cancel(
 				&mut stream,
 				&mut finished,
+				&mut messages,
 				version,
 				cx
 			)));

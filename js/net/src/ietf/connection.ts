@@ -1,5 +1,5 @@
 import { Nano, Second } from "@moq/clock";
-import { type Getter, Once, Signal } from "@moq/signals";
+import { type Getter, Once, race, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
@@ -185,8 +185,11 @@ export class Connection implements Established {
 					this.#close({ closeCode: err.code, reason: err.message });
 					return;
 				}
-				console.error("adapter error", err);
-				this.#close();
+				this.#violated(
+					err instanceof ProtocolViolation
+						? err
+						: new ProtocolViolation("control stream failed", { cause: err }),
+				);
 			});
 		}
 
@@ -615,33 +618,46 @@ export class Connection implements Established {
 	 */
 	async #runGoAway(controlStream: Stream, version: IetfVersion) {
 		try {
-			for (;;) {
-				const done = await controlStream.reader.done();
-				if (done) return;
+			const read = async () => {
+				for (;;) {
+					const done = await controlStream.reader.done();
+					if (done) throw new ProtocolViolation("control stream closed");
 
-				const msg = await this.#readGoAway(controlStream, version).catch((err: unknown) => {
-					throw malformed(err, "setup stream message");
-				});
-				if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
-				// A client may leave, but only the server may name where to go.
-				if (!this.#client && msg.newSessionUri !== "") {
-					throw new ProtocolViolation("client GOAWAY must not name a redirect");
-				}
-				// Draft-18's Request ID names our IDs: even when we are the client, odd for a server.
-				// It is required here, on the control stream.
-				if (version === Version.DRAFT_18 && msg.requestId === undefined) {
-					throw new ProtocolViolation("draft-18 GOAWAY on the control stream lacks a Request ID");
-				}
-				if (msg.requestId !== undefined && msg.requestId % 2n !== (this.#client ? 0n : 1n)) {
-					throw new ProtocolViolation("GOAWAY Request ID has the wrong parity", {
-						code: SessionCode.InvalidRequestId,
+					const msg = await this.#readGoAway(controlStream, version).catch((err: unknown) => {
+						throw malformed(err, "setup stream message");
 					});
+					if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+					// A client may leave, but only the server may name where to go.
+					if (!this.#client && msg.newSessionUri !== "") {
+						throw new ProtocolViolation("client GOAWAY must not name a redirect");
+					}
+					// Draft-18's Request ID names our IDs: even when we are the client, odd for a server.
+					// It is required here, on the control stream.
+					if (version === Version.DRAFT_18 && msg.requestId === undefined) {
+						throw new ProtocolViolation("draft-18 GOAWAY on the control stream lacks a Request ID");
+					}
+					if (msg.requestId !== undefined && msg.requestId % 2n !== (this.#client ? 0n : 1n)) {
+						throw new ProtocolViolation("GOAWAY Request ID has the wrong parity", {
+							code: SessionCode.InvalidRequestId,
+						});
+					}
+					// Reject bytes already behind GOAWAY before a caller can close on the drain.
+					if (controlStream.reader.tryDecode((c) => c.u8()) !== undefined)
+						throw new ProtocolViolation("message after control stream GOAWAY");
+					this.#goaway.set(msg.drain());
 				}
-				this.#goaway.set(msg.drain());
-			}
+			};
+			const stopped = controlStream.writer.closed.then(() => {
+				throw new ProtocolViolation("control stream stopped");
+			});
+			await race([read(), stopped]);
 		} catch (err) {
-			if (err instanceof ProtocolViolation) this.#violated(err);
-			else if (!this.#closed) console.error("error reading setup stream", err);
+			if (!this.#closed)
+				this.#violated(
+					err instanceof ProtocolViolation
+						? err
+						: new ProtocolViolation("control stream failed", { cause: err }),
+				);
 		} finally {
 			this.#close();
 		}

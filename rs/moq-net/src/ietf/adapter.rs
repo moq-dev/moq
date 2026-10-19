@@ -47,12 +47,6 @@ impl<T> Queue<T> {
 		true
 	}
 
-	/// Dequeue the next message, waiting while the queue is open and empty.
-	/// Returns `None` once the queue is closed and drained.
-	async fn pop(&self) -> Option<T> {
-		kio::wait(|waiter| self.poll_pop(waiter)).await
-	}
-
 	/// Poll for the next message; ready with `None` once closed and drained.
 	fn poll_pop(&self, waiter: &kio::Waiter) -> Poll<Option<T>> {
 		self.0
@@ -66,7 +60,7 @@ impl<T> Queue<T> {
 			.map(|mut state| state.messages.pop_front())
 	}
 
-	/// Stop future pushes; buffered messages still drain, then `pop` returns `None`.
+	/// Stop future pushes; buffered messages still drain, then `poll_pop` returns `None`.
 	fn close(&self) {
 		self.0.lock().closed = true;
 	}
@@ -878,11 +872,23 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 
 	/// Writer task: drains the queue and writes to the control stream.
 	async fn run_write(&self, mut writer: Writer<S::SendStream, Version>) -> Result<(), Error> {
-		while let Some(msg) = self.shared.control.pop().await {
-			let mut buf = std::io::Cursor::new(msg);
-			writer.write_all(&mut buf).await?;
+		loop {
+			let message = kio::wait(|waiter| {
+				if writer.poll_closed(&mut waiter.context()).is_ready() {
+					return Poll::Ready(Err(Error::ProtocolViolation));
+				}
+				self.shared.control.poll_pop(waiter).map(Ok)
+			})
+			.await?;
+			let Some(message) = message else {
+				return Ok(());
+			};
+			let mut buf = std::io::Cursor::new(message);
+			writer
+				.write_all(&mut buf)
+				.await
+				.map_err(super::session::control_stream_error)?;
 		}
-		Ok(())
 	}
 
 	/// Dispatcher loop that reads control stream messages and routes them.
@@ -892,12 +898,20 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		goaway: crate::goaway::Protocol,
 	) -> Result<(), Error> {
 		loop {
-			let type_id = match reader.varint_maybe().await? {
+			let type_id = match reader
+				.varint_maybe()
+				.await
+				.map_err(super::session::control_stream_error)?
+			{
 				Some(id) => id,
-				None => return Ok(()),
+				None => return Err(Error::ProtocolViolation),
 			};
 
-			let body = reader.decode::<ietf::Body>().await?.0;
+			let body = reader
+				.decode::<ietf::Body>()
+				.await
+				.map_err(super::session::control_stream_error)?
+				.0;
 
 			// Reconstruct raw message bytes: [type_id][size][body]
 			let raw = encode_raw(type_id, &body, self.version);
@@ -1442,7 +1456,7 @@ mod tests {
 			shared
 				.open_incoming(target_id, Bytes::from_static(b"request"), None)
 				.unwrap();
-			let (_, mut recv) = shared.incoming.pop().await.unwrap();
+			let (_, mut recv) = kio::wait(|waiter| shared.incoming.poll_pop(waiter)).await.unwrap();
 			assert_eq!(
 				recv.read_chunk(usize::MAX).await.unwrap(),
 				Some(Bytes::from_static(b"request"))
@@ -1575,7 +1589,7 @@ mod tests {
 		let n = stream.write(b"hello").await.unwrap();
 		assert_eq!(n, 5);
 
-		let data = control.pop().await.unwrap();
+		let data = kio::wait(|waiter| control.poll_pop(waiter)).await.unwrap();
 		assert_eq!(data, &b"hello"[..]);
 	}
 
@@ -1636,7 +1650,7 @@ mod tests {
 			.open_incoming(request_id, encode_msg(&msg, version), None)
 			.unwrap();
 
-		let (_, mut recv) = shared.incoming.pop().await.unwrap();
+		let (_, mut recv) = kio::wait(|waiter| shared.incoming.poll_pop(waiter)).await.unwrap();
 
 		// Drain the advertisement the stream opened with, so both halves are quiescent
 		// and a later read only sees what the terminal message routes.
@@ -1936,6 +1950,26 @@ mod tests {
 		let log = Log::default();
 		let writer = Writer::new(SinkSend::new(log.clone()), VERSION);
 		(adapter, Reader::new(recv, VERSION), writer, log)
+	}
+
+	#[moq_clock::test]
+	async fn a_legacy_control_stream_fin_or_reset_is_a_protocol_violation() {
+		use crate::lite::test_transport::{DeadStreamSession, ScriptedSession};
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let mut session = ScriptedSession::eof(Vec::new());
+			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
+			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
+			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
+
+			let mut session = DeadStreamSession::bis(0);
+			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
+			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
+			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
+		}
 	}
 
 	/// A request ID at the MAX_REQUEST_ID we advertised closes the session with the

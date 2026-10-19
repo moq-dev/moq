@@ -62,7 +62,7 @@ import {
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { finCancels, refuseReserved } from "./request_stream.ts";
+import { finCancels, nextMessage, refuseReserved } from "./request_stream.ts";
 import { joinFilter, Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
@@ -514,7 +514,8 @@ export class Subscriber {
 
 				// Resolves to how many NAMESPACEs make up the initial set (MoQ Active Count).
 				const response = (async () => {
-					const respTypeId = await stream.reader.u53();
+					const respTypeId = await nextMessage(stream.reader, version, this.#session.client);
+					if (respTypeId === undefined) throw new Error("namespace stream ended before its response");
 					if (respTypeId === RequestOk.id) {
 						const ok = await RequestOk.decode(stream.reader, version);
 						// A count the negotiation did not promise, or a missing one it did, is
@@ -547,14 +548,13 @@ export class Subscriber {
 					for (;;) {
 						if (initial === 0) announced.synced();
 
-						const done = await stream.reader.done();
-						if (done) {
+						const msgType = await nextMessage(stream.reader, version, this.#session.client);
+						if (msgType === undefined) {
 							if (initial > 0)
 								throw new ProtocolViolation("namespace stream ended inside the initial set");
 							break;
 						}
 
-						const msgType = await stream.reader.u53();
 						// The counted initial set is NAMESPACEs only, so anything else cuts it short.
 						if (initial > 0 && msgType !== SubscribeNamespaceEntry.id) {
 							throw new ProtocolViolation(`message 0x${msgType.toString(16)} inside the initial set`);
@@ -625,6 +625,7 @@ export class Subscriber {
 				throw err;
 			}
 		} catch (err: unknown) {
+			if (err instanceof ProtocolViolation) this.#violated(err);
 			const e = error(err);
 			console.warn(`subscribe_namespace error: ${reason(e)}`);
 
@@ -763,6 +764,7 @@ export class Subscriber {
 			}
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
+			if (err instanceof ProtocolViolation) this.#violated(err);
 			// A control request that timed out is not late content, so it carries its own code.
 			// Local abandonment must commit without yielding after the demand check.
 			const e = err === abandoned ? abandoned : await sessionCause(this.#quic, err);
@@ -877,6 +879,7 @@ export class Subscriber {
 			stream.close();
 			console.debug(`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
+			if (err instanceof ProtocolViolation) this.#violated(err);
 			const e = await sessionCause(this.#quic, err);
 			producer.close(this.#localClose ? undefined : e);
 			stream.abort(e);
@@ -911,8 +914,8 @@ export class Subscriber {
 		// further answer is owed.
 		let refused = false;
 		for (;;) {
-			if (await stream.reader.done()) throw new ProtocolViolation("subscribe stream ended without PUBLISH_DONE");
-			const typeId = await stream.reader.u53();
+			const typeId = await nextMessage(stream.reader, version, this.#session.client);
+			if (typeId === undefined) throw new ProtocolViolation("subscribe stream ended without PUBLISH_DONE");
 			if (typeId === PublishDone.id) break;
 			const answer = (typeId === RequestOk.id || typeId === RequestError.id) && !refused && unanswered.peek() > 0;
 			if (!answer) throw new ProtocolViolation(`unexpected message on a subscription: 0x${typeId.toString(16)}`);
@@ -1080,7 +1083,8 @@ export class Subscriber {
 		if (state.cancelled) throw new Error("subscribe cancelled while it was being sent");
 		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
-		const respTypeId = await state.stream.reader.u53();
+		const respTypeId = await nextMessage(state.stream.reader, version, this.#session.client);
+		if (respTypeId === undefined) throw new Error("subscription ended before its response");
 		if (respTypeId !== SubscribeOk.id) {
 			let reasonPhrase = "unknown error";
 			try {
@@ -1246,13 +1250,15 @@ export class Subscriber {
 					)
 				: undefined;
 			for (;;) {
-				if (await (stopped !== undefined ? race([stream.reader.done(), stopped]) : stream.reader.done())) {
+				const typeId = await (stopped !== undefined
+					? race([nextMessage(stream.reader, version, this.#session.client), stopped.then(() => undefined)])
+					: nextMessage(stream.reader, version, this.#session.client));
+				if (typeId === undefined) {
 					if (!finCancels(version)) await stopped;
 					stream.reader.stop(new StreamError(StreamCode.Cancel));
 					break;
 				}
 
-				const typeId = await stream.reader.u53();
 				// Drafts 14-15 have no update for an advertisement, so a SUBSCRIBE_UPDATE the
 				// adapter routed here is refused and changes nothing. Draft 14 answers no update;
 				// draft 15 names the update's own Request ID, which the adapter already spent.
@@ -1414,6 +1420,7 @@ export class Subscriber {
 			// The control message establishing this alias can arrive after the data stream.
 			subscription = await this.#aliases.get(group.trackAlias);
 		} catch (err: unknown) {
+			if (err instanceof ProtocolViolation) this.#violated(err);
 			const e = await sessionCause(this.#quic, err);
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			// Anything else on this alias is the publisher sending data for a track it never
@@ -1511,6 +1518,7 @@ export class Subscriber {
 			// A group with no objects still exists.
 			open().close();
 		} catch (err: unknown) {
+			if (err instanceof ProtocolViolation) this.#violated(err);
 			const e = await sessionCause(this.#quic, err);
 			// The compact form names the subgroup by its first Object ID, so a nonzero one is
 			// subgroup N: stop the stream before any group exists for it.

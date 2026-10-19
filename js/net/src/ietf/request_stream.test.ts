@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
 import { Reader } from "../stream.ts";
 import * as Varint from "../varint.ts";
-import { namespaceUpdate } from "./request_stream.ts";
-import { Version } from "./version.ts";
+import { namespaceUpdate, nextMessage } from "./request_stream.ts";
+import { Version, versionName } from "./version.ts";
 
 test("an oversized or truncated namespace update type is a protocol violation", async () => {
 	// Both drafts use leading-ones varints.
@@ -13,9 +13,7 @@ test("an oversized or truncated namespace update type is a protocol violation", 
 		const truncated = Uint8Array.of(0x80);
 		for (const bytes of [oversized, truncated]) {
 			const reader = new Reader(undefined, bytes, version);
-			await expect(namespaceUpdate(reader, version, { client: false, seen: false })).rejects.toBeInstanceOf(
-				ProtocolViolation,
-			);
+			await expect(namespaceUpdate(reader, version, false)).rejects.toBeInstanceOf(ProtocolViolation);
 		}
 	}
 });
@@ -24,9 +22,7 @@ test("namespace update framing refuses duplicate prefix parameters", async () =>
 	for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
 		const body = [2, 2, 0x34, 1, 1, 97, 0, 1, 1, 98];
 		const reader = new Reader(undefined, Uint8Array.from([2, 0, body.length, ...body]), version);
-		await expect(namespaceUpdate(reader, version, { client: false, seen: false })).rejects.toBeInstanceOf(
-			ProtocolViolation,
-		);
+		await expect(namespaceUpdate(reader, version, false)).rejects.toBeInstanceOf(ProtocolViolation);
 	}
 });
 
@@ -34,9 +30,37 @@ test("a repeated namespace update token is a request refusal", async () => {
 	for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
 		const body = [2, 2, 3, 3, 3, 0, 170, 0, 3, 3, 0, 170];
 		const reader = new Reader(undefined, Uint8Array.from([2, 0, body.length, ...body]), version);
-		expect(await namespaceUpdate(reader, version, { client: false, seen: false })).toEqual({
+		expect(await namespaceUpdate(reader, version, false)).toEqual({
 			requestId: 2n,
 			refused: "malformed_auth_token",
 		});
 	}
+});
+
+for (const version of [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_21, Version.DRAFT_22]) {
+	test(`${versionName(version)} keeps GOAWAY state across request response phases`, async () => {
+		// GOAWAY, an empty REQUEST_OK, and another GOAWAY on the same stream.
+		const reader = new Reader(undefined, Uint8Array.of(0x10, 0, 2, 0, 0, 7, 0, 0, 0x10, 0, 2, 0, 0), version);
+		expect(await nextMessage(reader, version, true)).toBe(7);
+		expect(await reader.u16()).toBe(0);
+		await expect(nextMessage(reader, version, true)).rejects.toBeInstanceOf(ProtocolViolation);
+	});
+
+	test(`${versionName(version)} keeps separate request streams' GOAWAY state`, async () => {
+		for (let n = 0; n < 2; n++) {
+			const reader = new Reader(undefined, Uint8Array.of(0x10, 0, 2, 0, 0, 7, 0, 0), version);
+			expect(await nextMessage(reader, version, false)).toBe(7);
+		}
+	});
+}
+
+test("request message parsing preserves a transport session failure", async () => {
+	const failed = Object.assign(new Error("session closed"), { source: "session" });
+	const input = new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.error(failed);
+		},
+	});
+	const reader = new Reader(input, undefined, Version.DRAFT_22);
+	await expect(nextMessage(reader, Version.DRAFT_22, true)).rejects.toBe(failed);
 });

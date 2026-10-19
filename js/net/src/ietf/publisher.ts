@@ -54,7 +54,15 @@ import {
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { cancelled, finCancels, malformed, namespaceUpdate, nextMessage, refuseReserved } from "./request_stream.ts";
+import {
+	cancelled,
+	ended,
+	finCancels,
+	malformed,
+	namespaceUpdate,
+	nextMessage,
+	refuseReserved,
+} from "./request_stream.ts";
 import { GroupOrder, type Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
@@ -153,7 +161,15 @@ type Refused = "never" | number;
 type Answer = "held" | "dropped" | Refused;
 
 /** The open PUBLISH_NAMESPACE request per advertised path. */
-type Requests = Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream; auth?: Auth }>;
+type Request = {
+	path: Path.Valid;
+	requestId: bigint;
+	stream: Stream;
+	auth?: Auth;
+	reply?: Promise<number | undefined>;
+	updating?: boolean;
+};
+type Requests = Map<Path.Valid, Request>;
 
 /** What one announce loop knows about the peer, keyed the way that loop names namespaces. */
 interface Namespaces {
@@ -596,12 +612,13 @@ export class Publisher {
 				unsubscribe = resolve;
 			});
 			const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
-			const goaway = { client: this.#session.client, seen: false };
 			const updates = (async () => {
 				for (;;) {
-					const type = await nextMessage(stream.reader, version, goaway).catch((err: unknown) => {
-						throw malformed(err, "subscription message");
-					});
+					const type = await nextMessage(stream.reader, version, this.#session.client).catch(
+						(err: unknown) => {
+							throw malformed(err, "subscription message");
+						},
+					);
 					if (type === undefined) {
 						if (legacy || finCancels(version)) return;
 						return stream.writer.closed;
@@ -1209,9 +1226,8 @@ export class Publisher {
 		};
 
 		const ending = cancelled(stream, version);
-		const goaway = { client: this.#session.client, seen: false };
 		const readUpdate = () =>
-			namespaceUpdate(stream.reader, version, goaway).then(
+			namespaceUpdate(stream.reader, version, this.#session.client).then(
 				(update) => ({ update }),
 				(err) => ({ error: error(err) }),
 			);
@@ -1679,7 +1695,8 @@ export class Publisher {
 					await msg.encode(stream.writer, this.#session.version);
 
 					// Read response (RequestOk and PublishNamespaceOk share 0x07)
-					const respTypeId = await stream.reader.u53();
+					const respTypeId = await nextMessage(stream.reader, this.#session.version, this.#session.client);
+					if (respTypeId === undefined) throw new Error("advertisement ended before its response");
 					if (respTypeId === RequestError.id) {
 						const err = await RequestError.decode(stream.reader, this.#session.version);
 						const why = requestReason(
@@ -1705,17 +1722,45 @@ export class Publisher {
 				})(),
 			);
 
-			if (answer === "held" && request) requests.set(path, { path, requestId, stream: request, auth });
+			if (answer === "held" && request) {
+				const held: Request = { path, requestId, stream: request, auth };
+				requests.set(path, held);
+				if (this.#session.version >= Version.DRAFT_18) held.reply = this.#readAdvertisement(held);
+			}
 			return answer;
 		} catch (err: unknown) {
 			// The peer never answered the advertisement: a control timeout, not late content.
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
+			if (e instanceof ProtocolViolation) {
+				this.#quic.close({ closeCode: e.code, reason: e.message });
+				this.#session.close();
+			}
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 			request?.abort(e);
 			return e instanceof NoStreamCredit || (e instanceof StreamError && e.code === StreamCode.ControlTimeout)
 				? "never"
 				: "dropped";
 		}
+	}
+
+	// Keep reading while an advertisement is idle, so GOAWAY validation never waits for an update.
+	#readAdvertisement(request: Request): Promise<number | undefined> {
+		const reply = nextMessage(request.stream.reader, this.#session.version, this.#session.client)
+			.then((type) => {
+				if (type !== undefined && !request.updating)
+					throw new ProtocolViolation("unexpected message on an idle advertisement");
+				return type;
+			})
+			.catch((err: unknown) => {
+				if (err instanceof ProtocolViolation) {
+					this.#quic.close({ closeCode: err.code, reason: err.message });
+					this.#session.close();
+				}
+				throw err;
+			});
+		// A later update consumes the result; failures are acted on as soon as they arrive.
+		void reply.catch(() => undefined);
+		return reply;
 	}
 
 	/**
@@ -1769,10 +1814,12 @@ export class Publisher {
 			answer = await withTimeout(
 				(async (): Promise<Answer> => {
 					const { writer, reader } = request.stream;
+					request.updating = true;
 					await writer.u53(PublishNamespaceUpdate.id);
 					await new PublishNamespaceUpdate({ requestId, update, token }).encode(writer, version);
 
-					const typeId = await reader.u53();
+					const typeId = await (request.reply ?? nextMessage(reader, version, this.#session.client));
+					if (typeId === undefined) throw new Error("advertisement ended before its update response");
 					if (typeId === RequestError.id) {
 						const err = await RequestError.decode(reader, version);
 						const why = requestReason(err.errorCode, err.reasonPhrase, "publish_namespace", version);
@@ -1783,6 +1830,8 @@ export class Publisher {
 						throw new Error(`unexpected answer to the update: typeId=0x${typeId.toString(16)}`);
 					}
 					this.#answered(await RequestOk.decode(reader, version));
+					request.updating = false;
+					if (version >= Version.DRAFT_18) request.reply = this.#readAdvertisement(request);
 					return "held";
 				})(),
 				ADVERTISE_TIMEOUT,
@@ -1790,6 +1839,10 @@ export class Publisher {
 			);
 		} catch (err: unknown) {
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
+			if (e instanceof ProtocolViolation) {
+				this.#quic.close({ closeCode: e.code, reason: e.message });
+				this.#session.close();
+			}
 			console.warn(`publish_namespace update failed: broadcast=${path} error=${reason(e)}`);
 			requests.delete(path);
 			request.stream.abort(e);
@@ -1864,7 +1917,16 @@ export class Publisher {
 		// nothing, and lets go of the broadcast and track lookups.
 		const hold = new AbortController();
 		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
-		void cancelled(stream, version).then(() => hold.abort(cancel));
+		void ended(stream, version, this.#session.client).then(
+			() => hold.abort(cancel),
+			(err) => {
+				if (err instanceof ProtocolViolation) {
+					this.#quic.close({ closeCode: err.code, reason: err.message });
+					this.#session.close();
+				}
+				hold.abort(cancel);
+			},
+		);
 
 		// A grant that narrows abandons the lookup, and resets an answer the transport has
 		// not taken yet rather than delivering it.

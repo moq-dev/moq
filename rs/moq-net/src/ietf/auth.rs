@@ -328,14 +328,15 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 		}
 
 		let mut answered = false;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		loop {
 			enum Next {
 				Withdrawn,
-				Reply(Result<Option<(u64, super::Body)>, Error>),
+				Reply(Result<Option<super::request_stream::Framed>, Error>),
 			}
 
 			let next = {
-				let mut read = std::pin::pin!(read_message(&mut stream));
+				let mut read = std::pin::pin!(messages.next(&mut stream.reader));
 				kio::wait(|waiter| {
 					if self.handle.poll_withdrawn(self.id, waiter).is_ready() {
 						return Poll::Ready(Next::Withdrawn);
@@ -348,7 +349,7 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 			let (id, body) = match next {
 				// Resetting our side is what tells the peer.
 				Next::Withdrawn => return Error::Cancel,
-				Next::Reply(Ok(Some(msg))) => msg,
+				Next::Reply(Ok(Some(super::request_stream::Framed(id, body)))) => (id, body),
 				// The peer ended the grant without revoking it.
 				Next::Reply(Ok(None)) if answered => return Error::Cancel,
 				// A peer that closes before answering could not tell us anything.
@@ -409,18 +410,6 @@ fn decode_reply<T: Message>(body: &super::Body, version: Version) -> Result<T, E
 	Ok(msg)
 }
 
-/// Read one `[type][size][body]` message, or `None` once the peer finished the stream.
-#[cfg(feature = "async")]
-async fn read_message<S: crate::transport::poll::Session>(
-	stream: &mut Stream<S, Version>,
-) -> Result<Option<(u64, super::Body)>, Error> {
-	let Some(id) = stream.reader.varint_maybe().await? else {
-		return Ok(None);
-	};
-	let body: super::Body = stream.reader.decode().await?;
-	Ok(Some((id, body)))
-}
-
 /// Answers the peer's Auth requests: the app's verdict when it took the requests,
 /// otherwise the default grant for the connection's own credential.
 #[derive(Clone)]
@@ -440,6 +429,7 @@ impl Serve {
 		msg: Auth,
 		version: Version,
 	) -> Result<(), Error> {
+		let mut goaways = super::request_stream::GoAways::new(msg.request_id.0 % 2 == 1);
 		let serving = Serving::new(self.handle.clone());
 		let issue = &serving.issue;
 		let mut default = None;
@@ -463,7 +453,16 @@ impl Serve {
 			None => default = Some(crate::auth::DefaultGrant::new(self.handle.clone(), self.peer_grant)),
 		}
 
-		let err = match serve_issue(&self.runtime, issue, default.as_mut(), &mut stream, version).await {
+		let err = match serve_issue(
+			&self.runtime,
+			issue,
+			default.as_mut(),
+			&mut stream,
+			version,
+			&mut goaways,
+		)
+		.await
+		{
 			Ok(()) => Error::Cancel,
 			Err(err) => {
 				match &err {
@@ -498,6 +497,7 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 	mut default: Option<&mut crate::auth::DefaultGrant>,
 	stream: &mut Stream<S, Version>,
 	version: Version,
+	goaways: &mut super::request_stream::GoAways,
 ) -> Result<(), Error> {
 	enum Next {
 		Withdrawn(Result<(), Error>),
@@ -507,8 +507,8 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 	loop {
 		let next = kio::wait(|waiter| {
 			let mut cx = std::task::Context::from_waker(waiter.waker());
-			if let Poll::Ready(res) = stream.reader.poll_read_chunk(&mut cx, 1).map(|res| {
-				res.and_then(|chunk| match chunk {
+			if let Poll::Ready(res) = goaways.poll_next(&mut stream.reader, &mut cx).map(|res| {
+				res.and_then(|message| match message {
 					None => Ok(()),
 					Some(_) => Err(Error::ProtocolViolation),
 				})

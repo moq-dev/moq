@@ -38,6 +38,8 @@ export interface AuthWire {
 	read(stream: Stream): Promise<WireReply | undefined>;
 	/** The token the peer presents on a stream it opened. */
 	accept(stream: Stream): Promise<Uint8Array>;
+	/** Wait for the presenter to withdraw while validating follow-up messages. */
+	withdrawn(stream: Stream): Promise<void>;
 	/** Tell the presenter a grant. Throws {@link Unsupported} when this wire cannot represent it. */
 	grant(stream: Stream, grant: WireGrant): Promise<void>;
 	/** Refuse or revoke the presenter's token. */
@@ -172,11 +174,8 @@ class IssuedGrant implements Issued {
 		this.#stream = stream;
 		this.#wire = wire;
 		// The presenter withdraws by closing or cancelling its side.
-		this.closed = stream.reader
-			.done()
-			.then((done) => {
-				if (!done) throw new ProtocolViolation("additional message on an AUTH stream");
-			})
+		this.closed = wire
+			.withdrawn(stream)
 			.then(
 				() => null,
 				(err: unknown) => (err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),

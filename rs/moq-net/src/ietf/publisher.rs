@@ -397,11 +397,12 @@ impl<S: crate::transport::poll::Session> Target<S> {
 	fn poll_closed(
 		&mut self,
 		finished: &mut bool,
+		goaways: &mut super::request_stream::Messages<S>,
 		version: Version,
 		cx: &mut std::task::Context<'_>,
 	) -> Poll<Result<(), Error>> {
 		match self.stream() {
-			Some(stream) => super::request_stream::poll_cancel(stream, finished, version, cx),
+			Some(stream) => super::request_stream::poll_cancel(stream, finished, goaways, version, cx),
 			None => Poll::Pending,
 		}
 	}
@@ -410,7 +411,7 @@ impl<S: crate::transport::poll::Session> Target<S> {
 	fn poll_event(
 		&mut self,
 		finished: &mut bool,
-		goaways: &mut super::request_stream::GoAways,
+		goaways: &mut super::request_stream::Messages<S>,
 		version: Version,
 		cx: &mut std::task::Context<'_>,
 	) -> Poll<NamespaceEvent> {
@@ -420,7 +421,9 @@ impl<S: crate::transport::poll::Session> Target<S> {
 			version,
 			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
 		) {
-			return self.poll_closed(finished, version, cx).map(NamespaceEvent::Closed);
+			return self
+				.poll_closed(finished, goaways, version, cx)
+				.map(NamespaceEvent::Closed);
 		}
 		let Some(stream) = self.stream() else {
 			return Poll::Pending;
@@ -1101,6 +1104,7 @@ where
 			};
 
 			let mut request_finished = false;
+			let mut goaways = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 			// A token-authorized subscription is held to its own grant, which ends it when the
 			// grant lapses, is revoked, or stops covering it. Every subscription is gated so it
 			// ends once what the peer granted us stops covering it, and a limit-authorized one
@@ -1339,6 +1343,7 @@ where
 							if super::request_stream::poll_cancel(
 								&mut stream,
 								&mut request_finished,
+								&mut goaways,
 								self.version,
 								&mut cx,
 							)
@@ -1446,7 +1451,7 @@ where
 		// carry no Request ID, so they must go out in the order the updates arrived. The stash is
 		// a FIFO bounded by MAX_REQUEST_UPDATES (counting the one being verified).
 		let mut renewal = request_update::Renewal::<super::request_stream::Update>::default();
-		let mut goaways = super::request_stream::GoAways::new(self.control.client());
+		let mut goaways = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 
 		// What one turn of the loop resolved to.
 		enum Turn {
@@ -1506,8 +1511,12 @@ where
 						use super::request_stream::{Next, Update};
 						while !*finished {
 							match stream.reader.poll_decode_maybe::<Next<Update>>(&mut cx) {
-								Poll::Ready(Ok(Some(Next::Message(update)))) => {
+								Poll::Ready(Ok(Some(Next::Message(mut update)))) => {
 									if let Err(err) = self.control.accept(update.request_id) {
+										if matches!(err, Error::GoingAway) {
+											update.refused = Some(err);
+											return Poll::Ready(Turn::Update(update));
+										}
 										session.clone().close(
 											super::error::to_session_code(&crate::SessionError::from(&err)),
 											"invalid request ID",
@@ -1643,6 +1652,7 @@ where
 		// side admits is verified.
 		let refused = match update.refused {
 			Some(Error::Decode(err)) => Some((super::token::reason(&err), Error::Decode(err))),
+			Some(Error::GoingAway) => Some(("going away", Error::GoingAway)),
 			Some(err) => Some(("REQUEST_UPDATE parameters not supported", err)),
 			None if update.authorization_token.is_some()
 				&& request_grant.is_none()
@@ -2387,9 +2397,12 @@ where
 		let group = {
 			let mut read = std::pin::pin!(read_fetch(&track, start.group, start.object, until, priority));
 			let mut finished = false;
+			let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 			kio::wait(|waiter| {
 				let mut cx = waiter.context();
-				if super::request_stream::poll_cancel(&mut stream, &mut finished, self.version, &mut cx).is_ready() {
+				if super::request_stream::poll_cancel(&mut stream, &mut finished, &mut messages, self.version, &mut cx)
+					.is_ready()
+				{
 					return Poll::Ready(None);
 				}
 				if gate.poll_denied(waiter).is_ready() || lapsed(waiter) {
@@ -2621,13 +2634,16 @@ where
 		let joined = {
 			let mut pending = false;
 			let mut finished = false;
+			let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 			let mut deadline = crate::time::Deadline::after(&self.runtime, Duration::from_secs(10));
 			kio::wait(|waiter| {
 				let mut cx = waiter.context();
 				// The request reader is what the subscriber FINs or resets. The writer
 				// on a draft-14-16 virtual stream reports closed immediately, which is
 				// not a cancellation.
-				if super::request_stream::poll_cancel(stream, &mut finished, self.version, &mut cx).is_ready() {
+				if super::request_stream::poll_cancel(stream, &mut finished, &mut messages, self.version, &mut cx)
+					.is_ready()
+				{
 					return Poll::Ready(Err(Error::Cancel));
 				}
 				let joins = self.joins.poll(waiter, |joins| match joins.get(&subscribe_id) {
@@ -2742,9 +2758,12 @@ where
 		let info = {
 			let query = track.query();
 			let mut finished = false;
+			let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 			kio::wait(|waiter| {
 				let mut cx = waiter.context();
-				if super::request_stream::poll_cancel(&mut stream, &mut finished, self.version, &mut cx).is_ready() {
+				if super::request_stream::poll_cancel(&mut stream, &mut finished, &mut messages, self.version, &mut cx)
+					.is_ready()
+				{
 					return Poll::Ready(None);
 				}
 				if gate.poll_denied(waiter).is_ready() {
@@ -2937,6 +2956,7 @@ where
 			target,
 			watched,
 			requests,
+			woken,
 			updates,
 			..
 		} = ns;
@@ -3013,6 +3033,14 @@ where
 							.advertise_namespace(requests, path, suffix.clone(), advert.params(), auth)
 							.await?;
 					}
+				}
+				// Register an idle reader too: GOAWAY can arrive without an update in flight.
+				if !matches!(
+					self.version,
+					Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+				) && requests.contains_key(suffix)
+				{
+					woken.suffixes.lock().unwrap().push(suffix.clone());
 				}
 				// The peer can reject a fresh PUBLISH_NAMESPACE or an update, which leaves
 				// no request behind. Record what it actually holds, so a later route change
@@ -3099,7 +3127,8 @@ where
 
 		// Bounded for the same reason the open is: a peer that takes the stream and answers
 		// nothing would park this loop forever, and every withdrawal queued behind it.
-		let Some((type_id, body)) = self.read_response(&mut request).await? else {
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let Some((type_id, body)) = self.read_response(&mut request, &mut messages).await? else {
 			tracing::debug!(broadcast = %self.origin.absolute(path), "no answer to the advertisement");
 			return Ok(Refused::No);
 		};
@@ -3140,6 +3169,7 @@ where
 		requests.insert(
 			suffix,
 			NamespaceRequest {
+				messages,
 				path: path.clone(),
 				request_id,
 				stream: request,
@@ -3287,6 +3317,7 @@ where
 		inflight: &mut VecDeque<(crate::time::Instant, crate::PathOwned)>,
 		woken: &Arc<Woken>,
 		now: crate::time::Instant,
+		version: Version,
 		cx: &mut std::task::Context<'_>,
 	) -> Poll<(crate::PathOwned, Result<Answer, Error>)> {
 		// Registered before the take, so a wake landing between them is not lost.
@@ -3296,18 +3327,27 @@ where
 			let Some(request) = requests.get_mut(&suffix) else {
 				continue;
 			};
-			if request.pending.is_none() {
+			if request.pending.is_none()
+				&& matches!(
+					version,
+					Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+				) {
 				continue;
 			}
 			let waker = request.waker.get_or_insert_with(|| woken.waker(suffix.clone())).clone();
 			if let Poll::Ready(answer) = request
-				.stream
-				.reader
-				.poll_decode_maybe(&mut std::task::Context::from_waker(&waker))
+				.messages
+				.poll_next(&mut request.stream.reader, &mut std::task::Context::from_waker(&waker))
 			{
 				// The rest stay woken for the next pass.
 				woken.suffixes.lock().unwrap().append(&mut suffixes);
-				let answer = answer.map(|answer| answer.map_or(Answer::Ended, Answer::Message));
+				let answer = answer.and_then(|answer| {
+					if answer.is_some() && request.pending.is_none() {
+						return Err(request.messages.failed(Error::UnexpectedMessage));
+					}
+					Ok(answer.map_or(Answer::Ended, Answer::Message))
+				});
+				woken.suffixes.lock().unwrap().push(suffix.clone());
 				return Poll::Ready((suffix, answer));
 			}
 		}
@@ -3446,10 +3486,13 @@ where
 	/// behavior seen a step later: a stream the peer accepts and never answers on holds the
 	/// loop just as effectively as one it never grants. Giving up records nothing, so the
 	/// namespace stays outstanding and the retry re-offers it.
-	async fn read_response(&self, request: &mut Stream<S, Version>) -> Result<Option<(u64, ietf::Body)>, Error> {
+	async fn read_response(
+		&self,
+		request: &mut Stream<S, Version>,
+		messages: &mut super::request_stream::Messages<S>,
+	) -> Result<Option<(u64, ietf::Body)>, Error> {
 		let mut read = std::pin::pin!(async {
-			let type_id = request.reader.varint().await?;
-			let body: ietf::Body = request.reader.decode().await?;
+			let super::request_stream::Framed(type_id, body) = messages.message(&mut request.reader).await?;
 			Ok::<_, Error>((type_id, body))
 		});
 		let mut timeout = crate::time::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
@@ -3754,7 +3797,7 @@ where
 		initial: Vec<crate::announce::Announce>,
 	) -> Result<(), Error> {
 		let mut finished = false;
-		let mut goaways = super::request_stream::GoAways::new(self.control.client());
+		let mut goaways = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let _withdrawing = self.withdrawal.register();
 		if self.withdrawal.poll(&kio::Waiter::noop()).is_ready() {
 			return Ok(());
@@ -3825,7 +3868,9 @@ where
 					// Each update in flight is answered on its own stream, so many renew at
 					// once and none holds up the announcements behind it.
 					let now = self.runtime.now();
-					if let Poll::Ready((suffix, answer)) = Self::poll_answer(requests, inflight, woken, now, &mut cx) {
+					if let Poll::Ready((suffix, answer)) =
+						Self::poll_answer(requests, inflight, woken, now, self.version, &mut cx)
+					{
 						return Poll::Ready(NamespaceEvent::Answered(suffix, answer));
 					}
 					// The front is now the earliest update still waiting.
@@ -3858,13 +3903,17 @@ where
 				// Only a solicited loop has a stream to close, and its request task closes the
 				// session over a protocol violation.
 				NamespaceEvent::Closed(res) => break res,
-				NamespaceEvent::Request(update) => {
+				NamespaceEvent::Request(mut update) => {
 					if let Err(err) = self.control.accept(update.request_id) {
-						self.session.clone().close(
-							super::error::to_session_code(&crate::SessionError::from(&err)),
-							"invalid request ID",
-						);
-						break Err(err);
+						if matches!(err, Error::GoingAway) {
+							update.refused = Some(err);
+						} else {
+							self.session.clone().close(
+								super::error::to_session_code(&crate::SessionError::from(&err)),
+								"invalid request ID",
+							);
+							break Err(err);
+						}
 					}
 					let refusal = update
 						.refused
@@ -5080,6 +5129,7 @@ struct NamespaceRequest<S: crate::transport::poll::Session> {
 	path: crate::PathOwned,
 	request_id: RequestId,
 	stream: Stream<S, Version>,
+	messages: super::request_stream::Messages<S>,
 	/// The auth the peer holds the request under: the one it opened with, or the one
 	/// its last update carried. Held, so the credential stays presented while it does.
 	auth: Option<crate::auth::Auth>,
@@ -6043,6 +6093,90 @@ mod serve_tests {
 	use crate::coding::{Decode, Decoder};
 	use crate::lite::test_transport::{Log, ScriptedSession, Sent, SinkSession};
 	use crate::model::ProduceTest;
+
+	#[moq_clock::test]
+	async fn idle_advertisements_keep_reading_goaways() {
+		let version = Version::Draft21;
+		let mut session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
+		let stream = Stream::open(&mut session, version).await.unwrap();
+		let suffix: crate::PathOwned = "room".into();
+		let mut requests = HashMap::new();
+		requests.insert(
+			suffix.clone(),
+			NamespaceRequest {
+				path: suffix.clone(),
+				request_id: RequestId(0),
+				stream,
+				messages: super::super::request_stream::Messages::new(session.clone(), true),
+				auth: None,
+				queued: false,
+				pending: None,
+				waker: None,
+			},
+		);
+		let woken = Arc::new(Woken::default());
+		woken.suffixes.lock().unwrap().push(suffix.clone());
+		let mut inflight = VecDeque::new();
+		let runtime = crate::time::sim();
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		assert!(
+			Publisher::<ScriptedSession>::poll_answer(
+				&mut requests,
+				&mut inflight,
+				&woken,
+				runtime.now(),
+				version,
+				&mut cx
+			)
+			.is_pending()
+		);
+		assert!(session.log.closes().is_empty());
+		session.push(&[0x10, 0, 2, 0, 0]);
+		woken.suffixes.lock().unwrap().push(suffix);
+		assert!(matches!(
+			Publisher::<ScriptedSession>::poll_answer(
+				&mut requests,
+				&mut inflight,
+				&woken,
+				runtime.now(),
+				version,
+				&mut cx
+			),
+			Poll::Ready((_, Err(Error::ProtocolViolation)))
+		));
+		assert_eq!(session.log.closes()[0].0, 0x03);
+	}
+
+	#[moq_clock::test]
+	async fn an_update_after_draft18_goaway_is_refused_without_closing_the_session() {
+		let version = Version::Draft18;
+		let h = serve(version);
+		h.publisher.control.accept(RequestId(0)).unwrap();
+		assert_eq!(h.publisher.control.goaway().unwrap(), RequestId(2));
+		// REQUEST_UPDATE, Request ID 2, no parameters.
+		let mut session = ScriptedSession::new(vec![0x02, 0, 2, 2, 0]);
+		let mut stream = Stream::open(&mut session, version).await.unwrap();
+		let mut serving = TrackServe::new(
+			h.session.clone(),
+			h.track.subscribe(None),
+			RequestId(0),
+			version,
+			ServeRange::default(),
+			None,
+		);
+		let served = h
+			.publisher
+			.run_subscription(&mut stream, &mut serving, &mut false, async {}, None)
+			.await;
+		assert!(matches!(served, Some(Served::UpdateFailed(_))), "{served:?}");
+		assert!(h.log.closes().is_empty());
+		let written = session.log.writes.lock().unwrap().clone();
+		let mut bytes = bytes::Bytes::from(written);
+		let super::super::request_stream::Framed(id, body) =
+			crate::coding::decode_buf(&mut bytes, version, super::super::request_stream::Framed::decode).unwrap();
+		assert_eq!(id, ietf::RequestError::ID);
+		assert_eq!(body.message::<ietf::RequestError>(version).unwrap().error_code, 0x06);
+	}
 
 	fn occurrences(log: &Log, needle: &[u8]) -> usize {
 		let writes = log.writes.lock().unwrap();

@@ -1,12 +1,13 @@
 import { Unsupported } from "../auth.ts";
 import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
-import { SessionCode, SessionError } from "../error.ts";
+import { ProtocolViolation, SessionCode, SessionError } from "../error.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream, Writer } from "../stream.ts";
 import type { Session } from "./adapter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { SetupOption, type SetupOptions } from "./parameters.ts";
+import { nextMessage } from "./request_stream.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
@@ -233,8 +234,8 @@ export class IetfAuthWire implements AuthWire {
 	}
 
 	async read(stream: Stream): Promise<WireReply | undefined> {
-		if (await stream.reader.done()) return undefined;
-		const id = await stream.reader.u53();
+		const id = await nextMessage(stream.reader, this.#version, this.#session.client);
+		if (id === undefined) return undefined;
 		switch (id) {
 			case AuthOk.id: {
 				const ok = await AuthOk.decode(stream.reader, this.#version);
@@ -254,6 +255,11 @@ export class IetfAuthWire implements AuthWire {
 		const msg = await AuthMessage.decode(stream.reader, this.#version);
 		this.#session.spendRequest(msg.requestId);
 		return msg.token;
+	}
+
+	async withdrawn(stream: Stream): Promise<void> {
+		if ((await nextMessage(stream.reader, this.#version, this.#session.client)) !== undefined)
+			throw new ProtocolViolation("additional message on an AUTH stream");
 	}
 
 	async grant(stream: Stream, grant: WireGrant): Promise<void> {
