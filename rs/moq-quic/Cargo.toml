@@ -49,10 +49,10 @@ qlog = ["dep:qlog"]
 
 __rustls-post-quantum-test = []
 
-# Exposes the `fuzz/` harness's target bodies through the hidden `fuzz` module. The
-# connection target handshakes over TLS, so it brings ring and a certificate generator.
-# Off by default and hidden from the docs.
-fuzz = ["dep:arbitrary", "dep:rcgen", "rustls-ring"]
+# Exposes the `fuzz/` harness's target bodies, and the plaintext crypto the connection
+# target and the benches run on, through the hidden `fuzz` module. ring keys the endpoint's
+# reset and token secrets. Off by default and hidden from the docs.
+fuzz = ["dep:arbitrary", "ring"]
 
 [dependencies]
 arbitrary = { version = "1.5", features = ["derive"], optional = true }
@@ -65,7 +65,6 @@ moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = fals
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
 rand_pcg = "0.10"
-rcgen = { workspace = true, optional = true, features = ["ring"] }
 ring = { version = "0.17", optional = true }
 rustc-hash = { workspace = true }
 rustls = { version = "0.23.5", default-features = false, features = ["std"], optional = true }
@@ -93,8 +92,6 @@ hex-literal = "1"
 moq-clock = { path = "../moq-clock" }
 proptest = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
-# The benches build their own TLS configs, which the crate only re-exports behind `rustls`.
-rustls = { version = "0.23.5", default-features = false, features = ["std", "ring"] }
 stats_alloc = "0.1.10"
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
 wasm-bindgen-test = "0.3.45"
@@ -109,21 +106,26 @@ name = "fuzz-seeds"
 path = "examples/fuzz-seeds.rs"
 required-features = ["fuzz"]
 
+# The benches run on the hidden `fuzz` module's plaintext crypto.
 [[bench]]
 name = "streams"
 harness = false
+required-features = ["fuzz"]
 
 [[bench]]
 name = "receive"
 harness = false
+required-features = ["fuzz"]
 
 [[bench]]
 name = "endpoint"
 harness = false
+required-features = ["fuzz"]
 
 [[bench]]
 name = "wire"
 harness = false
+required-features = ["fuzz"]
 
 # quinn's workspace lints, kept so upstream code stays clean against them.
 [lints.rust]

@@ -692,7 +692,9 @@ impl Reader {
 		if let Some(Some(Ok(()))) = serving.map(&done) {
 			return Some(Poll::Ready(Ok(None)));
 		}
-		match self.route.end() {
+		let end = self.route.end();
+		let ended = end.is_some();
+		match end {
 			Some(Some(Err(err))) => return Some(Poll::Ready(Err(err))),
 			// Ended cleanly: once the serving copy (if any) drained.
 			Some(Some(Ok(()))) => match serving.map(&done) {
@@ -710,10 +712,22 @@ impl Reader {
 			},
 			None => {}
 		}
-		match self.route.poll_changed(self.generation.unwrap_or_default(), waiter) {
-			Poll::Ready(()) if self.route.end().is_none() => None,
-			_ => Some(Poll::Pending),
+		match self.poll_moved(ended, waiter) {
+			true => None,
+			false => Some(Poll::Pending),
 		}
+	}
+
+	/// Park until the route moves past the generation last synced, or `true` when it
+	/// already has and the caller should look again. `ended` is the end the caller
+	/// already acted on: an end set since then readies the route without parking on it,
+	/// so it has to be read rather than waited for.
+	fn poll_moved(&self, ended: bool, waiter: &kio::Waiter) -> bool {
+		!ended
+			&& self
+				.route
+				.poll_changed(self.generation.unwrap_or_default(), waiter)
+				.is_ready()
 	}
 
 	fn poll_recv_datagram(
@@ -782,54 +796,56 @@ impl Reader {
 	}
 
 	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
-		self.sync(waiter);
-		let groups = self.groups;
-		let concluded = self.route.end();
-		if let Some(Some(Err(err))) = concluded {
-			return Poll::Ready(Err(err));
-		}
-		let serving = self.generation;
-		if let Some(copy) = self.copies.last_mut().filter(|copy| Some(copy.generation) == serving) {
-			match copy.poll_ready(groups, waiter) {
-				Poll::Ready(Ok(sub)) => match sub.poll_finished(waiter) {
-					Poll::Ready(Ok(fin)) => return Poll::Ready(Ok(fin)),
-					// The copy failed: only the end of the track if no front replaces it.
+		loop {
+			self.sync(waiter);
+			let groups = self.groups;
+			let concluded = self.route.end();
+			if let Some(Some(Err(err))) = concluded {
+				return Poll::Ready(Err(err));
+			}
+			let serving = self.generation;
+			if let Some(copy) = self.copies.last_mut().filter(|copy| Some(copy.generation) == serving) {
+				match copy.poll_ready(groups, waiter) {
+					Poll::Ready(Ok(sub)) => match sub.poll_finished(waiter) {
+						Poll::Ready(Ok(fin)) => return Poll::Ready(Ok(fin)),
+						// The copy failed: only the end of the track if no front replaces it.
+						Poll::Ready(Err(err)) if concluded.is_some() => return Poll::Ready(Err(err)),
+						_ => {}
+					},
 					Poll::Ready(Err(err)) if concluded.is_some() => return Poll::Ready(Err(err)),
 					_ => {}
-				},
-				Poll::Ready(Err(err)) if concluded.is_some() => return Poll::Ready(Err(err)),
-				_ => {}
+				}
+			} else if concluded.is_some() {
+				return Poll::Ready(Err(Error::Unroutable));
 			}
-		} else if concluded.is_some() {
-			return Poll::Ready(Err(Error::Unroutable));
+			if !self.poll_moved(concluded.is_some(), waiter) {
+				return Poll::Pending;
+			}
 		}
-		let _ = self.route.poll_changed(serving.unwrap_or_default(), waiter);
-		Poll::Pending
 	}
 
 	/// The serving copy's subscription, once it answered; `None` once the track ended
 	/// without one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn poll_serving(&mut self, waiter: &kio::Waiter) -> Poll<Option<&mut track::Subscriber>> {
-		self.sync(waiter);
-		let groups = self.groups;
-		let serving = self.generation;
-		let concluded = self.route.end().is_some();
-		let copy = self.copies.last_mut().filter(|copy| Some(copy.generation) == serving);
-		match copy {
-			Some(copy) => match copy.poll_ready(groups, waiter) {
-				Poll::Ready(Ok(sub)) => Poll::Ready(Some(sub)),
-				Poll::Ready(Err(_)) if concluded => Poll::Ready(None),
-				_ => {
-					let _ = self.route.poll_changed(serving.unwrap_or_default(), waiter);
-					Poll::Pending
-				}
-			},
-			None if concluded => Poll::Ready(None),
-			None => {
-				let _ = self.route.poll_changed(serving.unwrap_or_default(), waiter);
-				Poll::Pending
+		loop {
+			self.sync(waiter);
+			let groups = self.groups;
+			let serving = self.generation;
+			let concluded = self.route.end().is_some();
+			let copy = self.copies.last_mut().filter(|copy| Some(copy.generation) == serving);
+			match copy.map(|copy| copy.poll_ready(groups, waiter).map(|res| res.is_ok())) {
+				Some(Poll::Ready(true)) => break,
+				Some(Poll::Ready(false)) | None if concluded => return Poll::Ready(None),
+				_ => {}
 			}
+			if !self.poll_moved(concluded, waiter) {
+				return Poll::Pending;
+			}
+		}
+		match self.copies.last_mut().map(|copy| &mut copy.sub) {
+			Some(Sub::Ready(sub)) => Poll::Ready(Some(sub)),
+			_ => unreachable!("the serving copy answered above"),
 		}
 	}
 

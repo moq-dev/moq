@@ -1,3 +1,4 @@
+import type * as Epoch from "../epoch.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { hasRangeFilters, isDraft20 } from "./filter.ts";
@@ -44,15 +45,19 @@ export class Fetch {
 	rangeFilters: boolean;
 	/** The decoded standalone namespace, absent for a joining fetch. */
 	trackNamespace?: Path.Valid;
+	/** The publisher instance the requester expects (EPOCH, MoQ Epoch), never on a joining fetch. */
+	epoch?: Epoch.Valid;
 
 	constructor({
 		requestId,
 		rangeFilters = false,
 		trackNamespace,
-	}: { requestId: bigint; rangeFilters?: boolean; trackNamespace?: Path.Valid }) {
+		epoch,
+	}: { requestId: bigint; rangeFilters?: boolean; trackNamespace?: Path.Valid; epoch?: Epoch.Valid }) {
 		this.requestId = requestId;
 		this.rangeFilters = rangeFilters;
 		this.trackNamespace = trackNamespace;
+		this.epoch = epoch;
 	}
 
 	async #encode(_w: Writer): Promise<void> {
@@ -106,8 +111,13 @@ export class Fetch {
 		if (params.trackPropertyFilter) {
 			throw new Error("TRACK_PROPERTY_FILTER is not allowed on FETCH");
 		}
+		// A joining FETCH is served by its subscription's instance, so naming one is malformed.
+		const epoch = params.epoch;
+		if (epoch !== undefined && trackNamespace === undefined) {
+			throw new Error("EPOCH is not allowed on a joining FETCH");
+		}
 
-		return new Fetch({ requestId, rangeFilters: params.rangeFilters, trackNamespace });
+		return new Fetch({ requestId, rangeFilters: params.rangeFilters, trackNamespace, epoch });
 	}
 }
 
