@@ -16,6 +16,7 @@ export class Manual {
 	#timers: Timer[] = [];
 	#order = 0;
 	#revision = 0;
+	#fired = 0;
 	#firing = false;
 	#armed?: () => void;
 	#backend: Backend = {
@@ -74,13 +75,15 @@ export class Manual {
 	async fire(): Promise<Instant> {
 		if (this.#firing) throw new Error("fire already pending");
 		this.#firing = true;
+		const fired = this.#fired;
 		try {
 			for (;;) {
 				// Lets a pending microtask chain arm an earlier timer before choosing the deadline.
 				await drain();
-				const first = this.#timers[0];
-				if (first) {
-					await this.advanceAsync(Instant.durationSince(Instant(first.at), this.#now));
+				// arm() runs an already-due timer at once, so it never waits in the heap.
+				const at = this.#fired !== fired ? this.#now : this.#timers[0]?.at;
+				if (at !== undefined) {
+					await this.advanceAsync(Instant.durationSince(Instant(at), this.#now));
 					return this.#now;
 				}
 				// A host task, such as I/O, may arm the timer later than any drain can wait for.
@@ -151,6 +154,7 @@ export class Manual {
 			if (!first || first.at > this.#now) return;
 			this.#remove(first);
 			this.#revision++;
+			this.#fired++;
 			first.ready();
 		}
 	}

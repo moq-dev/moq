@@ -272,3 +272,23 @@ test("fire waits, without a timer, until a later host task arms one", async () =
 	await pending;
 	expect(fired).toBe(7);
 });
+
+test("fire resolves when a later host task arms an already-due timer", async () => {
+	const clock = manual();
+	clock.advance(Nano(4));
+	let woke = false;
+	const pending = clock.fire();
+	await hostTimeout(0);
+	void sleep(Nano(0)).then(() => {
+		woke = true;
+	});
+	expect<number>(await pending).toBe(4);
+	expect(woke).toBe(true);
+});
+
+test("fire stops at an already-due timer a pending microtask chain arms", async () => {
+	const clock = manual();
+	void sleepUntil(Instant(100));
+	void Promise.resolve().then(() => sleep(Nano(0)));
+	expect<number>(await clock.fire()).toBe(0);
+});
