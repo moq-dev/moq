@@ -2696,9 +2696,12 @@ impl Connection {
     ) {
         // State transitions for error cases
         if let Err(ConnectionError::Reset) = result
-            && matches!(self.state, State::Draining | State::Drained)
+            && matches!(
+                self.state,
+                State::Closed(_) | State::Draining | State::Drained
+            )
         {
-            // Preserve the original close reason once draining has begun.
+            // Preserve the original close reason once the connection has closed.
             self.state = State::Drained;
         } else if let Err(conn_err) = result {
             self.error = Some(conn_err.clone());

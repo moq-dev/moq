@@ -19,11 +19,11 @@ release, with clustering stability and the in-tree QUIC stack first.
   expansion in m1. Keep their correctness, interoperability, memory, and
   performance evidence with them.
 - Defer P2P, watch-worker planning and implementation, AMD Vulkan encode and
-  Intel VA-API/Vulkan import, QoS lag and prefix stats, and active-active
-  same-epoch importers to m2 with their prerequisites. Their possible API
-  breaks do not make them prerequisites of this cut. Existing playback and
-  A/V clock validation remain here. Same-epoch importers require the epoch
-  anchor and raw TS epoch cuts before claiming redundant-import support.
+  Intel VA-API/Vulkan import, and QoS lag and prefix stats to m2 with their
+  prerequisites. Their possible API breaks do not make them prerequisites of
+  this cut. Existing playback and A/V clock validation remain here.
+  Same-epoch importers were dropped (maintainer, 2026-10-19): a redundant
+  ingest pair runs on [distinct epochs](/quest/m0/broadcast-epoch/distinct-importer-epochs.md).
 - Finalized lite-07 is preferred by first-party Rust and JS clients, with
   older-version negotiation fallback. Servers accept it by default. Never
   reuse a published identifier for an incompatible wire change; deferred
@@ -74,10 +74,11 @@ lands before the cut.
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
+- [Subscribing readers never ask TRACK_STATUS](/quest/m1/track-status-race.md) - a reader's subscription lands with its request, and the NOT_SUPPORTED fallback goes away
+- [IETF max age](/quest/m1/ietf-max-age.md) - a moq-transport subscriber sets lite's max age through a timestamp-draft SUBSCRIBE parameter
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [Browser follows a renamed track](/quest/m1/browser-rename-check.md) - a real browser keeps playing when `@moq/publish` renames a track after a codec change, while size-only changes keep their identity
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
-- [JSON duplicate keys](/quest/m1/json-duplicate-keys.md) - Rust and JS JSON decoders refuse duplicate keys in every frame kind
 - [Catalog too new](/quest/m1/catalog-unsupported.md) - `@moq/watch` reports a distinct status when its player cannot read the catalog version
 - [One hang catalog consumer](/quest/m1/catalog-consumer-fold.md) - `moq-mux` reads hang catalogs through `hang`'s consumer
 - [Broadcast archives](/quest/m1/archive/README.md) - SUBSCRIBE_ALL records every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for an opt-in `hls` field
@@ -86,6 +87,7 @@ lands before the cut.
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
 - [IETF takeover](/quest/m1/ietf-takeover.md) - carry the shared takeover contract through the negotiated IETF epoch extension
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explain pinned catalogs, lazy jobs, takeover, restart and version compatibility
+- [Redundant ingest guide](/quest/m1/redundant-ingest-guide.md) - a setup page on redundant ingest over multiple routes, for any publisher
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [moq-ffi reports why a first dial fails](/quest/m1/ffi-first-dial-failure.md) - OBS names the reason while the first dial retries, as moq-c already can
 - [Typed refusal reason](/quest/m1/refusal-reason.md) - an auth server's 403 names the reason (including `expired`) and the root and tier, so the relay's session outcomes count and attribute refusals
@@ -95,6 +97,8 @@ lands before the cut.
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence, and the media fixture's cold-start audio-tone flake is fixed at its cause
 - [Handshake deadline covers admission](/quest/m1/handshake-admission-deadline.md) - `listen.timeout` bounds a connection through auth admission on both listeners, replacing the hardcoded admission timeout
+- [Ring SETUP token](/quest/m1/uring-setup-token.md) - the ring forwards a moq-transport SETUP token to the auth decider, as tokio does
+- [Restart reset](/quest/m1/stateless-reset-key.md) - a relay restarted with the same `listen.reset_key` stateless-resets its predecessor's connections, so clients reconnect within an RTT instead of the idle timeout
 - [Drain cleanup](/quest/m1/drain-cleanup.md) - sessions force-closed at the drain deadline record their lease end and bytes before the relay or CLI exits, while unfinished handshakes stay bounded
 - [GOAWAY coverage](/quest/m1/goaway-coverage.md) - every IETF request stream handles GOAWAY, a closed control stream is a violation, and the draft-18 cutoff is honored
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
@@ -102,7 +106,6 @@ lands before the cut.
 - [Transcode finishes its group](/quest/m1/transcode-open-group.md) - `moq-transcode` never aborts a group a fetch's live loop opened
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
-- [Bufferbloat harness](/quest/m1/bufferbloat.md) - acceptance and performance checks impair paths with a rate limit and a deep queue, not random loss
 - [Random-loss audit](/quest/m1/random-loss-audit.md) - every decision random-loss gates drove is kept, reworked, or reverted on shaped paths
 - [Timed-out requests clean up](/quest/m1/legacy-request-timeout-cleanup.md) - on drafts 14-16, Rust and JS send PUBLISH_NAMESPACE_DONE or UNSUBSCRIBE_NAMESPACE for a timed-out request before its local reset
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide

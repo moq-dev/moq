@@ -145,6 +145,14 @@ pub struct Info {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
 	pub(crate) dynamic_groups: bool,
+	/// The moq-transport Track Properties moq-net does not interpret, learned from an
+	/// upstream moq-transport session and forwarded unchanged. `None` when there are none.
+	///
+	/// Relay-only, like [`Self::dynamic_groups`]: moq-lite does not carry them. Shared, since
+	/// every group holds a copy of the info.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
 }
 
 impl Default for Info {
@@ -154,6 +162,7 @@ impl Default for Info {
 			max_age: None,
 			priority: DEFAULT_PRIORITY,
 			dynamic_groups: false,
+			properties: None,
 		}
 	}
 }
@@ -5651,6 +5660,21 @@ impl Subscriber {
 	#[cfg(feature = "async")]
 	pub async fn largest(&mut self) -> Option<Position> {
 		kio::wait(|waiter| self.poll_largest(waiter)).await
+	}
+
+	/// The largest location known now, without waiting or moving [`Self::poll_largest`] on:
+	/// past what the cache holds once the source reported a newer one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: capability gap
+	pub(crate) fn peek_largest(&mut self) -> Option<Position> {
+		let mut seen = None;
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.state.read().cache.take_largest(&mut seen),
+			Inner::Resume(resume, _) => match resume.poll_largest(&mut seen, &kio::Waiter::noop()) {
+				Poll::Ready(largest) => largest,
+				Poll::Pending => None,
+			},
+		}
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]

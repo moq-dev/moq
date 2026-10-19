@@ -217,19 +217,30 @@ jobs:
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
-      # 1% random loss and 25 ms each way on the subscriber's leg (moq-dev/moq#4613), through
-      # moq-shaper: QUIC retransmission must keep the export T-STD compliant with no media lost.
-      # `--hrd`, since `--headroom` still loses audio just after the join at 1%.
-      - name: TS lossy path
+      # The subscriber's leg congested the way real paths are, through moq-shaper: 7 Mb/s under
+      # the 9 Mb/s video, behind a 2 s queue, 25 ms each way. The export must stay T-STD compliant
+      # and continuous, shed only whole groups, and keep its latency, so the last group arrives.
+      - name: TS congested path
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-        run: nix develop --command just test ts --hrd --loss 1 --duration 120
+        run: nix develop --command just test ts --hrd --rate 7000000 --duration 120
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
-      # The passthrough over the same path: retransmission must leave no packet missing or moved.
-      - name: TS passthrough lossy path
+      # The same path behind a 250 ms queue, with the relay's loss-based CUBIC: BBRv3 never fills a
+      # queue this deep, CUBIC overflows it every sawtooth. QUIC must recover what the queue drops
+      # inside the export's 1 s delay, and the run fails unless the queue overflowed.
+      - name: TS overflowing path
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-        run: nix develop --command just test ts --passthrough --loss 1 --duration 120
+        run: nix develop --command just test ts --hrd --rate 7000000 --queue 250ms --duration 120
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          MOQ_QUIC_CONGESTION_CONTROL: loss
+
+      # The passthrough over the congested path, under its 10 Mb/s multiplex: what arrives must be the
+      # source's packets in place.
+      - name: TS passthrough congested path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --passthrough --rate 7000000 --duration 120
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
