@@ -15,8 +15,10 @@ use crate::Instant;
 thread_local! {
 	/// The queue [`Deadlines::enter`] made this thread's ambient clock.
 	static ENTERED: RefCell<Option<Deadlines>> = const { RefCell::new(None) };
-	/// How many [`Entered`] guards are live on this thread, so each knows whether it is the innermost.
-	static DEPTH: Cell<usize> = const { Cell::new(0) };
+	/// The live [`Entered`] guards on this thread, innermost last.
+	static GUARDS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+	/// The id the next [`Entered`] guard on this thread takes.
+	static NEXT_GUARD: Cell<u64> = const { Cell::new(0) };
 }
 
 /// A deadline queue for caller-driven code, advanced only by the instants it is handed.
@@ -147,13 +149,11 @@ impl Deadlines {
 	/// reading of the host clock, so nothing it runs reads the host clock again.
 	pub fn enter(&self) -> Entered {
 		let previous = ENTERED.with(|entered| entered.replace(Some(self.clone())));
-		let depth = DEPTH.with(|depth| {
-			depth.set(depth.get() + 1);
-			depth.get()
-		});
+		let id = NEXT_GUARD.with(|next| next.replace(next.get() + 1));
+		GUARDS.with(|guards| guards.borrow_mut().push(id));
 		Entered {
 			previous,
-			depth,
+			id,
 			thread: PhantomData,
 		}
 	}
@@ -161,27 +161,36 @@ impl Deadlines {
 
 /// Keeps a [`Deadlines`] queue the thread's ambient clock; dropping it restores the one before.
 ///
-/// Guards must drop in reverse order of entering: dropping one while a later
-/// guard is still live panics.
+/// Guards must drop in reverse order of entering. Dropping one while a later
+/// guard is still live restores the clock from before it, retires the later
+/// guards (their drops do nothing), and panics.
 #[must_use = "the queue stops being the ambient clock when this drops"]
 pub struct Entered {
 	previous: Option<Deadlines>,
-	/// How many guards were live on this thread once this one entered.
-	depth: usize,
+	/// This guard's entry in the thread's live guards.
+	id: u64,
 	/// Restores the thread it was entered on.
 	thread: PhantomData<*const ()>,
 }
 
 impl Drop for Entered {
 	fn drop(&mut self) {
-		let innermost = DEPTH.with(|depth| depth.get()) == self.depth;
-		// Restoring out of order would bring back a queue whose guard already dropped.
-		if !innermost && !std::thread::panicking() {
-			panic!("an Entered guard dropped while a later one is still live");
-		}
+		let retired_later = GUARDS.with(|guards| {
+			let mut guards = guards.borrow_mut();
+			// Gone already: an outer guard dropped out of order retired this one.
+			let index = guards.iter().position(|id| *id == self.id)?;
+			let later = guards.len() - index - 1;
+			guards.truncate(index);
+			Some(later)
+		});
+		let Some(later) = retired_later else { return };
+		// The state is repaired before any panic, so a caught panic leaves no
+		// retired queue as the ambient clock.
 		let previous = self.previous.take();
 		ENTERED.with(|entered| *entered.borrow_mut() = previous);
-		DEPTH.with(|depth| depth.set(self.depth - 1));
+		if later > 0 && !std::thread::panicking() {
+			panic!("an Entered guard dropped while a later one is still live");
+		}
 	}
 }
 
@@ -689,5 +698,24 @@ mod tests {
 		let outer = outer.enter();
 		let _inner = inner.enter();
 		drop(outer);
+	}
+
+	/// A caught out-of-order drop leaves the clock from before the outer guard,
+	/// and the retired inner guard's drop does not bring a queue back.
+	#[test]
+	fn a_caught_out_of_order_drop_restores_the_clock() {
+		let outer = Deadlines::new(Instant::ZERO + Duration::from_secs(1));
+		let inner = Deadlines::new(Instant::ZERO + Duration::from_secs(2));
+		let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let outer = outer.enter();
+			let _inner = inner.enter();
+			drop(outer);
+		}));
+		assert!(result.is_err(), "the out-of-order drop did not panic");
+		assert!(super::entered().is_none(), "a dropped queue is still the ambient clock");
+		assert!(
+			crate::now() > Instant::ZERO + Duration::from_secs(2),
+			"the host clock is back"
+		);
 	}
 }
