@@ -62,8 +62,8 @@ reasons, so later sessions don't reopen them:
 - **The simulator folds into `moq-clock`** behind a `sim` feature (a
   dev-dependency only, so production builds never compile it). It is one
   backend of the ambient clock, starts at zero, keeps deadlock detection, and
-  seeds the later runtime trait. `#[moq_clock::test]` replaces
-  `#[moq_clock::test]`.
+  seeds the later runtime trait. `#[moq_clock::test]` runs tests on this
+  backend.
 - **Tests for migrated contracts use the sim wherever possible.** A test with no real I/O
   that cannot run on the sim yet uses paused tokio, whose clock `moq-clock`
   reads. A real-I/O test never uses paused tokio, which auto-advances to the

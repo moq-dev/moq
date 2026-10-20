@@ -71,5 +71,5 @@ inside. The header is the reference: each function carries a doc comment.
 
 ## Reference
 
-- API reference: [docs.rs/moq-c](https://docs.rs/moq-c)
+- API source: [rs/moq-c/src](https://github.com/moq-dev/moq/tree/main/rs/moq-c/src)
 - Source and a worked example: [`rs/moq-c`](https://github.com/moq-dev/moq/tree/main/rs/moq-c)

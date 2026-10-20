@@ -43,6 +43,7 @@ use moq_net::Timestamp;
 use super::catalog::Catalog as _;
 use crate::catalog::Stream;
 use crate::catalog::hang::Catalog;
+use crate::codec::annexb::InBandCodec;
 use crate::codec::video::{Hrd, Reorder};
 use crate::codec::{aac, annexb, opus};
 use crate::container::decode::{DecodeClock, MAX_REORDER};
@@ -3238,25 +3239,33 @@ fn ac3_sync_prefix(bytes: &[u8]) -> bool {
 }
 
 /// Build the Annex-B elementary-stream payload for one video frame: rewrite the
-/// length-prefixed NALs to start-code-delimited NALs, prepending the parameter
-/// sets (SPS/PPS, plus VPS for H.265) from the avcC/hvcC on keyframes so a
-/// receiver can tune in mid-stream.
+/// length-prefixed NALs to start-code-delimited NALs, injecting the parameter
+/// sets (SPS/PPS, plus VPS for H.265) from the avcC/hvcC after a leading AUD on
+/// keyframes so a receiver can tune in mid-stream.
 fn video_es_payload(stream_type: StreamType, description: Option<&Bytes>, frame: &Frame) -> anyhow::Result<Vec<u8>> {
 	let description = description.context("video codec config (avcC/hvcC) not resolved")?;
-	let (length_size, params) = match stream_type {
-		StreamType::H264 => crate::codec::h264::avcc_params(description)?,
-		StreamType::H265 => crate::codec::h265::hvcc_params(description)?,
+	let (codec, (length_size, params)) = match stream_type {
+		StreamType::H264 => (InBandCodec::H264, crate::codec::h264::avcc_params(description)?),
+		StreamType::H265 => (InBandCodec::H265, crate::codec::h265::hvcc_params(description)?),
 		other => anyhow::bail!("unsupported TS video stream type {other:?}"),
 	};
 
 	let mut out = Vec::with_capacity(frame.payload.len() + 64);
+	let mut nals = annexb::length_prefixed_nals(&frame.payload, length_size)?;
 	if frame.keyframe {
+		if let Some(aud) = nals.take_delimiter(codec)? {
+			out.extend_from_slice(&annexb::START_CODE);
+			out.extend_from_slice(aud);
+		}
 		for nal in &params {
 			out.extend_from_slice(&annexb::START_CODE);
 			out.extend_from_slice(nal);
 		}
 	}
-	annexb::length_prefixed_to_annexb(&frame.payload, length_size, &mut out)?;
+	for nal in nals {
+		out.extend_from_slice(&annexb::START_CODE);
+		out.extend_from_slice(nal?);
+	}
 	Ok(out)
 }
 
@@ -3483,8 +3492,168 @@ mod tests {
 		slot, unwrap_pts, verbatim_buffer,
 	};
 
+	/// The same available video/audio backlog must choose the same start in either fill order.
+	#[tokio::test(start_paused = true)]
+	async fn track_fill_observes_every_available_track_before_acquisition() {
+		use crate::catalog::hang::Container;
+		use crate::container::{Kind as MediaKind, Producer};
+
+		for order in [[0, 1], [1, 0]] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let mut publishers = Vec::new();
+			for name in ["video", "audio"] {
+				let track = broadcast.create_track(name, hang::container::track_info(0)).unwrap();
+				publishers.push(Producer::new(track, Container::Legacy(MediaKind::Data)));
+			}
+			let source = crate::source::announced(&broadcast.consume()).await;
+			let mut tracks = Vec::new();
+			for (pid, name, kind) in [
+				(1, "video", Kind::Video(mpeg2ts::es::StreamType::H264)),
+				(2, "audio", Kind::Mp2 { sample_rate: 48_000 }),
+			] {
+				let source = super::ExportSource::for_stream(&source, name, Duration::from_secs(2)).unwrap();
+				let mut track = super::Track::new(source, kind);
+				track.pid = pid;
+				tracks.push(track);
+			}
+			let frame = |at| super::Frame {
+				timestamp: ms(at),
+				duration: None,
+				payload: bytes::Bytes::from_static(b"frame"),
+				keyframe: at % 600 == 0,
+			};
+			let start = moq_clock::now();
+			let mut jitter = super::jitter::Buffer::new(Duration::from_millis(500));
+			jitter.expect([1, 2]);
+			let mut trimmed = 0;
+			for publisher in &mut publishers {
+				publisher.write(frame(0)).unwrap();
+			}
+			// As in Export::poll_next, the first held frame of each track arrives first.
+			kio::wait(|waiter| {
+				for track in &mut tracks {
+					track
+						.fill(
+							"track",
+							waiter,
+							&mut super::Input {
+								waiting_for_header: false,
+								video_start: None,
+								jitter: &mut jitter,
+								trimmed: &mut trimmed,
+							},
+						)
+						.unwrap();
+				}
+				if jitter.len() == 2 {
+					std::task::Poll::Ready(())
+				} else {
+					std::task::Poll::Pending
+				}
+			})
+			.await;
+			for (index, publisher) in publishers.iter_mut().enumerate() {
+				let end = if index == 0 { 1_200 } else { 800 };
+				for at in (40..=end).step_by(40) {
+					publisher.write(frame(at)).unwrap();
+				}
+				publisher.finish().unwrap();
+			}
+			let waiter = kio::Waiter::noop();
+			for index in order {
+				tracks[index]
+					.fill(
+						"track",
+						&waiter,
+						&mut super::Input {
+							waiting_for_header: false,
+							video_start: None,
+							jitter: &mut jitter,
+							trimmed: &mut trimmed,
+						},
+					)
+					.unwrap();
+			}
+			assert!(jitter.poll_next(&waiter).is_pending());
+			// The last available audio frame, including its scheduling lead, anchors both orders.
+			let (decode, key, _) = tracks[1].released.unwrap();
+			assert_eq!(decode.as_micros(), 800_000);
+			assert_eq!(jitter.at(key), Some(start + Duration::from_millis(500)), "{order:?}");
+			tokio::time::advance(Duration::from_millis(500)).await;
+			let video = std::iter::from_fn(|| match jitter.poll_next(&waiter) {
+				std::task::Poll::Ready(ready) => Some(ready),
+				std::task::Poll::Pending => None,
+			})
+			.find(|ready| ready.track == 1)
+			.expect("a video start");
+			assert_eq!(video.item.frame.timestamp.as_micros(), 600_000, "{order:?}");
+		}
+	}
+
 	fn ms(value: u64) -> Timestamp {
 		Timestamp::from_millis(value).unwrap()
+	}
+
+	#[test]
+	fn video_es_payload_keeps_aud_first() {
+		for (stream_type, params, aud, slice) in [
+			(
+				super::StreamType::H264,
+				vec![vec![0x67, 0x42, 0, 0x1f], vec![0x68, 0xce]],
+				vec![0x09, 0x10],
+				vec![0x65, 0x88],
+			),
+			(
+				super::StreamType::H265,
+				vec![vec![0x40, 1], vec![0x42, 1], vec![0x44, 1]],
+				vec![0x46, 1, 0x10],
+				vec![0x26, 1, 0x88],
+			),
+		] {
+			let params: Vec<bytes::Bytes> = params.into_iter().map(bytes::Bytes::from).collect();
+			let description = if stream_type == super::StreamType::H264 {
+				crate::codec::h264::build_avcc(&params[..1], &params[1..]).unwrap()
+			} else {
+				let mut hvcc = vec![0; 23];
+				hvcc[21] = 3;
+				hvcc[22] = 3;
+				for (kind, nal) in (32..=34).zip(&params) {
+					hvcc.extend_from_slice(&[kind, 0, 1]);
+					hvcc.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+					hvcc.extend_from_slice(nal);
+				}
+				hvcc.into()
+			};
+			for keyframe in [false, true] {
+				for leading in [None, Some(aud.as_slice())] {
+					let mut payload = Vec::new();
+					for nal in leading.into_iter().chain([slice.as_slice()]) {
+						payload.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+						payload.extend_from_slice(nal);
+					}
+					let frame = super::Frame {
+						timestamp: ms(0),
+						payload: payload.into(),
+						keyframe,
+						duration: None,
+					};
+					let mut expected = Vec::new();
+					if let Some(aud) = leading {
+						expected.extend_from_slice(&super::annexb::START_CODE);
+						expected.extend_from_slice(aud);
+					}
+					if keyframe {
+						expected.extend_from_slice(&super::annexb::build_prefix(&params));
+					}
+					expected.extend_from_slice(&super::annexb::START_CODE);
+					expected.extend_from_slice(&slice);
+					assert_eq!(
+						super::video_es_payload(stream_type, Some(&description), &frame).unwrap(),
+						expected
+					);
+				}
+			}
+		}
 	}
 
 	/// A six-block E-AC-3 sync frame of 512 bytes: `stream` is byte 2's top bits (strmtyp,

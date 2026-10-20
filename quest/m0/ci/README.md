@@ -62,6 +62,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 ## Required
 
+- [Cargo.lock pins wasm-bindgen](/quest/m0/ci/wasm-bindgen-pin.md) - the dev shell's wasm-bindgen CLI follows `Cargo.lock`, so a nixpkgs bump cannot break WASM on `main`
 - [Pin Quest's gate](/quest/m0/ci/quest-gate-pin.md) - make shared command admission available
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
 - [Require platform gates](/quest/m0/ci/platform-queue.md) - activate the consolidated platform checks in the main and release rulesets after the workflow lands
