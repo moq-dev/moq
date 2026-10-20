@@ -120,8 +120,8 @@ struct Media {
 
 struct Handle {
 	binding: Arc<moq_mux::Binding>,
-	/// The resolved track and the query keeping it alive without subscribing to its media.
-	track: Option<(moq_net::track::Consumer, moq_net::track::Querying)>,
+	/// The query holding the track instance alive without subscribing to its media.
+	track: Option<moq_net::track::Querying>,
 	/// The bound sibling ended, so only its retained rows drain.
 	ended: bool,
 }
@@ -131,10 +131,9 @@ impl Handle {
 		if self.track.is_none()
 			&& let Ok(track) = broadcast.track(name)
 		{
-			// Track handles are lazy. Querying installs and holds the concrete instance, so
-			// the second handle captures it before End refuses new broadcast lookups.
-			let query = track.query().into_inner();
-			self.track = broadcast.track(name).ok().map(|track| (track, query));
+			// The lookup is lazy: the query installs the instance, and reads pin to it through
+			// the query, since End may refuse any lookup made after this one.
+			self.track = Some(track.query().into_inner());
 		}
 	}
 }
@@ -213,7 +212,7 @@ impl Media {
 		};
 		let mut handle = self.handle.lock().expect("media lock poisoned");
 		handle.capture(&broadcast, &self.track);
-		Poll::Ready(handle.track.as_ref().map(|(track, _)| (broadcast, track.clone())))
+		Poll::Ready(handle.track.as_ref().map(|query| (broadcast, query.track())))
 	}
 }
 
@@ -1357,6 +1356,68 @@ mod tests {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		std::mem::forget(driver);
 		producer
+	}
+
+	// End may land while capture's query installs a dynamically served track. The handle must
+	// stay on that instance rather than repeat a lookup End refuses, or its retained media is lost.
+	#[test]
+	fn capture_keeps_the_queried_track_when_end_lands_during_the_query() {
+		struct Serve {
+			broadcast: moq_net::broadcast::Producer,
+			dynamic: std::sync::Mutex<moq_net::broadcast::Dynamic>,
+			track: std::sync::Mutex<Option<moq_net::track::Producer>>,
+			// Kept alive here, since a list only holds it weakly.
+			waiter: std::sync::OnceLock<kio::Waiter>,
+		}
+		impl Serve {
+			fn poll(&self) -> Poll<moq_net::Result<moq_net::track::Request>> {
+				let waiter = self.waiter.get().expect("waiter set");
+				self.dynamic.lock().unwrap().poll_requested_track(waiter)
+			}
+		}
+		impl std::task::Wake for Serve {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				// The lookup before the query wakes us too, so poll until the request lands.
+				let Poll::Ready(Ok(request)) = self.poll() else {
+					return;
+				};
+				let mut track = request.accept(moq_net::track::Info::default());
+				track.write_frame(None, Bytes::from_static(b"retained")).unwrap();
+				self.broadcast.close();
+				*self.track.lock().unwrap() = Some(track);
+			}
+		}
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let serve = Arc::new(Serve {
+			dynamic: std::sync::Mutex::new(broadcast.dynamic()),
+			broadcast,
+			track: Default::default(),
+			waiter: Default::default(),
+		});
+		let waiter = kio::Waiter::new(std::task::Waker::from(serve.clone()));
+		assert!(serve.waiter.set(waiter).is_ok());
+		assert!(serve.poll().is_pending());
+
+		let consumer = serve.broadcast.consume();
+		let mut handle = Handle {
+			binding: Arc::new(moq_mux::Binding::new(consumer.clone())),
+			track: None,
+			ended: false,
+		};
+		handle.capture(&consumer, "video");
+		assert!(serve.track.lock().unwrap().is_some(), "the query was served");
+		assert!(consumer.track("video").is_err(), "End refuses new lookups");
+
+		let query = handle.track.as_ref().expect("the queried track is kept");
+		let mut fetch = query.track().fetch_group(0, None).into_inner();
+		let Poll::Ready(group) = kio::Task::poll(&mut fetch, &kio::Waiter::noop()) else {
+			panic!("the retained group is cached");
+		};
+		group.expect("the retained group drains after End");
 	}
 
 	#[test]

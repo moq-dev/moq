@@ -4302,7 +4302,7 @@ pub struct Querying {
 
 impl Querying {
 	/// A handle on the track instance this query asked, whatever its broadcast serves later.
-	pub(super) fn track(&self) -> Consumer {
+	pub fn track(&self) -> Consumer {
 		Consumer {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
