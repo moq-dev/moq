@@ -78,3 +78,4 @@ numbers.
 ## Related
 
 - [Faster runners](/quest/m0/ci/runners.md) - waits on this audit's result
+- [CI workflow audit](/quest/m1/audit-ci.md) - the recurring per-workflow audit that starts from this one's result
