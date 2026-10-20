@@ -46,6 +46,11 @@ Decided with the maintainer, 2026-10-20:
   closed, then aborts it. With a budget above the outage, every group
   arrives. With a budget below it, only the in-budget tail arrives. No
   end-to-end relay kill test.
+- The `--delay 10s` loss must be explained before this closes #6062. If the
+  moq-net test passes, add a mock-time unit test in
+  `rs/moq-mux/src/container/consumer.rs` that feeds the consumer a resumed
+  backlog burst within its budget, and assert it reads every group without a
+  `Read::Gap`.
 - Fix any bug the test exposes at its source in moq-net, not in the exporter.
 - Correct `doc/concept/moq-lite.md` (*Same epoch resumes*): the resume point
   is a floor, and the subscriber's max age still bounds the backlog.
