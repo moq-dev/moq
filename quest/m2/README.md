@@ -108,7 +108,6 @@ ranked just below deterministic TS legs, which it requires.
 - [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - qmux is a
   first-class crate over `moq-quic`'s shared stream state machine
 - [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) - every backend implements moq-net's `transport::poll` traits, and the generic `web_transport_trait` adapters are deleted
-- [An async QUIC driver without moq-net](/quest/m2/quic-driver.md) - `moq_tokio::quic::driver` becomes usable without moq-net, so other applications can embed moq-quic on tokio
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - a written
   verdict on marking versus dropping, and whether Linode and OVH keep marks
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the

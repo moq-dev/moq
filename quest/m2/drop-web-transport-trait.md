@@ -47,7 +47,7 @@ each gets its own impl:
   `open_uni`/`open_bi` already accept.
 - moq-tokio's `quic::web` module is public but `#[doc(hidden)]`. Decide
   whether it is API or should be private. `quic::driver` stays public:
-  [An async QUIC driver without moq-net](/quest/m2/quic-driver.md) makes it
+  [An async QUIC driver without moq-net](/quest/m1/quic-driver.md) makes it
   supported API.
 
 Notes from related quests:
