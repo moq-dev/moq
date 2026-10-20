@@ -5679,12 +5679,12 @@ impl Subscriber {
 
 	/// The lowest group at or above `from` this subscriber's ranges cover, `None` when
 	/// none does: the groups between are never read, so a reader waiting on each group in
-	/// sequence need not wait for them. `Some(from)` while a relative start waits on the
-	/// first group, and for a reader that follows a route, which can't say.
+	/// sequence need not wait for them. `Some(from)` while a relative anchor waits on the
+	/// first group, which can't say yet.
 	pub fn next_in_range(&self, from: u64) -> Option<u64> {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.filter.window.runs(from).next().map(|run| *run.start()),
-			Inner::Resume(..) => Some(from),
+			Inner::Resume(resume, _) => resume.next_in_range(from),
 		}
 	}
 

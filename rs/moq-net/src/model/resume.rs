@@ -27,7 +27,7 @@ use std::task::{Poll, ready};
 use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
-use super::subscription::{Cap, Position, Resolved, Subscription};
+use super::subscription::{Anchor, Cap, Position, Resolved, Subscription, Window};
 
 /// What the front says about a logical track: the copy to read now, and how it ended.
 #[derive(Default)]
@@ -167,6 +167,7 @@ impl Consumer {
 	/// Subscribe to the logical track with the reader's own preferences.
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let mirrored = subscription.read().clone();
+		let mirrored_ranges = mirrored.ranges.clone();
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
@@ -176,7 +177,7 @@ impl Consumer {
 				generation: None,
 				copies: Vec::new(),
 				newest: None,
-				floor: None,
+				window: Window::new(&mirrored_ranges, None),
 				datagram: None,
 				groups: (0, Cap::from(..)),
 				groups_read: false,
@@ -428,18 +429,15 @@ impl Subscriber {
 		}
 	}
 
-	/// The floor the first copy answered with; see [`track::Subscriber::floor`]. Later
-	/// copies start where the reader got to, which names no floor of the reader's own, so
-	/// it is kept once answered, past the first copy being let go.
+	/// The lowest group the reader's ranges name; see [`track::Subscriber::floor`].
 	pub(super) fn floor(&self) -> Option<u64> {
-		let mut reader = self.reader();
-		if reader.floor.is_none() {
-			reader.floor = reader.copies.iter().find_map(|copy| match &copy.sub {
-				Sub::Ready(sub) if copy.floor.is_none() => Some(sub.floor()),
-				_ => None,
-			});
-		}
-		reader.floor.flatten()
+		self.reader().window().start()
+	}
+
+	/// The lowest group at or above `from` the reader's ranges cover; see
+	/// [`track::Subscriber::next_in_range`].
+	pub(super) fn next_in_range(&self, from: u64) -> Option<u64> {
+		self.reader().window().runs(from).next().map(|run| *run.start())
 	}
 
 	/// Poll for sequences the serving copy gave up; see [`track::Subscriber::poll_drop`].
@@ -528,8 +526,8 @@ struct Reader {
 	copies: Vec<Copy>,
 	/// The newest group handed out: where a new copy is asked to start.
 	newest: Option<u64>,
-	/// The floor the first copy answered for the current ranges, once it answered.
-	floor: Option<Option<u64>>,
+	/// The reader's ranges resolved; see [`Reader::window`].
+	window: Window,
 	/// The newest datagram handed out, by Group and Object ID.
 	datagram: Option<(u64, u64)>,
 	/// The local group filter; see [`track::Subscriber::set_groups`].
@@ -539,6 +537,46 @@ struct Reader {
 }
 
 impl Reader {
+	/// The reader's ranges resolved, a relative anchor as the first copy to answer for them
+	/// resolved it: a later copy starts where the reader got to, which would raise it.
+	/// Kept once resolved, past that copy being let go. Pending while a relative anchor
+	/// waits on that copy, or when the ranges changed after it was let go.
+	fn window(&mut self) -> &Window {
+		if self.window.is_pending() {
+			let ranges = &self.mirrored.ranges;
+			let resolved = self.copies.iter_mut().find_map(|copy| match &mut copy.sub {
+				Sub::Ready(sub) if copy.floor.is_none() && copy.from == *ranges => Some(sub.resolved_ranges()),
+				_ => None,
+			});
+			if let Some(resolved) = resolved {
+				let ranges: Vec<_> = ranges
+					.iter()
+					.enumerate()
+					.map(|(index, range)| {
+						let Some(resolved) = resolved.get(index).copied().flatten() else {
+							return *range;
+						};
+						track::Range {
+							start: match range.start {
+								// The farthest offset reaches back to the oldest group, which names no floor.
+								Anchor::Relative(back) if back != u64::MAX => {
+									Anchor::Absolute(Position::group(resolved.start))
+								}
+								start => start,
+							},
+							end: match (range.end, resolved.end) {
+								(Some(Anchor::Relative(_)), Some(end)) => Some(Anchor::Absolute(Position::group(end))),
+								(end, _) => end,
+							},
+						}
+					})
+					.collect();
+				self.window = Window::new(&ranges, None);
+			}
+		}
+		&self.window
+	}
+
 	/// Follow the route: subscribe to a new copy, mark the ones it replaced, and mirror
 	/// the reader's preferences into each.
 	fn sync(&mut self, waiter: &kio::Waiter) {
@@ -553,7 +591,7 @@ impl Reader {
 		});
 		if let Some(sub) = changed {
 			if sub.ranges != self.mirrored.ranges {
-				self.floor = None;
+				self.window = Window::new(&sub.ranges, None);
 			}
 			self.mirrored = sub;
 			for copy in &mut self.copies {
@@ -3323,7 +3361,8 @@ mod test {
 		}
 	}
 
-	/// The floor the first copy answered stays once a route switch lets that copy go.
+	/// A relative start, as the first copy resolved it, stays once a route switch lets that
+	/// copy go.
 	#[test]
 	#[cfg(feature = "async")]
 	fn the_floor_outlives_the_first_copy() {
@@ -3331,18 +3370,25 @@ mod test {
 		let logical = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
+		write(&a, 4);
+		write(&a, 5);
 		let subscription = Subscription::default()
 			.with_max_delay(Duration::from_secs(10))
-			.with_groups(5..);
+			.with_ranges([track::Range {
+				start: Anchor::Relative(1),
+				end: None,
+			}]);
 		let mut sub = logical
 			.consume()
 			.subscribe(subscription)
 			.now_or_never()
 			.unwrap()
 			.unwrap();
-		write(&a, 5);
-		assert_eq!(drain(&mut sub, false), [5]);
-		assert_eq!(sub.floor(), Some(5));
+		let mut read = drain(&mut sub, false);
+		read.sort();
+		assert_eq!(read, [4, 5]);
+		assert_eq!(sub.floor(), Some(4));
+		assert_eq!(sub.next_in_range(0), Some(4));
 
 		let b = copy();
 		routes.serve(b.consume());
@@ -3352,7 +3398,40 @@ mod test {
 		let reader = readers[0].upgrade().unwrap();
 		assert_eq!(reader.lock().unwrap().copies.len(), 1, "the first copy was let go");
 		drop(readers);
-		assert_eq!(sub.floor(), Some(5));
+		assert_eq!(sub.floor(), Some(4));
+		assert_eq!(sub.next_in_range(0), Some(4));
+	}
+
+	/// A resumed reader names the next group its ranges cover, so a reader waiting on each
+	/// group in sequence walks over the gap between two ranges instead of waiting for it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_resumed_reader_names_the_next_group_in_range() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_max_delay(Duration::from_secs(10))
+			.with_ranges([track::Range::groups(0..1), track::Range::groups(10..11)]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		for sequence in [0, 5, 10] {
+			write(&a, sequence);
+		}
+		let mut read = drain(&mut sub, false);
+		read.sort();
+		assert_eq!(read, [0, 10]);
+		assert_eq!(
+			sub.next_in_range(1),
+			Some(10),
+			"the gap between the ranges is never read"
+		);
+		assert_eq!(sub.next_in_range(11), None);
 	}
 
 	#[test]
