@@ -99,6 +99,44 @@ describe("Truck status", () => {
 		}
 	});
 
+	test("a status from before the truck saw an e-stop does not unlatch it", async () => {
+		const connection = new Moq.Connection({ enabled: false });
+		const driving = new Moq.Signals.Signal<string | undefined>(undefined);
+		const focused = new Moq.Signals.Signal<string | undefined>(undefined);
+		const truck = new Truck({
+			broadcastId: Moq.Path.from("carla/truck1/front.hang"),
+			connection,
+			driving,
+			focused,
+		});
+		const { origin, producer } = statusOrigin();
+		const next = async (update: TruckStatus) => {
+			const changed = truck.status.changed();
+			producer.update({ value: update });
+			await changed;
+		};
+
+		try {
+			(truck.broadcast.out.active as Moq.Signals.Signal<Moq.Broadcast.Consumer | undefined>).set(
+				origin.consume(),
+			);
+			await next(status(0.5));
+			truck.emergencyStop();
+			await next(status(0.4));
+			expect(truck.estopped.peek()).toBe(true);
+
+			// Once echoed, the truck's status is authoritative again.
+			await next({ ...status(0), estopped: true });
+			await next(status(0));
+			expect(truck.estopped.peek()).toBe(false);
+		} finally {
+			producer.finish();
+			origin.close();
+			truck.close();
+			connection.close();
+		}
+	});
+
 	test("marks status unavailable when an active broadcast disappears", async () => {
 		const connection = new Moq.Connection({ enabled: false });
 		const driving = new Moq.Signals.Signal<string | undefined>(undefined);

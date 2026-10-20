@@ -5,9 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from moq_carla_sim import runtime
-from moq_carla_sim.drive import Command, Drive, DriveState, Gear
+from moq_carla_sim.drive import Command, Drive, DriveState, Gear, TimestampEntry
 from moq_carla_sim.publish import Pose
-from moq_carla_sim.runtime import StuckDetector
+from moq_carla_sim.runtime import MAX_STAGE_MS, StuckDetector, latency_breakdown
 
 
 class FakeClock:
@@ -40,6 +40,16 @@ class DemandPublisher:
 
     def cut(self) -> None:
         self.cuts += 1
+
+
+def test_latency_breakdown_survives_any_finite_timestamps() -> None:
+    stages = (
+        TimestampEntry(label="received", ts=-1e308),
+        TimestampEntry(label="decoded", ts=1e308),
+        TimestampEntry(label="rendered", ts=-1e308),
+    )
+
+    assert [stage["ms"] for stage in latency_breakdown(stages)] == [MAX_STAGE_MS, 0]
 
 
 def test_takeover_synchronizes_gate_with_current_vehicle_controls() -> None:

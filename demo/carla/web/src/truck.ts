@@ -98,6 +98,8 @@ export class Truck {
 	#sequence = 0;
 	#sentAt = new Map<number, number>();
 	#sawStatusSource = false;
+	/** This player's e-stop, not yet echoed in a status. */
+	#estopUnconfirmed = false;
 
 	// The canvas is created by the UI layer after construction, so the renderer
 	// takes it as a signal input rather than a property set afterwards.
@@ -216,6 +218,7 @@ export class Truck {
 		this.respawning.set(false);
 		this.drive.set({ ...REST });
 		this.#sentDrive = undefined;
+		this.#estopUnconfirmed = true;
 		this.estopped.set(true);
 		if (this.active.peek()) {
 			this.#send({ type: "estop" });
@@ -390,7 +393,11 @@ export class Truck {
 					this.statusState.set("unavailable");
 					break;
 				}
-				this.estopped.set(status.estopped);
+				// A status sent before the truck saw this player's e-stop must not
+				// unlatch it: the heartbeat would then send drive frames, and a
+				// snapshot track keeps only the newest, so the stop could be lost.
+				if (status.estopped) this.#estopUnconfirmed = false;
+				if (!this.#estopUnconfirmed) this.estopped.set(status.estopped);
 				this.#acknowledgeSafety(status);
 				this.#acknowledge(status);
 				this.status.set(status);

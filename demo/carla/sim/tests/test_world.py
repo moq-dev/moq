@@ -118,8 +118,13 @@ def test_respawn_returns_to_spawn_and_reengages_autonomy() -> None:
         set_transform=lambda transform: events.append(("transform", transform)),
         set_target_velocity=lambda _velocity: events.append("velocity.reset"),
         set_target_angular_velocity=lambda _velocity: events.append("angular.reset"),
+        get_world=lambda: SimpleNamespace(
+            get_map=lambda: pytest.fail("respawn downloads the map again"),
+            get_actors=lambda: SimpleNamespace(filter=lambda _pattern: [vehicle]),
+        ),
     )
-    truck = Truck("truck1", vehicle, [], fake_sensor(), 8000, road_map=SimpleNamespace())
+    road_map = SimpleNamespace(get_spawn_points=lambda: [spawn])
+    truck = Truck("truck1", vehicle, [], fake_sensor(), 8000, road_map=road_map)
     truck._collision = Collision(at=1.0, other="barrier", impulse=2.0)
     events.clear()
 

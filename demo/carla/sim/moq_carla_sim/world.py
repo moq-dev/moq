@@ -407,7 +407,7 @@ class Truck:
     def respawn(self) -> None:
         """Return this actor to a free spawn point without breaking its sensors."""
         world = self._vehicle.get_world()
-        map_points = world.get_map().get_spawn_points()
+        map_points = self._road_map.get_spawn_points()
         candidates = [
             self._spawn_transform,
             *nearby_spawn_points(map_points, self._spawn_transform.location),

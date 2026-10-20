@@ -74,10 +74,16 @@ class StuckDetector:
         return now - self._since >= self._timeout
 
 
+# Longer than any real pipeline stage. A driver's timestamps are any finite
+# floats, whose difference can be infinite, so it is clamped before `int`.
+MAX_STAGE_MS = 60_000
+
+
 def latency_breakdown(timestamps: tuple[TimestampEntry, ...]) -> list[dict[str, Any]]:
     """Per-stage deltas from the driver's media timestamps, in milliseconds."""
     return [
-        {"label": f"{a.label}→{b.label}", "ms": max(0, int(b.ts - a.ts))} for a, b in zip(timestamps, timestamps[1:])
+        {"label": f"{a.label}→{b.label}", "ms": int(min(max(b.ts - a.ts, 0), MAX_STAGE_MS))}
+        for a, b in zip(timestamps, timestamps[1:])
     ]
 
 

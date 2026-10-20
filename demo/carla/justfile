@@ -5,10 +5,6 @@
 
 set fallback
 
-# The relay the worker publishes into. Production passes a demo-project token
-# here through ~/.config/moq/carla.env; local development needs none.
-relay_url := env("MOQ_URL", "http://localhost:4443")
-
 # The simulator is not included: start `just carla server` once and leave it
 # running across restarts of everything else.
 #
@@ -20,9 +16,10 @@ default:
     	"just wait && just wait-port 127.0.0.1 2000 && just worker" \
     	"just wait && just web"
 
-# Run the Python worker: every truck in one shared CARLA world.
+# Run the Python worker: every truck in one shared CARLA world. It reads the
+# relay from MOQ_URL itself, so a production token never reaches argv.
 worker *ARGS:
-    @MOQ_URL='{{ relay_url }}' sim/python.sh -m moq_carla_sim.main {{ ARGS }}
+    @sim/python.sh -m moq_carla_sim.main {{ ARGS }}
 
 # Run the web player against a relay.
 web url='http://localhost:4443':
