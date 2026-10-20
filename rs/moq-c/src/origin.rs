@@ -2,17 +2,8 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
+use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_string};
-
-/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
-///
-/// `close` is an `Option` so `*_close` can drop just the sender without
-/// removing the entry. The task delivers one final terminal callback and then
-/// removes itself, so `user_data` stays valid until that callback fires.
-struct TaskEntry {
-	close: Option<oneshot::Sender<()>>,
-	callback: OnStatus,
-}
 
 /// Global state managing all active resources.
 ///
@@ -29,10 +20,10 @@ pub struct Origin {
 	announced: NonZeroSlab<AnnouncedRecord>,
 
 	/// Announcement listener tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
-	announced_task: NonZeroSlab<Option<TaskEntry>>,
+	announced_task: NonZeroSlab<Task>,
 
 	/// Pending consume-until-announced tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
-	consume_task: NonZeroSlab<Option<TaskEntry>>,
+	consume_task: NonZeroSlab<Task>,
 
 	/// Served routes from [Self::dynamic], retracted when the handle is closed.
 	dynamic: NonZeroSlab<Option<DynamicEntry>>,
@@ -161,26 +152,11 @@ impl Origin {
 			.scope("", &moq_net::Patterns::from(scope))?
 			.with_hidden(hidden)
 			.announced();
-		let channel = oneshot::channel();
-
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_announce,
-		};
-		let id = self.announced_task.insert(Some(entry))?;
-
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_announced(on_announce, consumer, channel.1))).await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().origin.announced_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.announced_task.spawn(
+			on_announce,
+			|state| &mut state.origin.announced_task,
+			|close| async move { driver.watch(Self::run_announced(on_announce, consumer, close)).await },
+		)
 	}
 
 	async fn run_announced(
@@ -231,15 +207,7 @@ impl Origin {
 	}
 
 	pub fn announced_close(&mut self, announced: Id) -> Result<(), Error> {
-		// Signal shutdown; the task delivers a final callback and removes itself.
-		self.announced_task
-			.get_mut(announced)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::AnnouncementNotFound)?
-			.close
-			.take()
-			.ok_or(Error::AnnouncementNotFound)?;
-		Ok(())
+		self.announced_task.close(announced, Error::AnnouncementNotFound)
 	}
 
 	/// Follow the broadcast at `path`, delivering each publisher instance's handle via the callback.
@@ -252,28 +220,15 @@ impl Origin {
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
 		let consumer = origin.consume_owned();
-		let channel = oneshot::channel();
-
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_broadcast,
-		};
-		let id = self.consume_task.insert(Some(entry))?;
-
-		tokio::spawn(async move {
-			let res =
-				crate::ffi::run(driver.watch(Self::run_consume_announced(on_broadcast, consumer, path, channel.1)))
-					.await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().origin.consume_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.consume_task.spawn(
+			on_broadcast,
+			|state| &mut state.origin.consume_task,
+			|close| async move {
+				driver
+					.watch(Self::run_consume_announced(on_broadcast, consumer, path, close))
+					.await
+			},
+		)
 	}
 
 	async fn run_consume_announced(
@@ -370,26 +325,15 @@ impl Origin {
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
 		let consumer = origin.consume_owned();
-		let channel = oneshot::channel();
-
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_broadcast,
-		};
-		let id = self.consume_task.insert(Some(entry))?;
-
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_request(on_broadcast, consumer, path, channel.1))).await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().origin.consume_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.consume_task.spawn(
+			on_broadcast,
+			|state| &mut state.origin.consume_task,
+			|close| async move {
+				driver
+					.watch(Self::run_request(on_broadcast, consumer, path, close))
+					.await
+			},
+		)
 	}
 
 	async fn run_request(
@@ -415,15 +359,7 @@ impl Origin {
 	}
 
 	pub fn consume_announced_close(&mut self, task: Id) -> Result<(), Error> {
-		// Signal shutdown; the task delivers a final callback and removes itself.
-		self.consume_task
-			.get_mut(task)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::NotFound)?
-			.close
-			.take()
-			.ok_or(Error::NotFound)?;
-		Ok(())
+		self.consume_task.close(task, Error::NotFound)
 	}
 
 	/// Create an unannounced broadcast at `path` on an origin.

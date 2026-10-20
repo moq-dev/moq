@@ -192,7 +192,7 @@ pub(super) struct GroupState {
 	// cache policy moves the frames to them rather than dropping them.
 	handoff: Mutex<Weak<Handoff>>,
 
-	// Whether an adopted head (see [`Producer::adopt_head`]) begins at the group's first
+	// Whether an adopted head (see [`Handle::adopt_head`]) begins at the group's first
 	// object, for a wire header that arrives after it.
 	adopted: Option<bool>,
 }
@@ -2202,12 +2202,6 @@ impl Consumer {
 	/// Whether expiry can still discard content or unblock a group that may grow.
 	fn expiry_pending(&self) -> bool {
 		self.cursor.expiry_pending()
-	}
-
-	/// Whether the group has been aborted (including pool eviction); the abort
-	/// dropped the cached frames, so a held consumer has nothing left to read.
-	pub(super) fn is_aborted(&self) -> bool {
-		self.cursor.state.read().abort.is_some()
 	}
 
 	/// Mark the group as still being read, so a slow batch drain does not expire it.
