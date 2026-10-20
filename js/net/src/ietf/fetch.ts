@@ -1,3 +1,4 @@
+import type * as Epoch from "../epoch.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { hasRangeFilters, isDraft20 } from "./filter.ts";
@@ -44,15 +45,19 @@ export class Fetch {
 	rangeFilters: boolean;
 	/** The decoded standalone namespace, absent for a joining fetch. */
 	trackNamespace?: Path.Valid;
+	/** The publisher instance the requester expects (EPOCH, MoQ Epoch), never on a joining fetch. */
+	epoch?: Epoch.Valid;
 
 	constructor({
 		requestId,
 		rangeFilters = false,
 		trackNamespace,
-	}: { requestId: bigint; rangeFilters?: boolean; trackNamespace?: Path.Valid }) {
+		epoch,
+	}: { requestId: bigint; rangeFilters?: boolean; trackNamespace?: Path.Valid; epoch?: Epoch.Valid }) {
 		this.requestId = requestId;
 		this.rangeFilters = rangeFilters;
 		this.trackNamespace = trackNamespace;
+		this.epoch = epoch;
 	}
 
 	async #encode(_w: Writer): Promise<void> {
@@ -106,34 +111,13 @@ export class Fetch {
 		if (params.trackPropertyFilter) {
 			throw new Error("TRACK_PROPERTY_FILTER is not allowed on FETCH");
 		}
+		// A joining FETCH is served by its subscription's instance, so naming one is malformed.
+		const epoch = params.epoch;
+		if (epoch !== undefined && trackNamespace === undefined) {
+			throw new Error("EPOCH is not allowed on a joining FETCH");
+		}
 
-		return new Fetch({ requestId, rangeFilters: params.rangeFilters, trackNamespace });
-	}
-}
-
-export class FetchOk {
-	static id = 0x18;
-
-	requestId: bigint | undefined;
-
-	constructor({ requestId }: { requestId?: bigint }) {
-		this.requestId = requestId;
-	}
-
-	async #encode(_w: Writer): Promise<void> {
-		throw new Error("FETCH_OK messages are not supported");
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<FetchOk> {
-		return Message.decode(r, FetchOk.#decode);
-	}
-
-	static async #decode(_r: Reader): Promise<FetchOk> {
-		throw new Error("FETCH_OK messages are not supported");
+		return new Fetch({ requestId, rangeFilters: params.rangeFilters, trackNamespace, epoch });
 	}
 }
 
@@ -168,32 +152,5 @@ export class FetchError {
 
 	static async #decode(_r: Reader): Promise<FetchError> {
 		throw new Error("FETCH_ERROR messages are not supported");
-	}
-}
-
-// Removed in d17
-export class FetchCancel {
-	static id = 0x17;
-
-	requestId: bigint;
-
-	constructor({ requestId }: { requestId: bigint }) {
-		this.requestId = requestId;
-	}
-
-	async #encode(_w: Writer): Promise<void> {
-		throw new Error("FETCH_CANCEL messages are not supported");
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<FetchCancel> {
-		return Message.decode(r, FetchCancel.#decode);
-	}
-
-	static async #decode(_r: Reader): Promise<FetchCancel> {
-		throw new Error("FETCH_CANCEL messages are not supported");
 	}
 }

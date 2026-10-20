@@ -63,16 +63,10 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 ## Required
 
-- [Regression net](/quest/m1/quic/coverage/README.md) - benchmarks, fuzzing, characterization tests, and a seeded simulation, so later QUIC changes see every behavior or cost change
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
 - [A reset group keeps its header](/quest/m1/quic/group-reset.md) - a lite
   publisher resets a group with `RESET_STREAM_AT`, so its subscriber drops the
   tail grace
-- [Schedule datagrams by subscription priority](/quest/m1/quic/datagram-priority.md) -
-  datagrams join their subscription's send group instead of preempting every stream
-- [A FIN below received data is a final size error](/quest/m1/quic/final-size-below-received.md) - a shrunken final size closes with FINAL_SIZE_ERROR instead of blocking the reader forever
-- [A stateless reset keeps a closed connection's reason](/quest/m1/quic/close-reason-after-reset.md) - a reset after a local transport error neither replaces the reason nor reports a second loss
-- [0-RTT streams adopt a raised stream window](/quest/m1/quic/zero-rtt-window-raise.md) - a server's larger stream window reaches the client's 0-RTT streams, so they no longer stall
 
 ## Related
 

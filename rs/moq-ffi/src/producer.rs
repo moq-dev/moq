@@ -23,6 +23,11 @@ pub struct MoqTrackInfo {
 	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us).
 	#[uniffi(default = None)]
 	pub max_age_us: Option<u64>,
+	/// How many times its first frame a group's later bytes may grow before a joining
+	/// subscriber asks for a new group, or null to never ask. See
+	/// [`MoqTrackDemand::wanted`](crate::demand::MoqTrackDemand::wanted).
+	#[uniffi(default = None)]
+	pub refresh: Option<u32>,
 	/// Per-frame timescale in ticks per second, or null for an untimed track.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
@@ -32,7 +37,9 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 	type Error = MoqError;
 
 	fn try_from(info: MoqTrackInfo) -> Result<Self, MoqError> {
-		let mut out = moq_net::track::Info::default().with_priority(info.priority);
+		let mut out = moq_net::track::Info::default()
+			.with_priority(info.priority)
+			.with_refresh(info.refresh);
 		if let Some(us) = info.max_age_us {
 			out = out.with_max_age(std::time::Duration::from_micros(us));
 		}
@@ -66,6 +73,7 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 		Ok(Self {
 			priority: info.priority,
 			max_age_us,
+			refresh: info.refresh,
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
 		})
 	}
@@ -675,14 +683,31 @@ impl MoqGroupProducer {
 impl MoqGroupProducer {
 	/// Wait until a consumer has this group.
 	pub(crate) async fn used(&self) -> Result<(), MoqError> {
-		let producer = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		Ok(producer.demand().used().await?)
+		let demand = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.demand();
+		Ok(demand.used().await?)
 	}
 }
 
 #[cfg(test)]
 mod metadata_tests {
 	use super::*;
+
+	#[test]
+	fn dropping_a_group_binding_ends_its_unfinished_group() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
+		let group = track.append_group().unwrap();
+		let mut consumer = group.consume();
+		let binding = MoqGroupProducer {
+			sequence: group.sequence,
+			inner: std::sync::Mutex::new(Some(group)),
+		};
+		drop(binding);
+		assert!(matches!(
+			consumer.poll_read_frame(&moq_net::kio::Waiter::noop()),
+			std::task::Poll::Ready(Err(moq_net::Error::Dropped))
+		));
+	}
 
 	#[test]
 	fn untimed_info_round_trips_through_the_binding() {
@@ -698,6 +723,7 @@ mod metadata_tests {
 			let info = MoqTrackInfo {
 				priority: 0,
 				max_age_us,
+				refresh: None,
 				timescale: None,
 			};
 			let model = moq_net::track::Info::try_from(info).unwrap();

@@ -73,7 +73,9 @@ if(MOQ_FFI_DIR)
     endforeach()
     set(_build_ffi "")
 else()
-    set(_build_ffi COMMAND cargo build --locked --package moq-ffi ${_cargo_flags})
+    # The OpenH264 software fallback is opt-in in Rust; the C++ package ships it, like the
+    # prebuilt input does.
+    set(_build_ffi COMMAND cargo build --locked --package moq-ffi --features openh264 ${_cargo_flags})
     set(_ffi_byproducts "${MOQ_FFI_LIB}" "${_metadata}")
 endif()
 

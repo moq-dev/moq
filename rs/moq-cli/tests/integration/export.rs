@@ -28,10 +28,12 @@ const LONG: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data/
 const AV1: &[u8] = include_bytes!("../../../moq-mux/src/container/fmp4/test_data/av1.mp4");
 
 type Output = Arc<Mutex<Vec<u8>>>;
+type Arrivals = Arc<Mutex<Vec<(Instant, usize)>>>;
 
 struct Export {
 	child: Child,
 	output: Output,
+	arrivals: Arrivals,
 	stdout: JoinHandle<std::io::Result<()>>,
 	stderr: JoinHandle<String>,
 	settled: Option<tokio::sync::oneshot::Receiver<()>>,
@@ -159,7 +161,7 @@ fn export_as(relay: &Relay, global: &[&str], format: Format, flags: &[&str]) -> 
 		.stderr(Stdio::piped())
 		.spawn()
 		.expect("spawn export");
-	let (output, stdout, fence) = collect(child.stdout.take().expect("stdout"));
+	let (output, arrivals, stdout, fence) = collect(child.stdout.take().expect("stdout"));
 	let mut stderr = BufReader::new(child.stderr.take().expect("stderr"));
 	let (settle, settled) = tokio::sync::oneshot::channel();
 	let stderr = tokio::spawn(async move {
@@ -181,6 +183,7 @@ fn export_as(relay: &Relay, global: &[&str], format: Format, flags: &[&str]) -> 
 	Export {
 		child,
 		output,
+		arrivals,
 		stdout,
 		stderr,
 		settled: Some(settled),
@@ -193,11 +196,14 @@ fn collect(
 	mut pipe: tokio::process::ChildStdout,
 ) -> (
 	Output,
+	Arrivals,
 	JoinHandle<std::io::Result<()>>,
 	tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<usize>>,
 ) {
 	let output = Output::default();
 	let sink = output.clone();
+	let arrivals = Arrivals::default();
+	let received = arrivals.clone();
 	let (fence, mut requested) = tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<usize>>();
 	let task = tokio::spawn(async move {
 		let mut buf = vec![0; 64 * 1024];
@@ -206,7 +212,9 @@ fn collect(
 				n = pipe.read(&mut buf) => {
 					let n = n?;
 					if n == 0 { return Ok(()); }
-					sink.lock().unwrap().extend_from_slice(&buf[..n]);
+					let mut output = sink.lock().unwrap();
+					output.extend_from_slice(&buf[..n]);
+					received.lock().unwrap().push((Instant::now(), output.len()));
 				}
 				Some(fence) = requested.recv() => {
 					// The follower entered linger only after each old stdout write and flush.
@@ -225,7 +233,7 @@ fn collect(
 			}
 		}
 	});
-	(output, task, fence)
+	(output, arrivals, task, fence)
 }
 
 /// Start `moq import ts` and feed it the clip at about real time, handing stdin back
@@ -596,21 +604,20 @@ fn latest_pts(ts: &[u8]) -> u64 {
 	latest.expect("the capture carries PES timestamps")
 }
 
-/// A standby joining a live partner's epoch before its catalog names a servable track is never
+/// A standby joining a live partner's path before its catalog names a servable track is never
 /// asked for the tracks the partner's exports hold, since it announces only once it can serve
 /// them (#4352), and the exports keep running. Input that ends before declaring any track fails
 /// rather than announcing an empty broadcast.
 async fn a_standby_before_its_tracks(global: &[&str], format: Format) {
 	let relay = relay().await;
-	let epoch = hang::moq_net::Epoch::mint().to_string();
-	let publish: Vec<&str> = global.iter().copied().chain(["--epoch", epoch.as_str()]).collect();
-	let (mut active, feeding) = import_as(&relay, &publish, format);
+	let publish = global;
+	let (mut active, feeding) = import_as(&relay, publish, format);
 	let mut first = export_as(&relay, global, format, &[]);
 	let mut second = export_as(&relay, global, format, &[]);
 	first.output_past(0).await;
 	second.output_past(0).await;
 
-	let mut standby = moq(&relay, &publish)
+	let mut standby = moq(&relay, publish)
 		.args(["import", "--max-age", "1s", format.name])
 		.stdin(Stdio::piped())
 		.stderr(Stdio::piped())
@@ -768,4 +775,258 @@ async fn a_replaced_publisher_dying_fails_an_fmp4_export() {
 
 	drop(replacing.await.unwrap());
 	wait(&mut new).await;
+}
+
+/// Repeat the capture with continuous transport counters and source clocks. Both importers
+/// receive these same bytes, including when one joins after the other has already started.
+fn redundant_source() -> Vec<u8> {
+	use mpeg2ts::time::{ClockReference, Timestamp};
+	use mpeg2ts::ts::{ContinuityCounter, TsPacketWriter, WriteTsPacket};
+	let mut counters = std::collections::HashMap::<u16, u8>::new();
+	let mut writer = TsPacketWriter::new(Vec::new());
+	let period = LONG.len() as u64 * 8 * 90_000 / 400_000;
+	for repeat in 0..12 {
+		let offset = repeat * period;
+		let mut reader = TsPacketReader::new(Cursor::new(LONG));
+		while let Some(mut packet) = reader.read_ts_packet().unwrap() {
+			let counter = counters.entry(packet.header.pid.as_u16()).or_default();
+			if packet.payload.is_some() {
+				*counter = (*counter + 1) % 16;
+			}
+			packet.header.continuity_counter = ContinuityCounter::from_u8(*counter).unwrap();
+			if let Some(adaptation) = &mut packet.adaptation_field {
+				for clock in [&mut adaptation.pcr, &mut adaptation.opcr].into_iter().flatten() {
+					*clock = ClockReference::new(clock.as_u64() + offset * 300).unwrap();
+				}
+			}
+			if let Some(TsPayload::PesStart(pes)) = &mut packet.payload {
+				for timestamp in [&mut pes.header.pts, &mut pes.header.dts].into_iter().flatten() {
+					*timestamp = Timestamp::new(timestamp.as_u64() + offset).unwrap();
+				}
+			}
+			writer.write_ts_packet(&packet).unwrap();
+		}
+	}
+	writer.into_stream()
+}
+
+/// Feed one live source to every importer added to the channel; disconnected ones drop out.
+fn redundant_feed() -> (tokio::sync::mpsc::UnboundedSender<ChildStdin>, JoinHandle<()>) {
+	let (add, mut added) = tokio::sync::mpsc::unbounded_channel();
+	let task = tokio::spawn(async move {
+		let source = redundant_source();
+		let mut inputs: Vec<ChildStdin> = Vec::new();
+		let mut pace = tokio::time::interval(Duration::from_micros(30_080));
+		for chunk in source.chunks(8 * 188) {
+			pace.tick().await;
+			while let Ok(input) = added.try_recv() {
+				inputs.push(input);
+			}
+			let mut live = Vec::new();
+			for mut input in inputs {
+				if input.write_all(chunk).await.is_ok() {
+					live.push(input);
+				}
+			}
+			inputs = live;
+		}
+	});
+	(add, task)
+}
+
+/// Start an importer of the live source on lite-07, with `flags` for `import ts`.
+fn redundant_import(relay: &Relay, feed: &tokio::sync::mpsc::UnboundedSender<ChildStdin>, flags: &[&str]) -> Child {
+	let mut child = moq(relay, &["--connect-version", LITE_07])
+		.args(["import", "--max-age", "10s", "ts"])
+		.args(flags)
+		.stdin(Stdio::piped())
+		.spawn()
+		.expect("spawn redundant importer");
+	feed.send(child.stdin.take().unwrap()).unwrap();
+	child
+}
+
+/// Each replacement is one program switch, including an older still-live importer's return.
+#[tokio::test]
+async fn redundant_importers_switch_to_the_survivor_and_back_on_lite_07() {
+	redundant_failover(false).await;
+}
+
+/// The same behind a rate limit below the media's, over a deep but finite queue.
+#[tokio::test]
+async fn redundant_importers_switch_through_bufferbloat_on_lite_07() {
+	redundant_failover(true).await;
+}
+
+async fn redundant_failover(bufferbloat: bool) {
+	let relay = relay().await;
+	let shaper = if bufferbloat {
+		Some(
+			moq_shaper::Shaper::bind(moq_shaper::Config {
+				bind: "127.0.0.1:0".parse().unwrap(),
+				target: relay
+					.url
+					.trim_start_matches("https://")
+					.trim_end_matches('/')
+					.parse()
+					.unwrap(),
+				seed: 4354,
+				up: moq_shaper::Profile::default(),
+				down: moq_shaper::Profile {
+					rate: Some(moq_shaper::Rate {
+						bits_per_second: 160_000,
+						burst: 1200,
+						queue: Duration::from_secs(2),
+					}),
+					..Default::default()
+				},
+			})
+			.await
+			.unwrap(),
+		)
+	} else {
+		None
+	};
+	let subscribers = Relay {
+		url: shaper
+			.as_ref()
+			.map_or_else(|| relay.url.clone(), |s| format!("https://{}/", s.addr())),
+		origin: relay.origin.clone(),
+	};
+	let (feed, feeding) = redundant_feed();
+	let mut first = redundant_import(&relay, &feed, &[]);
+	let mut exports: Vec<_> = (0..2)
+		.map(|_| {
+			export_with(
+				&subscribers,
+				&["--connect-version", LITE_07],
+				&["--stitch", "--linger", "10s", "--delay", "3s"],
+			)
+		})
+		.collect();
+	for export in &mut exports {
+		export.output_past(0).await;
+	}
+	let mut second = redundant_import(&relay, &feed, &[]);
+	for version in 1..=3 {
+		for export in &mut exports {
+			tokio::time::timeout(TIMEOUT, async {
+				loop {
+					assert!(export.child.try_wait().unwrap().is_none(), "stitching export exited");
+					if packets(&export.output.lock().unwrap())
+						.filter_map(|packet| pat_version(packet))
+						.any(|v| v == version)
+					{
+						break;
+					}
+					tokio::time::sleep(Duration::from_millis(20)).await;
+				}
+			})
+			.await
+			.expect("export never switched programs");
+		}
+		if version == 1 {
+			second.kill().await.unwrap();
+		} else if version == 2 {
+			second = redundant_import(&relay, &feed, &[]);
+		}
+	}
+	first.kill().await.unwrap();
+	second.kill().await.unwrap();
+	feeding.abort();
+	for mut export in exports {
+		export.child.kill().await.unwrap();
+		let output = export.output.clone();
+		let arrivals = export.arrivals.clone();
+		let (status, errors) = export.wait().await;
+		assert!(!status.success(), "test terminates the export");
+		assert!(!errors.contains("rewind"), "{errors}");
+		let output = output.lock().unwrap();
+		let versions: Vec<_> = packets(&output).filter_map(|packet| pat_version(packet)).collect();
+		let mut distinct = versions.clone();
+		distinct.dedup();
+		assert_eq!(distinct, [0, 1, 2, 3], "one marked switch per change");
+		for version in 1..=3 {
+			// A program opens in the slot of its first PAT, with a PCR flagging the break.
+			let all: Vec<_> = packets(&output).collect();
+			let pat = all.iter().position(|p| pat_version(*p) == Some(version)).unwrap();
+			let old = all[..pat].iter().rposition(|p| pat_version(*p).is_some()).unwrap();
+			let opens = all[old..pat]
+				.iter()
+				.rposition(|p| adaptation_flags(*p).is_some_and(|flags| flags & 0x90 == 0x90))
+				.expect("the switch flags a break before its PAT");
+			let start = (old + opens) * 188;
+			let tail = &output[start..];
+			let end = packets(tail)
+				.position(|p| pat_version(p).is_some_and(|v| v != version))
+				.map_or(tail.len(), |n| n * 188);
+			assert_eq!(
+				unflagged(&tail[..end]),
+				Vec::<u16>::new(),
+				"every PID marks program {version}"
+			);
+			let arrivals = arrivals.lock().unwrap();
+			let at = arrivals.partition_point(|(_, bytes)| *bytes <= start);
+			let gap = at
+				.checked_sub(1)
+				.map_or(Duration::ZERO, |before| arrivals[at].0 - arrivals[before].0);
+			eprintln!("bufferbloat={bufferbloat}, program {version}, viewer output gap={gap:?}");
+		}
+	}
+	if let Some(shaper) = shaper {
+		let stats = shaper.verify().unwrap();
+		assert!(stats.down.throttled > 0, "bufferbloat never queued traffic: {stats}");
+		eprintln!("redundant ingest bufferbloat: {stats}");
+	}
+}
+
+/// The epoch of the next route announced for the path.
+async fn next_epoch(announced: &mut moq_net::announce::Follow) -> moq_net::Epoch {
+	tokio::time::timeout(TIMEOUT, async {
+		loop {
+			match announced.next().await.expect("the relay stays up") {
+				moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => {
+					return announce.route.epoch.expect("a lite-07 importer announces its epoch");
+				}
+				_ => continue,
+			}
+		}
+	})
+	.await
+	.expect("the importer never announced")
+}
+
+/// `export ts --passthrough` follows no restart: it stays on the passthrough importer it
+/// resolved while a backup on its own epoch starts, and ends once that importer goes.
+#[tokio::test]
+async fn a_passthrough_export_ends_with_its_redundant_importer() {
+	let relay = relay().await;
+	let mut announced = relay.origin.follow("demo").unwrap();
+	let (feed, feeding) = redundant_feed();
+	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
+	let incumbent = next_epoch(&mut announced).await;
+	let mut export = export_with(&relay, &["--connect-version", LITE_07], &["--passthrough"]);
+	export.output_past(0).await;
+
+	let mut second = redundant_import(&relay, &feed, &["--passthrough"]);
+	assert_ne!(
+		next_epoch(&mut announced).await,
+		incumbent,
+		"the backup mints its own epoch"
+	);
+	let mark = export.output.lock().unwrap().len();
+	export.output_past(mark).await;
+	assert!(
+		export.child.try_wait().unwrap().is_none(),
+		"a backup starting leaves the export on its importer"
+	);
+
+	first.kill().await.unwrap();
+	let (_, errors) = export.wait().await;
+	assert!(
+		second.try_wait().unwrap().is_none(),
+		"the export ended with the backup still up; exporter stderr: {errors}"
+	);
+	second.kill().await.unwrap();
+	feeding.abort();
 }

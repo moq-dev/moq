@@ -11,18 +11,23 @@ on:
       - 'js/**'
       - '.github/workflows/release-js.yml'
   # Dry-run: builds, packs, and runs `deno publish --dry-run`, which catches
-  # JSR-only failures before they break a release on `release`.
+  # JSR-only failures before they break a release on `release`. Only a push
+  # publishes, so nightly.yml calls this on main in place of main PRs.
+  workflow_call:
+  # `edited` catches a main PR retargeted to release.
   pull_request:
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - 'js/**'
       - '.github/workflows/release-js.yml'
 
 # Only publishing runs share the serialized group. GitHub keeps a single pending
-# run per group and drops the older one, so a PR sharing it would cancel a
+# run per group and drops the older one, so a dry-run sharing it would cancel a
 # queued release. Dry-runs get a per-ref group and cancel superseded builds.
 concurrency:
-  group: release-js-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: release-js-${{ github.event_name == 'push' && 'publish' || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   release:
@@ -35,14 +40,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter, as check.yml does. Without it
-          # `nix develop` built the dev shell from source, about 13 minutes.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
 
       - name: Setup npm registry
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
@@ -54,5 +52,5 @@ jobs:
 
       - name: Release packages
         env:
-          DRY_RUN: ${{ github.event_name == 'pull_request' }}
+          DRY_RUN: ${{ github.event_name != 'push' }}
         run: nix develop --command bun --filter '*' release

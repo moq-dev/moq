@@ -35,7 +35,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [#3129](/quest/m3/3129-moq-uring-write-the-webtransport-stream-header-at-open.md) - moq-uring writes the WebTransport stream header at open and settles the open contract, once a caller hits it
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement, if the ECN measurement says marks survive
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a Rust redial starts at the previous connection's rate
-- [Cut-through](/quest/m3/cut-through/README.md) - a lossy-hop bench decides whether a relay should forward bytes behind a QUIC stream hole; the build is re-planned if it says go
+- [Cut-through](/quest/m3/cut-through/README.md) - a bufferbloat bench decides whether a relay should forward bytes behind a QUIC stream hole; the build is re-planned if it says go
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [vcpkg registry](/quest/m3/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests, once a consumer asks
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`

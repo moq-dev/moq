@@ -92,7 +92,7 @@ choice (`Auto` / `Hardware` / `Software` / a named backend).
 
 | Codec | Software | macOS | Windows | Linux | Android |
 |---|---|---|---|---|---|
-| H.264 | OpenH264 (feature `openh264`, default) | VideoToolbox | Media Foundation | NVENC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
+| H.264 | OpenH264 (feature `openh264`) | VideoToolbox | Media Foundation | NVENC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
 | H.265 | none | VideoToolbox | Media Foundation | NVENC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
 
 Every backend emits Annex-B with in-band parameter sets (SPS/PPS, plus VPS for
@@ -134,9 +134,10 @@ Public entry points:
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 
-The default features are `openh264`, `nvidia`, and `mediacodec`. OpenH264 keeps
-a working software H.264 fallback but compiles vendored C++; disable defaults
-and select native features to omit it. `nvidia` is Linux-only, `dlopen`s the
+The default features are `nvidia` and `mediacodec`, so a default build has no
+software encoder. `openh264` adds the software H.264 fallback, the only H.264
+encoder on a GPU-less host, at the cost of compiling vendored C++; enable it
+wherever that fallback is expected. `nvidia` is Linux-only, `dlopen`s the
 driver at runtime, and needs no build-time toolkit. `vaapi` is opt-in because
 its bindgen needs libclang on the build host, while `v4l2` is opt-in only by
 convention, since `moq-v4l` checks its bindings in. `vpx` is opt-in because
@@ -206,7 +207,7 @@ Backends are tried hardware-first, like encode:
 
 | Codec | Software | macOS | Windows | Linux | Android |
 |---|---|---|---|---|---|
-| H.264 | OpenH264 (feature `openh264`, default) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
+| H.264 | OpenH264 (feature `openh264`) | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`), VAAPI (feature `vaapi`) | MediaCodec (feature `mediacodec`, API 26+) |
 | H.265 | none | VideoToolbox | Media Foundation (DXVA) | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, API 26+) |
 | AV1 | none | none | none | NVDEC (feature `nvidia`) | MediaCodec (feature `mediacodec`, when the device provides it) |
 | VP8, VP9 | libvpx (feature `vpx`) | none | none | none | none |
@@ -215,7 +216,7 @@ On macOS and iOS VideoToolbox decodes H.264 and H.265 on hardware, pulling the p
 sets (SPS/PPS, plus VPS for H.265) out of each keyframe to build the format
 description. On Windows the Microsoft decoder MFT runs synchronously with a
 Direct3D11 device bound to it, so the decode happens on the GPU through DXVA
-(NVDEC / Intel / AMD). H.264 falls back to openh264 on a GPU-less host; H.265 has
+(NVDEC / Intel / AMD). H.264 falls back to openh264 (with the `openh264` feature) on a GPU-less host; H.265 has
 no software decoder, so it needs the GPU path (on Windows, an HEVC decoder MFT:
 the inbox HEVC Video Extensions or a vendor one). On Linux, NVDEC decodes H.264,
 H.265, and 8-bit 4:2:0 AV1 to CUDA NV12 frames; AV1 is decode-only and is useful
@@ -237,7 +238,8 @@ which pairs that config with the subscription's `start` and `max_delay`.
 Common feature sets:
 
 ```bash
-cargo add moq-video                                      # native defaults + OpenH264, no renderer
+cargo add moq-video                                      # native defaults, no software fallback or renderer
+cargo add moq-video --features openh264                  # add the OpenH264 software fallback
 cargo add moq-video --no-default-features --features openh264  # software H.264 only
 cargo add moq-video --no-default-features --features nvidia    # Linux NVIDIA only
 cargo add moq-video --features render                    # add the wgpu renderer

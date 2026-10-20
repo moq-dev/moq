@@ -2,7 +2,7 @@
 # Keep benchmark builds together while unrelated Nightly workloads run independently.
 set -euo pipefail
 
-usage='usage: just gh nightly rust-test|rust-bench|js'
+usage='usage: just gh nightly rust-test|rust-bench|rust-extra|rust-uring|js'
 if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
@@ -10,7 +10,7 @@ fi
 # The measured groups write a report for the benchmark site; rust-test only runs.
 case "$1" in
     rust-test) report= ;;
-    rust-bench) report=rust ;;
+    rust-bench | rust-extra | rust-uring) report=rust ;;
     js) report=js ;;
     *)
         echo "$usage" >&2
@@ -69,7 +69,7 @@ case "$1" in
         ;;
     # Measured Cargo bench targets, all in the bench profile.
     rust-bench)
-        # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
+        # Fuzz exposes moq-net's codec benches, and moq-quic's plaintext crypto below.
         criterion net --no-fail-fast -p moq-net --features fuzz --bench '*'
         # Measure the optional thread-CPU clock as well as the normal elapsed time.
         SESSION_CPU=1 criterion net-cpu -p moq-net --bench session -- session_delivery_group_cost_cpu
@@ -78,7 +78,7 @@ case "$1" in
         # One invocation unifies this release build instead of rebuilding shared crates
         # independently for each target. Keep the explicit targets: '*' would add coverage.
         criterion shared --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
-            -p moq-quic --features moq-stats/bench \
+            -p moq-quic --features moq-stats/bench,moq-quic/fuzz \
             --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
             --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
             --bench chunk_interleaving --bench worker_turns \
@@ -86,14 +86,30 @@ case "$1" in
         # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
         criterion gst -p moq-gst --bench catalog
         ;;
+    # Keep added coverage out of the existing forty-minute benchmark leg.
+    rust-extra)
+        # The allocation/window/play-buffer tables keep their stdout in the run;
+        # only Criterion estimates enter the trend report.
+        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux \
+            --bench protect --bench codec --bench table --bench allocations --bench window \
+            --bench writer --bench play_buffer --bench jitter
+        ;;
+    rust-uring)
+        # One run per target makes an unsupported/skipped ring fail report
+        # validation instead of hiding behind the Tokio target's measurements.
+        for target in udp_tokio udp_uring echo_quic session_lite unreachable_dials timers; do
+            criterion "uring-$target" -p moq-uring --bench "$target"
+        done
+        ;;
     js)
-        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track interests priority; do
+        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track resume interests priority subscribe-drop refresh; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
         javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench
         javascript e2ee just js e2ee-bench
+        javascript json-stream just js json-stream-bench
         javascript signals just js signals-bench
         ;;
 esac

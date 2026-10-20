@@ -5,7 +5,7 @@ import { decodeUtf8 } from "../util/utf8.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** Convert the escaped moq-net path representation into IETF namespace tuple fields. */
-export function toTuple(namespace: Path.Valid): string[] {
+function toTuple(namespace: Path.Valid): string[] {
 	if (namespace === "") return [];
 
 	const parts = [""];

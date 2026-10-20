@@ -899,6 +899,7 @@ mod tests {
 			largest_location: None,
 			forward: true,
 			properties: Properties {
+				unknown: Default::default(),
 				dynamic_groups: false,
 				max_cache_duration: None,
 				timescale: None,
@@ -936,6 +937,7 @@ mod tests {
 			largest_location: None,
 			forward: true,
 			properties: Properties {
+				unknown: Default::default(),
 				dynamic_groups: false,
 				max_cache_duration: None,
 				timescale: None,

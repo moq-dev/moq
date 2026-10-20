@@ -7,12 +7,21 @@
 set -euo pipefail
 
 ffi_dir=""
+archive=""
 if [[ $# -gt 0 ]]; then
-    if [[ $# != 2 || "$1" != --ffi-dir ]]; then
-        echo "Usage: $0 [--ffi-dir DIR]" >&2
+    if [[ $# != 2 || ("$1" != --ffi-dir && "$1" != --archive) ]]; then
+        echo "Usage: $0 [--ffi-dir DIR | --archive FILE]" >&2
         exit 1
     fi
-    ffi_dir="$(cd "$2" && pwd)"
+    if [[ "$1" == --archive ]]; then
+        archive="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+        [[ -f "$archive" ]] || {
+            echo "Archive not found: $archive" >&2
+            exit 1
+        }
+    else
+        ffi_dir="$(cd "$2" && pwd)"
+    fi
 fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../cpp"
@@ -21,11 +30,32 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../../cpp"
 # --config Release, since the Rust staticlib links the release CRT (/MD) either way.
 build=moq/build
 if [[ -n "$ffi_dir" ]]; then build=moq/build/prebuilt; fi
-prefix="$PWD/$build/prefix"
-cmake -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib -DMOQ_FFI_DIR="$ffi_dir"
-cmake --build "$build/package" --config Release
-rm -rf "$prefix"
-cmake --install "$build/package" --config Release --prefix "$prefix"
+if [[ -n "$archive" ]]; then
+    build=moq/build/archive
+    version=$(tr -d '[:space:]' <moq/VERSION)
+    target=$(rustc -vV | sed -n 's/^host: //p')
+    name="moq-cpp-$version-$target"
+    extension=tar.gz
+    [[ "$target" == *-windows-* ]] && extension=zip
+    if [[ "$(basename "$archive")" != "$name.$extension" ]]; then
+        echo "Expected $name.$extension, got $archive" >&2
+        exit 1
+    fi
+    prefix="$PWD/$build/package/$name"
+    rm -rf "$build/package"
+    mkdir -p "$build/package"
+    (cd "$build/package" && cmake -E tar xf "$archive")
+    if [[ ! -f "$prefix/lib/cmake/moq-cpp/moq-cpp-config.cmake" ]]; then
+        echo "Missing moq-cpp package in $archive" >&2
+        exit 1
+    fi
+else
+    prefix="$PWD/$build/prefix"
+    cmake -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib -DMOQ_FFI_DIR="$ffi_dir"
+    cmake --build "$build/package" --config Release
+    rm -rf "$prefix"
+    cmake --install "$build/package" --config Release --prefix "$prefix"
+fi
 
 run() {
     if [[ -x "$1/probe" ]]; then "$1/probe"; else "$1/Release/probe.exe"; fi

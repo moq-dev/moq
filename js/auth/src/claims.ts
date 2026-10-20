@@ -50,6 +50,7 @@ export const ScopeSchema = z
 		}),
 	);
 
+/** A value parsed by {@link ScopeSchema}. */
 export type Scope = z.output<typeof ScopeSchema>;
 
 const ClaimsFields = {
