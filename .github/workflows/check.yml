@@ -72,11 +72,9 @@ jobs:
       - uses: DeterminateSystems/flake-checker-action@786422608c7bded2bbc9741ad9f91356842bf520 # main
         if: steps.scope.outputs.needed == 'true'
 
-      # cache.yml warms the default-branch store on `main`. Queue and release PR
-      # runs restore it; the action refuses to publish from them, and Actions
-      # would scope such an entry to its own ref anyway, where no later run
-      # could read it while it ate the repository's 10 GB budget. A selection
-      # of lints alone compiles no Rust, so it skips the restore.
+      # Hosted jobs restore the ARM64 cache warmed by cache.yml; self-hosted
+      # queue jobs reuse their local mbx store. Cache setup is needed only for
+      # selected work that compiles Rust.
       - name: Rust cache
         if: steps.scope.outputs.rust == 'true'
         uses: ./.github/actions/rust-cache

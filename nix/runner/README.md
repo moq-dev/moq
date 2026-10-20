@@ -85,7 +85,7 @@ The runner's home is `/var/cache/github-runner-home`; mbx uses
 on this runner. There is no cache-warming service or cache server. Persistent job
 state is shared with subsequent jobs, so route only trusted work to the runner.
 For MoQ, set `MOQ_QUEUE_RUNNER` to the runner label after a representative CI run
-passes; pull requests stay on hosted runners.
+passes; release pull requests use hosted runners and main pull requests skip cloud CI.
 
 `just gh runner-vm` builds a guest image and runs NixOS integration tests for
 startup without carrier, public egress for multiple guests, private-network and
