@@ -52,8 +52,10 @@ Both libraries offer solicit, auth, and epoch (draft 17 and later) unless a side
 `extensions` setting declines one, which connects it as a peer that does not
 speak that extension. The pooled JavaScript `Connection` has no such setting yet.
 [ietf](/draft/moq-ietf) goes the other way: it extends moq-lite-07 to carry this
-object state between relays. Only Rust offers it, when `extensions.ietf` is set,
-and `moq-relay` always does.
+object state between relays. moq-lite-07 is still a work in progress
+(`moq-lite-07-wip`), negotiated only when both sides enable it, so the default
+settings do not carry this state. Only Rust offers the extension, when
+`extensions.ietf` is set, and `moq-relay` always does on moq-lite-07.
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension. It encrypts
 application payloads, so relays still forward named tracks they cannot read.
 See [Encryption](/concept/hang#encryption).

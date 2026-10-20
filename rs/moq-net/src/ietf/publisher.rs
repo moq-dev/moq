@@ -4418,7 +4418,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				Some(wire) => {
 					// A datagram this draft cannot carry is dropped like an oversized one: it
 					// is best-effort, and the track's groups do not depend on it.
-					if wire.status == Some(1) && !matches!(self.version, Version::Draft14 | Version::Draft15) {
+					if wire.status == Some(DOES_NOT_EXIST)
+						&& !matches!(self.version, Version::Draft14 | Version::Draft15)
+					{
 						tracing::debug!(sequence, "dropping a datagram status this draft cannot carry");
 						continue;
 					}
@@ -5098,9 +5100,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	}
 }
 
-/// Object status: no object at or past this location exists.
-const END_OF_GROUP: u64 = 0x3;
-const END_OF_TRACK: u64 = 0x4;
+use super::object::{DOES_NOT_EXIST, END_OF_GROUP, END_OF_TRACK};
 
 /// An object's header, with private relay fields when it came from an IETF peer.
 struct Object<'a> {

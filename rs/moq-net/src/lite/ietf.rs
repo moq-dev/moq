@@ -257,6 +257,8 @@ pub(crate) fn decode_properties(
 pub(crate) struct Records {
 	/// The previous record's Object ID, `None` before the first.
 	prior: Option<u64>,
+	/// The stream stops at a frame cap, so its Group State promised no END_OF_GROUP.
+	capped: bool,
 	/// The units the track declares, which a sealed Timestamp must already be in.
 	timescale: Option<Timescale>,
 	version: Version,
@@ -285,6 +287,7 @@ impl Records {
 		writer.buffer_varint(encode_state(wire.as_ref(), whole, capped))?;
 		Ok(Some(Self {
 			prior: None,
+			capped,
 			timescale,
 			version,
 		}))
@@ -306,8 +309,9 @@ impl Records {
 		writer: &mut crate::coding::Writer<W, Version>,
 		group: &group::Consumer,
 	) -> Result<(), Error> {
-		// A stream capped short of the last frame stops before the end.
-		if group.index() < group.frame_count() as u64 {
+		// A capped stream stops at its cap even when that is the last frame, and one capped
+		// short of the last frame stops before the end.
+		if self.capped || group.index() < group.frame_count() as u64 {
 			return Ok(());
 		}
 		match group.end_object() {
@@ -453,6 +457,10 @@ pub(crate) fn decode_datagram(
 	let object_id = (state & OBJECT_ID != 0).then(|| r.varint()).transpose()?;
 	let priority = (state & PRIORITY != 0).then(|| r.u8()).transpose()?;
 	let status = (state & STATUS != 0).then(|| r.varint()).transpose()?;
+	// A relay holds and forwards it, so it must be one moq-transport ingress would accept.
+	if status.is_some_and(|status| !crate::ietf::object::status_defined(status)) {
+		return Err(DecodeError::InvalidValue);
+	}
 	let block = r.bytes()?;
 	let properties = decode_properties(block, timescale, version)?.properties;
 	Ok(Some(crate::model::datagram::Wire {
@@ -801,6 +809,25 @@ mod tests {
 		));
 	}
 
+	/// A relay holds and forwards a datagram's Status, so one moq-transport does not define
+	/// would close the session it reached: it is refused where it arrives.
+	#[test]
+	fn datagram_statuses_are_ones_moq_transport_defines() {
+		for (status, ok) in [(0, true), (1, true), (2, false), (3, true), (4, true), (5, false)] {
+			let wire = crate::model::datagram::Wire {
+				object_id: None,
+				priority: None,
+				end_of_group: false,
+				status: Some(status),
+				properties: Properties::default(),
+			};
+			let mut buf = Vec::new();
+			encode_datagram(&mut Encoder::new(&mut buf, V.into()), Some(&wire), V).unwrap();
+			let decoded = decode_datagram(&mut Decoder::new(&buf, V.into()), None, V);
+			assert_eq!(decoded.is_ok(), ok, "{status}");
+		}
+	}
+
 	#[test]
 	fn datagram_state_round_trips() {
 		let wire = crate::model::datagram::Wire {
@@ -1081,6 +1108,61 @@ mod hop_tests {
 				}
 			}
 		}
+	}
+
+	/// A subscription capped at a group's last frame stops there: its Group State promises
+	/// no END_OF_GROUP, so the END_OF_GROUP record past the cap is not sent either.
+	#[moq_clock::test]
+	async fn a_capped_stream_carries_no_end_record() {
+		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
+		let track = broadcast
+			.create_track("video", track::Info::timed().with_timescale(Timescale::MILLI))
+			.unwrap();
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 0,
+				extensions: false,
+				has_end: true,
+				fetchable: true,
+				last: None,
+			})
+			.unwrap();
+		for (index, payload) in [b"a", b"b"].into_iter().enumerate() {
+			let fields = crate::model::object::Fields {
+				id: index as u64,
+				properties: Properties::default(),
+			};
+			write(&mut group, index as u64, Some(fields), payload);
+		}
+		group.mark_gap(2, None).unwrap();
+		group
+			.set_end_object(crate::model::object::Fields {
+				id: 2,
+				properties: Properties::default(),
+			})
+			.unwrap();
+		group.finish().unwrap();
+
+		let (downstream, _sessions) = test_hop(&upstream, "room", [true, true]).await;
+		let broadcast = moq_clock::timeout(TIMEOUT, downstream.consume().request_broadcast("room", None))
+			.await
+			.expect("no broadcast")
+			.unwrap();
+		let capped = track::Subscription::default().with_end(track::Position::after(0, 1));
+		let mut subscriber = moq_clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(capped))
+			.await
+			.expect("no subscription")
+			.unwrap();
+		let mut received = recv(&mut subscriber).await;
+		assert_eq!(&next(&mut received).await.unwrap().payload[..], b"a");
+		assert_eq!(&next(&mut received).await.unwrap().payload[..], b"b");
+		assert!(next(&mut received).await.is_none());
+		assert!(!received.wire().expect("relay state").has_end);
+		assert!(received.end_object().is_none(), "an END_OF_GROUP past the cap");
 	}
 
 	/// Subscribe across a negotiated hop to a track carrying `properties`.

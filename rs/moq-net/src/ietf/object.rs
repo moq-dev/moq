@@ -24,6 +24,20 @@ pub(super) fn has_delivery_timeout(version: Version) -> bool {
 	)
 }
 
+/// Object status: the object does not exist, defined by drafts 14 and 15 only.
+pub(crate) const DOES_NOT_EXIST: u64 = 0x1;
+/// Object status: no object at or past this location in the group exists.
+pub(crate) const END_OF_GROUP: u64 = 0x3;
+/// Object status: no object at or past this location exists (every implemented draft).
+pub(crate) const END_OF_TRACK: u64 = 0x4;
+
+/// Whether any implemented draft defines the Object Status `status`, 0 being Normal.
+///
+/// Egress drops a DOES_NOT_EXIST for a draft without it, so a relay may hold one.
+pub(crate) fn status_defined(status: u64) -> bool {
+	matches!(status, 0 | DOES_NOT_EXIST | END_OF_GROUP | END_OF_TRACK)
+}
+
 /// Only draft-14 lets a status object, such as END_OF_GROUP, carry properties.
 #[cfg(feature = "async")]
 pub(super) fn status_has_properties(version: Version) -> bool {

@@ -91,7 +91,8 @@ A bit field describing the group's relay state, or 0 for a plain group:
 - `0x8` **END_OF_GROUP**: The stream's end ends the group, as a {{moqt}} subgroup that contains the end of its group.
 
 A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any other bit, a bit without RELAYED, or a record with Properties when EXTENSIONS is clear.
-A publisher MUST clear FIRST_OBJECT when the stream starts after the first frame it holds, and END_OF_GROUP when the stream stops before the end of the group, such as at a subscription's end frame.
+A publisher MUST clear FIRST_OBJECT when the stream starts after the first frame it holds, and END_OF_GROUP when the stream may stop before the end of the group, such as at a subscription's end frame.
+A stream that stops at an end frame carries no END_OF_GROUP record, even when that frame is the group's last.
 
 Only subgroup 0 of a {{moqt}} group is carried.
 
@@ -228,6 +229,7 @@ A bit field, or 0 for a plain datagram, which has none of the optional fields be
 A receiver MUST drop a datagram with any other bit, or a bit without RELAYED.
 
 A datagram with a non-zero Status carries no object: it has no Timestamp, even on a timed track, and its Payload MUST be empty.
+A receiver MUST drop a datagram whose Status no {{moqt}} draft defines: only 0 (Normal), 1 (DOES_NOT_EXIST, drafts 14 and 15), 3 (END_OF_GROUP), and 4 (END_OF_TRACK) are relayed.
 
 
 # Security Considerations

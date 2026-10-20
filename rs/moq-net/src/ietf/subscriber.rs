@@ -4092,11 +4092,13 @@ where
 
 		let (payload, status) = match datagram.body {
 			ietf::DatagramBody::Payload(payload) => (payload, None),
-			ietf::DatagramBody::Status(status @ (0 | END_OF_GROUP | END_OF_TRACK)) => {
-				(bytes::Bytes::new(), Some(status))
+			ietf::DatagramBody::Status(DOES_NOT_EXIST)
+				if !matches!(self.version, Version::Draft14 | Version::Draft15) =>
+			{
+				return Err(Error::Session(SessionError::ProtocolViolation));
 			}
-			ietf::DatagramBody::Status(1) if matches!(self.version, Version::Draft14 | Version::Draft15) => {
-				(bytes::Bytes::new(), Some(1))
+			ietf::DatagramBody::Status(status) if super::object::status_defined(status) => {
+				(bytes::Bytes::new(), Some(status))
 			}
 			ietf::DatagramBody::Status(_) => return Err(Error::Session(SessionError::ProtocolViolation)),
 		};
@@ -4180,11 +4182,7 @@ enum Ended {
 	Track { object: u64, properties: bool },
 }
 
-/// Object status: no object at or past this location in the group exists (draft-14, 15).
-const END_OF_GROUP: u64 = 0x3;
-
-/// Object status: no object at or past this location exists (every implemented draft).
-const END_OF_TRACK: u64 = 0x4;
+use super::object::{DOES_NOT_EXIST, END_OF_GROUP, END_OF_TRACK};
 
 /// The start of a subgroup stream's first object, peeked before its group is created.
 #[derive(Debug, Clone, Copy)]
