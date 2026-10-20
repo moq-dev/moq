@@ -65,10 +65,11 @@ platform coverage (56-57 minutes), binding benchmarks (43-57 minutes), Rust
 bench targets (40-51 minutes), and audio quality (47-60 minutes). Their work
 differs and belongs outside the PR gate; runner/cache changes stay with the
 CI epic. Queue run
-[39287133351](https://github.com/moq-dev/moq/actions/runs/39287133351) also
-exposed the Python clock test's stale expectation: a pending first-frame read
-fails with `Old` when its group expires, then a new read reaches the later
-group. Preserve both the exact deadline and that error classification.
+[39287133351](https://github.com/moq-dev/moq/actions/runs/39287133351) failed
+the Python clock test with `Old`:
+[moq-dev/moq#5944](https://github.com/moq-dev/moq/pull/5944) made an expired group fail its pending
+first-frame read. [moq-dev/moq#5962](https://github.com/moq-dev/moq/pull/5962)
+restored the skip to the later group, so the test keeps its original assertion.
 
 The branch check also shows a scoping cost worth measuring next: a JS net
 benchmark-only edit selects WASM and the net dependents, while a stats
@@ -78,5 +79,4 @@ build. Compare that cost with the regression signal before changing selection.
 Verified locally: `just check`, the full forward benchmark sweep, the 8 CI
 selection tests, and targeted stats producer-benchmark Clippy. The stats
 benchmark check temporarily used the dead-code audit's import cleanup; that
-prerequisite is excluded from this PR. The original Python clock fixture
-fails with `Old`; the corrected full Python suite passes all 101 tests.
+prerequisite is excluded from this PR.

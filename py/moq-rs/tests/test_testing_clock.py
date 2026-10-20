@@ -51,18 +51,7 @@ def test_a_pending_timer_waits_for_advance() -> None:
             assert not pending.done()
 
             clock.advance(0.001)
-            # A group already taken by read_frame fails when it becomes stale;
-            # the next read advances to the later group.
-            try:
-                await asyncio.wait_for(pending, timeout=5)
-            except moq.Error.Protocol as err:
-                protocol = moq.protocol_error(err)
-                assert protocol is not None
-                assert protocol.scope == moq.ErrorScope.STREAM
-                assert protocol.kind == moq.ProtocolKind.OLD
-            else:
-                raise AssertionError("the stalled group did not expire")
-            frame = await asyncio.wait_for(consumer.read_frame(), timeout=5)
+            frame = await asyncio.wait_for(pending, timeout=5)
             assert frame is not None and frame.payload == b"later"
             assert clock.time() == 1
 
