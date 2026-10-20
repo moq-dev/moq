@@ -1,9 +1,10 @@
-# [M] Test and CI cost audit
+# [M] Test cost audit
 
 ## Goal
 
-The slowest, flakiest, and least valuable tests and CI jobs are sped up, fixed,
-deleted, or planned, so the suite costs what it earns.
+The slowest, flakiest, and least valuable tests are sped up, fixed, deleted,
+or planned, so the suite costs what it earns. Workflows and jobs belong to the
+[CI workflow audit](/quest/m1/audit-ci.md).
 
 ## Plan
 
@@ -23,39 +24,16 @@ Use nextest's normal CI log to rank the slowest tests (`slow-timeout` is 30s).
 Flakes are tracked by hand in [test flakes](/quest/m1/test-flakes-2/README.md),
 and `retries = 0` is deliberate. A test that sleeps on the wall clock should
 mock time (AGENTS.md). Delete tests whose coverage another test already
-provides. [CI cost and latency](/quest/m0/ci/README.md) owns runner and cache
-infrastructure. Once the one-time [CI pipeline audit](/quest/m0/ci/audit.md)
-closes, this audit ranks job costs again.
+provides. Failed Nightly, Interop, and Platform jobs, and what each job costs, moved to
+the [CI workflow audit](/quest/m1/audit-ci.md) (2026-10-20).
 
-What the m0 run (2026-10-19) learned; check these first:
-
-- Classify every failed job of the latest Nightly, scheduled Interop, and
-  Platform runs, not just the slowest. The m0 run's first checkpoint looked
-  mainly at the Nightly's stalled JS benchmarks, while 28 Nightly jobs had
-  failed for eight independent causes, some for days. A red Nightly hides the
-  next regression: the send-depth gate and all six fuzz targets broke on
-  2026-10-18 and stayed broken unnoticed until this audit.
-- Platform (macOS, Windows) runs only in the merge queue and is not required,
-  so a Windows-only compile error in moq-video stayed red for two days across
-  dozens of queue runs until
-  [#5966](https://github.com/moq-dev/moq/pull/5966). Most Platform failures
-  in the sample were that error, a choco `nasm` install outage, or another
-  queued PR's breakage. Rank Platform by failure cause, not count.
-- A queue failure often belongs to another PR in the same batch: a stale
-  fixture in the entry itself, or a semantic conflict with a PR merged after it
-  was queued. Check the entry's head branch and what merged around it before
-  calling it a flake.
-- Fixed by the m0 run: the ACME rate-limit test's released port, the stats
-  session graph's recursive Send proof (send-depth and fuzz), bench/ffi-gen's
-  stale wasm-bindgen lock, moq-uring's fixed 1 ms calibration slack, the
-  Nightly JS benchmark stall, the CI selection test's feature count, and the
-  stats producer benchmark lint.
-- Planned by the m0 run: [redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md),
-  [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md), and
-  [nightly media players](/quest/m1/media-engines-nightly.md). Owned
-  elsewhere: release builds by [release builds link](/quest/m0/release-link.md),
-  and Rust advisories by the dependency audit. The Nix wasm-bindgen CLI now
-  follows `Cargo.lock` ([#6031](https://github.com/moq-dev/moq/pull/6031)).
+What the m0 run (2026-10-19) fixed: the ACME rate-limit test's released port,
+the stats session graph's recursive Send proof (send-depth and fuzz),
+bench/ffi-gen's stale wasm-bindgen lock, moq-uring's fixed 1 ms calibration
+slack, the Nightly JS benchmark stall, the CI selection test's feature count,
+and the stats producer benchmark lint. It planned
+[redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md)
+and [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md).
 
 Baselines from queue run
 [39371990135](https://github.com/moq-dev/moq/actions/runs/39371990135):
