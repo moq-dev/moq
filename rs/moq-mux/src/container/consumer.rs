@@ -522,11 +522,10 @@ impl<F: Container> Consumer<F> {
 				let since = self.hole.unwrap().1;
 				let elapsed = since.elapsed() >= self.max_delay;
 				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= self.max_delay);
-				let excluded = self.track.as_ref().is_some_and(|track| {
-					track
-						.next_in_range(self.current)
-						.is_none_or(|next| next >= sequence)
-				});
+				let excluded = self
+					.track
+					.as_ref()
+					.is_some_and(|track| track.next_in_range(self.current).is_none_or(|next| next >= sequence));
 				if finished || elapsed || aged || excluded {
 					let _ = self.pending.front_mut().unwrap().look_all(waiter, &self.format);
 					let front = self.pending.front_mut().unwrap();
