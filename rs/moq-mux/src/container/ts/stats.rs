@@ -213,15 +213,16 @@ impl Stream {
 #[serde(rename_all = "lowercase")]
 pub enum Class {
 	/// Continuous audio.
-	Audio,
+	Audio = 1,
 	/// Continuous video, including MPEG-1/2 video read only for its clock.
-	Video,
+	Video = 2,
 	/// Undecoded or sparse data (SCTE-35, ID3, private sections, private PES), or a PCR PID
 	/// that carries no elementary stream. A quiet second is not a stall. A class a later
-	/// version adds reads as data.
+	/// version adds reads as data. It must stay last for `#[serde(other)]`; the explicit
+	/// discriminants keep every variant's `as` value.
 	#[default]
 	#[serde(other)]
-	Data,
+	Data = 0,
 }
 
 impl Class {
@@ -437,6 +438,14 @@ impl Log {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	/// `Class` keeps its `as` values with `Data` last, and an unknown name reads as data.
+	#[test]
+	fn class_keeps_its_discriminants() {
+		assert_eq!([Class::Data as u8, Class::Audio as u8, Class::Video as u8], [0, 1, 2]);
+		let class: Class = serde_json::from_str(r#""subtitle""#).unwrap();
+		assert_eq!(class, Class::Data);
+	}
 
 	/// A stream whose count stops across a sample is logged once, with its silence, and again
 	/// only after it has delivered in between; a stream that keeps counting never is, and

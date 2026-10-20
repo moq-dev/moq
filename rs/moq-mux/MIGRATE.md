@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `ts::stats::Export`'s release counters move into `release` (#5849)
+
+`dropped`, `trimmed`, `gaps`, `drift`, and `out_of_tolerance` are now fields of `Export::release`, a `ts::stats::Release`, which `ts::Release::stats` also returns on its own.
+Read `export.release.dropped` where you read `export.dropped`, and likewise for the rest.
+
 ### `ts::Passthrough` describes the whole track in its `m2ts` section (#5967)
 
 The section's `randomAccess` turns false at the first group that does not start at a random access point and stays false, instead of recovering with the next two-second window; its `muxRate` follows the source's measured rate.
