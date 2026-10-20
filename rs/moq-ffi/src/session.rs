@@ -1,3 +1,5 @@
+//! Connect to peers and manage MoQ sessions.
+
 use std::sync::Arc;
 
 use url::Url;
@@ -877,6 +879,7 @@ impl Accepted {
 	}
 }
 
+/// A connection that exchanges broadcasts with a peer.
 #[derive(uniffi::Object)]
 pub struct MoqSession {
 	inner: Inner,

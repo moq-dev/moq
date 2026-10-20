@@ -20,13 +20,21 @@ use crate::ffi::Task;
 /// <https://developer.mozilla.org/en-US/docs/Web/API/AudioData/format>
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqAudioSampleFormat {
+	/// Unsigned 8-bit PCM samples, interleaved by channel.
 	U8,
+	/// Signed 16-bit PCM samples, interleaved by channel.
 	S16,
+	/// Signed 32-bit PCM samples, interleaved by channel.
 	S32,
+	/// 32-bit floating-point PCM samples, interleaved by channel.
 	F32,
+	/// Unsigned 8-bit PCM samples, one plane per channel.
 	U8Planar,
+	/// Signed 16-bit PCM samples, one plane per channel.
 	S16Planar,
+	/// Signed 32-bit PCM samples, one plane per channel.
 	S32Planar,
+	/// 32-bit floating-point PCM samples, one plane per channel.
 	F32Planar,
 }
 
@@ -106,9 +114,11 @@ impl From<MoqAudioPreset> for moq_audio::encode::Preset {
 /// PCM layout the caller will pass to [`MoqAudioProducer::write`].
 #[derive(uniffi::Record)]
 pub struct MoqAudioEncoderInput {
+	/// The raw PCM sample layout.
 	pub format: MoqAudioSampleFormat,
+	/// The number of samples per second.
 	pub sample_rate: u32,
-	/// Interleaved channel count, which also names the speaker layout by the
+	/// The channel count, which also names the speaker layout by the
 	/// WAVE convention: 1 mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1,
 	/// 8 7.1, in front left, front right, center, LFE, back, side order.
 	pub channels: u32,
@@ -119,14 +129,18 @@ pub struct MoqAudioEncoderInput {
 /// value if necessary)".
 #[derive(uniffi::Record)]
 pub struct MoqAudioEncoderOutput {
+	/// The codec used to encode this rendition.
 	pub codec: Arc<MoqAudioCodec>,
 	/// Track name for a broadcast-bound producer. `None` derives one from the codec.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
+	/// The encoded samples per second, or absent to match the input rate.
 	#[uniffi(default = None)]
 	pub sample_rate: Option<u32>,
+	/// The encoded channel count, or absent to match the input.
 	#[uniffi(default = None)]
 	pub channels: Option<u32>,
+	/// The target bitrate in bits per second, or absent for the codec default.
 	#[uniffi(default = None)]
 	pub bitrate: Option<u32>,
 	/// Encoded frame duration in microseconds. Opus accepts exactly
@@ -161,6 +175,7 @@ impl MoqAudioEncoderOutput {
 /// PCM layout the caller wants out of [`MoqAudioConsumer::next`].
 #[derive(uniffi::Record)]
 pub struct MoqAudioDecoderOutput {
+	/// The raw PCM sample layout.
 	pub format: MoqAudioSampleFormat,
 	/// `None` delivers samples at the codec's native rate.
 	#[uniffi(default = None)]
@@ -379,6 +394,7 @@ impl MoqAudioProducer {
 		Ok(())
 	}
 
+	/// Encode and publish one PCM frame.
 	pub fn write(&self, frame: MoqAudioFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let frame = moq_audio::Frame::try_from(frame)?;
@@ -395,6 +411,7 @@ impl MoqAudioProducer {
 		self.reservation.lock().unwrap().clone()
 	}
 
+	/// Drain the encoder and finish the audio track.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
