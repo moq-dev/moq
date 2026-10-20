@@ -25,14 +25,6 @@ pub(crate) struct Tail {
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
-	/// Fetches waiting on an accounted group, rather than every ledger write.
-	waiting: kio::Lock<Waiting>,
-}
-
-#[derive(Debug, Default)]
-struct Waiting {
-	groups: std::collections::BTreeMap<u64, kio::WaiterList>,
-	sweep: usize,
 }
 
 impl Default for Tail {
@@ -48,7 +40,6 @@ impl Tail {
 			ledger: Ledger::new(grace),
 			streams: 0,
 			active: 0,
-			waiting: Default::default(),
 		}
 	}
 
@@ -62,7 +53,6 @@ impl Tail {
 		if groups.is_empty() {
 			return;
 		}
-		self.wake_groups(groups.clone());
 		self.ledger.account(groups, now);
 		self.expire(now);
 	}
@@ -72,13 +62,8 @@ impl Tail {
 		self.ledger.demand(groups, now);
 	}
 
-	/// Fold every gap older than the grace into the runs around it, waking fetches held on them.
+	/// Fold every gap older than the grace into the runs around it.
 	pub fn expire(&mut self, now: Instant) {
-		for (gap, at) in self.ledger.folds() {
-			if at <= now {
-				self.wake_groups(gap);
-			}
-		}
 		self.ledger.expire(now);
 	}
 
@@ -88,34 +73,9 @@ impl Tail {
 	}
 
 	/// See [`Ledger::folds_at`].
+	#[cfg(test)]
 	pub fn folds_at(&self, group: u64) -> Option<Instant> {
-		self.ledger.folds_at(group)
-	}
-
-	/// Register only for this group's accounting, including an explicit drop.
-	pub fn watch_group(&self, group: u64, waiter: &kio::Waiter) {
-		let mut waiting = self.waiting.lock();
-		if waiting.groups.len() >= waiting.sweep {
-			waiting.groups.retain(|_, list| !list.is_empty());
-			waiting.sweep = (waiting.groups.len() * 2).max(16);
-		}
-		waiting.groups.entry(group).or_default().register(waiter);
-	}
-
-	fn wake_groups(&self, groups: Range<u64>) {
-		let mut woken = Vec::new();
-		{
-			let mut waiting = self.waiting.lock();
-			while let Some(at) = waiting.groups.range(groups.clone()).next().map(|(at, _)| *at) {
-				woken.extend(waiting.groups.remove(&at));
-			}
-		}
-		woken.iter_mut().for_each(kio::WaiterList::wake);
-	}
-
-	/// See [`Ledger::folds`].
-	pub fn folds(&self) -> impl Iterator<Item = (Range<u64>, Instant)> + '_ {
-		self.ledger.folds()
+		self.ledger.folds_at(group, self.ledger.grace())
 	}
 
 	/// Data streams received, whether they finished or were reset.

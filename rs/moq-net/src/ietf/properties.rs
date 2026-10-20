@@ -19,7 +19,8 @@ use crate::model::object::{Property, TrackProperties, Value};
 
 use super::{GroupOrder, Version};
 
-const MAX_PROPERTIES: u64 = 64;
+/// The most Track Properties a message may carry, which also bounds what a relay forwards.
+pub(crate) const MAX_PROPERTIES: u64 = 64;
 /// Maximum byte value length per spec Section 1.4.3.
 const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
 
@@ -87,6 +88,21 @@ impl Properties {
 		!matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 	}
 
+	/// The properties a relay states for a track it serves, from the `info` it acts on.
+	///
+	/// We serve the newest group first by default, matching moq-lite.
+	pub(crate) fn restated(info: &crate::track::Info) -> Self {
+		Self {
+			max_cache_duration: info.max_age,
+			timescale: info.timescale,
+			priority: Some(super::priority::to_wire(info.priority)),
+			group_order: Some(GroupOrder::Descending),
+			// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
+			dynamic_groups: info.refresh.is_some(),
+			unknown: TrackProperties::default(),
+		}
+	}
+
 	/// Write the block, which is the final field of the message: no count and no length,
 	/// so the caller must not append anything after it.
 	///
@@ -131,7 +147,7 @@ impl Properties {
 
 		let mut properties: Vec<_> = known
 			.iter()
-			.filter(|property| !self.unknown.sealed.contains(&property.id))
+			.filter(|property| !self.unknown.sealed().any(|id| id == property.id))
 			.chain(&self.unknown.values)
 			.collect();
 		// Delta types require ascending order. Equal types keep the publisher's order.
@@ -206,16 +222,10 @@ impl Properties {
 				let value = r.slice(len)?;
 				if abs == IMMUTABLE {
 					// A second block would leave the sealed list ambiguous.
-					if properties
-						.unknown
-						.immutable
-						.replace(super::object::encoding(version))
-						.is_some()
-					{
+					if properties.unknown.immutable().is_some() {
 						return Err(DecodeError::InvalidValue);
 					}
-					let sealed = sealed(&mut Decoder::new(value, version.into()), &mut properties, &mut seen)?;
-					properties.unknown.sealed = sealed;
+					sealed(&mut Decoder::new(value, version.into()), &mut properties, &mut seen)?;
 				}
 				// A small kept property must not pin the message's larger buffer.
 				properties.unknown.values.push(Property {
@@ -225,9 +235,9 @@ impl Properties {
 			}
 		}
 
-		// Recorded only beside a value it describes, so a set with nothing to forward stays empty.
-		properties.unknown.delivery_timeout =
-			!properties.unknown.values.is_empty() && super::object::has_delivery_timeout(version);
+		// Recorded only beside a value they describe, so a set with nothing to forward stays empty.
+		let forwarded = !properties.unknown.values.is_empty();
+		properties.unknown.encoding = forwarded.then(|| super::object::encoding(version));
 		Ok(properties)
 	}
 
@@ -265,6 +275,126 @@ impl Properties {
 	}
 }
 
+/// The Track Properties moq-net applies itself, which a relay restates from the track's
+/// info rather than forwarding the publisher's.
+const UNDERSTOOD: [u64; 5] = [
+	MAX_CACHE_DURATION,
+	TIMESCALE,
+	DEFAULT_PUBLISHER_PRIORITY,
+	DEFAULT_PUBLISHER_GROUP_ORDER,
+	DYNAMIC_GROUPS,
+];
+
+/// Whether moq-net applies the Track Property `id` itself.
+pub(crate) fn understood(id: u64) -> bool {
+	UNDERSTOOD.contains(&id)
+}
+
+/// The most Track Properties a relay forwards, leaving room for every one it restates
+/// within the [`MAX_PROPERTIES`] a message may carry.
+pub(crate) const MAX_FORWARDED: usize = MAX_PROPERTIES as usize - UNDERSTOOD.len();
+
+/// Check a Track Properties' Immutable Properties `block`, serialized in the `encoding`
+/// family, as [`Properties::decode`] does.
+pub(crate) fn check_immutable(block: &[u8], encoding: crate::model::object::Encoding) -> Result<(), DecodeError> {
+	// Track Properties start at draft-16, whose families all delta-encode their keys.
+	if encoding == crate::model::object::Encoding::Draft14 {
+		return Err(DecodeError::InvalidValue);
+	}
+	let version = super::object::family(encoding);
+	sealed(
+		&mut Decoder::new(block, version.into()),
+		&mut Properties::default(),
+		&mut Vec::new(),
+	)
+}
+
+impl TrackProperties {
+	/// The Immutable Properties block, serialized as [`Self::encoding`] says.
+	pub(crate) fn immutable(&self) -> Option<&Bytes> {
+		self.values
+			.iter()
+			.find_map(|property| match (property.id, &property.value) {
+				(IMMUTABLE, Value::Bytes(block)) => Some(block),
+				_ => None,
+			})
+	}
+
+	/// The keys inside Immutable Properties, which egress must not restate as mutable.
+	///
+	/// Read from the block each time rather than held as a list, which could be many times
+	/// its size. Ingress checked the block, so a malformed key cannot occur and ends it.
+	pub(crate) fn sealed(&self) -> impl Iterator<Item = u64> + '_ {
+		let mut r = self
+			.immutable()
+			.zip(self.encoding)
+			.map(|(block, encoding)| Decoder::new(block, super::object::family(encoding).into()));
+		let mut id: u64 = 0;
+		std::iter::from_fn(move || {
+			let r = r.as_mut().filter(|r| !r.is_empty())?;
+			id = id.checked_add(r.varint().ok()?)?;
+			match id.is_multiple_of(2) {
+				true => r.varint().ok().map(drop)?,
+				false => r.bytes().ok().map(drop)?,
+			}
+			Some(id)
+		})
+	}
+
+	/// Why a track carrying these beside `info` is neither processed nor forwarded, if it
+	/// is not: every ingress, moq-transport or a relay hop, refuses it here.
+	pub(crate) fn refused(&self, info: &crate::track::Info) -> Option<crate::Error> {
+		if self.mandatory() {
+			return Some(crate::Error::UnsupportedExtension);
+		}
+		// Egress forwards a sealed value in place of restating `info`, so the two must agree.
+		if self.contradicts(&Properties::restated(info)) {
+			return Some(crate::Error::Unsupported);
+		}
+		// Egress could not restate the track's info beside them without overflowing.
+		if self.values.len() > MAX_FORWARDED {
+			return Some(crate::Error::Unsupported);
+		}
+		// Nor could a relay hop carry them in one message.
+		if !crate::lite::ietf::fits(self) {
+			return Some(crate::Error::Unsupported);
+		}
+		None
+	}
+
+	/// Whether Immutable Properties seal a property we understand at another value than
+	/// the `restated` one the relay acts on.
+	fn contradicts(&self, restated: &Properties) -> bool {
+		let Some((block, encoding)) = self.immutable().zip(self.encoding) else {
+			return false;
+		};
+		let mut sealed = Properties::default();
+		let mut seen = Vec::new();
+		let r = &mut Decoder::new(block, super::object::family(encoding).into());
+		// Ingress checked the block, so a malformed one cannot occur and is refused.
+		if self::sealed(r, &mut sealed, &mut seen).is_err() {
+			return true;
+		}
+		seen.into_iter().any(|id| match id {
+			MAX_CACHE_DURATION => sealed.max_cache_duration != restated.max_cache_duration,
+			TIMESCALE => sealed.timescale != restated.timescale,
+			DEFAULT_PUBLISHER_PRIORITY => sealed.priority != restated.priority,
+			// Advisory: a relay serves its own order and forwards the publisher's preference.
+			DEFAULT_PUBLISHER_GROUP_ORDER => false,
+			DYNAMIC_GROUPS => sealed.dynamic_groups != restated.dynamic_groups,
+			_ => unreachable!("only the understood properties are seen"),
+		})
+	}
+
+	/// Whether one is a Mandatory Track Property (0x4000-0x7FFF), which by definition is
+	/// one moq-net does not understand: the track must be neither processed nor forwarded.
+	fn mandatory(&self) -> bool {
+		const MANDATORY: std::ops::RangeInclusive<u64> = 0x4000..=0x7fff;
+		self.values.iter().any(|property| MANDATORY.contains(&property.id))
+			|| self.sealed().any(|id| MANDATORY.contains(&id))
+	}
+}
+
 /// A DYNAMIC_GROUPS value, which is a boolean: anything but 0 or 1 is malformed.
 pub(super) fn dynamic_groups(value: u64) -> Result<bool, DecodeError> {
 	match value {
@@ -274,11 +404,10 @@ pub(super) fn dynamic_groups(value: u64) -> Result<bool, DecodeError> {
 	}
 }
 
-/// The keys inside an Immutable Properties value, applying the ones we understand, which
-/// the draft makes a processor search too. Its pairs are delta-encoded like the outer
+/// Check the keys inside an Immutable Properties value, applying the ones we understand,
+/// which the draft makes a processor search too. Its pairs are delta-encoded like the outer
 /// list, and nesting another Immutable Properties makes the track malformed.
-fn sealed(r: &mut Decoder<'_>, properties: &mut Properties, seen: &mut Vec<u64>) -> Result<Vec<u64>, DecodeError> {
-	let mut ids = Vec::new();
+fn sealed(r: &mut Decoder<'_>, properties: &mut Properties, seen: &mut Vec<u64>) -> Result<(), DecodeError> {
 	let mut id: u64 = 0;
 	while !r.is_empty() {
 		id = id.checked_add(r.varint()?).ok_or(DecodeError::BoundsExceeded)?;
@@ -290,9 +419,8 @@ fn sealed(r: &mut Decoder<'_>, properties: &mut Properties, seen: &mut Vec<u64>)
 			}
 			r.bytes()?;
 		}
-		ids.push(id);
 	}
-	Ok(ids)
+	Ok(())
 }
 
 #[cfg(test)]
@@ -566,9 +694,9 @@ mod tests {
 			let (properties, written) = round_trip(version, &block);
 			assert_eq!(written, block, "{version}");
 			assert_eq!(properties.unknown.values.len(), 3, "{version}");
-			assert_eq!(properties.unknown.sealed, [0x02], "{version}");
+			assert!(properties.unknown.sealed().eq([0x02]), "{version}");
 			assert_eq!(
-				properties.unknown.immutable,
+				properties.unknown.encoding,
 				Some(super::super::object::encoding(version)),
 				"{version}"
 			);
@@ -627,6 +755,147 @@ mod tests {
 			decode_draft22(&[0x0b, 0x00, 0x00, 0x00]),
 			Err(DecodeError::InvalidValue)
 		));
+	}
+
+	/// A relay forwards only as many properties as leave room for every one it restates, so
+	/// what it sends always decodes. One more is refused at ingress.
+	#[test]
+	fn forwarded_properties_leave_room_for_the_restated() {
+		let unknown = |count: usize| TrackProperties {
+			values: (0..count as u64)
+				.map(|i| Property {
+					id: 0x40 + 2 * i,
+					value: Value::Int(1),
+				})
+				.collect(),
+			encoding: Some(crate::model::object::Encoding::Draft19),
+		};
+		let properties = Properties {
+			max_cache_duration: Some(Duration::from_secs(1)),
+			timescale: Some(Timescale::MILLI),
+			priority: Some(1),
+			group_order: Some(GroupOrder::Descending),
+			dynamic_groups: true,
+			unknown: unknown(MAX_FORWARDED),
+		};
+		assert!(properties.unknown.refused(&crate::track::Info::default()).is_none());
+		let mut buf = Vec::new();
+		properties
+			.encode(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
+			.unwrap();
+		assert_eq!(decode_draft22(&buf).unwrap(), properties);
+
+		assert!(matches!(
+			unknown(MAX_FORWARDED + 1).refused(&crate::track::Info::default()),
+			Some(crate::Error::Unsupported)
+		));
+	}
+
+	/// Why a track whose publisher sealed `value` as the understood property `id` is
+	/// refused beside an info that restates 7s, 1000 Hz, priority 9, Descending, and
+	/// DYNAMIC_GROUPS.
+	fn seal(id: u64, value: u64) -> Option<crate::Error> {
+		let version = Version::Draft22;
+		let mut block = Vec::new();
+		let w = &mut Encoder::new(&mut block, version.into());
+		w.varint(id).unwrap();
+		w.varint(value).unwrap();
+		let unknown = TrackProperties {
+			values: vec![Property {
+				id: IMMUTABLE,
+				value: Value::Bytes(block.into()),
+			}],
+			encoding: Some(super::super::object::encoding(version)),
+		};
+		let info = crate::track::Info::default()
+			.with_max_age(Duration::from_secs(7))
+			.with_timescale(Timescale::MILLI)
+			.with_priority(9)
+			.with_refresh(0);
+		unknown.refused(&info)
+	}
+
+	/// A sealed value of a property the relay restates must be the one it acts on, since
+	/// egress forwards the sealed one in its place.
+	#[test]
+	fn a_sealed_max_cache_duration_matches_the_track() {
+		assert!(seal(MAX_CACHE_DURATION, 7000).is_none());
+		assert!(matches!(
+			seal(MAX_CACHE_DURATION, 7001),
+			Some(crate::Error::Unsupported)
+		));
+	}
+
+	#[test]
+	fn a_sealed_timescale_matches_the_track() {
+		assert!(seal(TIMESCALE, 1000).is_none());
+		assert!(matches!(seal(TIMESCALE, 900), Some(crate::Error::Unsupported)));
+		// Zero declares no timeline, which contradicts one.
+		assert!(matches!(seal(TIMESCALE, 0), Some(crate::Error::Unsupported)));
+	}
+
+	#[test]
+	fn a_sealed_priority_matches_the_track() {
+		let wire = u64::from(super::super::priority::to_wire(9));
+		assert!(seal(DEFAULT_PUBLISHER_PRIORITY, wire).is_none());
+		assert!(matches!(
+			seal(DEFAULT_PUBLISHER_PRIORITY, wire + 1),
+			Some(crate::Error::Unsupported)
+		));
+	}
+
+	#[test]
+	fn a_sealed_group_order_is_advisory() {
+		// The relay serves the newest group first, but forwards the publisher's preference.
+		for order in [1, 2] {
+			assert!(seal(DEFAULT_PUBLISHER_GROUP_ORDER, order).is_none(), "{order}");
+		}
+
+		// Egress forwards the sealed block unchanged and restates no mutable order beside it.
+		let version = Version::Draft22;
+		let mut sealed = Vec::new();
+		let w = &mut Encoder::new(&mut sealed, version.into());
+		w.varint(DEFAULT_PUBLISHER_GROUP_ORDER).unwrap();
+		w.varint(1).unwrap();
+		let unknown = TrackProperties {
+			values: vec![Property {
+				id: IMMUTABLE,
+				value: Value::Bytes(sealed.clone().into()),
+			}],
+			encoding: Some(super::super::object::encoding(version)),
+		};
+		let egress = Properties {
+			unknown: unknown.clone(),
+			..Properties::restated(&crate::track::Info::default())
+		};
+		let mut buf = Vec::new();
+		egress
+			.encode(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
+		let decoded = decode_draft22(&buf).unwrap();
+		assert_eq!(decoded.group_order, Some(GroupOrder::Ascending));
+		assert_eq!(decoded.unknown, unknown);
+	}
+
+	#[test]
+	fn sealed_dynamic_groups_match_the_track() {
+		assert!(seal(DYNAMIC_GROUPS, 1).is_none());
+		assert!(matches!(seal(DYNAMIC_GROUPS, 0), Some(crate::Error::Unsupported)));
+	}
+
+	/// Every property the relay restates has a sealed check above.
+	#[test]
+	fn every_understood_property_is_checked_when_sealed() {
+		assert_eq!(
+			UNDERSTOOD,
+			[
+				MAX_CACHE_DURATION,
+				TIMESCALE,
+				DEFAULT_PUBLISHER_PRIORITY,
+				DEFAULT_PUBLISHER_GROUP_ORDER,
+				DYNAMIC_GROUPS
+			]
+		);
 	}
 
 	/// 0x4000-0x7FFF are Mandatory Track Properties, mutable or sealed.
