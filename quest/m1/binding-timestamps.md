@@ -6,8 +6,8 @@ Every binding (moq-ffi, moq-c, cpp and cpp/obs, and the py, swift, kt, go and
 dart wrappers) carries media timestamps as an exact `{value, scale}` record
 mirroring `moq_net::Timestamp`, with untimed as absent. It replaces the lossy
 microsecond fields on frames, datagrams, media and audio frames, producer
-arguments, and the data values that
-[Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) adds.
+arguments, and the JSON data values (`MoqJsonValue`, `moq_json_value`, and each
+wrapper's `Timed`).
 
 The Rust core and `@moq/net` already carry exact timestamps. Wire: none.
 Public API: breaking in every binding.
@@ -54,10 +54,6 @@ Decided with the maintainer on 2026-10-18:
 Verification: round-trip a 90 kHz tick, a present zero, and untimed through
 moq-ffi, moq-c, C++ and every wrapper's tests; refuse scale 0, an
 out-of-range scale, and an out-of-range value; `just test interop --all`.
-
-## Required
-
-- [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - lands first with the interim microsecond fields this replaces
 
 ## Related
 

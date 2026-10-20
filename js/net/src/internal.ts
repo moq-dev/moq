@@ -283,6 +283,8 @@ export type RecvDatagram =
  * buffer of its own. Implemented by `resume.ts`, the counterpart of the Rust `Inner::Resume`.
  */
 export interface ResumeSource {
+	/** Re-evaluate a live-edge join at the serving copy. */
+	join(): void;
 	/** The next group not in `delivered`, in arrival or sequence order, without waiting. */
 	tryGroup(ordered: boolean, delivered: Delivered): Recv;
 	/**
@@ -304,7 +306,10 @@ export interface ResumeSource {
 	bufferedLargest(): Location | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
 	peekLargest(): { largest?: Location; ended: boolean };
-	/** The serving copy's largest location once newer than `seen`, or undefined once the logical track ends. */
+	/**
+	 * The serving copy's largest location once within the reader's cursor and newer than `seen`,
+	 * or undefined once the logical track ends.
+	 */
 	largest(seen: Location | undefined): Promise<Location | undefined>;
 	/** An independent subscriber to the serving copy. */
 	fork(options?: Subscription): Subscriber;
@@ -342,6 +347,16 @@ export const hooks: {
 	 * a higher one. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
+	// private: capability gap
+	/** The producer's largest reported location and its subsequent changes. */
+	producerLargest: (producer: Producer) => Getter<Location | undefined>;
+
+	// private: passthrough
+	/** Re-evaluate a live-edge join at this subscriber's copy. */
+	joinSubscriber: (subscriber: Subscriber) => void;
+	/** Re-evaluate a live-edge join at a producer. */
+	joinProducer: (producer: Producer) => void;
+
 	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * Declare the first group a wire subscription's live feed serves (lite SUBSCRIBE_START, or
@@ -486,6 +501,15 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	endTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	producerLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	joinProducer: () => {
+		throw new Error("track.ts not loaded");
+	},
+	joinSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	startTrack: () => {

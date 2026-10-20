@@ -15,9 +15,8 @@ so a faster runner doesn't pay for waste. This reopens the 2026-10-13
 decision to drop self-hosted CI, conditionally: compare all three options
 against the new baseline.
 
-- Only the merge queue needs cloud CI once
-  [cloud CI only in the queue](/quest/m0/ci/queue-only.md) lands, so the
-  comparison is the queue's Linux gate, plus whatever nightly needs.
+- Main PRs run no cloud CI, so the comparison is the queue's Linux gate, plus
+  whatever nightly and release PRs need.
 - A self-hosted runner on the desktop would run contributor-controlled code:
   a maintainer enqueues the PR, but the merge group still builds and runs
   what the contributor wrote. Treat every job as untrusted. The desktop is
@@ -32,4 +31,4 @@ against the new baseline.
 
 - [One CI pass](/quest/m0/ci/one-pass.md) - the job to benchmark
 - [CI pipeline audit](/quest/m0/ci/audit.md) - removes the waste first
-- [mbx on R2](/quest/m0/ci/mbx-r2.md) - the hosted baseline's cache
+- [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - the hosted baseline's cache

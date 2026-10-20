@@ -265,7 +265,8 @@ class Reader implements ResumeSource {
 	/** Records the properties a copy committed, and which source it came from. */
 	#record: (info: track.Info, source: Source) => void;
 
-	constructor(route: Route, shell: ResumeShell, record: (info: track.Info, source: Source) => void) {
+	/** `parent` is the newest copy of the reader this one forks, if any. */
+	constructor(route: Route, shell: ResumeShell, record: (info: track.Info, source: Source) => void, parent?: Copy) {
 		this.route = route;
 		this.#shell = shell;
 		this.#record = record;
@@ -278,6 +279,19 @@ class Reader implements ResumeSource {
 				for (const copy of this.#copies) this.#bound(copy);
 			}),
 		);
+		// A fork starts on its parent's newest copy, at that copy's generation: the copy keeps its
+		// retained groups even where no route serves the track, between routes or once the front
+		// concluded.
+		if (parent) {
+			this.#generation = parent.generation;
+			this.#add({
+				generation: parent.generation,
+				source: parent.source,
+				sub: parent.sub.fork(this.#wire({})),
+				replaced: false,
+				lease: 0,
+			});
+		}
 		// Subscribed to the serving copy at once, so groups it has now are the reader's even if
 		// the route changes before the first read, and to each copy after.
 		this.sync();
@@ -295,7 +309,7 @@ class Reader implements ResumeSource {
 		// group they get meanwhile may be one the new route never has. See #observe.
 		for (const copy of this.#copies) copy.replaced = true;
 		const floor = this.#newest;
-		const copy: Copy = {
+		this.#add({
 			generation: route.generation,
 			source,
 			// The wire request carries the floor from the first message: some sessions read the
@@ -305,7 +319,12 @@ class Reader implements ResumeSource {
 			datagramsSeen: this.#datagram,
 			replaced: false,
 			lease: 0,
-		};
+		});
+	}
+
+	/** Read `copy` as the newest one, recording the properties it commits. */
+	#add(copy: Copy): void {
+		const { source } = copy;
 		source.retain();
 		this.#bound(copy);
 		this.#copies.push(copy);
@@ -651,9 +670,12 @@ class Reader implements ResumeSource {
 			const serving = this.#serving();
 			const view = serving && hooks.peekLargest(serving.sub);
 			const largest = view?.largest;
+			const { start, end } = this.#shell.cursor.peek();
 			// A replacement copy can start below what an earlier one reported.
 			if (
 				largest &&
+				largest.group >= start &&
+				(end === undefined || largest.group < end) &&
 				(!seen || largest.group > seen.group || (largest.group === seen.group && largest.frame > seen.frame))
 			)
 				return largest;
@@ -666,17 +688,26 @@ class Reader implements ResumeSource {
 					for (const dispose of disposes) dispose();
 					resolve();
 				};
-				disposes.push(this.changed(wake), this.#shell.closed.changed(wake));
+				disposes.push(this.changed(wake), this.#shell.closed.changed(wake), this.#shell.cursor.changed(wake));
 				if (serving) disposes.push(hooks.largestChanged(serving.sub, wake));
 			});
 		}
 	}
 
-	fork(options?: track.Subscription): track.Subscriber {
+	join(): void {
 		this.sync();
 		const serving = this.#serving();
-		if (!serving) throw new Error("track has no serving route to fork from");
-		return serving.sub.fork(options);
+		if (serving) hooks.joinSubscriber(serving.sub);
+	}
+
+	fork(options?: track.Subscription): track.Subscriber {
+		this.sync();
+		const newest = this.#copies.at(-1);
+		return hooks.resumeSubscriber(
+			this.route.name,
+			options,
+			(shell) => new Reader(this.route, shell, this.#record, newest),
+		);
 	}
 
 	close(): void {

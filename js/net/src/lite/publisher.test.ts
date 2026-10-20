@@ -13,7 +13,7 @@ import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
-import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
+import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
@@ -2553,3 +2553,70 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 }
+
+test("lite-07 SYNCED survives an initial removal and continuous earlier-prefix churn", async () => {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const removed = publish(origin, Path.from("z/removed"));
+	const retained = publish(origin, Path.from("z/retained"));
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let output!: ReadableStreamDefaultController<Uint8Array>;
+	const reader = new Reader(
+		new ReadableStream<Uint8Array>({
+			start(controller) {
+				output = controller;
+			},
+		}),
+		undefined,
+		version,
+	);
+	let writes = 0;
+	let churnEnabled = true;
+	const churn: BroadcastProducer[] = [];
+	const stream = new Stream({
+		version,
+		readable: new ReadableStream<Uint8Array>(),
+		writable: new WritableStream<Uint8Array>({
+			async write(chunk) {
+				if (writes++ === 0) {
+					entered.resolve();
+					await release.promise;
+				}
+				output.enqueue(new Uint8Array(chunk));
+				if (churnEnabled) {
+					churn.push(publish(origin, Path.from(`a/${writes}`)));
+					if (churn.length > 2) churn.shift()?.close();
+				}
+			},
+		}),
+	});
+	const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
+	try {
+		await entered.promise;
+		removed.close();
+		release.resolve();
+		expect((await AnnounceOk.decode(reader, version)).active).toBe(0);
+		const events: AnnounceBroadcast[] = [];
+		for (let i = 0; i < 3; i++) {
+			const event = await decodeAnnounceBroadcast(reader, version);
+			events.push(event);
+			if (event.status === "synced") break;
+		}
+		expect(events[0]).toMatchObject({ status: "active", suffix: "z/retained" });
+		expect(events.at(-1)).toEqual({ status: "synced" });
+		expect(events).not.toContainEqual(expect.objectContaining({ suffix: "z/removed" }));
+	} finally {
+		churnEnabled = false;
+		await publisher.drain();
+		await running;
+		publisher.close();
+		retained.close();
+		for (const broadcast of churn) broadcast.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+	}
+});

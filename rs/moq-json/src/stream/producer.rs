@@ -222,7 +222,7 @@ impl Track {
 		// second group, and (with compression) write into it from a window the consumer never
 		// received. That is exactly the split log ending the track exists to prevent.
 		let group = match self.group.take() {
-			Some(group) => group.finish(),
+			Some(mut group) => group.finish(),
 			None => Ok(()),
 		};
 		let track = self.inner.finish();

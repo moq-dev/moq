@@ -34,8 +34,8 @@ moq-net = { workspace = true }
 thiserror = { workspace = true }
 tracing-wasm = "0.2"
 url = { workspace = true }
-# Pinned to the wasm-bindgen-cli version in the Nix dev shell: the bindgen
-# schema must match exactly between crate and CLI. Bump both together.
+# The bindgen schema must match exactly between crate and CLI. The Nix dev
+# shell selects its CLI from the resolved version in Cargo.lock.
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"
 web-async = { workspace = true }

@@ -30,7 +30,11 @@ on:
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
       - "sh/gh/release.sh"
+  # Main PRs skip it; nightly.yml calls it as a dry-run on main. `edited`
+  # catches a main PR retargeted to release.
   pull_request:
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "kt/moq/**"
       - "kt/gradle.properties"
@@ -43,6 +47,14 @@ on:
   # depends on land on Maven Central (the guard below skips otherwise). Only a
   # dispatch on `release` publishes.
   workflow_dispatch:
+  # A called run inherits its caller's event, which can be a dispatch on
+  # `release`, so the caller says it is a dry-run rather than the event.
+  workflow_call:
+    inputs:
+      dry-run:
+        description: "Publish to Maven Local and check the POMs, as a PR does"
+        type: boolean
+        default: true
   workflow_run:
     workflows: ["Release FFI", "Release Kotlin FFI"]
     types:
@@ -168,9 +180,9 @@ jobs:
   publish:
     name: Publish wrapper
     needs: [check-version]
-    # PRs always run (dry-run). Pushes publish only when the version is new.
+    # PRs and nightly always run (dry-run). Pushes publish only when the version is new.
     if: >-
-      github.event_name == 'pull_request' ||
+      github.event_name == 'pull_request' || inputs.dry-run ||
       (needs.check-version.outputs.should_publish == 'true' &&
        (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/release'))
     # Only publishing runs share the serialized group. GitHub keeps a single
@@ -179,8 +191,8 @@ jobs:
     # that skip publishing never enter it. Dry-runs get a per-ref group instead
     # and cancel their superseded builds.
     concurrency:
-      group: release-kt-lib-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+      group: release-kt-lib-${{ (github.event_name == 'pull_request' || inputs.dry-run) && github.ref || 'publish' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' || inputs.dry-run }}
     runs-on: ubuntu-latest
     env:
       # Picked up by com.vanniktech.maven.publish via Gradle project properties.
@@ -202,8 +214,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      # No Rust cache: its entry would evict the store every pull request
-      # restores from the 10 GB budget. See cache.yml.
+      # No Rust cache: shipped binaries compile from source rather than from
+      # whatever the shared R2 cache holds.
 
       # Generate the UniFFI Kotlin so the sibling :moq-ffi project compiles.
       - name: Generate bindings
@@ -233,11 +245,11 @@ jobs:
       # holding it may have published this version since. Check again.
       - name: Recheck wrapper publication
         id: recheck
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && !inputs.dry-run
         run: just gh release maven-exists dev.moq moq "${{ needs.check-version.outputs.version }}"
 
       - name: Publish to Maven Central
-        if: github.event_name != 'pull_request' && steps.recheck.outputs.exists != 'true'
+        if: github.event_name != 'pull_request' && !inputs.dry-run && steps.recheck.outputs.exists != 'true'
         env:
           MOQ_VERSION: ${{ needs.check-version.outputs.version }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
@@ -248,8 +260,8 @@ jobs:
             -Pandroid.enabled=true \
             :moq:publishAndReleaseToMavenCentral --no-configuration-cache
 
-      - name: Publish to Maven Local (PR dry-run)
-        if: github.event_name == 'pull_request'
+      - name: Publish to Maven Local (dry-run)
+        if: github.event_name == 'pull_request' || inputs.dry-run
         env:
           MOQ_VERSION: ${{ needs.check-version.outputs.version }}
         run: |
@@ -259,7 +271,7 @@ jobs:
             :moq:publishToMavenLocal --no-configuration-cache
 
       - name: Check published POM dependencies
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || inputs.dry-run
         env:
           MOQ_VERSION: ${{ needs.check-version.outputs.version }}
         run: |

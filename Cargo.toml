@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "demo/carla/bridge",
     "rs/hang",
     "rs/kio",
     "rs/libmoq",
@@ -131,6 +132,7 @@ flate2 = { version = "1.1", default-features = false }
 futures = "0.3"
 getrandom = { version = "0.4", features = ["wasm_js"] }
 hang = { version = "0.21.11", path = "rs/hang" }
+hashlink = "0.12.2"
 hex = "0.4"
 # HMAC-SHA256 for the mDNS membership proofs (moq-tokio's `mdns` feature).
 hmac = "0.13"
@@ -142,7 +144,6 @@ if-addrs = "0.15"
 io-uring = "0.7.15"
 jsonwebtoken = "11"
 kio = { version = "0.6.2", path = "rs/kio" }
-lazy_static = "1.5"
 libc = "0.2"
 libloading = "0.9"
 linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
@@ -256,7 +257,7 @@ tracing-test = "0.2"
 # carries generator-only patches against this release in its own manifest.
 uniffi = "0.32"
 url = "2"
-usage = { package = "usage-rs", version = "6.11.1" }
+usage-rs = "7.1.0"
 uuid = { version = "1.26", features = ["v7"] }
 web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.8.3"

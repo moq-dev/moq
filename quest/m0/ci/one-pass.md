@@ -23,9 +23,9 @@ its own artifact:
 - docs, wasm clippy, uring-check, the `wasm-release` build, and the py and kt
   binding builds.
 
-cache.yml runs both halves in one job, and its Test step takes as long as a
-standalone Test, so folding them as they are would only add the two times
-together.
+The `cache.yml` warm ran both halves in one job, and its Test step took as
+long as a standalone Test, so folding them as they are would only add the
+two times together.
 
 Decisions (maintainer, 2026-10-19): shrink Check, then fold it.
 
@@ -48,7 +48,3 @@ this PR is enqueued, which only loosens the gate, and merge groups built
 earlier still report both. [Release gates](/quest/m0/ci/release-gates.md)
 owns the ruleset edits. Record the queue's wall time per entry before and
 after in the PR.
-
-## Required
-
-- [Cloud CI only in the queue](/quest/m0/ci/queue-only.md) - adds the `just ci` recipe this job calls

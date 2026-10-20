@@ -1,13 +1,13 @@
 //! Settings registry for the flattened `moq-tokio` CLI groups.
 //!
-//! `usage::Cli` and `usage::Config` reject each other's attributes, so every
+//! `usage_rs::Cli` and `usage_rs::Config` reject each other's attributes, so every
 //! merged flag is declared twice: once on the `Args` structs the binaries parse,
-//! and once here. [`usage::config::Registry::drift`] is the test that the two stay in step.
+//! and once here. [`usage_rs::config::Registry::drift`] is the test that the two stay in step.
 
 #![allow(dead_code)]
 
 /// Accept-side settings (`[listen]`, `--listen-*`).
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "listen")]
 #[doc(hidden)]
 pub struct Listen {
@@ -45,7 +45,7 @@ pub struct Listen {
 }
 
 /// `[listen.tls]` / `--listen-tls-*`.
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "listen.tls")]
 struct ListenTls {
 	#[usage(env = "MOQ_LISTEN_TLS_CERT", cli("--listen-tls-cert"), parse = "list_by_comma")]
@@ -67,7 +67,7 @@ struct ListenTls {
 
 /// `[listen.tcp]` / `--listen-tcp-bind`.
 #[cfg(feature = "tcp")]
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "listen.tcp")]
 struct ListenTcp {
 	#[usage(env = "MOQ_LISTEN_TCP_BIND", cli("--listen-tcp-bind"))]
@@ -79,7 +79,7 @@ struct ListenTcp {
 
 /// `[listen.unix]` / `--listen-unix-*`.
 #[cfg(all(feature = "uds", unix))]
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "listen.unix")]
 struct ListenUnix {
 	#[usage(env = "MOQ_LISTEN_UNIX_BIND", cli("--listen-unix-bind"))]
@@ -91,7 +91,7 @@ struct ListenUnix {
 
 /// `[listen.unix.allow]`.
 #[cfg(all(feature = "uds", unix))]
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "listen.unix.allow")]
 struct ListenUnixAllow {
 	#[usage(
@@ -117,7 +117,7 @@ struct ListenUnixAllow {
 }
 
 /// Dial-side settings (`[connect]`, `--connect-*`).
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "connect")]
 #[doc(hidden)]
 pub struct Connect {
@@ -157,7 +157,7 @@ pub struct Connect {
 }
 
 /// `[connect.tls]` / `--connect-tls-*`.
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "connect.tls")]
 struct ConnectTls {
 	#[usage(env = "MOQ_CONNECT_TLS_ROOT", cli("--connect-tls-root"), parse = "list_by_comma")]
@@ -187,7 +187,7 @@ struct ConnectTls {
 }
 
 /// `[connect.backoff]` / `--backoff-*`.
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "connect.backoff")]
 struct ConnectBackoff {
 	#[usage(env = "MOQ_BACKOFF_INITIAL", cli("--backoff-initial"))]
@@ -204,7 +204,7 @@ struct ConnectBackoff {
 }
 
 /// `[connect.goaway]` / `--goaway-*`.
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "connect.goaway")]
 struct ConnectGoaway {
 	#[usage(env = "MOQ_GOAWAY_REDIRECT", cli("--goaway-redirect"))]
@@ -216,7 +216,7 @@ struct ConnectGoaway {
 
 /// `[connect.websocket]` / `--connect-websocket-*`.
 #[cfg(feature = "websocket")]
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "connect.websocket")]
 struct ConnectWebsocket {
 	#[usage(env = "MOQ_CONNECT_WEBSOCKET_ENABLED", cli("--connect-websocket-enabled"))]
@@ -227,7 +227,7 @@ struct ConnectWebsocket {
 }
 
 /// Shared QUIC tuning (`[quic]`, `--quic-*`).
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "quic")]
 #[doc(hidden)]
 pub struct Quic {
@@ -266,7 +266,7 @@ pub struct Quic {
 }
 
 /// Log settings (`[log]`, `--log-level`).
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "log")]
 #[doc(hidden)]
 pub struct Log {
@@ -276,7 +276,7 @@ pub struct Log {
 
 /// Iroh endpoint settings (`[iroh]`, `--iroh-*`).
 #[cfg(feature = "iroh")]
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "iroh")]
 #[doc(hidden)]
 pub struct Iroh {
