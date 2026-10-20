@@ -5036,11 +5036,8 @@ impl Cursor {
 			next_sequence: Some(0),
 			end_sequence: None,
 			servable: Servable::ALL,
-			published: kio::Producer::new(Published::new(
-				Arc::new(RangeInclusiveSet::from_iter([0..=u64::MAX])),
-				0,
-				None,
-			)),
+			// Replaced by the cursor's own below, before anything is handed out.
+			published: kio::Producer::new(Published::new(Arc::default(), 0, None)),
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
 			drops: None,
