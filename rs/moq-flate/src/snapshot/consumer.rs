@@ -1,6 +1,6 @@
 //! Consuming opaque values and their timestamps from a track.
 
-use std::{ops::Bound, task::Poll};
+use std::task::Poll;
 
 use bytes::Bytes;
 
@@ -16,8 +16,6 @@ pub struct Consumer {
 	/// normally one frame, but the window is per group either way.
 	flate: Option<crate::Decoder>,
 	compression: bool,
-	/// The newest group the bounded largest reported, the target of `latest`.
-	largest: Option<u64>,
 }
 
 impl Consumer {
@@ -30,7 +28,6 @@ impl Consumer {
 			group: None,
 			flate: None,
 			compression: config.compression.is_deflate(),
-			largest: None,
 		}
 	}
 
@@ -53,8 +50,7 @@ impl Consumer {
 		kio::wait(|waiter| self.poll_latest(waiter)).await
 	}
 
-	/// Poll for the newest state within the track's group bounds, discarding superseded groups
-	/// and intermediate yields.
+	/// Poll for the newest state, discarding superseded groups and intermediate yields.
 	///
 	/// Frames inside the newest group are still decoded in order. What this skips is gone;
 	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
@@ -64,22 +60,12 @@ impl Consumer {
 
 	fn poll_read(&mut self, waiter: &kio::Waiter, skip: bool) -> Poll<Result<Option<moq_net::Timed<Bytes>>>> {
 		if skip {
-			// Bounded by the reader's cap, so a cap set before this consumer took the track holds.
-			if let Poll::Ready(Some(largest)) = self.track.poll_largest(waiter) {
-				self.largest = Some(largest.group);
-			}
-			if let Some(largest) = self.largest {
-				if self.group.as_ref().is_some_and(|group| group.sequence < largest) {
-					self.group = None;
-				}
-				// Raise only the floor: an omitted end would drop the cap. Raising it only when
-				// it moves keeps the bounds change from waking the parked largest poll again.
-				if self.group.is_none()
-					&& let (Bound::Included(start), end) = self.track.bounds()
-					&& start < largest
-				{
-					self.track.set_groups((Bound::Included(largest), end));
-				}
+			// Jump to the newest group the reader already has; a newer one supersedes the rest.
+			// Taking groups, not the track's largest position, ignores datagrams (which share
+			// the sequence space) and stays inside any cap the caller set on the reader.
+			while let Poll::Ready(Some(group)) = self.track.poll_next_group(waiter)? {
+				self.group = Some(group);
+				self.flate = self.compression.then(crate::Decoder::new);
 			}
 		}
 
@@ -258,5 +244,28 @@ mod timestamps {
 		};
 		assert_eq!(value.value[0], 4, "latest crossed the cap");
 		assert!(consumer.poll_next(&waiter).is_pending());
+	}
+
+	#[test]
+	fn latest_ignores_datagrams() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("data", moq_net::track::Info::default())
+			.unwrap();
+		let mut raw = track.clone();
+		let subscriber = track.subscribe(None);
+		let config = crate::snapshot::Config::default();
+		let mut producer = crate::snapshot::Producer::new(track, config.clone());
+		let mut consumer = Consumer::new(subscriber, config);
+		let waiter = kio::Waiter::noop();
+		for n in 0..2u8 {
+			producer.update(Bytes::from(vec![n; 32])).unwrap();
+		}
+		// A datagram shares the sequence space, so it outnumbers every group.
+		raw.append_datagram(None, &b"noise"[..]).unwrap();
+		let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) else {
+			panic!("a datagram hid the latest state")
+		};
+		assert_eq!(value.value[0], 1);
 	}
 }

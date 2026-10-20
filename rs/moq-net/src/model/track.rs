@@ -6031,19 +6031,8 @@ impl Subscriber {
 		self.largest.bounds_moved();
 	}
 
-	/// This reader's group bounds as [`Self::set_groups`] set them: an inclusive floor and an exclusive cap.
-	///
-	/// Pass a modified copy back to [`Self::set_groups`] to move one end and keep the other.
-	pub fn bounds(&self) -> (Bound<u64>, Bound<u64>) {
-		let bounds = self.local_bounds();
-		(
-			Bound::Included(bounds.start),
-			bounds.end.map_or(Bound::Unbounded, Bound::Excluded),
-		)
-	}
-
 	/// The local bounds `largest` reports within.
-	fn local_bounds(&self) -> Bounds {
+	fn bounds(&self) -> Bounds {
 		match &self.inner {
 			Inner::Plain(cursor) => Bounds {
 				start: cursor.min_sequence,
@@ -6091,7 +6080,7 @@ impl Subscriber {
 		if self.largest.ended {
 			return Poll::Ready(None);
 		}
-		let bounds = self.local_bounds();
+		let bounds = self.bounds();
 		let poll = self.poll_largest_within(bounds, waiter);
 		// Only a parked poll waits on the bounds; a finished one is not woken by them.
 		match poll {
@@ -6266,11 +6255,6 @@ impl Ordered {
 	/// See [`Subscriber::set_groups`] for inclusive, exclusive, and omitted bounds.
 	pub fn set_groups(&mut self, groups: impl RangeBounds<u64>) {
 		self.inner.set_groups(groups);
-	}
-
-	/// This reader's group bounds; see [`Subscriber::bounds`].
-	pub fn bounds(&self) -> (Bound<u64>, Bound<u64>) {
-		self.inner.bounds()
 	}
 
 	/// Create a handle for updating this subscriber's delivery preferences without
@@ -6961,25 +6945,6 @@ mod test {
 			reader.poll_largest(&noop).is_pending(),
 			"a floor below the largest leaves it where it was"
 		);
-	}
-
-	/// The bounds getter reads back what `set_groups` set, so a caller can move one end and keep the other.
-	#[test]
-	fn bounds_read_back_what_set_groups_set() {
-		let producer = track_producer("test", Info::default());
-		let mut reader = producer.subscribe(replay());
-		assert_eq!(reader.bounds(), (Bound::Included(0), Bound::Unbounded));
-
-		reader.set_groups(2..5);
-		assert_eq!(reader.bounds(), (Bound::Included(2), Bound::Excluded(5)));
-
-		let (_, end) = reader.bounds();
-		reader.set_groups((Bound::Included(4), end));
-		assert_eq!(reader.bounds(), (Bound::Included(4), Bound::Excluded(5)));
-
-		let mut ordered = reader.ordered();
-		ordered.set_groups(..=6);
-		assert_eq!(ordered.bounds(), (Bound::Included(4), Bound::Excluded(7)));
 	}
 
 	/// Once the stream ended, widening the bounds over a largest it never reported does not
