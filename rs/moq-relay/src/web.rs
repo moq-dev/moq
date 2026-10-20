@@ -27,7 +27,7 @@ use tower_service::Service;
 use crate::{auth, cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
-#[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -71,7 +71,7 @@ impl Config {
 }
 
 /// Plain HTTP listener configuration.
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -88,7 +88,7 @@ pub struct Http {
 
 /// HTTPS listener configuration with TLS certificates and keys.
 #[serde_with::serde_as]
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -988,7 +988,7 @@ async fn admit_http(
 		.auth
 		.admit(request)
 		.await
-		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
+		.inspect_err(|err| state.cluster.refusals.record_auth(err))?;
 	let token = lease.token();
 	let Some(origin) = state.cluster.subscriber(token) else {
 		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
@@ -1245,6 +1245,63 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn http_refusals_keep_the_deciders_root_and_tier() {
+		use moq_net::stats::{Registry, Report};
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
+		let (auth, mut admissions) = auth::Auth::embedded("test");
+		let decider = tokio::spawn(async move {
+			for _ in 0..2 {
+				let mut refusal = moq_auth::Refusal::default();
+				refusal.reason = moq_auth::refusal::Reason::Expired;
+				refusal.root = Some("tenant".into());
+				refusal.tier = Some("edge".into());
+				admissions.next().await.unwrap().refuse(auth::Error::Refused(refusal));
+			}
+		});
+		let registry = Registry::new(Default::default());
+		let mut cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		cluster.refusals = crate::refusals::Refusals::new(&registry);
+		let state = Web::new(auth, cluster, certificates, Config::default()).state;
+		let fetched = serve_fetch(
+			Path("room/video".to_owned()),
+			Query(FetchParams {
+				auth: AuthQuery { jwt: None },
+				group: FetchGroup::Latest,
+			}),
+			None,
+			ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+			"/fetch/room/video".parse().unwrap(),
+			http::HeaderMap::new(),
+			State(state.clone()),
+		)
+		.await;
+		assert!(fetched.is_err(), "fetch was admitted");
+		let announced = serve_announced(
+			Some(Path("room".to_owned())),
+			Query(AuthQuery { jwt: None }),
+			None,
+			ConnectInfo(crate::listener::Peer("127.0.0.1:1234".parse().unwrap())),
+			"/announced/room".parse().unwrap(),
+			http::HeaderMap::new(),
+			State(state.clone()),
+		)
+		.await;
+		assert!(announced.is_err(), "announced was admitted");
+		decider.await.unwrap();
+
+		let mut report = Report::default();
+		registry.report(&mut report);
+		let [entry] = report.sessions.as_slice() else {
+			panic!("expected one attributed entry: {:?}", report.sessions);
+		};
+		assert_eq!(entry.label.as_str(), "tenant");
+		assert_eq!(entry.tier.as_str(), "edge");
+		assert_eq!(entry.presence.sessions_refused.expired, 2);
 	}
 
 	#[tokio::test(start_paused = true)]

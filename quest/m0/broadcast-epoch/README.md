@@ -4,8 +4,9 @@
 
 A path and the epoch on its route are the only content identity, and no
 first-party publisher reuses a pair for different content. Only routes with
-the same epoch resume a subscription from the first frame it lacks; a route
-without one keeps its subscriptions until it goes. So epochs are what make
+the same epoch resume a subscription from the first frame it lacks, within
+the subscriber's max age; a route without one keeps its subscriptions until
+it goes. So epochs are what make
 failover seamless. Routes without an epoch never splice (maintainer,
 2026-10-08): a `Restart` (or an end and start on older versions) tells every
 downstream subscriber to stop using its copy of the old source and
@@ -30,7 +31,7 @@ unchanged paths and End+Start on replacement. The relay retains the explicit
 identity internally; fresh requests cannot join its old cached instance.
 This does not promise cache invalidation in arbitrary older IETF relays or
 clients that retain objects across broadcasts. The negotiated
-[IETF extension](/quest/m1/ietf-epochs.md) follows in m1, independently of
+[IETF extension](/drafts/draft-lcurley-moq-epoch.md) landed in m1, independently of
 this release gate; seamless JS handover stays in m1 too.
 
 Non-goals: pooling, which needs nothing here. A redundant ingest pair runs on
@@ -125,7 +126,6 @@ End+Start. The child quests own their focused regressions.
 ## Required
 
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - announcement followers restart replaced siblings; other readers retain pins, with optional epochs and legacy best effort
-- [Distinct importer epochs](/quest/m0/broadcast-epoch/distinct-importer-epochs.md) - `moq --epoch` never ships, a redundant importer pair fails over as a marked restart, and the shared-epoch alignment code is reverted
 
 ## Related
 

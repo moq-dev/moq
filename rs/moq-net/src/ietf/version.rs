@@ -89,6 +89,7 @@ mod tests {
 		};
 
 		let subscribe = Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("broadcast"),
@@ -105,6 +106,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		let subscribe_ok = SubscribeOk {
@@ -143,6 +145,7 @@ mod tests {
 			range_filters: false,
 			fill_timeout: false,
 			properties_wanted: false,
+			epoch: None,
 		};
 
 		let group = GroupHeader {
@@ -166,6 +169,7 @@ mod tests {
 	#[test]
 	fn draft22_changes_only_the_location_filter() {
 		let subscribe = Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("broadcast"),
@@ -179,6 +183,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 
 		// Draft-20 spells Next Object as a Length of 2 and two zero fields; draft-22 as type 0x05.

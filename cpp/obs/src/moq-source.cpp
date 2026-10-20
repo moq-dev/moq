@@ -170,6 +170,7 @@ struct moq_source {
 	// Settings - current active connection settings
 	std::string url;
 	std::string broadcast;
+	bool keylog = false;
 
 	// The current connection, or null while disconnected. A continuation for any
 	// other connection is stale and returns without touching anything.
@@ -293,13 +294,15 @@ static void moq_source_update(void *data, obs_data_t *settings)
 	const char *broadcast_value = obs_data_get_string(settings, "broadcast");
 	const std::string url = url_value ? url_value : "";
 	const std::string broadcast = broadcast_value ? broadcast_value : "";
+	const bool keylog = obs_data_get_bool(settings, "quic_keylog");
 
 	bool settings_changed;
 	{
 		std::lock_guard<std::mutex> lock(ctx->mutex);
-		settings_changed = url != ctx->url || broadcast != ctx->broadcast;
+		settings_changed = url != ctx->url || broadcast != ctx->broadcast || keylog != ctx->keylog;
 		ctx->url = url;
 		ctx->broadcast = broadcast;
+		ctx->keylog = keylog;
 	}
 
 	// Check if new settings are valid for connection
@@ -324,6 +327,7 @@ static void moq_source_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_string(settings, "url", "http://localhost:4443");
 	obs_data_set_default_string(settings, "broadcast", "obs/test");
+	obs_data_set_default_bool(settings, "quic_keylog", false);
 }
 
 static obs_properties_t *moq_source_properties(void *data)
@@ -334,6 +338,9 @@ static obs_properties_t *moq_source_properties(void *data)
 
 	obs_properties_add_text(props, "url", "URL", OBS_TEXT_DEFAULT);
 	obs_properties_add_text(props, "broadcast", "Broadcast", OBS_TEXT_DEFAULT);
+	// Writes TLS session secrets to the file SSLKEYLOGFILE names, to decrypt a packet
+	// capture; without SSLKEYLOGFILE the dial fails.
+	obs_properties_add_bool(props, "quic_keylog", "TLS key log");
 
 	return props;
 }
@@ -348,6 +355,14 @@ static void moq_source_fail_locked(struct moq_source *ctx)
 	moq_source_blank_video(ctx);
 }
 
+// The source dials with the defaults, plus the TLS key log when the user opts in.
+static moq::ClientConfig moq_source_client_config(bool keylog)
+{
+	moq::ClientConfig config;
+	config.quic.keylog = keylog;
+	return config;
+}
+
 static void moq_source_reconnect(struct moq_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -359,9 +374,9 @@ static void moq_source_reconnect(struct moq_source *ctx)
 	auto conn = std::make_shared<Connection>();
 	conn->url = ctx->url;
 	conn->broadcast = ctx->broadcast;
-	// The source dials with the defaults. Neither origin side is wired, so the
-	// session's consume side carries the remote's announcements.
-	auto client = moq::Client::init(moq::ClientConfig{});
+	// Neither origin side is wired, so the session's consume side carries the
+	// remote's announcements.
+	auto client = moq::Client::init(moq_source_client_config(ctx->keylog));
 	if (!client) {
 		// Already disconnected and blanked above.
 		LOG_ERROR("Failed to create MoQ client: %s", client.error().to_string().c_str());

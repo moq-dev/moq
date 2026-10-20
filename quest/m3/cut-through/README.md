@@ -71,7 +71,7 @@ stats field, which its quest documents inline.
 ## Required
 
 - [Loss delay](/quest/m3/cut-through/loss-delay.md) - relays report, per broadcast, the ingress bytes a loss held back by at least one RTT
-- [Bench](/quest/m3/cut-through/bench.md) - a lossy relay hop swept over loss, frame size, and egress headroom, measuring the post-hole drain time, with a go or no-go verdict
+- [Bench](/quest/m3/cut-through/bench.md) - a congested relay hop swept over ingress rate, queue depth, frame size, and egress headroom, measuring the post-hole drain time, with a go or no-go verdict
 
 ## Related
 

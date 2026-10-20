@@ -23,8 +23,7 @@ on a fixed sleep. moq-relay's in-memory integration tests
 
 moq-auth's `Grant` and lease clock, and moq-relay's lease, credential, and
 admission timers, already run on moq-clock (`Grant::deadline` returns a
-`moq_clock::Instant`); build on that rather than migrating them again. What
-remains in moq-auth is its JWT claim checks (`claims.rs`, `key.rs`) and `serve`.
+`moq_clock::Instant`); build on that rather than migrating them again.
 
 Fix mixed clocks first: anything that reads std time but waits on tokio time
 (a backoff's stability window, a gate computed with std `Instant` and slept
@@ -33,6 +32,16 @@ with tokio) is a bug under paused time.
 Split the PR by crate group if review needs it; ban direct clock reads in each
 production scope as it finishes. Unrelated legacy test conversions and the
 workspace-wide lint ratchet follow in m2.
+
+[#5987](https://github.com/moq-dev/moq/pull/5987) migrated moq-auth (auth
+accounting, JWT checks, policy expiry), RTMP session timestamps and
+deadlines, archive retention, and listener stall accounting, and added the
+per-crate ratchet to moq-auth, moq-rtmp, and moq-archive. The ratchet also
+covers moq-net, moq-mux, moq-ffi, moq-room, moq-stats, and moq-uring; the
+rest of the workspace and public `SystemTime` fields still need migration. In particular,
+SRT and WebRTC hand instants to third-party APIs on std's clock, and audio/video
+device threads block outside an async runtime; those boundaries still need
+clock support rather than a second host-clock read at each call site.
 
 Public API: breaking wherever a crate exposes an instant or a time source.
 Wire: none.

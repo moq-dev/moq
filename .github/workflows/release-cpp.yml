@@ -151,6 +151,16 @@ jobs:
           fi
           just cpp package "${args[@]}"
 
+      - name: Check packaged archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version=$(tr -d '[:space:]' < cpp/moq/VERSION)
+          extension=tar.gz
+          [[ "$TARGET" == *-windows-* ]] && extension=zip
+          just cpp check --archive "dist/moq-cpp-$version-$TARGET.$extension"
+
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -199,11 +209,12 @@ jobs:
   # every release: rebuild it against the release just published (no second
   # cargo build, guaranteed-matching bindings) and cut a parallel
   # obs-moq-v<version> release. The plugin's version is its own,
-  # cpp/obs/VERSION. Runs after `release` so the archives
-  # the plugin's CMake fetches are already live.
+  # cpp/obs/VERSION. Tags wait for `release` so downloads are live; dry runs
+  # consume this run's checked local archive without publishing anything.
   obs-build:
     name: OBS plugin (${{ matrix.target }})
-    needs: release
+    needs: [build, release]
+    if: ${{ always() && !cancelled() && needs.build.result == 'success' && (github.ref_type != 'tag' || needs.release.result == 'success') }}
     runs-on: ${{ matrix.os }}
 
     # macOS + Windows only. These link the ffmpeg the obs-deps bundle ships
@@ -234,16 +245,30 @@ jobs:
         shell: bash
         run: echo "version=$(tr -d '[:space:]' < cpp/moq/VERSION)" >>"$GITHUB_OUTPUT"
 
+      - name: Download local C++ archive
+        if: github.ref_type != 'tag'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: moq-cpp-${{ matrix.target }}
+          path: cpp-archive
+
       # Native Xcode / Visual Studio; libobs/Qt6/ffmpeg come from the obs-deps
-      # bundle and the C++ package from the release just published (--moq-release).
+      # bundle and C++ comes from the checked local archive, or the published tag.
       # build.sh versions the plugin from cpp/obs/VERSION.
       - name: Build and package
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           MOQ_RELEASE: ${{ steps.parse.outputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
-          just obs package --target "$TARGET" --moq-release "$MOQ_RELEASE" --output dist
+          args=(--moq-release "$MOQ_RELEASE")
+          if [[ "$REF_TYPE" != tag ]]; then
+            extension=tar.gz
+            [[ "$TARGET" == *-windows-* ]] && extension=zip
+            args=(--moq-archive "$GITHUB_WORKSPACE/cpp-archive/moq-cpp-$MOQ_RELEASE-$TARGET.$extension")
+          fi
+          just obs package --target "$TARGET" "${args[@]}" --output dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -254,6 +279,7 @@ jobs:
   obs-release:
     name: OBS plugin release
     needs: obs-build
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write

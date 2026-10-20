@@ -14,7 +14,7 @@ use crate::moq::{ImportTarget, notify_ready};
 
 /// WebRTC endpoint args: exactly one of `--connect` (WHIP/WHEP client) /
 /// `--listen` (WHIP/WHEP server). The parent direction picks WHIP vs WHEP.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(group("rtc-mode", required))]
 pub struct Args {

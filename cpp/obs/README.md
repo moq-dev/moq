@@ -21,3 +21,8 @@ just obs build
 
 Licensed under GPL-2.0-or-later (see [LICENSE](LICENSE)), separate from the rest of the
 repository, because it links OBS.
+
+Release dry runs use `just obs package --target TARGET --moq-archive FILE` to
+link the matching local C++ release archive. Tag builds use
+`--moq-release VERSION` to download the published archive. The two inputs are
+mutually exclusive; neither changes the plugin version in `VERSION`.

@@ -108,7 +108,9 @@ async fn track_info_interest_precedes_a_subscription() {
 		let remote = consumer.request_broadcast("bcast", None).await.unwrap();
 		let copy = remote.track("video").unwrap();
 		copy.query().await.expect("TRACK_INFO");
-		track.demand().used().await.expect("TRACK_INFO holds demand");
+		crate::support::wanted(track.demand())
+			.await
+			.expect("TRACK_INFO holds demand");
 		assert!(track.subscription().is_none(), "{version}: no SUBSCRIBE was requested");
 	}
 }

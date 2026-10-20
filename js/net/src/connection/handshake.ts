@@ -13,9 +13,9 @@ import * as Extensions from "./extensions.ts";
  * Returns the control stream, the uni streams that arrived before it (see
  * {@link receiveSetup}), plus what the peer's SETUP declared: whether it requires
  * solicitation, which decides whether we announce namespaces unprompted (see the MoQ Solicit
- * extension), its Hop ID (see the MoQ Cluster extension), and whether MoQ Auth is negotiated.
- * We declare our Hop ID on every session, and Solicit and Auth unless `extensions` declines
- * them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
+ * extension), its Hop ID (see the MoQ Cluster extension), and whether MoQ Auth and MoQ Epoch
+ * are negotiated. We declare our Hop ID on every session, and Solicit, Auth, and Epoch unless
+ * `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
  * can tell us nothing we won't have asked for, and a peer that knows our Hop ID can withhold
  * the advertisements that already flowed through us.
  */
@@ -29,15 +29,18 @@ export async function exchangeSetup(
 	early: Reader[];
 	solicit: boolean | undefined;
 	hidden: boolean;
+	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Ietf.Cluster.Hops;
 	auth: boolean;
+	epoch: boolean;
 }> {
 	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
 	Extensions.intoSetup(params, extensions, version);
 	Ietf.hiddenIntoSetup(params);
+	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, version);
 
 	// One id per session, like the moq-lite connection: nothing in this process forwards
@@ -66,10 +69,12 @@ export async function exchangeSetup(
 		early: received.early,
 		solicit: received.solicit,
 		hidden: received.hidden,
+		maxAge: received.maxAge,
 		activeCount: received.activeCount,
 		cluster: { self, peer: received.cluster },
 		// Negotiated only when both sides offer it.
 		auth: received.auth && extensions.auth,
+		epoch: received.epoch && extensions.epoch,
 	};
 }
 
@@ -97,9 +102,11 @@ async function receiveSetup(
 	early: Reader[];
 	solicit: boolean | undefined;
 	hidden: boolean;
+	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Hop | undefined;
 	auth: boolean;
+	epoch: boolean;
 }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
@@ -151,8 +158,10 @@ async function receiveSetup(
 		early,
 		solicit: Ietf.solicitFromSetup(setup.parameters),
 		hidden: Ietf.hiddenFromSetup(setup.parameters),
+		maxAge: Ietf.maxAgeFromSetup(setup.parameters),
 		activeCount: Ietf.activeCountFromSetup(setup.parameters, version),
 		cluster: Ietf.Cluster.fromSetup(setup.parameters, version),
 		auth: Ietf.Auth.fromSetup(setup.parameters, version) === true,
+		epoch: Ietf.Epoch.fromSetup(setup.parameters, version),
 	};
 }

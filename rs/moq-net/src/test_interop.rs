@@ -168,6 +168,7 @@ fn lite_varint_interop() {
 
 		// An untimed track: zero on lite-07, milliseconds before it.
 		let track_info = lite::TrackInfo {
+			refresh: None,
 			priority: 1,
 			max_age: None,
 			timescale: None,
@@ -400,6 +401,7 @@ fn ietf_track_status_interop() {
 				track_namespace: crate::Path::new(namespace),
 				track_name: "video".into(),
 				properties_wanted: wanted,
+				epoch: None,
 			}
 			.encode(&mut w, version)
 			.unwrap();

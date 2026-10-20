@@ -83,14 +83,6 @@ type ContainerInit struct {
 	Timebase *Timebase
 }
 
-// ContainerStreamInit describes a byte-stream container and an optional shared timebase.
-type ContainerStreamInit struct {
-	// Format selects the container parser.
-	Format ContainerFormat
-	// Timebase shares a source offset, or nil for an independent offset.
-	Timebase *Timebase
-}
-
 // MediaFrame is a container-decoded payload, presentation timestamp, and keyframe flag.
 type MediaFrame struct {
 	Payload   []byte
@@ -205,7 +197,7 @@ func NewVideoTrackStreamProducer(broadcast *moq.BroadcastProducer, target Target
 	return &TrackStreamProducer{inner: inner}, nil
 }
 
-// NewContainerProducer imports complete container chunks.
+// NewContainerProducer imports a container from chunks split anywhere, such as a byte stream.
 func NewContainerProducer(broadcast *moq.BroadcastProducer, init ContainerInit) (*ContainerProducer, error) {
 	var timebase **ffi.MoqMediaTimebase
 	if init.Timebase != nil {
@@ -216,19 +208,6 @@ func NewContainerProducer(broadcast *moq.BroadcastProducer, init ContainerInit) 
 		return nil, err
 	}
 	return &ContainerProducer{inner: inner}, nil
-}
-
-// NewContainerStreamProducer imports a container byte stream.
-func NewContainerStreamProducer(broadcast *moq.BroadcastProducer, init ContainerStreamInit) (*ContainerStreamProducer, error) {
-	var timebase **ffi.MoqMediaTimebase
-	if init.Timebase != nil {
-		timebase = &init.Timebase.inner
-	}
-	inner, err := ffi.NewMoqMediaContainerStreamProducer(bridge.BroadcastProducer(broadcast), ffi.MoqContainerStreamInit{Format: init.Format, Timebase: timebase})
-	if err != nil {
-		return nil, err
-	}
-	return &ContainerStreamProducer{inner: inner}, nil
 }
 
 // NewCatalogConsumer subscribes to broadcast's catalog snapshots.
@@ -428,7 +407,7 @@ type ContainerProducer struct {
 	inner *ffi.MoqMediaContainerProducer
 }
 
-// Write pushes a whole chunk of container bytes.
+// Write pushes container bytes; the container recovers its own framing.
 func (c *ContainerProducer) Write(payload []byte) error {
 	return c.inner.Write(payload)
 }
@@ -447,22 +426,6 @@ func (c *ContainerProducer) Seek(sequence uint64) error {
 
 // Finish finishes every track this container publishes.
 func (c *ContainerProducer) Finish() error {
-	return c.inner.Finish()
-}
-
-// ContainerStreamProducer publishes a container fed by a raw byte stream, which
-// recovers its own framing.
-type ContainerStreamProducer struct {
-	inner *ffi.MoqMediaContainerStreamProducer
-}
-
-// Write pushes raw container bytes; chunk boundaries don't matter.
-func (c *ContainerStreamProducer) Write(payload []byte) error {
-	return c.inner.Write(payload)
-}
-
-// Finish finishes every track this container publishes.
-func (c *ContainerStreamProducer) Finish() error {
 	return c.inner.Finish()
 }
 
@@ -491,6 +454,14 @@ func (m *TrackStreamProducer) Finish() error {
 	return m.inner.Finish()
 }
 
+// mediaFrame converts the result of a Next call, keeping (nil, nil) for the end.
+func mediaFrame(frame *ffi.MoqMediaFrame, err error) (*MediaFrame, error) {
+	if frame == nil || err != nil {
+		return nil, err
+	}
+	return &MediaFrame{Payload: frame.Payload, Timestamp: time.Duration(frame.TimestampUs) * time.Microsecond, Keyframe: frame.Keyframe}, nil
+}
+
 // TrackConsumer is a stream of decoded media frames.
 type TrackConsumer struct {
 	inner *ffi.MoqMediaTrackConsumer
@@ -498,11 +469,7 @@ type TrackConsumer struct {
 
 // Next returns the next frame, or (nil, nil) when the track ends.
 func (m *TrackConsumer) Next(ctx context.Context) (*MediaFrame, error) {
-	frame, err := bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
-	if frame == nil || err != nil {
-		return nil, err
-	}
-	return &MediaFrame{Payload: frame.Payload, Timestamp: time.Duration(frame.TimestampUs) * time.Microsecond, Keyframe: frame.Keyframe}, nil
+	return mediaFrame(bridge.Call(ctx, m.inner.Cancel, m.inner.Next))
 }
 
 // All ranges over frames until the track ends or the loop breaks.
@@ -528,11 +495,7 @@ func (m *GroupConsumer) Sequence() uint64 {
 
 // Next returns the next decoded frame, or (nil, nil) when the group ends.
 func (m *GroupConsumer) Next(ctx context.Context) (*MediaFrame, error) {
-	frame, err := bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
-	if frame == nil || err != nil {
-		return nil, err
-	}
-	return &MediaFrame{Payload: frame.Payload, Timestamp: time.Duration(frame.TimestampUs) * time.Microsecond, Keyframe: frame.Keyframe}, nil
+	return mediaFrame(bridge.Call(ctx, m.inner.Cancel, m.inner.Next))
 }
 
 // All ranges over decoded frames until the group ends or the loop breaks.
