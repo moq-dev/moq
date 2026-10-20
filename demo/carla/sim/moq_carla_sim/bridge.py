@@ -392,10 +392,12 @@ class BridgeStream:
 
     async def _watch(self, index: int, demand: moq.TrackDemand) -> None:
         while True:
-            await demand.used()
+            while await demand.wanted_changed() is None:
+                pass
             self._set_demand(index, True)
             try:
-                await demand.unused()
+                while await demand.wanted_changed() is not None:
+                    pass
             finally:
                 self._set_demand(index, False)
 

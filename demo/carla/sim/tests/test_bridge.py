@@ -97,15 +97,24 @@ def test_read_event_distinguishes_a_clean_end_from_a_torn_message() -> None:
 
 
 class FakeDemand:
+    """`moq.TrackDemand`: the first `wanted_changed` returns at once, later ones wait for a change."""
+
     def __init__(self) -> None:
-        self.used_event = asyncio.Event()
-        self.unused_event = asyncio.Event()
+        self._wanted: int | None = None
+        self._fresh = True
+        self._changed = asyncio.Event()
 
-    async def used(self) -> None:
-        await self.used_event.wait()
+    def want(self, group: int | None) -> None:
+        self._wanted = group
+        self._fresh = True
+        self._changed.set()
 
-    async def unused(self) -> None:
-        await self.unused_event.wait()
+    async def wanted_changed(self) -> int | None:
+        if not self._fresh:
+            self._changed.clear()
+            await self._changed.wait()
+        self._fresh = False
+        return self._wanted
 
 
 def microseconds(timestamp: timedelta) -> int:
@@ -216,9 +225,9 @@ def test_stream_advertises_publishes_and_forwards_demand(bridge_socket) -> None:
             assert broadcast.tracks["hd"].hint.bitrate == 4_000_000
 
             demand = group.create_task(stream.watch_demand())
-            broadcast.tracks["hd"].demand_handle.used_event.set()
+            broadcast.tracks["hd"].demand_handle.want(0)
             assert await _request(reader) == (0x03, struct.pack("<IB", 1, 0b10))
-            broadcast.tracks["sd"].demand_handle.used_event.set()
+            broadcast.tracks["sd"].demand_handle.want(0)
             assert await _request(reader) == (0x03, struct.pack("<IB", 1, 0b11))
 
             # Timestamps are rebased onto the first frame's simulation time and
@@ -232,9 +241,7 @@ def test_stream_advertises_publishes_and_forwards_demand(bridge_socket) -> None:
             assert broadcast.tracks["hd"].frames == [(b"idr", 0), (b"p", 33_333)]
             assert broadcast.tracks["hd"].flushed == [0, 33_333]
             assert broadcast.tracks["sd"].frames == [(b"idr-sd", 0)]
-
-            broadcast.tracks["hd"].demand_handle.used_event.clear()
-            broadcast.tracks["hd"].demand_handle.unused_event.set()
+            broadcast.tracks["hd"].demand_handle.want(None)
             assert await _request(reader) == (0x03, struct.pack("<IB", 1, 0b01))
 
             stream.keyframe(0)
@@ -352,21 +359,21 @@ def test_demand_prepares_rendering_before_the_bridge_and_parks_it_after(bridge_s
         client._send = lambda message: (order.append(f"demand {message[-1]:02b}"), sent(message))
         demand = asyncio.create_task(stream.watch_demand(lambda wanted: order.append(f"render {wanted}")))
         sd, hd = broadcast.tracks["sd"].demand_handle, broadcast.tracks["hd"].demand_handle
-        sd.used_event.set()
-        hd.used_event.set()
+        sd.want(0)
+        hd.want(0)
         await _request(reader)
         await _request(reader)
-        sd.used_event.clear()
-        sd.unused_event.set()
-        hd.used_event.clear()
-        hd.unused_event.set()
+        # A subscriber moving on to the next group is still demand.
+        sd.want(1)
+        hd.want(None)
         await _request(reader)
+        sd.want(None)
         await _request(reader)
         assert order == [
             "render True",
             "demand 01",
             "demand 11",
-            "demand 10",
+            "demand 01",
             "demand 00",
             "render False",
         ]

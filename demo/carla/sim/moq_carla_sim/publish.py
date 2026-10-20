@@ -201,10 +201,12 @@ class StatusPublisher:
         self._producer.update(payload)
 
     async def used(self) -> None:
-        await self._demand.used()
+        while await self._demand.wanted_changed() is None:
+            pass
 
     async def unused(self) -> None:
-        await self._demand.unused()
+        while await self._demand.wanted_changed() is not None:
+            pass
 
 
 def _parse_timestamps(raw: Any) -> tuple[TimestampEntry, ...]:
