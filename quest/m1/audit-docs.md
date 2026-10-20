@@ -28,7 +28,8 @@ comparing against these baselines:
 - Rust: 26 crates set `#![warn(missing_docs)]`. Count the rest with
   `cargo rustdoc -p <crate> --lib --all-features -- -W missing_docs`; only
   `--all-features` reaches feature-gated items, which is how the m0 run found
-  moq-auth's undocumented server refusals. `moq-mux`, `moq-ffi`, and `moq-c`
+  moq-auth's undocumented server refusals, and `just rs wasm` reaches
+  wasm-only items such as kio's `MaybeSend`. `moq-mux`, `moq-ffi`, and `moq-c`
   have follow-ups. `moq-video`, `moq-audio`, and `moq-sock` are documented on
   Linux but stay unlinted: they gate public items on macOS, Windows, and
   Android, and the dev shell has no std for those targets, so a lint could
