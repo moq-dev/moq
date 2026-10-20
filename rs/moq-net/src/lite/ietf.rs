@@ -271,7 +271,15 @@ pub(crate) fn decode_properties(
 /// Record that `properties` carry their Timestamps in `timescale`, the units the track
 /// declares, when they carry any.
 pub(crate) fn stamp(properties: &mut Properties, timescale: Option<Timescale>) {
-	properties.timescale = timescale.filter(|_| properties.timestamp.is_some() || properties.sealed_time);
+	properties.timescale = timescale.filter(|_| properties.time().is_some());
+}
+
+/// Whether relayed `properties` agree with the Timestamp a timed track's `frame` carries.
+///
+/// Lite egress sends the frame's and moq-transport egress the properties', so properties
+/// that say anything must hold the frame's as their time, mutable or else sealed.
+pub(crate) fn agrees(properties: &Properties, frame: Option<u64>) -> bool {
+	frame.is_none() || (properties.block.is_none() && properties.timestamp.is_none()) || properties.time() == frame
 }
 
 /// A group stream's object records on egress, sent before each frame once the extension
@@ -387,11 +395,10 @@ impl Message for TrackProperties {
 		{
 			return Err(DecodeError::InvalidValue);
 		}
-		// The sealed keys are the block's own, so they are parsed rather than trusted.
-		let sealed = match (immutable(&values, encoding)?, encoding) {
-			(Some(block), Some(encoding)) => crate::ietf::properties::sealed_ids(block, encoding)?,
-			_ => Vec::new(),
-		};
+		// Egress reads the sealed keys from the block, so it must be one ingress would keep.
+		if let (Some(block), Some(encoding)) = (immutable(&values, encoding)?, encoding) {
+			crate::ietf::properties::check_immutable(block, encoding)?;
+		}
 		if values.is_empty() {
 			// Only the canonical form, so what decodes re-encodes to the same bytes.
 			return match flags {
@@ -402,7 +409,6 @@ impl Message for TrackProperties {
 		Ok(Self(Some(Arc::new(crate::model::object::TrackProperties {
 			values,
 			immutable: encoding,
-			sealed,
 			delivery_timeout,
 		}))))
 	}
@@ -544,7 +550,7 @@ mod tests {
 		let properties = Properties {
 			timestamp: Some(1_000),
 			timescale: Some(Timescale::MILLI),
-			sealed_time: true,
+			sealed_time: Some(77),
 			block: crate::ietf::object::block(&values, Encoding::DeltaQuic, true).unwrap(),
 		};
 		let body = encode_properties(&properties, properties.timestamp, V).unwrap();
@@ -625,7 +631,6 @@ mod tests {
 				},
 			],
 			immutable: Some(Encoding::Delta { seven: true }),
-			sealed: vec![0x02],
 			delivery_timeout: true,
 		};
 		let msg = TrackProperties(Some(Arc::new(properties.clone())));
@@ -676,11 +681,37 @@ mod tests {
 			.unwrap()
 			.0
 			.unwrap();
-		assert_eq!(decoded.sealed, [0x20, 0x24]);
+		assert!(decoded.sealed().eq([0x20, 0x24]));
 		assert!(
 			decode(vec![sealed], Some(Encoding::Absolute)).is_err(),
 			"track properties never use absolute keys"
 		);
+	}
+
+	/// Sealed keys are read from the Immutable Properties block, never held beside it as a
+	/// list that could cost several times the block.
+	#[test]
+	fn track_properties_hold_sealed_keys_in_their_block() {
+		// Nearly as many two-byte keys as a lite message holds: 0x20 = 1, then zero deltas.
+		let count = 32_000;
+		let mut sealed = vec![0x20, 1];
+		sealed.extend([0, 1].repeat(count - 1));
+		let msg = TrackProperties(Some(Arc::new(crate::model::object::TrackProperties {
+			values: vec![Property {
+				id: IMMUTABLE,
+				value: Value::Bytes(sealed.into()),
+			}],
+			immutable: Some(Encoding::Delta { seven: true }),
+			delivery_timeout: false,
+		})));
+		let buf = crate::coding::Encode::encode_bytes(&msg, V).unwrap();
+		let decoded = <TrackProperties as crate::coding::Decode<Version>>::decode(&mut Decoder::new(&buf, V.into()), V)
+			.unwrap()
+			.0
+			.unwrap();
+		assert_eq!(decoded.values.len(), 1);
+		assert_eq!(decoded.sealed().count(), count);
+		assert!(decoded.sealed().all(|id| id == 0x20));
 	}
 
 	#[test]
@@ -854,7 +885,8 @@ mod hop_tests {
 
 	/// A relayed group crosses the hop frame by frame while it is still open, with its
 	/// Object IDs, properties, and END_OF_GROUP position, and its track's properties.
-	/// A side that does not offer the extension gets the plain frames alone.
+	/// A side that does not offer the extension gets the plain frames alone. The track info
+	/// moq-transport egress restates as Track Properties crosses either way.
 	#[moq_clock::test]
 	async fn relayed_state_crosses_while_the_group_is_open() {
 		for offer in [[true, true], [true, false], [false, true]] {
@@ -862,6 +894,8 @@ mod hop_tests {
 			let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 			let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
 			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
+			info.max_age = Some(Duration::from_secs(7));
+			info.priority = 9;
 			let track_properties = crate::model::object::TrackProperties {
 				values: vec![property(0x40, 3)],
 				..Default::default()
@@ -939,6 +973,11 @@ mod hop_tests {
 			assert_eq!(&frame.payload[..], b"b");
 			assert!(next(&mut received).await.is_none());
 			let info = moq_clock::timeout(TIMEOUT, copy.query()).await.unwrap().unwrap();
+			assert_eq!(
+				(info.max_age, info.timescale, info.priority),
+				(Some(Duration::from_secs(7)), Some(Timescale::MILLI), 9),
+				"{offer:?}"
+			);
 			match negotiated {
 				true => {
 					assert_eq!(fields(&frame), Some((second.id, second.properties.clone())));

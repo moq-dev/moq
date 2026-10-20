@@ -132,7 +132,7 @@ impl Properties {
 
 		let mut properties: Vec<_> = known
 			.iter()
-			.filter(|property| !self.unknown.sealed.contains(&property.id))
+			.filter(|property| !self.unknown.sealed().any(|id| id == property.id))
 			.chain(&self.unknown.values)
 			.collect();
 		// Delta types require ascending order. Equal types keep the publisher's order.
@@ -215,8 +215,7 @@ impl Properties {
 					{
 						return Err(DecodeError::InvalidValue);
 					}
-					let sealed = sealed(&mut Decoder::new(value, version.into()), &mut properties, &mut seen)?;
-					properties.unknown.sealed = sealed;
+					sealed(&mut Decoder::new(value, version.into()), &mut properties, &mut seen)?;
 				}
 				// A small kept property must not pin the message's larger buffer.
 				properties.unknown.values.push(Property {
@@ -275,9 +274,9 @@ pub(crate) fn understood(id: u64) -> bool {
 	)
 }
 
-/// The keys a Track Properties' Immutable Properties `block` seals, serialized in the
-/// `encoding` family, checking the ones we understand as [`Properties::decode`] does.
-pub(crate) fn sealed_ids(block: &[u8], encoding: crate::model::object::Encoding) -> Result<Vec<u64>, DecodeError> {
+/// Check a Track Properties' Immutable Properties `block`, serialized in the `encoding`
+/// family, as [`Properties::decode`] does.
+pub(crate) fn check_immutable(block: &[u8], encoding: crate::model::object::Encoding) -> Result<(), DecodeError> {
 	// Track Properties start at draft-16, whose families all delta-encode their keys.
 	if encoding == crate::model::object::Encoding::Absolute {
 		return Err(DecodeError::InvalidValue);
@@ -290,6 +289,44 @@ pub(crate) fn sealed_ids(block: &[u8], encoding: crate::model::object::Encoding)
 	)
 }
 
+impl TrackProperties {
+	/// The keys inside Immutable Properties, which egress must not restate as mutable.
+	///
+	/// Read from the block each time rather than held as a list, which could be many times
+	/// its size. Ingress checked the block, so a malformed key cannot occur and ends it.
+	pub(crate) fn sealed(&self) -> impl Iterator<Item = u64> + '_ {
+		let block = self
+			.values
+			.iter()
+			.find_map(|property| match (property.id, &property.value) {
+				(IMMUTABLE, Value::Bytes(block)) => Some(block),
+				_ => None,
+			});
+		let mut r = block
+			.zip(self.immutable)
+			.map(|(block, encoding)| Decoder::new(block, super::object::family(encoding).into()));
+		let mut id: u64 = 0;
+		std::iter::from_fn(move || {
+			let r = r.as_mut().filter(|r| !r.is_empty())?;
+			id = id.checked_add(r.varint().ok()?)?;
+			match id.is_multiple_of(2) {
+				true => r.varint().ok().map(drop)?,
+				false => r.bytes().ok().map(drop)?,
+			}
+			Some(id)
+		})
+	}
+
+	/// Whether one is a Mandatory Track Property (0x4000-0x7FFF), which by definition is
+	/// one moq-net does not understand: the track must be neither processed nor forwarded.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn mandatory(&self) -> bool {
+		const MANDATORY: std::ops::RangeInclusive<u64> = 0x4000..=0x7fff;
+		self.values.iter().any(|property| MANDATORY.contains(&property.id))
+			|| self.sealed().any(|id| MANDATORY.contains(&id))
+	}
+}
+
 /// A DYNAMIC_GROUPS value, which is a boolean: anything but 0 or 1 is malformed.
 pub(super) fn dynamic_groups(value: u64) -> Result<bool, DecodeError> {
 	match value {
@@ -299,11 +336,10 @@ pub(super) fn dynamic_groups(value: u64) -> Result<bool, DecodeError> {
 	}
 }
 
-/// The keys inside an Immutable Properties value, applying the ones we understand, which
-/// the draft makes a processor search too. Its pairs are delta-encoded like the outer
+/// Check the keys inside an Immutable Properties value, applying the ones we understand,
+/// which the draft makes a processor search too. Its pairs are delta-encoded like the outer
 /// list, and nesting another Immutable Properties makes the track malformed.
-fn sealed(r: &mut Decoder<'_>, properties: &mut Properties, seen: &mut Vec<u64>) -> Result<Vec<u64>, DecodeError> {
-	let mut ids = Vec::new();
+fn sealed(r: &mut Decoder<'_>, properties: &mut Properties, seen: &mut Vec<u64>) -> Result<(), DecodeError> {
 	let mut id: u64 = 0;
 	while !r.is_empty() {
 		id = id.checked_add(r.varint()?).ok_or(DecodeError::BoundsExceeded)?;
@@ -315,9 +351,8 @@ fn sealed(r: &mut Decoder<'_>, properties: &mut Properties, seen: &mut Vec<u64>)
 			}
 			r.bytes()?;
 		}
-		ids.push(id);
 	}
-	Ok(ids)
+	Ok(())
 }
 
 #[cfg(test)]
@@ -591,7 +626,7 @@ mod tests {
 			let (properties, written) = round_trip(version, &block);
 			assert_eq!(written, block, "{version}");
 			assert_eq!(properties.unknown.values.len(), 3, "{version}");
-			assert_eq!(properties.unknown.sealed, [0x02], "{version}");
+			assert!(properties.unknown.sealed().eq([0x02]), "{version}");
 			assert_eq!(
 				properties.unknown.immutable,
 				Some(super::super::object::encoding(version)),

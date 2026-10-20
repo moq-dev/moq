@@ -96,6 +96,11 @@ impl Datagram {
 		} else {
 			None
 		};
+		if let Some(Some(wire)) = &ietf
+			&& !super::ietf::agrees(&wire.properties, timestamp)
+		{
+			return Err(DecodeError::InvalidValue);
+		}
 
 		// Everything remaining is the payload (the datagram boundary delimits it).
 		let payload = buf.slice(buf.len() - r.remaining()..);
@@ -197,6 +202,34 @@ mod test {
 				"{version}"
 			);
 		}
+	}
+
+	/// A relayed datagram's properties must hold the Timestamp it carries on a timed track,
+	/// so lite and moq-transport egress cannot send different times for it.
+	#[test]
+	fn relayed_time_must_be_the_datagram_time() {
+		let dg = |timestamp: u64| Datagram {
+			subscribe: 1,
+			sequence: 2,
+			timestamp: Some(500),
+			payload: Bytes::from_static(b"x"),
+			ietf: Some(Some(crate::model::datagram::Wire {
+				object_id: None,
+				priority: None,
+				end_of_group: false,
+				status: None,
+				properties: crate::model::object::Properties {
+					timestamp: Some(timestamp),
+					..Default::default()
+				},
+			})),
+		};
+		let decode = |dg: Datagram| {
+			let buf = dg.encode_bytes(Version::Lite07).unwrap();
+			Datagram::decode(buf, Version::Lite07, true, |_| true)
+		};
+		assert!(decode(dg(500)).is_ok());
+		assert!(matches!(decode(dg(499)), Err(DecodeError::InvalidValue)));
 	}
 
 	#[test]

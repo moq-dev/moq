@@ -87,10 +87,10 @@ A bit field describing the group's relay state, or 0 for a plain group:
 
 - `0x1` **RELAYED**: The group is relayed. Every other bit requires it.
 - `0x2` **FIRST_OBJECT**: The first record is the group's first object, as the FIRST_OBJECT state of a {{moqt}} subgroup.
-- `0x4` **EXTENSIONS**: The {{moqt}} subgroup header said its objects carry properties.
+- `0x4` **EXTENSIONS**: The {{moqt}} subgroup header said its objects carry properties. Without it, every record's Properties are empty.
 - `0x8` **END_OF_GROUP**: The stream's end ends the group, as a {{moqt}} subgroup that contains the end of its group.
 
-A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any other bit, or a bit without RELAYED.
+A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any other bit, a bit without RELAYED, or a record with Properties when EXTENSIONS is clear.
 A publisher MUST clear FIRST_OBJECT when the stream starts after the first frame it holds, and END_OF_GROUP when the stream stops before the end of the group, such as at a subscription's end frame.
 
 Only subgroup 0 of a {{moqt}} group is carried.
@@ -147,6 +147,10 @@ DELIVERY_TIMEOUT lets a relay refuse to forward property 0x06 to a draft that wo
 The object's mutable Timestamp property (0x10), in the track's Timescale ({{moql}} TRACK_INFO).
 It MUST be present whenever the object has one, since an absent Timestamp is relayed as absent.
 
+On a timed track, an object's time is its mutable Timestamp, or else the one inside its Immutable Properties.
+Non-empty Properties MUST hold the FRAME's Timestamp as that time, or the datagram's for a datagram, since a {{moql}} subscriber reads one and a {{moqt}} subscriber the other.
+A receiver MUST reset the stream with a PROTOCOL_VIOLATION on a record that breaks this, and drop such a datagram.
+
 **Property Block**:
 The rest of the Properties: every other property of the object, serialized as the {{moqt}} drafts of its encoding serialize an object's properties, in ascending ID order.
 Immutable Properties (0x0b) are in the same encoding, as the publisher sent them.
@@ -189,6 +193,7 @@ TRACK_INFO carries what a relay keeps of them, so a second copy could only contr
 A message that breaks either rule is malformed.
 
 The receiver parses the keys inside the Immutable Properties from its value, which a relay MUST NOT restate as mutable.
+It SHOULD read them from the value when needed rather than hold them beside it, as a list of IDs can cost several times the value.
 Track Properties never use the Immutable Properties family of drafts 14 and 15, so a `Flags >> 1` of 1 is malformed here.
 
 

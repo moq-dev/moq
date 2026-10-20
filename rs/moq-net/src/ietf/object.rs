@@ -54,7 +54,7 @@ struct List {
 	timestamp: Option<u64>,
 	time: Option<u64>,
 	gap: Option<u64>,
-	sealed_time: bool,
+	sealed_time: Option<u64>,
 	immutable: bool,
 }
 
@@ -66,7 +66,7 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 		timestamp: None,
 		time: None,
 		gap: None,
-		sealed_time: false,
+		sealed_time: None,
 		immutable: false,
 	};
 	let mut previous = 0u64;
@@ -101,7 +101,7 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 					return Err(Error::MalformedTrack);
 				}
 				let nested = list(&bytes, version, true).map_err(|_| Error::MalformedTrack)?;
-				result.sealed_time = nested.time.is_some();
+				result.sealed_time = nested.time;
 				result.time = result.time.or(nested.time);
 				if let Some(gap) = nested.gap
 					&& result.gap.replace(gap).is_some()
@@ -161,7 +161,7 @@ pub(crate) fn block(
 /// What a received [`Block`](crate::model::object::Block) holds beside its bytes.
 pub(crate) struct Checked {
 	pub immutable: bool,
-	pub sealed_time: bool,
+	pub sealed_time: Option<u64>,
 	pub gap: Option<u64>,
 }
 
@@ -228,7 +228,7 @@ pub(crate) fn egress_time(properties: &Properties, timescale: Option<Timescale>)
 		(Some(from), Some(to)) if from != to => Some((from, to)),
 		_ => None,
 	};
-	if properties.sealed_time && (convert.is_some() || unstamped) {
+	if properties.sealed_time.is_some() && (convert.is_some() || unstamped) {
 		return Err(Error::Unsupported);
 	}
 	properties
@@ -325,7 +325,7 @@ mod tests {
 			] {
 				let decoded = read(&bytes, version, Some(Timescale::MILLI)).unwrap();
 				assert_eq!(decoded.timestamp, None, "{version}");
-				assert!(!decoded.properties.sealed_time, "{version}");
+				assert_eq!(decoded.properties.sealed_time, None, "{version}");
 				for timescale in [Some(Timescale::MICRO), None] {
 					assert_eq!(
 						write(&decoded.properties, version, timescale).unwrap(),
@@ -443,7 +443,7 @@ mod tests {
 		// A sealed one is refused.
 		let sealed = Bytes::from_static(&[0x0b, 2, 0x06, 42]);
 		let decoded = read(&sealed, Version::Draft22, milli).unwrap();
-		assert!(!decoded.properties.sealed_time);
+		assert_eq!(decoded.properties.sealed_time, None);
 		assert_eq!(write(&decoded.properties, Version::Draft22, None).unwrap(), sealed);
 		assert!(matches!(
 			write(&decoded.properties, Version::Draft18, milli),

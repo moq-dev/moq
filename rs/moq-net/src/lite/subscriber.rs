@@ -1039,6 +1039,8 @@ struct RecordIngest {
 	/// The Group State carried relay state. Otherwise every record is plain: its Object ID
 	/// is the frame's index, with no properties and no END_OF_GROUP.
 	relayed: bool,
+	/// The Group State set EXTENSIONS, without which no record has properties.
+	extensions: bool,
 	/// The previous record's Object ID, `None` before the first.
 	prior: Option<u64>,
 	/// The record of the frame being read: its Object ID and properties block.
@@ -1125,11 +1127,13 @@ impl FrameIngest {
 					let state = ready!(reader.poll_varint(&mut cx))?;
 					let wire = lite::ietf::decode_state(state, self.frame_start)?;
 					let relayed = wire.is_some();
+					let extensions = wire.as_ref().is_some_and(|wire| wire.extensions);
 					if let Some(wire) = wire {
 						group.set_wire(wire)?;
 					}
 					self.records = Some(RecordIngest {
 						relayed,
+						extensions,
 						prior: None,
 						pending: None,
 					});
@@ -1164,7 +1168,7 @@ impl FrameIngest {
 					let block = ready!(reader.poll_read_exact(&mut cx, len))?;
 					let (id, end) = (*id, *end);
 					let records = self.records.as_mut().expect("the Group State came first");
-					if !records.relayed && (end || !block.is_empty()) {
+					if (end && !records.relayed) || (!block.is_empty() && !records.extensions) {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
 					if end {
@@ -1217,6 +1221,9 @@ impl FrameIngest {
 							let lite::ietf::Decoded { properties, gap } =
 								lite::ietf::decode_properties(&block, self.timescale, self.version)?;
 							group.mark_gap(id, gap)?;
+							if !lite::ietf::agrees(&properties, timestamp.map(|time| time.value())) {
+								return Poll::Ready(Err(Error::ProtocolViolation));
+							}
 							// Time alone, which the frame header carries already, is plain.
 							let plain = id == group.frame_count() as u64
 								&& properties.is_plain() && properties
@@ -2429,10 +2436,13 @@ mod tests {
 		}
 	}
 
-	/// Receive group 0 of an untimed track over a lite-07 session that negotiated the
+	/// Receive group 0 of a track in `timescale` over a lite-07 session that negotiated the
 	/// `ietf` extension, its stream holding `body` after the GROUP header. Also returns the
 	/// cache pool the track charges.
-	async fn receive_ietf(body: &[u64]) -> (Result<(), Error>, track::Producer, crate::cache::Pool) {
+	async fn receive_ietf(
+		timescale: Option<Timescale>,
+		body: &[u64],
+	) -> (Result<(), Error>, track::Producer, crate::cache::Pool) {
 		use crate::transport::poll::Session as _;
 
 		let version = Version::Lite07;
@@ -2473,13 +2483,13 @@ mod tests {
 				..Default::default()
 			}),
 			"video",
-			crate::track::Info::default().with_timescale(None),
+			crate::track::Info::default().with_timescale(timescale),
 		);
 		subscriber.subscribes.lock().insert(
 			7,
 			TrackEntry {
 				producer: track.clone(),
-				timescale: None,
+				timescale,
 				tail: Default::default(),
 			},
 		);
@@ -2494,7 +2504,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn ietf_records_frame_a_group() {
 		// A plain group: Group State 0, then frame 0 with an empty record.
-		let (res, track, _) = receive_ietf(&[0, 0, 0, 1, u64::from(b'x')]).await;
+		let (res, track, _) = receive_ietf(None, &[0, 0, 0, 1, u64::from(b'x')]).await;
 		res.unwrap();
 		let mut group = track.consume().peek_group(0).unwrap();
 		assert_eq!(
@@ -2503,7 +2513,7 @@ mod tests {
 		);
 
 		// A relayed group starting at Object 4, then END_OF_GROUP at Object 6.
-		let (res, track, _) = receive_ietf(&[0x1, 4 << 1, 0, 1, u64::from(b'x'), (1 << 1) | 1, 0]).await;
+		let (res, track, _) = receive_ietf(None, &[0x1, 4 << 1, 0, 1, u64::from(b'x'), (1 << 1) | 1, 0]).await;
 		res.unwrap();
 		let group = track.consume().peek_group(0).unwrap();
 		assert_eq!(group.end_object().map(|end| end.id), Some(6));
@@ -2522,8 +2532,50 @@ mod tests {
 			(&[0x1, 1, 0, 0], "a byte after END_OF_GROUP"),
 			(&[0x1, 0, 0], "a stream ending inside a frame"),
 		] {
-			let (res, ..) = receive_ietf(body).await;
+			let (res, ..) = receive_ietf(None, body).await;
 			assert!(res.is_err(), "accepted {reason}");
+		}
+	}
+
+	/// A relayed group's records carry properties only when its Group State sets EXTENSIONS,
+	/// as the moq-transport subgroup it mirrors could hold none otherwise.
+	#[moq_clock::test]
+	async fn ietf_records_need_extensions_for_properties() {
+		// Object 0 with a draft-18 block holding 0x20 = 1, or with a Timestamp alone.
+		for record in [&[3, 4 << 2, 0x20, 1][..], &[2, 0x2, 7]] {
+			for (state, ok) in [(0x1 | 0x4, true), (0x1, false)] {
+				let mut body = vec![state, 0];
+				body.extend(record);
+				body.push(0);
+				let (res, ..) = receive_ietf(None, &body).await;
+				assert_eq!(res.is_ok(), ok, "Group State {state:#x}, record {record:?}");
+			}
+		}
+	}
+
+	/// On a timed track, a relayed record's time, its mutable Timestamp or else a sealed one,
+	/// must be its frame's: lite egress sends one and moq-transport egress the other.
+	#[moq_clock::test]
+	async fn ietf_records_agree_with_their_frame_time() {
+		let frame = crate::coding::varint::zigzag(500);
+		for (record, ok, reason) in [
+			(&[0][..], true, "nothing but the frame's"),
+			(&[3, 0x2, 500], true, "the frame's Timestamp"),
+			(&[3, 0x2, 499], false, "another Timestamp"),
+			(&[3, 4 << 2, 0x20, 1], false, "properties without a Timestamp"),
+			(
+				&[5, 0x2 | 4 << 2, 500, 0x20, 1],
+				true,
+				"properties and the frame's Timestamp",
+			),
+			(&[6, 4 << 2, 0x0b, 3, 0x10, 500], true, "the frame's Timestamp, sealed"),
+			(&[6, 4 << 2, 0x0b, 3, 0x10, 499], false, "another Timestamp, sealed"),
+		] {
+			let mut body = vec![0x1 | 0x4, 0];
+			body.extend(record);
+			body.extend([frame, 0]);
+			let (res, ..) = receive_ietf(Some(Timescale::MILLI), &body).await;
+			assert_eq!(res.is_ok(), ok, "{reason}: {res:?}");
 		}
 	}
 
@@ -2534,12 +2586,12 @@ mod tests {
 		const COUNT: u64 = 1000;
 		// A relayed group's Object 0, whose draft-18 block holds COUNT two-byte properties
 		// (0x20 = 1, then zero deltas), then an empty frame.
-		let mut body = vec![0x1, 0, 1 + 2 * COUNT, 4 << 2, 0x20, 1];
+		let mut body = vec![0x1 | 0x4, 0, 1 + 2 * COUNT, 4 << 2, 0x20, 1];
 		for _ in 1..COUNT {
 			body.extend([0, 1]);
 		}
 		body.push(0);
-		let (res, track, pool) = receive_ietf(&body).await;
+		let (res, track, pool) = receive_ietf(None, &body).await;
 		res.unwrap();
 		let group = track.consume().peek_group(0).unwrap();
 		assert_eq!(group.frame_count(), 1);

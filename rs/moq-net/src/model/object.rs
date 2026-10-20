@@ -35,10 +35,18 @@ pub(crate) struct Properties {
 	/// The units of the Timestamps, when the track declared any. The cache keeps the track
 	/// in its own units, so egress converts mutable ones to the units it declares.
 	pub timescale: Option<Timescale>,
-	/// The immutable block holds a Timestamp, which keeps its ingress units.
-	pub sealed_time: bool,
+	/// The Timestamp the immutable block holds, if any, which keeps its ingress units.
+	pub sealed_time: Option<u64>,
 	/// Every property but the mutable Timestamp, if there are any.
 	pub block: Option<Block>,
+}
+
+impl Properties {
+	/// The object's time as moq-transport ingress takes it: the mutable Timestamp, or else
+	/// the sealed one.
+	pub fn time(&self) -> Option<u64> {
+		self.timestamp.or(self.sealed_time)
+	}
 }
 
 /// An object's properties other than its mutable Timestamp, as one encoded list.
@@ -82,21 +90,8 @@ pub(crate) struct TrackProperties {
 	pub values: Vec<Property>,
 	/// How the publisher serialized the keys inside Immutable Properties, when present.
 	pub immutable: Option<Encoding>,
-	/// The keys inside Immutable Properties, which egress must not restate as mutable.
-	pub sealed: Vec<u64>,
 	/// Property 0x06 means SUBGROUP_DELIVERY_TIMEOUT on the ingress draft.
 	pub delivery_timeout: bool,
-}
-
-impl TrackProperties {
-	/// Whether one is a Mandatory Track Property (0x4000-0x7FFF), which by definition is
-	/// one moq-net does not understand: the track must be neither processed nor forwarded.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn mandatory(&self) -> bool {
-		const MANDATORY: std::ops::RangeInclusive<u64> = 0x4000..=0x7fff;
-		self.values.iter().any(|property| MANDATORY.contains(&property.id))
-			|| self.sealed.iter().any(|id| MANDATORY.contains(id))
-	}
 }
 
 /// Object numbering is separate from the public frame's ordinal in its group.

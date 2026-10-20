@@ -66,7 +66,7 @@ fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Resul
 	// Across draft-19, forwarding 0x06 would give it a different meaning, as for object
 	// properties. A mutable one is dropped; a sealed one is refused.
 	if !unknown.values.is_empty() && unknown.delivery_timeout != super::object::has_delivery_timeout(version) {
-		if block && unknown.sealed.contains(&0x06) {
+		if block && unknown.sealed().any(|id| id == 0x06) {
 			return Err(Error::Unsupported);
 		}
 		unknown.values.retain(|property| property.id != 0x06);
