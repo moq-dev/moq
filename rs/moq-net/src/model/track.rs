@@ -4741,29 +4741,53 @@ struct Edge {
 
 /// The groups `window` covers from `from`, below the exclusive `cap`.
 fn admitted(window: &Window, from: u64, cap: Option<u64>) -> RangeInclusiveSet<u64> {
-	let mut admitted = RangeInclusiveSet::new();
+	below(window.runs(from), cap)
+}
+
+/// `runs`, lowest first, below the exclusive `cap`.
+fn below(runs: impl Iterator<Item = ops::RangeInclusive<u64>>, cap: Option<u64>) -> RangeInclusiveSet<u64> {
+	let mut below = RangeInclusiveSet::new();
 	let last = match cap {
 		Some(end) => match end.checked_sub(1) {
 			Some(last) => last,
-			None => return admitted,
+			None => return below,
 		},
 		None => u64::MAX,
 	};
-	for run in window.runs(from) {
+	for run in runs {
 		if *run.start() > last {
 			break;
 		}
-		admitted.insert(*run.start()..=(*run.end()).min(last));
+		below.insert(*run.start()..=(*run.end()).min(last));
 	}
-	admitted
+	below
 }
 
-/// A cursor's [`Servable`] as the groups it handed out see it, with the cap it was cut to,
-/// so a [`Control`] replacing the ranges can republish it without the cursor.
+/// A cursor's [`Servable`] as the groups it handed out see it, derived from its two
+/// inputs: the window, which a [`Control`] replacing the ranges republishes, and the cap,
+/// which only the cursor moves. Each writer replaces its own input and derives the servable
+/// under the same write, so neither can publish one cut from the other's stale input.
 #[derive(Clone, PartialEq)]
 struct Published {
-	servable: Servable,
+	/// The window's groups, resolved for `revision` of the ranges.
+	runs: Arc<RangeInclusiveSet<u64>>,
+	/// The [`Preferences::ranges_revision`] `runs` were resolved for.
+	revision: u64,
 	cap: Option<u64>,
+	/// `runs` below `cap`.
+	servable: Servable,
+}
+
+impl Published {
+	fn new(runs: Arc<RangeInclusiveSet<u64>>, revision: u64, cap: Option<u64>) -> Self {
+		let servable = Servable::new(below(runs.iter().cloned(), cap));
+		Self {
+			runs,
+			revision,
+			cap,
+			servable,
+		}
+	}
 }
 
 /// The groups a reader can be served, the only ones its drift is measured against: one it
@@ -5012,10 +5036,11 @@ impl Cursor {
 			next_sequence: Some(0),
 			end_sequence: None,
 			servable: Servable::ALL,
-			published: kio::Producer::new(Published {
-				servable: Servable::ALL,
-				cap: None,
-			}),
+			published: kio::Producer::new(Published::new(
+				Arc::new(RangeInclusiveSet::from_iter([0..=u64::MAX])),
+				0,
+				None,
+			)),
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
 			drops: None,
@@ -5054,17 +5079,25 @@ impl Cursor {
 	/// groups already handed out. Costs the ranges, never the cache.
 	fn update_servable(&mut self) {
 		self.servable = Servable::new(self.admitted(0, self.end_sequence));
-		let published = Published {
-			servable: self.servable.clone(),
-			cap: self.end_sequence,
+		let (revision, cap) = (self.filter.resolved, self.end_sequence);
+		let next = |current: &Published| {
+			// Ranges a `Control` republished past this window stay until this cursor syncs
+			// to them; the cap is this cursor's own.
+			let runs = match current.revision > revision {
+				true => current.runs.clone(),
+				false => Arc::new(self.admitted(0, None)),
+			};
+			let next = Published::new(runs, revision.max(current.revision), cap);
+			(next != *current).then_some(next)
 		};
-		// Compared with the channel, which a `Control` may have republished, and a no-op
-		// write skipped: every handed-out group's expiry watches it.
-		if *self.published.read() == published {
+		// A no-op write is skipped: every handed-out group's expiry watches the channel.
+		if next(&self.published.read()).is_none() {
 			return;
 		}
-		if let Ok(mut current) = self.published.write() {
-			*current = published;
+		if let Ok(mut current) = self.published.write()
+			&& let Some(next) = next(&current)
+		{
+			*current = next;
 		}
 	}
 
@@ -5284,7 +5317,11 @@ impl Cursor {
 
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
+		self.poll_recv_with(drift, waiter)
+	}
 
+	/// [`Self::poll_recv_group`] once synced, judging against `drift`.
+	fn poll_recv_with(&mut self, mut drift: Drift, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		loop {
 			// Re-offer what a widening newly covers ahead of the arrival walk, lowest first:
 			// it is the oldest thing still owed. A group the walk has yet to reach comes
@@ -5314,6 +5351,10 @@ impl Cursor {
 					if self.filter.window.is_pending() {
 						self.sync();
 						self.admit();
+						// The snapshot saw the pending window, which serves everything.
+						if !self.filter.window.is_pending() {
+							drift = ready!(self.poll_drift(&self.servable, waiter))?;
+						}
 						if consumer.sequence < self.floor() {
 							continue;
 						}
@@ -5378,11 +5419,20 @@ impl Cursor {
 			return Poll::Ready(Ok(None));
 		};
 		self.sync();
-		let mut floor = next.max(self.floor());
-		let end = self.end_sequence;
+		let floor = next.max(self.floor());
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
+		self.poll_next_with(floor, drift, waiter)
+	}
 
+	/// [`Self::poll_next_group`] once synced, from `floor`, judging against `drift`.
+	fn poll_next_with(
+		&mut self,
+		mut floor: u64,
+		mut drift: Drift,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<group::Consumer>>> {
+		let end = self.end_sequence;
 		let group = loop {
 			let window = &self.filter.window;
 			let Some(producer) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, end, window))?)
@@ -5398,6 +5448,10 @@ impl Cursor {
 			// The first group to arrive resolves a relative floor, which may land above it.
 			if self.filter.window.is_pending() {
 				self.sync();
+				// The snapshot saw the pending window, which serves everything.
+				if !self.filter.window.is_pending() {
+					drift = ready!(self.poll_drift(&self.servable, waiter))?;
+				}
 				if group.sequence < self.floor() || !self.filter.window.contains(group.sequence) {
 					floor = floor.max(self.floor()).max(group.sequence.saturating_add(1));
 					continue;
@@ -5469,19 +5523,25 @@ struct Republish {
 }
 
 impl Republish {
-	/// Resolve `ranges` as the cursor will, under its cap, and publish them.
-	fn publish(&self, ranges: &[Range]) {
+	/// Resolve the ranges in `preferences` as the cursor will, and publish them under the
+	/// cap the cursor holds then, unless the cursor already published them or newer.
+	fn publish(&self, preferences: &Preferences) {
 		let Some(published) = self.published.produce() else {
 			return;
 		};
-		let window = Window::new(ranges, self.state.read().newest_produced);
-		let cap = published.read().cap;
-		let servable = Servable::new(admitted(&window, 0, cap));
-		if published.read().servable == servable {
+		let (ranges, revision) = {
+			let current = preferences.read();
+			(current.ranges.clone(), preferences.ranges_revision())
+		};
+		if published.read().revision >= revision {
 			return;
 		}
-		if let Ok(mut current) = published.write() {
-			current.servable = servable;
+		let window = Window::new(&ranges, self.state.read().newest_produced);
+		let runs = Arc::new(admitted(&window, 0, None));
+		if let Ok(mut current) = published.write()
+			&& current.revision < revision
+		{
+			*current = Published::new(runs, revision, current.cap);
 		}
 	}
 }
@@ -5497,12 +5557,11 @@ impl Control {
 	/// Returns [`Error::Closed`] if the track already ended; the update is
 	/// meaningless at that point and can usually be ignored.
 	pub fn update(&self, subscription: Subscription) -> Result<()> {
-		// Republished first, so the cursor's own resolution, when it next reads, replaces it.
-		let replaced = self.republish.is_some() && self.subscription.read().ranges != subscription.ranges;
-		if let Some(republish) = self.republish.as_ref().filter(|_| replaced) {
-			republish.publish(&subscription.ranges);
+		self.subscription.update(subscription)?;
+		if let Some(republish) = &self.republish {
+			republish.publish(&self.subscription);
 		}
-		self.subscription.update(subscription)
+		Ok(())
 	}
 }
 
@@ -9973,6 +10032,83 @@ mod test {
 		let pending = moq_clock::sim::spawn(async move { held.read_frame().await });
 		moq_clock::sim::yield_now().await;
 		assert!(!pending.is_finished(), "group 0 is within the budget of its run");
+	}
+
+	/// A drift snapshot taken while the window waits on its first group is taken again once
+	/// that group settles it. Groups 0 and 1 land between the snapshot and the arrival: the
+	/// settled `0..=0` judges group 0 against itself, not group 1, which it never reads.
+	#[test]
+	fn the_first_arrival_retakes_a_pending_drift_snapshot() {
+		for ordered in [false, true] {
+			let mut producer = track_producer("test", Info::timed());
+			let subscription = Subscription::default()
+				.with_max_delay(Duration::ZERO)
+				.with_ranges([Range {
+					start: Anchor::Absolute(Position::group(0)),
+					end: Some(Anchor::Relative(0)),
+				}]);
+			let mut subscriber = producer.subscribe(subscription);
+			let Inner::Plain(cursor) = &mut subscriber.inner else {
+				unreachable!("a local subscriber reads its own cursor");
+			};
+			let waiter = kio::Waiter::noop();
+			cursor.sync();
+			assert!(cursor.filter.window.is_pending());
+			let Poll::Ready(Ok(drift)) = cursor.poll_drift(&cursor.servable, &waiter) else {
+				unreachable!("a drift snapshot is always ready");
+			};
+
+			append_at(&mut producer, 0);
+			append_at(&mut producer, 1000);
+			let res = match ordered {
+				true => cursor.poll_next_with(0, drift, &waiter),
+				false => cursor.poll_recv_with(drift, &waiter),
+			};
+			let Poll::Ready(Ok(Some(group))) = res else {
+				panic!("group 0 is the newest group its range reads (ordered: {ordered})");
+			};
+			assert_eq!(group.sequence, 0);
+		}
+	}
+
+	/// A [`Control`] replacing the ranges and the cursor moving its cap each change only
+	/// their own part of what handed-out groups are judged against, whichever goes first,
+	/// and with the cap moving between the ranges being written and republished.
+	#[test]
+	fn a_control_update_and_a_cap_never_publish_a_mismatched_pair() {
+		let published = |subscriber: &Subscriber| {
+			let Inner::Plain(cursor) = &subscriber.inner else {
+				unreachable!("a local subscriber reads its own cursor");
+			};
+			let current = cursor.published.read();
+			(current.servable.clone(), current.cap)
+		};
+		let ranges = Subscription::default().with_groups(10..20);
+		// Nothing in 10..20 sits below a cap at 5.
+		let expected = (Servable::new(RangeInclusiveSet::new()), Some(5));
+		for order in ["ranges first", "cap first", "cap between"] {
+			let producer = track_producer("test", Info::timed());
+			let mut subscriber = producer.subscribe(Subscription::default());
+			let control = subscriber.control();
+			match order {
+				"ranges first" => {
+					control.update(ranges.clone()).unwrap();
+					subscriber.set_groups(..5);
+				}
+				"cap first" => {
+					subscriber.set_groups(..5);
+					control.update(ranges.clone()).unwrap();
+				}
+				_ => {
+					control.subscription.update(ranges.clone()).unwrap();
+					subscriber.set_groups(..5);
+					control.republish.as_ref().unwrap().publish(&control.subscription);
+				}
+			}
+			assert!(published(&subscriber) == expected, "{order}");
+			let _ = subscriber.poll_recv_group(&kio::Waiter::noop());
+			assert!(published(&subscriber) == expected, "{order}, once the cursor syncs");
+		}
 	}
 
 	/// Ranges replaced through a [`Control`] republish what a held group is judged against
