@@ -3,13 +3,18 @@ name: OSS Scanner
 # Builds .oss-scanner/ with Anthropic's own tools/check, so the image the
 # scanner builds from main keeps working. Nightly, because a new native
 # dependency in any in-scope crate or a rule change upstream breaks it without
-# touching these files; on pull requests only when the files themselves change.
+# touching these files; on release pull requests only when the files themselves
+# change.
 #
 # Outside Nix, like android.yml: the dev shell's store would compete for the
 # disk the ~20 GB scanner image needs, and the image brings its own toolchain.
 on:
   workflow_call:
   pull_request:
+    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
+    # retargeted to release.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - ".oss-scanner/**"
       - "sh/oss-scanner.sh"

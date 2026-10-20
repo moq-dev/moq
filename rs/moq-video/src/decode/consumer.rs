@@ -39,7 +39,8 @@ pub enum Start {
 	/// backlog at decode speed before reaching live media, which a viewer sees
 	/// as playback jumping backwards and then sprinting to catch up. A
 	/// rendition with a catalog `warmup` also decodes the group before it, for
-	/// the max-delay decoder (see [`Consumer`]).
+	/// the max-delay decoder (see [`Consumer`]). Opening waits for the track's
+	/// live edge, or its end.
 	Latest,
 }
 
@@ -287,8 +288,12 @@ impl Reader {
 		// aggregated across every live subscriber, so naming a stale cached
 		// sequence there asks the publisher to rewind the track for everyone
 		// reading it. What a player wants is to skip what it already has.
+		//
+		// The live edge is known only once the feed is live: a warm copy still waiting on
+		// its source reports nothing yet, so wait for it rather than read the backlog. The
+		// wait ends with the track.
 		if options.start == Start::Latest
-			&& let std::task::Poll::Ready(Some(live_edge)) = subscriber.poll_largest(&moq_net::kio::Waiter::noop())
+			&& let Some(live_edge) = subscriber.largest().await
 		{
 			subscriber.set_groups(live_edge.group.saturating_sub(lookback)..);
 		}

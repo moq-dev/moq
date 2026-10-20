@@ -25,7 +25,12 @@ name: Nightly
 # nightly it competes with nothing, and a regression surfaces a day late against
 # a budget that still means something. The recorded-trace replays are the
 # exception: deterministic and seconds long, so audio-quality.yml also gates
-# PRs on them.
+# release PRs on them.
+#
+# Main PRs run no cloud CI beyond the merge queue's Check and Test, so every
+# path-filtered gate (Android, C++, WASM, X11, the audio replays, the OSS
+# Scanner image, platform.yml and the release dry-runs) runs here on main too,
+# and on release PRs.
 #
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in check.yml.
@@ -43,8 +48,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The path-filtered gates main PRs skip; release PRs still run them.
   x11:
     uses: ./.github/workflows/x11.yml
+
+  android:
+    uses: ./.github/workflows/android.yml
+
+  cpp:
+    uses: ./.github/workflows/cpp.yml
+
+  wasm:
+    uses: ./.github/workflows/wasm.yml
+
+  audio-replay:
+    uses: ./.github/workflows/audio-quality.yml
 
   oss-scanner:
     uses: ./.github/workflows/oss-scanner.yml
@@ -286,13 +304,15 @@ jobs:
       matrix:
         # `rs uring` is a separate feature compile (off the default set), and
         # MOQ_STRICT fails it below the 6.12 kernel floor. The embedding tests for
-        # io_uring live there; uring.yml also runs it on affected PRs.
+        # io_uring live there; uring.yml also runs it on affected release PRs.
         # `test drain` stands up two relays and drains one under a live JS
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
         # `gh test` exercises workflow and release tooling, which no pull request runs.
         # `rs quic-sim` sweeps moq-quic's simulated workloads from a fresh seed; PRs run a fixed 64.
-        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test", "test json-properties", "rs quic-sim", "rs quic-stress"]
+        # `gate` runs the queue's Check and Test over every package, catching
+        # what a diff-scoped queue run let into main.
+        recipe: ["gate check", "gate test", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test", "test json-properties", "rs quic-sim", "rs quic-stress"]
         include:
           - recipe: rs send-depth
             nightly: true
@@ -323,7 +343,7 @@ jobs:
           MOQ_STRICT: 1
 
   # Media QA with non-Chromium players against a Chromium fixture. The Chromium
-  # player already runs in interop.yml, on PRs and nightly.
+  # player already runs in interop.yml, nightly and on release PRs.
   media-engines:
     name: Media (${{ matrix.engine }} player)
     runs-on: ubuntu-24.04-arm
@@ -363,7 +383,7 @@ jobs:
           path: ${{ runner.temp }}/moq-test-runs
           if-no-files-found: error
 
-  # Full platform coverage without rebuilding after every main queue merge.
+  # The only macOS and Windows coverage main gets; release PRs run it too.
   platform:
     uses: ./.github/workflows/platform.yml
     with:
@@ -437,13 +457,35 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # Every tag-driven release workflow, run against main with publishing skipped:
-  # the workflows gate their publish jobs on `github.ref_type == 'tag'`, and no
-  # secrets are passed, so a dry-run cannot publish even by accident.
+  # Every release workflow, run against main with publishing skipped: the
+  # workflows gate their publish jobs on `github.ref_type == 'tag'`, a push, or
+  # (Kotlin) a dry-run input, and no secrets are passed, so a dry-run cannot
+  # publish even by accident.
   #
   # A caller has to grant every permission a nested job declares, skipped or
   # not, so these carry the release-time grants. Nothing that runs here uses
   # them.
+  release-dart:
+    name: Release Dart
+    uses: ./.github/workflows/release-dart.yml
+    permissions:
+      contents: read
+      id-token: write
+
+  release-js:
+    name: Release JS
+    uses: ./.github/workflows/release-js.yml
+    permissions:
+      contents: read
+      id-token: write
+
+  release-kt-lib:
+    name: Release Kotlin lib
+    uses: ./.github/workflows/release-kt-lib.yml
+    permissions:
+      contents: read
+      actions: read
+
   release-py-ffi:
     name: Release Py FFI
     uses: ./.github/workflows/release-py-ffi.yml

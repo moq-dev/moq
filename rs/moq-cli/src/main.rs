@@ -577,9 +577,8 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		let mut stdin = None;
 		let mut stdout = None;
 
-		// One publisher instance per run, unless redundant publishers named a shared one.
-		let shared = moq.epoch.is_some();
-		let epoch = moq.epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+		// Each run publishes its own content and therefore mints its own instance.
+		let epoch = moq_net::Epoch::mint();
 		tracing::info!(%epoch, "publisher instance");
 
 		for stage in stages {
@@ -589,15 +588,9 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					if import.source.stdin_format().is_some() {
 						claim("stdin", &mut stdin, &name)?;
 					}
-					if let Some(publish) = spawn_import(
-						&origin,
-						import,
-						name,
-						epoch.clone(),
-						shared,
-						bandwidth.clone(),
-						&mut tasks,
-					)? {
+					if let Some(publish) =
+						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
+					{
 						locals.push(publish);
 					}
 				}
@@ -686,8 +679,7 @@ fn display_name(name: &str) -> &str {
 /// Route one stage's source INTO the shared Origin, exposing it to the MoQ network.
 ///
 /// The sources announced once per run take `epoch`; the ingest gateways and
-/// `ts --program all` mint their own per connection or program. A `shared` epoch,
-/// one redundant publishers were given, also places the importers' clock.
+/// `ts --program all` mint their own per connection or program.
 ///
 /// Returns the pipeline that has to run on the caller's thread, for the sources
 /// that have one (the stdin containers and capture).
@@ -696,7 +688,6 @@ fn spawn_import(
 	import: Import,
 	name: String,
 	epoch: moq_net::Epoch,
-	shared: bool,
 	bandwidth: moq_net::bandwidth::Allocator,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Option<Publish>> {
@@ -732,7 +723,7 @@ fn spawn_import(
 			Publish::ts_programs(origin.clone(), name, config)
 		} else {
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-			Publish::new(broadcast, &format, config, shared.then_some(&epoch))?
+			Publish::new(broadcast, &format, config)?
 		};
 		publish.announce(epoch)?;
 		local = Some(publish);
@@ -740,7 +731,7 @@ fn spawn_import(
 		match import.source {
 			ImportSource::Hls(hls) => {
 				warn_if_missing_format(&name);
-				tasks.spawn(hls::import(target(name), hls.playlist, epoch, shared));
+				tasks.spawn(hls::import(target(name), hls.playlist, epoch));
 			}
 			ImportSource::Rtmp(rtmp) => {
 				if let Some(addr) = rtmp.listen {
