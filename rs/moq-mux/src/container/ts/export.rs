@@ -43,6 +43,7 @@ use moq_net::Timestamp;
 use super::catalog::Catalog as _;
 use crate::catalog::Stream;
 use crate::catalog::hang::Catalog;
+use crate::codec::annexb::InBandCodec;
 use crate::codec::video::{Hrd, Reorder};
 use crate::codec::{aac, annexb, opus};
 use crate::container::decode::{DecodeClock, MAX_REORDER};
@@ -3214,16 +3215,16 @@ fn ac3_sync_prefix(bytes: &[u8]) -> bool {
 /// keyframes so a receiver can tune in mid-stream.
 fn video_es_payload(stream_type: StreamType, description: Option<&Bytes>, frame: &Frame) -> anyhow::Result<Vec<u8>> {
 	let description = description.context("video codec config (avcC/hvcC) not resolved")?;
-	let (length_size, params) = match stream_type {
-		StreamType::H264 => crate::codec::h264::avcc_params(description)?,
-		StreamType::H265 => crate::codec::h265::hvcc_params(description)?,
+	let (codec, (length_size, params)) = match stream_type {
+		StreamType::H264 => (InBandCodec::H264, crate::codec::h264::avcc_params(description)?),
+		StreamType::H265 => (InBandCodec::H265, crate::codec::h265::hvcc_params(description)?),
 		other => anyhow::bail!("unsupported TS video stream type {other:?}"),
 	};
 
 	let mut out = Vec::with_capacity(frame.payload.len() + 64);
 	let mut nals = annexb::length_prefixed_nals(&frame.payload, length_size)?;
 	if frame.keyframe {
-		if let Some(aud) = nals.take_delimiter(params.first().and_then(|nal| nal.first()).copied())? {
+		if let Some(aud) = nals.take_delimiter(codec)? {
 			out.extend_from_slice(&annexb::START_CODE);
 			out.extend_from_slice(aud);
 		}

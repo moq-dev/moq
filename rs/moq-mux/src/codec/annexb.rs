@@ -57,17 +57,11 @@ pub(crate) struct LengthPrefixedNals<'a> {
 }
 
 impl<'a> LengthPrefixedNals<'a> {
-	/// Take a leading AUD, identifying the codec from an injected parameter-set header.
-	pub(crate) fn take_delimiter(&mut self, parameter_header: Option<u8>) -> Result<Option<&'a [u8]>> {
-		// NAL headers overlap between codecs: an H.265 slice can look like an H.264 AUD.
-		let codec = parameter_header.and_then(|header| match (header & 0x1f, (header >> 1) & 0x3f) {
-			(7 | 8, _) => Some(InBandCodec::H264),
-			(_, 32..=34) => Some(InBandCodec::H265),
-			_ => None,
-		});
+	/// Take a leading access unit delimiter, which must stay ahead of injected parameter sets.
+	pub(crate) fn take_delimiter(&mut self, codec: InBandCodec) -> Result<Option<&'a [u8]>> {
 		if let Some(nal) = self.clone().next().transpose()?
 			&& !nal.is_empty()
-			&& codec.is_some_and(|codec| codec.nal_type(nal) == codec.delimiter())
+			&& codec.nal_type(nal) == codec.delimiter()
 		{
 			return self.next().transpose();
 		}
@@ -105,12 +99,14 @@ pub fn from_length_prefixed(payload: &[u8], length_size: usize, prefix: Option<&
 	let mut out = BytesMut::with_capacity(payload.len() + prefix.map(|p| p.len()).unwrap_or(0) + 16);
 	let mut nals = length_prefixed_nals(payload, length_size)?;
 	if let Some(prefix) = prefix {
-		let header = after_start_code(prefix)
+		let codec = after_start_code(prefix)
 			.ok()
 			.flatten()
 			.and_then(|start| prefix.get(start))
-			.copied();
-		if let Some(aud) = nals.take_delimiter(header)? {
+			.and_then(|&header| InBandCodec::of_parameter_set(header));
+		if let Some(codec) = codec
+			&& let Some(aud) = nals.take_delimiter(codec)?
+		{
 			out.extend_from_slice(&START_CODE);
 			out.extend_from_slice(aud);
 		}
@@ -164,6 +160,18 @@ impl InBandCodec {
 		match self {
 			Self::H264 => &[(7, "SPS"), (8, "PPS")],
 			Self::H265 => &[(32, "VPS"), (33, "SPS"), (34, "PPS")],
+		}
+	}
+
+	/// The codec whose parameter-set NAL begins with `header`.
+	///
+	/// NAL headers overlap between codecs (an H.265 slice can look like an H.264 AUD), so
+	/// only a parameter set identifies one.
+	fn of_parameter_set(header: u8) -> Option<Self> {
+		match (header & 0x1f, (header >> 1) & 0x3f) {
+			(7 | 8, _) => Some(Self::H264),
+			(_, 32..=34) => Some(Self::H265),
+			_ => None,
 		}
 	}
 
