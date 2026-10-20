@@ -129,6 +129,9 @@ pkgs.testers.runNixOSTest {
               chmod +x "$directory/exec-probe"
               test "$("$directory/exec-probe")" = executable
             done
+            # Jobs list processes and bind the IPv6 loopback.
+            command -v pgrep
+            ${pkgs.python3}/bin/python3 -c 'import socket; socket.socket(socket.AF_INET6).bind(("::1", 0))'
             ulimit -l > "$MBX_CACHE_DIR/memlock"
             if test -f "$MBX_CACHE_DIR/marker"; then
               touch "$MBX_CACHE_DIR/reused"
@@ -233,6 +236,9 @@ pkgs.testers.runNixOSTest {
         other.succeed("${pkgs.python3}/bin/python3 ${./spoof-test.py} finish")
         router.wait_for_file("/tmp/udp-result")
         router.succeed("test $(cat /tmp/udp-result) = finish")
+
+    with subtest("the uplink stays IPv4-only"):
+        guest.succeed("test $(cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6) = 1")
 
     with subtest("the runner inherits the hosted CI locked-memory budget"):
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/memlock")
