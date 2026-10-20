@@ -304,7 +304,10 @@ export interface ResumeSource {
 	bufferedLargest(): Location | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
 	peekLargest(): { largest?: Location; ended: boolean };
-	/** The serving copy's largest location once newer than `seen`, or undefined once the logical track ends. */
+	/**
+	 * The serving copy's largest location once within the reader's cursor and newer than `seen`,
+	 * or undefined once the logical track ends.
+	 */
 	largest(seen: Location | undefined): Promise<Location | undefined>;
 	/** An independent subscriber to the serving copy. */
 	fork(options?: Subscription): Subscriber;
