@@ -10,6 +10,15 @@ A `track::Subscriber` now reads only the groups its own `Subscription::ranges` c
 A reader that relied on groups another subscriber asked for must widen its own ranges.
 Once a track finishes, a subscriber with nothing left under its `set_groups` cap ends rather than waiting for the cap to rise; raise it before the track finishes to read past it.
 
+### `largest()` reports only upstream state, within a reader's `set_groups` bounds
+
+`track::Subscriber::largest()` and `track::Ordered::largest()` (and their `poll_largest`) report the track's largest only while it is within the bounds set with `set_groups`, where they used to ignore the bounds.
+A largest past the cap or below the floor reports nothing; the cache never stands in for it.
+A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
+Every `largest()`, `track::Producer` and `track::Consumer` included, now waits while a relay's copy is idle and reports once its new upstream subscription is live, rather than the largest an ended feed left.
+Cached groups are still served meanwhile.
+To read the track's edge from a capped reader, lift the cap with `set_groups(..)` first.
+
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
 
 `lite::SubscribeEnd` now contains only `group`; remove `streams` from struct literals and stop calling `Version::has_stream_count()`.
