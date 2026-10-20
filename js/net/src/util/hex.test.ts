@@ -8,7 +8,13 @@ describe("hex", () => {
 		expect(Hex.toBytes("0x0142002AFF")).toEqual(bytes);
 	});
 
+	it("rejects an empty string", () => {
+		expect(() => Hex.toBytes("")).toThrow("empty hex string");
+		expect(() => Hex.toBytes("0x")).toThrow("empty hex string");
+	});
+
 	it("rejects an odd length", () => {
+		expect(() => Hex.toBytes("0xabc")).toThrow("invalid hex string length");
 		expect(() => Hex.toBytes("abc")).toThrow("invalid hex string length");
 	});
 

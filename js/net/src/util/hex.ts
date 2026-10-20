@@ -8,6 +8,10 @@ const HEX = /^[0-9a-fA-F]*$/;
  */
 export function toBytes(hex: string): Uint8Array<ArrayBuffer> {
 	hex = hex.startsWith("0x") ? hex.slice(2) : hex;
+	// A zero-length certificate hash can never match, so an empty value is a config error.
+	if (!hex) {
+		throw new Error("empty hex string");
+	}
 	if (hex.length % 2) {
 		throw new Error("invalid hex string length");
 	}
