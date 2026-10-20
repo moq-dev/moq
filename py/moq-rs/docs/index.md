@@ -146,6 +146,7 @@ broadcast, and producers advertise it in the catalog.
    StreamProducer
    SnapshotConsumer
    StreamConsumer
+   Timed
 ```
 
 ## Opaque data

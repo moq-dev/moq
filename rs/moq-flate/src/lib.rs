@@ -2,8 +2,8 @@
 //!
 //! Two track modes carry the payloads:
 //!
-//! - [`snapshot`]: **lossy**. One value updated over time; a consumer only gets the most recent
-//!   one. Older values are superseded and dropped.
+//! - [`snapshot`]: **lossy**. One value updated over time; `next` yields states inside the drift
+//!   budget, while `latest` skips to the newest state. Superseded groups may be lost.
 //! - [`stream`]: **lossless**. An ordered append-log of self-contained payloads, delivered in order
 //!   with nothing superseded. Bounded by the group budget: see [`stream`] for what happens once
 //!   it is spent.

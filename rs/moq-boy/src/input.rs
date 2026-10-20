@@ -129,8 +129,8 @@ async fn handle_viewer_commands(
 		moq_json::snapshot::Consumer::<RawCommand>::new(track, moq_json::snapshot::consumer::Config::default());
 
 	loop {
-		let command = match commands.next().await {
-			Ok(Some(command)) => command,
+		let command = match commands.latest().await {
+			Ok(Some(command)) => command.value,
 			Ok(None) => break,
 			// A malformed command is skipped; a track error ends the stream.
 			Err(err @ (moq_json::Error::Json(_) | moq_json::Error::DuplicateKey)) => {

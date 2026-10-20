@@ -113,7 +113,7 @@ macro_rules! test_config_duration {
 	($name:ident, $config:ty, $field:ident, $flag:literal, $resolve:expr, $expected:expr) => {
 		#[test]
 		fn $name() {
-			#[derive(usage::Cli)]
+			#[derive(usage_rs::Cli)]
 			#[usage(unknown_flags = "error", args_override_self = false)]
 			#[usage(settings)]
 			struct Wrapper {

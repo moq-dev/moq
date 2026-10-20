@@ -42,13 +42,13 @@ mod stats;
 mod status;
 mod video;
 
-#[derive(usage::Cli, Clone)]
+#[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-boy")]
 #[usage(completion, settings)]
 pub struct Config {
 	/// Path to the Game Boy ROM file.
-	#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("gb", "gbc"))]
+	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("gb", "gbc"))]
 	pub rom: PathBuf,
 
 	/// Session name (used in broadcast path). Defaults to ROM filename.
