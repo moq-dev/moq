@@ -2659,19 +2659,16 @@ where
 		// SUBSCRIBEs: its TRACK_STATUS answer cannot say whether the track is timed.
 		let mut target = match request.subscription() {
 			None if ietf::TrackStatusOk::describes_track(self.version) => {
-				match self.track_status(&broadcast_path, &track_name, request).await {
-					Some(Target::Resume(idle)) => {
-						let Some(next) = self
-							.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
-							.await
-						else {
-							return;
-						};
-						Target::Resume(next)
-					}
-					Some(target) => target,
-					None => return,
-				}
+				let Some(idle) = self.track_status(&broadcast_path, &track_name, request).await else {
+					return;
+				};
+				let Some(next) = self
+					.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
+					.await
+				else {
+					return;
+				};
+				Target::Resume(next)
 			}
 			_ => Target::Request(request),
 		};
@@ -3750,18 +3747,15 @@ where
 		}
 	}
 
-	/// Learn a track nobody subscribes to from TRACK_STATUS, and accept it as a copy with no
-	/// subscription ([`Target::Resume`]), which [`Self::linger`] serves fetches from and
-	/// subscribes once someone does. A publisher that does not implement TRACK_STATUS hands
-	/// the request back ([`Target::Request`]) to be learned from SUBSCRIBE. `None` once the
-	/// request was refused or abandoned: a publisher that refuses the track's status refuses
-	/// the fetch-only request too.
+	/// Learn a track nobody subscribes to from TRACK_STATUS, accepting an idle copy that
+	/// [`Self::linger`] serves fetches from and subscribes once someone does. `None` once
+	/// refused or abandoned: a refused status fails the query-only or fetch-only request.
 	async fn track_status(
 		&mut self,
 		broadcast_path: &Path<'_>,
 		track_name: &str,
 		request: track::Request,
-	) -> Option<Target> {
+	) -> Option<Idle> {
 		let validity = self.validity.start();
 		// An allocated ID is always sent, as in `subscribe_once`.
 		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
@@ -3842,12 +3836,6 @@ where
 		};
 		let ok = match ok {
 			Ok(ok) => ok,
-			// NOT_SUPPORTED refuses the method, not the track. The origin queries a track before
-			// its first reader's subscription lands, so this is often a subscriber's request.
-			Err(Error::Unsupported) => {
-				tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status not supported, subscribing");
-				return Some(Target::Request(request));
-			}
 			Err(err) => {
 				tracing::debug!(%err, broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status refused");
 				request.reject(err);
@@ -3861,12 +3849,12 @@ where
 		track.received();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
-		Some(Target::Resume(Idle {
+		Some(Idle {
 			demand: track.demand(),
 			track,
 			dynamic,
 			timescale: ok.properties.timescale,
-		}))
+		})
 	}
 
 	/// Read the answer to a TRACK_STATUS: TRACK_STATUS_OK, or the publisher's refusal as an
@@ -7410,73 +7398,198 @@ mod tests {
 		buf
 	}
 
-	/// A publisher without TRACK_STATUS still serves the track: its NOT_SUPPORTED refuses
-	/// the method, so the request is learned from SUBSCRIBE instead. The origin queries a new
-	/// track before its first reader's subscription lands, so a reader reaching such a
-	/// publisher through a relay takes this path.
+	/// Serve the front's request on its wake, before the requesting call can return.
+	/// A peer that refuses TRACK_STATUS must still receive SUBSCRIBE for a catalog reader.
 	#[moq_clock::test]
-	async fn an_unsupported_track_status_subscribes_instead() {
+	async fn a_catalog_subscription_never_requests_track_status() {
+		use std::sync::{Arc, Mutex};
+		use std::task::{Context, Wake, Waker};
+
+		struct Peer {
+			version: Version,
+			dynamic: Mutex<Option<broadcast::Dynamic>>,
+			park: Mutex<kio::Park>,
+			log: Mutex<Option<crate::lite::test_transport::Log>>,
+		}
+		impl Wake for Peer {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				let (dynamic, request) = {
+					let mut dynamic = self.dynamic.lock().unwrap();
+					let Some(serving) = dynamic.as_mut() else { return };
+					let mut park = self.park.lock().unwrap();
+					let waker = Waker::from(self.clone());
+					let waiter = park.hold(&Context::from_waker(&waker));
+					let Poll::Ready(Ok(request)) = serving.poll_requested_track(waiter) else {
+						return;
+					};
+					*park = kio::Park::default();
+					(dynamic.take().unwrap(), request)
+				};
+				let version = self.version;
+				// The subscriber chooses its wire request from this snapshot. Answer a
+				// TRACK_STATUS with the undefined code used by the refusing peer.
+				let answer = if request.subscription().is_none() {
+					message(
+						ietf::RequestError::ID,
+						&ietf::RequestError {
+							request_id: None,
+							error_code: u32::MAX.into(),
+							reason_phrase: "TRACK_STATUS is refused".into(),
+							retry_interval: 0,
+						},
+						version,
+					)
+				} else {
+					message(
+						ietf::SubscribeOk::ID,
+						&ietf::SubscribeOk {
+							request_id: None,
+							track_alias: 7,
+							largest: None,
+							properties: Default::default(),
+						},
+						version,
+					)
+				};
+				let session = crate::lite::test_transport::ScriptedSession::new(answer);
+				*self.log.lock().unwrap() = Some(session.log.clone());
+				let mut serving = Box::pin(async move {
+					let (tasks, _task_set) = crate::util::TaskSet::new();
+					let mut subscriber = Subscriber::new(
+						crate::time::sim(),
+						session,
+						crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce(),
+						Control::new(None, false),
+						None,
+						peer::PeerSetup::declared(peer::Peer::default()),
+						crate::Hop::new(2).unwrap(),
+						None,
+						version,
+						tasks,
+						Default::default(),
+					);
+					subscriber
+						.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+						.await;
+				});
+				// Run the request classification before the front can add demand after
+				// its query. The simulator takes over only once the wire work parks.
+				if std::future::Future::poll(serving.as_mut(), &mut Context::from_waker(Waker::noop())).is_pending() {
+					drop(moq_clock::sim::spawn(serving));
+				}
+			}
+		}
+
 		for version in [Version::Draft18, Version::Draft19, Version::Draft22] {
-			let refused = message(
-				ietf::RequestError::ID,
-				&ietf::RequestError {
-					request_id: None,
-					error_code: request::to_code(&Error::Unsupported, request::Kind::TrackStatus, version),
-					reason_phrase: "TRACK_STATUS is not supported".into(),
-					retry_interval: 0,
-				},
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let source = origin.publish("broadcast", Default::default()).unwrap();
+			let resolved = origin.consume().request_broadcast("broadcast", None).await.unwrap();
+			let peer = Arc::new(Peer {
 				version,
-			);
-			let subscribe_ok = message(
-				ietf::SubscribeOk::ID,
-				&ietf::SubscribeOk {
-					request_id: None,
-					track_alias: 7,
-					largest: None,
-					properties: Default::default(),
-				},
-				version,
-			);
-			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![refused, subscribe_ok]);
-			let log = session.log.clone();
-			let (tasks, _task_set) = crate::util::TaskSet::new();
-			let mut subscriber = Subscriber::new(
-				crate::time::sim(),
-				session,
-				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-				Control::new(None, false),
-				None,
-				peer::PeerSetup::declared(peer::Peer::default()),
-				crate::Hop::new(1).unwrap(),
-				None,
-				version,
-				tasks,
-				Default::default(),
-			);
-
-			let producer = crate::broadcast::Info::default().produce();
-			let mut dynamic = producer.dynamic();
-			let consumer = producer.consume();
-			let track = consumer.track("video").unwrap();
-			let mut query = std::pin::pin!(track.query());
-			assert!(futures::poll!(query.as_mut()).is_pending());
-			let request = dynamic.requested_track().await.expect("no track requested");
-
-			let serving = moq_clock::sim::spawn(async move {
-				subscriber
-					.run_subscribe(Path::new("broadcast"), dynamic, None, request)
-					.await;
+				dynamic: Mutex::new(Some(source.dynamic())),
+				park: Default::default(),
+				log: Default::default(),
 			});
-			settle().await;
-
-			assert!(query.await.is_ok(), "{version}: NOT_SUPPORTED refused the track");
-			assert!(track.subscribe(None).await.is_ok(), "{version}: the reader was refused");
+			peer.wake_by_ref();
+			let result = resolved.track("catalog").unwrap().subscribe(None).await;
+			let log = peer.log.lock().unwrap();
 			assert_eq!(
-				control_message_types(&log, version)[..2],
-				[ietf::TrackStatus::ID, ietf::Subscribe::ID],
-				"{version}"
+				control_message_types(log.as_ref().expect("the front asked its source"), version),
+				[ietf::Subscribe::ID],
+				"{version}: a subscribing reader sent TRACK_STATUS"
 			);
-			serving.abort();
+			assert!(result.is_ok(), "{version}: the catalog reader was refused");
+		}
+	}
+
+	/// Query-only and fetch-only demand fail with the peer's TRACK_STATUS refusal,
+	/// including NOT_SUPPORTED and undefined codes, without opening a subscription.
+	#[moq_clock::test]
+	async fn a_refused_track_status_never_subscribes() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft22,
+		] {
+			for code in [3, u64::from(u32::MAX)] {
+				for fetching in [false, true] {
+					let refused = if version == Version::Draft14 {
+						message(
+							ietf::TRACK_STATUS_ERROR_14,
+							&ietf::SubscribeError {
+								request_id: RequestId(0),
+								error_code: code,
+								reason_phrase: "TRACK_STATUS is refused".into(),
+							},
+							version,
+						)
+					} else {
+						message(
+							ietf::RequestError::ID,
+							&ietf::RequestError {
+								request_id: matches!(version, Version::Draft15 | Version::Draft16)
+									.then_some(RequestId(0)),
+								error_code: code,
+								reason_phrase: "TRACK_STATUS is refused".into(),
+								retry_interval: 0,
+							},
+							version,
+						)
+					};
+					let session = crate::lite::test_transport::ScriptedSession::new(refused);
+					let log = session.log.clone();
+					let (tasks, _task_set) = crate::util::TaskSet::new();
+					let mut subscriber = Subscriber::new(
+						crate::time::sim(),
+						session,
+						crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+						Control::new(None, false),
+						None,
+						peer::PeerSetup::declared(peer::Peer::default()),
+						crate::Hop::new(1).unwrap(),
+						None,
+						version,
+						tasks,
+						Default::default(),
+					);
+
+					let producer = crate::broadcast::Info::default().produce();
+					let mut dynamic = producer.dynamic();
+					let consumer = producer.consume();
+					let track = consumer.track("video").unwrap();
+					let mut pending = Box::pin(async {
+						if fetching {
+							track.fetch_group(0, None).await.map(|_| ())
+						} else {
+							track.query().await.map(|_| ())
+						}
+					});
+					assert!(futures::poll!(pending.as_mut()).is_pending());
+					let request = dynamic.requested_track().await.expect("no track requested");
+					let mut serving =
+						Box::pin(subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request));
+					assert!(
+						futures::poll!(serving.as_mut()).is_ready(),
+						"{version}: refusal was not terminal"
+					);
+					match pending.await.expect_err("TRACK_STATUS was refused") {
+						Error::Unsupported => assert_eq!(code, 3),
+						Error::Remote(value) => assert_eq!(u64::from(value), code),
+						err => panic!("{version}, fetching: {fetching}: wrong refusal: {err:?}"),
+					}
+					assert_eq!(
+						control_message_types(&log, version),
+						[ietf::TrackStatus::ID],
+						"{version}"
+					);
+				}
+			}
 		}
 	}
 

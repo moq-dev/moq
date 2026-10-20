@@ -1243,7 +1243,7 @@ if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 && "$IN_TREE" -eq 1 ]]; then
         fi
     done
     if needs js-native-node; then
-        for version in moq-lite-05 moq-lite-06; do
+        for version in moq-lite-05 moq-lite-06 moq-lite-07-wip; do
             run_drop_pair rust js-native-node "$version"
             run_drop_pair js-native-node rust "$version"
         done
