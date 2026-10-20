@@ -5286,8 +5286,8 @@ enum Begin<S: crate::transport::poll::Session> {
 	Establish(Establish<S>),
 }
 
-/// Buffer a SUBSCRIBE_UPDATE echoing the current params, varying only the end
-/// bound. The caller flushes.
+/// Buffer the current SUBSCRIBE parameters with an updated end and optional refresh join.
+/// The caller flushes.
 fn buffer_update<S: crate::transport::poll::Session>(
 	active: &mut SubStream<S>,
 	end: Option<Position>,
