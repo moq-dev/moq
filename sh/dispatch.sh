@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Run `just check`, `just fix`, or `just ci check|test` over the branch diff.
+# Run `just check`, `just fix`, or `just ci [check|test]` over the branch diff.
 # `--query` prints the selection instead; `ci-platform` exists only as a query.
 #
-# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query]
+# Usage: sh/dispatch.sh check|fix|ci|ci-check|ci-test [BASE|--all] [--query]
 #        sh/dispatch.sh ci-platform BASE|--all --query
 #
 # The branch diff is resolved once and matched against the impact map below,
 # the one place that says which paths put which module in scope. `check` is
-# `ci-check` plus `ci-test`, which CI runs as parallel jobs with MOQ_STRICT=1,
-# so there is no second definition of "checked".
+# `ci-check` plus `ci-test`, which the merge queue runs as parallel jobs with
+# MOQ_STRICT=1, so there is no second definition of "checked". `ci` runs both
+# halves in turn, as a contributor does before pushing.
 set -euo pipefail
 
-usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query], or ci-platform BASE|--all --query"
+usage="usage: sh/dispatch.sh check|fix|ci|ci-check|ci-test [BASE|--all] [--query], or ci-platform BASE|--all --query"
 action=${1:?$usage}
 base=${2:-}
 query=${3:-}
@@ -21,6 +22,14 @@ if [[ $# -gt 3 || (-n "$query" && "$query" != --query) || ("$action" == ci-platf
 fi
 case "$action" in
     check | fix | ci-check | ci-test | ci-platform) ;;
+    ci)
+        if [[ -n "$query" ]]; then
+            echo "$usage" >&2
+            exit 2
+        fi
+        "$0" ci-check "$base"
+        exec "$0" ci-test "$base"
+        ;;
     *)
         echo "$usage" >&2
         exit 2
