@@ -25,6 +25,11 @@ import type { Probe, Stats } from "./stats.ts";
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
  * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the current
  * URL. A new URL or a disable/re-enable starts another sequence.
+ *
+ * A GOAWAY off a session that outlived {@link ReloadDelay.initial} migrates at once, unless it
+ * sends the connection back to an endpoint that already redirected it elsewhere and the
+ * session lived less than {@link ReloadDelay.max}. Two peers redirecting to each other thus
+ * wait out this backoff and count against the timeout.
  */
 export type ReloadDelay = {
 	/** The delay before reconnecting (default: 1000ms). */
@@ -38,8 +43,8 @@ export type ReloadDelay = {
 
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
-	 * (default: 0, unlimited). Resets after each successful connection, a URL change, or a
-	 * disable/re-enable.
+	 * (default: 0, unlimited). Resets after each successful connection outside a redirect loop,
+	 * a URL change, or a disable/re-enable.
 	 */
 	timeout?: Milli;
 };
@@ -210,7 +215,7 @@ export class Reload {
 
 	// The endpoints that sent us away during the current run of migrations. A redirect back to
 	// one of them is a loop, however healthy each session looked. Cleared when a session ends
-	// without a GOAWAY or a new sequence starts.
+	// without a GOAWAY, outlives the capped delay, or a new sequence starts.
 	#departed = new Set<string>();
 
 	// Whether a connect attempt is in flight, so a retiring predecessor reports the right status.
@@ -450,6 +455,11 @@ export class Reload {
 					// run of migrations escalates the backoff, which never resets mid-loop, so the
 					// retry window still applies. A one-way rolling restart never revisits one, and
 					// a GOAWAY back to the same place is a restart, not a move, so it never counts.
+					// A session that outlived the capped delay already redials no faster than the
+					// backoff would allow, so it starts a new run: rolling restarts days apart
+					// never add up to a loop.
+					const lived = Instant.durationSince(now(), connected);
+					if (lived >= Nano.fromMilli(this.delay?.max ?? DEFAULT_DELAY.max)) this.#departed.clear();
 					const next = (this.#redirect.peek() ?? url).href;
 					const moved = next !== dialing.href;
 					const loop = moved && this.#departed.has(next);
@@ -462,7 +472,7 @@ export class Reload {
 					// A session that outlived the initial delay was healthy, so its handover is not a
 					// failure. One redirected almost at once still migrates, but through the backoff,
 					// so two peers bouncing us between them escalate to the capped delay.
-					if (Instant.durationSince(now(), connected) < Nano.fromMilli(this.#initial())) {
+					if (lived < Nano.fromMilli(this.#initial())) {
 						this.#retry(effect, connected, new Error("peer redirected immediately"));
 						return;
 					}
