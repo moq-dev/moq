@@ -132,6 +132,7 @@ drill-sensitivity *args:
 [positional-arguments]
 ts *args:
     python3 ./ts/fragment_pes.test.py
+    python3 ./ts/drop_nulls.test.py
     python3 ./ts/compliance.test.py
     python3 ./ts/pcr-timing.test.py
     python3 ./ts/open-gop.test.py
