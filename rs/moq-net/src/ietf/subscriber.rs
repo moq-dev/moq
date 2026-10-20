@@ -12186,7 +12186,22 @@ mod stitch_tests {
 			(Some((direct_ok, direct_rest)), Some((hopped_ok, hopped_rest)))
 				if direct_ok.end_of_track && !hopped_ok.end_of_track =>
 			{
-				assert_eq!(hopped_ok.properties, direct_ok.properties, "{ingress} -> {egress}");
+				// Without End of Track, the End Location is the requested end rather than the
+				// track's, which can only reach further.
+				assert!(
+					(hopped_ok.end_location.group, hopped_ok.end_location.object)
+						>= (direct_ok.end_location.group, direct_ok.end_location.object),
+					"{ingress} -> {egress}"
+				);
+				assert_eq!(
+					hopped_ok,
+					ietf::FetchOk {
+						end_of_track: false,
+						end_location: hopped_ok.end_location,
+						..direct_ok
+					},
+					"{ingress} -> {egress}: only End of Track and its End Location may differ"
+				);
 				assert_eq!(
 					hopped_rest, direct_rest,
 					"{ingress} -> {egress}: the hop changed the objects"
