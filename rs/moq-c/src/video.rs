@@ -918,7 +918,7 @@ pub unsafe extern "C" fn moq_decode_video(
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };
 
 		let mut state = State::lock();
-		let rendition = state.consume.video_rendition(catalog, index as usize)?;
+		let rendition = state.consume.rendition(catalog, index as usize)?;
 
 		let State { video, .. } = &mut *state;
 		video.consume(rendition, options, output, on_frame)

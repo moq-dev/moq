@@ -494,7 +494,7 @@ pub unsafe extern "C" fn moq_decode_audio(
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };
 
 		let mut state = State::lock();
-		let rendition = state.consume.audio_rendition(catalog, index as usize)?;
+		let rendition = state.consume.rendition(catalog, index as usize)?;
 
 		let State { audio, .. } = &mut *state;
 		audio.consume(rendition, config, on_frame)

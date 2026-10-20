@@ -1,4 +1,5 @@
 use std::{
+	collections::BTreeMap,
 	ffi::c_char,
 	future::Future,
 	ops::Bound,
@@ -47,6 +48,42 @@ impl ConsumeCatalog {
 				.map(|origin| origin.driver.clone())
 				.unwrap_or_default(),
 		}
+	}
+}
+
+/// A catalog media section whose renditions are consumed by index.
+pub(crate) trait Media: hang::catalog::Reference + Clone {
+	/// The delivery priority its tracks subscribe with.
+	const PRIORITY: u8;
+
+	/// Its renditions, keyed by ID.
+	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self>;
+
+	/// Whether the publisher is serving this rendition.
+	fn enabled(&self) -> bool;
+}
+
+impl Media for hang::catalog::VideoConfig {
+	const PRIORITY: u8 = hang::catalog::PRIORITY.video;
+
+	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
+		&catalog.video.renditions
+	}
+
+	fn enabled(&self) -> bool {
+		self.enabled
+	}
+}
+
+impl Media for hang::catalog::AudioConfig {
+	const PRIORITY: u8 = hang::catalog::PRIORITY.audio;
+
+	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
+		&catalog.audio.renditions
+	}
+
+	fn enabled(&self) -> bool {
+		self.enabled
 	}
 }
 
@@ -410,22 +447,19 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn video(
+	/// Subscribe to the video or audio rendition at catalog `index`, delivering its frames.
+	pub fn media<C: Media>(
 		&mut self,
 		catalog: Id,
 		index: usize,
 		max_delay: std::time::Duration,
 		on_frame: OnStatus,
-	) -> Result<Id, Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let (name, config) = consume
-			.catalog
-			.video
-			.renditions
-			.iter()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
-		if !config.enabled {
+	) -> Result<Id, Error>
+	where
+		for<'a> moq_mux::catalog::hang::Container: TryFrom<&'a C, Error = moq_mux::Error>,
+	{
+		let (consume, name, config) = self.select::<C>(catalog, index)?;
+		if !config.enabled() {
 			return Err(moq_net::Error::NotFound.into());
 		}
 		let name = hang::catalog::Reference::track(config, name).to_string();
@@ -435,7 +469,7 @@ impl Consume {
 		let container = moq_mux::catalog::hang::Container::try_from(config)?;
 		// The rendition may live in a sibling broadcast, so resolve its reference rather than
 		// assuming the catalog's own broadcast serves the track.
-		let reference = config.broadcast.clone();
+		let reference = config.broadcast().cloned();
 		let broadcast = consume.broadcast.clone();
 		let origin = consume.origin.clone();
 		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
@@ -452,56 +486,7 @@ impl Consume {
 							.track(&name)?
 							.subscribe(
 								moq_net::track::Subscription::default()
-									.with_priority(hang::catalog::PRIORITY.video)
-									.with_max_delay(max_delay),
-							)
-							.await?;
-						let track = moq_mux::container::Consumer::new(track, container);
-						Self::run_track(on_frame, track, close).await
-					})
-					.await
-			},
-		)
-	}
-
-	pub fn audio(
-		&mut self,
-		catalog: Id,
-		index: usize,
-		max_delay: std::time::Duration,
-		on_frame: OnStatus,
-	) -> Result<Id, Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let (name, config) = consume
-			.catalog
-			.audio
-			.renditions
-			.iter()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
-		if !config.enabled {
-			return Err(moq_net::Error::NotFound.into());
-		}
-		let name = hang::catalog::Reference::track(config, name).to_string();
-		let container = moq_mux::catalog::hang::Container::try_from(config)?;
-		let reference = config.broadcast.clone();
-		let broadcast = consume.broadcast.clone();
-		let origin = consume.origin.clone();
-		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
-
-		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
-		self.track_task.spawn(
-			on_frame,
-			|state| &mut state.consume.track_task,
-			|close| async move {
-				driver
-					.watch(async move {
-						let broadcast = resolve(broadcast, origin, reference).await?;
-						let track = broadcast
-							.track(&name)?
-							.subscribe(
-								moq_net::track::Subscription::default()
-									.with_priority(hang::catalog::PRIORITY.audio)
+									.with_priority(C::PRIORITY)
 									.with_max_delay(max_delay),
 							)
 							.await?;
@@ -860,19 +845,6 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Look up a video rendition by catalog index, mirroring the index-based selection in `video`.
-	pub fn video_rendition(&self, catalog: Id, index: usize) -> Result<Rendition<hang::catalog::VideoConfig>, Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let (name, config) = consume
-			.catalog
-			.video
-			.renditions
-			.iter()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
-		Ok(consume.rendition(name, config))
-	}
-
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 	///
 	/// `on_value` is called with a value ID for each new latest value; a consumer that falls
@@ -1015,17 +987,21 @@ impl Consume {
 		self.json_value.remove(value).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
-	/// Look up an audio rendition by catalog index, mirroring the index-based selection in `audio`.
-	pub fn audio_rendition(&self, catalog: Id, index: usize) -> Result<Rendition<hang::catalog::AudioConfig>, Error> {
+
+	/// Look up a video or audio rendition by catalog index, mirroring the selection in [`Self::media`].
+	pub fn rendition<C: Media>(&self, catalog: Id, index: usize) -> Result<Rendition<C>, Error> {
+		let (consume, name, config) = self.select(catalog, index)?;
+		Ok(consume.rendition(name, config))
+	}
+
+	/// A catalog and its rendition at `index`, in catalog order.
+	fn select<C: Media>(&self, catalog: Id, index: usize) -> Result<(&ConsumeCatalog, &String, &C), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let (name, config) = consume
-			.catalog
-			.audio
-			.renditions
+		let (name, config) = C::renditions(&consume.catalog)
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
-		Ok(consume.rendition(name, config))
+		Ok((consume, name, config))
 	}
 }
 
@@ -1057,7 +1033,7 @@ mod supervision_tests {
 				sections: Vec::new(),
 			})
 			.unwrap();
-		let rendition = consume.audio_rendition(id, 0).unwrap();
+		let rendition = consume.rendition::<hang::catalog::AudioConfig>(id, 0).unwrap();
 		*trigger
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
