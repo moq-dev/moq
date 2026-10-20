@@ -97,7 +97,7 @@ case "$1" in
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report
         # validation instead of hiding behind the Tokio target's measurements.
-        for target in udp_tokio udp_uring echo_quic session_lite unreachable_dials; do
+        for target in udp_tokio udp_uring echo_quic session_lite unreachable_dials timers; do
             criterion "uring-$target" -p moq-uring --bench "$target"
         done
         ;;

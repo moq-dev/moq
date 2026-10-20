@@ -76,7 +76,7 @@ the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
 have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 (#5389) and Windows tests (#5339).
 
-Hygiene (decided 2026-10-19): ten audits sit at the end of this list.
+Hygiene (decided 2026-10-19): the audits sit at the end of this list.
 Each recurs once per major release: its PR adds the next run to the following
 milestone, gated from m2 onward on the [release cut](/quest/m2/release/cut.md).
 Each lands its fixes in its own PR and plans only what needs a decision.
@@ -95,8 +95,6 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [Performance audit](/quest/m0/audit-perf.md) - benchmarks that regressed since the last run are explained, fixed, or planned, and unbenched hot paths get coverage
 - [Compile time audit](/quest/m0/audit-compile-time.md) - build-time hotspots are measured against a baseline and the worst are fixed or planned
-- [Test and CI cost audit](/quest/m0/audit-test-cost.md) - the slowest, flakiest, and least valuable tests and CI jobs are fixed, deleted, or planned
-- [Test coverage audit](/quest/m0/audit-test-coverage.md) - untested behavior that matters is covered or planned, and every test runs in CI
 - [Documentation audit](/quest/m0/audit-docs.md) - stale pages, examples, links, and undocumented exports are fixed or planned
 - [Dependency and alternatives audit](/quest/m0/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
 - [Artifact size audit](/quest/m0/audit-size.md) - binary, FFI, WASM, and bundle growth since the last run is explained, fixed, or planned

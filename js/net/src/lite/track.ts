@@ -4,19 +4,10 @@ import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasGroupOrder, hasRefresh, Version, wireTimescale } from "./version.ts";
+import { hasGroupOrder, hasRefresh, hasTrackStream, Version, wireTimescale } from "./version.ts";
 
-// The Track Stream (0x6) is draft-05+ only.
 function guardTrack(version: Version) {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-			throw new Error("track stream not supported for this version");
-		default:
-			break;
-	}
+	if (!hasTrackStream(version)) throw new Error("track stream not supported for this version");
 }
 
 /**
