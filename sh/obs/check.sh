@@ -59,6 +59,30 @@ if command -v cmake >/dev/null; then
         cat "$build_dir/configure.log" >&2
         exit 1
     fi
+    archive="$build_dir/moq-cpp-0.0.0-x86_64-unknown-linux-gnu.tar.gz"
+    touch "$archive"
+    for scenario in conflict missing mismatch; do
+        args=("-DMOQ_ARCHIVE_FILE=$archive" -DMOQ_VERSION=0.0.0 -DMOQ_TARGET=x86_64-unknown-linux-gnu -DMOQ_ARCHIVE=tar.gz)
+        case "$scenario" in
+            conflict) expected="MOQ_ARCHIVE_FILE requires an empty MOQ_LOCAL" ;;
+            missing)
+                args+=(-DMOQ_LOCAL= "-DMOQ_ARCHIVE_FILE=$build_dir/missing.tar.gz")
+                expected="moq-cpp archive not found"
+                ;;
+            mismatch)
+                args+=(-DMOQ_LOCAL= -DMOQ_TARGET=aarch64-apple-darwin)
+                expected="moq-cpp archive does not match"
+                ;;
+        esac
+        if cmake -S . -B "$build_dir/$scenario" "${args[@]}" >"$build_dir/configure.log" 2>&1; then
+            echo "CMake accepted invalid archive input: $scenario" >&2
+            exit 1
+        fi
+        if ! grep -Fq "$expected" "$build_dir/configure.log"; then
+            cat "$build_dir/configure.log" >&2
+            exit 1
+        fi
+    done
 fi
 if command -v clang-format >/dev/null; then
     git ls-files 'src/*.cpp' 'src/*.h' 'test/*.cpp' | xargs clang-format --dry-run --Werror

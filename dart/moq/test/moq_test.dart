@@ -187,7 +187,8 @@ void main() {
 
     // Routed subscriptions pull their source lazily when the consumer is first read.
     final nextGroup = consumer.nextGroup();
-    await track.demand().used().timeout(timeout);
+    final demand = track.demand();
+    while (await demand.wantedChanged().timeout(timeout) == null) {}
 
     final producer = track.appendGroup();
     producer.writeFrame(

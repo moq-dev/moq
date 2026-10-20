@@ -1,3 +1,6 @@
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
+
 use crate::{SessionError, announce, frame, group, origin, track};
 use rangemap::RangeSet;
 use std::{
@@ -5,7 +8,7 @@ use std::{
 	ops::{Bound, ControlFlow, Range},
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicU64, AtomicUsize, Ordering},
+		atomic::{AtomicUsize, Ordering},
 	},
 	task::{Context, Poll, ready},
 	time::Duration,
@@ -2026,7 +2029,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						version: shared.version,
 						timescale,
 						runtime: shared.runtime.clone(),
-						opens: Default::default(),
+						outcomes: Default::default(),
 					};
 
 					let bounds = Bounds::from(msg.as_ref());
@@ -3199,23 +3202,17 @@ struct Subscription<S: crate::transport::poll::Session> {
 	timescale: Option<crate::Timescale>,
 	/// The clock an untimed track's Lite05/06 send times are read from.
 	runtime: crate::time::Deadlines,
-	/// The group streams this subscription opened, shared by every group it serves.
-	opens: Arc<Opens>,
+	/// Outcomes shared by the subscription and every group it serves.
+	outcomes: Arc<GroupOutcomes>,
 }
 
-/// Counts a subscription's group streams for lite-07's SUBSCRIBE_END.
-///
-/// A group is pending from the moment it is queued until its stream opens, or it gives
-/// up first (expired, or the open failed) and is never counted.
-///
-/// `unencodable` rides along because every group machine and the run loop already share
-/// this handle. A header that cannot be encoded writes nothing, so the group-stream
-/// reset is not a stream the subscriber can pin to this subscription.
+/// Group outcomes the subscription must report even if no header reached the peer.
 #[derive(Default)]
-struct Opens {
-	pending: AtomicU64,
-	opened: AtomicU64,
+struct GroupOutcomes {
+	#[cfg(test)]
+	opened: std::sync::atomic::AtomicU64,
 	unencodable: Mutex<Option<Error>>,
+	dropped: Mutex<Vec<lite::SubscribeDrop>>,
 }
 
 impl<S: crate::transport::poll::Session> Subscription<S> {
@@ -3277,7 +3274,7 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	///
 	/// The first one wins. The run loop resets the subscribe stream with it.
 	fn note_unencodable(&self, err: &Error) {
-		let mut slot = self.opens.unencodable.lock().unwrap();
+		let mut slot = self.outcomes.unencodable.lock().unwrap();
 		if slot.is_none() {
 			*slot = Some(err.clone());
 		}
@@ -3285,7 +3282,7 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 
 	/// Take the encode failure, if a group recorded one.
 	fn take_unencodable(&self) -> Option<Error> {
-		self.opens.unencodable.lock().unwrap().take()
+		self.outcomes.unencodable.lock().unwrap().take()
 	}
 
 	/// Test shim: drive one group stream like the old `serve_group`, surfacing the
@@ -3331,10 +3328,7 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	// Groups skipped for a missing head before the start resolved, which it must not name.
 	skipped: BTreeSet<u64>,
 	end_sent: bool,
-	// Lite07+ sends SUBSCRIBE_END with the stream count instead of as soon as the
-	// boundary is known, once every group below it has opened its stream.
-	count_streams: bool,
-	// Lite05 and Lite06 name every sequence below the end that this subscription never
+	// Lite05+ names every sequence below the end that this subscription never
 	// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
 	// for a group that will not come. The sequences served, sent as a datagram, or
 	// dropped. A gap that never arrived stays until the end sweep names it: this side
@@ -3355,10 +3349,9 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		track.end_at(bounds.end_group.map_or(Bound::Unbounded, Bound::Included));
 
 		let emit_range = ctx.version.has_track_stream();
-		let count_streams = ctx.version.has_stream_count();
 		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
 		// Lite03 and Lite04 declare no end, so neither side could settle on a drop.
-		let served = (emit_range && !count_streams).then(RangeSet::new);
+		let served = emit_range.then(RangeSet::new);
 
 		Self {
 			start_frame: bounds.start_frame(),
@@ -3371,7 +3364,6 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			first: None,
 			skipped: BTreeSet::new(),
 			end_sent: false,
-			count_streams,
 			served,
 			datagrams,
 			children: kio::Tasks::new(),
@@ -3450,7 +3442,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	#[cfg(test)]
 	fn poll(&mut self, writer: &mut Writer<S::SendStream, Version>, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		while ready!(self.poll_step(writer, waiter))?.is_continue() {}
-		Poll::Ready(Ok(()))
+		writer.poll_flush(&mut waiter.context())
 	}
 
 	/// Serve one ready group or datagram (`Continue`), or `Break` once the live edge
@@ -3472,6 +3464,14 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// forward it here or the reader waits forever.
 		if let Some(err) = self.ctx.take_unencodable() {
 			return Poll::Ready(Err(err));
+		}
+
+		let dropped = std::mem::take(&mut *self.ctx.outcomes.dropped.lock().unwrap());
+		if !dropped.is_empty() {
+			for dropped in dropped {
+				writer.buffer(&lite::SubscribeResponse::Drop(dropped))?;
+			}
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
 		if self.poll_forward_drop(writer, waiter)? {
@@ -3523,7 +3523,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// group and, when enabled, the next best-effort datagram. Groups are polled
 		// first so a datagram burst can't starve them; datagrams flow whenever no
 		// group is ready (including while groups are parked above the cap).
-		let emit_boundary = self.emit_range && !self.end_sent && !self.count_streams;
+		let emit_boundary = self.emit_range && !self.end_sent;
 		if let Poll::Ready(res) = poll_recv_next(&mut self.track, self.datagrams, emit_boundary, waiter) {
 			match res? {
 				Recv::Group(mut group) => {
@@ -3547,7 +3547,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 						} else if self.start.is_some()
 							&& let Some(end) = group.sequence.checked_add(1)
 						{
-							// Lite-05/06 name it now; a no-op on other versions.
+							// Lite-05+ names it now; a no-op on other versions.
 							self.drop_range(group.sequence..end, writer)?;
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -3563,22 +3563,12 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 					// even if trailing groups (below `group`) are still in flight, then
 					// keep serving them until the live edge reaches the boundary.
 					self.end_sent = true;
-					writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams: 0 }))?;
-				}
-				Recv::Finished if self.count_streams && !self.end_sent => {
-					// The count is final only once no served group is still waiting to
-					// open its stream. A group that gives up first is never counted, so
-					// the subscriber is not left waiting for it. The child's wake
-					// re-polls this loop.
-					if self.ctx.opens.pending.load(Ordering::Relaxed) > 0 {
-						return Poll::Pending;
-					}
-					let group = final_sequence(ready!(self.track.poll_finished(waiter))?);
-					let streams = self.ctx.opens.opened.load(Ordering::Relaxed);
-					self.end_sent = true;
-					writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group, streams }))?;
+					writer.buffer(&lite::SubscribeResponse::End(lite::SubscribeEnd { group }))?;
 				}
 				Recv::Finished => {
+					if !self.children.is_empty() {
+						return Poll::Pending;
+					}
 					self.drop_unserved(writer)?;
 					return Poll::Ready(Ok(ControlFlow::Break(())));
 				}
@@ -3593,7 +3583,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		Poll::Pending
 	}
 
-	/// Lite-05/06 name a sequence as soon as this cursor gives it up; whether one went out.
+	/// Lite-05+ names a sequence as soon as this cursor gives it up; whether one went out.
 	/// Before SUBSCRIBE_START there is no owed range yet, so the eventual start accounts
 	/// for it instead.
 	fn poll_forward_drop(
@@ -3802,7 +3792,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		rank: Rank<GroupOf<S>>,
 		group: group::Consumer,
 	) -> Self {
-		ctx.opens.pending.fetch_add(1, Ordering::Relaxed);
 		Self {
 			ctx,
 			rank,
@@ -3815,11 +3804,11 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		}
 	}
 
-	/// Leave [`GroupState::Open`], counting the stream if it opened.
-	fn settle_open(&mut self, opened: bool) {
-		self.ctx.opens.pending.fetch_sub(1, Ordering::Relaxed);
-		if opened {
-			self.ctx.opens.opened.fetch_add(1, Ordering::Relaxed);
+	/// Count opened streams for the scheduling tests.
+	fn settle_open(&mut self, _opened: bool) {
+		#[cfg(test)]
+		if _opened {
+			self.ctx.outcomes.opened.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 
@@ -4079,9 +4068,14 @@ impl<S: crate::transport::poll::Session> kio::Task for GroupServe<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		// The machine owns its outcome: the stream was aborted with the reason (or
-		// reset by the writer's Drop), which is all the subscriber sees.
-		ready!(self.poll_serve(waiter)).map(|()| ()).unwrap_or(());
+		// A reset can lose its header, so the control stream also accounts for the group.
+		if ready!(self.poll_serve(waiter)).is_err() && self.ctx.version.has_track_stream() {
+			self.ctx.outcomes.dropped.lock().unwrap().push(lite::SubscribeDrop {
+				start: self.sequence,
+				end: self.sequence,
+				error: 0,
+			});
+		}
 		Poll::Ready(())
 	}
 }
@@ -4229,7 +4223,7 @@ mod serve_group_test {
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
-			opens: Default::default(),
+			outcomes: Default::default(),
 		};
 
 		let track = track::Producer::new(
@@ -4274,7 +4268,7 @@ mod serve_group_test {
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
-			opens: Default::default(),
+			outcomes: Default::default(),
 		};
 
 		let track = track::Producer::new(
@@ -4323,7 +4317,7 @@ mod serve_group_test {
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
-			opens: Default::default(),
+			outcomes: Default::default(),
 		};
 
 		let track = track::Producer::new(
@@ -4372,7 +4366,7 @@ mod serve_group_test {
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
-			opens: Default::default(),
+			outcomes: Default::default(),
 		};
 
 		let track = track::Producer::new(
@@ -4439,7 +4433,7 @@ mod serve_group_test {
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
-			opens: Default::default(),
+			outcomes: Default::default(),
 		};
 
 		let track = track::Producer::new(
@@ -4515,7 +4509,7 @@ mod serve_group_test {
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
-			opens: Default::default(),
+			outcomes: Default::default(),
 		};
 
 		let track = track::Producer::new(
@@ -4563,7 +4557,7 @@ mod serve_group_test {
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
-			opens: Default::default(),
+			outcomes: Default::default(),
 		};
 
 		let track = track::Producer::new(
@@ -4610,7 +4604,7 @@ mod serve_group_test {
 			version: Version::Lite06,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
-			opens: Default::default(),
+			outcomes: Default::default(),
 		};
 
 		let track = track::Producer::new(
@@ -4669,7 +4663,7 @@ mod serve_group_test {
 			version,
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
-			opens: Default::default(),
+			outcomes: Default::default(),
 		};
 		let bounds = Bounds {
 			start_group: Some(0),
@@ -4861,23 +4855,26 @@ mod serve_group_test {
 		// A frame's header takes well under a payload more, and a poll may also flush what
 		// the last one buffered.
 		let most = 2 * (BUDGET + 1) * 2 * PAYLOAD;
-		let owner = kio::Waiter::noop();
 		let mut polls = 0;
-		while log.writes.lock().unwrap().len() < FRAMES * PAYLOAD {
+		kio::wait(|owner| {
+			if log.writes.lock().unwrap().len() >= FRAMES * PAYLOAD {
+				return Poll::Ready(());
+			}
 			let before = log.writes.lock().unwrap().len();
-			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			assert!(tasks.poll(owner).is_pending(), "the serve never ends");
 			polls += 1;
 			let wrote = log.writes.lock().unwrap().len() - before;
 			assert!(wrote <= most, "one poll wrote {wrote} bytes");
 			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
 			assert!(polls <= FRAMES as u64, "the serve stalled");
-		}
+			Poll::Pending
+		})
+		.await;
 	}
 
-	/// SUBSCRIBE_END counts the group streams opened, not the groups below the end: a
-	/// group the track never produced has no stream and is not counted.
+	/// A skipped sequence is accounted for by DROP rather than a stream count.
 	#[moq_clock::test]
-	async fn lite07_end_counts_the_streams_opened() {
+	async fn lite07_end_drops_skipped_sequences() {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"test",
@@ -4893,8 +4890,8 @@ mod serve_group_test {
 		track.finish().unwrap();
 		run.await.unwrap();
 
-		// SUBSCRIBE_START at 0 (largest 0.0), then SUBSCRIBE_END at 3 with 2 streams.
-		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 1, 2, 3, 2]);
+		// SUBSCRIBE_START at 0, SUBSCRIBE_END at 3, and a DROP for the skipped group 1.
+		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 1, 1, 3, 2, 3, 1, 1, 0]);
 	}
 
 	/// A relay that holds only the first group of a backlog answers with the largest its
@@ -4946,7 +4943,7 @@ mod serve_group_test {
 		drops
 	}
 
-	/// Lite-05 and lite-06 name every sequence below the end that the subscription never
+	/// Lite-05 and later name every sequence below the end that the subscription never
 	/// got once the track ends: one skipped between groups, and one past the last.
 	#[moq_clock::test]
 	async fn the_end_drops_the_sequences_never_served() {
@@ -5148,7 +5145,11 @@ mod serve_group_test {
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
-		assert_eq!(run.ctx.opens.opened.load(Ordering::Relaxed), 2, "groups 0 and 2 only");
+		assert_eq!(
+			run.ctx.outcomes.opened.load(Ordering::Relaxed),
+			2,
+			"groups 0 and 2 only"
+		);
 	}
 
 	/// A late group the cursor skips as stale is dropped at once, even when it is the only
@@ -5173,7 +5174,11 @@ mod serve_group_test {
 		moq_clock::sim::advance(Duration::from_secs(2)).await;
 		write_group(&mut track, 1, 1);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		assert_eq!(run.ctx.opens.opened.load(Ordering::Relaxed), 2, "group 1 is not served");
+		assert_eq!(
+			run.ctx.outcomes.opened.load(Ordering::Relaxed),
+			2,
+			"group 1 is not served"
+		);
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
 	}
 
@@ -5206,7 +5211,7 @@ mod serve_group_test {
 		write_group(&mut track, 1, 1);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(
-			run.ctx.opens.opened.load(Ordering::Relaxed),
+			run.ctx.outcomes.opened.load(Ordering::Relaxed),
 			1,
 			"only group 0 is served"
 		);
@@ -5411,7 +5416,7 @@ mod serve_group_test {
 		let mut settle = |run: &mut TrackRun<SinkSession>| {
 			let res = kio::wait(|waiter| run.poll(&mut writer, waiter)).now_or_never();
 			assert!(res.is_none(), "the run ended");
-			run.ctx.opens.opened.load(Ordering::Relaxed)
+			run.ctx.outcomes.opened.load(Ordering::Relaxed)
 		};
 
 		write_group(&mut track, 7, 7);
@@ -5462,7 +5467,7 @@ mod serve_group_test {
 		let res = kio::wait(|waiter| run.poll(&mut writer, waiter)).now_or_never();
 		assert!(res.is_none(), "the run ended");
 		assert_eq!(
-			run.ctx.opens.opened.load(Ordering::Relaxed),
+			run.ctx.outcomes.opened.load(Ordering::Relaxed),
 			1,
 			"group 0 was not served"
 		);
@@ -5503,7 +5508,7 @@ mod serve_group_test {
 		run: TrackRun<ScriptedSession>,
 		writer: Writer<SinkSend, Version>,
 		session: ScriptedSession,
-		opens: Arc<Opens>,
+		outcomes: Arc<GroupOutcomes>,
 	}
 
 	impl RelayRun {
@@ -5518,7 +5523,7 @@ mod serve_group_test {
 			let session = ScriptedSession::new(Vec::new());
 			let writer = Writer::new(SinkSend::new(session.log.clone()), Version::Lite07);
 			let steer = kio::Producer::new(Steer::default());
-			let opens = Arc::<Opens>::default();
+			let outcomes = Arc::<GroupOutcomes>::default();
 			let ctx = Subscription {
 				session: session.clone(),
 				id: 0,
@@ -5530,7 +5535,7 @@ mod serve_group_test {
 				version: Version::Lite07,
 				timescale: Some(crate::Timescale::MILLI),
 				runtime: crate::time::sim(),
-				opens: opens.clone(),
+				outcomes: outcomes.clone(),
 			};
 			let bounds = Bounds {
 				start_group: Some(start_group),
@@ -5542,7 +5547,7 @@ mod serve_group_test {
 				run: TrackRun::new(ctx, subscriber, bounds, steer),
 				writer,
 				session,
-				opens,
+				outcomes,
 			}
 		}
 
@@ -5555,7 +5560,7 @@ mod serve_group_test {
 
 		/// How many group streams the run opened.
 		fn opened(&self) -> u64 {
-			self.opens.opened.load(Ordering::Relaxed)
+			self.outcomes.opened.load(Ordering::Relaxed)
 		}
 
 		/// Whether the first thing written was SUBSCRIBE_START at `group`.
@@ -5717,7 +5722,7 @@ mod serve_group_test {
 
 	/// A track that ends without a group still ends the subscription, with no stream owed.
 	#[moq_clock::test]
-	async fn lite07_end_counts_zero_streams() {
+	async fn lite07_empty_track_ends_without_a_start() {
 		let track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"test",
@@ -5728,14 +5733,12 @@ mod serve_group_test {
 
 		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
-		assert_eq!(*log.writes.lock().unwrap(), [1, 2, 0, 0]);
+		assert_eq!(*log.writes.lock().unwrap(), [1, 1, 0]);
 	}
 
-	/// The count is sent once every served group has opened its stream or given up, so a
-	/// group still waiting for stream credit holds SUBSCRIBE_END back, and one that expires
-	/// first is never counted.
+	/// A declared end is sent before stream credit, and a group that expires first is dropped.
 	#[moq_clock::test]
-	async fn lite07_end_waits_for_every_stream_to_open() {
+	async fn lite07_end_precedes_blocked_streams_and_reports_expiry() {
 		let gate = kio::Producer::new(false);
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
@@ -5756,8 +5759,8 @@ mod serve_group_test {
 		assert!(futures::poll!(run.as_mut()).is_pending(), "group 1 is still opening");
 		assert_eq!(
 			*log.writes.lock().unwrap(),
-			[0, 3, 0, 1, 0],
-			"only SUBSCRIBE_START so far"
+			[0, 3, 0, 1, 0, 2, 3, 0, 0, 0, 1, 1, 2],
+			"the expired group is dropped and the end precedes stream credit"
 		);
 
 		let Ok(mut open) = gate.write() else {
@@ -5766,7 +5769,7 @@ mod serve_group_test {
 		*open = true;
 		drop(open);
 		run.await.unwrap();
-		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 1, 2, 2, 1]);
+		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 2, 3, 0, 0, 0, 1, 1, 2]);
 	}
 }
 
@@ -6310,7 +6313,6 @@ mod tests {
 			reader: crate::coding::Reader::new(recv, version),
 		};
 		let mut serve = RequestServe::<_, R>::new(publisher.shared.clone(), stream);
-		let waiter = kio::Waiter::noop();
 		assert!(!drive(&mut serve).await, "{case}: nothing to answer with");
 
 		// The lookup reached the track, which stays wanted while the requester waits.
@@ -6320,10 +6322,7 @@ mod tests {
 				.now_or_never()
 				.expect("track requested")
 				.unwrap();
-			assert!(
-				track.demand().poll_unused(&waiter).is_pending(),
-				"{case}: nobody wants the track"
-			);
+			assert!(track.demand().wanted().is_some(), "{case}: nobody wants the track");
 			track
 		});
 
@@ -6331,9 +6330,10 @@ mod tests {
 		assert!(drive(&mut serve).await, "{case}: still serving");
 		drop(serve);
 		if let Some(track) = track {
+			let mut demand = track.demand();
 			let unused = moq_clock::timeout(
 				Duration::from_millis(1),
-				kio::wait(|waiter| track.demand().poll_unused(waiter)),
+				kio::wait(|waiter| crate::util::poll_unwanted(&mut demand, waiter)),
 			);
 			assert!(unused.await.is_ok(), "{case}: the track is still wanted");
 		}
@@ -6461,7 +6461,7 @@ mod tests {
 						matches!(serve.state, RequestState::Hold { finished, .. } if finished != blocked),
 						"{case}: TRACK_INFO was not answered as expected"
 					);
-					assert!(track.demand().is_used(), "{case}: the track was let go");
+					assert!(track.demand().wanted().is_some(), "{case}: the track was let go");
 					assert_eq!(
 						publisher.shared.owed.load(Ordering::Relaxed),
 						usize::from(blocked),
@@ -6470,10 +6470,13 @@ mod tests {
 
 					session.close(close);
 					assert!(drive(&mut serve).await, "{case}: still holding");
-					moq_clock::timeout(Duration::from_millis(1), track.demand().unused())
-						.await
-						.unwrap_or_else(|_| panic!("{case}: the track is still wanted"))
-						.unwrap();
+					let mut demand = track.demand();
+					moq_clock::timeout(
+						Duration::from_millis(1),
+						kio::wait(|waiter| crate::util::poll_unwanted(&mut demand, waiter)),
+					)
+					.await
+					.unwrap_or_else(|_| panic!("{case}: the track is still wanted"));
 					// The incomplete reply is cancelled; a delivered one is not.
 					assert_eq!(
 						session.log.resets().is_empty(),
@@ -6646,15 +6649,17 @@ mod tests {
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
 			panic!("the subscription is not running");
 		};
-		let opens = run.ctx.opens.clone();
+		let outcomes = run.ctx.outcomes.clone();
 
 		let mut tasks: kio::Tasks<Task> = kio::Tasks::new();
 
 		// The producer appends a batch of ready groups on each of its turns.
+		// Keep the track open after the producer task finishes its last batch.
+		let producer = track.clone();
 		let mut appended = 0;
 		tasks.push(Box::new(move |waiter: &kio::Waiter| {
 			for _ in 0..BATCH.min(GROUPS - appended) {
-				let mut group = track.create_group(group::Info { sequence: appended }).unwrap();
+				let mut group = producer.create_group(group::Info { sequence: appended }).unwrap();
 				group
 					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
 					.unwrap();
@@ -6681,17 +6686,21 @@ mod tests {
 			serve.poll(waiter).map(|res| res.expect("serve"))
 		}));
 
-		let owner = kio::Waiter::noop();
 		let mut polls = 0;
-		while opens.opened.load(Ordering::Relaxed) < GROUPS {
-			let before = opens.opened.load(Ordering::Relaxed);
-			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+		kio::wait(|owner| {
+			if outcomes.opened.load(Ordering::Relaxed) >= GROUPS {
+				return Poll::Ready(());
+			}
+			let before = outcomes.opened.load(Ordering::Relaxed);
+			assert!(tasks.poll(owner).is_pending(), "the serve never ends");
 			polls += 1;
-			let served = opens.opened.load(Ordering::Relaxed) - before;
+			let served = outcomes.opened.load(Ordering::Relaxed) - before;
 			assert!(served <= BUDGET, "one poll served {served} groups");
 			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
 			assert!(polls <= 2 * GROUPS, "the serve stalled");
-		}
+			Poll::Pending
+		})
+		.await;
 		assert!(
 			session.log.resets().is_empty(),
 			"a group was reset: {:?}",

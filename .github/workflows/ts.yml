@@ -227,11 +227,11 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # The subscriber's leg congested the way real paths are, through moq-shaper: 7 Mb/s under
-      # the 9 Mb/s video, behind a 2 s queue, 25 ms each way. The export must stay T-STD compliant
-      # and continuous, shed only whole groups, and keep its latency, so the last group arrives.
+      # the 9 Mb/s video and four audio PIDs, behind a 2 s queue, 25 ms each way. The export must
+      # stay T-STD compliant and continuous, shed whole groups, and keep its latency through EOF.
       - name: TS congested path
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-        run: nix develop --command just test ts --hrd --rate 7000000 --duration 120
+        run: nix develop --command just test ts --headroom --rate 7000000 --duration 120
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
@@ -240,18 +240,19 @@ jobs:
       # inside the export's 1 s delay, and the run fails unless the queue overflowed.
       - name: TS overflowing path
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-        run: nix develop --command just test ts --hrd --rate 7000000 --queue 250ms --duration 120
+        run: nix develop --command just test ts --headroom --rate 7000000 --queue 250ms --duration 120
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
           MOQ_QUIC_CONGESTION_CONTROL: loss
 
-      # The passthrough over the congested path, under its 10 Mb/s multiplex: what arrives must be the
-      # source's packets in place.
-      - name: TS passthrough congested path
+      # Passthrough over the overflowing path, under its 10 Mb/s multiplex: what arrives must be
+      # the source's packets in place, through the source's last packet.
+      - name: TS passthrough overflowing path
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-        run: nix develop --command just test ts --passthrough --rate 7000000 --duration 120
+        run: nix develop --command just test ts --passthrough --rate 7000000 --queue 250ms --duration 120
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          MOQ_QUIC_CONGESTION_CONTROL: loss
 
       - name: Upload failure artifacts
         if: ${{ failure() }}

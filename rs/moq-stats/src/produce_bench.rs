@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use moq_clock::Instant;
 use moq_net::{PathOwned, origin, stats::Registry, track};
 
 use super::{Drain, PendingPair, Task};

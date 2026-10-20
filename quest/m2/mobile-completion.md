@@ -21,7 +21,8 @@ native/mobile getting-started docs with the working path.
 Do not close #700 merely because its next subset or a design decision finished.
 
 Promoted from m2 on 2026-10-09 by maintainer priority, with both capture
-quests.
+quests. Deferred back to m2 in #5427 (`8f0dfa760`) with those capture
+quests; mobile completion does not gate the next breaking cut.
 
 ## Required
 

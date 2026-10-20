@@ -28,8 +28,12 @@ start on the first loss or a mismatched RTT.
   `failover.rs`) seeds a redial from the session it replaces, and
   the relay's cluster peers seed from the previous session to the same peer.
 
-Measure time to the encoder's target rate after a reconnect on the impaired
-path profile, plus loss and latency during the jump. Ship it on by default
+Measure time to the encoder's target rate after a reconnect on bufferbloat:
+a rate below the media bitrate behind a deep but finite queue, with actual
+overflow drops, plus loss and latency during the jump. Include competing
+loss-based traffic when BBR alone does not fill the queue. Random loss may
+prove fallback correctness, but never grades the jump's performance.
+Ship it on by default
 only when the jump never makes the first second worse than slow start.
 
 ## Related

@@ -113,7 +113,7 @@ class FeatureTest(unittest.TestCase):
         boundary = self.trace("tokio")
         exhaustive = self.trace("tokio", "--all")
         self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 2)
-        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 9)
+        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 10)
         self.assertEqual([call for call in boundary if not call.startswith("clippy ")],
                          [call for call in exhaustive if not call.startswith("clippy ")])
 
@@ -126,7 +126,7 @@ class FeatureTest(unittest.TestCase):
                          [call for call in exhaustive if not call.startswith("check ")])
 
 
-CARGO_STUB = r"""#!/bin/bash
+CARGO_STUB = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FEATURE_CALLS"
 if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features quic' ]]; then
  echo 'a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature' >&2

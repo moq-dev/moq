@@ -55,7 +55,10 @@ Verification: round-trip a 90 kHz tick, a present zero, and untimed through
 moq-ffi, moq-c, C++ and every wrapper's tests; refuse scale 0, an
 out-of-range scale, and an out-of-range value; `just test interop --all`.
 
-## Related
+## Required
 
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - lands first with the interim microsecond fields this replaces
+
+## Related
+
 - [Controlled time](/quest/m1/time/README.md) - wall and monotonic time, not media timestamps; keep the types distinct
