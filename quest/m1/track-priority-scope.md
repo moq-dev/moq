@@ -69,15 +69,14 @@ Direction to settle in the draft first, then the code:
   or narrow the goal to subscription delivery.
 - Rank by track priority, then subscription, then the subscription's own group
   order (`Subscription::order`, newest first by default).
-- Decide whether the publisher's `track::Info::priority` breaks a tie
-  between equal subscriber priorities in `Priority::cmp`
-  (`rs/moq-net/src/priority.rs`). The
-  [ladder controller](/quest/m3/ladder/controller.md), now in m3, wants that
-  tiebreak; this quest owns the answer and the code change, so the controller
-  only consumes it (2026-10-06 audit). Either way, make the docs agree:
+- Decided 2026-10-20 (maintainer): the publisher's `track::Info::priority`
+  breaks a tie between equal subscriber priorities in `Priority::cmp`
+  (`rs/moq-net/src/priority.rs`), so the same number decides what to produce
+  and, among equal subscriber priorities, what to send first. The
+  [ladder controller](/quest/m3/ladder/controller.md) only consumes it.
   `Info::priority` in `rs/moq-net/src/model/track.rs` already claims the
-  tiebreak, and the allocator doc in `rs/moq-net/src/model/bandwidth.rs`
-  presents send order as unrelated.
+  tiebreak; fix the allocator doc in `rs/moq-net/src/model/bandwidth.rs`,
+  which presents send order as unrelated.
 - A per-session cap on distinct ranks is a scheduling detail; whatever replaces
   the 255-entry sort must stay O(log n) per group under chat-shaped churn.
 - moq-quic already has the fair tier: send domains sharing bytes by deficit

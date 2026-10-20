@@ -20,7 +20,7 @@ on `Dynamic` rather than a group request. Time anchors land separately; see
   including the archive consumer's time resolution from its key listing if it
   has landed, plus the
   published surfaces built on them, per the cross-package table: moq-ffi
-  (`fetch_group`, `requested_group`), moq-c (`poll_requested_group`), every
+  (`fetch_group`, `requested_group`), moq-c (`poll_requested_group`, through the generated package, not the frozen hand-written ABI), every
   binding wrapper and its `doc/lib` page, and `moq fetch` through
   `moq_relay::fetch_group` (added in the 2026-10-05 audit).
 - Every sequence in range either arrives or is named as dropped, so a reader
@@ -38,3 +38,7 @@ on `Dynamic` rather than a group request. Time anchors land separately; see
   restoring a historical exemption.
 - Benchmark filling over range count and span as separate axes, beside
   `track_range_serving`, which covers serving.
+
+## Required
+
+- [Generated C bindings](/quest/m1/c/README.md) - the replacement reaches C through the generated package, not the frozen hand-written ABI
