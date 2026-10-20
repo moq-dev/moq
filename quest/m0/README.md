@@ -32,8 +32,7 @@ of Seattle. The cold-relay Largest stays compliant with INVALID_RANGE
 (decided 2026-10-08), and the deviations doc landed in #5022.
 An imquic draft-22 rig (2026-10-08) hit LOCATION_FILTER and a clear
 FIRST_OBJECT at object 0 (#5027). Both shipped with moq-noq 1.3.5 in
-moq-relay 0.17.3 and `@moq/net` 0.4.3; [release notices](/quest/m0/release-22/README.md)
-remain for the testers and reporters of the later clock and quiet-edge fixes.
+moq-relay 0.17.3 and `@moq/net` 0.4.3.
 
 Identity: the [broadcast epoch](/quest/m0/broadcast-epoch/README.md) line
 gates the next release (decided 2026-10-03:
@@ -90,7 +89,6 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [Discarded-Retry backport](/quest/m0/retry-backport.md) - one injected or corrupted Retry no longer kills a handshake on the release line, via a moq-noq 1.3.x patch
 
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
-- [Draft-22 release notices](/quest/m0/release-22/README.md) - tell testers and reporters which published releases contain their fixes
 - [nixpkgs ships the lld fix](/quest/m0/nixpkgs-lld-fix.md) - waiting on NixOS/nixpkgs#568680 to reach `nixpkgs-unstable`, which the release build fix bumps to
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on #412 to publish the patched 0.6.x that main adopts
