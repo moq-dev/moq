@@ -1292,7 +1292,7 @@ An optional unsigned 32-bit byte ratio, encoded as the ratio plus one; `0` disab
 On a live-edge join, a publisher asks for a group beyond every sequence already produced when the newest group's bytes after its first frame exceed the ratio times that first frame's bytes.
 Joins coalesce until the requested group arrives.
 A relay preserves the ratio and evaluates joins against its own cache, forwarding demand in SUBSCRIBE_UPDATE.
-Lite-05/06 omit Refresh and Wanted Group; a Track received on those versions never refreshes.
+Versions before lite-07 omit Refresh and Wanted Group; a Track received on those versions never refreshes.
 
 ## SUBSCRIBE_OK {#subscribe-ok}
 A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start position.

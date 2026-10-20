@@ -36,7 +36,8 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
     unchanged inner bytes, so downstream IETF egress can refuse incompatible
     encodings.
 - Dynamic-group requests are not this extension's job. Native lite-07
-  carries them as [refresh](/quest/m1/refresh/lite.md), decided 2026-10-16.
+  carries them as refresh (TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE
+  `Wanted Group`), decided 2026-10-16.
 - Write `drafts/draft-lcurley-moq-ietf.md` for the extension and pass
   `just drafts check`. List it with the other project drafts in
   `doc/concept/standard.md`, and note in `doc/bin/relay/` that relays enable
@@ -55,7 +56,5 @@ Public API: `setup::Extensions::ietf`. Wire: a new lite-07 SETUP extension
 and the framing above, only when negotiated.
 
 ## Related
-
-- [Refresh on the lite wire](/quest/m1/refresh/lite.md) - carries dynamic-group requests between relays instead of this extension
 
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - the extension targets the wip version and does not gate the cut

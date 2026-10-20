@@ -436,13 +436,9 @@ impl Message for SubscribeUpdate {
 		let (start_frame, end_frame) = decode_frame_bounds(r, version, start_group, end_group)?;
 		let start_group = canonical_start_group(version, start_group, start_frame);
 
-		let wanted_group = if matches!(
-			version,
-			Version::Lite03 | Version::Lite04 | Version::Lite05 | Version::Lite06
-		) {
-			None
-		} else {
-			r.varint()?.checked_sub(1)
+		let wanted_group = match version.has_refresh() {
+			true => r.varint()?.checked_sub(1),
+			false => None,
 		};
 
 		Ok(Self {
@@ -482,10 +478,7 @@ impl Message for SubscribeUpdate {
 			self.end_frame,
 		)?;
 
-		if !matches!(
-			version,
-			Version::Lite03 | Version::Lite04 | Version::Lite05 | Version::Lite06
-		) {
+		if version.has_refresh() {
 			w.varint_opt(self.wanted_group)?;
 		}
 		Ok(())
@@ -928,8 +921,7 @@ mod test {
 		);
 	}
 
-	/// Lite-07 carries `Group Order` right after the priority, on SUBSCRIBE and
-	/// SUBSCRIBE_UPDATE alike, and refuses a value it does not define.
+	/// Lite-07 carries `Wanted Group` on SUBSCRIBE_UPDATE; older versions drop it.
 	#[test]
 	fn wanted_group_roundtrips_only_on_lite07() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
@@ -946,18 +938,13 @@ mod test {
 				};
 				let buf = update.encode_bytes(version).unwrap();
 				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, SubscribeUpdate::decode).unwrap();
-				assert_eq!(
-					got.wanted_group,
-					if matches!(version, Version::Lite07) {
-						wanted
-					} else {
-						None
-					}
-				);
+				assert_eq!(got.wanted_group, if version.has_refresh() { wanted } else { None });
 			}
 		}
 	}
 
+	/// Lite-07 carries `Group Order` right after the priority, on SUBSCRIBE and
+	/// SUBSCRIBE_UPDATE alike, and refuses a value it does not define.
 	#[test]
 	fn group_order_roundtrips_on_lite07() {
 		use crate::track::Order;

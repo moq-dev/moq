@@ -4,7 +4,7 @@ import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasGroupOrder, Version, wireTimescale } from "./version.ts";
+import { hasGroupOrder, hasRefresh, Version, wireTimescale } from "./version.ts";
 
 // The Track Stream (0x6) is draft-05+ only.
 function guardTrack(version: Version) {
@@ -114,7 +114,7 @@ export class TrackInfo {
 		const age = this.maxAge === undefined ? undefined : BigInt(this.maxAge);
 		await w.u62(legacy ? (age ?? BigInt(Number.MAX_SAFE_INTEGER)) : age === undefined ? 0n : age + 1n);
 		await w.u53(wireTimescale(version, this.timescale) ?? 0);
-		if (!legacy) await w.u53(this.refresh === undefined ? 0 : this.refresh + 1);
+		if (hasRefresh(version)) await w.u53(this.refresh === undefined ? 0 : this.refresh + 1);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<TrackInfo> {
@@ -135,7 +135,7 @@ export class TrackInfo {
 		// Lite-05/06 have no untimed encoding, so zero is malformed there.
 		const scale = await r.u53();
 		const timescale = scale === 0 && !legacy ? undefined : Timescale(scale);
-		const refresh = legacy ? undefined : (await r.u53()) - 1;
+		const refresh = hasRefresh(version) ? (await r.u53()) - 1 : undefined;
 		return new TrackInfo({ priority, maxAge, timescale, refresh: refresh === -1 ? undefined : refresh });
 	}
 

@@ -91,14 +91,14 @@ impl Message for TrackInfo {
 			scale => Some(Timescale::new(scale).map_err(|_| DecodeError::InvalidValue)?),
 		};
 
-		let refresh = match version {
-			Version::Lite05 | Version::Lite06 => None,
-			_ => r
+		let refresh = match version.has_refresh() {
+			true => r
 				.varint()?
 				.checked_sub(1)
 				.map(u32::try_from)
 				.transpose()
 				.map_err(|_| DecodeError::InvalidValue)?,
+			false => None,
 		};
 
 		Ok(Self {
@@ -124,7 +124,7 @@ impl Message for TrackInfo {
 		};
 		w.varint(encoded)?;
 		w.varint(version.wire_timescale(self.timescale).map_or(0, u64::from))?;
-		if !matches!(version, Version::Lite05 | Version::Lite06) {
+		if version.has_refresh() {
 			w.varint(self.refresh.map_or(0, |ratio| u64::from(ratio) + 1))?;
 		}
 		Ok(())
@@ -160,11 +160,7 @@ mod test {
 					refresh: ratio,
 					..info_sample()
 				};
-				let expected = if matches!(version, Version::Lite07) {
-					ratio
-				} else {
-					None
-				};
+				let expected = if version.has_refresh() { ratio } else { None };
 				assert_eq!(info_roundtrip(version, &info).refresh, expected);
 			}
 		}

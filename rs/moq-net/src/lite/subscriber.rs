@@ -3474,6 +3474,52 @@ mod tests {
 		assert_eq!((msg.end_group, msg.end_frame), (Some(5), None));
 	}
 
+	/// Concurrent joins over the refresh ratio send one SUBSCRIBE_UPDATE upstream, and
+	/// the next request waits until the requested group arrives.
+	#[moq_clock::test]
+	async fn refresh_joins_coalesce_upstream() {
+		let h = Harness::new(Version::Lite07);
+		let request = h._broadcast.reserve_track("refresh").unwrap();
+		let mut serving = ServeLoop::new(&h.serve, request, track::Info::default().with_refresh(1), None);
+		let track = h._broadcast.consume().track("refresh").unwrap();
+		let _baseline = track.subscribe(None).await.unwrap();
+		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		assert!(matches!(serving.sub, Sub::Active(_)), "the reader opens the upstream");
+		let established = h.wire().len();
+
+		let arrive = |serving: &ServeLoop<SinkSession>, sequence| {
+			let mut group = serving.serving.receive_group(group::Info { sequence }).unwrap();
+			for frame in [&b"key"[..], b"abc", b"d"] {
+				group.write_frame(None, frame).unwrap();
+			}
+			group.finish().unwrap();
+		};
+		let wanted = |h: &Harness| {
+			let wire = h.wire();
+			let mut wire = &wire[established..];
+			let mut wanted = Vec::new();
+			while !wire.is_empty() {
+				let msg = crate::coding::decode_buf(&mut wire, Version::Lite07, lite::SubscribeUpdate::decode).unwrap();
+				wanted.extend(msg.wanted_group);
+			}
+			wanted
+		};
+
+		// The deltas outweigh the first frame, so every join asks for group 1.
+		arrive(&serving, 0);
+		let mut joins = Vec::new();
+		for _ in 0..8 {
+			joins.push(track.subscribe(None).await.unwrap());
+			assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		}
+		assert_eq!(wanted(&h), [1], "joins coalesce into one request");
+
+		arrive(&serving, 1);
+		joins.push(track.subscribe(None).await.unwrap());
+		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		assert_eq!(wanted(&h), [1, 2], "the requested group re-arms the next request");
+	}
+
 	/// A buffered SUBSCRIBE_START describes the demand its SUBSCRIBE carried, so
 	/// it applies exactly while the current start matches that demand: an update
 	/// that moves the start makes it stale (applying it could reopen a range the
@@ -6120,7 +6166,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 
 					// Each stream carries at most one outstanding refresh. Its new SUBSCRIBE
 					// already counted as a join at the upstream hop.
-					if matches!(serve.subscriber.version, Version::Lite07) {
+					if serve.subscriber.version.has_refresh() {
 						if let Poll::Ready(Some(largest)) = self.serving.poll_largest(waiter) {
 							self.largest = Some(largest.group);
 						}

@@ -57,6 +57,7 @@ import {
 	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
+	hasRefresh,
 	resolvesStart,
 	updateSupported,
 	Version,
@@ -1327,7 +1328,7 @@ export class Subscriber {
 			const largest = edge.peek()?.group;
 			const wanted = demand.wanted.peek();
 			const refresh =
-				this.version === Version.DRAFT_07 &&
+				hasRefresh(this.version) &&
 				largest !== undefined &&
 				(pendingWanted === undefined || largest >= pendingWanted) &&
 				wanted !== undefined &&

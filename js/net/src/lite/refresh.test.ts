@@ -16,8 +16,8 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 	const broadcast = source.createBroadcast(Path.from("room"));
 	broadcast.announce();
 	const producer = broadcast.createTrack("data", { refresh: 1 });
-	const transports = [createMockTransportPair(alpn)];
-	const peers = [];
+	const pair = createMockTransportPair(alpn);
+	const url = new URL("https://localhost/refresh");
 	const updates: number[] = [];
 	const encode = SubscribeUpdate.prototype.encode;
 	const spy = spyOn(SubscribeUpdate.prototype, "encode").mockImplementation(function (
@@ -28,17 +28,14 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		if (this.wantedGroup !== undefined) updates.push(this.wantedGroup);
 		return encode.call(this, writer, version);
 	});
+	const peers: { abort(): void }[] = [];
 	try {
-		for (const [index, [upstream, downstream]] of [[source, b]].entries()) {
-			const pair = transports[index];
-			const url = new URL("https://localhost/refresh");
-			peers.push(
-				...(await Promise.all([
-					connect({ url, transport: pair.client, consume: downstream }),
-					accept({ url, transport: pair.server, publish: upstream.consume() }),
-				])),
-			);
-		}
+		peers.push(
+			...(await Promise.all([
+				connect({ url, transport: pair.client, consume: b }),
+				accept({ url, transport: pair.server, publish: source.consume() }),
+			])),
+		);
 		const announcements = b.announced();
 		while ((await announcements.next())?.kind !== "start") {}
 		const request = b.request(Path.from("room"));
