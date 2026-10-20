@@ -1297,8 +1297,9 @@ export class Subscriber {
 
 		let pendingWanted: number | undefined;
 		const demand = track.demand();
+		const edge = hooks.producerLargest(track);
 		for (;;) {
-			const largest = hooks.cachedLargest(track)?.group;
+			const largest = edge.peek()?.group;
 			const wanted = demand.wanted.peek();
 			const refresh =
 				this.version === Version.DRAFT_07 &&
@@ -1311,7 +1312,12 @@ export class Subscriber {
 			const current = track.subscription.peek();
 			if (current === undefined || (refresh === undefined && this.#sameSubscription(current, lastSent))) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await race([track.subscription.changed(), demand.wanted.changed(), stopped]);
+				const next = await race([
+					track.subscription.changed(),
+					demand.wanted.changed(),
+					edge.changed(),
+					stopped,
+				]);
 				if (next === null) return;
 				continue;
 			}

@@ -344,6 +344,10 @@ export const hooks: {
 	 * a higher one. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
+	// private: capability gap
+	/** The producer's largest reported location and its subsequent changes. */
+	producerLargest: (producer: Producer) => Getter<Location | undefined>;
+
 	// private: passthrough
 	/** Re-evaluate a live-edge join at this subscriber's copy. */
 	joinSubscriber: (subscriber: Subscriber) => void;
@@ -371,7 +375,6 @@ export const hooks: {
 	pendingTrackProducer: (request: Request) => Producer;
 	/** Have a producer write through a broadcast's sequence namespace for its name. */
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
-	// private: capability gap
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Location | undefined;
 	// private: capability gap
@@ -495,6 +498,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	endTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	producerLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
 	joinProducer: () => {

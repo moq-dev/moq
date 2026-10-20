@@ -721,6 +721,7 @@ export class Producer {
 	}
 
 	static {
+		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
 		hooks.startTrack = (producer, served) => {
