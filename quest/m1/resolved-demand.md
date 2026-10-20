@@ -95,7 +95,7 @@ with no wire change.
   "re-offer or not"; the serving and re-offer path stays #5929's.
 - **The record is bounded by the pool, never by guessing.** Each run is
   billed to the cache's `Pool` through a `Charge` at a fixed per-run cost
-  (the same bound in `js/net`) and is settled a run at a time, so a cursor's
+  and is settled a run at a time, so a cursor's
   state and CPU track its runs, never their span. The floor only rises over
   a final prefix: the runs from the floor up to the lowest run that is not
   final. Final means delivered, reported, or skipped as stale at the
@@ -110,6 +110,12 @@ with no wire change.
     subscription ends with `TooFarBehind` (stream code 0x5, already meaning
     a reader that fell too far behind and lost content), the subscriber
     re-subscribes, and the cursor's whole record is released with it.
+
+  `js/net` has no byte pool and gets no new cap: a cursor's runs expire
+  with the same idle window as the groups they sit between, under the same
+  fold-or-`TooFarBehind` rule, so there are at most about one per cached
+  sequence and the record grows no faster than the JS cache. The JS byte
+  bound is [JS unbounded groups](/quest/m2/unbounded-groups/js.md).
 - **Drops are final for now**, decided by the maintainer on 2026-10-19. A
   widening re-offers only groups this cursor never reported in
   SUBSCRIBE_DROP; a reported group stays dropped, as today. That leaves a
@@ -170,3 +176,4 @@ max age or the range.
 
 - [Archive producer](/quest/m1/archive/producer.md) - its resume floor crosses relays that viewers may have warmed
 - [Drop set](/quest/m1/drop-set.md) - closes the gap this leaves for groups already reported dropped
+- [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - the JS byte bound for groups and the cursor runs between them

@@ -128,11 +128,17 @@ Untrusted input: a hostile upstream can fragment the set by alternating
 drops and arrivals, and an open live range is no bound, since its groups are
 evicted while their runs would stay. Bill each run to the cache's existing
 byte accounting like a group: the Rust `Pool` through a `Charge` at a fixed
-per-run cost, and the same eviction bound in `js/net`. Under pressure the
-pool evicts the oldest runs as it evicts groups, and a run older than the
-cache's retention window is forgotten, so the set never outgrows what the
-pool would hold, with no new constant. An evicted run's sequences become
-unknown again.
+per-run cost. Under pressure the pool evicts the oldest runs as it evicts
+groups, and a run older than the cache's retention window is forgotten, so
+the set never outgrows what the pool would hold, with no new constant. An
+evicted run's sequences become unknown again. `js/net` has no byte pool and
+gets no new cap: its shared and per-cursor runs expire with the same idle
+window as the groups they sit between, and expiry applies the same
+fold-or-`TooFarBehind` rule as a Rust eviction. A run sits between cached
+sequences, so there are at most about one per cached sequence (alternating
+drop and arrival), and JS run state grows no faster than the JS cache
+itself. The JS byte bound for both is
+[JS unbounded groups](/quest/m2/unbounded-groups/js.md).
 
 The per-cursor record keeps resolved-demand's pool bound and floor rule,
 with "final" narrowed: only a delivered run or a budget-independent drop (a
@@ -193,9 +199,11 @@ Test on mock time through a relay:
   within reach, or a run above it, ends the cursor with `TooFarBehind`
   instead of losing the re-offer. Through a lite-06 hop the reported run
   folds.
-- A flood of fragmented runs stays within the pool, evicting the oldest
-  shared runs first, and a sequence whose shared run was evicted is judged
-  locally or filled by range, never waited on indefinitely.
+- A flood of fragmented runs stays within the pool in Rust, evicting the
+  oldest shared runs first, and a sequence whose shared run was evicted is
+  judged locally or filled by range, never waited on indefinitely. In
+  `js/net` the same flood holds at most one run more than its cached
+  sequences, and the runs expire with the idle window.
 - A single run spanning billions of sequences is settled by each cursor in
   one step, whether dropped, skipped by a wider reader, or evicted and
   judged again.
@@ -214,3 +222,4 @@ unchanged.
 ## Related
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
+- [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache
