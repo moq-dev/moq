@@ -273,6 +273,18 @@ impl Version {
 		}
 	}
 
+	/// Whether a session may negotiate the `ietf` extension (draft-lcurley-moq-ietf), which
+	/// carries moq-transport object state between relays. Added on lite-07; published
+	/// versions get no framing changes.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_ietf(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether the announce stream has ANNOUNCE_RESTART: another publisher instance
 	/// replacing an advertisement in place. Added in lite-07. Older versions send an
 	/// ANNOUNCE_END then an ANNOUNCE_START.
