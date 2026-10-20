@@ -18,7 +18,8 @@ its own decryption path.
   and `@moq/watch`'s subscriptions.
 - `@moq/e2ee`'s broadcast, track, and group wrappers adapt to `@moq/net`'s
   method shapes, as moq-e2ee does in Rust, with its errors mapped to
-  `@moq/net`'s.
+  `@moq/net`'s. Like moq-e2ee, it compresses a `compress` track before
+  encryption and publishes the physical track uncompressed.
 - Demand and preference cross the wrapper: a publisher with no viewer
   through an encrypted track stays idle.
 - Test publish and watch round trips through a pass-through wrapper and

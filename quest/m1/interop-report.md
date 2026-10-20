@@ -18,9 +18,11 @@ Decided with the maintainer on 2026-10-20.
   another writer's pages. Every job in that group sets `queue: max`: the
   default queue keeps one pending job and cancels the older one, which would
   silently skip a night's report when three writers line up. Add it to
-  Nightly's `benchmark-site` job too. Reuse the smoke report's per-directory
-  publisher (`test/smoke/report/publish.sh`, landed in
-  [moq-dev/moq#6046](https://github.com/moq-dev/moq/pull/6046)). Update the
+  Nightly's `benchmark-site` job too. Reuse the smoke report's publisher
+  (`test/smoke/report/publish.sh`, landed in
+  [moq-dev/moq#6046](https://github.com/moq-dev/moq/pull/6046)), which
+  hard-codes `relays/` today: make it take its destination directory, so
+  each writer replaces only its own. Update the
   single-writer comment on Nightly's `benchmark-site` job to describe the
   per-directory ownership.
 - The harness emits structured results next to its logs, one record per

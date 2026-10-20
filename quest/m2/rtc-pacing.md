@@ -17,6 +17,10 @@ WHEP enforcement needs it and nobody owned it.
 
 - Pace frames to the cap before packetizing. Past cap plus burst, skip to
   the next group, the same whole-group drop moq.pro's RTMP play uses.
+  Skip only at a group boundary: a group that has started is paced through
+  to its end even when it is larger than the burst, as large frames finish
+  gradually on [QUIC](/quest/m2/rate-quic.md), so an oversized keyframe
+  group still makes progress.
   Dropping individual RTP packets would leave partial frames that corrupt
   the picture and draw NACKs and PLIs nobody can satisfy.
 - NACK resends draw from the same rate-plus-burst bucket as the frame pacer,

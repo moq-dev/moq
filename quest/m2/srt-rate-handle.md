@@ -22,6 +22,8 @@ enforcement needs it and nobody owned it.
   this.
 - Pull: pace frames to the cap before muxing TS. Past cap plus burst, skip to
   the next group; dropping 188-byte TS packets would leave partial frames.
+  As in [moq-rtc pacing](/quest/m2/rtc-pacing.md), skip only at a group
+  boundary, so a group larger than the burst is paced through to its end.
   Retransmissions draw from the same bucket, and one with no credit left is
   skipped, which needs the hook `srt-protocol`'s sender exposes when driven
   directly.

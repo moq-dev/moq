@@ -27,6 +27,14 @@ the reverse (decided 2026-10-20, maintainer):
   event stays on moq-e2ee's own consumer, outside the trait, for callers
   that hold the concrete type. A trait read can't carry it without
   breaking the exact mirror.
+- `track::Info.compress` is logical. Ciphertext doesn't compress, so the
+  wrapper compresses each group with moq-net's
+  [track compression](/quest/m1/compress/README.md) before AEAD, creates the
+  physical track uncompressed, and inflates after decryption. This keeps
+  [rust-publish](/quest/m2/e2ee/rust-publish.md)'s rule that protected
+  catalogs compress before encryption, and needs moq-net to expose its group
+  codec to the wrapper. `@moq/e2ee` does the same in
+  [JS](/quest/m2/net-wrap/js.md).
 - Demand and preference cross the wrapper: an encrypted track's demand is
   its physical track's, and preference updates reach the physical track.
 - Keep the nonce rules the epic specifies: a group producer still owns its
