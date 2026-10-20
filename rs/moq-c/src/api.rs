@@ -1132,7 +1132,7 @@ pub struct moq_client_config {
 	pub quic_mtu_discovery: bool,
 	pub has_quic_mtu_discovery: bool,
 
-	/// Congestion control family name, or NULL for the backend's choice.
+	/// Congestion control family name (`loss`, `delay`, or `none`), or NULL for the backend's choice.
 	pub quic_congestion_control: *const c_char,
 	pub quic_congestion_control_len: usize,
 
@@ -1140,6 +1140,10 @@ pub struct moq_client_config {
 	/// compile-time optional; see [moq_qlog_supported].
 	pub quic_qlog: *const c_char,
 	pub quic_qlog_len: usize,
+
+	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
+	/// decrypting a capture. Off when false; on without `SSLKEYLOGFILE` fails the dial.
+	pub quic_keylog: bool,
 }
 
 /// The settings [moq_session_connect] dials with when given NULL.
@@ -1429,6 +1433,10 @@ pub struct moq_server_config {
 	/// fingerprint ([moq_server_fingerprints]) or disable verification.
 	pub tls_generate: *const moq_string,
 	pub tls_generate_len: usize,
+
+	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
+	/// decrypting a capture. Off when false; on without `SSLKEYLOGFILE` fails the listen.
+	pub quic_keylog: bool,
 }
 
 /// Build the listener `config` describes, binding its socket.
@@ -1452,9 +1460,9 @@ unsafe fn parse_server(config: &moq_server_config) -> Result<moq_tokio::Server, 
 		.collect();
 	listen.tls.generate = unsafe { ffi::parse_strings(config.tls_generate, config.tls_generate_len)? };
 
-	listen
-		.init(Default::default())
-		.map_err(|err| Error::InvalidConfig(err.to_string()))
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.keylog = Some(config.quic_keylog);
+	listen.init(quic).map_err(|err| Error::InvalidConfig(err.to_string()))
 }
 
 /// Listen for incoming sessions.

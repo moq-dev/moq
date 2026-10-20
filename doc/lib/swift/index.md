@@ -23,10 +23,10 @@ Raw tracks with a `nil` timescale are untimed on both publish and receive.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `Media.CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
-Share `Media.Timebase(broadcast:)` through container init records when several imports
-use one source timeline. `ContainerStreamProducer` takes `ContainerStreamInit`;
-omitting its timebase keeps an independent offset. A timebase belongs to its broadcast
-and does not keep it open.
+Share `Media.Timebase(broadcast:)` through `ContainerInit` when several imports use one
+source timeline; omitting it keeps an independent offset. A timebase belongs to its
+broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
+so a raw byte stream needs no other importer.
 For arrival-order reads, decode each group from `TrackConsumer.recvGroup()` with
 `Media.GroupConsumer(group:container:)`; frames carry container media time as they land.
 

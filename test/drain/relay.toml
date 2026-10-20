@@ -16,6 +16,13 @@ level = "info"
 # QUIC on UDP. 127.0.0.1 avoids IPv6 flakiness on CI runners.
 bind = "127.0.0.1:4470"
 tls.generate = ["localhost", "127.0.0.1"]
+# Publisher epochs travel on lite-07 only, and the epoch is what lets the viewer's subscription
+# resume on the other relay instead of ending with its route.
+version = ["moq-lite-07-wip", "moq-lite-06"]
+
+[connect]
+# A's cluster dial to B carries the epoch on to the viewer, so it needs lite-07 too.
+version = ["moq-lite-07-wip", "moq-lite-06"]
 
 [web.http]
 # HTTP and WebSocket on TCP, also serving /certificate.sha256, which is how the

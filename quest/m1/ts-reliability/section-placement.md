@@ -10,8 +10,8 @@ them, and a program without video has no clock for them at import.
 
 ## Plan
 
-Reuse the placement the [importer](/quest/m1/ts-reliability/pes-import.md)
-derives from the PCR in `SectionStream`, replacing `last_pts`/`start_pts`
+Reuse the placement the [importer](/rs/moq-mux/src/container/ts/import.rs)
+derives from the PCR for whole PES (`Placement`) in `SectionStream`, replacing `last_pts`/`start_pts`
 and the edge clamp in `SectionStream::emit`. SCTE-35 splice times live in
 the section bytes and keep their `pts_adjustment` rebasing.
 
@@ -32,7 +32,3 @@ position and
 one with a cue beside the tune-in keyframe, and
 reword "the media time it arrived at" in the draft's {{verbatim}} to the
 shared placement definition.
-
-## Required
-
-- [Whole-PES import](/quest/m1/ts-reliability/pes-import.md) - the placement clock this reuses

@@ -12,6 +12,26 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 
 
+class Loss(unittest.TestCase):
+    def test_confirmed_loss_survives_reordering_recovery(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stats, summary = root / 'stats.jsonl', root / 'summary.json'
+            rows = [dict(timestamp_ms=t, bytes_sent=t, bytes_recv=t,
+                         frames_sent=t, frames_recv=t, groups_expected=100,
+                         groups_present=present, groups_lost=lost,
+                         latency_p50_ms=1, latency_p99_ms=2)
+                    for t, present, lost in [(1000, 90, 2), (6000, 99, 3)]]
+            stats.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            result = subprocess.run(['bash', '-c',
+                'source "$1/bench/relay.sh"; summarize_load "$2" "$3" fixture',
+                'test', str(ROOT), str(stats), str(summary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(summary.read_text())
+            self.assertEqual(report['loss_pct'], 3)
+
+
 class Lifecycle(unittest.TestCase):
     def test_sampler_stops_generator_after_collecting_both_processes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -28,7 +48,7 @@ if not a.pid:
     assert '--duration' not in rest
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     a.output.write_text(''.join(json.dumps(dict(timestamp_ms=t, bytes_sent=t*10, bytes_recv=t*10,
-        frames_sent=t, frames_recv=t, groups_expected=1, groups_present=1,
+        frames_sent=t, frames_recv=t, groups_expected=1, groups_present=1, groups_lost=0,
         latency_p50_ms=1, latency_p99_ms=1))+'\\n' for t in range(500,10000,500)))
     with open(os.environ['READY'], 'w') as ready:
         ready.write('ready')

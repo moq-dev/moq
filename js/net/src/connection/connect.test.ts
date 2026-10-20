@@ -292,3 +292,56 @@ test("SETUP preserves a delayed session close code", async () => {
 		jest.useRealTimers();
 	}
 });
+
+// The WebSocket subprotocols one connect() attempt asks a server for.
+async function websocketOffer(props: Omit<ConnectProps, "url">): Promise<string[]> {
+	const original = globalThis.WebTransport;
+	// No WebTransport, so the WebSocket attempt goes at once.
+	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
+	let offer: string[] = [];
+	const server = Bun.serve({
+		port: 0,
+		fetch(request) {
+			offer = (request.headers.get("sec-websocket-protocol") ?? "").split(",").map((protocol) => protocol.trim());
+			return new Response("no", { status: 400 });
+		},
+	});
+	const controller = new AbortController();
+	try {
+		const attempt = connect(new URL(`http://127.0.0.1:${server.port}/`), {
+			signal: controller.signal,
+			...props,
+		}).catch(() => undefined);
+		for (let i = 0; i < 100 && offer.length === 0; i++) await settle();
+		controller.abort();
+		await attempt;
+		return offer;
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop(true);
+	}
+}
+
+test("the WebSocket fallback offers lite-07 only when asked", async () => {
+	const defaults = await websocketOffer({});
+	expect(defaults.some((protocol) => protocol.endsWith(ALPN_06))).toBe(true);
+	expect(defaults.some((protocol) => protocol.endsWith(ALPN_07_WIP))).toBe(false);
+
+	const asked = await websocketOffer({ websocket: { protocols: [ALPN_07_WIP, ALPN_06] } });
+	expect(asked[0]?.endsWith(ALPN_07_WIP)).toBe(true);
+	expect(asked.some((protocol) => protocol.endsWith(ALPN_05))).toBe(false);
+});
+
+test("the WebSocket fallback refuses an unsupported protocol", async () => {
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
+	try {
+		for (const protocol of ["moq-lite-99", "toString"]) {
+			await expect(connect(url, { websocket: { protocols: [protocol] } })).rejects.toThrow(
+				"unsupported WebSocket protocol",
+			);
+		}
+	} finally {
+		globalThis.WebTransport = original;
+	}
+});

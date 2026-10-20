@@ -87,7 +87,7 @@ case "$1" in
         criterion gst -p moq-gst --bench catalog
         ;;
     js)
-        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track interests priority; do
+        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track resume interests priority; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
