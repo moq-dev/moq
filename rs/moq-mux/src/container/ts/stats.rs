@@ -112,7 +112,8 @@ pub struct Stream {
 	pub damaged: u64,
 	/// Whole PES or sections dropped because the program clock could not place
 	/// them: before the first PCR, after the last with no interval to extrapolate from, or
-	/// before the broadcast clock's zero. Export stays zero.
+	/// before the broadcast clock's zero. Any PES lands before that zero while its stream is
+	/// still behind a wrap the import's first PTS already crossed. Export stays zero.
 	pub unplaced: u64,
 	/// Times this PID's stream was refused rather than carried altered: an undecoded stream
 	/// in a program with no PCR to place it by, or a private PES stream with a clock field only

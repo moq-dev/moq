@@ -223,7 +223,10 @@ impl Queue {
 	}
 
 	async fn round(&mut self) {
-		self.held.pop_front().unwrap().refuse(auth::Error::Refused);
+		self.held
+			.pop_front()
+			.unwrap()
+			.refuse(auth::Error::Refused(Default::default()));
 		self.present();
 		let admission = self.admissions.next().await.unwrap();
 		self.held.push_back(admission);

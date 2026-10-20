@@ -276,7 +276,7 @@ mod tests {
 		let admission = admissions.next().await.unwrap();
 		trigger.start();
 		let waited = shutdown.drained().now_or_never().is_none();
-		admission.refuse(crate::auth::Error::Refused);
+		admission.refuse(crate::auth::Error::Refused(Default::default()));
 		drop(connecting.await.unwrap());
 		running.await.unwrap().unwrap();
 		assert!(waited, "drain completed while auth admission is pending");

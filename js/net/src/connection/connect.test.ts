@@ -1,7 +1,9 @@
 import { expect, jest, test } from "bun:test";
 import { SessionCode, SessionError } from "../error.ts";
-import { ALPN_05, ALPN_06, ALPN_07_WIP } from "../lite/version.ts";
+import * as Ietf from "../ietf/index.ts";
+import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP } from "../lite/version.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
 
 const url = new URL("https://example.com/test");
@@ -84,7 +86,7 @@ test("WebTransport offers lite-06 first by default", async () => {
 });
 
 test("WebTransport negotiates lite-07-wip only when explicitly offered", async () => {
-	const { protocols, version } = await offered(ALPN_07_WIP, { webtransport: { protocols: [ALPN_07_WIP] } });
+	const { protocols, version } = await offered(ALPN_07_WIP, { versions: ["moq-lite-07-wip"] });
 	expect(protocols).toEqual(["moq-lite-07-wip"]);
 	expect(version).toBe("moq-lite-07-wip");
 });
@@ -293,6 +295,84 @@ test("SETUP preserves a delayed session close code", async () => {
 	}
 });
 
+test("versions map to WebTransport ALPNs in order", async () => {
+	const versions = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22", "moq-lite-02", "moq-transport-14"];
+	expect((await offered(ALPN_07_WIP, { versions })).protocols).toEqual([
+		ALPN_07_WIP,
+		ALPN_06,
+		Ietf.ALPN.DRAFT_22,
+		ALPN,
+	]);
+});
+
+test("versions reject empty, duplicate, unsupported and ALPN spellings", async () => {
+	for (const versions of [[], ["moq-lite-06", "moq-lite-06"], ["moq-lite-99"], ["toString"], [Ietf.ALPN.DRAFT_22]]) {
+		expect(await connect(url, { versions }).catch((err: unknown) => err)).toBeInstanceOf(TypeError);
+	}
+});
+
+test("the removed per-transport protocols fail loudly", async () => {
+	for (const props of [{ webtransport: { protocols: [ALPN_06] } }, { websocket: { protocols: [ALPN_06] } }]) {
+		await expect(connect(url, props as Omit<ConnectProps, "url">)).rejects.toThrow("protocols was removed");
+	}
+});
+
+test("a peer cannot select outside the explicit versions", async () => {
+	const pair = createMockTransportPair(ALPN_05);
+	const restore = stubWebTransport(pair.client);
+	try {
+		await expect(connect(url, { versions: ["moq-lite-06"], websocket: { enabled: false } })).rejects.toThrow(
+			`server selected an unoffered protocol: ${ALPN_05}`,
+		);
+	} finally {
+		restore();
+	}
+});
+
+test("an IETF version name negotiates its ALPN", async () => {
+	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_22);
+	const restore = stubWebTransport(pair.client);
+	try {
+		const [client, server] = await Promise.all([
+			connect(url, { versions: ["moq-transport-22"], websocket: { enabled: false } }),
+			accept({ url, transport: pair.server }),
+		]);
+		expect(client.version).toBe("moq-transport-22");
+		client.abort();
+		server.abort();
+	} finally {
+		restore();
+	}
+});
+
+test("SETUP offers only the named versions to a peer without an ALPN", async () => {
+	const pair = createMockTransportPair("");
+	const restore = stubWebTransport(pair.client);
+	try {
+		const [client, server] = await Promise.all([
+			connect(url, { versions: ["moq-lite-06", "moq-transport-14"], websocket: { enabled: false } }),
+			accept({ url, transport: pair.server }),
+		]);
+		expect(client.version).toBe("moq-transport-14");
+		client.abort();
+		server.abort();
+	} finally {
+		restore();
+	}
+});
+
+test("a peer without an ALPN is refused when no named version negotiates in SETUP", async () => {
+	const pair = createMockTransportPair("");
+	const restore = stubWebTransport(pair.client);
+	try {
+		await expect(connect(url, { versions: ["moq-lite-06"], websocket: { enabled: false } })).rejects.toThrow(
+			"server negotiated no protocol",
+		);
+	} finally {
+		restore();
+	}
+});
+
 // The WebSocket subprotocols one connect() attempt asks a server for.
 async function websocketOffer(props: Omit<ConnectProps, "url">): Promise<string[]> {
 	const original = globalThis.WebTransport;
@@ -322,26 +402,12 @@ async function websocketOffer(props: Omit<ConnectProps, "url">): Promise<string[
 	}
 }
 
-test("the WebSocket fallback offers lite-07 only when asked", async () => {
+test("the WebSocket fallback offers the same versions", async () => {
 	const defaults = await websocketOffer({});
 	expect(defaults.some((protocol) => protocol.endsWith(ALPN_06))).toBe(true);
 	expect(defaults.some((protocol) => protocol.endsWith(ALPN_07_WIP))).toBe(false);
 
-	const asked = await websocketOffer({ websocket: { protocols: [ALPN_07_WIP, ALPN_06] } });
+	const asked = await websocketOffer({ versions: ["moq-lite-07-wip", "moq-lite-06"] });
 	expect(asked[0]?.endsWith(ALPN_07_WIP)).toBe(true);
 	expect(asked.some((protocol) => protocol.endsWith(ALPN_05))).toBe(false);
-});
-
-test("the WebSocket fallback refuses an unsupported protocol", async () => {
-	const original = globalThis.WebTransport;
-	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
-	try {
-		for (const protocol of ["moq-lite-99", "toString"]) {
-			await expect(connect(url, { websocket: { protocols: [protocol] } })).rejects.toThrow(
-				"unsupported WebSocket protocol",
-			);
-		}
-	} finally {
-		globalThis.WebTransport = original;
-	}
 });

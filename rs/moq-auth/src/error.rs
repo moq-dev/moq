@@ -120,8 +120,8 @@ pub enum Error {
 	#[error("invalid stats label: {0}")]
 	InvalidLabel(moq_pattern::InvalidPattern),
 
-	#[error("the auth server refused the session")]
-	Refused,
+	#[error(transparent)]
+	Refused(#[from] crate::Refusal),
 
 	#[error("auth server unavailable: {0}")]
 	Unavailable(String),
