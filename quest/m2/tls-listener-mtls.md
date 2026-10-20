@@ -40,4 +40,4 @@ Public API: relay config may gain a listener option. Wire: none.
 ## Related
 
 - [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - carries `tls://` on the shared TCP port, where the certificate request stays on the moq ALPN
-- [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - moves qmux in-tree; if it lands first, the peer-certificate accessor lands here instead of upstream
+- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - moves qmux in-tree; if it lands first, the peer-certificate accessor lands here instead of upstream

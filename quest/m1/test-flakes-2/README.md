@@ -36,12 +36,22 @@ hit it. The same day's test cost audit added the macOS QUIC connects, and the
 redundant failover drift first: it may hide a TS export bug and failed two of
 three loaded `just check` runs.
 
+Added 2026-10-20 (maintainer): four more from that day's merge batch, the
+draft-16 cancel race first since it fails on a mocked clock and so may hide
+an ordering bug. The failed-listen test was meant to join the redial quest,
+which #6032 had already finished, so it reuses #6032's reserved-port fix as
+its own child.
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
+- [Draft-16 cancel race](/quest/m1/test-flakes-2/draft16-cancel-race.md) - the cancel-ahead-of-the-answer test settles the same way every run, fixing `run_publish_namespaces` if the order is real
 - [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md) - moq-tokio's loopback QUIC tests stop timing out on the macOS Platform job
+- [Relay bench holder](/quest/m1/test-flakes-2/relay-bench-holder.md) - the foreign-listener bench test fails fast when its holder cannot bind, instead of hanging on a fifo
+- [moq-uring host clock](/quest/m1/test-flakes-2/uring-host-clock.md) - the host clock test checks the calibration mapping instead of 1 ms of wall-clock slack
+- [moq-tokio failed listen](/quest/m1/test-flakes-2/tokio-failed-listen.md) - the failed-listen test keeps its port reserved from first bind to final check
 
 ## Related
 

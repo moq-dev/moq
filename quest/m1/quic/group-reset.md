@@ -56,5 +56,5 @@ half did not reach.
 
 ## Related
 
-- [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - qmux reuses
+- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - qmux reuses
   `moq-quic`'s reset state

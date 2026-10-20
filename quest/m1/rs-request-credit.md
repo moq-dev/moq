@@ -26,9 +26,10 @@ session trait. Also note that
 rather than dropping it, so the next request inherits it; the non-waiting open
 should avoid that. `quic::web` is in-tree and can ask `moq-quic` directly,
 but the backends `moq-tokio` wraps through `web-transport-trait` (qmux,
-iroh) have no credit query there; prefer adding one upstream in
-moq-dev/web-transport over leaving them waiting, and say in the PR which
-backends fail fast.
+iroh) have no credit query there. Decided 2026-10-20 (maintainer): no new
+work in moq-dev/web-transport, so qmux gets its query when it moves in-tree
+([qmux on moq-quic](/quest/m1/quic-qmux.md)), and iroh, an accepted
+exception, keeps waiting. Say in the PR which backends fail fast.
 
 Propose the error variant's name in the PR. Public API: one new `Error`
 variant, and possibly a `transport::poll` session method. Wire: none.
