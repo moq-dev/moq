@@ -65,7 +65,3 @@ one policy step, holds it on a `None` grant, and ramps back when the grant
 returns; a grant below the Opus floor disables the rendition, and recovered
 bandwidth enables it again even after the last viewer unsubscribed; a PCM Producer
 ignores every grant.
-
-## Closes
-
-- [#2848](https://github.com/moq-dev/moq/issues/2848) - close this issue when the quest finishes

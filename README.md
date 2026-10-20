@@ -139,7 +139,7 @@ just check --all
 just fix --all
 ```
 
-CI runs `check` as two parallel jobs, `just ci check` and `just ci test`, so it covers the same ground as your local run. It sets two things you don't: `MOQ_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
+PRs into `main` get no cloud CI until the merge queue, so run `just ci` before pushing. It runs what the queue runs, the same ground as `just check`, plus two settings: `MOQ_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
 
 See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.
 
