@@ -48,12 +48,12 @@ Restart the host VM service after replacing the token.
 The host service and disk are named by `name`: the example uses `queue-ci.service`
 and `/var/lib/queue-ci/root.qcow2`. Its disk is created once. Changing the configured
 image does not replace existing state, and changing `resources.disk` does not
-resize an existing disk. For guest updates, expose the evaluated guest through
-the host flake:
+resize an existing disk. For guest updates, expose the evaluated guest in the
+host flake's outputs (`{ self, ... }:`):
 
 ```nix
 nixosConfigurations.queue-ci =
-  nixosConfigurations.build-host.config.services.github-runner-vm.guest;
+  self.nixosConfigurations.build-host.config.services.github-runner-vm.guest;
 ```
 
 Then deploy with `nixos-rebuild switch --flake .#queue-ci --target-host
