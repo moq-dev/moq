@@ -1,4 +1,4 @@
-import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
+import { Elapsed, Instant, Milli, Nano, now, sleep, timeout } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
@@ -57,6 +57,12 @@ const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
 const PROBE_MAX_DELTA = 0.25;
 const PROBE_RTT_DELTA = 0.25;
+// How long a finished group's stream has to complete after its last write, plus its payload
+// at GROUP_COMPLETION_RATE. `Writer.close` only queues the FIN, and a stream that never
+// completes while the session stays up keeps the only copy of the group the subscriber could
+// still receive, so past this the stream is reset.
+const GROUP_COMPLETION_TIMEOUT = 3000; // ms
+const GROUP_COMPLETION_RATE = 50; // bytes per ms, the slowest uplink a group drains at
 
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `varint::zigzag`). */
 function zigzag(delta: bigint): bigint {
@@ -94,6 +100,9 @@ interface TrackInfoEntry {
 interface RunGroup {
 	/** The subscription ID. */
 	sub: bigint;
+
+	/** The subscription's cursor over the track, which learns of a group its stream failed to carry. */
+	track: track.Subscriber;
 
 	/** The group to serve. */
 	group: group.Consumer;
@@ -1229,6 +1238,7 @@ export class Publisher {
 
 				const options: RunGroup = {
 					sub,
+					track,
 					group,
 					timescale,
 					priority,
@@ -1495,7 +1505,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
-		const { sub, group, timescale, priority, start: startFrame, end: endFrame } = options;
+		const { sub, track, group, timescale, priority, start: startFrame, end: endFrame } = options;
 		// This model holds whole groups, so frame `startFrame` is always reachable unless
 		// the group ends first. Declaring it up front keeps the stream self-describing.
 		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
@@ -1515,6 +1525,8 @@ export class Publisher {
 			// Whether the cursor ever reached the requested start, which decides how the
 			// end of the group is read below.
 			let reached = startFrame === 0;
+			// Payload bytes written, which size the completion deadline.
+			let bytes = 0;
 
 			for (;;) {
 				const read = await race([hooks.readGroupFrame(group), stream.closed]);
@@ -1544,6 +1556,7 @@ export class Publisher {
 
 					await hooks.guardGroup(group, () => stream.u53(read.frame.payload.byteLength));
 					await hooks.guardGroup(group, () => stream.write(read.frame.payload));
+					bytes += read.frame.payload.byteLength;
 				} finally {
 					read.complete();
 				}
@@ -1552,7 +1565,22 @@ export class Publisher {
 			stream.close();
 			group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			return await stream.closed.then(() => undefined, error);
+			// One that never completes is reset past its deadline and reported the same way, and
+			// the track learns which group it was.
+			try {
+				return await timeout(
+					Nano.fromMilli(Milli(GROUP_COMPLETION_TIMEOUT + bytes / GROUP_COMPLETION_RATE)),
+					stream.closed.then(() => undefined, error),
+				);
+			} catch (err: unknown) {
+				if (!(err instanceof Elapsed)) throw err;
+				const stalled = new StreamError(StreamCode.DeliveryTimeout, {
+					message: `group ${group.sequence} stream never completed`,
+				});
+				stream.reset(stalled);
+				hooks.failGroup(track, group.sequence, stalled);
+				return stalled;
+			}
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);
