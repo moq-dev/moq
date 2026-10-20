@@ -510,12 +510,16 @@ type WebTransportHash = NonNullable<WebTransportOptions["serverCertificateHashes
 
 // Strip PEM armor and base64-decode to the raw DER bytes.
 function pemToDer(pem: string): Uint8Array<ArrayBuffer> {
-	const match = pem.match(/-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----/);
-	if (!match) {
+	// indexOf rather than a lazy regex, which goes quadratic on repeated BEGIN lines without an END.
+	const begin = "-----BEGIN CERTIFICATE-----";
+	const start = pem.indexOf(begin);
+	const end = start < 0 ? -1 : pem.indexOf("-----END CERTIFICATE-----", start + begin.length);
+	const body = end < 0 ? "" : pem.slice(start + begin.length, end).replace(/\s+/g, "");
+	if (!body) {
 		throw new Error("invalid PEM certificate: missing -----BEGIN/END CERTIFICATE----- armor");
 	}
 
-	const binary = atob(match[1].replace(/\s+/g, ""));
+	const binary = atob(body);
 	const der = new Uint8Array(binary.length);
 	for (let i = 0; i < binary.length; i++) {
 		der[i] = binary.charCodeAt(i);

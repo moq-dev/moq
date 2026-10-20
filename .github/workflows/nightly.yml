@@ -225,7 +225,10 @@ jobs:
           path: ${{ matrix.artifact-path }}
           retention-days: 45
 
-  # One writer owns gh-pages, including future Criterion regression history.
+  # gh-pages is the one Pages site, including future Criterion regression
+  # history. smoke.yml also commits its relay report there under relays/; each
+  # writer touches only its own directory, deploys the whole branch, and holds
+  # the benchmark-pages group so they never race.
   # Explicit Pages deployment works with GITHUB_TOKEN; a branch push alone does not.
   benchmark-site:
     name: Benchmark site
@@ -246,7 +249,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Only this main-branch publisher pushes the shared history branch.
+          # Only main-branch publishers push the shared history branch.
           persist-credentials: true
       - uses: ./.github/actions/nix
       # No dev shell: these recipes need only just, the runner's python3 and git.
