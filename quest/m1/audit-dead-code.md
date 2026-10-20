@@ -65,3 +65,12 @@ Start by comparing the live tree against these baselines:
 No public removal was justified by this run. Propose any future public
 removals separately with their migration and consumer evidence. The public
 model and performance audits own their API and benchmark decisions.
+
+A bounded follow-up on 2026-10-20 checked the source changes between the m0
+audit merge (`e900b9f62`) and `49c78f9b0`: only the TS carriage diagnostic
+helper and its tests changed. The helper has two callers; no JS, dependency,
+feature, flag, or unused-code suppression was added. Cargo-shear 1.14.0 found
+one redundant `moq-uring` self-dependency ignore, removed after confirming
+the crate's integration tests and benchmarks import it. Its post-removal run
+had no findings. This is incremental evidence, not completion of the m1
+release-cycle audit; the baselines above still need their next full pass.
