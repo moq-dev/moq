@@ -6083,6 +6083,8 @@ impl AnnounceConsumer {
 		kio::wait(|waiter| self.poll_synced(waiter)).await
 	}
 
+	// The wire sender uses this only to bound its initial replay.
+	// private: tuning
 	#[cfg(feature = "async")]
 	pub(crate) fn pending_len(&self) -> usize {
 		self.state.read().pending.len()
