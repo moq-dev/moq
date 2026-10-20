@@ -15,8 +15,11 @@ on:
   # Packaging changes only, like the other FFI release workflows. A change to
   # the moq-ffi sources is covered on every platform by cheaper gates: check.yml
   # compiles it and regenerates the Dart bindings, platform.yml compiles it for
-  # macOS, Windows, and iOS, and nightly runs this full matrix.
+  # macOS, Windows, and iOS, and nightly runs this full matrix. Main PRs skip
+  # it; `edited` catches a main PR retargeted to release.
   pull_request:
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - ".github/workflows/release-dart-ffi.yml"
       - ".github/workflows/release-ffi.yml"
@@ -43,8 +46,20 @@ jobs:
       language: dart
       # The raw bindings are checked in under dart/moq_ffi, so none here.
       bindings: false
-      # Full platform packaging remains nightly; PRs keep only Linux/Android.
-      targets: ${{ github.event_name == 'pull_request' && github.base_ref != 'release' && '["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]' || '["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim", "x86_64-apple-ios", "x86_64-pc-windows-msvc"]' }}
+      targets: >-
+        [
+          "aarch64-linux-android",
+          "armv7-linux-androideabi",
+          "x86_64-linux-android",
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "aarch64-apple-darwin",
+          "x86_64-apple-darwin",
+          "aarch64-apple-ios",
+          "aarch64-apple-ios-sim",
+          "x86_64-apple-ios",
+          "x86_64-pc-windows-msvc"
+        ]
 
   # hook/build.dart downloads moq-ffi-<version>-<target>-<library> and its
   # .sha256 from the release, so each target's shared library is renamed flat.

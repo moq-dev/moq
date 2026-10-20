@@ -14,7 +14,11 @@ on:
         type: boolean
         default: false
   workflow_dispatch:
+  # Main PRs skip it; nightly.yml runs it on main through release-shared-ffi.yml.
+  # `edited` catches a main PR retargeted to release.
   pull_request:
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - ".github/workflows/release-go-ffi.yml"
       - ".github/workflows/release-ffi.yml"
