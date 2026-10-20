@@ -57,6 +57,7 @@ import {
 	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
+	hasRefresh,
 	hasSynced,
 	hasTrackStream,
 	resolvesStart,
@@ -964,6 +965,7 @@ export class Subscriber {
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
 			priority: info.priority,
+			refresh: info.refresh,
 		};
 	}
 
@@ -1312,11 +1314,32 @@ export class Subscriber {
 			},
 		};
 
+		// The wanted group is subscription state: an update announces each new one past our
+		// largest, and every later update restates it. Joins asking for the same group
+		// coalesce into that one update.
+		let sentWanted: number | undefined;
+		const demand = track.demand();
+		const edge = hooks.producerLargest(track);
 		for (;;) {
+			const largest = edge.peek()?.group;
+			const wanted = demand.wanted.peek();
+			const refresh =
+				hasRefresh(this.version) &&
+				largest !== undefined &&
+				wanted !== undefined &&
+				wanted > largest &&
+				wanted !== sentWanted
+					? wanted
+					: undefined;
 			const current = track.subscription.peek();
-			if (current === undefined || this.#sameSubscription(current, lastSent)) {
+			if (current === undefined || (refresh === undefined && this.#sameSubscription(current, lastSent))) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await race([track.subscription.changed(), stopped]);
+				const next = await race([
+					track.subscription.changed(),
+					demand.wanted.changed(),
+					edge.changed(),
+					stopped,
+				]);
 				if (next === null) return;
 				continue;
 			}
@@ -1335,6 +1358,7 @@ export class Subscriber {
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxDelay/etc.
 			const update = new SubscribeUpdate({
+				wantedGroup: refresh ?? sentWanted,
 				priority: current.priority ?? 0,
 				order: current.order,
 				maxDelay: current.maxDelay,
@@ -1352,6 +1376,7 @@ export class Subscriber {
 			} catch {
 				return;
 			}
+			if (refresh !== undefined) sentWanted = refresh;
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}

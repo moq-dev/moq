@@ -285,6 +285,18 @@ impl Version {
 		}
 	}
 
+	/// Whether TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE a wanted group,
+	/// so a join at any hop reaches the publisher. Added in lite-07; older peers see a
+	/// track that never refreshes.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_refresh(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether discovery streams end their initial set with SYNCED rather than a count.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_synced(self) -> bool {
