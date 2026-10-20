@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `ts::Passthrough` describes the whole track in its `m2ts` section (#5967)
+
+The section's `randomAccess` turns false at the first group that does not start at a random access point and stays false, instead of recovering with the next two-second window; its `muxRate` follows the source's measured rate.
+A consumer that waited for `randomAccess` to return after a fallback cut now waits forever: treat false as final for the track.
+A source that never marks random access gets a group one second after each group's start, rather than on a one-second grid shared by every importer, and the first catalog names the track with its first group instead of after the first window.
+
 ### `catalog::Timebase::is_on` is removed (#5967)
 
 Nothing needs to check which catalog a timebase came from any more: mint it from the catalog the importer writes, with `Producer::timebase` or `Producer::reserve`, and drop the call.
