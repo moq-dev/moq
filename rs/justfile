@@ -89,7 +89,7 @@ tokio-features *args:
 
 # Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
 # skips; platform.yml runs it on a Windows runner, scoped like `check-changed`
-# so the merge queue compiles only the affected crates. Default
+# so a release PR compiles only the affected crates. Default
 # features, since jemalloc doesn't build on MSVC.
 
 # Compile what the branch changed since BASE on a Windows host, or everything with `--all`.

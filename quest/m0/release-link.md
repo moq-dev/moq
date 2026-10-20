@@ -27,9 +27,9 @@ NixOS/nixpkgs#568680. With `staging-next`'s (aaba2f7c9) `zig` and
 `cargo-zigbuild`, `cargo zigbuild --locked --release --target
 x86_64-unknown-linux-gnu.2.34 -p moq-relay` links.
 
-Remaining work: once the fix reaches `nixpkgs-unstable`, bump `flake.lock`
-(or take the weekly Dependabot nix bump), then confirm the same command for
-`moq-relay`, `moq-cli` and `moq-gst` on both Linux targets.
+NixOS/nixpkgs#568680 is now in `nixpkgs-unstable`. Remaining work: bump
+`flake.lock` (or take the weekly Dependabot nix bump), then confirm the same
+command for `moq-relay`, `moq-cli` and `moq-gst` on both Linux targets.
 
 `release` still pins the pre-bump nixpkgs, so shipping releases are fine;
 only the next `main` -> `release` merge carries the break.
@@ -44,7 +44,3 @@ Decisions (maintainer, 2026-10-13):
   cost plan (#5426).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [nixpkgs ships the lld fix](/quest/m0/nixpkgs-lld-fix.md) - NixOS/nixpkgs#568680 reaches `nixpkgs-unstable`
