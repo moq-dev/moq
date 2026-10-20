@@ -23,6 +23,8 @@ broadcast and does not keep it open. `ContainerProducer` takes chunks split anyw
 so a raw byte stream needs no other importer.
 `MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
+JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
+and `await consumer.latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
 `moq.flate.SnapshotProducer` / `StreamProducer` publish opaque payloads; their `update` / `append`
 and the JSON producers accept `timestamp=timedelta(...)` (`None` for untimed).

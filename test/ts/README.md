@@ -569,6 +569,12 @@ outside media packets (moq-dev/moq#5362). `--full` exports at 900 ms, above its
 source's lead of about 0.65 s, which absorbs a small excess for a while, so it also
 runs `overhead.py` on the source and capture before the compliance report.
 
+ffmpeg pads its multiplex with nulls, so `drop_nulls.py` removes them before the PCRs
+are restamped at the rate the rest fill. Restamping alone would move each packet by the
+nulls' uneven spread before it, tens of milliseconds, and the DVB AC-3 the export carries
+at its source placement would arrive after it decodes. So every PID but the video keeps
+its time in the padded clip, and the video, sent most of a second ahead, absorbs the rest.
+
 ```bash
 ./overhead.py source.ts capture.ts
 ```

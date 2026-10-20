@@ -307,3 +307,23 @@ test.each([Version.DRAFT_03, Version.DRAFT_05, Version.DRAFT_06])(
 		expect(decoded.order).toBe("descending");
 	},
 );
+
+test("wanted group survives lite-07 and disappears on legacy wires", async () => {
+	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+		for (const wantedGroup of [undefined, 0, 3, Number.MAX_SAFE_INTEGER]) {
+			const update = new SubscribeUpdate({ priority: 7, wantedGroup });
+			const encoded = await encodeMessage(version, update);
+			const decoded = await SubscribeUpdate.decode(new Reader(undefined, encoded, version), version);
+			expect(decoded.wantedGroup).toBe(version === Version.DRAFT_07 ? wantedGroup : undefined);
+		}
+	}
+});
+
+test("wanted groups refuse malformed input before writing bytes", async () => {
+	for (const wantedGroup of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN]) {
+		expect(() => new SubscribeUpdate({ priority: 0, wantedGroup })).toThrow(RangeError);
+		const update = new SubscribeUpdate({ priority: 0 });
+		update.wantedGroup = wantedGroup;
+		await expect(encodeMessage(Version.DRAFT_07, update)).rejects.toThrow(RangeError);
+	}
+});

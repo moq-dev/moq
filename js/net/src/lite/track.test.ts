@@ -201,3 +201,14 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 		}
 	});
 }
+
+test("refresh ratio survives lite-07 and disappears on legacy wires", async () => {
+	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+		for (const refresh of [undefined, 0, 3, 0xffff_ffff]) {
+			const info = new TrackInfo({ priority: 7, refresh });
+			const encoded = await bytes((w) => info.encode(w, version), version);
+			const decoded = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
+			expect(decoded.refresh).toBe(version === Version.DRAFT_07 ? refresh : undefined);
+		}
+	}
+});

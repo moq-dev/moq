@@ -198,6 +198,8 @@ impl Message for AuthError {
 const UNAUTHORIZED: u64 = 0x1;
 const NOT_SUPPORTED: u64 = 0x3;
 const EXPIRED_AUTH_TOKEN: u64 = 0x5;
+/// Draft-17 assigned it, the first draft this extension negotiates on.
+const GOING_AWAY: u64 = 0x6;
 
 /// The AUTH_ERROR code for a refusal. The public API speaks session codes, and the
 /// actionable distinctions this registry carries are unsupported, expired, and unauthorized.
@@ -214,8 +216,24 @@ fn from_code(code: u64) -> Error {
 	match code {
 		NOT_SUPPORTED => Error::Unsupported,
 		EXPIRED_AUTH_TOKEN => Error::Expired,
+		GOING_AWAY => Error::GoingAway,
 		_ => Error::Session(SessionError::Unauthorized),
 	}
+}
+
+/// Refuse an AUTH past our GOAWAY cutoff with AUTH_ERROR, the only answer its presenter reads.
+#[cfg(feature = "async")]
+pub(super) async fn refuse_going_away<S: crate::transport::poll::Session>(
+	mut stream: Stream<S, Version>,
+) -> Result<(), Error> {
+	let reply = AuthError {
+		code: GOING_AWAY,
+		reason: "going away".to_string(),
+	};
+	stream.writer.encode_message(&reply).await?;
+	// A peer dropping the response after reading the refusal is a normal end.
+	let _ = stream.writer.close().await;
+	Ok(())
 }
 
 /// What the peer's connection credential earns by default: publishing what our
@@ -328,14 +346,15 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 		}
 
 		let mut answered = false;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		loop {
 			enum Next {
 				Withdrawn,
-				Reply(Result<Option<(u64, super::Body)>, Error>),
+				Reply(Result<Option<super::request_stream::Framed>, Error>),
 			}
 
 			let next = {
-				let mut read = std::pin::pin!(read_message(&mut stream));
+				let mut read = std::pin::pin!(messages.next(&mut stream.reader));
 				kio::wait(|waiter| {
 					if self.handle.poll_withdrawn(self.id, waiter).is_ready() {
 						return Poll::Ready(Next::Withdrawn);
@@ -348,7 +367,7 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 			let (id, body) = match next {
 				// Resetting our side is what tells the peer.
 				Next::Withdrawn => return Error::Cancel,
-				Next::Reply(Ok(Some(msg))) => msg,
+				Next::Reply(Ok(Some(super::request_stream::Framed(id, body)))) => (id, body),
 				// The peer ended the grant without revoking it.
 				Next::Reply(Ok(None)) if answered => return Error::Cancel,
 				// A peer that closes before answering could not tell us anything.
@@ -386,9 +405,9 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 					};
 					let err = from_code(refused.code);
 					tracing::warn!(%err, code = refused.code, reason = %refused.reason, "auth token refused");
-					// A grant the acceptor could not tell is unknown, not empty, so only a
-					// real refusal settles the union.
-					if !matches!(err, Error::Unsupported) {
+					// A grant the acceptor could not tell, or never judged, is unknown, not
+					// empty, so only a real refusal settles the union.
+					if !matches!(err, Error::Unsupported | Error::GoingAway) {
 						self.handle.refused(self.id);
 					}
 					return err;
@@ -407,18 +426,6 @@ fn decode_reply<T: Message>(body: &super::Body, version: Version) -> Result<T, E
 		return Err(Error::WrongSize);
 	}
 	Ok(msg)
-}
-
-/// Read one `[type][size][body]` message, or `None` once the peer finished the stream.
-#[cfg(feature = "async")]
-async fn read_message<S: crate::transport::poll::Session>(
-	stream: &mut Stream<S, Version>,
-) -> Result<Option<(u64, super::Body)>, Error> {
-	let Some(id) = stream.reader.varint_maybe().await? else {
-		return Ok(None);
-	};
-	let body: super::Body = stream.reader.decode().await?;
-	Ok(Some((id, body)))
 }
 
 /// Answers the peer's Auth requests: the app's verdict when it took the requests,
@@ -440,6 +447,7 @@ impl Serve {
 		msg: Auth,
 		version: Version,
 	) -> Result<(), Error> {
+		let mut goaways = super::request_stream::GoAways::new(msg.request_id.0 % 2 == 1);
 		let serving = Serving::new(self.handle.clone());
 		let issue = &serving.issue;
 		let mut default = None;
@@ -463,7 +471,16 @@ impl Serve {
 			None => default = Some(crate::auth::DefaultGrant::new(self.handle.clone(), self.peer_grant)),
 		}
 
-		let err = match serve_issue(&self.runtime, issue, default.as_mut(), &mut stream, version).await {
+		let err = match serve_issue(
+			&self.runtime,
+			issue,
+			default.as_mut(),
+			&mut stream,
+			version,
+			&mut goaways,
+		)
+		.await
+		{
 			Ok(()) => Error::Cancel,
 			Err(err) => {
 				match &err {
@@ -489,6 +506,19 @@ impl Serve {
 	}
 }
 
+/// Anything but a GOAWAY after the presenter's Auth: refused once its type is read,
+/// rather than waiting on a body that cannot make it legal.
+#[cfg(feature = "async")]
+#[derive(Debug)]
+struct Unexpected;
+
+#[cfg(feature = "async")]
+impl crate::coding::Decode<Version> for Unexpected {
+	fn decode(r: &mut crate::coding::Decoder<'_>, _: Version) -> Result<Self, crate::coding::DecodeError> {
+		Err(crate::coding::DecodeError::InvalidMessage(r.varint()?))
+	}
+}
+
 /// Write the acceptor's replies until either side ends the token. `default` feeds
 /// the default acceptor's grant into the outbox as it changes.
 #[cfg(feature = "async")]
@@ -498,6 +528,7 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 	mut default: Option<&mut crate::auth::DefaultGrant>,
 	stream: &mut Stream<S, Version>,
 	version: Version,
+	goaways: &mut super::request_stream::GoAways,
 ) -> Result<(), Error> {
 	enum Next {
 		Withdrawn(Result<(), Error>),
@@ -507,12 +538,10 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 	loop {
 		let next = kio::wait(|waiter| {
 			let mut cx = std::task::Context::from_waker(waiter.waker());
-			if let Poll::Ready(res) = stream.reader.poll_read_chunk(&mut cx, 1).map(|res| {
-				res.and_then(|chunk| match chunk {
-					None => Ok(()),
-					Some(_) => Err(Error::ProtocolViolation),
-				})
-			}) {
+			if let Poll::Ready(res) = goaways
+				.poll_next::<Unexpected, _>(&mut stream.reader, &mut cx)
+				.map(|res| res.map(|_| ()))
+			{
 				return Poll::Ready(Next::Withdrawn(res));
 			}
 			if let Some(default) = default.as_deref_mut()

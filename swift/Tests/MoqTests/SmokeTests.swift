@@ -278,18 +278,23 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.SnapshotProducer<Status>(
-            broadcast: broadcast, track: try broadcast.publishTrack(name: "status"), compression: true)
+            broadcast: broadcast,
+            track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000)),
+            compression: true)
         let consumer = try Json.SnapshotConsumer<Status>(
             track: try await broadcast.consume().subscribeTrack(name: "status"), compression: true)
 
-        try producer.update(Status(state: "live", viewers: 42))
-        let first = try await consumer.next()
-        XCTAssertEqual(first, Status(state: "live", viewers: 42))
+        for viewers in 1...4 {
+            try producer.update(Status(state: "live", viewers: viewers), timestampUs: UInt64(viewers) * 1000)
+        }
 
-        // A second update supersedes the first; a late reader collapses to the latest.
-        try producer.update(Status(state: "live", viewers: 43))
+        // `next` yields every state in order; `latest` skips the buffered third.
+        let first = try await consumer.next()
+        XCTAssertEqual(first, Json.Timed(value: Status(state: "live", viewers: 1), timestampUs: 1000))
         let second = try await consumer.next()
-        XCTAssertEqual(second, Status(state: "live", viewers: 43))
+        XCTAssertEqual(second, Json.Timed(value: Status(state: "live", viewers: 2), timestampUs: 2000))
+        let latest = try await consumer.latest()
+        XCTAssertEqual(latest, Json.Timed(value: Status(state: "live", viewers: 4), timestampUs: 4000))
 
         consumer.cancel()
         try producer.finish()
@@ -310,7 +315,7 @@ final class SmokeTests: XCTestCase {
         for n in 0..<3 {
             try producer.append(Event(n: n))
             let record = try await consumer.next()
-            XCTAssertEqual(record, Event(n: n))
+            XCTAssertEqual(record, Json.Timed(value: Event(n: n), timestampUs: nil))
         }
 
         consumer.cancel()
