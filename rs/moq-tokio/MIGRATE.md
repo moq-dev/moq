@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `jemalloc::tikv_jemallocator` is 0.7
+### `jemalloc::tikv_jemallocator` is 0.7 (#6053)
 
 The re-exported allocator crate moved from tikv-jemallocator 0.6 to 0.7.
 Name the allocator through `moq_tokio::jemalloc::tikv_jemallocator`, or bump your own tikv-jemallocator to 0.7.
