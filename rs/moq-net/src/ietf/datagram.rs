@@ -58,6 +58,12 @@ impl ObjectDatagram {
 	}
 }
 
+/// Whether `version` lets a datagram of Object Status `status` carry properties: from
+/// draft-17 on, only a Normal Object may.
+pub(super) fn carries_properties(status: u64, version: Version) -> bool {
+	status == 0 || matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+}
+
 impl Encode<Version> for ObjectDatagram {
 	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		let mut kind = 0;
@@ -99,9 +105,7 @@ impl Encode<Version> for ObjectDatagram {
 
 		match &self.body {
 			DatagramBody::Status(status) => {
-				// Draft-17 on: only a Normal Object may carry Properties.
-				let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
-				if !legacy && *status != 0 && self.properties.is_some() {
+				if self.properties.is_some() && !carries_properties(*status, version) {
 					return Err(EncodeError::InvalidState);
 				}
 				w.varint(*status)?
@@ -146,9 +150,7 @@ impl Decode<Version> for ObjectDatagram {
 		let body = match kind & flag::STATUS != 0 {
 			true => {
 				let status = r.varint()?;
-				// Draft-17 on: only a Normal Object may carry Properties.
-				let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
-				if !legacy && status != 0 && properties.is_some() {
+				if properties.is_some() && !carries_properties(status, version) {
 					return Err(DecodeError::InvalidValue);
 				}
 				if !r.is_empty() {

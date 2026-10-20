@@ -64,6 +64,8 @@ export class Subscribe {
 	trackNamespace: Path.Valid;
 	trackName: string;
 	subscriberPriority: number;
+	/** Subscriber max age in milliseconds (MoQ Timestamp), if negotiated. */
+	maxAge?: number;
 
 	/** The order the publisher is asked to deliver groups in (GROUP_ORDER). Defaults to descending. */
 	groupOrder: Order;
@@ -97,6 +99,7 @@ export class Subscribe {
 		trackNamespace,
 		trackName,
 		subscriberPriority,
+		maxAge,
 		groupOrder,
 		filter,
 		fill,
@@ -110,6 +113,7 @@ export class Subscribe {
 		trackNamespace: Path.Valid;
 		trackName: string;
 		subscriberPriority: number;
+		maxAge?: number;
 		groupOrder?: Order;
 		filter?: Filter.Filter;
 		fill?: Filter.Fill;
@@ -123,6 +127,7 @@ export class Subscribe {
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 		this.subscriberPriority = subscriberPriority;
+		this.maxAge = maxAge;
 		this.groupOrder = groupOrder ?? "descending";
 		this.filter = filter ?? { kind: "unfiltered" };
 		this.fill = fill;
@@ -146,11 +151,14 @@ export class Subscribe {
 			await w.u8(encodeGroupOrder(this.groupOrder));
 			await w.bool(this.forward);
 			await w.write(Filter.encode(this.filter, version));
-			await w.u53(0); // no parameters
+			const params = new Parameters();
+			params.maxAge = this.maxAge;
+			await params.encode(w, version);
 		} else {
 			// v15+: fields moved into parameters
 			const params = new Parameters();
 			params.subscriberPriority = this.subscriberPriority;
+			params.maxAge = this.maxAge;
 			params.groupOrder = encodeGroupOrder(this.groupOrder);
 			params.forward = this.forward;
 			params.subscriptionFilter = this.filter;
@@ -197,10 +205,11 @@ export class Subscribe {
 			const forward = await r.bool();
 			const filter = await Filter.decodeInline(r);
 
-			await Parameters.decode(r, version); // ignore parameters
+			const params = await Parameters.decode(r, version, "subscribe");
 
 			return new Subscribe({
 				requestId,
+				maxAge: params.maxAge,
 				trackNamespace,
 				trackName,
 				subscriberPriority,
@@ -235,6 +244,7 @@ export class Subscribe {
 		const fill = rawFill !== undefined ? Filter.decodeFill(rawFill, version) : undefined;
 
 		return new Subscribe({
+			maxAge: params.maxAge,
 			requestId,
 			trackNamespace,
 			trackName,

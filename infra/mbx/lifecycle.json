@@ -1,0 +1,11 @@
+{
+	"rules": [
+		{
+			"id": "expire",
+			"enabled": true,
+			"conditions": { "prefix": "" },
+			"deleteObjectsTransition": { "condition": { "type": "Age", "maxAge": 2592000 } },
+			"abortMultipartUploadsTransition": { "condition": { "type": "Age", "maxAge": 86400 } }
+		}
+	]
+}

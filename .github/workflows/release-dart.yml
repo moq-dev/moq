@@ -8,7 +8,13 @@ on:
   push:
     tags:
       - "moq-dart-v*"
+  # Dry-run: check the source package, publish nothing. Only a tag push
+  # publishes, so nightly.yml calls this on main in place of main PRs.
+  workflow_call:
+  # `edited` catches a main PR retargeted to release.
   pull_request:
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - ".github/workflows/release-dart.yml"
       - "dart/moq/**"
@@ -46,7 +52,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+          if [[ "$EVENT_NAME" != "push" ]]; then
             VERSION=$(sed -n 's/^version: //p' dart/moq/pubspec.yaml | head -1)
           else
             just gh release parse-version moq-dart
@@ -54,8 +60,8 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Check source package (PR)
-        if: github.event_name == 'pull_request'
+      - name: Check source package (dry-run)
+        if: github.event_name != 'push'
         working-directory: dart/moq
         run: |
           if [ -f pubspec.lock ]; then

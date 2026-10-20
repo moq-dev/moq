@@ -62,8 +62,10 @@ The cut:
   rejection. If SETUP keeps its own rule, the lite-07 changelog still names
   that rejection, not only the cap.
 
-Decided 2026-10-17: SUBSCRIBE_ALL joins Required, so lite-07 ships the
-prefix-scoped request the archive line and IETF SUBSCRIBE_TRACKS mapping need.
+Decided 2026-10-17: the archive line's discovery request joins Required, so
+lite-07 ships what the archive and the IETF SUBSCRIBE_TRACKS mapping need.
+On 2026-10-19 TRACKS, a per-broadcast track listing, replaced SUBSCRIBE_ALL
+and kept that slot.
 The `Time(pts)` range end rides in Subscribe ranges, already Required.
 
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
@@ -82,13 +84,12 @@ is published; older versions are unchanged.
 - [In-band auth](/quest/m1/auth/README.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
 - [Identity proof](/quest/m1/cluster-routing/identity.md) - lite-07 carries the routing key and its per-session proof
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`
+- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - settles what lite-07's DROP Error Code means
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
-- [Refresh on the lite wire](/quest/m1/refresh/lite.md) - TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE the wanted group
 - [Compressed tracks in Rust](/quest/m1/compress/core.md) - TRACK_INFO carries the compress flag and the frame header each compressed frame's inflated size
 - [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
-- [SUBSCRIBE_ALL](/quest/m1/archive/subscribe-all.md) - lite-07 carries the prefix-scoped request for every track of every broadcast under a path
+- [TRACKS](/quest/m1/archive/tracks.md) - lite-07 carries the request listing a broadcast's tracks as they appear
 
 ## Related
 

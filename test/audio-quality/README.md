@@ -255,9 +255,10 @@ The nightly `Audio quality` job runs the browser rows under `--enforce` and the 
 only, until an intermittent two-second device stall that voids about one AAC native row in seven is
 fixed. It keeps every run directory for a week as the `audio-quality-run` artifact: each process's log, the shaper's counters, every row's raw
 samples and summary. The
-replays also run under `--enforce` on every PR that touches the player's packages (`js/watch`,
-`js/hang`, `js/net`, `js/signals`) or the harness (`.github/workflows/audio-quality.yml`), so a
-change that moves them updates `budgets.json` in the same PR.
+replays also run under `--enforce` nightly on `main` and on every release PR that touches the
+player's packages (`js/watch`, `js/hang`, `js/net`, `js/signals`) or the harness
+(`.github/workflows/audio-quality.yml`). A change that moves them updates `budgets.json` in the
+same PR, so run `just test audio-quality --replays --enforce` before pushing one.
 
 ## Layout
 

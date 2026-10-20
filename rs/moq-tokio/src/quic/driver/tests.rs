@@ -827,7 +827,7 @@ fn echo_dualstack() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "receive-window stress test; run nightly with just rs quic-stress"]
 #[cfg_attr(target_os = "solaris", ignore = "Hangs in poll() on Solaris")]
 fn stress_receive_window() {
     run_echo(EchoArgs {
@@ -841,7 +841,7 @@ fn stress_receive_window() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "receive-window stress test; run nightly with just rs quic-stress"]
 #[cfg_attr(target_os = "solaris", ignore = "Hangs in poll() on Solaris")]
 fn stress_stream_receive_window() {
     // Note that there is no point in running this with too many streams,
@@ -857,7 +857,7 @@ fn stress_stream_receive_window() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "receive-window stress test; run nightly with just rs quic-stress"]
 #[cfg_attr(target_os = "solaris", ignore = "Hangs in poll() on Solaris")]
 fn stress_both_windows() {
     run_echo(EchoArgs {

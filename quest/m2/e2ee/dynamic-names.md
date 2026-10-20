@@ -2,7 +2,7 @@
 
 ## Goal
 
-A written design, approved by the maintainer before any implementation, for
+A written design, approved by the maintainer before any dynamic-name implementation, for
 how an e2ee publisher answers a request for a track name it never declared.
 It compares at least three options against the threat model of
 [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md):
@@ -20,8 +20,12 @@ Decided with the maintainer on 2026-10-17:
 
 - Design-only, with a design-review gate: open the PR as a draft and get the
   maintainer's approval of the choice before any implementation quest starts.
-- [#5876](https://github.com/moq-dev/moq/pull/5876) (the e2ee broadcast
-  wrappers, with `reserve_track`) is held until this quest decides.
+- The Rust publishers do not wait on it (maintainer, 2026-10-19): the
+  broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876),
+  and [rust-publish](/quest/m2/e2ee/rust-publish.md) declares every track it
+  serves. [Reopen](/quest/m2/e2ee/reopen.md) and the
+  [consumer shape](/quest/m2/e2ee/consumer.md) still wait, since the chosen
+  mapping can change the physical names they handle.
 
 Background: a physical track name is a one-way HKDF of the semantic name
 (the draft's Key Derivation section). Only the CDN sees physical names, and a

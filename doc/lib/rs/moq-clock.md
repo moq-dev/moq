@@ -25,7 +25,8 @@ and `performance.now()` with `setTimeout` in the browser. Nothing is plumbed
 through. On native, every unpaused runtime and every plain thread share one
 clock, so their instants compare. A paused tokio runtime has its own clock,
 and it pauses the instant but not wall time. The simulator is its own clock
-too.
+too. A runtime that reads the time itself, like a moq-uring worker, enters a
+`Deadlines` queue on its thread, and the ambient clock is that queue.
 
 Instants from different clocks don't compare, and there is no conversion back
 to `std::time::Instant`.

@@ -4,10 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Dropping an unfinished send stream resets it
+### Dropping an unfinished send stream resets it (#5909)
 
 `quic::driver::SendStream` and `quic::web::SendStream` send `RESET_STREAM` with code 0 when dropped before `finish()`, instead of finishing implicitly.
 Call `finish()` before dropping a stream whose data should arrive whole.
+
+### `jemalloc::tikv_jemallocator` is 0.7 (#6053)
+
+The re-exported allocator crate moved from tikv-jemallocator 0.6 to 0.7.
+Name the allocator through `moq_tokio::jemalloc::tikv_jemallocator`, or bump your own tikv-jemallocator to 0.7.
+
+### Usage types come from usage-rs 7 (#6060)
+
+The `Args` and `Config` derives now implement usage-rs 7 traits, and `cli::usage` is renamed `cli::usage_rs`.
+A CLI that flattens these types depends on `usage-rs = "7"` under its own name: the derives emit `::usage_rs` paths and no longer read `Cargo.toml`.
+Rename a `usage = { package = "usage-rs" }` alias to `usage-rs`, or add `#[usage(crate = usage)]` to each derive.
 
 ### Key logging is opt-in (#5907)
 

@@ -19,6 +19,8 @@ updates catalog properties and sections without keeping the broadcast open.
 Its writes fail after closing or releasing the broadcast.
 `Flate.SnapshotProducer` / `StreamProducer` publish opaque bytes with an optional `timestampUs`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
+`Json` consumers yield `Json.Timed` (`value`, `timestampUs`); a snapshot consumer yields each state in order,
+and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `Media.CatalogProducer.now()` to stamp a locally
@@ -118,6 +120,6 @@ A catalog that needs a newer moq-hang draft than this build reads raises `MoqErr
 
 ## Reference
 
-- API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
+- API source: [swift/Sources/Moq](https://github.com/moq-dev/moq/tree/main/swift/Sources/Moq)
 - Source: [`swift/`](https://github.com/moq-dev/moq/tree/main/swift); `just swift check` builds and tests on a Mac
 - Packages SPM resolves: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)

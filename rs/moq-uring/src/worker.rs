@@ -4,14 +4,16 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use io_uring::{EnterFlags, IoUring, opcode, types};
+use moq_clock::Instant;
 
+use crate::clock::{Clock, Wait};
 use crate::metrics::Metrics;
 use crate::park::{FUTEX_BITSET_MATCH_ANY, FUTEX2_PRIVATE, FUTEX2_SIZE_U32, PARKED, RUNNING, Unpark};
 use crate::shared::{Cqe, Op, Shared, Task};
-use crate::{Error, timer, udp};
+use crate::{Error, udp};
 
 /// Submission queue depth. The SQ only holds SQEs staged between submits,
 /// never in-flight operations, so it needs no relation to the socket pools;
@@ -79,7 +81,7 @@ impl Clone for Config {
 	}
 }
 
-/// A thread-pinned io_uring executor: the ring, a timer heap, and a local
+/// A thread-pinned io_uring executor: the ring, a timer queue, and a local
 /// (`!Send`) task set, driven by a caller-owned loop.
 ///
 /// Create one per thread, keep it on that thread (`!Send`), and drive it with
@@ -104,6 +106,11 @@ pub struct Worker {
 	cqes: Vec<Cqe>,
 	/// Whether the park-word `FUTEX_WAIT` SQE is in flight.
 	futex_armed: bool,
+	/// Registered on the timer queue, so a deadline armed off this thread while
+	/// parked wakes the worker to re-park for it.
+	owner: kio::Waiter,
+	/// A manual clock's wake for the next deadline; the host clock needs none.
+	alarm: Option<moq_clock::Sleep>,
 }
 
 impl Worker {
@@ -145,13 +152,19 @@ impl Worker {
 			)));
 		}
 
+		let clock = Clock::new();
+		let deadlines = moq_clock::Deadlines::new(clock.now());
+		let unpark = Unpark::new(metrics.clone());
 		Ok(Self {
+			owner: kio::Waiter::new(unpark.waker()),
 			shared: Rc::new(Shared {
 				ring: RefCell::new(ring),
 				ops: RefCell::new(slab::Slab::new()),
-				timers: Rc::new(RefCell::new(timer::Heap::new(metrics.clone()))),
+				clock,
+				deadlines,
+				turning: std::cell::Cell::new(false),
 				spawns: RefCell::new(Vec::new()),
-				unpark: Unpark::new(metrics.clone()),
+				unpark,
 				metrics,
 				next_bgid: std::cell::Cell::new(0),
 				stopped: std::cell::Cell::new(false),
@@ -161,6 +174,7 @@ impl Worker {
 			park: kio::Park::default(),
 			cqes: Vec::new(),
 			futex_armed: false,
+			alarm: None,
 		})
 	}
 
@@ -176,11 +190,19 @@ impl Worker {
 	/// Spawned tasks run alongside it and keep running across calls; they do
 	/// not keep `block_on` alive. An `Err` means the ring itself failed, which
 	/// is fatal to the worker.
+	///
+	/// While it runs, the worker's clock is the thread's ambient
+	/// [`moq_clock`] clock: [`moq_clock::now`] reads the instant the current
+	/// turn sampled, and [`moq_clock::sleep`] arms this worker's timers.
 	pub fn block_on<F: Future>(&mut self, future: F) -> Result<F::Output, Error> {
 		let mut future = std::pin::pin!(future);
 		let waker = self.shared.unpark.waker();
+		let _turn = Turn::enter(&self.shared);
 		loop {
 			self.shared.metrics.turns.add(1);
+			// The turn's one clock read: every timer due by now fires, and
+			// everything polled below sees this instant.
+			self.shared.deadlines.advance(self.shared.clock.now());
 			// Adopt tasks spawned since the last turn (spawning wakes us).
 			let spawns = std::mem::take(&mut *self.shared.spawns.borrow_mut());
 			for task in spawns {
@@ -196,7 +218,6 @@ impl Worker {
 			// registered for the next push.
 			let _ = self.tasks.poll(waiter);
 
-			self.shared.timers.borrow_mut().fire(Instant::now());
 			self.pump()?;
 			self.maybe_park()?;
 		}
@@ -224,8 +245,9 @@ impl Worker {
 	}
 
 	fn reap(&mut self, deadline: Option<Instant>) -> Result<(), Error> {
+		let clock = self.shared.clock.clone();
 		loop {
-			if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+			if deadline.is_some_and(|deadline| clock.host_now() >= deadline) {
 				return Ok(());
 			}
 			// Copy the completions out so dispatch can borrow the ring (to
@@ -246,7 +268,7 @@ impl Worker {
 					}));
 			}
 			self.shared.metrics.completions.add(self.cqes.len() as u64);
-			if self.cqes.is_empty() || !self.dispatch_batch(deadline, Instant::now) {
+			if self.cqes.is_empty() || !self.dispatch_batch(deadline, || clock.host_now()) {
 				return Ok(());
 			}
 		}
@@ -326,14 +348,15 @@ impl Worker {
 		// especially sends, must still reach the kernel before it gates draining.
 		let submission_failed = self.submit_teardown().is_err();
 		if !submission_failed {
+			let clock = self.shared.clock.clone();
 			loop {
 				if self.shared.ops.borrow().is_empty() {
 					return;
 				}
-				if Instant::now() >= deadline || self.pump_until(deadline).is_err() {
+				if clock.host_now() >= deadline || self.pump_until(deadline).is_err() {
 					break;
 				}
-				let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+				let Some(remaining) = deadline.checked_duration_since(clock.host_now()) else {
 					break;
 				};
 				let mut ring = self.shared.ring.borrow_mut();
@@ -413,6 +436,19 @@ impl Worker {
 			return Ok(());
 		}
 
+		// Registered while parked: a deadline armed off this thread before this
+		// read is in it, and one after wakes the owner, which unparks.
+		let deadline = self.shared.deadlines.park(&self.owner);
+		let mut cx = self.owner.context();
+		let wait = match self.shared.clock.wait(deadline, &mut self.alarm, &mut cx) {
+			Wait::Elapsed => {
+				unpark.word.store(RUNNING, Ordering::Release);
+				return Ok(());
+			}
+			Wait::Forever => None,
+			Wait::Until(at) => Some(types::Timespec::new().sec(at.as_secs()).nsec(at.subsec_nanos())),
+		};
+
 		// Keep exactly one FUTEX_WAIT armed. It waits while the word still
 		// holds PARKED; a remote unpark stores NOTIFIED and kicks the futex,
 		// and if the store lands before this submission the wait completes
@@ -435,19 +471,17 @@ impl Worker {
 			self.futex_armed = true;
 		}
 
-		let deadline = self.shared.timers.borrow().next();
 		self.shared.metrics.parks.add(1);
 		let result = {
 			let mut ring = self.shared.ring.borrow_mut();
 			let to_submit = ring.submission().len() as u32;
 			let before = ring.completion().len();
 			let submitter = ring.submitter();
-			let result = match deadline {
+			let result = match wait {
 				None => submitter.submit_and_wait(1),
-				Some(at) => {
+				Some(ts) => {
 					// Zero timeout SQEs: the earliest userspace deadline rides
 					// the enter call as an absolute CLOCK_MONOTONIC timeout.
-					let ts = abs_timespec(at);
 					let args = types::SubmitArgs::new().timespec(&ts);
 					let flags = EnterFlags::GETEVENTS | EnterFlags::EXT_ARG | EnterFlags::ABS_TIMER;
 					// SAFETY: `args` (and the timespec it references) outlive
@@ -478,13 +512,37 @@ impl Worker {
 	}
 }
 
+/// A running turn: the worker's queue is the ambient clock and holds the
+/// current instant until this drops.
+struct Turn {
+	shared: Rc<Shared>,
+	_ambient: moq_clock::Entered,
+}
+
+impl Turn {
+	fn enter(shared: &Rc<Shared>) -> Self {
+		shared.turning.set(true);
+		Self {
+			shared: shared.clone(),
+			_ambient: shared.deadlines.enter(),
+		}
+	}
+}
+
+impl Drop for Turn {
+	fn drop(&mut self) {
+		self.shared.turning.set(false);
+	}
+}
+
 impl Drop for Worker {
 	fn drop(&mut self) {
 		// Handles may outlive us; everything they try from here on fails
 		// instead of pending on a loop that will never run again.
 		self.shared.stopped.set(true);
-		// One deadline bounds cancellation staging and draining together.
-		let deadline = Instant::now() + TEARDOWN_TIMEOUT;
+		// One deadline bounds cancellation staging and draining together. It is
+		// on the host's time, so it passes even on a manual clock.
+		let deadline = self.shared.clock.host_now() + TEARDOWN_TIMEOUT;
 		// The kernel may still write into provided buffers and read send
 		// headers owned by the ops slab. Queue cancels behind every staged
 		// receive and the futex, so partial submissions cannot strand an
@@ -499,7 +557,7 @@ impl Drop for Worker {
 			.collect();
 		let mut cancellation_failed = false;
 		for key in cancel {
-			if Instant::now() >= deadline {
+			if self.shared.clock.host_now() >= deadline {
 				cancellation_failed = true;
 				break;
 			}
@@ -593,15 +651,26 @@ pub(crate) struct Owner {
 	/// the driver that owns it is torn down by the same drop that would need
 	/// it.
 	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
-	timers: Rc<RefCell<timer::Heap>>,
+	deadlines: moq_clock::Deadlines,
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	metrics: std::sync::Arc<crate::metrics::Counters>,
 }
 
 impl Owner {
 	pub(crate) fn new(shared: &Rc<Shared>) -> Self {
 		Self {
 			shared: Rc::downgrade(shared),
-			timers: shared.timers.clone(),
+			deadlines: shared.deadlines.clone(),
+			metrics: shared.metrics.clone(),
 		}
+	}
+
+	/// The worker's time: the current turn's instant, or the clock's between turns.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	pub fn now(&self) -> Instant {
+		self.shared
+			.upgrade()
+			.map_or_else(|| self.deadlines.now(), |shared| shared.now())
 	}
 
 	/// The worker's core while it is still allocated, torn down or not.
@@ -626,14 +695,14 @@ impl Owner {
 	/// A disarmed timer on the worker.
 	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn timer(&self) -> crate::Timer {
-		crate::Timer::from_heap(self.timers.clone())
+		crate::Timer::from_queue(&self.deadlines, self.metrics.clone())
 	}
 
 	/// A timer that expires after `duration`.
 	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn after(&self, duration: Duration) -> crate::Timer {
 		let mut timer = self.timer();
-		timer.set(Instant::now().checked_add(duration));
+		timer.set(self.now().checked_add(duration));
 		timer
 	}
 }
@@ -647,19 +716,22 @@ impl std::fmt::Debug for Handle {
 impl Handle {
 	/// Allocate a disarmed timer on this worker.
 	pub fn timer(&self) -> crate::Timer {
-		crate::Timer::from_heap(self.shared.timers.clone())
+		crate::Timer::from_queue(&self.shared.deadlines, self.shared.metrics.clone())
 	}
 
-	/// Run a MoQ driver with this worker's timer and monotonic clock, resolving
-	/// with its terminal error.
+	/// The worker's time: the current turn's instant, or the clock's between turns.
+	pub(crate) fn now(&self) -> Instant {
+		self.shared.now()
+	}
+
+	/// Run a MoQ driver on this worker's timers and clock, resolving with its
+	/// terminal error.
 	pub async fn run<D: moq_net::time::Driver>(&self, mut driver: D) -> moq_net::Error {
 		let mut timer = self.timer();
 		kio::wait(|waiter| {
 			loop {
-				// Sampled together, so time the poll spends is not added to its deadline.
-				let (now, host) = (moq_net::time::now(), Instant::now());
-				match driver.poll(now, waiter) {
-					Ok(at) => timer.set(at.map(|at| host + at.saturating_duration_since(now))),
+				match driver.poll(self.now(), waiter) {
+					Ok(at) => timer.set(at),
 					Err(err) => return Poll::Ready(err),
 				}
 				if timer.poll(waiter).is_pending() {
@@ -685,22 +757,6 @@ fn kernel_release() -> String {
 		.into_owned()
 }
 
-/// Convert a deadline into an absolute `CLOCK_MONOTONIC` timespec (what
-/// `IORING_ENTER_ABS_TIMER` expects).
-fn abs_timespec(at: Instant) -> types::Timespec {
-	// `std::time::Instant` is CLOCK_MONOTONIC on Linux but its origin is
-	// opaque, so anchor the difference on a raw clock read.
-	let delta = at.saturating_duration_since(Instant::now());
-	let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-	// SAFETY: valid out-pointer.
-	unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
-	let nanos = now.tv_nsec as u64 + delta.subsec_nanos() as u64;
-	let secs = (now.tv_sec as u64)
-		.saturating_add(delta.as_secs())
-		.saturating_add(nanos / 1_000_000_000);
-	types::Timespec::new().sec(secs).nsec((nanos % 1_000_000_000) as u32)
-}
-
 /// Accept a bounded number of interrupted teardown submissions.
 fn retry_teardown_submit(interruptions: &mut usize, err: std::io::Error) -> std::io::Result<()> {
 	if err.raw_os_error() != Some(libc::EINTR) || *interruptions >= TEARDOWN_EINTR_RETRIES {
@@ -724,6 +780,20 @@ mod tests {
 
 	fn worker_with(config: Config) -> Option<Worker> {
 		worker_result(Worker::new(config), std::env::var_os("MOQ_STRICT").is_some())
+	}
+
+	/// A worker on a manual clock, which only `advance` moves.
+	fn manual() -> Option<(Worker, moq_clock::Installed)> {
+		let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+		let clock = moq_clock::Manual::new().install(runtime.handle());
+		let _entered = runtime.enter();
+		Some((worker()?, clock))
+	}
+
+	/// Past on the host clock but ahead of the worker's last turn, so a park
+	/// for it times out at once.
+	fn due(worker: &Worker) -> Instant {
+		worker.shared.deadlines.now() + Duration::from_nanos(1)
 	}
 
 	fn worker_result(result: Result<Worker, Error>, required: bool) -> Option<Worker> {
@@ -767,7 +837,7 @@ mod tests {
 			.push(&opcode::Nop::new().build().user_data(key))
 			.expect("stage NOP");
 		let mut timer = worker.handle().timer();
-		timer.set(Some(Instant::now()));
+		timer.set(Some(due(&worker)));
 		worker.pump().expect("pump");
 		worker.maybe_park().expect("park");
 		assert_eq!(
@@ -800,7 +870,7 @@ mod tests {
 	fn an_armed_futex_carries_a_full_queue_in_the_parked_enter() {
 		let Some(mut worker) = worker() else { return };
 		let mut timer = worker.handle().timer();
-		timer.set(Some(Instant::now()));
+		timer.set(Some(due(&worker)));
 		worker.maybe_park().expect("arm futex");
 		assert!(worker.futex_armed);
 		let before = worker.handle().metrics().snapshot();
@@ -834,9 +904,12 @@ mod tests {
 		worker.shared.ring.borrow_mut().submit().expect("arm receive");
 		peer.send_to(b"deferred", sock.local_addr().expect("addr"))
 			.expect("send");
-		let deadline = Instant::now() + Duration::from_secs(5);
+		let deadline = worker.shared.clock.now() + Duration::from_secs(5);
 		while !worker.shared.ring.borrow_mut().submission().taskrun() {
-			assert!(Instant::now() < deadline, "the kernel did not flag deferred task work");
+			assert!(
+				worker.shared.clock.now() < deadline,
+				"the kernel did not flag deferred task work"
+			);
 			std::thread::yield_now();
 		}
 		assert!(worker.shared.ring.borrow_mut().submission().is_empty());
@@ -880,58 +953,146 @@ mod tests {
 		assert_eq!(flag.get(), 6);
 	}
 
+	/// Nothing else wakes this worker: the park's absolute timeout is the only
+	/// thing that can fire the deadline, and it fires on the worker's own clock.
 	#[test]
 	fn deadline_fires_at_park() {
 		let Some(mut worker) = worker() else { return };
 		let handle = worker.handle();
-		let start = Instant::now();
-		// Nothing else wakes this worker: the park's absolute timeout is the
-		// only thing that can fire the deadline.
-		worker
+		let at = worker
 			.block_on(async move {
-				Deadline::after(&handle, Duration::from_millis(50)).wait().await;
+				let at = moq_clock::now() + Duration::from_millis(50);
+				let mut timer = handle.timer();
+				timer.set(Some(at));
+				timer.wait().await;
+				assert!(moq_clock::now() >= at, "fired before the turn reached it");
+				at
 			})
 			.unwrap();
-		let elapsed = start.elapsed();
-		assert!(elapsed >= Duration::from_millis(50), "woke early: {elapsed:?}");
-		assert!(elapsed < Duration::from_secs(5), "woke far too late: {elapsed:?}");
+		let snap = worker.handle().metrics().snapshot();
+		assert!(snap.parks > 0, "the worker never parked: {snap:?}");
+		assert_eq!(snap.timers_fired, 1, "{snap:?}");
+		assert!(worker.shared.deadlines.now() >= at);
+	}
+
+	/// A parked worker on a manual clock wakes when the clock is advanced past
+	/// its deadline, and not before.
+	#[test]
+	fn a_manual_clock_wakes_the_parked_worker() {
+		let Some((mut worker, clock)) = manual() else { return };
+		let start = clock.now();
+		let parks = worker.handle().metrics();
+		let advancer = std::thread::spawn(move || {
+			// The worker parks once on the armed deadline and stays parked: the
+			// clock never moves on its own.
+			while parks.snapshot().parks == 0 {
+				std::hint::spin_loop();
+			}
+			clock.advance(Duration::from_secs(5));
+		});
+		let woke = worker
+			.block_on(async move {
+				moq_clock::sleep(Duration::from_secs(5)).await;
+				moq_clock::now()
+			})
+			.unwrap();
+		advancer.join().unwrap();
+		assert_eq!(woke, start + Duration::from_secs(5));
+	}
+
+	/// Ambient timers and reads on the worker resolve to its clock.
+	#[test]
+	fn the_worker_is_the_ambient_clock() {
+		let Some((mut worker, clock)) = manual() else { return };
+		clock.advance(Duration::from_secs(1));
+		let handle = worker.handle();
+		let (now, timed_out) = worker
+			.block_on(async move {
+				let now = moq_clock::now();
+				// Due at once, so this needs no advance.
+				let timed_out = moq_clock::timeout(Duration::ZERO, std::future::pending::<()>()).await;
+				assert_eq!(handle.now(), now);
+				(now, timed_out.is_err())
+			})
+			.unwrap();
+		assert_eq!(now, moq_clock::Instant::ZERO + Duration::from_secs(1));
+		assert!(timed_out);
+	}
+
+	/// Wall time on a worker comes from the manual clock it runs on, so it agrees
+	/// with the worker's instants.
+	#[test]
+	fn the_worker_reads_its_manual_clocks_wall_time() {
+		let Some((mut worker, clock)) = manual() else { return };
+		clock.advance(Duration::from_secs(5));
+		let (wall, anchor) = worker
+			.block_on(async { (moq_clock::wall(), moq_clock::anchor()) })
+			.unwrap();
+		assert_eq!(wall, clock.wall(), "the worker read the host's wall time");
+		assert_eq!(anchor.0, clock.now());
+		assert_eq!(anchor.1, clock.wall());
+	}
+
+	/// A timer made between turns counts from the clock, not from the last turn's
+	/// instant, so an idle worker does not hand out deadlines already past.
+	#[test]
+	fn a_timer_between_turns_counts_from_the_clock() {
+		let Some((mut worker, clock)) = manual() else { return };
+		let handle = worker.handle();
+		worker.block_on(async {}).unwrap();
+		clock.advance(Duration::from_secs(10));
+		let mut timer = crate::Timer::after(&handle, Duration::from_secs(5));
+
+		clock.advance(Duration::from_secs(4));
+		worker.block_on(async {}).unwrap();
+		assert!(
+			timer.poll(&kio::Waiter::noop()).is_pending(),
+			"fired 5s after the previous turn"
+		);
+		clock.advance(Duration::from_secs(1));
+		worker.block_on(async {}).unwrap();
+		assert!(timer.poll(&kio::Waiter::noop()).is_ready());
 	}
 
 	#[test]
 	fn timer_rearm_and_disarm() {
-		let Some(mut worker) = worker() else { return };
+		let Some((mut worker, clock)) = manual() else { return };
 		let handle = worker.handle();
 		let mut timer = handle.timer();
+		let now = handle.now();
 
 		// Disarmed timers never fire.
 		assert!(timer.poll(&kio::Waiter::noop()).is_pending());
 
-		// An instant already in the past is immediately elapsed, and stays
-		// elapsed (fused) until re-armed.
-		timer.set(Some(Instant::now() - Duration::from_millis(1)));
+		// An instant already reached is immediately elapsed, and stays elapsed
+		// (fused) until re-armed.
+		timer.set(Some(now));
 		assert!(timer.poll(&kio::Waiter::noop()).is_ready());
 		assert!(timer.poll(&kio::Waiter::noop()).is_ready());
 
 		// Re-arming to the future pends again; disarming stays pending.
-		timer.set(Some(Instant::now() + Duration::from_secs(60)));
+		timer.set(Some(now + Duration::from_secs(60)));
 		assert!(timer.poll(&kio::Waiter::noop()).is_pending());
 		timer.set(None);
 		assert!(timer.poll(&kio::Waiter::noop()).is_pending());
 
-		// And a short re-arm actually fires through the worker.
-		let start = Instant::now();
+		// And a re-arm fires through the worker once its clock gets there.
+		timer.set(Some(now + Duration::from_millis(20)));
+		clock.advance(Duration::from_millis(20));
 		worker
 			.block_on(async move {
-				timer.set(Some(Instant::now() + Duration::from_millis(20)));
 				kio::wait(|waiter| timer.poll(waiter)).await;
 			})
 			.unwrap();
-		assert!(start.elapsed() >= Duration::from_millis(20));
+		assert_eq!(handle.now(), now + Duration::from_millis(20));
 	}
 
 	#[test]
 	fn dropped_worker_rejects_operations() {
-		let Some(worker) = worker() else { return };
+		let Some((worker, clock)) = manual() else { return };
+		// Far past the host's time, which bounds teardown: comparing the two
+		// would end the drain before it dispatched anything.
+		clock.advance(Duration::from_secs(86_400));
 		let handle = worker.handle();
 		let bind = || std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
 		let sock = handle.udp(bind(), udp::Config::default()).expect("socket");
@@ -972,7 +1133,7 @@ mod tests {
 			result: 0,
 			flags: 0,
 		};
-		let before = Instant::now();
+		let before = moq_clock::Instant::ZERO;
 		let deadline = before + Duration::from_millis(1);
 		let mut now = [before, deadline].into_iter();
 
@@ -994,7 +1155,7 @@ mod tests {
 		}
 		assert_eq!(worker.shared.ring.borrow_mut().submission().len(), SQ_ENTRIES as usize);
 
-		worker.drain_teardown(Instant::now());
+		worker.drain_teardown(worker.shared.clock.host_now());
 		assert!(worker.shared.ring.borrow_mut().submission().is_empty());
 	}
 
@@ -1113,7 +1274,7 @@ mod tests {
 
 		// Drive the worker until every completion, backlog included, has been
 		// reaped and released its buffer back to the pool.
-		let deadline = Instant::now() + Duration::from_secs(10);
+		let deadline = handle.now() + Duration::from_secs(10);
 		loop {
 			overflowed = overflowed || saw_overflow(&worker);
 			let h = handle.clone();
@@ -1134,7 +1295,7 @@ mod tests {
 				break;
 			}
 			assert!(
-				Instant::now() < deadline,
+				handle.now() < deadline,
 				"buffers stuck in flight: {} of {ceiling} free",
 				free.len()
 			);
@@ -1370,7 +1531,7 @@ mod tests {
 		// Two trains of two: the first is rejected and resent, the second
 		// never tries GSO.
 		for _ in 0..2 {
-			let deadline = Instant::now() + Duration::from_secs(5);
+			let deadline = handle.now() + Duration::from_secs(5);
 			let mut received = 0;
 			let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 				panic!("the socket failed after a rejected train");
@@ -1382,7 +1543,7 @@ mod tests {
 				ecn: None,
 			})
 			.expect("send");
-			while received < 2 * 1200 && Instant::now() < deadline {
+			while received < 2 * 1200 && handle.now() < deadline {
 				let handle = handle.clone();
 				worker
 					.block_on(async move {
@@ -1434,9 +1595,9 @@ mod tests {
 
 		// Drive the worker until the loopback delivers, parking on a timer each
 		// turn so the park and timer counters see traffic too.
-		let deadline = Instant::now() + Duration::from_secs(5);
+		let deadline = handle.now() + Duration::from_secs(5);
 		let mut received = 0;
-		while received == 0 && Instant::now() < deadline {
+		while received == 0 && handle.now() < deadline {
 			let handle = handle.clone();
 			worker
 				.block_on(async move {
@@ -1517,9 +1678,9 @@ mod tests {
 
 		// Hold the received packet: its buffer is the pool, so the re-arm has
 		// nowhere to receive into.
-		let deadline = Instant::now() + Duration::from_secs(5);
+		let deadline = handle.now() + Duration::from_secs(5);
 		let mut held = None;
-		while held.is_none() && Instant::now() < deadline {
+		while held.is_none() && handle.now() < deadline {
 			let handle = handle.clone();
 			worker
 				.block_on(async move {
@@ -1560,28 +1721,56 @@ mod tests {
 		let Some(worker) = worker_with(config) else { return };
 		let handle = worker.handle();
 		let mut timer = handle.timer();
+		let now = handle.now();
 
-		timer.set(Some(Instant::now() + Duration::from_secs(60)));
+		timer.set(Some(now + Duration::from_secs(60)));
 		assert_eq!(metrics.snapshot().timers_active(), 1);
 
 		// A re-arm is a cancel plus an arm, which is exactly the churn signal.
-		timer.set(Some(Instant::now() + Duration::from_secs(60)));
+		timer.set(Some(now + Duration::from_secs(61)));
 		let snap = metrics.snapshot();
 		assert_eq!((snap.timers_armed, snap.timers_cancelled, snap.timers_fired), (2, 1, 0));
 		assert_eq!(snap.timers_active(), 1);
 
-		// An eager poll past the deadline fires rather than cancels.
-		timer.set(Some(Instant::now() - Duration::from_millis(1)));
+		// An instant already reached fires rather than cancels.
+		timer.set(Some(now));
 		assert!(timer.poll(&kio::Waiter::noop()).is_ready());
 		let snap = metrics.snapshot();
 		assert_eq!((snap.timers_armed, snap.timers_cancelled, snap.timers_fired), (3, 2, 1));
 		assert_eq!(snap.timers_active(), 0);
 
-		// A dropped armed timer is a cancel, and the heap empties again.
-		timer.set(Some(Instant::now() + Duration::from_secs(60)));
+		// A dropped armed timer is a cancel, and the queue empties again.
+		timer.set(Some(now + Duration::from_secs(60)));
 		assert_eq!(metrics.snapshot().timers_active(), 1);
 		drop(timer);
 		assert_eq!(metrics.snapshot().timers_active(), 0);
+	}
+
+	/// A timer whose deadline the worker reached counts as fired even if no poll
+	/// saw it: dropped or re-armed afterwards, it is not a cancel.
+	#[test]
+	fn metrics_count_an_unpolled_expiry_as_fired() {
+		let metrics = Metrics::default();
+		let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+		let clock = moq_clock::Manual::new().install(runtime.handle());
+		let _entered = runtime.enter();
+		let Some(mut worker) = worker_with(Config {
+			metrics: metrics.clone(),
+			..Default::default()
+		}) else {
+			return;
+		};
+		let handle = worker.handle();
+		let mut rearmed = crate::Timer::after(&handle, Duration::from_secs(1));
+		let dropped = crate::Timer::after(&handle, Duration::from_secs(1));
+		clock.advance(Duration::from_secs(1));
+		worker.block_on(async {}).unwrap();
+
+		drop(dropped);
+		rearmed.set(Some(handle.now() + Duration::from_secs(1)));
+		let snap = metrics.snapshot();
+		assert_eq!((snap.timers_armed, snap.timers_cancelled, snap.timers_fired), (3, 0, 2));
+		assert_eq!(snap.timers_active(), 1);
 	}
 
 	/// A remote wake has to find the worker parked, then kick the futex. The park

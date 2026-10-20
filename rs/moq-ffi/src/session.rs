@@ -137,6 +137,8 @@ pub enum MoqCongestionControl {
 	Loss,
 	/// Delay-based (BBR): keeps queues short and the send rate steady enough for an encoder to track.
 	Delay,
+	/// No congestion control and no pacing, for tests and controlled links.
+	None,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -145,6 +147,7 @@ impl From<MoqCongestionControl> for moq_tokio::quic::CongestionControl {
 		match family {
 			MoqCongestionControl::Loss => Self::Loss,
 			MoqCongestionControl::Delay => Self::Delay,
+			MoqCongestionControl::None => Self::None,
 		}
 	}
 }

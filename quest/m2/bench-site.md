@@ -10,10 +10,15 @@ site.
 
 ## Plan
 
-The pipeline is in review. Remaining: the maintainer enables repository Pages
-with **Source: GitHub Actions** (until then the Nightly's Benchmark site job
-fails at deployment), then verifies the first Nightly deployment at
-<https://moq-dev.github.io/moq/bench/>. The "Rust benchmark tests" job is not
+The pipeline landed in #5759 (`9fcb3f327`), including the shared history
+publisher and explicit Pages deployment. Through 2026-10-19 the publisher
+never finished: it built the full dev shell without the cachix substituter
+and hit its 15-minute timeout, so no `gh-pages` branch exists. It now skips
+the dev shell, taking only `just` from the pinned nixpkgs. Pages is still off
+(`gh api repos/moq-dev/moq/pages` returns 404): the maintainer switches it
+to **Source: GitHub Actions**, then verify the first Nightly deployment at
+<https://moq-dev.github.io/moq/bench/>. Until then the deploy step fails
+after the history push, so `gh-pages` still accumulates. The "Rust benchmark tests" job is not
 charted yet: its nextest benchmarks print no structured measurements.
 
 Decided with the maintainer on 2026-10-15:
@@ -41,5 +46,8 @@ Decided with the maintainer on 2026-10-15:
   on (or approve the `gh api` call) at that step.
 - Document the site URL, what each series means, and local reproduction in
   `bench/README.md`.
+
+Keep the landed publisher and documented local reproduction; verify the
+deployed reports before filling any remaining measurement gaps.
 
 Public API: none. Wire: none.

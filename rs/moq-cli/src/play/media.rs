@@ -258,12 +258,11 @@ impl<O: Output> Media<O> {
 									.with_max_delay(max_delay),
 							)
 							.await?;
-						// Start at the local live edge without asking the shared publisher
-						// subscription to rewind to a cached sequence. Only what is known now: a
-						// track with nothing yet starts wherever its first group lands.
-						if let std::task::Poll::Ready(Some(largest)) =
-							subscriber.poll_largest(&moq_net::kio::Waiter::noop())
-						{
+						// Start at the live edge without asking the shared publisher
+						// subscription to rewind to a cached sequence. The edge is known only
+						// once the feed is live, so wait for it rather than read the backlog of
+						// a warm copy still waiting on its source; the wait ends with the track.
+						if let Some(largest) = subscriber.largest().await {
 							subscriber.set_groups(largest.group..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;

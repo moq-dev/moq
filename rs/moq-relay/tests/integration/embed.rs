@@ -447,7 +447,7 @@ async fn embedded_listener_health_reaches_metrics() {
 	stop(trigger, running).await;
 }
 
-#[derive(usage::Cli, Clone, Debug, Default, serde::Deserialize)]
+#[derive(usage_rs::Cli, Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
 #[usage(name = "embedded-relay", unknown_flags = "error", args_override_self = false)]
 #[usage(settings)]
@@ -477,7 +477,7 @@ fn embedded_cli_merges_only_relay_settings() {
 	};
 	parsed
 		.relay
-		.merge_into(&cli, &usage::config::EnvLayer::from_process(), Some(source))
+		.merge_into(&cli, &usage_rs::config::EnvLayer::from_process(), Some(source))
 		.unwrap();
 	assert_eq!(parsed.worker_name.as_deref(), Some("recorder"));
 	assert_eq!(parsed.relay.cluster.id, Some(9));
