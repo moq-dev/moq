@@ -123,6 +123,8 @@
       PrivateUsers = false;
       SystemCallFilter = lib.mkForce [ ];
       TasksMax = 16384;
+      # Concurrent io_uring tests share the runner service's locked-memory budget.
+      LimitMEMLOCK = "64M";
     };
   };
   systemd.services.github-runner-runner = {

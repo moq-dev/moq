@@ -82,6 +82,7 @@ pkgs.testers.runNixOSTest {
         ExecStart = lib.mkForce (
           pkgs.writeShellScript "cache-probe" ''
             mkdir -p "$MBX_CACHE_DIR"
+          ulimit -l > "$MBX_CACHE_DIR/memlock"
             if test -f "$MBX_CACHE_DIR/marker"; then
               touch "$MBX_CACHE_DIR/reused"
             fi
@@ -130,6 +131,10 @@ pkgs.testers.runNixOSTest {
         for address in ["10.231.0.1", "192.168.2.2", "100.100.100.1"]:
             guest.fail(f"curl --fail --connect-timeout 1 http://{address}:8080/")
         router.succeed("nft list table inet github-runner-vm")
+
+    with subtest("the runner inherits the hosted CI locked-memory budget"):
+        guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/memlock")
+        guest.succeed("test $(cat /var/cache/github-runner-home/.cache/mbx/memlock) = 65536")
 
     with subtest("local Nix and mbx storage survive runner and VM restarts"):
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/marker")
