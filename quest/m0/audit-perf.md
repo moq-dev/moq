@@ -69,9 +69,10 @@ Audit evidence (2026-10-19, second checkpoint, incomplete):
   nights; its -12% on small frames sits inside that band, and both nights
   used Dart 3.13.0 (the nixpkgs bump `4109d3893` did not change it). No
   binding regression is established. Recheck Dart against `gh-pages`.
-- JS: the Nightly JS leg is cancelled at one hour by the forward fixture,
-  which [the test-cost audit](/quest/m0/audit-test-cost.md) is fixing. Until
-  it lands there is no JS history. Nightly never runs these JS benches:
+- JS: the Nightly JS leg was cancelled at one hour by the forward fixture,
+  which the test-cost audit fixed in
+  [#5976](https://github.com/moq-dev/moq/pull/5976). Until a Nightly runs
+  with it there is no JS history. Nightly never runs these JS benches:
   net `observed`; json `codec` and `parse`; hang `slow-group`; watch
   `warmup`; clock `timers` (`qmux` and `serve-browser` run, uncharted, in
   the audio-quality job). Add them, with an inventory test like the Rust

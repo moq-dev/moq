@@ -12,121 +12,60 @@ import uniffi.moq.MoqException
  * Stream of decoded audio frames in the layout declared by the
  * [AudioDecoderOutput] the consumer was created with.
  */
-fun dev.moq.audio.Consumer.frames(): Flow<dev.moq.audio.Frame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun dev.moq.audio.Consumer.frames(): Flow<dev.moq.audio.Frame> = pull({ cancel() }) { next() }
 
 /**
  * Stream of decoded video frames. Each owns the decoder's surface: close it
  * (or `use` it) when done, since held frames stall the decoder.
  */
-fun dev.moq.video.Consumer.frames(): Flow<VideoDecodedFrame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun dev.moq.video.Consumer.frames(): Flow<VideoDecodedFrame> = pull({ cancel() }) { next() }
 
 /** Stream of groups in sequence order, skipping forward if the reader falls behind. */
-fun TrackConsumer.groups(): Flow<GroupConsumer> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(nextGroup() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun TrackConsumer.groups(): Flow<GroupConsumer> = pull({ cancel() }) { nextGroup() }
 
 /** Stream of groups in arrival order, including out-of-sequence deliveries. */
-fun TrackConsumer.groupsAsArrived(): Flow<GroupConsumer> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(recvGroup() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun TrackConsumer.groupsAsArrived(): Flow<GroupConsumer> = pull({ cancel() }) { recvGroup() }
 
 /**
  * Stream of timestamped raw frames from one-frame-per-group tracks.
  *
  * Completed empty groups are skipped. The flow ends when the track ends.
  */
-fun TrackConsumer.frames(): Flow<Frame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(readFrame() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun TrackConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
 
 /** Stream of best-effort datagrams in arrival order. */
-fun TrackConsumer.datagrams(): Flow<Datagram> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(recvDatagram() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
+fun TrackConsumer.datagrams(): Flow<Datagram> = pull({ cancel() }) { recvDatagram() }
 
 /** Stream of tracks requested by subscribers. */
-fun BroadcastDynamic.requestedTracks(): Flow<TrackRequest> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(requestedTrack())
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun BroadcastDynamic.requestedTracks(): Flow<TrackRequest> = pull({ cancel() }) { requestedTrack() }
 
 /** Stream of uncached group requests for one track. */
-fun TrackDynamic.requestedGroups(): Flow<GroupRequest> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(requestedGroup())
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun TrackDynamic.requestedGroups(): Flow<GroupRequest> = pull({ cancel() }) { requestedGroup() }
 
 /** Stream of broadcasts requested by consumers. */
-fun OriginDynamic.requestedBroadcasts(): Flow<BroadcastRequest> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(requestedBroadcast())
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun OriginDynamic.requestedBroadcasts(): Flow<BroadcastRequest> = pull({ cancel() }) { requestedBroadcast() }
 
 /** Stream of timestamped raw frames within a group. */
-fun GroupConsumer.frames(): Flow<Frame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(readFrame() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun GroupConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
 
 /**
  * Stream of announce events, as `announced(config).updates()`.
  *
  * Collect it once: the handle is cancelled when collection ends, however it ends.
  */
-fun AnnounceConsumer.updates(): Flow<AnnounceEvent> = flow {
+fun AnnounceConsumer.updates(): Flow<AnnounceEvent> = pull { next() }.onCompletion { cancel() }
+
+/** Emits [next] until it returns null, checking for cancellation before each pull. */
+private fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
     }
-}.onCompletion { cancel() }
+}
+
+/**
+ * [pull], calling [cancel] when the collector is cancelled so the native
+ * handle wakes a pending [next] and releases the stream.
+ */
+internal fun <T : Any> pull(cancel: () -> Unit, next: suspend () -> T?): Flow<T> =
+    pull(next).onCompletion { cause -> if (cause is CancellationException) cancel() }
