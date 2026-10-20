@@ -104,7 +104,6 @@ lands before the cut.
 - [Timed-out requests clean up](/quest/m1/legacy-request-timeout-cleanup.md) - on drafts 14-16, Rust and JS send PUBLISH_NAMESPACE_DONE or UNSUBSCRIBE_NAMESPACE for a timed-out request before its local reset
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Resume reorder](/quest/m1/resume-reorder.md) - a group whose stream header arrives after its successor's still resumes on failover; only a dropped or long-gone group fails
-- [SUBSCRIBE_OK names where delivery starts](/quest/m1/subscribe-ok-start.md) - a warm relay names the same start group as a cold one instead of groups it skipped as stale
 - [Rust resumed reads](/quest/m1/resume-ordered.md) - a Rust reader takes the lowest group across route copies in both orders, as JS does
 - [Resumed close](/quest/m1/resume-closed.md) - a resumed JS track keeps its declared end across copies, and its `closed` and `largest()` settle on a clean end
 - [Resumed in-flight groups](/quest/m1/resume-in-flight.md) - a replaced route copy stays while a group below its bound is in flight or it backs a handed-out group late, and no longer than the reader's budget

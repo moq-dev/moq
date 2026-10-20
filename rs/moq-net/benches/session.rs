@@ -105,6 +105,8 @@ struct Shape {
 	/// Whole groups each watched broadcast writes per round, so a serve loop finds a
 	/// backlog ready: the group rate a round stands in for.
 	burst: usize,
+	/// Cached groups per track before a join, whose older groups the live budget skips.
+	history: usize,
 	/// Bytes queued before a mock stream applies backpressure.
 	window: usize,
 	/// Read each group via a fresh FETCH rather than a live subscription.
@@ -123,6 +125,7 @@ impl Shape {
 		frame: 64,
 		paced: false,
 		burst: 1,
+		history: 1,
 		window: 1024 * 1024,
 		fetch: false,
 	};
@@ -149,7 +152,7 @@ impl Shape {
 
 	fn id(&self, version: &str) -> String {
 		format!(
-			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}",
+			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}{}",
 			self.relays,
 			self.publishers,
 			self.broadcasts,
@@ -172,6 +175,11 @@ impl Shape {
 				String::new()
 			},
 			if self.fetch { "/fetch" } else { "" },
+			if self.history > 1 {
+				format!("/history={}", self.history)
+			} else {
+				String::new()
+			},
 		)
 	}
 }
@@ -725,7 +733,15 @@ fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) 
 						let cluster = Cluster::new(version, *shape).await;
 						let payload = Bytes::from(vec![0; shape.frame]);
 						for track in &cluster.tracks {
-							write_group(track, &payload, FRAMES);
+							for sequence in 0..shape.history {
+								let mut group = track.append_group().unwrap();
+								for _ in 0..FRAMES {
+									group
+										.write_frame(Timestamp::from_millis(sequence as u64).unwrap(), payload.clone())
+										.unwrap();
+								}
+								group.finish().unwrap();
+							}
 						}
 						cluster
 					})
@@ -1227,6 +1243,20 @@ fn session(c: &mut Criterion) {
 			})
 		}),
 	);
+	// A live join skips a cached prefix. Sweep publishers against that prefix so
+	// resolving one start cannot hide a scan of unrelated publishers or group IDs.
+	join(
+		c,
+		"stale",
+		[1, 8, 32].into_iter().flat_map(|publishers| {
+			[1, 64, 1024].map(move |history| Shape {
+				publishers,
+				history,
+				..base
+			})
+		}),
+	);
+
 	join(c, "relays", [1, 2, 8].map(|relays| Shape { relays, ..base }));
 
 	churn(c, "sessions", [1, 16, 128].map(|sessions| Churn { sessions, held: 16 }));
