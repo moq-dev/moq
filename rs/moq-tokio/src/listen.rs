@@ -822,9 +822,7 @@ load_balancer = { id = "ab", nonce = 8 }
 					nonce: 8,
 				})
 			}),
-			("--listen-reset-secret", |c| {
-				c.reset.secret = Some("reset.key".into())
-			}),
+			("--listen-reset-secret", |c| c.reset.secret = Some("reset.key".into())),
 		];
 		for (name, set) in cases {
 			let mut config = stream_only();

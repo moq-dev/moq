@@ -3264,7 +3264,10 @@ mod tests {
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = RelayConfig::parse_and_merge(args).expect("config load");
 		assert!(config.cluster.lan.enabled);
-		assert_eq!(config.cluster.lan.secret.as_deref(), Some(std::path::Path::new("cluster.key")));
+		assert_eq!(
+			config.cluster.lan.secret.as_deref(),
+			Some(std::path::Path::new("cluster.key"))
+		);
 		assert_eq!(
 			config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
 			Some("custom")
@@ -3295,7 +3298,10 @@ mod tests {
 			std::ffi::OsString::from("from-cli"),
 		];
 		let config = RelayConfig::parse_and_merge(args).expect("config load");
-		assert_eq!(config.cluster.lan.secret.as_deref(), Some(std::path::Path::new("from-cli.key")));
+		assert_eq!(
+			config.cluster.lan.secret.as_deref(),
+			Some(std::path::Path::new("from-cli.key"))
+		);
 		assert_eq!(
 			config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
 			Some("from-cli")

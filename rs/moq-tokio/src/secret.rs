@@ -90,6 +90,9 @@ mod tests {
 			assert!(matches!(Secret::read(&path), Err(Error::Invalid(_))), "{contents:?}");
 		}
 
-		assert!(matches!(Secret::read(dir.path().join("missing.key")), Err(Error::Read(..))));
+		assert!(matches!(
+			Secret::read(dir.path().join("missing.key")),
+			Err(Error::Read(..))
+		));
 	}
 }
