@@ -1,11 +1,12 @@
 ---
 title: Demos
-description: The web demo and MoQ Boy
+description: The web demo, MoQ Boy, and CARLA
 ---
 
 # Demos
 
-Both run locally from a checkout and live at [moq.dev](https://moq.dev).
+Each runs locally from a checkout. The web demo and MoQ Boy also live at
+[moq.dev](https://moq.dev); CARLA's simulator needs a Linux host with an NVIDIA GPU.
 
 ## Web demo
 
