@@ -29,7 +29,9 @@ Decided with the maintainer on 2026-10-20.
   Suite and case keep apart the media QA controls that share one browser
   pairing (frozen video, silent audio, offset audio, leaked session,
   lagging latecomer). The report is generated from those records, never by
-  scraping logs.
+  scraping logs. It checks them against the expected suite and case
+  inventory, so a case with no record (the harness died in shared setup or
+  mid-suite) shows as a red "not run" cell instead of disappearing.
 - The page's `<title>` labels it on the Pages root, which lists every report
   directory ([moq-dev/moq#6079](https://github.com/moq-dev/moq/pull/6079)).
 - Only scheduled runs on `main` publish; manual and release-PR runs keep

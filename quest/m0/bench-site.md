@@ -38,6 +38,9 @@ too much space, and hid regressions instead of surfacing them.
   failed. A series whose newest point is older than the newest nightly
   commit is marked stale with its age, never shown or flagged as tonight's
   result, and a whole source missing tonight shows as one stale section.
+  When every source fails, `prepare` raises today and Nightly never
+  regenerates the page; it must still rebuild the table from the existing
+  history, with every section stale.
 - **One point per commit:** re-running the Benchmark site job appends another
   point for the same commit. On 2026-10-20, two re-runs left three identical
   points for `f13283b30`. Collapse points by commit (the latest wins), so
