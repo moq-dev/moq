@@ -409,7 +409,6 @@ impl Message for SubscribeEnd {
 /// Sent by the subscriber to update subscription parameters.
 ///
 /// Lite03+ only.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct SubscribeUpdate {
 	pub priority: u8,

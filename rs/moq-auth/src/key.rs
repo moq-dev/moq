@@ -554,8 +554,15 @@ impl Key {
 	/// Scoping the claims to a connection path is a separate step; see
 	/// [`Claims::authorize`].
 	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
-		let claims: Claims = self.decode(token)?;
+		let claims = self.verify_claims(token)?;
 		validate_times(&claims, moq_clock::wall().into())?;
+		Ok(claims)
+	}
+
+	/// Verify the signature, claims, and key scope but not the times, so an expired
+	/// token's root is still known to be genuine.
+	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
+		let claims: Claims = self.decode(token)?;
 		claims.validate()?;
 		self.validate_scope(&claims)?;
 		Ok(claims)
@@ -611,7 +618,7 @@ impl Key {
 }
 
 /// Refuse claims expired at `now` (`exp <= now`) or not yet valid (`nbf > now`), as `jose` does.
-fn validate_times(claims: &Claims, now: std::time::SystemTime) -> crate::Result<()> {
+pub(crate) fn validate_times(claims: &Claims, now: std::time::SystemTime) -> crate::Result<()> {
 	if claims.expires.is_some_and(|exp| exp <= now) {
 		return Err(crate::Error::TokenExpired);
 	}

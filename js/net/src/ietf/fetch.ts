@@ -121,32 +121,6 @@ export class Fetch {
 	}
 }
 
-export class FetchOk {
-	static id = 0x18;
-
-	requestId: bigint | undefined;
-
-	constructor({ requestId }: { requestId?: bigint }) {
-		this.requestId = requestId;
-	}
-
-	async #encode(_w: Writer): Promise<void> {
-		throw new Error("FETCH_OK messages are not supported");
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<FetchOk> {
-		return Message.decode(r, FetchOk.#decode);
-	}
-
-	static async #decode(_r: Reader): Promise<FetchOk> {
-		throw new Error("FETCH_OK messages are not supported");
-	}
-}
-
 export class FetchError {
 	static id = 0x19;
 
@@ -178,32 +152,5 @@ export class FetchError {
 
 	static async #decode(_r: Reader): Promise<FetchError> {
 		throw new Error("FETCH_ERROR messages are not supported");
-	}
-}
-
-// Removed in d17
-export class FetchCancel {
-	static id = 0x17;
-
-	requestId: bigint;
-
-	constructor({ requestId }: { requestId: bigint }) {
-		this.requestId = requestId;
-	}
-
-	async #encode(_w: Writer): Promise<void> {
-		throw new Error("FETCH_CANCEL messages are not supported");
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<FetchCancel> {
-		return Message.decode(r, FetchCancel.#decode);
-	}
-
-	static async #decode(_r: Reader): Promise<FetchCancel> {
-		throw new Error("FETCH_CANCEL messages are not supported");
 	}
 }
