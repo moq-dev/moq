@@ -286,6 +286,10 @@ fi
 # fail and is what judges the export; `--loss` drops datagrams at random (moq-dev/moq#4613),
 # which real paths do not, so it only proves QUIC retransmission keeps the output whole.
 SHAPED="$LOSS$RATE"
+if [[ -n "$LOSS" && -n "$RATE$LIVE" ]]; then
+    echo "error: --loss cannot be combined with --rate or --live; use --rate without random loss for quality grading" >&2
+    exit 1
+fi
 if [[ -n "$SHAPED" && -n "$ANALYZE_ONLY$PAIR" ]]; then
     echo "error: --loss and --rate impair the round-trip's one subscriber and cannot be combined with --analyze-only or --pair" >&2
     exit 1

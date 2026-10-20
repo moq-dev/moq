@@ -86,7 +86,8 @@ restarted encoder or a looping file wrapping to the top, ends the import with
 an error; run it again to publish anew. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
 MPEG-TS timestamps follow their source history across the 33-bit wrap
-(every 26.5 hours), including files imported faster than real time.
+(every 26.5 hours), including files imported faster than real time and flagged
+jumps, so a jump of more than half a wrap (13.25 hours) can read as a rewind.
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
 and every other stream it does not decode (KLV, subtitles, DVB AC-3) through as

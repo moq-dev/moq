@@ -151,19 +151,7 @@ impl<S: poll::Boxable> Sealed for Accepted<S> {
 	}
 
 	fn admission(&self, auth: &auth::Auth) -> moq_auth::Request {
-		let setup = self.handshake.path();
-		let (path, query) = match setup.split_once('?') {
-			Some((path, query)) => (path, Some(query.to_string())),
-			None => (setup, None),
-		};
-		let mut request = auth.request(self.transport, if path.is_empty() { "/" } else { path });
-		request.query = query;
-		request.token = self.handshake.token().map(|token| moq_auth::Token {
-			kind: token.kind,
-			value: token.value.clone(),
-		});
-		request.role = self.handshake.role().and_then(auth::role);
-		request
+		auth::request_for_setup(auth, &self.handshake, self.transport)
 	}
 
 	async fn reject(self, status: http::StatusCode) {
