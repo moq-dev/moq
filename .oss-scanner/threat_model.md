@@ -14,7 +14,18 @@ Treat everything a peer sends as hostile, before and after authentication:
 - **Ingest gateways**: RTMP (`moq-rtmp`), RTSP (`moq-rtsp`), SRT (`moq-srt`), WebRTC and ICE/STUN (`moq-rtc`, `moq-ice`), and HLS playlists and segments (`moq-hls`).
 - **Peer relays** in a cluster are authenticated but should not be able to break a node beyond what their grant allows.
 
-A design rule of the project: whatever a peer sends, the memory, CPU, and state it makes the other side hold must be bounded. A peer that can grow relay memory or CPU without bound, past the configured per-session limits (`rs/moq-relay/src/limits.rs`), is a bug even when it takes many messages to do.
+## Security properties the relay must hold
+
+The relay is deployed on the public internet as shared infrastructure: one process serves many unrelated tenants, most of them anonymous or holding a token from a third party's auth server. Attack these properties:
+
+- **Untrusted network input, bounded cost.** Whatever a peer sends, the memory, CPU, and state it makes the other side hold must be bounded. A peer that can grow relay memory or CPU without bound, past the configured per-session limits (`rs/moq-relay/src/limits.rs`), is a bug even when it takes many messages to do. Fan-out is the multiplier to look for: one publisher's bytes, or one subscriber's request, reaching many sessions or pinning cache.
+- **Encryption.** Every transport is TLS 1.3 via rustls with aws-lc: QUIC and WebTransport, and WebSocket over `[web.https]`. Certificates are loaded from disk, issued by ACME (`rs/moq-relay/src/acme.rs`, TLS-ALPN-01), or self-signed and pinned by the fingerprint at `/certificate.sha256`. Check whether the relay accepts 0-RTT, and if it does, whether early data can be replayed. Plain `[web.http]` is a documented development option, not a finding.
+- **Authentication.** Sessions are admitted by a JWT (`moq-auth`, which accepts HMAC, RSA, ECDSA and EdDSA keys, so algorithm confusion and key selection are in scope), by an external auth server over HTTP (`doc/bin/relay/auth.md`), by a verified client certificate weighed by that server, or by a static anonymous grant. Expiry, revalidation, and in-band renewal must never extend a grant past what the server issued, and a failure to reach the auth server must refuse rather than admit.
+- **Multi-tenancy.** A grant's `root` scopes a session to one subtree; `mounts` add read-only views. A session must never publish, subscribe, receive announcements, fetch, or see stats outside its grant, whether through path normalization, pattern matching (`moq-pattern`), the HTTP endpoints, cluster forwarding, or a revalidation that changes the grant mid-session. One tenant must not be able to degrade another beyond its fair share, for example by exhausting a shared cache or a shared connection limit.
+- **Cache integrity.** The relay caches and forwards groups by broadcast, track, and group. A publisher must not be able to overwrite or inject into a broadcast it was not granted, and a subscriber must never receive one tenant's data under another tenant's name.
+- **Cluster trust.** Peer relays authenticate with tokens or mTLS and get broader rights than clients. A relay dials only configured or discovered peers, never a URL learned from an announcement. LAN discovery over mDNS (`[cluster.lan]`) is open to anyone on the network unless `secret` is set, which is documented; with `secret` set, an unkeyed host must not be able to join.
+- **Amplification and reflection.** QUIC's anti-amplification limit and address validation, the opt-in public STUN responder (`rs/moq-relay/src/stun.rs`), and ICE in the WebRTC gateway all answer unauthenticated UDP. A response larger than the request toward a spoofed source is a finding.
+- **End-to-end encryption.** `moq-e2ee` encrypts groups, datagrams, and track names so a relay cannot read them. A flaw in its construction (nonce reuse, a key or name leaking to the relay, a forgeable group) is in scope.
 
 ## Components that matter most / least
 
@@ -24,7 +35,7 @@ Most important, in this order:
 2. Authorization: a session publishing, subscribing, or seeing announcements outside its grant, or reaching another root (tenant) through path tricks, revalidation, mounts, or cluster links.
 3. `rs/moq-mux` and `rs/hang`: container, codec, and catalog parsing of publisher-controlled bytes.
 4. The ingest gateways: `rs/moq-rtmp`, `rs/moq-rtsp`, `rs/moq-srt`, `rs/moq-rtc`, `rs/moq-ice`, `rs/moq-hls`.
-5. `rs/moq-cli`, `rs/moq-flate`, `rs/moq-json`, `rs/moq-stats`, `rs/kio`, `rs/moq-clock`.
+5. `rs/moq-e2ee`, `rs/moq-cli`, `rs/moq-flate`, `rs/moq-json`, `rs/moq-stats`, `rs/kio`, `rs/moq-clock`.
 
 `unsafe` is rare and worth reading closely where it appears: `rs/moq-quic`, `rs/moq-net/src/model`, `rs/moq-net/src/util/cell.rs`, `rs/moq-net/src/transport.rs`, and `rs/moq-relay/src/uring.rs`.
 
@@ -41,9 +52,9 @@ The image is offline, with every crate fetched and `CARGO_NET_OFFLINE` set. The 
 
 ## How you rate severity
 
-- **Critical**: memory corruption or code execution reachable by an unauthenticated peer; any way to publish to, subscribe to, or enumerate paths outside a session's grant, including reaching another root.
-- **High**: memory corruption that needs an authenticated session; a panic, abort, deadlock, or unbounded memory or CPU growth in `moq-relay` that one unauthenticated peer can trigger, since it takes down every session on the node.
-- **Medium**: the same relay denial of service when it needs an authenticated session; resource use that exceeds the configured limits by a large constant factor; a panic in a gateway or parser on publisher-controlled media.
+- **Critical**: memory corruption or code execution reachable by an unauthenticated peer; any way to publish to, subscribe to, or enumerate paths outside a session's grant, including reaching another root; accepting a forged, tampered, or expired credential; reading or altering another session's traffic, or `moq-e2ee` plaintext, without its keys.
+- **High**: memory corruption that needs an authenticated session; a panic, abort, deadlock, or unbounded memory or CPU growth in `moq-relay` that one unauthenticated peer can trigger, since it takes down every session on the node; one tenant serving data under another tenant's broadcast name.
+- **Medium**: the same relay denial of service when it needs an authenticated session; resource use that exceeds the configured limits by a large constant factor; a panic in a gateway or parser on publisher-controlled media; UDP amplification toward a spoofed address; an unkeyed host joining a `secret`-protected LAN cluster.
 - **Low**: a crash or hang in a client (`moq` CLI, a subscriber) caused by a malicious relay or publisher; leaking non-secret metadata.
 
 Not a vulnerability: bandwidth exhaustion by simply sending a lot of data within limits, generous defaults an operator can lower, the anonymous `**` grant in `demo/relay/localhost.toml`, and plain-HTTP token exposure (documented as dev-only).

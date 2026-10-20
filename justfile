@@ -111,6 +111,11 @@ ci-select $JOB $BASE="":
 fix $BASE="":
     sh/dispatch.sh fix "$BASE"
 
+# Build .oss-scanner/ with Anthropic's OSS Scanner tools/check: `just oss-scanner [REF] [REPO]`. REF must be pushed.
+[positional-arguments]
+oss-scanner *args:
+    sh/oss-scanner.sh "$@"
+
 # Build the packages.
 build:
     just js build

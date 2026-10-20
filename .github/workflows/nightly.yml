@@ -46,6 +46,9 @@ jobs:
   x11:
     uses: ./.github/workflows/x11.yml
 
+  oss-scanner:
+    uses: ./.github/workflows/oss-scanner.yml
+
   # Each independent workload gets its own hour. Each benchmark group keeps one
   # build environment, so a benchmark reuses the dependencies its group already
   # compiled. The Rust benchmarks outgrew one hour, so they split by harness:
