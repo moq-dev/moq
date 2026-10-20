@@ -1,6 +1,9 @@
 //! Tokens and grant watches that follow a reconnecting connection.
 
-use std::task::{Poll, ready};
+use std::{
+	sync::{Arc, Mutex},
+	task::{Poll, ready},
+};
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -32,10 +35,23 @@ impl Handle {
 		let connection = self.connection.clone();
 		let pacing = self.pacing;
 		let token = token.into();
+		let replay = Arc::new(Replay {
+			bytes: token,
+			queued: Mutex::new(Vec::new()),
+		});
+		{
+			let state = connection.read();
+			let mut tokens = state.tokens.lock().unwrap();
+			tokens.retain(|token| token.strong_count() > 0);
+			if let Some(session) = &state.session {
+				replay.queue(session, state.connects);
+			}
+			tokens.push(Arc::downgrade(&replay));
+		}
 		let (answered, answer) = tokio::sync::oneshot::channel();
 		let task = AbortOnDrop::new(tokio::spawn(async move {
 			let mut answered = Some(answered);
-			if let Err(err) = present(connection, pacing, token, &producer, &mut answered).await {
+			if let Err(err) = present(connection, pacing, replay, &producer, &mut answered).await {
 				if let Some(answered) = answered.take() {
 					let _ = answered.send(Err(err.clone()));
 				}
@@ -48,6 +64,83 @@ impl Handle {
 		answer.await.map_err(|_| Error::from(moq_net::Error::Cancel))??;
 		Ok(Auth { _task: task, state })
 	}
+}
+
+type Opening = futures::future::BoxFuture<'static, moq_net::Result<auth::Auth>>;
+
+/// Registration shared with session publication, while the task owns its token's life.
+pub(super) struct Replay {
+	bytes: Bytes,
+	/// Registrations queued as sessions are published, until the task takes them.
+	queued: Mutex<Vec<Queued>>,
+}
+
+struct Queued {
+	connects: u64,
+	session: moq_net::Session,
+	opening: Opening,
+}
+
+impl Replay {
+	fn queue(&self, session: &moq_net::Session, connects: u64) {
+		let handle = session.auth();
+		let bytes = self.bytes.clone();
+		let mut opening = async move { handle.add(bytes).await }.boxed();
+		// The first poll registers the token synchronously, before the session can be
+		// observed. The replay task replaces this noop waker when it takes the future.
+		if let Some(result) = opening.as_mut().now_or_never() {
+			opening = futures::future::ready(result).boxed();
+		}
+		self.queued.lock().unwrap().push(Queued {
+			connects,
+			session: session.clone(),
+			opening,
+		});
+	}
+
+	/// Take the registration queued for session `connects`, moving older ones to `draining`.
+	fn take(&self, connects: u64, draining: &mut Draining) -> Option<Opening> {
+		let mut queued = self.queued.lock().unwrap();
+		let mut current = None;
+		for entry in std::mem::take(&mut *queued) {
+			match entry.connects.cmp(&connects) {
+				// Requests on a draining session may still be waiting on this answer.
+				std::cmp::Ordering::Less => draining.push(entry.session, entry.opening),
+				std::cmp::Ordering::Equal => current = Some(entry.opening),
+				// A replacement published since the task's snapshot already holds this token.
+				// Dropping its registration would withdraw the token from a session consumers
+				// can see, so leave it for the task's next pass.
+				std::cmp::Ordering::Greater => queued.push(entry),
+			}
+		}
+		current
+	}
+}
+
+/// Tokens kept on sessions draining after a migration. Each is held by a task that
+/// releases it, and its session, once that session ends; dropping this withdraws them all.
+#[derive(Default)]
+struct Draining(Vec<AbortOnDrop>);
+
+impl Draining {
+	/// Keep `held`, a token answered or not, registered on `session` until it ends.
+	fn push(&mut self, session: moq_net::Session, held: impl Send + 'static) {
+		self.0.retain(|task| !task.is_finished());
+		self.0.push(AbortOnDrop::new(tokio::spawn(async move {
+			session.closed().await;
+			drop(held);
+		})));
+	}
+}
+
+pub(super) fn replay(state: &State, session: &moq_net::Session, connects: u64) {
+	state.tokens.lock().unwrap().retain(|token| {
+		let Some(token) = token.upgrade() else {
+			return false;
+		};
+		token.queue(session, connects);
+		true
+	});
 }
 
 /// A presented token; dropping it withdraws it from live and draining sessions.
@@ -193,12 +286,12 @@ fn transient(err: &moq_net::Error) -> bool {
 async fn present(
 	connection: kio::Consumer<State>,
 	pacing: Pacing,
-	bytes: Bytes,
+	replay: Arc<Replay>,
 	producer: &kio::Producer<Granted>,
 	answered: &mut Option<tokio::sync::oneshot::Sender<crate::Result<()>>>,
 ) -> crate::Result<()> {
 	let mut snapshot = next(&connection, None).await?;
-	let mut draining = Vec::new();
+	let mut draining = Draining::default();
 	'session: loop {
 		let (connects, session) = snapshot;
 		let Some(session) = session else {
@@ -211,20 +304,37 @@ async fn present(
 		if let Ok(mut state) = producer.write() {
 			state.grant = None;
 		}
-		let handle = session.auth();
 		let mut delay = None;
+		let mut opening = replay.take(connects, &mut draining);
 		let token = loop {
 			let attempt = async {
-				if let Some(delay) = delay {
-					tokio::time::sleep(delay).await;
+				if opening.is_none() {
+					if let Some(delay) = delay {
+						tokio::time::sleep(delay).await;
+					}
+					let handle = session.auth();
+					let bytes = replay.bytes.clone();
+					opening = Some(async move { handle.add(bytes).await }.boxed());
 				}
-				handle.add(bytes.clone()).await
+				opening.as_mut().expect("opening").await
 			};
 			let result = tokio::select! {
 				biased;
-				changed = next(&connection, Some((connects, true))) => { snapshot = changed?; continue 'session; }
-				result = attempt => result,
+				changed = next(&connection, Some((connects, true))) => Err(changed),
+				result = attempt => Ok(result),
 			};
+			let result = match result {
+				Ok(result) => result,
+				Err(changed) => {
+					// Requests on a draining session may still be waiting on this answer.
+					if let Some(opening) = opening.take() {
+						draining.push(session, opening);
+					}
+					snapshot = changed?;
+					continue 'session;
+				}
+			};
+			opening = None;
 			match result {
 				Ok(token) => break token,
 				// The session ending is no verdict on the token: replay it on the next one.
@@ -274,8 +384,7 @@ async fn present(
 		}
 		// A migrated session may still be serving its streams during GOAWAY drain.
 		// Keep its grant until that session ends or the application drops this token.
-		draining.retain(|(session, _): &(moq_net::Session, auth::Auth)| session.closed().now_or_never().is_none());
-		draining.push((session, token));
+		draining.push(session, token);
 	}
 }
 
@@ -357,7 +466,132 @@ mod tests {
 	fn attach(connection: &kio::Producer<State>, session: &moq_net::Session) {
 		let mut state = connection.write().ok().expect("connection observed");
 		state.connects += 1;
+		replay(&state, session, state.connects);
 		state.session = Some(session.clone());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn replay_is_registered_before_the_session_is_published() {
+		let connection = kio::Producer::<State>::default();
+		let auth = retained(&connection);
+		let mut first = pair().await;
+		attach(&connection, &first.client);
+		let (token, _issued) = tokio::join!(auth.add("replay"), async {
+			first.requests.recv().await.unwrap().accept(auth::Grant::all())
+		});
+		let token = token.unwrap();
+		let mut second = pair().await;
+		let connects = {
+			let state = connection.read();
+			let connects = state.connects + 1;
+			replay(&state, &second.client, connects);
+			connects
+		};
+		// The task still observes the first session. The second token reaches the peer
+		// before publication only if queueing it already polled add's registration.
+		let request = tokio::time::timeout(std::time::Duration::from_secs(1), second.requests.recv())
+			.await
+			.expect("token was not queued before publication")
+			.unwrap();
+		assert_eq!(request.token().as_ref(), b"replay");
+		{
+			let mut state = connection.write().ok().expect("connection observed");
+			state.connects = connects;
+			state.session = Some(second.client.clone());
+		}
+		let _issued = request.accept(auth::Grant::all());
+		let mut watch = token.grant();
+		while watch.peek().is_none() {
+			watch.changed().await.unwrap();
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_stale_snapshot_keeps_the_newer_sessions_registration() {
+		let mut first = pair().await;
+		let mut second = pair().await;
+		let replay = Replay {
+			bytes: "replay".into(),
+			queued: Mutex::new(Vec::new()),
+		};
+		let mut draining = Draining::default();
+		// The replacement queues and publishes while the task still holds the first snapshot.
+		replay.queue(&second.client, 2);
+		let request = second.requests.recv().await.unwrap();
+		assert!(replay.take(1, &mut draining).is_none());
+		let opening = replay
+			.take(2, &mut draining)
+			.expect("the newer session's registration was dropped");
+		let _issued = request.accept(auth::Grant::all());
+		let _token = opening.await.unwrap();
+		// A registration for a session the task has moved past stays on it while it drains.
+		replay.queue(&first.client, 1);
+		let _stale = first.requests.recv().await.unwrap();
+		assert!(replay.take(2, &mut draining).is_none());
+		assert!(replay.queued.lock().unwrap().is_empty());
+		assert_eq!(draining.0.len(), 1, "the draining session lost its registration");
+	}
+
+	/// A draining session that closes releases its token and its session handle at once,
+	/// not only when a later migration adds another.
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_draining_session_releases_its_token() {
+		let pair = pair().await;
+		let mut draining = Draining::default();
+		let held = Arc::new(());
+		draining.push(pair.client.clone(), held.clone());
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		assert_eq!(Arc::strong_count(&held), 2, "released while its session lives");
+		pair.client.abort(moq_net::Error::Cancel);
+		pair.client.closed().await;
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		assert_eq!(Arc::strong_count(&held), 1, "a closed draining session kept its token");
+		drop(draining);
+	}
+
+	/// A migration keeps an unanswered replay on the session it leaves, whether or not the
+	/// task had taken it, since requests there may still be waiting on its answer.
+	#[tokio::test(start_paused = true)]
+	async fn a_draining_session_keeps_an_unanswered_replay() {
+		for taken in [false, true] {
+			let connection = kio::Producer::<State>::default();
+			let auth = retained(&connection);
+			let mut first = pair().await;
+			attach(&connection, &first.client);
+			let (token, _first_grant) = tokio::join!(auth.add("renew"), async {
+				first.requests.recv().await.unwrap().accept(auth::Grant::all())
+			});
+			let token = token.unwrap();
+			let mut second = pair().await;
+			let third = pair().await;
+			attach(&connection, &second.client);
+			if taken {
+				// Let the task take the queued registration and wait on its answer.
+				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+			}
+			attach(&connection, &third.client);
+			let request = tokio::time::timeout(std::time::Duration::from_secs(5), second.requests.recv())
+				.await
+				.unwrap_or_else(|_| panic!("taken={taken}: the draining session withdrew its token unsent"))
+				.unwrap();
+			assert_eq!(request.token().as_ref(), b"renew");
+			let _issued = request.accept(auth::Grant::all());
+			let mut grant = second.client.auth().grant();
+			tokio::time::timeout(std::time::Duration::from_secs(5), async {
+				while grant.peek() != Some(auth::Grant::all()) {
+					grant.changed().await.unwrap();
+				}
+			})
+			.await
+			.unwrap_or_else(|_| panic!("taken={taken}: the draining session never applied its token"));
+			tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+			assert_eq!(
+				second.client.auth().grant().peek(),
+				Some(auth::Grant::all()),
+				"taken={taken}: the draining session withdrew its token"
+			);
+			drop(token);
+		}
 	}
 
 	#[tokio::test(start_paused = true)]

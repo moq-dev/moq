@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { type Grant, type Issued, Unsupported } from "./auth.ts";
 import type { AuthSession } from "./auth_session.ts";
@@ -17,6 +17,7 @@ import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { type Stream, Writer } from "./stream.ts";
+import { abandoned } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { nextTask } from "./util/yield.ts";
 import { wireOf } from "./wire.ts";
@@ -45,6 +46,19 @@ async function waitFor<T>(getter: Getter<T>, ready: (value: T) => boolean): Prom
 	let value = getter.peek();
 	while (!ready(value)) value = await getter.changed();
 	return value;
+}
+
+/** Whether a request on `path` logged the end of its authorization wait. */
+function waited(logged: { mock: { calls: unknown[][] } }, path: string): boolean {
+	return logged.mock.calls.some(([line]) =>
+		String(line).startsWith(`request waited for authorization: path=${path} `),
+	);
+}
+
+/** Yield until `done` holds, failing if it never does. */
+async function settles(done: () => boolean): Promise<void> {
+	for (let i = 0; i < 50 && !done(); i++) await nextTask();
+	expect(done()).toBe(true);
 }
 
 interface Pair {
@@ -139,6 +153,39 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		expect(info.closeCode).toBe(SessionCode.Unauthorized);
 		expect(info.reason).toBe("unauthorized: foo/bar");
 		server.abort();
+	});
+
+	test("a broadcast withdrawn while its token waits is not refused", async () => {
+		const origin = new OriginProducer();
+		const { client, server, transport } = await connect({ publish: origin, protocol });
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		const initial = setup.accept(grant(["baz"], []));
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		const adding = client.auth.add("new");
+		try {
+			const unanswered = await requests.next();
+			if (!unanswered) throw new Error("missing token");
+			const withdrawn = origin.createBroadcast(Path.from("foo/bar"));
+			withdrawn.announce();
+			await nextTask();
+			withdrawn.unannounce();
+			await nextTask();
+			const issued = unanswered.accept(grant(["other"], []));
+			await adding;
+			// Still enforcing: the next uncovered broadcast is the one named.
+			origin.createBroadcast(Path.from("still-bad")).announce();
+			const info = await transport.closed;
+			expect(info.closeCode).toBe(SessionCode.Unauthorized);
+			expect(info.reason).toBe("unauthorized: still-bad");
+			issued.close();
+		} finally {
+			initial.close();
+			client.abort();
+			server.abort();
+			await adding.catch(() => void 0);
+		}
 	});
 
 	test("a revoked grant withdraws its broadcasts without closing the session", async () => {
@@ -239,6 +286,175 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		expect((client.auth as AuthSession).scope.peek()?.publish.size).toBeGreaterThan(0);
 		server.abort();
 	});
+
+	test("a request waits for its token and survives union renewal", async () => {
+		const clock = new Manual();
+		const restore = clock.install();
+		const logged = spyOn(console, "debug");
+		const origin = new OriginProducer();
+		const broadcast = origin.createBroadcast(Path.from("room/x"));
+		broadcast.announce();
+		const published = broadcast.createTrack("video");
+		published.appendGroup().writeFrame({ payload: new Uint8Array([1]) });
+		const { client, server } = await connect({ serverPublish: origin, protocol });
+		const requests = server.auth.requests();
+		await (client.auth as AuthSession).ready(Path.from("room/x"), "subscribe");
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		const initial = setup.accept(grant([], []));
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		const adding = client.auth.add("first");
+		try {
+			const unanswered = await requests.next();
+			if (!unanswered) throw new Error("missing token");
+			const track = wireOf(client).consume(Path.from("room/x")).track("video").subscribe();
+			await nextTask();
+			expect(track.closed.peek()).toBeUndefined();
+			clock.advance(Nano.fromMilli(Milli(7)));
+			const firstGrant = unanswered.accept(grant([], ["room"]));
+			const first = await adding;
+			expect(await track.recvGroup()).toBeDefined();
+			expect(
+				logged.mock.calls.filter(([line]) => String(line).startsWith("request waited for authorization:")),
+			).toEqual([["request waited for authorization: path=room/x waited=7ms"]]);
+			const renewing = client.auth.add("renewal");
+			const renewal = await requests.next();
+			if (!renewal) throw new Error("missing renewal");
+			broadcast
+				.createTrack("audio")
+				.appendGroup()
+				.writeFrame({ payload: new Uint8Array([3]) });
+			const covered = wireOf(client).consume(Path.from("room/x")).track("audio").subscribe();
+			expect(await covered.recvGroup()).toBeDefined();
+			covered.close();
+			const renewedGrant = renewal.accept(grant([], ["room"]));
+			const renewed = await renewing;
+			first.close();
+			await nextTask();
+			expect(track.closed.peek()).toBeUndefined();
+			published.appendGroup().writeFrame({ payload: new Uint8Array([2]) });
+			expect(await track.recvGroup()).toBeDefined();
+			track.close();
+			renewed.close();
+			firstGrant.close();
+			renewedGrant.close();
+		} finally {
+			initial.close();
+			client.abort();
+			server.abort();
+			await adding.catch(() => void 0);
+			logged.mockRestore();
+			restore();
+		}
+	});
+
+	test("an abandoned request stops waiting for its token", async () => {
+		const { client, server } = await connect({ protocol });
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		const initial = setup.accept(grant([], []));
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		const adding = client.auth.add("first");
+		try {
+			const unanswered = await requests.next();
+			if (!unanswered) throw new Error("missing token");
+			const track = new OriginProducer().createBroadcast(Path.from("room/x")).createTrack("video");
+			const reader = track.subscribe();
+			const ready = (client.auth as AuthSession).ready(Path.from("room/x"), "subscribe", {
+				until: () => abandoned(track.demand()),
+			});
+			let settled = false;
+			void ready.then(() => {
+				settled = true;
+			});
+			await nextTask();
+			expect(settled).toBe(false);
+			reader.close();
+			expect(await ready).toBe(false);
+			unanswered.accept(grant([], [])).close();
+		} finally {
+			initial.close();
+			client.abort();
+			server.abort();
+			await adding.catch(() => void 0);
+		}
+	});
+
+	test("a subscribe abandoned while its token waits never reaches the wire", async () => {
+		const logged = spyOn(console, "debug");
+		const origin = new OriginProducer();
+		const broadcast = origin.createBroadcast(Path.from("room/x"));
+		broadcast.announce();
+		broadcast.createTrack("video");
+		const { client, server, transport } = await connect({ serverPublish: origin, protocol });
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		const initial = setup.accept(grant([], []));
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		const adding = client.auth.add("first");
+		try {
+			const unanswered = await requests.next();
+			if (!unanswered) throw new Error("missing token");
+			const track = wireOf(client).consume(Path.from("room/x")).track("video").subscribe();
+			await nextTask();
+			track.close();
+			await settles(() => waited(logged, "room/x"));
+			const opened = transport.sendStreams.bidi.length;
+			const issued = unanswered.accept(grant([], ["room"]));
+			await adding;
+			for (let i = 0; i < 10; i++) await nextTask();
+			expect(transport.sendStreams.bidi.length).toBe(opened);
+			issued.close();
+		} finally {
+			initial.close();
+			client.abort();
+			server.abort();
+			await adding.catch(() => void 0);
+			logged.mockRestore();
+		}
+	});
+
+	// The window between the wait seeing the reader leave and acting on it spans a few
+	// microtasks, so sweep where the new reader lands.
+	test.each(Array.from({ length: 17 }, (_, gap) => gap))(
+		"a subscribe that regains a reader while its token waits keeps waiting (%d)",
+		async (gap) => {
+			const origin = new OriginProducer();
+			const broadcast = origin.createBroadcast(Path.from("room/x"));
+			broadcast.announce();
+			const published = broadcast.createTrack("video");
+			published.appendGroup().writeFrame({ payload: new Uint8Array([7]) });
+			const { client, server } = await connect({ serverPublish: origin, protocol });
+			const requests = server.auth.requests();
+			const setup = await requests.next();
+			if (!setup) throw new Error("missing setup token");
+			const initial = setup.accept(grant([], []));
+			await waitFor(client.auth.grant, (g) => g !== undefined);
+			const adding = client.auth.add("first");
+			try {
+				const unanswered = await requests.next();
+				if (!unanswered) throw new Error("missing token");
+				const track = wireOf(client).consume(Path.from("room/x")).track("video");
+				const first = track.subscribe();
+				await nextTask();
+				first.close();
+				for (let i = 0; i < gap; i++) await Promise.resolve();
+				const second = track.subscribe();
+				const issued = unanswered.accept(grant([], ["room"]));
+				await adding;
+				expect(await second.recvGroup()).toBeDefined();
+				second.close();
+				issued.close();
+			} finally {
+				initial.close();
+				client.abort();
+				server.abort();
+				await adding.catch(() => void 0);
+			}
+		},
+	);
 
 	test("a session's close is not a revocation of its subscriptions", async () => {
 		const origin = new OriginProducer();
@@ -364,6 +580,94 @@ describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 });
 
 // moq-lite carries patterns, so every grant arrives exactly as issued.
+test("a fetch abandoned while its token waits never reaches the wire", async () => {
+	const logged = spyOn(console, "debug");
+	const origin = new OriginProducer();
+	const broadcast = origin.createBroadcast(Path.from("room/x"));
+	broadcast.announce();
+	broadcast
+		.createTrack("video")
+		.appendGroup()
+		.writeFrame({ payload: new Uint8Array([1]) });
+	const { client, server, transport } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
+	const requests = server.auth.requests();
+	const setup = await requests.next();
+	if (!setup) throw new Error("missing setup token");
+	const initial = setup.accept(grant([], []));
+	await waitFor(client.auth.grant, (g) => g !== undefined);
+	const adding = client.auth.add("first");
+	try {
+		const unanswered = await requests.next();
+		if (!unanswered) throw new Error("missing token");
+		const abort = new AbortController();
+		const fetched = wireOf(client)
+			.consume(Path.from("room/x"))
+			.track("video")
+			.fetchGroup(0, { signal: abort.signal });
+		await nextTask();
+		abort.abort(new Error("left"));
+		await expect(fetched).rejects.toThrow();
+		await settles(() => waited(logged, "room/x"));
+		const opened = transport.sendStreams.bidi.length;
+		const issued = unanswered.accept(grant([], ["room"]));
+		await adding;
+		for (let i = 0; i < 10; i++) await nextTask();
+		expect(transport.sendStreams.bidi.length).toBe(opened);
+		issued.close();
+	} finally {
+		initial.close();
+		client.abort();
+		server.abort();
+		await adding.catch(() => void 0);
+		logged.mockRestore();
+	}
+});
+
+// The window between the wait seeing the caller leave and acting on it spans a few
+// microtasks, so sweep where the new caller lands.
+test.each(Array.from({ length: 17 }, (_, gap) => gap))(
+	"a fetch that regains a caller while its token waits keeps waiting (%d)",
+	async (gap) => {
+		const origin = new OriginProducer();
+		const broadcast = origin.createBroadcast(Path.from("room/x"));
+		broadcast.announce();
+		broadcast
+			.createTrack("video")
+			.appendGroup()
+			.writeFrame({ payload: new Uint8Array([7]) });
+		const { client, server } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		const initial = setup.accept(grant([], []));
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		const adding = client.auth.add("first");
+		try {
+			const unanswered = await requests.next();
+			if (!unanswered) throw new Error("missing token");
+			const track = wireOf(client).consume(Path.from("room/x")).track("video");
+			const abort = new AbortController();
+			const first = track.fetchGroup(0, { signal: abort.signal });
+			await nextTask();
+			// The last caller leaves and another coalesces before the wait observes it.
+			abort.abort(new Error("left"));
+			for (let i = 0; i < gap; i++) await Promise.resolve();
+			const second = track.fetchGroup(0);
+			await expect(first).rejects.toThrow();
+			const issued = unanswered.accept(grant([], ["room"]));
+			await adding;
+			const group = await second;
+			expect((await group.readFrame())?.payload).toEqual(new Uint8Array([7]));
+			issued.close();
+		} finally {
+			initial.close();
+			client.abort();
+			server.abort();
+			await adding.catch(() => void 0);
+		}
+	},
+);
+
 test("lite-07 carries literal and wildcard grants exactly", async () => {
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });
 	const requests = server.auth.requests();

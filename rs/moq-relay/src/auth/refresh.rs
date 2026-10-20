@@ -944,7 +944,7 @@ mod tests {
 					other.publish = Default::default();
 					admission.grant(lease::Consumer::fixed(other));
 				} else {
-					admission.refuse(super::super::Error::Refused);
+					admission.refuse(super::super::Error::Refused(Default::default()));
 				}
 			});
 			assert!(result.is_err());
