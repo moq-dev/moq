@@ -225,6 +225,12 @@ impl TimeEnd {
 					}
 				},
 				Some((sequence, Held::Started(time))) if !later(time, self.pts) => self.known = Some(sequence),
+				// Past every held group: the next to arrive is the speculative one, judged
+				// once a settle sees it, before it is read.
+				None if self.after.is_none() => {
+					self.held = at;
+					break;
+				}
 				_ => match holdings.gone(at) {
 					Some(end) if end > at => {
 						self.held = end;
@@ -245,7 +251,7 @@ impl TimeEnd {
 			_ if holdings.complete() => None,
 			(Some(speculative), _) => speculative.checked_add(1),
 			(None, Some(after)) => Some(after),
-			// Every sequence from here on is gone, or the last one is in range.
+			// Every held group is accounted for: the next to arrive is the speculative one.
 			(None, None) => None,
 		};
 
@@ -947,6 +953,7 @@ mod tests {
 		let mut groups = Groups::new([Groups::started(0, 3000), (3, Held::Never)]);
 		let mut window = Window::new(&[range(time(3000), time(3500))], Some(3), &groups).unwrap();
 		assert_eq!(covered(&window, 5), vec![0, 1]);
+		assert_eq!(window.speculative().collect::<Vec<_>>(), vec![1]);
 		groups.held.insert(2, Held::Pending);
 		groups.held.insert(1, Held::Pending);
 		window.settle(Some(3), &groups);
