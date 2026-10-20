@@ -177,8 +177,11 @@ impl Applied {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
+	/// Encoded width in pixels.
 	pub width: u32,
+	/// Encoded height in pixels.
 	pub height: u32,
+	/// Encoded frame rate.
 	pub framerate: Rate,
 	/// Target bitrate. `None` derives a sane default
 	/// from resolution and framerate (~0.07 bits per pixel per second).
@@ -188,6 +191,7 @@ pub struct Config {
 	pub gop: Gop,
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
+	/// Which encoder implementation to use. Defaults to [`Kind::Auto`].
 	pub kind: Kind,
 	/// How the encoder trades latency for compression. Defaults to
 	/// [`Preset::LowLatency`].
