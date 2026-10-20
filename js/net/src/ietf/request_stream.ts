@@ -100,7 +100,10 @@ export async function refuseReserved(stream: Stream, version: IetfVersion): Prom
  * may name a new session.
  * @internal
  */
-export type GoAways = { client: boolean; seen: boolean };
+type GoAways = { client: boolean; seen: boolean };
+
+// One reader spans the initial response and later updates on the same request.
+const goaways = new WeakMap<Reader, GoAways>();
 
 /**
  * Read the type of a request stream's next message, or undefined once the peer finishes.
@@ -108,19 +111,39 @@ export type GoAways = { client: boolean; seen: boolean };
  * or a client's naming a new session, is a protocol violation.
  * @internal
  */
-export async function nextMessage(reader: Reader, version: IetfVersion, goaway: GoAways): Promise<number | undefined> {
-	for (;;) {
-		if (await reader.done()) return undefined;
-		const type = await reader.u53();
-		if (type !== GoAway.id || version < Version.DRAFT_18) return type;
-		if (goaway.seen) throw new ProtocolViolation("second GOAWAY on a request stream");
-		goaway.seen = true;
-		// Draft-18's Request ID belongs on the control stream only.
-		const msg = await GoAway.decode(reader, version);
-		if (msg.requestId !== undefined) throw new ProtocolViolation("request stream GOAWAY carries a Request ID");
-		if (!goaway.client && msg.newSessionUri !== "")
-			throw new ProtocolViolation("client GOAWAY names a new session");
+export async function nextMessage(reader: Reader, version: IetfVersion, client: boolean): Promise<number | undefined> {
+	let goaway = goaways.get(reader);
+	if (!goaway) {
+		goaway = { client, seen: false };
+		goaways.set(reader, goaway);
 	}
+	try {
+		for (;;) {
+			if (await reader.done()) return undefined;
+			const type = await reader.u53();
+			if (type !== GoAway.id || version < Version.DRAFT_18) return type;
+			if (goaway.seen) throw new ProtocolViolation("second GOAWAY on a request stream");
+			goaway.seen = true;
+			// Draft-18's Request ID belongs on the control stream only.
+			const msg = await GoAway.decode(reader, version);
+			if (msg.requestId !== undefined) throw new ProtocolViolation("request stream GOAWAY carries a Request ID");
+			if (!goaway.client && msg.newSessionUri !== "")
+				throw new ProtocolViolation("client GOAWAY names a new session");
+		}
+	} catch (err) {
+		throw malformed(err, "request stream message");
+	}
+}
+
+/** Wait for a request's FIN or reset while still validating its GOAWAY messages. @internal */
+export async function ended(stream: Stream, version: IetfVersion, client: boolean): Promise<void> {
+	if (version <= Version.DRAFT_16) return cancelled(stream, version);
+	const read = (async () => {
+		if ((await nextMessage(stream.reader, version, client)) !== undefined)
+			throw new ProtocolViolation("unexpected request stream message");
+		if (!finCancels(version)) await stream.writer.closed;
+	})();
+	await race([read, stream.writer.closed]);
 }
 
 /**
@@ -130,11 +153,11 @@ export async function nextMessage(reader: Reader, version: IetfVersion, goaway: 
 export async function namespaceUpdate(
 	reader: Reader,
 	version: IetfVersion,
-	goaway: GoAways,
+	client: boolean,
 ): Promise<{ requestId: bigint; prefix?: Path.Valid; refused?: RequestCondition } | undefined> {
 	try {
 		// Inside the normalization, so an oversized or truncated type is malformed too.
-		const type = await nextMessage(reader, version, goaway);
+		const type = await nextMessage(reader, version, client);
 		if (type === undefined) return undefined;
 		if (type !== 0x02) throw new ProtocolViolation("expected namespace REQUEST_UPDATE");
 		return await Message.decode(reader, async (body) => {
@@ -165,6 +188,11 @@ export async function namespaceUpdate(
  * @internal
  */
 export function malformed(err: unknown, what: string): unknown {
-	if (err instanceof ProtocolViolation || err instanceof StreamError) return err;
+	if (
+		err instanceof ProtocolViolation ||
+		err instanceof StreamError ||
+		(typeof err === "object" && err !== null && "source" in err && err.source === "session")
+	)
+		return err;
 	return new ProtocolViolation(`malformed ${what}`, { cause: err });
 }

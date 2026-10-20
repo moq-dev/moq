@@ -60,6 +60,7 @@ import {
 import { RequestError, RequestOk } from "./request.ts";
 import {
 	cancelled,
+	ended,
 	finCancels,
 	malformed,
 	namespaceUpdate,
@@ -166,7 +167,14 @@ type Refused = "never" | number;
 type Answer = "held" | "dropped" | Refused;
 
 /** One open PUBLISH_NAMESPACE request. */
-type NamespaceRequest = { path: Path.Valid; requestId: bigint; stream: Stream; auth?: Auth };
+type NamespaceRequest = {
+	path: Path.Valid;
+	requestId: bigint;
+	stream: Stream;
+	auth?: Auth;
+	reply?: Promise<number | undefined>;
+	updating?: boolean;
+};
 
 /** The open PUBLISH_NAMESPACE request per advertised path. */
 type Requests = Map<Path.Valid, NamespaceRequest>;
@@ -321,6 +329,9 @@ export class Publisher {
 	// told on request. On draft-16 and later {@link runSubscribeNamespace} also carries
 	// every match: a NAMESPACE is discovery, not a second route.
 	#advertised: Getter<Advertisements | undefined>;
+	// Bumped when an idle draft-18+ advertisement ends without an update, so the announce
+	// loop re-offers it instead of holding a request the peer dropped.
+	#lapsed = new Signal(0);
 	#publish?: OriginConsumer;
 
 	// What every advertisement carries on a session that negotiated the MoQ Cluster
@@ -624,12 +635,13 @@ export class Publisher {
 				unsubscribe = resolve;
 			});
 			const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
-			const goaway = { client: this.#session.client, seen: false };
 			const updates = (async () => {
 				for (;;) {
-					const type = await nextMessage(stream.reader, version, goaway).catch((err: unknown) => {
-						throw malformed(err, "subscription message");
-					});
+					const type = await nextMessage(stream.reader, version, this.#session.client).catch(
+						(err: unknown) => {
+							throw malformed(err, "subscription message");
+						},
+					);
 					if (type === undefined) {
 						if (legacy || finCancels(version)) return;
 						return stream.writer.closed;
@@ -1237,9 +1249,8 @@ export class Publisher {
 		};
 
 		const ending = cancelled(stream, version);
-		const goaway = { client: this.#session.client, seen: false };
 		const readUpdate = () =>
-			namespaceUpdate(stream.reader, version, goaway).then(
+			namespaceUpdate(stream.reader, version, this.#session.client).then(
 				(update) => ({ update }),
 				(err) => ({ error: error(err) }),
 			);
@@ -1472,6 +1483,9 @@ export class Publisher {
 
 			// Keyed by path.
 			const ns: Namespaces = { active: new Map(), refused: new Map(), offered: new Map() };
+			// How long to stay away the next time the peer ends each advertisement while idle,
+			// and the instance that wait is about.
+			const lapses = new Map<Path.Valid, { snap: Advertised; wait: number }>();
 			let retry = 0;
 
 			for (;;) {
@@ -1488,12 +1502,26 @@ export class Publisher {
 					const grant = this.#grant.changed(() => resolve("changed"));
 					// A token that ended leaves the request carrying it to be made again without.
 					const ended = this.#auth?.ended.changed(() => resolve("changed"));
+					const lapsed = this.#lapsed.changed(() => resolve("changed"));
 					dispose = () => {
 						table();
 						grant();
 						ended?.();
+						lapsed();
 					};
 				});
+
+				// The peer no longer holds a namespace whose request ended while idle. The wait
+				// before offering it again doubles each time, so a peer that ends every one it
+				// accepts sees them on a backoff rather than in a loop.
+				for (const [key, snap] of [...ns.active]) {
+					if (requests.has(key)) continue;
+					ns.active.delete(key);
+					const wait = lapses.get(key)?.wait ?? RETRY_BASE;
+					lapses.set(key, { snap, wait: Math.min(wait * 2, RETRY_MAX) });
+					ns.refused.set(key, Instant.add(now(), Nano.fromMilli(Milli(wait))));
+					ns.offered.set(key, snap);
+				}
 
 				const advertised = this.#advertised.peek();
 				if (!advertised) {
@@ -1512,6 +1540,11 @@ export class Publisher {
 					)
 						continue;
 					updated.set(covered, candidates[0]);
+				}
+				// Another broadcast at the path starts its backoff fresh, as a refusal does.
+				for (const [key, lapse] of lapses) {
+					const snap = updated.get(key);
+					if (snap === undefined || !sameInstance(lapse.snap, snap)) lapses.delete(key);
 				}
 
 				const outstanding = await this.#reconcile(ns, updated, target);
@@ -1728,7 +1761,8 @@ export class Publisher {
 					await msg.encode(stream.writer, this.#session.version);
 
 					// Read response (RequestOk and PublishNamespaceOk share 0x07)
-					const respTypeId = await stream.reader.u53();
+					const respTypeId = await nextMessage(stream.reader, this.#session.version, this.#session.client);
+					if (respTypeId === undefined) throw new Error("advertisement ended before its response");
 					if (respTypeId === RequestError.id) {
 						const err = await RequestError.decode(stream.reader, this.#session.version);
 						const why = requestReason(
@@ -1754,17 +1788,60 @@ export class Publisher {
 				})(),
 			);
 
-			if (answer === "held" && request) requests.set(path, { path, requestId, stream: request, auth });
+			if (answer === "held" && request) {
+				const held: NamespaceRequest = { path, requestId, stream: request, auth };
+				requests.set(path, held);
+				if (this.#session.version >= Version.DRAFT_18) held.reply = this.#readAdvertisement(held, requests);
+			}
 			return answer;
 		} catch (err: unknown) {
 			// The peer never answered the advertisement: a control timeout, not late content.
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
+			if (e instanceof ProtocolViolation) {
+				this.#quic.close({ closeCode: e.code, reason: e.message });
+				this.#session.close();
+			}
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 			request?.abort(e);
 			return e instanceof NoStreamCredit || (e instanceof StreamError && e.code === StreamCode.ControlTimeout)
 				? "never"
 				: "dropped";
 		}
+	}
+
+	/**
+	 * Keep reading while an advertisement is idle, so GOAWAY validation never waits for an
+	 * update. A stream that ends while idle drops the request, and the announce loop re-offers it
+	 * after a backoff.
+	 */
+	#readAdvertisement(request: NamespaceRequest, requests: Requests): Promise<number | undefined> {
+		const reply = nextMessage(request.stream.reader, this.#session.version, this.#session.client)
+			.then((type) => {
+				if (type !== undefined && !request.updating)
+					throw new ProtocolViolation("unexpected message on an idle advertisement");
+				return type;
+			})
+			.catch((err: unknown) => {
+				if (err instanceof ProtocolViolation) {
+					this.#quic.close({ closeCode: err.code, reason: err.message });
+					this.#session.close();
+				}
+				throw err;
+			});
+		// A later update consumes an answer; an end is acted on as soon as it arrives.
+		void reply.then(
+			(type) => type === undefined && this.#lapse(request, requests),
+			() => this.#lapse(request, requests),
+		);
+		return reply;
+	}
+
+	/** Drop an idle advertisement whose stream ended, unless an update already took it over. */
+	#lapse(request: NamespaceRequest, requests: Requests) {
+		if (request.updating || requests.get(request.path) !== request) return;
+		requests.delete(request.path);
+		request.stream.abort(new StreamError(StreamCode.Cancel, { message: "advertisement ended" }));
+		this.#lapsed.update((n) => n + 1);
 	}
 
 	/**
@@ -1819,6 +1896,7 @@ export class Publisher {
 			answer = await withTimeout(
 				(async (): Promise<Answer> => {
 					const { writer, reader } = request.stream;
+					request.updating = true;
 					await writer.u53(PublishNamespaceUpdate.id);
 					const namespaceRequestId = version === Version.DRAFT_16 ? request.requestId : undefined;
 					await new PublishNamespaceUpdate({ requestId, namespaceRequestId, update, token }).encode(
@@ -1830,7 +1908,8 @@ export class Publisher {
 					// can beat the answer.
 					if (version === Version.DRAFT_16 && (await reader.done())) return "dropped";
 
-					const typeId = await reader.u53();
+					const typeId = await (request.reply ?? nextMessage(reader, version, this.#session.client));
+					if (typeId === undefined) throw new Error("advertisement ended before its update response");
 					if (typeId === RequestError.id) {
 						const err = await RequestError.decode(reader, version);
 						const why = requestReason(err.errorCode, err.reasonPhrase, "publish_namespace", version);
@@ -1841,6 +1920,8 @@ export class Publisher {
 						throw new Error(`unexpected answer to the update: typeId=0x${typeId.toString(16)}`);
 					}
 					this.#answered(await RequestOk.decode(reader, version));
+					request.updating = false;
+					if (version >= Version.DRAFT_18) request.reply = this.#readAdvertisement(request, requests);
 					return "held";
 				})(),
 				ADVERTISE_TIMEOUT,
@@ -1848,6 +1929,10 @@ export class Publisher {
 			);
 		} catch (err: unknown) {
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
+			if (e instanceof ProtocolViolation) {
+				this.#quic.close({ closeCode: e.code, reason: e.message });
+				this.#session.close();
+			}
 			console.warn(`publish_namespace update failed: broadcast=${path} error=${reason(e)}`);
 			requests.delete(path);
 			// Aborting a request riding the control stream tells the peer nothing, so it would
@@ -1950,7 +2035,16 @@ export class Publisher {
 		// nothing, and lets go of the broadcast and track lookups.
 		const hold = new AbortController();
 		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
-		void cancelled(stream, version).then(() => hold.abort(cancel));
+		void ended(stream, version, this.#session.client).then(
+			() => hold.abort(cancel),
+			(err) => {
+				if (err instanceof ProtocolViolation) {
+					this.#quic.close({ closeCode: err.code, reason: err.message });
+					this.#session.close();
+				}
+				hold.abort(cancel);
+			},
+		);
 
 		// A grant that narrows abandons the lookup, and resets an answer the transport has
 		// not taken yet rather than delivering it.
