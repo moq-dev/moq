@@ -487,8 +487,6 @@ export const hooks: {
 	readGroupFrame: (group: GroupConsumer, from?: number) => Promise<ReadGroupFrame | undefined>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */
 	evictGroup: (group: GroupConsumer) => void;
-	/** Tell the track producer behind a subscription that a stream failed to carry a group it had fully written. */
-	failGroup: (subscriber: Subscriber, sequence: number, error: Error) => void;
 	/** Attach the origin advertisement of a created broadcast. */
 	attachAnnouncer: (
 		producer: BroadcastProducer,
@@ -639,9 +637,6 @@ export const hooks: {
 	},
 	evictGroup: () => {
 		throw new Error("group.ts not loaded");
-	},
-	failGroup: () => {
-		throw new Error("track.ts not loaded");
 	},
 	attachAnnouncer: () => {
 		throw new Error("broadcast.ts not loaded");

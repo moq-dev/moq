@@ -553,8 +553,6 @@ function binary(value: number): [bigint, number] {
 }
 
 let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
-// Records a group a subscriber's stream failed to carry; assigned in the producer's static block.
-let failProducerGroup: (producer: Producer, sequence: number, error: Error) => void;
 // A fresh read handle on a group the producer still caches; assigned in its static block.
 let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
@@ -694,9 +692,6 @@ export class Producer {
 
 	// The group subscribers want while any is attached, watched through {@link demand}.
 	#wanted = new Signal<number | undefined>(undefined);
-	// The latest group a subscriber's stream failed to carry after it was fully written, watched
-	// through {@link failed}.
-	#failed = new Signal<{ sequence: number; error: Error } | undefined>(undefined);
 	// The lowest group they want while no refresh is pending, never lowered.
 	#floor = 0;
 	// A join over the refresh ratio asked for a group past every sequence written, and none
@@ -730,7 +725,6 @@ export class Producer {
 	static {
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
-		failProducerGroup = (producer, sequence, error) => producer.#failed.set({ sequence, error });
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
@@ -830,16 +824,6 @@ export class Producer {
 	 */
 	get subscription(): Getter<Subscription | undefined> {
 		return this.#state.update;
-	}
-
-	/**
-	 * The latest group a subscriber's stream failed to carry after it was fully written, with
-	 * the failure: the peer reset it, or it never completed and was reset here. A publisher that
-	 * must not lose a group watches this to write its content again as a new group; the failed
-	 * sequence itself is not served again.
-	 */
-	get failed(): Getter<{ sequence: number; error: Error } | undefined> {
-		return this.#failed;
 	}
 
 	/** Commit the immutable publisher properties, resolving {@link info}. Returns `this`. */
@@ -1805,10 +1789,6 @@ export class Subscriber {
 		hooks.joinSubscriber = (subscriber) => {
 			if (subscriber.#resume) subscriber.#resume.join();
 			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
-		};
-		hooks.failGroup = (subscriber, sequence, error) => {
-			const producer = subscriber.#state.producer;
-			if (producer) failProducerGroup(producer, sequence, error);
 		};
 		hooks.tryRecvGroup = (subscriber, started) => subscriber.#tryRecvGroup(started);
 		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();
