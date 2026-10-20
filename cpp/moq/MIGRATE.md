@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `CongestionControl` gained `kNone` (#5926)
+
+`moq::CongestionControl::kNone` runs no congestion control and no pacing, for tests and controlled links.
+A `switch` without a `default` needs one more case.
+
 ### Container byte streams use `MediaContainerProducer` (#5919)
 
 `moq::MediaContainerStreamProducer` and `moq::ContainerStreamInit` are gone: a container recovers its own framing, so `moq::MediaContainerProducer` takes chunks split anywhere.
@@ -12,6 +17,11 @@ Pass empty `data` and write the stream through it.
 ```cpp
 auto stream = ok(moq::MediaContainerProducer::init(broadcast, {moq::ContainerFormat::kFmp4, {}}));
 ```
+
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `QuicConfig::keylog` to `true` as well to capture them; without `SSLKEYLOGFILE` the client or server refuses to build.
 
 ### Subscriptions carry group ranges (#5732)
 

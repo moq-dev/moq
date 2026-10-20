@@ -166,8 +166,7 @@ summarize_load() {
     local output=$2
     local workload=$3
 
-    # The counters are sampled independently, so mirror moq-bench's saturating
-    # subtraction when a snapshot catches one update between the two loads.
+    # Confirmed losses are monotonic; outstanding gaps can recover and hide loss.
     jq -s --arg workload "$workload" '
 		if length < 2 then error("load benchmark produced fewer than two samples") else . end
 		| .[-1] as $last
@@ -193,8 +192,8 @@ summarize_load() {
 			recv_mbps: (($last.bytes_recv - $first.bytes_recv) * 8 / $seconds / 1000000),
 			send_fps: (($last.frames_sent - $first.frames_sent) / $seconds),
 			recv_fps: (($last.frames_recv - $first.frames_recv) / $seconds),
-			loss_pct: (if $last.groups_expected == 0 or $last.groups_present >= $last.groups_expected then 0 else
-				(($last.groups_expected - $last.groups_present) * 100 / $last.groups_expected)
+			loss_pct: (if $last.groups_expected == 0 then 0 else
+				($last.groups_lost * 100 / $last.groups_expected)
 			end),
 			latency_p50_ms: $last.latency_p50_ms,
 			latency_p99_ms: $last.latency_p99_ms

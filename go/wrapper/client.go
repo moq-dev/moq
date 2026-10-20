@@ -34,6 +34,7 @@ type clientConfig struct {
 	quicMTUDiscovery *bool
 	quicCongestion   *CongestionControl
 	quicQlog         *string
+	quicKeylog       *bool
 	websocketEnabled *bool
 	websocketDelay   *time.Duration
 	once             bool
@@ -79,6 +80,7 @@ func (c *clientConfig) ffi() (ffi.MoqClientConfig, error) {
 			MtuDiscovery:      c.quicMTUDiscovery,
 			CongestionControl: c.quicCongestion,
 			Qlog:              c.quicQlog,
+			Keylog:            c.quicKeylog,
 		},
 		Websocket: ffi.MoqWebSocketConfig{Enabled: c.websocketEnabled, DelayUs: us("websocket delay", c.websocketDelay)},
 		Once:      c.once,
@@ -266,6 +268,12 @@ func WithQUICCongestionControl(family CongestionControl) ClientOption {
 // QlogSupported.
 func WithQUICQlog(dir string) ClientOption {
 	return func(c *clientConfig) { c.quicQlog = &dir }
+}
+
+// WithQUICKeylog writes TLS session secrets to the file SSLKEYLOGFILE names, for
+// decrypting a capture. Off by default; on without SSLKEYLOGFILE fails the dial.
+func WithQUICKeylog(enabled bool) ClientOption {
+	return func(c *clientConfig) { c.quicKeylog = &enabled }
 }
 
 // WithWebSocketEnabled toggles the WebSocket fallback, which races QUIC for

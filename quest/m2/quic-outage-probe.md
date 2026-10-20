@@ -17,7 +17,7 @@ Decided 2026-10-19 by the maintainer (#5953):
 - Declined from #5953: a congestion controller that holds a fixed rate
   through random loss, exposing the reorder thresholds, and a named
   provisioned-path profile. Random loss is not a quality target
-  ([random-loss audit](/quest/m1/random-loss-audit.md)), and the reorder
+  (see [shaped-path grading](/test/ts/README.md)), and the reorder
   evidence came from random netem reorder only. Revisit the thresholds with
   a bufferbloat or real-path measurement.
 - Test on mocked time: a link that drops everything for 5 s, then returns.

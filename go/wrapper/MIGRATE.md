@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `CongestionControl` gained `CongestionControlNone` (#5926)
+
+`CongestionControlNone` runs no congestion control and no pacing, for tests and controlled links.
+A `switch` that handles every value needs one more case.
+
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Pass `WithQUICKeylog(true)` to `Dial` or `WithServerQUICKeylog(true)` to `Listen` as well to capture them; without `SSLKEYLOGFILE` the dial or listen fails.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.GroupStart` and `GroupEnd` are replaced by `Ranges`, a slice of `Range` whose ends are `AnchorAbsolute` or `AnchorRelative` (an absolute group and frame, or a count of groups before the latest), and an optional `Order`.

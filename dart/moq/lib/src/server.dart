@@ -26,6 +26,10 @@ final class ListenOptions {
   /// Cap on the concurrent QUIC streams each peer may open toward this server.
   final int? maxStreams;
 
+  /// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
+  /// decrypting a capture. Off by default; on without `SSLKEYLOGFILE` fails.
+  final bool keylog;
+
   /// Origin whose broadcasts are served to incoming sessions; auto-created when null.
   final OriginProducer? publish;
 
@@ -39,6 +43,7 @@ final class ListenOptions {
     this.tlsGenerate,
     this.versions,
     this.maxStreams,
+    this.keylog = false,
     this.publish,
     this.consume,
   });
@@ -85,7 +90,10 @@ final class Server {
           key: options.tlsKey ?? const [],
           generate: options.tlsGenerate ?? const [],
         ),
-        quic: MoqQuicConfig(maxStreams: options.maxStreams),
+        quic: MoqQuicConfig(
+          maxStreams: options.maxStreams,
+          keylog: options.keylog,
+        ),
         publish: publishOrigin,
         consume: options.consume ?? shared,
       ),

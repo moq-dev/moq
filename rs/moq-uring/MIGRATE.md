@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Timers run on moq-clock
+
+The worker is a moq-clock backend, so its deadlines are `moq_clock::Instant`s instead of `std::time::Instant`s.
+`Timer::set` takes an `Option<moq_clock::Instant>`, and `quic::handshake::Info::deadline` is one.
+Read the worker's time with `moq_clock::now()` inside it.
+
 ### Datagrams take `SendOptions` (#5770, #5872)
 
 `quic::Connection::send_datagram` and `quic::web::Session::send_datagram` take a `quic::SendOptions { group, priority }` and never block; pass `SendOptions::default()` for an ungrouped datagram.

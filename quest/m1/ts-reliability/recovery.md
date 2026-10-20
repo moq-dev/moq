@@ -21,7 +21,11 @@ nothing, in its stream row's `units` and `quiet`.
 
 Test content loss separately from IP packet loss. QUIC may retransmit IP
 loss; a netem percentage does not establish that any MoQ object was omitted.
-Keep the real network impairment arm for transport and pacing evidence, and
+Keep the real network impairment arm for transport and pacing evidence,
+using a rate below the media bitrate behind a deep but finite queue with
+verified overflow drops. Random loss only proves retransmission correctness,
+never output quality or latency. Reuse the overflowing lane in
+`test/ts/README.md`, and
 add deterministic fault schedules at the MoQ content boundary.
 
 Cover a cold join, a skipped group, a partially delivered group, late objects
