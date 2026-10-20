@@ -2543,12 +2543,6 @@ impl Consumer {
 		self.cursor.expiry_pending()
 	}
 
-	/// Whether the group has been aborted (including pool eviction); the abort
-	/// dropped the cached frames, so a held consumer has nothing left to read.
-	pub(super) fn is_aborted(&self) -> bool {
-		self.cursor.state.read().abort.is_some()
-	}
-
 	/// Mark the group as still being read, so a slow batch drain does not expire it.
 	pub fn keep_alive(&self) {
 		self.cursor.state.read().charge.refresh();

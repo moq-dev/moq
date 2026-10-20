@@ -28,6 +28,7 @@ export const HopSchema = z
 	.check(z.refine((value) => value >= 0n && value < 1n << 62n, "Hop must be a non-negative 62-bit integer"))
 	.brand("Hop");
 
+/** A relay's hop id, validated by {@link HopSchema}. */
 export type Hop = z.infer<typeof HopSchema>;
 
 // pending: /quest/m1/public-model/answer.md

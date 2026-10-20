@@ -245,7 +245,7 @@ should prefer the canonical name and fall back to the legacy one.
     "requests": 3, "sessions_started": 12, "sessions_ended": 10,
     "sessions": 12, "sessions_closed": 10,
     "sent_bytes": 1048576, "received_bytes": 524288,
-    "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0 },
+    "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
     "wire_tx": 2048, "wire_rx": 1024

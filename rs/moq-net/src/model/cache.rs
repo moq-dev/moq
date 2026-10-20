@@ -819,19 +819,15 @@ impl Track {
 		&self.wakes
 	}
 
-	pub(super) fn watch_aborts(&self) -> aborts::Watch {
-		self.aborts.get_or_init(Arc::default).watch()
-	}
-
 	/// Watch every group the publisher cuts, rather than chosen sequences.
 	pub(super) fn watch_cuts(&self) -> aborts::Watch {
 		self.aborts.get_or_init(Arc::default).watch_cuts()
 	}
 
-	/// Notify watchers that group `sequence` aborted, and whether the publisher cut it.
+	/// Notify watchers that group `sequence` aborted, if the publisher cut it.
 	pub(super) fn aborted(&self, sequence: u64, cut: bool) {
-		if let Some(aborts) = self.aborts.get() {
-			aborts.notify(sequence, cut);
+		if cut && let Some(aborts) = self.aborts.get() {
+			aborts.notify(sequence);
 		}
 	}
 

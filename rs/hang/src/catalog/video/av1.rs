@@ -38,6 +38,7 @@ pub struct AV1 {
 }
 
 impl AV1 {
+	/// The codec string prefix that identifies AV1.
 	pub const PREFIX: &'static str = "av01";
 }
 
