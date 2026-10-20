@@ -6840,11 +6840,8 @@ mod test {
 
 		// An older report or frame does not move it back.
 		producer.report_largest(Position { group: 7, frame: 1 });
-		producer
-			.create_group(group::Info { sequence: 2 })
-			.unwrap()
-			.write_frame(None, &b"a"[..])
-			.unwrap();
+		let mut _open = producer.create_group(group::Info { sequence: 2 }).unwrap();
+		_open.write_frame(None, &b"a"[..]).unwrap();
 		assert!(subscriber.largest().now_or_never().is_none());
 
 		producer.report_largest(Position { group: 8, frame: 0 });
@@ -7530,7 +7527,7 @@ mod test {
 			"the newest sequence"
 		);
 
-		producer.append_group().unwrap();
+		let _open = producer.append_group().unwrap();
 		assert!(
 			matches!(fetch(sequence), Some(Err(Error::NotFetchable))),
 			"below a newer group"
@@ -7915,13 +7912,13 @@ mod test {
 	#[test]
 	fn evict_keeps_max_sequence() {
 		let producer = track_producer("test", Info::timed());
-		producer.append_group().unwrap(); // seq 0
+		let _open = producer.append_group().unwrap(); // seq 0
 
 		// Advance time past the LRU window.
 		elapse(&producer, cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 
 		// Append another group; seq 0 is expired and evicted.
-		producer.append_group().unwrap(); // seq 1
+		let _open = producer.append_group().unwrap(); // seq 1
 
 		{
 			let state = producer.state.read();
@@ -7986,7 +7983,7 @@ mod test {
 		let producer = track_producer_pooled("test", pool.clone());
 		let mut stalled = producer.append_group().unwrap(); // seq 0, left open
 		stalled.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
-		producer.append_group().unwrap(); // seq 1, the live edge
+		let _open = producer.append_group().unwrap(); // seq 1, the live edge
 
 		elapse(&producer, Duration::from_secs(2));
 		pool.sweep();
@@ -8008,7 +8005,7 @@ mod test {
 		let producer = track_producer_pooled("test", pool.clone());
 		let mut group = producer.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"first".as_slice()).unwrap();
-		producer.append_group().unwrap();
+		let _open = producer.append_group().unwrap();
 		// Activity written while cleanup was idle gets the new supplied time.
 		let later = now + Duration::from_secs(60);
 		pool.gc(later, &kio::Waiter::noop());
@@ -8024,7 +8021,7 @@ mod test {
 		let producer = track_producer_pooled("test", pool.clone());
 		let now = crate::model::clock::now();
 		let groups: Vec<_> = (0..EVICT_SCAN * 3).map(|_| producer.append_group().unwrap()).collect();
-		producer.append_group().unwrap();
+		let _open = producer.append_group().unwrap();
 		pool.gc(now, &kio::Waiter::noop());
 		// Keep more than a write scan's worth of leading entries fresh.
 		for group in &groups[..EVICT_SCAN * 2] {
@@ -8050,11 +8047,13 @@ mod test {
 
 		// Comfortably more than one write-driven scan window (EVICT_SCAN).
 		let backlog = 4 * EVICT_SCAN;
+		let mut _open = Vec::new();
 		for _ in 0..backlog {
 			let mut group = producer.append_group().unwrap();
 			group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+			_open.push(group);
 		}
-		producer.append_group().unwrap(); // the live edge, always protected
+		let _open = producer.append_group().unwrap(); // the live edge, always protected
 
 		elapse(&producer, Duration::from_secs(2));
 		pool.sweep();
@@ -8068,11 +8067,11 @@ mod test {
 	fn pool_expiry_controls_eviction() {
 		// A shorter LRU window on the pool evicts sooner than the default.
 		let producer = track_producer_expiring("test", Duration::from_secs(1));
-		producer.append_group().unwrap(); // seq 0
+		let _open = producer.append_group().unwrap(); // seq 0
 
 		// Past the pool's window but well within cache::DEFAULT_EXPIRY.
 		elapse(&producer, Duration::from_secs(2));
-		producer.append_group().unwrap(); // seq 1
+		let _open = producer.append_group().unwrap(); // seq 1
 
 		// Seq 0 is gone because the pool only keeps idle groups for 1s.
 		let state = producer.state.read();
@@ -8791,7 +8790,7 @@ mod test {
 	fn a_stamped_successor_expires_an_unstamped_group() {
 		let mut producer = track_producer("test", Info::timed());
 		let mut subscriber = producer.subscribe(None);
-		producer.append_group().unwrap(); // seq 0 stalls before its first frame
+		let _open = producer.append_group().unwrap(); // seq 0 stalls before its first frame
 
 		append_at(&mut producer, 1000); // seq 1 proves the live feed moved on
 
@@ -10370,9 +10369,9 @@ mod test {
 		let producer = track_producer("test", Info::timed());
 
 		// Arrive out of order: seq 5 first, then 3, then 4.
-		producer.create_group(group::Info { sequence: 5 }).unwrap();
-		producer.create_group(group::Info { sequence: 3 }).unwrap();
-		producer.create_group(group::Info { sequence: 4 }).unwrap();
+		let _open = producer.create_group(group::Info { sequence: 5 }).unwrap();
+		let _open = producer.create_group(group::Info { sequence: 3 }).unwrap();
+		let _open = producer.create_group(group::Info { sequence: 4 }).unwrap();
 
 		// max_sequence = 5, which is at the front of the VecDeque.
 		{
@@ -10384,7 +10383,7 @@ mod test {
 		elapse(&producer, cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 
 		// Append seq 6 (becomes new max_sequence).
-		producer.append_group().unwrap(); // seq 6
+		let _open = producer.append_group().unwrap(); // seq 6
 
 		// Seq 3, 4, 5 are all expired. Seq 5 was the old max_sequence but now 6 is.
 		// All old groups are evicted.
@@ -10483,7 +10482,7 @@ mod test {
 	fn drop_unfinished_clears_cached_groups() {
 		let producer = track_producer("test", Info::timed());
 		let writer = producer.clone();
-		writer.append_group().unwrap();
+		let _open = writer.append_group().unwrap();
 
 		// A stale consumer keeps the channel (and thus the cache) alive.
 		let mut consumer = producer.subscribe(None);
@@ -10519,7 +10518,7 @@ mod test {
 		let warns = count_drop_warnings("track::Producer dropped without finish", || {
 			let producer = track_producer("test", Info::timed());
 			let writer = producer.clone();
-			writer.append_group().unwrap();
+			let _open = writer.append_group().unwrap();
 			let _consumer = producer.subscribe(None);
 			drop(writer);
 			drop(producer);
@@ -10611,7 +10610,7 @@ mod test {
 	fn finish_after_groups() {
 		let producer = track_producer("test", Info::timed());
 
-		producer.append_group().unwrap();
+		let _open = producer.append_group().unwrap();
 		assert!(producer.finish().is_ok());
 		assert!(producer.finish().is_err());
 		assert!(producer.append_group().is_err());
@@ -10620,7 +10619,7 @@ mod test {
 	#[test]
 	fn finish_at_rejects_a_boundary_at_or_below_the_live_edge() {
 		let mut producer = track_producer("test", Info::timed());
-		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		let _open = producer.create_group(group::Info { sequence: 5 }).unwrap();
 
 		// The boundary is exclusive, so it must be strictly above the highest produced
 		// group. 5 or below would orphan groups that already exist.
@@ -10742,7 +10741,7 @@ mod test {
 		let mut producer = track_producer("test", Info::timed());
 		assert_eq!(producer.end(), None);
 
-		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		let _open = producer.create_group(group::Info { sequence: 5 }).unwrap();
 		assert_eq!(producer.end(), None, "a group does not declare an end");
 
 		producer.finish_at(Position::group(9)).unwrap();
@@ -10755,7 +10754,7 @@ mod test {
 	#[test]
 	fn end_reports_the_live_edge_after_finish() {
 		let producer = track_producer("test", Info::timed());
-		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		let _open = producer.create_group(group::Info { sequence: 5 }).unwrap();
 		producer.finish().unwrap();
 		assert_eq!(producer.end(), Some(Position::group(6)));
 	}
@@ -11040,8 +11039,9 @@ mod test {
 		);
 		assert_eq!(producer.end(), Some(Position::group(3)), "the first end stands");
 
+		let mut _low = Vec::new();
 		for sequence in [0, 1] {
-			let _low = producer.create_group(group::Info { sequence }).unwrap();
+			_low.push(producer.create_group(group::Info { sequence }).unwrap());
 			assert_eq!(arrival.assert_group().sequence, sequence);
 		}
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
@@ -11688,7 +11688,7 @@ mod test {
 		);
 
 		consumer.set_groups(..3);
-		producer.create_group(group::Info { sequence: 3 }).unwrap();
+		let _open = producer.create_group(group::Info { sequence: 3 }).unwrap();
 		assert!(consumer.recv_group().now_or_never().is_none(), "capped at 3");
 		producer.finish().unwrap();
 		assert!(
@@ -12575,7 +12575,7 @@ mod test {
 
 		live.abort(Error::Cancel).unwrap();
 		// The next group demotes 0 into the eviction order and runs an expiry scan.
-		producer.create_group(group::Info { sequence: 1 }).unwrap();
+		let _open = producer.create_group(group::Info { sequence: 1 }).unwrap();
 
 		let mut group = producer.consume().peek_group(0).expect("the head still serves group 0");
 		assert_eq!(
@@ -12592,12 +12592,12 @@ mod test {
 		let producer = track_producer("test", Info::timed());
 		let (mut live, _head) = live_group_with_head(&producer).await;
 		live.finish().unwrap();
-		producer.create_group(group::Info { sequence: 1 }).unwrap();
+		let _open = producer.create_group(group::Info { sequence: 1 }).unwrap();
 
 		elapse(&producer, cache::DEFAULT_EXPIRY + Duration::from_secs(1));
 		// A fetch hit on the head, past the window the live copy was last written in.
 		producer.consume().fetch_group(0, None).await.unwrap();
-		producer.create_group(group::Info { sequence: 2 }).unwrap();
+		let _open = producer.create_group(group::Info { sequence: 2 }).unwrap();
 
 		assert!(producer.consume().peek_group(0).is_some(), "a read head keeps its slot");
 	}
@@ -12832,7 +12832,7 @@ mod test {
 		// A track with no `Dynamic` can't serve old content, so a cache miss
 		// resolves to NotFound instead of blocking forever.
 		let producer = track_producer("test", Info::timed());
-		producer.append_group().unwrap(); // seq 0, but we miss on seq 5
+		let _open = producer.append_group().unwrap(); // seq 0, but we miss on seq 5
 		let consumer = producer.consume();
 		assert!(matches!(consumer.fetch_group(5, None).await, Err(Error::NotFound)));
 	}
@@ -12841,7 +12841,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_past_final_not_found() {
 		let producer = track_producer("test", Info::timed());
-		producer.append_group().unwrap(); // seq 0
+		let _open = producer.append_group().unwrap(); // seq 0
 		producer.finish().unwrap(); // final_sequence = 1
 
 		// A group at or past the final sequence can never exist, even with a handler,
@@ -13415,7 +13415,7 @@ mod test {
 	fn aborted_group_leaves_no_ghost_sample() {
 		let (producer, pool) = pooled_producer(1 << 40);
 		let group0 = producer.append_group().unwrap();
-		producer.append_group().unwrap(); // demotes seq 0 into the mean
+		let _open = producer.append_group().unwrap(); // demotes seq 0 into the mean
 
 		assert!(pool.average().is_some(), "demoted group is sampled");
 		group0.abort(Error::Cancel).unwrap();
@@ -13914,7 +13914,7 @@ mod test {
 	fn a_replacement_wants_past_its_predecessor() {
 		let broadcast = broadcast::Info::default().produce();
 		let first = broadcast.create_track("test", Info::default()).unwrap();
-		first.create_group(group::Info { sequence: 7 }).unwrap();
+		let _open = first.create_group(group::Info { sequence: 7 }).unwrap();
 		first.finish().unwrap();
 		drop(first);
 
@@ -13923,7 +13923,7 @@ mod test {
 		assert_eq!(wanted_changed(&mut demand), Some(None));
 		let _subscriber = second.subscribe(None);
 		assert_eq!(wanted_changed(&mut demand), Some(Some(8)));
-		second.create_group(group::Info { sequence: 8 }).unwrap();
+		let _open = second.create_group(group::Info { sequence: 8 }).unwrap();
 		assert_eq!(wanted_changed(&mut demand), None);
 	}
 

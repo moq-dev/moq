@@ -3374,8 +3374,8 @@ mod test {
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(10));
 			assert!(sub.recv_datagram().now_or_never().is_none());
+			let _zero = ordered_first.then(|| a.create_group(group::Info { sequence: 0 }).unwrap());
 			if ordered_first {
-				let _zero = a.create_group(group::Info { sequence: 0 }).unwrap();
 				assert_eq!(
 					kio::wait(|waiter| sub.poll_next_group(waiter))
 						.now_or_never()

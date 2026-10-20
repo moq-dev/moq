@@ -667,6 +667,7 @@ fn modify(state: &kio::Producer<GroupState>) -> Result<kio::Mut<'_, GroupState>>
 /// let _: moq_net::group::Producer = producer.clone();
 /// # }
 /// ```
+#[must_use = "dropping an unfinished group aborts it with `Dropped`"]
 pub struct Producer {
 	handle: Handle,
 	stats: stats::Meter,

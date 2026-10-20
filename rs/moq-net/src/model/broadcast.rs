@@ -1386,7 +1386,7 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
-		track.append_group().unwrap();
+		let _open = track.append_group().unwrap();
 		let handle = consumer.track("a").unwrap();
 		assert_eq!(handle.latest_sequence(), Some(0));
 		drop(track);
@@ -1420,7 +1420,7 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
-		track.append_group().unwrap();
+		let _open = track.append_group().unwrap();
 		let handle = consumer.track("a").unwrap();
 		producer.close();
 		drop(track);
@@ -1729,7 +1729,7 @@ mod test {
 		let mut first = dynamic.assert_request().accept(crate::track::Info::timed());
 		assert_eq!(first.append_group().unwrap().sequence, 0);
 		assert_eq!(first.append_datagram(crate::Timestamp::ZERO, b"x").unwrap(), 1);
-		first.create_group(crate::group::Info { sequence: 8 }).unwrap();
+		let _open = first.create_group(crate::group::Info { sequence: 8 }).unwrap();
 		first.insert_datagram(12, crate::Timestamp::ZERO, b"x").unwrap();
 		first.finish().unwrap();
 		drop((first, track));
@@ -1743,7 +1743,7 @@ mod test {
 		));
 
 		// An explicit first write picks the start, and appends continue from there.
-		second.create_group(crate::group::Info { sequence: 13 }).unwrap();
+		let _open = second.create_group(crate::group::Info { sequence: 13 }).unwrap();
 		assert_eq!(second.append_datagram(crate::Timestamp::ZERO, b"x").unwrap(), 14);
 		second.finish().unwrap();
 		drop((second, track));
