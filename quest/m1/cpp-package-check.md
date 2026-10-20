@@ -17,11 +17,17 @@ packaged archive runs the installed-consumer checks (`just cpp check
 (`just obs package --moq-archive`, CMake `MOQ_ARCHIVE_FILE`) instead of a
 release download. It passed on one Linux host locally.
 
-What remains is the proof on every target: the `Release Cpp` job of a
-scheduled Nightly on `main` after #6006 (`.github/workflows/release-cpp.yml`
-through `nightly.yml`) builds, checks, and packages the C++ archive and the
-OBS plugin on every matrix host, and the OBS settings/session-report parity
-lane passes. Fix whatever that run turns up; delete this quest once it is
-green.
+What remains is the proof from a scheduled Nightly on `main` after #6006:
+
+- Its `Release Cpp` job (`.github/workflows/release-cpp.yml` through
+  `nightly.yml`) builds and checks the C++ archive for all four targets, and
+  packages the OBS plugin against the checked archive for the two OBS
+  targets, macOS and Windows. Linux OBS is build-from-source and ships no
+  plugin.
+- Its separate Linux `OBS` lane (`just obs ci`) passes the settings and
+  session-report tests. That lane builds the plugin in-tree, not from the
+  packaged archive.
+
+Fix whatever those runs turn up; delete this quest once both are green.
 
 Public API: none beyond the binding changes owned by their quests. Wire: none.

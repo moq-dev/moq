@@ -48,7 +48,8 @@ Checkpoint, 2026-10-19, against `main` at `2e1ec2ebf`:
   the request-behind-its-token race from #5972) were checked only against
   this run's edits, not audited in full.
 - Rechecked against `main` at `9b90cdd56` (#5967) for quests left behind by
-  their own merged PRs. Retired moq-uring on moq-clock (#5926), IETF max age
+  their own merged PRs. Retired moq-uring on moq-clock (#5926), moving its
+  unmeasured `[vdso]` profile to an m2 perf quest, IETF max age
   (#5993), the request-behind-its-token race (#5992), and the moq-quic
   regression net with its last child (#5989). Trimmed the TRACK_STATUS race
   (#5991) to its deferred upstream report, and recorded what #6006 and #5987

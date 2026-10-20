@@ -62,7 +62,8 @@ profile shows no pool contention.
 [#5926](https://github.com/moq-dev/moq/pull/5926): the io_uring worker is a
 `moq-clock` backend that samples the clock once per turn, cutting
 `clock_gettime` from 44.7 to 1.05 calls per turn. `perf` was unavailable
-there, so the `[vdso]` share itself was not re-profiled.
+there, so [Profile the io_uring clock read](/quest/m2/perf/uring-clock-profile.md)
+owns the `[vdso]` share and relay CPU measurement.
 
 Decided 2026-10-14: kio channel contention ranks first. Its 215% lock wait on
 the default tokio runtime is the largest measured cost, and the lock-wait
@@ -76,3 +77,4 @@ optimization.
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
+- [Profile the io_uring clock read](/quest/m2/perf/uring-clock-profile.md) - a `perf` profile shows whether #5926's per-turn clock read cut the io_uring relay's `[vdso]` share and CPU
