@@ -18,7 +18,7 @@ use crate::moq::notify_ready;
 const GRACE: Duration = Duration::from_secs(30);
 
 /// `export archive` args.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
 	/// Where to record: `file:///dir`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://container/prefix`.
@@ -35,7 +35,7 @@ pub struct ExportArgs {
 }
 
 /// `import archive` args.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
 	/// The recording to replay, as `export archive` wrote it.

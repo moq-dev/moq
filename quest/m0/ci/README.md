@@ -73,7 +73,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 ## Required
 
-- [Cargo.lock pins wasm-bindgen](/quest/m0/ci/wasm-bindgen-pin.md) - the dev shell's wasm-bindgen CLI follows `Cargo.lock`, so a nixpkgs bump cannot break WASM on `main`
 - [One CI pass](/quest/m0/ci/one-pass.md) - the queue's Linux gate is one `just ci` job once Check sheds its permutations
 - [Require the release gates](/quest/m0/ci/release-gates.md) - release PRs require platform and the optional workflows; main requires only the Linux gate
 - [CI pipeline audit](/quest/m0/ci/audit.md) - every queue and nightly job earns its minutes, and the Rust cache reuses unchanged crates

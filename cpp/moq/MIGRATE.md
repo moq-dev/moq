@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 `Anchor` gains a `Time` case holding `timestamp_us`, the group containing that presentation time, so exhaustive visits need a case for it.
 `TrackConsumer::update` now returns a result, failing with `TimestampMismatch` on a time anchor an untimed track can't serve.
 
+### JSON consumers return `JsonValue` (#5677)
+
+`JsonSnapshotConsumer::next()` and `JsonStreamConsumer::next()` return `JsonValue` (`value`, `timestamp_us`) instead of a string; `timestamp_us` is empty when untimed.
+A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+Timestamps are rounded down to a whole microsecond.
+
 ### Ranges filter reads (#5929)
 
 A subscription now reads only the groups its own `ranges` cover.

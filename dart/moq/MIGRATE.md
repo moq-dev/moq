@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 `Anchor` gains a time variant, so exhaustive switches need a case for it.
 `TrackConsumer.update` now throws on a time anchor an untimed track can't serve.
 
+### JSON consumers return `Value` (#5677)
+
+`SnapshotConsumer.next()` and `StreamConsumer.next()` return `Value` (`value`, `timestampUs`) instead of a string; `timestampUs` is null when untimed.
+A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+Timestamps are rounded down to a whole microsecond.
+
 ### Ranges filter reads (#5929)
 
 A subscription now reads only the groups its own `ranges` cover.

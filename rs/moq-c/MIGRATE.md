@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 `moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.
 `moq_consume_track_update` fails with a negative code when the track refuses an update, such as a time anchor on an untimed track, leaving the subscription as it was.
 
+### JSON values carry their timestamp (#5677)
+
+`moq_json_value` gains `timestamp_us` and `timestamp_present`, which changes its ABI.
+A snapshot consumer's callback now fires for each state in order instead of only the newest.
+Timestamps are rounded down to a whole microsecond.
+
 ### Ranges filter reads (#5929)
 
 A raw track consumer now reads only the groups its `ranges` cover, rather than every group from the lowest start to the last absolute end.

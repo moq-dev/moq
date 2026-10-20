@@ -65,6 +65,16 @@
           overlays = [ (import rust-overlay) ];
         };
 
+        wasm-bindgen-version =
+          (pkgs.lib.findSingle (package: package.name == "wasm-bindgen")
+            (throw "Cargo.lock has no wasm-bindgen package")
+            (throw "Cargo.lock has multiple wasm-bindgen versions")
+            (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package
+          ).version;
+        wasm-bindgen-cli =
+          pkgs.${"wasm-bindgen-cli_${builtins.replaceStrings [ "." ] [ "_" ] wasm-bindgen-version}"}
+            or (throw "nixpkgs does not package wasm-bindgen-cli ${wasm-bindgen-version} locked in Cargo.lock");
+
         # Pinned build toolchain (not latest stable) so `nix develop` and CI
         # compile against a fixed rustc and the relay's MSRV can't creep up
         # unnoticed. The floor is 1.98, not the 1.95 relay MSRV: earlier rustc
@@ -144,8 +154,8 @@
             # Source-based test coverage (`just rs coverage`).
             cargo-llvm-cov
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
-            # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
-            # crate is pinned to nixpkgs' CLI version); bump both together.
+            # Cargo.lock selects the matching schema version, independently of
+            # nixpkgs' default wasm-bindgen-cli.
             wasm-bindgen-cli
           ]
           ++ gstreamerDeps

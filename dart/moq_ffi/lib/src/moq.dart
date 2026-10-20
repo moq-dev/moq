@@ -963,6 +963,65 @@ class FfiConverterMoqJsonStreamConfig {
   }
 }
 
+class MoqJsonValue {
+  final String value;
+  final int? timestampUs;
+  MoqJsonValue({required this.value, this.timestampUs});
+}
+
+class FfiConverterMoqJsonValue {
+  static MoqJsonValue lift(RustBuffer buf) {
+    return FfiConverterMoqJsonValue.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqJsonValue> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final value_lifted = FfiConverterString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final value = value_lifted.value;
+    new_offset += value_lifted.bytesRead;
+    final timestampUs_lifted = FfiConverterOptionalUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final timestampUs = timestampUs_lifted.value;
+    new_offset += timestampUs_lifted.bytesRead;
+    return LiftRetVal(
+      MoqJsonValue(value: value, timestampUs: timestampUs),
+      new_offset - buf.offsetInBytes,
+    );
+  }
+
+  static RustBuffer lower(MoqJsonValue value) {
+    final total_length =
+        FfiConverterString.allocationSize(value.value) +
+        FfiConverterOptionalUInt64.allocationSize(value.timestampUs) +
+        0;
+    final buf = Uint8List(total_length);
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqJsonValue value, Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    new_offset += FfiConverterString.write(
+      value.value,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalUInt64.write(
+      value.timestampUs,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(MoqJsonValue value) {
+    return FfiConverterString.allocationSize(value.value) +
+        FfiConverterOptionalUInt64.allocationSize(value.timestampUs) +
+        0;
+  }
+}
+
 class MoqAudio {
   final String? label;
   final String? broadcast;
@@ -8785,7 +8844,8 @@ class FfiConverterMoqFlateStreamProducer {
 
 abstract class MoqJsonSnapshotConsumerInterface {
   void cancel();
-  Future<String?> next();
+  Future<MoqJsonValue?> latest();
+  Future<MoqJsonValue?> next();
 }
 
 final _MoqJsonSnapshotConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -8845,7 +8905,20 @@ class MoqJsonSnapshotConsumer implements MoqJsonSnapshotConsumerInterface {
     }, null);
   }
 
-  Future<String?> next() {
+  Future<MoqJsonValue?> latest() {
+    return uniffiRustCallAsync(
+      () => uniffi_moq_ffi_fn_method_moqjsonsnapshotconsumer_latest(
+        uniffiClonePointer(),
+      ),
+      ffi_moq_ffi_rust_future_poll_rust_buffer,
+      ffi_moq_ffi_rust_future_complete_rust_buffer,
+      ffi_moq_ffi_rust_future_free_rust_buffer,
+      FfiConverterOptionalMoqJsonValue.lift,
+      moqExceptionErrorHandler,
+    );
+  }
+
+  Future<MoqJsonValue?> next() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqjsonsnapshotconsumer_next(
         uniffiClonePointer(),
@@ -8853,7 +8926,7 @@ class MoqJsonSnapshotConsumer implements MoqJsonSnapshotConsumerInterface {
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
-      FfiConverterOptionalString.lift,
+      FfiConverterOptionalMoqJsonValue.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -9001,7 +9074,7 @@ class FfiConverterMoqJsonSnapshotProducer {
 
 abstract class MoqJsonStreamConsumerInterface {
   void cancel();
-  Future<String?> next();
+  Future<MoqJsonValue?> next();
 }
 
 final _MoqJsonStreamConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -9061,7 +9134,7 @@ class MoqJsonStreamConsumer implements MoqJsonStreamConsumerInterface {
     }, null);
   }
 
-  Future<String?> next() {
+  Future<MoqJsonValue?> next() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqjsonstreamconsumer_next(
         uniffiClonePointer(),
@@ -9069,7 +9142,7 @@ class MoqJsonStreamConsumer implements MoqJsonStreamConsumerInterface {
       ffi_moq_ffi_rust_future_poll_rust_buffer,
       ffi_moq_ffi_rust_future_complete_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
-      FfiConverterOptionalString.lift,
+      FfiConverterOptionalMoqJsonValue.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -13643,6 +13716,53 @@ class FfiConverterOptionalMoqGroupConsumer {
   }
 }
 
+class FfiConverterOptionalMoqJsonValue {
+  static MoqJsonValue? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqJsonValue.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqJsonValue?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqJsonValue.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqJsonValue?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqJsonValue? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqJsonValue.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqJsonValue? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqJsonValue.allocationSize(value),
+    );
+    FfiConverterOptionalMoqJsonValue.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqJsonValue? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqJsonValue.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
 class FfiConverterOptionalMoqMediaFrame {
   static MoqMediaFrame? lift(RustBuffer buf) {
     return FfiConverterOptionalMoqMediaFrame.read(buf.asUint8List()).value;
@@ -15592,6 +15712,11 @@ uniffi_moq_ffi_fn_constructor_moqjsonsnapshotconsumer_new(
 external void uniffi_moq_ffi_fn_method_moqjsonsnapshotconsumer_cancel(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqjsonsnapshotconsumer_latest(
+  Pointer<Void> ptr,
 );
 
 @Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
@@ -17866,6 +17991,9 @@ external int uniffi_moq_ffi_checksum_method_moqflatestreamproducer_finish();
 external int uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_cancel();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_latest();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_next();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -18513,10 +18641,14 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_cancel() !=
-      45114) {
+      52062) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_next() != 64727) {
+  if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_latest() !=
+      60932) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_next() != 65302) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_demand() !=
@@ -18534,7 +18666,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqjsonstreamconsumer_cancel() != 29308) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqjsonstreamconsumer_next() != 7523) {
+  if (uniffi_moq_ffi_checksum_method_moqjsonstreamconsumer_next() != 21257) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_append() != 36078) {

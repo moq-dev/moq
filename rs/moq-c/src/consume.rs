@@ -154,12 +154,27 @@ enum RawStep<T> {
 	Stop,
 }
 
-/// A raw frame or datagram timestamp in microseconds, `None` when untimed.
+/// A raw frame, datagram, or JSON value timestamp in microseconds, `None` when untimed.
 fn timestamp_us(timestamp: Option<moq_net::Timestamp>) -> Result<Option<u64>, Error> {
 	timestamp
 		.map(|timestamp| timestamp.as_micros().try_into())
 		.transpose()
 		.map_err(|_| Error::TimestampOverflow(moq_net::TimeOverflow))
+}
+
+/// A JSON value pre-serialized to a string, with its frame timestamp.
+struct JsonValue {
+	json: String,
+	timestamp_us: Option<u64>,
+}
+
+impl JsonValue {
+	fn new(value: moq_net::Timed<serde_json::Value>) -> Result<Self, Error> {
+		Ok(Self {
+			json: serde_json::to_string(&value.value)?,
+			timestamp_us: timestamp_us(value.at)?,
+		})
+	}
 }
 
 #[derive(Default)]
@@ -194,8 +209,8 @@ pub struct Consume {
 	/// JSON consumer tasks (snapshot and stream share this slab).
 	json_task: NonZeroSlab<Task>,
 
-	/// Buffered JSON values ready for consumption, pre-serialized to a string.
-	json_value: NonZeroSlab<String>,
+	/// Buffered JSON values ready for consumption.
+	json_value: NonZeroSlab<JsonValue>,
 }
 
 impl Consume {
@@ -827,8 +842,8 @@ impl Consume {
 
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 	///
-	/// `on_value` is called with a value ID for each new latest value; a consumer that falls
-	/// behind collapses the backlog and only sees the newest. Values must be released with
+	/// `on_value` is called with a value ID for each state, in order; a group superseded by a
+	/// newer one before it is read is skipped. Values must be released with
 	/// [`Self::json_value_close`]. Pass the same compression the producer used.
 	pub fn json_snapshot(
 		&mut self,
@@ -878,9 +893,10 @@ impl Consume {
 				},
 			};
 
-			let json = serde_json::to_string(&value)?;
-			// Hold the lock only to buffer the value; release it before the callback.
-			let value_id = State::lock().consume.json_value.insert(json)?;
+			// Serialize before locking, hold the lock only to buffer the value, and release it
+			// before the callback.
+			let value = JsonValue::new(value)?;
+			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
 	}
@@ -937,8 +953,8 @@ impl Consume {
 				},
 			};
 
-			let json = serde_json::to_string(&value)?;
-			let value_id = State::lock().consume.json_value.insert(json)?;
+			let value = JsonValue::new(value)?;
+			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
 	}
@@ -952,11 +968,13 @@ impl Consume {
 	/// Fill `dst` with a JSON value delivered via a consumer callback. The pointer is valid
 	/// until the value is released with [`Self::json_value_close`].
 	pub fn json_value(&self, value: Id, dst: &mut moq_json_value) -> Result<(), Error> {
-		let json = self.json_value.get(value).ok_or(Error::FrameNotFound)?;
+		let value = self.json_value.get(value).ok_or(Error::FrameNotFound)?;
 
 		*dst = moq_json_value {
-			json: json.as_str().as_ptr() as *const c_char,
-			json_len: json.len(),
+			json: value.json.as_ptr() as *const c_char,
+			json_len: value.json.len(),
+			timestamp_us: value.timestamp_us.unwrap_or_default(),
+			timestamp_present: value.timestamp_us.is_some(),
 		};
 
 		Ok(())

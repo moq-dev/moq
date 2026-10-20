@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 `Anchor` gains `AnchorTime`, so exhaustive `when` expressions need a branch for it.
 `TrackConsumer.update` now throws `MoqException` on a time anchor an untimed track can't serve.
 
+### JSON consumers emit timestamps (#5677)
+
+`values()` emits `json.Value` (`value`, plus `timestamp` as a `Duration?`) instead of a string, and `valuesAs<T>()` emits `Timed<T>(value, timestamp)`.
+A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+Timestamps are rounded down to a whole microsecond.
+
 ### Ranges filter reads (#5929)
 
 A subscription now reads only the groups its own `ranges` cover.

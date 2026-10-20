@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 `AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.
 `TrackConsumer.Update` also fails on a time anchor an untimed track can't serve.
 
+### JSON consumers return `*json.Timed` (#5677)
+
+`SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.
+A snapshot consumer's `Next` now yields every state in order; call `Latest(ctx)` for the newest.
+Timestamps are rounded down to a whole microsecond.
+
 ### Ranges filter reads (#5929)
 
 A subscription now reads only the groups its own `Ranges` cover.

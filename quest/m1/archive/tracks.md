@@ -207,5 +207,4 @@ answer it. Wire: a new lite-07-wip stream.
 ## Related
 
 - [SUBSCRIBE_TRACKS](/quest/m1/archive/subscribe-tracks.md) - moq-transport answers and learns listings through this hook
-- [SUBSCRIBE_OK names where delivery starts](/quest/m1/subscribe-ok-start.md) - a warm relay answers like a cold one, found while building SUBSCRIBE_ALL
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the subscription shape each per-track SUBSCRIBE uses
