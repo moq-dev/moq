@@ -20,8 +20,9 @@ Decided with the maintainer on 2026-10-17:
 
 - Design-only, with a design-review gate: open the PR as a draft and get the
   maintainer's approval of the choice before any implementation quest starts.
-- [#5876](https://github.com/moq-dev/moq/pull/5876) (the e2ee broadcast
-  wrappers, with `reserve_track`) is held until this quest decides.
+- Nothing waits on it (maintainer, 2026-10-19): the broadcast wrappers
+  merged in [#5876](https://github.com/moq-dev/moq/pull/5876), and the Rust
+  publishers declare every track they serve.
 
 Background: a physical track name is a one-way HKDF of the semantic name
 (the draft's Key Derivation section). Only the CDN sees physical names, and a

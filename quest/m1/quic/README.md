@@ -65,9 +65,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 - [Regression net](/quest/m1/quic/coverage/README.md) - benchmarks, fuzzing, characterization tests, and a seeded simulation, so later QUIC changes see every behavior or cost change
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
-- [A reset group keeps its header](/quest/m1/quic/group-reset.md) - a lite
-  publisher resets a group with `RESET_STREAM_AT`, so its subscriber drops the
-  tail grace
 
 ## Related
 
