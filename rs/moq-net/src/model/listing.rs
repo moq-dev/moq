@@ -15,6 +15,9 @@ use std::{
 	task::{Poll, ready},
 };
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use hashlink::LinkedHashMap;
 
 use super::{BroadcastState, Consumer};
@@ -50,6 +53,20 @@ struct Entry {
 	answered: bool,
 }
 
+/// Who holds a listing, such as a session serving a peer: at most one listing of each
+/// broadcast at a time. A newer listing by the same owner ends the older with
+/// [`Error::Cancel`], so an owner's listings cost one queue per broadcast however many
+/// paths or requests reach it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Owner(u64);
+
+impl Owner {
+	pub(crate) fn new() -> Self {
+		static NEXT: AtomicU64 = AtomicU64::new(0);
+		Self(NEXT.fetch_add(1, Ordering::Relaxed))
+	}
+}
+
 /// The listing half of a broadcast's state, guarded by the broadcast's lock.
 #[derive(Default)]
 pub(super) struct ListingState {
@@ -60,6 +77,8 @@ pub(super) struct ListingState {
 	/// Bumped whenever every reader is detached at once, so a reader of an earlier
 	/// answer releases nothing on drop.
 	generation: u64,
+	/// Each owner's reader, by its key in `readers`.
+	owners: HashMap<Owner, usize>,
 	/// Whether a [`Lister`] exists. While one does, readers wait for its answer to sync.
 	lister: bool,
 	/// Whether the handler's answer has synced.
@@ -78,8 +97,8 @@ impl ListingState {
 		}
 	}
 
-	/// Start a reader with every listed track queued.
-	fn read(&mut self) -> (kio::Shared<Queue>, usize, u64) {
+	/// Start a reader with every listed track queued, ending `owner`'s older one.
+	fn read(&mut self, owner: Option<Owner>) -> (kio::Shared<Queue>, usize, u64) {
 		let mut queue = Queue::default();
 		for (name, entry) in &self.live {
 			queue.pending.insert(name.clone(), Pending::Add(entry.info.clone()));
@@ -89,12 +108,23 @@ impl ListingState {
 		}
 		let queue = kio::Shared::new(queue);
 		let key = self.readers.insert(queue.clone());
+		if let Some(older) = owner.and_then(|owner| self.owners.insert(owner, key)) {
+			let older = self.readers.remove(older);
+			let mut older = older.lock();
+			older.end = Some(Err(Error::Cancel));
+			older.detached = true;
+		}
 		(queue, key, self.generation)
 	}
 
-	fn release(&mut self, key: usize, generation: u64) {
-		if generation == self.generation {
-			self.readers.try_remove(key);
+	fn release(&mut self, key: usize, generation: u64, owner: Option<Owner>, queue: &kio::Shared<Queue>) {
+		// A replaced reader already left, and its key may be another's now.
+		if generation != self.generation || queue.read().detached {
+			return;
+		}
+		self.readers.try_remove(key);
+		if let Some(owner) = owner {
+			self.owners.remove(&owner);
 		}
 	}
 
@@ -126,12 +156,20 @@ impl ListingState {
 		match self.live.get_mut(&name) {
 			// The earlier track of the name has not unlisted yet, but it left the table
 			// for this one to be created: readers see it go and the new one arrive.
-			Some(entry) if entry.own.is_some() => {
-				let answered = entry.answered;
+			Some(entry) if entry.own.is_some() && !entry.answered => {
 				self.remove(&name);
 				let own = Some(token);
-				self.insert(name, Entry { info, own, answered });
+				self.insert(
+					name,
+					Entry {
+						info,
+						own,
+						answered: false,
+					},
+				);
 			}
+			// Listed already, by the handler if not by the producer, and it never stopped
+			// being listed: only the token moves.
 			Some(entry) => entry.own = Some(token),
 			None => {
 				let own = Some(token);
@@ -219,6 +257,7 @@ impl ListingState {
 	fn detach(&mut self, end: Result<(), Error>) {
 		self.each(|queue| queue.end = Some(end.clone()));
 		self.readers.clear();
+		self.owners.clear();
 		self.generation += 1;
 	}
 
@@ -290,6 +329,8 @@ pub(super) struct Queue {
 	/// SYNCED was sent.
 	synced: bool,
 	end: Option<Result<(), Error>>,
+	/// A newer reader of the same owner replaced this one.
+	detached: bool,
 }
 
 impl Queue {
@@ -380,6 +421,7 @@ pub struct Tracks {
 	queue: kio::Shared<Queue>,
 	key: usize,
 	generation: u64,
+	owner: Option<Owner>,
 }
 
 impl Tracks {
@@ -407,7 +449,10 @@ impl Tracks {
 
 impl Drop for Tracks {
 	fn drop(&mut self) {
-		self.broadcast.state.lock().listing.release(self.key, self.generation);
+		let mut state = self.broadcast.state.lock();
+		state
+			.listing
+			.release(self.key, self.generation, self.owner, &self.queue);
 	}
 }
 
@@ -420,17 +465,28 @@ impl Consumer {
 	/// request is never listed, and listing never requests one. Fails with
 	/// [`Error::Unroutable`] once the broadcast has ended.
 	pub fn tracks(&self) -> Result<Tracks, Error> {
+		self.list(None)
+	}
+
+	/// [`Self::tracks`] for `owner`, ending its older listing of this broadcast with
+	/// [`Error::Cancel`].
+	pub(crate) fn tracks_as(&self, owner: Owner) -> Result<Tracks, Error> {
+		self.list(Some(owner))
+	}
+
+	fn list(&self, owner: Option<Owner>) -> Result<Tracks, Error> {
 		let mut state = self.state.lock();
 		if state.closing {
 			return Err(Error::Unroutable);
 		}
-		let (queue, key, generation) = state.listing.read();
+		let (queue, key, generation) = state.listing.read(owner);
 		drop(state);
 		Ok(Tracks {
 			broadcast: self.clone(),
 			queue,
 			key,
 			generation,
+			owner,
 		})
 	}
 }
@@ -830,6 +886,60 @@ mod tests {
 		assert_eq!(drain(&mut tracks), ["+up"]);
 		drop(lister);
 		assert_eq!(drain(&mut tracks), ["-up", "synced"]);
+	}
+
+	/// An owner holds one listing per broadcast: its newer listing ends the older, while
+	/// other owners and other broadcasts keep theirs.
+	#[test]
+	fn an_owner_lists_each_broadcast_once() {
+		let broadcast = Info::new().produce();
+		let other = Info::new().produce();
+		let _a = broadcast.create_track("a", None).unwrap();
+		let owner = Owner::new();
+
+		let mut older = broadcast.consume().tracks_as(owner).unwrap();
+		let mut elsewhere = other.consume().tracks_as(owner).unwrap();
+		let mut stranger = broadcast.consume().tracks_as(Owner::new()).unwrap();
+		let mut newer = broadcast.consume().tracks_as(owner).unwrap();
+		assert_eq!(drain(&mut older), [format!("error: {}", Error::Cancel)]);
+		assert_eq!(drain(&mut newer), ["+a", "synced"]);
+		assert_eq!(
+			drain(&mut elsewhere),
+			["synced"],
+			"another broadcast is its own listing"
+		);
+		assert_eq!(
+			drain(&mut stranger),
+			["+a", "synced"],
+			"another owner keeps its listing"
+		);
+
+		// The replaced reader leaving releases nothing of the newer one's.
+		drop(older);
+		let _b = broadcast.create_track("b", None).unwrap();
+		assert_eq!(drain(&mut newer), ["+b"]);
+		assert_eq!(broadcast.state.lock().listing.readers.len(), 2);
+		drop(newer);
+		assert_eq!(broadcast.state.lock().listing.readers.len(), 1);
+		assert!(
+			broadcast.state.lock().listing.owners.len() == 1,
+			"the stranger's entry stays"
+		);
+	}
+
+	/// A producer's track replaced under a name the handler also lists never stopped
+	/// being listed, so readers see nothing.
+	#[test]
+	fn an_answered_name_survives_its_own_track_being_replaced() {
+		let mut listing = ListingState::default();
+		let first = listing.list_own("a".into(), track::Info::default());
+		listing.answer_add("a".into(), track::Info::default()).unwrap();
+		let (queue, _, _) = listing.read(None);
+		assert!(matches!(queue.lock().next(), Ok(Some(TracksEvent::Added { .. }))));
+		// The new track of the name lists before the earlier one unlists.
+		listing.list_own("a".into(), track::Info::default());
+		listing.unlist_own("a", first);
+		assert!(queue.lock().pending.is_empty(), "the name never stopped being listed");
 	}
 
 	/// One answer per broadcast: a second handler's answer would share the first's sync

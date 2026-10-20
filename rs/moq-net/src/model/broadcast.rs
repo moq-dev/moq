@@ -24,6 +24,7 @@ use super::{Requests, WeakCache};
 
 #[path = "listing.rs"]
 mod listing;
+pub(crate) use listing::Owner;
 pub(super) use listing::{ListOnAccept, Unlist};
 pub use listing::{Lister, Tracks, TracksEvent};
 
