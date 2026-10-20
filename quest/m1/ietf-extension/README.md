@@ -1,4 +1,4 @@
-# moq-transport passthrough
+# [M] moq-transport passthrough
 
 ## Goal
 
@@ -80,10 +80,6 @@ Work owned by this README, after the children land:
   before working around it.
 - FETCH cases are skipped upstream. Section 8 stays out while PUBLISH is
   declined.
-
-## Required
-
-- [Relay hops](/quest/m1/ietf-extension/lite.md) - the `ietf` SETUP extension carries every crate-private field across a lite-07 hop between relays
 
 ## Related
 

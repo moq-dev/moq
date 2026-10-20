@@ -31,10 +31,8 @@ Decided 2026-10-16 (see the [epic](/quest/m1/refresh/README.md)).
   join.
 - **Drafts.** Update `drafts/draft-lcurley-moq-lite.md` (TRACK_INFO,
   SUBSCRIBE_UPDATE, the lite-07 changelog) and pass `just drafts check`.
-- **The ietf extension.** Cluster hops no longer need it to carry
-  dynamic-group requests; native lite does. This quest removes that duty
-  from the [relay extension](/quest/m1/ietf-extension/lite.md) if that quest
-  has not landed yet, or deletes its request path if it has.
+- **The ietf extension.** Cluster hops carry dynamic-group requests on
+  native lite; the [ietf extension](/drafts/draft-lcurley-moq-ietf.md) has no request path.
 
 Tests: codec round trips on lite-07 and an older version without the
 fields. A two-relay cluster test checks that a join over the ratio at the far
