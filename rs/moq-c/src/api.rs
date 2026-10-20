@@ -3574,7 +3574,9 @@ pub unsafe extern "C" fn moq_consume_video(
 		let index = index as usize;
 		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.video(catalog, index, max_delay, on_frame)
+		State::lock()
+			.consume
+			.media::<hang::catalog::VideoConfig>(catalog, index, max_delay, on_frame)
 	})
 }
 
@@ -3618,7 +3620,9 @@ pub unsafe extern "C" fn moq_consume_audio(
 		let index = index as usize;
 		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.audio(catalog, index, max_delay, on_frame)
+		State::lock()
+			.consume
+			.media::<hang::catalog::AudioConfig>(catalog, index, max_delay, on_frame)
 	})
 }
 
