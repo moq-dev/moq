@@ -209,16 +209,25 @@ class StatusPublisher:
             pass
 
 
+# The player's pipeline stages. Anything else a driver sends is dropped, so an
+# anonymous lease holder cannot grow the status the truck echoes.
+TIMESTAMP_LABELS = ("received", "decoded", "rendered")
+
+
 def _parse_timestamps(raw: Any) -> tuple[TimestampEntry, ...]:
     if not isinstance(raw, list):
         return ()
-    entries = []
+    entries: dict[str, TimestampEntry] = {}
     for item in raw:
-        if isinstance(item, dict) and "label" in item and "ts" in item:
-            timestamp = _number_or_none(item["ts"])
-            if timestamp is not None:
-                entries.append(TimestampEntry(label=str(item["label"]), ts=timestamp))
-    return tuple(entries)
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label")
+        if label not in TIMESTAMP_LABELS or label in entries:
+            continue
+        timestamp = _number_or_none(item.get("ts"))
+        if timestamp is not None:
+            entries[label] = TimestampEntry(label=label, ts=timestamp)
+    return tuple(entries.values())
 
 
 def parse_command(driver_id: str, message: Any, epoch: str | None = None) -> Command | None:

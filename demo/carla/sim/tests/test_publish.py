@@ -64,6 +64,21 @@ def test_malformed_timestamp_does_not_drop_driver_command() -> None:
     assert command.timestamps == (TimestampEntry(label="received", ts=12.5),)
 
 
+def test_only_the_players_pipeline_stages_are_kept() -> None:
+    stages = [{"label": "received", "ts": 1.0}, {"label": "decoded", "ts": 2.0}]
+    junk = [{"label": "x" * 10_000, "ts": 3.0}] * 1_000
+    command = parse_command(
+        "driver",
+        {"type": "drive", "sequence": 1, "timestamps": [*stages, *junk, {"label": "received", "ts": 9.0}]},
+    )
+
+    assert command is not None
+    assert command.timestamps == (
+        TimestampEntry(label="received", ts=1.0),
+        TimestampEntry(label="decoded", ts=2.0),
+    )
+
+
 def test_respawn_command_is_carla_only_control_input() -> None:
     command = parse_command("driver", {"type": "respawn", "sequence": 8})
 

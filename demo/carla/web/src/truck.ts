@@ -208,14 +208,6 @@ export class Truck {
 	}
 
 	/** Request an emergency stop. */
-	estop() {
-		this.respawning.set(false);
-		this.drive.set({ ...REST });
-		this.#sentDrive = undefined;
-		this.estopped.set(true);
-		this.#send({ type: "estop" });
-	}
-
 	/**
 	 * Latch e-stop on this truck even without holding the driving lease. A viewer
 	 * sends it on a one-shot safety broadcast, leaving the driving session alone.

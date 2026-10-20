@@ -613,9 +613,10 @@ function updateSource(sample: WheelSample | undefined) {
 function wheelButtons(sample: WheelSample) {
 	const truck = activeTruck();
 	// E-stop is the documented exception to arbitration: any source may latch it
-	// at any time. Gear is a drive command, so it follows the active source -
-	// a bumped paddle must not shift a truck being driven from the keyboard.
-	if (sample.pressed.has("estop")) truck?.estop();
+	// at any time, on the truck in view whether or not this browser drives it.
+	// Gear is a drive command, so it follows the active source - a bumped paddle
+	// must not shift a truck being driven from the keyboard.
+	if (sample.pressed.has("estop")) safetyTruck()?.emergencyStop();
 	if (!truck || truck.estopped.peek() || source.peek() !== "wheel") return;
 	const gear = truck.drive.peek().gear as Gear;
 	if (sample.pressed.has("gearUp")) requestGear(truck, shiftGear(gear, 1));
