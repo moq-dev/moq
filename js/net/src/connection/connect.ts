@@ -431,13 +431,15 @@ async function negotiate(
 	Ietf.hiddenIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, setupVersion);
 
-	const offered =
-		setupVersion === Ietf.Version.DRAFT_16
-			? [Ietf.Version.DRAFT_16]
-			: setupVersion === Ietf.Version.DRAFT_15
-				? [Ietf.Version.DRAFT_15]
-				: setup;
-	const client = new Ietf.ClientSetup({ versions: offered, parameters: params });
+	const client = new Ietf.ClientSetup({
+		versions:
+			setupVersion === Ietf.Version.DRAFT_16
+				? [Ietf.Version.DRAFT_16]
+				: setupVersion === Ietf.Version.DRAFT_15
+					? [Ietf.Version.DRAFT_15]
+					: setup,
+		parameters: params,
+	});
 	await client.encode(stream.writer, setupVersion);
 
 	const serverCompat = await stream.reader.u53();
@@ -446,9 +448,6 @@ async function negotiate(
 	}
 
 	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
-	if (!(offered as number[]).includes(server.version)) {
-		throw new Error(`server selected an unoffered version: 0x${server.version.toString(16)}`);
-	}
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
 		return new Lite.Connection({
