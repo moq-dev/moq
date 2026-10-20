@@ -22,7 +22,12 @@ import { Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { toWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
-import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
+import {
+	PublishNamespace,
+	PublishNamespaceCancel,
+	PublishNamespaceDone,
+	PublishNamespaceUpdate,
+} from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { GroupOrder, Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
@@ -1696,6 +1701,200 @@ test("swapping a route's token is one REQUEST_UPDATE carrying it", async () => {
 	} finally {
 		restore();
 		close();
+	}
+});
+
+/**
+ * Draft 16 renews in place too: the REQUEST_UPDATE names the PUBLISH_NAMESPACE it renews,
+ * and the adapter routes its answer back, so the request is neither withdrawn nor made again.
+ */
+test("draft 16 swaps a route's token with one REQUEST_UPDATE", async () => {
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPNS[version]);
+	const control = await Stream.open(pair.server, { version });
+	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, false);
+	void adapter.run().catch(() => undefined);
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+	const tokens = new Tokens();
+	const { pub, origin } = publisher(pair.server, { session: adapter, auth: tokens });
+	const { sent, restore } = carriedTokens();
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		broadcast.announce({ auth: tokens.issue("first") });
+		void pub.runPublishNamespaces();
+
+		expect(await peer.reader.u53()).toBe(PublishNamespace.id);
+		const advertised = await PublishNamespace.decode(peer.reader, version);
+		await peer.writer.u53(RequestOk.id);
+		await new RequestOk({ requestId: advertised.requestId }).encode(peer.writer, version);
+
+		// The next renewal waits on the answer to this one, which only routing delivers.
+		for (const token of ["second", "third"]) {
+			broadcast.announce({ auth: tokens.issue(token) });
+			expect(await peer.reader.u53()).toBe(PublishNamespaceUpdate.id);
+			const update = await PublishNamespaceUpdate.decode(peer.reader, version);
+			expect(update.namespaceRequestId).toBe(advertised.requestId);
+			await peer.writer.u53(RequestOk.id);
+			await new RequestOk({ requestId: update.requestId }).encode(peer.writer, version);
+		}
+
+		// Answered and still held: nothing withdrawn or advertised again.
+		const more = watch(peer.reader.u53());
+		await flush();
+		expect(more.state).toBe("pending");
+		expect(sent).toEqual(["first", "second", "third"]);
+	} finally {
+		restore();
+		origin.close();
+		adapter.close();
+	}
+});
+
+/**
+ * A draft-16 request rides the control stream, where dropping it tells the peer nothing, so
+ * an unanswered update withdraws it with PUBLISH_NAMESPACE_DONE before offering it again.
+ */
+test("an unanswered draft 16 update withdraws its request before offering it again", async () => {
+	jest.useFakeTimers();
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPNS[version]);
+	const control = await Stream.open(pair.server, { version });
+	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, false);
+	void adapter.run().catch(() => undefined);
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+	const tokens = new Tokens();
+	const { pub, origin } = publisher(pair.server, { session: adapter, auth: tokens });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		broadcast.announce({ auth: tokens.issue("first") });
+		void pub.runPublishNamespaces();
+
+		expect(await peer.reader.u53()).toBe(PublishNamespace.id);
+		const advertised = await PublishNamespace.decode(peer.reader, version);
+		await peer.writer.u53(RequestOk.id);
+		await new RequestOk({ requestId: advertised.requestId }).encode(peer.writer, version);
+
+		broadcast.announce({ auth: tokens.issue("second") });
+		expect(await peer.reader.u53()).toBe(PublishNamespaceUpdate.id);
+		await PublishNamespaceUpdate.decode(peer.reader, version);
+
+		const next = watch(peer.reader.u53());
+		await advanceUntil(() => next.state !== "pending", 10_100);
+		expect(next.value).toBe(PublishNamespaceDone.id);
+		expect((await PublishNamespaceDone.decode(peer.reader, version)).requestId).toBe(advertised.requestId);
+
+		const fresh = watch(peer.reader.u53());
+		await advanceUntil(() => fresh.state !== "pending", 30_000);
+		expect(fresh.value).toBe(PublishNamespace.id);
+	} finally {
+		warn.mockRestore();
+		origin.close();
+		adapter.close();
+		jest.useRealTimers();
+	}
+});
+
+/**
+ * A draft-16 PUBLISH_NAMESPACE_CANCEL can beat the answer to our update. The peer already let
+ * the namespace go, and draft 16 sends no PUBLISH_NAMESPACE_DONE after a cancel, so the next
+ * message is the namespace offered again.
+ */
+test("a draft 16 cancel ahead of the answer offers the namespace again without DONE", async () => {
+	jest.useFakeTimers();
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPNS[version]);
+	const control = await Stream.open(pair.server, { version });
+	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, false);
+	void adapter.run().catch(() => undefined);
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+	const tokens = new Tokens();
+	const { pub, origin } = publisher(pair.server, { session: adapter, auth: tokens });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		broadcast.announce({ auth: tokens.issue("first") });
+		void pub.runPublishNamespaces();
+
+		expect(await peer.reader.u53()).toBe(PublishNamespace.id);
+		const advertised = await PublishNamespace.decode(peer.reader, version);
+		await peer.writer.u53(RequestOk.id);
+		await new RequestOk({ requestId: advertised.requestId }).encode(peer.writer, version);
+
+		broadcast.announce({ auth: tokens.issue("second") });
+		expect(await peer.reader.u53()).toBe(PublishNamespaceUpdate.id);
+		await PublishNamespaceUpdate.decode(peer.reader, version);
+		await peer.writer.u53(PublishNamespaceCancel.id);
+		await new PublishNamespaceCancel({ requestId: advertised.requestId, reasonPhrase: "gone" }).encode(
+			peer.writer,
+			version,
+		);
+
+		const next = watch(peer.reader.u53());
+		await advanceUntil(() => next.state !== "pending", 30_000);
+		expect(next.value).toBe(PublishNamespace.id);
+	} finally {
+		warn.mockRestore();
+		origin.close();
+		adapter.close();
+		jest.useRealTimers();
+	}
+});
+
+/**
+ * A draft-16 receiver refuses an update with REQUEST_ERROR and then PUBLISH_NAMESPACE_CANCEL.
+ * Draft 16 sends no PUBLISH_NAMESPACE_DONE after a cancel, so the next message is the
+ * namespace offered again once the refusal's wait is out.
+ */
+test("a refused draft 16 update offers the namespace again without DONE", async () => {
+	jest.useFakeTimers();
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPNS[version]);
+	const control = await Stream.open(pair.server, { version });
+	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, false);
+	void adapter.run().catch(() => undefined);
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+	const tokens = new Tokens();
+	const { pub, origin } = publisher(pair.server, { session: adapter, auth: tokens });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		broadcast.announce({ auth: tokens.issue("first") });
+		void pub.runPublishNamespaces();
+
+		expect(await peer.reader.u53()).toBe(PublishNamespace.id);
+		const advertised = await PublishNamespace.decode(peer.reader, version);
+		await peer.writer.u53(RequestOk.id);
+		await new RequestOk({ requestId: advertised.requestId }).encode(peer.writer, version);
+
+		broadcast.announce({ auth: tokens.issue("second") });
+		expect(await peer.reader.u53()).toBe(PublishNamespaceUpdate.id);
+		const update = await PublishNamespaceUpdate.decode(peer.reader, version);
+		await peer.writer.u53(RequestError.id);
+		await new RequestError({
+			requestId: update.requestId,
+			errorCode: 0x1,
+			reasonPhrase: "no",
+			retryInterval: 1n,
+		}).encode(peer.writer, version);
+		await peer.writer.u53(PublishNamespaceCancel.id);
+		await new PublishNamespaceCancel({ requestId: advertised.requestId, reasonPhrase: "no" }).encode(
+			peer.writer,
+			version,
+		);
+
+		const next = watch(peer.reader.u53());
+		await advanceUntil(() => next.state !== "pending", 30_000);
+		expect(next.value).toBe(PublishNamespace.id);
+	} finally {
+		warn.mockRestore();
+		origin.close();
+		adapter.close();
+		jest.useRealTimers();
 	}
 });
 

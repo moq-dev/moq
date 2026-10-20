@@ -8,17 +8,29 @@ use std::{fmt, str::FromStr};
 ///
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum Algorithm {
+	/// HMAC with SHA-256.
 	HS256,
+	/// HMAC with SHA-384.
 	HS384,
+	/// HMAC with SHA-512.
 	HS512,
+	/// ECDSA on P-256 with SHA-256.
 	ES256,
+	/// ECDSA on P-384 with SHA-384.
 	ES384,
+	/// RSASSA-PKCS1-v1_5 with SHA-256.
 	RS256,
+	/// RSASSA-PKCS1-v1_5 with SHA-384.
 	RS384,
+	/// RSASSA-PKCS1-v1_5 with SHA-512.
 	RS512,
+	/// RSASSA-PSS with SHA-256.
 	PS256,
+	/// RSASSA-PSS with SHA-384.
 	PS384,
+	/// RSASSA-PSS with SHA-512.
 	PS512,
+	/// EdDSA on Ed25519.
 	EdDSA,
 }
 

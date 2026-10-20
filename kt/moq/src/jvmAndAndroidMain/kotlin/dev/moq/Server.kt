@@ -1,12 +1,7 @@
 package dev.moq
 
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
 import uniffi.moq.MoqException
 import uniffi.moq.MoqServer
@@ -56,14 +51,7 @@ class Server internal constructor(
      *
      * The Flow completes when the server stops accepting.
      */
-    fun requests(): Flow<Request> = flow {
-        while (true) {
-            currentCoroutineContext().ensureActive()
-            emit(server.accept() ?: break)
-        }
-    }.onCompletion { cause ->
-        if (cause is CancellationException) server.cancel()
-    }
+    fun requests(): Flow<Request> = pull({ server.cancel() }) { server.accept() }
 
     /**
      * Accept every session in a loop, holding each one alive in its own
