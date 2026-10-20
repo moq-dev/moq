@@ -57,6 +57,13 @@ The module uses the host's NixOS NAT service. Leave `networking.nat.externalInte
 unset, or set it to the same uplink as every runner. Fixed `networking.nat.externalIP`
 is unsupported. Conflicting settings are rejected during evaluation.
 
+For a public repository, require approval for **all external contributors' workflows**
+before registering a persistent runner. A contributor can change `runs-on` in a
+pull request, so a workflow condition is not an assignment boundary. Review the
+workflow and its code before approving it: approval authorizes execution against
+the persistent guest and its caches. Restricting approval only to first-time
+contributors does not provide this boundary. See [GitHub's approval policy](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository).
+
 Mint a repository registration token with `gh api -X POST
 repos/OWNER/REPO/actions/runners/registration-token --jq .token`, and install it
 at `tokenFile` with mode `0600` in a root-only directory. Runtime credentials reach
