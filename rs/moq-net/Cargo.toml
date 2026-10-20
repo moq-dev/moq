@@ -32,6 +32,7 @@ bytes = { workspace = true }
 # space left but the flush unfinished, silently truncating the frame.
 flate2 = { workspace = true, features = ["zlib-rs", "runtime_detection"] }
 futures = { workspace = true, optional = true }
+hashlink = { workspace = true }
 kio = { workspace = true }
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 moq-pattern = { workspace = true, features = ["serde"] }

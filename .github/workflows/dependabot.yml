@@ -13,9 +13,8 @@ name: Dependabot
 # calls one `gh` command against the pull request number.
 #
 # The moq-bot token rather than GITHUB_TOKEN: a merge enabled by GITHUB_TOKEN
-# does not trigger further workflow runs, which would silently skip Cache
-# (the Rust cache warm keyed on Cargo.lock, exactly what the cargo group
-# changes), release-rs and release-js on every auto-merged bump.
+# does not trigger further workflow runs, which would silently skip
+# release-rs and release-js on every auto-merged bump.
 
 permissions: {}
 

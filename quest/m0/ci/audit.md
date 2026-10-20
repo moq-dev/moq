@@ -11,8 +11,9 @@ recurring [test cost audit](/quest/m1/audit-test-cost.md).
 ## Plan
 
 Decided 2026-10-19: a one-time m0 audit, separate from the recurring test cost
-audit. It also owns the cache fixes; storage still moves to R2 in
-[mbx on R2](/quest/m0/ci/mbx-r2.md).
+audit. It also owns the cache fixes. Storage moved to R2, written by the
+merge queue and `main`; [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md)
+measures it.
 
 Measured 2026-10-19 (ubuntu-24.04-arm; sample of 20 PR and 20 queue runs of
 check.yml, plus 35 wider runs). Start from these levers and re-measure each
@@ -28,10 +29,11 @@ before and after:
   41% of Rust jobs ran cold. Key on what restored artifacts actually depend
   on: the toolchain's and the native libraries' store paths. Build scripts
   link against those paths, which is why the key covers the flake today.
+  The R2 cache has no key of ours: mbx keys each compilation itself.
 - **Cold warm timeout:** a cold `cache.yml` warm takes 58 to 60 minutes
   against `timeout-minutes: 60`. On 10-19, two of three were cancelled while
-  saving, so cold windows lasted up to 3.5 hours. Split the warm or let it
-  finish.
+  saving, so cold windows lasted up to 3.5 hours. The R2 cache drops the
+  warm: the merge queue publishes what it builds.
 - **Workspace crates rebuild on a hit:** 76 workspace units recompile in Test
   and 112 in Check even when the cache hits, and mbx's object store reports 0
   hits in 914 of 960 sessions. The likely cause is that checkout resets file

@@ -3178,6 +3178,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashlink"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
+dependencies = [
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4685,6 +4694,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-carla-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ash",
+ "bytes",
+ "moq-mux",
+ "moq-net",
+ "moq-video",
+ "parking_lot",
+ "pollster",
+ "tracing",
+]
+
+[[package]]
 name = "moq-cli"
 version = "0.14.2"
 dependencies = [
@@ -4958,6 +4982,7 @@ dependencies = [
  "flate2",
  "futures",
  "getrandom 0.4.3",
+ "hashlink",
  "kio 0.6.2",
  "libc",
  "loom",
