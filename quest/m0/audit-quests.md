@@ -47,6 +47,18 @@ Checkpoint, 2026-10-19, against `main` at `2e1ec2ebf`:
   Quests added since the baseline (the resume line, egress held state, and
   the request-behind-its-token race from #5972) were checked only against
   this run's edits, not audited in full.
+- Rechecked against `main` at `9b90cdd56` (#5967) for quests left behind by
+  their own merged PRs. Retired moq-uring on moq-clock (#5926), IETF max age
+  (#5993), the request-behind-its-token race (#5992), and the moq-quic
+  regression net with its last child (#5989). Trimmed the TRACK_STATUS race
+  (#5991) to its deferred upstream report, and recorded what #6006 and #5987
+  left of the C++ package proof and the moq-clock crate migration. Check
+  first, next run: every PR merged from a `quest/...` branch whose quest file
+  still exists.
+- Cause of those leftovers: no quest skill tells the PR that finishes a quest
+  to delete its file, or a partial PR to rewrite it to the remainder, and
+  `/quest-merge` enables auto-merge without checking either. Drafts whose
+  bodies said "the quest remains open" were merged with the quest unchanged.
 
 This run remains open, with no successor, until the unresolved conflicts are
 settled. The unattended instruction was to skip uncertain choices:
