@@ -142,10 +142,16 @@ impl Consumer {
 		self.state.read().copy.clone()
 	}
 
-	/// Poll for a largest location newer than `seen` on the serving copy, recording it there.
-	/// A copy ending is its route failing, so the logical track ends only with the route:
-	/// at once when the front ends it, or with the last copy once the front concluded.
-	pub(super) fn poll_largest(&self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+	/// Poll for a largest location within `bounds` newer than `seen` on the serving copy,
+	/// recording it there. A copy ending is its route failing, so the logical track ends
+	/// only with the route: at once when the front ends it, or with the last copy once the
+	/// front concluded.
+	pub(super) fn poll_largest(
+		&self,
+		seen: &mut Option<Position>,
+		bounds: track::Bounds,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<Position>> {
 		loop {
 			let (generation, copy) = {
 				let route = self.state.read();
@@ -153,7 +159,7 @@ impl Consumer {
 			};
 			let end = self.end();
 			// A replacement copy can start below what an earlier one reported.
-			match copy.map(|copy| copy.poll_largest_after(seen, waiter)) {
+			match copy.map(|copy| copy.poll_largest_after(seen, bounds, waiter)) {
 				Some(Poll::Ready(Some(largest))) => return Poll::Ready(Some(largest)),
 				_ if matches!(end, Some(Some(_))) => return Poll::Ready(None),
 				Some(Poll::Pending) if end.is_some() => return Poll::Pending,
@@ -167,6 +173,9 @@ impl Consumer {
 	/// Subscribe to the logical track with the reader's own preferences.
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let mirrored = subscription.read().clone();
+		// An absolute floor holds from the start, as on a plain cursor; a relative one
+		// counts back from an edge, so the reported largest is never below it.
+		let floor = mirrored.floor(None).unwrap_or(0);
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
@@ -177,7 +186,7 @@ impl Consumer {
 				copies: Vec::new(),
 				newest: None,
 				datagram: None,
-				groups: (0, Cap::from(..)),
+				groups: (floor, Cap::from(..)),
 				groups_read: false,
 			})
 		});
@@ -448,10 +457,24 @@ impl Subscriber {
 		self.reader().latest()
 	}
 
-	/// Poll for a largest location newer than `seen`; see [`Consumer::poll_largest`].
-	pub(super) fn poll_largest(&mut self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+	/// Poll for a largest location within `bounds` newer than `seen`; see [`Consumer::poll_largest`].
+	pub(super) fn poll_largest(
+		&mut self,
+		seen: &mut Option<Position>,
+		bounds: track::Bounds,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<Position>> {
 		let route = self.reader().route.clone();
-		route.poll_largest(seen, waiter)
+		route.poll_largest(seen, bounds, waiter)
+	}
+
+	/// The local group filter, as [`track::Subscriber::poll_largest`] reports within it.
+	pub(super) fn bounds(&self) -> track::Bounds {
+		let (start, end) = self.reader().groups;
+		track::Bounds {
+			start,
+			end: end.exclusive(),
+		}
 	}
 
 	/// The groups the copies' drift budget skipped since the last call, counted against
@@ -1707,6 +1730,48 @@ mod test {
 		routes.end(Ok(()));
 		drop(b);
 		assert_eq!(sub.largest().now_or_never(), Some(None));
+	}
+
+	/// A front's reader reports the serving copy's largest only within its cap.
+	#[test]
+	#[cfg(feature = "async")]
+	fn largest_honours_the_cap_on_the_serving_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		for sequence in 0..5 {
+			write(&a, sequence);
+		}
+		sub.set_groups(..3);
+		assert!(sub.largest().now_or_never().is_none(), "the largest is past the cap");
+		sub.set_groups(..);
+		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(4))));
+	}
+
+	/// A front's reader created with a floor above the serving copy's edge reports nothing
+	/// below it, as a plain reader does.
+	#[test]
+	#[cfg(feature = "async")]
+	fn largest_honours_the_subscription_floor_on_the_serving_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let subscription = Subscription::default().with_max_delay(HOUR).with_groups(8..);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		for sequence in 0..5 {
+			write(&a, sequence);
+		}
+		assert!(sub.largest().now_or_never().is_none(), "the largest is below the floor");
+		write(&a, 8);
+		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(8))));
 	}
 
 	/// A track reader waiting before any route serves is woken by the first one's frame.

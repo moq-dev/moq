@@ -745,13 +745,18 @@ impl Track {
 		}
 	}
 
-	/// Poll for a largest location newer than `seen`, recording it there. `None` once the
-	/// track ended with nothing newer.
-	pub(super) fn poll_largest(&self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+	/// Poll for a largest location within `bounds` newer than `seen`, recording it there.
+	/// `None` once the track ended with nothing newer.
+	pub(super) fn poll_largest(
+		&self,
+		seen: &mut Option<Position>,
+		bounds: track::Bounds,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<Position>> {
 		let newer = |largest: &Largest| {
 			largest
 				.position
-				.filter(|position| seen.is_none_or(|seen| *position > seen))
+				.filter(|position| bounds.contains(position.group) && seen.is_none_or(|seen| *position > seen))
 		};
 		let largest = ready!(
 			self.largest
@@ -767,13 +772,13 @@ impl Track {
 		Poll::Ready(next)
 	}
 
-	/// The largest frame newer than `seen` without waiting, recording it there.
-	pub(super) fn take_largest(&self, seen: &mut Option<Position>) -> Option<Position> {
+	/// The largest frame within `bounds` newer than `seen` without waiting, recording it there.
+	pub(super) fn take_largest(&self, seen: &mut Option<Position>, bounds: track::Bounds) -> Option<Position> {
 		let next = self
 			.largest
 			.read()
 			.position
-			.filter(|position| seen.is_none_or(|seen| *position > seen));
+			.filter(|position| bounds.contains(position.group) && seen.is_none_or(|seen| *position > seen));
 		if next.is_some() {
 			*seen = next;
 		}

@@ -2,6 +2,7 @@ import { Milli } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
+import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
@@ -21,7 +22,7 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
-import { unwanted } from "../util/demand.ts";
+import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
@@ -56,6 +57,7 @@ import {
 	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
+	hasTrackStream,
 	resolvesStart,
 	updateSupported,
 	Version,
@@ -69,19 +71,6 @@ export const SUBSCRIBE_SETUP_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
 // Cost::DRAIN: cost is the whole mechanism, not a separate state.
 const DRAIN_COST: Cost = 2n ** 62n - 1n;
-
-// The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
-function supportsTrackStream(version: Version): boolean {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-			return false;
-		default:
-			return true;
-	}
-}
 
 // What a subscription has set up so far, so a revocation (or a timeout) can reach it at
 // any stage.
@@ -177,6 +166,7 @@ export class Subscriber {
 	// Our grant: a subscription it stops covering is cancelled. Undefined until the peer
 	// answers, and forever on a version without AUTH, which allows everything.
 	#grant?: Getter<Grant | undefined>;
+	#auth?: AuthSession;
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -200,6 +190,7 @@ export class Subscriber {
 		goaway?: GetPromise<Drain>,
 		grant?: Getter<Grant | undefined>,
 		limits: Limits = LIMITS,
+		auth?: AuthSession,
 	) {
 		this.#quic = quic;
 		this.#announces = new Slots(limits.announces, { quic, reason: "too many announcements" });
@@ -209,6 +200,7 @@ export class Subscriber {
 		this.#peerSetup = peerSetup;
 		this.#goaway = goaway;
 		this.#grant = grant;
+		this.#auth = auth;
 	}
 
 	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
@@ -648,6 +640,22 @@ export class Subscriber {
 			return;
 		}
 		const refused = unauthorized(broadcast);
+		try {
+			for (;;) {
+				const ready = await this.#auth?.ready(broadcast, "subscribe", {
+					signal: consumed.valid,
+					until: () => abandoned(request.demand()),
+				});
+				if (ready !== false) break;
+				// Demand returning before we commit is not abandonment, matching the serving loop.
+				if (!isAbandoned(request.demand())) continue;
+				request.reject(new Error("subscribe abandoned before it was authorized"));
+				return;
+			}
+		} catch (err) {
+			request.reject(error(err));
+			return;
+		}
 		// Armed before the first check and held to the end, so a shrink while the
 		// subscription sets up is never missed: it resets whatever reached the wire.
 		const state: SubscribeSetup = { cancel: new AbortController() };
@@ -752,9 +760,7 @@ export class Subscriber {
 			// its FIN; older drafts just close it. Either way group streams can still be in
 			// flight, so the track ends only once the tail is accounted for. A reset rejects
 			// instead, so the track ends with that error rather than a clean tail.
-			const responses = supportsTrackStream(this.version)
-				? this.runResponses(stream, entry)
-				: stream.reader.closed;
+			const responses = hasTrackStream(this.version) ? this.runResponses(stream, entry) : stream.reader.closed;
 			let tailSettled = false;
 			const closed = responses.then(async () => {
 				await this.#settleTail(entry);
@@ -828,7 +834,7 @@ export class Subscriber {
 		let producer: track.Producer;
 		let drainOk = false;
 
-		if (supportsTrackStream(this.version)) {
+		if (hasTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
 			const { info, stream } = await this.#trackInfo(
 				msg.broadcast,
@@ -967,7 +973,7 @@ export class Subscriber {
 		epoch?: Epoch.Valid,
 		hold?: AbortSignal,
 	): Promise<track.Info> {
-		if (!supportsTrackStream(this.version)) {
+		if (!hasTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
 		const deadline = new Deadline();
@@ -1047,15 +1053,26 @@ export class Subscriber {
 		maxDelay?: Milli,
 	): Promise<void> {
 		const refused = unauthorized(broadcast);
-		// Arm before checking so revocation during setup or response cannot be missed.
-		const disposeGrant = this.#grant?.subscribe(() => {
-			if (this.#denied(broadcast)) group.close(refused);
-		});
-		void group.closed.then(() => disposeGrant?.());
-
 		try {
+			// Every caller leaving ends the wait like it ends the setup below. A caller that
+			// coalesced back onto the group before we commit keeps it waiting.
+			while (
+				(await this.#auth?.ready(broadcast, "subscribe", {
+					signal: consumed.valid,
+					until: () => group.demand().unused(),
+				})) === false
+			) {
+				if (group.closed.peek() === undefined && group.demand().used.peek()) continue;
+				throw new StreamError(StreamCode.Cancel, { message: "cancel" });
+			}
+			// Arm after admission, before checking: another unanswered token may still
+			// widen the union while we wait, which is not a revocation of this fetch.
+			const disposeGrant = this.#grant?.subscribe(() => {
+				if (this.#denied(broadcast)) group.close(refused);
+			});
+			void group.closed.then(() => disposeGrant?.());
 			if (this.#denied(broadcast)) throw refused;
-			if (!supportsTrackStream(this.version)) {
+			if (!hasTrackStream(this.version)) {
 				throw new Error("fetch group requires moq-lite-05 or newer");
 			}
 

@@ -1814,6 +1814,96 @@ fn raw_track_subscription_options_and_update() {
 }
 
 #[test]
+fn raw_track_relative_update_counts_from_the_track_edge() {
+	let origin = id(moq_origin_create());
+	let path = b"raw-track-relative";
+	let broadcast = publish_broadcast(origin, path);
+
+	let track_name = b"data";
+	let track = id(unsafe {
+		moq_publish_track(
+			broadcast,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			std::ptr::null(),
+		)
+	});
+	let publish = |payload: &[u8]| {
+		assert_eq!(
+			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), 0) },
+			0
+		);
+	};
+	let anchor = |kind: moq_anchor_kind, group: u64| moq_anchor {
+		kind: kind as u32,
+		group,
+		frame: 0,
+	};
+	let subscribe = |ranges: &[moq_range]| moq_subscription {
+		priority: 0,
+		max_delay_us: 60_000_000,
+		ranges: ranges.as_ptr(),
+		ranges_len: ranges.len(),
+		order: 0,
+	};
+	let recv = |frame_cb: &Callback| {
+		let frame_id = id(frame_cb.recv());
+		let mut frame = moq_frame {
+			payload: std::ptr::null(),
+			payload_size: 0,
+			timestamp_us: 0,
+			timestamp_present: false,
+			keyframe: false,
+		};
+		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) }.to_vec();
+		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+		received
+	};
+
+	publish(b"zero");
+	let consume = request_broadcast(origin, path);
+
+	// Group 0 only: the reader's cap sits below where the track will be.
+	let first = [moq_range {
+		start: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 0),
+		end: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 1),
+		end_present: true,
+	}];
+	let frame_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_track(
+			consume,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			&subscribe(&first),
+			Some(channel_callback),
+			frame_cb.ptr,
+		)
+	});
+	assert_eq!(recv(&frame_cb), b"zero");
+
+	publish(b"one");
+	publish(b"two");
+
+	// The latest group is the track's, group 2, not the newest one under the old cap.
+	let latest = [moq_range {
+		start: anchor(moq_anchor_kind::MOQ_ANCHOR_RELATIVE, 0),
+		end: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 0),
+		end_present: false,
+	}];
+	assert_eq!(unsafe { moq_consume_track_update(consumer, &subscribe(&latest)) }, 0);
+	assert_eq!(recv(&frame_cb), b"two");
+
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn json_snapshot_publish_consume() {
 	let origin = id(moq_origin_create());
 	let path = b"json-snapshot";

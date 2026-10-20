@@ -2,6 +2,7 @@ import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
+import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
@@ -45,6 +46,7 @@ import {
 	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
+	hasTrackStream,
 	resolvesStart,
 	Version,
 	waitsForSubscriberFin,
@@ -110,20 +112,6 @@ interface RunGroup {
 
 	/** Last frame to send (inclusive), or undefined for the rest of the group. */
 	end?: number;
-}
-
-// The TRACK stream, implicit SUBSCRIBE acceptance, and SUBSCRIBE_START/END are
-// all lite-05+.
-function supportsTrackStream(version: Version): boolean {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-			return false;
-		default:
-			return true;
-	}
 }
 
 /**
@@ -773,13 +761,13 @@ export class Publisher {
 		// for a group that will not come. The sequences served (as a group or a datagram) or
 		// dropped. A gap that never arrived stays until the end sweep names it: this side
 		// cannot tell when the subscriber stopped waiting for it. Undefined on other versions.
-		const served: Run[] | undefined = supportsTrackStream(this.version) ? [] : undefined;
+		const served: Run[] | undefined = hasTrackStream(this.version) ? [] : undefined;
 
 		try {
 			// Older drafts carry no timestamps.
 			let timescale: Timescale | undefined;
 
-			if (supportsTrackStream(this.version)) {
+			if (hasTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
 				// properties live in TRACK_INFO), and the resolved range arrives as
 				// SUBSCRIBE_START / SUBSCRIBE_END emitted from #runTrack.
@@ -869,7 +857,7 @@ export class Publisher {
 	async runFetch(msg: Fetch, stream: Stream) {
 		this.#fetches.acquire();
 		try {
-			if (!supportsTrackStream(this.version)) {
+			if (!hasTrackStream(this.version)) {
 				stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
 				return;
 			}
@@ -1007,7 +995,7 @@ export class Publisher {
 		const { sub, broadcast, timescale, served, bounds } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
-		const emitRange = supportsTrackStream(this.version);
+		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startSequence: number | undefined;
@@ -1693,9 +1681,9 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async runEnforce(setupAnswered: Promise<void>): Promise<void> {
+	async runEnforce(setupAnswered: Promise<void>, auth?: AuthSession): Promise<void> {
 		if (!this.#grant) return;
-		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered });
+		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered, auth });
 	}
 
 	/**

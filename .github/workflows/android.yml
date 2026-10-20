@@ -1,6 +1,6 @@
 name: Android
 
-# Compiles moq-video for Android, which nothing else on a pull request does.
+# Compiles moq-video for Android, which no merge queue job does.
 # Its MediaCodec encoder and decoder, the `Surface::HardwareBuffer` variant and
 # the `frame::android` module are all `#[cfg(target_os = "android")]`, so every
 # Linux job compiles them to nothing, and a moq-net change that breaks them
@@ -23,10 +23,14 @@ permissions:
   contents: read
 
 on:
+  workflow_call:
   pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
+    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
+    # retargeted to release. `closed` is here only so merging/closing a PR
+    # cancels its in-flight run via the concurrency group below; the job itself
+    # is skipped on close.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited, closed]
     paths:
       - "rs/moq-video/**"
       - "rs/moq-ffi/**"

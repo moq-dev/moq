@@ -928,7 +928,7 @@ where
 					let request_id = msg.request_id;
 					return Ok(async move {
 						let reason = "SUBSCRIBE_NAMESPACE for PUBLISH is not supported";
-						if let Err(err) = this.reject_namespace_request(stream, Some(request_id), reason).await {
+						if let Err(err) = this.reject_namespace_request(stream, request_id, reason).await {
 							tracing::debug!(%err, "subscribe_namespace refusal failed");
 						}
 					}
@@ -955,15 +955,14 @@ where
 				.maybe_boxed()
 			}
 			// SUBSCRIBE_TRACKS asks for every track under a prefix via PUBLISH, which we
-			// never send. Read its prefix to recognize reserved namespaces; replies carry no
-			// Request ID, so there is nothing to decode before refusing.
+			// never send. Read its prefix to recognize reserved namespaces before refusing.
 			ietf::SUBSCRIBE_TRACKS_ID
 				if !matches!(
 					this.version,
 					Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
 				) =>
 			{
-				RequestId::decode(&mut data, this.version)?;
+				let request_id = RequestId::decode(&mut data, this.version)?;
 				let namespace = super::namespace::decode_namespace(&mut data)?;
 				if let Some(error) = super::namespace::refusal(&namespace, this.version) {
 					return Ok(async move {
@@ -975,7 +974,7 @@ where
 				}
 				async move {
 					let reason = "SUBSCRIBE_TRACKS is not supported";
-					if let Err(err) = this.reject_namespace_request(stream, None, reason).await {
+					if let Err(err) = this.reject_namespace_request(stream, request_id, reason).await {
 						tracing::debug!(%err, "subscribe_tracks refusal failed");
 					}
 				}
@@ -1783,43 +1782,8 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::Subscribe, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				writer.buffer_varint(ietf::SubscribeError::ID)?;
-				writer
-					.encode(&ietf::SubscribeError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				writer.buffer_varint(ietf::RequestError::ID)?;
-				writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				writer.buffer_varint(ietf::RequestError::ID)?;
-				writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
-		Ok(())
+		super::request_stream::write_error(writer, request::Kind::Subscribe, request_id, err, reason, self.version)
+			.await
 	}
 
 	/// Serve a draft-20 fill on its own fetch stream: the requested range, read from the
@@ -2855,53 +2819,23 @@ where
 		request_id: RequestId,
 		err: &Error,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::TrackStatus, self.version);
-		let reason_phrase = err.to_string().into();
-		if self.version == Version::Draft14 {
-			// TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body.
-			stream.writer.varint(ietf::TRACK_STATUS_ERROR_14).await?;
-			stream
-				.writer
-				.encode(&ietf::SubscribeError {
-					request_id,
-					error_code,
-					reason_phrase,
-				})
-				.await?;
-		} else {
-			stream.writer.varint(ietf::RequestError::ID).await?;
-			stream
-				.writer
-				.encode(&ietf::RequestError {
-					request_id: matches!(self.version, Version::Draft15 | Version::Draft16).then_some(request_id),
-					error_code,
-					reason_phrase,
-					retry_interval: 0,
-				})
-				.await?;
-		}
+		let (kind, reason) = (request::Kind::TrackStatus, err.to_string());
+		super::request_stream::write_error(&mut stream.writer, kind, request_id, err, &reason, self.version).await?;
 		let _ = stream.writer.close().await;
 		Ok(())
 	}
 
 	/// Refuse a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS that asks for PUBLISH, which we
-	/// never send. Only draft-16 replies carry the Request ID; draft-17+ replies never do.
+	/// never send. Both exist only from draft-16, so the reply is always REQUEST_ERROR.
 	async fn reject_namespace_request(
 		&self,
 		mut stream: Stream<S, Version>,
-		request_id: Option<RequestId>,
+		request_id: RequestId,
 		reason: &str,
 	) -> Result<(), Error> {
-		stream.writer.varint(ietf::RequestError::ID).await?;
-		stream
-			.writer
-			.encode(&ietf::RequestError {
-				request_id: request_id.filter(|_| self.version == Version::Draft16),
-				error_code: request::to_code(&Error::Unsupported, request::Kind::SubscribeNamespace, self.version),
-				reason_phrase: reason.into(),
-				retry_interval: 0,
-			})
-			.await?;
+		let kind = request::Kind::SubscribeNamespace;
+		let err = &Error::Unsupported;
+		super::request_stream::write_error(&mut stream.writer, kind, request_id, err, reason, self.version).await?;
 		let _ = stream.writer.close().await;
 		Ok(())
 	}
@@ -2915,56 +2849,9 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		self.write_fetch_error(&mut stream.writer, request_id, err, reason)
-			.await?;
-
+		let kind = request::Kind::Fetch;
+		super::request_stream::write_error(&mut stream.writer, kind, request_id, err, reason, self.version).await?;
 		let _ = stream.writer.close().await;
-		Ok(())
-	}
-
-	async fn write_fetch_error(
-		&self,
-		writer: &mut Writer<S::SendStream, Version>,
-		request_id: RequestId,
-		err: &Error,
-		reason: &str,
-	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::Fetch, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				writer.varint(ietf::FetchError::ID).await?;
-				writer
-					.encode(&ietf::FetchError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				writer.varint(ietf::RequestError::ID).await?;
-				writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				writer.varint(ietf::RequestError::ID).await?;
-				writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
 		Ok(())
 	}
 

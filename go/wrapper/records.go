@@ -1,32 +1,15 @@
 package moq
 
 import (
-	"fmt"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
+	"moq.dev/moq/internal/bridge"
 )
 
 // moq-ffi spells every duration as integer microseconds, because not every
 // target language has a duration type. These records mirror the generated ones
 // with time.Duration fields and convert at the boundary.
-
-// micros converts d to microseconds, refusing a negative duration rather than
-// letting it wrap when cast to uint64.
-func micros(name string, d time.Duration) (uint64, error) {
-	if d < 0 {
-		return 0, fmt.Errorf("negative %s: %v", name, d)
-	}
-	return uint64(d.Microseconds()), nil
-}
-
-func optMicros(name string, d *time.Duration) (*uint64, error) {
-	if d == nil {
-		return nil, nil
-	}
-	us, err := micros(name, *d)
-	return &us, err
-}
 
 func fromMicros(us uint64) time.Duration {
 	return time.Duration(us) * time.Microsecond
@@ -48,7 +31,7 @@ type Frame struct {
 }
 
 func (f Frame) ffi() (ffi.MoqFrame, error) {
-	us, err := optMicros("timestamp", f.Timestamp)
+	us, err := bridge.OptionalDuration(f.Timestamp, "timestamp")
 	return ffi.MoqFrame{Payload: f.Payload, TimestampUs: us}, err
 }
 
@@ -87,7 +70,7 @@ type Subscription struct {
 }
 
 func (s Subscription) ffi() (ffi.MoqSubscription, error) {
-	maxDelay, err := micros("max delay", s.MaxDelay)
+	maxDelay, err := bridge.Duration(s.MaxDelay, "max delay")
 	var ranges *[]ffi.MoqRange
 	if s.Ranges != nil {
 		ranges = &s.Ranges
@@ -127,7 +110,7 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 	if info == nil {
 		return nil, nil
 	}
-	maxAge, err := optMicros("max age", info.MaxAge)
+	maxAge, err := bridge.OptionalDuration(info.MaxAge, "max age")
 	return &ffi.MoqTrackInfo{
 		Priority:  info.Priority,
 		MaxAgeUs:  maxAge,

@@ -5,7 +5,7 @@ import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasCompression, hasGroupOrder, Version, wireTimescale } from "./version.ts";
+import { hasCompression, hasGroupOrder, hasTrackStream, Version, wireTimescale } from "./version.ts";
 
 // TRACK_INFO `Compression` codec ids: none, or per-group DEFLATE (draft-lcurley-moq-flate).
 const COMPRESSION_NONE = 0;
@@ -23,17 +23,8 @@ async function decodeCompression(r: Reader): Promise<boolean> {
 	}
 }
 
-// The Track Stream (0x6) is draft-05+ only.
 function guardTrack(version: Version) {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-			throw new Error("track stream not supported for this version");
-		default:
-			break;
-	}
+	if (!hasTrackStream(version)) throw new Error("track stream not supported for this version");
 }
 
 /**
