@@ -1,5 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Auth, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -661,8 +661,11 @@ test("a blocked group header is reset when the group expires", async () => {
 
 // A finished group's stream still holds the connection until its FIN is acknowledged. One
 // whose FIN never completes is waited on only while the group is within the budget, then
-// reset like a stream still serving, as the Rust `GroupServe` does.
+// reset like a stream still serving, as the Rust `GroupServe` does. The track ending first
+// does not end the wait: PUBLISH_DONE waits on the stream, so the budget still judges it.
 test("a group stream whose FIN never completes is reset when the group expires", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 
 	let closing!: () => void;
@@ -670,11 +673,16 @@ test("a group stream whose FIN never completes is reset when the group expires",
 		closing = resolve;
 	});
 	let reset = false;
+	let resetting!: () => void;
+	const streamReset = new Promise<void>((resolve) => {
+		resetting = resolve;
+	});
 	const stalled = new WritableStream<Uint8Array>({
 		start(controller) {
 			// An abort while the close is in flight reaches the sink only through its signal.
 			controller.signal.addEventListener("abort", () => {
 				reset = true;
+				resetting();
 			});
 		},
 		close() {
@@ -684,9 +692,11 @@ test("a group stream whose FIN never completes is reset when the group expires",
 	});
 	spyOn(pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
 
+	const budget = Milli(5000);
 	const { pub, origin } = publisher(pair.server);
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(5000) });
+	// No subscriber max age, so the track's caps the budget.
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: budget });
 	const client = await Stream.open(pair.client, { version: VERSION });
 	const server = await Stream.accept(pair.server, VERSION);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
@@ -702,28 +712,33 @@ test("a group stream whose FIN never completes is reset when the group expires",
 			server,
 		);
 
-		const write = (sequence: number, at: number) => {
+		const write = (sequence: number) => {
 			const group = new GroupProducer(sequence);
-			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(at) });
+			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
 			group.close();
 			track.writeGroup(group);
 		};
 
-		write(0, 0);
+		write(0);
 		await closeStarted;
-		// The newest group is never stale, however long its FIN takes.
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		// The newest group is never stale, however long its FIN takes. Kept inside the cache's
+		// idle window: a group evicted once superseded is no longer judged.
+		await clock.advanceAsync(Nano.fromMilli(Milli(budget * 2)));
 		expect(reset).toBe(false);
 
-		// Group 0 reaches no further than where group 1 begins, 10s behind the edge.
-		write(1, 10_000);
-		write(2, 20_000);
-		for (let i = 0; i < 50 && !reset; i++) await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(reset).toBe(true);
+		// Its successor presents no further, so only the wall clock since it arrived convicts
+		// group 0, after the track has ended.
+		write(1);
+		track.close();
+		await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+		expect(reset).toBe(false);
+		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await streamReset;
 	} finally {
 		client.close();
 		broadcast.close();
 		origin.close();
+		restore();
 	}
 });
 
