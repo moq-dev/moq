@@ -53,7 +53,9 @@ sessions a reconnect-to-me GOAWAY and waits up to `--drain-timeout` (default
 such as `moq-lite-03`, get none and are closed when the window ends. A second
 signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
 Pending handshakes and admission requests share the same drain window, and an
-open stdin pipe does not keep the process alive afterward.
+open stdin pipe does not keep the process alive afterward. Admission is part of
+the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission without
+a deadline.
 
 Add `--stats-enabled` before the first stage to publish accepted-session and
 traffic counters with the relay's `--stats-*` settings. An export-only listener

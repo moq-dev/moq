@@ -980,11 +980,13 @@ fn check_rates(publish: &moq_auth::Access, subscribe: &moq_auth::Access) -> Resu
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
 ///
 /// The transport has already accepted each one; it waits for its answer, so a
-/// slow decider holds connects the way a slow auth server would, and one that
-/// takes longer than a server may (ten seconds) is refused as unavailable. An
-/// [attached](Admission::attached) token holds one of its session's verification
-/// slots until the decider answers or drops it, even past that, and the session's
-/// later tokens wait for a slot before they reach the decider.
+/// slow decider holds connects the way a slow auth server would. A connection's
+/// admission has no bound of its own: whoever awaits [`Auth::admit`] owns the
+/// deadline, which the relay's listeners set to their handshake deadline. An
+/// [attached](Admission::attached) token is refused as unavailable after ten
+/// seconds, but holds one of its session's verification slots until the decider
+/// answers or drops it, even past that, and the session's later tokens wait for a
+/// slot before they reach the decider.
 /// Answer in place or hand each [`Admission`] to its own task; nothing here
 /// serializes them.
 pub struct Admissions(mpsc::UnboundedReceiver<Admission>);
