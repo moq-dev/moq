@@ -13,6 +13,7 @@ import { ALPN, Version } from "../src/ietf/version";
 import { createMockTransportPair } from "../src/mock";
 import { Producer } from "../src/origin";
 import * as Path from "../src/path";
+import { readsFrom } from "../src/resume.test-util";
 import { Stream } from "../src/stream";
 import { wireOf } from "../src/wire";
 
@@ -149,7 +150,7 @@ for (const failovers of [0, 1, 16, 128])
 					sources.push(source);
 					pending[i].accept(source);
 					await settle();
-					if (entries[i].held.active.peek()?.closed !== source.closed) throw new Error("lost failover");
+					if (!readsFrom(entries[i].held.active.peek(), source)) throw new Error("lost failover");
 				}
 				if (round > 1) samples.push(active / 128);
 			} finally {
