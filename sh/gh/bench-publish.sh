@@ -21,7 +21,7 @@ case ${1:-} in
             exit 2
         fi
         git worktree add "$2" gh-pages
-        just gh benchmark-report index "$2"
+        python3 "$(dirname "$0")/bench-report.py" index "$2"
         git -C "$2" add bench/index.html .nojekyll
         if ! git -C "$2" diff --cached --quiet; then
             git -C "$2" -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \

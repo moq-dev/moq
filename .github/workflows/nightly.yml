@@ -225,18 +225,17 @@ jobs:
         with:
           # Only this main-branch publisher pushes the shared history branch.
           persist-credentials: true
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
+      # No dev shell: these steps need only the runner's python3 and git, and
+      # building the shell's uncached tools outlasted this job's timeout.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: bench-*
           path: benchmark-inputs
       - name: Validate completed reports
         id: reports
-        run: nix develop --command just gh benchmark-report prepare benchmark-inputs benchmark-reports
+        run: python3 sh/gh/bench-report.py prepare benchmark-inputs benchmark-reports
       - name: Prepare history
-        run: nix develop --command just gh benchmark-publish init
+        run: sh/gh/bench-publish.sh init
       - name: Store time, CPU and ratio history
         if: steps.reports.outputs.costs == 'true'
         uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
@@ -266,7 +265,7 @@ jobs:
           comment-on-alert: false
           fail-on-alert: false
       - name: Publish shared history
-        run: nix develop --command just gh benchmark-publish finish benchmark-site
+        run: sh/gh/bench-publish.sh finish benchmark-site
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: benchmark-site
