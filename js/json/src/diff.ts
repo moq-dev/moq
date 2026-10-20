@@ -1,14 +1,17 @@
 // RFC 7396 JSON Merge Patch: generate a patch between two values, and apply one.
 
+/** The result of diffing two values. */
 export interface Diff {
-	// A merge patch transforming the old value into the new one.
+	/** A merge patch transforming the old value into the new one. */
 	patch: unknown;
 
-	// Set when the change can't be faithfully expressed as a merge patch, so the caller should
-	// publish a full snapshot instead. This happens when a value is set to null, or an object
-	// holding a null is written whole, since merge patch reads a null as a key deletion. Arrays are
-	// fine: merge patch replaces them wholesale, which is still typically smaller than a full
-	// snapshot.
+	/**
+	 * Set when the change can't be faithfully expressed as a merge patch, so the caller should
+	 * publish a full snapshot instead. This happens when a value is set to null, or an object
+	 * holding a null is written whole, since merge patch reads a null as a key deletion. Arrays are
+	 * fine: merge patch replaces them wholesale, which is still typically smaller than a full
+	 * snapshot.
+	 */
 	forcedSnapshot: boolean;
 }
 

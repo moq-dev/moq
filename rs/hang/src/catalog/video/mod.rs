@@ -150,7 +150,9 @@ impl Video {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Display {
+	/// Width in pixels.
 	pub width: u32,
+	/// Height in pixels.
 	pub height: u32,
 }
 
@@ -216,6 +218,7 @@ pub struct VideoConfig {
 	/// The picture resizes in band at a keyframe below these ceilings, unless the
 	/// `description` pins it. Absent means unknown; a publisher may fill it once.
 	pub coded_width: Option<u32>,
+	/// The height counterpart of `coded_width`.
 	pub coded_height: Option<u32>,
 
 	/// The aspect ratio the whole picture is displayed at, as WebCodecs'
@@ -228,6 +231,7 @@ pub struct VideoConfig {
 	/// rename to `displayAspect*`; the current name is what we emit.
 	#[serde(alias = "displayRatioWidth")]
 	pub display_aspect_width: Option<u32>,
+	/// The height counterpart of `display_aspect_width`.
 	#[serde(alias = "displayRatioHeight")]
 	pub display_aspect_height: Option<u32>,
 

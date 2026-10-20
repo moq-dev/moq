@@ -16,6 +16,8 @@
 //! Grants and claims name paths with [`Pattern`]s from `moq-pattern`, re-exported here:
 //! `foo` is one broadcast, `foo/**` is a subtree, `**` is everything.
 
+#![warn(missing_docs)]
+
 mod access;
 mod algorithm;
 mod claims;
