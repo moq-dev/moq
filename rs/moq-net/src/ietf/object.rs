@@ -236,7 +236,9 @@ pub(crate) struct Checked {
 /// ingress validates a list, for an object that is `framed` or a frameless status.
 ///
 /// A framed object's mutable Timestamp on a timed track is its frame's, so one inside is
-/// malformed, as is an empty block, which is sent as none.
+/// malformed, as is an empty block, which is sent as none. Absolute IDs must ascend, as
+/// delta ones do, since egress may forward the block unchanged; Immutable Properties stay
+/// as the publisher sent them.
 pub(crate) fn check(
 	bytes: &Bytes,
 	encoding: Encoding,
@@ -249,6 +251,9 @@ pub(crate) fn check(
 	}
 	let parsed = list(bytes, family(encoding), false, lifted.is_some())?;
 	if lifted.is_some() && parsed.timestamp.is_some() {
+		return Err(Error::MalformedTrack);
+	}
+	if !parsed.values.is_sorted_by_key(|property| property.id) {
 		return Err(Error::MalformedTrack);
 	}
 	Ok(Checked {
@@ -636,6 +641,18 @@ mod tests {
 		let block = status.block.unwrap().bytes;
 		assert!(check(&block, Encoding::Draft14, milli, false).is_ok());
 		assert!(check(&block, Encoding::Draft14, milli, true).is_err());
+	}
+
+	/// A draft-14 block crosses the lite hop in ascending order, as ingress sorts it, so
+	/// one whose absolute IDs descend is malformed. Its Immutable Properties may not ascend.
+	#[test]
+	fn a_draft14_block_ascends() {
+		let milli = Some(Timescale::MILLI);
+		assert!(check(&Bytes::from_static(&[0x02, 1, 0x20, 1]), Encoding::Draft14, milli, true).is_ok());
+		assert!(check(&Bytes::from_static(&[0x02, 1, 0x02, 2]), Encoding::Draft14, milli, true).is_ok());
+		assert!(check(&Bytes::from_static(&[0x20, 1, 0x02, 1]), Encoding::Draft14, milli, true).is_err());
+		let sealed = Bytes::from_static(&[0x02, 1, 0x0b, 4, 0x20, 1, 0x02, 1]);
+		assert!(check(&sealed, Encoding::Draft14, milli, true).is_ok());
 	}
 
 	/// Draft-19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so it cannot cross that boundary.
