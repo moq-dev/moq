@@ -359,7 +359,7 @@ clients/
 ## CI
 
 `.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
-PRs that touch `test/interop/`). A red cell means a real interop break in the
+release PRs that touch `test/interop/`). A red cell means a real interop break in the
 current tree.
 
 ## Subscription termination

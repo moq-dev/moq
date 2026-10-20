@@ -29,12 +29,6 @@ impl<E: CatalogExt> Timebase<E> {
 		}
 	}
 
-	/// Whether this timebase was minted from `catalog` or a clone of it, which is where an importer
-	/// reserving through it writes.
-	pub fn is_on(&self, catalog: &Producer<E>) -> bool {
-		self.catalog.same(catalog)
-	}
-
 	/// Begin reserving an importer's tracks, sharing this timebase's offset.
 	///
 	/// See [`Producer::reserve`] for how the reservation gates the catalog.
@@ -45,8 +39,7 @@ impl<E: CatalogExt> Timebase<E> {
 	/// Place this timebase's `pts` at the wall-clock instant `wall`, instead of at the arrival of its
 	/// first frame.
 	///
-	/// For a source whose timestamps say when they happened (a program clock, a shared epoch), so
-	/// two importers of one stream publish identical timestamps whenever each starts. Like a first
+	/// For a source whose timestamps say when they happened, such as a program clock. Like a first
 	/// frame, this places the catalog's clock if it is not yet fixed and offsets onto it otherwise.
 	/// A placement alone publishes nothing: the clock goes out with the catalog's first track.
 	/// Refused once this timebase has an offset, and when the host's wall clock was unset, leaving no
@@ -75,47 +68,6 @@ impl<E: CatalogExt> Timebase<E> {
 	pub(crate) fn shift(&self, pts: moq_net::Timestamp) -> crate::Result<moq_net::Timestamp> {
 		self.anchor(pts)?.apply(pts)
 	}
-
-	/// `raw`, a value of a field that wraps, in the era (a whole number of periods added in the
-	/// field's own ticks) that lands it nearest this timebase's reading of the catalog clock now.
-	/// A first value anchors the timebase, in era zero.
-	///
-	/// The era depends on the value and the clock alone, never on the values before it, so two
-	/// importers whose clocks agree (a timebase placed by one shared epoch) agree on every era
-	/// wherever each started. Media time has to stay within half a period of the clock's reading:
-	/// further ahead reads as a period behind, a rewind.
-	pub(crate) fn nearest(&self, raw: u64, wrap: Wrap) -> crate::Result<u64> {
-		let offset = self.anchor(moq_net::Timestamp::from_scale(raw, wrap.hz)?)?;
-		u64::try_from(self.era(raw, wrap, offset)).map_err(|_| {
-			crate::Error::UnmappableTimestamp(format!(
-				"{raw} at {} Hz lands before the broadcast clock's zero",
-				wrap.hz
-			))
-		})
-	}
-
-	/// `raw` in the era [`Self::nearest`] gives it, without anchoring: `None` until the timebase
-	/// has an offset. Signed, since a value just behind the wrap the anchor sits past lands in
-	/// the era before zero, as a PCR leading a PTS just past the wrap does.
-	pub(crate) fn unwrap(&self, raw: u64, wrap: Wrap) -> Option<i128> {
-		Some(self.era(raw, wrap, self.offset()?))
-	}
-
-	fn era(&self, raw: u64, wrap: Wrap, offset: Offset) -> i128 {
-		let micros = self.catalog.current_clock().now().as_micros() as i128 - offset.0 as i128;
-		let reading = (micros * wrap.hz as i128).div_euclid(1_000_000);
-		let period = wrap.period as i128;
-		let era = (reading - raw as i128 + period / 2).div_euclid(period);
-		raw as i128 + era * period
-	}
-}
-
-/// A timestamp field that wraps every `period` ticks of a `hz` clock, as MPEG-TS's 33-bit PTS
-/// (2^33 at 90 kHz) and PCR (2^33 * 300 at 27 MHz) do.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Wrap {
-	pub hz: u64,
-	pub period: u64,
 }
 
 // Manual so a timebase is clonable regardless of whether `E` is.
@@ -192,49 +144,5 @@ mod test {
 		assert_eq!(Offset(15).ticks(90_000), 1);
 		assert_eq!(Offset(-15).ticks(90_000), -2);
 		assert_eq!(Offset(1_000_000).ticks(48_000), 48_000);
-	}
-
-	/// Placed with PTS zero one wrap before an epoch's wall time, as `moq import ts --epoch` places
-	/// it, a timebase puts a source whose clock reads zero then one wrap in, at the epoch's wall
-	/// time, and each value in the era nearest the clock however far the clock has run.
-	#[tokio::test(start_paused = true)]
-	async fn each_value_takes_the_era_nearest_the_clock() {
-		use std::time::{Duration, SystemTime};
-
-		const PTS: Wrap = Wrap {
-			hz: 90_000,
-			period: 1 << 33,
-		};
-		const HALF: u64 = 1 << 32;
-		let epoch = SystemTime::UNIX_EPOCH + Duration::from_millis(1_760_000_000_000);
-		crate::clock::fake_host_wall(epoch);
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = Producer::new(&mut broadcast, Default::default()).unwrap();
-		let timebase = catalog.timebase();
-		timebase
-			.place(moq_net::Timestamp::ZERO, epoch - Duration::from_micros(95_443_717_689))
-			.unwrap();
-
-		assert_eq!(timebase.nearest(0, PTS).unwrap(), 1 << 33);
-		let wall = catalog
-			.clock()
-			.wall_clock(moq_net::Timestamp::from_scale(1 << 33, 90_000).unwrap())
-			.unwrap();
-		assert!(
-			epoch.duration_since(wall).unwrap() < Duration::from_micros(1),
-			"{wall:?}"
-		);
-		// Half a wrap from the clock's reading is the boundary between eras.
-		assert_eq!(timebase.nearest(HALF + 1, PTS).unwrap(), HALF + 1);
-		assert_eq!(timebase.nearest(HALF, PTS).unwrap(), (1 << 33) + HALF);
-
-		// Thirty hours on, past the source's own wrap, the clock still names the era.
-		tokio::time::advance(Duration::from_secs(30 * 3600)).await;
-		let ran = 30 * 3600 * 90_000;
-		assert_eq!(timebase.nearest(ran % (1 << 33), PTS).unwrap(), (1 << 33) + ran);
-		assert_eq!(
-			timebase.nearest(ran % (1 << 33) - 90_000, PTS).unwrap(),
-			(1 << 33) + ran - 90_000
-		);
 	}
 }
