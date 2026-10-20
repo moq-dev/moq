@@ -366,33 +366,35 @@ impl Window {
 		self.pending || self.groups.contains(&sequence)
 	}
 
-	/// Whether a datagram is in range: a whole group of one frame, so its own `timestamp`
-	/// says exactly whether it falls inside a range's times, even once groups have
-	/// resolved them to sequences. While the ranges wait, which is for good on a time
-	/// start over a track that only sends datagrams, the times and absolute groups decide.
+	/// Whether a datagram is in range, judged on its own and never through a time end's
+	/// settling: its `timestamp` against each range's times, and its `sequence` against the
+	/// range's absolute groups and the relative ones resolved so far.
 	pub fn admits_datagram(&self, sequence: u64, timestamp: Option<Timestamp>) -> bool {
 		let Some(timestamp) = timestamp else {
 			return self.contains(sequence);
 		};
-		let timely = |range: &Range| {
-			!matches!(range.start, Anchor::Time(pts) if later(pts, timestamp))
-				&& !matches!(range.end, Some(Anchor::Time(pts)) if later(timestamp, pts))
-		};
-		if self.pending {
-			return self.ranges.iter().filter(|range| !range.is_empty()).any(|range| {
-				!matches!(range.start, Anchor::Absolute(start) if sequence < start.group)
-					&& !matches!(range.end, Some(Anchor::Absolute(end))
-						if end.final_sequence().is_some_and(|end| sequence >= end))
-					&& timely(range)
-			});
-		}
-		self.spans.iter().any(|span| {
-			span.start <= sequence
-				&& match span.end {
-					End::Before(end) => sequence < end,
-					End::Open | End::Time(_) => true,
-				} && timely(&self.ranges[span.index])
-		})
+		self.ranges
+			.iter()
+			.enumerate()
+			.filter(|(_, range)| !range.is_empty())
+			.any(|(index, range)| {
+				// A relative anchor still waiting on a latest group bounds nothing yet.
+				let span = self.spans.iter().find(|span| span.index == index);
+				let started = match range.start {
+					Anchor::Time(pts) => !later(pts, timestamp),
+					Anchor::Absolute(start) => sequence >= start.group,
+					Anchor::Relative(_) => span.is_none_or(|span| sequence >= span.start),
+				};
+				let ended = match range.end {
+					None => true,
+					Some(Anchor::Time(pts)) => !later(timestamp, pts),
+					Some(Anchor::Absolute(end)) => end.final_sequence().is_none_or(|end| sequence < end),
+					Some(Anchor::Relative(_)) => {
+						span.is_none_or(|span| !matches!(span.end, End::Before(end) if sequence >= end))
+					}
+				};
+				started && ended
+			})
 	}
 
 	/// The lowest group in range, `None` while a relative anchor waits. Nothing in range

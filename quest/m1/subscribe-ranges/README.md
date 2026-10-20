@@ -74,11 +74,11 @@ relay bounds a sparse FETCH only if the model can request ranges:
   premise that ranges are group-only because a group's timestamp isn't always
   known: timed tracks know it, and untimed ones refuse. The cache half landed in its own PR after #5929.
   A datagram is judged on its own (maintainer, 2026-10-20): its timestamp
-  against the range's times, its sequence against the groups resolved so far,
-  never through the settle walk. Refusing time anchors on datagram tracks was
-  considered and can't work: nothing signals that a track carries datagrams,
-  and the lite draft lets a publisher send any single-frame group as a
-  datagram, including a copy of one it also streams.
+  against the range's times, its sequence against the absolute and resolved
+  relative groups, never through the settle walk. Refusing time anchors on
+  datagram tracks was considered and can't work: nothing signals that a track
+  carries datagrams, and the lite draft lets a publisher send any single-frame
+  group as a datagram, including a copy of one it also streams.
 - Ranges are frame-precise (`Position`), not whole groups. The IETF joining
   FETCH for a mid-group SUBSCRIBE's uncached prefix stays, because today's
   bridge relies on it (maintainer, 09-29).

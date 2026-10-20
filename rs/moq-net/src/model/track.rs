@@ -976,13 +976,21 @@ impl TrackState {
 		self.record_arrival(sequence, now);
 		// A datagram is its group's frame 0, so it says where that group starts: a time
 		// end must not count the sequence as arrived without knowing, since the same group
-		// may still stream.
-		if let Some(start) = start {
-			self.starts
-				.get_mut()
-				.unwrap_or_else(PoisonError::into_inner)
-				.entry(sequence)
-				.or_insert(start);
+		// may still stream. Datagrams skip the start checks groups get, so only one that
+		// keeps the index ascending is indexed; another counts as arrived alone.
+		let starts = self.starts.get_mut().unwrap_or_else(PoisonError::into_inner);
+		if let Some(start) = start
+			&& !starts.contains_key(&sequence)
+			&& starts
+				.range(..sequence)
+				.next_back()
+				.is_none_or(|(_, below)| !later(*below, start))
+			&& starts
+				.range(sequence.saturating_add(1)..)
+				.next()
+				.is_none_or(|(_, above)| !later(start, *above))
+		{
+			starts.insert(sequence, start);
 			self.cache.wakes().started(sequence);
 		}
 		self.shown(sequence);
@@ -15526,6 +15534,39 @@ mod test {
 
 	/// A datagram is a whole group of one frame, so its own timestamp says whether it falls
 	/// inside a time end, without one ever settling from the groups.
+	/// A datagram that rewinds is left out of the starts, which stay ascending for the groups
+	/// a time end settles against, and every datagram is still judged by its own timestamp.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_rewinding_datagram_stays_out_of_the_starts() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Absolute(Position::group(0)),
+			end: Some(Anchor::Time(at(75))),
+		}]));
+		for millis in [0, 100, 50, 200] {
+			producer.append_datagram(at(millis), &b"x"[..]).unwrap();
+		}
+		assert_eq!(
+			producer
+				.state
+				.read()
+				.starts
+				.lock()
+				.unwrap()
+				.keys()
+				.copied()
+				.collect::<Vec<_>>(),
+			vec![0, 1, 3]
+		);
+		let mut read = Vec::new();
+		while let Some(Ok(Some(datagram))) = subscriber.recv_datagram().now_or_never() {
+			read.push(datagram.sequence);
+		}
+		assert_eq!(read, vec![0, 2], "each judged by its own timestamp");
+	}
+
 	/// A datagram arriving in a gap says where its group starts, so a time end does not
 	/// settle as if the gap held a group inside it: the same group may still stream.
 	#[test]
