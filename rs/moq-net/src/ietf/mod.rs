@@ -28,10 +28,10 @@ mod location;
 pub(crate) mod max_age;
 pub mod message;
 mod namespace;
-mod object;
+pub(crate) mod object;
 pub mod peer;
 mod priority;
-mod properties;
+pub(crate) mod properties;
 mod publish;
 mod publish_namespace;
 #[cfg(feature = "async")]

@@ -18,7 +18,7 @@ and fix the rest the same way:
 - `export hls`: `moq-hls`'s server resolves per request; check that a restart
   moves new requests to the new instance and how a playlist marks the break
   (`EXT-X-DISCONTINUITY`). Coordinate with
-  [HLS export failure signal](/quest/m1/hls-failure-signal.md).
+  [Failed HLS exports error](/quest/m1/hls-failure-signal.md).
 - `export rtmp`, `export srt`, `export rtc`, both `--listen` (per-viewer
   streams in `moq-rtmp`, `moq-srt`, `moq-rtc`) and `--connect` (one push).
   SRT already rides the TS follower (`--linger`, `--stitch`); confirm its

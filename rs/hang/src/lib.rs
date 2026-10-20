@@ -14,6 +14,9 @@
 //! - **CMAF**: Fragmented MP4 container (moof+mdat pair)
 //!
 //! See the [moq-mux](https://crates.io/crates/moq-mux) crate for importing existing media formats into hang broadcasts.
+
+#![warn(missing_docs)]
+
 mod error;
 mod snapshot;
 

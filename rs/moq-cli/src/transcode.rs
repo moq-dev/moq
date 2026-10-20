@@ -14,7 +14,7 @@ use crate::args::MoqSide;
 use hang::moq_net;
 
 /// Ladder and codec options for the `transcode` verb.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// The derivative broadcast path. Defaults to `<broadcast>/transcode.hang`.

@@ -170,6 +170,21 @@ with Rust on the same host: above 1x means slower or more CPU per delivered byte
 <a href="https://github.com/moq-dev/moq/blob/main/bench/README.md">Metrics and local reproduction</a></p>
 </html>
 ''')
+    # gh-pages hosts every nightly report, each in its own directory with its own writer.
+    reports = []
+    for page in sorted(directory.glob('*/index.html')):
+        title = re.search(r'<title>(.*?)</title>', page.read_text(), re.S)
+        label = title.group(1).strip() if title else page.parent.name
+        reports.append(f'<li><a href="{page.parent.name}/">{html.escape(label)}</a></li>')
+    (directory / 'index.html').write_text('''<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>MoQ nightly reports</title>
+<style>body{font:18px system-ui;max-width:48rem;margin:4rem auto;padding:0 1rem;line-height:1.6}a{color:#066fbb}</style>
+<h1>MoQ nightly reports</h1>
+<ul>''' + ''.join(reports) + '''</ul>
+<p><a href="https://github.com/moq-dev/moq/actions/workflows/nightly.yml">Nightly runs</a></p>
+</html>
+''')
     (directory / '.nojekyll').touch()
 
 

@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import tempfile
@@ -81,6 +82,15 @@ class NightlyTest(unittest.TestCase):
                     for manifest in (ROOT / "rs").glob("*/Cargo.toml")
                     for bench in tomllib.loads(manifest.read_text()).get("bench", [])}
         self.assertEqual(declared - covered, set(), "Cargo bench targets missing from Nightly")
+
+    def test_dev_shell_jobs_trust_the_nix_cache(self):
+        # Without the flake's substituter, the dev shell builds uncached tools from
+        # source and outlasts short jobs: the benchmark site timed out before publishing.
+        workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
+        jobs = re.split(r"^  (?=[\w-]+:\n)", workflow.split("\njobs:\n", 1)[1], flags=re.M)
+        for job in jobs:
+            if "nix develop" in job:
+                self.assertIn("uses: ./.github/actions/nix", job, job.splitlines()[0])
 
     def test_benchmark_tests_stay_out_of_cargo_bench(self):
         result, calls = self.run_group("rust-test")

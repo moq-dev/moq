@@ -175,17 +175,7 @@ impl<F: Container> Consumer<F> {
 		// edge from there. The budget is clamped to the track's retention window,
 		// since history the publisher no longer keeps can't be waited for and would
 		// otherwise stall the catch-up by the excess.
-		// Only absolute starts name a floor: a relative one counts back from wherever the
-		// publisher is, which the first arrivals say.
-		let start = subscription
-			.ranges
-			.iter()
-			.map(|range| match range.start {
-				moq_net::track::Anchor::Absolute(start) => Some(start.group),
-				moq_net::track::Anchor::Relative(_) => None,
-			})
-			.collect::<Option<Vec<_>>>()
-			.and_then(|starts| starts.into_iter().min());
+		let start = track.floor();
 		let max_delay = subscription
 			.max_delay
 			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
@@ -326,6 +316,15 @@ impl<F: Container> Consumer<F> {
 		// (a gap below the served window looks like in-flight groups until the budget
 		// expires, or forever on a quiet track), so the cursor adopts it from the
 		// first arrivals instead of assuming group 0. Skipping stays the budget's job.
+		// A relative start names its floor once the first group to arrive resolves it.
+		if self.startup
+			&& !self.newest
+			&& let Some(start) = self.subscriber().floor()
+		{
+			self.pending.retain(|group| group.sequence >= start);
+			self.current = start;
+			self.startup = false;
+		}
 		if self.startup {
 			// NOTE: poll_min_timestamp buffers at least one frame per group and
 			// registers the waiter on the ones still empty. Any wire frame counts, so a
@@ -510,7 +509,9 @@ impl<F: Container> Consumer<F> {
 			// the gap outright, since no new group can arrive. That proof covers only
 			// sequences that never arrived: finishing the track ends new groups, not
 			// the frames still flowing on ones already open, so arrived groups are
-			// settled below by their own FIN, abort, or the budget.
+			// settled below by their own FIN, abort, or the budget. Sequences the
+			// subscriber's own ranges exclude never arrive either, so a gap between two
+			// ranges closes at once.
 			if let Some(front) = self.pending.front()
 				&& front.sequence > self.current
 			{
@@ -521,7 +522,11 @@ impl<F: Container> Consumer<F> {
 				let since = self.hole.unwrap().1;
 				let elapsed = since.elapsed() >= self.max_delay;
 				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= self.max_delay);
-				if finished || elapsed || aged {
+				let excluded = self
+					.track
+					.as_ref()
+					.is_some_and(|track| track.next_in_range(self.current).is_none_or(|next| next >= sequence));
+				if finished || elapsed || aged || excluded {
 					let _ = self.pending.front_mut().unwrap().look_all(waiter, &self.format);
 					let front = self.pending.front_mut().unwrap();
 					let empty = front.empty && matches!(front.group.poll_finished(waiter), Poll::Ready(Ok(_)));
@@ -3341,6 +3346,63 @@ mod tests {
 		assert_eq!(micros, vec![0, 100_000], "the open group's late frames are delivered");
 	}
 
+	/// A gap between two ranges is never read, so the reader walks over it at once rather
+	/// than waiting a budget, or forever on an open track, for groups it never gets.
+	#[tokio::test]
+	async fn an_excluded_gap_between_ranges_does_not_stall() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(Duration::from_secs(10))
+			.with_ranges([
+				moq_net::track::Range::groups(0..1),
+				moq_net::track::Range::groups(10..11),
+			]);
+		let mut consumer = Consumer::new(
+			track.subscribe(subscription),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+		for sequence in [0, 5, 10] {
+			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+		}
+
+		let mut micros = Vec::new();
+		for _ in 0..2 {
+			let frame = tokio::time::timeout(Duration::from_millis(200), consumer.read_frame())
+				.await
+				.expect("the open track still delivers the later range")
+				.unwrap()
+				.expect("a frame");
+			micros.push(frame.timestamp.as_micros());
+		}
+		assert_eq!(micros, vec![0, 1_000_000]);
+	}
+
+	/// A relative start names its floor once resolved: delivery starts that many groups
+	/// back from the latest, rather than at whichever group arrives first.
+	#[tokio::test]
+	async fn startup_at_a_relative_start() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		for sequence in 5..=9 {
+			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+		}
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(Duration::from_secs(10))
+			.with_ranges([moq_net::track::Range {
+				start: moq_net::track::Anchor::Relative(2),
+				end: None,
+			}]);
+		let consumer_track = track.subscribe(subscription);
+		assert_eq!(consumer_track.floor(), Some(7));
+		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
+		assert_eq!(micros, vec![700_000, 800_000, 900_000]);
+	}
+
 	#[tokio::test]
 	async fn startup_single_group_mid_stream() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -3648,7 +3710,7 @@ mod tests {
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500)));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
-		let group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		group0.finish().unwrap();
 
 		write_group(&mut track, 1, &[ts(30_000)]);

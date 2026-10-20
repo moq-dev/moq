@@ -8,7 +8,7 @@ use crate::{auth, cache, cluster, internal, stats, web};
 /// Loadable from CLI arguments, environment variables, or a TOML file.
 /// Precedence is CLI > env > file > defaults.
 ///
-/// `usage::Args` rather than `usage::Cli` on purpose: the program-level parts (a
+/// `usage_rs::Args` rather than `usage_rs::Cli` on purpose: the program-level parts (a
 /// name, a version, the completion command) belong to whichever binary owns the
 /// process, and a `Cli` cannot be `#[usage(flatten)]`ed into another one. Keeping
 /// them off this type is what lets an embedder put the relay's whole flag surface
@@ -16,7 +16,7 @@ use crate::{auth, cache, cluster, internal, stats, web};
 /// re-declaring it and drifting on every flag added here. This binary wraps it in
 /// a private `Cli` that adds those program-level parts; [`spec`] exposes the
 /// resulting command line.
-#[derive(usage::Args, Clone, Debug, Deserialize, Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -129,13 +129,13 @@ pub struct Config {
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
-	#[usage(value_hint = usage::ValueHint::FilePath, extensions("toml"))]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
 	pub file: Option<String>,
 
 	/// Provenance from the last load, skipped in TOML.
 	#[usage(skip)]
 	#[serde(skip)]
-	origins: Option<usage::config::Resolved>,
+	origins: Option<usage_rs::config::Resolved>,
 
 	/// Iroh specific configuration, used for both a client and server.
 	#[usage(flatten)]
@@ -187,7 +187,7 @@ impl Default for Config {
 // binary: an embedder declares its own and flattens `Config` into it, so nothing
 // outside needs to name this one. What callers do need -- the program's spec,
 // for completions, docs, and the released-flag test -- is `spec`.
-#[derive(usage::Cli, Clone, Debug)]
+#[derive(usage_rs::Cli, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-relay", version = env!("CARGO_PKG_VERSION"))]
 #[usage(completion, settings)]
@@ -203,7 +203,7 @@ struct Cli {
 /// the PROGRAM's, and `Config` is a composable fragment -- an embedder that
 /// flattens it has its own spec, so `Config::spec()` would hand back the wrong
 /// one and read as though it were theirs.
-pub fn spec() -> &'static usage::spec::Spec<'static> {
+pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
 	Cli::spec()
 }
 
@@ -268,7 +268,7 @@ impl Config {
 				anyhow::bail!("{}", answer.message());
 			}
 		};
-		let env = usage::config::EnvLayer::from_process();
+		let env = usage_rs::config::EnvLayer::from_process();
 		let file_path = cli.config.file.clone();
 		let file_body = file_path
 			.as_ref()
@@ -296,8 +296,8 @@ impl Config {
 	/// its `relay` field. Other CLI-only fields remain untouched.
 	pub fn merge_into(
 		&mut self,
-		cli: &usage::config::CliLayer,
-		env: &usage::config::EnvLayer,
+		cli: &usage_rs::config::CliLayer,
+		env: &usage_rs::config::EnvLayer,
 		file: Option<moq_tokio::cli::FileSource<'_>>,
 	) -> anyhow::Result<()> {
 		#[cfg(not(feature = "iroh"))]
@@ -335,7 +335,7 @@ impl Config {
 		self.origins
 			.as_ref()
 			.and_then(|resolved| resolved.origin_key(key))
-			.map(usage::config::Origin::describe)
+			.map(usage_rs::config::Origin::describe)
 	}
 }
 
@@ -519,8 +519,8 @@ mod tests {
 			"MOQ_IROH_DISABLE_RELAY",
 		] {
 			let mut config = Config::default();
-			let cli = usage::config::CliLayer::new(std::iter::empty::<(String, String)>());
-			let env = usage::config::EnvLayer::new([(name.to_string(), "false".to_string())]);
+			let cli = usage_rs::config::CliLayer::new(std::iter::empty::<(String, String)>());
+			let env = usage_rs::config::EnvLayer::new([(name.to_string(), "false".to_string())]);
 			let error = config.merge_into(&cli, &env, None).unwrap_err();
 			assert!(error.to_string().contains(name), "{error}");
 		}
@@ -1286,7 +1286,7 @@ uid = [1001]
 	fn the_config_can_be_embedded() {
 		/// A stand-in for an embedder's command line: the relay's flags plus one of
 		/// its own.
-		#[derive(usage::Cli, Clone, Debug)]
+		#[derive(usage_rs::Cli, Clone, Debug)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(name = "embedder", version = "0")]
 		#[usage(settings)]
@@ -1375,7 +1375,7 @@ uid = [1001]
 		};
 		let mut config = parsed.config;
 		config
-			.merge_into(&cli, &usage::config::EnvLayer::from_process(), Some(source))
+			.merge_into(&cli, &usage_rs::config::EnvLayer::from_process(), Some(source))
 			.unwrap();
 		assert_eq!(config.cluster.id, Some(9));
 		assert_eq!(config.source("cluster.id"), Some("--cluster-id"));

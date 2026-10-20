@@ -159,7 +159,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			out.push(value);
+			out.push(value.value);
 		}
 		out
 	}
@@ -234,7 +234,7 @@ mod test {
 		for n in 0..3 {
 			producer.append(&json!({ "n": n })).unwrap();
 			match consumer.poll_next(&waiter) {
-				Poll::Ready(Ok(Some(value))) => assert_eq!(value, json!({ "n": n })),
+				Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "n": n })),
 				other => panic!("expected record, got {other:?}"),
 			}
 		}
@@ -419,7 +419,7 @@ mod test {
 
 		assert!(matches!(
 			consumer.poll_next(&waiter),
-			Poll::Ready(Ok(Some(value))) if value == json!({ "n": 0 })
+			Poll::Ready(Ok(Some(value))) if value.value == json!({ "n": 0 })
 		));
 		assert!(matches!(
 			consumer.poll_next(&waiter),
