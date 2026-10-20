@@ -32,7 +32,7 @@ Full documentation lives at **[doc.moq.dev](https://doc.moq.dev)**.
 - **[Linux packages](https://doc.moq.dev/setup/install)** - install the relay and GStreamer plugin from `apt.moq.dev` / `rpm.moq.dev`.
 - **[Production setup](https://doc.moq.dev/setup/prod)** - deploy a relay with a real domain and TLS.
 
-The quickest way to see it in action (requires [Nix](https://nixos.org/download.html) with [flakes](https://nixos.wiki/wiki/Flakes)):
+The quickest way to see it in action (requires [Nix](https://nixos.org/download.html) with [flakes](https://wiki.nixos.org/wiki/Flakes)):
 
 ```sh
 # Runs a relay, demo media, and the web server
