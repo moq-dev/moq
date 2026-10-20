@@ -1021,9 +1021,10 @@ export class Subscriber {
 
 	/**
 	 * Follow the aggregate subscriber priority upstream until `done` settles: SUBSCRIBE_UPDATE
-	 * through draft 16, REQUEST_UPDATE after, each under a Request ID of its own. From draft 17
-	 * the answer comes back on this stream, so one update is in flight at a time and changes
-	 * meanwhile coalesce. No draft lets an update change the group order, so it stays as asked.
+	 * through draft 16, REQUEST_UPDATE after, each under a Request ID of its own. From draft 16
+	 * the answer comes back on this stream (routed by the adapter on draft 16), so one update is
+	 * in flight at a time and changes meanwhile coalesce. No draft lets an update change the
+	 * group order, so it stays as asked.
 	 */
 	async #runUpdates(
 		stream: Stream,
@@ -1036,6 +1037,8 @@ export class Subscriber {
 	): Promise<void> {
 		const version = this.#session.version;
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		// Draft 14 answers no update, and draft 15's answer reaches no subscription.
+		const answered = version !== Version.DRAFT_14 && version !== Version.DRAFT_15;
 		const stopped = done.then(
 			() => null,
 			() => null,
@@ -1076,7 +1079,7 @@ export class Subscriber {
 				? new SubscribeUpdate({ requestId, ownRequestId: own, parameters })
 				: new SubscribeUpdate({ requestId: own, parameters });
 			// Counted before writing: the answer can be read before the write's promise resolves.
-			if (!legacy) unanswered.update((count) => count + 1);
+			if (answered) unanswered.update((count) => count + 1);
 			try {
 				await stream.writer.u53(SubscribeUpdate.id);
 				await update.encode(stream.writer, version);

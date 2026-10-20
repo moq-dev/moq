@@ -1629,7 +1629,7 @@ export class Publisher {
 	 * the token the request carries.
 	 *
 	 * moq-transport renames a request's token with REQUEST_UPDATE, but cannot name one on a
-	 * request that had none, nor drop one, and before draft-17 cannot update a namespace at
+	 * request that had none, nor drop one, and before draft-16 cannot update a namespace at
 	 * all: those withdraw the request and make it again.
 	 */
 	#change(
@@ -1644,7 +1644,7 @@ export class Publisher {
 		const to = target.carry(next.route.auth);
 		if (from === to) return diff;
 		const version = this.#session.version;
-		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
 		if (from === undefined || to === undefined || legacy) return "restart";
 		return { ...(diff === "same" ? {} : diff), token: to };
 	}
@@ -1830,7 +1830,11 @@ export class Publisher {
 				(async (): Promise<Answer> => {
 					const { writer, reader } = request.stream;
 					await writer.u53(PublishNamespaceUpdate.id);
-					await new PublishNamespaceUpdate({ requestId, update, token }).encode(writer, version);
+					const namespaceRequestId = version === Version.DRAFT_16 ? request.requestId : undefined;
+					await new PublishNamespaceUpdate({ requestId, namespaceRequestId, update, token }).encode(
+						writer,
+						version,
+					);
 
 					const typeId = await reader.u53();
 					if (typeId === RequestError.id) {
@@ -1852,7 +1856,10 @@ export class Publisher {
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
 			console.warn(`publish_namespace update failed: broadcast=${path} error=${reason(e)}`);
 			requests.delete(path);
-			request.stream.abort(e);
+			// Aborting a request riding the control stream tells the peer nothing, so it would
+			// hold the namespace beside the one advertised next.
+			if (version === Version.DRAFT_16) await this.#end(request).catch(() => undefined);
+			else request.stream.abort(e);
 			return "dropped";
 		}
 

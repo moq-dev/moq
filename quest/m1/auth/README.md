@@ -51,7 +51,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   a request racing the token it relies on, is
   [A request right behind its token](/quest/m1/auth/request-race.md). Step 3
   sends outgoing request tokens on moq-transport through `Route::auth` as
-  `USE_VALUE` ([Live requests follow their auth](/quest/m1/auth/request-update.md));
+  `USE_VALUE` ([#5695](https://github.com/moq-dev/moq/pull/5695));
   lite has nothing to send, since the token already sits in the union.
 - ✅ Decided 2026-10-15 (maintainer, #5148): `auth::Handle::authorize`
   keeps its name and now means the connection credential's grant; the
@@ -144,7 +144,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Required
 
-- [Live requests follow their auth](/quest/m1/auth/request-update.md) - a route swaps its auth and the session sends the update, keeping the request up
 - [Auth outlives its session](/quest/m1/auth/issuer.md) - one `auth::Handle` spans a connection's sessions, so a route's auth survives a reconnect
 - [A request right behind its token](/quest/m1/auth/request-race.md) - a lite request relying on a just-presented token is admitted, with no auth field on any request
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every

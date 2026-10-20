@@ -110,5 +110,5 @@ Public API: none. Wire: lite-07-wip draft text only, no new bytes.
 
 - [#5927](https://github.com/moq-dev/moq/pull/5927) - the closed named-auth
   version this replaces
-- [Live requests follow their auth](/quest/m1/auth/request-update.md) -
-  moq-transport request renewal; lite renews through the union
+- [#5695](https://github.com/moq-dev/moq/pull/5695) - moq-transport request
+  renewal; lite renews through the union

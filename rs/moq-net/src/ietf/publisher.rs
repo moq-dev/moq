@@ -569,7 +569,7 @@ enum NamespaceEvent {
 
 /// What came back for an update in flight.
 enum Answer {
-	/// The peer's REQUEST_OK or REQUEST_ERROR.
+	/// The peer's REQUEST_OK or REQUEST_ERROR, or a draft-16 PUBLISH_NAMESPACE_CANCEL.
 	Message(super::request_stream::Framed),
 	/// The peer ended the request instead, a cancel from draft 17.
 	Ended,
@@ -3010,13 +3010,13 @@ where
 		let renamed = wanted && held && held_epoch != epoch;
 		let replaced = renamed && held_epoch.is_some() && epoch.is_some();
 		// moq-transport renames a request's auth with REQUEST_UPDATE, but cannot name one on
-		// a request that had none, nor drop one, and before draft-17 cannot update a
+		// a request that had none, nor drop one, and before draft-16 cannot update a
 		// namespace at all: those withdraw the request and make it again.
 		let restart = renamed
 			|| held_auth != auth
 				&& (held_auth.is_none()
 					|| auth.is_none()
-					|| matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16));
+					|| matches!(self.version, Version::Draft14 | Version::Draft15));
 
 		// An update already waiting or in flight carries whatever is current once it goes
 		// out, and its answer brings the loop back here for anything after that.
@@ -3325,7 +3325,7 @@ where
 			(Some(next), Some(held)) => ietf::PublishNamespaceUpdate::between(request_id, &held, &next),
 			_ => ietf::PublishNamespaceUpdate {
 				request_id,
-				namespace_request_id: None,
+				namespace_request_id: (self.version == Version::Draft16).then_some(request.request_id),
 				hops: None,
 				cost: None,
 				authorization_token: None,
@@ -3439,8 +3439,18 @@ where
 		let refused = match answer {
 			Answer::Late => {
 				tracing::debug!(broadcast = %absolute, "no answer to the update");
-				// Abrupt: a peer that never answers is not owed the FIN handshake.
-				ns.requests.remove(&suffix);
+				match self.version {
+					// Dropping a request riding the control stream tells the peer nothing, so
+					// it would hold the namespace beside the one advertised next.
+					Version::Draft16 => {
+						self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
+							.await?
+					}
+					// Abrupt: a peer that never answers is not owed the FIN handshake.
+					_ => {
+						ns.requests.remove(&suffix);
+					}
+				}
 				Refused::No
 			}
 			Answer::Ended => {
@@ -3474,6 +3484,14 @@ where
 						self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
 							.await?;
 						self.refusal(msg.retry_interval)
+					}
+					// Draft-16 carries its cancel as a message, which can beat the answer.
+					ietf::PublishNamespaceCancel::ID if self.version == Version::Draft16 => {
+						let msg: ietf::PublishNamespaceCancel = body.message(self.version)?;
+						tracing::debug!(broadcast = %absolute, message = ?msg, "update cancelled");
+						self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
+							.await?;
+						Refused::No
 					}
 					_ => return Err(Error::UnexpectedMessage),
 				}
@@ -14201,10 +14219,77 @@ mod tests {
 
 	/// A route's auth rides its PUBLISH_NAMESPACE as the request's token, and swapping it
 	/// renews the request in place: REQUEST_UPDATE on the same stream, carrying only the
-	/// new token.
+	/// new token. Draft-16 names the request in the update.
 	#[moq_clock::test]
 	async fn swapping_a_route_auth_is_a_request_update() {
-		const VERSION: Version = Version::Draft19;
+		swaps_a_route_auth(Version::Draft16).await;
+		swaps_a_route_auth(Version::Draft19).await;
+	}
+
+	async fn swaps_a_route_auth(version: Version) {
+		let origin = unheld_origin();
+		let auth = crate::auth::Handle::ietf(false);
+		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
+		let second = auth
+			.present(bytes::Bytes::from_static(b"second-secret"), false)
+			.unwrap();
+		let cam = origin
+			.announce("cam", crate::origin::Route::default().with_auth(first))
+			.unwrap();
+		settle().await;
+
+		let ok = publish_namespace_ok(version).await;
+		let (publisher, log) = auth_publisher(&origin, &auth, vec![[ok.clone(), ok].concat()], version);
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		poll_until(&mut run, &log, b"cam", 1).await;
+		assert_eq!(
+			occurrences(&log, b"cam"),
+			1,
+			"{version}: the advertisement never went out"
+		);
+		assert_eq!(
+			occurrences(&log, b"first-secret"),
+			1,
+			"{version}: PUBLISH_NAMESPACE carries the auth"
+		);
+
+		cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
+		let expected = request_update(
+			version,
+			&ietf::PublishNamespaceUpdate {
+				request_id: RequestId(3),
+				namespace_request_id: (version == Version::Draft16).then_some(RequestId(1)),
+				hops: None,
+				cost: None,
+				authorization_token: Some(auth_token(b"second-secret")),
+			},
+		)
+		.await;
+		poll_until(&mut run, &log, &expected, 1).await;
+
+		assert_eq!(
+			occurrences(&log, &expected),
+			1,
+			"{version}: REQUEST_UPDATE with the new token"
+		);
+		// Let its answer land, which leaves the request standing.
+		for _ in 0..10 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, b"cam"),
+			1,
+			"{version}: PUBLISH_NAMESPACE was not repeated"
+		);
+		assert_eq!(log.bi_opens(), 1, "{version}: the update rode the request's own stream");
+	}
+
+	/// A draft-16 peer's PUBLISH_NAMESPACE_CANCEL can beat its answer to our update. It
+	/// withdraws only that namespace, which is offered again, and the loop carries on.
+	#[moq_clock::test]
+	async fn a_draft_16_cancel_ahead_of_the_answer_ends_only_its_request() {
+		const VERSION: Version = Version::Draft16;
 
 		let origin = unheld_origin();
 		let auth = crate::auth::Handle::ietf(false);
@@ -14218,33 +14303,31 @@ mod tests {
 		settle().await;
 
 		let ok = publish_namespace_ok(VERSION).await;
-		let (publisher, log) = auth_publisher(&origin, &auth, vec![[ok.clone(), ok].concat()], VERSION);
+		let cancel = {
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
+			writer.varint(ietf::PublishNamespaceCancel::ID).await.unwrap();
+			writer
+				.encode(&ietf::PublishNamespaceCancel {
+					track_namespace: crate::Path::new("cam"),
+					request_id: RequestId(1),
+					error_code: 0,
+					reason_phrase: "gone".into(),
+				})
+				.await
+				.unwrap();
+			log.writes.lock().unwrap().clone()
+		};
+		let (publisher, log) = auth_publisher(&origin, &auth, vec![[ok.clone(), cancel].concat(), ok], VERSION);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		poll_until(&mut run, &log, b"cam", 1).await;
-		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
-		assert_eq!(
-			occurrences(&log, b"first-secret"),
-			1,
-			"PUBLISH_NAMESPACE carries the auth"
-		);
+		poll_until(&mut run, &log, b"first-secret", 1).await;
 
 		cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
-		let expected = request_update(
-			VERSION,
-			&ietf::PublishNamespaceUpdate {
-				request_id: RequestId(3),
-				namespace_request_id: None,
-				hops: None,
-				cost: None,
-				authorization_token: Some(auth_token(b"second-secret")),
-			},
-		)
-		.await;
-		poll_until(&mut run, &log, &expected, 1).await;
+		poll_until(&mut run, &log, b"cam", 2).await;
 
-		assert_eq!(occurrences(&log, &expected), 1, "REQUEST_UPDATE with the new token");
-		assert_eq!(occurrences(&log, b"cam"), 1, "PUBLISH_NAMESPACE was not repeated");
-		assert_eq!(log.bi_opens(), 1, "the update rode the request's own stream");
+		assert_eq!(occurrences(&log, b"cam"), 2, "the namespace was not offered again");
+		assert_eq!(log.bi_opens(), 2, "a fresh request after the cancel");
 	}
 
 	/// An auth another handle issued is not this session's to present: the route is
@@ -14302,7 +14385,7 @@ mod tests {
 		assert_eq!(log.bi_opens(), 2, "a fresh stream for the fresh request");
 	}
 
-	/// Before draft-17 a namespace cannot be updated, so a renewal withdraws the request
+	/// Before draft-16 a namespace cannot be updated, so a renewal withdraws the request
 	/// and makes it again with the new token.
 	#[moq_clock::test]
 	async fn a_draft_14_renewal_restarts_the_request() {
@@ -14430,11 +14513,15 @@ mod tests {
 	}
 
 	/// An update the peer never answers drops its request once the timeout passes, and
-	/// the retry advertises the namespace afresh under the current auth.
+	/// the retry advertises the namespace afresh under the current auth. Draft-16's request
+	/// rides the control stream, where only PUBLISH_NAMESPACE_DONE withdraws it.
 	#[moq_clock::test]
 	async fn an_unanswered_renewal_advertises_again() {
-		const VERSION: Version = Version::Draft19;
+		advertises_again_unanswered(Version::Draft16).await;
+		advertises_again_unanswered(Version::Draft19).await;
+	}
 
+	async fn advertises_again_unanswered(version: Version) {
 		let origin = unheld_origin();
 		let auth = crate::auth::Handle::ietf(false);
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
@@ -14443,8 +14530,8 @@ mod tests {
 			.unwrap();
 		settle().await;
 
-		let ok = publish_namespace_ok(VERSION).await;
-		let (publisher, log) = auth_publisher(&origin, &auth, vec![ok.clone(), ok], VERSION);
+		let ok = publish_namespace_ok(version).await;
+		let (publisher, log) = auth_publisher(&origin, &auth, vec![ok.clone(), ok], version);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"first", 1).await;
 		cam.update(crate::origin::Route::default().with_auth(present(b"second")))
@@ -14462,8 +14549,25 @@ mod tests {
 		assert_eq!(
 			occurrences(&log, b"second"),
 			2,
-			"the unanswered renewal was never retried"
+			"{version}: the unanswered renewal was never retried"
 		);
+		if version == Version::Draft16 {
+			let done = {
+				let log = crate::lite::test_transport::Log::default();
+				let mut writer =
+					crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+				writer.varint(ietf::PublishNamespaceDone::ID).await.unwrap();
+				writer
+					.encode(&ietf::PublishNamespaceDone {
+						track_namespace: crate::Path::new("cam"),
+						request_id: RequestId(1),
+					})
+					.await
+					.unwrap();
+				log.writes.lock().unwrap().clone()
+			};
+			assert_eq!(occurrences(&log, &done), 1, "the peer was never told to let it go");
+		}
 	}
 
 	/// moq-transport has no restart: another source winning a namespace without an epoch

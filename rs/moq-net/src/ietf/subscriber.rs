@@ -3117,11 +3117,11 @@ where
 			group: largest.group,
 			object: largest.object.saturating_add(1),
 		});
-		// REQUEST_UPDATEs sent and not yet answered. Drafts 14-16 answer on the control
-		// stream by the update's own Request ID, which reaches no subscription, so only
-		// later drafts count them.
+		// REQUEST_UPDATEs sent and not yet answered. Draft-14 answers none, and draft-15's
+		// answer names only the update's own Request ID, which reaches no subscription, so
+		// only draft-16 on count them; the adapter routes draft-16's back by that ID.
 		let unanswered = AtomicU64::new(0);
-		let answered_here = !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16);
+		let answered_here = !matches!(self.version, Version::Draft14 | Version::Draft15);
 
 		let mut fetch_done = fetching.is_none();
 		// Our grant stopped covering the track, which is aborted rather than kept lingering.
