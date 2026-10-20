@@ -37,6 +37,7 @@ pub struct UdpSocketState {
 }
 
 impl UdpSocketState {
+    /// Configures `socket` for this platform's offloads and ancillary data and returns its state.
     pub fn new(socket: UdpSockRef<'_>) -> io::Result<Self> {
         assert!(
             CMSG_LEN
@@ -186,6 +187,7 @@ impl UdpSocketState {
         )
     }
 
+    /// Receives datagrams into `bufs`, filling one [`RecvMeta`] per message, and returns how many messages arrived.
     pub fn recv(
         &self,
         socket: UdpSockRef<'_>,
@@ -334,6 +336,7 @@ impl UdpSocketState {
         socket.0.recv_buffer_size()
     }
 
+    /// Whether transmitted datagrams might get fragmented by the IP layer
     #[inline]
     pub fn may_fragment(&self) -> bool {
         false

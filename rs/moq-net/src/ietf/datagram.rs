@@ -113,7 +113,7 @@ impl crate::model::datagram::Wire {
 
 /// Whether `version` lets a datagram of Object Status `status` carry properties: from
 /// draft-17 on, only a Normal Object may.
-fn carries_properties(status: u64, version: Version) -> bool {
+pub(super) fn carries_properties(status: u64, version: Version) -> bool {
 	status == 0 || matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 }
 

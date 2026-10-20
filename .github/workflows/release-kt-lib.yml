@@ -214,8 +214,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      # No Rust cache: its entry would evict the store every pull request
-      # restores from the 10 GB budget. See cache.yml.
+      # No Rust cache: shipped binaries compile from source rather than from
+      # whatever the shared R2 cache holds.
 
       # Generate the UniFFI Kotlin so the sibling :moq-ffi project compiles.
       - name: Generate bindings

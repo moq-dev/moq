@@ -56,7 +56,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 		};
 		let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
 		frame.write(payload.clone()).unwrap();
-		frame.finish().unwrap();
+		group = frame.finish().unwrap();
 	}
 	group.finish().unwrap();
 	(broadcast, track, group)
@@ -1138,7 +1138,6 @@ pub fn seeds() -> Vec<Seed> {
 /// the bytes received.
 pub struct FrameRecv {
 	streams: Vec<Option<(coding::Reader<Chunks, lite::Version>, frame::ProducerOwned)>>,
-	groups: Vec<group::Producer>,
 	// Keeps the groups' track alive.
 	_track: track::Producer,
 	_broadcast: broadcast::Producer,
@@ -1161,16 +1160,14 @@ impl FrameRecv {
 		let budget = budget.map(frame::Budget::new).unwrap_or_default();
 		let payload = bytes::Bytes::from(vec![0u8; size]);
 
-		let mut groups = Vec::with_capacity(streams);
 		let streams = (0..streams)
 			.map(|_| {
-				let mut group = track.append_group().unwrap();
+				let group = track.append_group().unwrap();
 				let info = frame::Info {
 					size: size as u64,
 					timestamp: Some(crate::Timestamp::ZERO),
 				};
 				let frame = group.create_frame_owned(info, &budget).unwrap();
-				groups.push(group);
 				let stream = Chunks {
 					payload: payload.clone(),
 					chunk,
@@ -1182,7 +1179,6 @@ impl FrameRecv {
 
 		Self {
 			streams,
-			groups,
 			_track: track,
 			_broadcast: broadcast,
 		}
@@ -1198,13 +1194,11 @@ impl FrameRecv {
 				if let std::task::Poll::Ready(res) = reader.poll_read_frame(&mut cx, frame) {
 					res.unwrap();
 					let (_, frame) = slot.take().unwrap();
-					frame.finish().unwrap();
+					let mut group = frame.finish().unwrap();
+					group.finish().unwrap();
 					open -= 1;
 				}
 			}
-		}
-		for group in &self.groups {
-			group.finish().unwrap();
 		}
 	}
 }

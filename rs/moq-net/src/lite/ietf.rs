@@ -1027,8 +1027,14 @@ mod hop_tests {
 		crate::ietf::object::block(values, Encoding::Draft19).unwrap()
 	}
 
-	/// Write a frame carrying relay `fields`, as moq-transport ingress does.
-	fn write(group: &mut group::Producer, millis: u64, fields: Option<crate::model::object::Fields>, payload: &[u8]) {
+	/// Write a frame carrying relay `fields`, as moq-transport ingress does, returning the
+	/// group's writer.
+	fn write(
+		group: group::Producer,
+		millis: u64,
+		fields: Option<crate::model::object::Fields>,
+		payload: &[u8],
+	) -> group::Producer {
 		let mut frame = group
 			.create_frame_owned(
 				frame::Header {
@@ -1042,7 +1048,7 @@ mod hop_tests {
 			)
 			.unwrap();
 		frame.write(Bytes::copy_from_slice(payload)).unwrap();
-		frame.finish().unwrap();
+		frame.finish().unwrap()
 	}
 
 	/// A frame's Object ID and properties, when it keeps any.
@@ -1121,7 +1127,7 @@ mod hop_tests {
 				},
 			};
 			group.mark_gap(6, Some(6)).unwrap();
-			write(&mut group, 0, Some(first.clone()), b"a");
+			group = write(group, 0, Some(first.clone()), b"a");
 
 			let (downstream, _sessions) = test_hop(&upstream, "room", offer).await;
 			let (copy, mut subscriber) = subscribe(&downstream).await;
@@ -1153,7 +1159,7 @@ mod hop_tests {
 				},
 			};
 			group.mark_gap(9, Some(2)).unwrap();
-			write(&mut group, 1, Some(second.clone()), b"b");
+			group = write(group, 1, Some(second.clone()), b"b");
 			group.mark_gap(10, None).unwrap();
 			group
 				.set_end_object(crate::model::object::Fields {
@@ -1214,7 +1220,7 @@ mod hop_tests {
 				id: index as u64,
 				properties: Properties::default(),
 			};
-			write(&mut group, index as u64, Some(fields), payload);
+			group = write(group, index as u64, Some(fields), payload);
 		}
 		group.mark_gap(2, None).unwrap();
 		group

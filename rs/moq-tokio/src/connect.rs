@@ -145,7 +145,7 @@ fn default_bind() -> net::SocketAddr {
 ///
 /// Still parsed, and still carrying their original env vars, so a process can name
 /// the replacement and stop. Nothing reads the values: see [`Config::deprecated`].
-#[derive(Clone, Debug, Default, usage::Args)]
+#[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(
@@ -486,9 +486,9 @@ pub(crate) fn all_extensions(extensions: &moq_net::setup::Extensions) -> bool {
 
 /// The dial side of an endpoint: where to connect and how to get there.
 ///
-/// Derives [`usage::Args`], so flatten it into a binary's own parser with
+/// Derives [`usage_rs::Args`], so flatten it into a binary's own parser with
 /// `#[usage(flatten)]`. The accept side is [`crate::listen::Config`].
-#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]

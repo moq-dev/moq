@@ -497,7 +497,7 @@ impl<V: Serialize> Snapshot<V> {
 			return Err(err.into());
 		}
 		if frame.keyframe {
-			if let Some(group) = self.group.take() {
+			if let Some(mut group) = self.group.take() {
 				group.finish()?;
 			}
 			self.group = Some(self.track.create_group(moq_net::group::Info {
@@ -517,7 +517,7 @@ impl<V: Serialize> Snapshot<V> {
 	}
 
 	fn finish(&mut self) -> moq_json::Result<()> {
-		if let Some(group) = self.group.take() {
+		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(self.track.finish()?)
@@ -1736,7 +1736,7 @@ mod tests {
 					drop(group);
 					drop(cursor);
 					let mut reader = moq_json::snapshot::Consumer::<PresenceFrame>::new(subscriber, config.clone());
-					let initial = pumping(&mut drain, reader.next()).await.unwrap().unwrap();
+					let initial = pumping(&mut drain, reader.next()).await.unwrap().unwrap().value;
 					assert_eq!(
 						(initial[""].wire_tx, initial[""].wire_rx),
 						(0, 0),
@@ -1745,14 +1745,14 @@ mod tests {
 					store(reading + delta);
 					drain.collect();
 					drain.publish(Instant::now());
-					let next = pumping(&mut drain, reader.next()).await.unwrap().unwrap();
+					let next = pumping(&mut drain, reader.next()).await.unwrap().unwrap().value;
 					assert_eq!((next[""].wire_tx, next[""].wire_rx), (delta, delta * 2));
 					if compressed {
 						// Cross the codec's group budget naturally, leaving a completed
 						// group cached when unsubscribe aborts the still-open last group.
 						for extra in 1..=300 {
 							store(reading + delta + extra);
-							let next = pumping(&mut drain, reader.next()).await.unwrap().unwrap();
+							let next = pumping(&mut drain, reader.next()).await.unwrap().unwrap().value;
 							assert_eq!(
 								(next[""].wire_tx, next[""].wire_rx),
 								(delta + extra, (delta + extra) * 2)
@@ -1831,7 +1831,13 @@ mod tests {
 		};
 		let mut plain = read("t.json", moq_json::Compression::None);
 		let mut compressed = read("t.json.z", moq_json::Compression::Deflate);
-		let next = |reader: &mut moq_json::snapshot::Consumer<Value>| reader.next().now_or_never().unwrap();
+		let next = |reader: &mut moq_json::snapshot::Consumer<Value>| {
+			reader
+				.next()
+				.now_or_never()
+				.unwrap()
+				.map(|value| value.map(|value| value.value))
+		};
 		let small = Value::from([("small".to_string(), 1)]);
 		assert_eq!(next(&mut plain).unwrap(), Some(small.clone()));
 		assert_eq!(next(&mut compressed).unwrap(), Some(small));

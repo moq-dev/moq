@@ -637,7 +637,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
-			if let Some(g) = track.group.take() {
+			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
 			track.track.finish()?;

@@ -26,6 +26,8 @@
 //! the GPU; set [`Config::resize`]'s output to `Output::Cpu` to decode to CPU
 //! pixels and resize there.
 
+#![warn(missing_docs)]
+
 pub mod active;
 pub mod ladder;
 

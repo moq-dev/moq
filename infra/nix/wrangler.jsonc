@@ -1,0 +1,34 @@
+{
+	// Cloudflare Wrangler configuration for the Nix binary cache worker.
+	// Serves nix.moq.dev from two R2 buckets: released packages, kept forever,
+	// and CI dev shells, which a lifecycle rule expires.
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "nix-moq-dev",
+	"main": "src/worker.ts",
+	"compatibility_date": "2025-07-09",
+	"account_id": "dd618f5dbd5da77b8296f1613c301f5c",
+	"workers_dev": false,
+	"route": {
+		"pattern": "nix.moq.dev",
+		"custom_domain": true
+	},
+	// R2 bucket bindings
+	"r2_buckets": [
+		{
+			"binding": "RELEASE",
+			"bucket_name": "nix-moq-dev",
+			"remote": true
+		},
+		{
+			"binding": "CI",
+			"bucket_name": "nix-ci-moq-dev",
+			"remote": true
+		}
+	],
+	// Observability
+	"observability": {
+		"logs": {
+			"enabled": true
+		}
+	}
+}

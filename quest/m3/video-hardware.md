@@ -61,6 +61,24 @@ A separate-plane producer belongs to
 Pi produces nothing, write it down and stop. `doc/lib/rs/moq-video.md` says
 both paths are reachable; correct that sentence if one cannot capture.
 
+### Windows and Apple GPU probes
+
+Ignored moq-video tests that only a GPU on that platform can run, and that no
+runner hosts (found by the m0 coverage audit):
+
+- Direct3D11 video processing: `d3d11_resize_defaults_to_the_gpu`,
+  `d3d11_resize_matches_cpu`, and
+  `mediafoundation_resized_texture_reencodes_in_place`. `VideoProcessorBlt`
+  can hang on affected drivers, so run them one at a time.
+- WGC conversion and encode: `wgc_conversion_crops_odd_edges_and_preserves_color`,
+  `wgc_conversion_workload`, and
+  `wgc_nv12_encodes_with_matching_color_on_gpu_and_software`. The `wgc_*`
+  capture tests belong to [Windows.Graphics.Capture](/quest/m2/capture-wgc.md).
+- Media Foundation encode: `mediafoundation_cpu_rgba` and
+  `mediafoundation_camera_texture`.
+- Metal import on an Apple Silicon Mac: `the_metal_import_matches_the_cpu_path`
+  and `imports_survive_decoder_pool_recycling`.
+
 ### Fixes
 
 Fix only a defect a run hits. Precedent for what this catches: NVENC

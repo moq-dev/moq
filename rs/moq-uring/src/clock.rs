@@ -144,12 +144,14 @@ mod tests {
 	/// monotonic clock from another origin.
 	#[test]
 	fn host_tracks_moq_clock() {
+		// Off by at most the gap between the two calibration reads, which a
+		// preemption can stretch, so measure it rather than assume one.
+		let start = monotonic();
 		let host = Host::calibrate();
+		let slack = monotonic() - start;
 		let before = moq_clock::now();
 		let now = host.now();
 		let after = moq_clock::now();
-		// Off by at most the gap between the two calibration reads.
-		let slack = Duration::from_millis(1);
 		assert!(
 			before <= now + slack && now <= after + slack,
 			"{before:?} <= {now:?} <= {after:?}"

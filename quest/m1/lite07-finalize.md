@@ -91,7 +91,6 @@ is published; older versions are unchanged.
 - [Compressed tracks in Rust](/quest/m1/compress/core.md) - TRACK_INFO carries the compress flag and the frame header each compressed frame's inflated size
 - [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
 - [TRACKS](/quest/m1/archive/tracks.md) - lite-07 carries the request listing a broadcast's tracks as they appear
-- [Announce SYNCED](/quest/m1/announce-synced.md) - lite-07's Announce stream marks its initial set with SYNCED instead of `Active Count`
 
 ## Related
 

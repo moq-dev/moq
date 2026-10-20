@@ -79,9 +79,9 @@ pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 
 /// The accept side of an endpoint: what to listen on and how to be trusted.
 ///
-/// Derives [`usage::Args`], so flatten it into a binary's own parser with
+/// Derives [`usage_rs::Args`], so flatten it into a binary's own parser with
 /// `#[usage(flatten)]`. The dial side is [`crate::connect::Config`].
-#[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -304,7 +304,7 @@ pub(crate) use moq_sock::shard::Socket;
 /// They carry their original env vars, which is why these are separate args rather
 /// than Usage aliases: an alias renames the flag but not the variable, and a relay
 /// deployed through the environment is the common case.
-#[derive(Clone, Debug, Default, usage::Args)]
+#[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(name = "server-bind", long = "server-bind", env = "MOQ_SERVER_BIND", hide = true)]
@@ -558,7 +558,7 @@ mod tests {
 	}
 	/// A parser wrapping the config, since it derives `Args` (see the note in
 	/// [`crate::connect`]).
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(settings)]
 	struct Cli {
