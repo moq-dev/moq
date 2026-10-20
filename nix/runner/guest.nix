@@ -137,7 +137,7 @@
         "github-runner-work"
       ];
       CacheDirectoryMode = "0700";
-      # DynamicUser cache mounts default to noexec, but jobs execute checkout
+      # The sandbox mounts cache directories noexec, but jobs execute checkout
       # scripts, build outputs, and tools installed in their persistent home.
       ExecPaths = [
         "/var/cache/github-runner-home"
