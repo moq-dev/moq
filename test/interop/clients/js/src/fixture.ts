@@ -116,8 +116,10 @@ export class Fixture {
 
 		// Mark the codec change only once the probe has published it. Marking on request would paint the
 		// new generation into pictures the old codec still encodes onto the old track.
+		// Read the catalog before the generation check, so a rerun after marking still tracks a signal.
 		this.#signals.run((effect) => {
-			if (this.#generation === 0 && effect.get(video.out.catalog)?.codec.startsWith("vp8")) this.#generation = 1;
+			const codec = effect.get(video.out.catalog)?.codec;
+			if (this.#generation === 0 && codec?.startsWith("vp8")) this.#generation = 1;
 		});
 
 		// Handed the source at page load, before any gesture, like a pre-granted microphone. Readiness
