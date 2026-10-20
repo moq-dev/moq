@@ -201,31 +201,51 @@ impl TimeEnd {
 			}
 		}
 
-		// The first held group that may still start is the one read on speculation.
+		// The first sequence above `known` that may still start is the one read on
+		// speculation: a held group yet to start, or a missing one that may arrive. Only a
+		// group starting inside the end is jumped to, since it puts all below it in range.
 		self.speculative = None;
-		while let Some(from) = self.unknown(start)
-			&& let Some((sequence, held)) = holdings.next_held(self.held.max(from))
-			&& self.after.is_none_or(|after| sequence < after)
-		{
-			match held {
-				Held::Started(at) if later(at, self.pts) => self.after = Some(sequence),
-				Held::Started(_) => self.known = Some(sequence),
-				Held::Never => {}
-				Held::Pending => {
-					self.held = sequence;
-					self.speculative = Some(sequence);
-					break;
-				}
+		while let Some(from) = self.unknown(start) {
+			let at = self.held.max(from);
+			if self.after.is_some_and(|after| at >= after) {
+				break;
+			}
+			let next = holdings
+				.next_held(at)
+				.filter(|(sequence, _)| self.after.is_none_or(|after| *sequence < after));
+			match next {
+				Some((sequence, held)) if sequence == at => match held {
+					Held::Started(time) if later(time, self.pts) => self.after = Some(at),
+					Held::Started(_) => self.known = Some(at),
+					Held::Never => {}
+					Held::Pending => {
+						self.held = at;
+						self.speculative = Some(at);
+						break;
+					}
+				},
+				Some((sequence, Held::Started(time))) if !later(time, self.pts) => self.known = Some(sequence),
+				_ => match holdings.gone(at) {
+					Some(end) if end > at => {
+						self.held = end;
+						continue;
+					}
+					_ => {
+						self.held = at;
+						self.speculative = (!holdings.complete()).then_some(at);
+						break;
+					}
+				},
 			}
 			// Nothing sits above the last sequence, so the walk ends on it.
-			let Some(next) = sequence.checked_add(1) else { break };
+			let Some(next) = at.checked_add(1) else { break };
 			self.held = next;
 		}
 		self.limit = match (self.speculative, self.after) {
 			_ if holdings.complete() => None,
 			(Some(speculative), _) => speculative.checked_add(1),
 			(None, Some(after)) => Some(after),
-			// Every held group is accounted for: the next to arrive is the speculative one.
+			// Every sequence from here on is gone, or the last one is in range.
 			(None, None) => None,
 		};
 
@@ -765,13 +785,13 @@ mod tests {
 		assert!(!window.is_settled(), "4 and 5 may still arrive inside the end");
 		assert_eq!(
 			covered(&window, 8),
-			vec![3, 4, 5],
-			"but never 6, known to start past it"
+			vec![3, 4],
+			"only 4, the first that may still arrive, on speculation, and never 6"
 		);
 
-		// 4 arrives yet to start: the one read on speculation, so 5 waits.
+		// 4 arrives yet to start: still the one read on speculation, so 5 waits.
 		groups.held.insert(4, Held::Pending);
-		assert!(window.settle(Some(6), &groups));
+		assert!(!window.settle(Some(6), &groups), "4 was already the speculative one");
 		assert_eq!(covered(&window, 8), vec![3, 4]);
 		groups.held.insert(4, Held::Started(at(3500)));
 		assert!(window.settle(Some(6), &groups));
@@ -917,6 +937,22 @@ mod tests {
 			&racing,
 		)
 		.unwrap();
+		assert_eq!(window.resolved(), vec![Some(Resolved { start: 0, end: Some(1) })]);
+	}
+
+	#[test]
+	fn a_missing_sequence_past_a_time_end_is_the_one_read_on_speculation() {
+		// 1 and 2 are missing, and 3 never starts: the walk may not pass the gap, or every
+		// sequence in it that arrives later is read past the end.
+		let mut groups = Groups::new([Groups::started(0, 3000), (3, Held::Never)]);
+		let mut window = Window::new(&[range(time(3000), time(3500))], Some(3), &groups).unwrap();
+		assert_eq!(covered(&window, 5), vec![0, 1]);
+		groups.held.insert(2, Held::Pending);
+		groups.held.insert(1, Held::Pending);
+		window.settle(Some(3), &groups);
+		assert_eq!(covered(&window, 5), vec![0, 1], "2 waits on 1 starting");
+		groups.held.insert(1, Held::Started(at(3600)));
+		window.settle(Some(3), &groups);
 		assert_eq!(window.resolved(), vec![Some(Resolved { start: 0, end: Some(1) })]);
 	}
 
