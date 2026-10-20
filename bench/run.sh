@@ -208,11 +208,20 @@ criterion_targets() {
                 .packages[] as $package
                 | $package.targets[]
                 | select(any(.kind[]; . == "bench"))
-                | [($package.manifest_path | ltrimstr($root)), .name]
+                | [($package.manifest_path | ltrimstr($root)), .name, (.["required-features"] // [] | join(","))]
                 | @tsv
             ' |
             sort
     )
+}
+
+# The features a bench target requires, comma-separated; cargo refuses to build it without them.
+target_features() {
+    local checkout=$1
+    local manifest=$2
+    local target=$3
+    criterion_targets "$checkout" |
+        awk -F '\t' -v manifest="$manifest" -v target="$target" '$1 == manifest && $2 == target { print $3; exit }'
 }
 
 target_dir() {
@@ -236,7 +245,7 @@ run_criterion() {
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
     fi
-    while IFS=$'\t' read -r manifest target; do
+    while IFS=$'\t' read -r manifest target _; do
         run_criterion_target "$checkout" "$manifest" "$target" "$@"
     done <"$target_list"
 }
@@ -245,18 +254,20 @@ run_criterion_target() {
     local checkout=$1
     local manifest=$2
     local target=$3
+    local features
     shift 3
+    features=$(target_features "$checkout" "$manifest" "$target") || return 1
     (
         cd "$checkout" || exit 1
         CARGO_TARGET_DIR=$(target_dir "$checkout") \
-            cargo bench --locked --manifest-path "$manifest" --bench "$target" -- \
+            cargo bench --locked --manifest-path "$manifest" --bench "$target" ${features:+--features "$features"} -- \
             "${CRITERION_ARGS[@]}" "$@"
     )
 }
 
 criterion_cases() {
     local checkout=$1
-    local manifest target benchmark
+    local manifest target features benchmark
     local listing=$RUN/criterion-listing
     local target_list=$RUN/criterion-targets
 
@@ -267,11 +278,11 @@ criterion_cases() {
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
     fi
-    while IFS=$'\t' read -r manifest target; do
+    while IFS=$'\t' read -r manifest target features; do
         if ! (
             cd "$checkout" || exit 1
             CARGO_TARGET_DIR=$(target_dir "$checkout") \
-                cargo bench --locked --manifest-path "$manifest" --bench "$target" -- --list
+                cargo bench --locked --manifest-path "$manifest" --bench "$target" ${features:+--features "$features"} -- --list
         ) | sed -n 's/: benchmark$//p' >"$listing"; then
             return 1
         fi
