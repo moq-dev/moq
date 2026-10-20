@@ -3,9 +3,9 @@ name: Release Nix
 # Pushes each released package to nix.moq.dev, so `nix run` on a release tag
 # substitutes it instead of building from source.
 #
-# The signing key and the release bucket's write key live in the
-# `nix-release` Environment, which only these tag patterns can deploy from. A
-# tag ruleset limits who can create them; see infra/README.md.
+# The signing key and the bucket write key live in the `cache-write`
+# Environment, which only `main`, the merge queue, and these tag patterns can
+# deploy from. A tag ruleset limits who can create them; see infra/README.md.
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
   release:
     name: Release (${{ matrix.runs-on }})
     runs-on: ${{ matrix.runs-on }}
-    environment: nix-release
+    environment: cache-write
     permissions:
       contents: read
     strategy:

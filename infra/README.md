@@ -146,14 +146,16 @@ sets `fallback = true` because that expiry can remove a path before one that
 depends on it.
 
 Nix only trusts paths signed by the key in `flake.nix`, so the signing key is
-the trust boundary, not the bucket keys. It lives in two GitHub Environments:
-`cache-write`, which only `main` can deploy to, and `nix-release`, which only
-the five release tag patterns can. Readers need no secret.
+the trust boundary, not the bucket keys. It lives in the `cache-write`
+Environment beside one R2 token for both buckets. Only `main`, the merge queue,
+and the five release tag patterns can deploy there; anything that can reach
+the key can sign any path, so a second Environment for releases would only
+guard the bucket. Readers need no secret.
 
 All of this runs once, by a maintainer, in this order:
 
 1. **Restrict the release tags.** Anyone with write access can push a tag
-   today, and `nix-release` admits any commit carrying one. Limit creating,
+   today, and `cache-write` admits any commit carrying one. Limit creating,
    moving, and deleting them to moq-bot, the GitHub App release-plz tags
    with, plus the role the `release` branch ruleset already lets bypass:
 
@@ -185,42 +187,27 @@ All of this runs once, by a maintainer, in this order:
 
    After editing the rules, `just infra nix lifecycle` applies them.
 
-3. **Create the two Environments.** Name `main` rather than using a
-   protected-branches policy, which would admit `release` too. Skip
-   `cache-write` if the Rust build cache bootstrap already made it.
+3. **Admit the release tags to `cache-write`**, which the Rust build cache
+   bootstrap created:
 
    ```bash
-   gh api -X PUT repos/moq-dev/moq/environments/cache-write --input - <<'EOF'
-   {"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
-   EOF
-   gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
-     -f name=main -f type=branch
-
-   gh api -X PUT repos/moq-dev/moq/environments/nix-release --input - <<'EOF'
-   {"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
-   EOF
    for tag in 'moq-relay-v*' 'moq-cli-v*' 'moq-boy-v*' 'moq-c-v*' 'moq-gst-v*'; do
-     gh api -X POST repos/moq-dev/moq/environments/nix-release/deployment-branch-policies \
+     gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
        -f name="$tag" -f type=tag
    done
    ```
 
-4. **Create two R2 API tokens** in the dashboard (R2 -> Manage API tokens ->
-   Create Account API token), each **Object Read & Write** on one bucket only.
-   Wrangler cannot create R2 tokens. Store each in its Environment:
+4. **Create one R2 API token** in the dashboard (R2 -> Manage API tokens ->
+   Create Account API token) with **Object Read & Write** on `nix-moq-dev` and
+   `nix-ci-moq-dev` only. Wrangler cannot create R2 tokens.
 
    ```bash
-   # Scoped to nix-ci-moq-dev
    gh secret set NIX_R2_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
    gh secret set NIX_R2_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
-
-   # Scoped to nix-moq-dev
-   gh secret set NIX_R2_ACCESS_KEY_ID --env nix-release --repo moq-dev/moq
-   gh secret set NIX_R2_SECRET_ACCESS_KEY --env nix-release --repo moq-dev/moq
    ```
 
-5. **Generate the signing key.** This stores it as `NIX_SIGNING_KEY` in both
-   Environments without writing it to disk, and prints the public key:
+5. **Generate the signing key.** This stores it as `NIX_SIGNING_KEY` in
+   `cache-write` without writing it to disk, and prints the public key:
 
    ```bash
    just infra nix keygen
@@ -230,7 +217,8 @@ All of this runs once, by a maintainer, in this order:
 
 A job missing its secrets fails rather than skip the push. A job naming an
 Environment that does not exist yet creates it with no deployment policy, so
-if either workflow ran before step 3, check the policy before adding secrets.
+if a workflow ran before the Rust bootstrap, check the policy before adding
+secrets.
 
 To rotate the key, run `keygen` again and add the new public key next to the
 old one in `flake.nix`. Drop the old key once nothing signed with it matters:

@@ -16,8 +16,7 @@
   nixConfig = {
     extra-substituters = [ "https://nix.moq.dev" ];
     extra-trusted-public-keys = [
-      # PLACEHOLDER until `just infra nix keygen` prints the real key.
-      "nix.moq.dev-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      "nix.moq.dev-1:BZ0DtCypDFv1ESX3hxuB42yc0vitSA1YHojSmVwB5bk="
     ];
     fallback = true;
   };

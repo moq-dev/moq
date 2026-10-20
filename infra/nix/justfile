@@ -8,8 +8,8 @@ deploy:
 # Create the release and CI R2 buckets and the CI bucket's lifecycle rule. Run once.
 create:
     bun install --frozen-lockfile
-    bun wrangler r2 bucket create nix-moq-dev
-    bun wrangler r2 bucket create nix-ci-moq-dev
+    bun wrangler r2 bucket create nix-moq-dev --update-config=false
+    bun wrangler r2 bucket create nix-ci-moq-dev --update-config=false
     just lifecycle
 
 # Replace the CI bucket's lifecycle rules with lifecycle.json.
@@ -22,9 +22,8 @@ lifecycle:
 push bucket +paths:
     #!/usr/bin/env bash
     set -euo pipefail
-    # The R2 token must be scoped to that bucket. `nix copy` skips any path the
-    # bucket already has.
-    : "${NIX_SIGNING_KEY:?not set; the job needs the cache-write or nix-release Environment}"
+    # `nix copy` skips any path the bucket already has.
+    : "${NIX_SIGNING_KEY:?not set; the job needs the cache-write Environment}"
     : "${AWS_ACCESS_KEY_ID:?not set}"
     : "${AWS_SECRET_ACCESS_KEY:?not set}"
     key=$(mktemp)
@@ -32,13 +31,11 @@ push bucket +paths:
     printf '%s' "$NIX_SIGNING_KEY" >"$key"
     nix copy --to "s3://{{ bucket }}?endpoint=dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com&region=auto&compression=zstd&secret-key=$key" {{ paths }}
 
-# Generate a signing key into both Environments and print its public half for flake.nix.
+# Generate a signing key into the cache-write Environment and print its public half for flake.nix.
 keygen:
     #!/usr/bin/env bash
     set -euo pipefail
     key=$(nix key generate-secret --key-name nix.moq.dev-1)
-    for env in cache-write nix-release; do
-        printf '%s' "$key" | gh secret set NIX_SIGNING_KEY --env "$env" --repo moq-dev/moq
-    done
+    printf '%s' "$key" | gh secret set NIX_SIGNING_KEY --env cache-write --repo moq-dev/moq
     printf '%s' "$key" | nix key convert-secret-to-public
     echo

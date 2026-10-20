@@ -4,7 +4,7 @@
 
 Condition: a maintainer has run the `nix.moq.dev` bootstrap in
 `infra/README.md` (the release tag ruleset, both buckets and the Worker, the
-`cache-write` and `nix-release` Environments and their secrets, and the
+`cache-write` Environment's tag policies and secrets, and the
 signing key), and the PR that wired it in has merged with the real public key
 in `flake.nix`. Check it with `curl https://nix.moq.dev/nix-cache-info` and
 `gh run list --workflow cache.yml --branch main`.
