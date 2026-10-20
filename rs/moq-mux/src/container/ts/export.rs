@@ -1135,6 +1135,7 @@ where
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
+	/// Poll for the next MPEG-TS packet frame, or `None` once the export ends.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while !self.catalog_ended {
