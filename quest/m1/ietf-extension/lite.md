@@ -33,9 +33,12 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
   - Track info gains the unknown track properties: `track::Info::properties`
     (`model::object::TrackProperties`), with its sealed keys.
   - Track info carries the ingress moq-transport version once. Immutable
-    properties keep their unchanged inner bytes, and downstream IETF egress
-    derives their encoding family from that version to refuse incompatible
-    encodings.
+    properties keep their unchanged inner bytes. Downstream IETF egress
+    applies today's single-relay rules from that version: refuse an
+    incompatible immutable encoding (drafts 14/15 carry no immutable track
+    block, so egress there skips that check), and across draft 19, where
+    0x06 becomes SUBGROUP_DELIVERY_TIMEOUT, drop a mutable 0x06 and refuse a
+    sealed one.
 - Record provenance as the ingress version, decided 2026-10-20. In the
   model, the track's ingress `ietf::Version` replaces `object::Encoding` and
   the `delivery_timeout` flags on `Properties` and `TrackProperties`; both
@@ -64,7 +67,10 @@ without the extension (no properties), and run
 Prove that frames arrive through both relays while the upstream group is
 still open, then preserve its terminal status position. Cover FIRST_OBJECT
 both set and clear with the same nonzero starting object ID, immutable
-encoding provenance.
+encoding provenance, and 0x06 provenance: a draft-18 publisher's object and
+track properties exit draft 19 with a mutable 0x06 dropped and a sealed one
+refused. Both drafts share an encoding family, so only the carried version
+distinguishes them.
 
 Public API: `setup::Extensions::ietf`. Wire: a new lite-07 SETUP extension
 and the framing above, only when negotiated.
