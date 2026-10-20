@@ -15,13 +15,22 @@ Decided by the maintainer on 2026-10-19, over clearing a history playlist to
 an ended empty one (still reads as finished) and an in-band marker (HLS and
 DASH have none; `EXT-X-GAP` needs durations a failed timeline cannot give).
 
-Today `watch_timeline` (`rs/moq-hls/src/export/mod.rs`) ends every playlist
-through `renditions::Fanout::finish` on success and failure alike. Give the
-feed a failed state beside `ended`, set it on a timeline error, and have the
-playlist and manifest routes (`rs/moq-hls/src/server/routes.rs`) answer the
-existing no-store error response for a failed feed. Late-created renditions
-start failed like they start ended. Segments already listed may stay
-fetchable; only the listings refuse.
+Failures take two paths today, and both end the playlist as finished:
+
+- The shared reference timeline: `watch_timeline`
+  (`rs/moq-hls/src/export/mod.rs`) calls `renditions::Fanout::finish` on
+  success and failure alike. Give the feed a failed state beside `ended`, set
+  on a timeline error; late-created renditions start failed like they start
+  ended.
+- A rendition's own timeline: `watch_spans` calls `Spans::fail`
+  (`rs/moq-hls/src/export/spans.rs`), and `Rendition::snapshot_as`
+  (`rendition.rs`) folds a failed last row into `finished`. Expose that
+  rendition-local failure to the playlist route instead of rendering
+  `EXT-X-ENDLIST`.
+
+The playlist and manifest routes (`rs/moq-hls/src/server/routes.rs`) answer
+the existing no-store error response for either failure. Segments already
+listed may stay fetchable; only the listings refuse.
 
 Test a mid-history group that fails to FETCH or decode, a live timeline
 error, a single failed rendition beside a healthy one, and the DASH manifest.
