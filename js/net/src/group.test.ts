@@ -250,6 +250,42 @@ test("readable waits past replayed frames after adopting an open replacement", a
 	replacement.close();
 });
 
+test("done ignores replayed frames an adopted copy buffers", async () => {
+	const producer = new Producer(0);
+	const consumer = producer.mirror();
+	const replacement = new Producer(0);
+	const route = new Signal(false);
+	const adopted = Promise.withResolvers<void>();
+	hooks.recoverGroup(consumer, {
+		changed: route,
+		wants: () => route.peek(),
+		replace: async () => ({
+			group: replacement.mirror(),
+			expiry: { expired: () => false, changed: [] },
+			adopt: () => {
+				route.set(false);
+				adopted.resolve();
+			},
+			discard: () => {},
+		}),
+	});
+	producer.writeFrame(textFrame("zero"));
+	expect(await consumer.readString()).toBe("zero");
+	route.set(true);
+
+	const readable = consumer.readable();
+	await adopted.promise;
+	// Drain the adoption's microtasks without advancing wall-clock time.
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	// The adopted copy ends having repeated only the frame already read.
+	replacement.writeFrame(textFrame("zero"));
+	replacement.close();
+	expect(consumer.done).toBe(true);
+	await readable;
+	expect(consumer.tryReadFrame()).toBeUndefined();
+	producer.close();
+});
+
 test("buffered frames are still readable after the group closes", async () => {
 	const { producer, consumer } = pair(0);
 	producer.writeFrame(textFrame("a"));
