@@ -257,6 +257,11 @@ impl TimeEnd {
 
 		// Settle once every sequence up to the first group starting past `pts` can no
 		// longer start inside it.
+		//
+		// Datagrams stay ephemeral and never index where their group starts, so a sequence
+		// that arrived only as a datagram counts as gone here. A stream copy of that group
+		// arriving later is read even if it starts past `pts`: accepted, since a publisher
+		// that streams a group it also sent as a datagram is rare.
 		let after = self.after?;
 		// Everything at or below `known` is in range, and `after` lies above it.
 		self.accounted = self.accounted.max(self.unknown(start).unwrap_or(after));

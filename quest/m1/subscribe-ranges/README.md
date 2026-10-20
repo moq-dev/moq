@@ -78,7 +78,11 @@ relay bounds a sparse FETCH only if the model can request ranges:
   relative groups, never through the settle walk. Refusing time anchors on
   datagram tracks was considered and can't work: nothing signals that a track
   carries datagrams, and the lite draft lets a publisher send any single-frame
-  group as a datagram, including a copy of one it also streams.
+  group as a datagram, including a copy of one it also streams. Datagrams stay
+  ephemeral (maintainer, 2026-10-20): a buffered datagram never indexes where
+  its group starts, so a time end settles across a sequence that arrived only
+  as a datagram, and a stream copy of that group arriving later is read even
+  if it starts past the end.
 - Ranges are frame-precise (`Position`), not whole groups. The IETF joining
   FETCH for a mid-group SUBSCRIBE's uncached prefix stays, because today's
   bridge relies on it (maintainer, 09-29).
