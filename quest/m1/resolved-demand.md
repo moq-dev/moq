@@ -76,7 +76,9 @@ with no wire change.
   a stale drop in flight across an aggregate range change (lite-07, see
   [Drop set](/quest/m1/drop-set.md)) may settle a reader whose own range
   would not convict, since SUBSCRIBE_UPDATE has no acknowledgement and the
-  drop names only its `Max Age`; deferred for the same reason.
+  drop names only its `Max Age`; deferred for the same reason. A group
+  arriving after its drop was folded into a cursor's floor under pool
+  pressure is not delivered to that cursor ([Drop set](/quest/m1/drop-set.md)).
 - **Each cursor keeps a disposition record,** as the maintainer first framed
   it ("keep what was dropped within each cursor and within the track
   state"). It is what makes a re-offer safe: the cursor must tell a group it

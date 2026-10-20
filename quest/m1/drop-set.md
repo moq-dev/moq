@@ -98,7 +98,7 @@ which keeps drops final for now.
 - **Draft wording.** `drafts/draft-lcurley-moq-lite.md` states, for lite-07's
   restored SUBSCRIBE_DROP, that a drop holds only under the terms in effect
   when it was sent, that a widening re-offers held groups and re-drops the
-  rest, and that a later group wins over its drop. Whichever of this and
+  rest, and that a later group, when sent, wins over its drop. Whichever of this and
   [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md)
   lands second writes it, including the `Max Age` field above, which is
   free to add because lite-07 is unpublished.
@@ -129,7 +129,10 @@ folds into the floor. A stale run reported on lite-07 within reach of the
 max age bound is budget-qualified, so it is treated like an unknown hole:
 the floor never rises over it, and if the pool must evict it or a run above
 it, the cursor fails with `TooFarBehind`. Folding it would forgo the
-re-offer this plan promises after a widening.
+re-offer this plan promises after a widening. A later group wins over its
+drop only while the cursor's record still holds that drop: a drop folded
+into the floor under pool pressure is final for that cursor, so its group
+arriving late is not delivered there.
 
 A cursor judges an unknown missing sequence (never a stale run its record
 still holds as reported, which only a widening settles) as it would a
@@ -153,8 +156,9 @@ Test on mock time through a relay:
 - On lite-07, after a widening from B1 to B2 for a group the upstream no
   longer holds, an in-flight drop tagged B1 settles only the B1 reader, and
   the re-drop tagged B2 settles the B2 reader.
-- A group arriving after its drop is served, and a drop arriving after its
-  group leaves it served.
+- A group arriving after its drop, while the cursor's record still holds
+  the drop, is served, and a drop arriving after its group leaves it
+  served.
 - Through a lite-06 hop, a reported group stays dropped for every reader,
   with no session error.
 - A shrink sends no drops.
