@@ -40,7 +40,8 @@ reference failure; a rendition-local failure omits that representation and
 keeps its siblings available. Segments already listed may stay fetchable;
 only the listings refuse.
 
-Test a mid-history group that fails to FETCH or decode, a retained reference
+Test a mid-history group that fails to FETCH or decode, a ranged clip over a
+failed timeline (5xx, not 416), a retained reference
 failing after a handoff, a live timeline error, a single failed rendition
 beside a healthy one (its playlist errors, the sibling's and the DASH
 manifest's do not), and the DASH manifest after a shared failure.
@@ -51,7 +52,11 @@ API: every public accessor that renders a listing reports it as an error, so a
 failed timeline differs from a listing that is not available yet. Today those
 are `Broadcaster::manifest` and `Rendition::media_playlist` (both
 `Option<String>`, becoming `Result<Option<String>>`) and `Rendition::playlist`
-(already a `Result`). The routes map those errors to the 5xx.
+(already a `Result`). The routes map those errors to the 5xx. This includes the ranged history
+path: `snapshot_range` turns a failed timeline into `Error::RangeUnavailable`,
+which answers 416 as if the client asked for a bad range; it returns the
+failed-timeline error instead. Audit every snapshot path for the same fold
+rather than relying on this list.
 
 Public API: breaking, `export::Broadcaster::manifest` and
 `export::Rendition::media_playlist` return a `Result`, and a new `Error`
