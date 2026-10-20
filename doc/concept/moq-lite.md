@@ -233,10 +233,12 @@ On moq-lite 05 and later, a publisher explicitly reports groups that will not ar
 This lets a finished subscription settle without waiting for missing groups.
 Datagram delivery stays best effort.
 
-Ranges are a request, not a filter. A subscriber reads from where its lowest
-range starts, and may also get groups another subscriber of the same track
-asked for. A relay merges its subscribers' ranges into one upstream request,
-which today's wire versions carry as the single span covering them.
+Ranges are both a request and a filter. A subscriber reads only the groups its
+own ranges cover, resolved again whenever it replaces them, even when another
+subscriber of the same track asked for more. Widening them, including lowering
+the start, also serves the cached groups they newly cover, never one already
+served. A relay merges its subscribers' ranges into one upstream request, which
+today's wire versions carry as the single span covering them.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of

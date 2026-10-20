@@ -5258,9 +5258,9 @@ mod serve_group_test {
 			drop(track);
 			run.await.unwrap();
 		}
-		// Group 2 arrived before the subscription and the cursor has passed it, so it was
-		// never served either.
-		assert_eq!(drops(&mut writer, &log, version).await, [(0, 4), (6, 6)]);
+		// Group 2 arrived before the subscription, but it is cached, so the lowered start
+		// serves it and the drops name only what is missing around it.
+		assert_eq!(drops(&mut writer, &log, version).await, [(0, 1), (3, 4), (6, 6)]);
 	}
 
 	/// A lowered start restarts the age of the gaps it newly asks for, as the subscriber does,
@@ -5602,10 +5602,10 @@ mod serve_group_test {
 		assert_eq!(relay.opened(), 1, "the finished group is the live edge");
 	}
 
-	/// Widening the floor never rewinds past a group already served: group 0
-	/// arrived before the served groups, so the cursor has moved past it.
+	/// Widening the floor serves a cached group below the old one, even though it arrived
+	/// before the groups already served, and serves those only once.
 	#[moq_clock::test]
-	async fn a_widening_update_does_not_rewind_past_served_groups() {
+	async fn a_widening_update_serves_a_cached_group_below_the_old_floor() {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"test",
@@ -5630,7 +5630,7 @@ mod serve_group_test {
 			end_frame: None,
 		});
 		relay.settle();
-		assert_eq!(relay.opened(), 2, "group 0 was passed, not skipped");
+		assert_eq!(relay.opened(), 3, "group 0 is cached and now in range");
 	}
 
 	/// A SUBSCRIBE_UPDATE landing while the first group waits on the source's start keeps

@@ -14,12 +14,14 @@ export const KeyIdSchema = z.string().check(
 		message: "Key ID must contain only alphanumeric characters, hyphens, and underscores",
 	}),
 );
+/** A value parsed by {@link KeyIdSchema}. */
 export type KeyId = z.infer<typeof KeyIdSchema>;
 
 /**
  * Key operations that can be performed
  */
 export const OperationSchema = z.enum(["sign", "verify", "decrypt", "encrypt"]);
+/** A value parsed by {@link OperationSchema}. */
 export type Operation = z.infer<typeof OperationSchema>;
 
 const MIN_HMAC_SECRET_BYTES = 32;
@@ -107,10 +109,15 @@ const OkpKeySchema = z.extend(BaseKeySchema, {
 });
 
 const CanonicalKeySchema = z.discriminatedUnion("kty", [OctKeySchema, RsaKeySchema, EcKeySchema, OkpKeySchema]);
+/** A JSON Web Key of any supported type: oct, RSA, EC, or OKP. */
 export const KeySchema = CanonicalKeySchema;
+/** A value parsed by {@link KeySchema}. */
 export type Key = z.infer<typeof KeySchema>;
+/** An RSA, EC, or OKP key. */
 export type AsymmetricKey = Exclude<Key, { kty: "oct" }>;
+/** An oct (HMAC secret) key. */
 export type SymmetricKey = Extract<Key, { kty: "oct" }>;
+/** An asymmetric key without its private parameters. */
 export type PublicKey = Omit<AsymmetricKey, "d" | "p" | "q" | "dp" | "dq" | "qi">;
 
 /** Derive a verify-only copy of this key, dropping the private material. */
