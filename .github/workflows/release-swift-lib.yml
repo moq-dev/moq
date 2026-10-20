@@ -60,13 +60,15 @@ jobs:
   ffi-release:
     name: Check FFI publisher
     runs-on: ubuntu-latest
-    # workflow_run is privileged. Preserve the owner, push and tag gates before
-    # reading the trusted upstream checkout or allowing wrapper publication.
+    # workflow_run is privileged. Preserve the owner, same-repo, push and tag
+    # gates before reading the trusted upstream checkout or allowing wrapper
+    # publication.
     if: >-
       github.repository_owner == 'moq-dev' &&
       (github.event_name != 'workflow_run' ||
        ((github.event.workflow_run.name == 'Release FFI' || github.event.workflow_run.conclusion == 'success') &&
         github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
         startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v')))
     permissions:
       contents: read
@@ -172,7 +174,8 @@ jobs:
     # failed) when the pinned moq-ffi version isn't mirrored yet, so the first
     # bootstrap doesn't deadlock on a not-yet-published FFI package.
     name: Verify staged package resolves
-    needs: [build]
+    # Directly on ffi-release: its gate is what makes the head_sha checkout trusted.
+    needs: [ffi-release, build]
     runs-on: macos-latest
 
     steps:
@@ -219,7 +222,8 @@ jobs:
 
   publish:
     name: Publish to Swift Package mirror
-    needs: [build, verify]
+    # Directly on ffi-release: its gate is what makes the head_sha checkout trusted.
+    needs: [ffi-release, build, verify]
     runs-on: ubuntu-latest
     if: ${{ needs.build.outputs.publish == 'true' }}
 

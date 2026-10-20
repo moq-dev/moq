@@ -21,7 +21,7 @@ Guidance:
 - Measure what the bindings actually do: publish and subscribe throughput
   through moq-ffi on the [binding benchmark](/bench/README.md), plus
   audio and video encode and decode. The binding benchmark already runs
-  nightly and charts on the [trend site](/quest/m2/bench-site.md); add the
+  nightly and feeds the [regression table](/quest/m0/bench-site.md); add the
   "s" build as a series there.
 - If it's adopted, use a named profile (for example `[profile.ffi]`,
   inheriting release) that every binding build path selects, so the relay

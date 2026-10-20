@@ -5,7 +5,7 @@
 Each Nightly run on `main` compares every measured Rust Criterion benchmark
 against the previous nightly's commit, built and run on the same runner, and
 publishes the comparison to the git.moq.dev nightly report beside the
-[trend site](/quest/m2/bench-site.md). A regression past a loose threshold
+[regression table](/quest/m0/bench-site.md). A regression past a loose threshold
 fails the job, so the existing Alert workflow posts it to Discord.
 
 Benchmarks never run in the merge queue or on PRs. Rust Criterion targets
@@ -27,7 +27,7 @@ VMs, so its thresholds fire on runner noise.
 - Paired comparison: build the previous nightly's commit beside `main` on the
   same runner, run the selected targets for both, and compare saved
   Criterion baselines. Only that paired comparison fails the job; the
-  cross-run history stays informational on the trend site.
+  cross-run history stays informational on the regression table.
 - Extend `bench/run.sh` and `sh/gh/nightly.sh` (`just gh nightly rust-bench`,
   `rust-extra`, and `rust-uring`) with the paired mode instead of writing a second runner, and publish its
   table through `just gh benchmark-report` into the report.
@@ -48,4 +48,4 @@ VMs, so its thresholds fire on runner noise.
 ## Related
 
 - [Benchmark reporting](/bench/README.md) - the existing `bench/run.sh` retains repeated paired rounds
-- [Benchmark trend site](/quest/m2/bench-site.md) - where the nightly history is charted
+- [Benchmark regression table](/quest/m0/bench-site.md) - where the nightly history is shown
