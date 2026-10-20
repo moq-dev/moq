@@ -336,13 +336,14 @@ mod test {
 			assert_eq!(info_roundtrip(Version::Lite07, &info).compress, compress);
 		}
 
-		let mut buf = TrackInfo {
+		// The message body, without its length prefix, ends in the codec id.
+		let mut buf = Vec::new();
+		TrackInfo {
 			compress: true,
 			..info_sample()
 		}
-		.encode_bytes(Version::Lite07)
-		.unwrap()
-		.to_vec();
+		.encode_msg(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
+		.unwrap();
 		// An unknown codec id, still a one-byte varint.
 		*buf.last_mut().unwrap() = 2;
 		let mut slice = buf.as_slice();
