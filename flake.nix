@@ -1,19 +1,24 @@
 {
   description = "MoQ - Media over QUIC";
 
-  # Pre-built binaries live in our Cachix cache. Only tagged releases are
-  # pushed (CI fires on moq-relay-v*, moq-cli-v*, etc.), so pin the flake ref
-  # to a recent tag to get a hit. The default branch HEAD is not cached and
-  # builds from source:
+  # Pre-built binaries live in our binary cache at nix.moq.dev. Of the
+  # packages, only tagged releases are pushed (moq-relay-v*, moq-cli-v*, etc.),
+  # so pin the flake ref to a recent tag to get a hit. The default branch HEAD
+  # builds from source, though its dev shell is cached:
   #   nix run github:moq-dev/moq/moq-relay-v0.12.4#moq-relay --accept-flake-config
   #
   # --accept-flake-config opts into the nixConfig below for one command. To
-  # trust the cache permanently instead, run: cachix use kixelated
+  # trust the cache permanently instead, add these settings to nix.conf.
+  #
+  # The dev shell paths expire 30 days after upload, possibly before a path
+  # that depends on them; `fallback` builds whatever is missing instead of
+  # failing the substitution.
   nixConfig = {
-    extra-substituters = [ "https://kixelated.cachix.org" ];
+    extra-substituters = [ "https://nix.moq.dev" ];
     extra-trusted-public-keys = [
-      "kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk="
+      "nix.moq.dev-1:BZ0DtCypDFv1ESX3hxuB42yc0vitSA1YHojSmVwB5bk="
     ];
+    fallback = true;
   };
 
   inputs = {

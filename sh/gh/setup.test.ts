@@ -35,12 +35,12 @@ for (const name of ["check", "test"]) {
 		// No expensive action or command may bypass the query, including future additions.
 		// The Rust cache is the largest restore, so it also waits for selected work that compiles Rust.
 		const setup = job.steps.slice(scopeIndex + 1);
-		expect(setup.some((step) => step.uses?.startsWith("DeterminateSystems/nix-installer-action@"))).toBe(true);
+		expect(setup.some((step) => step.uses === "./.github/actions/nix")).toBe(true);
 		expect(setup.some((step) => step.uses === "./.github/actions/rust-cache")).toBe(true);
 		expect(setup.at(-1)?.name).toBe(job.name);
 		for (const step of setup) {
 			const output = step.uses === "./.github/actions/rust-cache" ? "rust" : "needed";
-			const hosted = step.uses?.startsWith("DeterminateSystems/nix-installer-action@")
+			const hosted = step.uses === "./.github/actions/nix"
 				? " && runner.environment != 'self-hosted'"
 				: "";
 			expect(step.if).toBe(`steps.scope.outputs.${output} == 'true'${hosted}`);

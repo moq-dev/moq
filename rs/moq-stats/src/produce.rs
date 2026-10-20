@@ -497,7 +497,7 @@ impl<V: Serialize> Snapshot<V> {
 			return Err(err.into());
 		}
 		if frame.keyframe {
-			if let Some(group) = self.group.take() {
+			if let Some(mut group) = self.group.take() {
 				group.finish()?;
 			}
 			self.group = Some(self.track.create_group(moq_net::group::Info {
@@ -517,7 +517,7 @@ impl<V: Serialize> Snapshot<V> {
 	}
 
 	fn finish(&mut self) -> moq_json::Result<()> {
-		if let Some(group) = self.group.take() {
+		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(self.track.finish()?)

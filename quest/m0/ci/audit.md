@@ -49,8 +49,8 @@ before and after:
   queue.
 - **Dev shell:** `nix develop` downloads for 52 s (p90 90 s) in every job,
   even ones that compile no Rust. That overlaps with
-  [the Nix cache](/quest/m0/ci/nix-cache.md); measure what is still slow
-  once it lands.
+  [the Nix cache](/quest/m0/ci/nix-cache-verify.md); measure what is still
+  slow once it lands.
 - **Waste in the dependency graph:** both rustls backends (ring from moq-quic's
   default `rustls-ring`, aws-lc-rs from rustls, str0m, jsonwebtoken, rcgen and
   object_store), and aws-lc-sys recompiling 3 to 5 times per cold job because

@@ -1326,7 +1326,7 @@ async fn json_consumer_takes_an_unread_track() {
 		.subscribe_track("events".into(), None)
 		.await
 		.unwrap();
-	track.append_group().unwrap();
+	track.append_group().unwrap().finish().unwrap();
 	tokio::time::timeout(TIMEOUT, read.recv_group())
 		.await
 		.expect("timed out waiting for a group")
@@ -6079,34 +6079,40 @@ async fn session_protocol_codes_cross_the_ffi() {
 }
 #[tokio::test]
 async fn client_cancel_aborts_a_pending_connect() {
-	let server = MoqServer::new(MoqServerConfig {
-		bind: Some("127.0.0.1:0".into()),
-		tls: localhost_tls(),
-		..Default::default()
-	})
-	.unwrap();
-	let addr = server.listen().await.expect("listen failed");
+	// A bound socket that never answers, so the QUIC handshake can't finish before cancel.
+	// A real server would not do: the dial establishes without the server accepting.
+	let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+	let addr = silent.local_addr().unwrap();
 
 	let client = MoqClient::new(MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
 		once: true,
+		websocket: MoqWebSocketConfig {
+			enabled: Some(false),
+			delay_us: None,
+		},
 		..Default::default()
 	})
 	.unwrap();
 
-	// The server never accepts, so connect parks in established().
-	let connecting = client.clone();
-	let connect = spawn_parked(async move { connecting.connect(format!("https://{addr}")).await }).await;
+	// Poll in place rather than spawning, so cancel lands before the next poll.
+	let mut connect = std::pin::pin!(client.connect(format!("https://{addr}")));
+	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(connect.as_mut().poll(cx))).await;
+	assert!(
+		first.is_pending(),
+		"connect resolved before cancel: {:?}",
+		first.map(|result| result.map(|_| "session")),
+	);
 
 	client.cancel();
 
-	let connect_err = tokio::time::timeout(TIMEOUT, connect)
-		.await
-		.expect("connect task timed out")
-		.expect("connect task panicked");
-	assert!(matches!(connect_err, Err(MoqError::Cancelled)));
-	server.cancel();
+	let connect_err = tokio::time::timeout(TIMEOUT, connect).await.expect("connect timed out");
+	assert!(
+		matches!(connect_err, Err(MoqError::Cancelled)),
+		"connect returned {:?}",
+		connect_err.map(|_| "session"),
+	);
 }
 
 #[tokio::test]

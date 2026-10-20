@@ -2459,7 +2459,11 @@ mod test {
 		let mut subscriber = producer.subscribe(None);
 
 		// The last group is 6 (exclusive 7), but only group 5 has been produced so far.
-		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		producer
+			.create_group(group::Info { sequence: 5 })
+			.unwrap()
+			.finish()
+			.unwrap();
 		producer.finish_at(track::Position::group(7)).unwrap();
 
 		// Group 5 is delivered first.
@@ -2477,7 +2481,11 @@ mod test {
 
 		// The caller stops requesting the boundary once sent. The trailing group arrives,
 		// then the track finishes.
-		producer.create_group(group::Info { sequence: 6 }).unwrap();
+		producer
+			.create_group(group::Info { sequence: 6 })
+			.unwrap()
+			.finish()
+			.unwrap();
 		match recv_next(&mut subscriber, false, false).await.unwrap() {
 			Recv::Group(group) => assert_eq!(group.sequence, 6),
 			_ => panic!("expected group 6"),
@@ -2498,14 +2506,22 @@ mod test {
 		let mut producer = track_producer("test");
 		let mut subscriber = producer.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(5)));
 
-		producer.create_group(group::Info { sequence: 2 }).unwrap();
+		producer
+			.create_group(group::Info { sequence: 2 })
+			.unwrap()
+			.finish()
+			.unwrap();
 		match recv_next(&mut subscriber, false, false).await.unwrap() {
 			Recv::Group(group) => assert_eq!(group.sequence, 2),
 			_ => panic!("expected group 2"),
 		}
 
 		// Group 1 lands after group 2 was already served.
-		producer.create_group(group::Info { sequence: 1 }).unwrap();
+		producer
+			.create_group(group::Info { sequence: 1 })
+			.unwrap()
+			.finish()
+			.unwrap();
 		match recv_next(&mut subscriber, false, false).now_or_never() {
 			Some(Ok(Recv::Group(group))) => assert_eq!(group.sequence, 1),
 			Some(_) => panic!("expected the late-arriving group"),
