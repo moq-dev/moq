@@ -95,8 +95,21 @@
     '';
   };
 
+  # A static user, unlike DynamicUser, gets real cache directories instead of
+  # symlinks into /var/cache/private. Builds resolve `..` lexically against
+  # canonical paths (askama's template includes), which misses through a
+  # symlinked HOME. On the switch, systemd moves the private directories back
+  # and chowns them, so caches and the registration survive.
+  users.users.github-runner = {
+    isSystemUser = true;
+    group = "github-runner";
+  };
+  users.groups.github-runner = { };
+
   services.github-runners.runner = {
     enable = true;
+    user = "github-runner";
+    group = "github-runner";
     url = runner.url;
     name = runner.name;
     extraLabels = runner.labels;

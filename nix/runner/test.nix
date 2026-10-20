@@ -107,10 +107,17 @@ pkgs.testers.runNixOSTest {
         before = [ "github-runner-runner.service" ];
         unitConfig.ConditionPathExists = "!/var/lib/cache-seeded";
         serviceConfig.Type = "oneshot";
+        # Lay out the cache and registration the way DynamicUser left them on
+        # deployed guests, owned by the nobody user they show as there.
         script = ''
-          install -d -m 0700 /var/cache/github-runner-home
-          echo seeded > /var/cache/github-runner-home/seeded
-          chmod 0600 /var/cache/github-runner-home/seeded
+          install -d -m 0700 /var/cache/private/github-runner-home /var/lib/private/github-runner/runner
+          ln -s private/github-runner-home /var/cache/github-runner-home
+          install -d /var/lib/github-runner
+          ln -s ../private/github-runner/runner /var/lib/github-runner/runner
+          echo seeded > /var/cache/private/github-runner-home/seeded
+          echo registered > /var/lib/private/github-runner/runner/.runner
+          chmod 0600 /var/cache/private/github-runner-home/seeded /var/lib/private/github-runner/runner/.runner
+          chown -R nobody:nogroup /var/cache/private/github-runner-home /var/lib/private/github-runner
           touch /var/lib/cache-seeded
         '';
       };
@@ -128,6 +135,10 @@ pkgs.testers.runNixOSTest {
               printf '#!${pkgs.runtimeShell}\necho executable\n' > "$directory/exec-probe"
               chmod +x "$directory/exec-probe"
               test "$("$directory/exec-probe")" = executable
+              # Builds such as askama's template includes join `..` to a
+              # canonical path lexically, which misses through a symlink.
+              lexical=$(realpath -s --relative-to="$directory" "$(realpath "$directory/exec-probe")")
+              test "$("$directory/$lexical")" = executable
             done
             # Jobs list processes and bind the IPv6 loopback.
             command -v pgrep
@@ -236,6 +247,10 @@ pkgs.testers.runNixOSTest {
         other.succeed("${pkgs.python3}/bin/python3 ${./spoof-test.py} finish")
         router.wait_for_file("/tmp/udp-result")
         router.succeed("test $(cat /tmp/udp-result) = finish")
+
+    with subtest("the runner adopts the registration DynamicUser left behind"):
+        guest.succeed("test ! -L /var/lib/github-runner/runner")
+        guest.succeed("test $(cat /var/lib/github-runner/runner/.runner) = registered")
 
     with subtest("the uplink stays IPv4-only"):
         guest.succeed("test $(cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6) = 1")
