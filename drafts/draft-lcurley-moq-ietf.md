@@ -39,6 +39,7 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 
 A **relayed** group or datagram arrived from a MoQ Transport publisher, so it has object state that moq-lite cannot express.
 A **plain** one has none: its Object IDs are its frame indices, it has no properties, and its group ends where its last frame does.
+A track's **Version** is the {{moqt}} version its original publisher spoke, which serialized every property it carries, or none for a track published over moq-lite ([Track Stream](#track)).
 
 
 # Introduction
@@ -63,6 +64,7 @@ The value MUST be empty; a receiver MUST close the session with a PROTOCOL_VIOLA
 The extension is negotiated only when both endpoints offer it, and only on moq-lite-07 and later.
 An endpoint MUST NOT send any field this document defines unless the extension is negotiated, and MUST NOT parse a Group Stream, FETCH response, Track Stream, or datagram from the peer until it has the peer's SETUP and so knows whether it was.
 An endpoint MAY drop a datagram that arrives before then.
+A Group Stream, FETCH response, or datagram is read with the Version of its track, which the Track Stream carries before any subscription or fetch opens.
 
 
 # Group Streams {#group}
@@ -91,6 +93,7 @@ A bit field describing the group's relay state, or 0 for a plain group:
 - `0x8` **END_OF_GROUP**: The stream's end ends the group, as a {{moqt}} subgroup that contains the end of its group.
 
 A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any other bit, a bit without RELAYED, or a record with Properties when EXTENSIONS is clear.
+A track without a Version has no {{moqt}} state, so a receiver MUST reset the stream with a PROTOCOL_VIOLATION on any Group State but 0 for one.
 A publisher MUST clear FIRST_OBJECT when the stream starts after the first frame it holds, and END_OF_GROUP when the stream may stop before the end of the group, such as at a subscription's end frame.
 A stream that stops at an end frame carries no END_OF_GROUP record, even when that frame is the group's last.
 
@@ -114,7 +117,7 @@ Object Record {
 **Properties**:
 The object's [properties](#properties), in `Properties Length` bytes.
 An empty one means the object has none.
-A receiver MUST reset the stream if the length exceeds 65,537, the largest Property Block beside an Encoding byte.
+A receiver MUST reset the stream if the length exceeds 65,536, the largest Property Block.
 
 In a plain group, every record has a `Skip` of 0 after the first, whose Object ID is the index of its frame, no properties, and `End` of 0.
 A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any other record in a plain group.
@@ -124,39 +127,19 @@ The Object ID is relay state beside it, so a plain subscriber still reads consec
 
 
 # Properties {#properties}
-An object's properties, as one block in the encoding of the {{moqt}} draft it arrived on.
+An object's properties, as one Property Block in the encoding of its track's Version.
 A relay forwards the block to a peer of that encoding unchanged, so the block never grows on a hop, and holds it as received rather than as a decoded list many times its size.
 
-~~~
-Properties {
-  Encoding (i)
-  Property Block (..)
-}
-~~~
-
-**Encoding**:
-The {{moqt}} drafts the Property Block came from, which serialize it alike and give each property the same meaning:
-
-| Code | Drafts | IDs | Varints |
-|-----:|:-------|:----|:--------|
-| 1 | 14 and 15 | absolute | QUIC |
-| 2 | 16 | delta | QUIC |
-| 3 | 17 | delta | draft 17 |
-| 4 | 18 | delta | draft 18 |
-| 5 | 19 and later | delta | draft 18 |
-
-A receiver MUST treat any other code as malformed, including 0: an empty Properties says the object has none.
-Codes 4 and 5 serialize alike, but only drafts 19 and later assign property 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a relay knows not to forward 0x06 to a draft that would read it differently.
-
 **Property Block**:
-Every property of the object, serialized as the {{moqt}} drafts of its encoding serialize an object's properties, in ascending ID order.
+Every property of the object, serialized as the track's Version serializes an object's properties, in ascending ID order.
 Immutable Properties (0x0b) are in the same encoding, as the publisher sent them.
 It MUST NOT be empty or longer than 65,536 bytes.
+A track without a Version carries no properties: a Property Block on one is malformed.
 On a timed track an object with a FRAME, or a datagram without a Status, MUST NOT carry one longer than 65,526 bytes, leaving room for the largest Timestamp a relay restates ([Timestamps](#timestamps)): a one-byte key and a value of up to nine bytes.
 A relay MUST refuse a {{moqt}} object whose properties, less its mutable Timestamp, exceed that, so every object it forwards fits.
-A receiver MUST treat a block its encoding's drafts would refuse as malformed.
-The Encoding names the drafts the object came from, so a receiver MUST also treat a block as malformed on an object none of them could send with properties.
-Only draft 14 lets a status object carry them, so a block on the END_OF_GROUP record MUST have Encoding 1, and a datagram with a block MUST have fields an OBJECT_DATAGRAM Type of those drafts carries ([Datagrams](#datagrams)).
+A receiver MUST treat a block the track's Version would refuse as malformed, as it MUST a block on an object that Version could not send with properties.
+Only draft 14 lets a status object carry them, so a block on the END_OF_GROUP record needs a Version of draft 14, and a datagram with a block MUST have fields an OBJECT_DATAGRAM Type of its Version carries ([Datagrams](#datagrams)).
+The Version also gives each property its meaning: drafts 18 and 19 serialize a block alike, but only drafts 19 and later assign property 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a relay knows not to forward a 0x06 to a draft that would read it differently.
 Other properties are opaque to this extension.
 
 ## Timestamps {#timestamps}
@@ -175,19 +158,21 @@ When the extension is negotiated, the publisher sends a TRACK_PROPERTIES message
 ~~~
 TRACK_PROPERTIES Message {
   Message Length (i)
-  Encoding (i)
+  Version (i)
   Property List (..)
 }
 ~~~
 
-**Encoding**:
-The drafts the Property List came from, with the codes of [Properties](#properties).
-A message without properties MUST have an Encoding of 0 and an empty Property List.
-Track Properties start at draft 16, so any other message with an Encoding of 0 or 1 is malformed.
+**Version**:
+The track's Version: the {{moqt}} version its original publisher spoke, as {{moqt}} numbers it, such as 0xff000012 for draft 18.
+It is 0 for a track published over moq-lite, which carries no {{moqt}} state, and then the Property List MUST be empty.
+A receiver MUST treat a Version that names no {{moqt}} version it implements as malformed.
+A track has one Version, since each publisher is its own track: a relay forwards it unchanged, and a track from another publisher is another track.
 
 **Property List**:
-The {{moqt}} Track Properties a relay forwards without interpreting, serialized as the publisher's draft serializes them: in ascending ID order, with delta-encoded IDs and the varints of that encoding.
-A relay keeps the publisher's encoding, so a repeated ID still costs a one-byte delta and the list never grows on a hop.
+The {{moqt}} Track Properties a relay forwards without interpreting, serialized as the Version serializes them: in ascending ID order, with delta-encoded IDs and the varints of that version.
+Track Properties start at draft 16, so the list MUST be empty for drafts 14 and 15.
+A relay keeps the Version's encoding, so a repeated ID still costs a one-byte delta and the list never grows on a hop.
 Immutable Properties (0x0b), at most one, are forwarded as the publisher's bytes, in the same encoding.
 
 A message MUST NOT carry more than 64 properties, nor any a relay interprets rather than forwards: MAX_CACHE_DURATION (0x04), TIMESCALE (0x08), DEFAULT_PUBLISHER_PRIORITY (0x0e), DEFAULT_PUBLISHER_GROUP_ORDER (0x22), and DYNAMIC_GROUPS (0x30).
@@ -195,7 +180,7 @@ TRACK_INFO carries what a relay keeps of them, so a second copy could only contr
 A message that breaks either rule is malformed.
 
 A relay restates up to five of those from TRACK_INFO, so it forwards at most 59 properties, and it refuses a track with more, from a {{moqt}} publisher or over this extension, as unsupported.
-Dropping those five can widen the delta that spans them, so a relay also refuses a {{moqt}} track whose remaining list would not fit a TRACK_PROPERTIES message, as unsupported.
+Dropping those five can widen the delta that spans them, so a relay also refuses a {{moqt}} track whose remaining list would not fit a TRACK_PROPERTIES message beside its Version, as unsupported.
 
 The Immutable Properties may still hold one of those five, which a relay forwards in place of the one it would restate.
 A relay acts on TRACK_INFO, so a sealed value MUST equal the one it restates: MAX_CACHE_DURATION the Max Age in milliseconds, TIMESCALE the Timescale, DEFAULT_PUBLISHER_PRIORITY the priority, and DYNAMIC_GROUPS whether its Refresh is nonzero.
@@ -235,13 +220,13 @@ A bit field, or 0 for a plain datagram, which has none of the optional fields be
 - `0x8` **END_OF_GROUP**: The object ends its group.
 - `0x10` **STATUS**: The {{moqt}} Object Status follows.
 
-A receiver MUST drop a datagram with any other bit, or a bit without RELAYED.
+A receiver MUST drop a datagram with any other bit, a bit without RELAYED, or any bit on a track without a Version.
 
 A datagram with a Status MUST have an empty Payload, as {{moqt}} sends no payload beside one; a Normal (0) Status is an empty object.
 A non-zero Status carries no object: it has no Timestamp, even on a timed track.
 A receiver MUST drop a datagram whose Status no {{moqt}} draft defines: only 0 (Normal), 1 (DOES_NOT_EXIST, drafts 14 and 15), 3 (END_OF_GROUP), and 4 (END_OF_TRACK) are relayed.
-It MUST also drop one whose fields no {{moqt}} OBJECT_DATAGRAM Type can carry, such as STATUS with END_OF_GROUP.
-With Properties, only the drafts of their Encoding count: from draft 17 on a non-zero Status carries no properties, so one needs Encoding 1 or 2, and DOES_NOT_EXIST needs Encoding 1.
+It MUST also drop one its track's Version could not send: whose fields no OBJECT_DATAGRAM Type of that Version carries, such as STATUS with END_OF_GROUP, or whose Status it does not define.
+From draft 17 on a non-zero Status carries no properties, and only drafts 14 and 15 define DOES_NOT_EXIST.
 
 
 # Security Considerations
