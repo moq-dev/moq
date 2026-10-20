@@ -133,6 +133,27 @@ test("a fork continues its open group across a route failure after its parent cl
 	}
 });
 
+test.each(["conclude", "park"] as const)("a fork made after the front's %s replays its parent's copy", async (end) => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	const front = new Front();
+	front.serve(a.consume());
+	const parent = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	ta.write(1);
+	expect(drain(parent)).toEqual([1]);
+	front[end]();
+	const fork = parent.fork({ maxDelay: Milli(10_000) });
+	try {
+		expect(drain(fork)).toEqual([0, 1]);
+	} finally {
+		parent.close();
+		fork.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
 test("a resumed fork has its own preferences and replay cursor", async () => {
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
