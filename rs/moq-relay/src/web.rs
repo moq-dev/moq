@@ -337,8 +337,9 @@ impl Web {
 
 	/// Close a connection that sits this long with no complete request in flight,
 	/// including one stalled in its TLS handshake or headers or idle in keep-alive,
-	/// and bound a WebSocket's MoQ SETUP after the upgrade; `None`, or a timeout past the
-	/// clock's range, waits forever. Defaults to the
+	/// bound an HTTP request's auth admission (answering 502 past it), and bound a
+	/// WebSocket's MoQ SETUP after the upgrade; `None`, or a timeout past the clock's
+	/// range, waits forever. Defaults to the
 	/// [`moq_tokio::listen::Config::resolved_timeout`] default.
 	pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
 		let state = Arc::get_mut(&mut self.state).expect("with_timeout called after routes were built");
