@@ -36,7 +36,10 @@ before and after:
   and 112 in Check even when the cache hits, and mbx's object store reports 0
   hits in 914 of 960 sessions. The likely cause is that checkout resets file
   mtimes, so cargo's fingerprints see every workspace file as newer. Verify
-  that, then restore mtimes from git or use checksum freshness. A cache hit
+  that, then use checksum freshness, or backdate only files identical to the
+  commit the cache was built from (`git diff --name-only <cache-sha>` keeps
+  its fresh mtime). Never backdate a changed file: Cargo would then treat
+  the crate as fresh and the queue would pass on the old build. A cache hit
   currently saves only about 2.5 minutes net of its 2.5-minute restore.
 - **Release-profile builds in the gate:** dart's moq-ffi release build (fat
   LTO) and the `wasm-release` build. [One CI pass](/quest/m0/ci/one-pass.md)
