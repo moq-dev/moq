@@ -107,10 +107,10 @@ pub enum Refusal {
 	/// No keys are configured, so no token can be verified.
 	#[error("no keys are configured, so a token cannot be verified")]
 	NoKeys,
-	/// The token has no `kid`, and the key directory needs one.
-	#[error("the token names no key and the key directory needs one")]
+	/// The token has no `kid`, and the configured keys need one to choose a key.
+	#[error("the token names no key and the configured keys need one")]
 	MissingKeyId,
-	/// No configured key matches the token's `kid`.
+	/// The token's key could not be found or loaded: its `kid` is malformed or matches no key, or the key source is unreadable.
 	#[error("the token's key is unknown")]
 	UnknownKey,
 	/// The token failed to decode, verify, or authorize.
