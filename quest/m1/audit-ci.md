@@ -12,10 +12,10 @@ infrastructure with [CI cost and latency](/quest/m0/ci/README.md).
 
 Recurs once per major release (decided 2026-10-20). The PR that finishes
 this run also adds the next one with the same file name at the end of the next
-milestone's `Required` (m1 to m2, m2 to m3), creating the milestone if it is
-missing. The successor keeps the Goal and this paragraph; the rest of its Plan
-is rewritten with what this run learned: the per-workflow table, baselines,
-and what to check first. A successor placed in m2 or later lists the
+milestone's `Required` (m0 to m1, m1 to m2), never m3, the deferred bucket
+that does not shift with releases. The successor keeps the Goal and this
+paragraph; the rest of its Plan is rewritten with what this run learned: the
+per-workflow table, baselines, and what to check first. A successor placed in m2 lists the
 [release cut](/quest/m2/release/cut.md) under `Required`, so it waits for the
 release in flight to ship. The parent milestone lists this quest under
 `Required`. Only `/quest-delete` ends the recurrence. Fixes land in the run's
