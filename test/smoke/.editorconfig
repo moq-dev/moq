@@ -1,0 +1,35 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# shfmt reads these natively (indent + switch-case indent), so `just check`
+# drives shfmt with no CLI flags and the config lives here, matching moq.
+[*.sh]
+indent_style = space
+indent_size = 4
+switch_case_indent = true
+
+# The Docker channel wrappers are bash but carry no .sh extension; shfmt finds
+# them by shebang, so give them the same style as the *.sh scripts.
+[clients/docker/*]
+indent_style = space
+indent_size = 4
+switch_case_indent = true
+
+# YAML doesn't support hard tabs.
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# Nix defaults to spaces.
+[*.nix]
+indent_style = space
+indent_size = 2
+
+# Skip vendored / build output trees when shfmt walks the repo.
+[{node_modules,target,dist,.venv,.direnv}/**]
+ignore = true

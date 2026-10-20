@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>moq smoke (jsdelivr)</title>
+  </head>
+  <body>
+    <!-- No bundler, no install: pull the published packages straight from the
+         jsDelivr ESM CDN. /+esm resolves the package export map and bundles the
+         dependency graph (@moq/hang, @moq/net, @moq/signals) into one module.
+         No @version pin, so jsDelivr serves the latest published release. -->
+    <script type="module">
+      import "https://cdn.jsdelivr.net/npm/@moq/publish/element/+esm";
+      import "https://cdn.jsdelivr.net/npm/@moq/watch/element/+esm";
+      import "./setup.js";
+    </script>
+  </body>
+</html>

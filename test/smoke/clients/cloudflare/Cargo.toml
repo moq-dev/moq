@@ -1,0 +1,17 @@
+[package]
+name = "cloudflare-smoke"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+moq-native-ietf = { git = "https://github.com/cloudflare/moq-rs" }
+moq-transport = { git = "https://github.com/cloudflare/moq-rs" }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+web-transport = "0.10"

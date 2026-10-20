@@ -1,0 +1,12 @@
+# Keep the SHA-pinned GitHub Actions in .github/workflows current. Dependabot
+# bumps each `uses:` pin (and its `# vX` comment) as new releases land, so the
+# Node-24 migration and future runtime/security bumps land automatically.
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
