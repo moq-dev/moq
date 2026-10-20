@@ -5310,7 +5310,7 @@ mod group_priority_test {
 				);
 				assert!(serve.poll(&kio::Waiter::noop()).is_pending());
 				if finished {
-					group.clone().finish().unwrap();
+					group.finish().unwrap();
 					assert!(serve.poll(&kio::Waiter::noop()).is_pending());
 					assert!(log.trail().iter().any(|(_, event)| matches!(event, Sent::Finish)));
 				}
@@ -10023,7 +10023,7 @@ mod serve_tests {
 		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 5, None);
-			let empty = h.track.create_group(group::Info { sequence: 5 }).unwrap();
+			let mut empty = h.track.create_group(group::Info { sequence: 5 }).unwrap();
 			empty.finish().unwrap();
 			settle().await;
 
