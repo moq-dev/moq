@@ -72,9 +72,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   has no time filter. It is part of lite-07 and must land before
   [lite-07 finalizes](/quest/m1/lite07-finalize.md), which this line gates. This amends the 09-29
   premise that ranges are group-only because a group's timestamp isn't always
-  known: timed tracks know it, and untimed ones refuse. Split out of #5929
-  (2026-10-19) into [time anchors](/quest/m1/subscribe-ranges/time-anchors.md),
-  which lands in its own PR.
+  known: timed tracks know it, and untimed ones refuse. The cache half landed in its own PR after #5929.
 - Ranges are frame-precise (`Position`), not whole groups. The IETF joining
   FETCH for a mid-group SUBSCRIBE's uncached prefix stays, because today's
   bridge relies on it (maintainer, 09-29).
@@ -92,7 +90,6 @@ every sequence delivered or dropped.
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity
 - [Frame bounds](/quest/m1/subscribe-ranges/frame-bounds.md) - a local subscriber reads only the frames its ranges cover
-- [Time anchors](/quest/m1/subscribe-ranges/time-anchors.md) - a range start or end may name a presentation time
 
 ## Related
 

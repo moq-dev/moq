@@ -4,11 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Ranges filter reads, and anchors can name a time (#5929)
+### Anchors can name a time
 
-A raw track consumer now reads only the groups its `ranges` cover, rather than every group from the lowest start to the last absolute end.
 `moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.
 `moq_consume_track_update` fails with a negative code when the track refuses an update, such as a time anchor on an untimed track, leaving the subscription as it was.
+
+### Ranges filter reads (#5929)
+
+A raw track consumer now reads only the groups its `ranges` cover, rather than every group from the lowest start to the last absolute end.
 
 ### Demand reports the wanted group (#5930)
 

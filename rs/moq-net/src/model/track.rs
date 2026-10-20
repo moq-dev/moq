@@ -9973,6 +9973,37 @@ mod test {
 		assert_eq!(group.sequence, 3);
 	}
 
+	/// A subscriber read by either cursor, so one test covers both.
+	#[cfg(feature = "async")]
+	enum Reader {
+		Arrival(Subscriber),
+		Ordered(Ordered),
+	}
+
+	#[cfg(feature = "async")]
+	impl Reader {
+		fn new(subscriber: Subscriber, ordered: bool) -> Self {
+			match ordered {
+				true => Self::Ordered(subscriber.ordered()),
+				false => Self::Arrival(subscriber),
+			}
+		}
+
+		fn drain(&mut self) -> Vec<u64> {
+			match self {
+				Self::Arrival(subscriber) => drain(subscriber),
+				Self::Ordered(ordered) => drain_ordered(ordered),
+			}
+		}
+
+		fn resolved(&mut self) -> Vec<Option<Resolved>> {
+			match self {
+				Self::Arrival(subscriber) => subscriber.resolved_ranges(),
+				Self::Ordered(ordered) => ordered.inner.resolved_ranges(),
+			}
+		}
+	}
+
 	/// Every group the ordered cursor can read right now, in sequence order.
 	#[cfg(feature = "async")]
 	fn drain_ordered(subscriber: &mut Ordered) -> Vec<u64> {
@@ -15108,6 +15139,98 @@ mod test {
 			one.write_frame(at(1000), bytes::Bytes::from_static(b"x")).unwrap();
 			assert_eq!(drain(&mut subscriber), vec![0]);
 		}
+	}
+
+	/// A time end at the live edge reads at most one group past it: groups opened before
+	/// their first frame wait on the one below them starting, rather than every one being
+	/// handed out while the end is unsettled.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_end_reads_one_group_past_it_at_the_live_edge() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let ranges = [Range {
+			start: Anchor::Time(at(3000)),
+			end: Some(Anchor::Time(at(3500))),
+		}];
+		for ordered in [false, true] {
+			let mut producer = track_producer("test", Info::timed());
+			append_at(&mut producer, 3000);
+			let mut groups: Vec<_> = (1..4)
+				.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
+				.collect();
+			let subscriber = producer.subscribe(replay().with_ranges(ranges));
+			let mut reader = Reader::new(subscriber, ordered);
+			assert_eq!(reader.drain(), vec![0, 1], "1 is read on speculation, 2 and 3 wait");
+			groups[0].write_frame(at(3600), bytes::Bytes::from_static(b"x")).unwrap();
+			groups[1].write_frame(at(4000), bytes::Bytes::from_static(b"x")).unwrap();
+			assert_eq!(reader.drain(), Vec::<u64>::new(), "ordered: {ordered}");
+			assert_eq!(
+				reader.resolved(),
+				vec![Some(Resolved { start: 0, end: Some(1) })],
+				"1 starting past the end settles it"
+			);
+		}
+	}
+
+	/// A read parked on a time end's cap wakes when the speculative group starts, and when
+	/// a later group starts inside the end while the speculative one stalls.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_read_parked_on_a_time_end_wakes_as_groups_start() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let producer = track_producer("test", Info::timed());
+		let mut groups: Vec<_> = (0..4)
+			.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
+			.collect();
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Absolute(Position::group(0)),
+			end: Some(Anchor::Time(at(3500))),
+		}]));
+		assert_eq!(drain(&mut subscriber), vec![0]);
+
+		let parked = moq_clock::sim::spawn(async move {
+			let one = subscriber.recv_group().await.unwrap().unwrap().sequence;
+			let two = subscriber.recv_group().await.unwrap().unwrap().sequence;
+			(one, two, subscriber)
+		});
+		moq_clock::sim::yield_now().await;
+		assert!(!parked.is_finished(), "1 waits on 0 starting");
+		groups[0].write_frame(at(3000), bytes::Bytes::from_static(b"x")).unwrap();
+		moq_clock::sim::yield_now().await;
+		assert!(!parked.is_finished(), "1 is read, and 2 waits on 1 starting");
+
+		// 1 stalls, so only 2 starting inside the end lifts the cap past it.
+		groups[2].write_frame(at(3200), bytes::Bytes::from_static(b"x")).unwrap();
+		let (one, two, mut subscriber) = parked.await.unwrap();
+		assert_eq!((one, two), (1, 2));
+		assert_eq!(drain(&mut subscriber), vec![3], "3 is the speculative one now");
+		groups[3].write_frame(at(3600), bytes::Bytes::from_static(b"x")).unwrap();
+		groups[1].write_frame(at(3100), bytes::Bytes::from_static(b"x")).unwrap();
+		assert_eq!(
+			subscriber.resolved_ranges(),
+			vec![Some(Resolved { start: 0, end: Some(3) })]
+		);
+	}
+
+	/// A datagram is a whole group of one frame, so its own timestamp says whether it falls
+	/// inside a time end, without one ever settling from the groups.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_datagram_is_judged_against_a_time_end_by_its_timestamp() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Absolute(Position::group(0)),
+			end: Some(Anchor::Time(at(3500))),
+		}]));
+		for millis in [3000, 3400, 3600, 3700] {
+			producer.append_datagram(at(millis), &b"x"[..]).unwrap();
+		}
+		let mut read = Vec::new();
+		while let Some(Ok(Some(datagram))) = subscriber.recv_datagram().now_or_never() {
+			read.push(datagram.sequence);
+		}
+		assert_eq!(read, vec![0, 1]);
 	}
 
 	/// An untimed track refuses a time anchor wherever the ranges reach it.

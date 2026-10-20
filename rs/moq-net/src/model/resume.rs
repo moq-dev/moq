@@ -2639,6 +2639,48 @@ mod test {
 		);
 	}
 
+	/// Capping a replaced copy never replaces a time end it has not settled: the copy keeps
+	/// filtering by time, so a group below the cap that starts past the end stays out.
+	#[test]
+	#[cfg(feature = "async")]
+	fn capping_a_replaced_copy_keeps_its_time_end() {
+		let routes = Producer::new();
+		let a = copy();
+		routes.serve(a.consume());
+		let mut zero = a.create_group(group::Info { sequence: 0 }).unwrap();
+		zero.write_frame(ts(3000), b"x".as_ref()).unwrap();
+		zero.finish().unwrap();
+		let range = track::Range {
+			start: track::Anchor::Absolute(Position::group(0)),
+			end: Some(track::Anchor::Time(ts(3500))),
+		};
+		let subscription = Subscription::default()
+			.with_max_delay(Duration::from_secs(30))
+			.with_ranges([range]);
+		let sub = routes.consume().subscribe(kio::Producer::new(subscription).into());
+		let mut reader = sub.reader.lock().unwrap();
+		let (groups, mirrored) = (reader.groups, reader.mirrored.clone());
+		let old = &mut reader.copies[0];
+		old.replaced = true;
+		old.until = Some(Some(4));
+		old.update(&mirrored);
+		assert_eq!(old.wire(&mirrored).ranges, vec![range], "the time end outlives the cap");
+
+		for (sequence, millis) in [(1, 3600), (2, 3700)] {
+			let mut group = a.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(ts(millis), b"x".as_ref()).unwrap();
+			group.finish().unwrap();
+		}
+		let Poll::Ready(Ok(copy)) = old.poll_ready(groups, &kio::Waiter::noop()) else {
+			panic!("the copy answered");
+		};
+		let mut read = Vec::new();
+		while let Some(Ok(Some(group))) = copy.recv_group().now_or_never() {
+			read.push(group.sequence);
+		}
+		assert_eq!(read, vec![0]);
+	}
+
 	#[test]
 	fn a_replaced_copy_at_the_last_sequence_has_no_overflow_cap() {
 		for (last, end) in [(Some(u64::MAX), None), (None, Some(Position::default()))] {

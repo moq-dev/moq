@@ -243,9 +243,9 @@ served. A relay merges its subscribers' ranges into one upstream request, which
 today's wire versions carry as the single span covering them. A time anchor is
 resolved from the groups the serving hop holds; upstream it asks for everything
 max delay allows, and an untimed track refuses it. At the live edge, a time end
-lets through every group handed out before its first frame showed it starts past
-the end, since holding each group until its first frame arrives would cost
-latency.
+may let one group through before its first frame shows it starts past the end:
+the first group that has yet to start is handed out without waiting for that
+frame, and the next one waits on it.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
