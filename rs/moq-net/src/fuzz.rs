@@ -35,10 +35,14 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 			std::sync::Arc::new(crate::model::object::Fields {
 				id: id as u64,
 				properties: crate::model::object::Properties {
-					values: vec![crate::model::object::Property {
-						id: 0x80,
-						value: crate::model::object::Value::Int(96_000),
-					}],
+					block: crate::ietf::object::block(
+						&[crate::model::object::Property {
+							id: 0x80,
+							value: crate::model::object::Value::Int(96_000),
+						}],
+						crate::model::object::Encoding::Draft19,
+					)
+					.unwrap(),
 					..Default::default()
 				},
 			})
@@ -99,7 +103,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 ];
 
 /// How many types [`lite_wire`] dispatches over.
-const LITE_KINDS: u8 = 21;
+const LITE_KINDS: u8 = 22;
 
 /// How many types [`ietf_wire`] dispatches over.
 const IETF_KINDS: u8 = 40;
@@ -146,20 +150,28 @@ where
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	// The body doesn't say whether it carries a timestamp, so try both readings.
+	// The body doesn't say whether it carries a timestamp, or whether the session
+	// negotiated the `ietf` extension, so try every reading.
+	let ietf: &[bool] = match version.has_ietf() {
+		true => &[false, true],
+		false => &[false],
+	};
 	let mut any = false;
-	for timed in [true, false] {
-		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
-			continue;
-		};
-		any = true;
+	for &ietf in ietf {
+		for timescale in [Some(crate::Timescale::MILLI), None] {
+			let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, ietf, |_| timescale) else {
+				continue;
+			};
+			any = true;
 
-		let Ok(first) = decoded.encode_bytes(version) else {
-			continue;
-		};
+			let Ok(first) = decoded.encode_bytes(version) else {
+				continue;
+			};
 
-		let echo = lite::Datagram::decode(first, version, |_| timed).expect("could not decode our own encoding");
-		assert_eq!(echo, decoded, "datagram did not survive a round trip");
+			let echo =
+				lite::Datagram::decode(first, version, ietf, |_| timescale).expect("could not decode our own encoding");
+			assert_eq!(echo, decoded, "datagram did not survive a round trip");
+		}
 	}
 	any
 }
@@ -197,6 +209,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		18 => roundtrip::<lite::Probe, _>(rest, version),
 		19 => datagram(rest, version),
 		20 => roundtrip::<lite::Parameters, _>(rest, version),
+		21 => roundtrip::<lite::ietf::TrackProperties, _>(rest, version),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
 }
@@ -432,6 +445,7 @@ impl LiteSample {
 				sequence: 1_234,
 				timestamp: Some(1_234_567_890),
 				payload: bytes::Bytes::new(),
+				ietf: None,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -463,9 +477,11 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
-				.map(|_| 1)
-				.unwrap(),
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| {
+				Some(crate::Timescale::MILLI)
+			})
+			.map(|_| 1)
+			.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
 		}
 	}

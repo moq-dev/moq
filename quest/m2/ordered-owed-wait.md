@@ -74,5 +74,4 @@ Public API: behavior only. Wire: none.
 
 ## Related
 
-- [Resume reorder](/quest/m1/resume-reorder.md) - late stream headers are not proof that a group was dropped
 - [Read backfill](/quest/m1/read-backfill.md) - container reads drop groups below the cursor

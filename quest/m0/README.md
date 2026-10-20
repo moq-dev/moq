@@ -32,8 +32,7 @@ of Seattle. The cold-relay Largest stays compliant with INVALID_RANGE
 (decided 2026-10-08), and the deviations doc landed in #5022.
 An imquic draft-22 rig (2026-10-08) hit LOCATION_FILTER and a clear
 FIRST_OBJECT at object 0 (#5027). Both shipped with moq-noq 1.3.5 in
-moq-relay 0.17.3 and `@moq/net` 0.4.3; [release notices](/quest/m0/release-22/README.md)
-remain for the testers and reporters of the later clock and quiet-edge fixes.
+moq-relay 0.17.3 and `@moq/net` 0.4.3.
 
 Identity: the [broadcast epoch](/quest/m0/broadcast-epoch/README.md) line
 gates the next release (decided 2026-10-03:
@@ -88,11 +87,11 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
 
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
-- [Draft-22 release notices](/quest/m0/release-22/README.md) - tell testers and reporters which published releases contain their fixes
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on #412 to publish the patched 0.6.x that main adopts
 - [qmux credit](/quest/m0/qmux-credit.md) - main adopts qmux 0.6 credit and close fixes; the 0.5 backport is independent
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
+- [Benchmark regression table](/quest/m0/bench-site.md) - the nightly benchmark page is one light table where red and green flag regressions and improvements beyond each series' noise
 - [Performance audit](/quest/m0/audit-perf.md) - benchmarks that regressed since the last run are explained, fixed, or planned, and unbenched hot paths get coverage
 - [Compile time audit](/quest/m0/audit-compile-time.md) - build-time hotspots are measured against a baseline and the worst are fixed or planned
 - [Artifact size audit](/quest/m0/audit-size.md) - binary, FFI, WASM, and bundle growth since the last run is explained, fixed, or planned

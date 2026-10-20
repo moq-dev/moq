@@ -44,8 +44,7 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 /// INCLUDE_PROPERTIES=0, which keeps the block present but empty.
 ///
 /// Declaring the timescale is what opts the track into timestamps; every object Timestamp
-/// is in these units. We serve the newest group first by default, matching moq-lite. A draft
-/// without room for a property drops it on encode.
+/// is in these units. A draft without room for a property drops it on encode.
 ///
 /// Fails with [`Error::Unsupported`] for Immutable Properties the draft cannot carry:
 /// rewriting them for its encoding would break them, and forwarding them unchanged would
@@ -57,28 +56,26 @@ fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Resul
 	let mut unknown = info.properties.as_deref().cloned().unwrap_or_default();
 	let block = !matches!(version, Version::Draft14 | Version::Draft15);
 	if block
-		&& unknown
-			.immutable
-			.is_some_and(|ingress| ingress != super::object::encoding(version))
+		&& unknown.immutable().is_some()
+		&& !unknown
+			.encoding
+			.is_some_and(|encoding| super::object::same_bytes(encoding, super::object::encoding(version)))
 	{
 		return Err(Error::Unsupported);
 	}
 	// Across draft-19, forwarding 0x06 would give it a different meaning, as for object
 	// properties. A mutable one is dropped; a sealed one is refused.
-	if !unknown.values.is_empty() && unknown.delivery_timeout != super::object::has_delivery_timeout(version) {
-		if block && unknown.sealed.contains(&0x06) {
+	if unknown.encoding.is_some_and(|encoding| {
+		super::object::delivery_timeout(encoding) != super::object::has_delivery_timeout(version)
+	}) {
+		if block && unknown.sealed().any(|id| id == 0x06) {
 			return Err(Error::Unsupported);
 		}
 		unknown.values.retain(|property| property.id != 0x06);
 	}
 	Ok(ietf::Properties {
-		max_cache_duration: info.max_age,
-		timescale: info.timescale,
-		priority: Some(super::priority::to_wire(info.priority)),
-		group_order: Some(GroupOrder::Descending),
-		// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
-		dynamic_groups: info.refresh.is_some(),
 		unknown,
+		..ietf::Properties::restated(info)
 	})
 }
 
@@ -184,10 +181,12 @@ async fn read_fetch(
 	}
 	// Relayed Object IDs need not match frame ordinals, so a relayed group is read from
 	// its first frame and filtered by ID. Its marked gaps cover the IDs between where it
-	// starts and its first object; a start below that misses to the upstream.
+	// starts and its first object; a start below that misses to the upstream. A miss may
+	// be relayed too, which only the upstream knows, so it fetches the whole group.
 	let frame_start = match (&wire, &cached) {
 		(Some(_), Some(group)) => skip.min(group.first_frame()),
-		_ => skip,
+		(None, Some(_)) => skip,
+		(_, None) => 0,
 	};
 	let mut group = track
 		.fetch_group(
@@ -2063,7 +2062,7 @@ where
 		// timestamp only on drafts that can declare its units.
 		let timescale = timescale.filter(|_| ietf::Properties::sends_timescale(version));
 		let properties = if let Some(fields) = fields {
-			let properties = super::object::write(&fields.properties, version, timescale)?;
+			let properties = super::object::write(&fields.properties, timestamp, version, timescale)?;
 			(!properties.is_empty()).then_some(properties)
 		} else {
 			match timescale {
@@ -2453,9 +2452,12 @@ where
 			.info
 			.timescale
 			.filter(|_| ietf::Properties::sends_timescale(self.version));
-		let fields = group.frames.iter().filter_map(|frame| frame.fields.as_deref());
-		for fields in fields.chain(group.end_object.as_deref()) {
-			if let Err(err) = super::object::write(&fields.properties, self.version, timescale) {
+		let frames = group
+			.frames
+			.iter()
+			.filter_map(|frame| Some((frame.fields.as_deref()?, frame.timestamp)));
+		for (fields, frame) in frames.chain(group.end_object.as_deref().map(|end| (end, None))) {
+			if let Err(err) = super::object::write(&fields.properties, frame, self.version, timescale) {
 				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
 			}
 		}
@@ -4409,7 +4411,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				Some(wire) => {
 					// A datagram this draft cannot carry is dropped like an oversized one: it
 					// is best-effort, and the track's groups do not depend on it.
-					if wire.status == Some(1) && !matches!(self.version, Version::Draft14 | Version::Draft15) {
+					if wire
+						.status
+						.is_some_and(|status| !super::object::status_defined(status, self.version))
+					{
 						tracing::debug!(sequence, "dropping a datagram status this draft cannot carry");
 						continue;
 					}
@@ -4423,7 +4428,12 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						true => &stripped,
 						false => &wire.properties,
 					};
-					let properties = match super::object::write(forwarded, self.version, self.timescale) {
+					let properties = match super::object::write(
+						forwarded,
+						datagram.datagram.timestamp,
+						self.version,
+						self.timescale,
+					) {
 						Ok(properties) => properties,
 						Err(err) => {
 							tracing::debug!(%err, sequence, "dropping a datagram whose properties cannot be forwarded");
@@ -5094,9 +5104,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 	}
 }
 
-/// Object status: no object at or past this location exists.
-const END_OF_GROUP: u64 = 0x3;
-const END_OF_TRACK: u64 = 0x4;
+use super::object::{END_OF_GROUP, END_OF_TRACK};
 
 /// An object's header, with private relay fields when it came from an IETF peer.
 struct Object<'a> {
@@ -5145,7 +5153,12 @@ fn buffer_object<W: crate::transport::poll::SendStream>(
 	writer.buffer_varint(object.delta)?;
 	if encoding.extensions {
 		let ext = match object.fields {
-			Some(fields) => super::object::write(&fields.properties, encoding.version, encoding.timescale)?,
+			Some(fields) => super::object::write(
+				&fields.properties,
+				object.timestamp,
+				encoding.version,
+				encoding.timescale,
+			)?,
 			None => {
 				let mut ext = Vec::new();
 				if let Some(timescale) = encoding.timescale {
