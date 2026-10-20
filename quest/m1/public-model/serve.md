@@ -56,6 +56,11 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
       publisher's `setGroups({ start })`).
     - `js/json` snapshot and `js/flate` `latest()` raise the floor of the same
       reader on each read; `js/room` chat sets it after `largest()` resolves.
+      The snapshot consumers (`js/json/src/snapshot/consumer.ts` `#read`,
+      `js/flate/src/snapshot/consumer.ts` `latest()`) call
+      `setGroups({ start: { included: latest.group } })`, whose omitted end
+      removes the caller's cap. The rebinding must keep that cap; land it with
+      a regression test where a capped snapshot reader stays below its cap.
     - `rs/moq-hls` export narrows a fetched group with `set_frames(..end)`.
     - Readers that set a floor once right after `poll_largest` (moq-audio,
       moq-video, moq-cli play, moq-json window, moq-mux) fit the builder.
