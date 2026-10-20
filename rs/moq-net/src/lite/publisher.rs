@@ -4687,8 +4687,8 @@ mod serve_group_test {
 		(TrackRun::new(ctx, track, bounds, steer), writer, log)
 	}
 
-	#[test]
-	fn wanted_updates_ignore_stale_groups_and_recheck_the_ratio() {
+	#[moq_clock::test]
+	async fn wanted_updates_ignore_stale_groups_and_recheck_the_ratio() {
 		let track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"refresh",
