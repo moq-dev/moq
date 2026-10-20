@@ -2,6 +2,7 @@ import { Milli } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
+import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
@@ -21,6 +22,7 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
+import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
@@ -55,7 +57,6 @@ import {
 	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
-	hasStreamCount,
 	hasSynced,
 	resolvesStart,
 	updateSupported,
@@ -126,8 +127,6 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
-	// Group streams opened by the publisher, when SUBSCRIBE_END carries the count.
-	streams?: number;
 	// The TRACK stream that answered (lite-05+), held open as interest in the track until
 	// the SUBSCRIBE has its first response, so the publisher's demand never lapses between
 	// the two.
@@ -180,6 +179,7 @@ export class Subscriber {
 	// Our grant: a subscription it stops covering is cancelled. Undefined until the peer
 	// answers, and forever on a version without AUTH, which allows everything.
 	#grant?: Getter<Grant | undefined>;
+	#auth?: AuthSession;
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -203,6 +203,7 @@ export class Subscriber {
 		goaway?: GetPromise<Drain>,
 		grant?: Getter<Grant | undefined>,
 		limits: Limits = LIMITS,
+		auth?: AuthSession,
 	) {
 		this.#quic = quic;
 		this.#announces = new Slots(limits.announces, { quic, reason: "too many announcements" });
@@ -212,6 +213,7 @@ export class Subscriber {
 		this.#peerSetup = peerSetup;
 		this.#goaway = goaway;
 		this.#grant = grant;
+		this.#auth = auth;
 	}
 
 	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
@@ -657,6 +659,22 @@ export class Subscriber {
 			return;
 		}
 		const refused = unauthorized(broadcast);
+		try {
+			for (;;) {
+				const ready = await this.#auth?.ready(broadcast, "subscribe", {
+					signal: consumed.valid,
+					until: () => abandoned(request.demand()),
+				});
+				if (ready !== false) break;
+				// Demand returning before we commit is not abandonment, matching the serving loop.
+				if (!isAbandoned(request.demand())) continue;
+				request.reject(new Error("subscribe abandoned before it was authorized"));
+				return;
+			}
+		} catch (err) {
+			request.reject(error(err));
+			return;
+		}
 		// Armed before the first check and held to the end, so a shrink while the
 		// subscription sets up is never missed: it resets whatever reached the wire.
 		const state: SubscribeSetup = { cancel: new AbortController() };
@@ -792,8 +810,9 @@ export class Subscriber {
 			const idle = Symbol("idle");
 			const demand = producer.demand();
 			for (;;) {
-				const reason = await race([done, demand.unused().then(() => idle)]);
-				if (reason === idle && demand.closed.peek() === undefined && demand.used.peek()) continue;
+				const reason = await race([done, unwanted(demand).then(() => idle)]);
+				if (reason === idle && demand.closed.peek() === undefined && demand.wanted.peek() !== undefined)
+					continue;
 				break;
 			}
 
@@ -1053,13 +1072,24 @@ export class Subscriber {
 		maxDelay?: Milli,
 	): Promise<void> {
 		const refused = unauthorized(broadcast);
-		// Arm before checking so revocation during setup or response cannot be missed.
-		const disposeGrant = this.#grant?.subscribe(() => {
-			if (this.#denied(broadcast)) group.close(refused);
-		});
-		void group.closed.then(() => disposeGrant?.());
-
 		try {
+			// Every caller leaving ends the wait like it ends the setup below. A caller that
+			// coalesced back onto the group before we commit keeps it waiting.
+			while (
+				(await this.#auth?.ready(broadcast, "subscribe", {
+					signal: consumed.valid,
+					until: () => group.demand().unused(),
+				})) === false
+			) {
+				if (group.closed.peek() === undefined && group.demand().used.peek()) continue;
+				throw new StreamError(StreamCode.Cancel, { message: "cancel" });
+			}
+			// Arm after admission, before checking: another unanswered token may still
+			// widen the union while we wait, which is not a revocation of this fetch.
+			const disposeGrant = this.#grant?.subscribe(() => {
+				if (this.#denied(broadcast)) group.close(refused);
+			});
+			void group.closed.then(() => disposeGrant?.());
 			if (this.#denied(broadcast)) throw refused;
 			if (!supportsTrackStream(this.version)) {
 				throw new Error("fetch group requires moq-lite-05 or newer");
@@ -1218,7 +1248,6 @@ export class Subscriber {
 			} else if ("end" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				entry.end = resp.end.group;
-				if (hasStreamCount(this.version)) entry.streams = resp.end.streams;
 				// A local close can win the race with the response; there is nothing left to end.
 				if (entry.track.closed.peek() !== undefined) continue;
 				try {
@@ -1243,15 +1272,13 @@ export class Subscriber {
 
 	// Wait for the group streams the publisher still owes once it has ended the subscription.
 	//
-	// lite-07 counts streams, so skipped sequences owe nothing. Older drafts account for
-	// the range using received headers and SUBSCRIBE_DROP. A counted stream reset before
-	// its header leaves no trace, so the grace still bounds that wait. Streams whose
+	// Received headers and SUBSCRIBE_DROP account for the range. An unaccounted
+	// sequence, such as a lost datagram, still waits out the grace. Streams whose
 	// headers arrived keep reading until their own FIN or reset.
 	#settleTail(entry: SubscribeEntry): Promise<void> {
 		const { tail, track } = entry;
 
 		const complete = () => {
-			if (entry.streams !== undefined) return tail.streams >= entry.streams;
 			// Without SUBSCRIBE_END (older drafts) nothing says which groups are owed.
 			if (entry.end === undefined) return false;
 			// Without SUBSCRIBE_START the publisher served no group at all.

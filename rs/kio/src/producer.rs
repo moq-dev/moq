@@ -124,19 +124,20 @@ impl<T> Producer<T> {
 	/// while pending.
 	///
 	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll<F>(&self, waiter: &Waiter, f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<()>,
 	{
 		let state = self.state.lock();
 		if state.closed {
-			return Poll::Ready(Err(Ref { state }));
+			return crate::coop::ready(Err(Ref { state }));
 		}
 
 		let mut guard = Ref { state };
 		match f(&guard) {
 			// Upgrade the Ref to a Mut, keeping the same lock guard.
-			Poll::Ready(()) => Poll::Ready(Ok(Mut::new(guard.state))),
+			Poll::Ready(()) => crate::coop::ready(Ok(Mut::new(guard.state))),
 			Poll::Pending => {
 				waiter.register(&mut guard.state.waiters_value);
 				Poll::Pending
@@ -150,6 +151,7 @@ impl<T> Producer<T> {
 	/// [`Mut`], so it never flags the state modified and never wakes consumers.
 	/// Use it to wait on a read condition from the producer side without creating
 	/// a [`Consumer`].
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_ref<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
@@ -158,11 +160,11 @@ impl<T> Producer<T> {
 		let mut guard = Ref { state };
 
 		if let Poll::Ready(res) = f(&guard) {
-			return Poll::Ready(Ok(res));
+			return crate::coop::ready(Ok(res));
 		}
 
 		if guard.state.closed {
-			return Poll::Ready(Err(guard));
+			return crate::coop::ready(Err(guard));
 		}
 
 		waiter.register(&mut guard.state.waiters_value);
@@ -191,10 +193,11 @@ impl<T> Producer<T> {
 
 	/// Poll for channel closure (an explicit [`Mut::close`], e.g. an abort),
 	/// registering the waiter if still open.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {
-			return Poll::Ready(());
+			return crate::coop::ready(());
 		}
 
 		waiter.register(&mut state.waiters_closed);
@@ -210,14 +213,15 @@ impl<T> Producer<T> {
 
 	/// Poll-based variant of [`Self::unused`]: `Ready(Ok(()))` when no consumers
 	/// remain, [`Closed`] if the channel closed first, else `Pending`.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_unused(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
 		let mut state = self.state.lock();
 		if state.closed {
-			return Poll::Ready(Err(Closed));
+			return crate::coop::ready(Err(Closed));
 		}
 
 		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
-			return Poll::Ready(Ok(()));
+			return crate::coop::ready(Ok(()));
 		}
 
 		waiter.register(&mut state.waiters_consumer);
@@ -225,7 +229,7 @@ impl<T> Producer<T> {
 		// Re-check after registration to avoid TOCTOU race where the last
 		// consumer drops between the initial check and waiter registration.
 		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
-			return Poll::Ready(Ok(()));
+			return crate::coop::ready(Ok(()));
 		}
 
 		Poll::Pending
@@ -248,14 +252,15 @@ impl<T> Producer<T> {
 
 	/// Poll-based variant of [`Self::used`]: `Ready(Ok(()))` once a consumer
 	/// exists, [`Closed`] if the channel closed first, else `Pending`.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_used(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
 		let mut state = self.state.lock();
 		if state.closed {
-			return Poll::Ready(Err(Closed));
+			return crate::coop::ready(Err(Closed));
 		}
 
 		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
-			return Poll::Ready(Ok(()));
+			return crate::coop::ready(Ok(()));
 		}
 
 		waiter.register(&mut state.waiters_consumer);
@@ -263,7 +268,7 @@ impl<T> Producer<T> {
 		// Re-check after registration to avoid TOCTOU race where a consumer
 		// is created between the initial check and waiter registration.
 		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
-			return Poll::Ready(Ok(()));
+			return crate::coop::ready(Ok(()));
 		}
 
 		Poll::Pending

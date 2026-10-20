@@ -33,8 +33,6 @@ const ANNOUNCE_UPDATE = 2;
 const ANNOUNCE_RESTART = 3;
 const SYNCED = 4;
 
-export type { Cost };
-
 /**
  * Lite-07: copy `keep` path segments (from the head) or hops (from the tail) of the
  * live announcement `distance` back from the stream's next Announce ID, where 1 is the

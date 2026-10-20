@@ -23,14 +23,15 @@ When pushing additional commits to an existing PR, update the title and descript
 When taking over someone else's PR, push commits on top of theirs so they keep credit.
 
 Create a draft PR.
-Switch it to "Ready for review" when you're finished and local `just check` passes.
+Run `just ci` before switching it to "Ready for review" and before every push.
 Fix any merge conflicts and failing CI checks.
 
 # Merge queue
 
-PRs into `main` land through a merge queue, which re-runs **Check** and **Test** on the PR combined with the latest `main` and the PRs queued ahead of it.
-The **macOS** and **Windows** platform gates (selected by **Platform scope**) run only there; main PRs report them as skipped.
-Enqueue a reviewed PR with `gh pr merge <number>`.
+PRs into `main` get no cloud CI: they report **Check** and **Test** as skipped, and `just ci` runs the same gate locally.
+The merge queue runs Check and Test on the PR combined with the latest `main` and the PRs queued ahead of it.
+Enqueue with `gh pr merge <number>` once the review is clean.
+Both select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
 
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
 Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.

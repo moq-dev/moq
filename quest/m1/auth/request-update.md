@@ -8,7 +8,7 @@ application swaps it, the session sends REQUEST_UPDATE (moq-transport)
 carrying the new auth, and the request stays up. Lite sends nothing: a
 route's auth already sits in the session union through its AUTH stream, so
 lite renews through the union as in
-[A request right behind its token](/quest/m1/auth/request-race.md). The first consumer is a client that keeps a
+[A request right behind its token](https://github.com/moq-dev/moq/pull/5992). The first consumer is a client that keeps a
 PUBLISH_NAMESPACE alive past its credential's expiry by sending
 REQUEST_UPDATE with a fresh token before it expires.
 
@@ -84,4 +84,4 @@ REQUEST_UPDATE.
 
 ## Related
 
-- [A request right behind its token](/quest/m1/auth/request-race.md) - lite renewal through the union
+- [A request right behind its token](https://github.com/moq-dev/moq/pull/5992) - lite renewal through the union

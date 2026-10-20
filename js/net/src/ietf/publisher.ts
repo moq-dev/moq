@@ -2,6 +2,7 @@ import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type { Auth, Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
+import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
@@ -28,7 +29,7 @@ import * as Path from "../path.ts";
 import { Priority } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
+import type { Groups, Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { LIMITS, type Limits, Slots } from "../util/limits.ts";
@@ -41,6 +42,7 @@ import { encodeDatagram } from "./datagram.ts";
 import { type RequestKind, requestReason, toRequestCode } from "./error.ts";
 import { type Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
+import { MAX_AGE_PARAMETER } from "./max_age.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
@@ -492,14 +494,15 @@ export class Publisher {
 
 		const priority = fromWire(msg.subscriberPriority);
 		const order = msg.groupOrder;
+		// A range that resolves without the live edge has a fixed start, which is no join:
+		// bound the subscription before subscribing so the refresh ratio never judges it.
+		const fixed = subscribeRange(msg, {}, version);
 		const track = wireOf(broadcast).subscribe(msg.trackName, {
 			priority,
 			order,
-			// moq-transport has no subscriber latency parameter. Keep everything the
-			// producer retained and let the receiving subscriber enforce its own budget.
-			// Keep the sentinel encodable if this demand crosses a Lite hop before the
-			// producer's retention bound is known.
-			maxDelay: Milli(Varint.MAX_U53),
+			// An absent budget preserves everything retained by the producer.
+			maxDelay: Milli(msg.maxAge ?? Varint.MAX_U53),
+			groups: fixed.start ? rangeGroups(fixed) : undefined,
 		});
 
 		let cache: TrackSubscriber | undefined;
@@ -551,11 +554,8 @@ export class Publisher {
 			track.update({
 				priority,
 				order,
-				maxDelay: Milli(Varint.MAX_U53),
-				groups: {
-					start: range.start ? { included: Number(range.start.group) } : undefined,
-					end: range.end ? { included: Number(range.end.group) } : undefined,
-				},
+				maxDelay: Milli(msg.maxAge ?? Varint.MAX_U53),
+				groups: rangeGroups(range),
 			});
 			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
 			if (startGroup !== undefined) track.setGroups({ start: { included: startGroup } });
@@ -680,13 +680,20 @@ export class Publisher {
 						params.bytes.size > 0 ||
 						params.rangeFilters ||
 						[...params.vars.keys()].some(
-							(key) => key !== 0x02n && key !== 0x06n && key !== 0x10n && key !== 0x20n,
+							(key) =>
+								key !== MAX_AGE_PARAMETER &&
+								key !== 0x02n &&
+								key !== 0x06n &&
+								key !== 0x10n &&
+								key !== 0x20n,
 						);
 					if (unsupported)
 						throw await refuse("not_supported", "REQUEST_UPDATE parameters not supported", ownRequestId);
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
 						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
+					if (params.maxAge !== undefined)
+						track.update({ ...track.subscription.peek(), maxDelay: Milli(params.maxAge) });
 					if (version === Version.DRAFT_14) continue;
 					await stream.writer.u53(RequestOk.id);
 					await new RequestOk({ requestId: ownRequestId }).encode(stream.writer, version);
@@ -1194,8 +1201,8 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async runEnforce(setupAnswered: Promise<void>): Promise<void> {
-		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered });
+	async runEnforce(setupAnswered: Promise<void>, auth?: AuthSession): Promise<void> {
+		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered, auth });
 	}
 
 	/**
@@ -2168,6 +2175,14 @@ interface ServeRange {
 	 * once the range is exhausted; draft-20 removed the notion of a filter ending one.
 	 */
 	end?: EndLocation;
+}
+
+/** The model's group bounds for a {@link ServeRange}: an absent start joins at the latest group. */
+function rangeGroups(range: ServeRange): Groups {
+	return {
+		start: range.start ? { included: Number(range.start.group) } : undefined,
+		end: range.end ? { included: Number(range.end.group) } : undefined,
+	};
 }
 
 /** The slice of one group a subscription's {@link ServeRange} selects. */

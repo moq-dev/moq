@@ -192,6 +192,8 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 ## Track demand
 
+`demand()->wanted()` is the group subscribers want, or `std::nullopt` while nobody subscribes, and `wanted_changed()` waits for it to move: start a new group once it passes your largest. Set `TrackInfo::refresh` to have a joining subscriber ask for a new group once the newest has grown past `refresh` times its first frame.
+
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Stats
