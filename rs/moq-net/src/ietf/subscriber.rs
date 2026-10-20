@@ -12849,9 +12849,13 @@ mod stitch_tests {
 		for ingress in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let egresses = [
 				Version::Draft14,
+				Version::Draft15,
 				Version::Draft16,
 				Version::Draft17,
 				Version::Draft18,
+				Version::Draft19,
+				Version::Draft20,
+				Version::Draft21,
 				Version::Draft22,
 			];
 			let pairs = egresses
