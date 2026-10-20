@@ -71,10 +71,11 @@ Audit evidence (2026-10-19, second checkpoint, incomplete):
   binding regression is established. Recheck Dart against `gh-pages`.
 - JS: the Nightly JS leg is cancelled at one hour by the forward fixture,
   which [the test-cost audit](/quest/m0/audit-test-cost.md) is fixing. Until
-  it lands there is no JS history. Nightly also omits these JS benches:
-  net `observed`, `qmux`, `qmux-eager`, `qmux-lazy`; json `codec` and
-  `parse`; hang `slow-group`; watch `warmup`; clock `timers`. Add them, with
-  an inventory test like the Rust one, only after the leg fits its hour.
+  it lands there is no JS history. Nightly never runs these JS benches:
+  net `observed`; json `codec` and `parse`; hang `slow-group`; watch
+  `warmup`; clock `timers` (`qmux` and `serve-browser` run, uncharted, in
+  the audio-quality job). Add them, with an inventory test like the Rust
+  one, only after the leg fits its hour.
   Browser smoke artifacts remain one-round correctness runs.
 - Inventory: moq-uring `timers` (`cdff3c8f9`) landed after the Rust
   inventory test and failed it; this run schedules it in the io_uring group.
