@@ -757,8 +757,7 @@ pub struct Import {
 	latency_max: Option<crate::duration::Duration>,
 
 	/// Name a stats track in the catalog and fill it with what each track has written, about
-	/// once a second while subscribed. The stdin imports only, without --epoch: the counts are
-	/// this instance's own.
+	/// once a second while subscribed. The stdin imports only.
 	#[usage(long)]
 	pub stats: bool,
 

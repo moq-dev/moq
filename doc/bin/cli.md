@@ -453,7 +453,7 @@ so the other formats refuse `--linger`.
 `import --stats` names a stats track in the catalog and reports what each
 rendition has written, about once a second while someone subscribes, with the
 connection's RTT, estimated send rate, and loss. It covers the stdin imports;
-capture, the gateways, `archive`, `ts --program all`, and `--epoch` refuse it.
+capture, the gateways, `archive`, and `ts --program all` refuse it.
 
 `export --echo <name>` answers a publisher that solicits feedback: under the
 catalog's `echo` path it publishes `<name>.echo`, reporting what each rendition
