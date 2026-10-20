@@ -1,4 +1,4 @@
-# [M] moq-transport passthrough
+# moq-transport passthrough
 
 ## Goal
 
@@ -80,6 +80,10 @@ Work owned by this README, after the children land:
   before working around it.
 - FETCH cases are skipped upstream. Section 8 stays out while PUBLISH is
   declined.
+
+## Required
+
+- [Ingress-version provenance](/quest/m1/ietf-extension/lite.md) - a track crossing a lite-07 hop carries its moq-transport ingress version once, replacing per-block Encoding codes
 
 ## Related
 
