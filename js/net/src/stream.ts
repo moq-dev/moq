@@ -55,7 +55,7 @@ const MAX_READ_SIZE = 1024 * 1024 * 64; // don't allocate more than 64MB for a m
  * of rejecting the create, which is what we want for the streams a session
  * opens occasionally. `@types/web` doesn't declare it yet, hence the intersection.
  */
-export function sendOptions(options?: OpenOptions): WebTransportSendStreamOptions & { waitUntilAvailable?: boolean } {
+function sendOptions(options?: OpenOptions): WebTransportSendStreamOptions & { waitUntilAvailable?: boolean } {
 	return { sendOrder: options?.sendOrder, waitUntilAvailable: options?.waitUntilAvailable ?? true };
 }
 

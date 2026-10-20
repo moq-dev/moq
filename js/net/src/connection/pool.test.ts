@@ -6,6 +6,7 @@ import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { Stream } from "../stream.ts";
 import * as Time from "../time.ts";
 import { connect } from "./connect.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
@@ -623,4 +624,86 @@ test("a handle's announcements sync with the shared origin", async () => {
 
 	watch.close();
 	handle.close();
+});
+
+test("shared connections distinguish ordered versions", async () => {
+	const dials = stubTransports();
+	const versions = ["moq-lite-07-wip", "moq-lite-06", "moq-lite-05"];
+	const first = new Connection({ url, versions, share: true, linger });
+	const same = new Connection({ url, versions: [...versions], share: true, linger });
+	const reversed = new Connection({ url, versions: [...versions].reverse(), share: true, linger });
+	const defaults = new Connection({ url, linger });
+	try {
+		await advance();
+		expect(first.status.peek()).toBe("connected");
+		expect(same.origin.peek()).toBe(first.origin.peek());
+		expect(reversed.origin.peek()).not.toBe(first.origin.peek());
+		expect(defaults.origin.peek()).not.toBe(first.origin.peek());
+		expect(dials.count()).toBe(3);
+	} finally {
+		first.close();
+		same.close();
+		reversed.close();
+		defaults.close();
+	}
+});
+
+test("a caller cannot mutate acquired versions", async () => {
+	const dials = stubTransports();
+	const versions = ["moq-lite-07-wip", "moq-lite-05"];
+	const first = new Connection({ url, versions, linger });
+	versions.reverse();
+	const original = new Connection({ url, versions: ["moq-lite-07-wip", "moq-lite-05"], linger });
+	const changed = new Connection({ url, versions, linger });
+	try {
+		await advance();
+		expect(first.origin.peek()).toBe(original.origin.peek());
+		expect(changed.origin.peek()).not.toBe(first.origin.peek());
+		expect(dials.count()).toBe(2);
+	} finally {
+		first.close();
+		original.close();
+		changed.close();
+	}
+});
+
+test("GOAWAY keeps version pools distinct at the redirected URL", async () => {
+	const moved = new URL("https://example.com:5443/pool");
+	const peers: WebTransport[] = [];
+	globalThis.WebTransport = function RedirectTransport(address: string | URL) {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		peers.push(pair.server);
+		void accept(pair.server, new URL(address));
+		return pair.client;
+	} as unknown as typeof WebTransport;
+	const versions = ["moq-lite-07-wip", "moq-lite-06"];
+	const first = new Connection({ url, versions, linger });
+	const resident = new Connection({ url: moved, linger });
+	let joined: Connection | undefined;
+	let defaults: Connection | undefined;
+	try {
+		await advance();
+		const origin = first.origin.peek();
+		// Exercise a healthy migration after the immediate-redirect backoff guard.
+		await advance(2_000);
+		const peer = peers[0];
+		if (!peer) throw new Error("missing initial peer");
+		const stream = await Stream.open(peer, { version: Lite.Version.DRAFT_06 });
+		await stream.writer.u53(Lite.StreamId.Goaway);
+		await new Lite.Goaway(moved.href).encode(stream.writer, Lite.Version.DRAFT_06);
+		await advance();
+		joined = new Connection({ url: moved, versions, linger });
+		defaults = new Connection({ url: moved, linger });
+		await advance();
+		expect(joined.status.peek()).toBe("connected");
+		expect(joined.origin.peek()).toBe(origin);
+		expect(defaults.origin.peek()).toBe(resident.origin.peek());
+		expect(defaults.origin.peek()).not.toBe(origin);
+		expect(peers).toHaveLength(3);
+	} finally {
+		first.close();
+		resident.close();
+		joined?.close();
+		defaults?.close();
+	}
 });

@@ -2,8 +2,9 @@
 
 ## Goal
 
-Pull requests get a CI verdict without queueing behind the hosted runner
-limits, and every job spends its minutes on the work its diff selected rather
+Pull requests are validated locally with `just ci` and get their cloud verdict
+from the merge queue without waiting behind the hosted runner limits, and
+every job spends its minutes on the work its diff selected rather
 than on setup, cold caches, or repeated builds. Concurrent local agents share
 expensive-command capacity, and retained tests earn their cost through useful
 regression signal. Valuable checks stay gated or move to an appropriate queue
@@ -40,6 +41,8 @@ Decisions (maintainer, 2026-10-13):
 
 - macOS and Windows run in the merge queue, not on every PR push. The fast
   platform test suites move with them; the rest of Nightly stays nightly.
+  Superseded 2026-10-19: they run nightly on `main` and are required on
+  `release`.
 - Caches move to Cloudflare R2: mbx's S3 backend for Rust, and `nix.moq.dev`
   replacing Cachix for Nix. The infra lives in `infra/` beside apt and rpm,
   checked in where wrangler allows; one-time commands where it does not.
@@ -50,21 +53,37 @@ Decisions (maintainer, 2026-10-13):
   and run uncached.
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
   spare-desktop runner, its cache server, and the cache release it waited on.
+  Reopened 2026-10-19, conditionally: [faster runners](/quest/m0/ci/runners.md)
+  compares it again once the pipeline is optimized.
 
 Decided 2026-10-15: local CPU admission, test-cost reductions, and setup
 reductions are all m0. `quest gate` owns generic command admission; repositories
 adopt it through their entrypoints. Agents remain concurrent. Selective test
 retirement is allowed with evidence and an explicit coverage tradeoff, replacing
-the earlier blanket no-shrink constraint. Check/Test remain on PRs and the queue.
+the earlier blanket no-shrink constraint. Check/Test remain on PRs and the queue
+(superseded 2026-10-19, below).
+
+Decided 2026-10-19, to cut review-to-merge latency and CI spend: cloud CI runs
+only in the merge queue, and contributors and agents run `just ci` locally
+before pushing. The queue's Linux gate becomes one job once Check sheds its
+feature permutations and release-profile builds. Expensive and optional checks
+run nightly on `main` and are required on `release`. Faster runners come last,
+chosen from measurements of the optimized pipeline. Each CI pass costs twice
+per merged PR today (PR and queue), at 13 minutes median and 26 minutes p90 of
+wall time per PR run.
 
 Measure each change against a current baseline and record the result in its PR.
 The historical samples locate candidates; they are not controlled benchmarks.
 
 ## Required
 
+- [Cloud CI only in the queue](/quest/m0/ci/queue-only.md) - main PRs skip cloud CI, `just ci` runs the queue's gate locally, and optional workflows move to nightly and release PRs
+- [One CI pass](/quest/m0/ci/one-pass.md) - the queue's Linux gate is one `just ci` job once Check sheds its permutations
+- [Require the release gates](/quest/m0/ci/release-gates.md) - release PRs require platform and the optional workflows; main requires only the Linux gate
+- [CI pipeline audit](/quest/m0/ci/audit.md) - every queue and nightly job earns its minutes, and the Rust cache reuses unchanged crates
 - [Pin Quest's gate](/quest/m0/ci/quest-gate-pin.md) - make shared command admission available
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
-- [Require platform gates](/quest/m0/ci/platform-queue.md) - activate the consolidated platform checks in the main and release rulesets after the workflow lands
 - [mbx on R2](/quest/m0/ci/mbx-r2.md) - Rust builds on every OS read an R2 cache that only `main` writes, escaping the 10 GB Actions cache
 - [Nix cache](/quest/m0/ci/nix-cache.md) - `nix.moq.dev` on R2 replaces Cachix for CI and releases
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the first `moq-ffi-v*` tag that runs `Release FFI`, and a `Shipping sizes` run; verify the wrappers and size keys
+- [Faster runners](/quest/m0/ci/runners.md) - pick hosted, Blacksmith or the NixOS desktop from measurements of the optimized queue

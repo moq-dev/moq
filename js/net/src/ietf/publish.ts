@@ -153,26 +153,6 @@ export class Publish {
 	}
 }
 
-export class PublishOk {
-	static id = 0x1e;
-
-	async #encode(_w: Writer): Promise<void> {
-		throw new Error("PUBLISH_OK messages are not supported");
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<PublishOk> {
-		return Message.decode(r, PublishOk.#decode);
-	}
-
-	static async #decode(_r: Reader): Promise<PublishOk> {
-		throw new Error("PUBLISH_OK messages are not supported");
-	}
-}
-
 export class PublishError {
 	static id = 0x1f;
 
