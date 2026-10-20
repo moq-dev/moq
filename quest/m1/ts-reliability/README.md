@@ -99,10 +99,8 @@ remain with their current quests.
 
 ## Required
 
-- [Deterministic grading](/quest/m1/ts-reliability/grader-determinism.md) - the same input gets the same start and the same verdict
 - [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
 - [Sequence holes get a time budget](/quest/m1/ts-reliability/hole-budget.md) - a hole gives up on max(wall, pts), so a break marker behind it on a paused track is delivered
-- [AUD first](/quest/m1/ts-reliability/aud-first.md) - a keyframe's access unit delimiter stays ahead of the re-injected parameter sets
 - [TS source front end](/quest/m1/ts-reliability/source-front-end.md) - cli.md says to pipe a TS source's bytes, and the first PMT logs what each stream became
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
 

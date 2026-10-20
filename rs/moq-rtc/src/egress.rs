@@ -1172,7 +1172,12 @@ mod tests {
 		assert_eq!(written(&mut writes).await.as_ref(), b"low-0");
 
 		drop(writes);
-		tokio::time::timeout(Duration::from_secs(1), low.demand().unused())
+		let mut demand = low.demand();
+		let unwanted = async {
+			while demand.wanted_changed().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
+		tokio::time::timeout(Duration::from_secs(1), unwanted)
 			.await
 			.expect("the line unsubscribes")
 			.unwrap();

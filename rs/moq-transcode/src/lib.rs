@@ -1249,7 +1249,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_idle_rung_leaves_its_source_unused() {
 		let source = source_catalog(320, 240);
-		let demand = source._track.demand();
+		let mut demand = source._track.demand();
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -1274,21 +1274,29 @@ mod tests {
 			snapshot.video.renditions.contains_key("video/120p")
 		})
 		.await;
-		assert!(!demand.is_used(), "the published ladder holds its source");
+		assert_eq!(demand.wanted(), None, "the published ladder holds its source");
 
 		// A held query is demand, so the rung starts encoding and subscribes to the
 		// source.
 		let rung = consumer.track("video/120p").unwrap();
 		let mut query = rung.query();
 		(&mut query).await.unwrap();
-		tokio::time::timeout(std::time::Duration::from_secs(5), demand.used())
+		let wanted = async {
+			while demand.wanted_changed().await?.is_none() {}
+			moq_net::Result::Ok(())
+		};
+		tokio::time::timeout(std::time::Duration::from_secs(5), wanted)
 			.await
 			.expect("the rung never asked for its source")
 			.unwrap();
 
 		// Its task outlives the viewer, idle until the next one.
 		drop(query);
-		tokio::time::timeout(std::time::Duration::from_secs(5), demand.unused())
+		let unwanted = async {
+			while demand.wanted_changed().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
+		tokio::time::timeout(std::time::Duration::from_secs(5), unwanted)
 			.await
 			.expect("the idle rung kept its source wanted")
 			.unwrap();
@@ -1550,7 +1558,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn ended_demand_finishes_the_open_live_group() {
 		let source = source_catalog(320, 240);
-		let source_demand = source._track.demand();
+		let mut source_demand = source._track.demand();
 		// Parks the rung's own fetch of the group below, so that fetch is demand
 		// for as long as the caller holds it and nothing else serves it.
 		let _source_fetches = source._track.dynamic();
@@ -1614,11 +1622,14 @@ mod tests {
 		// The only demand ends with output group 0 still open.
 		drop(fetching);
 		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-		assert!(source_demand.is_used(), "the live path left its source mid-group");
+		assert!(
+			source_demand.wanted().is_some(),
+			"the live path left its source mid-group"
+		);
 
 		// Once the source group ends, the live path finishes its copy and leaves.
 		group.finish().unwrap();
-		source_demand.unused().await.unwrap();
+		while source_demand.wanted_changed().await.unwrap().is_some() {}
 
 		let mut frames = 0;
 		while fetched.read_frame().await.expect("group 0 was aborted").is_some() {
@@ -1640,7 +1651,7 @@ mod tests {
 	async fn ended_demand_opens_no_new_live_group() {
 		for _ in 0..8 {
 			let source = source_catalog(320, 240);
-			let source_demand = source._track.demand();
+			let mut source_demand = source._track.demand();
 			// Parks the rung's own fetch of the group below, so that fetch is
 			// demand for as long as the caller holds it and nothing else serves it.
 			let _source_fetches = source._track.dynamic();
@@ -1708,7 +1719,11 @@ mod tests {
 			write(&mut next, &[66_666]);
 			drop(fetching);
 
-			tokio::time::timeout(std::time::Duration::from_secs(10), source_demand.unused())
+			let unwanted = async {
+				while source_demand.wanted_changed().await?.is_some() {}
+				moq_net::Result::Ok(())
+			};
+			tokio::time::timeout(std::time::Duration::from_secs(10), unwanted)
 				.await
 				.expect("the live path opened a group nobody asked for")
 				.unwrap();
