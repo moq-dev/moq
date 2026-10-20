@@ -27,7 +27,7 @@ use std::task::{Poll, ready};
 use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
-use super::subscription::{Anchor, Cap, Position, Resolved, Subscription, Window};
+use super::subscription::{Anchor, Cap, Position, Resolved, Subscription, Unheld, Window};
 
 /// What the front says about a logical track: the copy to read now, and how it ended.
 #[derive(Default)]
@@ -173,7 +173,7 @@ impl Consumer {
 	/// Subscribe to the logical track with the reader's own preferences.
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let mirrored = subscription.read().clone();
-		let window = Window::new(&mirrored.ranges, None);
+		let window = Window::new(&mirrored.ranges, None, &Unheld).expect("an unheld hop refuses nothing");
 		// An absolute floor holds from the start, as on a plain cursor; a relative one
 		// counts back from an edge, so the reported largest is never below it.
 		let floor = window.floor().unwrap_or(0);
@@ -627,16 +627,20 @@ impl Reader {
 					start: match range.start {
 						// The farthest offset reaches back to the oldest group, which names no floor.
 						Anchor::Relative(back) if back != u64::MAX => Anchor::Absolute(Position::group(resolved.start)),
+						Anchor::Time(_) => Anchor::Absolute(Position::group(resolved.start)),
 						start => start,
 					},
+					// A time end the copy has not settled stays one: its cap is not the end.
 					end: match (range.end, resolved.end) {
-						(Some(Anchor::Relative(_)), Some(end)) => Some(Anchor::Absolute(Position::group(end))),
+						(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => {
+							Some(Anchor::Absolute(Position::group(end)))
+						}
 						(end, _) => end,
 					},
 				}
 			})
 			.collect();
-		let window = Window::new(&ranges, None);
+		let window = Window::new(&ranges, None, &Unheld).expect("an unheld hop refuses nothing");
 		if !window.is_pending() {
 			self.window = window;
 		}
@@ -657,7 +661,7 @@ impl Reader {
 		if let Some(sub) = changed {
 			let replaced = sub.ranges != self.mirrored.ranges;
 			if replaced {
-				self.window = Window::new(&sub.ranges, None);
+				self.window = Window::new(&sub.ranges, None, &Unheld).expect("an unheld hop refuses nothing");
 			}
 			self.mirrored = sub;
 			for copy in &mut self.copies {
@@ -2475,16 +2479,23 @@ mod test {
 		assert_eq!(recv(&mut sub).sequence, 6);
 	}
 
-	/// A replacement copy keeps a later range disjoint: the floor raises nothing above it,
-	/// and capping the replaced copy never widens its end.
+	/// A replacement copy keeps each range where the serving copy resolved it: the floor
+	/// raises a later time range's start rather than lowering it to the floor, and capping
+	/// the replaced copy never widens a time end.
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_replacement_keeps_a_later_range_disjoint() {
+	fn a_replacement_keeps_a_later_time_range_disjoint() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();
 		routes.serve(a.consume());
-		let ranges = [track::Range::groups(0..1), track::Range::groups(10..12)];
+		let ranges = [
+			track::Range::groups(0..1),
+			track::Range {
+				start: track::Anchor::Time(ts(10_000)),
+				end: Some(track::Anchor::Time(ts(11_000))),
+			},
+		];
 		let subscription = Subscription::default()
 			.with_max_delay(Duration::from_secs(30))
 			.with_ranges(ranges);
@@ -2520,11 +2531,11 @@ mod test {
 		assert_eq!(rest, vec![10, 11]);
 	}
 
-	/// A replacement updated to a relative range it cannot resolve yet asks for that range,
+	/// A replacement updated to a time range it cannot resolve yet asks for that range,
 	/// not everything from the floor: before it answers, and once it answers with nothing
 	/// to resolve it against.
 	#[test]
-	fn a_replacement_keeps_an_updated_relative_start() {
+	fn a_replacement_keeps_an_updated_time_start() {
 		let routes = Producer::new();
 		let a = copy();
 		routes.serve(a.consume());
@@ -2535,7 +2546,7 @@ mod test {
 		let copy = &mut reader.copies[0];
 		copy.floor = Some(Position::group(0));
 		let ranges = vec![track::Range {
-			start: track::Anchor::Relative(3),
+			start: track::Anchor::Time(ts(10_000)),
 			end: None,
 		}];
 		let updated = Subscription::default().with_ranges(ranges.clone());
@@ -2604,7 +2615,7 @@ mod test {
 		// The read subscribes the replacement, which has not answered yet.
 		assert!(sub.recv_group().now_or_never().is_none());
 		let ranges = [track::Range {
-			start: track::Anchor::Relative(2),
+			start: track::Anchor::Time(ts(10_000)),
 			end: None,
 		}];
 		sub.update(sub.subscription().with_ranges(ranges)).unwrap();
@@ -2623,8 +2634,8 @@ mod test {
 		assert!(sub.recv_group().now_or_never().is_none());
 		let start = c.subscription().expect("subscribed").ranges[0].start;
 		assert!(
-			matches!(start, track::Anchor::Absolute(_)),
-			"the replacement asks from where b resolved the relative start: {start:?}"
+			matches!(start, track::Anchor::Absolute(position) if position.group >= 10),
+			"the replacement asks from where b resolved the time: {start:?}"
 		);
 	}
 

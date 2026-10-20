@@ -22,7 +22,7 @@ use super::{Datagram, Requests};
 
 use super::Cap;
 pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
-use super::subscription::{Resolved, Window};
+use super::subscription::{Containing, Held, Holdings, Resolved, Window, later};
 use rangemap::{RangeInclusiveSet, RangeSet};
 
 mod demand;
@@ -351,6 +351,11 @@ pub(crate) struct TrackState {
 	// the read guard a first frame holds, so it needs its own lock, never contended.
 	bounds: Mutex<BTreeMap<u64, Timestamp>>,
 
+	// Where each cached group's frame 0 presented, by sequence, received groups too: what
+	// a time anchor resolves against without walking groups that have not started. Filled
+	// through the read guard a first frame holds, like `bounds`.
+	starts: Mutex<BTreeMap<u64, Timestamp>>,
+
 	// The sequence and start of the highest-sequence group that left the cache holding a
 	// checked start (see [`group::Origin::Bound`]). Eviction is not a sequence prefix, so a
 	// group above it is checked against it as well as its cached neighbors; one at or below
@@ -589,6 +594,20 @@ impl Slot {
 		}
 	}
 
+	/// Where the group starts in presentation time, from a live copy holding frame 0. A
+	/// copy joined mid-group stamps a later frame, which proves nothing about the start.
+	fn start(&self) -> Option<Timestamp> {
+		self.copies()
+			.filter(|group| group.live_first_frame() == Some(0))
+			.find_map(group::Producer::timestamp)
+	}
+
+	/// Whether the group has no start yet but may still get one: a copy holding frame 0
+	/// has not presented it.
+	fn may_start(&self) -> bool {
+		self.start().is_none() && self.copies().any(group::Producer::may_start)
+	}
+
 	/// The checked start of whichever copy began at frame 0.
 	fn bound(&self) -> Option<Timestamp> {
 		self.copies().find_map(group::Producer::bound)
@@ -649,6 +668,71 @@ pub(crate) struct FetchOutcome {
 	// An accept still refuses joined fetches the cached group cannot cover, without
 	// giving the request's demand watcher a rejection reason.
 	accepted: bool,
+}
+
+/// Where the groups this hop holds start, for resolving time anchors: ordered lookups in
+/// the starts index and the cache, so no query walks more than the run it answers.
+impl Holdings for TrackState {
+	fn timed(&self) -> bool {
+		self.info.as_ref().is_none_or(|info| info.timescale.is_some())
+	}
+
+	fn containing(&self, pts: Timestamp) -> Containing {
+		let starts = self.starts.lock().unwrap_or_else(PoisonError::into_inner);
+		let (Some((&first, &first_at)), Some((&last, &last_at))) = (starts.first_key_value(), starts.last_key_value())
+		else {
+			return Containing::Unknown;
+		};
+		if later(first_at, pts) {
+			return Containing::Before;
+		}
+		if !later(last_at, pts) {
+			return Containing::Group(last);
+		}
+		// Timestamps never rewind, so the starts ascend with the sequence: bisect the
+		// sequences between the newest start known at or before `pts` and one known after.
+		let (mut best, mut low, mut high) = (first, first, last);
+		while high - low > 1 {
+			let mid = low + (high - low) / 2;
+			match starts.range(low + 1..=mid).next_back() {
+				Some((&sequence, &at)) if later(at, pts) => high = sequence,
+				Some((&sequence, _)) => (best, low) = (sequence, mid),
+				None => low = mid,
+			}
+		}
+		Containing::Group(best)
+	}
+
+	fn next_start(&self, from: u64) -> Option<(u64, Timestamp)> {
+		let starts = self.starts.lock().unwrap_or_else(PoisonError::into_inner);
+		starts.range(from..).next().map(|(&sequence, &at)| (sequence, at))
+	}
+
+	fn next_held(&self, from: u64) -> Option<(u64, Held)> {
+		let (&sequence, slot) = self.lookup.range(from..).next()?;
+		let held = match slot.start() {
+			Some(at) => Held::Started(at),
+			None if slot.may_start() => Held::Pending,
+			None => Held::Never,
+		};
+		Some((sequence, held))
+	}
+
+	fn gone(&self, sequence: u64) -> Option<u64> {
+		// Without a declared start, the first arrival stands in for it, as the tail's does.
+		let floor = self.start_sequence.or(self.arrivals.first()).unwrap_or(0);
+		if sequence < floor {
+			return Some(floor);
+		}
+		self.drops
+			.get(&sequence)
+			.map(|dropped| dropped.end)
+			.or_else(|| self.arrivals.run_end(sequence))
+	}
+
+	fn complete(&self) -> bool {
+		self.sealed || self.abort.is_some()
+	}
 }
 
 impl TrackState {
@@ -719,9 +803,31 @@ impl TrackState {
 		})
 	}
 
+	/// Group `sequence` wrote its first frame: index where it starts, and share a
+	/// just-checked `bound` with its neighbors.
+	pub(super) fn first_frame(&self, sequence: u64, bound: Option<Timestamp>) {
+		if let Some(bound) = bound {
+			self.share_bound(sequence, bound);
+		}
+		self.index_start(sequence);
+	}
+
+	/// Index where cached group `sequence` starts, read back through its slot so only the
+	/// cached copy holding frame 0 counts, and wake the reads a time end parks on it.
+	fn index_start(&self, sequence: u64) {
+		let Some(start) = self.lookup.get(&sequence).and_then(Slot::start) else {
+			return;
+		};
+		self.starts
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.insert(sequence, start);
+		self.cache.wakes().started(sequence);
+	}
+
 	/// Record group `sequence`'s just-checked `start` as a bound for its neighbors and the
 	/// name's later producers. A group stamped after it left the cache bounds nothing.
-	pub(super) fn share_bound(&self, sequence: u64, start: Timestamp) {
+	fn share_bound(&self, sequence: u64, start: Timestamp) {
 		if self.lookup.get(&sequence).and_then(Slot::bound) != Some(start) {
 			return;
 		}
@@ -1461,6 +1567,10 @@ impl TrackState {
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
 			.retain(|sequence, _| lookup.contains_key(sequence));
+		self.starts
+			.get_mut()
+			.unwrap_or_else(PoisonError::into_inner)
+			.retain(|sequence, _| lookup.contains_key(sequence));
 	}
 
 	/// Take `sequence` out of the cache, keeping the withheld count in step.
@@ -1468,6 +1578,10 @@ impl TrackState {
 		let slot = self.lookup.remove(&sequence)?;
 		self.withheld -= usize::from(slot.pending);
 		self.bounds
+			.get_mut()
+			.unwrap_or_else(PoisonError::into_inner)
+			.remove(&sequence);
+		self.starts
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
 			.remove(&sequence);
@@ -1632,6 +1746,8 @@ impl TrackState {
 				.unwrap_or_else(PoisonError::into_inner)
 				.remove(&sequence);
 		}
+		// A group inserted with its first frame already written started before it was here.
+		self.index_start(sequence);
 		self.cache.wakes().arrived(sequence..=sequence);
 		if visible && !pending {
 			self.arrival.push_back((sequence, stamp));
@@ -4147,6 +4263,7 @@ impl Subscribing {
 		// Wait until the track info is available
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
 			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
+		refuse_untimed(&info, &self.subscription.read())?;
 
 		let resume = self.state.read().routes.clone();
 		let inner = match resume {
@@ -4987,6 +5104,8 @@ struct Filter {
 	resolved: u64,
 	/// Bumped whenever the window moves, so the drop scan knows to look again.
 	revision: u64,
+	/// Why the ranges can't be served here: a time anchor on an untimed track.
+	refused: Option<Error>,
 	/// What the arrival walk reads: the window from the floor, below the cap. The walk
 	/// passes a group outside it holding nothing, so widening it re-scans the cache.
 	admitted: RangeInclusiveSet<u64>,
@@ -5009,7 +5128,10 @@ impl Cursor {
 			let preferences = subscription.read();
 			let ranges_revision = subscription.ranges_revision();
 			let state = state.read();
-			let window = Window::new(&preferences.ranges, state.newest_produced);
+			let (window, refused) = match Window::new(&preferences.ranges, state.newest_produced, &*state) {
+				Ok(window) => (window, None),
+				Err(err) => (Window::new(&[], None, &*state).expect("nothing to refuse"), Some(err)),
+			};
 			// Arrival order need not be timestamp order. Only skip the initial stale prefix;
 			// subsequent delivery stays in arrival order, including late datagrams.
 			let newest = state.datagrams.iter().filter_map(|datagram| datagram.timestamp).max();
@@ -5029,6 +5151,7 @@ impl Cursor {
 				window,
 				resolved: ranges_revision,
 				revision: 0,
+				refused,
 				admitted: RangeInclusiveSet::new(),
 				admitted_at: None,
 				owed: RangeInclusiveSet::new(),
@@ -5110,8 +5233,8 @@ impl Cursor {
 
 	/// Bring [`Self::window`] up to date: resolved again once the subscriber replaces its
 	/// ranges, counting relative anchors back from the latest group then, and settled as
-	/// the groups it waits on arrive.
-	fn sync(&mut self) {
+	/// the groups it waits on arrive. Returns whether the window moved.
+	fn sync(&mut self) -> bool {
 		let replaced = {
 			let preferences = self.subscription.read();
 			let revision = self.subscription.ranges_revision();
@@ -5121,18 +5244,50 @@ impl Cursor {
 		let moved = match replaced {
 			Some((revision, ranges)) => {
 				self.filter.resolved = revision;
-				self.filter.window = Window::new(&ranges, state.newest_produced);
+				match Window::new(&ranges, state.newest_produced, &*state) {
+					Ok(window) => {
+						self.filter.window = window;
+						self.filter.refused = None;
+					}
+					Err(err) => self.filter.refused = Some(err),
+				}
 				true
 			}
+			None if self.filter.window.is_settled() => false,
 			// The track had no produced group when the ranges resolved, so the newest one
 			// then was the first to arrive, however many have arrived or left since.
-			None => self.filter.window.settle(state.first_produced),
+			None if self.filter.window.is_pending() => self.filter.window.settle(state.first_produced, &*state),
+			None => self.filter.window.settle(state.newest_produced, &*state),
 		};
 		drop(state);
 		if moved {
 			self.filter.revision += 1;
 			self.update_servable();
 		}
+		moved
+	}
+
+	/// Park a read the cap of an unsettled time end holds back on what raises it: the
+	/// speculative group starting or ending, or any group it waits on starting. Returns
+	/// whether the cap already moved, so the read goes again rather than parking.
+	fn watch_time(&mut self, waiter: &kio::Waiter) -> bool {
+		if self.filter.window.is_settled() || self.filter.refused.is_some() {
+			return false;
+		}
+		{
+			let state = self.state.read();
+			if let Some(from) = self.filter.window.watch_starts() {
+				state.cache.wakes().watch_start(from, waiter);
+			}
+			for sequence in self.filter.window.speculative() {
+				if let Some(slot) = state.lookup.get(&sequence) {
+					let _ = slot.serving().poll_started(waiter);
+				}
+			}
+		}
+		// Registered first, so a start landing since the last sync is either seen here or
+		// wakes the read.
+		self.sync()
 	}
 
 	/// The lowest group this cursor reads: its own floor, raised to its window's.
@@ -5330,6 +5485,9 @@ impl Cursor {
 			return Poll::Ready(Ok(Some(self.with_expiry(peeked.group))));
 		}
 		self.sync();
+		if let Some(err) = &self.filter.refused {
+			return Poll::Ready(Err(err.clone()));
+		}
 		self.admit();
 
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
@@ -5361,9 +5519,12 @@ impl Cursor {
 				}
 				None => {
 					let floor = self.floor();
-					let Some((producer, found_index)) =
-						ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, floor))?)
-					else {
+					let polled = self.poll(waiter, |state| state.poll_recv_group(self.index, floor));
+					if polled.is_pending() && self.watch_time(waiter) {
+						self.admit();
+						continue;
+					}
+					let Some((producer, found_index)) = ready!(polled)? else {
 						return Poll::Ready(Ok(None));
 					};
 					let consumer = producer.consume();
@@ -5374,8 +5535,8 @@ impl Cursor {
 					}
 
 					// The first group to arrive resolves a relative floor, which may land
-					// above it.
-					if self.filter.window.is_pending() {
+					// above it, and a later one may settle where a time end falls.
+					if !self.filter.window.is_settled() {
 						self.sync();
 						self.admit();
 						// The snapshot saw the pending window, which serves everything.
@@ -5446,6 +5607,11 @@ impl Cursor {
 	/// group past the cap, nothing holds it for a later raise.
 	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<super::datagram::Stored>>> {
 		loop {
+			// Refuse before reading, so a refused subscription consumes no datagram.
+			self.sync();
+			if let Some(err) = &self.filter.refused {
+				return Poll::Ready(Err(err.clone()));
+			}
 			let Some((datagram, found_index)) =
 				ready!(self.poll(waiter, |state| state.poll_recv_datagram(self.datagram_index))?)
 			else {
@@ -5459,7 +5625,10 @@ impl Cursor {
 				start.group == sequence
 					&& start.frame > datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0)
 			});
-			if sequence >= self.floor() && self.admits(sequence) && !mid_group {
+			// A datagram is a whole group, so its own timestamp places it against a time end.
+			let admits = super::subscription::before_end(sequence, self.end_sequence)
+				&& self.filter.window.admits_datagram(sequence, datagram.timestamp);
+			if sequence >= self.floor() && admits && !mid_group {
 				return Poll::Ready(Ok(Some(datagram)));
 			}
 		}
@@ -5475,6 +5644,9 @@ impl Cursor {
 			return Poll::Ready(Ok(None));
 		};
 		self.sync();
+		if let Some(err) = &self.filter.refused {
+			return Poll::Ready(Err(err.clone()));
+		}
 		let floor = next.max(self.floor());
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(&self.servable, waiter))?;
@@ -5493,8 +5665,11 @@ impl Cursor {
 		let end = self.end_sequence;
 		let group = loop {
 			let window = &self.filter.window;
-			let Some(producer) = ready!(self.poll(waiter, |state| state.poll_next_in_range(floor, end, window))?)
-			else {
+			let polled = self.poll(waiter, |state| state.poll_next_in_range(floor, end, window));
+			if polled.is_pending() && self.watch_time(waiter) {
+				continue;
+			}
+			let Some(producer) = ready!(polled)? else {
 				// Deliberately no flush of `seek_pending` here: only a delivery commit
 				// may count a conviction. This `None` can be an artifact of a floor
 				// that will lower again. A conviction never committed is dropped
@@ -5503,8 +5678,9 @@ impl Cursor {
 			};
 			let group = producer.consume();
 
-			// The first group to arrive resolves a relative floor, which may land above it.
-			if self.filter.window.is_pending() {
+			// The first group to arrive resolves a relative floor, which may land above it, and
+			// a later one may settle where a time end falls.
+			if !self.filter.window.is_settled() {
 				self.sync();
 				// The snapshot saw the pending window, which serves everything.
 				if !self.filter.window.is_pending() {
@@ -5583,6 +5759,8 @@ pub struct Control {
 	/// group it handed out is judged against them before the cursor next reads. `None`
 	/// for a reader that follows a route, whose copies take them on its next read.
 	republish: Option<Republish>,
+	// Whether the track is timed, so a time anchor on an untimed one is refused.
+	timed: bool,
 }
 
 /// What a [`Control`] needs to republish a plain cursor's [`Published`] window.
@@ -5606,7 +5784,12 @@ impl Republish {
 		if published.read().revision >= revision {
 			return;
 		}
-		let window = Window::new(&ranges, self.state.read().newest_produced);
+		let state = self.state.read();
+		// The update was refused before it got here if the track can't resolve it.
+		let Ok(window) = Window::new(&ranges, state.newest_produced, &*state) else {
+			return;
+		};
+		drop(state);
 		let runs = Arc::new(admitted(&window, 0, None));
 		if let Ok(mut current) = published.write()
 			&& current.revision < revision
@@ -5625,13 +5808,25 @@ impl Control {
 	/// Replace this subscriber's preferences, updating the producer's aggregate.
 	///
 	/// Returns [`Error::Closed`] if the track already ended; the update is
-	/// meaningless at that point and can usually be ignored.
+	/// meaningless at that point and can usually be ignored. Refuses a time anchor on
+	/// an untimed track with [`Error::TimestampMismatch`], leaving the preferences as they were.
 	pub fn update(&self, subscription: Subscription) -> Result<()> {
+		if !self.timed && subscription.has_time() {
+			return Err(Error::TimestampMismatch);
+		}
 		self.subscription.update(subscription)?;
 		if let Some(republish) = &self.republish {
 			republish.publish(&self.subscription);
 		}
 		Ok(())
+	}
+}
+
+/// Refuse `subscription` when it asks an untimed track for a presentation time.
+fn refuse_untimed(info: &Info, subscription: &Subscription) -> Result<()> {
+	match info.timescale.is_none() && subscription.has_time() {
+		true => Err(Error::TimestampMismatch),
+		false => Ok(()),
 	}
 }
 
@@ -5674,6 +5869,7 @@ impl Subscriber {
 
 	/// Create a handle for updating this subscriber's delivery preferences.
 	pub fn control(&self) -> Control {
+		let timed = self.info.timescale.is_some();
 		match &self.inner {
 			Inner::Plain(cursor) => Control {
 				subscription: cursor.subscription.clone(),
@@ -5681,10 +5877,12 @@ impl Subscriber {
 					state: cursor.state.weak(),
 					published: cursor.published.weak(),
 				}),
+				timed,
 			},
 			Inner::Resume(resume, _) => Control {
 				subscription: resume.subscription().clone(),
 				republish: None,
+				timed,
 			},
 		}
 	}
@@ -6002,7 +6200,9 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => {
 				let state = cursor.state.read();
-				Window::new(ranges, state.newest_produced).resolved()
+				Window::new(ranges, state.newest_produced, &*state)
+					.map(|window| window.resolved())
+					.unwrap_or_default()
 			}
 			Inner::Resume(..) => Vec::new(),
 		}
@@ -6162,8 +6362,10 @@ impl Subscriber {
 	/// the cached groups they newly cover, even ones that arrived before the groups
 	/// already read. Returns [`Error::Closed`]
 	/// if the track already ended; the update is meaningless at that point and can usually
-	/// be ignored.
+	/// be ignored. Refuses a time anchor on an untimed track with
+	/// [`Error::TimestampMismatch`], leaving the preferences as they were.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
+		refuse_untimed(&self.info, &subscription)?;
 		let channel = match &self.inner {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
@@ -14786,5 +14988,175 @@ mod test {
 			dropped.push(range);
 		}
 		assert_eq!(dropped, vec![2..4, 6..8]);
+	}
+
+	/// A time start is the cached group containing it and a time end stops just past that
+	/// group; one past every start held stays open until a group starts after it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn time_anchors_resolve_against_the_cache() {
+		let mut producer = track_producer("test", Info::timed());
+		for second in 0..4 {
+			append_at(&mut producer, second * 1000);
+		}
+		let time = |millis| Anchor::Time(Timestamp::from_millis(millis).unwrap());
+
+		let mut seek = producer.subscribe(replay().with_ranges([Range {
+			start: time(1500),
+			end: Some(time(2000)),
+		}]));
+		assert_eq!(drain(&mut seek), vec![1, 2]);
+
+		// A start before every group reaches back to the oldest one.
+		let mut early = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Time(Timestamp::from_micros(0).unwrap()),
+			end: Some(time(500)),
+		}]));
+		assert_eq!(drain(&mut early), vec![0]);
+
+		// Past the newest start: open until a group is known to start after the end.
+		let mut live = producer.subscribe(replay().with_ranges([Range {
+			start: time(3000),
+			end: Some(time(4500)),
+		}]));
+		assert_eq!(drain(&mut live), vec![3]);
+		append_at(&mut producer, 4000);
+		append_at(&mut producer, 5000);
+		append_at(&mut producer, 6000);
+		assert_eq!(drain(&mut live), vec![4]);
+	}
+
+	/// A group joined mid-group stamps a later frame than its start, so it never proves a
+	/// time end falls before it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_partial_group_proves_no_start() {
+		let mut producer = track_producer("test", Info::timed());
+		append_at(&mut producer, 0);
+		append_at(&mut producer, 1000);
+		let mut partial = producer.append_group().unwrap();
+		partial.start_at(1).unwrap();
+		partial
+			.write_frame(Timestamp::from_millis(2500).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		partial.finish().unwrap();
+
+		let time = |millis| Anchor::Time(Timestamp::from_millis(millis).unwrap());
+		let mut seek = producer.subscribe(replay().with_ranges([Range {
+			start: time(1500),
+			end: Some(time(2200)),
+		}]));
+		assert_eq!(drain(&mut seek), vec![1, 2]);
+	}
+
+	/// A time end stays open across a group that has yet to start: it may start before the
+	/// end, so a later group starting after it settles nothing.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_end_waits_on_an_unstarted_group_below_it() {
+		let producer = track_producer("test", Info::timed());
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut zero = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		zero.write_frame(at(0), bytes::Bytes::from_static(b"x")).unwrap();
+		let mut hole = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		let mut two = producer.create_group(group::Info { sequence: 2 }).unwrap();
+		two.write_frame(at(2000), bytes::Bytes::from_static(b"x")).unwrap();
+
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Absolute(Position::group(0)),
+			end: Some(Anchor::Time(at(500))),
+		}]));
+		hole.write_frame(at(1000), bytes::Bytes::from_static(b"x")).unwrap();
+		assert_eq!(drain(&mut subscriber), vec![0]);
+	}
+
+	/// A time end stays open across a sequence yet to arrive: it may start before the end,
+	/// so a later group starting after it settles nothing. Once that sequence is reported
+	/// dropped, nothing below the later group can start before the end, so it settles.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_end_waits_on_an_absent_group_below_it() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let ranges = [Range {
+			start: Anchor::Absolute(Position::group(0)),
+			end: Some(Anchor::Time(at(500))),
+		}];
+		for dropped in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			let mut zero = producer.create_group(group::Info { sequence: 0 }).unwrap();
+			zero.write_frame(at(0), bytes::Bytes::from_static(b"x")).unwrap();
+			let mut two = producer.create_group(group::Info { sequence: 2 }).unwrap();
+			two.write_frame(at(2000), bytes::Bytes::from_static(b"x")).unwrap();
+
+			let mut subscriber = producer.subscribe(replay().with_ranges(ranges));
+			assert_eq!(
+				subscriber.resolved_ranges(),
+				vec![Some(Resolved { start: 0, end: None })],
+				"group 1 may still start before the end"
+			);
+			if dropped {
+				producer.drop_groups(1..2);
+				assert_eq!(drain(&mut subscriber), vec![0]);
+				assert_eq!(
+					subscriber.resolved_ranges(),
+					vec![Some(Resolved { start: 0, end: Some(2) })],
+					"the drop settles the end"
+				);
+				continue;
+			}
+			let mut one = producer.create_group(group::Info { sequence: 1 }).unwrap();
+			one.write_frame(at(1000), bytes::Bytes::from_static(b"x")).unwrap();
+			assert_eq!(drain(&mut subscriber), vec![0]);
+		}
+	}
+
+	/// An untimed track refuses a time anchor wherever the ranges reach it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_untimed_track_refuses_time_anchors() {
+		let mut producer = untimed_producer();
+		let timed = replay().with_ranges([Range {
+			start: Anchor::Time(Timestamp::from_millis(0).unwrap()),
+			end: None,
+		}]);
+
+		let pending = producer.consume().subscribe(timed.clone());
+		assert!(matches!(
+			pending.poll_ok(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::TimestampMismatch))
+		));
+
+		let mut subscriber = producer.subscribe(replay());
+		assert!(matches!(
+			subscriber.update(timed.clone()),
+			Err(Error::TimestampMismatch)
+		));
+		assert!(matches!(
+			subscriber.control().update(timed.clone()),
+			Err(Error::TimestampMismatch)
+		));
+		assert_eq!(subscriber.subscription(), replay(), "a refused update changes nothing");
+
+		let mut refused = producer.subscribe(timed);
+		assert!(matches!(
+			refused.recv_group().now_or_never(),
+			Some(Err(Error::TimestampMismatch))
+		));
+		producer.append_datagram(None, &b"x"[..]).unwrap();
+		assert!(matches!(
+			refused.recv_datagram().now_or_never(),
+			Some(Err(Error::TimestampMismatch))
+		));
+
+		// Ranges it can serve lift the refusal.
+		refused.update(replay()).unwrap();
+		let group = producer.append_group().unwrap();
+		group.finish().unwrap();
+		let read = refused.recv_group().now_or_never().expect("the group is cached");
+		assert_eq!(
+			read.unwrap().map(|group| group.sequence),
+			Some(1),
+			"the datagram took sequence 0"
+		);
 	}
 }

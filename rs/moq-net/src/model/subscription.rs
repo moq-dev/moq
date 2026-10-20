@@ -3,8 +3,10 @@ use std::{
 	time::Duration,
 };
 
+use crate::Timestamp;
+
 mod window;
-pub(super) use window::{Resolved, Window};
+pub(super) use window::{Containing, Held, Holdings, Resolved, Unheld, Window, later};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -101,28 +103,41 @@ pub enum Order {
 	Descending,
 }
 
-/// Where one end of a [`Range`] falls: a fixed position, or a count of groups back from the
-/// latest one.
+/// Where one end of a [`Range`] falls: a fixed position, a count of groups back from the
+/// latest one, or a presentation time.
 ///
-/// A relative anchor resolves against the latest group of the hop that serves it, when it
-/// starts serving and again whenever the subscriber replaces its ranges. Before any group
-/// exists it resolves at the first one, so [`Range::live`] starts there.
+/// A relative or time anchor resolves at the hop that serves it, when it starts serving
+/// and again whenever the subscriber replaces its ranges. Before any group exists a
+/// relative anchor resolves at the first one, so [`Range::live`] starts there.
 ///
-/// No published wire carries one yet: upstream, a relative start is no floor, the same
-/// request as [`Range::oldest`], and a relative end is no end. Behind a moq-transport
-/// upstream, which joins without a floor at the live group, `Relative(n)..` starts there.
+/// No published wire carries either yet: upstream, a relative or time start is no floor,
+/// the same request as [`Range::oldest`], and a relative or time end is no end. Behind a
+/// moq-transport upstream, which joins without a floor at the live group, `Relative(n)..`
+/// starts there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Anchor {
 	/// This exact position.
 	Absolute(Position),
 	/// The group this many before the latest, clamped to group 0: `Relative(0)` is the latest group.
 	Relative(u64),
+	/// The group containing this presentation time: the newest one starting at or before it.
+	///
+	/// Resolved from the starts of the groups the serving hop holds. When none starts at
+	/// or before it, a start reaches back to the oldest group, and while no group has
+	/// started at all it waits like `Relative(0)`. An end stays open until a group
+	/// starting after it is known and every sequence below that one is accounted for
+	/// (started, dropped, or never to start), so at the live edge a reader may get every
+	/// group handed out before its first frame showed it starts past the end, and a feed
+	/// that reports no drops leaves it open across a missing group until the wait for that
+	/// group runs out. An untimed track
+	/// refuses it with [`Error::TimestampMismatch`](crate::Error::TimestampMismatch).
+	Time(Timestamp),
 }
 
 /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `None`.
 ///
-/// Relative anchors cover whole groups: a relative start is frame 0 of its group, and a
-/// relative end includes its group, so `Absolute(0)..Relative(0)` delivers through the latest
+/// Relative and time anchors cover whole groups: such a start is frame 0 of its group, and
+/// such an end includes its group, so `Absolute(0)..Relative(0)` delivers through the latest
 /// group. An absolute end is exclusive, like the end of a [`std::ops::Range`]: see
 /// [`Position::after`] and [`Position::after_group`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -230,6 +245,8 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 		(Anchor::Absolute(_), None | Some(Anchor::Absolute(_))) | (Anchor::Relative(_), None) => false,
 		(Anchor::Absolute(start), _) => tail.is_none_or(|tail| start < tail),
 		(Anchor::Relative(back), _) => farthest.is_none_or(|farthest| back > farthest),
+		// A time can't be placed against the others without the hop's groups.
+		(Anchor::Time(_), _) => true,
 	}));
 	union.extend(farthest.map(|back| Range {
 		start: Anchor::Relative(back),
@@ -346,10 +363,11 @@ impl Subscription {
 	/// These preferences with every range raised to start no earlier than `floor` and
 	/// stop no later than `end`, the exclusive end, without ever widening one.
 	///
-	/// `resolved` names where each range resolved, by index, so a relative anchor
+	/// `resolved` names where each range resolved, by index, so a relative or time anchor
 	/// becomes its own group, raised to `floor` or capped at `end`. A start not resolved
 	/// keeps its anchor, since the floor may lie before it, so the caller drops what it
-	/// resolves to below `floor`; an end not resolved becomes the bound.
+	/// resolves to below `floor`; an end not resolved becomes the bound, except a time end,
+	/// which stays so the caller enforces `end` apart from it.
 	pub(super) fn clamped(
 		&self,
 		floor: Option<Position>,
@@ -364,11 +382,15 @@ impl Subscription {
 			.map(|(index, range)| {
 				let resolved = resolved.get(index).copied().flatten().filter(|_| clamping);
 				let start = match (range.start, resolved) {
-					(Anchor::Relative(_), Some(resolved)) => Anchor::Absolute(Position::group(resolved.start)),
+					(Anchor::Relative(_) | Anchor::Time(_), Some(resolved)) => {
+						Anchor::Absolute(Position::group(resolved.start))
+					}
 					(start, _) => start,
 				};
 				let requested = match (range.end, resolved.and_then(|resolved| resolved.end)) {
-					(Some(Anchor::Relative(_)), Some(resolved)) => Some(Anchor::Absolute(Position::group(resolved))),
+					(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(resolved)) => {
+						Some(Anchor::Absolute(Position::group(resolved)))
+					}
 					(requested, _) => requested,
 				};
 				Range {
@@ -379,12 +401,22 @@ impl Subscription {
 					end: match (requested, end) {
 						(requested, None) => requested,
 						(Some(Anchor::Absolute(requested)), Some(end)) => Some(Anchor::Absolute(requested.min(end))),
+						// Folding the cap in would end the copy's time filter for good, so the
+						// caller enforces the cap itself and the copy keeps the time.
+						(Some(Anchor::Time(pts)), Some(_)) => Some(Anchor::Time(pts)),
 						(_, Some(end)) => Some(Anchor::Absolute(end)),
 					},
 				}
 			})
 			.collect();
 		Self { ranges, ..self.clone() }
+	}
+
+	/// Whether any range ends at a presentation time, which an untimed track refuses.
+	pub(super) fn has_time(&self) -> bool {
+		self.ranges
+			.iter()
+			.any(|range| matches!(range.start, Anchor::Time(_)) || matches!(range.end, Some(Anchor::Time(_))))
 	}
 
 	/// Whether a subscriber joins at the live edge: a range counting back from the latest
@@ -629,7 +661,7 @@ mod tests {
 	/// group exists only the farthest offset resolves, since it is group 0 regardless.
 	#[test]
 	fn relative_starts_resolve_against_the_latest_group() {
-		let floor = |sub: &Subscription, latest| Window::new(&sub.ranges, latest).floor();
+		let floor = |sub: &Subscription, latest| Window::new(&sub.ranges, latest, &Unheld).unwrap().floor();
 
 		let live = Subscription::default().with_ranges([Range::live()]);
 		assert_eq!(floor(&live, Some(7)), Some(7));

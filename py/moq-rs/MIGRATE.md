@@ -4,9 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Ranges filter reads (#5929)
+### Ranges filter reads, and anchors can name a time (#5929)
 
 A subscription now reads only the groups its own `ranges` cover.
+`Anchor` gains a `TIME` variant, the group containing a presentation time.
+`TrackConsumer.update` now raises on a time anchor an untimed track can't serve.
 
 ### Track demand reports the wanted group (#5930)
 
