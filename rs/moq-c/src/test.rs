@@ -1406,6 +1406,8 @@ fn publish_track_invalid_broadcast() {
 		max_age_present: false,
 		timescale: 0,
 		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
 	};
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert!(moq_publish_track_group(9999) < 0);
@@ -1435,6 +1437,8 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 		max_age_present: false,
 		timescale: 0,
 		timescale_present: true,
+		refresh: 0,
+		refresh_present: false,
 	};
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
@@ -1709,6 +1713,8 @@ fn raw_track_subscription_options_and_update() {
 		max_age_present: true,
 		timescale: 1_000_000,
 		timescale_present: true,
+		refresh: 0,
+		refresh_present: false,
 	};
 	let track =
 		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
@@ -1805,6 +1811,96 @@ fn raw_track_subscription_options_and_update() {
 }
 
 #[test]
+fn raw_track_relative_update_counts_from_the_track_edge() {
+	let origin = id(moq_origin_create());
+	let path = b"raw-track-relative";
+	let broadcast = publish_broadcast(origin, path);
+
+	let track_name = b"data";
+	let track = id(unsafe {
+		moq_publish_track(
+			broadcast,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			std::ptr::null(),
+		)
+	});
+	let publish = |payload: &[u8]| {
+		assert_eq!(
+			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), 0) },
+			0
+		);
+	};
+	let anchor = |kind: moq_anchor_kind, group: u64| moq_anchor {
+		kind: kind as u32,
+		group,
+		frame: 0,
+	};
+	let subscribe = |ranges: &[moq_range]| moq_subscription {
+		priority: 0,
+		max_delay_us: 60_000_000,
+		ranges: ranges.as_ptr(),
+		ranges_len: ranges.len(),
+		order: 0,
+	};
+	let recv = |frame_cb: &Callback| {
+		let frame_id = id(frame_cb.recv());
+		let mut frame = moq_frame {
+			payload: std::ptr::null(),
+			payload_size: 0,
+			timestamp_us: 0,
+			timestamp_present: false,
+			keyframe: false,
+		};
+		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) }.to_vec();
+		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+		received
+	};
+
+	publish(b"zero");
+	let consume = request_broadcast(origin, path);
+
+	// Group 0 only: the reader's cap sits below where the track will be.
+	let first = [moq_range {
+		start: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 0),
+		end: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 1),
+		end_present: true,
+	}];
+	let frame_cb = Callback::new();
+	let consumer = id(unsafe {
+		moq_consume_track(
+			consume,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			&subscribe(&first),
+			Some(channel_callback),
+			frame_cb.ptr,
+		)
+	});
+	assert_eq!(recv(&frame_cb), b"zero");
+
+	publish(b"one");
+	publish(b"two");
+
+	// The latest group is the track's, group 2, not the newest one under the old cap.
+	let latest = [moq_range {
+		start: anchor(moq_anchor_kind::MOQ_ANCHOR_RELATIVE, 0),
+		end: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 0),
+		end_present: false,
+	}];
+	assert_eq!(unsafe { moq_consume_track_update(consumer, &subscribe(&latest)) }, 0);
+	assert_eq!(recv(&frame_cb), b"two");
+
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn json_snapshot_publish_consume() {
 	let origin = id(moq_origin_create());
 	let path = b"json-snapshot";
@@ -1838,6 +1934,7 @@ fn json_snapshot_publish_consume() {
 		)
 	});
 
+	let mut last_us = 0;
 	for expected in [r#"{"a":1}"#, r#"{"a":2}"#] {
 		assert_eq!(
 			unsafe { moq_publish_json_snapshot_update(producer, expected.as_ptr() as *const c_char, expected.len()) },
@@ -1847,8 +1944,14 @@ fn json_snapshot_publish_consume() {
 		let mut value = moq_json_value {
 			json: std::ptr::null(),
 			json_len: 0,
+			timestamp_us: 0,
+			timestamp_present: false,
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
+		// The producer stamps each value with the broadcast clock.
+		assert!(value.timestamp_present);
+		assert!(value.timestamp_us >= last_us);
+		last_us = value.timestamp_us;
 		let received = unsafe { std::slice::from_raw_parts(value.json.cast::<u8>(), value.json_len) };
 		assert_eq!(
 			serde_json::from_slice::<serde_json::Value>(received).unwrap(),
@@ -1901,6 +2004,7 @@ fn json_stream_publish_consume() {
 		)
 	});
 
+	let mut last_us = 0;
 	for expected in [r#"{"n":0}"#, r#"{"n":1}"#, r#"{"n":2}"#] {
 		assert_eq!(
 			unsafe { moq_publish_json_stream_append(producer, expected.as_ptr() as *const c_char, expected.len()) },
@@ -1910,8 +2014,14 @@ fn json_stream_publish_consume() {
 		let mut value = moq_json_value {
 			json: std::ptr::null(),
 			json_len: 0,
+			timestamp_us: 0,
+			timestamp_present: false,
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
+		// The producer stamps each value with the broadcast clock.
+		assert!(value.timestamp_present);
+		assert!(value.timestamp_us >= last_us);
+		last_us = value.timestamp_us;
 		let received = unsafe { std::slice::from_raw_parts(value.json.cast::<u8>(), value.json_len) };
 		assert_eq!(
 			serde_json::from_slice::<serde_json::Value>(received).unwrap(),
@@ -2446,6 +2556,91 @@ fn track_demand_follows_subscribers() {
 	assert_eq!(demand_cb.recv_terminal(), 0);
 	assert!(
 		moq_publish_demand_cancel(watcher) < 0,
+		"the watcher is gone after its terminal"
+	);
+
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Read a demand watcher's wanted group, or `None` while nobody subscribes.
+fn demand_wanted(watcher: u32) -> Option<u64> {
+	let mut group = u64::MAX;
+	let mut present = true;
+	assert_eq!(
+		unsafe { moq_publish_demand_wanted(watcher, &mut group, &mut present) },
+		0
+	);
+	present.then_some(group)
+}
+
+/// Cancel a raw track subscription, freeing the frames delivered before its terminal.
+fn cancel_track(consumer: u32, cb: &Callback) {
+	assert_eq!(moq_consume_track_cancel(consumer), 0);
+	loop {
+		let code = cb.recv();
+		if code <= 0 {
+			assert_eq!(code, 0);
+			return;
+		}
+		assert_eq!(moq_consume_track_frame_free(id(code)), 0);
+	}
+}
+
+#[test]
+fn track_demand_reports_the_wanted_group() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-demand-wanted");
+	let name = b"data";
+	let info = moq_track_info {
+		priority: 127,
+		max_age_us: 0,
+		max_age_present: false,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: true,
+	};
+	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
+
+	let demand_cb = Callback::new();
+	let watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(demand_wanted(watcher), None);
+
+	// The first subscriber of a track with no group wants group 0.
+	let consume = consume_local(broadcast);
+	let first_cb = Callback::new();
+	let first = consume_track(consume, name, &first_cb);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
+	assert_eq!(demand_wanted(watcher), Some(0));
+
+	// A delta after the first frame puts the group past a `refresh` of 0.
+	let group = id(moq_publish_track_group(track));
+	for timestamp_us in [0, 1_000] {
+		assert_eq!(
+			unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), timestamp_us) },
+			0
+		);
+	}
+
+	// A joiner asks for the next group, and the callback repeats USED to say so.
+	let second_cb = Callback::new();
+	let second = consume_track(consume, name, &second_cb);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_USED as i32);
+	assert_eq!(demand_wanted(watcher), Some(1));
+
+	cancel_track(first, &first_cb);
+	cancel_track(second, &second_cb);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
+	assert_eq!(demand_wanted(watcher), None);
+
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(demand_cb.recv_terminal(), 0);
+	let (mut group, mut present) = (0, false);
+	assert!(
+		unsafe { moq_publish_demand_wanted(watcher, &mut group, &mut present) } < 0,
 		"the watcher is gone after its terminal"
 	);
 

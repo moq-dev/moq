@@ -14,7 +14,6 @@ use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::Instant;
 
 use bytes::BytesMut;
 use moq_quic::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
@@ -170,7 +169,7 @@ impl Endpoint {
 			.inner
 			.endpoint
 			.borrow_mut()
-			.connect(moq_clock::Instant::now(), client, config.peer, &config.server_name)
+			.connect(self.inner.owner.now(), client, config.peer, &config.server_name)
 			.map_err(|err| Error::Quic(err.to_string()))?;
 		let shared = self.inner.launch(key, conn);
 		// Flush the Initial flight; the demux task takes it from here.
@@ -279,10 +278,10 @@ impl Inner {
 			// The socket does not report which local address a datagram
 			// arrived on, so the four-tuple stays half known, exactly as it
 			// does on a platform without `IP_PKTINFO`.
-			let event =
-				self.endpoint
-					.borrow_mut()
-					.handle(moq_clock::Instant::now(), from, None, ecn, segment, &mut buf);
+			let event = self
+				.endpoint
+				.borrow_mut()
+				.handle(self.owner.now(), from, None, ecn, segment, &mut buf);
 			match event {
 				Some(DatagramEvent::ConnectionEvent(key, event)) => {
 					let conn = self.conns.borrow().get(&key).cloned();
@@ -359,11 +358,8 @@ impl Inner {
 		let deadline = self
 			.handshake
 			.timeout
-			.and_then(|timeout| Instant::now().checked_add(timeout));
-		let accepted = self
-			.endpoint
-			.borrow_mut()
-			.accept(incoming, moq_clock::Instant::now(), buf, None);
+			.and_then(|timeout| self.owner.now().checked_add(timeout));
+		let accepted = self.endpoint.borrow_mut().accept(incoming, self.owner.now(), buf, None);
 		let (key, conn) = match accepted {
 			Ok(accepted) => accepted,
 			Err(err) => {

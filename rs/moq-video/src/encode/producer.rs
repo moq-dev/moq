@@ -5,8 +5,12 @@
 //! nothing has been encoded yet), and the encoder itself only runs while a
 //! subscriber is watching. Capture opens its camera once at startup to learn
 //! the mode it negotiates, then keeps it closed between viewers. This mirrors
-//! `moq-boy`, which pauses its emulator on `track::Producer::used()` /
-//! `unused()`.
+//! `moq-boy`, which pauses its emulator while
+//! [`Demand::wanted`](moq_net::track::Demand::wanted) is `None`.
+//!
+//! Capture advertises [`track::Info::refresh`](moq_net::track::Info::refresh) when its encoder
+//! is sure to honor a cut, and forces a keyframe whenever a joining subscriber asks for a group
+//! past the largest. The encoder's GOP stays the upper bound between keyframes.
 
 use moq_mux::catalog::hang::CatalogExt;
 #[cfg(feature = "capture")]
@@ -33,6 +37,17 @@ use super::encoder::Codec;
 /// Last-resort framerate when neither the caller nor the camera reports one.
 #[cfg(feature = "capture")]
 const DEFAULT_FRAMERATE: Rate = Rate::integer(30);
+
+/// The [`track::Info::refresh`](moq_net::track::Info::refresh) ratio a capture advertises: a
+/// joiner forces a keyframe once a group's deltas outweigh twice its keyframe, so it downloads
+/// at most about three keyframes' worth before it can decode.
+///
+/// Measured on realtime CBR encodes (two-second GOPs at 2 to 4 Mbps), where a GOP's deltas run
+/// three to five keyframes: one join a second halves the mean joiner download for 10 to 13%
+/// more bitrate, and one every ten seconds costs about 1%. A ratio scales with the keyframe,
+/// so it holds for every rendition.
+#[cfg(feature = "capture")]
+const REFRESH: u32 = 2;
 
 /// Convert the probed rendition into the importer hint published before the first frame.
 fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::VideoHint {
@@ -78,6 +93,12 @@ enum Codecs {
 /// publishes into a catalog of the same shape.
 pub struct Producer<E: CatalogExt = ()> {
 	codecs: Codecs,
+	/// The published track, read for its largest group.
+	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
+	track: moq_net::track::Producer,
+	/// The largest group published, as last read from `track`.
+	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
+	largest: Option<u64>,
 	_ext: std::marker::PhantomData<fn() -> E>,
 }
 
@@ -123,6 +144,7 @@ impl<E: CatalogExt> Producer<E> {
 		reserved: moq_mux::catalog::Reserved<E>,
 		rendition: hang::catalog::VideoConfig,
 	) -> Result<Self, Error> {
+		let published = track.clone();
 		let codecs = match &rendition.codec {
 			hang::catalog::VideoCodec::H264(_) => Codecs::H264 {
 				split: moq_mux::codec::h264::Split::new(),
@@ -141,18 +163,32 @@ impl<E: CatalogExt> Producer<E> {
 		};
 		Ok(Self {
 			codecs,
+			track: published,
+			largest: None,
 			_ext: std::marker::PhantomData,
 		})
 	}
 
 	/// A watch-only handle to the track's subscriber demand, created eagerly so
 	/// subscription state is observable before any frames arrive. Watch it via
-	/// [`used`](moq_net::track::Demand::used) / [`unused`](moq_net::track::Demand::unused).
+	/// [`wanted`](moq_net::track::Demand::wanted) / [`wanted_changed`](moq_net::track::Demand::wanted_changed).
 	pub fn demand(&self) -> moq_net::track::Demand {
 		match &self.codecs {
 			Codecs::H264 { import, .. } => import.demand(),
 			Codecs::H265 { import, .. } => import.demand(),
 		}
+	}
+
+	/// The group a subscriber wants past the largest published, which the next frame should
+	/// open with a keyframe, or `None` while the largest serves.
+	#[cfg(feature = "capture")]
+	fn wanted(&mut self) -> Option<u64> {
+		let wanted = self.track.demand().wanted()?;
+		// Ready only when the largest moved since the last read.
+		if let std::task::Poll::Ready(Some(largest)) = self.track.poll_largest(&kio::Waiter::noop()) {
+			self.largest = Some(largest.group);
+		}
+		self.largest.is_none_or(|largest| wanted > largest).then_some(wanted)
 	}
 
 	/// Publish already-encoded frames, each at its own timestamp. Each frame is one
@@ -316,7 +352,11 @@ impl Control {
 			Codec::H264 => ".avc3",
 			Codec::H265 => ".hev1",
 		};
-		let track = broadcast.unique_track(suffix, catalog.track_info(hang::catalog::PRIORITY.video))?;
+		// Advertised only when every backend the encoder may open honors a cut, since the info
+		// is fixed before the driver learns which one it got.
+		let refresh = super::backend::always_cuts(options.encode.codec, &options.encode.kind).then_some(REFRESH);
+		let info = catalog.track_info(hang::catalog::PRIORITY.video).with_refresh(refresh);
+		let track = broadcast.unique_track(suffix, info)?;
 		let requests = kio::Producer::new(Requests::default());
 		let driver = Driver {
 			track,
@@ -330,10 +370,11 @@ impl Control {
 	/// Request a keyframe, opening a new group at a frame no earlier than this call.
 	///
 	/// For a resume, a recording cut, or a known tune-in moment; [`Config::gop`](super::Config::gop)
-	/// is the cadence. Requests coalesce into the next keyframe, whether forced or on that cadence,
-	/// and a forced one lands at least 500ms after any other, so a caller in a loop cannot pin the
-	/// encoder at all-IDR; a request that arrives too soon waits rather than being dropped. A
-	/// request while nothing is watching is served by the keyframe every fresh encoder opens with.
+	/// is the longest a group runs, and a joining subscriber already opens one through
+	/// [`track::Info::refresh`](moq_net::track::Info::refresh). Requests between two frames
+	/// coalesce into one keyframe on the next, with no spacing: a caller in a loop pins the
+	/// encoder at all-IDR. A request while nothing is watching is served by the keyframe every
+	/// fresh encoder opens with.
 	///
 	/// # Errors
 	///
@@ -623,6 +664,14 @@ fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Erro
 	producer.discontinuity()
 }
 
+/// Wait until some viewer wants the track, or none does.
+#[cfg(feature = "capture")]
+async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> Result<(), moq_net::Error> {
+	let mut demand = demand.clone();
+	while demand.wanted_changed().await?.is_some() != wanted {}
+	Ok(())
+}
+
 // Race source setup or an encode against the last viewer leaving, so an unwatched track
 // stops waiting promptly.
 #[cfg(feature = "capture")]
@@ -632,7 +681,7 @@ async fn wait_capture<T>(
 ) -> Result<Option<T>, Error> {
 	tokio::select! {
 		biased;
-		res = demand.unused() => {
+		res = until_wanted(demand, false) => {
 			if let Err(err) = res {
 				log_track_ended(err);
 			}
@@ -672,7 +721,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		// Idle until a viewer subscribes; the track ending is a clean exit. The
 		// catalog rendition was published when the track was created, so a
 		// subscriber can get here without a frame ever having been encoded.
-		if let Err(err) = demand.used().await {
+		if let Err(err) = until_wanted(demand, true).await {
 			log_track_ended(err);
 			return Ok(());
 		}
@@ -706,7 +755,8 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		};
 		// A reopen can land on another backend than the probe did, so the controls
 		// learn this one's answer before any request is counted against it.
-		let served = learn(requests, refusal(&mut encoder).await?);
+		let refused = refusal(&mut encoder).await?;
+		let served = learn(requests, refused);
 		tracing::info!(encoder = encoder.name(), device = camera.label(), "capturing");
 
 		// A reopen can negotiate a different mode (a display resized while nothing was
@@ -722,7 +772,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		// reopened camera starts optimistic again rather than inheriting the
 		// backed-off rate from whatever the link was doing last time.
 		let mut rate = Some((reservation.consumer(), rate::Control::new(rate::Policy::new(ceiling))));
-		// Per encoder, so a reopen forgets the old encoder's last keyframe along with it.
+		// Per encoder, since a fresh one opens with a keyframe that serves every earlier ask.
 		let mut forced = Cuts::new(served);
 
 		loop {
@@ -731,7 +781,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 			// unwatched track stops before reading another frame.
 			let frame = tokio::select! {
 				biased;
-				res = demand.unused() => {
+				res = until_wanted(demand, false) => {
 					if let Err(err) = res {
 						log_track_ended(err);
 						return Ok(());
@@ -752,16 +802,15 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 			let Some(mut frame) = frame else { break };
 			frame.timestamp = map_capture_timestamp(capture_epoch, frame.timestamp)?;
 			let count = counted.read().count;
-			if forced.due(count, frame.timestamp) {
+			// A backend that cannot cut leaves every group to its cadence.
+			let wanted = refused.is_none().then(|| producer.wanted()).flatten();
+			if forced.due(count, wanted) {
 				// Never refused: `Control::cut` stops counting once this encoder is known to.
 				encoder.cut().await?;
 			}
 			let Some(encoded) = wait_capture(demand, encoder.encode(frame)).await? else {
 				break;
 			};
-			for unit in encoded.iter().filter(|unit| unit.keyframe) {
-				forced.keyframe(unit.timestamp);
-			}
 			producer.publish(&encoded)?;
 		}
 
@@ -1515,8 +1564,38 @@ mod tests {
 			}
 		}
 
-		/// Drive cuts through the public control and read their group boundaries from the track.
-		async fn capture_cuts(cut_after_cadence: bool) -> Vec<usize> {
+		/// What the driver is fed next, one at a time.
+		enum Step {
+			/// A frame 10ms after the previous one, waited on until the first subscriber has it.
+			Frame(crate::frame::Surface),
+			/// A keyframe request through the public control.
+			Cut,
+			/// Another subscriber joining at the live edge, held until the end.
+			Join,
+		}
+
+		/// A frame of seeded noise, which no encoder can predict from the one before it.
+		fn noise(seed: u32) -> crate::frame::Surface {
+			let mut state = seed.wrapping_mul(2_654_435_761) | 1;
+			let data = (0..320 * 240 * 3 / 2)
+				.map(|_| {
+					state ^= state << 13;
+					state ^= state >> 17;
+					state ^= state << 5;
+					120 + (state as u8 >> 4)
+				})
+				.collect();
+			crate::frame::Surface::I420(crate::frame::I420 {
+				width: 320,
+				height: 240,
+				data,
+				color: None,
+			})
+		}
+
+		/// Drive the real driver through `steps`, returning the info the track advertised and the
+		/// payload size of every frame the first subscriber read, grouped as it read them.
+		async fn capture_groups(steps: Vec<Step>) -> (moq_net::track::Info, Vec<Vec<usize>>) {
 			use moq_mux::container::Container as _;
 
 			// Off Apple, encoding waits on an OS thread. Keep Tokio from auto-advancing
@@ -1527,7 +1606,7 @@ mod tests {
 			});
 			let started = tokio::time::Instant::now();
 			// Capture streams are !Send on macOS.
-			let groups = tokio::task::LocalSet::new()
+			let result = tokio::task::LocalSet::new()
 				.run_until(async {
 					let mut broadcast = moq_net::broadcast::Info::new().produce();
 					let consumer = broadcast.consume();
@@ -1535,10 +1614,12 @@ mod tests {
 						moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 					let mut options = Capture::default();
 					options.encode.kind = encoder::Kind::Software;
+					// Room for noise, which rate control would otherwise skip frames of.
+					options.encode.bitrate = Some(moq_net::bandwidth::Rate::from_mbps(4));
 					let (control, driver) = Control::new(broadcast.clone(), catalog, options).unwrap();
 
-					// Ten nominal fps makes the default two-second GOP twenty frames. Feed them
-					// 10ms apart in media time so cadence falls inside the 500ms cut spacing window.
+					// Ten nominal fps makes the default two-second GOP twenty frames, which every
+					// script below stays inside.
 					let rate = crate::Rate::new(10, 1).unwrap();
 					let (_probe, probe) = Synthetic::open(crate::Size::new(320, 240), rate);
 					let (camera, stream) = Synthetic::open(crate::Size::new(320, 240), rate);
@@ -1547,28 +1628,30 @@ mod tests {
 						moq_mux::catalog::Consumer::<()>::new(&consumer, moq_mux::catalog::CatalogFormat::Hang)
 							.await
 							.unwrap();
-					let (mut subscriber, format) = loop {
+					let (name, mut subscriber, format) = loop {
 						let snapshot = catalog.next().await.unwrap().expect("a catalog");
 						if let Some((name, rendition)) = snapshot.video.renditions.iter().next() {
 							break (
+								name.clone(),
 								consumer.track(name).unwrap().subscribe(None).await.unwrap(),
 								moq_mux::catalog::hang::Container::try_from(rendition).unwrap(),
 							);
 						}
 					};
+					let info = subscriber.info().clone();
 
 					let (published, mut received) = tokio::sync::mpsc::unbounded_channel();
 					let collect = tokio::task::spawn_local(async move {
 						let mut groups = Vec::new();
 						while let Some(mut group) = subscriber.recv_group().await.unwrap() {
-							let mut frames = 0;
+							let mut frames = Vec::new();
 							while let Some(batch) =
 								kio::wait(|waiter| format.poll_read(&mut group, waiter)).await.unwrap()
 							{
 								for frame in batch {
 									// A duration marker closes the group but is not an encoded picture.
 									if format.end(&frame).is_none() {
-										frames += 1;
+										frames.push(frame.payload.len());
 										published.send(()).unwrap();
 									}
 								}
@@ -1578,36 +1661,97 @@ mod tests {
 						groups
 					});
 
-					let timestamps = (0..=20).map(|frame| frame * 10).chain([201, 699, 700, 1200]);
-					for (frame, millis) in timestamps.enumerate() {
-						camera.push_native(surface(), us(millis * 1000));
-						// Wait for delivery before requesting a cut or replacing the capture's latest slot.
-						received.recv().await.expect("the frame reached the subscriber");
-						if frame == 0 || (frame == 20 && cut_after_cadence) {
-							control.cut().unwrap();
+					let mut joined = Vec::new();
+					let mut millis = 0;
+					for step in steps {
+						match step {
+							Step::Frame(surface) => {
+								camera.push_native(surface, us(millis * 1000));
+								millis += 10;
+								// Wait for delivery before the next step, which also keeps the
+								// capture's latest slot from being replaced.
+								received.recv().await.expect("the frame reached the subscriber");
+							}
+							Step::Cut => control.cut().unwrap(),
+							Step::Join => joined.push(consumer.track(&name).unwrap().subscribe(None).await.unwrap()),
 						}
 					}
 					drop(control);
 					run.await.unwrap().unwrap();
-					collect.await.unwrap()
+					(info, collect.await.unwrap())
 				})
 				.await;
 			assert_eq!(started.elapsed(), Duration::ZERO);
 			drop(hold);
 			clock.await.unwrap();
-			groups
+			result
 		}
 
+		/// Each request opens a group at the next frame, with no spacing between them.
 		#[tokio::test(start_paused = true)]
-		async fn cadence_keyframe_serves_a_pending_capture_cut() {
-			// The keyframe at 200ms serves the pending cut. Passing 700ms must not force another.
-			assert_eq!(capture_cuts(false).await, [20, 5]);
+		async fn capture_cuts_land_on_the_next_frame() {
+			let steps = vec![
+				Step::Frame(surface()),
+				Step::Cut,
+				Step::Frame(surface()),
+				Step::Frame(surface()),
+				Step::Cut,
+				Step::Frame(surface()),
+				Step::Frame(surface()),
+			];
+			let (_, groups) = capture_groups(steps).await;
+			let lengths: Vec<_> = groups.iter().map(Vec::len).collect();
+			assert_eq!(lengths, [1, 2, 2]);
 		}
 
+		/// A capture whose encoder always cuts advertises the refresh ratio, and a join opens a
+		/// group at the next frame only once the deltas outweigh it, well within 500ms of the
+		/// keyframe before.
 		#[tokio::test(start_paused = true)]
-		async fn capture_cut_after_cadence_waits_for_spacing() {
-			// A new cut after 200ms waits through 699ms, opens at 700ms, and fires only once.
-			assert_eq!(capture_cuts(true).await, [20, 3, 2]);
+		async fn a_join_over_the_refresh_ratio_forces_a_keyframe() {
+			let mut steps = vec![
+				Step::Frame(noise(0)),
+				Step::Frame(surface()),
+				Step::Frame(surface()),
+				// Two flat deltas cost next to nothing against a noise keyframe.
+				Step::Join,
+				Step::Frame(surface()),
+			];
+			steps.extend((1..=10).map(|seed| Step::Frame(noise(seed))));
+			steps.extend([Step::Join, Step::Frame(surface()), Step::Frame(surface())]);
+			let (info, groups) = capture_groups(steps).await;
+			assert_eq!(info.refresh, Some(REFRESH));
+
+			let lengths: Vec<_> = groups.iter().map(Vec::len).collect();
+			assert_eq!(lengths, [14, 2], "only the second join cut, at the frame after it");
+			let ratio = usize::try_from(REFRESH).unwrap();
+			let first = &groups[0];
+			assert!(
+				first[1..3].iter().sum::<usize>() <= ratio * first[0],
+				"the first join was under the ratio: {first:?}"
+			);
+			assert!(
+				first[1..].iter().sum::<usize>() > ratio * first[0],
+				"the second join was over the ratio: {first:?}"
+			);
+		}
+
+		/// Refresh is advertised only when every backend the encoder may open honors a cut, since
+		/// the track info is fixed before the driver learns which one it got.
+		#[test]
+		fn a_backend_that_may_refuse_cuts_advertises_no_refresh() {
+			for (kind, refresh) in [
+				(encoder::Kind::Software, Some(REFRESH)),
+				(encoder::Kind::Named(probe::NO_CUT.into()), None),
+			] {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog =
+					moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+				let mut options = Capture::default();
+				options.encode.kind = kind;
+				let (_control, driver) = Control::new(broadcast.clone(), catalog, options).unwrap();
+				assert_eq!(driver.track.info().refresh, refresh);
+			}
 		}
 
 		/// Drop the controls while the driver sits in its `opens`th open, which never finishes.

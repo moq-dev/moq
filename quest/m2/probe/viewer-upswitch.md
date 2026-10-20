@@ -26,6 +26,11 @@ moq-quic, so it requires [native probing](/quest/m2/probe/native.md); if that
 ends in a measured no-go, require [padding](/quest/m2/probe/padding.md)
 instead rather than leaving this blocked.
 
+Selection reads its broadcast's viewer grant from the
+[target](/quest/m2/probe/target.md) quest, not the connection's whole
+`estimatedRecvRate`, so several watchers on one pooled connection don't each
+select against the full downlink (decided with the maintainer on 2026-10-19).
+
 Selection discounts the estimate by 0.8x, so a probe that only reaches the
 rendition's bitrate never makes it selectable. Settle with
 [players](/quest/m2/probe/players.md) whether its handle covers that margin

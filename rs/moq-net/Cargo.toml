@@ -29,6 +29,7 @@ fuzz = ["async"]
 arrayvec = "0.7"
 bytes = { workspace = true }
 futures = { workspace = true, optional = true }
+hashlink = { workspace = true }
 kio = { workspace = true }
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 moq-pattern = { workspace = true, features = ["serde"] }
@@ -166,11 +167,9 @@ name = "request-ids"
 harness = false
 required-features = ["fuzz"]
 
-# Uses the hidden fuzz module to reach the crate-private NEW_GROUP_REQUEST.
 [[bench]]
-name = "new-group"
+name = "refresh"
 harness = false
-required-features = ["fuzz"]
 
 # Uses the hidden fuzz module to observe source selection without public API.
 [[bench]]

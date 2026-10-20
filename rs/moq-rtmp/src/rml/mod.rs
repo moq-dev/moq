@@ -22,6 +22,7 @@
 #![allow(clippy::pedantic)]
 #![allow(clippy::nursery)]
 #![allow(rustdoc::all)]
+#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 pub mod amf0;
 

@@ -2,7 +2,6 @@ import audio from "./icons/audio.svg?raw";
 import ban from "./icons/ban.svg?raw";
 import camera from "./icons/camera.svg?raw";
 import cameraOff from "./icons/camera-off.svg?raw";
-import check from "./icons/check.svg?raw";
 import close from "./icons/close.svg?raw";
 import file from "./icons/file.svg?raw";
 import fullscreenEnter from "./icons/fullscreen-enter.svg?raw";
@@ -19,7 +18,6 @@ export {
 	ban,
 	camera,
 	cameraOff,
-	check,
 	close,
 	file,
 	fullscreenEnter,

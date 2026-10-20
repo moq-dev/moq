@@ -40,11 +40,11 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use hang::timeline::{Position, Record};
+use moq_clock::Instant;
 use moq_mux::timeline::{self, Segmenter};
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
 use object_store::ObjectStore;
 use tokio::sync::{mpsc, watch};
-use tokio::time::Instant;
 
 use crate::recover::{Resume, checkpoint, recover};
 use crate::segment::{Frame, Group, Object};
@@ -318,7 +318,7 @@ impl<S: ObjectStore> Writer<S> {
 				_ = source.closed(), if !closed => closed = true,
 				// Also once commands closed: an enrollment in flight still settles its count.
 				_ = enrolling.changed(), if idle => {}
-				_ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+				_ = moq_clock::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
 					let (_, expired) = deletions.pop_front().unwrap();
 					delete(&shared.store, &mut pruned, expired).await;
 				}
@@ -328,7 +328,7 @@ impl<S: ObjectStore> Writer<S> {
 		// Complete expirations already committed to the timelines; nothing new expires after the
 		// final records.
 		for (deadline, expired) in deletions {
-			tokio::time::sleep_until(deadline).await;
+			moq_clock::sleep_until(deadline).await;
 			delete(&shared.store, &mut pruned, expired).await;
 		}
 
@@ -1048,6 +1048,7 @@ fn recorded_end(resume: &Resume, timescale: Option<Timescale>) -> Result<Option<
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use futures::TryStreamExt;
 	use object_store::memory::InMemory;

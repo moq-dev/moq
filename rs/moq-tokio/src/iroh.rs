@@ -23,6 +23,42 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn iroh::endpoint::Cont
 	match family {
 		CongestionControl::Loss => Arc::new(noq_proto::congestion::CubicConfig::default()),
 		CongestionControl::Delay => Arc::new(noq_proto::congestion::Bbr3Config::default()),
+		CongestionControl::None => Arc::new(Unlimited),
+	}
+}
+
+/// No congestion control: a window that never shrinks, too large for noq to pace.
+///
+/// noq has no such controller, so this mirrors moq-quic's `congestion::Unlimited`.
+#[derive(Clone, Copy, Debug)]
+struct Unlimited;
+
+impl noq_proto::congestion::Controller for Unlimited {
+	fn on_congestion_event(&mut self, _: std::time::Instant, _: std::time::Instant, _: bool, _: bool, _: u64, _: u64) {}
+
+	fn on_mtu_update(&mut self, _: u16) {}
+
+	// noq turns its pacer off for any window past `u32::MAX`.
+	fn window(&self) -> u64 {
+		u64::MAX
+	}
+
+	fn clone_box(&self) -> Box<dyn noq_proto::congestion::Controller> {
+		Box::new(*self)
+	}
+
+	fn initial_window(&self) -> u64 {
+		u64::MAX
+	}
+
+	fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+		self
+	}
+}
+
+impl noq_proto::congestion::ControllerFactory for Unlimited {
+	fn build(self: Arc<Self>, _: std::time::Instant, _: u16) -> Box<dyn noq_proto::congestion::Controller> {
+		Box::new(*self)
 	}
 }
 
@@ -131,7 +167,7 @@ crate::error::from_message! {
 type Result<T> = std::result::Result<T, Error>;
 
 /// Settings for the shared iroh endpoint, used by both the client and server.
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -468,7 +504,7 @@ mod tests {
 	/// endpoint is the accepted-and-ignored failure in miniature.
 	#[tokio::test]
 	async fn bind_refuses_a_released_quic_spelling() {
-		#[derive(usage::Cli)]
+		#[derive(usage_rs::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(settings)]
 		struct Cli {
@@ -537,6 +573,9 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<noq_proto::congestion::Bbr3>().is_ok());
+
+		let none = congestion_factory(CongestionControl::None).build(now, mtu);
+		assert!(none.into_any().downcast::<Unlimited>().is_ok());
 	}
 
 	/// The connection keep-alive is the resolved interval, not iroh's 5s heartbeat.

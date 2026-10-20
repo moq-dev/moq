@@ -120,3 +120,29 @@ async fn a_second_session_catches_up() {
 	read_until_synced(&mut announced).await;
 	drop(second);
 }
+
+/// A cold relay's empty set is complete before an upstream joins it.
+#[moq_clock::test]
+async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
+	let relay = produce_origin(2);
+	let subscriber = produce_origin(3);
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let mut downstream = MockConnectOptions::new(version);
+	downstream.server_publish = Some(relay.consume());
+	downstream.client_subscribe = Some(subscriber.clone());
+	let _downstream = connect_mock(downstream).await;
+	let mut announced = subscriber.consume().announced();
+	moq_net::kio::wait(|waiter| announced.poll_synced(waiter)).await;
+	assert!(announced.try_next().is_none());
+
+	let upstream = produce_origin(1);
+	let broadcast = upstream.create_broadcast("room/cam").unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(upstream.consume());
+	options.client_subscribe = Some(relay.clone());
+	let _upstream = connect_mock(options).await;
+	let event = announced.next().await.unwrap();
+	assert!(matches!(event, announce::Event::Start(route) if route.prefix.as_str() == "room/cam"));
+	assert!(announced.is_synced());
+}

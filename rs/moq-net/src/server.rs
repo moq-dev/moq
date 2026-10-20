@@ -121,7 +121,8 @@ impl Server {
 		self
 	}
 
-	/// Choose which moq-transport extensions to offer in SETUP. Defaults to all of them.
+	/// Choose which extensions to offer in SETUP. Defaults to every moq-transport one, and
+	/// not [`ietf`](setup::Extensions::ietf), which only relays turn on.
 	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
 		self.extensions = extensions;
 		self
@@ -167,6 +168,7 @@ impl Server {
 				cost: None,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				ietf: self.extensions.ietf && version.has_ietf(),
 			}
 		} else {
 			lite::Setup::default()
@@ -442,6 +444,7 @@ impl Server {
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&params, v)?,
 					hidden: ietf::hidden::from_setup(&params, v),
+					max_age: ietf::max_age::from_setup(&params, v),
 					active_count: ietf::active_count::from_setup(&params, v),
 					..Default::default()
 				};
@@ -715,6 +718,7 @@ where
 						ietf::solicit::into_setup(&mut parameters, v);
 					}
 					ietf::hidden::into_setup(&mut parameters, v);
+					ietf::max_age::into_setup(&mut parameters, v);
 					ietf::active_count::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
 				}
@@ -1182,6 +1186,7 @@ mod tests {
 			role,
 			cost: None,
 			hop,
+			ietf: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();

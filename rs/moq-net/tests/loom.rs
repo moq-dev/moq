@@ -100,7 +100,7 @@ fn back_to_back_groups_arrive_in_order() {
 
 		let publisher = thread::spawn(move || {
 			for _ in 0..2 {
-				let group = track.append_group().expect("append group");
+				let mut group = track.append_group().expect("append group");
 				group.finish().expect("finish group");
 			}
 			track.finish().expect("finish track");
@@ -176,7 +176,7 @@ fn group_abort_flag_never_leads_the_group_state() {
 	});
 }
 
-/// A publisher parked on `Demand::used` drives on-demand capture, so a subscriber
+/// A publisher parked on `Demand::wanted_changed` drives on-demand capture, so a subscriber
 /// appearing on another thread must always wake it.
 #[test]
 fn subscriber_wakes_parked_demand() {
@@ -184,15 +184,18 @@ fn subscriber_wakes_parked_demand() {
 		let broadcast = broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).expect("create track");
-		let demand = track.demand();
+		let mut demand = track.demand();
 
 		let subscriber = thread::spawn(move || {
 			let track_consumer = consumer.track("video").expect("track");
-			// Held until joined, so it outlives the `used()` poll.
+			// Held until joined, so it outlives the `wanted_changed()` poll.
 			block_on(track_consumer.subscribe(None)).expect("subscribe")
 		});
 
-		block_on(demand.used()).expect("the new subscriber was missed");
+		while block_on(demand.wanted_changed())
+			.expect("the new subscriber was missed")
+			.is_none()
+		{}
 
 		drop(subscriber.join().unwrap());
 		drop(track);
@@ -268,7 +271,7 @@ fn a_front_sees_a_reader_come_and_go() {
 		// A first reader gets the source asked, then leaves.
 		let first = room.track("video").expect("track").query();
 		driver.poll(now, &noop).unwrap();
-		assert!(demand.is_used(), "the front never asked the source");
+		assert!(demand.wanted().is_some(), "the front never asked the source");
 		drop(first);
 
 		let racing = room.clone();
@@ -278,9 +281,9 @@ fn a_front_sees_a_reader_come_and_go() {
 
 		block_on(std::future::poll_fn(|cx| {
 			driver.poll(now, &kio::Waiter::new(cx.waker().clone())).unwrap();
-			match demand.is_used() {
-				true => std::task::Poll::Pending,
-				false => std::task::Poll::Ready(()),
+			match demand.wanted() {
+				Some(_) => std::task::Poll::Pending,
+				None => std::task::Poll::Ready(()),
 			}
 		}));
 	});
@@ -311,7 +314,7 @@ fn a_front_sees_a_reader_return() {
 		driver.poll(now, &noop).unwrap();
 		drop(first);
 		driver.poll(now, &noop).unwrap();
-		assert!(!demand.is_used(), "the front kept the source for nobody");
+		assert!(demand.wanted().is_none(), "the front kept the source for nobody");
 
 		let leaving = room.track("video").expect("track").query();
 		let racing = room.clone();
@@ -324,9 +327,9 @@ fn a_front_sees_a_reader_return() {
 
 		block_on(std::future::poll_fn(|cx| {
 			driver.poll(now, &kio::Waiter::new(cx.waker().clone())).unwrap();
-			match demand.is_used() {
-				true => std::task::Poll::Ready(()),
-				false => std::task::Poll::Pending,
+			match demand.wanted() {
+				Some(_) => std::task::Poll::Ready(()),
+				None => std::task::Poll::Pending,
 			}
 		}));
 		drop(returned);
@@ -552,46 +555,13 @@ fn an_aborted_parked_group_releases_a_finished_track() {
 	model(|| {
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("parked", timed()).unwrap();
-		let group = track.append_group().unwrap();
-		group.clone().finish().unwrap();
+		let mut group = track.append_group().unwrap();
+		group.finish().unwrap();
 		let mut subscriber = track.subscribe(moq_net::track::Subscription::default().with_groups(0..));
 		subscriber.set_groups(..0);
 		track.finish().unwrap();
 		let aborting = thread::spawn(move || group.abort(Error::Old).unwrap());
 		assert!(block_on(subscriber.recv_group()).unwrap().is_none());
 		aborting.join().unwrap();
-	});
-}
-
-/// A frame written on one group handle racing `finish` on another must never reopen
-/// the finished largest group, or a reader at the declared end waits forever.
-#[test]
-fn a_frame_racing_finish_never_reopens_the_largest() {
-	model(|| {
-		let broadcast = broadcast::Info::new().produce();
-		let mut track = broadcast
-			.create_track("largest", moq_net::track::Info::default())
-			.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(None, Bytes::from_static(b"a")).unwrap();
-		track.finish().unwrap();
-
-		let finishing = group.clone();
-		let writer = thread::spawn(move || {
-			// Refused once the finish wins; either order must end the stream.
-			let _ = group.write_frame(None, Bytes::from_static(b"b"));
-			group
-		});
-		finishing.finish().unwrap();
-		let _group = writer.join().unwrap();
-
-		let noop = kio::Waiter::noop();
-		loop {
-			match track.poll_largest(&noop) {
-				std::task::Poll::Ready(Some(_)) => continue,
-				std::task::Poll::Ready(None) => break,
-				std::task::Poll::Pending => panic!("a stale frame write reopened the finished largest group"),
-			}
-		}
 	});
 }

@@ -1,6 +1,7 @@
-// Exercise the event policy: skipped native PR contexts, one OS job per merge
-// group, and release PR coverage despite release having no merge queue.
+// Exercise the event policy: main PRs run no cloud CI, the merge queue runs only
+// Check and Test, and release PRs keep everything since release has no queue.
 import assert from "node:assert/strict";
+import { readdir } from "node:fs/promises";
 
 const workflow = async (name: string) => Bun.YAML.parse(await Bun.file(`.github/workflows/${name}.yml`).text());
 const check = await workflow("check");
@@ -18,57 +19,71 @@ function condition(expression: string, event: string, base: string, selected = t
 	return new Function("github", "needs", `return (${source});`)(github, { scope: { outputs } });
 }
 
-for (const config of [check, platform]) {
-	assert.ok(config.on.pull_request);
-	assert.equal(config.on.pull_request.paths, undefined, "required PR contexts must always report");
-	assert.ok(config.on.merge_group);
-}
-// Check and Test run on every PR as well as in the queue.
+// Check and Test are main's only queue gate. Every PR reports both names, since
+// they are required, but only release PRs and merge groups do the work.
+assert.ok(check.on.merge_group);
+assert.equal(check.on.pull_request.paths, undefined, "required PR contexts must always report");
+assert.equal(check.on.pull_request.branches, undefined, "main PRs must report the required names");
+assert.ok(check.on.pull_request.types.includes("edited"), "retargeting to release must rerun");
 for (const job of [check.jobs.check, check.jobs.test]) {
-	for (const base of ["main", "release"]) assert.equal(condition(job.if, "pull_request", base), true);
+	assert.equal(condition(job.if, "pull_request", "main"), false);
+	assert.equal(condition(job.if, "pull_request", "release"), true);
+	assert.equal(condition(job.if, "pull_request", "release", true, "edited"), true);
+	assert.equal(condition(job.if, "pull_request", "release", true, "closed"), false);
 	assert.equal(condition(job.if, "merge_group", ""), true);
 }
-// Native jobs skip main PRs; release has no queue, so its PRs run them.
-assert.equal(condition(platform.jobs.scope.if, "pull_request", "main"), false);
-assert.equal(condition(platform.jobs.scope.if, "pull_request", "release"), true);
-assert.equal(condition(platform.jobs.scope.if, "merge_group", ""), true);
-// Retargeting a main PR to release emits `edited`, which must run the native gates.
-assert.equal(condition(platform.jobs.scope.if, "pull_request", "release", true, "edited"), true);
-// Check, Test and Release Dart FFI already run on main PRs, where an edit would
-// only cancel and repeat their builds.
-for (const config of [platform, swift]) {
-	assert.ok(config.on.pull_request.types.includes("edited"), "retargeting to release must rerun");
+
+// Every other workflow stays out of main PRs and main's merge groups: optional
+// checks run nightly on main and on release PRs, retargeted ones included.
+const files = (await readdir(".github/workflows")).filter((file) => file.endsWith(".yml"));
+for (const file of files) {
+	const name = file.replace(/\.yml$/, "");
+	if (name === "check") continue;
+	const config = await workflow(name);
+	assert.equal(config.on.merge_group, undefined, `${file} must not run in the merge queue`);
+	if (!config.on.pull_request) continue;
+	assert.deepEqual(config.on.pull_request.branches, ["release"], `${file} must skip main PRs`);
+	assert.ok(config.on.pull_request.types.includes("edited"), `${file} must rerun when retargeted to release`);
 }
+
+// Platform reports on every release PR without path filters, so release can
+// require its names, and Nightly runs it on main.
+assert.equal(platform.on.pull_request.paths, undefined, "required release PR contexts must always report");
+assert.equal(condition(platform.jobs.scope.if, "pull_request", "release"), true);
+assert.equal(condition(platform.jobs.scope.if, "pull_request", "release", true, "edited"), true);
+assert.equal(condition(platform.jobs.scope.if, "schedule", ""), true);
 assert.deepEqual(Object.keys(platform.jobs).sort(), ["macos", "scope", "windows"]);
 // The selector runs before any toolchain, through the same query as Check and Test.
 assert.equal(platform.jobs.scope.steps.at(-1).run, 'just ci-select platform "$CI_BASE" >> "$GITHUB_OUTPUT"');
 for (const job of [platform.jobs.macos, platform.jobs.windows]) {
-	assert.equal(condition(job.if, "merge_group", "", false), false);
-	assert.equal(condition(job.if, "merge_group", "", true), true);
+	assert.equal(condition(job.if, "pull_request", "release", false), false);
+	assert.equal(condition(job.if, "pull_request", "release", true), true);
 }
+assert.equal(nightly.jobs.platform.uses, "./.github/workflows/platform.yml");
+assert.deepEqual(platform.on.push.branches, ["release"]);
+
+// Nightly covers what main PRs skip.
+for (const name of ["x11", "android", "cpp", "wasm", "audio-quality", "oss-scanner", "runner-vm"]) {
+	assert.ok(
+		Object.values(nightly.jobs).some(
+			(job) => (job as { uses?: string }).uses === `./.github/workflows/${name}.yml`,
+		),
+		`nightly must call ${name}.yml`,
+	);
+}
+for (const job of ["release-swift-lib", "release-dart-ffi", "release-dart", "release-js", "release-kt-lib"]) {
+	assert.ok(nightly.jobs[job], `nightly must dry-run ${job}`);
+}
+
 assert.equal((await workflow("obs")).jobs.release, undefined);
+assert.deepEqual((await workflow("obs")).on.push.branches, ["release"]);
 assert.equal((await workflow("cpp")).jobs.msvc, undefined);
 assert.deepEqual((await workflow("moq-sh")).jobs.test.strategy.matrix.os, ["ubuntu-latest"]);
 assert.equal(await Bun.file(".github/workflows/swift.yml").exists(), false);
 assert.deepEqual(swift.on.pull_request.branches, ["release"]);
-assert.ok(nightly.jobs["release-swift-lib"]);
-assert.equal(nightly.jobs.platform.uses, "./.github/workflows/platform.yml");
-assert.deepEqual(platform.on.push.branches, ["release"]);
-const targets = dart.jobs.ffi.with.targets;
-assert.ok(
-	JSON.parse(condition(targets, "pull_request", "main") as string).every(
-		(target: string) => !/-apple-|-windows-/.test(target),
-	),
-);
-for (const [event, base] of [
-	["pull_request", "release"],
-	["schedule", ""],
-]) {
-	assert.ok(
-		JSON.parse(condition(targets, event, base) as string).some((target: string) => target.includes("-apple-")),
-	);
-	assert.ok(
-		JSON.parse(condition(targets, event, base) as string).some((target: string) => target.includes("-windows-")),
-	);
-}
+
+// Release Dart FFI only runs on release PRs and nightly, so it packages every platform.
+const targets = JSON.parse(dart.jobs.ffi.with.targets);
+assert.ok(targets.some((target: string) => target.includes("-apple-")));
+assert.ok(targets.some((target: string) => target.includes("-windows-")));
 console.log("queue event policy passed");
