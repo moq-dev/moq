@@ -58,11 +58,14 @@ Explained:
   IETF half, and every crate that awaits a `moq-tokio` future or calls
   `moq_net::Server`/`Client` with a concrete session codegens its own copy
   (release builds share no generics across crates, and async bodies are
-  instantiated where they are polled). On main, `moq-net` is 9.1 of 23.5 MiB
-  of Rust text in the relay, split across eight copies by `moq_relay` and
-  `moq_tokio`; 6.6 of 19.2 MiB in the FFI library, half instantiated by
-  `moq_ffi` and half by `moq_tokio`; 7.6 MiB in the CLI. Repeated copies of
-  the same instance total 7.0 MiB (relay), 4.2 MiB (FFI) and 8.6 MiB (CLI).
+  instantiated where they are polled). On main, `moq-net` (symbols whose path
+  is in `moq_net`, wherever instantiated) is 9.1 of 23.5 MiB of Rust text in
+  the relay, split across eight copies by `moq_relay` and `moq_tokio`; 6.4 of
+  19.2 MiB in the FFI library, half instantiated by `moq_ffi` and half by
+  `moq_tokio`; 7.4 of 36.5 MiB in the CLI. Copies beyond the first of an
+  identical demangled function add 4.8 MiB of that in the relay, 2.6 MiB in
+  the FFI library and 3.0 MiB in the CLI; across all Rust code they add 7.0,
+  4.2 and 8.6 MiB.
   This is most of the native growth since July and the FFI 0.4.0 jump.
 - The catalog producer, `moq_mux::catalog::Producer<E>`, instantiates the
   `moq-json` diff serializer for `hang` catalog types once per importer
