@@ -25,7 +25,8 @@ runs:
     # repository. Fork pull requests get no secrets at all and build cold.
     #
     # A writer without a key means the Environment is misconfigured, and
-    # building on would leave every reader cold with nothing to say why.
+    # building on would leave every reader cold with nothing to say why. Half
+    # a pair is a broken secret on any job, never a fork's empty one.
     - name: Cache credentials
       shell: bash
       env:
@@ -33,13 +34,17 @@ runs:
         SECRET: ${{ inputs.secret-access-key }}
         WRITE: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/') }}
       run: |
-        if [ -z "$KEY_ID" ] || [ -z "$SECRET" ]; then
+        if [ -z "$KEY_ID" ] && [ -z "$SECRET" ]; then
           if [ "$WRITE" = "true" ]; then
             echo "::error::$GITHUB_REF writes the cache but the cache-write Environment supplied no R2 key"
             exit 1
           fi
           echo "::warning::No R2 cache credentials, as for a fork pull request; building cold"
           exit 0
+        fi
+        if [ -z "$KEY_ID" ] || [ -z "$SECRET" ]; then
+          echo "::error::only one of the R2 access key id and secret is set; check the MBX_R2_* secrets"
+          exit 1
         fi
         {
           echo "AWS_ACCESS_KEY_ID=$KEY_ID"
