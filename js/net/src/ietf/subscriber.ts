@@ -697,7 +697,11 @@ export class Subscriber {
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request, valid?: AbortSignal) {
 		const refused = unauthorized(broadcast);
 		try {
-			await this.#auth?.ready(broadcast, "subscribe", valid);
+			const ready = await this.#auth?.ready(broadcast, "subscribe", { signal: valid, demand: request.demand() });
+			if (ready === false) {
+				request.reject(new Error("subscribe abandoned before it was authorized"));
+				return;
+			}
 		} catch (err) {
 			request.reject(error(err));
 			return;

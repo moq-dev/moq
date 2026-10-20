@@ -577,7 +577,7 @@ A presenter MUST NOT send a request outside its known union while any non-empty 
 Once those tokens are answered, it sends the request if the union covers it, or refuses it locally.
 An empty token does not hold requests: the connection credential is judged before the session serves requests.
 The same wait applies before closing the session for announcing a broadcast outside the union.
-An endpoint that announces a broadcast outside the settled union SHOULD close the session with UNAUTHORIZED, rather than wait for a subscription that will never come.
+An endpoint that announces a broadcast outside the settled union, and still announces it once the wait ends, SHOULD close the session with UNAUTHORIZED, rather than wait for a subscription that will never come.
 To renew a token without interrupting requests the new grant still covers, the presenter waits for the new token's AUTH_OK before withdrawing the old token.
 
 An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, MUST send AUTH_ERROR with NOT_SUPPORTED and close its side of the stream.

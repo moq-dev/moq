@@ -13,6 +13,7 @@ import {
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Stream } from "./stream.ts";
+import type { Demand } from "./track.ts";
 import { nextTask } from "./util/yield.ts";
 
 /** A grant as the wire carries it: the expiry is milliseconds from now. @internal */
@@ -375,17 +376,36 @@ export class AuthSession implements Handle {
 		while (this.#setupPending.peek() > 0) await this.#setupPending.changed();
 	}
 
-	/** Wait for presented tokens that might admit this path, without delaying a covered path. */
-	async ready(path: Path.Valid, direction: "publish" | "subscribe", signal?: AbortSignal): Promise<void> {
+	/**
+	 * Wait for presented tokens that might admit this path, without delaying a covered path.
+	 * Resolves false once `demand` loses the subscribers it gained, so an abandoned request
+	 * never waits on a token that may never be answered.
+	 */
+	async ready(
+		path: Path.Valid,
+		direction: "publish" | "subscribe",
+		{ signal, demand }: { signal?: AbortSignal; demand?: Demand } = {},
+	): Promise<boolean> {
 		let started: Instant | undefined;
+		// An info-only lookup attaches no subscriber, so only demand that arrived and left is abandonment.
+		let wanted = false;
+		const abandoned = () => {
+			if (!demand) return false;
+			if (demand.closed.peek() !== undefined) return true;
+			if (demand.used.peek()) wanted = true;
+			return wanted && !demand.used.peek();
+		};
 		try {
 			while (this.#pending.peek() > 0 && !this.#union.peek()?.[direction].matches(path)) {
+				if (abandoned()) return false;
 				started ??= now();
 				signal?.throwIfAborted();
 				await new Promise<void>((resolve, reject) => {
 					const cleanup = () => {
 						pending();
 						grant();
+						used?.();
+						closed?.();
 						signal?.removeEventListener("abort", abort);
 					};
 					const done = () => {
@@ -398,9 +418,12 @@ export class AuthSession implements Handle {
 					};
 					const pending = this.#pending.changed(done);
 					const grant = this.#union.changed(done);
+					const used = demand?.used.changed(done);
+					const closed = demand?.closed.changed(done);
 					signal?.addEventListener("abort", abort, { once: true });
 				});
 			}
+			return true;
 		} finally {
 			if (started !== undefined) {
 				console.debug(
@@ -632,6 +655,8 @@ export async function enforceGrant({
 				if (live.has(path)) continue;
 				if (!current.publish.matches(path)) {
 					await auth?.ready(path, "publish");
+					// A broadcast withdrawn during the wait is no longer ours to judge.
+					if (!advertised.peek()?.has(path)) continue;
 					if (grant.peek()?.publish.matches(path)) {
 						live.add(path);
 						continue;

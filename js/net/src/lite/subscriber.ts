@@ -655,7 +655,14 @@ export class Subscriber {
 		}
 		const refused = unauthorized(broadcast);
 		try {
-			await this.#auth?.ready(broadcast, "subscribe", consumed.valid);
+			const ready = await this.#auth?.ready(broadcast, "subscribe", {
+				signal: consumed.valid,
+				demand: request.demand(),
+			});
+			if (ready === false) {
+				request.reject(new Error("subscribe abandoned before it was authorized"));
+				return;
+			}
 		} catch (err) {
 			request.reject(error(err));
 			return;
@@ -1057,7 +1064,7 @@ export class Subscriber {
 	): Promise<void> {
 		const refused = unauthorized(broadcast);
 		try {
-			await this.#auth?.ready(broadcast, "subscribe", consumed.valid);
+			await this.#auth?.ready(broadcast, "subscribe", { signal: consumed.valid });
 			// Arm after admission, before checking: another unanswered token may still
 			// widen the union while we wait, which is not a revocation of this fetch.
 			const disposeGrant = this.#grant?.subscribe(() => {

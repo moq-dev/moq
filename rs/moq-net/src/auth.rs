@@ -1865,7 +1865,9 @@ pub(crate) struct Enforce {
 	/// Every broadcast admitted so far, still announced.
 	live: std::collections::HashSet<crate::PathOwned>,
 	setup: bool,
-	pending: Option<Gate>,
+	/// Broadcasts outside the union, still announced, waiting on tokens that might cover
+	/// them, in announcement order.
+	pending: Vec<Gate>,
 }
 
 impl Enforce {
@@ -1890,34 +1892,49 @@ impl Enforce {
 			return Poll::Pending;
 		}
 
-		loop {
-			if let Some(gate) = &mut self.pending {
-				std::task::ready!(gate.poll_ready(waiter));
-				let gate = self.pending.take().expect("pending publication");
-				if !handle.within_grant(Direction::Publish, gate.path.as_str()) {
-					return Poll::Ready(Some(gate.path));
-				}
-				self.live.insert(gate.path);
-			}
-			let Some(event) = ready_or!(announced.poll_next(waiter)) else {
+		// Withdrawals queued behind a wait apply before it is judged, so a broadcast that is
+		// no longer published never closes the session.
+		while let Poll::Ready(event) = announced.poll_next(waiter) {
+			let Some(event) = event else {
 				return Poll::Ready(None);
 			};
 			match event {
 				crate::announce::Event::Start(update) | crate::announce::Event::Update(update)
 					if !self.live.contains(&update.prefix) =>
 				{
-					if !handle.within_grant(Direction::Publish, update.prefix.as_str()) {
-						self.pending = Some(Gate::new(handle.clone(), update.prefix, Direction::Publish));
+					if self.pending.iter().any(|gate| gate.path == update.prefix) {
 						continue;
 					}
-					self.live.insert(update.prefix);
+					let mut gate = Gate::new(handle.clone(), update.prefix, Direction::Publish);
+					if gate.poll_ready(waiter).is_pending() {
+						self.pending.push(gate);
+						continue;
+					}
+					if !handle.within_grant(Direction::Publish, gate.path.as_str()) {
+						return Poll::Ready(Some(gate.path));
+					}
+					self.live.insert(gate.path);
 				}
 				crate::announce::Event::End(update) => {
 					self.live.remove(&update.prefix);
+					self.pending.retain(|gate| gate.path != update.prefix);
 				}
 				_ => {}
 			}
 		}
+
+		while let Some(index) = self
+			.pending
+			.iter_mut()
+			.position(|gate| gate.poll_ready(waiter).is_ready())
+		{
+			let gate = self.pending.remove(index);
+			if !handle.within_grant(Direction::Publish, gate.path.as_str()) {
+				return Poll::Ready(Some(gate.path));
+			}
+			self.live.insert(gate.path);
+		}
+		Poll::Pending
 	}
 }
 

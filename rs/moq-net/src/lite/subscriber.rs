@@ -2809,6 +2809,56 @@ mod tests {
 		}
 	}
 
+	/// A track waiting on an unanswered token ends once nobody wants it, rather than
+	/// holding its task and track until a token that may never be answered.
+	#[moq_clock::test]
+	async fn an_unused_track_stops_waiting_for_auth() {
+		let auth = crate::auth::Handle::new(true);
+		let _token = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: SinkSession::default(),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth,
+		});
+
+		let broadcast = crate::broadcast::Info::new().produce();
+		let mut dynamic = broadcast.dynamic();
+		let consumer = broadcast.consume();
+		let mut waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));
+		assert!(futures::poll!(waiting.as_mut()).is_pending());
+		let request = dynamic.requested_track().now_or_never().unwrap().expect("request");
+
+		let mut run = TrackServeRun::new(
+			TrackServe {
+				validity: Default::default(),
+				route: None,
+				subscriber,
+				path: Path::new("room").to_owned(),
+				epoch: None,
+				name: "video".to_string(),
+			},
+			request,
+		);
+		let waiter = kio::Waiter::noop();
+		assert!(
+			kio::Task::poll(&mut run, &waiter).is_pending(),
+			"waits on the token while the track is wanted"
+		);
+
+		drop(waiting);
+		assert!(
+			kio::Task::poll(&mut run, &waiter).is_ready(),
+			"an unused track kept waiting on its token"
+		);
+	}
+
 	/// `establish` puts exactly one SUBSCRIBE on the wire, and the id is registered
 	/// before any of it reaches the transport.
 	///
@@ -5488,12 +5538,38 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 	}
 }
 
+impl<S: crate::transport::poll::Session> TrackServeRun<S> {
+	/// Nobody wants the track anymore (the origin failed over, the reader left): stop
+	/// waiting on a token or a peer that may never answer, which would otherwise hold
+	/// this task, its TRACK stream, and the track for good. Dropping the fetch resets the
+	/// stream. Ready once the request is released.
+	fn poll_unused(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let TrackRunState::Info { request, .. } = &self.state else {
+				return Poll::Pending;
+			};
+			let pending = request.as_ref().expect("request pending");
+			let _ = ready!(pending.demand().poll_unused(waiter));
+			if pending.reject_unused(Error::Cancel) {
+				self.state = TrackRunState::Done;
+				return Poll::Ready(());
+			}
+			// Demand returned in the gap and won inside `reject_unused`: poll again so the
+			// unused wait is armed for when it leaves.
+		}
+	}
+}
+
 impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
+		// Checked before the auth wait too, so an abandoned request never parks on a token.
+		if self.poll_unused(waiter).is_ready() {
+			return Poll::Ready(());
+		}
 		ready!(self.gate.poll_ready(waiter));
+		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
 		if !matches!(self.state, TrackRunState::Finish(_)) && self.gate.poll_denied(waiter).is_ready() {
 			self.revoke();
 			return Poll::Ready(());
@@ -5501,20 +5577,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 		loop {
 			match &mut self.state {
 				TrackRunState::Info { request, info } => {
-					// Nobody wants the track anymore (the origin failed over, the reader
-					// left): stop waiting on a peer that may never answer, which would
-					// otherwise hold this task, its TRACK stream, and the track for good.
-					// Dropping the fetch resets the stream.
-					let pending = request.as_ref().expect("request pending");
-					if pending.demand().poll_unused(waiter).is_ready() {
-						if pending.reject_unused(Error::Cancel) {
-							self.state = TrackRunState::Done;
-							return Poll::Ready(());
-						}
-						// Demand returned in the gap and won inside `reject_unused`: poll
-						// again so the unused wait is armed for when it leaves.
-						continue;
-					}
+					// Abandonment was checked at the top of this poll, arming its wait.
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
 					let request = request.take().expect("request pending");
 					match res {

@@ -2518,9 +2518,25 @@ where
 			Some(live) => crate::auth::Gate::announced(auth, path, direction, live),
 			None => crate::auth::Gate::new(auth, path, direction),
 		};
-		if gate.guard(async { Ok(()) }).await.is_err() {
-			request.reject(Error::Unauthorized);
-			return;
+		// Nobody wanting the track any more ends a wait on a token that may never be answered.
+		loop {
+			let admitted = kio::wait(|waiter| {
+				if gate.poll_ready(waiter).is_ready() {
+					return Poll::Ready(Some(gate.poll_denied(waiter).is_pending()));
+				}
+				request.demand().poll_unused(waiter).map(|_| None)
+			})
+			.await;
+			match admitted {
+				Some(true) => break,
+				Some(false) => {
+					request.reject(Error::Unauthorized);
+					return;
+				}
+				None if request.reject_unused(Error::Cancel) => return,
+				// Demand returned in the gap.
+				None => continue,
+			}
 		}
 
 		let track_name = request.name().to_owned();

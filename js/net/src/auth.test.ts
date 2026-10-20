@@ -141,6 +141,39 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		server.abort();
 	});
 
+	test("a broadcast withdrawn while its token waits is not refused", async () => {
+		const origin = new OriginProducer();
+		const { client, server, transport } = await connect({ publish: origin, protocol });
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		const initial = setup.accept(grant(["baz"], []));
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		const adding = client.auth.add("new");
+		try {
+			const unanswered = await requests.next();
+			if (!unanswered) throw new Error("missing token");
+			const withdrawn = origin.createBroadcast(Path.from("foo/bar"));
+			withdrawn.announce();
+			await nextTask();
+			withdrawn.unannounce();
+			await nextTask();
+			const issued = unanswered.accept(grant(["other"], []));
+			await adding;
+			// Still enforcing: the next uncovered broadcast is the one named.
+			origin.createBroadcast(Path.from("still-bad")).announce();
+			const info = await transport.closed;
+			expect(info.closeCode).toBe(SessionCode.Unauthorized);
+			expect(info.reason).toBe("unauthorized: still-bad");
+			issued.close();
+		} finally {
+			initial.close();
+			client.abort();
+			server.abort();
+			await adding.catch(() => void 0);
+		}
+	});
+
 	test("a revoked grant withdraws its broadcasts without closing the session", async () => {
 		const origin = new OriginProducer();
 		const { client, server, transport } = await connect({ publish: origin, protocol });
@@ -298,6 +331,39 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 			await adding.catch(() => void 0);
 			logged.mockRestore();
 			restore();
+		}
+	});
+
+	test("an abandoned request stops waiting for its token", async () => {
+		const { client, server } = await connect({ protocol });
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		const initial = setup.accept(grant([], []));
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		const adding = client.auth.add("first");
+		try {
+			const unanswered = await requests.next();
+			if (!unanswered) throw new Error("missing token");
+			const track = new OriginProducer().createBroadcast(Path.from("room/x")).createTrack("video");
+			const reader = track.subscribe();
+			const ready = (client.auth as AuthSession).ready(Path.from("room/x"), "subscribe", {
+				demand: track.demand(),
+			});
+			let settled = false;
+			void ready.then(() => {
+				settled = true;
+			});
+			await nextTask();
+			expect(settled).toBe(false);
+			reader.close();
+			expect(await ready).toBe(false);
+			unanswered.accept(grant([], [])).close();
+		} finally {
+			initial.close();
+			client.abort();
+			server.abort();
+			await adding.catch(() => void 0);
 		}
 	});
 

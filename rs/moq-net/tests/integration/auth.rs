@@ -56,6 +56,7 @@ cases!(
 	an_out_of_scope_announce_aborts_with_the_path,
 	a_broadcast_published_before_the_grant_is_checked,
 	an_unanswered_token_holds_the_check,
+	a_broadcast_withdrawn_while_its_token_waits_is_not_refused,
 	tokens_union_and_withdrawing_one_shrinks_it,
 	an_update_replaces_one_tokens_grant,
 	a_revoked_grant_withdraws_and_can_be_restored,
@@ -640,6 +641,46 @@ async fn an_unanswered_token_holds_the_check(version: &'static str) {
 			pair.server.closed().await,
 			Error::Session(SessionError::Unauthorized)
 		));
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A broadcast withdrawn while its token is unanswered is not judged once the token settles.
+async fn a_broadcast_withdrawn_while_its_token_waits_is_not_refused(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(2);
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(produce_origin(1)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut requests = pair.requests.take().unwrap();
+		let _setup = requests.next().await.unwrap().accept(grant(&["baz"], &[]));
+		assert_eq!(granted(&pair.client).await, grant(&["baz"], &[]));
+		let auth = pair.client.auth();
+		let pending = moq_clock::sim::spawn(async move { auth.add("new").await });
+		let unanswered = requests.next().await.unwrap();
+		let withdrawn = publisher.create_broadcast("foo/bar").unwrap();
+		withdrawn.announce(Default::default()).unwrap();
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		withdrawn.unannounce();
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		let _issued = unanswered.accept(grant(&["other"], &[]));
+		let _token = pending.await.unwrap().unwrap();
+		assert_eq!(granted(&pair.client).await, grant(&["baz", "other"], &[]));
+		// Still enforcing: the next uncovered broadcast is the one named.
+		let bad = publisher.create_broadcast("still-bad").unwrap();
+		bad.announce(Default::default()).unwrap();
+		assert!(matches!(
+			pair.server.closed().await,
+			Error::Session(SessionError::Unauthorized)
+		));
+		let (_, reason) = pair.client_transport.close_reason().expect("closed");
+		assert_eq!(reason, "unauthorized: still-bad");
 	})
 	.await
 	.expect("timed out");
