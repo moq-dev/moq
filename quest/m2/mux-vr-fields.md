@@ -17,10 +17,12 @@ Decided with the maintainer on 2026-10-20, from #5543's follow-ups. Start once
 - The fields are live state like `color` (#5543), so fill them the way the
   importers fill color (`rs/moq-mux/src/codec/color.rs`) and update them when
   the source's config changes.
-- Derive `fov` from the equirectangular bounds. A projection the catalog has
-  no kind for (cubemap, mesh) leaves the field absent: a flat picture is a
-  worse result, not a wrong one. Malformed input, such as family 2 with a
-  channel count that is not a square of at least 4, is refused.
+- Derive `fov` from the equirectangular bounds.
+- Refuse what the catalog cannot describe, since an absent field claims flat
+  video or plain channels: a cubemap or mesh projection, and an Opus family 2
+  stream outside a square channel count of at least 4 (zeroth order, or one
+  carrying RFC 8486's non-diegetic stereo pair). Input RFC 8486 itself
+  forbids is malformed and refused the same way.
 - `mp4-atom` 0.16.2 has no `st3d` or `sv3d` atom; add them in
   kixelated/mp4-atom. `webm-iterable` already names the Matroska elements.
 - An fMP4 Opus track needs the `dOps` mapping table that
@@ -29,8 +31,8 @@ Decided with the maintainer on 2026-10-20, from #5543's follow-ups. Start once
 - Exporters writing the fields back are out of scope.
 
 Tests: a fixture per source (MP4 360 and VR180, Matroska stereo, Opus
-first-order ambisonics) imports with the expected fields, and a malformed one
-is refused.
+first-order ambisonics) imports with the expected fields, and a cubemap, an
+ambisonic stream with non-diegetic stereo, and a malformed one are refused.
 
 Public API: none beyond the catalog fields #5543 adds. Wire: none.
 
