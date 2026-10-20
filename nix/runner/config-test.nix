@@ -45,6 +45,9 @@ assert pkgs.lib.assertMsg (pkgs.lib.all (item: item.assertion) valid.config.asse
   )
 );
 assert pkgs.lib.all (item: item.assertion) matchingNat.config.assertions;
+assert pkgs.lib.all (
+  name: valid.config.systemd.services.${name}.serviceConfig.Restart == "always"
+) (builtins.attrNames ids);
 assert pkgs.lib.any (item: !item.assertion) duplicate.config.assertions;
 assert pkgs.lib.any (item: !item.assertion) wrongUplink.config.assertions;
 assert pkgs.lib.any (item: !item.assertion) fixedAddress.config.assertions;

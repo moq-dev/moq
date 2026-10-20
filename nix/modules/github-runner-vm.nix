@@ -178,6 +178,7 @@ let
           RuntimeDirectoryMode = "0700";
           LoadCredential = [ "runner-token:${cfg.tokenFile}" ];
           ExecStop = stop;
+          Restart = "always";
           TimeoutStopSec = 120;
           ProtectHome = true;
           ProtectSystem = "strict";
