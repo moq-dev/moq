@@ -392,8 +392,8 @@ export class AuthSession implements Handle {
 		const abandoned = () => {
 			if (!demand) return false;
 			if (demand.closed.peek() !== undefined) return true;
-			if (demand.used.peek()) wanted = true;
-			return wanted && !demand.used.peek();
+			if (demand.wanted.peek() !== undefined) wanted = true;
+			return wanted && demand.wanted.peek() === undefined;
 		};
 		try {
 			while (this.#pending.peek() > 0 && !this.#union.peek()?.[direction].matches(path)) {
@@ -418,7 +418,7 @@ export class AuthSession implements Handle {
 					};
 					const pending = this.#pending.changed(done);
 					const grant = this.#union.changed(done);
-					const used = demand?.used.changed(done);
+					const used = demand?.wanted.changed(done);
 					const closed = demand?.closed.changed(done);
 					signal?.addEventListener("abort", abort, { once: true });
 				});
