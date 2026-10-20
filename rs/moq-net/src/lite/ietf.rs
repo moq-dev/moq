@@ -216,12 +216,14 @@ pub(crate) struct Decoded {
 }
 
 /// Decode an object's record body on a track in `timescale`, the units the track
-/// declares, which its sealed Timestamp is in.
+/// declares, which its sealed Timestamp is in. A `framed` object's frame holds its time;
+/// a status object's block holds it.
 ///
 /// Only the canonical form is accepted, so what decodes re-encodes to the same bytes.
 pub(crate) fn decode_properties(
 	body: &[u8],
 	timescale: Option<Timescale>,
+	framed: bool,
 	version: Version,
 ) -> Result<Decoded, DecodeError> {
 	if body.is_empty() {
@@ -236,7 +238,8 @@ pub(crate) fn decode_properties(
 	let encoding = encoding.ok_or(DecodeError::InvalidValue)?;
 	// A small cached block must not pin the reader's larger receive buffer.
 	let bytes = Bytes::copy_from_slice(&body[body.len() - r.remaining()..]);
-	let checked = crate::ietf::object::check(&bytes, encoding, timescale).map_err(|_| DecodeError::InvalidValue)?;
+	let checked =
+		crate::ietf::object::check(&bytes, encoding, timescale, framed).map_err(|_| DecodeError::InvalidValue)?;
 	Ok(Decoded {
 		properties: Properties {
 			sealed_time: checked.sealed_time,
@@ -457,19 +460,22 @@ pub(crate) fn decode_datagram(
 	let object_id = (state & OBJECT_ID != 0).then(|| r.varint()).transpose()?;
 	let priority = (state & PRIORITY != 0).then(|| r.u8()).transpose()?;
 	let status = (state & STATUS != 0).then(|| r.varint()).transpose()?;
-	// A relay holds and forwards it, so it must be one moq-transport ingress would accept.
-	if status.is_some_and(|status| !crate::ietf::object::status_defined(status)) {
-		return Err(DecodeError::InvalidValue);
-	}
+	// A status object has no frame to hold its time.
+	let framed = status.is_none_or(|status| status == 0);
 	let block = r.bytes()?;
-	let properties = decode_properties(block, timescale, version)?.properties;
-	Ok(Some(crate::model::datagram::Wire {
+	let properties = decode_properties(block, timescale, framed, version)?.properties;
+	let wire = crate::model::datagram::Wire {
 		object_id,
 		priority,
 		end_of_group: state & DATAGRAM_END != 0,
 		status,
 		properties,
-	}))
+	};
+	// A relay holds and forwards it, so it must be one moq-transport ingress would accept.
+	if !wire.defined() {
+		return Err(DecodeError::InvalidValue);
+	}
+	Ok(Some(wire))
 }
 
 #[cfg(test)]
@@ -546,18 +552,18 @@ mod tests {
 			block: crate::ietf::object::block(&values, Encoding::DeltaQuic, true).unwrap(),
 		};
 		let body = encode_properties(&properties, V).unwrap();
-		let decoded = decode_properties(&body, Some(Timescale::MILLI), V).unwrap();
+		let decoded = decode_properties(&body, Some(Timescale::MILLI), true, V).unwrap();
 		assert_eq!(decoded.properties, properties);
 		assert_eq!(decoded.gap, Some(2));
 
 		// None at all is an empty body.
 		assert!(encode_properties(&Properties::default(), V).unwrap().is_empty());
-		let empty = decode_properties(&[], Some(Timescale::MILLI), V).unwrap();
+		let empty = decode_properties(&[], Some(Timescale::MILLI), true, V).unwrap();
 		assert_eq!(empty.properties, Properties::default());
 
 		// An untimed track's Timestamp has no frame to hold it, so it stays in the block.
 		let untimed = [4 << 1, 0x10, 7];
-		let decoded = decode_properties(&untimed, None, V).unwrap();
+		let decoded = decode_properties(&untimed, None, true, V).unwrap();
 		assert_eq!(encode_properties(&decoded.properties, V).unwrap(), untimed);
 	}
 
@@ -578,7 +584,7 @@ mod tests {
 			(&[delta, 0x0b, 2, 0x0b, 0][..], "a nested Immutable Properties"),
 		] {
 			assert!(
-				decode_properties(body, Some(Timescale::MILLI), V).is_err(),
+				decode_properties(body, Some(Timescale::MILLI), true, V).is_err(),
 				"accepted {reason}"
 			);
 		}
@@ -609,7 +615,7 @@ mod tests {
 
 			let body = encode_properties(&properties, V).unwrap();
 			assert!(body.len() <= MAX_PROPERTIES, "{version}: {} bytes", body.len());
-			let received = decode_properties(&body, Some(Timescale::MILLI), V).unwrap();
+			let received = decode_properties(&body, Some(Timescale::MILLI), true, V).unwrap();
 			assert_eq!(received.properties, properties, "{version}");
 			let written =
 				crate::ietf::object::write(&received.properties, frame, version, Some(Timescale::MILLI)).unwrap();
@@ -828,8 +834,10 @@ mod tests {
 		}
 	}
 
+	/// No moq-transport draft defines a status datagram that also ends the group, so one
+	/// is refused where it arrives, by the check moq-transport ingress applies.
 	#[test]
-	fn datagram_state_round_trips() {
+	fn a_status_datagram_cannot_end_the_group() {
 		let wire = crate::model::datagram::Wire {
 			object_id: Some(3),
 			priority: Some(9),
@@ -839,8 +847,24 @@ mod tests {
 		};
 		let mut buf = Vec::new();
 		encode_datagram(&mut Encoder::new(&mut buf, V.into()), Some(&wire), V).unwrap();
-		let decoded = decode_datagram(&mut Decoder::new(&buf, V.into()), None, V).unwrap();
-		assert_eq!(decoded, Some(wire));
+		assert!(decode_datagram(&mut Decoder::new(&buf, V.into()), None, V).is_err());
+	}
+
+	#[test]
+	fn datagram_state_round_trips() {
+		for (end_of_group, status) in [(false, Some(3)), (true, None)] {
+			let wire = crate::model::datagram::Wire {
+				object_id: Some(3),
+				priority: Some(9),
+				end_of_group,
+				status,
+				properties: Properties::default(),
+			};
+			let mut buf = Vec::new();
+			encode_datagram(&mut Encoder::new(&mut buf, V.into()), Some(&wire), V).unwrap();
+			let decoded = decode_datagram(&mut Decoder::new(&buf, V.into()), None, V).unwrap();
+			assert_eq!(decoded, Some(wire));
+		}
 
 		let mut plain = Vec::new();
 		encode_datagram(&mut Encoder::new(&mut plain, V.into()), None, V).unwrap();

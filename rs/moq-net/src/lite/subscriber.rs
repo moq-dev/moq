@@ -1169,7 +1169,7 @@ impl FrameIngest {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
 					if end {
-						let decoded = lite::ietf::decode_properties(&block, self.timescale, self.version)?;
+						let decoded = lite::ietf::decode_properties(&block, self.timescale, false, self.version)?;
 						group.mark_gap(id, decoded.gap)?;
 						group.set_end_object(crate::model::object::Fields {
 							id,
@@ -1216,7 +1216,7 @@ impl FrameIngest {
 						Some(records) => {
 							let (id, block) = records.pending.take().expect("a record precedes each frame");
 							let lite::ietf::Decoded { properties, gap } =
-								lite::ietf::decode_properties(&block, self.timescale, self.version)?;
+								lite::ietf::decode_properties(&block, self.timescale, true, self.version)?;
 							group.mark_gap(id, gap)?;
 							let plain = id == group.frame_count() as u64 && properties.is_empty();
 							if !plain && !records.relayed {

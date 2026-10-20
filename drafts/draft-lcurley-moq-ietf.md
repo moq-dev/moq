@@ -146,7 +146,7 @@ DELIVERY_TIMEOUT lets a relay refuse to forward property 0x06 to a draft that wo
 Every property of the object, serialized as the {{moqt}} drafts of its encoding serialize an object's properties, in ascending ID order.
 Immutable Properties (0x0b) are in the same encoding, as the publisher sent them.
 It MUST NOT be empty or longer than 65,536 bytes.
-On a timed track it MUST NOT be longer than 65,526 bytes, leaving room for the largest Timestamp a relay restates ([Timestamps](#timestamps)): a one-byte key and a value of up to nine bytes.
+On a timed track an object with a FRAME, or a datagram without a Status, MUST NOT carry one longer than 65,526 bytes, leaving room for the largest Timestamp a relay restates ([Timestamps](#timestamps)): a one-byte key and a value of up to nine bytes.
 A relay MUST refuse a {{moqt}} object whose properties, less its mutable Timestamp, exceed that, so every object it forwards fits.
 A receiver MUST treat a block its encoding's drafts would refuse as malformed.
 Other properties are opaque to this extension.
@@ -158,6 +158,7 @@ A relay forwarding the object to {{moqt}} restates the time as the mutable Times
 A sealed Timestamp is in the track's Timescale ({{moql}} TRACK_INFO), and a relay MUST NOT forward one to a peer of other units, which would change its meaning.
 
 On an untimed track there is no FRAME Timestamp, so a mutable Timestamp stays in the Property Block as an opaque property.
+Likewise, an object without a FRAME, such as the END_OF_GROUP record or a datagram with a non-zero Status, has no time of its own beside the block, so its mutable Timestamp stays there on any track.
 
 
 # Track Stream {#track}
@@ -230,6 +231,7 @@ A receiver MUST drop a datagram with any other bit, or a bit without RELAYED.
 
 A datagram with a non-zero Status carries no object: it has no Timestamp, even on a timed track, and its Payload MUST be empty.
 A receiver MUST drop a datagram whose Status no {{moqt}} draft defines: only 0 (Normal), 1 (DOES_NOT_EXIST, drafts 14 and 15), 3 (END_OF_GROUP), and 4 (END_OF_TRACK) are relayed.
+It MUST also drop one whose fields no {{moqt}} OBJECT_DATAGRAM Type can carry, such as STATUS with END_OF_GROUP.
 
 
 # Security Considerations

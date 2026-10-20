@@ -206,16 +206,22 @@ pub(crate) struct Checked {
 }
 
 /// Validate a block received as `encoding` on a track in `timescale`, as moq-transport
-/// ingress validates a list.
+/// ingress validates a list, for an object that is `framed` or a frameless status.
 ///
-/// A timed track's mutable Timestamp is its frame's, so one inside is malformed, as is an
-/// empty block, which is sent as none.
-pub(crate) fn check(bytes: &Bytes, encoding: Encoding, timescale: Option<Timescale>) -> Result<Checked, Error> {
-	if bytes.is_empty() || bytes.len() > max_block(timescale) {
+/// A framed object's mutable Timestamp on a timed track is its frame's, so one inside is
+/// malformed, as is an empty block, which is sent as none.
+pub(crate) fn check(
+	bytes: &Bytes,
+	encoding: Encoding,
+	timescale: Option<Timescale>,
+	framed: bool,
+) -> Result<Checked, Error> {
+	let lifted = timescale.filter(|_| framed);
+	if bytes.is_empty() || bytes.len() > max_block(lifted) {
 		return Err(Error::MalformedTrack);
 	}
-	let parsed = list(bytes, family(encoding), false, timescale.is_some())?;
-	if timescale.is_some() && parsed.timestamp.is_some() {
+	let parsed = list(bytes, family(encoding), false, lifted.is_some())?;
+	if lifted.is_some() && parsed.timestamp.is_some() {
 		return Err(Error::MalformedTrack);
 	}
 	Ok(Checked {
@@ -250,13 +256,25 @@ pub(crate) fn values(block: &crate::model::object::Block) -> Result<Vec<Property
 /// Read an object's property list on a track in `timescale`. A timed track's frame holds
 /// the object's time, its mutable Timestamp or else a sealed one, so the block does not.
 pub(crate) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>) -> Result<Decoded, Error> {
-	let parsed = list(data, version, false, timescale.is_some())?;
+	decode(data, version, timescale, true)
+}
+
+/// Read the property list of an object without a frame, such as an END_OF_GROUP status,
+/// on a track in `timescale`. No frame holds its time, so a mutable Timestamp stays in the
+/// block, as on an untimed track.
+pub(crate) fn unframed(data: &Bytes, version: Version, timescale: Option<Timescale>) -> Result<Properties, Error> {
+	Ok(decode(data, version, timescale, false)?.properties)
+}
+
+fn decode(data: &Bytes, version: Version, timescale: Option<Timescale>, framed: bool) -> Result<Decoded, Error> {
+	let lifted = timescale.filter(|_| framed);
+	let parsed = list(data, version, false, lifted.is_some())?;
 	let properties = Properties {
 		sealed_time: timed(parsed.sealed_time, timescale)?,
 		block: block(&parsed.values, encoding(version), has_delivery_timeout(version))?,
 	};
 	// A list at the limit with a small Timestamp cannot take back a larger one on egress.
-	if properties.heap() > max_block(timescale) as u64 {
+	if properties.heap() > max_block(lifted) as u64 {
 		return Err(Error::Unsupported);
 	}
 	Ok(Decoded {
@@ -568,9 +586,26 @@ mod tests {
 
 		// The same bound on a block arriving over the lite hop.
 		let encoding = Encoding::Delta { seven: true };
-		assert!(check(&block(limit), encoding, milli).is_ok());
-		assert!(check(&block(limit + 1), encoding, milli).is_err());
-		assert!(check(&block(limit + 1), encoding, None).is_ok());
+		assert!(check(&block(limit), encoding, milli, true).is_ok());
+		assert!(check(&block(limit + 1), encoding, milli, true).is_err());
+		assert!(check(&block(limit + 1), encoding, None, true).is_ok());
+	}
+
+	/// A status object has no frame to hold its time, so its mutable Timestamp stays in the
+	/// block on a timed track, where a framed object's is lifted out.
+	#[test]
+	fn a_status_object_keeps_its_timestamp() {
+		let milli = Some(Timescale::MILLI);
+		let list = Bytes::from_static(&[0x10, 7, 0x3e, 1]);
+		let framed = read(&list, Version::Draft14, milli).unwrap();
+		assert_eq!(framed.timestamp, Some(Timestamp::new(7, Timescale::MILLI).unwrap()));
+		let status = unframed(&list, Version::Draft14, milli).unwrap();
+		assert_eq!(write(&status, None, Version::Draft14, None).unwrap(), list.to_vec());
+
+		// Over the lite hop, only a status block may hold it.
+		let block = status.block.unwrap().bytes;
+		assert!(check(&block, Encoding::Absolute, milli, false).is_ok());
+		assert!(check(&block, Encoding::Absolute, milli, true).is_err());
 	}
 
 	/// Draft-19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so it cannot cross that boundary.

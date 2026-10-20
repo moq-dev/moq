@@ -4118,14 +4118,24 @@ where
 		// Like a subgroup object: a track that declared no timescale is untimed. One on a
 		// timed track without a Timestamp is refused by the model.
 		let properties = bytes::Bytes::from(datagram.properties.unwrap_or_default());
-		let decoded = super::object::read(&properties, self.version, track.timescale)?;
+		// A status object has no frame to hold its time, so its block keeps it.
+		let (timestamp, properties) = match status.is_some_and(|status| status != 0) {
+			true => (
+				None,
+				super::object::unframed(&properties, self.version, track.timescale)?,
+			),
+			false => {
+				let decoded = super::object::read(&properties, self.version, track.timescale)?;
+				(decoded.timestamp, decoded.properties)
+			}
+		};
 		let Some(producer) = track.producer.as_mut() else {
 			return Ok(());
 		};
 		producer.insert_wire_datagram(crate::model::datagram::Stored {
 			datagram: crate::Datagram {
 				sequence,
-				timestamp: decoded.timestamp,
+				timestamp,
 				payload,
 			},
 			wire: Some(std::sync::Arc::new(crate::model::datagram::Wire {
@@ -4133,7 +4143,7 @@ where
 				priority: datagram.publisher_priority,
 				end_of_group: datagram.end_of_group,
 				status,
-				properties: decoded.properties,
+				properties,
 			})),
 		})?;
 		Ok(())
@@ -4413,6 +4423,8 @@ struct GroupIngest {
 	prior_object: Option<u64>,
 	start: Option<u64>,
 	properties: crate::model::object::Properties,
+	/// The property list `properties` was read from, for a status object, which has no frame.
+	raw: bytes::Bytes,
 	gap: Option<u64>,
 	/// The object being read is one the group started past, so it is read and dropped.
 	dropping: bool,
@@ -4453,6 +4465,7 @@ impl GroupIngest {
 			prior_object: None,
 			start,
 			properties: Default::default(),
+			raw: bytes::Bytes::new(),
 			gap: None,
 			dropping: false,
 			phase: IngestPhase::Delta,
@@ -4703,11 +4716,8 @@ where
 				continue;
 			}
 
-			let decoded = super::object::read(
-				&bytes::Bytes::from(object.properties.unwrap_or_default()),
-				self.version,
-				timescale,
-			)?;
+			let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
+			let decoded = super::object::read(&raw, self.version, timescale)?;
 			let expected = head
 				.as_ref()
 				.filter(|(sequence, _, _)| group.is_none_or(|group| group == *sequence))
@@ -4762,6 +4772,7 @@ where
 					producer,
 					FetchPayload {
 						decoded,
+						raw,
 						timescale,
 						keep,
 						id,
@@ -4787,6 +4798,7 @@ where
 	) -> Result<Fetched, Error> {
 		let FetchPayload {
 			decoded,
+			raw,
 			timescale,
 			keep,
 			id,
@@ -4797,23 +4809,26 @@ where
 		let size = stream.varint().await?;
 		if size == 0 && matches!(self.version, Version::Draft14 | Version::Draft15) {
 			let status = stream.varint().await?;
-			if status != 0 {
-				super::object::check_status(self.version, &decoded.properties)?;
-			}
-			match status {
-				0 => {}
-				END_OF_GROUP => {
+			// A status object has no frame to hold its time, so its block keeps it.
+			let unframed = match status {
+				0 => None,
+				_ => {
+					let properties = super::object::unframed(&raw, self.version, timescale)?;
+					super::object::check_status(self.version, &properties)?;
+					Some(properties)
+				}
+			};
+			match (status, unframed) {
+				(0, _) => {}
+				(END_OF_GROUP, Some(properties)) => {
 					if keep {
-						producer.set_end_object(crate::model::object::Fields {
-							id,
-							properties: decoded.properties,
-						})?;
+						producer.set_end_object(crate::model::object::Fields { id, properties })?;
 					}
 					return Ok(Fetched::EndOfGroup);
 				}
 				// END_OF_TRACK is track-level, so there is nowhere to keep its properties.
-				END_OF_TRACK if !decoded.properties.is_empty() => return Err(Error::Unsupported),
-				END_OF_TRACK => return Ok(Fetched::EndOfTrack),
+				(END_OF_TRACK, Some(properties)) if !properties.is_empty() => return Err(Error::Unsupported),
+				(END_OF_TRACK, _) => return Ok(Fetched::EndOfTrack),
 				_ => return Err(Error::Unsupported),
 			}
 		}
@@ -5277,11 +5292,8 @@ where
 			if group.is_some_and(|group| group != sequence) || id < next {
 				return Err(Error::ProtocolViolation);
 			}
-			let decoded = super::object::read(
-				&bytes::Bytes::from(object.properties.unwrap_or_default()),
-				self.version,
-				timescale,
-			)?;
+			let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
+			let decoded = super::object::read(&raw, self.version, timescale)?;
 			if id > next && decoded.gap.is_none_or(|gap| gap < id - next) {
 				return Err(Error::Unsupported);
 			}
@@ -5291,6 +5303,7 @@ where
 					producer,
 					FetchPayload {
 						decoded,
+						raw,
 						timescale,
 						keep: true,
 						id,
@@ -5341,6 +5354,8 @@ enum Fetched {
 
 struct FetchPayload {
 	decoded: super::object::Decoded,
+	/// The property list `decoded` was read from, for a status object, which has no frame.
+	raw: bytes::Bytes,
 	timescale: Option<Timescale>,
 	keep: bool,
 	id: u64,
@@ -5583,6 +5598,7 @@ impl GroupIngest {
 					let id = next_object_id(self.prior_object, id_delta, self.start)?;
 					self.prior_object = Some(id);
 					self.properties = Default::default();
+					self.raw = bytes::Bytes::new();
 					self.gap = None;
 					self.dropping = self.start.is_some() && id < group.frame_count() as u64;
 					self.phase = match self.has_extensions {
@@ -5599,6 +5615,7 @@ impl GroupIngest {
 					let decoded = super::object::read(&ext, self.version, self.timescale)?;
 					let timestamp = decoded.timestamp;
 					self.properties = decoded.properties;
+					self.raw = ext;
 					self.gap = decoded.gap;
 					self.phase = IngestPhase::Size { timestamp };
 				}
@@ -5633,6 +5650,8 @@ impl GroupIngest {
 						self.phase = IngestPhase::Delta;
 						continue;
 					}
+					// A status object has no frame to hold its time, so its block keeps it.
+					self.properties = super::object::unframed(&self.raw, self.version, self.timescale)?;
 					super::object::check_status(self.version, &self.properties)?;
 					if status == END_OF_GROUP {
 						group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
@@ -12639,6 +12658,54 @@ mod stitch_tests {
 		assert_eq!(decoder.varint().unwrap(), 0);
 		assert_eq!(decoder.varint().unwrap(), END_OF_GROUP);
 		assert!(decoder.is_empty());
+	}
+
+	/// Draft-14 lets a status object carry properties, and it has no frame to hold its
+	/// time, so a mutable Timestamp stays in its block on a timed track: through a subgroup
+	/// and a FETCH, and out again as it arrived.
+	#[moq_clock::test]
+	async fn a_status_object_keeps_its_timestamp() {
+		use futures::FutureExt;
+
+		let version = Version::Draft14;
+		let status = [0x10, 7];
+		let leaves = |properties: &crate::model::object::Properties| {
+			super::super::object::write(properties, None, version, None).unwrap()
+		};
+
+		let script = object_stream(
+			version,
+			true,
+			&[(0, &[0x10, 5], None), (1, &status, Some(END_OF_GROUP))],
+		);
+		let mut h = Harness::with_timescale(Fill::Done, vec![script], Some(Timescale::MILLI));
+		h.subscriber.version = version;
+		let mut consumer = h.track.subscribe(None);
+		let mut stream = h.stream().await.with_version(version);
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		let group = consumer.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		let end = group.end_object().expect("the END_OF_GROUP object");
+		assert_eq!(leaves(&end.properties), status, "subgroup");
+
+		// A draft-14 FETCH object: Group, Subgroup, Object, priority, then its properties,
+		// an empty payload, and the status.
+		let mut objects = Vec::new();
+		let w = &mut Encoder::new(&mut objects, version.into());
+		for value in [SEQUENCE, 0, 0] {
+			w.varint(value).unwrap();
+		}
+		w.u8(128);
+		w.bytes(&status).unwrap();
+		w.varint(0u64).unwrap();
+		w.varint(END_OF_GROUP).unwrap();
+		let mut run = GroupFetchRun::new(version, objects).await;
+		let mut producer = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+		run.subscriber
+			.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(1), Some(Timescale::MILLI))
+			.await
+			.unwrap();
+		let end = producer.consume().end_object().expect("the END_OF_GROUP object");
+		assert_eq!(leaves(&end.properties), status, "fetch");
 	}
 
 	#[moq_clock::test]
