@@ -80,11 +80,11 @@ fn publish(
 	broadcast.announce(Default::default()).expect("announce");
 	let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 	let track = broadcast.create_track("video", info).expect("create track");
-	track
-		.append_group()
-		.expect("append group")
+	let mut group = track.append_group().expect("append group");
+	group
 		.write_frame(moq_net::Timestamp::ZERO, name.as_bytes())
 		.expect("write frame");
+	group.finish().expect("finish group");
 	(origin, broadcast, track)
 }
 

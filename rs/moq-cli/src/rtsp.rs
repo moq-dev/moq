@@ -15,7 +15,7 @@ const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 /// RTSP import args.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
 	/// Pull `rtsp://[user:pass@]host[:port]/path`, such as an IP camera's stream.

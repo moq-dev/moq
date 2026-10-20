@@ -12,7 +12,7 @@
 
 use anyhow::Context;
 
-#[derive(usage::Cli)]
+#[derive(usage_rs::Cli)]
 #[usage(bin = "transcode", unknown_flags = "error", args_override_self = false)]
 struct Args {
 	/// The relay URL, including any auth path prefix.

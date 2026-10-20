@@ -27,7 +27,7 @@ use tower_service::Service;
 use crate::{auth, cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
-#[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -71,7 +71,7 @@ impl Config {
 }
 
 /// Plain HTTP listener configuration.
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -88,7 +88,7 @@ pub struct Http {
 
 /// HTTPS listener configuration with TLS certificates and keys.
 #[serde_with::serde_as]
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]

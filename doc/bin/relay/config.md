@@ -35,6 +35,7 @@ bind = "/run/moq/internal.sock"
 allow.uid = [1001]
 
 [listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
+                                     # The relay always offers ietf, for moq-lite-07 relay links.
 auth = false                         # Decline MoQ Auth (draft 17+).
 solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
 epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch (draft 17+).

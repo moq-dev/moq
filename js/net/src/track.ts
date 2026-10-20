@@ -723,6 +723,8 @@ export class Producer {
 	}
 
 	static {
+		hooks.producerLargest = (producer) => producer.#state.largest;
+		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
@@ -1784,6 +1786,10 @@ export class Subscriber {
 
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
+		hooks.joinSubscriber = (subscriber) => {
+			if (subscriber.#resume) subscriber.#resume.join();
+			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
+		};
 		hooks.tryRecvGroup = (subscriber, started) => subscriber.#tryRecvGroup(started);
 		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();
 		hooks.peekGroup = (subscriber, ordered) => subscriber.#peekGroup(ordered);
@@ -2015,6 +2021,7 @@ export class Subscriber {
 	 * publisher read the cache alongside the cursor it is serving from. Resolving the track
 	 * again through the broadcast would not do: a dynamic serve is one request per peer
 	 * subscription, so that mints a second producer the application has to answer separately.
+	 * A routed track's fork follows the same logical track across route swaps.
 	 *
 	 * @internal Wire layers only.
 	 */

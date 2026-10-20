@@ -49,6 +49,7 @@ impl<T> Queue<T> {
 
 	/// Dequeue the next message, waiting while the queue is open and empty.
 	/// Returns `None` once the queue is closed and drained.
+	#[cfg(test)]
 	async fn pop(&self) -> Option<T> {
 		kio::wait(|waiter| self.poll_pop(waiter)).await
 	}
@@ -66,7 +67,7 @@ impl<T> Queue<T> {
 			.map(|mut state| state.messages.pop_front())
 	}
 
-	/// Stop future pushes; buffered messages still drain, then `pop` returns `None`.
+	/// Stop future pushes; buffered messages still drain, then `poll_pop` returns `None`.
 	fn close(&self) {
 		self.0.lock().closed = true;
 	}
@@ -960,11 +961,27 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		let _ = self.shared.control.push(raw.into());
 	}
 
-	/// Writer task: drains the queue and writes to the control stream.
+	/// Writer task: drains the queue and writes to the control stream. The peer's
+	/// STOP_SENDING, seen while idle or as a failed write, is a protocol violation.
 	async fn run_write(&self, mut writer: Writer<S::SendStream, Version>) -> Result<(), Error> {
-		while let Some(msg) = self.shared.control.pop().await {
+		loop {
+			let msg = kio::wait(|waiter| {
+				// Never finished, so any end is the peer's or the session's.
+				if let Poll::Ready(res) = writer.poll_closed(&mut waiter.context()) {
+					let err = res
+						.err()
+						.map_or(Error::ProtocolViolation, super::session::control_stream_error);
+					return Poll::Ready(Err(err));
+				}
+				self.shared.control.poll_pop(waiter).map(Ok)
+			})
+			.await?;
+			let Some(msg) = msg else { break };
 			let mut buf = std::io::Cursor::new(msg);
-			writer.write_all(&mut buf).await?;
+			writer
+				.write_all(&mut buf)
+				.await
+				.map_err(super::session::control_stream_error)?;
 		}
 		Ok(())
 	}
@@ -976,12 +993,20 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		goaway: crate::goaway::Protocol,
 	) -> Result<(), Error> {
 		loop {
-			let type_id = match reader.varint_maybe().await? {
+			let type_id = match reader
+				.varint_maybe()
+				.await
+				.map_err(super::session::control_stream_error)?
+			{
 				Some(id) => id,
-				None => return Ok(()),
+				None => return Err(Error::ProtocolViolation),
 			};
 
-			let body = reader.decode::<ietf::Body>().await?.0;
+			let body = reader
+				.decode::<ietf::Body>()
+				.await
+				.map_err(super::session::control_stream_error)?
+				.0;
 
 			// Reconstruct raw message bytes: [type_id][size][body]
 			let raw = encode_raw(type_id, &body, self.version);
@@ -2107,6 +2132,48 @@ mod tests {
 		let log = Log::default();
 		let writer = Writer::new(SinkSend::new(log.clone()), VERSION);
 		(adapter, Reader::new(recv, VERSION), writer, log)
+	}
+
+	#[moq_clock::test]
+	async fn a_legacy_control_stream_fin_or_reset_is_a_protocol_violation() {
+		use crate::lite::test_transport::{DeadStreamSession, ScriptedSession};
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let mut session = ScriptedSession::eof(Vec::new());
+			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
+			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
+			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
+
+			let mut session = DeadStreamSession::bis(0);
+			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
+			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
+			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
+		}
+	}
+
+	/// A STOP_SENDING on a legacy control stream ends the session even with nothing queued
+	/// to write, while the peer keeps its own half open.
+	#[moq_clock::test]
+	async fn a_legacy_control_stream_stopped_while_idle_is_a_protocol_violation() {
+		use crate::transport::memory;
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let (mut session, mut peer) = memory::pair(memory::Config::default());
+			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
+			let mut remote = crate::coding::Stream::accept(&mut peer, version).await.unwrap();
+			remote.reader.abort(&Error::Cancel);
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
+			let res = moq_clock::timeout(
+				std::time::Duration::from_secs(10),
+				adapter.run(stream.reader, stream.writer, protocol),
+			)
+			.await
+			.expect("an idle writer missed the STOP_SENDING");
+			assert!(matches!(res, Err(Error::ProtocolViolation)), "{version:?}: {res:?}");
+		}
 	}
 
 	/// A request ID at the MAX_REQUEST_ID we advertised closes the session with the

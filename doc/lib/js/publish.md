@@ -49,7 +49,10 @@ for a permission, device, or settings change instead of prompting again.
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
 Codec, resolution, framerate, and bitrate are tunable through
-`el.video.config`, and `el.video.cut()` asks for an extra keyframe. Size,
+`el.video.config`, and `el.video.cut()` asks for an extra keyframe. A viewer
+who joins once a group's deltas outweigh twice its keyframe gets a fresh one,
+so `keyframeInterval` is only the longest a group runs. Through a moq-lite
+relay, only the join that opens the relay's upstream subscription counts. Size,
 bitrate, and framerate change in place, while a codec or audio format change
 keeps the rendition's catalog ID under a fresh `track` name that viewers
 follow through the catalog. For

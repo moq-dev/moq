@@ -61,6 +61,9 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
       `setGroups({ start: { included: latest.group } })`, whose omitted end
       removes the caller's cap. The rebinding must keep that cap; land it with
       a regression test where a capped snapshot reader stays below its cap.
+      A datagram also advances `largest()` past every group, stranding the
+      read. The Rust consumers instead drain the groups the reader already
+      has and keep the newest (#5677), which needs no floor at all.
     - `rs/moq-hls` export narrows a fetched group with `set_frames(..end)`.
     - Readers that set a floor once right after `poll_largest` (moq-audio,
       moq-video, moq-cli play, moq-json window, moq-mux) fit the builder.

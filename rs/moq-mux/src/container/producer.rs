@@ -545,7 +545,7 @@ where
 		if let Some(group) = self.group.as_mut() {
 			self.container.finish_group(group, tail_end)?;
 		}
-		if let Some(group) = self.group.take() {
+		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 			if let Some(recorder) = self.recorder.as_mut() {
 				recorder.finish_group(group.sequence);

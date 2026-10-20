@@ -31,7 +31,7 @@ def test_a_pending_timer_waits_for_advance() -> None:
 
             # Group 0 stalls with no frame, so the in-order read waits on it until
             # group 1 has been out for max_delay: a native timer is pending.
-            track.append_group()
+            _stalled = track.append_group()
             later = track.append_group()
             later.write_frame(b"later")
             later.finish()

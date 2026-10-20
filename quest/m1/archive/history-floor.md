@@ -38,5 +38,5 @@ stored segment, and a hole after it still fails.
 
 ## Related
 
-- [HLS failure signal](/quest/m1/hls-failure-signal.md) - the other history-mode gap left by #5236
+- [Failed HLS exports error](/quest/m1/hls-failure-signal.md) - the other history-mode gap left by #5236
 - [DVR rewind](/quest/m2/archive-dvr.md) - seeks through the same bounded archive

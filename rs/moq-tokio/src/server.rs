@@ -2582,7 +2582,7 @@ mod tests {
 
 	#[test]
 	fn version_help_lists_every_parseable_name() {
-		#[derive(usage::Cli)]
+		#[derive(usage_rs::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(settings)]
 		struct Cli {

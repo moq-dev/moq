@@ -477,9 +477,11 @@ elif [[ -n "$FULL" ]]; then
     # clocks or audio framing (moq-dev/moq#5362). ffmpeg pads any multiplex rate it is
     # given, so mux with room to spare, drop the nulls, and stamp the clock at the rate the
     # rest fill. The PTS and DTS stay: moving them with each PCR would move B pictures
-    # against their group's keyframe, and the video goes out far enough ahead of its DTS
-    # for its packets to arrive a little earlier or later. Muxed at most 0.5 s ahead, it
-    # arrives up to about 0.65 s ahead once the nulls are gone.
+    # against their group's keyframe. The video absorbs the time the nulls leave
+    # (drop_nulls.py), since it goes out far enough ahead of its DTS for its packets to
+    # arrive a little earlier or later: muxed at most 0.5 s ahead, it arrives up to about
+    # 0.65 s ahead once the nulls are gone. The audio keeps ffmpeg's placement, which the
+    # export keeps for the AC-3 it carries whole.
     PADDED_TS="$HARNESS_RUN/padded.ts"
     PADDED_RATE=27000000
     ffmpeg -y -hide_banner -loglevel error \
@@ -499,8 +501,9 @@ elif [[ -n "$FULL" ]]; then
         exit 1
     }
     BITRATE=$((PADDED_RATE * (PACKETS - NULLS) / PACKETS))
-    tsp -I file "$PADDED_TS" -P filter --negate --pid 0x1FFF \
-        -P pcradjust --bitrate "$BITRATE" --ignore-pts --ignore-dts -O file "$SRC_TS"
+    DROPPED_TS="$HARNESS_RUN/dropped.ts"
+    python3 "$DIR/drop_nulls.py" "$PADDED_TS" "$DROPPED_TS" --pid 0x100
+    tsp -I file "$DROPPED_TS" -P pcradjust --bitrate "$BITRATE" --ignore-pts --ignore-dts -O file "$SRC_TS"
     echo "  ${NULLS} null packets dropped of ${PACKETS}: ${BITRATE} b/s"
 elif [[ -n "$KLV" ]]; then
     echo "### generating ~${DURATION}s clip with DVB AC-3 and KLV"
