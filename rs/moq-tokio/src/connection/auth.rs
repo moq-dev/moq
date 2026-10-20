@@ -86,6 +86,21 @@ impl Replay {
 		}
 		*self.opening.lock().unwrap() = Some((connects, opening));
 	}
+
+	/// The registration queued for session `connects`, if any.
+	fn take(&self, connects: u64) -> Option<Opening> {
+		let mut opening = self.opening.lock().unwrap();
+		// A replacement published since the task's snapshot already holds this token.
+		// Dropping its registration would withdraw the token from a session consumers can
+		// see, so leave it for the task's next pass.
+		if opening.as_ref().is_some_and(|(queued, _)| *queued > connects) {
+			return None;
+		}
+		opening
+			.take()
+			.filter(|(queued, _)| *queued == connects)
+			.map(|(_, opening)| opening)
+	}
 }
 
 pub(super) fn replay(state: &State, session: &moq_net::Session, connects: u64) {
@@ -261,13 +276,7 @@ async fn present(
 		}
 		let handle = session.auth();
 		let mut delay = None;
-		let mut queued = replay
-			.opening
-			.lock()
-			.unwrap()
-			.take()
-			.filter(|(queued, _)| *queued == connects)
-			.map(|(_, opening)| opening);
+		let mut queued = replay.take(connects);
 		let token = loop {
 			let attempt = async {
 				if let Some(delay) = delay {
@@ -453,6 +462,28 @@ mod tests {
 		while watch.peek().is_none() {
 			watch.changed().await.unwrap();
 		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_stale_snapshot_keeps_the_newer_sessions_registration() {
+		let mut first = pair().await;
+		let mut second = pair().await;
+		let replay = Replay {
+			bytes: "replay".into(),
+			opening: Mutex::new(None),
+		};
+		// The replacement queues and publishes while the task still holds the first snapshot.
+		replay.queue(&second.client, 2);
+		let request = second.requests.recv().await.unwrap();
+		assert!(replay.take(1).is_none());
+		let opening = replay.take(2).expect("the newer session's registration was dropped");
+		let _issued = request.accept(auth::Grant::all());
+		let _token = opening.await.unwrap();
+		// A registration for a session the task has moved past is dropped.
+		replay.queue(&first.client, 1);
+		let _stale = first.requests.recv().await.unwrap();
+		assert!(replay.take(2).is_none());
+		assert!(replay.opening.lock().unwrap().is_none());
 	}
 
 	#[tokio::test(start_paused = true)]
