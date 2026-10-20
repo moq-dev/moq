@@ -58,9 +58,12 @@ export const MAX_PARTS = 32;
 
 /** Build a path from one or more components, joining with "/" and trimming redundant slashes. */
 export function from(...paths: string[]): Valid {
-	// Join paths with "/" and then remove leading and trailing slashes, and collapse multiple slashes into one.
-	const joined = paths.join("/");
-	return joined.replace(/\/+/g, "/").replace(/^\/+/, "").replace(/\/+$/, "") as Valid;
+	// Dropping empty parts collapses repeated slashes and trims leading and trailing ones.
+	return paths
+		.join("/")
+		.split("/")
+		.filter((part) => part !== "")
+		.join("/") as Valid;
 }
 
 /** Split a path into its slash-separated parts. The empty path has no parts. */
