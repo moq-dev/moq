@@ -12,6 +12,12 @@ A cap moved below the largest stays pending. Moving the bounds wakes a pending r
 Unbounded readers and `Track.Producer.largest()` are unchanged.
 To read the track's edge from a capped reader, lift the cap with `setGroups({})` first.
 
+### `webtransport.protocols` is `versions` (#5979)
+
+Move the list to the top-level `versions` of `connect` or `Connection`, spelled as version names: `moq-transport-22`, not the ALPN `moqt-22`; lite names are unchanged.
+It now applies to the WebSocket fallback too, so list every fallback you still want, such as `versions: ["moq-lite-07-wip", "moq-lite-06"]`.
+Passing `webtransport.protocols` or `websocket.protocols` throws a `TypeError`; move either to `versions`.
+
 ### Track demand reports the wanted group (#5930)
 
 `Track.Demand.used` and `unused()` are gone.

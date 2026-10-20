@@ -10,9 +10,10 @@ site.
 
 ## Plan
 
-The pipeline is in review. Remaining: the maintainer enables repository Pages
-with **Source: GitHub Actions** (until then the Nightly's Benchmark site job
-fails at deployment), then verifies the first Nightly deployment at
+The pipeline landed in #5759 (`9fcb3f327`), including the shared history
+publisher and explicit Pages deployment. Pages activation and the first
+successful deployment remain unverified: confirm the repository uses
+**Source: GitHub Actions** and verify the first Nightly deployment at
 <https://moq-dev.github.io/moq/bench/>. The "Rust benchmark tests" job is not
 charted yet: its nextest benchmarks print no structured measurements.
 
@@ -41,5 +42,8 @@ Decided with the maintainer on 2026-10-15:
   on (or approve the `gh api` call) at that step.
 - Document the site URL, what each series means, and local reproduction in
   `bench/README.md`.
+
+Keep the landed publisher and documented local reproduction; verify the
+deployed reports before filling any remaining measurement gaps.
 
 Public API: none. Wire: none.

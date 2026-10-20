@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
+import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import { SubscribeOk } from "./subscribe.ts";
+import { maxAgeFromSetup, maxAgeIntoSetup } from "./max_age.ts";
+import { Parameters, SetupOptions } from "./parameters.ts";
+import { Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 async function bytes(version: IetfVersion, encode: (writer: Writer) => Promise<void>) {
@@ -59,3 +62,42 @@ for (const version of Object.values(Version).filter(
 		}
 	});
 }
+
+for (const version of Object.values(Version).filter((v): v is IetfVersion => v !== Version.DRAFT_07)) {
+	test(`subscriber max age round trips on ${version}`, async () => {
+		for (const maxAge of [undefined, 0, 250, Number.MAX_SAFE_INTEGER]) {
+			const msg = new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("live"),
+				trackName: "catalog",
+				subscriberPriority: 128,
+				maxAge,
+			});
+			const encoded = await bytes(version, (w) => msg.encode(w, version));
+			expect((await Subscribe.decode(new Reader(undefined, encoded, version), version)).maxAge).toBe(maxAge);
+			const parameters = new Parameters();
+			parameters.maxAge = maxAge;
+			const legacy = version <= Version.DRAFT_16;
+			const update = new SubscribeUpdate({ requestId: 2n, ownRequestId: legacy ? 4n : undefined, parameters });
+			const encodedUpdate = await bytes(version, (w) => update.encode(w, version));
+			expect(
+				(await SubscribeUpdate.decode(new Reader(undefined, encodedUpdate, version), version)).parameters
+					.maxAge,
+			).toBe(maxAge);
+		}
+	});
+}
+
+test("subscriber max age has its own Setup Option and refuses unsafe budgets", () => {
+	const params = new SetupOptions();
+	expect(maxAgeFromSetup(params)).toBeFalse();
+	maxAgeIntoSetup(params);
+	expect(maxAgeFromSetup(params)).toBeTrue();
+	const budget = new Parameters();
+	for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1])
+		expect(() => {
+			budget.maxAge = value;
+		}).toThrow();
+	budget.vars.set(0x915c6n, 1n << 53n);
+	expect(() => budget.maxAge).toThrow();
+});

@@ -3,7 +3,7 @@
 //! A relay asks one question per session, "may this connect?", and this crate holds
 //! every piece of the answer:
 //!
-//! - [`Request`] and [`Grant`]: the JSON a relay POSTs to an auth server on
+//! - [`Request`], [`Grant`], and [`Refusal`]: the JSON a relay POSTs to an auth server on
 //!   [`Event::Connect`], [`Event::Revalidate`], and [`Event::End`], and what comes back.
 //! - [`lease::Producer`] / [`lease::Consumer`]: the handle a session holds for its
 //!   grant, so whoever runs the accept loop decides how, in process or over HTTP.
@@ -31,6 +31,8 @@ mod set;
 mod wire;
 
 pub mod lease;
+pub mod refusal;
+pub use refusal::Refusal;
 #[cfg(feature = "serve")]
 pub mod serve;
 

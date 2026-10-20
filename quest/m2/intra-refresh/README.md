@@ -6,8 +6,9 @@ Video encoded with periodic intra refresh has no keyframes. Each frame refreshes
 a stripe of the picture, so a decoder that starts at the beginning of a sweep is
 clean once the sweep completes, and the bitrate never spikes. This questline
 makes such video a first-class hang broadcast on import and playback: streams
-contributed that way import cleanly, and every viewer tunes in without a
-visible glitch.
+contributed that way import cleanly, and viewers stay live while recovering
+to a clean picture. A cold join or skip may show refresh stripes until the
+second decoder catches up, as the playback decision below permits.
 
 Measured on 2026-10-06: at fixed quality, a 60s keyframe interval saves
 10-16% against 2s on the 240p-720p rungs and about 10% at 1080p (x264
