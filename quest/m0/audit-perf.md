@@ -42,7 +42,7 @@ Audit evidence (2026-10-19, second checkpoint, incomplete):
   the full dev shell without the cachix substituter and hit its 15-minute
   timeout (jobs 117680366708 and 118138225497). This run takes only `just`
   from the pinned nixpkgs there, and a nightly tooling test requires
-  every dev-shell job to trust cachix. Pages itself is still off; see
+  every dev-shell job to trust the Nix cache. Pages itself is still off; see
   [benchmark trend site](/quest/m2/bench-site.md). Check that `gh-pages`
   exists and gains a commit per night before comparing against it.
 - Rust: both the October 18 (`50da59e67`) and October 19 (`ad87ad34e`)

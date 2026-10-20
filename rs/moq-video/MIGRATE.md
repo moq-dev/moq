@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Control::cut` is not rate limited, and capture advertises refresh (#6048)
+
+`encode::Control::cut` no longer spaces keyframes 500 ms apart: every request forces one on the next frame, so frequent calls produce all-keyframe video.
+Debounce your own calls if you relied on the spacing.
+Capture tracks now advertise `refresh: Some(2)` when every backend the selection may open honors a cut, and the driver forces a keyframe when `Demand::wanted` passes the largest group.
+
 ### OpenH264 is opt-in (#5771)
 
 The default features drop `openh264`, so a default build has no software H.264 encoder or decoder and a GPU-less host fails to open one.

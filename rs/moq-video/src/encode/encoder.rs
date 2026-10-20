@@ -441,7 +441,9 @@ impl Encoder {
 	/// Rarely needed: the encoder opens groups automatically, so reach for this
 	/// only when something outside the encoder needs a boundary at a specific
 	/// frame. A source group boundary (transcode mirrors the source's groups) is
-	/// the usual reason; a scene change or a source switch is another.
+	/// the usual reason; a scene change, a source switch, or a subscriber joining
+	/// over [`track::Info::refresh`](moq_net::track::Info::refresh) are others.
+	/// Capture cuts for joiners itself.
 	///
 	/// The request waits for the next [`encode`](Self::encode) rather than applying
 	/// at once, so it is safe to call before the frame exists. Calling it repeatedly

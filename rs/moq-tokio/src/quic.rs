@@ -82,7 +82,7 @@ pub struct LoadBalancer {
 /// The congestion control family for a QUIC connection.
 ///
 /// CUBIC is used for loss-based control and BBRv3 for delay-based control.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, usage::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, usage_rs::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[usage(ignore_case)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -103,7 +103,8 @@ impl std::str::FromStr for CongestionControl {
 	type Err = String;
 
 	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-		<Self as usage::argv::spec::ValueEnum>::from_choice(s).ok_or_else(|| format!("unknown congestion control: {s}"))
+		<Self as usage_rs::argv::spec::ValueEnum>::from_choice(s)
+			.ok_or_else(|| format!("unknown congestion control: {s}"))
 	}
 }
 
@@ -141,7 +142,7 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(3);
 
 /// The `--quic-*` transport section, applied to dialed and accepted connections alike.
-#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -293,7 +294,7 @@ pub struct Config {
 	/// Requires the `qlog` feature; setting it errors at init otherwise.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	#[usage(name = "quic-qlog", long = "quic-qlog", env = "MOQ_QUIC_QLOG", setting = "quic.qlog")]
-	#[usage(value_hint = usage::ValueHint::DirPath)]
+	#[usage(value_hint = usage_rs::ValueHint::DirPath)]
 	pub qlog: Option<PathBuf>,
 
 	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names. Defaults to off.
@@ -344,7 +345,7 @@ impl Default for Config {
 
 /// The hidden `--client-quic-*` / `--server-quic-*` spellings (and their env
 /// vars), from when the endpoint config was split by role.
-#[derive(Clone, Debug, Default, usage::Args)]
+#[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(
@@ -761,7 +762,7 @@ mod tests {
 	use super::*;
 	/// A minimal parser so we can exercise the `--quic-*` args (and the legacy
 	/// role-prefixed spellings) in isolation.
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(settings)]
 	struct Cli {
@@ -873,15 +874,15 @@ mod tests {
 	fn every_replacement_is_a_real_flag() {
 		let canonical: std::collections::HashSet<String> = Cli::spec()
 			.root
-			.flags
+			.flags()
 			.iter()
-			.flat_map(|flag| flag.flag.longs.iter().map(|long| format!("--{long}")))
+			.flat_map(|flag| flag.flag().longs.iter().map(|long| format!("--{long}")))
 			.collect();
 		let envs: std::collections::HashSet<String> = Cli::spec()
 			.root
-			.flags
+			.flags()
 			.iter()
-			.filter_map(|flag| flag.env.map(str::to_owned))
+			.filter_map(|flag| flag.env().map(str::to_owned))
 			.collect();
 
 		for args in [

@@ -26,7 +26,7 @@ pub enum SubscribeFormat {
 
 /// `Usage` adapter for [`CatalogFormat`] (which is `#[non_exhaustive]` and so
 /// can't derive `ValueEnum` itself).
-#[derive(usage::ValueEnum, Clone, Copy)]
+#[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum CatalogFormatArg {
 	Hang,
 	#[usage(name = "hangz")]
@@ -45,7 +45,7 @@ impl From<CatalogFormatArg> for CatalogFormat {
 }
 
 /// `Usage` adapter for [`VideoCodecKind`].
-#[derive(usage::ValueEnum, Clone, Copy)]
+#[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum VideoCodecArg {
 	H264,
 	H265,
@@ -67,7 +67,7 @@ impl From<VideoCodecArg> for VideoCodecKind {
 }
 
 /// `Usage` adapter for [`AudioCodecKind`].
-#[derive(usage::ValueEnum, Clone, Copy)]
+#[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum AudioCodecArg {
 	Aac,
 	Opus,
@@ -86,7 +86,7 @@ impl From<AudioCodecArg> for AudioCodecKind {
 
 /// Rendition selection flags for the stdout container sinks that honor them and
 /// native playback. With no flags set, every rendition is kept.
-#[derive(usage::Args, Clone, Default)]
+#[derive(usage_rs::Args, Clone, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct SelectArgs {
 	/// Pick the video rendition with this exact name.

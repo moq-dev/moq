@@ -12,6 +12,27 @@ import MoqFFI
 public enum Json {}
 
 extension Json {
+    /// A decoded JSON value and the timestamp of the frame that carried it.
+    public struct Timed<Value> {
+        /// The decoded value.
+        public let value: Value
+        /// The frame's timestamp on the broadcast clock in microseconds, or `nil` when untimed.
+        /// Rounded down to a whole microsecond, so a tick on a track like 90 kHz may not survive
+        /// a read and republish exactly.
+        public let timestampUs: UInt64?
+
+        /// Pair `value` with its frame timestamp.
+        public init(value: Value, timestampUs: UInt64?) {
+            self.value = value
+            self.timestampUs = timestampUs
+        }
+
+        init?(_ ffi: MoqJsonValue?) throws where Value: Decodable {
+            guard let ffi else { return nil }
+            self.init(value: try decodeJson(ffi.value), timestampUs: ffi.timestampUs)
+        }
+    }
+
     /// Write side of a JSON snapshot track (lossy latest-value).
     ///
     /// Each `update` supersedes the last, so a late joiner only sees the newest value.
@@ -55,11 +76,12 @@ extension Json {
         }
     }
 
-    /// Read side of a JSON snapshot track (lossy latest-value). Iterating yields the latest value,
-    /// collapsing the backlog for a reader that has fallen behind: `for try await value in json { ... }`.
+    /// Read side of a JSON snapshot track (lossy latest-value). Iterating yields each state in
+    /// order with its timestamp: `for try await state in json { ... }`. Groups older than the
+    /// subscription's `maxDelayUs` are skipped; `latest()` skips to the newest state instead.
     public final class SnapshotConsumer<Value: Decodable & Sendable>: AsyncSequence, Sendable {
-        /// The decoded snapshot value emitted by this sequence.
-        public typealias Element = Value
+        /// The decoded snapshot state emitted by this sequence.
+        public typealias Element = Timed<Value>
 
         let ffi: MoqJsonSnapshotConsumer
 
@@ -71,10 +93,15 @@ extension Json {
             ffi = try MoqJsonSnapshotConsumer(track: track.ffi, config: MoqJsonSnapshotConfig(compression: compression))
         }
 
-        /// The next value, decoded as `Value`, or `nil` once the track ends or is closed.
-        public func next() async throws -> Value? {
-            guard let json = try await ffi.next() else { return nil }
-            return try decodeJson(json) as Value
+        /// The next state in order, or `nil` once the track ends or is closed.
+        public func next() async throws -> Timed<Value>? {
+            try Timed(try await ffi.next())
+        }
+
+        /// Skip to the newest state, or wait for one; `nil` once the track ends or is closed.
+        /// Skipped states are gone, and `next()` continues after this one.
+        public func latest() async throws -> Timed<Value>? {
+            try Timed(try await ffi.latest())
         }
 
         /// Cancel all current and future reads.
@@ -83,7 +110,7 @@ extension Json {
         }
 
         /// Create an iterator that cancels native reads when iteration ends.
-        public func makeAsyncIterator() -> AsyncThrowingStream<Value, Swift.Error>.Iterator {
+        public func makeAsyncIterator() -> AsyncThrowingStream<Timed<Value>, Swift.Error>.Iterator {
             moqStream(cancel: { [ffi] in ffi.cancel() }) { [self] in
                 try await next()
             }.makeAsyncIterator()
@@ -128,7 +155,7 @@ extension Json {
     /// order: `for try await record in json { ... }`.
     public final class StreamConsumer<Value: Decodable & Sendable>: AsyncSequence, Sendable {
         /// The decoded stream record emitted by this sequence.
-        public typealias Element = Value
+        public typealias Element = Timed<Value>
 
         let ffi: MoqJsonStreamConsumer
 
@@ -139,10 +166,9 @@ extension Json {
             ffi = try MoqJsonStreamConsumer(track: track.ffi, config: MoqJsonStreamConfig(compression: compression))
         }
 
-        /// The next record, decoded as `Value`, or `nil` once the track ends or is closed.
-        public func next() async throws -> Value? {
-            guard let json = try await ffi.next() else { return nil }
-            return try decodeJson(json) as Value
+        /// The next record, or `nil` once the track ends or is closed.
+        public func next() async throws -> Timed<Value>? {
+            try Timed(try await ffi.next())
         }
 
         /// Cancel all current and future reads.
@@ -151,13 +177,16 @@ extension Json {
         }
 
         /// Create an iterator that cancels native reads when iteration ends.
-        public func makeAsyncIterator() -> AsyncThrowingStream<Value, Swift.Error>.Iterator {
+        public func makeAsyncIterator() -> AsyncThrowingStream<Timed<Value>, Swift.Error>.Iterator {
             moqStream(cancel: { [ffi] in ffi.cancel() }) { [self] in
                 try await next()
             }.makeAsyncIterator()
         }
     }
 }
+
+extension Json.Timed: Sendable where Value: Sendable {}
+extension Json.Timed: Equatable where Value: Equatable {}
 
 private func encodeJson(_ value: some Encodable) throws -> String {
     String(decoding: try JSONEncoder().encode(value), as: UTF8.self)

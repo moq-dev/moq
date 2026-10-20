@@ -1934,6 +1934,7 @@ fn json_snapshot_publish_consume() {
 		)
 	});
 
+	let mut last_us = 0;
 	for expected in [r#"{"a":1}"#, r#"{"a":2}"#] {
 		assert_eq!(
 			unsafe { moq_publish_json_snapshot_update(producer, expected.as_ptr() as *const c_char, expected.len()) },
@@ -1943,8 +1944,14 @@ fn json_snapshot_publish_consume() {
 		let mut value = moq_json_value {
 			json: std::ptr::null(),
 			json_len: 0,
+			timestamp_us: 0,
+			timestamp_present: false,
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
+		// The producer stamps each value with the broadcast clock.
+		assert!(value.timestamp_present);
+		assert!(value.timestamp_us >= last_us);
+		last_us = value.timestamp_us;
 		let received = unsafe { std::slice::from_raw_parts(value.json.cast::<u8>(), value.json_len) };
 		assert_eq!(
 			serde_json::from_slice::<serde_json::Value>(received).unwrap(),
@@ -1997,6 +2004,7 @@ fn json_stream_publish_consume() {
 		)
 	});
 
+	let mut last_us = 0;
 	for expected in [r#"{"n":0}"#, r#"{"n":1}"#, r#"{"n":2}"#] {
 		assert_eq!(
 			unsafe { moq_publish_json_stream_append(producer, expected.as_ptr() as *const c_char, expected.len()) },
@@ -2006,8 +2014,14 @@ fn json_stream_publish_consume() {
 		let mut value = moq_json_value {
 			json: std::ptr::null(),
 			json_len: 0,
+			timestamp_us: 0,
+			timestamp_present: false,
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
+		// The producer stamps each value with the broadcast clock.
+		assert!(value.timestamp_present);
+		assert!(value.timestamp_us >= last_us);
+		last_us = value.timestamp_us;
 		let received = unsafe { std::slice::from_raw_parts(value.json.cast::<u8>(), value.json_len) };
 		assert_eq!(
 			serde_json::from_slice::<serde_json::Value>(received).unwrap(),

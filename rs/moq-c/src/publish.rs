@@ -901,7 +901,7 @@ impl Publish {
 
 	/// Finish a raw group. No more frames can be written.
 	pub fn group_finish(&mut self, group: Id) -> Result<(), Error> {
-		let group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
+		let mut group = self.groups.remove(group).ok_or(Error::GroupNotFound)?;
 		group.finish()?;
 		Ok(())
 	}
