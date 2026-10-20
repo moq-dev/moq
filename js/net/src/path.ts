@@ -58,12 +58,9 @@ export const MAX_PARTS = 32;
 
 /** Build a path from one or more components, joining with "/" and trimming redundant slashes. */
 export function from(...paths: string[]): Valid {
-	// Dropping empty parts collapses repeated slashes and trims leading and trailing ones.
-	return paths
-		.join("/")
-		.split("/")
-		.filter((part) => part !== "")
-		.join("/") as Valid;
+	// Join paths with "/" and then remove leading and trailing slashes, and collapse multiple slashes into one.
+	const joined = paths.join("/");
+	return joined.replace(/\/+/g, "/").replace(/^\/+/, "").replace(/\/+$/, "") as Valid;
 }
 
 /** Split a path into its slash-separated parts. The empty path has no parts. */
@@ -88,8 +85,12 @@ export function decode(raw: string): Valid {
  * emit a path the remote side is required to reject.
  */
 export function encode(path: Valid): Valid {
-	if (parts(path).length > MAX_PARTS) {
-		throw new Error(`path exceeds ${MAX_PARTS} parts`);
+	// Count separators with an early exit instead of splitting, so a hostile path never allocates per part.
+	let count = path === "" ? 0 : 1;
+	for (let i = path.indexOf("/"); i !== -1; i = path.indexOf("/", i + 1)) {
+		if (++count > MAX_PARTS) {
+			throw new Error(`path exceeds ${MAX_PARTS} parts`);
+		}
 	}
 	return path;
 }
