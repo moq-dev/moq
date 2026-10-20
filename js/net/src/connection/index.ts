@@ -4,17 +4,6 @@
  * @module
  */
 export { type AcceptProps, accept } from "./accept.ts";
-export { isWebTransportSupported } from "./browser.ts";
-export {
-	type CertificateHash,
-	type ConnectProps,
-	certificateHash,
-	connect,
-	type WebSocketProps,
-	type WebTransportProps,
-} from "./connect.ts";
+export { type ConnectProps, connect } from "./connect.ts";
 export type { Established } from "./established.ts";
-export type { Extensions } from "./extensions.ts";
-export { Connection, type ConnectionProps } from "./pool.ts";
-export type { Probe, Stats } from "./stats.ts";
-export type { Transport } from "./transport.ts";
+export { Connection } from "./pool.ts";

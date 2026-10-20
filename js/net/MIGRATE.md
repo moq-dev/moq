@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 Construct `SubscribeEnd(group)` without a stream count; remove reads of `.streams` and calls to `hasStreamCount()`.
 The unpublished `moq-lite-07-wip` wire restores `SUBSCRIBE_DROP` and removes Stream Count from `SUBSCRIBE_END`. Update both ends together; published lite versions keep their framing.
 
+### `webtransport.protocols` is `versions` (#5979)
+
+Move the list to the top-level `versions` of `connect` or `Connection`, spelled as version names: `moq-transport-22`, not the ALPN `moqt-22`; lite names are unchanged.
+It now applies to the WebSocket fallback too, so list every fallback you still want, such as `versions: ["moq-lite-07-wip", "moq-lite-06"]`.
+Passing `webtransport.protocols` or `websocket.protocols` throws a `TypeError`; move either to `versions`.
+
 ### Track demand reports the wanted group (#5930)
 
 `Track.Demand.used` and `unused()` are gone.

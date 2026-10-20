@@ -97,7 +97,6 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [qmux credit](/quest/m0/qmux-credit.md) - main adopts qmux 0.6 credit and close fixes; the 0.5 backport is independent
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [Performance audit](/quest/m0/audit-perf.md) - benchmarks that regressed since the last run are explained, fixed, or planned, and unbenched hot paths get coverage
-- [Dead code and API surface audit](/quest/m0/audit-dead-code.md) - unused code, exports, features, and flags are deleted or planned for deletion
 - [Compile time audit](/quest/m0/audit-compile-time.md) - build-time hotspots are measured against a baseline and the worst are fixed or planned
 - [Test and CI cost audit](/quest/m0/audit-test-cost.md) - the slowest, flakiest, and least valuable tests and CI jobs are fixed, deleted, or planned
 - [Test coverage audit](/quest/m0/audit-test-coverage.md) - untested behavior that matters is covered or planned, and every test runs in CI
