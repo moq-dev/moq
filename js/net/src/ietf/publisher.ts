@@ -1805,8 +1805,9 @@ export class Publisher {
 	 * MAX_REQUEST_UPDATES the peer set without reading it; a change landing meanwhile waits
 	 * for the next turn. The answer decides whether the peer still holds the namespace: a
 	 * REQUEST_ERROR closes the peer's side and withdraws the advertisement, so ours is
-	 * finished too, and an unanswered update is dropped abruptly, since a peer that ignored
-	 * it cannot be assumed to hold either price. Either way the retry re-offers it fresh.
+	 * finished too, a draft-16 cancel ends it with nothing more sent, and an unanswered update
+	 * is dropped, since a peer that ignored it cannot be assumed to hold either price. Either
+	 * way the retry re-offers it fresh.
 	 *
 	 * A different original publisher is an update like any other: the receiver drains what
 	 * it already serves from the old one and never splices the two.
@@ -1835,6 +1836,15 @@ export class Publisher {
 						writer,
 						version,
 					);
+
+					// Draft 16's adapter ends the stream on the peer's PUBLISH_NAMESPACE_CANCEL, which
+					// can beat the answer. The peer already let the namespace go, and draft 16 sends
+					// no PUBLISH_NAMESPACE_DONE after a cancel.
+					if (version === Version.DRAFT_16 && (await reader.done())) {
+						requests.delete(path);
+						request.stream.abort(new Error("cancelled by the peer"));
+						return "dropped";
+					}
 
 					const typeId = await reader.u53();
 					if (typeId === RequestError.id) {

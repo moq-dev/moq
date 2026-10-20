@@ -2331,9 +2331,14 @@ test("a draft 16 subscription update waits for the last one's answer", async () 
 		expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
 		const first = await SubscribeUpdate.decode(peer.reader, version);
 		const highest = track.fork({ priority: 20 });
-		const next = peer.reader.u53();
-		const waiting = await Promise.race([next, new Promise((resolve) => setTimeout(() => resolve("waiting"), 50))]);
-		expect(waiting).toBe("waiting");
+		let sent = false;
+		const next = peer.reader.u53().then((id) => {
+			sent = true;
+			return id;
+		});
+		// The mock transport schedules nothing on timers, so settled promise chains are final.
+		for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+		expect(sent).toBe(false);
 
 		await peer.writer.u53(RequestOk.id);
 		await new RequestOk({ requestId: first.ownRequestId }).encode(peer.writer, version);

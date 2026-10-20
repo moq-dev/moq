@@ -3489,8 +3489,9 @@ where
 					ietf::PublishNamespaceCancel::ID if self.version == Version::Draft16 => {
 						let msg: ietf::PublishNamespaceCancel = body.message(self.version)?;
 						tracing::debug!(broadcast = %absolute, message = ?msg, "update cancelled");
-						self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
-							.await?;
+						// The peer already let it go, and draft 16 sends no
+						// PUBLISH_NAMESPACE_DONE after a cancel.
+						ns.requests.remove(&suffix);
 						Refused::No
 					}
 					_ => return Err(Error::UnexpectedMessage),
@@ -13914,6 +13915,21 @@ mod tests {
 	}
 
 	/// The bytes of one REQUEST_UPDATE, framed as the publisher writes it.
+	/// PUBLISH_NAMESPACE_DONE withdrawing the first request, "cam".
+	async fn publish_namespace_done(version: Version) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		writer.varint(ietf::PublishNamespaceDone::ID).await.unwrap();
+		writer
+			.encode(&ietf::PublishNamespaceDone {
+				track_namespace: crate::Path::new("cam"),
+				request_id: RequestId(1),
+			})
+			.await
+			.unwrap();
+		log.writes.lock().unwrap().clone()
+	}
+
 	async fn request_update(version: Version, msg: &ietf::PublishNamespaceUpdate) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
@@ -14328,6 +14344,11 @@ mod tests {
 
 		assert_eq!(occurrences(&log, b"cam"), 2, "the namespace was not offered again");
 		assert_eq!(log.bi_opens(), 2, "a fresh request after the cancel");
+		assert_eq!(
+			occurrences(&log, &publish_namespace_done(VERSION).await),
+			0,
+			"PUBLISH_NAMESPACE_DONE after the peer's cancel"
+		);
 	}
 
 	/// An auth another handle issued is not this session's to present: the route is
@@ -14552,20 +14573,7 @@ mod tests {
 			"{version}: the unanswered renewal was never retried"
 		);
 		if version == Version::Draft16 {
-			let done = {
-				let log = crate::lite::test_transport::Log::default();
-				let mut writer =
-					crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
-				writer.varint(ietf::PublishNamespaceDone::ID).await.unwrap();
-				writer
-					.encode(&ietf::PublishNamespaceDone {
-						track_namespace: crate::Path::new("cam"),
-						request_id: RequestId(1),
-					})
-					.await
-					.unwrap();
-				log.writes.lock().unwrap().clone()
-			};
+			let done = publish_namespace_done(version).await;
 			assert_eq!(occurrences(&log, &done), 1, "the peer was never told to let it go");
 		}
 	}

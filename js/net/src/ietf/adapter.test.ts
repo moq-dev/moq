@@ -734,11 +734,16 @@ test("an answer to our update reaches the request it updated on draft 16 only", 
 				stream.writer,
 				version,
 			);
-			const next = () =>
-				Promise.race([
-					stream.reader.u53(),
-					new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), WAIT)),
-				]);
+			// The mock transport schedules nothing on timers, so settled promise chains are final.
+			const next = async () => {
+				let id: number | undefined;
+				const read = stream.reader.u53().then((value) => {
+					id = value;
+				});
+				for (let i = 0; i < 20 && id === undefined; i++) await new Promise((resolve) => setImmediate(resolve));
+				void read.catch(() => undefined);
+				return id;
+			};
 			const renew = async (own: bigint) => {
 				await stream.writer.u53(SubscribeUpdate.id);
 				const update =
