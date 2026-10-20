@@ -92,6 +92,7 @@ class ReportTest(unittest.TestCase):
         (chart / 'data.js').write_text('history')
         report.index(self.root)
         self.assertIn('costs/', (chart.parent / 'index.html').read_text())
+        self.assertIn('url=bench/', (self.root / 'index.html').read_text())
         self.assertEqual((chart / 'data.js').read_text(), 'history')
         self.assertTrue((self.root / '.nojekyll').exists())
 

@@ -170,6 +170,13 @@ with Rust on the same host: above 1x means slower or more CPU per delivered byte
 <a href="https://github.com/moq-dev/moq/blob/main/bench/README.md">Metrics and local reproduction</a></p>
 </html>
 ''')
+    # Benchmarks are the only report so far; the root forwards to them instead of 404ing.
+    (directory / 'index.html').write_text('''<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=bench/">
+<title>MoQ nightly reports</title>
+<a href="bench/">MoQ nightly benchmarks</a>
+</html>
+''')
     (directory / '.nojekyll').touch()
 
 
