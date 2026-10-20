@@ -149,7 +149,7 @@ func (r *TrackRequest) Abort(errorCode uint16) error {
 	return r.inner.Abort(errorCode)
 }
 
-// TrackDemand watches whether a published track has subscribers.
+// TrackDemand watches the group a published track's subscribers want next.
 //
 // It is weak: holding it neither keeps the track open nor locks the producer, so
 // a wait can park here while the producer keeps publishing. Waits return
@@ -163,19 +163,15 @@ func (d *TrackDemand) Name() string {
 	return d.inner.Name()
 }
 
-// IsUsed reports whether the track has at least one active subscriber right now.
-func (d *TrackDemand) IsUsed() bool {
-	return d.inner.IsUsed()
+// Wanted is the group subscribers want next, or nil while nobody subscribes. A
+// value past the newest group asks for a new group now, typically a keyframe.
+func (d *TrackDemand) Wanted() *uint64 {
+	return d.inner.Wanted()
 }
 
-// Used blocks until the track has at least one active subscriber.
-func (d *TrackDemand) Used(ctx context.Context) error {
-	return d.inner.Used(ctx)
-}
-
-// Unused blocks until the track has no active subscribers.
-func (d *TrackDemand) Unused(ctx context.Context) error {
-	return d.inner.Unused(ctx)
+// WantedChanged blocks until Wanted changes and returns it. The first call returns at once.
+func (d *TrackDemand) WantedChanged(ctx context.Context) (*uint64, error) {
+	return d.inner.WantedChanged(ctx)
 }
 
 // TrackProducer writes arbitrary byte payloads with no codec required.
@@ -183,7 +179,7 @@ type TrackProducer struct {
 	inner *ffi.MoqTrackProducer
 }
 
-// Demand returns a watch-only handle to the track's name and whether it has subscribers.
+// Demand returns a watch-only handle to the track's name and the group its subscribers want.
 func (t *TrackProducer) Demand() (*TrackDemand, error) {
 	inner, err := t.inner.Demand()
 	if err != nil {

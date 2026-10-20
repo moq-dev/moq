@@ -31,7 +31,3 @@ under the same names.
 - The Cross-Package Sync rows that name the hand-written `rs/moq-c` (as the
   target of `rs/moq-ffi` changes, and its `moq.h` C ABI) point at the
   generated package instead; update `AGENTS.md` in this quest.
-
-## Required
-
-- [FFI shape](/quest/m1/ffi-shape/README.md) - moq-c 0.8.0 ships the reshaped moq-ffi, so C breaks once

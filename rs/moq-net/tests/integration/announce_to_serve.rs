@@ -162,7 +162,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	// A track in flight across the unannounce.
 	let mut reader = read(&first, "video").await;
-	moq_clock::timeout(SETTLE, track.demand().used())
+	moq_clock::timeout(SETTLE, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -202,7 +202,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	let audio = broadcast.create_track("audio", timed()).unwrap();
 	let mut reader = read(&again, "audio").await;
-	moq_clock::timeout(SETTLE, audio.demand().used())
+	moq_clock::timeout(SETTLE, crate::support::wanted(audio.demand()))
 		.await
 		.expect("no subscriber appeared after reannouncing")
 		.unwrap();

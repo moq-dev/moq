@@ -8,8 +8,10 @@ ProbeRTT, recognizing bandwidth growth within a round, and precautionary
 bandwidth probing. Reduce demonstrated frame deadline interference without
 stale minimum RTT, persistent queues, or unfairness. Application limitation
 alone is not evidence that the path drained, and Google parity is not
-assumed to be an improvement. Grade them, and BBR's response to random
-loss, on a 10 % random-loss media profile as well.
+assumed to be an improvement. Acceptance and performance use a rate below
+the media bitrate behind a deep but finite queue with verified overflow
+drops. Random loss may prove recovery correctness, but never grades media
+quality or performance.
 
 ## Plan
 
@@ -42,8 +44,10 @@ path change. Blanket skipping is only a diagnostic control. Retain the
 simpler baseline if no material interference is demonstrated.
 
 Use identical media traces and seeds. Start with short and long RTT paths,
-then test capacity changes, base-RTT changes, competing bulk traffic, shallow
-queues, loss bursts, and compressed or delayed ACKs. Record deadlines and
+then test capacity changes, base-RTT changes, competing bulk traffic, queue
+depths, and compressed or delayed ACKs. Use loss-based cross traffic when
+BBR alone does not fill the deep queue; verify actual overflow drops. Keep
+scripted loss bursts as recovery correctness checks only. Record deadlines and
 frame completion, withheld useful bytes, sender backlog separately from
 network queueing, RTT-baseline error, sample labels, and mode residence.
 Set latency and fairness acceptance limits before tuning. Persist the
@@ -78,38 +82,30 @@ BBR3 state machine.
   and [Google QUICHE](https://github.com/google/quiche/blob/535a2730e77d47e0dc03746555cc9c34b17bc9e9/quiche/quic/core/congestion_control/bbr3_sender.cc#L1079)
   stop precautionarily when probing reaches a previously lossy inflight
   bound, then accelerate a later probe if feedback is clean. Noq lacks this
-  state and transition. Compare shallow queues, capacity increases, random
-  loss, and competing flows.
+  state and transition. Compare queue depths, capacity increases, and
+  competing flows on shaped paths with verified overflow drops.
 
 Report throughput, queue delay, loss, convergence time, and fairness with
 pinned code and configurations. Keep transport differences and QUICHE flags
 explicit and compare each algorithm change separately. A simulation result
 is not an end-to-end network measurement.
 
-### Random loss
+### Congestion evidence
 
-Moved from the finished T-STD export epic (2026-10-16), whose nightly
-stays at 1 %.
-`just test ts --hrd --loss <percent>` drops that share of the relay's
-datagrams to the subscriber at random through `moq-shaper`, 25 ms each way,
-and grades the export with T-STD, PCR accuracy and `holes.py`. Measured on a
-loaded host (rerun before deciding):
+Use the overflowing and deep-queue lanes in `test/ts/README.md` as the
+end-to-end baseline. A BBR-only run that sheds groups at the relay but never
+overflows the network queue cannot judge the loss response. A CUBIC run
+that overflows establishes that the harness exercises recovery; it cannot
+establish whether changing BBR improves it.
 
-| Clip | Loss | Result |
-|---|---:|---|
-| default (low media rate) | 10 % | passes |
-| `--hrd` (9 Mb/s video, 10 Mb/s mux) | 1 %, 3 % | passes, no holes |
-| `--hrd` | 5 %, 7 %, 10 % | groups evicted `Old`, export fails |
-| `--hrd`, `LOSS_THRESH` 20 % (experiment) | 10 % | T-STD and PCR pass; 1.56 s of video misses the 1 s delay |
-| `--hrd`, CUBIC | 10 % | no output |
-
-BBRv3 takes a round with more than 2 % loss (`LOSS_THRESH`) as congestion
-and cuts its inflight bound, so random loss above it holds the leg below the
-media rate. Decide whether and how BBR should tell random loss from
-congestion without giving up fairness against loss-based flows, and how that
-interacts with the precautionary probe stop under Google differences.
+Keep the current 2% `LOSS_THRESH` and baseline controller policy unless a
+candidate improves the shaped-path comparison, including queues and
+fairness. Surviving an independent random-loss percentage is not a reason
+to weaken the congestion response or precautionary probe stop. This study
+still decides natural-drain credit, growth recognition, and probe behavior
+separately; it does not adopt any of them in advance.
 
 ## Related
 
-- [TS validation](/test/ts/README.md) - the `--loss` rig, `holes.py` and the full measurements
+- [TS validation](/test/ts/README.md) - shaped paths, whole-group shedding, and measured baselines
 - [Native probing](/quest/m2/probe/native.md) - preserving an estimate and discovering spare capacity are separate problems

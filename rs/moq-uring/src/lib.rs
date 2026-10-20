@@ -1,7 +1,7 @@
 //! A thread-per-core io_uring worker for the native MoQ stack.
 //!
 //! One [`Worker`] per pinned thread. It owns a `SINGLE_ISSUER | DEFER_TASKRUN |
-//! COOP_TASKRUN` ring, a userspace timer heap, a local task set, and the UDP
+//! COOP_TASKRUN` ring, a userspace timer queue, a local task set, and the UDP
 //! sockets bound through it. The caller owns the thread loop: drive everything
 //! with [`Worker::block_on`], spawn extra `!Send` tasks through [`Handle`], and
 //! wake the worker from other threads through any [`std::task::Waker`] it hands
@@ -37,6 +37,7 @@
 #![cfg_attr(not(target_os = "linux"), allow(rustdoc::broken_intra_doc_links))]
 #![cfg(target_os = "linux")]
 
+mod clock;
 mod error;
 pub mod metrics;
 mod park;

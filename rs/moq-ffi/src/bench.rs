@@ -242,6 +242,7 @@ async fn rust_ffi() {
 		let timed = MoqTrackInfo {
 			priority: 127,
 			max_age_us: None,
+			refresh: None,
 			timescale: Some(1_000_000),
 		};
 		let tracks: Vec<_> = (0..case.publishers)

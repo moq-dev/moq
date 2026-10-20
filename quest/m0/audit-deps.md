@@ -26,7 +26,44 @@ performance, and API fit before planning a swap.
 Starting points (2026-10-19): Dependabot bumps weekly with a 7-day cooldown, so
 look for the majors it cannot take. `deny.toml` warns on duplicate versions;
 count them in `Cargo.lock` and `bun.lock`. `cargo deny` runs only
-nightly, although the `deny.toml` header says `just rs check` runs it.
-Nothing audits JS advisories. Look for unmaintained dependencies (RUSTSEC
+nightly. Look for unmaintained dependencies (RUSTSEC
 `unmaintained`, no release in a year) and for hand-rolled utilities a
 maintained crate or package now covers.
+
+Partial run (2026-10-19): compatible Bun updates reduced the root audit from
+27 findings across 11 packages to six across four. Vue's renderer, browser
+metadata, brace-expansion, PostCSS, nanoid, and source-map-js were refreshed.
+Wrangler 4.151.2 removed the vulnerable sharp pin in `infra/moq-sh`.
+All four independent Worker lockfiles now audit cleanly. `just js audit`
+checks all five Bun graphs nightly without installing dependencies, and
+`deny.toml` now points to the actual Rust audit recipe.
+The obsolete standalone `doc/bun.lock` was removed: `doc` belongs to the
+root Bun workspace, and that lock still named its old package and tooling.
+
+Baselines: Cargo.lock has 1,078 entries, 91 names with multiple versions
+(110 extra versions), plus 11 names repeated from different sources at the
+same version. The root Bun lock moved from 70 duplicate names / 82 extra
+versions to 68 / 79. Independent Worker locks have no duplicate names.
+These counts are inventory, not evidence that incompatible major versions
+can safely be unified.
+
+Remaining advisories need an upstream release or a scope decision; no new
+exceptions or overrides were added:
+
+- ashpd 0.13.13 pulls zbus 5 and the unmaintained zvariant, zvariant_derive,
+  and zbus_names crates (RUSTSEC-2026-0370, 0371, 0372). Upstream's
+  [zbus 6 migration](https://github.com/bilelmoussaoui/ashpd/pull/491) is open.
+  Prefer its maintained release over removing desktop portal support or
+  adding a Git dependency.
+- VitePress 1.6.4 pins Vite 5, which pins vulnerable esbuild. The replacement
+  VitePress line is still a prerelease. A migration, override, or advisory
+  exception needs a decision.
+- `@tailwindcss/typography` 0.5.20 pins postcss-selector-parser 6.0.10;
+  the fix starts at 7.1.6. Prefer a maintained upstream update.
+- braces 3.0.3 has no published fix for
+  [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm).
+  It is pulled by fast-glob/micromatch and remark-cli's watcher chain.
+
+This run is incomplete: compare direct dependency majors, maintenance and
+alternatives, investigate duplicate ownership, and review hand-rolled non-core
+utilities before declaring the audit complete and adding its successor.
