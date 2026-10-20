@@ -333,6 +333,10 @@ export class Truck {
 
 	#runControlLease(effect: Moq.Signals.Effect) {
 		if (!effect.get(this.active)) {
+			// Releasing control closes the driving broadcast, which may not have
+			// delivered this player's e-stop yet: carry it on the safety broadcast,
+			// which stays up until a status echoes the latch.
+			if (this.#estopUnconfirmed) this.#sendSafety({ type: "estop" });
 			this.respawning.set(false);
 			this.drive.set({ ...REST });
 			this.#command.set(undefined);
