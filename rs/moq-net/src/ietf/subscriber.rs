@@ -480,6 +480,11 @@ fn accepted_info(properties: &ietf::Properties) -> track::Info {
 	info
 }
 
+/// Why a track answered with `properties` is neither processed nor forwarded, if it is not.
+fn refused(properties: &ietf::Properties) -> Option<Error> {
+	properties.unknown.refused(&accepted_info(properties))
+}
+
 /// The Largest Group a subscription knows: its SUBSCRIBE_OK's, or a newer one since.
 fn largest_group(track: &track::Producer, answer: Option<ietf::Location>) -> Option<u64> {
 	answer.map(|largest| largest.group).max(track.latest_sequence())
@@ -2949,8 +2954,8 @@ where
 			// A track that needs a property we do not understand, or carries more than we
 			// could forward, is neither processed nor forwarded: the subscription is
 			// cancelled and the subscribers refused.
-			Ok(Some(accepted)) if accepted.properties.unknown.refused().is_some() => {
-				let err = accepted.properties.unknown.refused().expect("checked by the guard");
+			Ok(Some(accepted)) if refused(&accepted.properties).is_some() => {
+				let err = refused(&accepted.properties).expect("checked by the guard");
 				tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, %err, "subscribe refused");
 				// Refuse before waiting on the peer to acknowledge the cancellation.
 				if let Some(pending) = self.take_pending(request_id) {
@@ -3848,7 +3853,7 @@ where
 		let _ = stream.writer.finish();
 		let ok = match response {
 			// A track that needs a property we do not understand is not forwarded.
-			Ok(ok) => match ok.properties.unknown.refused() {
+			Ok(ok) => match refused(&ok.properties) {
 				Some(err) => Err(err),
 				None => Ok(ok),
 			},
@@ -15965,6 +15970,34 @@ mod track_property_tests {
 					probe.state.lock().subscribes.is_empty(),
 					"{version}: the subscription was kept"
 				);
+			}
+		}
+	}
+
+	/// A sealed DEFAULT_PUBLISHER_GROUP_ORDER the relay does not serve refuses the track:
+	/// egress would forward it in place of the order the relay restates.
+	#[moq_clock::test]
+	async fn a_sealed_group_order_the_relay_does_not_serve_refuses_the_track() {
+		for version in VERSIONS {
+			for (order, ok) in [(2, true), (1, false)] {
+				let sealed = Property {
+					id: 0x0b,
+					value: Value::Bytes(
+						block(
+							version,
+							&[Property {
+								id: 0x22,
+								value: Value::Int(order),
+							}],
+						)
+						.into(),
+					),
+				};
+				let (subscribed, _probe) = subscribe(version, &block(version, &[sealed])).await;
+				match ok {
+					true => assert!(subscribed.is_ok(), "{version}: {order}"),
+					false => assert!(matches!(subscribed, Err(Error::Unsupported)), "{version}: {order}"),
+				}
 			}
 		}
 	}

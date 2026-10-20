@@ -188,6 +188,10 @@ A message that breaks either rule is malformed.
 A relay restates up to five of those from TRACK_INFO, so it forwards at most 59 properties, and it refuses a track with more, from a {{moqt}} publisher or over this extension, as unsupported.
 Dropping those five can widen the delta that spans them, so a relay also refuses a {{moqt}} track whose remaining list would not fit a TRACK_PROPERTIES message, as unsupported.
 
+The Immutable Properties may still hold one of those five, which a relay forwards in place of the one it would restate.
+A relay acts on TRACK_INFO, so a sealed value MUST equal the one it restates: MAX_CACHE_DURATION the Max Age in milliseconds, TIMESCALE the Timescale, DEFAULT_PUBLISHER_PRIORITY the priority, DEFAULT_PUBLISHER_GROUP_ORDER descending, the order a relay serves, and DYNAMIC_GROUPS whether the track takes a new group request.
+A relay refuses a track whose sealed value differs, from a {{moqt}} publisher or over this extension, as unsupported.
+
 A relay neither processes nor forwards a track with a Mandatory Track Property (0x4000 to 0x7FFF), mutable or inside the Immutable Properties, so a publisher never sends one.
 A receiver refuses such a track as {{moqt}} ingress does, with an unsupported extension error.
 

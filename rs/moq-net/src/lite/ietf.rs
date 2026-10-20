@@ -748,7 +748,10 @@ mod tests {
 
 			let ingress = crate::ietf::Properties::decode(&mut Decoder::new(&list, version.into()), version).unwrap();
 			assert_eq!(ingress.unknown.values.len(), repeats + 1, "{version}");
-			assert!(ingress.unknown.refused().is_none(), "{version}");
+			assert!(
+				ingress.unknown.refused(&crate::track::Info::default()).is_none(),
+				"{version}"
+			);
 
 			let msg = TrackProperties(Some(Arc::new(ingress.unknown.clone())));
 			let buf = crate::coding::Encode::encode_bytes(&msg, V).unwrap();
@@ -792,7 +795,10 @@ mod tests {
 		let ingress = crate::ietf::Properties::decode(&mut Decoder::new(&list, version.into()), version).unwrap();
 		assert!(ingress.dynamic_groups);
 		assert!(!fits(&ingress.unknown));
-		assert!(matches!(ingress.unknown.refused(), Some(crate::Error::Unsupported)));
+		assert!(matches!(
+			ingress.unknown.refused(&crate::track::Info::default()),
+			Some(crate::Error::Unsupported)
+		));
 	}
 
 	#[test]
@@ -1122,6 +1128,31 @@ mod hop_tests {
 				matches!(res, Err(crate::Error::UnsupportedExtension)),
 				"{values:?}: {res:?}"
 			);
+		}
+	}
+
+	/// A sealed TIMESCALE that contradicts TRACK_INFO is refused across the hop: the relay
+	/// times frames by TRACK_INFO, while egress would forward the sealed one.
+	#[moq_clock::test]
+	async fn a_sealed_property_must_match_track_info() {
+		for (timescale, ok) in [(1000, true), (900, false), (0, false)] {
+			let mut sealed = Vec::new();
+			let e = &mut Encoder::new(&mut sealed, crate::ietf::Version::Draft22.into());
+			e.varint(0x08).unwrap();
+			e.varint(timescale).unwrap();
+			let res = subscribe_across(crate::model::object::TrackProperties {
+				values: vec![Property {
+					id: IMMUTABLE,
+					value: Value::Bytes(sealed.into()),
+				}],
+				encoding: Some(Encoding::Delta { seven: true }),
+				..Default::default()
+			})
+			.await;
+			match ok {
+				true => assert!(res.is_ok(), "{timescale}: {res:?}"),
+				false => assert!(matches!(res, Err(crate::Error::Unsupported)), "{timescale}: {res:?}"),
+			}
 		}
 	}
 

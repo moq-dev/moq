@@ -6092,13 +6092,13 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					}
 					self.state = TrackInfoState::Properties { stream, info: model };
 				}
-				TrackInfoState::Properties { stream, .. } => {
+				TrackInfoState::Properties { stream, info } => {
 					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
 						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 					}
 					let properties = ready!(stream.reader.poll_decode::<lite::ietf::TrackProperties>(&mut cx))?;
 					// Refused as moq-transport ingress refuses it.
-					if let Some(err) = properties.0.as_ref().and_then(|properties| properties.refused()) {
+					if let Some(err) = properties.0.as_ref().and_then(|properties| properties.refused(info)) {
 						return Poll::Ready(Err(err));
 					}
 					let TrackInfoState::Properties { stream, mut info } =

@@ -44,8 +44,7 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 /// INCLUDE_PROPERTIES=0, which keeps the block present but empty.
 ///
 /// Declaring the timescale is what opts the track into timestamps; every object Timestamp
-/// is in these units. We serve the newest group first by default, matching moq-lite. A draft
-/// without room for a property drops it on encode.
+/// is in these units. A draft without room for a property drops it on encode.
 ///
 /// Fails with [`Error::Unsupported`] for Immutable Properties the draft cannot carry:
 /// rewriting them for its encoding would break them, and forwarding them unchanged would
@@ -68,13 +67,8 @@ fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Resul
 		unknown.values.retain(|property| property.id != 0x06);
 	}
 	Ok(ietf::Properties {
-		max_cache_duration: info.max_age,
-		timescale: info.timescale,
-		priority: Some(super::priority::to_wire(info.priority)),
-		group_order: Some(GroupOrder::Descending),
-		// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
-		dynamic_groups: info.refresh.is_some(),
 		unknown,
+		..ietf::Properties::restated(info)
 	})
 }
 

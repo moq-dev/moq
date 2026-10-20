@@ -88,6 +88,21 @@ impl Properties {
 		!matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 	}
 
+	/// The properties a relay states for a track it serves, from the `info` it acts on.
+	///
+	/// We serve the newest group first by default, matching moq-lite.
+	pub(crate) fn restated(info: &crate::track::Info) -> Self {
+		Self {
+			max_cache_duration: info.max_age,
+			timescale: info.timescale,
+			priority: Some(super::priority::to_wire(info.priority)),
+			group_order: Some(GroupOrder::Descending),
+			// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
+			dynamic_groups: info.refresh.is_some(),
+			unknown: TrackProperties::default(),
+		}
+	}
+
 	/// Write the block, which is the final field of the message: no count and no length,
 	/// so the caller must not append anything after it.
 	///
@@ -327,11 +342,15 @@ impl TrackProperties {
 		})
 	}
 
-	/// Why a track carrying these is neither processed nor forwarded, if it is not: every
-	/// ingress, moq-transport or a relay hop, refuses it here.
-	pub(crate) fn refused(&self) -> Option<crate::Error> {
+	/// Why a track carrying these beside `info` is neither processed nor forwarded, if it
+	/// is not: every ingress, moq-transport or a relay hop, refuses it here.
+	pub(crate) fn refused(&self, info: &crate::track::Info) -> Option<crate::Error> {
 		if self.mandatory() {
 			return Some(crate::Error::UnsupportedExtension);
+		}
+		// Egress forwards a sealed value in place of restating `info`, so the two must agree.
+		if self.contradicts(&Properties::restated(info)) {
+			return Some(crate::Error::Unsupported);
 		}
 		// Egress could not restate the track's info beside them without overflowing.
 		if self.values.len() > MAX_FORWARDED {
@@ -342,6 +361,29 @@ impl TrackProperties {
 			return Some(crate::Error::Unsupported);
 		}
 		None
+	}
+
+	/// Whether Immutable Properties seal a property we understand at another value than
+	/// the `restated` one the relay acts on.
+	fn contradicts(&self, restated: &Properties) -> bool {
+		let Some((block, encoding)) = self.immutable().zip(self.encoding) else {
+			return false;
+		};
+		let mut sealed = Properties::default();
+		let mut seen = Vec::new();
+		let r = &mut Decoder::new(block, super::object::family(encoding).into());
+		// Ingress checked the block, so a malformed one cannot occur and is refused.
+		if self::sealed(r, &mut sealed, &mut seen).is_err() {
+			return true;
+		}
+		seen.into_iter().any(|id| match id {
+			MAX_CACHE_DURATION => sealed.max_cache_duration != restated.max_cache_duration,
+			TIMESCALE => sealed.timescale != restated.timescale,
+			DEFAULT_PUBLISHER_PRIORITY => sealed.priority != restated.priority,
+			DEFAULT_PUBLISHER_GROUP_ORDER => sealed.group_order != restated.group_order,
+			DYNAMIC_GROUPS => sealed.dynamic_groups != restated.dynamic_groups,
+			_ => unreachable!("only the understood properties are seen"),
+		})
 	}
 
 	/// Whether one is a Mandatory Track Property (0x4000-0x7FFF), which by definition is
@@ -738,7 +780,7 @@ mod tests {
 			dynamic_groups: true,
 			unknown: unknown(MAX_FORWARDED),
 		};
-		assert!(properties.unknown.refused().is_none());
+		assert!(properties.unknown.refused(&crate::track::Info::default()).is_none());
 		let mut buf = Vec::new();
 		properties
 			.encode(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
@@ -746,9 +788,94 @@ mod tests {
 		assert_eq!(decode_draft22(&buf).unwrap(), properties);
 
 		assert!(matches!(
-			unknown(MAX_FORWARDED + 1).refused(),
+			unknown(MAX_FORWARDED + 1).refused(&crate::track::Info::default()),
 			Some(crate::Error::Unsupported)
 		));
+	}
+
+	/// Why a track whose publisher sealed `value` as the understood property `id` is
+	/// refused beside an info that restates 7s, 1000 Hz, priority 9, Descending, and
+	/// DYNAMIC_GROUPS.
+	fn seal(id: u64, value: u64) -> Option<crate::Error> {
+		let version = Version::Draft22;
+		let mut block = Vec::new();
+		let w = &mut Encoder::new(&mut block, version.into());
+		w.varint(id).unwrap();
+		w.varint(value).unwrap();
+		let unknown = TrackProperties {
+			values: vec![Property {
+				id: IMMUTABLE,
+				value: Value::Bytes(block.into()),
+			}],
+			encoding: Some(super::super::object::encoding(version)),
+			delivery_timeout: true,
+		};
+		let info = crate::track::Info::default()
+			.with_max_age(Duration::from_secs(7))
+			.with_timescale(Timescale::MILLI)
+			.with_priority(9)
+			.with_refresh(0);
+		unknown.refused(&info)
+	}
+
+	/// A sealed value of a property the relay restates must be the one it acts on, since
+	/// egress forwards the sealed one in its place.
+	#[test]
+	fn a_sealed_max_cache_duration_matches_the_track() {
+		assert!(seal(MAX_CACHE_DURATION, 7000).is_none());
+		assert!(matches!(
+			seal(MAX_CACHE_DURATION, 7001),
+			Some(crate::Error::Unsupported)
+		));
+	}
+
+	#[test]
+	fn a_sealed_timescale_matches_the_track() {
+		assert!(seal(TIMESCALE, 1000).is_none());
+		assert!(matches!(seal(TIMESCALE, 900), Some(crate::Error::Unsupported)));
+		// Zero declares no timeline, which contradicts one.
+		assert!(matches!(seal(TIMESCALE, 0), Some(crate::Error::Unsupported)));
+	}
+
+	#[test]
+	fn a_sealed_priority_matches_the_track() {
+		let wire = u64::from(super::super::priority::to_wire(9));
+		assert!(seal(DEFAULT_PUBLISHER_PRIORITY, wire).is_none());
+		assert!(matches!(
+			seal(DEFAULT_PUBLISHER_PRIORITY, wire + 1),
+			Some(crate::Error::Unsupported)
+		));
+	}
+
+	#[test]
+	fn a_sealed_group_order_matches_the_track() {
+		assert!(seal(DEFAULT_PUBLISHER_GROUP_ORDER, 2).is_none());
+		// The relay serves the newest group first, so it cannot forward Ascending.
+		assert!(matches!(
+			seal(DEFAULT_PUBLISHER_GROUP_ORDER, 1),
+			Some(crate::Error::Unsupported)
+		));
+	}
+
+	#[test]
+	fn sealed_dynamic_groups_match_the_track() {
+		assert!(seal(DYNAMIC_GROUPS, 1).is_none());
+		assert!(matches!(seal(DYNAMIC_GROUPS, 0), Some(crate::Error::Unsupported)));
+	}
+
+	/// Every property the relay restates has a sealed check above.
+	#[test]
+	fn every_understood_property_is_checked_when_sealed() {
+		assert_eq!(
+			UNDERSTOOD,
+			[
+				MAX_CACHE_DURATION,
+				TIMESCALE,
+				DEFAULT_PUBLISHER_PRIORITY,
+				DEFAULT_PUBLISHER_GROUP_ORDER,
+				DYNAMIC_GROUPS
+			]
+		);
 	}
 
 	/// 0x4000-0x7FFF are Mandatory Track Properties, mutable or sealed.
