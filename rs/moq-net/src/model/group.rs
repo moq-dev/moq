@@ -324,7 +324,24 @@ impl Flate {
 
 	/// Compress a locally written frame, returning its stored slice.
 	fn deflate(&mut self, payload: &[u8]) -> Bytes {
-		self.encoder.get_or_insert_with(flate::Encoder::new).frame(payload)
+		let plain = &self.plain;
+		let encoder = self.encoder.get_or_insert_with(|| {
+			plain.bill.add(flate::ENCODER_HEAP);
+			flate::Encoder::new()
+		});
+		encoder.frame(payload)
+	}
+
+	/// Drop the codec state once no frame follows: the encoder, and the decoder if its
+	/// readers already inflated every frame.
+	fn finish(&mut self) {
+		if self.encoder.take().is_some() {
+			self.plain.bill.sub(flate::ENCODER_HEAP);
+		}
+		let mut plain = self.plain.lock();
+		if plain.frames.len() == self.sizes.len() {
+			self.plain.drop_decoder(&mut plain);
+		}
 	}
 
 	/// Drop everything but how the group is read, failing a late inflater with `err`.
@@ -343,8 +360,8 @@ struct Plain {
 	// Frames inflated so far, so a reader under the group's guard takes only the slices
 	// past it without waiting on an inflater.
 	len: AtomicUsize,
-	// The inflated bytes, counted toward the group's eviction size once they exist.
-	// Changed only under `state`.
+	// The inflated bytes and the group's codec state, counted toward its eviction size
+	// once they exist. Changed only under `state`, or the group's lock for the encoder.
 	bill: cache::Extra,
 	state: Mutex<PlainState>,
 }
@@ -365,6 +382,13 @@ struct PlainState {
 impl Plain {
 	fn lock(&self) -> MutexGuard<'_, PlainState> {
 		self.state.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Drop `state`'s decoder, which no frame needs any more.
+	fn drop_decoder(&self, state: &mut PlainState) {
+		if state.decoder.take().is_some() {
+			self.bill.sub(flate::DECODER_HEAP);
+		}
 	}
 
 	/// Inflated local frame `local`, or why it is not.
@@ -418,7 +442,14 @@ impl Inflate {
 			}
 			let frame = usize::try_from(*size)
 				.map_err(|_| Error::FrameTooLarge)
-				.and_then(|size| state.decoder.get_or_insert_with(flate::Decoder::new).frame(slice, size));
+				.and_then(|size| {
+					let bill = &self.plain.bill;
+					let decoder = state.decoder.get_or_insert_with(|| {
+						bill.add(flate::DECODER_HEAP);
+						flate::Decoder::new()
+					});
+					decoder.frame(slice, size)
+				});
 			match frame {
 				Ok(frame) => {
 					self.plain.bill.add(frame.len() as u64);
@@ -426,12 +457,12 @@ impl Inflate {
 					state.frames.push_back(frame);
 					self.plain.len.store(state.frames.len(), Ordering::Release);
 					if self.fin == Some(state.frames.len()) {
-						state.decoder = None;
+						self.plain.drop_decoder(&mut state);
 					}
 				}
 				Err(err) => {
 					state.err = Some(err);
-					state.decoder = None;
+					self.plain.drop_decoder(&mut state);
 					break;
 				}
 			}
@@ -1551,7 +1582,7 @@ impl Producer {
 		state.fin = Some(state.next_index);
 		// No frame follows to compress.
 		if let Some(flate) = &mut state.flate {
-			flate.encoder = None;
+			flate.finish();
 		}
 		// A finished group can no longer raise the track's largest, which may end its stream.
 		self.handle.cache.finish_largest(self.sequence);
@@ -4711,6 +4742,42 @@ mod test {
 		assert!(matches!(late.get(0), Err(Error::Evicted)));
 		assert_eq!(pool.used(), used, "a late inflater bills nothing past the release");
 		assert_eq!(inflated(), plain);
+	}
+
+	/// The codec state counts toward the pool while it lives: the encoder until the group
+	/// finishes, and a reader's decoder until the last frame inflates.
+	#[test]
+	#[cfg(feature = "async")]
+	fn codec_state_is_billed_while_held() {
+		let pool = cache::Pool::unbounded();
+		let mut group = compressed_group(&pool);
+		group.write_frame(None, verbose(0)).unwrap();
+		let stored = group.handle.state.read().charge.size();
+		assert_eq!(group.handle.cache_size(), stored + flate::ENCODER_HEAP);
+		group.write_frame(None, verbose(1)).unwrap();
+
+		// The read inflates both frames ahead, but the open group may still get a third.
+		let mut reader = group.consume();
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(0));
+		let inflated = (verbose(0).len() + verbose(1).len()) as u64;
+		let stored = group.handle.state.read().charge.size();
+		let held = stored + flate::ENCODER_HEAP + flate::DECODER_HEAP + inflated;
+		assert_eq!(group.handle.cache_size(), held, "an open group keeps both");
+
+		group.finish().unwrap();
+		assert_eq!(group.handle.cache_size(), stored + inflated, "finishing drops both");
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(1));
+
+		// A finished group's decoder goes with the last frame it inflates.
+		let mut group = compressed_group(&pool);
+		group.write_frame(None, verbose(0)).unwrap();
+		let mut reader = group.consume();
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(0));
+		group.write_frame(None, verbose(1)).unwrap();
+		group.finish().unwrap();
+		let stored = group.handle.state.read().charge.size();
+		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(1));
+		assert_eq!(group.handle.cache_size(), stored + inflated);
 	}
 
 	/// A plain read of a compressed group that started past frame 0 lags on every read,

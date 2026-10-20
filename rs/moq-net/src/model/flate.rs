@@ -23,6 +23,16 @@ const SYNC_FLUSH_TAIL: [u8; 4] = [0x00, 0x00, 0xff, 0xff];
 /// Scratch buffer size for the streaming (de)compress loops.
 const CHUNK: usize = 8 * 1024;
 
+/// The DEFLATE window, 2^15 bytes for raw DEFLATE at the default `windowBits`.
+const WINDOW: u64 = 1 << 15;
+
+/// Heap an [`Encoder`] holds, as zlib sizes it at the default `memLevel` of 8: the doubled
+/// window, its `prev` chain and hash `head` tables, and the pending buffer, 64 KiB each.
+pub(super) const ENCODER_HEAP: u64 = 8 * WINDOW;
+
+/// Heap a [`Decoder`] holds: the window, plus its inflate state rounded up to 8 KiB.
+pub(super) const DECODER_HEAP: u64 = WINDOW + 8 * 1024;
+
 /// Compresses a group's frames into one shared window, one slice per frame.
 // Boxed: zlib-rs keeps its stream header inline, which would bloat the group state.
 pub(super) struct Encoder(Box<Compress>);
