@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "demo/carla/bridge",
     "rs/hang",
     "rs/kio",
     "rs/libmoq",
