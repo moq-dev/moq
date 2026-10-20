@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Track demand reports the wanted group (#5930)
+
+`TrackDemand.IsUsed`, `Used`, and `Unused` are gone.
+`Wanted()` returns nil while nobody subscribes, otherwise the group subscribers want next, and `WantedChanged(ctx)` waits for it to change (the first call returns at once).
+Loop on `WantedChanged` until it returns non-nil where you called `Used`, and nil where you called `Unused`.
+`TrackInfo` gains `Refresh`. `GroupDemand` is unchanged.
+
 ### `CongestionControl` gained `CongestionControlNone` (#5926)
 
 `CongestionControlNone` runs no congestion control and no pacing, for tests and controlled links.

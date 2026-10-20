@@ -10,6 +10,7 @@ check:
 
 # Tests of repository tooling; nightly, not on every pull request.
 test:
+    python3 sh/coverage.test.py
     python3 sh/size/report.test.py
     python3 sh/size/release.test.py
     python3 sh/size/nightly.test.py

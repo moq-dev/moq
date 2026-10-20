@@ -43,8 +43,11 @@ reuse its filter rather than recreating that completed work.
 RFC 7983 already partitions the first byte: STUN is 0 to 3, DTLS 20 to 63,
 RTP and RTCP 128 to 191. QUIC fills the gaps: a long header is 192 to 255 and
 a short header 64 to 127, as long as the fixed bit is set, so the QUIC
-config disables QUIC-bit greasing (RFC 9287) explicitly; `moq-quic` turns it on by
-default and nothing here disables it today. SRT does not fit:
+config disables QUIC-bit greasing (RFC 9287) explicitly. `moq-quic` turns it
+on by default, but the existing shard-steering path already disables it in
+`rs/moq-tokio/src/quic/backend.rs`. The shared demux must apply the same
+requirement to every QUIC endpoint it serves, including an unsharded one.
+SRT does not fit:
 its data packets start with a 0 bit and its control packets with a 1, so both
 overlap. SRT is demuxed by flow instead. A 4-tuple ICE has succeeded on is pinned
 to WebRTC in the outer table before any SRT test, because an RTP v2 packet

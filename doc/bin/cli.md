@@ -95,9 +95,9 @@ For a source already in MPEG-TS, `ffmpeg -c copy -f mpegts` re-muxes and drops P
 `tsp -I ip 239.1.2.3:1234 -O file - | moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts`,
 or use [`import srt`](/bin/srt).
 
-MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
-and every other stream it does not decode (KLV, subtitles, DVB AC-3) through as
-tracks. Each such PES goes through whole, at its place on the program clock
+MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3/Opus, and passes
+SCTE-35 and every other stream it does not decode (KLV, subtitles, DVB AC-3)
+through as tracks. Each such PES goes through whole, at its place on the program clock
 (PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
 is refused with a warning: any in a program with no PCR, and one whose PES carry
 an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
@@ -116,7 +116,8 @@ logs feed health (stalled streams, TR 101 290 errors) without changing what it
 publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
 program aboard, for what demultiplexing cannot carry, such as a scrambled
-service; `export ts --passthrough` writes it back out. FLV covers H.264 + AAC.
+service; `export ts --passthrough` writes it back out. FLV accepts the same
+legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
 `import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
 re-encoding. RTP rides the RTSP connection, so run it on the camera's network
@@ -128,7 +129,7 @@ including when the camera sends no media for 10 seconds or no keyframe for 30,
 until a fatal error (refused access, or no stream it can publish), and
 each RTSP session is a new broadcast with its own catalog, since the session's
 RTP time restarts; a camera whose clock jumps mid-session is restarted the same
-way. Embed [`moq-rtsp`](https://docs.rs/moq-rtsp) for your own supervision,
+way. Embed [`moq-rtsp`](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp) for your own supervision,
 such as two of a camera's URLs as renditions of one broadcast.
 
 ```bash

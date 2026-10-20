@@ -5505,7 +5505,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 					// otherwise hold this task, its TRACK stream, and the track for good.
 					// Dropping the fetch resets the stream.
 					let pending = request.as_ref().expect("request pending");
-					if pending.demand().poll_unused(waiter).is_ready() {
+					if crate::util::poll_unwanted(&mut pending.demand(), waiter).is_ready() {
 						if pending.reject_unused(Error::Cancel) {
 							self.state = TrackRunState::Done;
 							return Poll::Ready(());
@@ -5978,7 +5978,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					{
 						return Poll::Ready(ServeEnd::Finished);
 					}
-					if self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready() {
+					if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready() {
 						return Poll::Ready(ServeEnd::Idle);
 					}
 					let mut cx = std::task::Context::from_waker(waiter.waker());
@@ -6058,17 +6058,16 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// went with the last subscriber, so it lingers, cache and all, for a
 					// reader or fetch that asks again soon, then is dropped. In-flight
 					// fetches keep it alive: work already accepted still gets finished.
-					if self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready() {
+					if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready() {
 						self.held = None;
 						if self.linger.deadline().is_none() {
 							let now = serve.subscriber.runtime.now();
 							self.linger.set(now.checked_add(track::IDLE_LINGER));
 						}
+						// A reader returning restarts the countdown when it next leaves.
 						if self.linger.poll(waiter).is_ready() {
 							return Poll::Ready(ServeEnd::Idle);
 						}
-						// A reader returning restarts the countdown when it next leaves.
-						let _ = self.demand.poll_used(waiter);
 					} else {
 						self.linger.set(None);
 					}

@@ -18,7 +18,6 @@ use crate::{
 	AsPath, DecodeError, Error, Timescale, Timestamp,
 	coding::{Decode as _, Encode as _, Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
-	model::NewGroup,
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
 	util::{MaybeBoxedExt, MaybeSendBox},
@@ -78,9 +77,8 @@ fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Resul
 		timescale: info.timescale,
 		priority: Some(super::priority::to_wire(info.priority)),
 		group_order: Some(GroupOrder::Descending),
-		// Advertised only where an upstream session carries the request back to the
-		// original publisher; a local track has nothing to answer it.
-		dynamic_groups: info.dynamic_groups,
+		// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
+		dynamic_groups: info.refresh.is_some(),
 		unknown,
 	})
 }
@@ -1220,10 +1218,21 @@ where
 					};
 
 					let order = msg.group_order.to_order();
+					// A live SUBSCRIBE's NEW_GROUP_REQUEST asks nothing more: subscribing is itself
+					// a join, which the track's refresh ratio judges.
 					let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
-					// Set before subscribing, so a relay that has no upstream subscription yet
-					// carries it on the SUBSCRIBE it opens, as the draft requires.
-					subscription.new_group = msg.new_group.and_then(|value| NewGroup::new(value, None));
+					// A range that resolves without the live edge has a fixed start, which is no
+					// join: bound the subscription before subscribing so the ratio never judges it.
+					// From the start of its group, so a relay's copy holds the group's head for
+					// its other readers, as a live join would; the resolved range trims below.
+					let fixed = subscribe_range(&msg, LiveEdge::default(), self.version);
+					if let Some(start) = fixed.start {
+						ServeRange {
+							start: Some(Location { object: 0, ..start }),
+							..fixed
+						}
+						.apply(&mut subscription);
+					}
 
 					// Subscribe before resolving the filter: on a routed broadcast the live edge only
 					// becomes readable once the subscription's demand attaches a route, so the edge
@@ -1249,18 +1258,7 @@ where
 					// cover the group with no gap and no overlap.
 					let edge = live_edge(&cache);
 					let range = subscribe_range(&msg, edge, self.version);
-					subscription.set_bounds(
-						range.start.map(|start| track::Position {
-							group: start.group,
-							frame: start.object,
-						}),
-						range.end.and_then(|end| match end.object {
-							Some(object) => track::Position::after(end.group, object),
-							None => track::Position::after_group(end.group),
-						}),
-					);
-					// The live edge is only known once subscribed.
-					subscription.new_group = msg.new_group.and_then(|value| NewGroup::new(value, edge.latest));
+					range.apply(&mut subscription);
 					let _ = track.update(subscription);
 					// A Timestamp goes out wherever the draft can declare its units and the track
 					// has them. A subscriber that opted out of this SUBSCRIBE_OK's properties learns
@@ -1287,6 +1285,12 @@ where
 					let mut track_serve =
 						TrackServe::new(self.session.clone(), track, request_id, self.version, range, timescale)
 							.ranked(self.priority.clone());
+					// A fixed start is no join, so its NEW_GROUP_REQUEST asks as an update's would.
+					if fixed.start.is_some()
+						&& let Some(value) = msg.new_group
+					{
+						track_serve.request_new_group(value);
+					}
 
 					// Draft-20 replaced joining FETCH with subscription fills. Older drafts save
 					// the same boundary used by the subscription so the two streams never overlap.
@@ -1688,7 +1692,7 @@ where
 				))
 			}
 			// The draft forbids it on a track that did not advertise DYNAMIC_GROUPS.
-			None if update.new_group.is_some() && !serve.track.info().dynamic_groups => Some((
+			None if update.new_group.is_some() && serve.track.info().refresh.is_none() => Some((
 				"NEW_GROUP_REQUEST on a track without DYNAMIC_GROUPS",
 				Error::Unsupported,
 			)),
@@ -1709,7 +1713,7 @@ where
 				.map_err(failed)?;
 		}
 		if let Some(value) = update.new_group {
-			serve.request_new_group(value).map_err(failed)?;
+			serve.request_new_group(value);
 		}
 		if let (Some(token), Some(grant)) = (update.authorization_token, request_grant) {
 			renewal.verify(grant.verify_renewal(&self.auth, token.0), update.request_id);
@@ -2579,7 +2583,9 @@ where
 				})
 				.await?;
 			let mut prior = None;
+			let mut budget = kio::coop::Budget::new(32);
 			for (ordinal, frame) in (group.first..).zip(group.frames) {
+				kio::wait(|waiter| budget.poll_yield(waiter)).await;
 				let object = frame.fields.as_ref().map_or(ordinal, |fields| fields.id);
 				let position = fetch_prior(self.version, prior, object)?;
 				prior = Some(object);
@@ -4219,17 +4225,14 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		Ok(())
 	}
 
-	/// Hold the subscriber's NEW_GROUP_REQUEST until a group answers it; the upstream
-	/// session decides whether it goes further. One a held group answers asks nothing.
-	fn request_new_group(&mut self, value: u64) -> Result<(), Error> {
-		let Some(request) = NewGroup::new(value, self.track.latest_sequence()) else {
-			return Ok(());
-		};
-		let mut subscription = self.track.subscription();
-		// Merged like requests from different subscribers, so a later, weaker request does
-		// not drop a stronger one still held.
-		subscription.new_group = subscription.new_group.max(Some(request));
-		self.track.update(subscription)
+	/// The subscriber's NEW_GROUP_REQUEST counts as a join, judged by the track's refresh
+	/// ratio rather than forwarded as is: every hop's cache holds the same group. One
+	/// naming a group already held asks nothing, since that group is on its way.
+	fn request_new_group(&self, value: u64) {
+		if value != 0 && self.track.latest_sequence().is_some_and(|latest| value <= latest) {
+			return;
+		}
+		self.track.join();
 	}
 
 	/// Group streams opened so far.
@@ -5553,7 +5556,8 @@ mod group_priority_test {
 
 	/// Drive `serve` beside a sibling that only counts its turns, until `done`, checking every
 	/// poll stays under `most` by `progress` and leaves the sibling its turn.
-	fn serve_beside_a_sibling(
+	/// Each task-set pass returns to the executor so its children's yields reach the task.
+	async fn serve_beside_a_sibling(
 		mut serve: TrackServe<SinkSession>,
 		mut produce: impl FnMut() -> bool + 'static,
 		progress: impl Fn() -> usize,
@@ -5580,22 +5584,26 @@ mod group_priority_test {
 			serve.poll(waiter).map(|res| res.expect("serve"))
 		}));
 
-		let owner = kio::Waiter::noop();
 		let mut polls = 0;
-		while progress() < done {
+		kio::wait(|owner| {
+			if progress() >= done {
+				return Poll::Ready(());
+			}
 			let before = progress();
-			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			assert!(tasks.poll(owner).is_pending(), "the serve never ends");
 			polls += 1;
 			let made = progress() - before;
 			assert!(made <= most, "one poll made {made} progress");
 			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
 			assert!(polls <= 2 * done as u64, "the serve stalled");
-		}
+			Poll::Pending
+		})
+		.await;
 	}
 
 	/// A track that always has another group ready yields within its budget.
-	#[test]
-	fn a_busy_track_yields_to_its_siblings() {
+	#[moq_clock::test]
+	async fn a_busy_track_yields_to_its_siblings() {
 		/// `TrackServe`'s passes per poll; each starts at most one group.
 		const BUDGET: usize = 32;
 		const GROUPS: u64 = 10_000;
@@ -5638,7 +5646,8 @@ mod group_priority_test {
 			|| opened.load(Ordering::Relaxed) as usize,
 			BUDGET,
 			GROUPS as usize,
-		);
+		)
+		.await;
 	}
 
 	/// On a transport with send groups, a subscription opens one at its priority and its
@@ -5775,7 +5784,8 @@ mod group_priority_test {
 			|| log.writes.lock().unwrap().len(),
 			2 * (BUDGET + 1) * 2 * PAYLOAD,
 			FRAMES * PAYLOAD,
-		);
+		)
+		.await;
 	}
 
 	/// Serve one group at `version` with `timescale` and return the header plus what follows it.
@@ -6911,124 +6921,131 @@ mod serve_tests {
 		ietf::SubscribeOk::decode_msg(&mut Decoder::new(&rest[2..2 + size], version.into()), version).unwrap()
 	}
 
-	/// A SUBSCRIBE's NEW_GROUP_REQUEST for 0 reaches the track still 0, so a relay behind
-	/// the original publisher forwards what was asked, but answered only by a group past
-	/// the latest. SUBSCRIBE_OK advertises DYNAMIC_GROUPS only for a track that supports it.
-	#[moq_clock::test]
-	async fn a_subscribe_new_group_request_reaches_the_track() {
-		for (version, dynamic_groups) in [
-			(Version::Draft15, true),
-			(Version::Draft15, false),
-			(Version::Draft16, true),
-			(Version::Draft16, false),
-			(Version::Draft22, true),
-			(Version::Draft22, false),
-		] {
-			let h = serve_track(
-				version,
-				crate::track::Info {
-					dynamic_groups,
-					..crate::track::Info::timed()
-				},
-			);
-			let _group = h.track.create_group(group::Info { sequence: 4 }).unwrap();
-			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
-			let msg = ietf::Subscribe {
-				new_group: Some(0),
-				..subscribe(Filter::NextObject, None)
-			};
-			let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
-			serve_until(serve.as_mut(), "the request reached the track past group 4", || {
-				h.track.new_group() == Some(NewGroup { value: 0, first: 5 })
-			})
-			.await;
-			assert_eq!(
-				subscribe_ok(&h.log, version).properties.dynamic_groups,
-				dynamic_groups,
-				"{version}"
-			);
-		}
+	/// Group 4 of `h`'s track: a 3 byte first frame and a 5 byte delta, over a refresh
+	/// ratio of 1.
+	fn refresh_group(h: &Serve) -> group::Producer {
+		let mut group = h.track.create_group(group::Info { sequence: 4 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"key".as_slice()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"delta".as_slice()).unwrap();
+		group
 	}
 
-	/// An update's NEW_GROUP_REQUEST is recorded on a track with DYNAMIC_GROUPS and
-	/// answered with REQUEST_OK.
+	/// A SUBSCRIBE is a join, with or without NEW_GROUP_REQUEST: a track opted in to refresh
+	/// wants the group past one over its ratio, and SUBSCRIBE_OK advertises DYNAMIC_GROUPS.
 	#[moq_clock::test]
-	async fn a_new_group_update_reaches_a_dynamic_track() {
+	async fn a_subscribe_joins_under_the_refresh_ratio() {
 		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
-			let h = serve_track(
-				version,
-				crate::track::Info {
-					dynamic_groups: true,
-					..crate::track::Info::timed()
-				},
-			);
-			let mut session = ScriptedSession::new(new_group_update(version, 10, 9));
-			let mut stream = Stream::open(&mut session, version).await.unwrap();
-			let mut serving = TrackServe::new(
-				h.session.clone(),
-				h.track.subscribe(None),
-				RequestId(0),
-				version,
-				ServeRange::default(),
-				None,
-			);
-			let mut finished = false;
-			let mut run =
-				std::pin::pin!(
-					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+			for refresh in [Some(1), None] {
+				let h = serve_track(version, crate::track::Info::timed().with_refresh(refresh));
+				let _group = refresh_group(&h);
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				let msg = ietf::Subscribe {
+					new_group: Some(0),
+					..subscribe(Filter::NextObject, None)
+				};
+				let wanted = if refresh.is_some() { 5 } else { 0 };
+				let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+				serve_until(serve.as_mut(), "the join reached the track", || {
+					h.track.demand().wanted() == Some(wanted) && !h.log.trail().is_empty()
+				})
+				.await;
+				assert_eq!(
+					subscribe_ok(&h.log, version).properties.dynamic_groups,
+					refresh.is_some(),
+					"{version}"
 				);
-			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
-			assert_eq!(h.track.new_group(), Some(NewGroup { value: 9, first: 0 }), "{version}");
-			// Draft 16 names the update it answers; later drafts answer on its own stream.
-			let written = session.log.writes.lock().unwrap().clone();
-			assert_eq!(written[0], ietf::RequestOk::ID as u8, "{version}: {written:?}");
-			if version == Version::Draft16 {
-				assert_eq!(written[3], 10, "{version}: {written:?}");
 			}
 		}
 	}
 
-	/// A weaker request on the same subscription keeps the stronger one it still holds.
+	/// An absolute filter has a fixed start, so its SUBSCRIBE is no join even over the ratio.
 	#[moq_clock::test]
-	async fn a_later_update_keeps_the_stronger_request() {
-		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
-			let h = serve_track(
-				version,
-				crate::track::Info {
-					dynamic_groups: true,
-					..crate::track::Info::timed()
-				},
-			);
-			let mut session =
-				ScriptedSession::new([new_group_update(version, 10, 9), new_group_update(version, 12, 0)].concat());
-			let mut stream = Stream::open(&mut session, version).await.unwrap();
-			let mut serving = TrackServe::new(
-				h.session.clone(),
-				h.track.subscribe(None),
-				RequestId(0),
-				version,
-				ServeRange::default(),
-				None,
-			);
-			let mut finished = false;
-			let mut run =
-				std::pin::pin!(
-					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
-				);
-			assert!(
-				futures::poll!(run.as_mut()).is_pending(),
-				"{version}: an update ended it"
-			);
-			assert_eq!(h.track.new_group(), Some(NewGroup { value: 9, first: 0 }), "{version}");
+	async fn an_absolute_subscribe_is_no_join() {
+		let version = Version::Draft22;
+		let h = serve_track(version, crate::track::Info::timed().with_refresh(1));
+		let _group = refresh_group(&h);
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		let msg = subscribe(
+			Filter::Absolute {
+				start: Location { group: 4, object: 0 },
+				end: None,
+			},
+			None,
+		);
+		let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+		serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !h.log.trail().is_empty()).await;
+		assert_eq!(h.track.demand().wanted(), Some(0));
+	}
+
+	/// An absolute SUBSCRIBE carrying NEW_GROUP_REQUEST asks as an update would: past a group
+	/// the track holds, it is a join under the ratio.
+	#[moq_clock::test]
+	async fn an_absolute_subscribe_with_a_new_group_request_joins() {
+		let version = Version::Draft22;
+		for (value, wanted) in [(0, 5), (5, 5), (4, 0)] {
+			let h = serve_track(version, crate::track::Info::timed().with_refresh(1));
+			let _group = refresh_group(&h);
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let msg = ietf::Subscribe {
+				new_group: Some(value),
+				..subscribe(
+					Filter::Absolute {
+						start: Location { group: 4, object: 0 },
+						end: None,
+					},
+					None,
+				)
+			};
+			let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+			serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !h.log.trail().is_empty()).await;
+			assert_eq!(h.track.demand().wanted(), Some(wanted), "{value}");
 		}
 	}
 
-	/// A track without DYNAMIC_GROUPS cannot honor a NEW_GROUP_REQUEST update, which fails
-	/// the subscription like any update it cannot apply.
+	/// An update's NEW_GROUP_REQUEST is a join on a track opted in to refresh, answered with
+	/// REQUEST_OK. One naming a group the track holds asks nothing.
 	#[moq_clock::test]
-	async fn a_new_group_update_without_dynamic_groups_fails() {
+	async fn a_new_group_update_joins_a_refreshing_track() {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
+			for (value, wanted) in [(0, 5), (5, 5), (4, 0)] {
+				let h = serve_track(version, crate::track::Info::timed().with_refresh(1));
+				let mut session = ScriptedSession::new(new_group_update(version, 10, value));
+				let mut stream = Stream::open(&mut session, version).await.unwrap();
+				// Subscribed before the group, so only the update can ask for a new one.
+				let subscriber = h.track.subscribe(None);
+				let _group = refresh_group(&h);
+				let mut serving = TrackServe::new(
+					h.session.clone(),
+					subscriber,
+					RequestId(0),
+					version,
+					ServeRange::default(),
+					None,
+				);
+				let mut finished = false;
+				let mut run = std::pin::pin!(h.publisher.run_subscription(
+					&mut stream,
+					&mut serving,
+					&mut finished,
+					async {},
+					None
+				));
+				assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
+				assert_eq!(h.track.demand().wanted(), Some(wanted), "{version} {value}");
+				// Draft 16 names the update it answers; later drafts answer on its own stream.
+				let written = session.log.writes.lock().unwrap().clone();
+				assert_eq!(written[0], ietf::RequestOk::ID as u8, "{version}: {written:?}");
+				if version == Version::Draft16 {
+					assert_eq!(written[3], 10, "{version}: {written:?}");
+				}
+			}
+		}
+	}
+
+	/// A track without refresh cannot honor a NEW_GROUP_REQUEST update, which fails the
+	/// subscription like any update it cannot apply.
+	#[moq_clock::test]
+	async fn a_new_group_update_without_refresh_fails() {
 		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
 			let h = serve(version);
 			let mut session = ScriptedSession::new(new_group_update(version, 10, 9));
@@ -7050,7 +7067,6 @@ mod serve_tests {
 				matches!(served, Some(Served::UpdateFailed(Error::Unsupported))),
 				"{version}: {served:?}"
 			);
-			assert_eq!(h.track.new_group(), None, "{version}");
 		}
 	}
 
@@ -9260,6 +9276,49 @@ mod serve_tests {
 		run_fetch(h, fetch_type, group_order, true).await
 	}
 
+	#[moq_clock::test]
+	async fn a_cached_standalone_fetch_yields_while_writing() {
+		for version in FETCH_DRAFTS {
+			let h = serve(version);
+			let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+			for _ in 0..256 {
+				group.write_frame(timestamp(), vec![7; 1024]).unwrap();
+			}
+			group.finish().unwrap();
+			settle().await;
+
+			let done = std::rc::Rc::new(std::cell::Cell::new(false));
+			let saw_payload = std::rc::Rc::new(std::cell::Cell::new(false));
+			let sibling = moq_clock::sim::spawn({
+				let done = done.clone();
+				let saw_payload = saw_payload.clone();
+				let log = h.log.clone();
+				async move {
+					while !done.get() {
+						if log.writes.lock().unwrap().len() > 1024 {
+							saw_payload.set(true);
+						}
+						moq_clock::sim::yield_now().await;
+					}
+				}
+			});
+			let wire = standalone_fetch(
+				&h,
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 256 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			done.set(true);
+			sibling.await.unwrap();
+			assert!(wire.len() > 256 * 1024);
+			assert!(
+				saw_payload.get(),
+				"{version}: writing the cached group starved its sibling"
+			);
+		}
+	}
+
 	/// A standalone FETCH of `room/<track>`, spelled as [`standalone_fetch`] describes.
 	fn fetch_range(version: Version, track: &'static str, start: Location, end: Location) -> FetchType<'static> {
 		let namespace = crate::Path::new("room");
@@ -9541,7 +9600,7 @@ mod serve_tests {
 		.unwrap();
 		assert!(upstream.dynamic_groups);
 		let info = track::Info {
-			dynamic_groups: true,
+			refresh: Some(0),
 			properties: Some(Arc::new(upstream.unknown.clone())),
 			..track::Info::timed()
 		};
@@ -14932,6 +14991,22 @@ struct ServeRange {
 	/// open once the range is exhausted; draft-20 removed the notion of a filter ending
 	/// a subscription.
 	end: Option<EndLocation>,
+}
+
+impl ServeRange {
+	/// Bound `subscription` to this range.
+	fn apply(&self, subscription: &mut Subscription) {
+		subscription.set_bounds(
+			self.start.map(|start| track::Position {
+				group: start.group,
+				frame: start.object,
+			}),
+			self.end.and_then(|end| match end.object {
+				Some(object) => track::Position::after(end.group, object),
+				None => track::Position::after_group(end.group),
+			}),
+		);
+	}
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.
