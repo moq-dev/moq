@@ -79,3 +79,7 @@ Regression tests:
   read pending rejects that read with the abort.
 
 Public API: behavior only. Wire: none.
+
+## Related
+
+- [Rust resumed reads](/quest/m1/resume-ordered.md) - another resume follow-up from #5836
