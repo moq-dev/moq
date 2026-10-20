@@ -14725,7 +14725,11 @@ mod test {
 		let _wide = producer.subscribe(replay());
 		let mut narrow = producer.subscribe(replay().with_groups(0..2));
 		for sequence in 0..1000 {
-			producer.create_group(group::Info { sequence }).unwrap().finish().unwrap();
+			producer
+				.create_group(group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
 		}
 		assert_eq!(drain(&mut narrow), vec![0, 1]);
 		let Inner::Plain(cursor) = &narrow.inner else {
