@@ -18,11 +18,12 @@ against the new baseline.
 - Only the merge queue needs cloud CI once
   [cloud CI only in the queue](/quest/m0/ci/queue-only.md) lands, so the
   comparison is the queue's Linux gate, plus whatever nightly needs.
-- A self-hosted runner on the desktop runs only trusted code: merge groups
-  contain only maintainer-enqueued PRs, but the queue still builds
-  contributor code. Settle the isolation (ephemeral NixOS VMs, as the closed
-  [#5218](https://github.com/moq-dev/moq/pull/5218) prepared) before choosing
-  it.
+- A self-hosted runner on the desktop would run contributor-controlled code:
+  a maintainer enqueues the PR, but the merge group still builds and runs
+  what the contributor wrote. Treat every job as untrusted. The desktop is
+  not a candidate until ephemeral NixOS VMs keep jobs away from its
+  credentials, files and network, as the closed
+  [#5218](https://github.com/moq-dev/moq/pull/5218) prepared.
 - Blacksmith: compare its price per minute and its cache against hosted ARM
   runners plus the R2 caches.
 - Measure queue wall time per entry and cost per merged PR on each candidate.

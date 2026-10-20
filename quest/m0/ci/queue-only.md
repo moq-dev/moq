@@ -36,8 +36,11 @@ Decisions (maintainer, 2026-10-19):
 Implementation:
 
 - Use the trick `platform.yml` already uses: a job that always runs and
-  reports the required name, doing the work only on `merge_group` and on PRs
-  whose base is `release`. A PR retargeted from `main` to `release` has to
+  reports the required name. Check and Test do the work on `merge_group` and
+  on PRs whose base is `release`. Platform and the optional workflows do it
+  only on PRs into `release` and nightly, never in main's merge groups;
+  update the `sh/gh/queue.test.ts` contract, which asserts Platform runs
+  there today. A PR retargeted from `main` to `release` has to
   run them (`edited`, as `platform.yml` does).
 - The quest skills only wait for the checks GitHub reports, so skipped
   contexts satisfy them; no upstream change to kixelated/quest is needed.

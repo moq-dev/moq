@@ -63,8 +63,12 @@ before and after:
   costs stay visible after this audit.
 
 Scratch data from the 2026-10-19 measurement (job logs and scripts) was
-local only; re-measure rather than trusting those numbers once the
-queue-only change lands.
+local only; re-measure on the one-pass pipeline rather than trusting those
+numbers.
+
+## Required
+
+- [One CI pass](/quest/m0/ci/one-pass.md) - the pipeline this audit measures; it replaces the two jobs whose costs dominate the baseline
 
 ## Related
 
