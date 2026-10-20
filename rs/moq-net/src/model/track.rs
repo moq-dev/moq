@@ -15515,6 +15515,7 @@ mod test {
 	/// A track of only datagrams starts no group, so a time start is judged against each
 	/// datagram's own timestamp rather than letting every one through.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_datagram_is_judged_against_a_time_start_by_its_timestamp() {
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
 		let mut producer = track_producer("test", Info::timed());
