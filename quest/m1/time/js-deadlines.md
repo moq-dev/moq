@@ -56,7 +56,9 @@ Decided 2026-10-20, with reasons:
   or changing `Interval`'s first tick would add public surface and want a Rust
   mirror. Unlike an `Interval`, which keeps the clock it was created on, each
   `sleepUntil` reads the clock installed at that moment; document that on
-  `Effect.interval`.
+  `Effect.interval`. Keep `Interval`'s synchronous `RangeError` on a zero
+  period, with a regression test: a zero-period loop re-arms an already due
+  sleep forever, starving the event loop and never letting `advance` settle.
 - **`fire()` keeps its behavior,** advancing exactly to the earliest deadline;
   its doc comment and body call `advanceAsync` and move to `advance`. Check it
   still composes with the stepping loop.
