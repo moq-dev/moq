@@ -97,4 +97,4 @@ The release line keeps its current qmux and gets no backport.
 
 ## Related
 
-- [tls:// peer certificates](/quest/m2/tls-listener-mtls.md) - needs a peer-certificate accessor on qmux's TLS session, upstream or in-tree
+- [tls:// peer certificates](/quest/m2/tls-listener-mtls.md) - adds a peer-certificate accessor to the in-tree qmux TLS session

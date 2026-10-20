@@ -4,7 +4,9 @@
 
 A moq-net request (subscribe, track info, fetch, announce interest; lite and
 moq-transport) whose stream open finds no stream credit fails at once with a
-local error, instead of waiting for the peer to grant more. A relay resetting a
+local error, instead of waiting for the peer to grant more. This holds on
+every in-tree backend; iroh, an accepted exception that stays on upstream
+noq, keeps waiting. A relay resetting a
 downstream stream because of it sends `Internal`. Publisher group streams are
 out of scope.
 
