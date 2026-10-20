@@ -7,6 +7,10 @@ on:
   schedule:
     - cron: "0 8 * * *"
   pull_request:
+    # Main PRs skip it; the schedule above runs it on main. `edited` catches a
+    # main PR retargeted to release.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "test/ts/**"
       - "test/lib/**"

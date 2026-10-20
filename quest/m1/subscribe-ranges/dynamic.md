@@ -34,7 +34,7 @@ cache becomes a range request on `Dynamic` rather than a group request.
   `moq_relay::fetch_group` (added in the 2026-10-05 audit).
 - Every sequence in range either arrives or is named as dropped, so a reader
   never waits on a miss. Share the accounting with
-  [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) rather than adding a second one.
+  SUBSCRIBE_DROP rather than adding a second one.
 - Decided in the 2026-10-10 audit: `max_delay` caps every range, including
   historical FETCH replacements, and publisher `max_age` always clamps it.
   A FETCH with no reader delay uses publisher max-age alone, not the live
@@ -54,7 +54,3 @@ cache becomes a range request on `Dynamic` rather than a group request.
   the older groups the range asked for.
 - Benchmark serving and filling over range count and span as separate axes,
   beside `track_subscription_ranges`, which covers aggregation.
-
-## Related
-
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver

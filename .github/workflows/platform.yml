@@ -1,8 +1,7 @@
 name: Platform
 
-# The native macOS and Windows gates run once per main merge, in the merge queue,
-# rather than on every PR push. Release has no queue, so its PRs retain them. Every PR reports skipped OS checks without path filters,
-# allowing the same check names to be required before and inside the queue.
+# The native macOS and Windows gates run nightly on main (nightly.yml calls this)
+# and on every release PR, without path filters, so release can require their names.
 permissions:
   contents: read
 
@@ -24,12 +23,11 @@ on:
       - "**/justfile"
       - ".github/**"
   pull_request:
+    branches: [release]
     # `closed` only cancels an in-flight run. `edited` runs the gates when a main
     # PR is retargeted to release. Any edit reruns them, since a skipped rerun
-    # would post a passing context over a failed one; on main PRs that is free.
+    # would post a passing context over a failed one.
     types: [opened, synchronize, reopened, edited, closed]
-  merge_group:
-    types: [checks_requested]
   workflow_call:
     inputs:
       benchmarks:
@@ -57,7 +55,7 @@ jobs:
     # Require this check too: a failed selector otherwise skips its dependents,
     # and GitHub accepts skipped jobs as successful required checks.
     name: Platform scope
-    if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
+    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     outputs:
@@ -76,7 +74,7 @@ jobs:
       - name: Select platform checks
         id: scope
         env:
-          CI_BASE: ${{ (github.event_name != 'pull_request' && github.event_name != 'merge_group') && '--all' || github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
         run: just ci-select platform "$CI_BASE" >> "$GITHUB_OUTPUT"
 
   windows:
@@ -107,8 +105,7 @@ jobs:
         uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: nextest@0.9.146
-      # The merge queue and Nightly write these platforms; `release` pull
-      # requests read.
+      # Nightly writes these platforms; `release` pull requests read.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
         with:
@@ -122,7 +119,7 @@ jobs:
         if: needs.scope.outputs.rs == 'true'
         shell: bash
         env:
-          CI_BASE: ${{ (github.event_name != 'pull_request' && github.event_name != 'merge_group') && '--all' || github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
         run: |
           just rs windows "$CI_BASE"
           just rs windows-test
@@ -167,7 +164,7 @@ jobs:
       - name: Rust compile and tests
         if: needs.scope.outputs.rs == 'true'
         env:
-          CI_BASE: ${{ (github.event_name != 'pull_request' && github.event_name != 'merge_group') && '--all' || github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
         run: |
           just rs macos "$CI_BASE"
           just rs macos-test

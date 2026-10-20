@@ -77,5 +77,4 @@ numbers.
 
 ## Related
 
-- [Cloud CI only in the queue](/quest/m0/ci/queue-only.md) - changes the baseline: one cloud run per merge
 - [Faster runners](/quest/m0/ci/runners.md) - waits on this audit's result

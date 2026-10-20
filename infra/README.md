@@ -112,8 +112,8 @@ regenerates the repository metadata, signs it, and uploads the diff.
 namespaced per runner OS and architecture. Every job that runs on `main` or in
 its merge queue (`gh-readonly-queue/main/*`) writes what it compiles: a queued
 pull request is about to become `main`, so its code is trusted like `main`'s.
-Pull request jobs only read, and fork pull requests, which get no secrets,
-build cold.
+Release pull request jobs only read (main pull requests run no cloud CI), and
+fork pull requests, which get no secrets, build cold.
 
 The write key is what enforces that: it lives in a GitHub Environment that
 only those refs can deploy to, and each writer job names that Environment only

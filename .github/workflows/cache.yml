@@ -59,7 +59,7 @@ jobs:
       # package, so the dev shell itself was never cached. Anything in it that
       # nixpkgs doesn't serve prebuilt (uniffi-bindgen-go, a
       # buildRustPackage from a git tag) was therefore compiled from source by
-      # every job that entered the shell. Push it once here so pull requests
+      # every job that entered the shell. Push it once here so later jobs
       # substitute it instead.
       - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
         with:

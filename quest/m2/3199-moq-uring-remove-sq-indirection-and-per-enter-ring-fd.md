@@ -27,7 +27,3 @@ Follow-up to #2875.
 #### Acceptance
 
 Run the existing io-uring echo and relay workloads before and after. Record relay CPU, cycles, cache misses, `io_uring_enter` calls, and throughput at fixed load. Keep each optimization independently ablatable and retain it only if the measured result is neutral or positive.
-
-## Closes
-
-- [#3199](https://github.com/moq-dev/moq/issues/3199) - close this issue when the quest finishes

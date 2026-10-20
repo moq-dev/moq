@@ -11,14 +11,16 @@ Then confirm the cache earns its keep, and record the numbers in the PR that
 closes this:
 
 - Each merge queue and `main` job's `Check the cache` step reports
-  `effective read-write`, and a pull request's reports `effective read-only`.
-- Check, Test, and the macOS and Windows merge queue jobs show mbx remote hits
-  for code the pull request did not touch.
+  `effective read-write`, and a release pull request's reports
+  `effective read-only`.
+- The merge queue's Check and Test show mbx remote hits for code the queued
+  pull request did not touch, and Nightly's macOS and Windows jobs hit what
+  the previous Nightly wrote.
 - Restore plus build time against the 150-210s Actions restore of the ~6 GB
   store it replaced, from the same diff before and after.
 - Each object expires 30 days after upload, and the queue builds only what
   its diff selects, so an expired crate stays cold until a queue or `main`
-  job builds it again. Count how often a pull request pays that rebuild.
+  job builds it again. Count how often a queue entry pays that rebuild.
 - Bucket size and request counts after a month, against the 30-day expiry in
   `infra/mbx/lifecycle.json`. Shorten or lengthen it from that.
 

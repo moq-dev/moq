@@ -2644,9 +2644,25 @@ where
 			Some(live) => crate::auth::Gate::announced(auth, path, direction, live),
 			None => crate::auth::Gate::new(auth, path, direction),
 		};
-		if !gate.allows() {
-			request.reject(Error::Unauthorized);
-			return;
+		// Nobody wanting the track any more ends a wait on a token that may never be answered.
+		loop {
+			let admitted = kio::wait(|waiter| {
+				if gate.poll_ready(waiter).is_ready() {
+					return Poll::Ready(Some(gate.poll_denied(waiter).is_pending()));
+				}
+				crate::util::poll_unwanted(&mut request.demand(), waiter).map(|_| None)
+			})
+			.await;
+			match admitted {
+				Some(true) => break,
+				Some(false) => {
+					request.reject(Error::Unauthorized);
+					return;
+				}
+				None if request.reject_unused(Error::Cancel) => return,
+				// Demand returned in the gap.
+				None => continue,
+			}
 		}
 
 		let track_name = request.name().to_owned();
@@ -6750,6 +6766,120 @@ mod tests {
 			!control_message_types(&log, VERSION).contains(&ietf::Unsubscribe::ID),
 			"a rejected request is already gone; cancelling it names a dead id at the peer",
 		);
+	}
+
+	/// A subscriber whose session presented a token still unanswered, over a peer that
+	/// accepts streams and says nothing.
+	fn waiting_on_auth(
+		version: Version,
+	) -> (
+		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		crate::lite::test_transport::Log,
+		crate::auth::Handle,
+		Vec<crate::auth::Auth>,
+		crate::util::TaskSet,
+	) {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+		let auth = crate::auth::Handle::new(true);
+		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
+		auth.granted(setup.id(), crate::auth::Grant::default());
+		let unanswered = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		let subscriber = Subscriber::new(
+			crate::time::sim(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		)
+		.with_auth(auth.clone());
+		(subscriber, log, auth, vec![setup, unanswered], task_set)
+	}
+
+	/// A subscribe whose readers leave while it waits on a token ends, rather than holding
+	/// its task and track until a token that may never be answered.
+	#[moq_clock::test]
+	async fn an_abandoned_subscribe_stops_waiting_for_auth() {
+		const VERSION: Version = Version::Draft16;
+		let (mut subscriber, log, _auth, _tokens, _task_set) = waiting_on_auth(VERSION);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		let mut serving = moq_clock::sim::spawn(async move {
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
+		});
+		assert!(
+			moq_clock::timeout(std::time::Duration::from_secs(1), &mut serving)
+				.await
+				.is_err(),
+			"finished while the track was wanted"
+		);
+
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+		moq_clock::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("an abandoned subscribe kept waiting on its token")
+			.unwrap();
+		assert!(
+			!control_message_types(&log, VERSION).contains(&ietf::Subscribe::ID),
+			"an abandoned subscribe reached the wire",
+		);
+	}
+
+	/// A subscribe under an announced route that is withdrawn while it waits on a token
+	/// ends, judged against the union as it stands, so routing can recover.
+	#[moq_clock::test]
+	async fn a_withdrawn_route_ends_a_subscribe_waiting_for_auth() {
+		const VERSION: Version = Version::Draft16;
+		let (mut subscriber, log, _auth, _tokens, _task_set) = waiting_on_auth(VERSION);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		let route = kio::Producer::<()>::default();
+		let live = route.consume();
+		let mut serving = moq_clock::sim::spawn(async move {
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, Some(live), request)
+				.await;
+		});
+		assert!(
+			moq_clock::timeout(std::time::Duration::from_secs(1), &mut serving)
+				.await
+				.is_err(),
+			"finished while the route stood"
+		);
+
+		drop(route);
+		moq_clock::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("a withdrawn route kept the subscribe waiting on its token")
+			.unwrap();
+		assert!(
+			!control_message_types(&log, VERSION).contains(&ietf::Subscribe::ID),
+			"a subscribe outside the union reached the wire",
+		);
+		drop(subscription);
 	}
 
 	/// A publisher can be serving before its SUBSCRIBE_OK arrives, since data streams are

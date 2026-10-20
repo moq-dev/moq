@@ -46,10 +46,6 @@ be in it the day it ships. Cross-package sync: `rs/hang`, `js/hang`,
 
 - [fMP4 emsg](/quest/m3/emsg.md) - settles the shared timed-metadata contract this builds on, which needs maintainer agreement first
 
-## Closes
-
-- [#2279](https://github.com/moq-dev/moq/issues/2279) - close this issue when the quest finishes
-
 ## Related
 
 - [ID3 catalog section](/quest/m3/id3.md) - the other typed timed-metadata section, same rule

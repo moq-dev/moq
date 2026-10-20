@@ -2,6 +2,7 @@ import { Milli } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
+import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
@@ -35,7 +36,7 @@ import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
-import { unwanted } from "../util/demand.ts";
+import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -205,6 +206,7 @@ export class Subscriber {
 	// Our grant (MoQ Auth): a subscription it stops covering is cancelled. Undefined until
 	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
+	#auth?: AuthSession;
 
 	/** Marks this subscriber's deliberate local session close. @internal */
 	close() {
@@ -227,6 +229,7 @@ export class Subscriber {
 		solicit,
 		goaway,
 		grant,
+		auth,
 		limits = LIMITS,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
@@ -249,6 +252,7 @@ export class Subscriber {
 		goaway?: GetPromise<Drain>;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we subscribe to. */
 		grant?: Getter<Grant | undefined>;
+		auth?: AuthSession;
 		/** How many live requests the peer may hold. */
 		limits?: Limits;
 	}) {
@@ -263,6 +267,7 @@ export class Subscriber {
 		this.#solicit = solicit;
 		this.#goaway = goaway;
 		this.#grant = grant;
+		this.#auth = auth;
 		// A draining peer usually stops publishing namespaces, so reprice from the signal
 		// itself. Waiting for another message would leave the route primary until close.
 		void goaway?.then(() => this.#drainAnnounced());
@@ -755,6 +760,22 @@ export class Subscriber {
 
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request, valid?: AbortSignal, epoch?: Epoch.Valid) {
 		const refused = unauthorized(broadcast);
+		try {
+			for (;;) {
+				const ready = await this.#auth?.ready(broadcast, "subscribe", {
+					signal: valid,
+					until: () => demandAbandoned(request.demand()),
+				});
+				if (ready !== false) break;
+				// Demand returning before we commit is not abandonment, matching the serving loop.
+				if (!isAbandoned(request.demand())) continue;
+				request.reject(new Error("subscribe abandoned before it was authorized"));
+				return;
+			}
+		} catch (err) {
+			request.reject(error(err));
+			return;
+		}
 		if (this.#denied(broadcast)) {
 			request.reject(refused);
 			return;
@@ -795,15 +816,8 @@ export class Subscriber {
 		// Demand returning before we commit is not abandonment, matching the serving loop.
 		const demand = producer.demand();
 		const waitAbandoned = async (): Promise<null> => {
-			// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for
-			// the track info, so only demand that arrived and then left is abandonment.
-			while (demand.wanted.peek() === undefined && demand.closed.peek() === undefined) {
-				await Signal.race(demand.wanted, demand.closed);
-			}
-			for (;;) {
-				await unwanted(demand);
-				if (demand.closed.peek() !== undefined || demand.wanted.peek() === undefined) return null;
-			}
+			await demandAbandoned(demand);
+			return null;
 		};
 
 		let stream: Stream;

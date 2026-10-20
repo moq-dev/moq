@@ -25,7 +25,7 @@ legs share is the broadcast's media timeline, each object's timestamp on its
 catalog clock, with a constant mux rate. Two exports of one broadcast
 already read the same objects and timestamps, so this needs no importer
 alignment. Legs fed by different importers read different broadcasts
-([distinct epochs](/quest/m0/broadcast-epoch/distinct-importer-epochs.md)),
+(each importer mints its own epoch),
 so identity across them is a non-goal. Every byte a `--sync` leg
 renders from the objects it has (slot, PCR, table, PES header, continuity
 counter) is a function of those objects, that coordinate, the catalog, and

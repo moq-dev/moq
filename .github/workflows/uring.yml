@@ -5,7 +5,10 @@ permissions:
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, closed]
+    # Main PRs skip it; nightly.yml's `rs uring` runs the whole suite on main.
+    # `edited` catches a main PR retargeted to release.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited, closed]
     paths:
       # The shared Rust selector walks reverse dependencies, including feature
       # dependencies. Broad paths keep newly added shared crates covered.

@@ -1,7 +1,8 @@
 name: Dependabot
 
 # Enables auto-merge on Dependabot pull requests, so a bump lands on its own
-# once Check and Test pass. The main ruleset requires both, and dependabot.yml
+# once the merge queue's Check and Test pass. The main ruleset requires both
+# (a main PR reports them skipped, so auto-merge enqueues it), and dependabot.yml
 # holds every new version for 7 days, so nothing merges unreviewed by CI or the
 # moment it is published.
 #

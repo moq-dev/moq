@@ -5,6 +5,10 @@ name: X11 capture
 on:
   workflow_call:
   pull_request:
+    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
+    # retargeted to release.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "rs/moq-video/**"
       - "rs/justfile"
