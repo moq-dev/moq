@@ -3685,7 +3685,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		if let Some(skipped) = self.skipped.get(&start) {
 			start = skipped.end.min(group.sequence);
 		}
-		self.skipped = RangeSet::new();
+		let skipped = std::mem::take(&mut self.skipped);
 		self.start = Some(start);
 		// Only the group: the subscriber derives the start frame from its own request
 		// (see `lite::SubscribeStart`). The track is live by now, since its first group
@@ -3700,6 +3700,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			group: start,
 			largest,
 		}))?;
+		// The subscriber now owes itself everything from the start, so a range given up
+		// above it is named as it would have been after the start.
+		for range in skipped.iter() {
+			self.drop_range(range.start.max(start)..range.end, writer)?;
+		}
 		// SUBSCRIBE_START names where delivery starts. Groups already skipped between
 		// the requested floor and this group are not served. A later group at or above an
 		// explicit floor, still inside the subscriber's max age, is delivered, so the cursor
@@ -5409,6 +5414,31 @@ mod serve_group_test {
 				panic!("expected SUBSCRIBE_START, got {msg:?}");
 			};
 			assert_eq!(start.group, 1_000_000, "{version}: named a dropped group");
+		}
+	}
+
+	/// A range given up before the start resolves, but above it, is still named promptly.
+	#[moq_clock::test]
+	async fn a_range_skipped_above_the_start_is_dropped() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			track.start_at(0).unwrap();
+			let subscriber = track.subscribe(track::Subscription::default());
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			// The newer group beats the older ones, so the start resolves at the source's 0.
+			track.drop_groups(2..4);
+			write_group(&mut track, 5, 0);
+			assert!(
+				kio::wait(|waiter| run.poll(&mut writer, waiter))
+					.now_or_never()
+					.is_none()
+			);
+			assert_eq!(run.start, Some(0), "{version}");
+			assert_eq!(drops(&mut writer, &log, version).await, [(2, 3)], "{version}");
 		}
 	}
 
