@@ -13297,13 +13297,14 @@ mod test {
 		assert!(pool.used() < used, "its bytes are released");
 	}
 
-	/// Append a group of a 3 byte first frame and a `delta` byte delta.
+	/// Append a finished group of a 3 byte first frame and a `delta` byte delta.
 	fn refresh_group(producer: &Producer, delta: usize) {
 		let mut group = producer.append_group().unwrap();
 		group.write_frame(None, &b"key"[..]).unwrap();
 		if delta > 0 {
 			group.write_frame(None, vec![0u8; delta]).unwrap();
 		}
+		group.finish().unwrap();
 	}
 
 	/// Poll `demand` for a change without waiting.
