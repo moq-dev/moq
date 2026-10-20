@@ -6,6 +6,7 @@ Report vulnerabilities privately through [GitHub's private vulnerability reporti
 Please don't open a public issue, PR, or Discord thread for a suspected vulnerability.
 
 Include the affected package and version, how to reproduce it, and the impact you expect.
+AI-assisted reports are welcome, as long as the issue is real and the reproduction actually works.
 We'll follow up on the advisory, and credit you when it's published unless you'd rather stay anonymous.
 
 ## Supported Versions
