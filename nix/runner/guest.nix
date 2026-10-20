@@ -151,12 +151,18 @@
   systemd.services.runner-reclaim = {
     serviceConfig.Type = "oneshot";
     path = [ pkgs.procps ];
+    # A write-heavy build can leave sync running long enough for a job to start,
+    # so check again right before dropping.
     script = ''
-      if pgrep -f Runner.Worker >/dev/null; then
-        echo "A job is running; keeping caches."
-        exit 0
-      fi
+      idle() {
+        if pgrep -f Runner.Worker >/dev/null; then
+          echo "A job is running; keeping caches."
+          return 1
+        fi
+      }
+      idle || exit 0
       sync
+      idle || exit 0
       echo 3 > /proc/sys/vm/drop_caches
       echo "Dropped caches."
     '';
