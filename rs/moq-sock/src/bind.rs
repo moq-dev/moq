@@ -387,9 +387,6 @@ mod tests {
 		assert!(!socket.only_v6().unwrap(), "IPv6 socket should be dual-stack");
 	}
 
-	/// A specific IPv6 address can't carry IPv4, so the socket must not claim to:
-	/// Windows rejects the QUIC driver's IPv4 socket options on a dual-stack `[::1]` socket.
-	/// Linux forces v6-only on such a bind itself, so only Windows can regress.
 	/// A dual-stack ephemeral port must be free on the IPv4 side too: a socket already
 	/// holding it as `127.0.0.1` would otherwise receive every IPv4 reply. macOS checks
 	/// only IPv6 sockets when it picks one, so draw many ports against many holders.
@@ -412,6 +409,9 @@ mod tests {
 		}
 	}
 
+	/// A specific IPv6 address can't carry IPv4, so the socket must not claim to:
+	/// Windows rejects the QUIC driver's IPv4 socket options on a dual-stack `[::1]` socket.
+	/// Linux forces v6-only on such a bind itself, so only Windows can regress.
 	#[test]
 	fn udp_ipv6_loopback_is_v6_only() {
 		let socket = match udp(Udp::new("[::1]:0".parse().unwrap())) {
