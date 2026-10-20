@@ -109,13 +109,20 @@ regenerates the repository metadata, signs it, and uploads the diff.
 ## Bootstrapping the Rust build cache
 
 `.github/actions/rust-cache` points mbx at the private `mbx-moq-dev` bucket,
-namespaced per runner OS and architecture. Only `cache.yml`, on a push to
-`main`, writes. Everything else reads, and fork pull requests, which get no
-secrets, build cold. The write key is what enforces that: it lives in a GitHub
-Environment that only `main` can deploy to. mbx refusing to publish outside
-a protected-branch push is a second guard, not the boundary.
+namespaced per runner OS and architecture. Every job that runs on `main` or in
+its merge queue (`gh-readonly-queue/main/*`) writes what it compiles: a queued
+pull request is about to become `main`, so its code is trusted like `main`'s.
+Pull request jobs only read, and fork pull requests, which get no secrets,
+build cold.
 
-All of this runs once, by a maintainer:
+The write key is what enforces that: it lives in a GitHub Environment that
+only those refs can deploy to, and each writer job names that Environment only
+when it runs on one of them. mbx on its own trusts only a push to a protected
+branch, which leaves out the queue and Nightly's schedule, so the action sets
+`MBX_REMOTE_TRUST_WRITES` for writers and the Environment is the only boundary.
+
+All of this runs once, by a maintainer. Steps 1, 2, and 4 are done, and step 3
+is done for `main`.
 
 1. **Create the bucket and its lifecycle rule** under your `wrangler login`:
 
@@ -126,8 +133,8 @@ All of this runs once, by a maintainer:
    `lifecycle.json` deletes every object 30 days after upload and aborts
    multipart uploads left incomplete for a day. mbx writes each compilation
    once and never refreshes it, so a result still in use expires too; the
-   next `main` warm that misses it compiles and uploads it again. After
-   editing the rules, `just infra mbx lifecycle` applies them.
+   next writer that misses it compiles and uploads it again. After editing
+   the rules, `just infra mbx lifecycle` applies them.
 
 2. **Create two R2 API tokens** in the dashboard (R2 -> Manage API tokens ->
    Create Account API token), both scoped to `mbx-moq-dev` only. Wrangler
@@ -137,9 +144,9 @@ All of this runs once, by a maintainer:
    - `mbx-read`: **Object Read only**.
    - `mbx-write`: **Object Read & Write**.
 
-3. **Create the `cache-write` Environment**, deployable from `main` only. A
-   protected-branches policy would admit `release` as well, so name `main`
-   instead:
+3. **Create the `cache-write` Environment**, deployable from `main` and its
+   merge queue only. A protected-branches policy would admit `release` as
+   well, so name the branches instead:
 
    ```bash
    gh api -X PUT repos/moq-dev/moq/environments/cache-write --input - <<'EOF'
@@ -147,10 +154,15 @@ All of this runs once, by a maintainer:
    EOF
    gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
      -f name=main -f type=branch
+   gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
+     -f name='gh-readonly-queue/main/*' -f type=branch
    ```
 
+   Without the queue policy, every merge queue job that writes fails before
+   it starts, and the queue merges nothing.
+
 4. **Store the keys under the same two names at both levels.** An Environment
-   secret shadows a repository secret of the same name, so `cache.yml` gets the
+   secret shadows a repository secret of the same name, so writers get the
    write key and every other job the read key, all through one pair of names:
 
    ```bash
@@ -163,9 +175,9 @@ All of this runs once, by a maintainer:
    gh secret set MBX_R2_SECRET_ACCESS_KEY --repo moq-dev/moq
    ```
 
-Without the repository secrets, readers warn and build cold. Without the
-Environment, `cache.yml` fails rather than warm nothing, and so does a key the
-bucket refuses, in any job.
+Without the repository secrets, readers warn and build cold. A writer without
+its key fails rather than publish nothing, and so does a key the bucket
+refuses, in any job.
 
 ## Rotating the signing key
 

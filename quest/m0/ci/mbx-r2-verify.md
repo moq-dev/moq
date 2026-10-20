@@ -2,20 +2,23 @@
 
 ## Goal
 
-Condition: a maintainer has run the `mbx-moq-dev` bootstrap in
-`infra/README.md` (bucket, lifecycle rule, both R2 tokens, the `cache-write`
-Environment and its secrets), and `cache.yml` has warmed every leg from `main`
-since. Check it with `gh run list --workflow cache.yml --branch main`.
+Condition: the `mbx-moq-dev` bootstrap in `infra/README.md` is complete,
+including the `cache-write` Environment's `gh-readonly-queue/main/*` branch
+policy, and the merge queue has merged Rust changes since. Check it with
+`gh run list --workflow check.yml --event merge_group`.
 
 Then confirm the cache earns its keep, and record the numbers in the PR that
 closes this:
 
-- Each warm's `Check the cache` step reports `effective read-write`, and a
-  pull request's reports `effective read-only`.
+- Each merge queue and `main` job's `Check the cache` step reports
+  `effective read-write`, and a pull request's reports `effective read-only`.
 - Check, Test, and the macOS and Windows merge queue jobs show mbx remote hits
   for code the pull request did not touch.
 - Restore plus build time against the 150-210s Actions restore of the ~6 GB
   store it replaced, from the same diff before and after.
+- Each object expires 30 days after upload, and the queue builds only what
+  its diff selects, so an expired crate stays cold until a queue or `main`
+  job builds it again. Count how often a pull request pays that rebuild.
 - Bucket size and request counts after a month, against the 30-day expiry in
   `infra/mbx/lifecycle.json`. Shorten or lengthen it from that.
 

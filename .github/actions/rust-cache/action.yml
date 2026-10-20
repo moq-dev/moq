@@ -1,5 +1,5 @@
 name: Rust cache
-description: Install mbx, put its Cargo shim on PATH, and back it with the R2 build cache that `main` writes.
+description: Install mbx, put its Cargo shim on PATH, and back it with the R2 build cache that `main` and its merge queue write.
 
 inputs:
   access-key-id:
@@ -8,30 +8,34 @@ inputs:
   secret-access-key:
     description: R2 secret access key matching `access-key-id`.
     default: ""
-  write:
-    description: Publish compilations to the cache. Only cache.yml, holding the `cache-write` Environment's key, sets it.
-    default: "false"
 
 runs:
   using: composite
   steps:
-    # Only the write key is a boundary: it lives in the `cache-write`
-    # Environment, which only `main` can deploy to, so a pull request's code
-    # never sees it, even from this repository. The read key is a plain repo
-    # secret; fork pull requests get no secrets at all and build cold.
+    # Runs on `main` and in its merge queue write; everything else reads. A
+    # queued pull request is about to become `main`, so its code is trusted
+    # like `main`'s, and publishing from the queue keeps the cache current
+    # with what lands without building it again after the merge.
     #
-    # A writer without its key means the Environment is misconfigured, and
+    # The write key is the boundary. It lives in the `cache-write`
+    # Environment, whose branch policy admits exactly the refs `WRITE` names,
+    # and its secrets shadow the repository's read key under the same names.
+    # So every job that can run on those refs names the Environment there, and
+    # a pull request's code never sees the write key, even from this
+    # repository. Fork pull requests get no secrets at all and build cold.
+    #
+    # A writer without a key means the Environment is misconfigured, and
     # building on would leave every reader cold with nothing to say why.
     - name: Cache credentials
       shell: bash
       env:
         KEY_ID: ${{ inputs.access-key-id }}
         SECRET: ${{ inputs.secret-access-key }}
-        WRITE: ${{ inputs.write }}
+        WRITE: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/') }}
       run: |
         if [ -z "$KEY_ID" ] || [ -z "$SECRET" ]; then
           if [ "$WRITE" = "true" ]; then
-            echo "::error::write is set but the cache-write Environment supplied no R2 key"
+            echo "::error::$GITHUB_REF writes the cache but the cache-write Environment supplied no R2 key"
             exit 1
           fi
           echo "::warning::No R2 cache credentials, as for a fork pull request; building cold"
@@ -42,34 +46,37 @@ runs:
           echo "AWS_SECRET_ACCESS_KEY=$SECRET"
           echo "MBX_REMOTE_S3_ENDPOINT=https://dd618f5dbd5da77b8296f1613c301f5c.r2.cloudflarestorage.com"
           echo "MBX_REMOTE_S3_REGION=auto"
+          if [ "$WRITE" = "true" ]; then
+            echo "MBX_REMOTE_MODE=read-write"
+            # mbx trusts only a push to a protected branch, which leaves out
+            # the merge queue and Nightly's schedule. Its guess is bypassed on
+            # purpose: the Environment already decided who holds the write key.
+            echo "MBX_REMOTE_TRUST_WRITES=true"
+          else
+            echo "MBX_REMOTE_MODE=read-only"
+          fi
         } >> "$GITHUB_ENV"
 
     # mbx keys every compilation on the compiler, target, and inputs, so one
     # bucket serves every toolchain and workflow without a cache key of ours.
     # The namespace splits it per runner platform anyway, so a platform's
-    # usage and misses can be read off its own prefix.
-    #
-    # mbx narrows itself to read-only outside a push to a protected branch, so
-    # `write` alone cannot publish from a pull request or the merge queue. The
-    # Environment above is what enforces it; mbx's check is a second guard.
+    # usage and misses can be read off its own prefix. The remote mode comes
+    # from MBX_REMOTE_MODE above.
     - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
       with:
-        version: 1.24.0
+        version: 1.25.0
         backend: ${{ inputs.access-key-id != '' && inputs.secret-access-key != '' && 'remote' || 'local' }}
         remote-url: s3://mbx-moq-dev
         namespace: ${{ runner.os }}-${{ runner.arch }}
-        remote-mode: ${{ inputs.write == 'true' && 'read-write' || 'read-only' }}
 
     # The action only warns when it cannot reach the remote, which is how a
     # revoked or mistyped key would look. A cache that silently never hits
     # costs every job its full build, so refuse instead. A writer also has to
-    # come out read-write: mbx narrows it to read-only when `main` loses its
-    # protection, and nothing would publish again.
+    # come out read-write, or nothing would publish and every reader would
+    # drift cold unnoticed.
     - name: Check the cache
       if: inputs.access-key-id != '' && inputs.secret-access-key != ''
       shell: bash
-      env:
-        WRITE: ${{ inputs.write }}
       run: |
         report=$(mbx doctor --json || true)
         remote=$(jq -r '.checks[] | select(.name == "remote") | "\(.severity): \(.detail)"' <<< "$report")
@@ -80,7 +87,7 @@ runs:
           pass:*) ;;
           *) echo "::error::R2 cache unusable: $remote"; exit 1 ;;
         esac
-        if [ "$WRITE" = "true" ] && [[ "$policy" != *"effective read-write" ]]; then
+        if [ "$MBX_REMOTE_MODE" = "read-write" ] && [[ "$policy" != *"effective read-write" ]]; then
           echo "::error::the cache writer cannot publish: $policy"
           exit 1
         fi

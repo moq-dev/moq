@@ -29,13 +29,6 @@ dry run on PRs (five macOS builds per run). On Linux the PR Check and Test
 jobs and the `cache.yml` warm dominate. A branch's PR Check runs a median 2
 and a p90 5 times before it merges.
 
-`cache.yml` has not published since 2026-10-11: its save step only runs when
-the warm's `just ci check --all` and `just ci test --all` pass, and a
-formatting slip and a flaky test on `main` blocked it. OBS on a `main` push
-also saved into the same shared key space, so PRs restored its sliver of the
-workspace. #5428 lets the warm save regardless and stops OBS saving; a
-compile-only warm can follow if the warm's runtime matters.
-
 Decisions (maintainer, 2026-10-13):
 
 - macOS and Windows run in the merge queue, not on every PR push. The fast
@@ -48,6 +41,9 @@ Decisions (maintainer, 2026-10-13):
   signing key), so a pull request job cannot read them even from the same
   repository. Fork PRs get no secrets
   and run uncached.
+- Decided 2026-10-19: the merge queue is trusted like `main`, since a queued
+  PR is about to land. Rust cache writers are the jobs on `main` and in its
+  queue, and no separate warm rebuilds what landed.
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
   spare-desktop runner, its cache server, and the cache release it waited on.
 

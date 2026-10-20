@@ -1,22 +1,9 @@
 name: Cache
 
-# Populates the R2 Rust build cache that every other job reads, and the dev
-# shell closure that every nix job substitutes.
+# Pushes the dev shell closure that every nix job substitutes.
 #
-# This is the only writer. The R2 write key lives in the `cache-write`
-# Environment, whose deployment policy admits only `main`, so no pull request,
-# merge queue, or dispatched run can hold it. mbx also refuses to publish from
-# anything but a push to a protected branch, so a manual dispatch could not
-# seed the cache either; the push that changes the toolchain warms it instead.
-#
-# mbx uploads each compilation it misses and nothing else, so a warm after a
-# small merge compiles and publishes only what that merge changed. Every
-# runner platform a pull request, the merge queue, or Nightly builds Rust on
-# gets a leg, since compilations never cross platforms.
-#
-# This runs the unscoped suite rather than the diff-scoped one: the point is to
-# leave artifacts for whatever a future PR happens to touch, not to check `main`
-# (the PR that became `main` was already checked). It blocks nobody.
+# The Rust build cache is not warmed here: `main` and its merge queue publish
+# what they compile as they run (see .github/actions/rust-cache).
 
 permissions:
   contents: read
@@ -24,24 +11,17 @@ permissions:
 on:
   push:
     branches: [main]
-    # A docs-only merge can't change the build graph, so don't spend a runner.
+    # Only the flake decides the dev shell, so don't spend a runner otherwise.
     paths:
-      - "rs/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
       - "flake.nix"
       - "flake.lock"
+      - "nix/**"
       - ".github/workflows/cache.yml"
-      # The mbx pin lives here, and a new mbx can change what it keys on.
-      # Without this the sole writer would not re-run after such a change,
-      # leaving every reader cold until something else landed.
-      - ".github/actions/rust-cache/**"
+  # Priming the shell by hand, e.g. after a failed push.
+  workflow_dispatch:
 
-# Queue rather than cancel. A cold warm takes 30-50 minutes and `main` merges
-# more often than that, so cancelling meant no warm ever finished and every
-# pull request read a cache hours stale. Actions keeps only the newest pending
-# run per group, so merges that land mid-warm still coalesce into one.
+# Queue rather than cancel, so a run always finishes. Actions keeps only the
+# newest pending run per group, so merges that land mid-run coalesce into one.
 concurrency:
   group: cache-${{ github.ref }}
   cancel-in-progress: false
@@ -55,7 +35,6 @@ jobs:
         runner: [ubuntu-24.04-arm, ubuntu-latest]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    environment: cache-write
 
     steps:
       - name: Checkout
@@ -94,90 +73,3 @@ jobs:
           # out the build-time inputs.
           nix develop --profile /tmp/devshell --command true
           cachix push kixelated /tmp/devshell
-
-      - name: Rust cache
-        uses: ./.github/actions/rust-cache
-        with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-          write: true
-
-      # Both halves, so the cache carries the lint artifacts (clippy rmeta)
-      # and the test artifacts (codegen + linked test binaries). They share
-      # little, and a PR usually needs both.
-      #
-      # mbx publishes each compilation as it finishes, so a lint or test that
-      # fails on `main` costs nothing already built. `continue-on-error` keeps
-      # that failure from turning the warm red: the pull request gates are what
-      # report it.
-      - name: Check
-        continue-on-error: true
-        run: nix develop --command just ci check --all
-        env:
-          MOQ_STRICT: 1
-
-      - name: Test
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        run: nix develop --command just ci test --all
-        env:
-          MOQ_STRICT: 1
-          NEXTEST_PROFILE: ci
-
-  # The Rust half of platform.yml, which the merge queue, `release`, and Nightly
-  # run against the runner's rustup toolchain instead of the dev shell.
-  platform:
-    name: Warm (${{ matrix.runner }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-latest
-            os: macos
-          - runner: windows-2022
-            os: windows
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    environment: cache-write
-    defaults:
-      run:
-        shell: bash
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
-      NEXTEST_PROFILE: ci
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Install NASM
-        if: matrix.os == 'windows'
-        shell: pwsh
-        run: |
-          choco install nasm -y --no-progress
-          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - uses: ./.github/actions/just
-      - name: Install nextest
-        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
-        with:
-          tool: nextest@0.9.146
-
-      - name: Rust cache
-        uses: ./.github/actions/rust-cache
-        with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-          write: true
-
-      # The same recipes platform.yml runs, unscoped. As above, a failure here
-      # is the gates' to report.
-      - name: Compile
-        continue-on-error: true
-        run: just rs ${{ matrix.os }} --all
-
-      - name: Test
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        run: just rs ${{ matrix.os }}-test
