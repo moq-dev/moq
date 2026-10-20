@@ -15,7 +15,7 @@ Decided by the maintainer on 2026-10-19, over clearing a history playlist to
 an ended empty one (still reads as finished) and an in-band marker (HLS and
 DASH have none; `EXT-X-GAP` needs durations a failed timeline cannot give).
 
-Failures take three paths today, and both end the playlist as finished:
+Failures take three paths today, and all three end the playlist as finished:
 
 - The shared reference timeline: `watch_timeline`
   (`rs/moq-hls/src/export/mod.rs`) calls `renditions::Fanout::finish` on
@@ -56,7 +56,10 @@ API: every public accessor that renders a listing reports it as an error, so a
 failed timeline differs from a listing that is not available yet. Today those
 are `Broadcaster::manifest` and `Rendition::media_playlist` (both
 `Option<String>`, becoming `Result<Option<String>>`) and `Rendition::playlist`
-(already a `Result`). The routes map those errors to the 5xx. This includes the ranged history
+(already a `Result`). `Broadcaster::manifest` errors only for a shared or
+retained reference failure; a failed rendition drops from the manifest while its
+own `Rendition` accessors error. The routes map those errors to the 5xx. This
+includes the ranged history
 path: `snapshot_range` turns a failed timeline into `Error::RangeUnavailable`,
 which answers 416 as if the client asked for a bad range; it returns the
 failed-timeline error instead. Audit every snapshot path for the same fold
