@@ -28,7 +28,3 @@ the same `Group`.
 Public API: none. Wire: no encoding change; SUBSCRIBE_OK's `Group` changes
 behavior on every lite version with a resolved start (lite-05 on) to match
 its definition.
-
-## Related
-
-- [TRACKS](/quest/m1/archive/tracks.md) - the line of work that surfaced it

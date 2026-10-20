@@ -3,7 +3,7 @@
 ## Goal
 
 On lite-07, the Announce stream marks the end of its initial set with the
-same ordered SYNCED event [TRACKS](/quest/m1/archive/tracks.md) uses,
+same ordered SYNCED event (0x4) the lite-07 Tracks Stream uses,
 replacing ANNOUNCE_OK's `Active Count`. A subscriber knows it holds every
 route this hop held that is still live; one that ends before a slow reader
 reaches its ANNOUNCE_START is omitted, as in TRACKS. Published versions keep
@@ -65,4 +65,4 @@ ANNOUNCE_OK drops `Active Count` and the Announce stream gains SYNCED.
 
 ## Related
 
-- [TRACKS](/quest/m1/archive/tracks.md) - the same event on the track listing
+- [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - the same event on the track listing, in JS

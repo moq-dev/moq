@@ -3,7 +3,8 @@
 ## Goal
 
 moq-net speaks moq-transport SUBSCRIBE_TRACKS (draft-18 on) in both
-directions through the [TRACKS](/quest/m1/archive/tracks.md) model hook,
+directions through the TRACKS model hook (`broadcast::Consumer::tracks`
+and `broadcast::Lister`),
 instead of refusing it with NOT_SUPPORTED:
 
 - **Inbound.** A moq-transport subscriber's SUBSCRIBE_TRACKS lists every
@@ -244,7 +245,3 @@ Public API: none beyond the TRACKS hook. Wire: moq-transport support for an
 existing message, a FORWARD=0 PUBLISH held as a listing entry and resumed
 for data, and an
 inbound listing that answers FORWARD=1 with skips rather than data.
-
-## Required
-
-- [TRACKS](/quest/m1/archive/tracks.md) - the model hook this maps onto
