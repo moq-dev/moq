@@ -32,9 +32,24 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
   - Datagrams gain their object ID, properties, and status.
   - Track info gains the unknown track properties: `track::Info::properties`
     (`model::object::TrackProperties`), with its sealed keys.
-  - Immutable properties carry their ingress encoding family alongside the
-    unchanged inner bytes, so downstream IETF egress can refuse incompatible
+  - Track info carries the ingress moq-transport version once. Immutable
+    properties keep their unchanged inner bytes, and downstream IETF egress
+    derives their encoding family from that version to refuse incompatible
     encodings.
+- Record provenance as the ingress version, decided 2026-10-20. In the
+  model, the track's ingress `ietf::Version` replaces `object::Encoding` and
+  the `delivery_timeout` flags on `Properties` and `TrackProperties`; both
+  are functions of the ingress draft. One version per track suffices because
+  each publisher is its own stream; a different ingress is a new instance.
+- Rejected 2026-10-20: a generic crate-private `unknown` KVP block on route,
+  track, group, frame, and datagram, tagged by source version, that would
+  also tunnel future lite fields through a lite-07 hop. A relay cannot act on
+  fields it forwards blindly, and most lite additions (routes, refresh,
+  ranges, auth) change relay behavior. With no must-understand marker, only
+  relay-ignorable end-to-end hints could tunnel safely. The cost was a
+  separate model refactor and more draft surface for a speculative benefit.
+  Like this extension, it would have been SETUP-gated, so a receiver opts in
+  and plain peers never see stuffed properties.
 - Dynamic-group requests are not this extension's job. Native lite-07
   carries them as [refresh](/quest/m1/refresh/lite.md), decided 2026-10-16.
 - Write `drafts/draft-lcurley-moq-ietf.md` for the extension and pass
