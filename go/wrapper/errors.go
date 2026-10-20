@@ -69,6 +69,8 @@ var (
 	ErrUnauthorized = ffi.ErrMoqErrorUnauthorized
 	// ErrForbidden is returned when the relay rejects the session with HTTP 403.
 	ErrForbidden = ffi.ErrMoqErrorForbidden
+	// ErrExpired is returned when a request is refused because its authorization token expired.
+	ErrExpired = ffi.ErrMoqErrorExpired
 	// ErrNotFound is returned when the requested track or group is not available.
 	ErrNotFound = ffi.ErrMoqErrorNotFound
 	// ErrUnsupported is returned when the requested operation is not supported by this build or peer, however it is asked for.
@@ -83,6 +85,8 @@ var (
 	ErrInvalidPattern = ffi.ErrMoqErrorInvalidPattern
 	// ErrUnresolvableBroadcast is returned when a referenced sibling broadcast cannot be resolved without an origin.
 	ErrUnresolvableBroadcast = ffi.ErrMoqErrorUnresolvableBroadcast
+	// ErrUnsupportedCatalog is returned when a catalog needs a newer moq-hang draft than this build reads; upgrade to read it.
+	ErrUnsupportedCatalog = ffi.ErrMoqErrorUnsupportedCatalog
 	// ErrLog is returned when installing or configuring the native log subscriber fails.
 	ErrLog = ffi.ErrMoqErrorLog
 	// ErrConfig is returned when Dial or Listen is given a value the native side cannot use.
@@ -97,13 +101,14 @@ func IsShutdown(err error) bool {
 }
 
 // IsAuthError reports whether err is an authentication/authorization failure
-// (HTTP 401/403, or a protocol Unauthorized session close).
+// (HTTP 401/403, an expired token, a protocol Unauthorized or Expired session
+// close, or a track revocation).
 func IsAuthError(err error) bool {
-	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) {
+	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrExpired) {
 		return true
 	}
 	protocol, ok := ProtocolError(err)
-	return ok && protocol.Kind == ffi.MoqProtocolKindUnauthorized
+	return ok && (protocol.Kind == ffi.MoqProtocolKindUnauthorized || protocol.Kind == ffi.MoqProtocolKindExpired)
 }
 
 // ProtocolError reports the structured protocol failure, if err is one.

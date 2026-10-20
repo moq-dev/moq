@@ -2,7 +2,7 @@ import type { Effect, Getter, Signal } from "@moq/signals";
 import type { AnnounceMode } from "./element";
 
 // One captured track, as the announce gate sees it.
-export interface Track {
+interface Track {
 	enabled: Getter<boolean>;
 	source: Getter<unknown>;
 	// Whether the encoder's config resolved, or can't until something outside it changes.

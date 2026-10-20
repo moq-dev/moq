@@ -64,4 +64,4 @@ bound tests keep passing.
 
 ## Required
 
-- [UDP demux](/quest/m1/p2p/udp-demux.md) - the WebRTC hook and flow table this feeds from and pins into
+- [UDP demux](/quest/m2/p2p/udp-demux.md) - the WebRTC hook and flow table this feeds from and pins into

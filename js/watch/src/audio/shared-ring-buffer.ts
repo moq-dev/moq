@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Micro, Second } from "@moq/clock";
 
 // Control array slot indices. The playhead is not here: see `state`.
 const WRITE = 0;
@@ -236,10 +236,10 @@ export class SharedRingBuffer {
 	 * Insert audio samples at the given timestamp.
 	 * Main thread only. Handles out-of-order writes, gap filling, and overflow.
 	 */
-	insert(timestamp: Time.Micro, data: Float32Array[]): void {
+	insert(timestamp: Micro, data: Float32Array[]): void {
 		if (data.length !== this.channels) throw new Error("wrong number of channels");
 
-		let start = Math.round(Time.Second.fromMicro(timestamp) * this.rate);
+		let start = Math.round(Second.fromMicro(timestamp) * this.rate);
 		const originalLength = data[0].length;
 		let offset = 0;
 
@@ -446,8 +446,8 @@ export class SharedRingBuffer {
 	 * A successor track overwrites the slots its own samples land on, but anything the previous
 	 * track wrote beyond them would otherwise still play once the successor runs out.
 	 */
-	truncate(timestamp: Time.Micro): void {
-		const target = (Math.round(Time.Second.fromMicro(timestamp) * this.rate) - this.#anchor) | 0;
+	truncate(timestamp: Micro): void {
+		const target = (Math.round(Second.fromMicro(timestamp) * this.rate) - this.#anchor) | 0;
 		if (((Atomics.load(this.#control, WRITE) - target) | 0) <= 0) return; // nothing past the new timeline
 
 		// Bracket the retreat with epoch steps, so a reader is never left holding a WRITE this
@@ -554,8 +554,8 @@ export class SharedRingBuffer {
 	 * Main thread only, and stateful: it advances the unwrapped read position, so it has to be
 	 * polled rather than sampled once. See `#position`.
 	 */
-	get timestamp(): Time.Micro {
-		return Time.Micro.fromSecond(((this.#anchor + this.#unwrapRead()) / this.rate) as Time.Second);
+	get timestamp(): Micro {
+		return Micro.fromSecond(((this.#anchor + this.#unwrapRead()) / this.rate) as Second);
 	}
 
 	/** Whether the buffer is stalled (waiting to fill). */

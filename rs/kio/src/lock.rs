@@ -17,10 +17,30 @@ use crate::sync::{Mutex, MutexGuard};
 /// Poisoning is ignored: a panic while the lock is held must not cascade into every other
 /// handle sharing this state, or into a double panic (and an abort) from a `Drop` that locks it.
 ///
+/// State that cannot cross threads keeps the lock on its thread too.
+///
+/// ```compile_fail,E0277
+/// fn require_send(_: impl Send) {}
+/// require_send(kio::Lock::new(std::rc::Rc::new(())));
+/// ```
+///
+/// ```compile_fail,E0277
+/// fn require_sync(_: impl Sync) {}
+/// require_sync(kio::Lock::new(std::rc::Rc::new(())));
+/// ```
+///
 /// [`WaiterList`]: crate::WaiterList
 pub struct Lock<T> {
 	inner: Arc<Mutex<T>>,
 }
+
+// SAFETY: std and loom's Mutex<T> are Send + Sync when T: Send, so this is
+// exactly Arc<Mutex<T>>'s derived bound. Stopping here keeps recursive channel
+// graphs from expanding the same Arc/Mutex proof at every level.
+unsafe impl<T: Send> Send for Lock<T> {}
+
+// SAFETY: Arc<Mutex<T>> has the same T: Send bound for Sync, with either mutex.
+unsafe impl<T: Send> Sync for Lock<T> {}
 
 impl<T> Lock<T> {
 	/// Wrap a value.
@@ -141,6 +161,12 @@ impl<T> Default for WeakLock<T> {
 #[cfg(all(test, not(loom)))]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn send_state_does_not_have_to_be_sync() {
+		fn require_send_sync(_: impl Send + Sync) {}
+		require_send_sync(Lock::new(std::cell::Cell::new(1)));
+	}
 
 	#[test]
 	fn a_panic_under_the_lock_leaves_it_usable() {

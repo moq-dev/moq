@@ -31,7 +31,8 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		let (send, recv) = ready!(session.poll_open_bi(cx)).map_err(|err| version.transport_error(err))?;
+		let (send, recv) =
+			ready!(session.poll_open_bi(cx, Default::default())).map_err(|err| version.transport_error(err))?;
 		Poll::Ready(Ok(Self::build(send, recv, version)))
 	}
 
@@ -40,7 +41,10 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		let (send, recv) = session.open_bi().await.map_err(|err| version.transport_error(err))?;
+		let (send, recv) = session
+			.open_bi(Default::default())
+			.await
+			.map_err(|err| version.transport_error(err))?;
 		Ok(Self::build(send, recv, version))
 	}
 
@@ -67,7 +71,7 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 		V: Clone,
 	{
 		let mut writer = Writer::new(send, version.clone());
-		writer.set_priority(CONTROL_SEND_ORDER);
+		writer.set_priority(CONTROL_SEND_ORDER.into());
 		Self {
 			writer,
 			reader: Reader::new(recv, version),
@@ -92,7 +96,7 @@ mod tests {
 	/// starves it: quinn schedules strictly by priority and round-robins only
 	/// within a level, so a rank-0 group with bytes pending is enough to keep
 	/// the scheduler from ever reaching the transport's default of 0.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn open_prioritises_the_stream() {
 		let gate = kio::Producer::new(true);
 		let mut session = SinkSession::gated_bi(gate.consume());
@@ -110,7 +114,7 @@ mod tests {
 	/// The accepted half answers on the stream it was handed (track info, subscribe
 	/// responses), so it needs the same order as one we opened. A fix that only
 	/// covered `open` would leave every reply behind the media.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_prioritises_the_stream() {
 		let gate = kio::Producer::new(true);
 		let mut session = SinkSession::accepted_bi(gate.consume());

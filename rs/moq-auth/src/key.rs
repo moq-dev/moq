@@ -554,8 +554,15 @@ impl Key {
 	/// Scoping the claims to a connection path is a separate step; see
 	/// [`Claims::authorize`].
 	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
+		let claims = self.verify_claims(token)?;
+		validate_times(&claims, moq_clock::wall().into())?;
+		Ok(claims)
+	}
+
+	/// Verify the signature, claims, and key scope but not the times, so an expired
+	/// token's root is still known to be genuine.
+	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
 		let claims: Claims = self.decode(token)?;
-		validate_times(&claims, std::time::SystemTime::now())?;
 		claims.validate()?;
 		self.validate_scope(&claims)?;
 		Ok(claims)
@@ -611,7 +618,7 @@ impl Key {
 }
 
 /// Refuse claims expired at `now` (`exp <= now`) or not yet valid (`nbf > now`), as `jose` does.
-fn validate_times(claims: &Claims, now: std::time::SystemTime) -> crate::Result<()> {
+pub(crate) fn validate_times(claims: &Claims, now: std::time::SystemTime) -> crate::Result<()> {
 	if claims.expires.is_some_and(|exp| exp <= now) {
 		return Err(crate::Error::TokenExpired);
 	}
@@ -675,6 +682,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 
@@ -697,8 +705,8 @@ mod tests {
 	fn create_test_claims() -> Claims {
 		Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]),
-			subscribe: patterns(&["test-sub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
+			subscribe: patterns(&["test-sub/**"]).into(),
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
 			not_before: None,
@@ -859,12 +867,12 @@ mod tests {
 			.unwrap();
 		let allowed = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["allowed/room/**"]),
+			publish: patterns(&["allowed/room/**"]).into(),
 			..Default::default()
 		};
 		let denied = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["other/**"]),
+			publish: patterns(&["other/**"]).into(),
 			..Default::default()
 		};
 
@@ -881,7 +889,7 @@ mod tests {
 	fn test_key_derived_material_never_stale() {
 		let claims = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["test-pub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
 			..Default::default()
 		};
 
@@ -944,8 +952,8 @@ mod tests {
 		let key = create_test_key();
 		let invalid_claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&[]),
-			subscribe: patterns(&[]),
+			publish: patterns(&[]).into(),
+			subscribe: patterns(&[]).into(),
 			expires: None,
 			issued: None,
 			not_before: None,
@@ -1105,13 +1113,25 @@ mod tests {
 		assert!(result.is_err());
 	}
 
+	#[moq_clock::test]
+	async fn token_validity_uses_the_ambient_wall() {
+		let key = create_test_key();
+		let mut claims = create_test_claims();
+		claims.issued = Some(moq_clock::wall().into());
+		claims.expires = Some((moq_clock::wall() + Duration::from_secs(10)).into());
+		let token = key.sign(&claims).unwrap();
+		key.verify(&token).unwrap();
+		moq_clock::sleep(Duration::from_secs(10)).await;
+		assert!(matches!(key.verify(&token), Err(crate::Error::TokenExpired)));
+	}
+
 	#[test]
 	fn test_key_verify_token_without_exp() {
 		let key = create_test_key();
 		let claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["**"]),
-			subscribe: patterns(&["**"]),
+			publish: patterns(&["**"]).into(),
+			subscribe: patterns(&["**"]).into(),
 			expires: None,
 			issued: None,
 			not_before: None,
@@ -1130,8 +1150,8 @@ mod tests {
 		let key = create_test_key();
 		let original_claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]),
-			subscribe: patterns(&["test-sub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
+			subscribe: patterns(&["test-sub/**"]).into(),
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
 			not_before: None,
@@ -1732,8 +1752,8 @@ mod tests {
 		let key = Key::from_str(JS_HS256_KEY).unwrap();
 		let claims = key.verify(JS_HS256_TOKEN).unwrap();
 		assert_eq!(claims.root, "live");
-		assert_eq!(claims.publish, patterns(&["camera1"]));
-		assert_eq!(claims.subscribe, patterns(&["camera1", "camera2"]));
+		assert_eq!(claims.publish, patterns(&["camera1"]).into());
+		assert_eq!(claims.subscribe, patterns(&["camera1", "camera2"]).into());
 	}
 
 	#[test]
@@ -1741,8 +1761,8 @@ mod tests {
 		let key = Key::from_str(JS_HS256_KEY).unwrap();
 		let claims = key.verify(JS_HS256_LEGACY_TOKEN).unwrap();
 		assert_eq!(claims.root, "live");
-		assert_eq!(claims.publish, patterns(&["camera1/**"]));
-		assert_eq!(claims.subscribe, patterns(&["camera1/**", "camera2/**"]));
+		assert_eq!(claims.publish, patterns(&["camera1/**"]).into());
+		assert_eq!(claims.subscribe, patterns(&["camera1/**", "camera2/**"]).into());
 	}
 
 	#[test]
@@ -1754,12 +1774,12 @@ mod tests {
 
 		let inside = Claims {
 			root: "demo/room".into(),
-			publish: patterns(&["alice"]),
+			publish: patterns(&["alice"]).into(),
 			..Default::default()
 		};
 		let outside = Claims {
 			root: "demo".into(),
-			publish: patterns(&["lobby/**"]),
+			publish: patterns(&["lobby/**"]).into(),
 			..Default::default()
 		};
 		assert!(key.verify(&key.sign(&inside).unwrap()).is_ok());
@@ -1778,14 +1798,14 @@ mod tests {
 		let key = Key::from_str(JS_HS256_KEY).unwrap();
 		let claims = Claims {
 			root: "rust-test".to_string(),
-			publish: patterns(&["pub1/**"]),
-			subscribe: patterns(&["sub1/**"]),
+			publish: patterns(&["pub1/**"]).into(),
+			subscribe: patterns(&["sub1/**"]).into(),
 			..Default::default()
 		};
 		let token = key.sign(&claims).unwrap();
 		let verified = key.verify(&token).unwrap();
 		assert_eq!(verified.root, "rust-test");
-		assert_eq!(verified.publish, patterns(&["pub1/**"]));
+		assert_eq!(verified.publish, patterns(&["pub1/**"]).into());
 	}
 
 	#[test]
@@ -1803,7 +1823,7 @@ mod tests {
 		let key = Key::from_str(JS_EDDSA_PRIVATE_KEY).unwrap();
 		let claims = key.verify(JS_EDDSA_TOKEN).unwrap();
 		assert_eq!(claims.root, "stream");
-		assert_eq!(claims.publish, patterns(&["video/**"]));
+		assert_eq!(claims.publish, patterns(&["video/**"]).into());
 	}
 
 	#[test]
@@ -1811,7 +1831,7 @@ mod tests {
 		let key = Key::from_str(JS_EDDSA_PUBLIC_KEY).unwrap();
 		let claims = key.verify(JS_EDDSA_TOKEN).unwrap();
 		assert_eq!(claims.root, "stream");
-		assert_eq!(claims.publish, patterns(&["video/**"]));
+		assert_eq!(claims.publish, patterns(&["video/**"]).into());
 	}
 
 	#[test]

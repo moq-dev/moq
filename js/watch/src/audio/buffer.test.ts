@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { Time } from "@moq/net";
+import type { Micro } from "@moq/clock";
 import { createAudioBuffer } from "./buffer";
 import type { InitShared } from "./render";
 import { SharedRingBuffer } from "./shared-ring-buffer";
@@ -13,7 +13,7 @@ describe("SharedAudioBuffer", () => {
 		const buffer = createAudioBuffer(worklet, 1, 1000, 100);
 		try {
 			const old = new SharedRingBuffer(sent[0]);
-			buffer.insert(0 as Time.Micro, [new Float32Array(100).fill(1.0)]);
+			buffer.insert(0 as Micro, [new Float32Array(100).fill(1.0)]);
 			expect(old.read([new Float32Array(50)])).toBe(50);
 
 			buffer.setLatency(1000);
@@ -31,7 +31,7 @@ describe("SharedAudioBuffer", () => {
 	it("does not gate a wait on a closed buffer", async () => {
 		const worklet = { port: { postMessage: () => {} } } as unknown as AudioWorkletNode;
 		const buffer = createAudioBuffer(worklet, 1, 1000, 100, true);
-		buffer.insert(0 as Time.Micro, [new Float32Array(200)]);
+		buffer.insert(0 as Micro, [new Float32Array(200)]);
 		const settles = (wait: Promise<void>) =>
 			Promise.race([
 				wait.then(() => true),
@@ -39,10 +39,10 @@ describe("SharedAudioBuffer", () => {
 			]);
 
 		// Open, a frame this far ahead of the playhead is held.
-		expect(await settles(buffer.wait(10_000_000 as Time.Micro, new AbortController().signal))).toBe(false);
+		expect(await settles(buffer.wait(10_000_000 as Micro, new AbortController().signal))).toBe(false);
 
 		buffer.close();
-		expect(await settles(buffer.wait(10_000_000 as Time.Micro, new AbortController().signal))).toBe(true);
+		expect(await settles(buffer.wait(10_000_000 as Micro, new AbortController().signal))).toBe(true);
 	});
 
 	// A decode loop retired mid-wait (a rendition change while the playhead is parked) must not leave
@@ -51,15 +51,15 @@ describe("SharedAudioBuffer", () => {
 		const worklet = { port: { postMessage: () => {} } } as unknown as AudioWorkletNode;
 		const buffer = createAudioBuffer(worklet, 1, 1000, 100, true);
 		try {
-			buffer.insert(0 as Time.Micro, [new Float32Array(200)]);
+			buffer.insert(0 as Micro, [new Float32Array(200)]);
 			const controller = new AbortController();
-			const wait = buffer.wait(10_000_000 as Time.Micro, controller.signal);
+			const wait = buffer.wait(10_000_000 as Micro, controller.signal);
 			await Promise.resolve();
 			expect(Bun.peek.status(wait)).toBe("pending");
 
 			controller.abort();
 			expect(Bun.peek.status(wait)).toBe("fulfilled");
-			expect(Bun.peek.status(buffer.wait(10_000_000 as Time.Micro, controller.signal))).toBe("fulfilled");
+			expect(Bun.peek.status(buffer.wait(10_000_000 as Micro, controller.signal))).toBe("fulfilled");
 		} finally {
 			buffer.close();
 		}

@@ -9,6 +9,8 @@ import {
 	MAX_RENDITIONS,
 	type Root,
 	TooManyRenditions,
+	UnsupportedVersion,
+	VERSION,
 	watch,
 } from "./root";
 
@@ -62,6 +64,17 @@ test("watch refuses an oversized catalog update", async () => {
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update({ value: catalog(MAX_RENDITIONS + 1), at: Moq.Time.Timestamp.now() });
 	await expect(consumer.next()).rejects.toBeInstanceOf(TooManyRenditions);
+	producer.finish();
+	broadcast.close();
+});
+
+test("watch refuses a catalog needing a newer reader", async () => {
+	const broadcast = new Moq.Broadcast.Producer();
+	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
+	const producer = new Json.Snapshot.Producer<Root>({ track, deltaRatio: 0 });
+	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
+	producer.update({ value: { version: VERSION + 1 }, at: Moq.Time.Timestamp.now() });
+	await expect(consumer.next()).rejects.toBeInstanceOf(UnsupportedVersion);
 	producer.finish();
 	broadcast.close();
 });
@@ -126,4 +139,30 @@ test("watch subscribes and yields typed catalog updates", async () => {
 	await consumer.return?.();
 	producer.finish();
 	broadcast.close();
+});
+
+test("echo feedback prefix refuses root escape with the same URL resolution as renditions", () => {
+	for (const [base, reference, expected] of [
+		["room/live", "viewers", "room/viewers"],
+		["room/live", "live/viewers", "room/live/viewers"],
+		["room/live", "../viewers", "viewers"],
+		["room/live", "../../viewers", undefined],
+		["live", "../viewers", undefined],
+	] as const) {
+		const root = { echo: { path: Moq.Path.normalizeRelative(reference) } };
+		const path = Moq.Path.from(base);
+		if (expected === undefined) expect(() => checkResolvable(root, path)).toThrow(EscapingBroadcast);
+		else {
+			expect(checkResolvable(root, path)).toEqual(root);
+			expect(Moq.Path.tryResolve(path, root.echo.path)).toBe(Moq.Path.from(expected));
+		}
+	}
+});
+
+test("watch refuses an echo prefix escaping the requested broadcast root", async () => {
+	await expect(
+		watchRequested({ echo: { path: Moq.Path.normalizeRelative("../../viewers") } }),
+	).rejects.toBeInstanceOf(EscapingBroadcast);
+	const root = { echo: { path: Moq.Path.normalizeRelative("viewers") } };
+	expect(await watchRequested(root)).toMatchObject({ value: root });
 });

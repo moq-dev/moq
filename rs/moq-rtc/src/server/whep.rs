@@ -56,6 +56,7 @@ async fn handle(
 				resource_id,
 				answer,
 				session,
+				..
 			} = response;
 			let mut response_headers = HeaderMap::new();
 			response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/sdp"));
@@ -158,7 +159,12 @@ pub async fn accept(
 
 	let answer = rtc.sdp_api().accept_offer(offer).map_err(Error::rtc)?;
 	let resource_id = sdp::new_resource_id();
-	let session = session::Session::egress(rtc, mux.socket(), mux.candidates().to_vec(), inbound, source);
+	let socket = moq_ice::Socket {
+		udp: mux.socket(),
+		locals: mux.candidates().to_vec(),
+		inbound,
+	};
+	let session = session::Session::egress(rtc, socket, source)?;
 
 	// Register before returning so a DELETE that races startup still finds the
 	// session; Response::run unregisters itself when it ends.
@@ -167,6 +173,7 @@ pub async fn accept(
 	Ok(Response {
 		resource_id: resource_id.clone(),
 		answer: sdp::render_answer(&answer),
+		wire: session.wire(),
 		session: crate::server::AcceptedSession {
 			server: server.clone(),
 			resource_id,

@@ -129,19 +129,15 @@ public final class TrackDemand: Sendable {
         ffi.name()
     }
 
-    /// Whether the track has at least one active consumer right now.
-    public var isUsed: Bool {
-        ffi.isUsed()
+    /// The group subscribers want next, or nil while nobody subscribes. A value past the
+    /// newest group asks for a new group now, typically a keyframe.
+    public var wanted: UInt64? {
+        ffi.wanted()
     }
 
-    /// Suspend until the track has at least one active consumer.
-    public func used() async throws {
-        try await ffi.used()
-    }
-
-    /// Suspend until the track has no active consumers.
-    public func unused() async throws {
-        try await ffi.unused()
+    /// Suspend until `wanted` changes and return it. The first call returns at once.
+    public func wantedChanged() async throws -> UInt64? {
+        try await ffi.wantedChanged()
     }
 }
 

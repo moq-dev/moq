@@ -10,6 +10,7 @@
 //! which keeps the listeners, workers, and shutdown joins. `main.rs` is a thin
 //! wrapper over the two.
 
+pub mod acme;
 pub mod auth;
 pub mod cache;
 pub mod cluster;
@@ -19,6 +20,7 @@ mod critical;
 mod duration;
 mod fetch;
 mod http_client;
+mod incoming;
 pub mod internal;
 pub mod limits;
 mod listener;
@@ -58,6 +60,7 @@ fn configured_tier(label: Option<String>) -> moq_net::stats::Tier {
 pub use config::*;
 pub use connection::*;
 pub use fetch::*;
+pub use incoming::{Accepted, Incoming};
 pub use relay::*;
 #[cfg(feature = "test-support")]
 pub use test_support::*;

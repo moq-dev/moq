@@ -7,14 +7,19 @@
 //! once every task has stalled, [`run`] jumps the clock to the earliest armed
 //! timer and wakes it, like tokio's paused clock, so a test never waits on the
 //! host clock. A run whose tasks are all parked with nothing armed can never
-//! finish, so it panics rather than hang.
+//! finish, so it panics rather than hang, unless a task awaits [`idle`], which
+//! completes at exactly that point.
+//!
+//! A task poll that makes more than 4096 ready kio polls panics with the caller's
+//! source location, so a loop that forgets to yield fails instead of starving its siblings.
+//! Each `kio::Tasks` child poll counts on its own, like a spawned task.
 //!
 //! Caller-driven state machines take time from their caller:
 //! [`drive`](crate::drive) polls one with the simulated instant, and [`attach`]
 //! keeps a [`Deadlines`] queue in step.
 
 use std::{
-	cell::RefCell,
+	cell::{Cell, RefCell},
 	collections::BTreeMap,
 	future::{Future, IntoFuture},
 	pin::{Pin, pin},
@@ -37,6 +42,11 @@ thread_local! {
 
 type Task = Pin<Box<dyn Future<Output = ()>>>;
 
+fn poll<F: Future + ?Sized>(future: Pin<&mut F>, cx: &mut Context<'_>) -> Poll<F::Output> {
+	let _scope = kio::coop::scope();
+	future.poll(cx)
+}
+
 struct Runtime {
 	/// Tells this run from earlier ones on the thread, so a timer finds its own.
 	id: u64,
@@ -45,10 +55,13 @@ struct Runtime {
 	time: RefCell<Time>,
 	/// Queues kept in step with simulated time, until their owners drop them.
 	queues: RefCell<Vec<WeakDeadlines>>,
+	/// Awaiting [`idle`]: each flag is raised, and its waker woken, once nothing else can run.
+	idle: RefCell<Vec<(Rc<Cell<bool>>, Waker)>>,
 }
 
 struct Time {
 	clock: Manual,
+	anchor: Option<(Instant, Wall)>,
 	/// Orders timers armed for the same instant by when they were armed.
 	next: u64,
 	timers: BTreeMap<(Instant, u64), Waker>,
@@ -131,6 +144,18 @@ pub(crate) fn wall() -> Option<Wall> {
 	current().map(|runtime| runtime.time.borrow().clock.wall())
 }
 
+pub(crate) fn anchor() -> Option<(Instant, Wall)> {
+	current().map(|runtime| {
+		let mut time = runtime.time.borrow_mut();
+		if let Some(anchor) = time.anchor {
+			return anchor;
+		}
+		let anchor = (time.clock.now(), time.clock.wall());
+		time.anchor = Some(anchor);
+		anchor
+	})
+}
+
 /// Whether the calling thread is inside [`run`].
 pub fn is_running() -> bool {
 	CURRENT.with(|current| current.borrow().is_some())
@@ -161,7 +186,8 @@ impl Drop for Enter {
 /// # Panics
 ///
 /// When called inside another `run`, and when every task is parked with no timer
-/// armed, which is a deadlock.
+/// armed and none awaits [`idle`], which is a deadlock. Also when one root poll
+/// exceeds the ready kio poll limit, or a detached task panics.
 pub fn run<F: IntoFuture>(future: F) -> F::Output {
 	static RUNS: AtomicU64 = AtomicU64::new(0);
 	let runtime = Rc::new(Runtime {
@@ -169,10 +195,12 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 		spawned: RefCell::new(Vec::new()),
 		time: RefCell::new(Time {
 			clock: Manual::new(),
+			anchor: None,
 			next: 0,
 			timers: BTreeMap::new(),
 		}),
 		queues: RefCell::new(Vec::new()),
+		idle: RefCell::new(Vec::new()),
 	});
 	CURRENT.with(|current| {
 		let mut current = current.borrow_mut();
@@ -195,7 +223,7 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 	// itself cannot starve the root: `FuturesUnordered` yields after one pass.
 	let output = loop {
 		if root.0.swap(false, Ordering::SeqCst)
-			&& let Poll::Ready(output) = future.as_mut().poll(&mut root_cx)
+			&& let Poll::Ready(output) = poll(future.as_mut(), &mut root_cx)
 		{
 			break output;
 		}
@@ -208,17 +236,23 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 		if root.0.load(Ordering::SeqCst) || pool.0.load(Ordering::SeqCst) || !runtime.spawned.borrow().is_empty() {
 			continue;
 		}
-		assert!(
-			runtime.advance(queued),
-			"deadlock: every task is parked and no timer is armed"
-		);
+		if runtime.advance(queued) {
+			continue;
+		}
+		let idle = runtime.idle.take();
+		assert!(!idle.is_empty(), "deadlock: every task is parked and no timer is armed");
+		for (settled, waker) in idle {
+			settled.set(true);
+			waker.wake();
+		}
 	};
 
 	drop(tasks);
 	drop(runtime.spawned.take());
 	drop(enter);
-	// Timers may hold wakers into the dropped tasks.
+	// Timers and idle waiters may hold wakers into the dropped tasks.
 	runtime.queues.borrow_mut().clear();
+	runtime.idle.borrow_mut().clear();
 	runtime.time.borrow_mut().timers.clear();
 	output
 }
@@ -258,6 +292,25 @@ pub async fn advance(duration: Duration) {
 /// Outside [`run`].
 pub fn step_wall(wall: Wall) {
 	expect_current().time.borrow_mut().clock.step_wall(wall);
+}
+
+/// Complete once every other task is parked and no timer or queued deadline is
+/// armed, so nothing can happen until something outside the run acts: the system
+/// has settled.
+///
+/// # Panics
+///
+/// Outside [`run`].
+pub fn idle() -> impl Future<Output = ()> {
+	let runtime = expect_current();
+	let settled = Rc::new(Cell::new(false));
+	std::future::poll_fn(move |cx| {
+		if settled.get() {
+			return Poll::Ready(());
+		}
+		runtime.idle.borrow_mut().push((settled.clone(), cx.waker().clone()));
+		Poll::Pending
+	})
 }
 
 /// Yield once, letting every other ready task run first.
@@ -486,10 +539,8 @@ where
 		state.0.borrow_mut().task = Some(cx.waker().clone());
 
 		let running = future.as_mut().expect("task polled after completion");
-		let output = match std::panic::AssertUnwindSafe(running.as_mut())
-			.catch_unwind()
-			.poll_unpin(cx)
-		{
+		let running = std::future::poll_fn(|cx| poll(running.as_mut(), cx));
+		let output = match std::panic::AssertUnwindSafe(running).catch_unwind().poll_unpin(cx) {
 			Poll::Pending => return Poll::Pending,
 			Poll::Ready(output) => output,
 		};
@@ -524,10 +575,107 @@ impl<T> Drop for Cancel<T> {
 
 #[cfg(test)]
 mod tests {
-	use std::cell::Cell;
-
 	use super::*;
 	use crate::{Deadline, Deadlines, Elapsed, MissedTickBehavior};
+
+	fn spin() {
+		let producer = kio::Producer::new(());
+		let consumer = producer.consume();
+		let waiter = kio::Waiter::noop();
+		for _ in 0..10_000 {
+			assert!(consumer.poll(&waiter, |_| Poll::Ready(())).is_ready());
+		}
+	}
+
+	#[test]
+	#[should_panic(expected = "kio Ready poll limit")]
+	fn a_spinning_root_fails() {
+		run(async { spin() });
+	}
+
+	#[test]
+	#[should_panic(expected = "kio Ready poll limit")]
+	fn a_spinning_spawned_task_fails() {
+		run(async {
+			drop(spawn(async { spin() }));
+			yield_now().await;
+		});
+	}
+
+	#[crate::test]
+	async fn a_budgeted_loop_lets_a_sibling_run() {
+		let turns = Rc::new(Cell::new(0));
+		let sibling = spawn({
+			let turns = turns.clone();
+			async move {
+				turns.set(turns.get() + 1);
+			}
+		});
+		let producer = kio::Producer::new(());
+		let consumer = producer.consume();
+		let mut budget = kio::coop::Budget::new(32);
+		for _ in 0..10_000 {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
+			assert!(
+				kio::wait(|waiter| consumer.poll(waiter, |_| Poll::Ready(())))
+					.await
+					.is_ok()
+			);
+		}
+		assert_eq!(turns.get(), 1, "the sibling ran before the loop finished");
+		sibling.await.unwrap();
+	}
+
+	#[crate::test]
+	async fn pending_polls_do_not_count_as_work() {
+		let producer = kio::Producer::new(());
+		let consumer = producer.consume();
+		let waiter = kio::Waiter::noop();
+		for _ in 0..10_000 {
+			assert!(consumer.poll(&waiter, |_| Poll::<()>::Pending).is_pending());
+		}
+	}
+
+	#[test]
+	fn a_failed_run_restores_poll_accounting() {
+		assert!(std::panic::catch_unwind(|| run(async { spin() })).is_err());
+		spin();
+		run(async {});
+	}
+
+	#[crate::test]
+	async fn a_large_task_set_counts_each_child_alone() {
+		let producer = kio::Producer::new(());
+		let mut tasks = kio::Tasks::new();
+		for _ in 0..10_000 {
+			let consumer = producer.consume();
+			tasks.push(move |waiter: &kio::Waiter| consumer.poll(waiter, |_| Poll::Ready(())).map(drop));
+		}
+		kio::wait(|waiter| tasks.poll(waiter)).await;
+	}
+
+	#[test]
+	#[should_panic(expected = "kio Ready poll limit")]
+	fn a_spinning_task_set_child_fails() {
+		run(async {
+			let mut tasks = kio::Tasks::new();
+			tasks.push(|_: &kio::Waiter| {
+				spin();
+				Poll::Ready(())
+			});
+			kio::wait(|waiter| tasks.poll(waiter)).await;
+		});
+	}
+
+	#[test]
+	fn a_task_set_outside_the_simulator_counts_nothing() {
+		let mut tasks = kio::Tasks::new();
+		tasks.push(|_: &kio::Waiter| {
+			spin();
+			Poll::Ready(())
+		});
+		assert!(tasks.poll(&kio::Waiter::noop()).is_ready());
+	}
 
 	fn at(secs: u64) -> Instant {
 		Instant::ZERO + Duration::from_secs(secs)
@@ -537,6 +685,23 @@ mod tests {
 	async fn starts_at_zero() {
 		assert_eq!(crate::now(), Instant::ZERO);
 		assert_eq!(crate::wall(), Manual::WALL_START);
+	}
+
+	#[test]
+	fn idle_waits_for_every_timer() {
+		run(async {
+			let fired = Rc::new(Cell::new(0));
+			for secs in [1, 5, 3] {
+				let fired = fired.clone();
+				drop(spawn(async move {
+					crate::sleep(Duration::from_secs(secs)).await;
+					fired.set(fired.get() + 1);
+				}));
+			}
+			idle().await;
+			assert_eq!(fired.get(), 3);
+			assert_eq!(crate::now(), at(5));
+		});
 	}
 
 	#[test]

@@ -29,8 +29,8 @@ struct Inner {
 /// A discovered epoch cannot produce tracks:
 ///
 /// ```compile_fail
-/// fn encrypt(generation: &moq_e2ee::generation::Consumer, track: moq_net::track::Producer) {
-///     generation.produce(track);
+/// fn encrypt(generation: moq_e2ee::generation::Consumer, broadcast: moq_net::broadcast::Producer) {
+///     moq_e2ee::broadcast::Producer::new(broadcast, generation);
 /// }
 /// ```
 #[derive(Clone)]
@@ -75,7 +75,7 @@ impl Consumer {
 	/// # Errors
 	///
 	/// [`Error::Identity`] if the track name is not a physical name.
-	pub fn consume(&self, track: moq_net::track::Subscriber) -> Result<track::Consumer> {
+	pub(crate) fn consume(&self, track: moq_net::track::Subscriber) -> Result<track::Consumer> {
 		let name: Name = track.name().parse()?;
 		Ok(track::Consumer::new(
 			track,
@@ -162,16 +162,32 @@ impl Producer {
 	/// # Errors
 	///
 	/// [`Error::Identity`] if the track name is not a physical name, [`Error::Reuse`] if
-	/// this generation already produced it.
-	pub fn produce(&self, track: moq_net::track::Producer) -> Result<track::Producer> {
-		let name: Name = track.name().parse()?;
+	/// this generation already produced it. Either way `track` is aborted.
+	pub(crate) fn produce(&self, track: moq_net::track::Producer) -> Result<track::Producer> {
+		match self.claim(track.name()) {
+			Ok(keys) => Ok(track::Producer::new(track, keys)),
+			// Its subscribers should see the refusal, not the track vanish.
+			Err(err) => {
+				let _ = track.abort(moq_net::Error::Cancel);
+				Err(err)
+			}
+		}
+	}
+
+	/// Claim a physical name for good, returning its keys.
+	///
+	/// # Errors
+	///
+	/// [`Error::Identity`] if `name` is not a physical name, [`Error::Reuse`] if this
+	/// generation already claimed it.
+	pub(crate) fn claim(&self, name: &str) -> Result<track::Keys> {
+		let name: Name = name.parse()?;
 		if !self.claims.lock().expect("claims").insert(name) {
 			return Err(Error::Reuse);
 		}
-		Ok(track::Producer::new(
-			track,
-			self.consumer.key(&name, Domain::Group)?,
-			self.consumer.key(&name, Domain::Datagram)?,
-		))
+		Ok(track::Keys {
+			group: self.consumer.key(&name, Domain::Group)?,
+			datagram: self.consumer.key(&name, Domain::Datagram)?,
+		})
 	}
 }

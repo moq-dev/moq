@@ -16,7 +16,7 @@ Decided 2026-10-14 with the maintainer:
   and therefore a fresh identity; every live session of the process shares it,
   so P2P recognizes an origin reached through the CDN and directly.
 - A session announces the public key once (AUTH_CNF, moved here from
-  [Peer grants](/quest/m1/p2p/peer-grant.md)) and proves possession bound to
+  [Peer grants](/quest/m2/p2p/peer-grant.md)) and proves possession bound to
   this session: a fresh receiver challenge or the authenticated session
   transcript, never a signature over the key alone, which replays across
   sessions. The receiver then accepts that identity, and only that identity,
@@ -51,4 +51,4 @@ connection setup; report any key handle that leaks into `moq-ffi`.
 
 ## Related
 
-- [Peer grants](/quest/m1/p2p/peer-grant.md) - binds this key as `cnf` for direct sessions
+- [Peer grants](/quest/m2/p2p/peer-grant.md) - binds this key as `cnf` for direct sessions

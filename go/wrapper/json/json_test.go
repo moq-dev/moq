@@ -144,8 +144,8 @@ func TestDemand(t *testing.T) {
 	if name := snapshotDemand.Name(); name != "status" {
 		t.Fatalf("Name = %q, want status", name)
 	}
-	if snapshotDemand.IsUsed() {
-		t.Fatal("IsUsed before any subscriber")
+	if wanted := snapshotDemand.Wanted(); wanted != nil {
+		t.Fatalf("Wanted = %d before any subscriber", *wanted)
 	}
 
 	snapshotConsumer, err := moqjson.NewSnapshotConsumer(subscribeTrack(ctx, t, consumer, "status"), moqjson.ConsumerOptions{})
@@ -156,26 +156,39 @@ func TestDemand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshotDemand.Used(ctx); err != nil {
+	if err := untilWanted(ctx, snapshotDemand, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := streamDemand.Used(ctx); err != nil {
+	if err := untilWanted(ctx, streamDemand, true); err != nil {
 		t.Fatal(err)
 	}
 
 	snapshotConsumer.Cancel()
 	streamConsumer.Cancel()
-	if err := snapshotDemand.Unused(ctx); err != nil {
+	if err := untilWanted(ctx, snapshotDemand, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := streamDemand.Unused(ctx); err != nil {
+	if err := untilWanted(ctx, streamDemand, false); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := snapshot.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshotDemand.Used(ctx); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("Used after Finish = %v, want ErrClosed", err)
+	if err := untilWanted(ctx, snapshotDemand, true); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("untilWanted after Finish = %v, want ErrClosed", err)
+	}
+}
+
+// untilWanted blocks until some subscriber wants the track, or none does.
+func untilWanted(ctx context.Context, demand *moq.TrackDemand, wanted bool) error {
+	for {
+		next, err := demand.WantedChanged(ctx)
+		if err != nil {
+			return err
+		}
+		if (next != nil) == wanted {
+			return nil
+		}
 	}
 }

@@ -4,6 +4,16 @@ import 'package:moq_ffi/moq_ffi.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('destroyed object arguments are refused before native calls', () {
+    final broadcast = MoqBroadcastProducer();
+    broadcast.dispose();
+
+    expect(
+      () => MoqMediaCatalogProducer(broadcast: broadcast),
+      throwsStateError,
+    );
+  });
+
   test('stream abort preserves the structured protocol record', () async {
     final track = MoqBroadcastProducer().publishTrack(
       name: 'errors',

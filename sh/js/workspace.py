@@ -152,6 +152,7 @@ def run(action, plan):
         raise RuntimeError("add these cross-tree JS inputs to the js pattern in sh/dispatch.sh: "
                            + " ".join(missing))
     command("python3", "sh/rs/stats-docs.py")
+    command("python3", "sh/rs/model-markers.py")
     # These inexpensive shared checks still protect every package's imports.
     result = subprocess.run(["grep", "-rn", "--include=*.ts", "--include=*.tsx",
                              "--exclude-dir=node_modules", "--exclude-dir=dist",
@@ -179,10 +180,9 @@ def run(action, plan):
             command("bunx", "tsc", "--noEmit", "--project", name)
         finally:
             Path(name).unlink()
-    # The fallback covers files outside every workspace, like js/tsconfig.json and test/lib.
-    command("bun", "biome", "check", *(["js", "test"] if plan["all"] else
-                                       [p["directory"] for p in packages.values()
-                                        if p["directory"].startswith(("js/", "test/"))] + ["js/common"]))
+    # The fallback also covers unowned inputs, including demo/pub's Worker.
+    command("bun", "biome", "check", *(["js", "bench/browser", "test", "doc", "demo"] if plan["all"] else
+                                       [p["directory"] for p in packages.values()] + ["js/common"]))
     scripts("build")
     for name in ("@moq/watch", "@moq/publish"):
         if name in packages:

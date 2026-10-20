@@ -16,9 +16,8 @@ behind the `mediacodec` feature and the encode seam.
 - `audio/mp4a-latm` with `KEY_AAC_PROFILE` = LC. The catalog ASC is
   synthesized at construction per the encode seam, since `csd-0` only arrives
   with the first output buffer; assert the two match.
-- MediaCodec pipelines output, which the one-packet-per-frame seam does not
-  allow yet: add a `flush` and a zero-or-more return, a change to
-  `Encoder::encode`, unless the AudioToolbox quest already did.
+- MediaCodec pipelines output. Reuse the flush and zero-or-more packet
+  return owned by AudioToolbox encode; do not design another encoder seam.
 - Multichannel is device-dependent; probe the encoder's capabilities at open
   and refuse a layout it does not list.
 - Round-trip regression through the MediaCodec decoder; runtime proof on a
@@ -27,7 +26,4 @@ behind the `mediacodec` feature and the encode seam.
 ## Required
 
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - the round-trip regression decodes through it
-
-## Related
-
-- [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - the macOS and iOS backend, which may already add `flush` to `Encoder::encode`
+- [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - owns the shared flush and zero-or-more packet encoder contract

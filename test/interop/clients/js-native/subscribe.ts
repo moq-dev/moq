@@ -13,6 +13,7 @@
  * @module
  */
 import { parseArgs } from "node:util";
+import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
@@ -28,7 +29,7 @@ install();
 // subscribers. A relay drops a superseded group (RESET_STREAM Old) rather than
 // finish sending it, e.g. a cached group a fresh one lands right behind, so a
 // subscriber has to move on to the next group instead of failing.
-const MAX_DELAY = Moq.Time.Milli(1000);
+const MAX_DELAY = Milli(1000);
 
 const { positionals, values } = parseArgs({
 	allowPositionals: true,
@@ -65,11 +66,11 @@ async function video(bc: Moq.Broadcast.Consumer): Promise<[string, Catalog.Video
 async function run(): Promise<void> {
 	const origin = new Moq.Origin.Producer();
 	// The grant arrives over AUTH, which only the work-in-progress moq-lite-07 carries and no
-	// client offers by default. The WebSocket fallback cannot offer it, so it stays off.
+	// client offers by default.
 	const connection = await Moq.Connection.connect({
 		url: new URL(url as string),
 		consume: origin,
-		webtransport: { protocols: ["moq-lite-07-wip"] },
+		versions: ["moq-lite-07-wip"],
 		websocket: { enabled: false },
 	});
 	// The grant the relay sent, in the Rust client's `auth granted` shape, so the harness can

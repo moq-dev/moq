@@ -51,7 +51,7 @@ class SelectionTest(unittest.TestCase):
         sh = self.root / "sh"
         shutil.copy(selector.ROOT / "sh/dispatch.sh", sh / "dispatch.sh")
         changed = sh / "changed.sh"
-        changed.write_text("#!/bin/sh\nprintf '%s\\n' js/auth/src/token.ts quest/unrelated.md\n")
+        changed.write_text("#!/bin/sh\nprintf '%s\\n' js/auth/src/token.ts demo/pub/worker.ts quest/unrelated.md\n")
         changed.chmod(0o755)
         tools = self.root / "tools"
         tools.mkdir()
@@ -66,7 +66,8 @@ class SelectionTest(unittest.TestCase):
         env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", MOQ_ALLOW_HOST="1",
                    SELECT_CALLS=str(calls))
         subprocess.run(["bash", "sh/dispatch.sh", "ci-test", "base"], cwd=self.root, env=env, check=True)
-        self.assertEqual(calls.read_text().splitlines(), ["js test-changed", "js/auth/src/token.ts"])
+        self.assertEqual(calls.read_text().splitlines(),
+                         ["js test-changed", "js/auth/src/token.ts", "demo/pub/worker.ts"])
 
     def test_cli_loads_without_shadowing_standard_library_modules(self):
         result = subprocess.run([sys.executable, str(Path(__file__).with_name("workspace.py")),
@@ -190,11 +191,16 @@ class SelectionTest(unittest.TestCase):
     def test_biome_covers_unowned_js_files_in_fallback(self):
         def biome(paths):
             return next(c for c in self.calls(paths) if c[:3] == ["bun", "biome", "check"])
-        self.assertEqual(biome(["js/tsconfig.json"]), ["bun", "biome", "check", "js", "test"])
+        self.assertEqual(biome(["js/tsconfig.json"]), ["bun", "biome", "check", "js", "test", "doc", "demo"])
+        self.assertEqual(biome(["doc/index.md"]), ["bun", "biome", "check", "doc", "js/common"])
+        self.assertEqual(biome(["demo/nested/src/index.ts"]),
+                         ["bun", "biome", "check", "demo/nested", "js/common"])
+        self.assertEqual(biome(["demo/pub/src/index.ts"]),
+                         ["bun", "biome", "check", "js", "test", "doc", "demo"])
         self.assertEqual(biome(["js/core/src/index.ts"]),
-                         ["bun", "biome", "check", "js/core", "js/view", "js/common"])
+                         ["bun", "biome", "check", "js/core", "js/view", "doc", "js/common"])
         self.assertEqual(biome(["js/wasm/src/index.ts"]),
-                         ["bun", "biome", "check", "js/wasm", "test/browser", "js/common"])
+                         ["bun", "biome", "check", "js/wasm", "test/browser", "demo/nested", "js/common"])
 
     def test_build_never_generates_wasm(self):
         self.assertNotIn(["just", "js", "wasm"], self.calls(None, "build"))

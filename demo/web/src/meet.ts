@@ -143,6 +143,7 @@ function join(): void {
 		frames: local.cameraCapture.out.frames,
 		display: local.cameraCapture.out.display,
 		flip: true,
+		rotation: local.cameraCapture.out.rotation,
 	});
 
 	$("controls").hidden = false;

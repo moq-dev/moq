@@ -1,23 +1,23 @@
 import { expect, test } from "bun:test";
-import type { Time } from "@moq/net";
+import type { Micro } from "@moq/clock";
 import { Terminal } from "./terminal";
 
 const frame = (group: number, timestamp: number) => ({
 	kind: "frame" as const,
 	group,
-	frame: { timestamp: timestamp as Time.Micro },
+	frame: { timestamp: timestamp as Micro },
 });
-const end = (group: number, timestamp: number) => ({ kind: "end" as const, group, end: timestamp as Time.Micro });
+const end = (group: number, timestamp: number) => ({ kind: "end" as const, group, end: timestamp as Micro });
 const gap = { kind: "gap" as const };
 
 test("warmup trims by timestamp across callback sizes, not ordinary groups or declared returns", () => {
 	const terminal = new Terminal();
-	terminal.clear(0, 80_000 as Time.Micro);
+	terminal.clear(0, 80_000 as Micro);
 	terminal.update(frame(10, 1_000_000));
 	expect(terminal.span({ timestamp: 1_000_000, sampleRate: 48_000, numberOfFrames: 2_880 }).frames).toBe(0);
 	terminal.update(frame(11, 1_060_000));
 	expect(terminal.span({ timestamp: 1_060_000, sampleRate: 48_000, numberOfFrames: 2_880 })).toEqual({
-		timestamp: 1_080_000 as Time.Micro,
+		timestamp: 1_080_000 as Micro,
 		frameOffset: 960,
 		frames: 1_920,
 	});
@@ -43,13 +43,13 @@ test("Terminal maps Opus delay back before trimming terminal output", () => {
 	terminal.clear(312);
 	terminal.update(frame(0, 0));
 	const body = terminal.span({ timestamp: 0, sampleRate: 48_000, numberOfFrames: 960 });
-	expect(body).toEqual({ timestamp: 0 as Time.Micro, frameOffset: 312, frames: 648 });
+	expect(body).toEqual({ timestamp: 0 as Micro, frameOffset: 312, frames: 648 });
 
 	expect(terminal.update(end(1, 20_000))).toBe(false);
 	// The drain shares the end's group, so it continues the epoch.
 	expect(terminal.update(frame(1, 20_000))).toBe(false);
 	const drain = terminal.span({ timestamp: 20_000, sampleRate: 48_000, numberOfFrames: 960 });
-	expect(drain).toEqual({ timestamp: 13_500 as Time.Micro, frameOffset: 0, frames: 312 });
+	expect(drain).toEqual({ timestamp: 13_500 as Micro, frameOffset: 0, frames: 312 });
 	expect(body.frames + drain.frames).toBe(960);
 });
 
@@ -72,10 +72,10 @@ test("an endpoint after a gap trims its own group", () => {
 	expect(terminal.update(gap)).toBe(true);
 
 	terminal.update(end(1, 20_000));
-	expect(terminal.end).toBe(20_000 as Time.Micro);
+	expect(terminal.end).toBe(20_000 as Micro);
 	terminal.update(frame(1, 20_000));
 	const span = terminal.span({ timestamp: 20_000, sampleRate: 48_000, numberOfFrames: 960 });
-	expect(span).toEqual({ timestamp: 20_000 as Time.Micro, frameOffset: 312, frames: 0 });
+	expect(span).toEqual({ timestamp: 20_000 as Micro, frameOffset: 312, frames: 0 });
 });
 
 test("a gap reapplies Opus pre-skip in the resumed epoch", () => {
@@ -87,7 +87,7 @@ test("a gap reapplies Opus pre-skip in the resumed epoch", () => {
 	expect(terminal.update(gap)).toBe(true);
 	terminal.update(frame(1, 1_000_000));
 	const resumed = terminal.span({ timestamp: 1_000_000, sampleRate: 48_000, numberOfFrames: 960 });
-	expect(resumed).toEqual({ timestamp: 1_000_000 as Time.Micro, frameOffset: 312, frames: 648 });
+	expect(resumed).toEqual({ timestamp: 1_000_000 as Micro, frameOffset: 312, frames: 648 });
 });
 
 test("an endpoint does not trim media resumed in a later group", () => {

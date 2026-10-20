@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Micro } from "@moq/clock";
 import { Terminal } from "../src/audio/terminal";
 
 // Decoder count × callback size checks that trimming costs a span calculation,
@@ -13,12 +13,12 @@ for (const count of [1, 16, 64]) {
 			for (let repeat = 0; repeat < 3; repeat++) {
 				const decoders = Array.from({ length: count }, () => {
 					const decoder = new Terminal();
-					decoder.clear(0, Time.Micro(warmup));
+					decoder.clear(0, Micro(warmup));
 					return decoder;
 				});
 				const start = performance.now();
 				for (let callback = 0; callback < CALLBACKS; callback++) {
-					const timestamp = Time.Micro((callback * frames * 1_000_000) / 48_000);
+					const timestamp = Micro((callback * frames * 1_000_000) / 48_000);
 					const read = { kind: "frame" as const, group: callback, frame: { timestamp } };
 					const sample = { timestamp, sampleRate: 48_000, numberOfFrames: frames };
 					for (const decoder of decoders) {

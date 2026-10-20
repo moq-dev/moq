@@ -1,7 +1,7 @@
 //! Adapts the async transport interface to the poll one moq-net requires.
 //!
 //! moq-net accepts its own `moq_net::transport::poll` traits.
-//! A backend that offers only the async interface (qmux, iroh, noq) is wrapped
+//! A backend that offers only the async interface (qmux, iroh, quic) is wrapped
 //! in [`Session`] here, at the edge where async already lives. The wrapping
 //! costs one allocation per operation and one copy per write, and its
 //! closed-watch emulation is weaker than a native implementation (see
@@ -16,7 +16,9 @@ use bytes::Bytes;
 use futures::FutureExt;
 use web_transport_trait::poll as wt_poll;
 
+mod grouped;
 mod owned;
+pub(crate) use grouped::{Grouped, GroupedSend};
 pub use owned::Error;
 
 /// The network transport carrying a MoQ session, on either side of it.
@@ -35,6 +37,8 @@ pub enum Transport {
 	Unix,
 	/// WebTransport over HTTP/3 on QUIC.
 	WebTransport,
+	/// A WebRTC data channel using qmux framing.
+	WebRtc,
 }
 
 impl Transport {
@@ -47,6 +51,7 @@ impl Transport {
 			Self::Tcp => "tcp",
 			Self::Unix => "unix",
 			Self::WebTransport => "webtransport",
+			Self::WebRtc => "webrtc",
 		}
 	}
 }
@@ -61,8 +66,12 @@ impl std::fmt::Display for Transport {
 /// plain boxed flavor suffices.
 type OpBox<T> = futures::future::BoxFuture<'static, T>;
 
-/// Adapts a transport that only implements the async interface
-/// ([`web_transport_trait::Session`]) to the poll interface this crate requires.
+/// Adapts one of this crate's async backends (qmux, iroh, quic) to the poll interface
+/// moq-net requires.
+///
+/// Only those backends fit: the bound goes through a sealed trait, so another
+/// [`web_transport_trait::Session`] cannot be wrapped. A custom transport implements
+/// moq-net's `transport::poll` traits instead.
 ///
 /// Each pending session operation is stored as a boxed future built from a clone
 /// of the underlying session; stream operations temporarily move the stream into
@@ -157,7 +166,7 @@ impl<S: web_transport_trait::Session> Clone for Session<S> {
 
 impl<S> wt_poll::Session for Session<S>
 where
-	S: web_transport_trait::Session,
+	S: Grouped,
 	S::SendStream: 'static,
 	S::RecvStream: 'static,
 {
@@ -204,7 +213,10 @@ where
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
 		// The async interface's send is non-blocking (the transport queues or
 		// drops), so there is never a reason to return Pending.
-		Poll::Ready(self.session.send_datagram(Bytes::copy_from_slice(payload)))
+		Poll::Ready(web_transport_trait::Session::send_datagram(
+			&self.session,
+			Bytes::copy_from_slice(payload),
+		))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -242,13 +254,14 @@ where
 
 /// The send half produced by [`Session`]: an async-interface stream adapted to the
 /// poll interface. See [`Session`] for the deferred `finish`/`reset` behavior.
-pub struct SendStream<S: web_transport_trait::SendStream + 'static> {
+pub struct SendStream<S: GroupedSend + 'static> {
 	// Same never-locked Mutex as [`Session`]'s slots: `get_mut` is free on an
 	// exclusive borrow, and the wrapper keeps the boxed future from stripping
 	// `Sync` off the containing session types.
 	state: std::sync::Mutex<Option<SendState<S>>>,
 	// Deferred actions, applied when the in-flight operation settles.
-	priority: Option<i32>,
+	group: Option<S::Group>,
+	priority: Option<i64>,
 	finish: bool,
 	reset: Option<u32>,
 	/// Bytes already transmitted but not yet reported to the caller: a write the
@@ -266,7 +279,7 @@ pub struct SendStream<S: web_transport_trait::SendStream + 'static> {
 	interrupt: Option<futures::channel::oneshot::Sender<()>>,
 }
 
-enum SendState<S: web_transport_trait::SendStream + 'static> {
+enum SendState<S: GroupedSend + 'static> {
 	Idle(S),
 	/// A write in flight; `chunk` is the copied bytes, kept (refcounted, no
 	/// extra copy) so a completion absorbed by `poll_closed` can verify the
@@ -282,11 +295,12 @@ enum SendState<S: web_transport_trait::SendStream + 'static> {
 	Closing(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<(), S::Error>>)>),
 }
 
-impl<S: web_transport_trait::SendStream + 'static> SendStream<S> {
+impl<S: GroupedSend + 'static> SendStream<S> {
 	/// Wrap an async-interface send stream.
 	pub fn new(stream: S) -> Self {
 		Self {
 			state: std::sync::Mutex::new(Some(SendState::Idle(stream))),
+			group: None,
 			priority: None,
 			finish: false,
 			reset: None,
@@ -297,8 +311,11 @@ impl<S: web_transport_trait::SendStream + 'static> SendStream<S> {
 
 	/// Apply actions deferred while an operation was in flight.
 	fn settle(&mut self, stream: &mut S) {
-		if let Some(order) = self.priority.take() {
-			stream.set_priority(order);
+		if let Some(group) = self.group.take() {
+			stream.set_group(&group);
+		}
+		if let Some(priority) = self.priority.take() {
+			GroupedSend::set_priority(stream, priority);
 		}
 		if let Some(code) = self.reset.take() {
 			self.finish = false;
@@ -312,7 +329,50 @@ impl<S: web_transport_trait::SendStream + 'static> SendStream<S> {
 	}
 }
 
-impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for SendStream<S> {
+impl<S: GroupedSend + 'static> SendStream<S> {
+	/// Set the full-width priority, deferred while an operation holds the stream.
+	fn prioritize(&mut self, priority: i64) {
+		match self.state.get_mut().unwrap().as_mut() {
+			Some(SendState::Idle(stream)) => GroupedSend::set_priority(stream, priority),
+			// A finished stream still retransmits under its priority until the FIN is
+			// acknowledged, so reclaim it from the watch rather than wait that out.
+			Some(SendState::Closing(_)) => {
+				self.priority = Some(priority);
+				self.reclaim();
+			}
+			_ => self.priority = Some(priority),
+		}
+	}
+
+	/// Schedule a newly opened stream by its options.
+	fn schedule(&mut self, options: moq_net::transport::poll::SendOptions<'_, S::Group>) {
+		self.prioritize(options.priority);
+		if let Some(group) = options.group {
+			self.join(group);
+		}
+	}
+
+	/// Join `group`, deferred like [`prioritize`](Self::prioritize).
+	fn join(&mut self, group: &S::Group) {
+		match self.state.get_mut().unwrap().as_mut() {
+			Some(SendState::Idle(stream)) => stream.set_group(group),
+			Some(SendState::Closing(_)) => {
+				self.group = Some(group.clone());
+				self.reclaim();
+			}
+			_ => self.group = Some(group.clone()),
+		}
+	}
+
+	/// Interrupt the closed() watch so a deferred action applies now.
+	fn reclaim(&mut self) {
+		if let Some(tx) = self.interrupt.take() {
+			let _ = tx.send(());
+		}
+	}
+}
+
+impl<S: GroupedSend + 'static> wt_poll::SendStream for SendStream<S> {
 	type Error = S::Error;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
@@ -411,18 +471,7 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for SendS
 	}
 
 	fn set_priority(&mut self, order: i32) {
-		match self.state.get_mut().unwrap().as_mut() {
-			Some(SendState::Idle(stream)) => stream.set_priority(order),
-			// A finished stream still retransmits under its priority until the FIN is
-			// acknowledged, so reclaim it from the watch rather than wait that out.
-			Some(SendState::Closing(_)) => {
-				self.priority = Some(order);
-				if let Some(tx) = self.interrupt.take() {
-					let _ = tx.send(());
-				}
-			}
-			_ => self.priority = Some(order),
-		}
+		self.prioritize(order.into());
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
@@ -527,7 +576,7 @@ impl<S: web_transport_trait::SendStream + 'static> wt_poll::SendStream for SendS
 	}
 }
 
-impl<S: web_transport_trait::SendStream + 'static> Drop for SendStream<S> {
+impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 	fn drop(&mut self) {
 		match self.state.get_mut().unwrap().take() {
 			// Apply a deferred reset if the stream is idle.
@@ -823,6 +872,74 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 	}
 }
 
+#[cfg(feature = "quic")]
+impl Grouped for crate::quic::web::Session {
+	fn wire(&self) -> Option<moq_net::transport::Wire> {
+		Some(crate::quic::driver::Connection::wire(self))
+	}
+
+	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
+		Some(Self::send_group(self, priority))
+	}
+
+	fn send_datagram(
+		&self,
+		payload: Bytes,
+		options: moq_net::transport::poll::SendOptions<'_, crate::quic::driver::SendGroup>,
+	) -> Result<(), Self::Error> {
+		let options = crate::quic::driver::SendOptions {
+			group: options.group,
+			priority: options.priority,
+		};
+		Self::send_datagram(self, payload, options)
+	}
+}
+
+#[cfg(feature = "quic")]
+impl GroupedSend for crate::quic::web::SendStream {
+	type Group = crate::quic::driver::SendGroup;
+
+	fn set_group(&mut self, group: &Self::Group) {
+		// A closed stream has nothing left to schedule.
+		Self::set_group(self, Some(group)).ok();
+	}
+
+	fn set_priority(&mut self, priority: i64) {
+		crate::quic::web::SendStream::set_priority(self, priority).ok();
+	}
+}
+
+#[cfg(feature = "quic")]
+impl moq_net::transport::poll::SendGroup for crate::quic::driver::SendGroup {
+	fn set_priority(&mut self, priority: i64) {
+		Self::set_priority(self, priority)
+	}
+}
+
+#[cfg(feature = "iroh")]
+impl Grouped for web_transport_iroh::Session {}
+
+#[cfg(feature = "iroh")]
+impl GroupedSend for web_transport_iroh::SendStream {
+	type Group = moq_net::transport::poll::Ungrouped;
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match *group {}
+	}
+}
+
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+impl Grouped for qmux::Session {}
+
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+impl GroupedSend for qmux::SendStream {
+	type Group = moq_net::transport::poll::Ungrouped;
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match *group {}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::sync::{
@@ -857,6 +974,7 @@ mod tests {
 		writes: Arc<Mutex<Vec<u8>>>,
 		blocked: Arc<AtomicBool>,
 		priorities: Arc<Mutex<Vec<i32>>>,
+		groups: Arc<Mutex<Vec<u32>>>,
 		finished: Arc<AtomicBool>,
 		resets: Arc<Mutex<Vec<u32>>>,
 		/// The peer never acknowledges the FIN: closed() stays pending forever.
@@ -904,6 +1022,22 @@ mod tests {
 				}
 			})
 			.await
+		}
+	}
+
+	/// A send group that only names itself, so a test can see which one a stream joined.
+	#[derive(Clone)]
+	struct FakeGroup(u32);
+
+	impl moq_net::transport::poll::SendGroup for FakeGroup {
+		fn set_priority(&mut self, _: i64) {}
+	}
+
+	impl GroupedSend for FakeSend {
+		type Group = FakeGroup;
+
+		fn set_group(&mut self, group: &FakeGroup) {
+			self.groups.lock().unwrap().push(group.0);
 		}
 	}
 
@@ -1006,6 +1140,34 @@ mod tests {
 		fake.blocked.store(false, Ordering::SeqCst);
 		assert_eq!(send.poll_write(&mut cx, b"queued"), Poll::Ready(Ok(6)));
 		assert_eq!(fake.priorities.lock().unwrap().as_slice(), &[7]);
+	}
+
+	// A group joined while a write holds the stream applies when it settles, and one
+	// joined during the FIN watch reclaims the stream, which still retransmits.
+	#[test]
+	fn send_defers_a_group_across_an_inflight_write() {
+		use moq_net::transport::poll;
+		let fake = FakeSend::default();
+		fake.blocked.store(true, Ordering::SeqCst);
+		let mut send = SendStream::new(fake.clone());
+		let mut cx = cx();
+
+		assert!(send.poll_write(&mut cx, b"queued").is_pending());
+		poll::SendStream::set_group(&mut send, &FakeGroup(1));
+		poll::SendStream::set_priority(&mut send, i64::MAX);
+		assert!(fake.groups.lock().unwrap().is_empty(), "deferred while in flight");
+
+		fake.blocked.store(false, Ordering::SeqCst);
+		assert_eq!(send.poll_write(&mut cx, b"queued"), Poll::Ready(Ok(6)));
+		assert_eq!(fake.groups.lock().unwrap().as_slice(), &[1]);
+		assert_eq!(fake.priorities.lock().unwrap().as_slice(), &[i32::MAX], "saturated");
+
+		fake.never_ack.store(true, Ordering::SeqCst);
+		send.finish().unwrap();
+		assert!(send.poll_closed(&mut cx).is_pending());
+		poll::SendStream::set_group(&mut send, &FakeGroup(2));
+		assert!(send.poll_closed(&mut cx).is_pending());
+		assert_eq!(fake.groups.lock().unwrap().as_slice(), &[1, 2]);
 	}
 
 	// The cluster-failover corruption: a write held Pending by backpressure is
@@ -1281,6 +1443,8 @@ mod tests {
 	/// An async-interface session that never accepts, opens, or closes.
 	#[derive(Clone)]
 	struct FakeSession;
+
+	impl Grouped for FakeSession {}
 
 	impl web_transport_trait::Session for FakeSession {
 		type SendStream = FakeSend;

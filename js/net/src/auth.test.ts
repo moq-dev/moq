@@ -1,8 +1,10 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { Milli, Nano } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { type Grant, type Issued, Unsupported } from "./auth.ts";
+import type { AuthSession } from "./auth_session.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
-import { SessionCode, SessionError, StreamCode, toStreamCode } from "./error.ts";
+import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { AuthMessage as IetfAuthMessage, IetfAuthWire } from "./ietf/auth.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as IetfMessage from "./ietf/message.ts";
@@ -16,6 +18,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { type Stream, Writer } from "./stream.ts";
 import { withTimeout } from "./util/timeout.ts";
+import { nextTask } from "./util/yield.ts";
 import { wireOf } from "./wire.ts";
 
 const url = new URL("https://localhost:4443/test");
@@ -232,6 +235,34 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		const closed = client.auth.grant.peek();
 		expect(closed?.publish.size).toBe(0);
 		expect(closed?.subscribe.size).toBe(0);
+		// What the session enforced is not revoked by its end.
+		expect((client.auth as AuthSession).scope.peek()?.publish.size).toBeGreaterThan(0);
+		server.abort();
+	});
+
+	test("a session's close is not a revocation of its subscriptions", async () => {
+		const origin = new OriginProducer();
+		const broadcast = origin.createBroadcast(Path.from("room/x"));
+		broadcast.announce();
+		broadcast
+			.createTrack("video")
+			.appendGroup()
+			.writeFrame({ payload: new Uint8Array([1]) });
+
+		const { client, server } = await connect({ serverPublish: origin, protocol });
+		await waitFor(client.auth.grant, (g) => g !== undefined && g.subscribe.size > 0);
+		const track = wireOf(client).consume(Path.from("room/x")).track("video").subscribe();
+		expect(await track.recvGroup()).toBeDefined();
+
+		// The grant drops as the session closes, which can land before the transport's close
+		// reaches the subscription; force that order.
+		(client.auth as AuthSession).close();
+		expect(client.auth.grant.peek()?.subscribe.size).toBe(0);
+		await nextTask();
+		expect(track.closed.peek()).toBeUndefined();
+
+		client.abort();
+		expect(await track.closed).toBeNull();
 		server.abort();
 	});
 
@@ -246,7 +277,13 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 
 			issued.close();
 			// A regression leaves `closed` pending, so bound the wait rather than hang the runner.
-			expect(await withTimeout(Promise.resolve(issued.closed), 1000, "the grant stream never closed")).toBeNull();
+			expect(
+				await withTimeout(
+					Promise.resolve(issued.closed),
+					Nano.fromMilli(Milli(1000)),
+					"the grant stream never closed",
+				),
+			).toBeNull();
 		} finally {
 			client.abort();
 			server.abort();
@@ -360,12 +397,48 @@ test("lite-07 carries literal and wildcard grants exactly", async () => {
 	server.abort();
 });
 
-test.each([Lite.ALPN_05, Lite.ALPN_06, Ietf.ALPN.DRAFT_16])("%s has no grant", async (protocol) => {
+// moq-transport keeps the token for the requests that name it, with no grant of its own.
+test.each([
+	[Lite.ALPN_05, false],
+	[Lite.ALPN_06, false],
+	[Ietf.ALPN.DRAFT_16, true],
+])("%s has no grant, keeping a token for requests: %p", async (protocol, kept) => {
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 	expect(client.auth.grant.peek()).toBeUndefined();
-	await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
+	if (kept) {
+		const token = await client.auth.add("token");
+		expect(token.grant.peek()).toBeUndefined();
+		expect(client.auth.grant.peek()).toBeUndefined();
+		// A request carries the bytes as added, whatever the caller does with its buffer after.
+		const bytes = new TextEncoder().encode("bytes");
+		const copied = await client.auth.add(bytes);
+		bytes.fill(0);
+		expect((client.auth as AuthSession).carried(copied)).toEqual(new TextEncoder().encode("bytes"));
+		// The token ends with its session, like any other.
+		client.abort();
+		expect(await token.closed).toBeInstanceOf(Error);
+	} else {
+		await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
+	}
 	client.abort();
 	server.abort();
+});
+
+// With MoQ Auth negotiated, a reset AUTH stream fails the token rather than keeping it for
+// requests: only a peer whose SETUP omitted the extension leaves tokens to requests.
+test("a reset AUTH stream fails the token on moq-transport", async () => {
+	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Ietf.ALPN.DRAFT_22 });
+	await waitFor(client.auth.grant, (g) => g !== undefined);
+	const read = spyOn(IetfAuthWire.prototype, "read").mockRejectedValue(
+		new StreamError(StreamCode.Cancel, { message: "reset" }),
+	);
+	try {
+		await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
+	} finally {
+		read.mockRestore();
+		client.abort();
+		server.abort();
+	}
 });
 
 // lite-07 presents the connection's credential on an Auth Stream right away; lite-06 never
@@ -497,9 +570,10 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH 
 			await waitFor(pair.client.auth.grant, (g) => g !== undefined);
 			await waitFor(pair.server.auth.grant, (g) => g !== undefined);
 			await streams[0]?.writer.u53(0);
-			expect((await withTimeout(pair.transport.closed, 100, "second AUTH did not close")).closeCode).toBe(
-				SessionCode.ProtocolViolation,
-			);
+			expect(
+				(await withTimeout(pair.transport.closed, Nano.fromMilli(Milli(100)), "second AUTH did not close"))
+					.closeCode,
+			).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			spy.mockRestore();
 			pair?.client.abort();
@@ -523,9 +597,10 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH 
 		});
 		const added = pair.client.auth.add("bad").catch(() => undefined);
 		try {
-			expect((await withTimeout(pair.transport.closed, 100, "malformed AUTH did not close")).closeCode).toBe(
-				SessionCode.ProtocolViolation,
-			);
+			expect(
+				(await withTimeout(pair.transport.closed, Nano.fromMilli(Milli(100)), "malformed AUTH did not close"))
+					.closeCode,
+			).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			spy.mockRestore();
 			pair.client.abort();
@@ -579,9 +654,15 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH 
 					if (lite) await LiteMessage.encode(stream.writer, body, { id });
 					else await IetfMessage.encode(stream.writer, body, id);
 				}
-				expect((await withTimeout(pair.transport.closed, 100, "malformed AUTH did not close")).closeCode).toBe(
-					SessionCode.ProtocolViolation,
-				);
+				expect(
+					(
+						await withTimeout(
+							pair.transport.closed,
+							Nano.fromMilli(Milli(100)),
+							"malformed AUTH did not close",
+						)
+					).closeCode,
+				).toBe(SessionCode.ProtocolViolation);
 			} finally {
 				spy.mockRestore();
 				pair?.client.abort();
@@ -611,7 +692,13 @@ describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH request IDs %s", (
 				const added = (client ? pair.client : pair.server).auth.add("bad ID").catch(() => undefined);
 				try {
 					expect(
-						(await withTimeout(pair.transport.closed, 100, "invalid AUTH ID left session open")).closeCode,
+						(
+							await withTimeout(
+								pair.transport.closed,
+								Nano.fromMilli(Milli(100)),
+								"invalid AUTH ID left session open",
+							)
+						).closeCode,
 					).toBe(SessionCode.InvalidRequestId);
 				} finally {
 					spy.mockRestore();
@@ -641,7 +728,13 @@ for (const [protocol, version] of [
 				trackName: "video",
 			}).encode(writer, version);
 			expect(
-				(await withTimeout(pair.transport.closed, 100, "cross-request reuse left session open")).closeCode,
+				(
+					await withTimeout(
+						pair.transport.closed,
+						Nano.fromMilli(Milli(100)),
+						"cross-request reuse left session open",
+					)
+				).closeCode,
 			).toBe(SessionCode.InvalidRequestId);
 		} finally {
 			pair.client.abort();

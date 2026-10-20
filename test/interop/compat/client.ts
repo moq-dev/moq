@@ -12,6 +12,11 @@ import { connect } from "./transport";
 // API both have: the group and frame primitives and the snapshot decoder, not the consumers above
 // them, whose shapes follow the checkout.
 
+// The released packages brand units under `Moq.Time`, the checkout's under @moq/clock: both are
+// plain numbers at runtime, so cast rather than call either brand.
+type FrameMicros = Parameters<typeof Container.Legacy.encodeFrame>[1];
+type TimestampMicros = Parameters<typeof Moq.Time.Timestamp.fromMicros>[0];
+
 /** Find the catalog's first video rendition, reading updates until one has it. */
 async function video(bc: Moq.Broadcast.Consumer): Promise<[string, Catalog.VideoConfig]> {
 	const track = bc.track("catalog.json").subscribe({ priority: Catalog.PRIORITY.catalog });
@@ -123,7 +128,7 @@ if (command === "sign") {
 	writeFileSync(args[0], JSON.stringify(catalog));
 	writeFileSync(
 		args[1],
-		Container.Legacy.encodeFrame(new TextEncoder().encode("compat-frame"), Moq.Time.Micro(1000001)),
+		Container.Legacy.encodeFrame(new TextEncoder().encode("compat-frame"), 1000001 as FrameMicros),
 	);
 } else if (command === "publish") {
 	install();
@@ -139,15 +144,18 @@ if (command === "sign") {
 	// Stopped by the harness with SIGTERM: close, so the relay sees a close rather than timing it out.
 	process.once("SIGTERM", () => void connection.close());
 	console.log("published");
-	// `demand()` replaced the producer's own `used` after @moq/net 0.4.2, and this one
-	// client runs against both packages.
-	type Used = { peek(): boolean; changed(): Promise<unknown> };
-	const used: Used = "demand" in track ? track.demand().used : (track as unknown as { used: Used }).used;
-	while (!used.peek()) await used.changed();
+	// `demand()` replaced the producer's own `used` after @moq/net 0.4.2, then `wanted`
+	// replaced `demand().used`, and this one client runs against each package.
+	type Watch = { peek(): unknown; changed(): Promise<unknown> };
+	const demand = ("demand" in track ? track.demand() : track) as unknown as { used?: Watch; wanted?: Watch };
+	const watch = demand.wanted ?? demand.used;
+	if (!watch) throw new Error("track has no demand");
+	const wanted = () => (demand.wanted ? watch.peek() !== undefined : watch.peek() === true);
+	while (!wanted()) await watch.changed();
 	const group = track.appendGroup();
 	group.writeFrame({
 		payload: new TextEncoder().encode("compat-fetch"),
-		timestamp: Moq.Time.Timestamp.fromMicros(Moq.Time.Micro(1)),
+		timestamp: Moq.Time.Timestamp.fromMicros(1 as TimestampMicros),
 	});
 	group.close();
 	await connection.closed;

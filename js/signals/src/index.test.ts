@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano, Second } from "@moq/clock";
 import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
 const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
@@ -552,16 +553,8 @@ describe("Effect", () => {
 		let lateAbort: boolean | undefined;
 		let immediate: boolean | undefined;
 
-		// Fire the 5s timer by hand instead of waiting five real seconds for it.
-		let elapsed5s: (() => void) | undefined;
-		const realSetTimeout = globalThis.setTimeout;
-		const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
-			if (ms === 5000) {
-				elapsed5s = fn;
-				return 0 as unknown as ReturnType<typeof setTimeout>;
-			}
-			return realSetTimeout(fn, ms);
-		}) as typeof setTimeout);
+		const clock = new Manual();
+		const restore = clock.install();
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 
 		const effect = new Effect((e) => {
@@ -592,9 +585,7 @@ describe("Effect", () => {
 			expect(runs).toBe(1); // parked awaiting the task
 
 			// Five seconds pass. The warning fires, but the next run must stay shut.
-			expect(elapsed5s).toBeDefined();
-			elapsed5s?.();
-			await settle();
+			await clock.advanceAsync(Nano.fromSecond(Second(5)));
 			expect(runs).toBe(1);
 			expect(warn).toHaveBeenCalled();
 
@@ -610,7 +601,7 @@ describe("Effect", () => {
 			expect(runs).toBe(2);
 		} finally {
 			effect.close();
-			timer.mockRestore();
+			restore();
 			warn.mockRestore();
 		}
 	});
@@ -623,23 +614,8 @@ describe("Effect", () => {
 		const tick = new Signal(0);
 		const never = Promise.withResolvers<void>(); // deliberately never resolved
 
-		let elapsed5s: (() => void) | undefined;
-		let cleared = false;
-		const realSetTimeout = globalThis.setTimeout;
-		const realClearTimeout = globalThis.clearTimeout;
-		const TIMER = 987 as unknown as ReturnType<typeof setTimeout>;
-
-		const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
-			if (ms === 5000) {
-				elapsed5s = fn;
-				return TIMER;
-			}
-			return realSetTimeout(fn, ms);
-		}) as typeof setTimeout);
-		const clear = spyOn(globalThis, "clearTimeout").mockImplementation(((id?: unknown) => {
-			if (id === TIMER) cleared = true;
-			else realClearTimeout(id as never);
-		}) as typeof clearTimeout);
+		const clock = new Manual();
+		const restore = clock.install();
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 
 		const effect = new Effect((e) => {
@@ -652,23 +628,18 @@ describe("Effect", () => {
 		try {
 			await settle();
 			tick.set(1);
-			await settle();
-			expect(elapsed5s).toBeDefined(); // parked on the task, timer armed
+			await settle(); // parked on the task, timer armed
 
 			effect.close();
 			await settle();
 
-			// The wait let go, so the diagnostic timer was disarmed on the way out.
-			expect(cleared).toBe(true);
-
-			// Even if the timer had already been queued, a closed effect must not be warned about.
-			elapsed5s?.();
+			// The wait let go, so five seconds later a closed effect is not warned about.
+			await clock.advanceAsync(Nano.fromSecond(Second(5)));
 			const warned = warn.mock.calls.some((call) => String(call[0]).includes("spawn is still running"));
 			expect(warned).toBe(false);
 		} finally {
 			effect.close();
-			timer.mockRestore();
-			clear.mockRestore();
+			restore();
 			warn.mockRestore();
 		}
 	});
@@ -879,6 +850,37 @@ describe("Effect", () => {
 		} finally {
 			effect.close();
 			warn.mockRestore();
+		}
+	});
+
+	test("timer, timeout, and interval run on the installed clock until cleanup", async () => {
+		const ms = (value: number) => Nano.fromMilli(Milli(value));
+		const clock = new Manual();
+		const restore = clock.install();
+		const fired: string[] = [];
+		const effect = new Effect();
+		try {
+			effect.timer(() => fired.push("timer"), ms(10));
+			effect.interval(() => fired.push("tick"), ms(4));
+			effect.timeout((child) => child.cleanup(() => fired.push("timeout")), ms(6));
+
+			await clock.advanceAsync(ms(3));
+			expect(fired).toEqual([]);
+			await clock.advanceAsync(ms(1));
+			expect(fired).toEqual(["tick"]);
+			await clock.advanceAsync(ms(2));
+			expect(fired).toEqual(["tick", "timeout"]);
+			await clock.advanceAsync(ms(2));
+			expect(fired).toEqual(["tick", "timeout", "tick"]);
+			await clock.advanceAsync(ms(2));
+			expect(fired).toEqual(["tick", "timeout", "tick", "timer"]);
+
+			effect.close();
+			await clock.advanceAsync(ms(20));
+			expect(fired).toEqual(["tick", "timeout", "tick", "timer"]);
+		} finally {
+			effect.close();
+			restore();
 		}
 	});
 });

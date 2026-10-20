@@ -6,7 +6,6 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from moq_ffi import (
-    MoqAudioProducer,
     MoqBroadcastDynamic,
     MoqBroadcastProducer,
     MoqGroupDemand,
@@ -16,25 +15,17 @@ from moq_ffi import (
     MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
-    MoqVideoProducer,
 )
 
 from ._records import _subscription, _track_info
 from .types import (
-    AudioEncoderInput,
-    AudioEncoderOutput,
-    AudioFrame,
     Frame,
     Route,
     Subscription,
     TrackInfo,
-    VideoEncoderInput,
-    VideoEncoderOutput,
-    VideoFrame,
 )
 
 if TYPE_CHECKING:
-    from .session import Bandwidth, Reservation
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
 
 
@@ -72,7 +63,7 @@ class GroupProducer:
 
 
 class TrackDemand:
-    """A watch-only handle to whether a published track has subscribers.
+    """A watch-only handle to the group a published track's subscribers want next.
 
     Returned by a producer's ``demand()``. Weak: holding it neither keeps the
     track open nor locks the producer, so a wait can park here while the
@@ -88,17 +79,16 @@ class TrackDemand:
         """The name of the track this watches."""
         return self._inner.name()
 
-    def is_used(self) -> bool:
-        """Whether the track has at least one active subscriber right now."""
-        return self._inner.is_used()
+    def wanted(self) -> int | None:
+        """The group subscribers want next, or None while nobody subscribes.
 
-    async def used(self) -> None:
-        """Wait until the track has at least one active subscriber."""
-        await self._inner.used()
+        A value past the newest group asks for a new group now, typically a keyframe.
+        """
+        return self._inner.wanted()
 
-    async def unused(self) -> None:
-        """Wait until the track has no active subscribers."""
-        await self._inner.unused()
+    async def wanted_changed(self) -> int | None:
+        """Wait for ``wanted`` to change and return it. The first call returns at once."""
+        return await self._inner.wanted_changed()
 
 
 class TrackProducer:
@@ -289,127 +279,6 @@ class TrackDynamic:
         self._inner.cancel()
 
 
-class AudioProducer:
-    """Publish raw PCM and let libopus encode it on the way out.
-
-    Built via :meth:`BroadcastProducer.encode_audio`. PCM layout
-    (format / sample rate / channels / bitrate / frame duration) is
-    fixed at construction; each :meth:`write` call passes only bytes
-    and a presentation timestamp.
-    """
-
-    def __init__(self, inner: MoqAudioProducer) -> None:
-        self._inner = inner
-
-    @property
-    def name(self) -> str:
-        """The audio track name."""
-        return self._inner.name()
-
-    def demand(self) -> TrackDemand:
-        """A watch-only handle to whether this audio track has subscribers."""
-        return TrackDemand(self._inner.demand())
-
-    async def used(self) -> None:
-        """Wait until this audio track has at least one active subscriber. Prefer :meth:`demand`."""
-        await self._inner.used()
-
-    async def unused(self) -> None:
-        """Wait until this audio track has no active subscribers. Prefer :meth:`demand`."""
-        await self._inner.unused()
-
-    def reanchor(self) -> None:
-        """Re-anchor the timeline to the next frame after an idle gap."""
-        self._inner.reanchor()
-
-    def write(self, frame: AudioFrame) -> None:
-        """Push one frame of PCM in the configured input format."""
-        self._inner.write(frame)
-
-    def reservation(self) -> Reservation | None:
-        """This encoder's bandwidth reservation, if published against a session allocator."""
-        inner = self._inner.reservation()
-        if inner is None:
-            return None
-        from .session import Reservation as ReservationType
-
-        return ReservationType(inner)
-
-    def finish(self) -> None:
-        """Flush any pending samples and finalize the track."""
-        self._inner.finish()
-
-
-class VideoProducer:
-    """Publish raw pictures and let a native encoder compress them on the way out.
-
-    Built via :meth:`BroadcastProducer.encode_video`. Pixel format,
-    resolution, and framerate are fixed at construction; each
-    :meth:`write` call passes only pixels and a presentation timestamp.
-    """
-
-    def __init__(self, inner: MoqVideoProducer) -> None:
-        self._inner = inner
-
-    @property
-    def name(self) -> str:
-        """The video track name."""
-        return self._inner.name()
-
-    def demand(self) -> TrackDemand:
-        """A watch-only handle to whether this video track has subscribers."""
-        return TrackDemand(self._inner.demand())
-
-    async def used(self) -> None:
-        """Wait until this video track has at least one active subscriber. Prefer :meth:`demand`."""
-        await self._inner.used()
-
-    async def unused(self) -> None:
-        """Wait until this video track has no active subscribers. Prefer :meth:`demand`."""
-        await self._inner.unused()
-
-    def write(self, frame: VideoFrame) -> None:
-        """Encode and publish one frame in the configured input format.
-
-        A hardware encoder pipelines, so a call that puts nothing on the wire
-        is normal rather than an error.
-        """
-        self._inner.write(frame)
-
-    def cut(self) -> None:
-        """Start a new group at the next written frame.
-
-        Optional: the encoder keyframes every ``gop`` frames on its own, and
-        each of those cuts a group, so a subscriber can always join without
-        this. Reach for it only to place the boundaries yourself. Raises if
-        the selected encoder cannot force a keyframe; nothing is queued then
-        and groups keep their interval.
-        """
-        self._inner.cut()
-
-    def set_bitrate(self, bitrate: int) -> None:
-        """Retune the live encoder, in bits per second.
-
-        Cheap enough to drive from a congestion controller: no keyframe is
-        forced. Raises if this backend cannot retune while running. That is
-        not fatal: the encoder keeps its current rate.
-        """
-        self._inner.set_bitrate(bitrate)
-
-    def reservation(self) -> Reservation | None:
-        """This encoder's bandwidth reservation, if published against a session allocator."""
-        inner = self._inner.reservation()
-        if inner is None:
-            return None
-        from .session import Reservation as ReservationType
-
-        return ReservationType(inner)
-
-    def finish(self) -> None:
-        """Flush any frames the codec is holding and finalize the track."""
-        self._inner.finish()
-
-
 class BroadcastDynamic:
     """Async source of tracks requested by subscribers.
 
@@ -474,45 +343,6 @@ class BroadcastProducer:
     def unannounce(self) -> None:
         """Retract this broadcast's advertisement, if any, from local consumers and peers alike."""
         self._inner.unannounce()
-
-    def encode_audio(
-        self,
-        name: str,
-        input: AudioEncoderInput,
-        output: AudioEncoderOutput,
-        *,
-        bandwidth: Bandwidth | None = None,
-    ) -> AudioProducer:
-        """Publish a raw-audio track with an in-process encoder.
-
-        Select the codec with ``moq.AudioCodec.opus()`` or
-        ``moq.AudioCodec.aac()``, placed in ``output``.
-
-        Pass ``bandwidth`` to reserve this track's bitrate against the session's
-        allocator so a co-resident video encoder sizes itself against what is left.
-        """
-        return AudioProducer(
-            self._inner.encode_audio(name, input, output, None if bandwidth is None else bandwidth._inner)
-        )
-
-    def encode_video(
-        self,
-        input: VideoEncoderInput,
-        output: VideoEncoderOutput,
-        *,
-        bandwidth: Bandwidth | None = None,
-    ) -> VideoProducer:
-        """Publish a raw-video track with an in-process H.264/H.265 encoder.
-
-        Set ``output.track`` to choose the track name; otherwise one is derived
-        from the codec (``.avc3`` / ``.hev1``). The catalog rendition is
-        published immediately so subscribers can discover it before the first
-        frame exists.
-
-        Pass ``bandwidth`` to reserve this track's configured bitrate and follow
-        the grant.
-        """
-        return VideoProducer(self._inner.encode_video(input, output, None if bandwidth is None else bandwidth._inner))
 
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track

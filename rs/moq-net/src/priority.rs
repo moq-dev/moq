@@ -99,6 +99,22 @@ impl PartialOrd for Priority {
 	}
 }
 
+/// A stream's send order within its subscription's send group, where higher goes first.
+///
+/// The [`Priority`] ranking minus the parts the group itself carries: the group sequence in
+/// the subscription's `order`, then a group's first stream ahead of a later `start` in the
+/// same group. The low bit only splits a stream from the start of its group (`start == 0`)
+/// from the rest, which is the joining prefix beside the live stream; any other two streams
+/// of one group share. Sequences are wire varints below 2^62, so doubling one fits.
+pub fn in_group(group: u64, start: u64, order: Order) -> i64 {
+	let group = i64::try_from(group).unwrap_or(i64::MAX).saturating_mul(2);
+	let group = match order {
+		Order::Descending => group,
+		Order::Ascending => -group,
+	};
+	group.saturating_add(i64::from(start == 0))
+}
+
 #[derive(Debug, Clone)]
 struct PriorityItem {
 	id: usize,
@@ -837,7 +853,7 @@ mod tests {
 		assert_eq!(low_track_high_group.current(), 4); // track=50, group=100
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_watch_notification_on_overflow_promotion() {
 		let queue = PriorityQueue::default();
 
@@ -849,10 +865,10 @@ mod tests {
 		assert_eq!(overflow_item.current(), u8::MAX);
 
 		// Spawn task to wait for promotion from overflow
-		let task = moq_net_sim::spawn(async move { overflow_item.next().await });
+		let task = moq_clock::sim::spawn(async move { overflow_item.next().await });
 
 		// Give the task time to start waiting
-		moq_net_sim::sleep(std::time::Duration::from_millis(10)).await;
+		moq_clock::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Drop highest priority item, which should promote from overflow
 		fillers.remove(0);
@@ -954,7 +970,7 @@ mod tests {
 		assert_eq!(handles[1].current(), 0);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_notification_on_demotion_to_overflow() {
 		let queue = PriorityQueue::default();
 
@@ -966,9 +982,9 @@ mod tests {
 		assert_eq!(at_edge.current(), 254);
 
 		// Spawn task to wait for demotion notification
-		let task = moq_net_sim::spawn(async move { at_edge.next().await });
+		let task = moq_clock::sim::spawn(async move { at_edge.next().await });
 
-		moq_net_sim::sleep(std::time::Duration::from_millis(10)).await;
+		moq_clock::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Insert very high priority item, kicking at_edge to overflow
 		let _high = queue.insert(live(255, 1000));
@@ -1021,7 +1037,7 @@ mod tests {
 		assert_eq!(s1_g1.current(), 3);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_steer_track_notifies_other_handles() {
 		let queue = PriorityQueue::default();
 
@@ -1032,8 +1048,8 @@ mod tests {
 		assert_eq!(h_low.current(), 1);
 
 		// Wait for a change notification on h_low while another handle's steer runs.
-		let task = moq_net_sim::spawn(async move { h_low.next().await });
-		moq_net_sim::sleep(std::time::Duration::from_millis(10)).await;
+		let task = moq_clock::sim::spawn(async move { h_low.next().await });
+		moq_clock::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Demote h_high below h_low.
 		h_high.steer(10, Order::Descending);
@@ -1131,7 +1147,7 @@ mod tests {
 		assert_eq!(low.current(), 2);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_steer_track_notifies_swapped_overflow_item() {
 		let queue = PriorityQueue::default();
 
@@ -1144,8 +1160,8 @@ mod tests {
 		let mut f1 = fillers.remove(0);
 		assert_eq!(f1.current(), u8::MAX);
 
-		let task = moq_net_sim::spawn(async move { f1.next().await });
-		moq_net_sim::yield_now().await;
+		let task = moq_clock::sim::spawn(async move { f1.next().await });
+		moq_clock::sim::yield_now().await;
 
 		// Demoting top below every filler swaps it with f1 in overflow.
 		top.steer(0, Order::Descending);

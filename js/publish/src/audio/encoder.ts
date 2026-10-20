@@ -2,7 +2,6 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import {
 	type Computed,
 	Effect,
@@ -24,17 +23,18 @@ import type { CodecMime, Kind } from "./types";
 import { sourceKind } from "./types";
 
 const OPUS_BITRATE_PER_CHANNEL = 32_000;
-const OPUS_FRAME_DURATION = Time.Milli(20);
+const OPUS_FRAME_DURATION = Milli(20);
 // The only frame durations libopus (and so WebCodecs) will encode, in ms.
 const OPUS_FRAME_DURATIONS = [2.5, 5, 10, 20, 40, 60];
 const AAC_BITRATE_PER_CHANNEL = 64_000;
 const AAC_FRAME_SAMPLES = 1024; // AAC-LC encodes a fixed 1024 samples per frame.
 // Long enough that a volume change doesn't click, short enough that a mute is silent almost at once.
-const FADE = Time.Milli(50);
+const FADE = Milli(50);
 
 // The WebCodecs/MP4 codec string for AAC-LC. "aac" is our user-facing shorthand.
 const AAC_CODEC = "mp4a.40.2";
 
+import { Micro, Milli } from "@moq/clock";
 import { Framer } from "./framer";
 
 // Selects the audio codec and its encoder settings. Either the bare codec name (all defaults) or an
@@ -59,9 +59,9 @@ export type OpusConfig = {
 	mime: "opus";
 
 	bitrate?: number; // bits/sec, defaults to channelCount * 32kbps
-	// The type carries the unit (ms): build with Time.Milli(20). Opus takes exactly 2.5, 5, 10, 20,
+	// The type carries the unit (ms): build with Milli(20). Opus takes exactly 2.5, 5, 10, 20,
 	// 40, or 60 ms, and defaults to 20.
-	frameDuration?: Time.Milli;
+	frameDuration?: Milli;
 	complexity?: number; // 0-10, higher is better quality but more CPU
 	packetlossperc?: number; // 0-100, expected loss the encoder optimizes for
 	useinbandfec?: boolean; // in-band forward error correction
@@ -102,13 +102,13 @@ export type EncoderProps = Inputs<EncoderInput> & {
 
 	// How long a volume change ramps for, so a mute is silent once it passes. Defaults to 50 ms; 0
 	// steps at once.
-	fade?: Time.Milli | Signal<Time.Milli>;
+	fade?: Milli | Signal<Milli>;
 
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
 
 	// The minimum audio carried by each group. Defaults to 20 ms; zero puts every frame in its own group.
-	groupDuration?: Time.Milli | Signal<Time.Milli>;
+	groupDuration?: Milli | Signal<Milli>;
 };
 
 type EncoderOutput = {
@@ -149,7 +149,7 @@ export class Encoder {
 	/** Linear gain applied before encoding, where 1 is unity. Each change ramps over {@link fade}. */
 	volume: Signal<number>;
 	/** How long a volume change ramps for, whatever its size. 0 steps at once; a negative or non-finite fade refuses the rendition. */
-	fade: Signal<Time.Milli>;
+	fade: Signal<Milli>;
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
 	/**
@@ -157,7 +157,7 @@ export class Encoder {
 	 * relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group. A
 	 * negative or non-finite duration refuses the rendition.
 	 */
-	groupDuration: Signal<Time.Milli>;
+	groupDuration: Signal<Milli>;
 
 	/**
 	 * The capture supplying this rendition, or undefined while none is wired.
@@ -188,23 +188,23 @@ export class Encoder {
 
 	// The current subscription's track and the producer writing into it, or undefined without demand.
 	// `start` is the open group's first timestamp, undefined until a frame opens one.
-	#live: { track: Moq.Track.Producer; producer: Container.Legacy.Producer; start?: Time.Micro } | undefined;
+	#live: { track: Moq.Track.Producer; producer: Container.Legacy.Producer; start?: Micro } | undefined;
 
 	// Where the next frame submitted to the AudioEncoder starts, i.e. the exclusive end of the
 	// newest one, where an epoch's discontinuity marker goes. Cleared once the marker is written.
-	#next: Time.Micro | undefined;
+	#next: Micro | undefined;
 
 	// The newest epoch's marker. The AudioEncoder outlives a demand gap too brief to skip a frame,
 	// so chunks it still held when demand disappeared surface after the resume; they sit below the
 	// marker and are dropped.
-	#floor: Time.Micro | undefined;
+	#floor: Micro | undefined;
 
 	// The last valid fade, which the read loop ramps with. #runConfig refuses the rendition on an
 	// invalid one, so a bad value never reaches the gain.
-	#fade: Time.Milli = FADE;
+	#fade: Milli = FADE;
 
 	// The last valid group duration, validated by #runConfig the same way as #fade.
-	#groupDuration = Time.Micro(20_000);
+	#groupDuration = Micro(20_000);
 
 	// How many resolution runs threw for their current inputs (e.g. invalid codec settings), so no
 	// config is coming until one reruns.
@@ -252,7 +252,7 @@ export class Encoder {
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.fade = Signal.from(props?.fade ?? FADE);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
-		this.groupDuration = Signal.from(props?.groupDuration ?? Time.Milli(20));
+		this.groupDuration = Signal.from(props?.groupDuration ?? Milli(20));
 
 		// Only the capture graph has a node to expose.
 		this.#signals.run((effect) => {
@@ -463,7 +463,7 @@ export class Encoder {
 		const groupDuration = effect.get(this.groupDuration);
 		if (!Number.isFinite(groupDuration) || groupDuration < 0)
 			throw new Error(`audio group duration must be a finite, non-negative number of ms: ${groupDuration}`);
-		this.#groupDuration = Time.Micro.fromMilli(groupDuration);
+		this.#groupDuration = Micro.fromMilli(groupDuration);
 
 		const capture = effect.get(this.in.capture);
 		const captured = capture ? effect.get(capture.out.format) : undefined;
@@ -506,7 +506,7 @@ export class Encoder {
 				});
 				encoder.configure(encoderConfig);
 				const samples = Math.round(
-					(encoderConfig.sampleRate * (resolved.frameDuration ?? Time.Micro(20_000))) / 1_000_000,
+					(encoderConfig.sampleRate * (resolved.frameDuration ?? Micro(20_000))) / 1_000_000,
 				);
 				const frame = new AudioData({
 					format: "f32-planar",
@@ -644,7 +644,7 @@ export class Encoder {
 
 						const live = this.#live;
 						if (!live) return;
-						const timestamp = frame.timestamp as Time.Micro;
+						const timestamp = frame.timestamp as Micro;
 						if (this.#floor !== undefined && timestamp < this.#floor) return;
 
 						// Every audio frame decodes on its own, so any of them can open a group: the
@@ -676,7 +676,7 @@ export class Encoder {
 				}
 
 				// Where the next frame starts if it continues the last one encoded.
-				let contiguous: Time.Micro | undefined;
+				let contiguous: Micro | undefined;
 
 				const pipeline: Pipeline = {
 					channelCount: config.numberOfChannels,
@@ -692,7 +692,7 @@ export class Encoder {
 
 							// Round to whole microseconds once, here, so a chunk's timestamp and the marker
 							// placed at the next frame's start agree exactly.
-							const timestamp = Math.round(data.timestamp) as Time.Micro;
+							const timestamp = Math.round(data.timestamp) as Micro;
 
 							// Chrome stamps encoder output from the first input's timestamp plus the samples
 							// encoded since, ignoring any later jump. Across a gap (demand, or a capture
@@ -725,7 +725,7 @@ export class Encoder {
 							encoder.encode(frame);
 							frame.close();
 							// One input can complete several frames, and the framer has already advanced past all of them.
-							contiguous = Math.round(frames[i + 1]?.timestamp ?? framer.next) as Time.Micro;
+							contiguous = Math.round(frames[i + 1]?.timestamp ?? framer.next) as Micro;
 							this.#next = contiguous;
 						}
 					},
@@ -769,7 +769,7 @@ type Resolved = {
 	catalog: Catalog.AudioConfig;
 
 	/** The exact encoded frame duration, or undefined for a codec whose frame is a fixed sample count. */
-	frameDuration?: Time.Micro;
+	frameDuration?: Micro;
 };
 
 /**
@@ -819,7 +819,7 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 			bitrate: Catalog.u53(codec.bitrate ?? captured.channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
 		},
-		frameDuration: Time.Micro.fromMilli(frameDuration),
+		frameDuration: Micro.fromMilli(frameDuration),
 	};
 }
 
@@ -843,7 +843,7 @@ function createFramer(resolved: Resolved, sampleRate: number): Framer {
 	return new Framer({
 		sampleRate,
 		channels: config.numberOfChannels,
-		size: { duration: resolved.frameDuration ?? Time.Micro.fromMilli(OPUS_FRAME_DURATION) },
+		size: { duration: resolved.frameDuration ?? Micro.fromMilli(OPUS_FRAME_DURATION) },
 	});
 }
 

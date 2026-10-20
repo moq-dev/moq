@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { Time } from "@moq/net";
+import { Milli } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 import { Emitter } from "./emitter";
@@ -38,7 +38,7 @@ afterEach(() => {
 	else Reflect.deleteProperty(globalThis, "GainNode");
 });
 
-async function setup(fade?: Time.Milli) {
+async function setup(fade?: Milli) {
 	const context = { currentTime: 10, destination: {} };
 	const source = { out: { root: new Signal({ context, connect: () => {} }) } } as unknown as Decoder;
 	const volume = new Signal(0.5);
@@ -52,7 +52,7 @@ async function settle(): Promise<void> {
 }
 
 test("ramps a volume change over the fade", async () => {
-	const { emitter, volume, node } = await setup(Time.Milli(50));
+	const { emitter, volume, node } = await setup(Milli(50));
 	try {
 		node.calls.length = 0;
 		volume.set(0);
@@ -68,7 +68,7 @@ test("ramps a volume change over the fade", async () => {
 });
 
 test("steps at once with no fade", async () => {
-	const { emitter, volume, node } = await setup(Time.Milli(0));
+	const { emitter, volume, node } = await setup(Milli(0));
 	try {
 		node.calls.length = 0;
 		volume.set(0);
@@ -88,13 +88,13 @@ test("refuses an invalid fade", async () => {
 	const { emitter, node } = await setup();
 	try {
 		node.calls.length = 0;
-		emitter.fade.set(Time.Milli(-1));
+		emitter.fade.set(-1 as Milli);
 		await settle();
 		expect(node.calls.filter(([method]) => method === "ramp")).toEqual([]);
 		expect(error).toHaveBeenCalled();
 
 		error.mockClear();
-		emitter.fade.set(Time.Milli(Number.POSITIVE_INFINITY));
+		emitter.fade.set(Number.POSITIVE_INFINITY as Milli);
 		await settle();
 		expect(node.calls.filter(([method]) => method === "ramp")).toEqual([]);
 		expect(error).toHaveBeenCalled();

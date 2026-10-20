@@ -25,14 +25,16 @@ pub(super) async fn read(
 	let name = section
 		.timelines
 		.get(track)
-		.ok_or_else(|| moq_mux::Error::TimelineMissing(track.to_string()))?;
+		.ok_or_else(|| moq_mux::Error::TimelineMissing(track.to_string()))?
+		.track
+		.as_str();
 	let scale = moq_net::Timescale::new(section.timescale as u64)
 		.map_err(|_| moq_mux::Error::InvalidTimescale(section.timescale))?;
 	let track = broadcast.track(name)?;
 	// Effectively unbounded, so no history group is skipped as late: 2^53 - 1 ms is the largest
 	// delay every implementation decodes (js/net reads it as a safe integer).
 	let subscription = moq_net::track::Subscription::default()
-		.with_start(moq_net::track::Position::group(0))
+		.with_groups(0..)
 		.with_max_delay(Duration::from_millis((1_u64 << 53) - 1));
 	let mut live = track.subscribe(subscription).await?.ordered();
 	let mut decoder = window::Decoder::<Record>::new(window::ConsumerConfig::default().with_compression(true));
@@ -44,13 +46,16 @@ pub(super) async fn read(
 		let finished = head.is_none();
 		// A finished track can have no groups left in cache. Its high-water mark
 		// still tells us which stored groups must be fetched before returning.
-		let end = head.map(|group| group.sequence).or_else(|| track.latest());
+		let end = match head {
+			Some(group) => Some(group.sequence),
+			None => live.largest().await.map(|position| position.group),
+		};
 		while end.is_some_and(|end| next <= end) {
 			let mut group = match track.fetch_group(next, None).await {
 				Ok(group) => group,
 				// Retention prunes a recording's start, which this path cannot list from yet.
 				Err(moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound)) if next == 0 => {
-					return Err(crate::Error::HistoryPruned(name.clone()));
+					return Err(crate::Error::HistoryPruned(name.to_string()));
 				}
 				Err(err) => return Err(err.into()),
 			};

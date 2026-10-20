@@ -1,15 +1,17 @@
 /**
- * A reconnecting, shareable connection: one origin and one reconnect loop per relay URL.
+ * A reconnecting, shareable connection: one origin and reconnect loop per URL and version list.
  *
  * @module
  */
+
+import { Milli, Nano } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
-import * as Time from "../time.ts";
 import { Follow } from "../util/observed.ts";
+import { after } from "../util/timer.ts";
 import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import {
@@ -17,6 +19,7 @@ import {
 	type ConnectProps as ConnectPropsType,
 	certificateHash,
 	connect,
+	normalizeVersions,
 	type WebSocketProps as WebSocketPropsType,
 	type WebTransportProps as WebTransportPropsType,
 } from "./connect.ts";
@@ -24,12 +27,12 @@ import type { Established as EstablishedType } from "./established.ts";
 import type { Extensions as ExtensionsType } from "./extensions.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { GoawayProps, Redirect as RedirectType } from "./goaway.ts";
-import { Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
+import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
 
 /** How long an unreferenced shared connection lingers before it actually closes. */
-const LINGER_MS = Time.Milli(2000);
+const LINGER_MS = Milli(2000);
 
 /** Options for {@link Connection}. */
 export interface ConnectionProps {
@@ -46,14 +49,17 @@ export interface ConnectionProps {
 	 * everything it discovered are still warm when the new owner asks for them. The longest
 	 * linger requested by any handle sharing the connection wins.
 	 */
-	linger?: Time.Milli;
+	linger?: Milli;
 
 	/**
-	 * Share a pooled transport keyed on the URL. By default, options specific to this
-	 * handle use a private reconnect loop; otherwise connections share by URL.
+	 * Share a pooled transport keyed on the URL and ordered versions. By default, options specific to this
+	 * handle use a private reconnect loop; otherwise connections share by URL and versions.
 	 * Explicit `true` refuses options a pool cannot honor.
 	 */
 	share?: boolean;
+
+	/** Protocol versions to offer, most preferred first, spelled like `moq-lite-06`; connections pool by URL and this list. */
+	versions?: readonly string[];
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportPropsType;
@@ -86,7 +92,7 @@ export interface ConnectionProps {
 
 /**
  * A cloneable handle on a MoQ connection: `new Connection({ url })` reconnects and, by
- * default, shares one origin and one reconnect loop with every other handle on that URL.
+ * default, shares one origin and reconnect loop with handles using the same URL and versions.
  *
  * The shared {@link origin} is wired to both directions. Everything the relay announces
  * lands in it, a publish into it is announced to the relay, and a page that publishes and
@@ -200,6 +206,7 @@ export class Connection {
 	 * (plus the linger window) wants them.
 	 */
 	constructor(props?: ConnectionProps) {
+		const versions = normalizeVersions(props);
 		refuse(props);
 		this.#signals = new Effect();
 
@@ -219,7 +226,7 @@ export class Connection {
 		const href = this.#signals.computed((effect) => effect.get(this.url)?.href);
 
 		if (props && (props.share === false || requiresPrivate(props))) {
-			this.#runPrivate(props, href);
+			this.#runPrivate({ ...props, versions }, href);
 			return;
 		}
 
@@ -228,7 +235,7 @@ export class Connection {
 			const key = effect.get(href);
 			if (!key) return;
 
-			const lease = acquire(key, linger);
+			const lease = acquire(key, versions, linger);
 			effect.cleanup(lease.release);
 
 			effect.set(this.#origin, lease.origin, undefined);
@@ -252,6 +259,7 @@ export class Connection {
 			enabled: this.enabled,
 			publish: props.publish ?? (owned ? origin.consume() : undefined),
 			consume: origin,
+			versions: props.versions,
 			webtransport: props.webtransport,
 			websocket: props.websocket,
 			delay: props.delay,
@@ -279,44 +287,20 @@ export class Connection {
 		const producer = new Announce.Producer();
 		const consumer = producer.consume();
 
-		// Closing the consumer closes the shared state, so stop appending after that.
-		let closed = false;
-		void consumer.closed.then(() => {
-			closed = true;
-		});
-
 		// A child of this handle's scope rather than a standalone Effect it merely cleans up
 		// after: the disposer run() hands back also drops itself from the parent, so opening
 		// and closing announcement streams repeatedly does not pile up dead pumps that live
 		// until the whole handle closes.
 		const stop = this.#signals.run((effect) => {
 			const origin = effect.get(this.#origin);
-			if (!origin) return;
-
-			const upstream = origin.announced(scope, options);
-			effect.cleanup(() => upstream.close());
-
-			// Track what this origin announced so a URL switch retracts it; the last
-			// event rides along for the retraction.
-			const active = new Map<Path.Valid, Announce.Announce>();
-
-			effect.spawn(async () => {
-				try {
-					for (;;) {
-						const entry = await effect.race(upstream.next());
-						if (!entry) break;
-						if (entry.kind === "end") active.delete(entry.prefix);
-						else active.set(entry.prefix, entry);
-						producer.append(entry);
-					}
-				} finally {
-					if (!closed) {
-						for (const entry of active.values()) {
-							producer.append({ ...entry, kind: "end" });
-						}
-					}
-				}
-			});
+			if (!origin) {
+				// Like a reconnecting loop's origin: behind while enabled with nothing to deliver.
+				if (effect.get(this.enabled)) producer.behind();
+				else producer.synced();
+				return;
+			}
+			// A URL switch retracts what the old origin announced.
+			pumpAnnounced(effect, origin.announced(scope, options), producer);
 		});
 
 		void consumer.closed.then(stop);
@@ -422,25 +406,32 @@ function requiresPrivate(props: ConnectionProps): boolean {
 
 /** One shared connection and the handles keeping it alive. */
 interface Entry {
-	/** The pool key: the dialed URL, which a GOAWAY redirect moves. */
+	/** The pool key: the dialed URL and versions, moved together on GOAWAY. */
 	key: string;
 	origin: Origin.Producer;
 	connection: Reload;
 	refs: number;
-	linger: Time.Milli;
-	timer?: ReturnType<typeof setTimeout>;
+	linger: Milli;
+	timer?: () => void;
 }
 
 /** The process-wide pool backing {@link Connection}. */
 const pool = new Map<string, Entry>();
 
-/** Take a reference on the shared entry for `key`, creating it on first use. */
-function acquire(key: string, linger?: Time.Milli): Entry & { release: () => void } {
+// Preserve the ordered versions when a redirect moves the URL.
+function poolKey(url: string, versions?: readonly string[]): string {
+	return JSON.stringify([url, versions]);
+}
+
+/** Take a reference on the shared entry, creating it on first use. */
+function acquire(url: string, versions?: readonly string[], linger?: Milli): Entry & { release: () => void } {
+	const key = poolKey(url, versions);
 	let entry = pool.get(key);
 	if (!entry) {
 		const origin = new Origin.Producer();
 		const connection = new Reload({
-			url: new URL(key),
+			url: new URL(url),
+			versions,
 			enabled: true,
 			publish: origin.consume(),
 			consume: origin,
@@ -461,9 +452,11 @@ function acquire(key: string, linger?: Time.Milli): Entry & { release: () => voi
 		// A live entry already at the target wins: this one leaves the pool and serves only
 		// the handles it has until they release it.
 		connection.redirect.subscribe((redirect) => {
-			if (!redirect || redirect.href === created.key) return;
+			if (!redirect) return;
+			const key = poolKey(redirect.href, versions);
+			if (key === created.key) return;
 			if (pool.get(created.key) === created) pool.delete(created.key);
-			created.key = redirect.href;
+			created.key = key;
 			if (!pool.has(created.key)) pool.set(created.key, created);
 		});
 
@@ -472,10 +465,10 @@ function acquire(key: string, linger?: Time.Milli): Entry & { release: () => voi
 	}
 
 	const taken = entry;
-	taken.linger = Time.Milli(Math.max(taken.linger, linger ?? LINGER_MS));
+	taken.linger = Milli(Math.max(taken.linger, linger ?? LINGER_MS));
 	taken.refs += 1;
 	if (taken.timer !== undefined) {
-		clearTimeout(taken.timer);
+		taken.timer();
 		taken.timer = undefined;
 	}
 
@@ -489,14 +482,16 @@ function acquire(key: string, linger?: Time.Milli): Entry & { release: () => voi
 			taken.refs -= 1;
 			if (taken.refs > 0) return;
 
-			taken.timer = setTimeout(() => {
-				if (pool.get(taken.key) === taken) pool.delete(taken.key);
-				taken.connection.close();
-				taken.origin.close();
-			}, taken.linger);
-
 			// Don't hold a Node process open for a connection nobody is using.
-			(taken.timer as { unref?: () => void }).unref?.();
+			taken.timer = after(
+				Nano.fromMilli(taken.linger),
+				() => {
+					if (pool.get(taken.key) === taken) pool.delete(taken.key);
+					taken.connection.close();
+					taken.origin.close();
+				},
+				{ ref: false },
+			);
 		},
 	};
 }
@@ -512,7 +507,7 @@ export function resetShared(): void {
 	const entries = [...pool.values()];
 	pool.clear();
 	for (const entry of entries) {
-		if (entry.timer !== undefined) clearTimeout(entry.timer);
+		entry.timer?.();
 		entry.connection.close();
 		entry.origin.close();
 	}

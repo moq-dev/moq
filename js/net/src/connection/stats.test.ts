@@ -1,9 +1,9 @@
 import { expect, jest, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Effect } from "@moq/signals";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
-import * as Time from "../time.ts";
 import { type AcceptProps, accept as acceptSession, type ConnectProps, connect as connectSession } from "./index.ts";
 import { Reload } from "./reload.ts";
 import { type TransportStats, transportStats } from "./stats.ts";
@@ -33,7 +33,7 @@ test("transportStats maps the W3C dictionary and normalizes a null send rate", a
 			packetsLost: 6,
 		}),
 	);
-	expect(stats.rtt).toBe(Time.Milli(25));
+	expect(stats.rtt).toBe(Milli(25));
 	expect(stats.estimatedSendRate).toBeUndefined();
 	expect(stats.bytesSent).toBe(1);
 	expect(stats.bytesReceived).toBe(2);

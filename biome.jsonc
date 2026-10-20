@@ -61,6 +61,10 @@
 			}
 		}
 	},
+	"html": {
+		// Vue template reads count as uses of script variables.
+		"experimentalFullSupportEnabled": true
+	},
 	"css": {
 		"parser": {
 			"cssModules": false,
@@ -70,7 +74,9 @@
 	},
 	"overrides": [
 		{
-			"includes": ["js/clock/src/**", "!js/clock/src/host.ts"],
+			// Production code reads time through @moq/clock so a Manual clock drives it in tests.
+			// Tests are not swept yet.
+			"includes": ["js/*/src/**", "demo/web/src/**", "!js/clock/src/host.ts", "!**/*.test.ts", "!**/*.test.tsx"],
 			"linter": {
 				"rules": {
 					"style": {

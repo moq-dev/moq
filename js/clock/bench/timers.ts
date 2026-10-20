@@ -13,7 +13,9 @@ for (const scope of ["individual", "shared"]) {
 				try {
 					const start = performance.now();
 					const timers = Array.from({ length: armed }, (_, index) =>
-						sleep(Nano(index < ready ? 1 : 100), aborts[index % aborts.length].signal).catch(() => {}),
+						sleep(Nano(index < ready ? 1 : 100), { signal: aborts[index % aborts.length].signal }).catch(
+							() => {},
+						),
 					);
 					const armedAt = performance.now();
 					clock.advance(Nano(1));

@@ -49,12 +49,6 @@ jobs:
         env:
           CI_BASE: ${{ github.event.merge_group.base_sha }}
 
-      - name: Free disk space
-        if: steps.scope.outputs.needed == 'true'
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         if: steps.scope.outputs.needed == 'true'
         with:
@@ -74,7 +68,7 @@ jobs:
       # Read only: cache.yml warms the R2 cache from `main`, and this job never
       # holds the write key.
       - name: Rust cache
-        if: steps.scope.outputs.needed == 'true'
+        if: steps.scope.outputs.rust == 'true'
         uses: ./.github/actions/rust-cache
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
@@ -122,12 +116,6 @@ jobs:
         env:
           CI_BASE: ${{ github.event.merge_group.base_sha }}
 
-      - name: Free disk space
-        if: steps.scope.outputs.needed == 'true'
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         if: steps.scope.outputs.needed == 'true'
         with:
@@ -144,7 +132,7 @@ jobs:
 
       # Read only, same as the `check` job above.
       - name: Rust cache
-        if: steps.scope.outputs.needed == 'true'
+        if: steps.scope.outputs.rust == 'true'
         uses: ./.github/actions/rust-cache
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
@@ -158,56 +146,4 @@ jobs:
         env:
           CI_BASE: ${{ github.event.merge_group.base_sha }}
           MOQ_STRICT: 1
-          NEXTEST_PROFILE: ci
-
-  drill-sensitivity:
-    name: Drill sensitivity
-    if: github.event.action != 'closed'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
-    # Socket timing is still uncontrolled. Keep this advisory until the drills
-    # use the controlled clock, then remove this and require the stable job name.
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
-      - uses: ./.github/actions/just
-
-      - name: Select mutations
-        id: scope
-        run: just test drill-pr select "$CI_BASE" >> "$GITHUB_OUTPUT"
-        env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
-
-      - name: Free disk space
-        if: steps.scope.outputs.needed == 'true'
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        if: steps.scope.outputs.needed == 'true'
-        with:
-          determinate: false
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
-
-      - name: Rust cache
-        if: steps.scope.outputs.needed == 'true'
-        uses: ./.github/actions/rust-cache
-        with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-
-      - name: Prove sensitivity
-        if: steps.scope.outputs.needed == 'true'
-        run: nix develop --command just test drill-pr run "$CI_BASE"
-        env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
-          MOQ_SHAPER_SEED: "1"
           NEXTEST_PROFILE: ci

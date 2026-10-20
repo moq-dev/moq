@@ -1,3 +1,4 @@
+import { Milli, Nano } from "@moq/clock";
 import { race } from "@moq/signals";
 import { fromTransport, StreamCode, toStreamCode, toTransport } from "./error.ts";
 import { sharedStreamCode } from "./ietf/error.ts";
@@ -51,17 +52,16 @@ const MAX_READ_SIZE = 1024 * 1024 * 64; // don't allocate more than 64MB for a m
  * Options handed to the transport for one outgoing stream.
  *
  * `waitUntilAvailable` waits for the peer's concurrent stream limit to free a slot instead
- * of rejecting with a `QuotaExceededError`, which is what we want for the streams a session
+ * of rejecting the create, which is what we want for the streams a session
  * opens occasionally. `@types/web` doesn't declare it yet, hence the intersection.
  */
-export function sendOptions(options?: OpenOptions): WebTransportSendStreamOptions & { waitUntilAvailable?: boolean } {
+function sendOptions(options?: OpenOptions): WebTransportSendStreamOptions & { waitUntilAvailable?: boolean } {
 	return { sendOrder: options?.sendOrder, waitUntilAvailable: options?.waitUntilAvailable ?? true };
 }
 
 // How long any open may wait for the peer to free a stream slot. Every open needs this,
 // whether or not it asked to wait: an implementation may park an over-limit open rather
 // than rejecting it, and a peer can advertise a stream limit of zero and never raise it.
-// Matches the subscribe budget.
 const OPEN_TIMEOUT_MS = 10_000;
 
 /**
@@ -69,9 +69,14 @@ const OPEN_TIMEOUT_MS = 10_000;
  * the pre-waitUntilAvailable failure after a grace period. A stream arriving after the
  * deadline is discarded, since nobody is waiting for it any more.
  */
-async function openWithin<T>(opening: Promise<T>, timeout: number, discard: (stream: T) => void): Promise<T> {
+async function openWithin<T>(opening: Promise<T>, timeout: number | null, discard: (stream: T) => void): Promise<T> {
+	if (timeout === null) return opening;
 	try {
-		return await withTimeout(opening, timeout, `stream open timed out after ${timeout}ms waiting for a slot`);
+		return await withTimeout(
+			opening,
+			Nano.fromMilli(Milli(timeout)),
+			`stream open timed out after ${timeout}ms waiting for a slot`,
+		);
 	} catch (err: unknown) {
 		opening.then(discard).catch(() => void 0);
 		throw err;
@@ -158,10 +163,9 @@ export interface OpenOptions {
 
 	/**
 	 * Reject if the peer hasn't freed a stream slot within this many milliseconds. Defaults
-	 * to 10s. There is no way to wait indefinitely: a peer can advertise a stream limit of
-	 * zero and never raise it, so every open needs a way out.
+	 * to 10s. Set null only when the caller owns the create deadline.
 	 */
-	timeout?: number;
+	timeout?: number | null;
 
 	/**
 	 * Ask the transport to wait for a stream slot rather than failing when the peer's
@@ -232,7 +236,7 @@ export class Stream {
 	static async open(quic: WebTransport, options: OpenOptions): Promise<Stream> {
 		const { readable, writable } = await openWithin(
 			quic.createBidirectionalStream(sendOptions(options)),
-			options?.timeout ?? OPEN_TIMEOUT_MS,
+			options.timeout === undefined ? OPEN_TIMEOUT_MS : options.timeout,
 			(stream) => {
 				void stream.writable.abort().catch(() => void 0);
 				void stream.readable.cancel().catch(() => void 0);
@@ -813,7 +817,7 @@ export class Writer {
 	static async open(quic: WebTransport, options: OpenOptions): Promise<Writer> {
 		const writable = await openWithin(
 			quic.createUnidirectionalStream(sendOptions(options)) as Promise<WritableStream<Uint8Array>>,
-			options?.timeout ?? OPEN_TIMEOUT_MS,
+			options.timeout === undefined ? OPEN_TIMEOUT_MS : options.timeout,
 			(stream) => void stream.abort().catch(() => void 0),
 		);
 

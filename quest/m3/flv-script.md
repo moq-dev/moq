@@ -9,10 +9,9 @@ FLV script tags survive RTMP and FLV import instead of being discarded, so
 
 Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no named consumer for timed metadata.
 
-`rs/moq-mux/src/container/flv/import.rs` matches `TAG_SCRIPT => {}` and moves
-on, which drops every AMF data message an encoder sends. `onMetaData` is the
-one every RTMP publisher emits, and applications routinely push their own cues
-through the same channel.
+`rs/moq-mux/src/container/flv/import.rs` counts discarded `TAG_SCRIPT`
+payloads and warns on the first drop. `onMetaData` and application cues still
+need carriage; logging their loss does not implement this quest.
 
 Carry raw tag payloads without decoding AMF into a fixed vocabulary. Publish
 when received on independently sequenced metadata groups, with event time on

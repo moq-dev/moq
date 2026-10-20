@@ -1,5 +1,5 @@
+import { type Micro, Nano, now } from "@moq/clock";
 import * as Util from "@moq/hang/util";
-import type { Time } from "@moq/net";
 import {
 	type Computed,
 	Effect,
@@ -19,7 +19,7 @@ import { isSampleSource, normalizeSource, type SampleSource, type Source, type S
 /** A chunk of planar PCM, timestamped against the shared wall clock. */
 export interface AudioFrame {
 	/** When the first sample was captured. */
-	timestamp: Time.Micro;
+	timestamp: Micro;
 
 	/** One buffer per channel, all the same length. */
 	channels: Float32Array[];
@@ -245,7 +245,7 @@ export class Capture {
 					channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
 					// Stamp audio against the same wall clock as video (see video/processor.ts), so both
 					// tracks share an epoch and stay in sync.
-					processorOptions: { zero: performance.now() * 1000 },
+					processorOptions: { zero: Nano.toMicro(Nano(now())) },
 				});
 				// The edge originates at root, so only root can remove it; the worklet has no outputs.
 				root.connect(worklet);
@@ -307,7 +307,7 @@ function planar(): TransformStream<AudioData, AudioFrame> {
 				channels.push(plane);
 			}
 
-			controller.enqueue({ timestamp: data.timestamp as Time.Micro, channels });
+			controller.enqueue({ timestamp: data.timestamp as Micro, channels });
 			data.close();
 		},
 	});

@@ -22,6 +22,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -53,14 +54,26 @@ constexpr uint32_t AUDIO_FRAME_DURATION_US = 2'500;
 constexpr uint64_t AUDIO_BATCH_US = 20'000;
 constexpr size_t AUDIO_BATCH_SAMPLES = AUDIO_RATE * AUDIO_BATCH_US / 1'000'000;
 
+// The open session, which a failure closes so the relay sees a close rather than timing the
+// connection out.
+std::shared_ptr<moq::Session> open_session;
+
+[[noreturn]] void exit_failed() {
+    // Taken first, so a failure while closing cannot close it again.
+    if (auto session = std::exchange(open_session, nullptr)) {
+        session->shutdown().wait_for(std::chrono::seconds(5));
+    }
+    std::exit(1);
+}
+
 [[noreturn]] void fail(const char *what, const moq::Error &error) {
     std::fprintf(stderr, "error: %s: %s\n", what, error.to_string().c_str());
-    std::exit(1);
+    exit_failed();
 }
 
 [[noreturn]] void fail(const char *what) {
     std::fprintf(stderr, "error: %s\n", what);
-    std::exit(1);
+    exit_failed();
 }
 
 template <typename T>
@@ -91,12 +104,14 @@ std::shared_ptr<moq::Session> connect(const std::string &url, Clock::time_point 
     moq::ClientConfig config;
     config.tls.insecure = true;
     auto client = ok(moq::Client::init(config), "client init");
-    return until(client->connect(url), deadline, "connect");
+    open_session = until(client->connect(url), deadline, "connect");
+    return open_session;
 }
 
 // Closes the session and waits for the close to reach the relay. `cancel` would return at
 // once, and stopping the runtime right after it can leave the relay to time the connection out.
 void close_session(const std::shared_ptr<moq::Session> &session) {
+    open_session = nullptr;
     until(session->shutdown(), Clock::now() + std::chrono::seconds(5), "session shutdown");
 }
 
@@ -127,15 +142,17 @@ int publish(const std::string &url, const std::string &path) {
 
     // Hold the producer for the lifetime of the publish loop; close() unpublishes.
     auto broadcast = ok(session->publish()->create_broadcast(path), "create_broadcast");
+    auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "catalog producer");
     auto media = ok(
         moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kAvc3, {}}),
         "video stream producer"
     );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
+    output.track = AUDIO_TRACK;
     output.frame_duration_us = AUDIO_FRAME_DURATION_US;
     auto audio = ok(
-        broadcast->encode_audio(AUDIO_TRACK, {moq::AudioSampleFormat::kF32, AUDIO_RATE, 1}, output, nullptr),
-        "encode_audio"
+        moq::AudioProducer::init(catalog, {moq::AudioSampleFormat::kF32, AUDIO_RATE, 1}, output, nullptr),
+        "audio producer"
     );
     ok(broadcast->announce({}), "announce");
     std::printf(
@@ -191,12 +208,12 @@ int subscribe(const std::string &url, const std::string &path, double timeout) {
             fail("catalog stream ended without a video track");
         }
     }
-    const auto &[name, video] = *catalog->video.begin();
+    const auto &[id, video] = *catalog->video.begin();
 
     moq::Subscription subscription;
     subscription.max_delay_us = MAX_DELAY_US;
     auto media = until(
-        moq::MediaTrackConsumer::subscribe(consumer, {name, video.container, subscription}), deadline,
+        moq::MediaTrackConsumer::subscribe(consumer, {moq::Rendition::kVideo{id, video}, subscription}), deadline,
         "container consumer"
     );
 

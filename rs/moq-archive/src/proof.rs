@@ -121,7 +121,9 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	let control = writer.control();
 	for name in TRACKS {
 		let config = match MEDIA.contains(&name) {
-			true => moq_mux::timeline::Config::default(),
+			// Keep this storage-layout proof at one record per 2s source segment. The default
+			// timeline minimum is tested in moq-mux and is not part of this fixture's contract.
+			true => moq_mux::timeline::Config::default().with_duration_min(Duration::from_secs(2)),
 			false => moq_mux::timeline::Config::default().with_duration_min(Duration::ZERO),
 		};
 		control.track(name, config).await.unwrap();
@@ -227,10 +229,14 @@ async fn recordings_are_byte_identical_on_every_backend() {
 		if let crate::Key::Segments { track, .. } = key
 			&& !track.ends_with(hang::timeline::SUFFIX)
 		{
-			let object = crate::Object::decode(bytes.clone()).unwrap();
+			let object = crate::Object::decode(bytes.clone(), true).unwrap();
 			assert_eq!(object.frame_start, 0, "no source group outlived the maximum");
 			for group in object.groups {
-				let frames = group.frames.into_iter().map(|f| (f.timestamp, f.payload)).collect();
+				let frames = group
+					.frames
+					.into_iter()
+					.map(|f| (f.timestamp.unwrap(), f.payload))
+					.collect();
 				stored.insert((track.clone(), group.sequence), frames);
 			}
 		}
@@ -327,7 +333,7 @@ async fn an_offline_reader_follows_dvr_expiry() {
 	let committed = |segment: u64| {
 		let store = store.clone();
 		async move {
-			while store.get_segments(&timeline("video"), segment).await.is_err() {
+			while store.get_segments(&timeline("video"), segment, true).await.is_err() {
 				tokio::time::sleep(Duration::from_millis(5)).await;
 			}
 		}
@@ -350,7 +356,9 @@ async fn an_offline_reader_follows_dvr_expiry() {
 	}
 	committed(8).await;
 	// Records 7 and 8 hold the 2s window, and the newest timeline object restates both.
-	while store.get_segments("video", 6).await.is_ok() || store.get_segments(&timeline("video"), 7).await.is_ok() {
+	while store.get_segments("video", 6, true).await.is_ok()
+		|| store.get_segments(&timeline("video"), 7, true).await.is_ok()
+	{
 		tokio::time::sleep(Duration::from_millis(5)).await;
 	}
 
@@ -393,4 +401,177 @@ async fn an_offline_reader_follows_dvr_expiry() {
 	video.finish().unwrap();
 	source.close();
 	run.await.unwrap().unwrap();
+}
+
+/// Exercise the S3 HTTP adapter, rather than an ObjectStore listing fake.
+mod s3 {
+	use std::num::NonZeroUsize;
+	use std::sync::{Arc, Mutex};
+
+	use axum::body::Body;
+	use axum::http::{Method, Uri};
+	use object_store::aws::{AmazonS3, AmazonS3Builder, S3ConditionalPut};
+	use object_store::{PutMode, PutPayload};
+	use s3s::service::S3ServiceBuilder;
+
+	use super::*;
+
+	struct Request {
+		method: Method,
+		uri: Uri,
+		conditional: bool,
+	}
+
+	struct Server {
+		store: Store<AmazonS3>,
+		requests: Arc<Mutex<Vec<Request>>>,
+		task: tokio::task::JoinHandle<()>,
+		_dir: tempfile::TempDir,
+	}
+
+	impl Server {
+		async fn new() -> Self {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::create_dir(dir.path().join("archive-proof")).unwrap();
+			let service = S3ServiceBuilder::new(s3s_fs::FileSystem::new(dir.path()).unwrap()).build();
+			let requests = Arc::new(Mutex::new(Vec::new()));
+			let seen = requests.clone();
+			let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+				let service = service.clone();
+				let seen = seen.clone();
+				async move {
+					seen.lock().unwrap().push(Request {
+						method: request.method().clone(),
+						uri: request.uri().clone(),
+						conditional: request.headers().get("if-none-match").is_some_and(|value| value == "*"),
+					});
+					service
+						.call(request.map(s3s::Body::http_body_unsync))
+						.await
+						.unwrap()
+						.map(Body::new)
+				}
+			});
+			let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+				.await
+				.unwrap();
+			let endpoint = format!("http://{}", listener.local_addr().unwrap());
+			let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+			let store = AmazonS3Builder::new()
+				.with_bucket_name("archive-proof")
+				.with_region("us-east-1")
+				.with_endpoint(endpoint)
+				.with_allow_http(true)
+				.with_skip_signature(true)
+				.with_conditional_put(S3ConditionalPut::ETagMatch)
+				.build()
+				.unwrap();
+			Self {
+				store: Store::new(store, "rec"),
+				requests,
+				task,
+				_dir: dir,
+			}
+		}
+	}
+
+	impl Drop for Server {
+		fn drop(&mut self) {
+			self.task.abort();
+		}
+	}
+
+	#[tokio::test]
+	async fn archive_proof_crosses_s3_http() {
+		let memory = Store::new(Mock::memory(), "rec");
+		record(&memory).await;
+		let expected = objects(&memory).await;
+		let server = Server::new().await;
+		record(&server.store).await;
+		assert_eq!(objects(&server.store).await, expected);
+		let broadcast = broadcast::Info::new().produce();
+		let reader = Reader::open(server.store.clone(), &broadcast, config()).await.unwrap();
+		let task = tokio::spawn(reader.serve());
+		for segment in 0..SEGMENTS {
+			for (name, sequence, frames) in plan(segment) {
+				assert_eq!(fetch(&broadcast, name, sequence).await.unwrap(), frames);
+			}
+		}
+		task.abort();
+		assert!(
+			server
+				.requests
+				.lock()
+				.unwrap()
+				.iter()
+				.any(|request| request.uri.path().contains("catalog%252Ejson")),
+			"a percent-encoded recording key must survive URL encoding"
+		);
+	}
+
+	#[tokio::test]
+	async fn s3_create_offset_and_continuation_are_enforced() {
+		let server = Server::new().await;
+		record(&server.store).await;
+		let expected = objects(&server.store).await;
+		let (path, original) = expected.first_key_value().unwrap();
+		let path = Path::parse(path).unwrap();
+		let collision = server
+			.store
+			.inner()
+			.put_opts(&path, PutPayload::from_static(b"different"), PutMode::Create.into())
+			.await;
+		assert!(
+			matches!(collision, Err(object_store::Error::AlreadyExists { .. })),
+			"{collision:?}"
+		);
+		assert_eq!(
+			server.store.inner().get(&path).await.unwrap().bytes().await.unwrap(),
+			*original
+		);
+
+		let mut query = crate::store::list::Query::new().page_size(NonZeroUsize::new(2).unwrap());
+		let mut listed = Vec::new();
+		loop {
+			let page = server.store.list_paginated(&query).await.unwrap();
+			assert!(page.entries.len() <= 2);
+			listed.extend(
+				page.entries
+					.iter()
+					.map(|entry| server.store.path(&entry.key).unwrap().to_string()),
+			);
+			let Some(next) = page.next else { break };
+			query = next;
+		}
+		listed.sort();
+		assert_eq!(listed, expected.keys().cloned().collect::<Vec<_>>());
+
+		let after = crate::Key::segments("video/1080p", 0).unwrap();
+		let query = crate::store::list::Query::segments("video/1080p")
+			.unwrap()
+			.after(&after)
+			.unwrap();
+		let later: Vec<_> = server.store.list(&query).try_collect().await.unwrap();
+		assert_eq!(later.len(), (SEGMENTS - 1) as usize);
+		assert!(later.iter().all(
+			|entry| matches!(&entry.key, crate::Key::Segments { track, segment } if track == "video/1080p" && *segment > 0)
+		));
+		let requests = server.requests.lock().unwrap();
+		assert!(
+			requests
+				.iter()
+				.any(|request| request.method == Method::PUT && request.conditional)
+		);
+		assert!(requests.iter().any(|request| {
+			request
+				.uri
+				.query()
+				.is_some_and(|query| query.contains("continuation-token="))
+		}));
+		assert!(
+			requests
+				.iter()
+				.any(|request| request.uri.query().is_some_and(|query| query.contains("start-after=")))
+		);
+	}
 }

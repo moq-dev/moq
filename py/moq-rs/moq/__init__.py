@@ -5,10 +5,13 @@ Real-time pub/sub with built-in caching, fan-out, and prioritization.
 
 from moq_ffi import MoqError as Error
 
+from . import audio as audio
+
 # Layer namespaces stay out of __all__; json would shadow the stdlib module.
 from . import flate as flate
 from . import json as json
-from .client import Client, connect
+from . import video as video
+from .client import Client, CongestionControl, connect, qlog_supported, versions
 from .epoch import epoch_time, mint_epoch
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
@@ -27,7 +30,6 @@ from .origin import (
     OriginProducer,
 )
 from .publish import (
-    AudioProducer,
     BroadcastDynamic,
     BroadcastProducer,
     GroupDemand,
@@ -37,23 +39,18 @@ from .publish import (
     TrackDynamic,
     TrackProducer,
     TrackRequest,
-    VideoProducer,
 )
 from .server import Request, Server, Transport
 from .session import Bandwidth, Reservation, Session
 from .subscribe import (
-    AudioConsumer,
     BroadcastConsumer,
     GroupConsumer,
     TrackConsumer,
-    VideoConsumer,
 )
 from .types import (
+    Anchor,
     AudioCodec,
-    AudioDecoderOutput,
     AudioEncoderInput,
-    AudioEncoderOutput,
-    AudioFrame,
     AudioSampleFormat,
     Backoff,
     ConnectionStats,
@@ -62,22 +59,23 @@ from .types import (
     ErrorScope,
     FetchGroupOptions,
     Frame,
+    Order,
     ProtocolError,
     ProtocolKind,
+    Range,
     Route,
     Subscription,
     TrackInfo,
     VideoCodec,
     VideoDecodedFrame,
-    VideoDecoderOutput,
     VideoEncoderInput,
     VideoEncoderKind,
     VideoEncoderOutput,
-    VideoFrame,
     VideoPixelFormat,
 )
 
 __all__ = [
+    "Anchor",
     "Announce",
     "AnnounceConsumer",
     "AnnouncedBroadcast",
@@ -87,13 +85,8 @@ __all__ = [
     "AnnounceEventStart",
     "AnnounceEventUpdate",
     "AudioCodec",
-    "AudioConsumer",
-    "AudioDecoderOutput",
     "AudioEncoderInput",
-    "AudioEncoderOutput",
     "AudioSampleFormat",
-    "AudioFrame",
-    "AudioProducer",
     "Backoff",
     "Bandwidth",
     "BroadcastConsumer",
@@ -101,6 +94,7 @@ __all__ = [
     "BroadcastProducer",
     "BroadcastRequest",
     "Client",
+    "CongestionControl",
     "ConnectionStats",
     "ConnectionStatus",
     "Datagram",
@@ -117,6 +111,8 @@ __all__ = [
     "OriginConsumer",
     "OriginDynamic",
     "OriginProducer",
+    "Order",
+    "Range",
     "Request",
     "Reservation",
     "Route",
@@ -134,12 +130,8 @@ __all__ = [
     "VideoEncoderInput",
     "VideoEncoderKind",
     "VideoEncoderOutput",
-    "VideoFrame",
-    "VideoConsumer",
     "VideoDecodedFrame",
-    "VideoDecoderOutput",
     "VideoPixelFormat",
-    "VideoProducer",
     "connect",
     "epoch_time",
     "is_auth",
@@ -147,6 +139,8 @@ __all__ = [
     "log_level",
     "mint_epoch",
     "protocol_error",
+    "qlog_supported",
+    "versions",
 ]
 
 from . import media as media

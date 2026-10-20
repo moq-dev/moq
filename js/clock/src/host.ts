@@ -1,15 +1,12 @@
 import type { Backend } from "./backend.ts";
 
-let origin: number | undefined;
-
+// The origin is the realm's performance time origin, so DOM timestamps (rAF, events, media
+// callbacks) convert to an instant by unit alone.
 export const host: Backend = {
-	now: () => {
-		const reading = performance.now();
-		origin ??= reading;
-		return (reading - origin) * 1_000_000;
-	},
+	now: () => performance.now() * 1_000_000,
 	wall: () => Date.now(),
-	arm(at, ready) {
+	origin: () => performance.timeOrigin,
+	arm(at, ready, ref) {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let active = true;
 		const check = () => {
@@ -21,6 +18,7 @@ export const host: Backend = {
 			} else {
 				// Hosts clamp oversized delays to 1ms and may round shorter ones down.
 				timer = setTimeout(check, Math.min(Math.ceil(left / 1_000_000), 2_147_483_647));
+				if (!ref) (timer as unknown as { unref?: () => void }).unref?.();
 			}
 		};
 		check();

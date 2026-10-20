@@ -13,6 +13,9 @@
 //!
 //! Run with `cargo bench -p moq-net --bench memory`.
 
+// Custom timings measure the real time the work took, not the ambient clock.
+#![allow(clippy::disallowed_methods)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -77,7 +80,7 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn now() -> moq_net::time::Instant {
-	tokio::time::Instant::now().into_std()
+	moq_clock::now()
 }
 
 /// One publisher and one subscriber session over an in-memory pair.

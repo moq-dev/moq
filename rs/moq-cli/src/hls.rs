@@ -44,8 +44,8 @@ pub struct ExportArgs {
 }
 
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
-/// announced under `epoch`.
-pub async fn import(target: ImportTarget, playlist: String, epoch: moq_net::Epoch) -> anyhow::Result<()> {
+/// announced under `epoch`, which places the clock too when it is `shared`.
+pub async fn import(target: ImportTarget, playlist: String, epoch: moq_net::Epoch, shared: bool) -> anyhow::Result<()> {
 	let ImportTarget {
 		origin,
 		name,
@@ -64,7 +64,13 @@ pub async fn import(target: ImportTarget, playlist: String, epoch: moq_net::Epoc
 	let mut listed = catalog.consume()?;
 
 	let playlist = playlist_url(&playlist)?;
-	let mut importer = moq_hls::import::Import::new(producer.clone(), catalog, moq_hls::import::Config::new(playlist))?;
+	let mut config = moq_hls::import::Config::new(playlist);
+	config.timebase = Some(crate::publish::timebase(
+		&catalog,
+		shared.then_some(&epoch),
+		std::time::Duration::ZERO,
+	)?);
+	let mut importer = moq_hls::import::Import::new(producer.clone(), catalog, config)?;
 
 	tracing::info!(%name, "importing HLS");
 

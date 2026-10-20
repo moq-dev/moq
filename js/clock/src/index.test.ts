@@ -10,6 +10,7 @@ import {
 	MissedTickBehavior,
 	Nano,
 	now,
+	origin,
 	Second,
 	sleep,
 	sleepUntil,
@@ -60,6 +61,7 @@ test("manual reads and wall corrections share a clock without inventing elapsed 
 	clock.advance(ns(Milli(1)));
 	expect<number>(clock.now()).toBe(6_000_000);
 	expect<number>(clock.wall()).toBe(Manual.WALL_START + 1001);
+	expect<number>(origin()).toBe(Manual.WALL_START + 1000 - 5);
 });
 
 test("many small advances move wall time by their combined duration", () => {
@@ -121,11 +123,11 @@ test("a sleep stays on its creation clock and abort releases it", async () => {
 	await first.advanceAsync(Nano(10));
 	await pending;
 	const abort = new AbortController();
-	const cancelled = sleep(Nano(100), abort.signal).catch((error: unknown) => error);
+	const cancelled = sleep(Nano(100), { signal: abort.signal }).catch((error: unknown) => error);
 	abort.abort();
 	expect(await cancelled).toHaveProperty("name", "AbortError");
 	await second.advanceAsync(Nano(100));
-	await expect(sleep(Nano.zero, abort.signal)).rejects.toHaveProperty("name", "AbortError");
+	await expect(sleep(Nano.zero, { signal: abort.signal })).rejects.toHaveProperty("name", "AbortError");
 });
 
 test("timeouts prefer ready work, propagate rejection, and expire on the manual deadline", async () => {
@@ -188,6 +190,19 @@ test("an interval cancels pending ticks, refuses concurrent ticks and stays clos
 	await expect(ticks.tick()).rejects.toHaveProperty("name", "AbortError");
 });
 
+test("the host clock counts from the performance time origin", () => {
+	const host = performance;
+	const before = host.now();
+	const at = Nano.toMilli(Instant.durationSince(now(), Instant.zero));
+	expect(at).toBeGreaterThanOrEqual(before);
+	expect(at).toBeLessThanOrEqual(host.now());
+	expect<number>(origin()).toBe(host.timeOrigin);
+});
+
+test("an unreferenced sleep still completes on the host", async () => {
+	await sleep(Nano.fromMilli(Milli(1)), { ref: false });
+});
+
 test("manual installation leaves the host's own timers real", async () => {
 	manual();
 	await hostTimeout(0);
@@ -204,7 +219,7 @@ test("many cancelled and live timers retain deadline and arming order", async ()
 		aborts.push(abort);
 		const at = 1 + ((index * 73) % 17);
 		if (index % 3 !== 0) expected.push({ at, index });
-		return sleepUntil(Instant(at), abort.signal).then(
+		return sleepUntil(Instant(at), { signal: abort.signal }).then(
 			() => {
 				fired.push(index);
 			},
@@ -215,4 +230,65 @@ test("many cancelled and live timers retain deadline and arming order", async ()
 	await clock.advanceAsync(Nano(17));
 	await Promise.all(pending);
 	expect(fired).toEqual(expected.sort((a, b) => a.at - b.at || a.index - b.index).map(({ index }) => index));
+});
+
+test("fire advances exactly to the earliest deadline and runs only what is due", async () => {
+	const clock = manual();
+	const order: number[] = [];
+	void sleepUntil(Instant(30)).then(() => order.push(30));
+	void sleepUntil(Instant(10)).then(() => order.push(1));
+	void sleepUntil(Instant(20)).then(() => order.push(20));
+	void sleepUntil(Instant(10)).then(() => order.push(2));
+	clock.advance(Nano(3));
+	expect<number>(await clock.fire()).toBe(10);
+	expect<number>(now()).toBe(10);
+	expect(order).toEqual([1, 2]);
+	expect<number>(await clock.fire()).toBe(20);
+	expect<number>(await clock.fire()).toBe(30);
+	expect(order).toEqual([1, 2, 20, 30]);
+});
+
+test("fire picks an earlier timer that a pending microtask chain arms", async () => {
+	const clock = manual();
+	void sleepUntil(Instant(100));
+	void Promise.resolve().then(() => sleepUntil(Instant(10)));
+	expect<number>(await clock.fire()).toBe(10);
+});
+
+test("fire waits, without a timer, until a later host task arms one", async () => {
+	const clock = manual();
+	const abort = new AbortController();
+	void sleep(Nano(5), { signal: abort.signal }).catch(() => {});
+	abort.abort();
+	let fired: number | undefined;
+	const pending = clock.fire().then((at) => {
+		fired = at;
+	});
+	await hostTimeout(0);
+	await hostTimeout(0);
+	expect(fired).toBeUndefined();
+	await expect(clock.fire()).rejects.toThrow("already pending");
+	void sleep(Nano(7));
+	await pending;
+	expect(fired).toBe(7);
+});
+
+test("fire resolves when a later host task arms an already-due timer", async () => {
+	const clock = manual();
+	clock.advance(Nano(4));
+	let woke = false;
+	const pending = clock.fire();
+	await hostTimeout(0);
+	void sleep(Nano(0)).then(() => {
+		woke = true;
+	});
+	expect<number>(await pending).toBe(4);
+	expect(woke).toBe(true);
+});
+
+test("fire stops at an already-due timer a pending microtask chain arms", async () => {
+	const clock = manual();
+	void sleepUntil(Instant(100));
+	void Promise.resolve().then(() => sleep(Nano(0)));
+	expect<number>(await clock.fire()).toBe(0);
 });

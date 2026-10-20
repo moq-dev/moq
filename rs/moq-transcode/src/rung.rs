@@ -3,9 +3,11 @@
 //! Nothing is encoded until someone asks, via the two demand paths moq-net
 //! exposes on the output track:
 //!
-//! - A live subscription (`used`) starts a live loop that subscribes to the
-//!   source track (mirroring the aggregate subscription) and transcodes group
-//!   for group until the track goes `unused` again.
+//! - Any demand (`used`), including a fetch, starts a live loop that subscribes
+//!   to the source track (mirroring the aggregate subscription) and transcodes
+//!   group for group until the track goes `unused` again. The group open at
+//!   that point is finished first, so a later reader of that sequence gets the
+//!   whole group rather than an aborted one.
 //! - A fetch of a specific group (`requested_group`) fetches that same group
 //!   from the source and transcodes just that group with a fresh encoder. A
 //!   fetch that starts mid-group is refused: a fresh encode's frames are only
@@ -98,10 +100,10 @@ impl Rung {
 
 	/// An encoder producing this rung's rendition.
 	///
-	/// `color` is the space the frames reaching it are in, taken from the first
-	/// decoded frame where the decoder knows. A rung below 576 lines fed by an HD
-	/// source carries the source's space, not the one its own size implies, so
-	/// leaving this to the encoder's size guess would label the rung wrongly.
+	/// `color` is the space the frames reaching it are in, as the decoder
+	/// labelled them. A rung below 576 lines fed by an HD source carries the
+	/// source's space, not the one its own size implies, so leaving this to the
+	/// encoder's size guess would label the rung wrongly.
 	///
 	/// A [`Sink`](moq_video::encode::Sink) rather than a bare `Encoder`: both
 	/// callers hold it across `.await`, so on a multi-thread runtime the future
@@ -163,6 +165,15 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 	result
 }
 
+/// Wait until some subscriber wants the track, or none does, returning at once if
+/// that already holds. A fresh clone reports the current value first, so a
+/// change seen through [`moq_net::track::Demand::wanted`] instead is never missed.
+async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net::Result<()> {
+	let mut demand = demand.clone();
+	while demand.wanted_changed().await?.is_some() != wanted {}
+	Ok(())
+}
+
 /// The live path: wait for demand, attach to the shared decode [`Feed`], and
 /// resize + encode its frames group for group until demand goes away. The
 /// heavy lifting (subscription, decode) is shared with every other active rung
@@ -184,13 +195,13 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 		}
 
 		tokio::select! {
-			used = demand.used() => if used.is_err() {
+			wanted = until_wanted(&demand, true) => if wanted.is_err() {
 				// The output track closed; nothing more to serve.
 				return Ok(Ended::Closed);
 			},
 			() = rung.broadcast.closed() => {
-				// The source went away while idle; end the rung with it.
-				producer.clone().abort(moq_net::Error::Dropped)?;
+				// A broadcast end carries no error; stop the idle rung explicitly.
+				producer.clone().abort(moq_net::Error::Cancel)?;
 				return Ok(Ended::Closed);
 			}
 			() = retire.fired() => {
@@ -208,24 +219,40 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 
 		// One listener + encoder per demand session: rate control persists
 		// across groups, while every group still opens with a forced IDR.
-		// Dropping them on unused releases the shared decode (if last) and the
-		// encoder session until someone subscribes again.
+		// Dropping them once demand is gone releases the shared decode (if last)
+		// and the encoder session until someone asks again.
 		let mut listener = rung.feed.listen();
-		// Built from the first frame: the encoder writes that frame's color space
-		// into the bitstream, so it cannot open before one has arrived. A cut
-		// asked for at a group boundary waits here until it exists.
-		let mut encoder: Option<moq_video::encode::Sink> = None;
-		let mut pending_cut = false;
+		let mut encoder = Encoder::default();
 
 		// The output group currently being written, if the feed is mid-group.
 		let mut current: Option<moq_net::group::Producer> = None;
+		// Set while demand is gone but a group is still open. A group name always
+		// means the same content, so the group is finished for whoever reads that
+		// sequence later instead of aborted, and the session ends at its boundary.
+		let mut leaving = false;
 
 		'session: loop {
 			let item = tokio::select! {
 				item = listener.recv() => item,
-				_ = demand.unused() => {
+				unused = until_wanted(&demand, false), if !leaving => {
+					if unused.is_ok() && current.is_some() {
+						leaving = true;
+						continue;
+					}
+					// Between groups, or the track closed: nothing to finish.
 					if let Some(output) = current.take() {
-						// Signal downstream that the group is incomplete.
+						output.abort(moq_net::Error::Cancel)?;
+					}
+					break 'session;
+				}
+				used = until_wanted(&demand, true), if leaving => {
+					if used.is_ok() {
+						// Back before the group ended: carry on as if never gone.
+						leaving = false;
+						continue;
+					}
+					// The track closed under the group.
+					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
 					}
 					break 'session;
@@ -241,9 +268,15 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				}
 			};
 
+			// Demand can change without the `unused` or `used` branch seeing it,
+			// when the select picked this item instead. A returning viewer keeps
+			// the session rather than missing the next group while a new one
+			// attaches, and a departed one never opens another group.
+			leaving = demand.wanted().is_none();
+
 			match item {
 				Some(Item::Group(sequence)) => {
-					if retiring {
+					if retiring || leaving {
 						// The group we were riding out never ended, so it is
 						// incomplete however long we wait.
 						if let Some(output) = current.take() {
@@ -255,9 +288,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					// is being abandoned: a pipelined encoder still holding the previous
 					// group's tail would otherwise emit it into the new group, ahead of
 					// the keyframe requested just below.
-					if let Some(encoder) = &mut encoder {
-						encoder.flush().await?;
-					}
+					encoder.flush().await?;
 					if let Some(output) = current.take() {
 						// A group boundary without an end: treat as incomplete.
 						output.abort(moq_net::Error::Cancel)?;
@@ -267,9 +298,11 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					// rung that skips this group simply carries it forward. A backend
 					// that cannot cut fails the rung here: its groups could never
 					// mirror the source's, which is what this rung promises.
-					match &mut encoder {
-						Some(encoder) => encoder.cut().await?,
-						None => pending_cut = true,
+					encoder.cut().await?;
+					// Demand can also leave while the codec works above. Nothing is
+					// open yet, so there is nothing to finish.
+					if demand.wanted().is_none() {
+						break 'session;
 					}
 					// Mirror the source sequence so fetches and rendition
 					// switches map 1:1.
@@ -291,40 +324,35 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				}
 				Some(Item::Frame(frame)) => {
 					// No open group: attached mid-group, skipped a duplicate, or
-					// recovering from a lag. Wait for the next boundary.
-					let Some(output) = &mut current else { continue };
+					// recovering from a lag. Wait for the next boundary, unless
+					// nobody is left to serve it.
+					let Some(output) = &mut current else {
+						if leaving {
+							break 'session;
+						}
+						continue;
+					};
 
 					// The feed decodes at the source's native size; size this rung's copy
 					// here. Supported GPU paths feed the encoder without touching the
 					// CPU. The resize carries the source's color space across, which is
-					// why the encoder is opened from the scaled frame rather than from
-					// this rung's size.
+					// what the encoder signals.
 					let frame: Arc<moq_video::Frame> = match frame.size() == rung.info.size {
 						true => frame,
 						false => Arc::new(frame.resize(rung.info.size, &rung.resize)?),
 					};
-					let encoder = match &mut encoder {
-						Some(encoder) => encoder,
-						None => {
-							let mut opened = rung.encode(frame.surface.color()).await?;
-							if std::mem::take(&mut pending_cut) {
-								opened.cut().await?;
-							}
-							encoder.insert(opened)
-						}
-					};
-					write(output, &active, encoder.encode(frame).await?)?;
+					write(output, &active, encoder.encode(rung, frame).await?)?;
 				}
 				Some(Item::End) => {
 					if let Some(mut output) = current.take() {
 						// The source group is complete, so this one has to be too: a
 						// hardware encoder is still holding its last frames.
-						if let Some(encoder) = &mut encoder {
-							write(&mut output, &active, encoder.flush().await?)?;
-						}
+						write(&mut output, &active, encoder.flush().await?)?;
 						output.finish()?;
 					}
-					if retiring {
+					// Or during the flush.
+					leaving = demand.wanted().is_none();
+					if retiring || leaving {
 						break 'session;
 					}
 				}
@@ -334,7 +362,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
 					}
-					if retiring {
+					if retiring || leaving {
 						break 'session;
 					}
 				}
@@ -679,11 +707,7 @@ fn write(
 /// get `Frame::resize` instead.
 struct Pipeline {
 	decoder: moq_video::decode::Sink,
-	/// Opened from the first decoded frame, whose color space it has to declare.
-	/// `None` until one arrives; a cut requested before then waits in
-	/// `pending_cut`.
-	encoder: Option<moq_video::encode::Sink>,
-	pending_cut: bool,
+	encoder: Encoder,
 	rung: Rung,
 	size: moq_video::Size,
 }
@@ -700,8 +724,7 @@ impl Pipeline {
 
 		Ok(Self {
 			decoder,
-			encoder: None,
-			pending_cut: false,
+			encoder: Encoder::default(),
 			rung: rung.clone(),
 			size: rung.info.size,
 		})
@@ -719,10 +742,7 @@ impl Pipeline {
 		// actually arrives, which matters because a decoder that buffers returns
 		// nothing for the access unit that asked for one.
 		if keyframe {
-			match &mut self.encoder {
-				Some(encoder) => encoder.cut().await?,
-				None => self.pending_cut = true,
-			}
+			self.encoder.cut().await?;
 		}
 
 		let mut encoded = Vec::new();
@@ -740,15 +760,7 @@ impl Pipeline {
 			true => raw,
 			false => raw.resize(self.size, &self.rung.resize)?,
 		};
-		if self.encoder.is_none() {
-			let mut opened = self.rung.encode(raw.surface.color()).await?;
-			if std::mem::take(&mut self.pending_cut) {
-				opened.cut().await?;
-			}
-			self.encoder = Some(opened);
-		}
-		let encoder = self.encoder.as_mut().expect("just opened");
-		Ok(encoder.encode(raw).await?)
+		self.encoder.encode(&self.rung, raw).await
 	}
 
 	/// Drain the decoder and then the encoder, keeping every frame's timestamp.
@@ -761,10 +773,82 @@ impl Pipeline {
 			encoded.extend(self.encode_frame(raw).await?);
 		}
 
-		if let Some(encoder) = self.encoder {
-			encoded.extend(encoder.finish().await?);
-		}
+		encoded.extend(self.encoder.finish().await?);
 		Ok(encoded)
+	}
+}
+
+/// A rung's encoder, opened from the first frame it is handed: it writes that
+/// frame's color space into the bitstream, so it cannot open before one exists.
+///
+/// Reopened whenever a frame arrives in another space. A source can switch at
+/// a keyframe (an SDR insert in an HDR stream), and the encoder refuses a frame
+/// it would mislabel, so the rung would otherwise fail on the switch.
+#[derive(Default)]
+struct Encoder {
+	/// The open encoder and the space it signals.
+	open: Option<(moq_video::encode::Sink, Option<moq_video::Color>)>,
+	/// A cut asked for while no encoder was open, applied when one opens.
+	pending_cut: bool,
+}
+
+impl Encoder {
+	/// Start the next frame with an IDR.
+	async fn cut(&mut self) -> Result<(), Error> {
+		match &mut self.open {
+			Some((sink, _)) => sink.cut().await?,
+			None => self.pending_cut = true,
+		}
+		Ok(())
+	}
+
+	/// Encode one frame at the rung size, reopening first if its space changed.
+	///
+	/// The previous encoder's tail comes out ahead of the frame, in order.
+	async fn encode(
+		&mut self,
+		rung: &Rung,
+		frame: impl Into<Arc<moq_video::Frame>>,
+	) -> Result<Vec<moq_video::encode::Encoded>, Error> {
+		let frame = frame.into();
+		let color = frame.surface.color();
+		let mut encoded = Vec::new();
+		if let Some((_, signalled)) = &self.open
+			&& *signalled != color
+		{
+			let (sink, _) = self.open.take().expect("checked above");
+			encoded = sink.finish().await?;
+			// The new parameter sets only reach a decoder on an IDR.
+			self.pending_cut = true;
+		}
+		let sink = match &mut self.open {
+			Some((sink, _)) => sink,
+			None => {
+				let mut sink = rung.encode(color).await?;
+				if std::mem::take(&mut self.pending_cut) {
+					sink.cut().await?;
+				}
+				&mut self.open.insert((sink, color)).0
+			}
+		};
+		encoded.extend(sink.encode(frame).await?);
+		Ok(encoded)
+	}
+
+	/// Drain the frames the encoder still holds.
+	async fn flush(&mut self) -> Result<Vec<moq_video::encode::Encoded>, Error> {
+		match &mut self.open {
+			Some((sink, _)) => Ok(sink.flush().await?),
+			None => Ok(Vec::new()),
+		}
+	}
+
+	/// Drain and close the encoder.
+	async fn finish(self) -> Result<Vec<moq_video::encode::Encoded>, Error> {
+		match self.open {
+			Some((sink, _)) => Ok(sink.finish().await?),
+			None => Ok(Vec::new()),
+		}
 	}
 }
 
@@ -777,6 +861,99 @@ fn scale_hint(size: moq_video::Size, output: moq_video::Output) -> Option<moq_vi
 mod tests {
 	use super::*;
 	use moq_video::Output;
+
+	/// A 160x120 software rung of an idle source, with the source and the
+	/// retirement trigger that keep it alive.
+	fn idle_rung() -> (Rung, moq_net::broadcast::Producer, tokio::sync::watch::Sender<bool>) {
+		let source = moq_net::broadcast::Info::default().produce();
+		let broadcast = source.consume();
+		let config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let (trigger, retire) = Retire::channel();
+		let rung = Rung {
+			info: Resolved {
+				name: "video/120p".into(),
+				short_side: 120,
+				size: moq_video::Size::new(160, 120),
+				bitrate: moq_net::bandwidth::Rate::from_bps(100_000),
+				framerate: None,
+			},
+			source: "video".into(),
+			feed: Feed::new(
+				broadcast.clone(),
+				"video".into(),
+				config.clone(),
+				moq_video::decode::Config::new(),
+			),
+			broadcast,
+			config,
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			resize: Default::default(),
+			active: Default::default(),
+			retire,
+		};
+		(rung, source, trigger)
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn internal_idle_source_end_is_cancel() {
+		use std::future::Future;
+		let (rung, source, _retire) = idle_rung();
+		let output = moq_net::broadcast::Info::default().produce();
+		let mut track = output.create_track("video/120p", None).unwrap();
+		let observed = track.clone();
+		let mut running = std::pin::pin!(live(&rung, &mut track));
+		assert!(
+			running
+				.as_mut()
+				.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+				.is_pending()
+		);
+		source.close();
+		assert!(matches!(running.await, Ok(Ended::Closed)));
+		assert!(matches!(observed.closed().await, moq_net::Error::Cancel));
+	}
+
+	/// A source switching color space mid-stream (an SDR insert in an HDR
+	/// stream) reopens the rung encoder rather than failing on the mismatch, and
+	/// the new space starts on an IDR so a decoder sees its parameter sets.
+	#[tokio::test]
+	#[cfg(feature = "openh264")]
+	async fn a_color_switch_reopens_the_encoder() {
+		use moq_video::Color;
+		use moq_video::color::{Matrix, Primaries, Range, Transfer};
+
+		let (rung, _source, _retire) = idle_rung();
+		let size = rung.info.size;
+		let frame = |color: Color, micros| {
+			let i420 = moq_video::I420::new(size, vec![128; size.pixels() as usize * 3 / 2]).unwrap();
+			moq_video::Frame::new(
+				moq_video::Surface::I420(i420.with_color(color)),
+				moq_net::Timestamp::from_micros(micros).unwrap(),
+			)
+		};
+		let pq = Color {
+			matrix: Matrix::Bt2020,
+			range: Range::Limited,
+			primaries: Primaries::Bt2020,
+			transfer: Transfer::Pq,
+		};
+
+		let mut encoder = Encoder::default();
+		encoder.cut().await.unwrap();
+		let mut encoded = encoder.encode(&rung, frame(Color::BT709, 0)).await.unwrap();
+		encoded.extend(encoder.encode(&rung, frame(Color::BT709, 33_333)).await.unwrap());
+		let switched = encoder.encode(&rung, frame(pq, 66_666)).await.unwrap();
+		encoded.extend(encoder.finish().await.unwrap());
+
+		assert!(encoded.first().expect("the first frame").keyframe);
+		assert!(switched.last().expect("the switched frame").keyframe);
+	}
 
 	/// A fetched NVDEC group reaches `Frame::resize` at native size when
 	/// CPU output is forced, rather than being resized in the decoder first.

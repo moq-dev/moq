@@ -5,6 +5,7 @@
  * @module
  */
 
+import type { Micro } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
@@ -13,7 +14,7 @@ export interface Frame {
 	/** The codec bitstream payload, with the LOC property block stripped. */
 	payload: Uint8Array;
 	/** Presentation timestamp in microseconds. */
-	timestamp: Time.Micro;
+	timestamp: Micro;
 	/** True if this frame can be decoded without any preceding frames. */
 	keyframe: boolean;
 }
@@ -47,12 +48,13 @@ export class Format {
 	}
 
 	/** Return the video-frame or audio-source endpoint for an empty codec payload. */
-	end(frame: Frame): Time.Micro | undefined {
+	end(frame: Frame): Micro | undefined {
 		return this.kind !== "data" && frame.payload.byteLength === 0 ? frame.timestamp : undefined;
 	}
 
-	/** Decode one moq-net frame into its LOC frames. Throws on malformed input. */
+	/** Decode one moq-net frame into its LOC frames. On a data track an object with no bytes is the discontinuity marker, so it decodes to no frame. Throws on malformed input. */
 	decode(frame: Uint8Array): Frame[] {
+		if (this.kind === "data" && frame.byteLength === 0) return [];
 		const [propsLen, afterLen] = Moq.Varint.decode(frame);
 		if (afterLen.byteLength < propsLen) {
 			throw new Error("loc: properties_length exceeds frame size");
@@ -99,7 +101,7 @@ export class Format {
 		}
 
 		const activeTimescale = timescale ?? DEFAULT_TIMESCALE;
-		const micros = Math.round((timestamp * DEFAULT_TIMESCALE) / activeTimescale) as Time.Micro;
+		const micros = Math.round((timestamp * DEFAULT_TIMESCALE) / activeTimescale) as Micro;
 
 		return [{ payload, timestamp: micros, keyframe: false }];
 	}
@@ -127,11 +129,11 @@ export class Producer {
 	#track: Moq.Track.Producer;
 	#group?: Moq.Group.Producer;
 	// Last timestamp in the open group. The next keyframe is this group's end unless it lands earlier.
-	#previous?: Time.Micro;
+	#previous?: Micro;
 	// Furthest timestamp in the open group. The tail marker estimates from this, not decode order.
-	#end?: Time.Micro;
+	#end?: Micro;
 	// Gap between the last two increasing timestamps. Kept across groups so a clean close can bound the tail.
-	#interval?: Time.Micro;
+	#interval?: Micro;
 	// A frame's timestamp preceded the one before it. That group's presentation end does not bound its tail.
 	#reordered = false;
 
@@ -143,7 +145,7 @@ export class Producer {
 	 * Encode one frame and write it to the track.
 	 * A keyframe ends the open group with a duration marker, then starts the next.
 	 */
-	encode(data: Uint8Array | Source, timestamp: Time.Micro, keyframe: boolean) {
+	encode(data: Uint8Array | Source, timestamp: Micro, keyframe: boolean) {
 		if (keyframe) {
 			// A keyframe before the previous frame overlaps that frame, so it is not the group's end.
 			const overlaps = this.#previous !== undefined && timestamp < this.#previous;
@@ -161,13 +163,13 @@ export class Producer {
 
 		this.#reordered ||= this.#previous !== undefined && timestamp < this.#previous;
 		if (this.#previous !== undefined && timestamp > this.#previous) {
-			this.#interval = (timestamp - this.#previous) as Time.Micro;
+			this.#interval = (timestamp - this.#previous) as Micro;
 		}
 		this.#previous = timestamp;
 		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;
 	}
 
-	#encode(source: Uint8Array | Source, timestamp: Time.Micro): Uint8Array {
+	#encode(source: Uint8Array | Source, timestamp: Micro): Uint8Array {
 		const propTypeBytes = Moq.Varint.encode(PROP_TIMESTAMP);
 		const propValueBytes = Moq.Varint.encode(timestamp);
 		const propsLen = propTypeBytes.byteLength + propValueBytes.byteLength;
@@ -199,13 +201,13 @@ export class Producer {
 	// End the open group. `end` is the next keyframe when one is already in hand; otherwise the
 	// last gap estimates where the tail stops. A reordered group omits the marker: its presentation
 	// end does not bound the last frame in decode order.
-	#closeGroup(end?: Time.Micro) {
+	#closeGroup(end?: Micro) {
 		const group = this.#group;
 		if (!group) return;
 
 		let marker = this.#reordered ? undefined : end;
 		if (marker === undefined && !this.#reordered && this.#end !== undefined && this.#interval !== undefined) {
-			marker = (this.#end + this.#interval) as Time.Micro;
+			marker = (this.#end + this.#interval) as Micro;
 		}
 		if (marker !== undefined) {
 			group.writeFrame({

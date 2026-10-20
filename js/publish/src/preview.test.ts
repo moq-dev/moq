@@ -34,7 +34,7 @@ describe("Preview.Renderer", () => {
 		else Reflect.deleteProperty(globalThis, "cancelAnimationFrame");
 	});
 
-	it("draws the captured frame mirrored at its own size through the shared renderer", async () => {
+	it("draws the captured frame rotated and mirrored at its presented size", async () => {
 		const transforms: number[][] = [];
 		const draws: unknown[][] = [];
 		const canvas = { width: 300, height: 150 } as HTMLCanvasElement;
@@ -69,15 +69,15 @@ describe("Preview.Renderer", () => {
 			}),
 		);
 
-		const renderer = new Renderer({ canvas, frames: fanout, flip: true, backend: "2d" });
+		const renderer = new Renderer({ canvas, frames: fanout, flip: true, rotation: 90, backend: "2d" });
 		try {
 			push(frame);
 			await settle();
 			for (const callback of callbacks.splice(0)) callback(0);
 
-			expect(canvas.width).toBe(640);
-			expect(canvas.height).toBe(360);
-			expect(transforms.at(-1)).toEqual([-1, 0, 0, 1, 640, 0]);
+			expect(canvas.width).toBe(360);
+			expect(canvas.height).toBe(640);
+			expect(transforms.at(-1)).toEqual([0, 1, 1, 0, 0, 0]);
 			expect(draws.at(-1)?.slice(1)).toEqual([0, 0, 640, 360]);
 		} finally {
 			renderer.close();

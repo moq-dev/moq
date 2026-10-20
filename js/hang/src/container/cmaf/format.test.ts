@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { Micro } from "@moq/clock";
 import { Time } from "@moq/net";
 import type { InitSegment } from "./decode.ts";
 import { Format } from "./format.ts";
@@ -74,7 +75,7 @@ test("CmafFormat times samples from the frame timestamp", () => {
 	]);
 
 	const frames = new Format(INIT).decode(segment, Time.Timestamp.fromMillis(10_000));
-	expect(frames.map((f) => f.timestamp)).toEqual([10_000_000, 10_066_667, 10_033_333] as Time.Micro[]);
+	expect(frames.map((f) => f.timestamp)).toEqual([10_000_000, 10_066_667, 10_033_333] as Micro[]);
 });
 
 // A fragment can open on a sample that presents after a later one (open-GOP leading pictures,
@@ -86,7 +87,7 @@ test("CmafFormat anchors the earliest presentation time", () => {
 	]);
 
 	const frames = new Format(INIT).decode(segment, Time.Timestamp.fromMillis(5_000));
-	expect(frames.map((f) => f.timestamp)).toEqual([5_033_333, 5_000_000] as Time.Micro[]);
+	expect(frames.map((f) => f.timestamp)).toEqual([5_033_333, 5_000_000] as Micro[]);
 });
 
 // Runs continue one decode timeline, so the anchor is the earliest sample across all of them.
@@ -94,7 +95,7 @@ test("CmafFormat anchors the earliest sample across runs", () => {
 	const segment = fragment(0, [[3000, 6000]], [[3000, 0]]);
 
 	const frames = new Format(INIT).decode(segment, at(3000));
-	expect(frames.map((f) => f.timestamp)).toEqual([66_667, 33_333] as Time.Micro[]);
+	expect(frames.map((f) => f.timestamp)).toEqual([66_667, 33_333] as Micro[]);
 });
 
 // An untimed track's frames carry no broadcast time, so their samples present at `tfdt`.
@@ -106,7 +107,7 @@ test("CmafFormat times an untimed fragment from its tfdt", () => {
 	]);
 
 	const frames = new Format(INIT).decode(segment, undefined);
-	expect(frames.map((f) => f.timestamp)).toEqual([1_033_333, 1_100_000, 1_066_667] as Time.Micro[]);
+	expect(frames.map((f) => f.timestamp)).toEqual([1_033_333, 1_100_000, 1_066_667] as Micro[]);
 });
 
 // Samples are read front to back, so a run that skips bytes is refused rather than sliced wrong.

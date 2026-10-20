@@ -8,6 +8,8 @@
 		"driver.ts",
 		"harness.ts",
 		"harness.browser.ts",
+		"open-gop.browser.ts",
+		"open-gop",
 		"capture-channel-count.browser.ts",
 		"buffering",
 		"media.ts",

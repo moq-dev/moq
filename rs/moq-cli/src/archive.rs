@@ -361,6 +361,17 @@ mod tests {
 	/// export ends cleanly with its broadcast.
 	#[tokio::test]
 	async fn a_recording_replays_its_groups() {
+		replays_its_groups(Some(Timescale::MILLI)).await;
+	}
+
+	/// An untimed track, as every track is over moq-transport without TIMESCALE, records and
+	/// replays untimed.
+	#[tokio::test]
+	async fn an_untimed_recording_replays_untimed() {
+		replays_its_groups(None).await;
+	}
+
+	async fn replays_its_groups(timescale: Option<Timescale>) {
 		// `open` reads the credential variables.
 		let _env = crate::test_env::EnvGuard::clear(&[]);
 		let dir = tempfile::tempdir().unwrap();
@@ -370,7 +381,7 @@ mod tests {
 		let mut broadcast = origin.create_broadcast("live.hang").unwrap();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let info = track::Info::default()
-			.with_timescale(Timescale::MILLI)
+			.with_timescale(timescale)
 			.with_max_age(Duration::from_secs(3600));
 		let mut track = broadcast.create_track("audio", info).unwrap();
 		catalog
@@ -390,7 +401,7 @@ mod tests {
 		for sequence in 0..3 {
 			let mut group = track.create_group(group::Info { sequence }).unwrap();
 			for offset in [0, 500] {
-				let timestamp = Timestamp::from_millis(sequence * 1000 + offset).unwrap();
+				let timestamp = timescale.map(|_| Timestamp::from_millis(sequence * 1000 + offset).unwrap());
 				group.write_frame(timestamp, format!("{sequence}+{offset}")).unwrap();
 			}
 			group.finish().unwrap();
@@ -426,8 +437,8 @@ mod tests {
 			for offset in [0, 500] {
 				let frame = group.read_frame().await.unwrap().expect("a frame");
 				assert_eq!(
-					frame.timestamp.unwrap().as_millis(),
-					u128::from(sequence * 1000 + offset)
+					frame.timestamp.map(|timestamp| timestamp.as_millis()),
+					timescale.map(|_| u128::from(sequence * 1000 + offset))
 				);
 				assert_eq!(frame.payload, format!("{sequence}+{offset}"));
 			}
@@ -497,7 +508,7 @@ mod tests {
 		let store = super::open(&url).unwrap();
 		for track in ["audio", "audio2"] {
 			let object = store
-				.get_segments(&hang::timeline::default_name(track), 0)
+				.get_segments(&hang::timeline::default_name(track), 0, true)
 				.await
 				.expect("record 0");
 			let config = moq_json::window::ConsumerConfig::default().with_compression(true);

@@ -17,8 +17,8 @@ pub struct Group {
 /// One frame's timestamp and original payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
-	/// Absolute timestamp in the track's timescale.
-	pub timestamp: u64,
+	/// Absolute timestamp in the track's timescale, or `None` on an untimed track.
+	pub timestamp: Option<u64>,
 	/// Original frame payload, including any group-scoped compression.
 	pub payload: Bytes,
 }
@@ -73,6 +73,8 @@ impl Object {
 	}
 
 	/// Encode the binary envelope. The first sequence is absolute; later ones are `current - previous - 1`.
+	///
+	/// Frame timestamps are stored only when the frames have them, so every frame must agree.
 	pub fn encode(&self) -> Result<Bytes> {
 		validate(&self.groups)?;
 
@@ -99,7 +101,9 @@ impl Object {
 			for frame in &group.frames {
 				let offset = u64::try_from(payload.len()).map_err(|_| Error::Overflow)?;
 				let length = u64::try_from(frame.payload.len()).map_err(|_| Error::Overflow)?;
-				write_varint(&mut table, frame.timestamp)?;
+				if let Some(timestamp) = frame.timestamp {
+					write_varint(&mut table, timestamp)?;
+				}
 				write_varint(&mut table, offset)?;
 				write_varint(&mut table, length)?;
 				payload.extend_from_slice(&frame.payload);
@@ -111,7 +115,10 @@ impl Object {
 	}
 
 	/// Decode a complete table before slicing any payload, and refuse an unknown version.
-	pub fn decode(mut buf: impl Buf) -> Result<Self> {
+	///
+	/// `timed` is whether the track's `.info` declares a timescale, which says whether the table
+	/// stores a timestamp per frame.
+	pub fn decode(mut buf: impl Buf, timed: bool) -> Result<Self> {
 		let version = read_varint(&mut buf)?;
 		if version != VERSION {
 			return Err(Error::Version(version));
@@ -125,7 +132,7 @@ impl Object {
 
 		struct Entry {
 			sequence: u64,
-			frames: Vec<(u64, u64, u64)>,
+			frames: Vec<(Option<u64>, u64, u64)>,
 		}
 
 		let mut entries = Vec::new();
@@ -150,10 +157,13 @@ impl Object {
 			}
 			prev = Some(sequence);
 
-			let frame_count = read_count(&mut buf, 3)?;
+			let frame_count = read_count(&mut buf, if timed { 3 } else { 2 })?;
 			let mut frames = Vec::new();
 			for _ in 0..frame_count {
-				let timestamp = check_id(read_varint(&mut buf)?)?;
+				let timestamp = match timed {
+					true => Some(check_id(read_varint(&mut buf)?)?),
+					false => None,
+				};
 				let offset = read_varint(&mut buf)?;
 				let length = read_varint(&mut buf)?;
 				frames.push((timestamp, offset, length));
@@ -202,6 +212,7 @@ fn validate(groups: &[Group]) -> Result<()> {
 		return Err(Error::Empty);
 	}
 	let mut prev = None;
+	let mut timed = None;
 	for group in groups {
 		check_id(group.sequence)?;
 		if let Some(previous) = prev
@@ -211,7 +222,12 @@ fn validate(groups: &[Group]) -> Result<()> {
 		}
 		prev = Some(group.sequence);
 		for frame in &group.frames {
-			check_id(frame.timestamp)?;
+			if *timed.get_or_insert(frame.timestamp.is_some()) != frame.timestamp.is_some() {
+				return Err(Error::Timing);
+			}
+			if let Some(timestamp) = frame.timestamp {
+				check_id(timestamp)?;
+			}
 		}
 	}
 	Ok(())
@@ -241,7 +257,14 @@ mod tests {
 
 	fn frame(timestamp: u64, payload: &'static [u8]) -> Frame {
 		Frame {
-			timestamp,
+			timestamp: Some(timestamp),
+			payload: Bytes::from_static(payload),
+		}
+	}
+
+	fn untimed(payload: &'static [u8]) -> Frame {
+		Frame {
+			timestamp: None,
 			payload: Bytes::from_static(payload),
 		}
 	}
@@ -274,15 +297,55 @@ mod tests {
 			},
 		]);
 		let bytes = original.encode().unwrap();
-		assert_eq!(Object::decode(&bytes[..]).unwrap(), original);
+		assert_eq!(Object::decode(&bytes[..], true).unwrap(), original);
 		assert_eq!(original.start().unwrap(), Position::group(0));
 
 		let split = Object {
 			frame_start: 300,
 			..original
 		};
-		assert_eq!(Object::decode(split.encode().unwrap()).unwrap(), split);
+		assert_eq!(Object::decode(split.encode().unwrap(), true).unwrap(), split);
 		assert_eq!(split.start().unwrap(), Position::new(0, 300));
+	}
+
+	#[test]
+	fn an_untimed_object_stores_no_timestamps() {
+		let original = object(vec![
+			Group {
+				sequence: 3,
+				frames: vec![untimed(b"a"), untimed(b"bb")],
+			},
+			Group {
+				sequence: 4,
+				frames: vec![untimed(b"c")],
+			},
+		]);
+		let bytes = original.encode().unwrap();
+		let mut buf = &bytes[..];
+		for expected in [VERSION, 0, 2, 3, 2, 0, 1, 1, 2, 0, 1, 3, 1] {
+			assert_eq!(read_varint(&mut buf).unwrap(), expected);
+		}
+		assert_eq!(buf, b"abbc");
+		assert_eq!(Object::decode(bytes.clone(), false).unwrap(), original);
+		assert!(
+			Object::decode(bytes, true).is_err(),
+			"a timed reader misreads the table"
+		);
+	}
+
+	#[test]
+	fn frames_agree_on_timing() {
+		let mixed = object(vec![
+			Group {
+				sequence: 0,
+				frames: vec![frame(0, b"a")],
+			},
+			Group {
+				sequence: 1,
+				frames: vec![untimed(b"b")],
+			},
+		]);
+		assert_eq!(mixed.encode(), Err(Error::Timing));
 	}
 
 	#[test]
@@ -328,7 +391,7 @@ mod tests {
 		write_varint(&mut bytes, VERSION).unwrap();
 		write_varint(&mut bytes, 0).unwrap();
 		write_varint(&mut bytes, 0).unwrap();
-		assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Empty)));
+		assert!(matches!(Object::decode(bytes.freeze(), true), Err(Error::Empty)));
 	}
 
 	#[test]
@@ -373,7 +436,7 @@ mod tests {
 		write_varint(&mut bytes, 0).unwrap(); // no frames
 		write_varint(&mut bytes, 0).unwrap(); // consecutive => ID_MAX + 1
 		write_varint(&mut bytes, 0).unwrap();
-		assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Id(_))));
+		assert!(matches!(Object::decode(bytes.freeze(), true), Err(Error::Id(_))));
 	}
 
 	/// A table with one frameless group per delta.
@@ -390,7 +453,7 @@ mod tests {
 	}
 
 	fn sequences(bytes: Bytes) -> Result<Vec<u64>> {
-		Ok(Object::decode(bytes)?
+		Ok(Object::decode(bytes, true)?
 			.groups
 			.iter()
 			.map(|group| group.sequence)
@@ -437,7 +500,7 @@ mod tests {
 			let mut bytes = BytesMut::new();
 			write_varint(&mut bytes, version).unwrap();
 			write_varint(&mut bytes, 1).unwrap();
-			assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Version(v)) if v == version));
+			assert!(matches!(Object::decode(bytes.freeze(), true), Err(Error::Version(v)) if v == version));
 		}
 	}
 
@@ -451,7 +514,7 @@ mod tests {
 		.unwrap()
 		.to_vec();
 		good.push(b'x');
-		assert!(matches!(Object::decode(Bytes::from(good)), Err(Error::Table)));
+		assert!(matches!(Object::decode(Bytes::from(good), true), Err(Error::Table)));
 	}
 
 	#[test]
@@ -463,7 +526,7 @@ mod tests {
 		write_varint(&mut bytes, 0).unwrap();
 		write_varint(&mut bytes, 4).unwrap();
 		bytes.extend_from_slice(&[0, 0, 0, 0]);
-		assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Table)));
+		assert!(matches!(Object::decode(bytes.freeze(), true), Err(Error::Table)));
 	}
 
 	#[test]
@@ -472,9 +535,9 @@ mod tests {
 		for value in [VERSION, 0, 1, 0, 1, 0, 0, 4] {
 			write_varint(&mut bytes, value).unwrap(); // length 4, no payload
 		}
-		assert!(matches!(Object::decode(bytes.freeze()), Err(Error::Table)));
+		assert!(matches!(Object::decode(bytes.freeze(), true), Err(Error::Table)));
 
-		assert!(matches!(Object::decode(&b"\x02"[..]), Err(Error::Table)));
+		assert!(matches!(Object::decode(&b"\x02"[..], true), Err(Error::Table)));
 	}
 
 	#[test]
@@ -491,7 +554,7 @@ mod tests {
 				}
 			}
 			bytes.extend_from_slice(&vec![b'x'; payload]);
-			Object::decode(bytes.freeze())
+			Object::decode(bytes.freeze(), true)
 		};
 		assert!(table([(0, 1), (1, 2)], 3).is_ok());
 		assert!(matches!(table([(0, 1), (0, 2)], 3), Err(Error::Table)), "overlap");
@@ -558,6 +621,6 @@ mod tests {
 			sequence: ID_MAX,
 			frames: vec![frame(0, b"")],
 		}]);
-		assert_eq!(Object::decode(original.encode().unwrap()).unwrap(), original);
+		assert_eq!(Object::decode(original.encode().unwrap(), true).unwrap(), original);
 	}
 }

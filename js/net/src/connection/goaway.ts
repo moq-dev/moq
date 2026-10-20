@@ -4,8 +4,9 @@
  *
  * @module
  */
+
+import { Milli } from "@moq/clock";
 import { RefusedRedirect } from "../error.ts";
-import * as Time from "../time.ts";
 import type { Transport } from "./transport.ts";
 
 /** A peer's GOAWAY as a session received it. */
@@ -13,7 +14,7 @@ export interface Drain {
 	/** Where to reconnect, including any credentials it needs. Empty means the same endpoint. */
 	readonly uri: string;
 	/** When the peer force-closes the session. Undefined when the wire carried none. */
-	readonly timeout?: Time.Milli;
+	readonly timeout?: Milli;
 }
 
 /**
@@ -39,11 +40,11 @@ export interface GoawayProps {
 	 * (default: 10000ms). A cap: a shorter deadline from the peer wins, a longer one does not
 	 * extend it.
 	 */
-	handover?: Time.Milli;
+	handover?: Milli;
 }
 
 /** The handover cap when the caller names none. */
-export const DEFAULT_HANDOVER = Time.Milli(10_000);
+export const DEFAULT_HANDOVER = Milli(10_000);
 
 /**
  * How long a drained session may keep serving: the cap, lowered to the peer's deadline when
@@ -51,8 +52,8 @@ export const DEFAULT_HANDOVER = Time.Milli(10_000);
  *
  * @internal
  */
-export function handover(cap: Time.Milli, timeout?: Time.Milli): Time.Milli {
-	return timeout !== undefined && timeout > 0 ? Time.Milli(Math.min(cap, timeout)) : cap;
+export function handover(cap: Milli, timeout?: Milli): Milli {
+	return timeout !== undefined && timeout > 0 ? Milli(Math.min(cap, timeout)) : cap;
 }
 
 /**

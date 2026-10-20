@@ -36,25 +36,28 @@ struct Program {
 	broadcast: moq_net::broadcast::Producer,
 	import: Import<Ext>,
 	catalog: catalog::Producer<Ext>,
-	/// The route and catalog track until the catalog first goes out, which waits for the
-	/// program's PMT: announced any sooner, a relay would ask for tracks it cannot serve yet.
+	/// The route and catalog track until the catalog first names a servable track: announced any
+	/// sooner, a relay would ask for tracks it cannot serve yet.
 	pending: Option<(moq_net::origin::Route, moq_net::track::Consumer)>,
 }
 
 impl Program {
 	/// Announce the broadcast once its catalog has gone out.
-	fn announce_if_listed(&mut self) -> anyhow::Result<()> {
-		let Some((route, listed)) = &self.pending else {
-			return Ok(());
+	fn announce_if_listed(&mut self) -> anyhow::Result<bool> {
+		let Some((route, listed)) = &mut self.pending else {
+			return Ok(true);
 		};
-		if listed.latest().is_none() {
-			return Ok(());
+		if !matches!(
+			listed.poll_largest(&kio::Waiter::noop()),
+			std::task::Poll::Ready(Some(_))
+		) {
+			return Ok(false);
 		}
 		self.broadcast
 			.announce(route.clone())
 			.with_context(|| format!("failed to announce program {}", self.number))?;
 		self.pending = None;
-		Ok(())
+		Ok(true)
 	}
 }
 
@@ -147,22 +150,27 @@ impl Programs {
 
 	/// Finish each program's tracks, then its catalog while it still lists them.
 	///
-	/// Fails when the input ended before its PAT listed a program.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	/// Returns each program's [`Finish`](moq_net::broadcast::Finish), which keeps it servable
+	/// until its media is stale; dropping one closes that program.
+	/// Fails when the input ended before its PAT listed a program or any program declared a track.
+	pub fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Finish>> {
 		anyhow::ensure!(!self.programs.is_empty(), "input ended before its PAT listed a program");
+		let mut announced = false;
+		let mut finished = Vec::with_capacity(self.programs.len());
 		for program in &mut self.programs {
 			program.import.finish()?;
-			// EOF releases the catalog reservations, so this announces even a program whose PMT
-			// never arrived.
-			program.announce_if_listed()?;
+			announced |= program.announce_if_listed()?;
 			program.catalog.finish()?;
+			finished.push(program.broadcast.clone().finish());
 		}
-		Ok(())
+		anyhow::ensure!(announced, "input ended before any program declared a track");
+		Ok(finished)
 	}
 
-	/// Abort every program's tracks with `err`, as [`Import::abort`] does. Consumes the importer.
+	/// Abort every program's catalog and media tracks with `err`. Consumes the importer.
 	pub fn abort(self, err: moq_net::Error) {
 		for program in self.programs {
+			program.catalog.abort(err.clone());
 			program.import.abort(err.clone());
 		}
 	}
@@ -223,6 +231,26 @@ mod test {
 		corrupt, fifty_programs, pat_section, psi_packets, two_programs, two_section_pat,
 	};
 
+	#[tokio::test(start_paused = true)]
+	async fn internal_program_abort_preserves_the_catalog_error() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		programs.decode(&two_programs()).unwrap();
+		let mut consumers: Vec<_> = programs.programs.iter().map(|p| p.catalog.consume().unwrap()).collect();
+		programs.abort(moq_net::Error::Transport("decode failed".into()));
+		for consumer in &mut consumers {
+			let err = loop {
+				match consumer.next().await {
+					Ok(Some(_)) => {}
+					other => break other.unwrap_err(),
+				}
+			};
+			assert!(
+				matches!(err, crate::Error::Json(moq_json::Error::Net(moq_net::Error::Transport(ref reason))) if reason == "decode failed")
+			);
+		}
+	}
+
 	#[test]
 	fn program_broadcasts_keep_the_catalog_suffix_last() {
 		assert_eq!(program_broadcast("event.hang", 2), "event/2.hang");
@@ -256,7 +284,7 @@ mod test {
 		for chunk in input.chunks(100) {
 			programs.decode(chunk).unwrap();
 		}
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		assert_eq!(programs.programs.len(), 50);
 
 		let consumer = origin.consume().request_broadcast("event/50.hang", None).await.unwrap();
@@ -313,7 +341,7 @@ mod test {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
 		programs.decode(&two_section_pat()).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		assert_eq!(programs.programs.len(), 2);
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 		assert_eq!(renditions(&origin, "event/2.hang").await, 1);
@@ -326,7 +354,7 @@ mod test {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
 		programs.decode(&two_section_pat()).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		let epochs: Vec<_> = programs
 			.programs
 			.iter()
@@ -360,7 +388,7 @@ mod test {
 		for packet in packets {
 			programs.decode(packet).unwrap();
 		}
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		assert!(
 			programs
 				.programs
@@ -378,8 +406,30 @@ mod test {
 		let mut null = vec![0x47, 0x1f, 0xff, 0x10];
 		null.resize(188, 0xff);
 		programs.decode(&null).unwrap();
-		let err = programs.finish().expect_err("no PAT");
+		let Err(err) = programs.finish() else { panic!("no PAT") };
 		assert!(err.to_string().contains("PAT"), "{err:#}");
+	}
+
+	/// PAT and PMT metadata can name elementary streams before their codec config is known. EOF
+	/// there must fail without making an empty program discoverable.
+	#[test]
+	fn input_ending_after_pmts_but_before_media_fails_unannounced() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let input = two_programs();
+		programs.decode(&input[..3 * 188]).unwrap();
+
+		let Err(err) = programs.finish() else {
+			panic!("the PMTs have no configured media")
+		};
+		assert!(err.to_string().contains("declared a track"), "{err:#}");
+		assert!(
+			programs
+				.programs
+				.iter()
+				.all(|program| program.broadcast.route().is_none()),
+			"no empty program is announced"
+		);
 	}
 
 	/// A partial PAT holds only itself, not the multiplex that follows it.
@@ -434,7 +484,7 @@ mod test {
 			"no program is known before the PAT is whole"
 		);
 		programs.decode(&input[100..]).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		let after = std::time::SystemTime::now();
 
 		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {

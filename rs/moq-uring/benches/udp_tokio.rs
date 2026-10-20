@@ -1,4 +1,6 @@
 //! Tokio/epoll baseline for UDP receive batching and send GSO on Linux.
+// Benchmarks measure themselves on the host clock.
+#![allow(clippy::disallowed_methods)]
 
 use criterion::{criterion_group, criterion_main};
 

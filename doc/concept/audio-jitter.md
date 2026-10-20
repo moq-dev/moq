@@ -337,6 +337,17 @@ reference itself only ever moves earlier, so once the earliest subscribed track
 leaves, the clock stays anchored to it until playback re-anchors; that errs on
 the safe side.
 
+A track that replaces another in the same slot and on the same broadcast path,
+such as the new name a codec change publishes under, continues the outgoing
+track's histogram and startup ramp instead of the prior. The path's arrivals
+did not change with the name; a track on another path starts from the prior.
+Restarting would drop the target to the cold-start 100 ms at the switch, then
+raise it as the lateness is relearned, and the playout follows both moves:
+buffered audio is skipped on the drop and playback parks on each rise. Only the
+reference window restarts, so the new track's frames are measured against its
+own fastest. Its opening backlog would read as seconds late against the old
+track's arrivals.
+
 ## Rise, fall, startup, and the ceiling
 
 There is **no separate rise or fall limiter**. The histogram is the only

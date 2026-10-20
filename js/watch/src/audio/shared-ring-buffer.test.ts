@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { Time } from "@moq/net";
+import { Micro, Milli } from "@moq/clock";
 import { allocSharedRingBuffer, SharedRingBuffer, type SharedRingBufferInit } from "./shared-ring-buffer";
 
 function create(props?: { rate?: number; channels?: number; capacity?: number; latency?: number }) {
@@ -29,7 +29,7 @@ function insert(
 		channel.fill(opts?.value ?? 1.0);
 		data.push(channel);
 	}
-	buffer.insert(Time.Micro.fromMilli(timestampMs as Time.Milli), data);
+	buffer.insert(Micro.fromMilli(timestampMs as Milli), data);
 }
 
 /**
@@ -203,7 +203,7 @@ describe("insert", () => {
 	it("should throw on wrong channel count", () => {
 		const buffer = create({ channels: 2 });
 		expect(() => {
-			buffer.insert(0 as Time.Micro, [new Float32Array(10)]); // only 1 channel
+			buffer.insert(0 as Micro, [new Float32Array(10)]); // only 1 channel
 		}).toThrow(/wrong number of channels/);
 	});
 });
@@ -473,14 +473,14 @@ describe("timestamp getter", () => {
 		expect(buffer.stalled).toBe(false);
 
 		// Initially at 0
-		expect(buffer.timestamp).toBe(0 as Time.Micro);
+		expect(buffer.timestamp).toBe(0 as Micro);
 
 		// Read 50 samples
 		read(buffer, 50, 1);
 
 		// Timestamp should reflect READ = 50 at rate 1000
 		// 50 / 1000 = 0.05 seconds = 50000 microseconds
-		expect(buffer.timestamp).toBe(50000 as Time.Micro);
+		expect(buffer.timestamp).toBe(50000 as Micro);
 	});
 });
 
@@ -526,7 +526,7 @@ describe("setLatency", () => {
 		expect(buffer.stalled).toBe(false);
 
 		// Playback resumes where it parked rather than at the refill.
-		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(50 as Time.Milli);
+		expect(Milli.fromMicro(buffer.timestamp)).toBe(50 as Milli);
 		expect(read(buffer, 1, 1)[0][0]).toBe(1.0);
 	});
 
@@ -564,7 +564,7 @@ describe("setLatency", () => {
 		// The quantum raced the park, so none of it renders and the playhead stays put.
 		expect(result).toBe(0);
 		expect(out[0]).toEqual(new Float32Array(50));
-		expect(Time.Milli.fromMicro(main.timestamp)).toBe(0 as Time.Milli);
+		expect(Milli.fromMicro(main.timestamp)).toBe(0 as Milli);
 
 		insert(main, 100, 10, { channels: 1, value: 2.0 });
 		expect(main.stalled).toBe(false);
@@ -706,7 +706,7 @@ describe("i32 wrap epoch", () => {
 		buffer.setLatency(32);
 
 		insert(buffer, 0, 32, { channels: 1, value: 0.5 });
-		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(0 as Time.Milli);
+		expect(Milli.fromMicro(buffer.timestamp)).toBe(0 as Milli);
 
 		// Step READ up to the boundary and over it, observing each time. Production gets these
 		// observations from the 50ms poll in `buffer.ts`.
@@ -785,7 +785,7 @@ describe("i32 wrapping", () => {
 
 		expect(buffer.stalled).toBe(false);
 		// The anchor is preserved, so media time survives the wrap rather than reading negative.
-		expect(buffer.timestamp).toBe(Time.Micro.fromMilli(startMs as Time.Milli));
+		expect(buffer.timestamp).toBe(Micro.fromMilli(startMs as Milli));
 		const output = read(buffer, 128, 1);
 		expect(output[0].length).toBe(128);
 		expect(output[0][0]).toBeCloseTo(0.5, 5);
@@ -858,7 +858,7 @@ describe("buffered mode", () => {
 		const buffer = createBuffered(50);
 		// First frame at a future timestamp; READ should snap to it, not gap-fill from 0.
 		insert(buffer, 2000, 100, { channels: 1, value: 0.1 });
-		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(2000 as Time.Milli);
+		expect(Milli.fromMicro(buffer.timestamp)).toBe(2000 as Milli);
 		expect(buffer.stalled).toBe(false); // 100 buffered >= 50 latency
 	});
 
@@ -873,7 +873,7 @@ describe("buffered mode", () => {
 		// Read the oldest frame first; a non-buffered ring would have skipped to write-latency.
 		const first = read(buffer, 100, 1);
 		expect(first[0][0]).toBeCloseTo(0.1, 5);
-		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(2100 as Time.Milli);
+		expect(Milli.fromMicro(buffer.timestamp)).toBe(2100 as Milli);
 
 		const second = read(buffer, 100, 1);
 		expect(second[0][0]).toBeCloseTo(0.2, 5);
@@ -889,7 +889,7 @@ describe("buffered mode", () => {
 
 		// A new utterance with its own timestamps anchors fresh.
 		insert(buffer, 500, 100, { channels: 1, value: 0.9 });
-		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(500 as Time.Milli);
+		expect(Milli.fromMicro(buffer.timestamp)).toBe(500 as Milli);
 		const out = read(buffer, 100, 1);
 		expect(out[0][0]).toBeCloseTo(0.9, 5);
 	});
@@ -905,7 +905,7 @@ describe("buffered mode", () => {
 		insert(buffer, 256, 128, { channels: 1, value: 0.3 }); // exceeds cap; drops [0, 128)
 
 		// READ skipped forward to stay within the cap; oldest frame is gone.
-		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(128 as Time.Milli);
+		expect(Milli.fromMicro(buffer.timestamp)).toBe(128 as Milli);
 		expect(read(buffer, 128, 1)[0][0]).toBeCloseTo(0.2, 5);
 		expect(read(buffer, 128, 1)[0][0]).toBeCloseTo(0.3, 5);
 	});
@@ -919,7 +919,7 @@ describe("buffered mode", () => {
 
 		// A successor track takes over at 2200 with 100ms of its own audio. Writing it only overwrites
 		// [2200, 2300); without the truncate, [2300, 3000) of the old track still plays after it.
-		buffer.truncate(Time.Micro.fromMilli(2200 as Time.Milli));
+		buffer.truncate(Micro.fromMilli(2200 as Milli));
 		insert(buffer, 2200, 100, { channels: 1, value: 0.9 });
 
 		expect(buffer.stalled).toBe(false); // truncate keeps playing, unlike reset()
@@ -935,7 +935,7 @@ describe("buffered mode", () => {
 
 		// A successor whose first frame predates the playhead: those samples are already due, so WRITE
 		// floors there rather than going backwards.
-		buffer.truncate(Time.Micro.fromMilli(1000 as Time.Milli));
+		buffer.truncate(Micro.fromMilli(1000 as Milli));
 		expect(buffer.length).toBe(0);
 		expect(read(buffer, 100, 1)[0].length).toBe(0);
 	});
@@ -975,7 +975,7 @@ describe("truncate races the reader", () => {
 			// exactly the window where the reader would otherwise copy the tail it drops.
 			if (!fired && arr instanceof Int32Array && idx === LATENCY) {
 				fired = true;
-				main.truncate(Time.Micro.fromMilli(2100 as Time.Milli));
+				main.truncate(Micro.fromMilli(2100 as Milli));
 			}
 			return value;
 		};
@@ -1019,7 +1019,7 @@ describe("truncate races the reader", () => {
 		};
 
 		try {
-			main.truncate(Time.Micro.fromMilli(2100 as Time.Milli));
+			main.truncate(Micro.fromMilli(2100 as Milli));
 		} finally {
 			atomics.compareExchange = realExchange;
 		}
@@ -1051,10 +1051,10 @@ describe("packed state", () => {
 
 	it("carries the consumed cursor across a replacement truncate", () => {
 		const src = create({ rate: 1000, channels: 1, capacity: 64, latency: 64 });
-		src.insert(0 as Time.Micro, [Float32Array.from({ length: 64 }, (_, i) => i + 1)]);
+		src.insert(0 as Micro, [Float32Array.from({ length: 64 }, (_, i) => i + 1)]);
 		const dst = src.resize(256);
 		expect(read(src, 16, 1)[0]).toEqual(Float32Array.from({ length: 16 }, (_, i) => i + 1));
-		dst.truncate(Time.Micro.fromMilli(48 as Time.Milli));
+		dst.truncate(Micro.fromMilli(48 as Milli));
 
 		const replacement = new SharedRingBuffer(dst.init, src);
 		expect(replacement.length).toBe(32);
@@ -1073,7 +1073,7 @@ describe("packed state", () => {
 				const mutate = () => {
 					fired = true;
 					if (operation === "truncate") {
-						dst.truncate(Time.Micro.fromMilli(48 as Time.Milli));
+						dst.truncate(Micro.fromMilli(48 as Milli));
 					} else {
 						dst.reset();
 						insert(dst, 1000, 64, { channels: 1, value: 2 });

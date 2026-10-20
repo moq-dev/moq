@@ -19,6 +19,10 @@ mod import_test;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// Container display metadata has no valid catalog aspect ratio.
+	#[error("invalid display aspect: {0}")]
+	InvalidAspect(&'static str),
+
 	/// A subtitle cue cannot be represented with valid text and timing.
 	#[error("invalid subtitle: {0}")]
 	InvalidSubtitle(&'static str),
@@ -71,6 +75,10 @@ pub enum Error {
 
 	#[error("invalid AV1CodecConfigurationRecord")]
 	InvalidAv1c,
+
+	/// A `Colour` element value has no catalog representation.
+	#[error("invalid Colour {0}")]
+	InvalidColour(&'static str),
 
 	#[error("MKV track layout changed after header was emitted: track '{0}' added")]
 	HeaderAddedTrack(String),
