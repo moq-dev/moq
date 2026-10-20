@@ -56,11 +56,15 @@ Decided 2026-10-20, with reasons:
   its doc comment and body call `advanceAsync` and move to `advance`. Check it
   still composes with the stepping loop.
 - **Breaking API for `@moq/clock`.** Every call site renames: about 60
-  `advanceAsync` and 42 sync `advance` calls under `js/`. Audit them for
-  assertions that encoded the jump while renaming. The `MIGRATE.md` entry
-  covers the rename and the stepping, and `doc/lib/js/clock.md` (the example
-  and the `advance`/`advanceAsync`/`fire` paragraph) and `js/clock/README.md`
-  follow.
+  `advanceAsync` and 42 sync `advance` calls under `js/`, tests in every
+  package included. Audit them for assertions that encoded the jump while
+  renaming. An entry under `## Unreleased` in `js/clock/MIGRATE.md` covers the
+  rename and the stepping, and `doc/lib/js/clock.md` (the example and the
+  `advance`/`advanceAsync`/`fire` paragraph) and `js/clock/README.md` follow.
+- **Rust names stay.** `moq_clock::Manual::advance` arms no timers, so it has
+  no step-or-jump split to name. `moq_clock::sim::advance` is already the async
+  `advance`. `Installed::advance` is the sync jump and would become `jump` only
+  alongside making Rust step, which is out of scope.
 
 Watch for: a timer armed while draining joins the walk when it is due by the
 target, and the clock never ends past the target or moves backward.
