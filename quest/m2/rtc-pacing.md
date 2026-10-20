@@ -1,0 +1,37 @@
+# [M] moq-rtc paces WHEP viewers to a cap, NACKs included
+
+## Goal
+
+An embedder can give a `moq-rtc` WHEP session a bitrate cap, and moq-rtc
+never sends that viewer more than the cap plus a burst, retransmits
+included. This backs moq.pro's
+[egress caps](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/rate-egress.md).
+
+## Plan
+
+Decided 2026-10-20 (maintainer): planned upstream now, because moq.pro's
+WHEP enforcement needs it and nobody owned it.
+
+- Pace frames to the cap before packetizing. Past cap plus burst, skip to
+  the next group, the same whole-group drop moq.pro's RTMP play uses.
+  Dropping individual RTP packets would leave partial frames that corrupt
+  the picture and draw NACKs and PLIs nobody can satisfy.
+- NACK resends draw from the same rate-plus-burst bucket as the frame pacer,
+  and a resend with no credit left is skipped, so faking loss only spends the
+  credit the viewer's next group would have used. str0m fulfils NACKs from
+  its video send buffer (`rs/moq-rtc/src/session.rs`), so charging needs a
+  hook on that path: find one in str0m 0.24's API, or propose one upstream
+  to str0m with the maintainer's approval.
+- A per-session rate handle sets the cap and accepts live updates. The pacer
+  counts media; the docs advise headroom for RTP overhead.
+- Tests: a capped viewer never receives more than cap plus burst; a viewer
+  over the cap resumes cleanly on the next group; two viewers with different
+  caps, each NACKing every packet for several burst windows, stay under
+  their own cap plus burst.
+
+Public API: a rate handle on moq-rtc's WHEP server. Wire: none.
+
+## Related
+
+- [moq-rtc REMB and TIAS](/quest/m2/rtc-remb-tias.md) - the WHIP half of the same caps
+- [SRT rate handle](/quest/m2/srt-rate-handle.md) - the same pacing and retransmit charging on SRT

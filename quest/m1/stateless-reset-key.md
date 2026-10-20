@@ -30,6 +30,10 @@ Decided 2026-10-19 by the maintainer (#5861): land
 Public API: a new relay config field and `moq_quic::EndpointConfig::reset_secret`.
 Docs: `doc/bin/relay/`.
 
+## Required
+
+- [Bound message assembly](/quest/m1/quic/receive-memory.md) - #5910 rebases onto its #5878
+
 ## Closes
 
 - [#5861](https://github.com/moq-dev/moq/issues/5861) - a restarted relay can't stateless-reset its predecessor's connections

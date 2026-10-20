@@ -2,9 +2,8 @@
 
 ## Goal
 
-`archive::Producer` takes a path prefix and stores every track of every
-broadcast under it into an `object_store::ObjectStore`,
-each broadcast under its own key prefix. It holds what the publisher's cache
+`archive::Producer` takes one broadcast and stores every track of it into an
+`object_store::ObjectStore` under the key prefix its host picks. It holds what the publisher's cache
 stops serving: a lost group becomes a gap and never stalls the archive.
 Datagrams are lossy and never cached, so a track's datagrams are recorded
 from when its subscription takes effect; earlier ones are not. An
@@ -16,21 +15,20 @@ its timelines and recovery machinery.
 Decided by the maintainer on 2026-10-17 (see the
 [epic](/quest/m1/archive/README.md)):
 
-- **Input.** One producer records every broadcast under a prefix as it
-  appears: ANNOUNCE finds each broadcast announced at its own path,
-  [TRACKS](/quest/m1/archive/tracks.md) lists its tracks, and each track
-  records through its own SUBSCRIBE. A covering-prefix route is capability,
+- **Input.** One producer records one broadcast (decided 2026-10-20,
+  maintainer, because moq.pro's archive line records one broadcast per
+  recorder). The host runs the ANNOUNCE loop and starts a producer per
+  broadcast announced at its own path; `moq export archive` is such a host.
+  [TRACKS](/quest/m1/archive/tracks.md) lists the broadcast's tracks, and
+  each track records through its own SUBSCRIBE. A covering-prefix route is capability,
   not inventory, so broadcasts served under one on request without their own
   announcement are not recorded, and a TRACKS refused with NOT_FOUND on an
   announced path means it is not a broadcast; any other refusal, such as
   UNAUTHORIZED, is that broadcast's error and reaches the caller, never a
   silent skip
-  (decided 2026-10-19, replacing one SUBSCRIBE_ALL). The application maps
+  (decided 2026-10-19, replacing one SUBSCRIBE_ALL). The host maps
   each broadcast (path and epoch) to its key prefix, so a different epoch is
-  a different prefix and the producer stores no epoch. Open since discovery
-  became per broadcast: keep the prefix input, or take one broadcast and leave
-  the ANNOUNCE loop to the host. Recommended: keep the prefix, so every host
-  does not repeat that loop.
+  a different prefix and the producer stores no epoch.
 - **Ordering.** Each track records through an ascending subscription with max
   delay = min(the publisher's max age from TRACK_INFO, a configured cap). A
   group still missing at the cap is skipped and stays absent from the store,
@@ -119,6 +117,12 @@ Decided by the maintainer on 2026-10-17 (see the
   Rejected: resuming after the
   last stored group (loses a split or open group's tail) and re-recording the
   last group from frame 0 (fails once the source has dropped its head).
+- **Source restart.** A publisher restart mid-recording is a new broadcast
+  under a new epoch, so it records under its own key prefix; a continued
+  store under the new epoch already fails. Decide here what
+  `moq export archive` does with an epochless `Restart` (moved from
+  [sink restart follow](/quest/m1/sink-restart-follow.md) in the 2026-10-20
+  audit, since this line owns the archive's identity rules).
 - **DVR mode** stays in the crate, for hosts without bucket lifecycle rules:
   it deletes a track's objects older than a configured window after a grace
   period, so readers in flight finish, and always keeps each track's newest
@@ -137,8 +141,9 @@ within the bound, resume after a restart (including mismatched properties,
 and a restart mid-group for both a split timed group and an open untimed
 group, with no frame lost or duplicated), a track name holding `/` or
 starting with `.` round-tripping as one segment,
-DVR pruning with grace, a track added mid-recording, two broadcasts under
-the prefix landing under their own key prefixes, a track interleaving groups
+DVR pruning with grace, a track added mid-recording, `moq export archive`
+recording two broadcasts announced under its prefix into their own key
+prefixes, a track interleaving groups
 and datagrams stored with each sequence's form, a clean end writing no
 marker until the listing ends and then each track's `end` (including a
 mid-group end) followed by the broadcast's `.end`, a track removed and

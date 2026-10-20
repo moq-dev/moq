@@ -26,3 +26,10 @@ moq-net, and `just check` wall time. The nightly size job logs release
 for heavy proc macros, duplicate dependency versions (`deny.toml` only warns),
 monomorphization bloat (`cargo llvm-lines`), and default features that pull
 heavy dependencies.
+
+Scope (decided in [#6022](https://github.com/moq-dev/moq/pull/6022), which
+records the first baselines): this audit owns per-crate build cost in one
+build. Job-level CI cost (cache keys and hits, aws-lc-sys recompiling per
+cold job, both rustls backends in the gate, CI `--timings`) belongs to the
+[CI pipeline audit](/quest/m0/ci/audit.md), and dependency deduplication to
+the [dependency audit](/quest/m1/audit-deps.md).

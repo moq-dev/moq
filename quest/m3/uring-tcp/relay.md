@@ -8,12 +8,11 @@ then pinned to one thread for its whole life, exactly like a QUIC one.
 
 ## Plan
 
-`uring::Workers::bind` (`rs/moq-relay/src/uring.rs`) ignores `listen`'s
-`tcp`/`unix` listeners and points the operator at a separate `init_streams`
-tokio server; it refuses only settings a worker cannot serve
-(`tls.generate`, `lb_id`, several certificates). Replace the silent skip with real support: each
-worker binds its own listener in the reuseport group and runs the router from
-[stream](/quest/m3/uring-tcp/stream.md) on it.
+`uring::Workers::bind` (`rs/moq-relay/src/uring.rs`) serves QUIC only. The
+relay serves `listen`'s `tcp`/`unix` listeners beside it from the shared tokio
+runtime, through `init_streams` (`rs/moq-relay/src/relay.rs`). Move them onto
+the workers: each worker binds its own listener in the reuseport group and
+runs the router from [stream](/quest/m3/uring-tcp/stream.md) on it.
 
 The split of work stays what the `uring.rs` module docs already describe: the worker
 owns everything transport-shaped, while authentication and session

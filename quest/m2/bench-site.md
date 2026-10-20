@@ -1,53 +1,44 @@
-# [M] Benchmark trend site
+# [S] Benchmark trend site
 
 ## Goal
 
-A public GitHub Pages site charts nightly benchmarks over time, so a
-regression or an optimization shows as a step in the trend. It carries the
-[binding benchmarks](/bench/README.md) and the existing nightly Rust
-Criterion and JS benchmarks, and other sources can join without a new
-site.
+A public site charts nightly benchmarks over time at
+<https://git.moq.dev/bench/>, so a regression or an optimization shows as a
+step in the trend. It carries the [binding benchmarks](/bench/README.md) and
+the nightly Rust Criterion and JS benchmarks, and other sources can join
+without a new site.
 
 ## Plan
 
-The pipeline landed in #5759 (`9fcb3f327`), including the shared history
-publisher and explicit Pages deployment. Through 2026-10-19 the publisher
-never finished: it built the full dev shell without the cachix substituter
-and hit its 15-minute timeout, so no `gh-pages` branch exists. It now skips
-the dev shell, taking only `just` from the pinned nixpkgs. Pages is still off
-(`gh api repos/moq-dev/moq/pages` returns 404): the maintainer switches it
-to **Source: GitHub Actions**, then verify the first Nightly deployment at
-<https://moq-dev.github.io/moq/bench/>. Until then the deploy step fails
-after the history push, so `gh-pages` still accumulates. The "Rust benchmark tests" job is not
-charted yet: its nextest benchmarks print no structured measurements.
+The pipeline landed in #5759 (`9fcb3f327`) and #6045: the Nightly workflow
+keeps history on `gh-pages` and deploys github-action-benchmark's charts.
+Pages is on (GitHub Actions source, custom domain `git.moq.dev`), and
+<http://git.moq.dev/bench/> serves the charts (checked 2026-10-20).
+
+Left:
+
+- HTTPS: <https://git.moq.dev/bench/> fails, and Pages reports HTTPS not
+  enforced. Get the certificate provisioned for `git.moq.dev`, then enforce
+  HTTPS. Changing the Pages setting is a
+  repository setting: ask the maintainer or get approval for the `gh api`
+  call.
+- The report root <https://git.moq.dev/> returns GitHub's 404, though
+  `bench/README.md` says the nightly reports index links the trend site.
+  Deploy that index.
+- The "Rust benchmark tests" job is not charted: its nextest benchmarks
+  print no structured measurements.
 
 Decided with the maintainer on 2026-10-15:
 
-- **GitHub Pages via github-action-benchmark**: the nightly pushes each
-  run's results to a `gh-pages` branch, and the action's built-in charts are
-  the site. Its own alerting stays off; tracking is informational.
-- **Sources**: the binding benchmark's JSON and the "Rust benchmark tests",
-  "Rust bench targets" and "JS benchmarks" nightly jobs, converted to the
-  action's input format where they don't already emit one. Several are smoke runs today: most Rust
-  Criterion targets run with `-- --test`, which measures nothing. Switch the
-  charted targets to a measuring mode (or add a measurement pass), weighing
-  the added nightly runtime, and check each JS bench reports a measurement
-  before charting it. Nightly size history (today a 45-day
-  artifact) is a natural extra series if it fits cheaply. The relay load
-  benches (`bench-audio`, `bench-profile`) and the audio-quality job's
-  benchmarks are out of scope here; they can join later through the same
-  input format.
-- **One branch for everything**: [bench-ci](/quest/m2/bench-ci.md) records
-  its nightly Criterion history here instead of creating its own data
-  branch.
+- **GitHub Pages via github-action-benchmark**; its own alerting stays off,
+  so tracking is informational. Regression alerts are
+  [bench-ci](/quest/m2/bench-ci.md)'s paired comparison.
+- **One branch for everything**: bench-ci publishes into the same report
+  rather than its own data branch.
 - Hosted runners are noisy across runs; chart the binding / Rust ratios
   next to the raw numbers, since those hold steady across runners.
-- Enabling Pages is a repository setting: ask the maintainer to switch it
-  on (or approve the `gh api` call) at that step.
-- Document the site URL, what each series means, and local reproduction in
-  `bench/README.md`.
-
-Keep the landed publisher and documented local reproduction; verify the
-deployed reports before filling any remaining measurement gaps.
+- The relay load benches (`bench-audio`, `bench-profile`) and the
+  audio-quality job's benchmarks can join later through the same input
+  format.
 
 Public API: none. Wire: none.

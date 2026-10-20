@@ -41,13 +41,17 @@ its own is refused; a proof copied onto another session is refused; a session
 with no proof advertises no route of its own. Wire into CI with Rust/JS
 interop.
 
+Decided 2026-10-20 (audit): this waits only on
+[Token in band](/quest/m1/auth/token-in-band.md), whose AUTH streams carry
+the key and proof, not on the whole auth line.
+
 Wire: `drafts/draft-lcurley-moq-lite.md` gains the key and proof messages in
 lite-07-wip; `just drafts check` passes. Public API: likely none beyond
 connection setup; report any key handle that leaks into `moq-ffi`.
 
 ## Required
 
-- [In-band auth](/quest/m1/auth/README.md) - the AUTH stream carries the key and its proof
+- [Token in band](/quest/m1/auth/token-in-band.md) - the AUTH stream carries the key and its proof
 
 ## Related
 

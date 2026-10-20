@@ -14,18 +14,10 @@ are unchanged by the move itself.
 Decided with the maintainer on 2026-10-13, after a review of how moq uses
 UniFFI:
 
-- **Base**: the maintainer picks UniFFI or BoltFFI from
-  [the BoltFFI spike](/bench/ffi-gen/README.md), which recommends UniFFI.
-  The plan below assumes UniFFI. If BoltFFI is chosen, re-plan this quest
-  against it (the repo name, the
-  crate names, porting the Go, Dart, and C++/C generators to BoltFFI) along
-  with the quests that name UniFFI internals:
-  [Payload bytes](/quest/m2/ffi-bytes.md),
-  [Poll-native async](/quest/m2/ffi-poll-migrate.md),
-  [Foreign poll for hot reads](/quest/m2/ffi-poll-protocol.md),
-  [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md),
-  [Kotlin calls](/quest/m2/kt-ffi-calls.md), and
-  [Namespaced external types](/quest/m2/uniffi-namespaces.md).
+- **Base**: UniFFI. [The BoltFFI spike](/bench/ffi-gen/README.md)
+  recommended it, and #5838 (2026-10-17, maintainer) chose UniFFI-generated
+  moq-ffi for the browser too, over BoltFFI, so one generator serves every
+  language.
 
 - **Why**: every UniFFI minor release breaks external generators (0.31
   changed `module_path`, 0.32 changed the metadata encoding without bumping

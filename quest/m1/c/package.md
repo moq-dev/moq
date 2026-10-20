@@ -19,7 +19,7 @@ under the same names.
 - `doc/index.md` says the C library ships static and shared; say what the
   package actually ships.
 - A release workflow and nightly/CI jobs follow the C++ package's, on the same
-  generator pin; `v0.11.0-kixelated.4+v0.32.2` already carries the C backend
+  generator pin; `v0.11.0-kixelated.5+v0.32.2` already carries the C backend
   (`--lang c`).
 - Ship a `MIGRATE.md` with the package, since it is what C users install.
   Carry over `rs/moq-c/MIGRATE.md`'s history and add an `## Unreleased`
@@ -31,3 +31,12 @@ under the same names.
 - The Cross-Package Sync rows that name the hand-written `rs/moq-c` (as the
   target of `rs/moq-ffi` changes, and its `moq.h` C ABI) point at the
   generated package instead; update `AGENTS.md` in this quest.
+
+Decided 2026-10-20 (audit): this waits on
+[moq-ffi reporting a first dial's failure](/quest/m1/ffi-first-dial-failure.md),
+because the hand-written `moq_session_failure` already names a retrying first
+dial and the generated package must not drop that.
+
+## Required
+
+- [moq-ffi reports why a first dial fails](/quest/m1/ffi-first-dial-failure.md) - the generated C keeps what `moq_session_failure` reports today

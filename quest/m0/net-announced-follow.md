@@ -15,8 +15,12 @@ Decided with the maintainer on 2026-10-17: the goal as drafted, from
 decision 5 of [#5700](https://github.com/moq-dev/moq/pull/5700), which kept
 the loops per binding until moq-net owns them. Mirror the JS name.
 
-The sink follow helper waits on this quest so it does not add a third loop;
-the OBS source keeps calling `available()`, whose API does not change.
+Decided 2026-10-20 (maintainer): moved to m0 because
+[catalog references](/quest/m0/broadcast-epoch/catalog-references.md)
+builds `moq_mux::Source::follow` on this request, and
+[sink restart follow](/quest/m1/sink-restart-follow.md) reuses that helper,
+so neither adds another hand-rolled loop. The OBS source keeps calling
+`available()`, whose API does not change.
 
 The loops #5700 added drain `origin::Consumer::follow`, resolve the path with
 `routed_broadcast`, and settle three cases moq-net should own once:

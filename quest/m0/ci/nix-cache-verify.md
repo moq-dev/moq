@@ -2,8 +2,8 @@
 
 ## Goal
 
-Condition: the PR that wired `nix.moq.dev` into CI has merged. The maintainer
-ran the bootstrap in `infra/README.md` on 2026-10-19 and 2026-10-20 (the
+[#5693](https://github.com/moq-dev/moq/pull/5693) wired `nix.moq.dev` into
+CI. The maintainer ran the bootstrap in `infra/README.md` on 2026-10-19 and 2026-10-20 (the
 release tag ruleset, both buckets and the Worker, the `cache-write`
 Environment's tag policies and secrets, and the signing key). Check it with
 `curl https://nix.moq.dev/nix-cache-info` and

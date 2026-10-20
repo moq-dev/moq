@@ -24,7 +24,7 @@ Facts (2026-10-10, `origin/main` e5446b036):
   equivalent.
 - `OriginConsumer::follow` exists (`rs/moq-net/src/model/origin.rs:4473`);
   Rust has no announced-gated request like JS's, so the fold's shape is open.
-- Added 2026-10-17: [moq-net follows announced instances](/quest/m1/net-announced-follow.md)
+- Added 2026-10-17: [moq-net follows announced instances](/quest/m0/net-announced-follow.md)
   lands first and gives Rust its announced request. This quest then makes
   that request register discovery interest for its path, since the session
   stops asking for its whole scope.
@@ -47,8 +47,13 @@ closes 2s after nothing beneath it is watched (a fixed constant, since one-shot
 connections have no `linger`); a refused or reset request downgrades the
 whole session to blind answers.
 
-Open for the plan round: the Rust equivalent of an announced request, how the
-watch set crosses the poll-based session driver, and moq-ffi and binding
+Decided 2026-10-20 (maintainer): no blind answers in Rust. moq-net has no
+blind requests, and [net-announced-follow](/quest/m0/net-announced-follow.md)
+already waits on an announced route rather than falling back, so a refused or
+reset announce request does not downgrade a Rust session; the request fails
+like any other. This is the one place Rust does not mirror JS.
+
+Open for the plan round: how the watch set crosses the poll-based session driver, and moq-ffi and binding
 fallout (see the Cross-Package Sync table in `AGENTS.md`).
 
 Tests must pin the relay side: an origin in relay mode (cluster and upstream
@@ -57,4 +62,4 @@ lazy discovery never narrows what a relay discovers.
 
 ## Required
 
-- [moq-net follows announced instances](/quest/m1/net-announced-follow.md) - the Rust announced request this quest registers discovery interest for
+- [moq-net follows announced instances](/quest/m0/net-announced-follow.md) - the Rust announced request this quest registers discovery interest for

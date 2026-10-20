@@ -23,18 +23,14 @@ Rules every child keeps:
   timer before a real socket delivers. Where real sockets fight the paused
   clock, make the timers mockable or move the test off real sockets.
 
-Added 2026-10-15 (maintainer): three flakes seen while landing that day's
-merge batch, ranked by how likely each hides a product bug.
-
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did. moq-tokio's
 `a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
 known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
 
-Added 2026-10-19 (maintainer): three more, the redial pair first since CI
-hit it. The same day's test cost audit added the macOS QUIC connects, and the
-redundant failover drift first: it may hide a TS export bug and failed two of
-three loaded `just check` runs.
+Two children remain, ranked by how likely each hides a product bug: the
+redundant failover drift first, since it may hide a TS export bug and failed
+two of three loaded `just check` runs, then the macOS QUIC connects.
 
 Public API: none. Wire: none.
 

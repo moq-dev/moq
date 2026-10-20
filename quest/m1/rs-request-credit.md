@@ -32,3 +32,12 @@ backends fail fast.
 
 Propose the error variant's name in the PR. Public API: one new `Error`
 variant, and possibly a `transport::poll` session method. Wire: none.
+
+Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
+order, [receive memory](/quest/m1/quic/receive-memory.md) first, then this
+quest, then [Scope track priority](/quest/m1/track-priority-scope.md), so
+implementers rebase on one shape at a time.
+
+## Required
+
+- [Bound message assembly](/quest/m1/quic/receive-memory.md) - lands its `transport::poll` change first; this quest builds its non-waiting open on that shape

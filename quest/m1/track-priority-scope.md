@@ -31,7 +31,8 @@ Where the model stands today, all in `rs/moq-net`:
 - Group order within a track follows each subscription's `order` (#5385),
   newest first by default.
 - A relay forwards the max of its downstream subscriber priorities upstream
-  (`model/subscription.rs`, `lite/subscriber.rs`), never the publisher's track
+  (`model/subscription.rs`, `lite/subscriber.rs`, and on moq-transport
+  upstreams `ietf/subscriber.rs` since #5922), never the publisher's track
   priority, so one viewer asking for 255 raises that track above every other
   tenant's on the cluster link (`rs/moq-relay/src/cluster.rs`: one
   bidirectional session per peer pair carries every broadcast). The draft
@@ -105,12 +106,21 @@ Signed priority, decided with the maintainer:
 - Look for anything that does arithmetic on priority (the lite send queue, JS
   send-order packing, the bandwidth allocator, the relay's max-of-subscribers)
   and keep its ordering, not just its type.
-- moq-archive's `Info::priority` follows. Its version-1 `.info` stores the
-  `u8`, so existing recordings must keep their meaning: store the moq-lite
-  byte (`p + 128`) or bump the format version, never reinterpret silently.
+- moq-archive's `.info` priority follows and breaks in place with the
+  archive line's other formats (decided 2026-10-20, maintainer): no format
+  version or compatibility mapping for recordings made before the cut.
 - The moxygen default (127, #4273) already shipped, so the default byte moves
   a second time. Add an upgrade note to the release's upgrade page saying why.
   Rejected: a mapping that keeps today's bytes (lite byte = p + 127).
+
+Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
+order, [receive memory](/quest/m1/quic/receive-memory.md), then
+[Rust request credit](/quest/m1/rs-request-credit.md), then this quest, which
+adds the send domain last. [A stalled subscriber holds bounded
+state](/quest/m1/egress-held-state.md) rewrites the same serve loops and
+lands after this. The moq-c half lands on the
+[generated C package](/quest/m1/c/README.md), not the frozen hand-written
+ABI, so C users break once.
 
 Prove scoping with the existing lite publisher tests extended to two
 broadcasts on one session with fairness on: neither starves, a downstream 255
@@ -123,6 +133,11 @@ Public API impact: `u8` priority fields become `i8` in every language, and
 `Subscribe.priority` on a cluster session changes meaning. Wire impact: none
 in format, but the default byte moves from 127 to 128 on moq-lite and from 128
 to 127 on IETF. Report both with the draft change.
+
+## Required
+
+- [Generated C bindings](/quest/m1/c/README.md) - the `i8` priority reaches C through the generated package, so C users break once
+- [Rust request credit](/quest/m1/rs-request-credit.md) - the previous `transport::poll` break; this one adds the send domain on top
 
 ## Related
 

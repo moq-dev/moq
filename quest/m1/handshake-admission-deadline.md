@@ -25,8 +25,7 @@ the deadline while authorization runs):
 - Not chosen: keep `ADMIT_TIMEOUT` as an inner cap; a separate
   `auth.timeout` config with `listen.timeout` still ending at SETUP.
 
-Start after #5244 (io_uring handshake deadline) merges, since it adds the
-io_uring deadline this extends.
+#5244 added the io_uring handshake deadline this extends.
 
 Gaps found in this plan's review, to settle with the maintainer at start:
 

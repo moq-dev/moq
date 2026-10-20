@@ -17,3 +17,7 @@ Decided 2026-10-05: [Cluster routing](/quest/m1/cluster-routing/README.md)'s
 route layer lands in lite-07, so the final lite-07 carries ROUTE and
 path-less ANNOUNCE instead of hop lists, and loses the `Hop Base`/`Hop Keep`
 announce compression. moq.pro's rollout must plan for that wire.
+
+## Related
+
+- [Lite-07 on cluster dials](https://github.com/moq-dev/moq.pro/blob/main/quest/m1/lite07.md) - the moq.pro quest whose rollout clears this condition

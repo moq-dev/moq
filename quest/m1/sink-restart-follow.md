@@ -23,18 +23,19 @@ and fix the rest the same way:
   streams in `moq-rtmp`, `moq-srt`, `moq-rtc`) and `--connect` (one push).
   SRT already rides the TS follower (`--linger`, `--stitch`); confirm its
   listen side does too. FLV and WebRTC need a decision.
-- `export archive`: a restart already fails a continued store under a new
-  epoch; decide what a mid-recording restart does.
 - `transcode`: its source broadcast; following means restarting the ladder
   on the new instance.
 
-Share one helper (a `moq_mux` `Source::follow`-style API per
-[catalog references](/quest/m0/broadcast-epoch/catalog-references.md))
-rather than one rule per sink. Each fix lands with a test that replaces the
+`export archive` follows the [archive producer](/quest/m1/archive/producer.md)'s
+restart rule instead.
+
+Reuse `moq_mux::Source::follow` from
+[catalog references](/quest/m0/broadcast-epoch/catalog-references.md)
+rather than one rule per sink (decided 2026-10-20, maintainer). Each fix lands with a test that replaces the
 publisher while the sink runs.
 
-Public API: possibly a shared follow helper in `moq-mux`. Wire: none.
+Public API: none. Wire: none.
 
 ## Required
 
-- [moq-net follows announced instances](/quest/m1/net-announced-follow.md) - the shared follow helper builds on moq-net's announced request, not a third hand-rolled loop
+- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - owns `Source::follow`, built on moq-net's announced request

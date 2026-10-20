@@ -43,3 +43,7 @@ export the experimental Rust request hook through the bindings here.
 
 Additive. Decided in the 2026-09-30 audit: libmoq is frozen, so the C
 surface comes from moq-ffi rather than new `moq_session_auth_*` calls.
+
+## Required
+
+- [Auth outlives its session](/quest/m1/auth/issuer.md) - settles `Connection::auth()`'s shape before moq-ffi exposes it

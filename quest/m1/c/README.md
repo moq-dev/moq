@@ -50,6 +50,14 @@ is a narrow correctness exception. Its existing claim API migrates with
 Rust and JS so C cannot retain the unsafe accept path while this line waits.
 That change owns its C tests and `MIGRATE.md` entries; other API reshaping stays here.
 
+Decided 2026-10-20 (maintainer): m1 quests that change the C API
+([exact binding timestamps](/quest/m1/binding-timestamps.md),
+[scope track priority](/quest/m1/track-priority-scope.md),
+[binding linger](/quest/m1/linger-ffi.md),
+[binding docs](/quest/m1/docs-bindings.md), and
+[Rust identity enforcement](/quest/m1/catalog-identity-rs.md)) Require this
+line and land their C half on the generated package, so C users break once.
+
 ## Required
 
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow

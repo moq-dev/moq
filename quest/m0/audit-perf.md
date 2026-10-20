@@ -32,8 +32,10 @@ nightly tooling tests. Supplemental and io_uring measurements have separate
 one-hour jobs. Handwritten allocation, window, and playback-buffer tables
 remain in the raw run logs; only Criterion estimates enter the chart report.
 Fan-out paths need a sweep over both axes
-(AGENTS.md). JS perf is judged in a browser, not node or bun. PR-time gating
-belongs to [benchmark regressions in CI](/quest/m2/bench-ci.md); don't
+(AGENTS.md). JS perf is judged in a browser, not node or bun. Benchmarks never gate the
+merge queue (decided 2026-10-20, maintainer): each Nightly compares them into
+the git.moq.dev report, which the
+[nightly benchmark regression report](/quest/m2/bench-ci.md) owns; don't
 duplicate it.
 
 Audit evidence (2026-10-19, second checkpoint, incomplete):
@@ -42,9 +44,10 @@ Audit evidence (2026-10-19, second checkpoint, incomplete):
   the full dev shell without the cachix substituter and hit its 15-minute
   timeout (jobs 117680366708 and 118138225497). This run takes only `just`
   from the pinned nixpkgs there, and a nightly tooling test requires
-  every dev-shell job to trust the Nix cache. Pages itself is still off; see
-  [benchmark trend site](/quest/m2/bench-site.md). Check that `gh-pages`
-  exists and gains a commit per night before comparing against it.
+  every dev-shell job to trust the Nix cache. Pages now serves `gh-pages` at
+  git.moq.dev (see [benchmark trend site](/quest/m2/bench-site.md)) and the
+  branch holds Nightly results; check that it gains a commit per night before
+  comparing against it.
 - Rust: both the October 18 (`50da59e67`) and October 19 (`ad87ad34e`)
   Nightlies retain `bench-rust` (1,527 series each); the earlier note that
   the 19th had none was wrong. Across 1,682 cost series the median change is

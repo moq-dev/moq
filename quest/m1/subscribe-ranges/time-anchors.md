@@ -47,8 +47,17 @@ Open findings from #5929's review, each needing a regression test:
 
 Also pass a time anchor the cache can't resolve to the `track::Dynamic` handler
 in its range request, once [dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)
-land, and update `quest/m1/binding-timestamps.md` for the anchor's
-`timestamp_us` fields.
+land.
+
+Decided 2026-10-20 (maintainer): this waits on
+[exact binding timestamps](/quest/m1/binding-timestamps.md) and binds the
+anchor as its `{value, scale}` record, because a `timestamp_us` binding would
+floor a 90 kHz pts and break once more. [#6074](https://github.com/moq-dev/moq/pull/6074),
+which binds `timestamp_us`, rebases onto it.
+
+## Required
+
+- [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - the anchor binds as an exact `{value, scale}` record, never lossy microseconds
 
 ## Related
 

@@ -10,9 +10,11 @@ audio at the level the Opus `bursty` rows show, on both rings, and
 
 ## Plan
 
-Waits on the nightlies: check the `audio-quality-run` artifacts of the
-scheduled Nightly runs on `main` (`gh run download <id> -n audio-quality-run`)
-once seven have run since the fix merged. Never dispatch the nightly by hand.
+Read the `audio-quality-run` artifacts of the scheduled Nightly runs on
+`main` since the fix merged (`gh run download <id> -n audio-quality-run`).
+As of 2026-10-20 seven have run (38564590314 through 39421743227) and six
+carry the artifact; the October 17 run has none, so the next scheduled run
+completes the set. Never dispatch the nightly by hand.
 
 The fix measured reordered frames, which most AAC arrivals are: the publisher
 flushes seven one-frame groups at once and the relay sends the newest first.

@@ -23,17 +23,6 @@ serve instead of enumerating broadcasts. Serving the relay's ingested-only
 view (`origin::Consumer::local()`) to localhost workers belongs to moq.pro's
 edge, which embeds moq-relay; it moved there on 2026-09-28.
 
-Interop: Fastly's moq-relay-interop report (run of 2026-09-23, build
-7ee2b02) was triaged against `main` on 2026-10-07. Its SETUP, UNSUBSCRIBE
-and error-code items were already fixed. Fastly's reruns that day found
-that a relay moves End of Track's Location and refuses imquic's End of
-Group status. The fixes below LOCATION_FILTER come from them and go ahead
-of Seattle. The cold-relay Largest stays compliant with INVALID_RANGE
-(decided 2026-10-08), and the deviations doc landed in #5022.
-An imquic draft-22 rig (2026-10-08) hit LOCATION_FILTER and a clear
-FIRST_OBJECT at object 0 (#5027). Both shipped with moq-noq 1.3.5 in
-moq-relay 0.17.3 and `@moq/net` 0.4.3.
-
 Identity: the [broadcast epoch](/quest/m0/broadcast-epoch/README.md) line
 gates the next release (decided 2026-10-03:
 #4741 resumes an un-epoched republish into the old broadcast and stalls its
@@ -41,39 +30,16 @@ viewers). #4741 can merge to main, but no release ships until first-party
 publishers mint epochs. Backport patches cut from `release` don't carry
 #4741 and aren't gated (decided 2026-10-08).
 
-Liveness: a serve loop with work always ready never yields, which starved
-an FFI publisher's QUIC driver and fails hosted Interop's go lanes (found
-2026-10-08 landing #4225). The publish serve loops now yield through a
-`kio::coop::Budget`. The Go and Python interop cells it fails
-moved here from m1 the same day, because the stall masks interop on every
-wire PR and hides as slow passes; the harness now fails a cell whose
-connection idles out.
+Decided 2026-10-20 (maintainer): [moq-net follows announced
+instances](/quest/m0/net-announced-follow.md) moved here from m1, because
+catalog references builds `Source::follow` on it instead of hand-rolling
+another follow loop; m1's [sink restart follow](/quest/m1/sink-restart-follow.md)
+reuses that helper.
 
-Audio playout: the jitter target is default in both languages (#4162); the
-[line](/quest/m1/audio-jitter-target/README.md) moved to m1 in the
-2026-10-08 audit, since only a manual browser proof and a native trace replay
-remain and the release only requires the production clock and playback contracts
-that depend on them.
-
-Interop on main (2026-10-13): the cross-client matrix failed with `unroutable`
-whenever WebSocket won the connect race: since #5294, #4180's upgrade
-retired epochless handles before its held `Restart` reached anyone. Handles
-now retire only once it is deliverable. First-party consumers following it
-moved to m1 (maintainer, 2026-10-13), since the upgrade is removed.
-
-Crashes (2026-10-13, #5407): a publisher on a host whose wall clock reads
-before 2020 panics, and `panic = "abort"` turned any library panic into a
-dead host app. Both joined m0 (maintainer) and are fixed: the clock at its
-source, and unwinding so a panic closes only its connection.
-
-Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
-quests here. The nixpkgs bump broke the Linux zigbuild release builds (its
-GCC 16 miscompiles lld 21, fixed upstream and waiting on `nixpkgs-unstable`),
-and fat LTO in the release profile broke the fuzz build. Audio quality has been
-red since it landed, against budgets recorded locally; re-measuring them on
-the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
-have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
-(#5389) and Windows tests (#5339).
+Release builds: the 2026-10-11 nixpkgs bump broke the Linux zigbuild release
+builds ([release link](/quest/m0/release-link.md)). Decided 2026-10-20
+(audit): it and the epoch line rank above the qmux 0.5 backport, because both
+gate the next cut while the backport only patches the shipping line.
 
 Hygiene (decided 2026-10-19): the audits sit at the end of this list.
 Each recurs once per major release: its PR adds the next run to the following
@@ -82,15 +48,14 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 
 ## Required
 
-- [qmux 0.5 upstream](/quest/m0/qmux-credit-backport-upstream.md) - old-release publication, independent of the main fix
-
-- [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
-
-- [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
+- [moq-net follows announced instances](/quest/m0/net-announced-follow.md) - the Rust equivalent of JS `request(path, { announced: true })`, replacing the follow loops in moq-ffi and moq-c; catalog references builds `Source::follow` on it
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
+- [qmux 0.5 upstream](/quest/m0/qmux-credit-backport-upstream.md) - old-release publication, independent of the main fix
+- [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
+- [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on #412 to publish the patched 0.6.x that main adopts
 - [qmux credit](/quest/m0/qmux-credit.md) - main adopts qmux 0.6 credit and close fixes; the 0.5 backport is independent
-- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [Performance audit](/quest/m0/audit-perf.md) - benchmarks that regressed since the last run are explained, fixed, or planned, and unbenched hot paths get coverage
 - [Compile time audit](/quest/m0/audit-compile-time.md) - build-time hotspots are measured against a baseline and the worst are fixed or planned
 - [Artifact size audit](/quest/m0/audit-size.md) - binary, FFI, WASM, and bundle growth since the last run is explained, fixed, or planned

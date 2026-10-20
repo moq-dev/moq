@@ -85,6 +85,11 @@ throws. Admission control (per-token or per-address session caps) belongs to
 the deployment's auth server, which already refuses a connect with a 401 or
 403 ([relay auth](/doc/bin/relay/auth.md)); this repo needs nothing more.
 
+Decided 2026-10-20 (maintainer): this lands after
+[Scope track priority](/quest/m1/track-priority-scope.md), the last of the
+`transport::poll` breaks, because both rewrite the publisher serve loops and
+one owner at a time keeps them coherent.
+
 Reproduce first. A mock-time sim test (or a `just` drill against a real relay)
 with a subscriber that withholds stream credit, or drains below the media rate
 behind a deep finite queue, while the publisher writes groups across many
@@ -109,11 +114,14 @@ publisher in `js/net` is checked for the same shape and fixed or its gap
 named in the PR, and the PR reports public API and wire impact (expected:
 none on the wire; possibly a relay default).
 
+## Required
+
+- [Scope track priority](/quest/m1/track-priority-scope.md) - rewrites the same serve loops and decides who gets the next stream
+
 ## Related
 
 - [Bound incomplete messages](/quest/m1/quic/receive-memory.md) - the ingress counterpart: a receiver withholds QUIC credit to bound what it holds, and this quest bounds what the sender holds while it does
 - [Rust request credit](/quest/m1/rs-request-credit.md) - requests fail fast without stream credit; publisher group streams are left to this quest
-- [Scope track priority](/quest/m1/track-priority-scope.md) - who gets the next stream across subscriptions and tenants
 - [Public serving](/quest/m1/public-model/serve.md) - makes group expiry while serving public; coordinate the publisher serve loops with it
 - [Treat network input as untrusted](https://github.com/moq-dev/moq/pull/5961) - the rule this quest applies
 - [Resumed group head](https://github.com/moq-dev/moq/pull/5958) - the audit that found this, and bounded held heads by the cache pool

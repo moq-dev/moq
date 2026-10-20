@@ -20,3 +20,13 @@ UniFFI copies rustdoc into the generated Python, Swift, Kotlin, and Go code,
 and cbindgen copies it into `moq.h`. The hand-written wrappers listed in the
 Cross-Package Sync table keep their own docs; align them where they restate
 the same item.
+
+Decided 2026-10-20 (maintainer): the moq-c half lands on the
+[generated C package](/quest/m1/c/README.md), not the frozen hand-written
+ABI, so C users break once. There it means checking that the generated
+`moq.h` carries moq-ffi's rustdoc, rather than documenting the hand-written
+crate.
+
+## Required
+
+- [Generated C bindings](/quest/m1/c/README.md) - `moq.h` comes from the generated package; the hand-written crate gets no more work

@@ -57,9 +57,13 @@ following does not authorize substituting a different requested epoch.
 - Exporters: a late first announcement starts the rendition and End ends
   it. Restart behavior belongs to
   [sink restart follow](/quest/m1/sink-restart-follow.md).
-- Share this in `moq_mux` (a `Source::follow`-style API; the shape is open)
-  rather than per reader. `Source::bind` binds once today, as
+- Share this in `moq_mux` as `Source::follow`, built on moq-net's
+  [announced request](/quest/m0/net-announced-follow.md), rather than per
+  reader. `Source::bind` binds once today, as
   `failed_binding_does_not_retry_a_later_publisher` asserts; that changes.
+  Decided 2026-10-20 (maintainer): this quest owns `Source::follow` and
+  [sink restart follow](/quest/m1/sink-restart-follow.md) reuses it, so
+  no reader hand-rolls its own follow loop.
 
 Use the shared reference resolution paths rather than adding one rule per
 media type. Mirror schemas and behavior in `rs/hang`, `js/hang`, native
@@ -85,10 +89,15 @@ upgrade notes inline. The [identity guide](/quest/m1/identity-guide.md)
 consolidates the behavior separately. Explain both the strong epoch-aware
 guarantee and the selected legacy best-effort behavior.
 
+## Required
+
+- [moq-net follows announced instances](/quest/m0/net-announced-follow.md) - the announced request `Source::follow` builds on
+
 ## Related
 
 - [Source pin](https://github.com/moq-dev/moq/pull/5252) - exporters share their resolved catalog handle
 - [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - JS resolves the actual serving identity
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - held handles cannot emit unpinned requests after retirement
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - the same for the Rust publishers
+- [Hang contribution references](/quest/m2/contribution-ref.md) - builds its lazy contribution entries on these reference rules
 - [MoQ Epoch](/drafts/draft-lcurley-moq-epoch.md) - verified catalog identity over negotiated IETF sessions

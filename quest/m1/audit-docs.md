@@ -52,6 +52,5 @@ comparing against these baselines:
   but bad values do not. `gst-inspect-1.0` of a debug `moq-gst` build lists
   every element and pad property `doc/bin/gstreamer.md` names.
 - Cross-Package Sync: walked from the 2026-10-16 release cut (`d0b086e71b`)
-  through `9b90cdd569`. Walk the next run from there. The table's Go row
-  and `rs/moq-ffi/AGENTS.md` name `go/wrapper/moq`, which does not exist;
-  the wrapper is `go/wrapper/*.go` and its subpackages.
+  through `9b90cdd569`. Walk the next run from there. The Go row's
+  `go/wrapper/moq` path was fixed in #6063.

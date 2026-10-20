@@ -126,3 +126,5 @@ connection view and the dashboard flow.
   combined per-broadcast verdict reading both lives downstream
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   adapts its bitrate to what its viewers report
+- [Latency ledger](/quest/m2/latency-ledger.md) - adds the viewer's latency
+  stages to the same stats and feedback snapshots
