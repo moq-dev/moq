@@ -12,13 +12,20 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Require merge queue on self-hosted runners
+      if: runner.environment == 'self-hosted' && github.event_name != 'merge_group'
+      shell: bash
+      run: |
+        echo "::error::Persistent self-hosted caches require a merge_group job." >&2
+        exit 1
+
     # The pinned action saves in a post step guarded by success(), so failed
     # builds cannot publish a cache even when dispatch saving is enabled.
     - uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
       with:
         version: 1.10.0
-        # Self-hosted runners keep their mbx store locally between jobs.
-        backend: ${{ runner.environment == 'self-hosted' && 'local' || 'github' }}
+        # Only reviewed queue jobs share the persistent local store.
+        backend: ${{ runner.environment == 'self-hosted' && github.event_name == 'merge_group' && 'local' || 'github' }}
         # `github-cache-mode` is left at its `target` default. That transports
         # Cargo's pruned target tree, the same payload Swatinem carried, with
         # mbx's per-compilation store on top. The `objects` closure is portable

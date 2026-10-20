@@ -60,11 +60,19 @@ test("scope queries support both merge groups and release PRs without path filte
 	expect(workflow.on.pull_request).not.toHaveProperty("paths");
 });
 
-test("self-hosted runners use the local Rust cache while hosted runners restore GitHub cache", async () => {
+test("only self-hosted merge groups use the local Rust cache", async () => {
 	const action = Bun.YAML.parse(await Bun.file(".github/actions/rust-cache/action.yml").text());
 	const setup = action.runs.steps.find((step: Step) => step.uses?.startsWith("jdx/mr-boxington-action@"));
 	const expression = setup.with.backend.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
-	const backend = new Function("runner", `return (${expression});`);
-	expect(backend({ environment: "self-hosted" })).toBe("local");
-	expect(backend({ environment: "github-hosted" })).toBe("github");
+	const backend = new Function("runner", "github", `return (${expression});`);
+	const guard = new Function("runner", "github", `return (${action.runs.steps[0].if});`);
+	for (const event_name of ["merge_group", "pull_request", "pull_request_target", "push", "workflow_dispatch"]) {
+		expect(backend({ environment: "self-hosted" }, { event_name })).toBe(
+			event_name === "merge_group" ? "local" : "github",
+		);
+		expect(guard({ environment: "self-hosted" }, { event_name })).toBe(event_name !== "merge_group");
+		expect(backend({ environment: "github-hosted" }, { event_name })).toBe("github");
+		expect(guard({ environment: "github-hosted" }, { event_name })).toBe(false);
+	}
+	expect(action.runs.steps[0].run).toContain("exit 1");
 });
