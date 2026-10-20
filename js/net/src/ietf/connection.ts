@@ -16,28 +16,26 @@ import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, RequestWindowError, type Session } from "./adapter.ts";
 import { AuthMessage, supported as authSupported, IetfAuthWire } from "./auth.ts";
 import * as Cluster from "./cluster.ts";
-import { type RequestKind, toRequestCode } from "./error.ts";
-import { Fetch, FetchError, FetchHeader } from "./fetch.ts";
+import type { RequestKind } from "./error.ts";
+import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Group } from "./object.ts";
-import { Publish, PublishError } from "./publish.ts";
-import { PublishNamespace, PublishNamespaceError } from "./publish_namespace.ts";
+import { Publish } from "./publish.ts";
+import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
-import { RequestError } from "./request.ts";
-import { malformed } from "./request_stream.ts";
-import { Subscribe, SubscribeError, SubscribeUpdate } from "./subscribe.ts";
+import { malformed, refuse } from "./request_stream.ts";
+import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import {
 	SUBSCRIBE_TRACKS_ID,
 	SubscribeNamespace,
-	SubscribeNamespaceError,
 	SubscribeNamespaceLegacy,
 	SubscribeOptions,
 } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { MalformedAuthToken } from "./token.ts";
-import { TRACK_STATUS_ERROR_14, TrackStatusRequest } from "./track.ts";
+import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
 
 // The PADDING stream type (draft-18+): bytes a peer sends to probe for bandwidth.
@@ -251,6 +249,7 @@ export class Connection implements Established {
 			solicit,
 			goaway: this.#goaway,
 			grant: this.#auth.scope,
+			auth: this.#auth,
 		});
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
@@ -318,7 +317,7 @@ export class Connection implements Established {
 			];
 			// Fail loud on a publication our grant never covers, once the peer has answered the
 			// credential we presented at setup.
-			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered()));
+			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered(), this.#auth));
 			await Promise.all(tasks);
 		} catch (err) {
 			if (!this.#closed) {
@@ -540,24 +539,11 @@ export class Connection implements Established {
 
 	/** Refuse a request MALFORMED_AUTH_TOKEN, ending its stream. Mirrors Rust's `token::reject`. */
 	async #refuseToken(stream: Stream, kind: RequestKind, requestId: bigint) {
-		const version = this.#session.version;
-		// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into.
-		const id14 = {
-			subscribe: SubscribeError.id,
-			fetch: FetchError.id,
-			publish: PublishError.id,
-			publish_namespace: PublishNamespaceError.id,
-			subscribe_namespace: SubscribeNamespaceError.id,
-			track_status: TRACK_STATUS_ERROR_14,
-		}[kind];
-		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
-		await stream.writer.u53(version === Version.DRAFT_14 ? id14 : RequestError.id);
-		await new RequestError({
-			requestId: legacy ? requestId : undefined,
-			errorCode: toRequestCode("malformed_auth_token", kind, version),
+		await refuse(stream, this.#session.version, kind, {
+			requestId,
+			condition: "malformed_auth_token",
 			reasonPhrase: "repeated AUTHORIZATION TOKEN",
-		}).encode(stream.writer, version);
-		stream.close();
+		});
 	}
 
 	// A malformed OBJECT_DATAGRAM is the peer breaking the protocol, like an invalid stream type.

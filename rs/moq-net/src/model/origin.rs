@@ -471,7 +471,7 @@ pub struct Route {
 	/// solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer with a
 	/// PUBLISH_NAMESPACE, which carries it), and moq-lite (which rides the session's scope)
 	/// advertise the route unnamed. Swapping it is an update that renews the request with
-	/// REQUEST_UPDATE from draft 17, or ends and makes it again before. After a
+	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. After a
 	/// reconnect, add the token on the new session and name that. Local, like
 	/// [`Self::source`]: a relay never forwards it.
 	pub auth: Option<crate::auth::Auth>,
@@ -3133,11 +3133,14 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 						match sources.get(&source).map(|s| s.track(&name)) {
 							Some(Ok(lookup)) => {
-								// `into_inner` sheds the `Pending` future wrapper so only
-								// the pollable (which is `Sync`) is held across the wait.
-								let query = lookup.query().into_inner();
+								// Subscribe before the query exposes upstream demand, and query
+								// that same instance even if the broadcast changes meanwhile.
+								let sub = io.weak.subscription().map(|demand| lookup.subscribe(demand));
+								let query = match &sub {
+									Some(sub) => sub.query(),
+									None => lookup.query().into_inner(),
+								};
 								let copy = query.track();
-								let sub = io.weak.subscription().map(|demand| copy.subscribe(demand));
 								io.query = Some(Asked {
 									source,
 									copy,

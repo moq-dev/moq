@@ -5,10 +5,10 @@ import { error, ProtocolViolation, SessionCode, SessionError, sessionClosed } fr
 import { type OpenOptions, Reader, Stream, type Writer } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
-import { toRequestCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW, RequestError } from "./request.ts";
+import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW } from "./request.ts";
+import { refuseUpdate } from "./request_stream.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** The peer used a request ID the draft closes the session for. */
@@ -258,9 +258,10 @@ export class ControlStreamAdapter implements Session {
 	// SubscribeNamespace requestIds — for routing 0x08/0x0E entries that lack requestId (v14/v15)
 	#subscribeNamespaces = new Set<bigint>();
 
-	// Our updates' own request IDs on drafts 15 and 16, whose answer names that ID rather than
-	// the request it updated. Nothing waits on it, so it is consumed here.
-	#updates = new Set<bigint>();
+	// Our updates' own request IDs on drafts 15 and 16 → the request each updated, since the
+	// answer names only the update. Draft 16's reaches that request's stream; draft 15's is
+	// consumed here, since nothing there reads one. An entry goes with its answer or its request.
+	#updates = new Map<bigint, bigint>();
 
 	// Incoming stream queue (for acceptBi)
 	#incomingQueue: Stream[] = [];
@@ -397,7 +398,12 @@ export class ControlStreamAdapter implements Session {
 						}
 					} else {
 						spent = this.#updateId(toFlush);
-						if (spent !== undefined && this.version !== Version.DRAFT_14) this.#updates.add(spent);
+						if (
+							spent !== undefined &&
+							registeredRequestId !== undefined &&
+							this.version !== Version.DRAFT_14
+						)
+							this.#updates.set(spent, registeredRequestId);
 					}
 
 					await this.#send(toFlush, spent);
@@ -504,8 +510,13 @@ export class ControlStreamAdapter implements Session {
 					}
 
 					const { route, requestId } = classified;
-					if ((route === Route.Response || route === Route.ErrorResponse) && this.#updates.delete(requestId))
+					const updated = this.#updates.get(requestId);
+					if ((route === Route.Response || route === Route.ErrorResponse) && updated !== undefined) {
+						// A refused update leaves its request open: the answer is all it ends.
+						this.#updates.delete(requestId);
+						if (this.version === Version.DRAFT_16) this.#pushMessage(updated, typeId, size, body);
 						continue;
+					}
 
 					switch (route) {
 						case Route.NewRequest:
@@ -618,12 +629,11 @@ export class ControlStreamAdapter implements Session {
 		try {
 			await this.#writeMutex.runExclusive(async () => {
 				if (this.#closed) return;
-				await this.#writer.u53(RequestError.id);
-				await new RequestError({
+				await refuseUpdate(this.#writer, this.version, "subscribe", {
 					requestId,
-					errorCode: toRequestCode("not_supported", "subscribe", this.version),
+					condition: "not_supported",
 					reasonPhrase: "update not supported",
-				}).encode(this.#writer, this.version);
+				});
 			});
 		} catch {
 			// The control stream closed under the refusal.
@@ -652,6 +662,9 @@ export class ControlStreamAdapter implements Session {
 		const held = this.#open.delete(requestId);
 		this.#streams.delete(requestId);
 		this.#subscribeNamespaces.delete(requestId);
+		for (const [update, updated] of this.#updates) {
+			if (updated === requestId) this.#updates.delete(update);
+		}
 
 		const registered = this.#namespacesByRequestId.get(requestId);
 		if (registered !== undefined) {

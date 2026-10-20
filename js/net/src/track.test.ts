@@ -2027,6 +2027,92 @@ test("a datagram raises the largest", async () => {
 	producer.close();
 });
 
+/** Write untimed group `sequence` with `frames` frames, left open. */
+function framedGroup(producer: TrackProducer, sequence: number, frames: number): GroupProducer {
+	const group = new GroupProducer(sequence);
+	producer.writeGroup(group);
+	for (let i = 0; i < frames; i++) group.writeFrame({ payload: enc.encode("x") });
+	return group;
+}
+
+/** Whether `promise` is still pending once queued work settles. */
+async function isPending(promise: Promise<unknown>): Promise<boolean> {
+	let settled = false;
+	void promise.then(
+		() => (settled = true),
+		() => (settled = true),
+	);
+	await settle();
+	return !settled;
+}
+
+// The largest reports only while it is within the bounds: a cap below it or a floor above it
+// reports nothing, rather than a cached group standing in for it.
+test("largest reports only within the bounds", async () => {
+	const producer = new TrackProducer("test").accept({});
+	for (let sequence = 0; sequence < 6; sequence++) framedGroup(producer, sequence, 2);
+
+	const capped = producer.subscribe().withGroups({ end: { excluded: 3 } });
+	expect(await isPending(capped.largest())).toBe(true);
+
+	// An inclusive cap reports the group it names.
+	const ordered = producer
+		.subscribe()
+		.ordered()
+		.withGroups({ end: { included: 5 } });
+	expect(await ordered.largest()).toEqual({ group: 5, frame: 1 });
+
+	const floored = producer.subscribe().withGroups({ start: { included: 8 } });
+	const next = floored.largest();
+	expect(await isPending(next)).toBe(true);
+	framedGroup(producer, 8, 0);
+	expect(await next).toEqual({ group: 8, frame: 0 });
+	producer.close();
+});
+
+// Moving the bounds wakes a pending read, which reports the largest once it is within them;
+// bounds that leave it where it was report nothing new.
+test("largest follows the bounds as they move", async () => {
+	const producer = new TrackProducer("test").accept({});
+	for (let sequence = 0; sequence < 6; sequence++) framedGroup(producer, sequence, 1);
+
+	const reader = producer
+		.subscribe()
+		.ordered()
+		.withGroups({ end: { excluded: 3 } });
+	let next = reader.largest();
+	expect(await isPending(next)).toBe(true);
+	reader.setGroups({});
+	expect(await next).toEqual({ group: 5, frame: 0 });
+
+	next = reader.largest();
+	expect(await isPending(next)).toBe(true);
+	reader.setGroups({ end: { excluded: 2 } });
+	expect(await isPending(next)).toBe(true);
+
+	// Lifting it again leaves the last report standing.
+	reader.setGroups({});
+	expect(await isPending(next)).toBe(true);
+	framedGroup(producer, 6, 0);
+	expect(await next).toEqual({ group: 6, frame: 0 });
+	reader.setGroups({ start: { included: 3 } });
+	expect(await isPending(reader.largest())).toBe(true);
+	producer.close();
+});
+
+// Once the stream ended, widening the bounds over a largest it never reported does not bring
+// it back.
+test("largest stays ended when the bounds widen", async () => {
+	const producer = new TrackProducer("test").accept({});
+	framedGroup(producer, 5, 1).close();
+	producer.close();
+
+	const reader = producer.subscribe().withGroups({ end: { excluded: 3 } });
+	expect(await reader.largest()).toBeUndefined();
+	reader.setGroups({});
+	expect(await reader.largest()).toBeUndefined();
+});
+
 // A reader that starts at the largest group while it is still empty is at the live edge: it
 // gets that group, which ends with nothing, then the next one.
 test("a live-edge reader starts on an empty largest group", async () => {
@@ -2682,8 +2768,10 @@ test("a mid-group end survives eviction and a filtered late reader", async () =>
 		group.close();
 		producer.close();
 		await clock.advance(10_000 + CACHE_WINDOW_MS + 1);
+		expect(await producer.subscribe().largest()).toEqual({ group: 5, frame: 4 });
+		// The cap excludes the only group, so nothing is within it.
 		const reader = producer.subscribe().withGroups({ end: { excluded: 5 } });
-		expect(await reader.largest()).toEqual({ group: 5, frame: 4 });
+		expect(await reader.largest()).toBeUndefined();
 		expect(reader.end()).toEqual({ group: 5, frame: 5 });
 		reader.close();
 	} finally {

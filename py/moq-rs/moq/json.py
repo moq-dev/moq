@@ -22,6 +22,7 @@ from moq_ffi import (
 )
 
 from ._records import _opt_us
+from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand, TrackProducer
 from .subscribe import TrackConsumer
 
@@ -92,7 +93,7 @@ class StreamProducer:
         self._inner.finish()
 
 
-class SnapshotConsumer:
+class SnapshotConsumer(_Stream[Any]):
     """Async iterator over a JSON snapshot track, yielding the latest value (lossy).
 
     Each item is a parsed Python object. A consumer that has fallen behind collapses the backlog
@@ -105,15 +106,7 @@ class SnapshotConsumer:
         config = MoqJsonSnapshotConfig(compression=compression)
         self._inner = MoqJsonSnapshotConsumer(track._inner, config)
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
+    # Overrides the base so a JSON null still yields None; only a missing raw value ends the stream.
     async def __anext__(self) -> Any:
         value = await self._inner.next()
         if value is None:
@@ -125,7 +118,7 @@ class SnapshotConsumer:
         self._inner.cancel()
 
 
-class StreamConsumer:
+class StreamConsumer(_Stream[Any]):
     """Async iterator over a JSON stream track, yielding every record in order (lossless).
 
     Each item is a parsed Python object. Pass the same ``compression`` the producer used. Usable
@@ -136,15 +129,7 @@ class StreamConsumer:
         config = MoqJsonStreamConfig(compression=compression)
         self._inner = MoqJsonStreamConsumer(track._inner, config)
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
+    # Overrides the base so a JSON null still yields None; only a missing raw value ends the stream.
     async def __anext__(self) -> Any:
         value = await self._inner.next()
         if value is None:

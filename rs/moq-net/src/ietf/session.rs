@@ -1021,6 +1021,7 @@ where
 }
 
 /// What serving one incoming uni stream needs from its session.
+#[derive(Clone)]
 struct Uni<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	peer_setup: Option<peer::PeerSetup>,
@@ -1029,19 +1030,6 @@ struct Uni<S: crate::transport::poll::Session> {
 	goaway: crate::goaway::Protocol,
 	client: bool,
 	version: Version,
-}
-
-impl<S: crate::transport::poll::Session> Clone for Uni<S> {
-	fn clone(&self) -> Self {
-		Self {
-			subscriber: self.subscriber.clone(),
-			peer_setup: self.peer_setup.clone(),
-			seen_setup: self.seen_setup.clone(),
-			goaway: self.goaway.clone(),
-			client: self.client,
-			version: self.version,
-		}
-	}
 }
 
 impl<S: crate::transport::poll::Boxable> Uni<S> {
@@ -1276,6 +1264,7 @@ where
 }
 
 /// What serving one incoming bidi request needs from its session.
+#[derive(Clone)]
 struct Bidi<S: crate::transport::poll::Session> {
 	publisher: Publisher<S>,
 	subscriber: Subscriber<S>,
@@ -1285,20 +1274,6 @@ struct Bidi<S: crate::transport::poll::Session> {
 	declared: Option<bool>,
 	serve: Option<auth::Serve>,
 	version: Version,
-}
-
-impl<S: crate::transport::poll::Session> Clone for Bidi<S> {
-	fn clone(&self) -> Self {
-		Self {
-			publisher: self.publisher.clone(),
-			subscriber: self.subscriber.clone(),
-			peer: self.peer,
-			epoch: self.epoch,
-			declared: self.declared,
-			serve: self.serve.clone(),
-			version: self.version,
-		}
-	}
 }
 
 impl<S: crate::transport::poll::Boxable> Bidi<S> {

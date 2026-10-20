@@ -138,7 +138,7 @@ use std::{
 use kio::Lock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{AsPath, PathOwned, Pattern, Patterns};
+use crate::{AsPath, PathOwned, Pattern, Patterns, util::SendCell};
 
 mod outcomes;
 pub use outcomes::{Failure, Failures, Refusal, Refusals};
@@ -1344,7 +1344,7 @@ impl Handle {
 			presence.bytes().join(traffic.clone(), (0, 0));
 		}
 		Session {
-			inner: Some(Arc::new(SessionInner {
+			inner: Some(SendCell::new(Arc::new(SessionInner {
 				registry: self.stats.clone(),
 				connected: matches!(context, Context::Session),
 				current: Mutex::new(Current {
@@ -1358,7 +1358,7 @@ impl Handle {
 				viewers: Mutex::new(HashMap::new()),
 				held: Mutex::new(Vec::new()),
 				wire: Mutex::new(Vec::new()),
-			})),
+			}))),
 		}
 	}
 }
@@ -1383,7 +1383,7 @@ pub struct Wire {
 }
 
 struct WireInner {
-	session: Arc<SessionInner>,
+	session: SendCell<Arc<SessionInner>>,
 	counters: crate::transport::Wire,
 	last: Mutex<WireState>,
 }
@@ -1477,7 +1477,11 @@ impl Side {
 #[derive(Clone, Default)]
 pub struct Session {
 	/// `None` for the no-op context (disabled registry or a `default()` handle).
-	inner: Option<Arc<SessionInner>>,
+	///
+	/// The context and its wire counters reference each other, so every future
+	/// holding a context would repeat that recursive Send proof; [`SendCell`]
+	/// checks it once here.
+	inner: Option<SendCell<Arc<SessionInner>>>,
 }
 
 /// Which of a session's `crate::session::Limits` a [`Session::hold`] counts against.

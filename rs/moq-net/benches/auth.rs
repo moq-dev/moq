@@ -27,32 +27,40 @@ struct Pair {
 	_initial: auth::Issued,
 }
 
-async fn pair(version: Version) -> Pair {
+struct Origins<'a> {
+	publish: &'a origin::Producer,
+	subscribe: origin::Producer,
+}
+
+async fn pair(version: Version, origins: Option<Origins<'_>>) -> Pair {
 	let mut mock = moq_net::transport::memory::Config::default();
 	mock.protocol = Some(version.alpn().to_string());
 	let (client, server) = create_mock_session_pair(mock);
 	let client = async {
-		let (session, driver) = moq_net::Client::new()
-			.with_versions(version.into())
-			.connect(harness::now(), client)
-			.await
-			.unwrap();
+		let mut config = moq_net::Client::new().with_versions(version.into());
+		if let Some(origins) = &origins {
+			config = config.with_publisher(origins.publish);
+		}
+		let (session, driver) = config.connect(harness::now(), client).await.unwrap();
 		harness::spawn(driver);
 		session
 	};
 	let server = async {
-		let request = moq_net::Server::new()
-			.with_versions(version.into())
-			.accept_request(harness::now(), server)
-			.await
-			.unwrap();
+		let mut config = moq_net::Server::new().with_versions(version.into());
+		if let Some(origins) = &origins {
+			config = config.with_subscriber(origins.subscribe.clone());
+		}
+		let request = config.accept_request(harness::now(), server).await.unwrap();
 		let requests = request.auth().requests().unwrap();
 		let (session, driver) = request.ok().await.unwrap();
 		harness::spawn(driver);
 		(session, requests)
 	};
 	let (client, (server, mut requests)) = futures::join!(client, server);
-	let initial = requests.next().await.unwrap().accept(auth::Grant::all());
+	let initial = requests.next().await.unwrap().accept(match origins {
+		Some(_) => auth::Grant::default(),
+		None => auth::Grant::all(),
+	});
 	Pair {
 		client,
 		_server: server,
@@ -97,7 +105,7 @@ fn admission(c: &mut Criterion) {
 					&(sessions, tokens),
 					|b, &(sessions, tokens)| {
 						let mut pairs =
-							runtime.block_on(join_all((0..sessions).map(|_| pair(version.parse().unwrap()))));
+							runtime.block_on(join_all((0..sessions).map(|_| pair(version.parse().unwrap(), None))));
 						b.iter(|| runtime.block_on(join_all(pairs.iter_mut().map(|pair| pair.round(tokens)))));
 					},
 				);
@@ -211,5 +219,96 @@ fn renewal(c: &mut Criterion) {
 	}
 }
 
-criterion_group!(benches, admission, renewal);
+/// Publications held behind unanswered tokens, sweeping both the token table and paths.
+fn waiting(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	for version in ["moq-lite-07-wip", "moq-transport-22"] {
+		let mut group = c.benchmark_group(format!("auth/waiting/{version}"));
+		group.sample_size(10);
+		group.warm_up_time(Duration::from_millis(100));
+		group.measurement_time(Duration::from_millis(300));
+		for tokens in [1, 16, 128] {
+			for paths in [1, 16, 128] {
+				group.throughput(Throughput::Elements(paths as u64));
+				group.bench_with_input(
+					BenchmarkId::new(tokens.to_string(), paths),
+					&(tokens, paths),
+					|b, &(tokens, paths)| {
+						let _guard = runtime.enter();
+						let mut config = origin::Config::new(Hop::new(2).unwrap());
+						config.update_hold = Duration::ZERO;
+						let (publish, driver) = origin::Producer::new(config);
+						harness::spawn(driver);
+						let (receive, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+						harness::spawn(driver);
+						let mut pair = runtime.block_on(pair(
+							version.parse().unwrap(),
+							Some(Origins {
+								publish: &publish,
+								subscribe: receive.clone(),
+							}),
+						));
+						let mut generation = 0;
+						b.iter(|| {
+							runtime.block_on(async {
+								let handle = pair.client.auth();
+								let mut presenting =
+									std::pin::pin!(join_all((0..tokens).map(|_| handle.add("pending"))));
+								assert!(futures::poll!(presenting.as_mut()).is_pending());
+								let mut pending = Vec::with_capacity(tokens);
+								for _ in 0..tokens {
+									pending.push(pair.requests.next().await.unwrap());
+								}
+								let prefix = format!("wait/{generation}/");
+								generation += 1;
+								let broadcasts: Vec<_> = (0..paths)
+									.map(|path| {
+										let broadcast =
+											publish.create_broadcast(format!("{prefix}{path}").as_str()).unwrap();
+										broadcast.announce(Default::default()).unwrap();
+										broadcast
+									})
+									.collect();
+								// Let the session reach its admission wait before the final reply widens it.
+								tokio::task::yield_now().await;
+								let mut issued = Vec::with_capacity(tokens);
+								for (index, request) in pending.into_iter().enumerate() {
+									issued.push(request.accept(if index + 1 == tokens {
+										auth::Grant::all()
+									} else {
+										auth::Grant::default()
+									}));
+								}
+								let tokens: Vec<_> = presenting.await.into_iter().map(Result::unwrap).collect();
+								let mut announced = receive.consume().announced();
+								let mut seen = std::collections::HashSet::new();
+								while seen.len() < paths {
+									match announced.next().await.unwrap() {
+										moq_net::announce::Event::Start(update)
+										| moq_net::announce::Event::Update(update)
+										| moq_net::announce::Event::Restart(update)
+											if update.prefix.as_str().starts_with(&prefix) =>
+										{
+											seen.insert(update.prefix);
+										}
+										_ => {}
+									}
+								}
+								drop(broadcasts);
+								drop(tokens);
+								join_all(issued.iter().map(auth::Issued::closed)).await;
+							})
+						});
+					},
+				);
+			}
+		}
+		group.finish();
+	}
+}
+
+criterion_group!(benches, admission, renewal, waiting);
 criterion_main!(benches);

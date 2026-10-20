@@ -17,4 +17,5 @@ export const AlgorithmSchema = z.enum([
 	"PS512",
 	"EdDSA",
 ]);
+/** A value parsed by {@link AlgorithmSchema}. */
 export type Algorithm = z.infer<typeof AlgorithmSchema>;

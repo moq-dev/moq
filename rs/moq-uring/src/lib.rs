@@ -33,6 +33,8 @@
 //!
 //! Requires Linux 6.12; [`Worker::new`] refuses older kernels with a legible
 //! error instead of degrading. The crate compiles to nothing off Linux.
+
+#![warn(missing_docs)]
 // Off Linux the crate compiles to nothing, so these doc links have no target.
 #![cfg_attr(not(target_os = "linux"), allow(rustdoc::broken_intra_doc_links))]
 #![cfg(target_os = "linux")]
