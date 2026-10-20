@@ -6097,10 +6097,9 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 					}
 					let properties = ready!(stream.reader.poll_decode::<lite::ietf::TrackProperties>(&mut cx))?;
-					// Refused as moq-transport ingress refuses it: a track that needs a property
-					// we do not understand is neither processed nor forwarded.
-					if properties.0.as_ref().is_some_and(|properties| properties.mandatory()) {
-						return Poll::Ready(Err(Error::UnsupportedExtension));
+					// Refused as moq-transport ingress refuses it.
+					if let Some(err) = properties.0.as_ref().and_then(|properties| properties.refused()) {
+						return Poll::Ready(Err(err));
 					}
 					let TrackInfoState::Properties { stream, mut info } =
 						std::mem::replace(&mut self.state, TrackInfoState::Open)

@@ -48,6 +48,28 @@ pub(crate) struct Decoded {
 /// The largest properties block an object may carry, which a relay forwards unchanged.
 pub(crate) const MAX_BLOCK: usize = super::group::MAX_OBJECT_EXTENSIONS;
 
+/// The largest block a relay holds for an object on a track in `timescale`.
+///
+/// On a timed track, egress adds the frame's Timestamp to the block, so the block leaves
+/// room for the largest one any draft encodes. Refusing a larger block on ingress keeps
+/// every egress within [`MAX_BLOCK`].
+pub(crate) fn max_block(timescale: Option<Timescale>) -> usize {
+	if timescale.is_none() {
+		return MAX_BLOCK;
+	}
+	// A Timestamp's value is a QUIC varint at most, and its key, a delta of at most 0x10,
+	// only shrinks the key of the property after it.
+	let largest = [Version::Draft14, Version::Draft16, Version::Draft17, Version::Draft18]
+		.into_iter()
+		.map(|version| {
+			let form = version.into();
+			crate::coding::varint::size(0x10, form).unwrap() + crate::coding::varint::size((1 << 62) - 1, form).unwrap()
+		})
+		.max()
+		.unwrap();
+	MAX_BLOCK - largest
+}
+
 struct List {
 	/// In arrival order, without the mutable Timestamp. Values borrow the input.
 	values: Vec<Property>,
@@ -175,7 +197,7 @@ pub(crate) struct Checked {
 /// A timed track's mutable Timestamp is its frame's, so one inside is malformed, as is an
 /// empty block, which is sent as none.
 pub(crate) fn check(bytes: &Bytes, encoding: Encoding, timescale: Option<Timescale>) -> Result<Checked, Error> {
-	if bytes.is_empty() || bytes.len() > MAX_BLOCK {
+	if bytes.is_empty() || bytes.len() > max_block(timescale) {
 		return Err(Error::MalformedTrack);
 	}
 	let parsed = list(bytes, family(encoding), false, timescale.is_some())?;
@@ -219,6 +241,10 @@ pub(crate) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>)
 		sealed_time: timed(parsed.sealed_time, timescale)?,
 		block: block(&parsed.values, encoding(version), has_delivery_timeout(version))?,
 	};
+	// A list at the limit with a small Timestamp cannot take back a larger one on egress.
+	if properties.heap() > max_block(timescale) as u64 {
+		return Err(Error::Unsupported);
+	}
 	Ok(Decoded {
 		properties,
 		timestamp: timed(parsed.time, timescale)?,
@@ -300,13 +326,19 @@ pub(crate) fn write(
 	if flipped && sealed_key(&values, version, 0x06)? {
 		return Err(Error::Unsupported);
 	}
-	serialize(
+	let out = serialize(
 		values
 			.iter()
 			.filter(|property| property.id != 0x06 || !flipped)
 			.chain(&timestamp),
 		target,
-	)
+	)?;
+	// Ingress leaves room for the Timestamp, but another draft's varints can be wider, so a
+	// block re-encoded for it may not fit: refused, as the receiver would refuse it.
+	if out.len() > MAX_BLOCK {
+		return Err(Error::Unsupported);
+	}
+	Ok(out)
 }
 
 /// Whether the immutable block among `values` holds a property with `id`.
@@ -480,6 +512,51 @@ mod tests {
 			write(&decoded.properties, decoded.timestamp, Version::Draft22, milli).unwrap(),
 			[0x0b, 2, 0x10, 42]
 		);
+	}
+
+	/// A timed block leaves room for the Timestamp egress restates from the frame, so even
+	/// the largest one leaves within [`MAX_BLOCK`]. A byte more is refused at ingress.
+	#[test]
+	fn a_timed_block_leaves_room_for_its_timestamp() {
+		let milli = Some(Timescale::MILLI);
+		let limit = max_block(milli);
+		assert_eq!(limit, MAX_BLOCK - 10, "a one-byte key and a nine-byte value");
+		// A draft-22 block of `len` bytes: 0x20 = 1 and zero deltas, one value taking two
+		// bytes for an odd length. Its list adds a Timestamp in front.
+		let block = |len: usize| {
+			let mut block = vec![0x20, 1];
+			if len % 2 == 1 {
+				block.extend([0, 0x80, 0xc8]);
+			}
+			while block.len() < len {
+				block.extend([0, 1]);
+			}
+			assert_eq!(block.len(), len);
+			Bytes::from(block)
+		};
+		let list = |len: usize| {
+			let mut list = vec![0x10, 1, 0x10];
+			list.extend(&block(len)[1..]);
+			Bytes::from(list)
+		};
+		let decoded = read(&list(limit), Version::Draft22, milli).unwrap();
+		assert_eq!(decoded.properties.heap(), limit as u64);
+		let latest = Timestamp::new((1 << 62) - 1, Timescale::MILLI).unwrap();
+		let written = write(&decoded.properties, Some(latest), Version::Draft22, milli).unwrap();
+		assert_eq!(written.len(), MAX_BLOCK);
+
+		assert!(matches!(
+			read(&list(limit + 1), Version::Draft22, milli),
+			Err(Error::Unsupported)
+		));
+		// An untimed track has no Timestamp to restate, so its block may fill the limit.
+		assert!(read(&list(MAX_BLOCK - 2), Version::Draft22, None).is_ok());
+
+		// The same bound on a block arriving over the lite hop.
+		let encoding = Encoding::Delta { seven: true };
+		assert!(check(&block(limit), encoding, milli).is_ok());
+		assert!(check(&block(limit + 1), encoding, milli).is_err());
+		assert!(check(&block(limit + 1), encoding, None).is_ok());
 	}
 
 	/// Draft-19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so it cannot cross that boundary.

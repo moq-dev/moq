@@ -145,6 +145,8 @@ DELIVERY_TIMEOUT lets a relay refuse to forward property 0x06 to a draft that wo
 Every property of the object, serialized as the {{moqt}} drafts of its encoding serialize an object's properties, in ascending ID order.
 Immutable Properties (0x0b) are in the same encoding, as the publisher sent them.
 It MUST NOT be empty or longer than 65,536 bytes.
+On a timed track it MUST NOT be longer than 65,526 bytes, leaving room for the largest Timestamp a relay restates ([Timestamps](#timestamps)): a one-byte key and a value of up to nine bytes.
+A relay MUST refuse a {{moqt}} object whose properties, less its mutable Timestamp, exceed that, so every object it forwards fits.
 A receiver MUST treat a block its encoding's drafts would refuse as malformed.
 Other properties are opaque to this extension.
 
@@ -189,6 +191,8 @@ Property {
 A message MUST NOT carry more than 64 properties, nor any a relay interprets rather than forwards: MAX_CACHE_DURATION (0x04), TIMESCALE (0x08), DEFAULT_PUBLISHER_PRIORITY (0x0e), DEFAULT_PUBLISHER_GROUP_ORDER (0x22), and DYNAMIC_GROUPS (0x30).
 TRACK_INFO carries what a relay keeps of them, so a second copy could only contradict it.
 A message that breaks either rule is malformed.
+
+A relay restates up to five of those from TRACK_INFO, so it forwards at most 59 properties, and it refuses a track with more, from a {{moqt}} publisher or over this extension, as unsupported.
 
 A relay neither processes nor forwards a track with a Mandatory Track Property (0x4000 to 0x7FFF), mutable or inside the Immutable Properties, so a publisher never sends one.
 A receiver refuses such a track as {{moqt}} ingress does, with an unsupported extension error.

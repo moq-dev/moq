@@ -18,7 +18,7 @@ use crate::{
 use super::{Message, Version};
 
 /// The largest record body a peer may make us buffer: the largest block moq-transport
-/// admits, beside a Flags byte and a Timestamp of at most 9 bytes.
+/// admits, beside a Flags byte.
 pub(crate) const MAX_PROPERTIES: usize = crate::ietf::object::MAX_BLOCK + 1;
 
 // Group State bits.
@@ -562,7 +562,8 @@ mod tests {
 			for value in [0x10, 77, (1 << 40) - 0x10, 1] {
 				e.varint(value).unwrap();
 			}
-			while list.len() + 2 <= crate::ietf::object::MAX_BLOCK {
+			// The largest a timed track's block may be, once its Timestamp leaves it.
+			while list.len() <= crate::ietf::object::max_block(Some(Timescale::MILLI)) {
 				list.extend([0, 1]);
 			}
 			let list = Bytes::from(list);
@@ -961,6 +962,25 @@ mod hop_tests {
 		}
 	}
 
+	/// Subscribe across a negotiated hop to a track carrying `properties`.
+	async fn subscribe_across(properties: crate::model::object::TrackProperties) -> Result<(), crate::Error> {
+		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
+		let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
+		info.properties = Some(Arc::new(properties));
+		let _track = broadcast.create_track("video", info).unwrap();
+
+		let (downstream, _sessions) = test_hop(&upstream, "room", [true, true]).await;
+		let broadcast = moq_clock::timeout(TIMEOUT, downstream.consume().request_broadcast("room", None))
+			.await
+			.expect("no broadcast")
+			.unwrap();
+		moq_clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
+			.await
+			.expect("no answer")
+			.map(drop)
+	}
+
 	/// A track with a Mandatory Track Property, mutable or sealed, is refused across the hop
 	/// as moq-transport ingress refuses it: one we do not understand is neither processed
 	/// nor forwarded.
@@ -980,29 +1000,34 @@ mod hop_tests {
 				Some(Encoding::Delta { seven: true }),
 			),
 		] {
-			let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-			let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
-			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
-			info.properties = Some(Arc::new(crate::model::object::TrackProperties {
+			let res = subscribe_across(crate::model::object::TrackProperties {
 				values,
 				immutable,
 				..Default::default()
-			}));
-			let _track = broadcast.create_track("video", info).unwrap();
-
-			let (downstream, _sessions) = test_hop(&upstream, "room", [true, true]).await;
-			let broadcast = moq_clock::timeout(TIMEOUT, downstream.consume().request_broadcast("room", None))
-				.await
-				.expect("no broadcast")
-				.unwrap();
-			let res = moq_clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
-				.await
-				.expect("no answer");
+			})
+			.await;
 			assert!(
 				matches!(res, Err(crate::Error::UnsupportedExtension)),
-				"{immutable:?}: {:?}",
-				res.err()
+				"{immutable:?}: {res:?}"
 			);
+		}
+	}
+
+	/// A relay forwards only as many Track Properties as leave room for the ones it
+	/// restates from TRACK_INFO, so one more is refused across the hop.
+	#[moq_clock::test]
+	async fn forwarded_track_properties_leave_room_for_track_info() {
+		let max = crate::ietf::properties::MAX_FORWARDED;
+		for (count, ok) in [(max, true), (max + 1, false)] {
+			let res = subscribe_across(crate::model::object::TrackProperties {
+				values: (0..count as u64).map(|i| property(0x40 + 2 * i, 1)).collect(),
+				..Default::default()
+			})
+			.await;
+			match ok {
+				true => assert!(res.is_ok(), "{count}: {res:?}"),
+				false => assert!(matches!(res, Err(crate::Error::Unsupported)), "{count}: {res:?}"),
+			}
 		}
 	}
 

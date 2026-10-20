@@ -2946,10 +2946,11 @@ where
 		// SUBSCRIBE_OK commits the model's immutable metadata before the alias releases
 		// any data stream that arrived ahead of this control response.
 		let accepted = match response {
-			// A track that needs a property we do not understand is neither processed nor
-			// forwarded: the subscription is cancelled and the subscribers refused.
-			Ok(Some(accepted)) if accepted.properties.unknown.mandatory() => {
-				let err = Error::UnsupportedExtension;
+			// A track that needs a property we do not understand, or carries more than we
+			// could forward, is neither processed nor forwarded: the subscription is
+			// cancelled and the subscribers refused.
+			Ok(Some(accepted)) if accepted.properties.unknown.refused().is_some() => {
+				let err = accepted.properties.unknown.refused().expect("checked by the guard");
 				tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, %err, "subscribe refused");
 				// Refuse before waiting on the peer to acknowledge the cancellation.
 				if let Some(pending) = self.take_pending(request_id) {
@@ -3847,7 +3848,10 @@ where
 		let _ = stream.writer.finish();
 		let ok = match response {
 			// A track that needs a property we do not understand is not forwarded.
-			Ok(ok) if ok.properties.unknown.mandatory() => Err(Error::UnsupportedExtension),
+			Ok(ok) => match ok.properties.unknown.refused() {
+				Some(err) => Err(err),
+				None => Ok(ok),
+			},
 			res => res,
 		};
 		let ok = match ok {

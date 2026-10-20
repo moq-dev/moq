@@ -265,14 +265,24 @@ impl Properties {
 	}
 }
 
-/// Whether moq-net applies the Track Property `id` itself, so a relay restates it from the
-/// track's info rather than forwarding the publisher's.
+/// The Track Properties moq-net applies itself, which a relay restates from the track's
+/// info rather than forwarding the publisher's.
+const UNDERSTOOD: [u64; 5] = [
+	MAX_CACHE_DURATION,
+	TIMESCALE,
+	DEFAULT_PUBLISHER_PRIORITY,
+	DEFAULT_PUBLISHER_GROUP_ORDER,
+	DYNAMIC_GROUPS,
+];
+
+/// Whether moq-net applies the Track Property `id` itself.
 pub(crate) fn understood(id: u64) -> bool {
-	matches!(
-		id,
-		MAX_CACHE_DURATION | TIMESCALE | DEFAULT_PUBLISHER_PRIORITY | DEFAULT_PUBLISHER_GROUP_ORDER | DYNAMIC_GROUPS
-	)
+	UNDERSTOOD.contains(&id)
 }
+
+/// The most Track Properties a relay forwards, leaving room for every one it restates
+/// within the [`MAX_PROPERTIES`] a message may carry.
+pub(crate) const MAX_FORWARDED: usize = MAX_PROPERTIES as usize - UNDERSTOOD.len();
 
 /// Check a Track Properties' Immutable Properties `block`, serialized in the `encoding`
 /// family, as [`Properties::decode`] does.
@@ -317,9 +327,22 @@ impl TrackProperties {
 		})
 	}
 
+	/// Why a track carrying these is neither processed nor forwarded, if it is not: every
+	/// ingress, moq-transport or a relay hop, refuses it here.
+	pub(crate) fn refused(&self) -> Option<crate::Error> {
+		if self.mandatory() {
+			return Some(crate::Error::UnsupportedExtension);
+		}
+		// Egress could not restate the track's info beside them without overflowing.
+		if self.values.len() > MAX_FORWARDED {
+			return Some(crate::Error::Unsupported);
+		}
+		None
+	}
+
 	/// Whether one is a Mandatory Track Property (0x4000-0x7FFF), which by definition is
 	/// one moq-net does not understand: the track must be neither processed nor forwarded.
-	pub(crate) fn mandatory(&self) -> bool {
+	fn mandatory(&self) -> bool {
 		const MANDATORY: std::ops::RangeInclusive<u64> = 0x4000..=0x7fff;
 		self.values.iter().any(|property| MANDATORY.contains(&property.id))
 			|| self.sealed().any(|id| MANDATORY.contains(&id))
@@ -685,6 +708,42 @@ mod tests {
 		assert!(matches!(
 			decode_draft22(&[0x0b, 0x00, 0x00, 0x00]),
 			Err(DecodeError::InvalidValue)
+		));
+	}
+
+	/// A relay forwards only as many properties as leave room for every one it restates, so
+	/// what it sends always decodes. One more is refused at ingress.
+	#[test]
+	fn forwarded_properties_leave_room_for_the_restated() {
+		let unknown = |count: usize| TrackProperties {
+			values: (0..count as u64)
+				.map(|i| Property {
+					id: 0x40 + 2 * i,
+					value: Value::Int(1),
+				})
+				.collect(),
+			immutable: None,
+			// Draft-22 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
+			delivery_timeout: true,
+		};
+		let properties = Properties {
+			max_cache_duration: Some(Duration::from_secs(1)),
+			timescale: Some(Timescale::MILLI),
+			priority: Some(1),
+			group_order: Some(GroupOrder::Descending),
+			dynamic_groups: true,
+			unknown: unknown(MAX_FORWARDED),
+		};
+		assert!(properties.unknown.refused().is_none());
+		let mut buf = Vec::new();
+		properties
+			.encode(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
+			.unwrap();
+		assert_eq!(decode_draft22(&buf).unwrap(), properties);
+
+		assert!(matches!(
+			unknown(MAX_FORWARDED + 1).refused(),
+			Some(crate::Error::Unsupported)
 		));
 	}
 
