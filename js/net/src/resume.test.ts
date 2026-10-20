@@ -20,6 +20,17 @@ async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** Whether `promise` is still pending once queued work settles. */
+async function isPending(promise: Promise<unknown>): Promise<boolean> {
+	let settled = false;
+	void promise.then(
+		() => (settled = true),
+		() => (settled = true),
+	);
+	await settle();
+	return !settled;
+}
+
 /** A stand-in session announcing `path` under the epoch at `cost`, serving `source`. */
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
 	const handle = wireOf(origin).receive(path, Route.normalize({ epoch: EPOCH, cost }));
@@ -1149,6 +1160,36 @@ test("a fetch still out on the old route moves to the new one", async () => {
 	front.consumer.close();
 	a.close();
 	b.close();
+});
+
+// A front's reader reports the serving copy's largest only within its bounds: the cap it sets
+// and the floor its subscription names.
+test("the largest honours the reader's bounds on the serving copy", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const capped = front.consumer
+		.track("seq")
+		.subscribe()
+		.withGroups({ end: { excluded: 3 } });
+	const floored = front.consumer.track("seq").subscribe({ groups: { start: { included: 8 } } });
+	for (let sequence = 0; sequence < 5; sequence++) ta.write(sequence);
+
+	const next = capped.largest();
+	expect(await isPending(next)).toBe(true);
+	capped.setGroups({});
+	expect(await next).toEqual({ group: 4, frame: 0 });
+
+	const floor = floored.largest();
+	expect(await isPending(floor)).toBe(true);
+	ta.write(8);
+	expect(await floor).toEqual({ group: 8, frame: 0 });
+
+	capped.close();
+	floored.close();
+	front.consumer.close();
+	a.close();
 });
 
 test("the largest follows the serving copy across a swap without moving back, and ends with the route", async () => {
