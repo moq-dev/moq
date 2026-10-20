@@ -27,7 +27,8 @@ jobs:
     # Skip the actual work on close/merge: this run exists only to cancel the
     # superseded in-flight build via the concurrency group above.
     if: github.event.action != 'closed'
-    runs-on: ubuntu-24.04-arm
+    # Leave the variable unset until the local runner is online and verified.
+    runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 60
 
@@ -50,7 +51,7 @@ jobs:
           CI_BASE: ${{ github.event.merge_group.base_sha }}
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        if: steps.scope.outputs.needed == 'true'
+        if: steps.scope.outputs.needed == 'true' && runner.environment != 'self-hosted'
         with:
           determinate: false
           # Trust the flake's cachix substituter. `nixConfig` in flake.nix is
@@ -95,7 +96,7 @@ jobs:
   test:
     name: Test
     if: github.event.action != 'closed'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
     timeout-minutes: 60
 
     steps:
@@ -117,7 +118,7 @@ jobs:
           CI_BASE: ${{ github.event.merge_group.base_sha }}
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        if: steps.scope.outputs.needed == 'true'
+        if: steps.scope.outputs.needed == 'true' && runner.environment != 'self-hosted'
         with:
           determinate: false
           # Trust the flake's cachix substituter. `nixConfig` in flake.nix is

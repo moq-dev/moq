@@ -10,7 +10,7 @@ type Step = {
 	env?: Record<string, string>;
 	"continue-on-error"?: boolean;
 };
-type Job = { name: string; steps: Step[] };
+type Job = { name: string; steps: Step[]; "runs-on": string };
 const workflow = Bun.YAML.parse(await Bun.file(".github/workflows/check.yml").text()) as {
 	on: Record<string, unknown>;
 	jobs: Record<string, Job>;
@@ -38,8 +38,19 @@ for (const name of ["check", "test"]) {
 		expect(setup.at(-1)?.name).toBe(job.name);
 		for (const step of setup) {
 			const output = step.uses === "./.github/actions/rust-cache" ? "rust" : "needed";
-			expect(step.if).toBe(`steps.scope.outputs.${output} == 'true'`);
+			const hosted = step.uses?.startsWith("DeterminateSystems/nix-installer-action@")
+				? " && runner.environment != 'self-hosted'"
+				: "";
+			expect(step.if).toBe(`steps.scope.outputs.${output} == 'true'${hosted}`);
 		}
+	});
+
+	test(`${name} uses the configured runner only for merge groups`, () => {
+		const expression = workflow.jobs[name]["runs-on"].replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+		const runner = new Function("github", "vars", `return (${expression});`);
+		expect(runner({ event_name: "merge_group" }, { MOQ_QUEUE_RUNNER: "moq-queue" })).toBe("moq-queue");
+		expect(runner({ event_name: "merge_group" }, {})).toBe("ubuntu-24.04-arm");
+		expect(runner({ event_name: "pull_request" }, { MOQ_QUEUE_RUNNER: "moq-queue" })).toBe("ubuntu-24.04-arm");
 	});
 }
 
