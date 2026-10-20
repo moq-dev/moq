@@ -16,6 +16,9 @@ import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { Stream, Writer } from "../src/stream.ts";
 
+// Keep protocol diagnostics out of the measured CSV on stdout.
+console.debug = console.error;
+
 const routeCounts = [8, 32, 128];
 const observerCounts = [1, 8, 32];
 const updates = 32;
