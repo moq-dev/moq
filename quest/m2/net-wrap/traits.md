@@ -27,12 +27,14 @@ the methods exactly as moq-net has them today.
 - Inline moq-net's impls so a monomorphized caller compiles to today's code.
   Prove it on `rs/moq-net/benches` (`group.rs`, `frame.rs`) before and after:
   no regression on the plaintext path.
-- A pass-through test wrapper in moq-net's tests implements every trait and
-  checks that finish, a typed abort, demand, and preference updates reach
-  the other side at each level.
+- A pass-through test wrapper implements every trait and checks that
+  finish, a typed abort, demand, and preference updates reach the other
+  side at each level. It sits behind a hidden, off-by-default moq-net
+  feature, like `fuzz`, so moq-json, moq-stats, and hang reuse it from
+  their dev-dependencies.
 - Decide whether the existing `Consume<T>` in `model/origin.rs` folds into
   these traits or stays separate.
 - Update `doc/concept` where it names the concrete types, and add the traits
   to `MIGRATE.md`.
 
-Public API: new moq-net traits. Wire: none.
+Public API: new moq-net traits, plus the hidden test-wrapper feature. Wire: none.

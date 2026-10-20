@@ -2,9 +2,11 @@
 
 ## Goal
 
-The relay serves its WebSocket sessions, and its HTTP routes, from the
-io_uring workers rather than the shared tokio runtime. A qmux media session is
-then pinned to one thread for its whole life, exactly like a QUIC one.
+The relay serves its TCP listeners (WebSocket sessions, qmux over TCP, and
+the HTTP routes) from the io_uring workers rather than the shared tokio
+runtime. A qmux media session over TCP is then pinned to one thread for its
+whole life, exactly like a QUIC one. A `unix` listener stays on the shared
+tokio runtime.
 
 ## Plan
 

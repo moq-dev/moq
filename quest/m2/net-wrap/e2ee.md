@@ -21,8 +21,12 @@ the reverse (decided 2026-10-20, maintainer):
   typed codes (such as an authentication failure) distinguishable rather
   than collapsing into `Error::Dropped`.
 - Datagrams: `append_datagram`, `insert_datagram`, and `recv_datagram`
-  match moq-net's signatures; a bad datagram's typed event surfaces through
-  them as the draft requires.
+  match moq-net's signatures, so the trait read yields only authenticated
+  datagrams. A datagram that fails authentication, or a duplicate, is
+  dropped there and the track continues. The draft's `authentication`
+  event stays on moq-e2ee's own consumer, outside the trait, for callers
+  that hold the concrete type. A trait read can't carry it without
+  breaking the exact mirror.
 - Demand and preference cross the wrapper: an encrypted track's demand is
   its physical track's, and preference updates reach the physical track.
 - Keep the nonce rules the epic specifies: a group producer still owns its

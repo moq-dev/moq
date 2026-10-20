@@ -22,7 +22,7 @@ types, so each publishes into and reads from a wrapped track unchanged.
 - Group rolls these crates trigger themselves keep working through a
   wrapper, as do demand-gated encoders.
 - Existing tests keep passing with the defaults. Add one round trip per crate
-  through the moq-net pass-through test wrapper, and a moq-json snapshot
+  through moq-net's shared pass-through test wrapper, and a moq-json snapshot
   round trip through an encrypted track in moq-e2ee's tests.
 
 Public API: generic type parameters with moq-net defaults on moq-json,
