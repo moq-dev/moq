@@ -119,9 +119,14 @@ async function acceptAlpn(
 	wiring: SessionProps,
 ): Promise<Established> {
 	// Spread whole, so every negotiated flag reaches the connection.
-	const setup = await exchangeSetup(transport, version, "moq-lite-js", wiring);
+	// The IETF session code loads on demand, since most sessions negotiate lite; the ALPN already
+	// committed to IETF, so fetch it alongside SETUP.
+	const [setup, { Connection }] = await Promise.all([
+		exchangeSetup(transport, version, "moq-lite-js", wiring),
+		import("../ietf/connection.ts"),
+	]);
 
-	return new Ietf.Connection({
+	return new Connection({
 		...wiring,
 		client: false,
 		url,
@@ -170,7 +175,9 @@ async function acceptSetup(
 
 	const maxRequestId = client.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 
-	return new Ietf.Connection({
+	// The IETF session code loads on demand, since most sessions negotiate lite.
+	const { Connection } = await import("../ietf/connection.ts");
+	return new Connection({
 		...wiring,
 		client: false,
 		url,
@@ -242,7 +249,9 @@ async function acceptNegotiated(
 		});
 	} else if (Object.values(Ietf.Version).includes(selectedVersion as Ietf.Version)) {
 		const maxRequestId = client.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
-		return new Ietf.Connection({
+		// The IETF session code loads on demand, since most sessions negotiate lite.
+		const { Connection } = await import("../ietf/connection.ts");
+		return new Connection({
 			...wiring,
 			client: false,
 			url,
