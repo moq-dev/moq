@@ -4720,11 +4720,7 @@ async fn announced_broadcast_retries_a_dropped_wait() {
 	assert!(matches!(dropped.await, Err(err) if err.is_cancelled()));
 
 	let retry = tokio::spawn(async move { followed.available().await });
-	let served = request
-		.prepare(moq_mint_epoch())
-		.unwrap()
-		.publish()
-		.unwrap();
+	let served = request.prepare(moq_mint_epoch()).unwrap().publish().unwrap();
 	tokio::time::timeout(TIMEOUT, retry)
 		.await
 		.expect("the retry waited for another instance")

@@ -2379,12 +2379,12 @@ pub(super) struct Announcer {
 
 impl Announcer {
 	/// Advertise the broadcast's path with `route`, or re-price it in place.
-	pub(crate) fn announce(&mut self, route: Route) -> Result<(), Error> {
+	pub(super) fn announce(&mut self, route: Route) -> Result<(), Error> {
 		self.announce_if(route, || true).map(|_| ())
 	}
 
 	/// [`Self::announce`] once `admit` agrees; see [`AnnounceProducer::update_if`].
-	pub(crate) fn announce_if(&mut self, route: Route, admit: impl FnOnce() -> bool) -> Result<bool, Error> {
+	pub(super) fn announce_if(&mut self, route: Route, admit: impl FnOnce() -> bool) -> Result<bool, Error> {
 		if !self.entry.update_if(route, admit)? {
 			return Ok(false);
 		}
@@ -2424,19 +2424,19 @@ pub(crate) struct AnnounceProducer {
 }
 
 impl AnnounceProducer {
-	/// Replace the route in place, epoch included; see [`Dynamic::update`].
+	/// Replace the route in place, epoch included; see [`Dynamic::update_route`].
 	///
 	/// The prefix is fixed at announce time and a [`Route`] cannot name one: to
 	/// move an advertisement, drop this and announce again. Fails with
 	/// [`Error::Closed`] once the origin's [`Driver`] has been dropped.
-	pub(crate) fn update(&self, route: Route) -> Result<(), Error> {
+	pub fn update(&self, route: Route) -> Result<(), Error> {
 		self.update_if(route, || true).map(|_| ())
 	}
 
 	/// [`Self::update`] once `admit` agrees, returning whether it did. `admit` runs
 	/// under the table lock, so nothing ordered after that lock (a release, a
 	/// retraction, the teardown) can change its answer before the route lands.
-	pub(crate) fn update_if(&self, route: Route, admit: impl FnOnce() -> bool) -> Result<bool, Error> {
+	pub(super) fn update_if(&self, route: Route, admit: impl FnOnce() -> bool) -> Result<bool, Error> {
 		let mut shared = self.shared.lock();
 		if shared.closed {
 			return Err(Error::Closed);
@@ -7579,7 +7579,8 @@ mod tests {
 		assert_eq!(announced.expect_next_restarted("room").await.cost, Cost::new(1));
 		quiet(&mut announced).await;
 
-		c.update_route(Route::default().with_hops(hops(&[12])).with_cost(3)).unwrap();
+		c.update_route(Route::default().with_hops(hops(&[12])).with_cost(3))
+			.unwrap();
 		assert_eq!(announced.expect_next_restarted("room").await.cost, Cost::new(2));
 		quiet(&mut announced).await;
 	}
@@ -7597,7 +7598,8 @@ mod tests {
 		assert_eq!(announced.expect_next_active("room").await.cost, Cost::new(5));
 		let _sticky = hold(&consumer, "room/job", &a).await;
 
-		b.update_route(Route::default().with_hops(hops(&[11])).with_cost(3)).unwrap();
+		b.update_route(Route::default().with_hops(hops(&[11])).with_cost(3))
+			.unwrap();
 		assert_eq!(announced.expect_next_restarted("room").await.cost, Cost::new(3));
 		quiet(&mut announced).await;
 	}
@@ -8944,7 +8946,9 @@ mod tests {
 			.join("/");
 		let mut announced = producer.consume().announced();
 
-		let dynamic = producer.dynamic_route(&path, Route::default()).expect("max depth is allowed");
+		let dynamic = producer
+			.dynamic_route(&path, Route::default())
+			.expect("max depth is allowed");
 		announced.expect_next_active(&path).await;
 
 		let _pending = producer.consume().request_broadcast(&path, None);

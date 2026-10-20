@@ -223,7 +223,7 @@ for (const pathCount of routeCounts) {
 		await Promise.resolve();
 		const before = requests.map((request) => request.active.peek());
 		const start = performance.now();
-		dynamic.update({ epoch: nextEpoch });
+		dynamic.updateRoute({ epoch: nextEpoch });
 		await Promise.resolve();
 		const elapsed = performance.now() - start;
 		for (const [index, request] of requests.entries()) {

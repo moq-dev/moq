@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A claim answers by publishing (#5678)
+
+`OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
+Replace `request.accept(broadcast)` with `request.prepare(mintEpoch())`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
+
 ### JSON consumers emit timestamps (#5677)
 
 `values()` emits `json.Value` (`value`, plus `timestamp` as a `Duration?`) instead of a string, and `valuesAs<T>()` emits `Timed<T>(value, timestamp)`.

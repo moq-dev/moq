@@ -2288,9 +2288,12 @@ export class Dynamic {
 	 * request for one of those paths asks the handler again too. The broadcasts it served keep
 	 * running for the subscriptions already on them; close them to end those too.
 	 * Route selection still applies: another route still at the old epoch outranks one
-	 * without. To re-price, start from the current route, `update({ ...dynamic.route, cost })`.
+	 * without. To re-price, start from the current route, `updateRoute({ ...dynamic.route, cost })`.
+	 *
+	 * @internal
 	 */
-	update(
+	// pending: /quest/m1/public-model/answer.md
+	updateRoute(
 		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): void {
 		if (this.#closed) throw new Error("dynamic is closed");
@@ -2311,7 +2314,7 @@ export class Dynamic {
 		this.#retract();
 	}
 
-	/** Requests under this prefix, as they arrive, each to {@link Request.accept} or reject. */
+	/** Requests under this prefix, as they arrive, each to {@link Request.prepare} or reject. */
 	async *requested(): AsyncIterableIterator<Request> {
 		const server = this.#entry.server;
 		if (!server) return;
@@ -2408,12 +2411,13 @@ export class Request {
 	 * it for as long as it stays live.
 	 *
 	 * A JS app does not proxy: a broadcast a session delivered would go out labeled with
-	 * this origin's hop. To serve upstream content, copy its tracks into a broadcast you
-	 * produce and accept that.
+	 * this origin's hop. To serve upstream content, copy its tracks into a prepared answer
+	 * and publish it.
 	 *
 	 * @throws Error when handed a broadcast a session delivered. The request stays open.
 	 * @internal
 	 */
+	// pending: /quest/m1/public-model/answer.md
 	accept(source: broadcast.Producer | broadcast.Consumer): void {
 		if (this.#done) {
 			// A withdrawn request takes no answer. Only the handed-off consumer is ours;

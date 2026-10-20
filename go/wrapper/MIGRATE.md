@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A claim answers by publishing (#5678)
+
+`OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
+Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
+
 ### JSON consumers return `*json.Timed` (#5677)
 
 `SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.

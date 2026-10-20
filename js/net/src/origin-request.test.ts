@@ -155,7 +155,7 @@ test("announced requests follow the serving prefix, ignoring descendants and re-
 	exact.announce();
 	await settle();
 	expect(request.active.peek()?.closed).toBe(exact.closed);
-	prefix.update({ cost: 5n });
+	prefix.updateRoute({ cost: 5n });
 	await settle();
 	expect(request.active.peek()?.closed).toBe(exact.closed);
 	exact.close();
@@ -250,7 +250,7 @@ test("an announced request keeps a refusal that lands with a re-price", async ()
 	if (!pending) throw new Error("expected a request");
 
 	// Both land in one turn: the watch notification must not retry the refused request.
-	route.update({ cost: 5n });
+	route.updateRoute({ cost: 5n });
 	const denied = new Error("denied");
 	pending.reject(denied);
 	await settle();

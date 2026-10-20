@@ -274,7 +274,7 @@ impl Producer {
 	}
 
 	/// [`Self::announce`] once `admit` agrees, decided under the origin's table lock.
-	pub(crate) fn announce_if(&self, route: Route, admit: impl FnOnce() -> bool) -> Result<bool, Error> {
+	pub(super) fn announce_if(&self, route: Route, admit: impl FnOnce() -> bool) -> Result<bool, Error> {
 		let mut announcer = self.alive.announcer.lock();
 		let announcer = announcer.as_mut().ok_or(Error::Closed)?;
 		announcer.announce_if(route, admit)

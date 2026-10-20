@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A claim answers by publishing (#5678)
+
+`origin.dynamic_(prefix:)` takes no route, and `update` is gone.
+Replace `request.accept(broadcast:)` with `request.prepare(epoch: mintEpoch())`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
+
 ### JSON consumers return `Value` (#5677)
 
 `SnapshotConsumer.next()` and `StreamConsumer.next()` return `Value` (`value`, `timestampUs`) instead of a string; `timestampUs` is null when untimed.

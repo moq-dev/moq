@@ -94,7 +94,7 @@ test("a borrowed table exposes dynamic serving and a live scoped broadcast map",
 	const dynamic = table.dynamicRoute(prefix, { cost: 2n });
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(prefix)).toEqual(Route.normalize({ cost: 2n }));
-	dynamic.update({ cost: 3n });
+	dynamic.updateRoute({ cost: 3n });
 	await settle();
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(live.peek().get(prefix)).toEqual(Route.normalize({ cost: 3n }));
@@ -668,7 +668,7 @@ test("an identical reconnect restarts without an epoch and is quiet with one", a
 
 		// Retracting the stale twin is quiet, and a re-price of the winner is an update.
 		old.close();
-		fresh.update({ ...route, cost: 5n });
+		fresh.updateRoute({ ...route, cost: 5n });
 		expect(await announced.next()).toMatchObject({ prefix: path, kind: "update", route: { cost: 5n } });
 
 		fresh.close();
@@ -1329,7 +1329,7 @@ test("a re-priced route is delivered as an update", async () => {
 	const handle = origin.dynamicRoute(Path.from("live"));
 	const announced = origin.consume().announced();
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("live"), kind: "start" });
-	handle.update({ cost: 5n });
+	handle.updateRoute({ cost: 5n });
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("live"), kind: "update" });
 	handle.close();
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("live"), kind: "end" });
@@ -2107,7 +2107,7 @@ test("a scoped dynamic only serves allowed paths and presents relative requests"
 	pending.value?.accept(broadcast);
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(request.active.peek()).toBeDefined();
-	dynamic.update({ cost: 2n });
+	dynamic.updateRoute({ cost: 2n });
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect((await announcedView(origin)).peek().get(Path.from("tenant/room"))?.cost).toBe(2n);
 	await requests.return?.();
@@ -2284,7 +2284,7 @@ test("demand held across an epoch change asks again, unless it named the old epo
 	const { value: req } = await it.next();
 
 	// Another instance now serves the route: the old handler's answer is for the old one.
-	handle.update({ ...handle.route, epoch: NEWER });
+	handle.updateRoute({ ...handle.route, epoch: NEWER });
 	req?.accept(new BroadcastProducer().consume());
 	await expect(pinned).rejects.toThrow("unroutable");
 
@@ -2312,7 +2312,7 @@ test("a demand refused across an epoch change does not lose the carried demand's
 	const pinned = wireOf(consumer).demand(path, EPOCH);
 	await it.next();
 
-	handle.update({ ...handle.route, epoch: NEWER });
+	handle.updateRoute({ ...handle.route, epoch: NEWER });
 	await expect(pinned).rejects.toThrow("unroutable");
 	// The replacement's refusal reaches the demand that carried over.
 	(await it.next()).value?.reject(new Error("gone"));
@@ -2332,8 +2332,8 @@ test("demand held across an epoch round trip still asks again", async () => {
 	const { value: req } = await it.next();
 
 	// Released by the first change; the epoch coming back does not undo that.
-	handle.update({ ...handle.route, epoch: NEWER });
-	handle.update({ ...handle.route, epoch: EPOCH });
+	handle.updateRoute({ ...handle.route, epoch: NEWER });
+	handle.updateRoute({ ...handle.route, epoch: EPOCH });
 	req?.accept(new BroadcastProducer().consume());
 
 	const next = new BroadcastProducer();
@@ -2353,7 +2353,7 @@ test("demand held across an epoch round trip still asks again", async () => {
 test("re-pricing from the current route keeps the epoch", () => {
 	const origin = new Producer();
 	const handle = origin.dynamicRoute(Path.from("live"), { epoch: EPOCH, cost: 5n });
-	handle.update({ ...handle.route, cost: 1n });
+	handle.updateRoute({ ...handle.route, cost: 1n });
 	expect(handle.route).toEqual(Route.normalize({ epoch: EPOCH, cost: 1n }));
 
 	const broadcast = origin.createBroadcast(Path.from("room"));
@@ -2425,7 +2425,7 @@ test("a request held across an epoch change asks again and never takes the old h
 	const pinned = origin.consume().request(path, { epoch: EPOCH });
 	const requests = dynamic.requested();
 	const old = (await requests.next()).value;
-	dynamic.update({ ...dynamic.route, epoch: NEWER });
+	dynamic.updateRoute({ ...dynamic.route, epoch: NEWER });
 	const current = origin.consume().request(path, { epoch: NEWER });
 	old?.accept(new BroadcastProducer().consume());
 	await settle();
@@ -2473,7 +2473,7 @@ test.each([
 	expect((await sticky?.recvGroup())?.sequence).toBe(0);
 
 	// A re-price at the same epoch keeps every handle, and the handler is not asked again.
-	dynamic.update({ ...dynamic.route, cost: 5n });
+	dynamic.updateRoute({ ...dynamic.route, cost: 5n });
 	expect(await announced.next()).toMatchObject({ prefix, kind: "update" });
 	expect(held.active.peek()).toBe(resolved);
 	const same = origin.consume().request(path);
@@ -2482,7 +2482,7 @@ test.each([
 	const pinned = origin.consume().request(path, { epoch: from });
 
 	// Another epoch, or none, is another instance: resolved requests keep the old one.
-	dynamic.update({ ...dynamic.route, epoch: to });
+	dynamic.updateRoute({ ...dynamic.route, epoch: to });
 	expect(await announced.next()).toMatchObject({ prefix, kind: "restart" });
 	await settle();
 	expect(held.active.peek()).toBe(resolved);
@@ -2546,7 +2546,7 @@ test("an epoch update does not retain an answer that already closed", async () =
 	(await requests.next()).value?.accept(old);
 	old.close();
 	// The server's closure callback has not removed the answer yet.
-	dynamic.update({ epoch: NEWER });
+	dynamic.updateRoute({ epoch: NEWER });
 	try {
 		expect(held.closed.peek()).toBeInstanceOf(Error);
 		expect(held.active.peek()).toBeUndefined();
@@ -2573,7 +2573,7 @@ test("an unread resolved request retains its broadcast until its last handle clo
 	const old = new BroadcastProducer();
 	(await requests.next()).value?.accept(old);
 	// Change epochs before the active getter or its subscription can clone the answer.
-	dynamic.update({ epoch: NEWER });
+	dynamic.updateRoute({ epoch: NEWER });
 	expect(old.closed.peek()).toBeUndefined();
 	expect(held.active.peek()?.epoch).toBe(EPOCH);
 	held.close();
@@ -2597,7 +2597,7 @@ test("a session's re-request after an epoch update asks the handler again", asyn
 	(await requests.next()).value?.accept(old);
 	expect(await before).toBeDefined();
 
-	dynamic.update({ ...dynamic.route, epoch: NEWER });
+	dynamic.updateRoute({ ...dynamic.route, epoch: NEWER });
 	const after = wire.demand(path);
 	const next = new BroadcastProducer();
 	const track = next.createTrack("video");
@@ -2631,7 +2631,7 @@ test("an update does not override route selection: another claim at the epoch ke
 
 	// The first claim drops the epoch, so the second, still at it, outranks it: the
 	// resolved request keeps its answer, and new requests go through the second claim.
-	first.update({ ...first.route, epoch: undefined });
+	first.updateRoute({ ...first.route, epoch: undefined });
 	const fresh = origin.consume().request(path);
 	const replacement = new BroadcastProducer();
 	const track = replacement.createTrack("video");

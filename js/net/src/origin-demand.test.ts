@@ -200,7 +200,7 @@ test.each([
 	const first = wire.demand(path, undefined, hold.signal).catch(() => undefined);
 	// With competing routes, re-price the cancelled waiter's route so the survivor pends on another.
 	const cancelled = dynamics[0];
-	if (routes > 1) cancelled.update({ ...cancelled.route, cost: BigInt(routes) });
+	if (routes > 1) cancelled.updateRoute({ ...cancelled.route, cost: BigInt(routes) });
 	const requests = dynamics[routes > 1 ? 1 : 0].requested();
 	const second = other === "peer" ? wire.demand(path) : undefined;
 	const local = other === "local" ? origin.request(path) : undefined;
@@ -322,7 +322,7 @@ test("cancelling an old epoch waiter does not decrement a new epoch's demand", a
 	const old = (await requests.next()).value;
 	if (!old) throw new Error("expected old request");
 	const nextEpoch = Epoch.mint();
-	dynamic.update({ epoch: nextEpoch });
+	dynamic.updateRoute({ epoch: nextEpoch });
 	const after = wire.demand(path, nextEpoch);
 	hold.abort();
 	await before;
@@ -648,7 +648,7 @@ test("reset clears queued work while a handler is suspended and admits the new e
 		const old = (await requests.next()).value;
 		expect(old?.path).toBe(path);
 		const nextEpoch = Epoch.mint();
-		dynamic.update({ epoch: nextEpoch });
+		dynamic.updateRoute({ epoch: nextEpoch });
 		waits.push(wire.demand(path, nextEpoch).catch(() => {}));
 		const fresh = (await requests.next()).value;
 		expect(fresh?.path).toBe(path);

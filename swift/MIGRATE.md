@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A claim answers by publishing (#5678)
+
+`OriginProducer.dynamic(prefix:)` takes no route, and `OriginDynamic.update(route:)` is gone.
+Replace `request.accept(broadcast:)` with `let prepared = try request.prepare(epoch: mintEpoch())`, fill `prepared.broadcast`, then `try prepared.publish()`, which announces it at the exact path under that epoch and returns its producer.
+
 ### JSON consumers yield `Json.Timed` (#5677)
 
 `Json.SnapshotConsumer` and `Json.StreamConsumer` yield `Json.Timed<Value>` (`value`, `timestampUs`) instead of the bare value; `timestampUs` is `nil` when untimed.
