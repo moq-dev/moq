@@ -6175,11 +6175,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					}
 					let properties = ready!(stream.reader.poll_decode::<lite::ietf::TrackProperties>(&mut cx))?;
 					// Refused as moq-transport ingress refuses it.
-					if let Some(err) = properties
-						.0
-						.as_ref()
-						.and_then(|properties| properties.refused(info, true))
-					{
+					if let Some(err) = properties.0.as_ref().and_then(|properties| properties.refused(info)) {
 						return Poll::Ready(Err(err));
 					}
 					let TrackInfoState::Properties { stream, mut info } =

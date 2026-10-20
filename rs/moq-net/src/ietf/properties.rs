@@ -342,13 +342,13 @@ impl TrackProperties {
 	}
 
 	/// Why a track carrying these beside `info` is neither processed nor forwarded, if it
-	/// is not: every ingress, moq-transport or a relay `hop`, refuses it here.
-	pub(crate) fn refused(&self, info: &crate::track::Info, hop: bool) -> Option<crate::Error> {
+	/// is not: every ingress, moq-transport or a relay hop, refuses it here.
+	pub(crate) fn refused(&self, info: &crate::track::Info) -> Option<crate::Error> {
 		if self.mandatory() {
 			return Some(crate::Error::UnsupportedExtension);
 		}
 		// Egress forwards a sealed value in place of restating `info`, so the two must agree.
-		if self.contradicts(&Properties::restated(info), hop) {
+		if self.contradicts(&Properties::restated(info)) {
 			return Some(crate::Error::Unsupported);
 		}
 		// Egress could not restate the track's info beside them without overflowing.
@@ -363,8 +363,8 @@ impl TrackProperties {
 	}
 
 	/// Whether Immutable Properties seal a property we understand at another value than
-	/// the `restated` one the relay acts on, which a relay `hop` received over moq-lite.
-	fn contradicts(&self, restated: &Properties, hop: bool) -> bool {
+	/// the `restated` one the relay acts on.
+	fn contradicts(&self, restated: &Properties) -> bool {
 		let Some((block, encoding)) = self.immutable().zip(self.encoding) else {
 			return false;
 		};
@@ -381,9 +381,7 @@ impl TrackProperties {
 			DEFAULT_PUBLISHER_PRIORITY => sealed.priority != restated.priority,
 			// Advisory: a relay serves its own order and forwards the publisher's preference.
 			DEFAULT_PUBLISHER_GROUP_ORDER => false,
-			// Lite TRACK_INFO has no refresh to compare until moq-dev/moq#6030 carries it, so
-			// the hop forwards the sealed value as it arrived.
-			DYNAMIC_GROUPS => !hop && sealed.dynamic_groups != restated.dynamic_groups,
+			DYNAMIC_GROUPS => sealed.dynamic_groups != restated.dynamic_groups,
 			_ => unreachable!("only the understood properties are seen"),
 		})
 	}
@@ -780,12 +778,7 @@ mod tests {
 			dynamic_groups: true,
 			unknown: unknown(MAX_FORWARDED),
 		};
-		assert!(
-			properties
-				.unknown
-				.refused(&crate::track::Info::default(), false)
-				.is_none()
-		);
+		assert!(properties.unknown.refused(&crate::track::Info::default()).is_none());
 		let mut buf = Vec::new();
 		properties
 			.encode(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
@@ -793,7 +786,7 @@ mod tests {
 		assert_eq!(decode_draft22(&buf).unwrap(), properties);
 
 		assert!(matches!(
-			unknown(MAX_FORWARDED + 1).refused(&crate::track::Info::default(), false),
+			unknown(MAX_FORWARDED + 1).refused(&crate::track::Info::default()),
 			Some(crate::Error::Unsupported)
 		));
 	}
@@ -802,11 +795,6 @@ mod tests {
 	/// refused beside an info that restates 7s, 1000 Hz, priority 9, Descending, and
 	/// DYNAMIC_GROUPS.
 	fn seal(id: u64, value: u64) -> Option<crate::Error> {
-		seal_at(id, value, false)
-	}
-
-	/// As [`seal`], received on a relay `hop`.
-	fn seal_at(id: u64, value: u64, hop: bool) -> Option<crate::Error> {
 		let version = Version::Draft22;
 		let mut block = Vec::new();
 		let w = &mut Encoder::new(&mut block, version.into());
@@ -824,7 +812,7 @@ mod tests {
 			.with_timescale(Timescale::MILLI)
 			.with_priority(9)
 			.with_refresh(0);
-		unknown.refused(&info, hop)
+		unknown.refused(&info)
 	}
 
 	/// A sealed value of a property the relay restates must be the one it acts on, since
@@ -893,10 +881,6 @@ mod tests {
 	fn sealed_dynamic_groups_match_the_track() {
 		assert!(seal(DYNAMIC_GROUPS, 1).is_none());
 		assert!(matches!(seal(DYNAMIC_GROUPS, 0), Some(crate::Error::Unsupported)));
-		// A relay hop has no refresh to compare it with, so it forwards either.
-		for value in [0, 1] {
-			assert!(seal_at(DYNAMIC_GROUPS, value, true).is_none(), "{value}");
-		}
 	}
 
 	/// Every property the relay restates has a sealed check above.

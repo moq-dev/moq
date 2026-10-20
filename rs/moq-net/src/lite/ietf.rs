@@ -759,7 +759,7 @@ mod tests {
 			let ingress = crate::ietf::Properties::decode(&mut Decoder::new(&list, version.into()), version).unwrap();
 			assert_eq!(ingress.unknown.values.len(), repeats + 1, "{version}");
 			assert!(
-				ingress.unknown.refused(&crate::track::Info::default(), false).is_none(),
+				ingress.unknown.refused(&crate::track::Info::default()).is_none(),
 				"{version}"
 			);
 
@@ -806,7 +806,7 @@ mod tests {
 		assert!(ingress.dynamic_groups);
 		assert!(!fits(&ingress.unknown));
 		assert!(matches!(
-			ingress.unknown.refused(&crate::track::Info::default(), false),
+			ingress.unknown.refused(&crate::track::Info::default()),
 			Some(crate::Error::Unsupported)
 		));
 	}
@@ -1100,6 +1100,7 @@ mod hop_tests {
 			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
 			info.max_age = Some(Duration::from_secs(7));
 			info.priority = 9;
+			info.refresh = Some(0);
 			let track_properties = crate::model::object::TrackProperties {
 				values: vec![property(0x40, 3)],
 				encoding: Some(Encoding::Draft19),
@@ -1174,8 +1175,8 @@ mod hop_tests {
 			assert!(next(&mut received).await.is_none());
 			let info = moq_clock::timeout(TIMEOUT, copy.query()).await.unwrap().unwrap();
 			assert_eq!(
-				(info.max_age, info.timescale, info.priority),
-				(Some(Duration::from_secs(7)), Some(Timescale::MILLI), 9),
+				(info.max_age, info.timescale, info.priority, info.refresh),
+				(Some(Duration::from_secs(7)), Some(Timescale::MILLI), 9, Some(0)),
 				"{offer:?}"
 			);
 			match negotiated {
@@ -1249,12 +1250,17 @@ mod hop_tests {
 		assert!(received.end_object().is_none(), "an END_OF_GROUP past the cap");
 	}
 
-	/// Subscribe across a negotiated hop to a track carrying `properties`.
+	/// Subscribe across a negotiated hop to a timed track carrying `properties`.
 	async fn subscribe_across(properties: crate::model::object::TrackProperties) -> Result<(), crate::Error> {
-		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
 		let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
 		info.properties = Some(Arc::new(properties));
+		subscribe_across_info(info).await
+	}
+
+	/// Subscribe across a negotiated hop to a track with `info`.
+	async fn subscribe_across_info(info: track::Info) -> Result<(), crate::Error> {
+		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
 		let _track = broadcast.create_track("video", info).unwrap();
 
 		let (downstream, _sessions) = test_hop(&upstream, "room", [true, true]).await;
@@ -1320,24 +1326,37 @@ mod hop_tests {
 		}
 	}
 
-	/// A sealed DYNAMIC_GROUPS crosses the hop as it arrived, whatever it says: lite
-	/// TRACK_INFO has no refresh to compare it with until moq-dev/moq#6030.
+	/// A sealed DYNAMIC_GROUPS must match the refresh TRACK_INFO carries across the hop,
+	/// which moq-transport egress restates as DYNAMIC_GROUPS.
 	#[moq_clock::test]
-	async fn a_sealed_dynamic_groups_crosses_the_hop() {
-		for value in [0, 1] {
+	async fn a_sealed_dynamic_groups_must_match_track_info() {
+		for (refresh, value, ok) in [
+			(Some(0), 1, true),
+			(None, 0, true),
+			(Some(0), 0, false),
+			(None, 1, false),
+		] {
 			let mut sealed = Vec::new();
 			let e = &mut Encoder::new(&mut sealed, crate::ietf::Version::Draft22.into());
 			e.varint(0x30).unwrap();
 			e.varint(value).unwrap();
-			let res = subscribe_across(crate::model::object::TrackProperties {
+			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
+			info.refresh = refresh;
+			info.properties = Some(Arc::new(crate::model::object::TrackProperties {
 				values: vec![Property {
 					id: IMMUTABLE,
 					value: Value::Bytes(sealed.into()),
 				}],
 				encoding: Some(Encoding::Draft19),
-			})
-			.await;
-			assert!(res.is_ok(), "{value}: {res:?}");
+			}));
+			let res = subscribe_across_info(info).await;
+			match ok {
+				true => assert!(res.is_ok(), "{refresh:?} {value}: {res:?}"),
+				false => assert!(
+					matches!(res, Err(crate::Error::Unsupported)),
+					"{refresh:?} {value}: {res:?}"
+				),
+			}
 		}
 	}
 
