@@ -1178,7 +1178,7 @@ impl Generation {
 	async fn announce(&self, epoch: &Epoch) {
 		self.route(epoch);
 		for track in &self.tracks {
-			moq_clock::timeout(COPY_WAIT, track.demand().used())
+			moq_clock::timeout(COPY_WAIT, support::wanted(track.demand()))
 				.await
 				.expect("route swap did not splice")
 				.expect("replacement track closed");
@@ -1344,7 +1344,7 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> Resum
 	for _ in 1..routes {
 		generations.push(generation(&mut (0..retained).rev()));
 		let (_, latest) = generations.last().unwrap();
-		moq_clock::timeout(COPY_WAIT, latest.demand().used())
+		moq_clock::timeout(COPY_WAIT, support::wanted(latest.demand()))
 			.await
 			.expect("route swap did not splice")
 			.expect("replacement track closed");

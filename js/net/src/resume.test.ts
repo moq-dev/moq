@@ -522,7 +522,7 @@ test("a recovery fetch a later route supersedes is abandoned", async () => {
 	stalled.close(new StreamError(StreamCode.SessionClosed));
 	const read = group.readFrame();
 	await settle();
-	const fetching = tb.producer.demand().used.peek();
+	const fetching = tb.producer.demand().wanted.peek() !== undefined;
 
 	// Another route has it cached: the group continues there, and the fetch from b stops.
 	tc.write(0, 2);
@@ -531,7 +531,7 @@ test("a recovery fetch a later route supersedes is abandoned", async () => {
 	sub.close();
 	await settle();
 	expect(fetching).toBe(true);
-	expect(tb.producer.demand().used.peek()).toBe(false);
+	expect(tb.producer.demand().wanted.peek()).toBeUndefined();
 
 	front.consumer.close();
 	a.close();
@@ -563,13 +563,13 @@ test("a datagram reader lets go of the copies a swap replaced", async () => {
 	copy(b);
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
-	expect(ta.producer.demand().used.peek()).toBe(true);
+	expect(ta.producer.demand().wanted.peek()).toBeDefined();
 	front.serve(b.consume());
 	await settle();
 	// A read with nothing to deliver is the pass that lets go of a's copy.
 	void sub.recvDatagram();
 	await settle();
-	expect(ta.producer.demand().used.peek()).toBe(false);
+	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
 
 	sub.close();
 	front.consumer.close();
@@ -829,7 +829,7 @@ test.each([true, false])(
 			// The serving copy's group bounded the previous route's copy, so the next read lets it go.
 			pending = next();
 			await settle();
-			expect(copies[route - 1].producer.demand().used.peek()).toBe(false);
+			expect(copies[route - 1].producer.demand().wanted.peek()).toBeUndefined();
 		}
 
 		view?.close();

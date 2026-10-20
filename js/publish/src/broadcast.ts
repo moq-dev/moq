@@ -432,7 +432,7 @@ export class Broadcast {
 					});
 				}
 				inner.run((demand) => {
-					demand.set(signal, demand.get(served.demand().used) ? served : undefined);
+					demand.set(signal, demand.get(served.demand().wanted) !== undefined ? served : undefined);
 				});
 			}
 		});

@@ -317,7 +317,7 @@ mod test {
 				"compression={compression}"
 			);
 			assert!(refused(producer.append(huge.clone())), "compression={compression}");
-			assert!(producer.demand().is_used(), "a refusal must not end the track");
+			assert!(producer.demand().wanted().is_some(), "a refusal must not end the track");
 
 			producer.append(&b"second"[..]).unwrap();
 			producer.finish().unwrap();

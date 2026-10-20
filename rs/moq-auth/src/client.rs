@@ -1,8 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use moq_clock::Instant;
 use url::Url;
 
 use crate::lease::{self, Due, Reason};
@@ -392,6 +393,7 @@ impl<S: Post> Driver<S> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use moq_pattern::Patterns;
@@ -542,6 +544,19 @@ mod tests {
 				assert_eq!(bytes, Bytes { sent: 7, received: 11 });
 			}
 			other => panic!("expected an end, got {other:?}"),
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn session_duration_uses_the_lease_clock() {
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| Some(Ok(grant(None, None))));
+		let consumer = script.connect().await.unwrap();
+		tokio::time::advance(Duration::from_secs(60)).await;
+		consumer.close("done", Bytes::default());
+		match log.end().await.event {
+			Event::End { duration, .. } => assert_eq!(duration, Duration::from_secs(60)),
+			other => panic!("expected connection end, got {other:?}"),
 		}
 	}
 

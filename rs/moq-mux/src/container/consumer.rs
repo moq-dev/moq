@@ -2391,7 +2391,8 @@ mod tests {
 			let source = moq_net::broadcast::Info::new().produce();
 			let mut track = source.create_track("video", info.clone()).unwrap();
 			route.requested_broadcast().await.unwrap().accept(&source);
-			track.demand().used().await.unwrap();
+			let mut demand = track.demand();
+			while demand.wanted_changed().await.unwrap().is_none() {}
 			if sequence == 1 {
 				assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
 			}
@@ -2772,7 +2773,7 @@ mod tests {
 
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
-		assert!(!track.demand().is_used(), "the ended reader still subscribes");
+		assert!(track.demand().wanted().is_none(), "the ended reader still subscribes");
 		assert!(!malformed.demand().is_used(), "the ended reader still holds its group");
 		assert!(!later.demand().is_used(), "the ended reader still holds a later group");
 	}

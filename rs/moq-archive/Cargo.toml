@@ -17,6 +17,7 @@ bytes = { workspace = true }
 futures = { workspace = true }
 hang = { workspace = true }
 kio = { workspace = true }
+moq-clock = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }

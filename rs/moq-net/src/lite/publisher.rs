@@ -4861,17 +4861,21 @@ mod serve_group_test {
 		// A frame's header takes well under a payload more, and a poll may also flush what
 		// the last one buffered.
 		let most = 2 * (BUDGET + 1) * 2 * PAYLOAD;
-		let owner = kio::Waiter::noop();
 		let mut polls = 0;
-		while log.writes.lock().unwrap().len() < FRAMES * PAYLOAD {
+		kio::wait(|owner| {
+			if log.writes.lock().unwrap().len() >= FRAMES * PAYLOAD {
+				return Poll::Ready(());
+			}
 			let before = log.writes.lock().unwrap().len();
-			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			assert!(tasks.poll(owner).is_pending(), "the serve never ends");
 			polls += 1;
 			let wrote = log.writes.lock().unwrap().len() - before;
 			assert!(wrote <= most, "one poll wrote {wrote} bytes");
 			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
 			assert!(polls <= FRAMES as u64, "the serve stalled");
-		}
+			Poll::Pending
+		})
+		.await;
 	}
 
 	/// SUBSCRIBE_END counts the group streams opened, not the groups below the end: a
@@ -6310,7 +6314,6 @@ mod tests {
 			reader: crate::coding::Reader::new(recv, version),
 		};
 		let mut serve = RequestServe::<_, R>::new(publisher.shared.clone(), stream);
-		let waiter = kio::Waiter::noop();
 		assert!(!drive(&mut serve).await, "{case}: nothing to answer with");
 
 		// The lookup reached the track, which stays wanted while the requester waits.
@@ -6320,10 +6323,7 @@ mod tests {
 				.now_or_never()
 				.expect("track requested")
 				.unwrap();
-			assert!(
-				track.demand().poll_unused(&waiter).is_pending(),
-				"{case}: nobody wants the track"
-			);
+			assert!(track.demand().wanted().is_some(), "{case}: nobody wants the track");
 			track
 		});
 
@@ -6331,9 +6331,10 @@ mod tests {
 		assert!(drive(&mut serve).await, "{case}: still serving");
 		drop(serve);
 		if let Some(track) = track {
+			let mut demand = track.demand();
 			let unused = moq_clock::timeout(
 				Duration::from_millis(1),
-				kio::wait(|waiter| track.demand().poll_unused(waiter)),
+				kio::wait(|waiter| crate::util::poll_unwanted(&mut demand, waiter)),
 			);
 			assert!(unused.await.is_ok(), "{case}: the track is still wanted");
 		}
@@ -6461,7 +6462,7 @@ mod tests {
 						matches!(serve.state, RequestState::Hold { finished, .. } if finished != blocked),
 						"{case}: TRACK_INFO was not answered as expected"
 					);
-					assert!(track.demand().is_used(), "{case}: the track was let go");
+					assert!(track.demand().wanted().is_some(), "{case}: the track was let go");
 					assert_eq!(
 						publisher.shared.owed.load(Ordering::Relaxed),
 						usize::from(blocked),
@@ -6470,10 +6471,13 @@ mod tests {
 
 					session.close(close);
 					assert!(drive(&mut serve).await, "{case}: still holding");
-					moq_clock::timeout(Duration::from_millis(1), track.demand().unused())
-						.await
-						.unwrap_or_else(|_| panic!("{case}: the track is still wanted"))
-						.unwrap();
+					let mut demand = track.demand();
+					moq_clock::timeout(
+						Duration::from_millis(1),
+						kio::wait(|waiter| crate::util::poll_unwanted(&mut demand, waiter)),
+					)
+					.await
+					.unwrap_or_else(|_| panic!("{case}: the track is still wanted"));
 					// The incomplete reply is cancelled; a delivered one is not.
 					assert_eq!(
 						session.log.resets().is_empty(),
@@ -6651,10 +6655,12 @@ mod tests {
 		let mut tasks: kio::Tasks<Task> = kio::Tasks::new();
 
 		// The producer appends a batch of ready groups on each of its turns.
+		// Keep the track open after the producer task finishes its last batch.
+		let producer = track.clone();
 		let mut appended = 0;
 		tasks.push(Box::new(move |waiter: &kio::Waiter| {
 			for _ in 0..BATCH.min(GROUPS - appended) {
-				let mut group = track.create_group(group::Info { sequence: appended }).unwrap();
+				let mut group = producer.create_group(group::Info { sequence: appended }).unwrap();
 				group
 					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
 					.unwrap();
@@ -6681,17 +6687,21 @@ mod tests {
 			serve.poll(waiter).map(|res| res.expect("serve"))
 		}));
 
-		let owner = kio::Waiter::noop();
 		let mut polls = 0;
-		while opens.opened.load(Ordering::Relaxed) < GROUPS {
+		kio::wait(|owner| {
+			if opens.opened.load(Ordering::Relaxed) >= GROUPS {
+				return Poll::Ready(());
+			}
 			let before = opens.opened.load(Ordering::Relaxed);
-			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			assert!(tasks.poll(owner).is_pending(), "the serve never ends");
 			polls += 1;
 			let served = opens.opened.load(Ordering::Relaxed) - before;
 			assert!(served <= BUDGET, "one poll served {served} groups");
 			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
 			assert!(polls <= 2 * GROUPS, "the serve stalled");
-		}
+			Poll::Pending
+		})
+		.await;
 		assert!(
 			session.log.resets().is_empty(),
 			"a group was reset: {:?}",
