@@ -23,7 +23,7 @@ release, with clustering stability and the in-tree QUIC stack first.
   prerequisites. Their possible API breaks do not make them prerequisites of
   this cut. Existing playback and A/V clock validation remain here.
   Same-epoch importers were dropped (maintainer, 2026-10-19): a redundant
-  ingest pair runs on [distinct epochs](/quest/m0/broadcast-epoch/distinct-importer-epochs.md).
+  ingest pair runs on distinct epochs.
 - Finalized lite-07 is preferred by first-party Rust and JS clients, with
   older-version negotiation fallback. Servers accept it by default. Never
   reuse a published identifier for an incompatible wire change; deferred

@@ -135,11 +135,6 @@ pub enum Error {
 	/// I/O error while reading a local playlist or segment.
 	#[error("io: {0}")]
 	Io(std::sync::Arc<std::io::Error>),
-
-	/// [`Config::timebase`](crate::import::Config::timebase) was minted from another catalog than
-	/// the one the import writes, where its renditions would be reserved instead.
-	#[error("the timebase belongs to another catalog than the import's")]
-	ForeignTimebase,
 }
 
 impl Error {
