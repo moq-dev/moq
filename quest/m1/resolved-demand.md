@@ -72,7 +72,11 @@ with no wire change.
   depends on two groups (`drifted` uses G's successor for `reach` and a
   possibly later presentation edge in `live_above`, and losing either can
   free G), a range may end mid-group so an edge needs a frame position, and
-  a run skipped at the max age bound would no longer be final.
+  a run skipped at the max age bound would no longer be final. Likewise,
+  a stale drop in flight across an aggregate range change (lite-07, see
+  [Drop set](/quest/m1/drop-set.md)) may settle a reader whose own range
+  would not convict, since SUBSCRIBE_UPDATE has no acknowledgement and the
+  drop names only its `Max Age`; deferred for the same reason.
 - **Each cursor keeps a disposition record,** as the maintainer first framed
   it ("keep what was dropped within each cursor and within the track
   state"). It is what makes a re-offer safe: the cursor must tell a group it
