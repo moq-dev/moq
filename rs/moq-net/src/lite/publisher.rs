@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicU64;
 use crate::{SessionError, announce, frame, group, origin, track};
 use rangemap::RangeSet;
 use std::{
-	collections::{BTreeSet, HashMap},
+	collections::HashMap,
 	ops::{Bound, ControlFlow, Range},
 	sync::{
 		Arc, Mutex,
@@ -3611,8 +3611,8 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	start: Option<u64>,
 	// The first servable group, held until the source resolves where its feed starts.
 	first: Option<group::Consumer>,
-	// Groups skipped for a missing head before the start resolved, which it must not name.
-	skipped: BTreeSet<u64>,
+	// Groups given up before the start resolved, which it must not name.
+	skipped: RangeSet<u64>,
 	end_sent: bool,
 	// Lite05+ names every sequence below the end that this subscription never
 	// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
@@ -3648,7 +3648,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			emit_range,
 			start: None,
 			first: None,
-			skipped: BTreeSet::new(),
+			skipped: RangeSet::new(),
 			end_sent: false,
 			served,
 			datagrams,
@@ -3829,7 +3829,10 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 						// only be reset; the next servable group resolves the start.
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, "skipping group with a missing head");
 						if self.emit_range && self.start.is_none() {
-							self.skipped.insert(group.sequence);
+							// At u64::MAX no later group can resolve a start past this one.
+							if let Some(end) = group.sequence.checked_add(1) {
+								self.skipped.insert(group.sequence..end);
+							}
 						} else if self.start.is_some()
 							&& let Some(end) = group.sequence.checked_add(1)
 						{
@@ -3869,21 +3872,24 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		Poll::Pending
 	}
 
-	/// Lite-05+ names a sequence as soon as this cursor gives it up; whether one went out.
+	/// Lite-05+ names a sequence as soon as this cursor gives it up; whether one was taken.
 	/// Before SUBSCRIBE_START there is no owed range yet, so the eventual start accounts
-	/// for it instead.
+	/// for it instead, including ranges skipped while finding the first servable group.
 	fn poll_forward_drop(
 		&mut self,
 		writer: &mut Writer<S::SendStream, Version>,
 		waiter: &kio::Waiter,
 	) -> Result<bool, Error> {
-		if self.start.is_none() || self.served.is_none() {
+		if !self.emit_range {
 			return Ok(false);
 		}
 		let Poll::Ready(range) = self.track.poll_drop(waiter) else {
 			return Ok(false);
 		};
-		self.drop_range(range, writer)?;
+		match self.start {
+			None => self.skipped.insert(range),
+			Some(_) => self.drop_range(range, writer)?,
+		}
 		Ok(true)
 	}
 
@@ -3960,12 +3966,12 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		writer: &mut Writer<S::SendStream, Version>,
 	) -> Result<(), Error> {
 		let mut start = source.map_or(group.sequence, |source| source.min(group.sequence));
-		// A skipped group is never served, so it cannot be where the feed starts. This stops
-		// at the held group at the latest, since it was not skipped.
-		while self.skipped.contains(&start) {
-			start += 1;
+		// A group given up cannot be where the feed starts. This stops at the held group
+		// at the latest, since it was not skipped.
+		if let Some(skipped) = self.skipped.get(&start) {
+			start = skipped.end.min(group.sequence);
 		}
-		self.skipped.clear();
+		let skipped = std::mem::take(&mut self.skipped);
 		self.start = Some(start);
 		// Only the group: the subscriber derives the start frame from its own request
 		// (see `lite::SubscribeStart`). The track is live by now, since its first group
@@ -3980,6 +3986,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			group: start,
 			largest,
 		}))?;
+		// The subscriber now owes itself everything from the start, so a range given up
+		// above it is named as it would have been after the start.
+		for range in skipped.iter() {
+			self.drop_range(range.start.max(start)..range.end, writer)?;
+		}
 		// SUBSCRIBE_START names where delivery starts. Groups already skipped between
 		// the requested floor and this group are not served. A later group at or above an
 		// explicit floor, still inside the subscriber's max age, is delivered, so the cursor
@@ -5509,6 +5520,219 @@ mod serve_group_test {
 			"only group 0 is served"
 		);
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
+	}
+
+	/// A missing head at the model's largest sequence has no successor to name.
+	#[moq_clock::test]
+	async fn a_missing_head_at_the_maximum_sequence_does_not_panic() {
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
+		let mut group = track.create_group(group::Info { sequence: u64::MAX }).unwrap();
+		group.start_at(1).unwrap();
+		group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		group.finish().unwrap();
+		let (mut run, mut writer, _) = lite_run(Version::Lite07, SinkSession::new(Log::default()), subscriber);
+		assert!(
+			kio::wait(|waiter| run.poll(&mut writer, waiter))
+				.now_or_never()
+				.is_none()
+		);
+	}
+
+	/// A long-budget reader warms the relay without changing a live reader's resolved start.
+	#[moq_clock::test]
+	async fn cold_and_warm_relays_resolve_the_same_start() {
+		fn drive<D: crate::time::Driver + Send + Unpin + 'static>(mut driver: D) {
+			drop(moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
+				crate::time::Driver::poll(&mut driver, now, waiter)
+			})));
+		}
+
+		fn origin(hop: u64) -> origin::Producer {
+			let (origin, driver) = origin::Producer::new(origin::Config::new(crate::Hop::new(hop).unwrap()));
+			drive(driver);
+			origin
+		}
+
+		async fn connect(
+			version: Version,
+			publisher: &origin::Producer,
+			subscriber: &origin::Producer,
+		) -> (crate::Session, crate::Session) {
+			let version = crate::Version::Lite(version);
+			let config = crate::transport::memory::Config {
+				protocol: Some(version.alpn().into()),
+				..Default::default()
+			};
+			let (client_transport, server_transport) = crate::transport::memory::pair(config);
+			let client = crate::Client::new()
+				.with_versions(version.into())
+				.with_subscriber(subscriber.clone());
+			let server = crate::Server::new()
+				.with_versions(version.into())
+				.with_publisher(publisher);
+			futures::join!(
+				async {
+					let (session, driver) = client.connect(moq_clock::now(), client_transport).await.unwrap();
+					drive(driver);
+					session
+				},
+				async {
+					let (session, driver) = server.accept(moq_clock::now(), server_transport).await.unwrap();
+					drive(driver);
+					session
+				}
+			)
+		}
+
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut starts = Vec::new();
+			for warm in [false, true] {
+				let publisher = origin(1);
+				let broadcast = publisher.create_broadcast("room").unwrap();
+				let mut track = broadcast.create_track("test", crate::track::Info::timed()).unwrap();
+				track.start_at(0).unwrap();
+				broadcast.announce(Default::default()).unwrap();
+				let relay = origin(2);
+				let _upstream = connect(version, &publisher, &relay).await;
+				let remote = relay.consume().routed_broadcast("room").await.unwrap();
+				let mut keeper = match warm {
+					true => Some(
+						remote
+							.track("test")
+							.unwrap()
+							.subscribe(
+								track::Subscription::default()
+									.with_groups(0..)
+									.with_max_delay(Duration::from_secs(60)),
+							)
+							.await
+							.unwrap(),
+					),
+					false => None,
+				};
+				for sequence in 0..3 {
+					write_group(&mut track, sequence, sequence * 10);
+					if let Some(keeper) = &mut keeper {
+						assert_eq!(keeper.recv_group().await.unwrap().unwrap().sequence, sequence);
+					}
+				}
+				moq_clock::sim::advance(Duration::from_secs(1)).await;
+				let subscriber = origin(3);
+				let _downstream = connect(version, &relay, &subscriber).await;
+				let remote = subscriber.consume().routed_broadcast("room").await.unwrap();
+				let mut live = remote
+					.track("test")
+					.unwrap()
+					.subscribe(track::Subscription::default().with_groups(0..))
+					.await
+					.unwrap();
+				assert_eq!(live.recv_group().await.unwrap().unwrap().sequence, 2);
+				starts.push(kio::wait(|waiter| live.poll_start(waiter)).await);
+			}
+			assert_eq!(
+				starts,
+				[Some(2), Some(2)],
+				"{version}: cold and warm relay starts differ"
+			);
+		}
+	}
+
+	/// A relay's retained stale groups must not change the start it answers downstream.
+	#[moq_clock::test]
+	async fn the_start_names_past_the_stale_groups_it_skips() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut starts = Vec::new();
+			for warm in [false, true] {
+				let mut track = track::Producer::new(
+					Arc::new(broadcast::Info::default()),
+					"test",
+					crate::track::Info::timed(),
+				);
+				track.start_at(if warm { 0 } else { 2 }).unwrap();
+				for sequence in (if warm { 0 } else { 2 })..3 {
+					write_group(&mut track, sequence, sequence * 10);
+				}
+				moq_clock::sim::advance(Duration::from_secs(1)).await;
+				let subscriber = track.subscribe(track::Subscription::default());
+				let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+				assert!(
+					kio::wait(|waiter| run.poll(&mut writer, waiter))
+						.now_or_never()
+						.is_none()
+				);
+				kio::wait(|waiter| writer.poll_flush(&mut waiter.context()))
+					.await
+					.unwrap();
+				let writes = log.writes.lock().unwrap().clone();
+				let (msg, _) = lite::SubscribeResponse::decode_slice(&writes, version).unwrap();
+				let lite::SubscribeResponse::Start(start) = msg else {
+					panic!("expected SUBSCRIBE_START, got {msg:?}");
+				};
+				starts.push(start.group);
+			}
+			assert_eq!(starts, [2, 2], "{version}: cold and warm relay starts differ");
+		}
+	}
+
+	/// Upstream drops received before the start exclude the entire range, even on lite-07.
+	#[moq_clock::test]
+	async fn the_start_names_past_the_upstream_dropped_range() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			track.start_at(0).unwrap();
+			let subscriber = track.subscribe(track::Subscription::default());
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			track.drop_groups(0..1_000_000);
+			write_group(&mut track, 1_000_000, 0);
+			assert!(
+				kio::wait(|waiter| run.poll(&mut writer, waiter))
+					.now_or_never()
+					.is_none()
+			);
+			kio::wait(|waiter| writer.poll_flush(&mut waiter.context()))
+				.await
+				.unwrap();
+			let writes = log.writes.lock().unwrap().clone();
+			let (msg, _) = lite::SubscribeResponse::decode_slice(&writes, version).unwrap();
+			let lite::SubscribeResponse::Start(start) = msg else {
+				panic!("expected SUBSCRIBE_START, got {msg:?}");
+			};
+			assert_eq!(start.group, 1_000_000, "{version}: named a dropped group");
+		}
+	}
+
+	/// A range given up before the start resolves, but above it, is still named promptly.
+	#[moq_clock::test]
+	async fn a_range_skipped_above_the_start_is_dropped() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			track.start_at(0).unwrap();
+			let subscriber = track.subscribe(track::Subscription::default());
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			// The newer group beats the older ones, so the start resolves at the source's 0.
+			track.drop_groups(2..4);
+			write_group(&mut track, 5, 0);
+			assert!(
+				kio::wait(|waiter| run.poll(&mut writer, waiter))
+					.now_or_never()
+					.is_none()
+			);
+			assert_eq!(run.start, Some(0), "{version}");
+			assert_eq!(drops(&mut writer, &log, version).await, [(2, 3)], "{version}");
+		}
 	}
 
 	/// A SUBSCRIBE_UPDATE that lowers the start below SUBSCRIBE_START asks for those groups

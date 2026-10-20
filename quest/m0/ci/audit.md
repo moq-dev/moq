@@ -59,7 +59,7 @@ before and after:
   52 crate names are duplicated on aarch64-linux (syn 1, 2 and 3; rand 0.8,
   0.9 and 0.10; three toml versions; sha2 and digest 0.10 and 0.11). Cut what
   the gate doesn't need. Dependency upgrades belong to
-  [the dependency audit](/quest/m0/audit-deps.md).
+  [the dependency audit](/quest/m1/audit-deps.md).
 - **Nightly:** about 1250 runner-minutes and 2 hours of wall time, and the
   last 5 runs failed (the Features job, plus JS benchmarks cancelled at 60
   minutes). With main's optional checks moved to nightly, a red nightly hides

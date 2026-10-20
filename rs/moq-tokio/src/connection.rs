@@ -312,13 +312,7 @@ fn is_local_ip(ip: std::net::IpAddr) -> bool {
 		// it by that rather than by the v6 rules.
 		std::net::IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
 			Some(v4) => is_local_v4(v4),
-			// Loopback (::1), unspecified (::), unique local (fc00::/7), link local (fe80::/10).
-			None => {
-				ip.is_loopback()
-					|| ip.is_unspecified()
-					|| (ip.segments()[0] & 0xfe00) == 0xfc00
-					|| (ip.segments()[0] & 0xffc0) == 0xfe80
-			}
+			None => ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() || ip.is_unicast_link_local(),
 		},
 	}
 }

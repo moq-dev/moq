@@ -108,8 +108,8 @@ socket2 = { workspace = true, optional = true }
 str0m = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }
 thiserror = "2"
-tikv-jemalloc-ctl = { version = "0.6", optional = true }
-tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
+tikv-jemalloc-ctl = { version = "0.7", optional = true }
+tikv-jemallocator = { version = "0.7", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
