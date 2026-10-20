@@ -17,6 +17,8 @@ pub enum Refusal {
 	Forbidden,
 	/// The LAN membership proof was missing or invalid.
 	Lan,
+	/// The verified credential expired before admission.
+	Expired,
 }
 
 impl Refusal {
@@ -27,6 +29,7 @@ impl Refusal {
 		Self::Request,
 		Self::Forbidden,
 		Self::Lan,
+		Self::Expired,
 	];
 	/// The stable stats and metrics name.
 	pub const fn as_str(self) -> &'static str {
@@ -36,6 +39,7 @@ impl Refusal {
 			Self::Request => "request",
 			Self::Forbidden => "forbidden",
 			Self::Lan => "lan",
+			Self::Expired => "expired",
 		}
 	}
 }
@@ -55,6 +59,8 @@ pub struct Refusals {
 	pub forbidden: u64,
 	/// The LAN membership proof was missing or invalid.
 	pub lan: u64,
+	/// The verified credential expired before admission.
+	pub expired: u64,
 }
 
 impl Refusals {
@@ -66,6 +72,7 @@ impl Refusals {
 			Refusal::Request => self.request,
 			Refusal::Forbidden => self.forbidden,
 			Refusal::Lan => self.lan,
+			Refusal::Expired => self.expired,
 		}
 	}
 	/// Add every kind from another readout.
@@ -75,6 +82,7 @@ impl Refusals {
 		self.request += other.request;
 		self.forbidden += other.forbidden;
 		self.lan += other.lan;
+		self.expired += other.expired;
 	}
 	/// Whether any cumulative count went backwards.
 	pub fn regressed(&self, previous: &Self) -> bool {
@@ -83,6 +91,7 @@ impl Refusals {
 			|| self.request < previous.request
 			|| self.forbidden < previous.forbidden
 			|| self.lan < previous.lan
+			|| self.expired < previous.expired
 	}
 }
 
@@ -93,6 +102,7 @@ pub(super) struct RefusalCounters {
 	request: AtomicU64,
 	forbidden: AtomicU64,
 	lan: AtomicU64,
+	expired: AtomicU64,
 }
 
 impl RefusalCounters {
@@ -103,6 +113,7 @@ impl RefusalCounters {
 			Refusal::Request => &self.request,
 			Refusal::Forbidden => &self.forbidden,
 			Refusal::Lan => &self.lan,
+			Refusal::Expired => &self.expired,
 		}
 	}
 	pub(super) fn snapshot(&self) -> Refusals {
@@ -112,6 +123,7 @@ impl RefusalCounters {
 			request: self.request.load(Ordering::Relaxed),
 			forbidden: self.forbidden.load(Ordering::Relaxed),
 			lan: self.lan.load(Ordering::Relaxed),
+			expired: self.expired.load(Ordering::Relaxed),
 		}
 	}
 }

@@ -23,7 +23,7 @@ follow-up through `/quest-plan`.
 
 Narrowing a feature or reshaping an API is the maintainer's call, so those
 are proposals with a recommendation, filed as follow-ups. Unlike the [dead
-code audit](/quest/m0/audit-dead-code.md), this targets code that is used but
+code audit](/quest/m1/audit-dead-code.md), this targets code that is used but
 overbuilt.
 
 Starting points (2026-10-19): look for one concept implemented twice (across

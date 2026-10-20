@@ -2273,6 +2273,36 @@ test.each(["done", "fin"] as const)("a counted set cut short by %s closes the se
 	}
 });
 
+for (const negotiated of [false, true]) {
+	test(`subscriber max age is sent only to a declaring peer: ${negotiated}`, async () => {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const subscriber = new Subscriber({
+			session: new NativeSession(pair.server, VERSION, true),
+			maxAge: negotiated,
+		});
+		const track = subscriber
+			.consume(Path.from("room"))
+			.track("video")
+			.subscribe({ maxDelay: Milli(250) });
+		const peer = await nextStream(pair.client);
+		if (!peer) throw new Error("no subscribe stream");
+		expect(await peer.reader.u53()).toBe(Subscribe.id);
+		const request = await Subscribe.decode(peer.reader, VERSION);
+		expect(request.maxAge).toBe(negotiated ? 250 : undefined);
+		await peer.writer.u53(SubscribeOk.id);
+		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
+		await track.info();
+		// The aggregate can change before SUBSCRIBE_OK: the first update must catch it.
+		const tolerant = track.fork({ maxDelay: Milli(900), priority: 9 });
+		expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
+		const update = await SubscribeUpdate.decode(peer.reader, VERSION);
+		expect(update.parameters.maxAge).toBe(negotiated ? 900 : undefined);
+		expect(update.parameters.subscriberPriority).toBe(246);
+		tolerant.close();
+		track.close();
+		peer.close();
+	});
+}
 /** Advertise `path` inline under `epoch`, on a session that negotiated MoQ Epoch alone. */
 async function inlineEpoch(stream: Stream, path: Path.Valid, epoch: Epoch.Valid): Promise<void> {
 	await stream.writer.u53(SubscribeNamespaceEntry.id);

@@ -29,11 +29,20 @@ contact = ["mailto:ops@example.com"]
 dir = "/var/lib/moq-relay/acme"
 
 [auth]
-key = "/etc/moq/public.jwk"
+url = "http://127.0.0.1:4440/"
 
 [internal]
 listen = "127.0.0.1:9101"
 ```
+
+Run the auth server on the same host and supervise it alongside the relay:
+
+```bash
+moq auth serve --key /etc/moq/public.jwk
+```
+
+It verifies each session's JWT; a session without one is refused. See
+[Authentication](/bin/relay/auth) to define another access policy.
 
 Let's Encrypt validates the domain by connecting to TCP port 443, so
 `web.https.listen` must be reachable there, directly or forwarded. The first
