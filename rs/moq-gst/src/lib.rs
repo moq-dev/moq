@@ -18,7 +18,7 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
 /// Registers `moqsink` and `moqsrc` with `plugin` and installs a stderr tracing subscriber
-/// filtered by `RUST_LOG`.
+/// filtered by `RUST_LOG`, unless the host process already installed one.
 pub fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
 	sink::register(plugin)?;
 	source::register(plugin)?;
@@ -36,7 +36,8 @@ pub fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
 		.with_env_filter(filter)
 		.finish();
 
-	tracing::subscriber::set_global_default(logger).unwrap();
+	// An embedding application that installed its own subscriber keeps it.
+	let _ = tracing::subscriber::set_global_default(logger);
 	Ok(())
 }
 
