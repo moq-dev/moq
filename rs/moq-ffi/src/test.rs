@@ -6067,8 +6067,8 @@ async fn client_cancel_aborts_a_pending_connect() {
 	})
 	.unwrap();
 
-	// Keep the foreign call in place: after it parks, cancel before its next poll.
-	// A spawned call can finish while the helper waits for the runtime to catch up.
+	// The dial can establish without the server accepting, so a spawned connect may finish
+	// while `spawn_parked` waits for the runtime. Poll it in place and cancel before its next poll.
 	let mut connect = std::pin::pin!(client.connect(format!("https://{addr}")));
 	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(connect.as_mut().poll(cx))).await;
 	assert!(
