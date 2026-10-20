@@ -94,6 +94,5 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [Benchmark regression table](/quest/m0/bench-site.md) - the nightly benchmark page is one light table where red and green flag regressions and improvements beyond each series' noise
 - [Performance audit](/quest/m0/audit-perf.md) - benchmarks that regressed since the last run are explained, fixed, or planned, and unbenched hot paths get coverage
 - [Compile time audit](/quest/m0/audit-compile-time.md) - build-time hotspots are measured against a baseline and the worst are fixed or planned
-- [Artifact size audit](/quest/m0/audit-size.md) - binary, FFI, WASM, and bundle growth since the last run is explained, fixed, or planned
 - [Simplification audit](/quest/m0/audit-simplify.md) - overbuilt code and APIs are collapsed, merged, or narrowed into a net simpler whole
 - [Quest tree audit](/quest/m0/audit-quests.md) - the tree agrees with itself and with main
