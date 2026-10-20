@@ -32,16 +32,19 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
   - Datagrams gain their object ID, properties, and status.
   - Track info gains the unknown track properties: `track::Info::properties`
     (`model::object::TrackProperties`), with its sealed keys.
-  - Track info carries the ingress moq-transport version once. Immutable
-    properties keep their unchanged inner bytes. Downstream IETF egress
+  - Track info carries the ingress moq-transport version once, or none for a
+    track published over moq-lite, which has no IETF provenance and no
+    properties to derive rules for. Immutable properties keep their
+    unchanged inner bytes. Downstream IETF egress
     applies today's single-relay rules from that version: refuse an
     incompatible immutable encoding (drafts 14/15 carry no immutable track
     block, so egress there skips that check), and across draft 19, where
     0x06 becomes SUBGROUP_DELIVERY_TIMEOUT, drop a mutable 0x06 and refuse a
     sealed one.
 - Record provenance as the ingress version, decided 2026-10-20. In the
-  model, the track's ingress `ietf::Version` replaces `object::Encoding` and
-  the `delivery_timeout` flags on `Properties` and `TrackProperties`; both
+  model, the track's optional ingress `ietf::Version` replaces
+  `object::Encoding` and the `delivery_timeout` flags on `Properties` and
+  `TrackProperties`; both
   are functions of the ingress draft. One version per track suffices because
   each publisher is its own stream; a different ingress is a new instance.
 - Rejected 2026-10-20: a generic crate-private `unknown` KVP block on route,
@@ -70,7 +73,8 @@ both set and clear with the same nonzero starting object ID, immutable
 encoding provenance, and 0x06 provenance: a draft-18 publisher's object and
 track properties exit draft 19 with a mutable 0x06 dropped and a sealed one
 refused. Both drafts share an encoding family, so only the carried version
-distinguishes them.
+distinguishes them. Cover a lite-published track crossing the same hop with
+no ingress version.
 
 Public API: `setup::Extensions::ietf`. Wire: a new lite-07 SETUP extension
 and the framing above, only when negotiated.
