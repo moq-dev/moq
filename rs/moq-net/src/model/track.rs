@@ -5677,7 +5677,10 @@ impl Subscriber {
 	/// Pass a modified copy back to [`Self::set_groups`] to move one end and keep the other.
 	pub fn bounds(&self) -> (Bound<u64>, Bound<u64>) {
 		let bounds = self.local_bounds();
-		(Bound::Included(bounds.start), bounds.end.map_or(Bound::Unbounded, Bound::Excluded))
+		(
+			Bound::Included(bounds.start),
+			bounds.end.map_or(Bound::Unbounded, Bound::Excluded),
+		)
 	}
 
 	/// The local bounds `largest` reports within.
