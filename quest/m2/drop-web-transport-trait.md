@@ -45,8 +45,10 @@ each gets its own impl:
   `SendOptions` reach a new stream through its setters in both runtimes'
   adapters. A native impl can pass them to the open, as moq-tokio's driver
   `open_uni`/`open_bi` already accept.
-- moq-tokio's `quic::driver` and `quic::web` modules are public but
-  `#[doc(hidden)]`. Decide whether they are API or should be private.
+- moq-tokio's `quic::web` module is public but `#[doc(hidden)]`. Decide
+  whether it is API or should be private. `quic::driver` stays public:
+  [An async QUIC driver without moq-net](/quest/m2/quic-driver.md) makes it
+  supported API.
 
 Notes from related quests:
 - [qmux on moq-quic](/quest/m2/quic-qmux.md) planned to port qmux's
