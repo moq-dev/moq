@@ -230,7 +230,7 @@ stale.
 | `fetches` | One-shot group fetches requested, including ones that found nothing. Their payload counts in `bytes`, `frames`, and `groups`. |
 | `bytes` / `frames` / `groups` | Payload delivered. |
 | `datagrams` | Groups delivered as an unreliable datagram. A subset of `groups`. |
-| `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy. Not part of `bytes`, which counts payload as stored or sent. |
+| `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy, plus received compressed datagrams, which inflate on arrival. Not part of `bytes`, which counts payload as stored or sent. |
 | `stale` | Payload skipped because it aged past a subscriber's latency budget, with the same four fields. Disjoint from the top-level payload counters. |
 
 The last six fields are legacy spellings of the `*_started` and `*_ended`

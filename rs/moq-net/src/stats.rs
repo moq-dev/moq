@@ -59,7 +59,8 @@
 //! * `inflated`: cumulative bytes inflated from compressed groups for plain
 //!   readers (in-process consumers, and egress that cannot carry compression).
 //!   Every plain reader of a group shares one inflated copy, so each byte counts
-//!   once, on the side of the reader whose read inflated it. Kept separate from
+//!   once, on the side of the reader whose read inflated it. A received compressed
+//!   datagram inflates on arrival, counted on the receiving side. Kept separate from
 //!   `bytes`, which counts payload as stored or sent.
 //! * `requests` ([`Presence`]): cumulative request/response admissions under the
 //!   label and tier at admission. [`Handle::request`] meters their traffic
@@ -464,8 +465,9 @@ pub struct Traffic {
 	/// `frames` / `bytes`.
 	pub datagrams: u64,
 	/// Cumulative bytes inflated from compressed groups for plain readers. Every plain
-	/// reader shares one inflated copy per group, so each byte counts once; `bytes` still
-	/// counts payload as stored or sent.
+	/// reader shares one inflated copy per group, so each byte counts once. A received
+	/// compressed datagram counts here as it inflates on arrival. `bytes` still counts
+	/// payload as stored or sent.
 	pub inflated: u64,
 	/// Content skipped because it fell behind a subscriber's
 	/// [`max_delay`](crate::track::Subscription::max_delay) budget. Disjoint from the top-level payload
