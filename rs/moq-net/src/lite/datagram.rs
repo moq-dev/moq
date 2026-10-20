@@ -171,7 +171,10 @@ mod test {
 		};
 		let buf = dg.encode_bytes(Version::Lite07).unwrap();
 		assert_eq!(&buf[..4], [1, 2, 3, 40]);
-		assert_eq!(Datagram::decode(buf, Version::Lite07, false, |_| COMPRESSED).unwrap(), dg);
+		assert_eq!(
+			Datagram::decode(buf, Version::Lite07, false, |_| COMPRESSED).unwrap(),
+			dg
+		);
 
 		for version in [Version::Lite05, Version::Lite06] {
 			assert!(

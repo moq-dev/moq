@@ -1439,17 +1439,23 @@ mod hop_tests {
 		let mut received = recv(&mut subscriber).await;
 		for (millis, n) in [(5, 1), (6, 2)] {
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!((frame.timestamp, &frame.payload[..]), (Some(ts(millis)), &payload(n)[..]));
+			assert_eq!(
+				(frame.timestamp, &frame.payload[..]),
+				(Some(ts(millis)), &payload(n)[..])
+			);
 			assert!(frame.fields.is_none());
 		}
 		assert!(next(&mut received).await.is_none());
 
 		track.insert_datagram(7, ts(9), payload(3)).unwrap();
-		let datagram = moq_clock::timeout(TIMEOUT, kio::wait(|waiter| subscriber.poll_recv_stored_datagram(waiter)))
-			.await
-			.expect("no datagram")
-			.unwrap()
-			.unwrap();
+		let datagram = moq_clock::timeout(
+			TIMEOUT,
+			kio::wait(|waiter| subscriber.poll_recv_stored_datagram(waiter)),
+		)
+		.await
+		.expect("no datagram")
+		.unwrap()
+		.unwrap();
 		assert_eq!((datagram.sequence, datagram.timestamp), (7, Some(ts(9))));
 		assert_eq!(&datagram.payload[..], &payload(3)[..]);
 		assert!(datagram.deflated.is_some() && datagram.wire.is_none());
