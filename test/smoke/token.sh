@@ -388,9 +388,13 @@ else
                 echo "  PASS  reject($v, $algo): tampered token refused"
             fi
             # (b) a valid token verified against an unrelated key must be refused.
+            # The canonical generator mints that key: it just worked above, and
+            # the positive matrix proves every verifier reads its keys.
             wrongdir="$TMP/wrong-$v-$algo"
-            if ! gen "$v" "$algo" "$wrongdir" >"$wrongdir.gen.log" 2>&1; then
-                echo "  WARN  reject($v, $algo): could not mint a wrong key; skipping key check"
+            if ! gen "$canon" "$algo" "$wrongdir" >"$wrongdir.gen.log" 2>&1; then
+                echo "  FAIL  reject($v, $algo): unrelated key generation ($canon) failed"
+                sed 's/^/        /' "$wrongdir.gen.log" >&2 || true
+                overall=1
                 continue
             fi
             if verify "$v" "$wrongdir/verify.jwk" "$token" >"$TMP/neg-wrongkey-$v-$algo.log" 2>&1; then
