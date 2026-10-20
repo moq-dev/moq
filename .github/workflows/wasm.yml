@@ -33,10 +33,14 @@ permissions:
   contents: read
 
 on:
+  workflow_call:
   pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
+    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
+    # retargeted to release. `closed` is here only so merging/closing a PR
+    # cancels its in-flight run via the concurrency group below; the job itself
+    # is skipped on close.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited, closed]
     paths:
       - "rs/moq-wasm/**"
       - "rs/moq-clock/**"
@@ -116,7 +120,7 @@ jobs:
       # short while so a red run is diagnosable; a passing run deletes its own.
       - name: Upload failure artifacts
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: wasm-failure
           path: ${{ runner.temp }}/moq-test-runs

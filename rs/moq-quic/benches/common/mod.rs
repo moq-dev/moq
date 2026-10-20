@@ -1,8 +1,9 @@
-//! A sans-IO client/server harness for the benchmarks, built only from the public API so the
-//! suite compiles on both sides of a rewrite.
+//! A sans-IO client/server harness for the benchmarks, built from the public API so the suite
+//! compiles on both sides of a rewrite.
 //!
-//! Packets are not protected and the congestion window is unlimited, so a benchmark measures
-//! protocol CPU rather than AES or a controller's model. Time is virtual: it only advances to
+//! Both sides run the hidden `fuzz` module's plaintext crypto, which skips TLS and leaves packets
+//! unprotected, and the congestion window is unlimited, so a benchmark measures protocol CPU
+//! rather than AES or a controller's model. Time is virtual: it only advances to
 //! the next timer once no datagram is in flight. Cases are timed in thread CPU time, so a busy
 //! host descheduling the benchmark does not inflate them.
 
@@ -22,25 +23,19 @@ use criterion::{
 };
 use moq_clock::Instant;
 use moq_quic::{
-    ClientConfig, ConnectError, Connection, ConnectionHandle, ConnectionId, ConnectionIdGenerator,
-    DatagramEvent, Endpoint, EndpointConfig, Event, RandomConnectionIdGenerator, ReadError,
-    ServerConfig, Side, StreamEvent, StreamId, TransportConfig, TransportError, VarInt,
+    ClientConfig, Connection, ConnectionHandle, ConnectionId, ConnectionIdGenerator, DatagramEvent,
+    Endpoint, EndpointConfig, Event, RandomConnectionIdGenerator, ReadError, ServerConfig,
+    StreamEvent, StreamId, TransportConfig, VarInt,
     coding::Codec,
     congestion::{Controller, ControllerFactory},
-    crypto::{
-        self, CryptoError, ExportKeyingMaterialError, HeaderKey, KeyPair, Keys, PacketKey,
-        UnsupportedVersion,
-        rustls::{QuicClientConfig, QuicServerConfig},
-    },
-    transport_parameters::TransportParameters,
+    fuzz::Plaintext,
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// The most datagrams one `poll_transmit` may batch, as a GSO-capable socket would take.
 const MAX_DATAGRAMS: usize = 10;
 /// The window the unlimited controller reports: far beyond anything a benchmark puts in flight.
 const WINDOW: u64 = 1 << 30;
-/// AEAD tag space the protocol reserves in every packet, which the no-op key leaves zeroed.
+/// AEAD tag space the protocol reserves in every packet, which plaintext crypto leaves zeroed.
 const TAG_LEN: usize = 16;
 /// How far virtual time may jump to a timer while settling before the pair counts as idle.
 const SETTLE: Duration = Duration::from_secs(1);
@@ -574,58 +569,16 @@ fn transport() -> Arc<TransportConfig> {
     Arc::new(transport)
 }
 
-fn identity() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
-    let key = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    (
-        key.cert.der().clone(),
-        PrivateKeyDer::Pkcs8(key.signing_key.serialize_der().into()),
-    )
-}
-
-fn provider() -> Arc<rustls::crypto::CryptoProvider> {
-    Arc::new(rustls::crypto::ring::default_provider())
-}
-
 fn server_config() -> Arc<ServerConfig> {
-    let (cert, key) = IDENTITY.clone_key();
-    let tls = rustls::ServerConfig::builder_with_provider(provider())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert], key)
-        .unwrap();
-    let crypto = QuicServerConfig::try_from(tls).unwrap();
-    let mut config = ServerConfig::with_crypto(Arc::new(NoProtectionServer(Arc::new(crypto))));
+    let mut config = ServerConfig::with_crypto(Arc::new(Plaintext));
     config.transport_config(transport());
     Arc::new(config)
 }
 
 fn client_config() -> ClientConfig {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(IDENTITY.0.clone()).unwrap();
-    let tls = rustls::ClientConfig::builder_with_provider(provider())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    let crypto = QuicClientConfig::try_from(tls).unwrap();
-    let mut config = ClientConfig::new(Arc::new(NoProtectionClient(Arc::new(crypto))));
+    let mut config = ClientConfig::new(Arc::new(Plaintext));
     config.transport_config(transport());
     config
-}
-
-/// One certificate shared by every pair, since generating it dominates a small setup.
-static IDENTITY: std::sync::LazyLock<Identity> = std::sync::LazyLock::new(|| {
-    let (cert, key) = identity();
-    Identity(cert, key)
-});
-
-struct Identity(CertificateDer<'static>, PrivateKeyDer<'static>);
-
-impl Identity {
-    fn clone_key(&self) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
-        (self.0.clone(), self.1.clone_key())
-    }
 }
 
 /// A server connection ID generator that records every ID, so benchmarks can address them.
@@ -688,175 +641,6 @@ impl Controller for Unlimited {
 impl ControllerFactory for Unlimited {
     fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
         Box::new(Self)
-    }
-}
-
-// No-op packet protection, ported from quinn's `perf` `noprotection.rs`: the TLS handshake runs
-// for real, but every packet and header key leaves the bytes alone.
-
-struct NoProtectionClient(Arc<QuicClientConfig>);
-
-impl crypto::ClientConfig for NoProtectionClient {
-    fn start_session(
-        self: Arc<Self>,
-        version: u32,
-        server_name: &str,
-        params: &TransportParameters,
-    ) -> Result<Box<dyn crypto::Session>, ConnectError> {
-        let inner = self.0.clone().start_session(version, server_name, params)?;
-        Ok(Box::new(NoProtectionSession(inner)))
-    }
-}
-
-struct NoProtectionServer(Arc<QuicServerConfig>);
-
-impl crypto::ServerConfig for NoProtectionServer {
-    fn initial_keys(
-        &self,
-        version: u32,
-        dst_cid: ConnectionId,
-    ) -> Result<Keys, UnsupportedVersion> {
-        self.0.initial_keys(version, dst_cid).map(unprotect)
-    }
-
-    fn retry_tag(&self, version: u32, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16] {
-        self.0.retry_tag(version, orig_dst_cid, packet)
-    }
-
-    fn start_session(
-        self: Arc<Self>,
-        version: u32,
-        params: &TransportParameters,
-    ) -> Box<dyn crypto::Session> {
-        Box::new(NoProtectionSession(
-            self.0.clone().start_session(version, params),
-        ))
-    }
-}
-
-struct NoProtectionSession(Box<dyn crypto::Session>);
-
-impl crypto::Session for NoProtectionSession {
-    fn initial_keys(&self, dst_cid: ConnectionId, side: Side) -> Keys {
-        unprotect(self.0.initial_keys(dst_cid, side))
-    }
-
-    fn handshake_data(&self) -> Option<Box<dyn Any>> {
-        self.0.handshake_data()
-    }
-
-    fn peer_identity(&self) -> Option<Box<dyn Any>> {
-        self.0.peer_identity()
-    }
-
-    fn early_crypto(&self) -> Option<(Box<dyn HeaderKey>, Box<dyn PacketKey>)> {
-        let (header, packet) = self.0.early_crypto()?;
-        Some((
-            Box::new(NoHeader(header.sample_size())),
-            Box::new(NoPacket(packet.tag_len())),
-        ))
-    }
-
-    fn early_data_accepted(&self) -> Option<bool> {
-        self.0.early_data_accepted()
-    }
-
-    fn is_handshaking(&self) -> bool {
-        self.0.is_handshaking()
-    }
-
-    fn read_handshake(&mut self, buf: &[u8]) -> Result<bool, TransportError> {
-        self.0.read_handshake(buf)
-    }
-
-    fn transport_parameters(&self) -> Result<Option<TransportParameters>, TransportError> {
-        self.0.transport_parameters()
-    }
-
-    fn write_handshake(&mut self, buf: &mut Vec<u8>) -> Option<Keys> {
-        self.0.write_handshake(buf).map(unprotect)
-    }
-
-    fn next_1rtt_keys(&mut self) -> Option<KeyPair<Box<dyn PacketKey>>> {
-        let keys = self.0.next_1rtt_keys()?;
-        Some(KeyPair {
-            local: Box::new(NoPacket(keys.local.tag_len())),
-            remote: Box::new(NoPacket(keys.remote.tag_len())),
-        })
-    }
-
-    fn is_valid_retry(&self, orig_dst_cid: ConnectionId, header: &[u8], payload: &[u8]) -> bool {
-        self.0.is_valid_retry(orig_dst_cid, header, payload)
-    }
-
-    fn export_keying_material(
-        &self,
-        output: &mut [u8],
-        label: &[u8],
-        context: &[u8],
-    ) -> Result<(), ExportKeyingMaterialError> {
-        self.0.export_keying_material(output, label, context)
-    }
-}
-
-fn unprotect(keys: Keys) -> Keys {
-    Keys {
-        header: KeyPair {
-            local: Box::new(NoHeader(keys.header.local.sample_size())),
-            remote: Box::new(NoHeader(keys.header.remote.sample_size())),
-        },
-        packet: KeyPair {
-            local: Box::new(NoPacket(keys.packet.local.tag_len())),
-            remote: Box::new(NoPacket(keys.packet.remote.tag_len())),
-        },
-    }
-}
-
-/// Header protection that leaves the header in the clear.
-struct NoHeader(usize);
-
-impl HeaderKey for NoHeader {
-    fn decrypt(&self, _pn_offset: usize, _packet: &mut [u8]) {}
-
-    fn encrypt(&self, _pn_offset: usize, _packet: &mut [u8]) {}
-
-    fn sample_size(&self) -> usize {
-        self.0
-    }
-}
-
-/// Packet protection that zeroes the tag on the way out and strips it on the way in.
-///
-/// Its limits never trigger a key update, which a forged packet could not follow.
-struct NoPacket(usize);
-
-impl PacketKey for NoPacket {
-    fn encrypt(&self, _packet: u64, buf: &mut [u8], _header_len: usize) {
-        let tag = buf.len() - self.0;
-        buf[tag..].fill(0);
-    }
-
-    fn decrypt(
-        &self,
-        _packet: u64,
-        _header: &[u8],
-        payload: &mut BytesMut,
-    ) -> Result<(), CryptoError> {
-        let len = payload.len().checked_sub(self.0).ok_or(CryptoError)?;
-        payload.truncate(len);
-        Ok(())
-    }
-
-    fn tag_len(&self) -> usize {
-        self.0
-    }
-
-    fn confidentiality_limit(&self) -> u64 {
-        u64::MAX
-    }
-
-    fn integrity_limit(&self) -> u64 {
-        u64::MAX
     }
 }
 

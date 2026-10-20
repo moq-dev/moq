@@ -10,7 +10,7 @@ use crate::{
 use super::{
 	Control, Message, Publisher, Subscriber, Version, active_count,
 	adapter::ControlStreamAdapter,
-	auth, cluster, hidden, peer, request_update, solicit,
+	auth, cluster, epoch, hidden, max_age, peer, request_update, solicit,
 	subscriber::{is_protocol_violation, subscribe_prefixes},
 };
 
@@ -177,7 +177,7 @@ where
 	// What the peer declared in its SETUP. Seeded now when that stream was already
 	// read (the legacy handshake, or a gated server accept), and filled by the uni
 	// loop otherwise.
-	let peer_setup = peer::PeerSetup::default();
+	let peer_setup = peer::PeerSetup::new(extensions);
 	let setup_read = peer_declared.is_some();
 	match peer_declared {
 		Some(declared) => peer_setup.set(declared),
@@ -766,8 +766,10 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		cluster: cluster::peer_from_setup(params, version)?,
 		solicit: solicit::from_setup(params, version)?,
 		hidden: hidden::from_setup(params, version),
+		max_age: max_age::from_setup(params, version),
 		auth: auth::from_setup(params, version) == Some(true),
 		active_count: active_count::from_setup(params, version),
+		epoch: epoch::from_setup(params, version),
 	})
 }
 
@@ -812,10 +814,14 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		solicit::into_setup(&mut parameters, version);
 	}
 	hidden::into_setup(&mut parameters, version);
+	max_age::into_setup(&mut parameters, version);
 	if extensions.auth {
 		auth::into_setup(&mut parameters, version);
 	}
 	active_count::into_setup(&mut parameters, version);
+	if extensions.epoch {
+		epoch::into_setup(&mut parameters, version);
+	}
 	request_update::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
@@ -1003,6 +1009,7 @@ where
 }
 
 /// What serving one incoming uni stream needs from its session.
+#[derive(Clone)]
 struct Uni<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	peer_setup: Option<peer::PeerSetup>,
@@ -1011,19 +1018,6 @@ struct Uni<S: crate::transport::poll::Session> {
 	goaway: crate::goaway::Protocol,
 	client: bool,
 	version: Version,
-}
-
-impl<S: crate::transport::poll::Session> Clone for Uni<S> {
-	fn clone(&self) -> Self {
-		Self {
-			subscriber: self.subscriber.clone(),
-			peer_setup: self.peer_setup.clone(),
-			seen_setup: self.seen_setup.clone(),
-			goaway: self.goaway.clone(),
-			client: self.client,
-			version: self.version,
-		}
-	}
 }
 
 impl<S: crate::transport::poll::Boxable> Uni<S> {
@@ -1185,10 +1179,13 @@ where
 
 	// An AUTH without MoQ Auth negotiated, offered by both sides, is an unknown request,
 	// which falls through to the protocol violation in `Bidi::serve`.
-	let serve = match peer_setup.get().await.auth {
+	let declared_setup = peer_setup.get().await;
+	let serve = match declared_setup.auth {
 		true => serve,
 		false => None,
 	};
+	// Whether requests and PUBLISH_NAMESPACE may carry EPOCH (MoQ Epoch).
+	let epoch = declared_setup.epoch;
 
 	// From the same slot, so this costs nothing extra: it decides whether an unsolicited
 	// advertisement is the peer ignoring our own SETUP (MoQ Solicit).
@@ -1205,6 +1202,7 @@ where
 		publisher,
 		subscriber,
 		peer,
+		epoch,
 		declared,
 		serve,
 		version,
@@ -1254,26 +1252,16 @@ where
 }
 
 /// What serving one incoming bidi request needs from its session.
+#[derive(Clone)]
 struct Bidi<S: crate::transport::poll::Session> {
 	publisher: Publisher<S>,
 	subscriber: Subscriber<S>,
 	peer: cluster::Peer,
+	/// Whether both sides negotiated MoQ Epoch.
+	epoch: bool,
 	declared: Option<bool>,
 	serve: Option<auth::Serve>,
 	version: Version,
-}
-
-impl<S: crate::transport::poll::Session> Clone for Bidi<S> {
-	fn clone(&self) -> Self {
-		Self {
-			publisher: self.publisher.clone(),
-			subscriber: self.subscriber.clone(),
-			peer: self.peer,
-			declared: self.declared,
-			serve: self.serve.clone(),
-			version: self.version,
-		}
-	}
 }
 
 impl<S: crate::transport::poll::Boxable> Bidi<S> {
@@ -1283,6 +1271,7 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			publisher,
 			mut subscriber,
 			peer,
+			epoch,
 			declared,
 			serve,
 			version,
@@ -1330,7 +1319,7 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			ietf::SubscribeNamespaceLegacy::ID if version == Version::Draft16 => {
 				let request_id = RequestId::decode(&mut crate::coding::Decoder::new(&data.0, version.into()), version)?;
 				let permit = publisher.control.accept(request_id)?;
-				let task = publisher.handle_stream(id, data, stream)?;
+				let task = publisher.handle_stream(id, data, stream, epoch)?;
 				let _permit = permit;
 				task.await;
 			}
@@ -1342,11 +1331,11 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			| ietf::SubscribeNamespaceLegacy::ID
 			| ietf::SUBSCRIBE_TRACKS_ID
 			| ietf::TrackStatus::ID => {
-				publisher.handle_stream(id, data, stream)?.await;
+				publisher.handle_stream(id, data, stream, epoch)?.await;
 			}
 			// Subscriber handles: Publish, PublishNamespace
 			ietf::Publish::ID | ietf::PublishNamespace::ID => {
-				subscriber.handle_stream(id, data, stream, peer, declared)?.await;
+				subscriber.handle_stream(id, data, stream, peer, epoch, declared)?.await;
 			}
 			auth::Auth::ID if let Some(serve) = serve => {
 				let mut data = data.decoder(version);
@@ -1514,6 +1503,7 @@ mod tests {
 									track_namespace: crate::Path::from("test"),
 									track_name: "video".into(),
 									properties_wanted: true,
+									epoch: None,
 								}
 								.encode_msg(&mut encoder, version)
 								.unwrap();
@@ -1699,7 +1689,7 @@ mod tests {
 		writer
 			.encode(&ietf::Namespace {
 				suffix: crate::Path::new("cam"),
-				cluster: None,
+				params: None,
 			})
 			.await
 			.unwrap();
@@ -2566,6 +2556,7 @@ mod tests {
 		let mut encoder = crate::coding::Encoder::new(&mut subscribe, VERSION.into());
 		encoder.varint(ietf::Subscribe::ID).unwrap();
 		ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("room"),
@@ -2579,6 +2570,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		}
 		.encode(&mut encoder, VERSION)
 		.unwrap();
@@ -2885,7 +2877,7 @@ mod tests {
 			.encode(&ietf::PublishNamespace {
 				request_id: RequestId(1),
 				track_namespace: crate::Path::new("room/host"),
-				cluster: None,
+				params: Default::default(),
 				authorization_token: None,
 			})
 			.await
@@ -2986,6 +2978,7 @@ mod tests {
 	/// `token`, framed as a control message.
 	fn subscribe_with_token(version: Version, token: &[u8]) -> Vec<u8> {
 		let msg = ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(0),
 			track_namespace: crate::Path::new("room"),
@@ -2999,6 +2992,7 @@ mod tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		};
 		let mut body = Vec::new();
 		let mut w = crate::coding::Encoder::new(&mut body, version.into());

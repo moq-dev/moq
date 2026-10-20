@@ -14,7 +14,7 @@ use crate::{
 	setup::Token,
 };
 
-use super::{Message as _, Param, ParameterBytes, Parameters, RequestId, Version, error::request};
+use super::{Param, ParameterBytes, Parameters, RequestId, Version, error::request};
 
 /// Retire a registered alias.
 const DELETE: u64 = 0x0;
@@ -116,28 +116,16 @@ pub(super) async fn reject<S: crate::transport::poll::Session>(
 	version: Version,
 ) -> Result<(), Error> {
 	let request_id = RequestId::decode(&mut body.decoder(version), version)?;
-	// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into.
-	let id = match (version, kind) {
-		(Version::Draft14, request::Kind::Subscribe) => super::SubscribeError::ID,
-		(Version::Draft14, request::Kind::Fetch) => super::FetchError::ID,
-		(Version::Draft14, request::Kind::Publish) => super::PublishError::ID,
-		(Version::Draft14, request::Kind::PublishNamespace) => super::PublishNamespaceError::ID,
-		(Version::Draft14, request::Kind::SubscribeNamespace) => super::SubscribeNamespaceError::ID,
-		(Version::Draft14, request::Kind::TrackStatus) => super::TRACK_STATUS_ERROR_14,
-		_ => super::RequestError::ID,
-	};
 	let reason = reason(&err);
-	let err = Error::Decode(err);
-	stream.writer.varint(id).await?;
-	stream
-		.writer
-		.encode(&super::RequestError {
-			request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16).then_some(request_id),
-			error_code: request::to_code(&err, kind, version),
-			reason_phrase: reason.into(),
-			retry_interval: 0,
-		})
-		.await?;
+	super::request_stream::write_error(
+		&mut stream.writer,
+		kind,
+		request_id,
+		&Error::Decode(err),
+		reason,
+		version,
+	)
+	.await?;
 	// The peer dropping the stream once it has the rejection is a normal end.
 	let _ = stream.writer.close().await;
 	Ok(())

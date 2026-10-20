@@ -10,7 +10,6 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::fixture::{ACCESS, Flags, MS, Mux, WRAP, paced, program};
-use super::import::test::{WRAP_MICROS, epoch_clock, epoch_time};
 use super::passthrough::{
 	GROUP_BYTES_MAX, GROUP_OBJECTS_MAX, PacketSizeError, Passthrough, PcrGapError, PcrRestartError, PcrRewindError,
 };
@@ -77,36 +76,8 @@ async fn import_onto(
 	chunk: usize,
 	pcr_pid: Option<u16>,
 ) -> anyhow::Result<Imported> {
-	let timebase = catalog.timebase();
-	import_on(broadcast, catalog, timebase, data, chunk, pcr_pid).await
-}
-
-/// [`import`] on a host whose wall clock reads `host`, its clock placed by a shared epoch at
-/// `epoch`: PCR zero one wrap before it.
-async fn import_placed(
-	data: &[u8],
-	epoch: std::time::SystemTime,
-	host: std::time::SystemTime,
-) -> anyhow::Result<Imported> {
-	crate::clock::fake_host_wall(host);
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default())?;
-	let timebase = catalog.timebase();
-	timebase.place(moq_net::Timestamp::ZERO, epoch - Duration::from_micros(WRAP_MICROS))?;
-	import_on(broadcast, catalog, timebase, data, data.len(), None).await
-}
-
-/// [`import_onto`] on `timebase`, one of `catalog`'s.
-async fn import_on(
-	broadcast: moq_net::broadcast::Producer,
-	catalog: crate::catalog::Producer,
-	timebase: crate::catalog::Timebase,
-	data: &[u8],
-	chunk: usize,
-	pcr_pid: Option<u16>,
-) -> anyhow::Result<Imported> {
 	let consumer = broadcast.consume();
-	let mut passthrough = Passthrough::new(broadcast.clone(), timebase.reserve())?;
+	let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve())?;
 	if let Some(pid) = pcr_pid {
 		passthrough = passthrough.with_pcr_pid(pid);
 	}
@@ -607,112 +578,9 @@ async fn a_flagged_jump_forward_starts_a_group_behind_a_break() {
 	}
 }
 
-/// Where in `data` the packet carrying PCR `ticks` starts.
-fn pcr_at(data: &[u8], ticks: u64) -> usize {
-	let packet = data.chunks(188).position(|pkt| header(pkt).pcr == Some(ticks));
-	packet.expect("a packet carrying that PCR") * 188
-}
-
-/// Import `data` placed by `epoch` from its first byte, and again from the program and then the
-/// packet carrying PCR `join`, three seconds later on a host clock 7 ms ahead. The second must
-/// publish exactly the first's objects from its first group on.
-async fn import_twice_placed(data: &[u8], prefix: usize, join: u64) -> (Imported, Imported) {
-	let epoch = epoch_time();
-	let start = epoch + Duration::from_secs(600);
-	let first = import_placed(data, epoch, start).await.unwrap();
-	let mut joined = data[..prefix].to_vec();
-	joined.extend_from_slice(&data[pcr_at(data, join)..]);
-	tokio::time::advance(Duration::from_secs(3)).await;
-	let host = start + Duration::from_millis(3_007);
-	let second = import_placed(&joined, epoch, host).await.unwrap();
-
-	assert_eq!(first.catalog.clock, Some(epoch_clock(epoch)));
-	assert_eq!(second.catalog.clock, first.catalog.clock);
-	assert!(!second.objects.is_empty(), "the joiner published nothing");
-	let tail = &first.objects[first.objects.len() - second.objects.len()..];
-	for (index, (first, second)) in tail.iter().zip(&second.objects).enumerate() {
-		assert_eq!(
-			(first.micros, &first.payload),
-			(second.micros, &second.payload),
-			"object {index} of the importer that joined"
-		);
-	}
-	(first, second)
-}
-
-/// Importers placed by one epoch publish identical objects across a PCR wrap, the second joining
-/// after it.
-#[tokio::test(start_paused = true)]
-async fn importers_sharing_an_epoch_publish_identical_objects_across_a_wrap() {
-	const WRAP: u64 = (1 << 33) * 300;
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	let prefix = mux.out.len();
-	let start = WRAP - 2_000 * MS;
-	for i in 0..150 {
-		mux.packet(0x100, Flags::pcr((start + i * 40 * MS) % WRAP));
-		if i % 10 == 0 {
-			mux.packet(0x100, ACCESS);
-		}
-		mux.fill(0x101, 3);
-	}
-	let data = mux.bytes();
-	let (first, _) = import_twice_placed(&data, prefix, 1_000 * MS).await;
-	let micros: Vec<u64> = first.objects.iter().map(|object| object.micros).collect();
-	assert!(micros.windows(2).all(|pair| pair[0] < pair[1]), "{micros:?}");
-}
-
-/// Importers placed by one epoch agree across a flagged jump that carries the source over a wrap,
-/// the second joining after it and never seeing the flag.
-#[tokio::test(start_paused = true)]
-async fn importers_sharing_an_epoch_agree_across_a_flagged_jump() {
-	const WRAP: u64 = (1 << 33) * 300;
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	let prefix = mux.out.len();
-	paced(&mut mux, 0x100, WRAP - 3_000 * MS, 50, 10, 4);
-	// Flagged three seconds on from the PCR due a second short of the wrap, so the jump crosses it.
-	mux.packet(0x100, Flags::pcr(2_000 * MS).discontinuity());
-	mux.fill(0x101, 4);
-	paced(&mut mux, 0x100, 2_040 * MS, 50, 10, 4);
-	let data = mux.bytes();
-	let (first, _) = import_twice_placed(&data, prefix, 3_000 * MS).await;
-	let micros: Vec<u64> = first.objects.iter().map(|object| object.micros).collect();
-	assert!(micros.windows(2).all(|pair| pair[0] <= pair[1]), "{micros:?}");
-}
-
-/// With every PCR in the era nearest the clock and nothing clamping it, a flagged jump forward by
-/// less than the object a random access point started already reached would start its group
-/// before that one: the import ends rather than shift the timeline off the source's clock.
-#[tokio::test(start_paused = true)]
-async fn a_flagged_jump_short_of_a_group_start_ends_the_import() {
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	paced(&mut mux, 0x100, 10_000 * MS, 20, 10, 4);
-	mux.packet(0x100, Flags::pcr(10_800 * MS));
-	mux.packet(0x100, ACCESS);
-	mux.fill(0x101, 4);
-	// A millisecond on from the last PCR, short of the access point's group a few ms after it.
-	mux.packet(0x100, Flags::pcr(10_801 * MS).discontinuity());
-	mux.fill(0x101, 4);
-	paced(&mut mux, 0x100, 10_841 * MS, 20, 10, 4);
-	let data = mux.bytes();
-	let err = match import(&data, data.len(), None).await {
-		Ok(_) => panic!("the jump was clamped onto the group it falls short of"),
-		Err(err) => err,
-	};
-	assert!(
-		err.chain().any(|cause| matches!(
-			cause.downcast_ref::<crate::Error>(),
-			Some(crate::Error::TimestampRewind(_))
-		)),
-		"{err:?}"
-	);
-}
-
 /// A capture that took the catalog's clock first keeps it: the import shifts every object by one
-/// offset that lands its first PCR at now, so the timeline still never steps back and a flagged
-/// jump still adds its step.
+/// offset that lands the first at now, so the timeline still never steps back and a flagged jump
+/// still adds its step.
 #[tokio::test(start_paused = true)]
 async fn an_import_shifts_onto_a_clock_already_in_use() {
 	let mut mux = Mux::default();
@@ -737,10 +605,9 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 
 	assert_eq!(catalog.snapshot().clock, fixed, "the import never moves the clock");
 	let first = shifted.objects[0].micros;
-	let lead = verbatim.objects[0].micros - 3_600_000_000;
 	assert!(
-		(before + lead..=after + lead).contains(&first),
-		"the first PCR lands at now: {before} {first} {after}, {lead} µs ahead of it"
+		(before..=after).contains(&first),
+		"lands at now: {before} {first} {after}"
 	);
 	let offset = first as i64 - verbatim.objects[0].micros as i64;
 	assert!(offset < 0, "an hour in shifts back onto the capture's five seconds");

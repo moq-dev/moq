@@ -41,6 +41,10 @@
 //! wall clock: each empty group is handed out like any other, so a walk over the rest of
 //! the run per group shows up as a slope over it.
 //!
+//! `track_fanout_frame` writes frames into an open group while every subscriber is parked
+//! on the next one, re-polling whichever reader the write woke: a frame wakes no track
+//! reader, so waking them shows up as a slope over the subscribers.
+//!
 //! `track_fetch_expiry` polls budgeted fetched readers over independent fanout and
 //! retained-history axes, so expiry work that scans either table appears as a slope.
 //!
@@ -51,6 +55,15 @@
 //! `track_subscription_ranges` reads the aggregate of subscribers that each ask for a
 //! disjoint range, swept over how many ranges and how many groups each spans: reading the
 //! union must cost the same per range whatever it spans.
+//!
+//! `track_range_serving` drains one reader whose own ranges are disjoint, swept over how
+//! many ranges and how many cached groups each spans: each group handed out must cost the
+//! same, so a walk over the ranges or the groups between them shows up as a slope.
+//!
+//! `track_range_widening` widens one reader's ranges by a fixed span of cached groups and
+//! back, swept over the groups cached and the readers beside it: a reader holds nothing
+//! for the groups outside its ranges, so a widening scans only the span it newly covers,
+//! and a scan of the cache or the audience shows up as a slope.
 //!
 //! Run with `cargo bench -p moq-net --bench track`.
 
@@ -102,6 +115,17 @@ const RANGES: [u64; 4] = [1, 16, 256, 4096];
 
 /// Groups each aggregated range spans.
 const SPAN: [u64; 3] = [1, 64, 4096];
+
+/// Disjoint ranges one reader is served, and the cached groups each spans.
+const SERVED_RANGES: [u64; 3] = [1, 16, 256];
+const SERVED_SPAN: [u64; 3] = [1, 8, 64];
+
+/// Readers beside the one widening, and the groups cached around the span it widens by.
+const WIDENING_READERS: [usize; 3] = [1, 64, 1024];
+const WIDENING_CACHED: [u64; 3] = [64, 1024, 16_384];
+
+/// Cached groups one widening newly covers.
+const WIDENED: u64 = 8;
 
 /// Concurrent publishers sharing one relay-style cache pool.
 const WRITERS: [usize; 4] = [1, 2, 4, 8];
@@ -474,6 +498,77 @@ fn bench_fanout(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Frames written per group in `track_fanout_frame`, after which the group rolls and every
+/// subscriber takes the next one: enough that the roll's cost per frame stays small.
+const FRAMES_PER_GROUP: usize = 256;
+
+/// Queues its reader's index when woken, so only woken readers are re-polled.
+struct Fired {
+	index: usize,
+	queue: Arc<std::sync::Mutex<Vec<usize>>>,
+}
+
+impl futures::task::ArcWake for Fired {
+	fn wake_by_ref(fired: &Arc<Self>) {
+		fired.queue.lock().unwrap().push(fired.index);
+	}
+}
+
+fn bench_fanout_frame(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_fanout_frame");
+	for subscribers in FANOUT {
+		group.bench_with_input(
+			BenchmarkId::from_parameter(subscribers),
+			&subscribers,
+			|b, &subscribers| {
+				let mut fanout = Fanout::new(subscribers);
+				let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+				let waiters: Vec<_> = (0..subscribers)
+					.map(|index| {
+						let fired = Arc::new(Fired {
+							index,
+							queue: queue.clone(),
+						});
+						kio::Waiter::new(futures::task::waker(fired))
+					})
+					.collect();
+				let mut open: Option<moq_net::group::Producer> = None;
+				let mut written = FRAMES_PER_GROUP;
+				// Only the frame write and the re-polls it causes are timed, not the group roll.
+				b.iter_custom(|iterations| {
+					let mut elapsed = Duration::ZERO;
+					for _ in 0..iterations {
+						if written == FRAMES_PER_GROUP {
+							if let Some(open) = open.take() {
+								open.finish().unwrap();
+							}
+							open = Some(fanout.track.append_group().unwrap());
+							written = 0;
+							for (subscriber, waiter) in fanout.subscribers.iter_mut().zip(&waiters) {
+								assert!(matches!(subscriber.poll_recv_group(waiter), Poll::Ready(Ok(Some(_)))));
+								assert!(subscriber.poll_recv_group(waiter).is_pending());
+							}
+							queue.lock().unwrap().clear();
+						}
+						let group = open.as_mut().unwrap();
+						let start = Instant::now();
+						group.write_frame(Timestamp::ZERO, fanout.payload.clone()).unwrap();
+						// A woken reader re-polls, as its task would.
+						let woken = std::mem::take(&mut *queue.lock().unwrap());
+						for index in woken {
+							black_box(fanout.subscribers[index].poll_recv_group(&waiters[index]).is_pending());
+						}
+						elapsed += start.elapsed();
+						written += 1;
+					}
+					elapsed
+				});
+			},
+		);
+	}
+	group.finish();
+}
+
 fn bench_fetch_expiry(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_fetch_expiry");
 	for history in FETCH_HISTORY {
@@ -731,6 +826,48 @@ fn bench_subscription_ranges(c: &mut Criterion) {
 				b.iter(|| black_box(track.subscription()));
 			});
 			drop((viewers, track, broadcast));
+		}
+	}
+	group.finish();
+}
+
+fn bench_range_serving(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_range_serving");
+	for span in SERVED_SPAN {
+		for ranges in SERVED_RANGES {
+			let broadcast = broadcast::Info::default().produce();
+			let track = broadcast.create_track("bench", None).unwrap();
+			// A gap between neighbors keeps every range distinct, and its group cached.
+			for _ in 0..ranges * (span + 1) {
+				let mut group = track.append_group().unwrap();
+				group.write_frame(None, Bytes::from_static(b"x")).unwrap();
+				group.finish().unwrap();
+			}
+			let subscription = track::Subscription::default()
+				.with_max_delay(AGED_BUDGET)
+				.with_ranges((0..ranges).map(|i| {
+					let start = i * (span + 1);
+					track::Range::groups(start..start + span)
+				}));
+
+			group.throughput(Throughput::Elements(ranges * span));
+			group.bench_function(BenchmarkId::new(format!("span_{span}"), ranges), |b| {
+				b.iter_batched(
+					|| track.subscribe(subscription.clone()),
+					|mut reader| {
+						let waiter = kio::Waiter::noop();
+						let mut served = 0;
+						while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
+							black_box(group);
+							served += 1;
+						}
+						assert_eq!(served, ranges * span);
+						reader
+					},
+					BatchSize::SmallInput,
+				);
+			});
+			drop((track, broadcast));
 		}
 	}
 	group.finish();
@@ -1077,47 +1214,47 @@ fn bench_empty_run(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Abort one non-prefix parked group, swept over backlog and capped subscribers.
-fn bench_parked_abort(c: &mut Criterion) {
-	let mut bench = c.benchmark_group("track_parked_abort");
-	bench.sample_size(10);
-	for readers in [1, 8, 64] {
-		for retained in [1u64, 64, 1024] {
-			bench.bench_function(BenchmarkId::new(readers.to_string(), retained), |b| {
-				b.iter_batched_ref(
-					|| {
-						let broadcast = broadcast::Producer::new(Default::default());
-						let track = broadcast.create_track("parked", timed()).unwrap();
-						let mut subscribers: Vec<_> = (0..readers)
-							.map(|_| {
-								let mut subscriber =
-									track.subscribe(track::Subscription::default().with_max_delay(AGED_BUDGET));
-								subscriber.set_groups(..0);
-								subscriber
-							})
-							.collect();
-						let groups: Vec<_> = (0..retained)
-							.map(|sequence| {
-								let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-								group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
-								group.clone().finish().unwrap();
-								group
-							})
-							.collect();
-						for subscriber in &mut subscribers {
-							assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
-						}
-						(broadcast, track, subscribers, groups)
-					},
-					|(_, _, subscribers, groups)| {
-						groups[retained as usize / 2].clone().abort(Error::Old).unwrap();
-						for subscriber in subscribers {
-							let res = subscriber.poll_recv_group(&kio::Waiter::noop());
-							assert!(res.is_pending());
-						}
-					},
-					BatchSize::PerIteration,
-				);
+/// One reader widening its ranges by [`WIDENED`] cached groups mid-cache and back, beside
+/// idle narrow readers. Every widening after the first finds groups already handed out,
+/// which the reader skips, so each one costs the same scan of the span.
+fn bench_range_widening(c: &mut Criterion) {
+	let mut bench = c.benchmark_group("track_range_widening");
+	bench.throughput(Throughput::Elements(1));
+	for readers in WIDENING_READERS {
+		for cached in WIDENING_CACHED {
+			bench.bench_function(BenchmarkId::new(format!("{readers}r"), cached), |b| {
+				let broadcast = broadcast::Info::default().produce();
+				let track = broadcast.create_track("bench", None).unwrap();
+				for _ in 0..cached {
+					let mut group = track.append_group().unwrap();
+					group.write_frame(None, Bytes::from_static(b"x")).unwrap();
+					group.finish().unwrap();
+				}
+				let narrow = track::Subscription::default()
+					.with_max_delay(AGED_BUDGET)
+					.with_groups(0..1);
+				let mid = cached / 2;
+				let wide = narrow
+					.clone()
+					.with_ranges([track::Range::groups(0..1), track::Range::groups(mid..mid + WIDENED)]);
+				let waiter = kio::Waiter::noop();
+				let mut readers: Vec<_> = (0..readers)
+					.map(|_| {
+						let mut reader = track.subscribe(narrow.clone());
+						while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+						reader
+					})
+					.collect();
+				let reader = &mut readers[0];
+				b.iter(|| {
+					reader.update(wide.clone()).unwrap();
+					while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
+						black_box(group);
+					}
+					reader.update(narrow.clone()).unwrap();
+					assert!(reader.poll_recv_group(&waiter).is_pending());
+				});
+				drop((readers, track, broadcast));
 			});
 		}
 	}
@@ -1126,8 +1263,9 @@ fn bench_parked_abort(c: &mut Criterion) {
 
 criterion_group!(
 	benches,
-	bench_parked_abort,
+	bench_range_widening,
 	bench_fanout,
+	bench_fanout_frame,
 	bench_fetch_expiry,
 	bench_parallel_write,
 	bench_aborted_scan,
@@ -1137,6 +1275,7 @@ criterion_group!(
 	bench_subscriber_join,
 	bench_range_demand,
 	bench_subscription_ranges,
+	bench_range_serving,
 	bench_subscriber_preferences,
 	bench_datagram_subscriber_join,
 	bench_parked_read,

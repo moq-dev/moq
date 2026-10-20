@@ -1,6 +1,6 @@
 #![cfg(feature = "async")]
 
-//! A group sequence only moq-lite 07 can carry, relayed to a moq-lite 06 reader.
+//! Group sequence boundaries, directly and through a forwarding origin.
 
 use crate::support;
 
@@ -8,6 +8,57 @@ use std::time::Duration;
 
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
+
+/// Published QUIC-varint sequences keep all their bits on the live feed, directly
+/// and through a forwarding origin, even beyond JavaScript's exact number range.
+#[moq_clock::test]
+async fn largest_quic_sequence_reaches_the_subscriber() {
+	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-19"] {
+		for relayed in [false, true] {
+			let version: Version = alpn.parse().unwrap();
+			let publisher = produce_origin(1);
+			let relay = produce_origin(2);
+			let client = produce_origin(3);
+			let broadcast = publisher.create_broadcast("ladder").unwrap();
+			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
+			let track = broadcast.create_track("data", info).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+			let mut options = MockConnectOptions::new(version);
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(if relayed { relay.clone() } else { client.clone() });
+			let _upstream = connect_mock(options).await;
+			let _downstream = if relayed {
+				let mut options = MockConnectOptions::new(version);
+				options.server_publish = Some(relay.consume());
+				options.client_subscribe = Some(client.clone());
+				Some(connect_mock(options).await)
+			} else {
+				None
+			};
+			client.consume().routed("ladder").await.unwrap();
+			let remote = client.consume().request_broadcast("ladder", None).await.unwrap();
+			let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
+			for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
+				// Lite05/06 zigzag the first timestamp from zero, halving its positive range.
+				let timestamp = Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap();
+				let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+				group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
+				group.finish().unwrap();
+				let mut got = moq_clock::timeout(Duration::from_secs(5), sub.recv_group())
+					.await
+					.unwrap_or_else(|_| panic!("{alpn} relayed={relayed} sequence={sequence} hung"))
+					.unwrap()
+					.unwrap();
+				assert_eq!(got.sequence, sequence, "{alpn} relayed={relayed}");
+				let frame = got.read_frame().await.unwrap().unwrap();
+				assert_eq!(frame.payload, b"ladder".as_ref());
+				if alpn != "moq-lite-02" {
+					assert_eq!(frame.timestamp, Some(timestamp));
+				}
+			}
+		}
+	}
+}
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {

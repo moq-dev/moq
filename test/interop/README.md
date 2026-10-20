@@ -111,7 +111,7 @@ until moq-ffi exposes one, and the browser's shared connection keeps its session
 private, so their cells check media alone. AUTH is only on the work-in-progress
 moq-lite-07, so the printing clients dial `moq-lite-07-wip` alone and a printing
 client that reports nothing never got its grant. The native JS subscribers dial
-WebTransport alone, since the WebSocket fallback cannot offer it. The rest keep
+WebTransport alone and offer it there. The rest keep
 their defaults, so the matrix also crosses versions through the relay, which
 accepts both.
 
@@ -239,7 +239,7 @@ Firefox and WebKit players explicitly use WebSocket; Chromium keeps normal
 transport selection. This does not measure Firefox's QUIC path.
 
 The capability report names the engine version and separately lists missing
-publisher and player APIs. Firefox 155 in Playwright 1.63 exposes WebTransport and
+publisher and player APIs. Firefox 157 in Playwright 1.64 exposes WebTransport and
 WebCodecs but lacks `MediaStreamTrackProcessor`, so it can play this fixture but
 cannot publish it. Capabilities are measured on every run rather than assumed
 from an engine name. Playwright WebKit is not Safari; Safari device/transport
@@ -359,7 +359,7 @@ clients/
 ## CI
 
 `.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
-PRs that touch `test/interop/`). A red cell means a real interop break in the
+release PRs that touch `test/interop/`). A red cell means a real interop break in the
 current tree.
 
 ## Subscription termination

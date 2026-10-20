@@ -44,8 +44,7 @@ Rules every child follows:
   on one naming a deleted quest.
 - Items replaced by another quest's new API wait for that quest instead of
   growing a public shape it deletes: fetch and per-group requests
-  ([Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)), largest and
-  liveness ([Live largest location](/quest/m1/largest.md)), announce
+  ([Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)), announce
   interest ([Rust lazy discovery](/quest/m1/lazy-discovery/rust.md)).
 
 Inventory method, to rerun before each child starts (counts drift). Rust:
@@ -102,6 +101,7 @@ Work owned by this README, after the children land:
 
 ## Required
 
+- [One group writer](/quest/m1/public-model/group-writer.md) - `group::Producer` is not `Clone`; the model and sessions hold a crate-private handle that cannot write or finish
 - [Public ingest](/quest/m1/public-model/ingest.md) - a custom subscriber writes received groups, frames, starts, and ends into a track through public calls
 - [Public serving](/quest/m1/public-model/serve.md) - a custom publisher reads a track's start, cursor, and group expiry for its wire through public calls
 - [Public routes and answering](/quest/m1/public-model/answer.md) - a custom relay ingests routes, answers broadcast and track requests on demand, and advertises without echoing a peer's routes back

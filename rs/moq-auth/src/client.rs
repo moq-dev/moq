@@ -1,8 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use moq_clock::Instant;
 use url::Url;
 
 use crate::lease::{self, Due, Reason};
@@ -77,7 +78,7 @@ impl Client {
 
 	/// Verify another credential for this connection without owning its end event.
 	pub async fn attach(&self, connection: &lease::Consumer, request: Request) -> crate::Result<lease::Consumer> {
-		let context = connection.context().ok_or(Error::Refused)?;
+		let context = connection.context().ok_or(Error::Refused(Default::default()))?;
 		let context = context.attach(&request, &self.identity)?;
 		admit(self.clone(), request, context).await
 	}
@@ -135,16 +136,16 @@ impl Context {
 
 	fn attach(&self, request: &Request, issuer: &Arc<()>) -> crate::Result<Self> {
 		if !self.owner || !Arc::ptr_eq(issuer, &self.connection.issuer) || self.connection.request.tls.is_some() {
-			return Err(Error::Refused);
+			return Err(Error::Refused(Default::default()));
 		}
 		let mut expected = self.connection.request.clone();
 		expected.query = request.query.clone();
 		expected.token = request.token.clone();
 		if &expected != request {
-			return Err(Error::Refused);
+			return Err(Error::Refused(Default::default()));
 		}
 		if self.connection.lifecycle.read().ended.is_some() {
-			return Err(Error::Refused);
+			return Err(Error::Refused(Default::default()));
 		}
 		Ok(Self {
 			connection: self.connection.clone(),
@@ -158,7 +159,7 @@ impl Context {
 		}
 		let mut lifecycle = self.connection.lifecycle.lock();
 		if lifecycle.ended.is_some() {
-			return Err(Error::Refused);
+			return Err(Error::Refused(Default::default()));
 		}
 		lifecycle.pending += 1;
 		Ok(Some(Admission(self.connection.clone())))
@@ -226,12 +227,13 @@ trait Post: Clone + Send + Sync + 'static {
 
 impl Post for Client {
 	/// A 2xx carries the grant, a 401 or 403 refuses, and everything else is an
-	/// outage the caller decides about.
+	/// outage the caller decides about. A JSON refusal carries its reason and verified attribution;
+	/// legacy bodies refuse without attribution.
 	async fn post(&self, request: &Request) -> crate::Result<Grant> {
 		let response = self.http.post(self.url.clone()).json(request).send().await?;
 		let status = response.status();
 		if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-			return Err(Error::Refused);
+			return Err(Error::Refused(response.json().await.unwrap_or_default()));
 		}
 		if !status.is_success() {
 			return Err(Error::Unavailable(format!("auth server answered {status}")));
@@ -257,7 +259,7 @@ async fn admit<S: Post>(server: S, mut request: Request, context: Context) -> cr
 
 	let grant = ask(&server, &request).await?;
 	if context.connection.lifecycle.read().ended.is_some() {
-		return Err(Error::Refused);
+		return Err(Error::Refused(Default::default()));
 	}
 	let (producer, mut consumer) = lease::Producer::new(grant.clone());
 	consumer.set_context(context.clone());
@@ -281,7 +283,7 @@ async fn ask<S: Post>(server: &S, request: &Request) -> crate::Result<Grant> {
 	let grant = server.post(request).await?;
 	grant.validate().map_err(|err| match err {
 		// An empty grant is a refusal, not a malformed answer.
-		Error::UselessGrant => Error::Refused,
+		Error::UselessGrant => Error::Refused(Default::default()),
 		other => other,
 	})?;
 	Ok(grant)
@@ -358,7 +360,13 @@ impl<S: Post> Driver<S> {
 					inflight = None;
 					match result {
 						Ok(fresh) => producer.update(fresh),
-						Err(Error::Refused) => break producer.finish(Reason::Refused, Bytes::default()),
+						Err(Error::Refused(refusal)) => {
+							let reason = match refusal.reason {
+								crate::refusal::Reason::Expired => Reason::Expired,
+								_ => Reason::Refused,
+							};
+							break producer.finish(reason, Bytes::default());
+						},
 						Err(Error::GrantExpired | Error::UnboundedRevalidate | Error::ZeroRevalidate) => {
 							break producer.finish(Reason::Invalid, Bytes::default());
 						},
@@ -392,6 +400,7 @@ impl<S: Post> Driver<S> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use moq_pattern::Patterns;
@@ -485,7 +494,7 @@ mod tests {
 		async fn attach(&self, owner: &lease::Consumer, request: Request) -> crate::Result<lease::Consumer> {
 			let context = owner
 				.context()
-				.ok_or(Error::Refused)?
+				.ok_or(Error::Refused(Default::default()))?
 				.attach(&request, &self.identity)?;
 			admit(self.clone(), request, context).await
 		}
@@ -542,6 +551,19 @@ mod tests {
 				assert_eq!(bytes, Bytes { sent: 7, received: 11 });
 			}
 			other => panic!("expected an end, got {other:?}"),
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn session_duration_uses_the_lease_clock() {
+		let log = Log::default();
+		let script = Script::new(log.clone(), |_| Some(Ok(grant(None, None))));
+		let consumer = script.connect().await.unwrap();
+		tokio::time::advance(Duration::from_secs(60)).await;
+		consumer.close("done", Bytes::default());
+		match log.end().await.event {
+			Event::End { duration, .. } => assert_eq!(duration, Duration::from_secs(60)),
+			other => panic!("expected connection end, got {other:?}"),
 		}
 	}
 
@@ -708,7 +730,7 @@ mod tests {
 			"end overtook an in-flight connect for the same id"
 		);
 		server.release.notify_one();
-		assert!(matches!(pending.await.unwrap(), Err(Error::Refused)));
+		assert!(matches!(pending.await.unwrap(), Err(Error::Refused(_))));
 		assert!(matches!(
 			log.end().await.event,
 			Event::End {
@@ -735,13 +757,13 @@ mod tests {
 				2 => request.role = Some(crate::Role::Publisher),
 				_ => request.node = "another".into(),
 			}
-			assert!(matches!(script.attach(&owner, request).await, Err(Error::Refused)));
+			assert!(matches!(script.attach(&owner, request).await, Err(Error::Refused(_))));
 		}
 		let other = Script::new(log.clone(), |_| Some(Ok(grant(None, None))));
-		assert!(matches!(other.attach(&owner, request()).await, Err(Error::Refused)));
+		assert!(matches!(other.attach(&owner, request()).await, Err(Error::Refused(_))));
 		assert_eq!(log.events(), [Event::Connect]);
 		owner.clone().close("done", Bytes::default());
-		assert!(matches!(script.attach(&owner, request()).await, Err(Error::Refused)));
+		assert!(matches!(script.attach(&owner, request()).await, Err(Error::Refused(_))));
 	}
 
 	#[tokio::test]
@@ -771,7 +793,7 @@ mod tests {
 			let server = server(Log::default(), move |_| ResponseTemplate::new(status)).await;
 			let err = client(&server).connect(request()).await.unwrap_err();
 			match status {
-				401 | 403 => assert!(matches!(err, Error::Refused), "{status}: {err}"),
+				401 | 403 => assert!(matches!(err, Error::Refused(_)), "{status}: {err}"),
 				_ => assert!(matches!(err, Error::Unavailable(_)), "{status}: {err}"),
 			}
 		}
@@ -785,7 +807,71 @@ mod tests {
 		})
 		.await;
 		let err = client(&nothing).connect(request()).await.unwrap_err();
-		assert!(matches!(err, Error::Refused), "{err}");
+		assert!(matches!(err, Error::Refused(_)), "{err}");
+	}
+
+	#[tokio::test]
+	async fn typed_refusal_preserves_reason_root_and_tier() {
+		use crate::refusal::Reason;
+		for reason in [Reason::Refused, Reason::Forbidden, Reason::Expired] {
+			for root in [None, Some("tenant")] {
+				for tier in [None, Some("edge")] {
+					let expected = crate::Refusal {
+						reason,
+						root: root.map(str::to_owned),
+						tier: tier.map(str::to_owned),
+					};
+					let body = expected.clone();
+					let server = server(Log::default(), move |_| ResponseTemplate::new(403).set_body_json(&body)).await;
+					let Error::Refused(actual) = client(&server).connect(request()).await.unwrap_err() else {
+						panic!("expected typed refusal")
+					};
+					assert_eq!(actual, expected);
+				}
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn legacy_and_future_refusals_are_bounded() {
+		for status in [401, 403] {
+			let server = server(Log::default(), move |_| {
+				ResponseTemplate::new(status).set_body_string("legacy refusal")
+			})
+			.await;
+			let Error::Refused(actual) = client(&server).connect(request()).await.unwrap_err() else {
+				panic!("expected refusal")
+			};
+			assert_eq!(actual, crate::Refusal::default());
+		}
+		let server = server(Log::default(), |_| {
+			ResponseTemplate::new(403)
+				.set_body_json(serde_json::json!({"reason":"future","root":"tenant","tier":"edge"}))
+		})
+		.await;
+		let Error::Refused(actual) = client(&server).connect(request()).await.unwrap_err() else {
+			panic!("expected refusal")
+		};
+		assert_eq!(actual.reason, crate::refusal::Reason::Refused);
+		assert_eq!(actual.root.as_deref(), Some("tenant"));
+		assert_eq!(actual.tier.as_deref(), Some("edge"));
+	}
+
+	#[tokio::test]
+	async fn expired_refusal_ends_a_rechecked_lease_as_expired() {
+		tokio::time::pause();
+		let server = Script::new(Log::default(), |request| {
+			Some(match request.event {
+				Event::Connect => Ok(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1)))),
+				_ => Err(crate::Refusal {
+					reason: crate::refusal::Reason::Expired,
+					..Default::default()
+				}
+				.into()),
+			})
+		});
+		let lease = server.connect().await.unwrap();
+		assert_eq!(lease.closed().await, Reason::Expired);
 	}
 
 	#[tokio::test]

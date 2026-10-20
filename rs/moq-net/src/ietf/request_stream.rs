@@ -218,12 +218,47 @@ pub(super) async fn reject<S: crate::transport::poll::Session>(
 	Ok(())
 }
 
+/// Write the error refusing a `kind` request with `err`, as the negotiated draft spells it.
+///
+/// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into, so
+/// only the message type changes; draft-17 then drops the Request ID.
+pub(super) async fn write_error<S: crate::transport::poll::SendStream>(
+	writer: &mut crate::coding::Writer<S, Version>,
+	kind: super::error::request::Kind,
+	request_id: super::RequestId,
+	err: &Error,
+	reason: &str,
+	version: Version,
+) -> Result<(), Error> {
+	use super::error::request::Kind;
+
+	let id = match (version, kind) {
+		(Version::Draft14, Kind::Subscribe) => super::SubscribeError::ID,
+		(Version::Draft14, Kind::Fetch) => super::FetchError::ID,
+		(Version::Draft14, Kind::Publish) => super::PublishError::ID,
+		(Version::Draft14, Kind::PublishNamespace) => super::PublishNamespaceError::ID,
+		(Version::Draft14, Kind::SubscribeNamespace) => super::SubscribeNamespaceError::ID,
+		(Version::Draft14, Kind::TrackStatus) => super::TRACK_STATUS_ERROR_14,
+		_ => super::RequestError::ID,
+	};
+	writer.buffer_varint(id)?;
+	writer
+		.encode(&super::RequestError {
+			request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16).then_some(request_id),
+			error_code: super::error::request::to_code(err, kind, version),
+			reason_phrase: reason.into(),
+			retry_interval: 0,
+		})
+		.await
+}
+
 /// A framed subscription update, preserving omitted preferences.
 #[derive(Debug)]
 pub(super) struct Update {
 	/// The first Request ID: the update's own on drafts 14-16, which their answer names.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
+	pub(super) max_age: Option<u64>,
 	/// Why the update is refused, which fails the subscription: [`Error::Unsupported`], a
 	/// [`DecodeError::MalformedAuthToken`] for tokens that repeat, or a
 	/// [`DecodeError::MultipleAuthTokens`] for more than one token.
@@ -246,7 +281,7 @@ impl Update {
 
 	/// Decode the message body, after its type and length.
 	fn decode_body(data: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		use super::{Fill, Filter, Location, Opaque, Parameters, RequestId};
+		use super::{Fill, Filter, Location, Opaque, RequestId};
 		let request_id = RequestId::decode(data, version)?;
 		match version {
 			Version::Draft14 => {
@@ -259,7 +294,10 @@ impl Update {
 				let _end_group = data.varint()?;
 				let priority = data.u8()?;
 				let forward = data.bool()?;
-				let tokens = Parameters::skip_request(data)?;
+				decode_params!(data, version,
+					0x03 => tokens: Vec<super::token::RequestToken>,
+					super::max_age::PARAMETER => max_age: Option<u64>,
+				);
 				if !data.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
@@ -267,6 +305,7 @@ impl Update {
 				return Ok(Self {
 					request_id,
 					priority: Some(priority),
+					max_age: super::max_age::validate(max_age)?,
 					refused,
 					authorization_token,
 					new_group: None,
@@ -295,6 +334,7 @@ impl Update {
 			0x28 => property_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x29 => track_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x32 => new_group: Option<u64> where super::subscribe::has_new_group_request(version),
+			super::max_age::PARAMETER => max_age: Option<u64>,
 		);
 		if !data.is_empty() {
 			return Err(DecodeError::InvalidValue);
@@ -314,6 +354,7 @@ impl Update {
 		Ok(Self {
 			request_id,
 			priority,
+			max_age: super::max_age::validate(max_age)?,
 			refused,
 			authorization_token,
 			new_group,
@@ -485,5 +526,104 @@ mod tests {
 		let update = crate::coding::decode_buf(&mut buf, Version::Draft18, Update::decode_body).unwrap();
 		assert_eq!(update.priority, Some(5));
 		assert!(update.refused.is_none());
+	}
+
+	/// Draft-14's per-request error messages share REQUEST_ERROR's body, so the shared writer
+	/// must put the same bytes on the wire as each legacy message does.
+	#[moq_clock::test]
+	async fn draft14_errors_match_their_legacy_messages() {
+		use super::super::error::request::{Kind, to_code};
+		use super::super::{
+			FetchError, PublishError, PublishNamespaceError, RequestId, SubscribeError, SubscribeNamespaceError,
+		};
+		use crate::lite::test_transport::{Log, SinkSend};
+
+		let version = Version::Draft14;
+		let (request_id, err, reason) = (RequestId(6), Error::NotFound, "gone");
+
+		for kind in [
+			Kind::Subscribe,
+			Kind::Fetch,
+			Kind::Publish,
+			Kind::PublishNamespace,
+			Kind::SubscribeNamespace,
+			Kind::TrackStatus,
+		] {
+			let shared = Log::default();
+			let mut writer = crate::coding::Writer::new(SinkSend::new(shared.clone()), version);
+			write_error(&mut writer, kind, request_id, &err, reason, version)
+				.await
+				.unwrap();
+
+			let legacy = Log::default();
+			let mut writer = crate::coding::Writer::new(SinkSend::new(legacy.clone()), version);
+			let error_code = to_code(&err, kind, version);
+			let reason_phrase = reason.into();
+			match kind {
+				Kind::Subscribe => {
+					writer
+						.encode_message(&SubscribeError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::Fetch => {
+					writer
+						.encode_message(&FetchError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::Publish => {
+					writer
+						.encode_message(&PublishError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::PublishNamespace => {
+					writer
+						.encode_message(&PublishNamespaceError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::SubscribeNamespace => {
+					writer
+						.encode_message(&SubscribeNamespaceError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				// TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body under its own type.
+				Kind::TrackStatus => {
+					writer.buffer_varint(super::super::TRACK_STATUS_ERROR_14).unwrap();
+					writer
+						.encode(&SubscribeError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+			}
+			.unwrap();
+
+			assert_eq!(
+				*shared.writes.lock().unwrap(),
+				*legacy.writes.lock().unwrap(),
+				"{kind:?}"
+			);
+		}
 	}
 }

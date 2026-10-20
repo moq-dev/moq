@@ -15,7 +15,12 @@ pub enum Error {
 
 	/// A catalog has more media renditions than a consumer will hold.
 	#[error("catalog has {count} renditions, over the limit of {max}")]
-	TooManyRenditions { count: usize, max: usize },
+	TooManyRenditions {
+		/// How many renditions the catalog lists.
+		count: usize,
+		/// The most renditions the consumer accepts.
+		max: usize,
+	},
 
 	/// A catalog uses one rendition ID for both a video and an audio rendition.
 	#[error("catalog rendition ID is both video and audio: {0}")]

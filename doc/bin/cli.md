@@ -85,14 +85,25 @@ to the wall time the first frame arrived. A timeline that rewinds, such as a
 restarted encoder or a looping file wrapping to the top, ends the import with
 an error; run it again to publish anew. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
-MPEG-TS timestamps run on across their 33-bit wrap (every 26.5 hours), each
-taking the wrap that lands it nearest the clock, so media that gets more than
-13.25 hours ahead of it (a jump that far, or a long file read faster than real
-time) reads as a rewind.
+MPEG-TS timestamps follow their source history across the 33-bit wrap
+(every 26.5 hours), including files imported faster than real time and flagged
+jumps, so a jump of more than half a wrap (13.25 hours) can read as a rewind.
 
-MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
-and subtitle PIDs through as tracks. SCTE-35 cues wait for a media timestamp;
-input ending or declaring a clock break before that timestamp is refused.
+For a source already in MPEG-TS, `ffmpeg -c copy -f mpegts` re-muxes and drops PIDs
+(NIT, TDT/TOT, extra audio, teletext, SCTE-35), so pipe its bytes instead, for example
+`tsp -I ip 239.1.2.3:1234 -O file - | moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts`,
+or use [`import srt`](/bin/srt).
+
+MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3/Opus, and passes
+SCTE-35 and every other stream it does not decode (KLV, subtitles, DVB AC-3)
+through as tracks. Each such PES goes through whole, at its place on the program clock
+(PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
+is refused with a warning: any in a program with no PCR, and one whose PES carry
+an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
+or have a malformed header.
+SCTE-35 cues and private PES wait for a media timestamp; input ending or
+declaring a clock break before that timestamp is refused, so a program of data
+alone fails.
 PES and untimed section staging share a bounded budget, so a source that never
 supplies a PES boundary or clock fails rather than retaining bytes indefinitely.
 It takes one program: a multi-program
@@ -104,7 +115,8 @@ logs feed health (stalled streams, TR 101 290 errors) without changing what it
 publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
 program aboard, for what demultiplexing cannot carry, such as a scrambled
-service; `export ts --passthrough` writes it back out. FLV covers H.264 + AAC.
+service; `export ts --passthrough` writes it back out. FLV accepts the same
+legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
 `import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
 re-encoding. RTP rides the RTSP connection, so run it on the camera's network
@@ -116,7 +128,7 @@ including when the camera sends no media for 10 seconds or no keyframe for 30,
 until a fatal error (refused access, or no stream it can publish), and
 each RTSP session is a new broadcast with its own catalog, since the session's
 RTP time restarts; a camera whose clock jumps mid-session is restarted the same
-way. Embed [`moq-rtsp`](https://docs.rs/moq-rtsp) for your own supervision,
+way. Embed [`moq-rtsp`](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp) for your own supervision,
 such as two of a camera's URLs as renditions of one broadcast.
 
 ```bash
@@ -171,8 +183,10 @@ moq ... play --no-video --metrics play.ndjson   # log what the speaker played
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
-available, and Opus, PCM, and AAC-LC audio in software. The opt-in `vpx`
-feature adds software VP8 and VP9 through the build host's libvpx. The log
+available, and Opus, PCM, and AAC-LC audio in software. The opt-in `openh264`
+feature adds software H.264, which a host without a hardware decoder needs, and
+the opt-in `vpx` feature adds software VP8 and VP9 through the build host's
+libvpx. The log
 names the decoder each track opened.
 
 Playback starts at the newest group and trails the live edge by `--delay`. The
@@ -197,7 +211,7 @@ Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
 
 ```bash
-cargo install moq-cli --no-default-features --features "quic,websocket,play"
+cargo install moq-cli --no-default-features --features "quic,websocket,play,openh264"
 ```
 
 `moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
@@ -212,8 +226,8 @@ moq ... import capture --window --no-audio               # system window picker 
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
 ```
 
-Video goes through the platform hardware encoder with an H.264 software
-fallback, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
+Video goes through the platform hardware encoder, with an H.264 software
+fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
 backends. The camera opens only while someone is watching, and `--bitrate` is a
 ceiling that backends with live bitrate control lower to fit the connection.
 `moq devices` prints every source id. On Windows, `display:N` is an
@@ -227,7 +241,8 @@ The portal may reuse its grant when capture reopens within the same process;
 a new process shows the picker again. Bare `--window` requires a Linux build
 with `pipewire`; other builds require an explicit window id.
 
-Requires the `capture` feature. On Linux the microphone needs the ALSA
+Requires the `capture` feature, plus `openh264` on a host without a hardware
+encoder. On Linux the microphone needs the ALSA
 headers, and Portal screen/window capture and `pipewire:` cameras also need the `pipewire`
 feature (links libpipewire).
 
@@ -248,7 +263,7 @@ largest rendition this host can decode, so a software-only host transcodes
 from H.264 rather than a larger H.265 or AV1 one. When the source changes
 resolution, rungs are resolved again: one that no longer fits finishes, and
 one whose size changed comes back under a new name (`video/360p.2`). Requires
-the `transcode` feature.
+the `transcode` feature, plus `openh264` on a host without a hardware encoder.
 
 ## Announced
 
@@ -326,36 +341,23 @@ rtsp` one per RTSP session, and `import ts --program all` one per program.
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
 numbers to catch up. Epochs cross a connection only on moq-lite 07, which is
-opt-in, and order by the host's clock there, so a host whose clock runs behind
-the old run's waits for it to close. Older versions and moq-transport carry no
-epoch, so a restart from another session is the newest route at an equal cost,
-or a better one.
+opt-in, and on moq-transport draft 17 and later, and order by the host's clock
+there, so a host whose clock runs behind the old run's waits for it to close.
+Other versions carry no epoch, so a restart from another session is the newest
+route at an equal cost, or a better one.
 
-On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
-`uuidgen -7` prints) are one publisher: relays fail over between them
-mid-group, so they must produce identical tracks with aligned groups. Each
-derives its catalog clock from the epoch's wall time, so fed one stream they
-publish the same clock and timestamps wherever each started, without reading
-anything from the other; group numbering is not aligned yet. PTS zero is the
-epoch's time, and for `ts` one 33-bit wrap before it. The wall mapping is
-therefore off by the source clock's reading at the epoch's time: for a TS
-program clock, anywhere within 13.25 hours. Each process picks a TS timestamp's
-wrap from its own clock, so near either end of that range, processes whose host
-clocks or delivery differ by more than the distance left can put one timestamp
-in adjacent wraps, 26.5 hours apart, and one later reads its media as a rewind.
-FLV's millisecond timestamps are not unwrapped, so redundant `flv` imports stop
-matching at its 49.7-day wrap: the incumbent rewinds and exits, and one started
-after it publishes timestamps near zero. A host whose clock reads before the
-epoch's time cannot place an `fmp4`, `flv`, or `hls` import on it, and exits 1.
-Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
-accept it. The RTMP, SRT, RTSP, and WHIP ingests
-and `import ts --program all` refuse it because they mint their own, and `import
-avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
-timestamps or bytes come from the instance rather than the input. Each that
-accepts it announces once its catalog names a servable track, so a standby
-started ahead of its feed is never asked for tracks it cannot serve yet. Input
-that ends before then, such as an empty input or a PMT or header that
-configures no track, exits 1 without announcing.
+Each independent importer publishes its own epoch, even when two importers read
+one stream and publish one path. On a version that carries epochs, the newest
+importer wins new requests. If it leaves, a still-live older importer wins again
+as a restart. Players following announcements and `moq export ts --stitch`
+follow those restarts; other consumers end. `--stitch` also switches as soon as a newer
+importer starts, even while the current importer remains healthy. Each switch
+marks a program discontinuity, so redundant ingest does not promise hitless
+output.
+
+An importer announces once its catalog names a servable track. Input that ends
+before then, such as an empty input or a header that configures no track,
+exits 1 without announcing.
 
 ## Cluster
 
@@ -432,15 +434,17 @@ continuity error, and the rest carry on. It takes neither `--linger`,
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same
-stream. A replacement (a restarted publisher, under a new
+stream. A return that cannot be read yet, such as one still routed through a
+dead session, keeps it waiting for the next announcement; if the linger runs
+out first, it exits 1 with that error. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
 the break. `--linger` also bounds a mid-stream stitch from the replacement
 announcement through its first catalog snapshot; expiry exits 1. The default
 `--linger 0s` follows only a replacement whose catalog is already available.
 Without `--stitch` the export stays on the old publisher while it is
-up. Only lite-07 sessions carry epochs, so on the default version every return
-is a replacement. An export that fails while the broadcast stays up, such as on
+up. Only lite-07 and moq-transport draft 17+ sessions carry epochs, so on the
+default version every return is a replacement. An export that fails while the broadcast stays up, such as on
 a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
 so the other formats refuse `--linger`.
 

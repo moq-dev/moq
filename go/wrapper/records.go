@@ -1,32 +1,15 @@
 package moq
 
 import (
-	"fmt"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
+	"moq.dev/moq/internal/bridge"
 )
 
 // moq-ffi spells every duration as integer microseconds, because not every
 // target language has a duration type. These records mirror the generated ones
 // with time.Duration fields and convert at the boundary.
-
-// micros converts d to microseconds, refusing a negative duration rather than
-// letting it wrap when cast to uint64.
-func micros(name string, d time.Duration) (uint64, error) {
-	if d < 0 {
-		return 0, fmt.Errorf("negative %s: %v", name, d)
-	}
-	return uint64(d.Microseconds()), nil
-}
-
-func optMicros(name string, d *time.Duration) (*uint64, error) {
-	if d == nil {
-		return nil, nil
-	}
-	us, err := micros(name, *d)
-	return &us, err
-}
 
 func fromMicros(us uint64) time.Duration {
 	return time.Duration(us) * time.Microsecond
@@ -48,7 +31,7 @@ type Frame struct {
 }
 
 func (f Frame) ffi() (ffi.MoqFrame, error) {
-	us, err := optMicros("timestamp", f.Timestamp)
+	us, err := bridge.OptionalDuration(f.Timestamp, "timestamp")
 	return ffi.MoqFrame{Payload: f.Payload, TimestampUs: us}, err
 }
 
@@ -87,7 +70,7 @@ type Subscription struct {
 }
 
 func (s Subscription) ffi() (ffi.MoqSubscription, error) {
-	maxDelay, err := micros("max delay", s.MaxDelay)
+	maxDelay, err := bridge.Duration(s.MaxDelay, "max delay")
 	var ranges *[]ffi.MoqRange
 	if s.Ranges != nil {
 		ranges = &s.Ranges
@@ -109,12 +92,15 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 }
 
 // TrackInfo holds publisher-side track properties: priority, how long a
-// non-latest group is cached (nil for no limit), and the timescale in ticks per
-// second (nil means untimed on both publish and receive). A zero Priority is
-// the least urgent; set 127 for the midpoint a nil TrackInfo uses.
+// non-latest group is cached (nil for no limit), how many times its first frame
+// a group's later bytes may grow before a joining subscriber asks for a new group
+// (nil never asks), and the timescale in ticks per second (nil means untimed on
+// both publish and receive). A zero Priority is the least urgent; set 127 for the
+// midpoint a nil TrackInfo uses.
 type TrackInfo struct {
 	Priority  uint8
 	MaxAge    *time.Duration
+	Refresh   *uint32
 	Timescale *uint64
 }
 
@@ -122,12 +108,12 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 	if info == nil {
 		return nil, nil
 	}
-	maxAge, err := optMicros("max age", info.MaxAge)
-	return &ffi.MoqTrackInfo{Priority: info.Priority, MaxAgeUs: maxAge, Timescale: info.Timescale}, err
+	maxAge, err := bridge.OptionalDuration(info.MaxAge, "max age")
+	return &ffi.MoqTrackInfo{Priority: info.Priority, MaxAgeUs: maxAge, Refresh: info.Refresh, Timescale: info.Timescale}, err
 }
 
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
-	return TrackInfo{Priority: info.Priority, MaxAge: optFromMicros(info.MaxAgeUs), Timescale: info.Timescale}
+	return TrackInfo{Priority: info.Priority, MaxAge: optFromMicros(info.MaxAgeUs), Refresh: info.Refresh, Timescale: info.Timescale}
 }
 
 // ConnectionStats holds transport metrics for a session (RTT, bandwidth, byte

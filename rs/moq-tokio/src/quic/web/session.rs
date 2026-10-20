@@ -282,7 +282,7 @@ impl Session {
 		if let Some(group) = options.group {
 			send.set_group(Some(group)).ok();
 		}
-		let header = send.checkpoint();
+		let header = self.header_uni.len() as u64;
 		Ok(SendStream::new(send, self.close.clone(), Some(header)))
 	}
 
@@ -306,7 +306,7 @@ impl Session {
 		if let Some(group) = options.group {
 			send.set_group(Some(group)).ok();
 		}
-		let header = send.checkpoint();
+		let header = self.header_bi.len() as u64;
 		Ok((
 			SendStream::new(send, self.close.clone(), Some(header)),
 			RecvStream::new(recv, self.close.clone()),

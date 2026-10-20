@@ -32,8 +32,9 @@ With CMake, point `CMAKE_PREFIX_PATH` at the extracted archive, then
 
 From source, `add_subdirectory(rs/moq-c)` in CMake gives the same `moq::c`
 target, and `nix build .#moq-c` produces the release layout. A bare
-`cargo build -p moq-c` leaves `moq.h` in a hashed `OUT_DIR` and writes no
-pkg-config file.
+`cargo build -p moq-c` leaves `moq.h` in a hashed `OUT_DIR`, writes no
+pkg-config file, and omits the OpenH264 software fallback unless given
+`--features openh264`.
 
 ## Connect
 
@@ -65,9 +66,10 @@ inside. The header is the reference: each function carries a doc comment.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `moq_publish_media_flush` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `moq_publish_media_discontinuity`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** Free each frame id with `moq_decode_video_frame_free` promptly, or the decoder stalls.
 - **Stats.** `moq_session_stats()` fills `moq_connection_stats` with `rtt_us`, `estimated_send_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). Each has a `<field>_valid` flag, false when the transport does not report it, which is not the same as zero. `moq_session_snapshot()` adds the negotiated `protocol`, and while a session reconnects `moq_session_failure()` returns why, with the reason in `moq_error()`. Hold the handle returned by `moq_session_recv_bandwidth()` to request receive estimates. `moq_bandwidth_consumer_peek()` reads the estimate and `moq_bandwidth_consumer_changed()` waits for a change. `moq_bandwidth_consumer_close()` releases demand; the last consumer stops PROBE. Stats snapshots do not request it.
+- **Demand.** A watcher from `moq_publish_track_demand()` (or the media, video, and audio variants) calls back `MOQ_DEMAND_USED` or `MOQ_DEMAND_UNUSED`, again whenever the wanted group moves. `moq_publish_demand_wanted()` reads that group: start a new one once it passes your largest. Set `refresh` in `moq_track_info` to have a joining subscriber ask for a new group once the newest has grown past `refresh` times its first frame.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 
 ## Reference
 
-- API reference: [docs.rs/moq-c](https://docs.rs/moq-c)
+- API source: [rs/moq-c/src](https://github.com/moq-dev/moq/tree/main/rs/moq-c/src)
 - Source and a worked example: [`rs/moq-c`](https://github.com/moq-dev/moq/tree/main/rs/moq-c)

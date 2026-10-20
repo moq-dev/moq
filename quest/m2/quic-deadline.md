@@ -44,7 +44,11 @@ Implement in `moq-quic`.
   existing group-expired code on the MoQ wire, so a viewer sees the same
   signal it sees for a relay-side expiry today.
 
-Measure on the impaired path profile: delivery latency p95 and p99, bytes
+Measure on bufferbloat: a rate below the media bitrate behind a deep but
+finite queue whose overflow demonstrably drops packets, with competing
+loss-based traffic if needed to fill it. Random loss may prove recovery
+correctness, but never grades latency or throughput. Report delivery latency
+p95 and p99, bytes
 retransmitted past their deadline (must be zero), spurious resets under
 reordering, and probe overhead versus the default PTO. A proactive probe that
 raises loss or latency under any profile stays off by default.
@@ -56,6 +60,6 @@ Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it.
 - [QUIC receive-timestamps spike](/quest/m2/quic-realtime/receive-ts.md) - measures whether
   receive-time differences improve an explicit delay estimator over half-RTT
 - [ACK hook](/quest/m2/quic-ack-hook.md) - the same pattern for a moq-net method backed by `moq-quic`
-- [Discover media headroom](/quest/m2/quic-probe.md) - can reuse
-  retransmission machinery if redundant capacity probes prove worthwhile
+- [Native probing](/quest/m2/probe/native.md) - retransmits in-flight data
+  to probe, and must not resend what a deadline has expired
 - [noq#813](https://github.com/n0-computer/noq/issues/813) - the per-stream deadline proposal to n0

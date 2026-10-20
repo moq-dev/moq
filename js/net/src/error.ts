@@ -324,8 +324,6 @@ export class ProtocolViolation extends Error {
 
 /** Package-internal compatibility names used by the wire implementation. */
 export { Session as SessionError, Stream as StreamError, TooFarBehind as Lagged };
-/** Package-internal compatibility name used by the wire implementation. */
-export type StreamErrorOptions = StreamOptions;
 
 /** The WebTransport-shaped fields a stream reset code arrives in. */
 type StreamErrorLike = { source?: unknown; streamErrorCode?: unknown };
@@ -354,8 +352,11 @@ interface TransportErrorOptions {
  *
  * Lossy on purpose. An error describes what went wrong here, while the registry is what the peer
  * can act on, so anything without a code of its own degrades to {@link StreamCode.Internal}
- * rather than inventing one. A {@link Session} lands there too: the two registries are
- * disjoint, so forwarding its code onto a stream would mistranslate it.
+ * rather than inventing one. A {@link Session} is {@link StreamCode.Unroutable}: a stream that
+ * can still be reset outlived the session that failed, so that was the route it was served
+ * through, and forwarding the session's code would mistranslate it across disjoint registries.
+ * An application code is the exception, since both registries share the 64+ range. A session
+ * that failed at the transport, with no code at all, is {@link StreamCode.Unroutable} too.
  *
  * On an IETF stream the code has to be one the negotiated draft assigns the same meaning to,
  * so a condition it does not register degrades to INTERNAL_ERROR as well. See
@@ -375,6 +376,11 @@ function localStreamCode(err: unknown): StreamCode {
 	if (err instanceof TimeoutError) return StreamCode.DeliveryTimeout;
 	// Session-scoped: the peer learns which rule it broke from the session close, not from here.
 	if (err instanceof ProtocolViolation) return StreamCode.SessionClosed;
+	// App codes share the 64+ range in both registries.
+	if (err instanceof Session) return err.code >= 64 ? StreamCode(err.code) : StreamCode.Unroutable;
+	// A session that failed underneath without a close code, as on a network or idle failure.
+	const source = typeof err === "object" && err !== null ? (err as { source?: unknown }).source : undefined;
+	if (source === "session") return StreamCode.Unroutable;
 	return StreamCode.Internal;
 }
 

@@ -315,33 +315,6 @@ impl Invocation {
 			}
 		}
 
-		if self.moq.epoch.is_some() {
-			let mut publishes = false;
-			for command in &self.stages {
-				match command {
-					Command::Import(import) => {
-						if let Some(reason) = import.source.epoch_refusal() {
-							anyhow::bail!("--epoch makes instances one publisher of identical tracks, but {reason}");
-						}
-						anyhow::ensure!(
-							!import.stats,
-							"--epoch makes instances one publisher of identical tracks, but --stats reports this instance's own counts"
-						);
-						publishes = true;
-					}
-					#[cfg(feature = "transcode")]
-					Command::Transcode(_) => anyhow::bail!(
-						"--epoch makes instances one publisher of identical tracks, but two `transcode` encoders never produce the same bytes"
-					),
-					_ => {}
-				}
-			}
-			anyhow::ensure!(
-				publishes,
-				"--epoch names what this process publishes, but nothing here publishes"
-			);
-		}
-
 		for command in &self.stages {
 			if let Command::Import(import) = command
 				&& import.stats
@@ -470,25 +443,6 @@ pub struct MoqSide {
 	/// The released spelling of [`Self::broadcast`].
 	#[usage(long = "name", hide = true)]
 	name: Option<String>,
-
-	/// Announce under this epoch (a UUIDv7) instead of minting a fresh one per run.
-	///
-	/// Relays resume a subscription only between routes with the same epoch, so
-	/// redundant publishers of one broadcast pass the same value and fail over
-	/// seamlessly. Leave it unset otherwise: a fresh epoch per run is what makes a
-	/// restarted publisher replace the old broadcast instead of resuming into it.
-	/// Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
-	/// accept it, since the other publishers' tracks differ between instances.
-	///
-	/// The epoch's wall time also fixes the catalog clock, so publishers of one stream
-	/// agree on it and on every timestamp wherever each started: PTS zero is the epoch's
-	/// time, and for `ts` one 33-bit wrap (about 26.5 hours) before it. The wall mapping is
-	/// then off by the source clock's reading at the epoch's time, which for a TS program
-	/// clock is anywhere within half a wrap. Near either end of that range, processes whose
-	/// clocks or delivery differ can place one timestamp a wrap apart, and redundant `flv`
-	/// imports stop matching at FLV's 49.7-day millisecond wrap.
-	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
-	pub epoch: Option<hang::moq_net::Epoch>,
 
 	/// MoQ client config (`--connect`, `--connect-bind`, `--connect-tls-*`, ...).
 	#[usage(flatten)]
@@ -871,27 +825,6 @@ impl ImportSource {
 			Self::Flv => PublishFormat::Flv,
 			_ => return None,
 		})
-	}
-
-	/// Why `--epoch` can't name this source, or `None` when it can: the source must
-	/// announce once per run and derive its tracks from the input alone.
-	fn epoch_refusal(&self) -> Option<&'static str> {
-		match self {
-			Self::Ts(args) if args.program == Some(TsProgram::All) => {
-				Some("`import ts --program all` mints an epoch per program")
-			}
-			Self::Rtmp(_) | Self::Srt(_) => Some("the RTMP and SRT imports mint an epoch per connection"),
-			Self::Rtsp(_) => Some("`import rtsp` mints an epoch per RTSP session, since each restarts its RTP time"),
-			Self::Rtc(rtc) if rtc.listen.is_some() => Some("the WHIP listener mints an epoch per connection"),
-			Self::Rtc(_) => Some("`import rtc --connect` timestamps frames from its own RTP session"),
-			Self::Avc3 => Some("`import avc3` timestamps frames from their arrival on stdin"),
-			Self::Archive(_) => {
-				Some("`import archive` rewrites the catalog and timeline groups it replays under the live names")
-			}
-			#[cfg(feature = "capture")]
-			Self::Capture(_) => Some("two `import capture` encoders never produce the same bytes"),
-			Self::Ts(_) | Self::Fmp4 | Self::Flv | Self::Hls(_) => None,
-		}
 	}
 
 	/// Why `--stats` can't report this source, or `None` when it can: the CLI builds the one
@@ -1719,57 +1652,19 @@ mod tests {
 		}
 	}
 
-	/// `--epoch` reaches the importers that announce once per run and derive their tracks
-	/// from the input alone, and is refused everywhere else: an ingest that announces per
-	/// connection, a publisher whose timestamps or bytes come from the instance, or no
-	/// publisher at all.
 	#[test]
-	fn epoch_applies_only_to_a_once_per_run_publisher() {
-		let _env = crate::test_env::EnvGuard::clear(&["MOQ_EPOCH"]);
+	fn independent_importers_cannot_select_a_shared_epoch() {
 		let epoch = hang::moq_net::Epoch::mint().to_string();
-		let parse = |stage: &[&str]| {
-			let argv = ["moq", "--connect", "http://relay/anon", "--epoch", &epoch].into_iter();
-			Invocation::try_parse_from(argv.chain(stage.iter().copied())).expect("parse")
-		};
-
-		let cli = parse(&["import", "fmp4"]);
-		cli.validate().expect("a stdin import takes an epoch");
-		assert_eq!(cli.moq.epoch.map(|epoch| epoch.to_string()), Some(epoch.clone()));
-
-		for accepted in [
-			&["import", "ts"][..],
-			&["import", "ts", "--program", "1"],
-			&["import", "ts", "--passthrough"],
-			&["import", "flv"],
-			&["import", "hls", "https://example.com/live.m3u8"],
-		] {
-			parse(accepted)
-				.validate()
-				.unwrap_or_else(|err| panic!("{accepted:?} refused --epoch: {err:#}"));
-		}
-
-		for refused in [
-			&["import", "rtmp", "--listen", "[::]:1935"][..],
-			&["import", "rtmp", "--connect", "rtmp://example.com/live/key"],
-			&["import", "srt", "--connect", "srt://example.com:9000"],
-			&["import", "rtsp", "--connect", "rtsp://example.com/stream"],
-			&["import", "rtc", "--listen", "[::]:8080"],
-			&["import", "rtc", "--connect", "https://example.com/whep"],
-			&["import", "ts", "--program", "all"],
-			&["import", "avc3"],
-			&["import", "archive", "file:///tmp/recording"],
-			&["import", "--stats", "ts"],
-			#[cfg(feature = "capture")]
-			&["import", "capture"],
-			#[cfg(feature = "transcode")]
-			&["transcode"],
-			&["export", "fmp4"],
-		] {
-			assert!(parse(refused).validate().is_err(), "{refused:?} accepted --epoch");
-		}
-
-		let malformed = Invocation::try_parse_from(["moq", "--epoch", "42", "import", "fmp4"]);
-		assert!(malformed.is_err(), "--epoch accepted a value that is not a UUIDv7");
+		let refused = Invocation::try_parse_from([
+			"moq",
+			"--connect",
+			"http://relay/anon",
+			"--epoch",
+			&epoch,
+			"import",
+			"ts",
+		]);
+		assert!(refused.is_err(), "independent importers cannot claim identical content");
 	}
 
 	/// A stage carries config of its own, and the check has to reach it.
@@ -2434,7 +2329,6 @@ mod tests {
 			&["--auth-public", "**"],
 			&["--stats-enabled"],
 			&["--drain-timeout", "500ms"],
-			&["--epoch", "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b"],
 		];
 		let dial: &[&[&str]] = &[
 			&["--connect", "https://relay.example"],

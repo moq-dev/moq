@@ -258,10 +258,12 @@ impl<O: Output> Media<O> {
 									.with_max_delay(max_delay),
 							)
 							.await?;
-						// Start at the local live edge without asking the shared publisher
-						// subscription to rewind to a cached sequence.
-						if let Some(latest) = track.latest() {
-							subscriber.set_groups(latest..);
+						// Start at the live edge without asking the shared publisher
+						// subscription to rewind to a cached sequence. The edge is known only
+						// once the feed is live, so wait for it rather than read the backlog of
+						// a warm copy still waiting on its source; the wait ends with the track.
+						if let Some(largest) = subscriber.largest().await {
+							subscriber.set_groups(largest.group..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;
 						Ok::<_, anyhow::Error>((moq_mux::container::Consumer::new(subscriber, format), decoder))

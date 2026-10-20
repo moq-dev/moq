@@ -844,7 +844,7 @@ pub struct SendStream {
 	inner: super::SendStream,
 	/// The end of the WebTransport header on a stream we opened, for a reset
 	/// to deliver.
-	header: Option<moq_quic::Checkpoint>,
+	header: Option<u64>,
 	web: bool,
 }
 
@@ -875,8 +875,8 @@ impl SendStream {
 		self.inner.set_group(group);
 	}
 
-	/// Write the WebTransport header of a stream we opened, checkpointing it
-	/// once it is all written.
+	/// Write the WebTransport header of a stream we opened, noting where it
+	/// ends once it is all written.
 	fn poll_header(&mut self, cx: &mut Context<'_>, header: &mut Bytes) -> Poll<Result<(), Error>> {
 		if !self.web {
 			return Poll::Ready(Ok(()));
@@ -890,7 +890,7 @@ impl SendStream {
 			.map_err(|err| self.map(err))?;
 			header.advance(n);
 		}
-		self.header = Some(self.inner.checkpoint());
+		self.header = Some(self.inner.offset());
 		Poll::Ready(Ok(()))
 	}
 

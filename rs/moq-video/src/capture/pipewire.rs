@@ -2176,7 +2176,7 @@ mod tests {
 	/// needs a desktop session, PipeWire, and a human clicking the picker dialog:
 	/// `cargo test -p moq-video --features pipewire portal_capture -- --ignored`.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a desktop portal and a human at the picker; see quest/m3/video-hardware.md"]
 	async fn portal_captures_frames() {
 		let mut stream = match open(&Config::default(), None).await {
 			Ok(stream) => stream,

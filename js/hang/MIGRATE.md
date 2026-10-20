@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A container decode error rejects `Consumer.next()` (#5942)
+
+A payload the format fails to decode, or a data track's marker sharing its group, now rejects `Container.Consumer.next()` with that error and ends the reader.
+It used to truncate the group, log the error, and read the lost tail as a gap.
+Handle the rejection as fatal; only a reset or evicted group still reads as a gap.
+
 ### The catalog root reserves `version` (#5806)
 
 `version` is the oldest moq-hang draft that reads the catalog, and parsing throws `UnsupportedVersion` for one newer than this reader.

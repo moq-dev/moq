@@ -59,7 +59,7 @@ impl<T: serde::Serialize> Pair<T> {
 		let used = [&self.plain, &self.compressed]
 			.into_iter()
 			.flatten()
-			.any(|track| track.demand().is_used());
+			.any(|track| track.demand().wanted().is_some());
 		if used {
 			self.write(value);
 		}
