@@ -1835,6 +1835,21 @@ async fn stream_stopped_pending_across_reset() {
     assert_eq!(unpolled, Ok(Ok(None)));
 }
 
+/// A `stopped` future outliving its stream resolves on the drop reset
+#[tokio::test(start_paused = true)]
+async fn dropped_stream_resolves_stopped() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, _server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"truncated").await.unwrap();
+    let stopped = send.stopped();
+    drop(send);
+    let stopped = timeout(Duration::from_secs(10), stopped).await;
+    assert_eq!(stopped, Ok(Ok(None)));
+    assert_eq!(conn.stopped_waiters(), 0);
+}
+
 /// A reset releases the stream's `stopped` waiters, even one dropped while pending
 #[tokio::test(start_paused = true)]
 async fn stream_reset_releases_stopped() {

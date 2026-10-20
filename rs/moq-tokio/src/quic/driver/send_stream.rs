@@ -285,8 +285,8 @@ impl SendStream {
     /// Yields `Some` with the stop error code if the peer stops the stream. Yields `None` if the
     /// local side [`finish()`](Self::finish)es the stream and then the peer acknowledges receipt
     /// of all stream data (although not necessarily the processing of it), or once the local side
-    /// resets it with [`reset()`](Self::reset) or [`reset_at()`](Self::reset_at), after which the
-    /// peer closing the stream is no longer meaningful.
+    /// resets it with [`reset()`](Self::reset) or [`reset_at()`](Self::reset_at), or by dropping
+    /// it unfinished, after which the peer closing the stream is no longer meaningful.
     ///
     /// For a variety of reasons, the peer may not send acknowledgements immediately upon receiving
     /// data. As such, relying on `stopped` to know when the peer has read a stream to completion
@@ -428,6 +428,7 @@ impl Drop for SendStream {
             }
         };
         if reset.is_ok() {
+            conn.stopped_by_reset(self.stream);
             conn.wake();
         }
     }
