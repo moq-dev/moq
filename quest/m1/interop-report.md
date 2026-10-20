@@ -17,7 +17,9 @@ Decided with the maintainer on 2026-10-20.
   joins Nightly's `benchmark-pages` concurrency group so deploys never drop
   another writer's pages. If [moq-dev/moq#6046](https://github.com/moq-dev/moq/pull/6046)
   has landed, reuse its per-directory publisher (`test/smoke/report/publish.sh`);
-  otherwise write the same small one so both can share it.
+  otherwise write the same small one so both can share it. Update the
+  single-writer comment on Nightly's `benchmark-site` job to describe the
+  per-directory ownership.
 - The harness emits structured results (one record per cell: client pair,
   transport, version, outcome, duration) next to its logs, and the report is
   generated from those, never by scraping logs.

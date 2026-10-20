@@ -40,8 +40,12 @@ with three verdicts:
   coverage), and a report lands on the
   [Pages site](https://git.moq.dev/) or in a job summary. A result
   only in a run artifact or log is invisible: publish it, summarize it, or
-  stop producing it. The Pages site has one writer, Nightly's Benchmark site
-  job; a new report joins it rather than adding a second deploy.
+  stop producing it. Each report on the Pages site owns one `gh-pages`
+  directory: its workflow commits only that directory, deploys the whole
+  branch, and joins the `benchmark-pages` concurrency group, so no deploy
+  drops another report (decided 2026-10-20 with the
+  [interop report](/quest/m1/interop-report.md); Nightly's `benchmark-site`
+  comment still claims a single writer until the first second writer lands).
 - **Cost:** runner-minutes per month by runner type, from the org billing API
   and job timings, against that signal. macOS is the scarce one (a 5-job
   concurrency cap).
