@@ -32,8 +32,8 @@ pub struct Listen {
 	#[usage(env = "MOQ_LISTEN_QUIC_LB_NONCE", cli("--listen-quic-lb-nonce"))]
 	lb_nonce: Option<u64>,
 
-	#[usage(env = "MOQ_LISTEN_QUIC_RESET_SECRET", cli("--listen-quic-reset-secret"))]
-	reset_secret: Option<String>,
+	#[usage(flatten)]
+	reset: ListenReset,
 
 	#[usage(flatten)]
 	tls: ListenTls,
@@ -45,6 +45,14 @@ pub struct Listen {
 	#[cfg(all(feature = "uds", unix))]
 	#[usage(flatten)]
 	unix: ListenUnix,
+}
+
+/// `[listen.reset]` / `--listen-reset-*`.
+#[derive(usage_rs::Config)]
+#[usage(prefix = "listen.reset")]
+struct ListenReset {
+	#[usage(env = "MOQ_LISTEN_RESET_SECRET", cli("--listen-reset-secret"))]
+	secret: Option<String>,
 }
 
 /// `[listen.tls]` / `--listen-tls-*`.

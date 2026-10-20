@@ -1,4 +1,4 @@
-//! A server restarted with the same `listen.reset_secret` resets its predecessor's
+//! A server restarted with the same `listen.reset.secret` resets its predecessor's
 //! connections, so a peer learns at once that they are gone instead of waiting out
 //! its idle timeout.
 //!
@@ -44,7 +44,7 @@ impl Fixture {
 	}
 
 	/// Serve on `port` (0 for any) from a runtime of its own, returned with the bound port.
-	fn serve(&self, port: u16, reset_secret: Option<String>) -> (tokio::runtime::Runtime, u16) {
+	fn serve(&self, port: u16, reset_secret: Option<PathBuf>) -> (tokio::runtime::Runtime, u16) {
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(1)
 			.enable_all()
@@ -55,7 +55,7 @@ impl Fixture {
 		config.listen.bind = Some(format!("127.0.0.1:{port}").parse().unwrap());
 		config.listen.tls.cert = vec![self.cert_path.clone()];
 		config.listen.tls.key = vec![self.key_path.clone()];
-		config.listen.reset_secret = reset_secret;
+		config.listen.reset.secret = reset_secret;
 
 		let port = runtime.block_on(async move {
 			let mut listener = config
@@ -81,9 +81,6 @@ impl Fixture {
 
 /// Connect, crash the server and restart it on the same port, then report how the
 /// client's connection ended once it next sent something.
-///
-/// With a secret, the predecessor reads it from a file and the successor takes the
-/// same hex inline, so both forms must derive the same key.
 fn restart(reset_secret: bool) -> Result<driver::ConnectionError, tokio::time::error::Elapsed> {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let fixture = Fixture::new();
@@ -92,8 +89,8 @@ fn restart(reset_secret: bool) -> Result<driver::ConnectionError, tokio::time::e
 		.build()
 		.expect("client runtime");
 
-	let file = reset_secret.then(|| fixture.reset_secret.to_str().unwrap().to_string());
-	let (server, port) = fixture.serve(0, file);
+	let file = reset_secret.then(|| fixture.reset_secret.clone());
+	let (server, port) = fixture.serve(0, file.clone());
 	let (_endpoint, conn) = client.block_on(async {
 		let mut roots = rustls::RootCertStore::empty();
 		roots.add(fixture.cert.clone()).expect("root");
@@ -117,7 +114,7 @@ fn restart(reset_secret: bool) -> Result<driver::ConnectionError, tokio::time::e
 	});
 
 	drop(server);
-	let (_server, _) = fixture.serve(port, reset_secret.then(|| RESET_SECRET.to_string()));
+	let (_server, _) = fixture.serve(port, file);
 
 	client.block_on(async {
 		let mut send = conn.open_uni(Default::default()).await.expect("open");

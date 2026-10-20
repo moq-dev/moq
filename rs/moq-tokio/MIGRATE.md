@@ -4,10 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `mdns::Secret` is `secret::Secret` (#5910)
+### `mdns::Secret` is `secret::Secret`, read from a file (#5910)
 
-The 32-byte secret type moved out of `mdns` so `listen.reset_secret` shares it.
-Name it `moq_tokio::secret::Secret`; `new` and `load` now return `secret::Error` instead of `mdns::Error`.
+The 32-byte secret type moved out of `mdns` so `listen.reset.secret` shares it, and it no longer parses inline hex.
+Name it `moq_tokio::secret::Secret`.
+Replace `Secret::load(value)` with `Secret::read(path)`, which reads a file of 64 hexadecimal characters and returns `secret::Error`; replace `Secret::new(hex)` and `str::parse` with `Secret::from([u8; 32])`, decoding the hex yourself.
 
 ### `jemalloc::tikv_jemallocator` is 0.7 (#6053)
 

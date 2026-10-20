@@ -77,7 +77,7 @@ struct Serve {
 	/// `listen.timeout`, which each worker's endpoint starts at a connection's
 	/// first packet.
 	timeout: Option<std::time::Duration>,
-	/// `listen.reset_secret`, shared so any worker resets any worker's
+	/// `listen.reset.secret`, shared so any worker resets any worker's
 	/// connections, a restarted group's included.
 	reset_secret: Option<[u8; 32]>,
 }
@@ -219,11 +219,12 @@ impl Workers {
 		udp.gso = quic.gso.unwrap_or(true);
 
 		let reset_secret = listen
-			.reset_secret
+			.reset
+			.secret
 			.as_deref()
-			.map(moq_tokio::secret::Secret::load)
+			.map(moq_tokio::secret::Secret::read)
 			.transpose()
-			.context("invalid --listen-quic-reset-secret")?
+			.context("invalid --listen-reset-secret")?
 			.map(|secret| *secret.as_bytes());
 
 		let (failures_tx, failures) = tokio::sync::mpsc::unbounded_channel();

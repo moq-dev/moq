@@ -5,6 +5,11 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `cluster.lan.secret` is a file path only (#5910)
+
+`--cluster-lan-secret`, `MOQ_CLUSTER_LAN_SECRET`, and `[cluster.lan] secret` no longer accept 64 hex characters inline.
+Write the hex to a file (`openssl rand -hex 32 > cluster.key`) and pass its path; `LanConfig::secret` is now a `PathBuf`.
+
 ### Usage types come from usage-rs 7 (#6060)
 
 The relay's `Args` and `Config` derives now implement usage-rs 7 traits.

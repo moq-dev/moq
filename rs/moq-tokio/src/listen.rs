@@ -249,23 +249,10 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub load_balancer: Option<crate::quic::LoadBalancer>,
 
-	/// The secret the QUIC stateless reset key is derived from, as 64 hexadecimal
-	/// characters or a path to a file containing them.
-	///
-	/// A server restarted with the same secret resets its predecessor's connections,
-	/// so peers reconnect at once instead of waiting out their idle timeout. Every
-	/// holder can reset every other holder's connections, so share it between live
-	/// servers only behind one address that routes by connection ID (QUIC-LB).
-	/// Unset draws a random key per process.
-	#[usage(
-		name = "listen-quic-reset-secret",
-		long = "listen-quic-reset-secret",
-		env = "MOQ_LISTEN_QUIC_RESET_SECRET",
-		value_name = "HEX_OR_PATH",
-		setting = "listen.reset_secret"
-	)]
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub reset_secret: Option<String>,
+	/// QUIC stateless resets (`--listen-reset-*`).
+	#[usage(flatten)]
+	#[serde(default)]
+	pub reset: Reset,
 
 	/// The released `--server-*` spellings and their env vars, kept parsing but
 	/// hidden. Never read as settings: [`Config::deprecated`] names what replaced
@@ -304,11 +291,36 @@ impl Default for Config {
 			lb_id: None,
 			lb_nonce: None,
 			load_balancer: None,
-			reset_secret: None,
+			reset: Default::default(),
 			legacy: Default::default(),
 			quic: None,
 		}
 	}
+}
+
+/// QUIC stateless reset settings (`[listen.reset]`, `--listen-reset-*`).
+#[derive(usage_rs::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Reset {
+	/// A file holding the secret the stateless reset key is derived from, as 64
+	/// hexadecimal characters (`openssl rand -hex 32`).
+	///
+	/// A server restarted with the same secret resets its predecessor's connections,
+	/// so peers reconnect at once instead of waiting out their idle timeout. Every
+	/// holder can reset every other holder's connections, so share it between live
+	/// servers only behind one address that routes by connection ID (QUIC-LB).
+	/// Unset draws a random key per process.
+	#[usage(
+		name = "listen-reset-secret",
+		long = "listen-reset-secret",
+		env = "MOQ_LISTEN_RESET_SECRET",
+		setting = "listen.reset.secret"
+	)]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub secret: Option<std::path::PathBuf>,
 }
 
 /// One server's socket in a complete `SO_REUSEPORT` group.
@@ -527,8 +539,8 @@ impl Config {
 				"--listen-quic-lb-id (load_balancer) needs a QUIC listener (--listen)",
 			),
 			(
-				self.reset_secret.is_some(),
-				"--listen-quic-reset-secret needs a QUIC listener (--listen)",
+				self.reset.secret.is_some(),
+				"--listen-reset-secret needs a QUIC listener (--listen)",
 			),
 		];
 		match refused.into_iter().find(|(set, _)| *set) {
@@ -810,8 +822,8 @@ load_balancer = { id = "ab", nonce = 8 }
 					nonce: 8,
 				})
 			}),
-			("--listen-quic-reset-secret", |c| {
-				c.reset_secret = Some("reset.key".into())
+			("--listen-reset-secret", |c| {
+				c.reset.secret = Some("reset.key".into())
 			}),
 		];
 		for (name, set) in cases {

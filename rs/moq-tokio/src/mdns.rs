@@ -770,8 +770,8 @@ fn instance_id(fullname: &str) -> Option<&str> {
 mod tests {
 	use super::*;
 
-	const KEY_A: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-	const KEY_B: &str = "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+	const KEY_A: [u8; 32] = [0xa; 32];
+	const KEY_B: [u8; 32] = [0xb; 32];
 
 	/// Exactly one side of every pair dials: the lower id. Symmetric ids never
 	/// dial themselves.
@@ -822,8 +822,8 @@ mod tests {
 	/// the listener, so one captured anywhere stands in nowhere else.
 	#[test]
 	fn proofs_are_bound_to_one_listener() {
-		let a = Secret::new(KEY_A).expect("valid secret");
-		let b = Secret::new(KEY_B).expect("valid secret");
+		let a = Secret::from(KEY_A);
+		let b = Secret::from(KEY_B);
 		let base = proof(
 			&a,
 			CONTEXT_DIAL,
@@ -1010,8 +1010,8 @@ mod tests {
 	/// never receives a credential.
 	#[test]
 	fn verify_admits_only_the_secret_holder() {
-		let ours = Secret::new(KEY_A).expect("valid secret");
-		let theirs = Secret::new(KEY_B).expect("valid secret");
+		let ours = Secret::from(KEY_A);
+		let theirs = Secret::from(KEY_B);
 
 		// The holder is admitted, and gets the proof that peer will check.
 		let app = App::default();
@@ -1063,7 +1063,7 @@ mod tests {
 	/// service instance and port are what make the proof non-transferable.
 	#[test]
 	fn a_stolen_proof_does_not_transfer() {
-		let ours = Secret::new(KEY_A).expect("valid secret");
+		let ours = Secret::from(KEY_A);
 		let app = App::default();
 		let other: App = "other".parse().expect("valid app");
 
@@ -1152,10 +1152,10 @@ mod tests {
 	}
 
 	/// Advertise on a port nothing listens on, purely to exercise the record.
-	async fn discovery(app: App, secret: Option<&str>, fingerprint: &str) -> Result<Discovery> {
+	async fn discovery(app: App, secret: Option<[u8; 32]>, fingerprint: &str) -> Result<Discovery> {
 		let mut config = Config::new(app, 4443).with_fingerprint(fingerprint);
 		if let Some(secret) = secret {
-			config = config.with_secret(Secret::new(secret).expect("valid secret"));
+			config = config.with_secret(Secret::from(secret));
 		}
 		config.advertise().await
 	}

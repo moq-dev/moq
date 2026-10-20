@@ -19,7 +19,9 @@ Precedence is CLI, then env, then file, then defaults.
 bind = "[::]:443"                    # QUIC (UDP), as --listen. Omit for a stream-only relay.
 version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all.
 timeout = "10s"                      # Handshake deadline. "0" waits forever.
-reset_secret = "/etc/moq/reset.key"  # 64 hex chars, or a file holding them. Omit for a random key.
+
+[listen.reset]
+secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a random key.
 
 [listen.tls]
 cert = "cert.pem"                    # Certificate chain and key. Reloaded on change.
@@ -45,7 +47,7 @@ epoch = false                        # Decline MoQ Epoch, so routes over moq-tra
 `timeout` bounds the whole handshake, transport through MoQ SETUP, so a peer
 that connects and never speaks is closed instead of held open by keep-alives.
 
-`reset_secret` lets a relay restarted on the same address reset its
+`reset.secret` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of
 waiting out the idle timeout. Keep it secret, and give it to one relay
 only: any holder resets every other holder's connections, so live relays behind
@@ -56,7 +58,7 @@ Create one with `openssl rand -hex 32 > reset.key`.
 
 A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb_id` (or `load_balancer`), and
-`reset_secret`, which only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
+`reset.secret`, which only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
 `tcp.tls` serves it.
 `lb_nonce` needs `lb_id`. `lb_id` and `lb_nonce` cannot be combined with `load_balancer`.
 `unix.allow` needs `unix.bind`.
@@ -275,7 +277,7 @@ id = 12345                                            # Stable Hop ID across res
 
 [cluster.lan]                                         # Find peers on the LAN over mDNS.
 enabled = true
-# secret = "/etc/moq/cluster.key"                     # Optional: 64 hex chars, or a file holding them.
+# secret = "/etc/moq/cluster.key"                     # Optional: a file holding 64 hex chars.
 # app = "default"                                     # DNS-SD subtype; moq-cli shares this name.
 ```
 

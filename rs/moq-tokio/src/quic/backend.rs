@@ -210,7 +210,7 @@ pub enum Error {
 	#[error("QUIC-LB connection IDs cannot be combined with per-core workers")]
 	ShardWithQuicLb,
 
-	/// The stateless reset secret is neither 64 hexadecimal characters nor a file holding them.
+	/// The stateless reset secret file could not be read or does not hold 64 hexadecimal characters.
 	#[error("invalid stateless reset secret")]
 	ResetSecret(#[source] crate::secret::Error),
 
@@ -806,8 +806,8 @@ impl Server {
 		let mut endpoint_config = driver::EndpointConfig::default();
 		// First, since it also keys the default connection ID generator. The ones
 		// below validate a predecessor's IDs without it.
-		if let Some(secret) = &config.reset_secret {
-			let secret = crate::secret::Secret::load(secret).map_err(Error::ResetSecret)?;
+		if let Some(secret) = &config.reset.secret {
+			let secret = crate::secret::Secret::read(secret).map_err(Error::ResetSecret)?;
 			endpoint_config.reset_secret(secret.as_bytes());
 		}
 

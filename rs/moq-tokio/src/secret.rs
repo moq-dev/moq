@@ -1,56 +1,39 @@
-//! A 32-byte secret an operator configures, such as `cluster.lan.secret` or
-//! `listen.reset_secret`.
+//! A 32-byte secret an operator configures as a file, such as `cluster.lan.secret`
+//! or `listen.reset.secret`.
 
 use std::fmt;
-use std::str::FromStr;
+use std::path::{Path, PathBuf};
 
-/// A secret could not be decoded or read.
+/// A secret file could not be read or decoded.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-	/// The value is not exactly 32 bytes encoded as 64 hexadecimal characters.
-	#[error(
-		"secret must be exactly 32 bytes encoded as 64 hexadecimal characters, or a path to a file containing them"
-	)]
-	Invalid,
+	/// The file does not hold exactly 64 hexadecimal characters.
+	#[error("secret file {0} must hold exactly 64 hexadecimal characters (`openssl rand -hex 32`)")]
+	Invalid(PathBuf),
 
-	/// The value is not a secret, and not a file that could be read either.
-	#[error("secret must be 64 hexadecimal characters or a path to a file containing them, and {0} is neither")]
-	File(String, #[source] std::io::Error),
+	/// The file could not be read.
+	#[error("failed to read secret file {0}")]
+	Read(PathBuf, #[source] std::io::Error),
 }
 
-/// A random 32-byte secret, given as 64 hexadecimal characters.
+/// A random 32-byte secret.
 ///
 /// Anyone watching what it keys can brute-force a weak one offline, so generate
-/// it (`openssl rand -hex 32`) rather than choosing one.
+/// it (`openssl rand -hex 32`) rather than choosing one. `Debug` never prints it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret([u8; 32]);
 
 impl Secret {
-	/// Decode a secret from exactly 64 hexadecimal characters.
-	pub fn new(secret: impl AsRef<str>) -> Result<Self, Error> {
-		let secret = secret.as_ref();
-		let mut key = [0; 32];
-		if secret.len() != key.len() * 2 || hex::decode_to_slice(secret, &mut key).is_err() {
-			return Err(Error::Invalid);
-		}
-		Ok(Self(key))
-	}
-
-	/// Decode a secret given inline, or read it from the file `value` names.
-	///
-	/// What a `--*-secret <HEX_OR_PATH>` flag accepts. A path that exists but
-	/// holds something other than a secret is an error rather than a silent
-	/// fallback, and a path that doesn't exist is never created.
-	pub fn load(value: impl AsRef<str>) -> Result<Self, Error> {
-		let value = value.as_ref();
-		if let Ok(secret) = Self::new(value) {
-			return Ok(secret);
-		}
-		// Not a secret, so it can only have been meant as a path. A read failure
-		// here is the useful error: it names the file the operator actually typed.
-		let contents = std::fs::read_to_string(value).map_err(|err| Error::File(value.to_string(), err))?;
-		Self::new(contents.trim())
+	/// Read a secret from a file holding 64 hexadecimal characters, optionally
+	/// followed by one newline, as `openssl rand -hex 32` writes it.
+	pub fn read(path: impl AsRef<Path>) -> Result<Self, Error> {
+		let path = path.as_ref();
+		let contents = std::fs::read(path).map_err(|err| Error::Read(path.to_path_buf(), err))?;
+		let hex = contents.strip_suffix(b"\n").unwrap_or(&contents);
+		let mut secret = [0; 32];
+		hex::decode_to_slice(hex, &mut secret).map_err(|_| Error::Invalid(path.to_path_buf()))?;
+		Ok(Self(secret))
 	}
 
 	/// The secret's 32 bytes.
@@ -59,11 +42,9 @@ impl Secret {
 	}
 }
 
-impl FromStr for Secret {
-	type Err = Error;
-
-	fn from_str(secret: &str) -> Result<Self, Error> {
-		Self::new(secret)
+impl From<[u8; 32]> for Secret {
+	fn from(secret: [u8; 32]) -> Self {
+		Self(secret)
 	}
 }
 
@@ -80,29 +61,35 @@ mod tests {
 	const KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 	#[test]
-	fn new_requires_exactly_32_hex_bytes_and_redacts_debug() {
-		for invalid in ["", "00", &"x".repeat(64), &"00".repeat(33)] {
-			assert!(Secret::new(invalid).is_err(), "{invalid:?} must not parse");
-		}
-		assert_eq!(format!("{:?}", Secret::new(KEY).expect("valid")), "Secret([redacted])");
+	fn debug_never_prints_the_bytes() {
+		let secret = Secret::from([0xab; 32]);
+		assert_eq!(format!("{secret:?}"), "Secret([redacted])");
 	}
 
-	/// A file holding the hex, as `openssl rand -hex 32` writes it, decodes to the
-	/// same secret as the hex given inline.
+	/// The file `openssl rand -hex 32 > secret.key` writes decodes with or
+	/// without its newline, and anything else is refused.
 	#[test]
-	fn load_reads_inline_hex_or_a_file() {
+	fn read_requires_exactly_64_hex_characters() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("secret.key");
-		std::fs::write(&path, format!("{KEY}\n")).unwrap();
 
-		let inline = Secret::load(KEY).unwrap();
-		assert_eq!(Secret::load(path.to_str().unwrap()).unwrap(), inline);
-		assert_eq!(inline.as_bytes()[31], 0x1f);
+		for valid in [format!("{KEY}\n"), KEY.to_string()] {
+			std::fs::write(&path, valid).unwrap();
+			let secret = Secret::read(&path).unwrap();
+			assert_eq!(secret.as_bytes()[31], 0x1f);
+		}
 
-		// Raw bytes are refused rather than taken as a secret.
-		std::fs::write(&path, [0x5a; 32]).unwrap();
-		assert!(matches!(Secret::load(path.to_str().unwrap()), Err(Error::Invalid)));
-		let missing = dir.path().join("missing.key");
-		assert!(matches!(Secret::load(missing.to_str().unwrap()), Err(Error::File(..))));
+		// Empty, short, raw bytes, non-hex, and a byte too few or too many.
+		let invalid: [&[u8]; 6] = [b"", b"\n", &[0x5a; 32], &[b'x'; 64], &[b'0'; 62], &[b'0'; 66]];
+		for contents in invalid {
+			std::fs::write(&path, contents).unwrap();
+			assert!(matches!(Secret::read(&path), Err(Error::Invalid(_))), "{contents:?}");
+		}
+		for contents in [format!("{KEY}\n\n"), format!(" {KEY}"), format!("{KEY}\r\n")] {
+			std::fs::write(&path, &contents).unwrap();
+			assert!(matches!(Secret::read(&path), Err(Error::Invalid(_))), "{contents:?}");
+		}
+
+		assert!(matches!(Secret::read(dir.path().join("missing.key")), Err(Error::Read(..))));
 	}
 }
