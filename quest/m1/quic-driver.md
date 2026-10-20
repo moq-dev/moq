@@ -71,8 +71,9 @@ The work:
 - In-tree consumers with `default-features = false` and no transport feature
   that use moq-net-backed modules (moq-room, moq-boy, moq-bench) enable the
   new moq-net feature.
-- `quic::web` and `quic::backend` stay as they are, and
-  [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) proceeds
+- `quic::web` and `quic::backend` keep their features and dependencies here.
+  [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) owns their
+  API changes, such as `quic::web::Session` dropping its `Deref`, and proceeds
   on top. Driver API changes that quest makes, such as aligning the stream
   setters with moq-uring's, land in the driver here; neither quest waits on
   the other.
