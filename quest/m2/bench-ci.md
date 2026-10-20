@@ -28,8 +28,8 @@ VMs, so its thresholds fire on runner noise.
   same runner, run the selected targets for both, and compare saved
   Criterion baselines. Only that paired comparison fails the job; the
   cross-run history stays informational on the trend site.
-- Extend `bench/run.sh` and `sh/gh/nightly.sh` (`just gh nightly rust-bench`)
-  with the paired mode instead of writing a second runner, and publish its
+- Extend `bench/run.sh` and `sh/gh/nightly.sh` (`just gh nightly rust-bench`,
+  `rust-extra`, and `rust-uring`) with the paired mode instead of writing a second runner, and publish its
   table through `just gh benchmark-report` into the report.
 - The nightly jobs measure in Criterion's quick mode for runtime; the paired
   run needs enough samples for its threshold. Weigh a full run of the

@@ -15,8 +15,8 @@ Decided with the maintainer on 2026-10-13, after a review of how moq uses
 UniFFI:
 
 - **Base**: UniFFI. [The BoltFFI spike](/bench/ffi-gen/README.md)
-  recommended it, and #5838 (2026-10-17, maintainer) chose UniFFI-generated
-  moq-ffi for the browser too, over BoltFFI, so one generator serves every
+  recommended it. Decided later in #5838 (2026-10-17, maintainer):
+  UniFFI-generated moq-ffi serves the browser too, over BoltFFI, so one generator serves every
   language.
 
 - **Why**: every UniFFI minor release breaks external generators (0.31

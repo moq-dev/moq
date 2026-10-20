@@ -5,7 +5,9 @@
 kio exports an append-only log channel whose consumers read committed entries
 by cursor without taking a lock, and the hottest moq-net channels the
 [epic](/quest/m2/perf/kio-channel-contention/README.md)'s baseline names
-(expected: `GroupState` frames, `TrackState` arrival order) move onto it.
+(expected: `TrackState` arrival order, and `GroupState` frames if the
+[group storage benchmark](/quest/m2/group-storage-bench.md) picks the log)
+move onto it.
 Lands with the contended bench (`rs/kio/benches/contended.rs`) and `just bench-profile lock` before and after; a
 measured no-win abandons it.
 

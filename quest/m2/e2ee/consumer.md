@@ -3,8 +3,8 @@
 ## Goal
 
 Encrypted playback has one consumer shape, the mirror of the protected
-producer, that the browser, the CLI, and the FFI bindings share, so each
-player does not reinvent decryption and physical-name mapping.
+producer, that the browser and the CLI share, so each player does not
+reinvent decryption and physical-name mapping.
 
 ## Plan
 
@@ -22,12 +22,11 @@ What remains here:
   `credential.consume(epoch)` in one call each player shares, in Rust and JS
   with matching names.
 - Decrypt the protected catalog before the existing selection.
-- The moq-ffi consumer follows the `rs/moq-ffi` row of the root `AGENTS.md`
-  cross-package table: wrappers, C and C++, OBS where it plays, and the
-  language docs land with it, or the FFI part waits for a quest that does.
+- Rust and JS only (decided 2026-10-20, maintainer): the e2ee publisher has
+  no moq-ffi half either, so an FFI consumer waits for a quest that adds both.
 
-Public API: an e2ee consumer entry point in `moq-e2ee`, `@moq/e2ee`, and
-moq-ffi with its wrappers. Wire: none.
+Public API: an e2ee consumer entry point in `moq-e2ee` and `@moq/e2ee`.
+Wire: none.
 
 ## Required
 

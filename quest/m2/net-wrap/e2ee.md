@@ -28,8 +28,9 @@ the reverse (decided 2026-10-20, maintainer):
 - Keep the nonce rules the epic specifies: a group producer still owns its
   frame numbering, and a re-created track name is refused, not dropped (see
   [rust-publish](/quest/m2/e2ee/rust-publish.md)).
-- Test the wrappers against the questline's pass-through test cases, plus a
-  moq-json snapshot round trip through an encrypted track.
+- Test the wrappers against the questline's pass-through test cases. The
+  moq-json round trip through an encrypted track waits for
+  [moq-json to take the traits](/quest/m2/net-wrap/json.md).
 
 Public API: the moq-e2ee wrapper signatures change to moq-net's. Wire: none.
 

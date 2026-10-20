@@ -25,9 +25,11 @@ than evicting the middle of a group, which moved to m3
   writer appends. Reuse `rs/kio/benches/contended.rs` and moq-net's
   `group.rs`, and the multi-frame `just bench-profile lock` shape the log
   quest needs anyway.
-- Report how each shape refills a front hole: runs patch in place; a log or
-  ring buffer needs a side run or must reject refills below its base. If the
-  log wins, say what Front eviction's refill becomes.
+- Bench how each shape refills a front hole: runs patch in place; a log or
+  ring buffer needs a side run below its base. Rejecting the refill is not an
+  option: the [unbounded groups](/quest/m2/unbounded-groups/README.md) reader
+  contract refills an evicted run and returns `Error::Evicted` only when no
+  source has it. If the log wins, say what Front eviction's refill becomes.
 - Record the numbers and the choice in the
   [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md) and
   the [unbounded groups epic](/quest/m2/unbounded-groups/README.md).

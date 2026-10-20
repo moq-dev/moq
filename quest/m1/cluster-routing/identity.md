@@ -42,8 +42,10 @@ with no proof advertises no route of its own. Wire into CI with Rust/JS
 interop.
 
 Decided 2026-10-20 (audit): this waits only on
-[Token in band](/quest/m1/auth/token-in-band.md), whose AUTH streams carry
-the key and proof, not on the whole auth line.
+[Token in band](/quest/m1/auth/token-in-band.md), not on the whole auth line.
+That quest defines the AUTH stream (AUTH, AUTH_OK, AUTH_ERROR); this one adds
+AUTH_CNF and the proof to it and specifies their order in the draft, so Rust
+and JS implement one stream.
 
 Wire: `drafts/draft-lcurley-moq-lite.md` gains the key and proof messages in
 lite-07-wip; `just drafts check` passes. Public API: likely none beyond
@@ -51,7 +53,7 @@ connection setup; report any key handle that leaks into `moq-ffi`.
 
 ## Required
 
-- [Token in band](/quest/m1/auth/token-in-band.md) - the AUTH stream carries the key and its proof
+- [Token in band](/quest/m1/auth/token-in-band.md) - defines the AUTH stream the key and its proof extend
 
 ## Related
 

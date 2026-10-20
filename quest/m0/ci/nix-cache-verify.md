@@ -2,6 +2,12 @@
 
 ## Goal
 
+`nix.moq.dev` serves CI and releases: Nix jobs substitute the dev shell
+instead of building it, release tags substitute on a clean machine, its
+bucket sizes hold under the 30-day expiry, and Cachix is retired.
+
+## Plan
+
 [#5693](https://github.com/moq-dev/moq/pull/5693) wired `nix.moq.dev` into
 CI. The maintainer ran the bootstrap in `infra/README.md` on 2026-10-19 and 2026-10-20 (the
 release tag ruleset, both buckets and the Worker, the `cache-write`

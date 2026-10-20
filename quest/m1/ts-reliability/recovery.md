@@ -62,10 +62,6 @@ Short deterministic arms run on relevant PRs. Long drift and impairment
 arms run nightly with failure artifacts. Keep byte-position PCR accuracy
 and measured release timing as separate checks.
 
-## Required
-
-- moq-dev/moq#5849 merges: it adds the `gaps` count to `Release::stats` that the skipped and cut group assertions read
-
 ## Related
 
 - [Automated validation](/test/ts/README.md) - shared graders, profiles and known-bad controls

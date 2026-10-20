@@ -40,14 +40,14 @@ duplicate it.
 
 Audit evidence (2026-10-19, second checkpoint, incomplete):
 
-- History: no night has reached `gh-pages`. The Benchmark site job built
+- History: no night reached `gh-pages` before October 20. The Benchmark site job built
   the full dev shell without the cachix substituter and hit its 15-minute
   timeout (jobs 117680366708 and 118138225497). This run takes only `just`
   from the pinned nixpkgs there, and a nightly tooling test requires
   every dev-shell job to trust the Nix cache. Pages now serves `gh-pages` at
-  git.moq.dev (see [benchmark trend site](/quest/m2/bench-site.md)) and the
-  branch holds Nightly results; check that it gains a commit per night before
-  comparing against it.
+  git.moq.dev (see [benchmark trend site](/quest/m2/bench-site.md)), and the
+  October 20 Nightly pushed the first results (`f13283b30`); check that it
+  gains a commit per night before comparing against it.
 - Rust: both the October 18 (`50da59e67`) and October 19 (`ad87ad34e`)
   Nightlies retain `bench-rust` (1,527 series each); the earlier note that
   the 19th had none was wrong. Across 1,682 cost series the median change is

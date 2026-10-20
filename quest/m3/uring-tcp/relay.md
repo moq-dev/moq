@@ -10,9 +10,12 @@ then pinned to one thread for its whole life, exactly like a QUIC one.
 
 `uring::Workers::bind` (`rs/moq-relay/src/uring.rs`) serves QUIC only. The
 relay serves `listen`'s `tcp`/`unix` listeners beside it from the shared tokio
-runtime, through `init_streams` (`rs/moq-relay/src/relay.rs`). Move them onto
-the workers: each worker binds its own listener in the reuseport group and
-runs the router from [stream](/quest/m3/uring-tcp/stream.md) on it.
+runtime, through `init_streams` (`rs/moq-relay/src/relay.rs`). Move the TCP
+listeners onto the workers: each worker binds its own listener in the
+reuseport group and runs the router from
+[stream](/quest/m3/uring-tcp/stream.md) on it. A Unix socket has no reuseport
+group, so a `unix` listener keeps its one shared acceptor; the integration
+test covers it too.
 
 The split of work stays what the `uring.rs` module docs already describe: the worker
 owns everything transport-shaped, while authentication and session
