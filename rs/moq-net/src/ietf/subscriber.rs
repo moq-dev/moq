@@ -16039,12 +16039,12 @@ mod track_property_tests {
 		}
 	}
 
-	/// A sealed DEFAULT_PUBLISHER_GROUP_ORDER the relay does not serve refuses the track:
-	/// egress would forward it in place of the order the relay restates.
+	/// A sealed DEFAULT_PUBLISHER_GROUP_ORDER is advisory: the relay accepts the track, serves
+	/// its own order, and keeps the sealed block to forward unchanged.
 	#[moq_clock::test]
-	async fn a_sealed_group_order_the_relay_does_not_serve_refuses_the_track() {
+	async fn a_sealed_group_order_the_relay_does_not_serve_is_accepted() {
 		for version in VERSIONS {
-			for (order, ok) in [(2, true), (1, false)] {
+			for order in [2, 1] {
 				let sealed = Property {
 					id: 0x0b,
 					value: Value::Bytes(
@@ -16058,11 +16058,14 @@ mod track_property_tests {
 						.into(),
 					),
 				};
-				let (subscribed, _probe) = subscribe(version, &block(version, &[sealed])).await;
-				match ok {
-					true => assert!(subscribed.is_ok(), "{version}: {order}"),
-					false => assert!(matches!(subscribed, Err(Error::Unsupported)), "{version}: {order}"),
-				}
+				let (subscribed, _probe) = subscribe(version, &block(version, std::slice::from_ref(&sealed))).await;
+				let subscriber = subscribed.unwrap_or_else(|err| panic!("{version}: {order}: {err}"));
+				let properties = subscriber
+					.info()
+					.properties
+					.clone()
+					.expect("the sealed block was dropped");
+				assert_eq!(properties.values, [sealed], "{version}: {order}");
 			}
 		}
 	}

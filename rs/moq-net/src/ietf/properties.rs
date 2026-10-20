@@ -380,7 +380,8 @@ impl TrackProperties {
 			MAX_CACHE_DURATION => sealed.max_cache_duration != restated.max_cache_duration,
 			TIMESCALE => sealed.timescale != restated.timescale,
 			DEFAULT_PUBLISHER_PRIORITY => sealed.priority != restated.priority,
-			DEFAULT_PUBLISHER_GROUP_ORDER => sealed.group_order != restated.group_order,
+			// Advisory: a relay serves its own order and forwards the publisher's preference.
+			DEFAULT_PUBLISHER_GROUP_ORDER => false,
 			DYNAMIC_GROUPS => sealed.dynamic_groups != restated.dynamic_groups,
 			_ => unreachable!("only the understood properties are seen"),
 		})
@@ -848,13 +849,37 @@ mod tests {
 	}
 
 	#[test]
-	fn a_sealed_group_order_matches_the_track() {
-		assert!(seal(DEFAULT_PUBLISHER_GROUP_ORDER, 2).is_none());
-		// The relay serves the newest group first, so it cannot forward Ascending.
-		assert!(matches!(
-			seal(DEFAULT_PUBLISHER_GROUP_ORDER, 1),
-			Some(crate::Error::Unsupported)
-		));
+	fn a_sealed_group_order_is_advisory() {
+		// The relay serves the newest group first, but forwards the publisher's preference.
+		for order in [1, 2] {
+			assert!(seal(DEFAULT_PUBLISHER_GROUP_ORDER, order).is_none(), "{order}");
+		}
+
+		// Egress forwards the sealed block unchanged and restates no mutable order beside it.
+		let version = Version::Draft22;
+		let mut sealed = Vec::new();
+		let w = &mut Encoder::new(&mut sealed, version.into());
+		w.varint(DEFAULT_PUBLISHER_GROUP_ORDER).unwrap();
+		w.varint(1).unwrap();
+		let unknown = TrackProperties {
+			values: vec![Property {
+				id: IMMUTABLE,
+				value: Value::Bytes(sealed.clone().into()),
+			}],
+			encoding: Some(super::super::object::encoding(version)),
+			delivery_timeout: true,
+		};
+		let egress = Properties {
+			unknown: unknown.clone(),
+			..Properties::restated(&crate::track::Info::default())
+		};
+		let mut buf = Vec::new();
+		egress
+			.encode(&mut Encoder::new(&mut buf, version.into()), version)
+			.unwrap();
+		let decoded = decode_draft22(&buf).unwrap();
+		assert_eq!(decoded.group_order, Some(GroupOrder::Ascending));
+		assert_eq!(decoded.unknown, unknown);
 	}
 
 	#[test]
