@@ -9,7 +9,8 @@ moq.dev clients in englishm/moq-interop-runner (`builds/moq-dev-rs`,
 with `close()` instead of aborting.
 
 Check: read the moq-tokio and `@moq/net` changelogs for a release with the
-withdrawing `close()`. Delete this quest once the runner change is posted.
+withdrawing `close()`. Delete this quest once the runner's moq.dev clients use that release's
+`close()`.
 
 ## Plan
 

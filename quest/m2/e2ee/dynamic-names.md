@@ -2,7 +2,7 @@
 
 ## Goal
 
-A written design, approved by the maintainer before any implementation, for
+A written design, approved by the maintainer before any dynamic-name implementation, for
 how an e2ee publisher answers a request for a track name it never declared.
 It compares at least three options against the threat model of
 [draft-lcurley-moq-e2ee](/drafts/draft-lcurley-moq-e2ee.md):

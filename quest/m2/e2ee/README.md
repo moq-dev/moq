@@ -46,7 +46,7 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ### Dynamic names
 
-Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so a publisher cannot answer a request for a name it never declared. [Dynamic names](/quest/m2/e2ee/dynamic-names.md) designs that before any implementation. The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876) with `reserve_track`, which covers names declared in advance; that is every track the Rust publishers serve, so [rust-publish](/quest/m2/e2ee/rust-publish.md) does not wait on the design (maintainer, 2026-10-19). [Reopen](/quest/m2/e2ee/reopen.md) and the [consumer shape](/quest/m2/e2ee/consumer.md) still do.
+Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so a publisher cannot answer a request for a name it never declared. [Dynamic names](/quest/m2/e2ee/dynamic-names.md) designs that before any dynamic-name implementation. The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876) with `reserve_track`, which covers names declared in advance; that is every track the Rust publishers serve, so [rust-publish](/quest/m2/e2ee/rust-publish.md) does not wait on the design (maintainer, 2026-10-19). [Reopen](/quest/m2/e2ee/reopen.md) and the [consumer shape](/quest/m2/e2ee/consumer.md) still do.
 
 ## Required
 

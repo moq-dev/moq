@@ -15,7 +15,7 @@ Decided by the maintainer on 2026-10-19, over clearing a history playlist to
 an ended empty one (still reads as finished) and an in-band marker (HLS and
 DASH have none; `EXT-X-GAP` needs durations a failed timeline cannot give).
 
-Failures take two paths today, and both end the playlist as finished:
+Failures take three paths today, and both end the playlist as finished:
 
 - The shared reference timeline: `watch_timeline`
   (`rs/moq-hls/src/export/mod.rs`) calls `renditions::Fanout::finish` on
