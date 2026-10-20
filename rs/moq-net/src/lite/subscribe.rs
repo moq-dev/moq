@@ -412,6 +412,8 @@ impl Message for SubscribeEnd {
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct SubscribeUpdate {
+	/// A join requesting this group or later, judged against the local refresh ratio.
+	pub wanted_group: Option<u64>,
 	pub priority: u8,
 	pub max_delay: std::time::Duration,
 	pub start_group: Option<u64>,
@@ -445,7 +447,17 @@ impl Message for SubscribeUpdate {
 		let (start_frame, end_frame) = decode_frame_bounds(r, version, start_group, end_group)?;
 		let start_group = canonical_start_group(version, start_group, start_frame);
 
+		let wanted_group = if matches!(
+			version,
+			Version::Lite03 | Version::Lite04 | Version::Lite05 | Version::Lite06
+		) {
+			None
+		} else {
+			r.varint()?.checked_sub(1)
+		};
+
 		Ok(Self {
+			wanted_group,
 			priority,
 			max_delay,
 			start_group,
@@ -481,6 +493,12 @@ impl Message for SubscribeUpdate {
 			self.end_frame,
 		)?;
 
+		if !matches!(
+			version,
+			Version::Lite03 | Version::Lite04 | Version::Lite05 | Version::Lite06
+		) {
+			w.varint_opt(self.wanted_group)?;
+		}
 		Ok(())
 	}
 }
@@ -933,6 +951,34 @@ mod test {
 	/// Lite-07 carries `Group Order` right after the priority, on SUBSCRIBE and
 	/// SUBSCRIBE_UPDATE alike, and refuses a value it does not define.
 	#[test]
+	fn wanted_group_roundtrips_only_on_lite07() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for wanted in [None, Some(0), Some(1), Some(u64::MAX - 1)] {
+				let update = SubscribeUpdate {
+					wanted_group: wanted,
+					priority: 0,
+					max_delay: std::time::Duration::ZERO,
+					start_group: None,
+					end_group: None,
+					start_frame: 0,
+					end_frame: None,
+					order: crate::track::Order::Descending,
+				};
+				let buf = update.encode_bytes(version).unwrap();
+				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, SubscribeUpdate::decode).unwrap();
+				assert_eq!(
+					got.wanted_group,
+					if matches!(version, Version::Lite07) {
+						wanted
+					} else {
+						None
+					}
+				);
+			}
+		}
+	}
+
+	#[test]
 	fn group_order_roundtrips_on_lite07() {
 		use crate::track::Order;
 
@@ -947,6 +993,7 @@ mod test {
 			assert_eq!(got.order, order);
 
 			let update = SubscribeUpdate {
+				wanted_group: None,
 				priority: 3,
 				max_delay: std::time::Duration::from_millis(250),
 				start_group: None,

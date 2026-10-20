@@ -312,3 +312,12 @@ test.each([Version.DRAFT_03, Version.DRAFT_05, Version.DRAFT_06])(
 		expect(decoded.order).toBe("descending");
 	},
 );
+
+test("wanted group survives lite-07 and disappears on legacy wires", async () => {
+	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+		const update = new SubscribeUpdate({ priority: 7, wantedGroup: 3 });
+		const encoded = await encodeMessage(version, update);
+		const decoded = await SubscribeUpdate.decode(new Reader(undefined, encoded, version), version);
+		expect(decoded.wantedGroup).toBe(version === Version.DRAFT_07 ? 3 : undefined);
+	}
+});

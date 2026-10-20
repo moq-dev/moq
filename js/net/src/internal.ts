@@ -283,6 +283,8 @@ export type RecvDatagram =
  * buffer of its own. Implemented by `resume.ts`, the counterpart of the Rust `Inner::Resume`.
  */
 export interface ResumeSource {
+	/** Re-evaluate a live-edge join at the serving copy. */
+	join(): void;
 	/** The next group not in `delivered`, in arrival or sequence order, without waiting. */
 	tryGroup(ordered: boolean, delivered: Delivered): Recv;
 	/**
@@ -349,6 +351,10 @@ export const hooks: {
 	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
 	 * `track.ts`.
 	 */
+	/** Re-evaluate a live-edge join at this subscriber's copy. */
+	joinSubscriber: (subscriber: Subscriber) => void;
+	/** Re-evaluate a live-edge join at a producer. */
+	joinProducer: (producer: Producer) => void;
 	startTrack: (producer: Producer, served: { start: number; requested?: number }) => void;
 	// pending: /quest/m1/public-model/ingest.md
 	/**
@@ -486,6 +492,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	endTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	joinProducer: () => {
+		throw new Error("track.ts not loaded");
+	},
+	joinSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	startTrack: () => {

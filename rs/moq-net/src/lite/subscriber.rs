@@ -5138,7 +5138,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 							if start_moved {
 								let _ = producer.start_at(active.start.map(|start| start.group));
 							}
-							buffer_update(active, subscription.end())?;
+							buffer_update(active, subscription.end(), None)?;
 						}
 						Ok(Begin::None)
 					}
@@ -5291,9 +5291,11 @@ enum Begin<S: crate::transport::poll::Session> {
 fn buffer_update<S: crate::transport::poll::Session>(
 	active: &mut SubStream<S>,
 	end: Option<Position>,
+	wanted: Option<u64>,
 ) -> Result<(), Error> {
 	let bounds = WireBounds::new(active.start, end);
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
+		wanted_group: wanted,
 		priority: active.priority,
 		max_delay: active.max_delay,
 		start_group: bounds.start_group,
@@ -5682,7 +5684,8 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					let model = track::Info::default()
 						.with_timescale(info.timescale)
 						.with_max_age(info.max_age)
-						.with_priority(info.priority);
+						.with_priority(info.priority)
+						.with_refresh(info.refresh);
 					return Poll::Ready(Ok((model, HeldTrack(stream))));
 				}
 			}
@@ -5712,6 +5715,8 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	/// through the producer's aggregate (including the resume floor after a source
 	/// change).
 	serving: track::Producer,
+	largest: Option<u64>,
+	wanted: Option<u64>,
 	/// Watches `serving`'s subscribers, to release the copy once nobody reads it.
 	demand: track::Demand,
 	/// Serve on-demand fetches of uncached groups from this session.
@@ -5922,6 +5927,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 		let serving = request.accept(info);
 		serving.received();
 		Self {
+			largest: None,
+			wanted: None,
 			demand: serving.demand(),
 			serving,
 			dynamic,
@@ -5956,7 +5963,10 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					let id = est.id;
 					self.mode = ServeMode::Select;
 					match res {
-						Ok(active) => self.sub = Sub::Active(active),
+						Ok(active) => {
+							self.wanted = None;
+							self.sub = Sub::Active(active);
+						}
 						Err(err) => {
 							// Opening the upstream failed (usually the session dying): hand
 							// the track back for another route to resume.
@@ -6046,6 +6056,30 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						}
 						Poll::Ready(Err(err)) => return Poll::Ready(ServeEnd::GiveBack(err)),
 						Poll::Pending => {}
+					}
+
+					// Each stream carries at most one outstanding refresh. Its new SUBSCRIBE
+					// already counted as a join at the upstream hop.
+					if matches!(serve.subscriber.version, Version::Lite07) {
+						if let Poll::Ready(Some(largest)) = self.serving.poll_largest(waiter) {
+							self.largest = Some(largest.group);
+						}
+						let _ = self.demand.poll_wanted_changed(waiter);
+						if let Sub::Active(active) = &mut self.sub
+							&& let Some(largest) = self.largest
+							&& self.wanted.is_none_or(|wanted| largest >= wanted)
+							&& let Some(wanted) = self.demand.wanted().filter(|wanted| *wanted > largest)
+						{
+							self.wanted = Some(wanted);
+							if let Err(err) = buffer_update(
+								active,
+								self.serving.subscription().and_then(|sub| sub.end()),
+								Some(wanted),
+							) {
+								return Poll::Ready(ServeEnd::GiveBack(err));
+							}
+							continue;
+						}
 					}
 
 					// (2) In-flight fetches; completions just retire. The demand is settled,

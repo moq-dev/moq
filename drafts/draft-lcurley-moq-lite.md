@@ -1198,12 +1198,20 @@ SUBSCRIBE_UPDATE Message {
   Group End (i)
   Frame Start (i)
   Frame End (i)
+  Wanted Group (i)
 }
 ~~~
 
 See [SUBSCRIBE](#subscribe) for information about each field.
 Moving `Frame Start` forward within a group that is already being delivered does not retract frames the publisher has already sent; like `Group Start`, it only bounds what the publisher sends from here on.
 
+
+**Wanted Group**:
+A live-edge join requesting this group or later, encoded as the sequence plus one; `0` means no request.
+A publisher MUST ignore a request at or below its largest group, and otherwise evaluate it as a new SUBSCRIBE under the Track's Refresh ratio.
+A relay sends a request when local demand wants a group beyond its largest, and MUST NOT send another until its largest reaches the requested group.
+The pending request ends with the subscription.
+A new SUBSCRIBE itself counts as a join and needs no Wanted Group field.
 
 ## TRACK
 TRACK is sent by a subscriber to request a Track's immutable publisher properties.
@@ -1239,6 +1247,7 @@ TRACK_INFO Message {
   Publisher Priority (8)
   Publisher Max Age (i)
   Timescale (i)
+  Refresh (i)
 }
 ~~~
 
@@ -1270,6 +1279,13 @@ See the [Expiration](#expiration) section for more information.
 The number of timestamp units per second for frame timestamps on this Track, or `0` for an untimed Track, whose FRAME messages and datagrams carry no timestamp.
 lite-05 and lite-06 have no untimed encoding: there it MUST be non-zero, and a subscriber that receives 0 MUST reset the stream with a protocol violation.
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
+
+**Refresh**:
+An optional unsigned 32-bit byte ratio, encoded as the ratio plus one; `0` disables refresh.
+On a live-edge join, a publisher asks for a group beyond every sequence already produced when the newest group's bytes after its first frame exceed the ratio times that first frame's bytes.
+Joins coalesce until the requested group arrives.
+A relay preserves the ratio and evaluates joins against its own cache, forwarding demand in SUBSCRIBE_UPDATE.
+Lite-05/06 omit Refresh and Wanted Group; a Track received on those versions never refreshes.
 
 ## SUBSCRIBE_OK {#subscribe-ok}
 A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start position.
@@ -1585,6 +1601,8 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-07
+
+- Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 
 - A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's. Receivers do not check it, since a received timestamp may be a send time.
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.

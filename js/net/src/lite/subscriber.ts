@@ -954,6 +954,7 @@ export class Subscriber {
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
 			priority: info.priority,
+			refresh: info.refresh,
 		};
 	}
 
@@ -1294,11 +1295,23 @@ export class Subscriber {
 			},
 		};
 
+		let pendingWanted: number | undefined;
+		const demand = track.demand();
 		for (;;) {
+			const largest = hooks.cachedLargest(track)?.group;
+			const wanted = demand.wanted.peek();
+			const refresh =
+				this.version === Version.DRAFT_07 &&
+				largest !== undefined &&
+				(pendingWanted === undefined || largest >= pendingWanted) &&
+				wanted !== undefined &&
+				wanted > largest
+					? wanted
+					: undefined;
 			const current = track.subscription.peek();
-			if (current === undefined || this.#sameSubscription(current, lastSent)) {
+			if (current === undefined || (refresh === undefined && this.#sameSubscription(current, lastSent))) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await race([track.subscription.changed(), stopped]);
+				const next = await race([track.subscription.changed(), demand.wanted.changed(), stopped]);
 				if (next === null) return;
 				continue;
 			}
@@ -1317,6 +1330,7 @@ export class Subscriber {
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxDelay/etc.
 			const update = new SubscribeUpdate({
+				wantedGroup: refresh,
 				priority: current.priority ?? 0,
 				order: current.order,
 				maxDelay: current.maxDelay,
@@ -1334,6 +1348,7 @@ export class Subscriber {
 			} catch {
 				return;
 			}
+			if (refresh !== undefined) pendingWanted = refresh;
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
