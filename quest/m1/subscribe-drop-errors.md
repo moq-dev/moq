@@ -67,7 +67,3 @@ Regression tests: an early DROP settles the dropped group for its reader
 before the track's FIN, on both stacks, including a resumed latest group.
 Update `drafts/draft-lcurley-moq-lite.md` if option 1 changes what Error Code
 means on lite-07, then run `just drafts check` and `just test interop --all`.
-
-## Related
-
-- [Resume reorder](/quest/m1/resume-reorder.md) - late stream headers are not proof that a group was dropped

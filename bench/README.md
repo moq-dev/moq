@@ -344,14 +344,14 @@ The shared Rust benchmark nightly invocation measures both targets in quick mode
 
 ## Nightly trends
 
-The trend site will be at <https://moq-dev.github.io/moq/bench/> once the
-maintainer enables GitHub Pages with **Source: GitHub Actions**. The Nightly
+The trend site is at <https://git.moq.dev/bench/>, linked from the
+[nightly reports](https://git.moq.dev/) root with every other report. The Nightly
 workflow keeps history on one `gh-pages` branch and deploys the generated
 `github-action-benchmark` charts explicitly. The publisher runs only on `main`,
 serializes history writes, and leaves regression alerts and comments disabled.
-Enabling Pages is a separate repository setting; merging the workflow does not
-change it. Until it is enabled, the Nightly's Benchmark site job still records
-history on `gh-pages`, then fails at deployment.
+Re-running its job in place fails, because the earlier attempt's
+`github-pages` artifact remains; delete that artifact first or wait for the
+next Nightly.
 
 The charts include these measurements:
 

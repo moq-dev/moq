@@ -123,6 +123,10 @@ impl Relay {
 
 	async fn load_inner(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
+		// A relay keeps the moq-transport object state it forwards across a moq-lite hop to
+		// another relay. Only negotiated when both sides offer it, so other peers never see it.
+		config.listen.extensions.ietf = true;
+		config.connect.extensions.ietf = true;
 		// Every TLS listener serves the ACME certificate, so install it before any is built.
 		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
 		if let Some(acme) = &acme {

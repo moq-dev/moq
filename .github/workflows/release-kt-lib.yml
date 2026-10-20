@@ -67,13 +67,15 @@ jobs:
   ffi-release:
     name: Check FFI publisher
     runs-on: ubuntu-latest
-    # workflow_run is privileged. Preserve the owner, push and tag gates before
-    # reading the trusted upstream checkout or allowing wrapper publication.
+    # workflow_run is privileged. Preserve the owner, same-repo, push and tag
+    # gates before reading the trusted upstream checkout or allowing wrapper
+    # publication.
     if: >-
       github.event_name != 'workflow_run' ||
       (github.repository_owner == 'moq-dev' &&
        (github.event.workflow_run.name == 'Release FFI' || github.event.workflow_run.conclusion == 'success') &&
        github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
        startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v'))
     permissions:
       contents: read
@@ -179,7 +181,8 @@ jobs:
 
   publish:
     name: Publish wrapper
-    needs: [check-version]
+    # Directly on ffi-release: its gate is what makes the head_sha checkout trusted.
+    needs: [ffi-release, check-version]
     # PRs and nightly always run (dry-run). Pushes publish only when the version is new.
     if: >-
       github.event_name == 'pull_request' || inputs.dry-run ||

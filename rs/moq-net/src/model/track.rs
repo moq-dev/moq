@@ -764,6 +764,7 @@ impl TrackState {
 		if groups.is_empty() {
 			return;
 		}
+		self.cache.wakes().arrived(groups.clone());
 		self.drops.insert(groups);
 		self.drops_revision += 1;
 	}
@@ -1852,6 +1853,29 @@ impl TrackState {
 		}
 	}
 
+	/// A live group, or a verdict from its arrival record, independent of stream order.
+	fn poll_arrival(
+		&self,
+		sequence: u64,
+		now: crate::time::Instant,
+		grace: Duration,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<group::Consumer>> {
+		if let Poll::Ready(group) = self.landing(sequence) {
+			return Poll::Ready(group);
+		}
+		if self.drops.contains(&sequence)
+			|| sequence
+				.checked_add(1)
+				.is_some_and(|end| self.arrivals.covers(sequence..end))
+			|| self.arrivals.folds_at(sequence, grace).is_some_and(|at| at <= now)
+		{
+			return Poll::Ready(None);
+		}
+		self.cache.wakes().watch_arrival(sequence, waiter);
+		Poll::Pending
+	}
+
 	/// Record the declared first sequence of the live feed, replacing any earlier
 	/// declaration: the signal is scoped to the current subscription's demand,
 	/// which may legitimately move in either direction. `None` clears it (the
@@ -2519,15 +2543,12 @@ impl Producer {
 		let mut state = self.modify()?;
 		let info = state.info.as_ref().unwrap();
 		let timescale = info.timescale;
-		if info.compress && datagram.deflated.is_none() {
-			// A datagram is its own group, so it compresses alone.
+		let status = datagram.wire.as_ref().and_then(|wire| wire.status);
+		// A datagram is its own group, so it compresses alone. A status has no payload.
+		if info.compress && datagram.deflated.is_none() && status.is_none() {
 			datagram.deflated = Some(super::flate::Encoder::new().frame(&datagram.payload));
 		}
-		if !datagram
-			.wire
-			.as_ref()
-			.is_some_and(|wire| wire.status.is_some_and(|status| status != 0))
-		{
+		if status.is_none_or(|status| status == 0) {
 			datagram.datagram.timestamp = group::on_track(datagram.timestamp, timescale)?;
 		}
 		if state.final_sequence().is_some_and(|fin| datagram.sequence >= fin) {
@@ -2543,18 +2564,12 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Insert a received datagram of a compressed track: `deflated` is its payload as its
-	/// own DEFLATE stream, which must inflate to exactly `size` bytes. Kept as it arrived,
-	/// beside the inflated payload.
+	/// Insert a received datagram of a compressed track, whose payload is its own DEFLATE
+	/// stream that must inflate to exactly `size` bytes. Kept as it arrived, beside the
+	/// inflated payload.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
-	pub(crate) fn insert_deflated_datagram(
-		&mut self,
-		sequence: u64,
-		timestamp: Option<Timestamp>,
-		deflated: bytes::Bytes,
-		size: u64,
-	) -> Result<()> {
+	pub(crate) fn insert_deflated_datagram(&mut self, mut datagram: super::datagram::Stored, size: u64) -> Result<()> {
 		if !self.info.compress {
 			return Err(Error::ProtocolViolation);
 		}
@@ -2563,17 +2578,10 @@ impl Producer {
 			.ok()
 			.filter(|size| *size <= super::datagram::MAX_DATAGRAM_PAYLOAD)
 			.ok_or(Error::FrameTooLarge)?;
-		let payload = super::flate::Decoder::new().frame(&deflated, size)?;
+		let payload = super::flate::Decoder::new().frame(&datagram.payload, size)?;
 		let inflated = payload.len() as u64;
-		self.insert_wire_datagram(super::datagram::Stored {
-			datagram: Datagram {
-				sequence,
-				timestamp,
-				payload,
-			},
-			wire: None,
-			deflated: Some(deflated),
-		})?;
+		datagram.deflated = Some(std::mem::replace(&mut datagram.datagram.payload, payload));
+		self.insert_wire_datagram(datagram)?;
 		// Only once stored, so a refused datagram counts toward nothing.
 		self.stats.meter().inflated(inflated);
 		Ok(())
@@ -2747,6 +2755,17 @@ impl Producer {
 		}
 		if let Ok(mut state) = self.modify() {
 			state.drop_groups(groups);
+		}
+	}
+
+	/// Restart the age of every arrival gap reaching into `groups`, which the live feed's
+	/// subscription newly asks for.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/ingest.md
+	pub(crate) fn demand_arrivals(&self, groups: ops::Range<u64>) {
+		if let Ok(mut state) = self.modify() {
+			let now = state.cache.pool().now_wall();
+			state.arrivals.demand(groups, now);
 		}
 	}
 
@@ -3657,6 +3676,75 @@ pub(super) enum DemandState {
 	Closed,
 }
 
+/// A watch-only handle to a track's live arrivals.
+// Legacy fetch batches share one ledger read per poll.
+// private: tuning
+pub(crate) struct Arrivals {
+	state: kio::ConsumerWeak<TrackState>,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+impl Arrivals {
+	/// Whether both handles watch the same track.
+	// A fetch batch may share only one track's arrival ledger.
+	// private: tuning
+	pub(crate) fn same_channel(&self, other: &Self) -> bool {
+		self.state.same_channel(&other.state)
+	}
+
+	/// Read the ledger and wake its owner when arrivals or terminal bounds change.
+	// One owner watch opens batch deadlines without waking each held fetch.
+	// private: tuning
+	pub(crate) fn poll(&self, waiter: &kio::Waiter) -> ArrivalRead<'_> {
+		let _ = self.state.poll(waiter, |_| Poll::<()>::Pending);
+		let state = self.state.read();
+		let max_delay = clamp_max_delay(state.subscriptions.lock().max_delay(), state.max_age_bound());
+		ArrivalRead {
+			state,
+			grace: ledger::grace(max_delay),
+		}
+	}
+}
+
+/// A locked arrival ledger, so a batch never copies or re-locks its runs per fetch.
+// private: tuning
+pub(crate) struct ArrivalRead<'a> {
+	state: kio::Ref<'a, TrackState>,
+	grace: Duration,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+impl ArrivalRead<'_> {
+	/// Whether the live feed can no longer deliver any missing group.
+	// The batch checks closure without re-locking the track.
+	// private: tuning
+	pub(crate) fn is_closed(&self) -> bool {
+		self.state.is_closed()
+	}
+
+	/// Gaps that can expire held fetches, including the gap before the first arrival.
+	// Only the session's held-fetch deadline index needs all live gaps.
+	// private: tuning
+	pub(crate) fn folds(&self) -> impl Iterator<Item = (ops::Range<u64>, crate::time::Instant)> + '_ {
+		self.state.arrivals.folds(self.grace)
+	}
+
+	/// Judge one live group and register only for its own arrival or terminal bound.
+	// Legacy wires lack FETCH, so held requests need the live-feed verdict.
+	// private: capability gap
+	pub(crate) fn poll_group(
+		&self,
+		sequence: u64,
+		now: crate::time::Instant,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<group::Consumer>> {
+		match self.state.poll_arrival(sequence, now, self.grace, waiter) {
+			Poll::Pending if self.state.is_closed() => Poll::Ready(None),
+			res => res,
+		}
+	}
+}
+
 /// A lazy handle to a single track within a broadcast.
 ///
 /// Obtained from [`broadcast::Consumer::track`]. Holding it sends nothing and is not
@@ -3864,24 +3952,49 @@ impl Consumer {
 		})
 	}
 
-	/// Poll for group `sequence` the way the live feed delivers it: `Some` once it is
-	/// cached, `None` once the feed will not deliver it (it went past it, starts past it,
-	/// or ended), and pending while it still may.
+	/// The live arrivals of the track this handle reads now, without joining its demand.
+	// This batch view avoids per-fetch ledger copies and locks in the session.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: tuning
+	pub(crate) fn arrivals(&self) -> Option<Arrivals> {
+		self.with_state(|state| state.map(|state| Arrivals { state: state.clone() }))
+	}
+
+	/// Poll for a cached group, a terminal disposition, or a gap outliving its grace.
 	// private: test
 	pub(crate) fn poll_group(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Ready(None);
 			};
-			let res = state.poll(waiter, |state| match state.landing(sequence) {
-				Poll::Pending if state.max_sequence.is_some_and(|newest| newest > sequence) => Poll::Ready(None),
-				landed => landed,
+			let res = state.poll(waiter, |state| {
+				let max_delay = clamp_max_delay(state.subscriptions.lock().max_delay(), state.max_age_bound());
+				let grace = ledger::grace(max_delay);
+				let now = state.cache.pool().now_wall();
+				let res = state.poll_arrival(sequence, now, grace, waiter);
+				if res.is_pending() {
+					let Some(at) = state.arrivals.folds_at(sequence, grace) else {
+						// No later arrival yet: only this wait uses the track's change channel.
+						return Poll::Pending;
+					};
+					state.cache.watch_wall(at, waiter);
+				}
+				// A known gap waits on its own arrival and deadline, not unrelated writes.
+				Poll::Ready(res)
 			});
-			match res {
-				Poll::Ready(Ok(group)) => Poll::Ready(group),
+			let res = match res {
+				Poll::Ready(Ok(res)) => res,
 				Poll::Ready(Err(_)) => Poll::Ready(None),
 				Poll::Pending => Poll::Pending,
+			};
+			if res.is_pending() && state.poll_closed(waiter).is_ready() {
+				// A cached arrival may have raced closure after the first lookup.
+				return Poll::Ready(match state.read().landing(sequence) {
+					Poll::Ready(group) => group,
+					Poll::Pending => None,
+				});
 			}
+			res
 		})
 	}
 
@@ -3903,31 +4016,6 @@ impl Consumer {
 		for group in copies {
 			group.adopt_head(head);
 		}
-	}
-
-	/// [`Self::poll_group`], except a newer group is no verdict: QUIC does not order
-	/// streams, so this one may still land behind it. Pending until it is cached, or the
-	/// feed starts past it or ends before it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/deferred.md
-	pub(crate) fn poll_landed(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
-		self.with_state(|weak| {
-			let Some(weak) = weak else {
-				return Poll::Ready(None);
-			};
-			let state = weak.read();
-			if let Poll::Ready(group) = state.landing(sequence) {
-				return Poll::Ready(group);
-			}
-			// Register under the track lock, so an insert cannot slip between the lookup
-			// and its exact-group registration. Closure has a separate channel waiter.
-			state.cache.wakes().watch_arrival(sequence, waiter);
-			drop(state);
-			match weak.poll_closed(waiter) {
-				Poll::Ready(()) => Poll::Ready(None),
-				Poll::Pending => Poll::Pending,
-			}
-		})
 	}
 
 	/// Poll for group `sequence` falling a full `budget`, clamped to this track's retention,
@@ -5941,11 +6029,21 @@ impl Subscriber {
 	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
 	/// is aborted, or `Poll::Pending` when none is buffered yet.
 	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
-		let datagram = ready!(self.poll_recv_stored_datagram(waiter))?;
-		if let Some(datagram) = &datagram {
+		loop {
+			let Some(datagram) = ready!(self.poll_recv_stored_datagram(waiter))? else {
+				return Poll::Ready(Ok(None));
+			};
+			// A moq-transport status is no datagram an application can read.
+			if datagram
+				.wire
+				.as_ref()
+				.is_some_and(|wire| wire.status.is_some_and(|status| status != 0))
+			{
+				continue;
+			}
 			self.meter_datagram(datagram.payload.len() as u64);
+			return Poll::Ready(Ok(Some(datagram.datagram)));
 		}
-		Poll::Ready(Ok(datagram.map(|datagram| datagram.datagram)))
 	}
 
 	/// Count a datagram handed on as `bytes` of payload, the single-frame group it stands in
@@ -5955,49 +6053,32 @@ impl Subscriber {
 		self.stats.meter().datagram(bytes);
 	}
 
-	/// [`Self::poll_recv_datagram`], keeping what is stored beside the payload: a compressed
-	/// track's DEFLATE slice. Unmetered: the caller meters the form it hands on with
-	/// [`Self::meter_datagram`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	/// The next datagram as the track stores it: its wire metadata, any status, and a
+	/// compressed track's DEFLATE slice. Unmetered: the caller meters the form it hands on
+	/// with [`Self::meter_datagram`].
 	// private: passthrough
 	pub(crate) fn poll_recv_stored_datagram(
 		&mut self,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<super::datagram::Stored>>> {
-		loop {
-			let Some(datagram) = ready!(self.poll_recv_unmetered_datagram(waiter))? else {
-				return Poll::Ready(Ok(None));
-			};
-			if datagram
-				.wire
-				.as_ref()
-				.is_some_and(|wire| wire.status.is_some_and(|status| status != 0))
-			{
-				continue;
-			}
-			return Poll::Ready(Ok(Some(datagram)));
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.poll_recv_datagram(waiter),
+			Inner::Resume(resume, _) => resume.poll_recv_datagram(&self.delivered, waiter),
 		}
 	}
 
-	/// The next datagram with its wire metadata, metered as its plain payload: for a session
-	/// that never carries compression.
+	/// [`Self::poll_recv_stored_datagram`], metered as its plain payload: for a session that
+	/// never carries compression.
 	// private: passthrough
 	pub(crate) fn poll_recv_wire_datagram(
 		&mut self,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<super::datagram::Stored>>> {
-		let res = self.poll_recv_unmetered_datagram(waiter);
+		let res = self.poll_recv_stored_datagram(waiter);
 		if let Poll::Ready(Ok(Some(datagram))) = &res {
 			self.meter_datagram(datagram.payload.len() as u64);
 		}
 		res
-	}
-
-	fn poll_recv_unmetered_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<super::datagram::Stored>>> {
-		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll_recv_datagram(waiter),
-			Inner::Resume(resume, _) => resume.poll_recv_datagram(&self.delivered, waiter),
-		}
 	}
 
 	/// Receive the next datagram in arrival order.
@@ -6800,6 +6881,36 @@ mod test {
 	/// Let `duration` pass on the cache pool `producer`'s groups charge into.
 	fn elapse(producer: &Producer, duration: Duration) {
 		producer.broadcast.pool.step(duration);
+	}
+
+	#[test]
+	fn a_missing_group_uses_the_subscription_grace() {
+		let producer = track_producer("test", Info::default());
+		let budget = Duration::from_millis(50);
+		let _sub = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let feed = producer.consume();
+		let waiter = kio::Waiter::noop();
+		producer
+			.create_group(group::Info { sequence: 1 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		assert!(feed.poll_group(0, &waiter).is_pending());
+		assert!(feed.poll_group(u64::MAX, &waiter).is_pending());
+		elapse(&producer, budget / 2);
+		assert!(feed.poll_group(0, &waiter).is_pending());
+		elapse(&producer, budget / 2);
+		assert!(matches!(feed.poll_group(0, &waiter), Poll::Ready(None)));
+	}
+
+	#[test]
+	fn an_explicit_drop_does_not_wait_for_an_arrival_gap() {
+		let producer = track_producer("test", Info::default());
+		let feed = producer.consume();
+		let waiter = kio::Waiter::noop();
+		assert!(feed.poll_group(1, &waiter).is_pending());
+		producer.drop_groups(1..2);
+		assert!(matches!(feed.poll_group(1, &waiter), Poll::Ready(None)));
 	}
 
 	/// A bounded replay window for tests whose subject requires every buffered group.
@@ -7827,13 +7938,14 @@ mod test {
 			timestamp: Some(d.timestamp.unwrap().value()),
 			payload: d.payload.clone(),
 			inflated: None,
+			ietf: None,
 		}
 		.encode_bytes(version)
 		.unwrap();
 
 		// Subscriber decodes the body and writes it downstream, preserving the sequence.
-		let wire = lite::Datagram::decode(body, version, |_| lite::Format {
-			timed: true,
+		let wire = lite::Datagram::decode(body, version, false, |_| lite::Format {
+			timescale: Some(crate::Timescale::MICRO),
 			compressed: false,
 		})
 		.unwrap();

@@ -95,7 +95,8 @@ impl Client {
 		self
 	}
 
-	/// Choose which moq-transport extensions to offer in SETUP. Defaults to all of them.
+	/// Choose which extensions to offer in SETUP. Defaults to every moq-transport one, and
+	/// not [`ietf`](setup::Extensions::ietf), which only relays turn on.
 	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
 		self.extensions = extensions;
 		self
@@ -200,6 +201,7 @@ impl Client {
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				ietf: self.extensions.ietf && version.has_ietf(),
 			}
 		} else {
 			lite::Setup::default()

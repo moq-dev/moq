@@ -1937,6 +1937,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 		writer: &mut Writer<S::SendStream, Version>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
+		let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
 		let info = ready!(self.querying.poll_ok(waiter))?;
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
@@ -1948,6 +1949,9 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 			// An older peer is served the frames inflated.
 			compress: info.compress && shared.version.has_compression(),
 		})?;
+		if ietf {
+			writer.buffer(&lite::ietf::TrackProperties(info.properties.clone()))?;
+		}
 		Poll::Ready(Ok(ControlFlow::Break(())))
 	}
 }
@@ -2034,6 +2038,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		loop {
 			match self {
 				Self::Confirm { subscribing, .. } => {
+					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
 					let mut track = ready!(subscribing.poll_ok(waiter))?;
 					let Self::Confirm {
 						msg, latest, update, ..
@@ -2091,6 +2096,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						timescale,
 						runtime: shared.runtime.clone(),
 						outcomes: Default::default(),
+						ietf,
 					};
 
 					let bounds = Bounds::from(msg.as_ref());
@@ -2153,8 +2159,13 @@ enum FetchServe {
 		chunk: Option<bytes::Bytes>,
 		batch: Box<Objects>,
 		batch_pos: usize,
+		/// The `ietf` extension's object records, when negotiated.
+		records: Option<lite::ietf::Records>,
 	},
 }
+
+/// A batch of frames read for egress, each with what the wire needs beside it.
+type Objects = arrayvec::ArrayVec<frame::Object, 8>;
 
 impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 	const KIND: &'static str = "fetch";
@@ -2202,6 +2213,8 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 		loop {
 			match self {
 				Self::Fetch { msg, fetching } => {
+					// Before the group: a fetched group polled while this waited would be lost.
+					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
 					let mut group = ready!(kio::Task::poll(fetching, waiter))?;
 
 					// The response carries no header, so a short run is indistinguishable
@@ -2222,6 +2235,8 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					if shared.version.has_compression() {
 						group = group.compressed();
 					}
+					let capped = msg.end_frame.is_some();
+					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale, shared.version)?;
 
 					*self = Self::Serve {
 						group,
@@ -2231,6 +2246,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 						chunk: None,
 						batch: Box::default(),
 						batch_pos: 0,
+						records,
 					};
 				}
 				Self::Serve {
@@ -2241,6 +2257,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					chunk,
 					batch,
 					batch_pos,
+					records,
 				} => {
 					let mut cx = waiter.context();
 					loop {
@@ -2256,7 +2273,11 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 								None => *frame = None,
 							}
 						} else if *batch_pos < batch.len() {
+							let index = group.index() - batch.len() as u64 + *batch_pos as u64;
 							let batched = &mut batch[*batch_pos];
+							if let Some(records) = records {
+								records.frame(writer, index, batched.fields.as_deref())?;
+							}
 							buffer_frame_info(
 								writer,
 								batched.frame.timestamp,
@@ -2278,12 +2299,20 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 									*batch_pos = 0;
 									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
-								Poll::Ready(Ok(_)) => return Poll::Ready(Ok(ControlFlow::Break(()))),
+								Poll::Ready(Ok(_)) => {
+									if let Some(records) = records {
+										records.end(writer, group)?;
+									}
+									return Poll::Ready(Ok(ControlFlow::Break(())));
+								}
 								Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 								Poll::Pending => {}
 							}
 							match ready!(group.poll_next_frame(waiter))? {
 								Some(next) => {
+									if let Some(records) = records {
+										records.frame(writer, group.index() - 1, next.fields.as_deref())?;
+									}
 									buffer_frame_info(
 										writer,
 										next.timestamp,
@@ -2296,7 +2325,12 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 									*frame = Some(next);
 									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
-								None => return Poll::Ready(Ok(ControlFlow::Break(()))),
+								None => {
+									if let Some(records) = records {
+										records.end(writer, group)?;
+									}
+									return Poll::Ready(Ok(ControlFlow::Break(())));
+								}
 							}
 						}
 					}
@@ -3291,9 +3325,6 @@ fn buffer_zigzag_delta<W: crate::transport::poll::SendStream>(
 	Ok(())
 }
 
-/// A batch of frames read for egress, each with what the wire needs beside it.
-type Objects = arrayvec::ArrayVec<frame::Object, 8>;
-
 /// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
 /// best-effort datagram to forward, the track declaring its exclusive final sequence, or
 /// the track finishing (the live edge having reached that boundary).
@@ -3498,6 +3529,8 @@ struct Subscription<S: crate::transport::poll::Session> {
 	runtime: crate::time::Deadlines,
 	/// Outcomes shared by the subscription and every group it serves.
 	outcomes: Arc<GroupOutcomes>,
+	/// Whether the session negotiated the `ietf` extension, so streams carry relay state.
+	ietf: bool,
 }
 
 /// Group outcomes the subscription must report even if no header reached the peer.
@@ -3518,12 +3551,35 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 	/// transport's datagram limit or the send fails (congestion / no capacity right now).
 	/// Returns whether it was handed to the transport.
 	fn serve_datagram(&mut self, datagram: crate::model::datagram::Stored) -> bool {
+		// Only the `ietf` extension can say a datagram is a status rather than a payload.
+		let status = datagram
+			.wire
+			.as_ref()
+			.is_some_and(|wire| wire.status.is_some_and(|status| status != 0));
+		if status && !self.ietf {
+			return false;
+		}
 		let Ok(timestamp) = self
 			.timescale
+			.filter(|_| !status)
 			.map(|timescale| wire_timestamp(datagram.timestamp, timescale, &self.runtime))
 			.transpose()
 		else {
 			return false;
+		};
+		let ietf = match (self.ietf, &datagram.wire) {
+			(false, _) => None,
+			(true, None) => Some(None),
+			// A sealed Timestamp keeps its units, which the receiver reads as the track's.
+			(true, Some(wire))
+				if wire
+					.properties
+					.sealed_time
+					.is_some_and(|sealed| self.timescale != Some(sealed.scale())) =>
+			{
+				return false;
+			}
+			(true, Some(wire)) => Some(Some(wire.as_ref().clone())),
 		};
 		let sequence = datagram.sequence;
 		// A lite-07 peer takes a compressed track's datagram as stored, others inflated.
@@ -3534,6 +3590,7 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 			timestamp,
 			inflated,
 			payload: payload.clone(),
+			ietf,
 		};
 		// has_datagrams is checked before this runs, and the timescale is set wherever the
 		// version needs a timestamp, so encoding never hits a version guard.
@@ -3597,6 +3654,7 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 			self,
 			sequence,
 			frame_start,
+			false,
 			Rank::Queue(priority),
 			group,
 		));
@@ -4035,6 +4093,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	fn serve(&mut self, group: group::Consumer) {
 		let sequence = group.sequence;
 		let frame_start = group.index();
+		// The stream stops at the end frame, before the group may end.
+		let capped = self.end_frame.is_some_and(|(end, _)| end == sequence);
 		self.mark_served(sequence);
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
 
@@ -4051,8 +4111,14 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 					.insert(Priority::new(steer.priority, self.ctx.id, sequence).with_order(steer.order)),
 			),
 		};
-		self.children
-			.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, rank, group));
+		self.children.push(GroupServe::new(
+			self.ctx.clone(),
+			sequence,
+			frame_start,
+			capped,
+			rank,
+			group,
+		));
 	}
 }
 
@@ -4072,6 +4138,8 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	group: group::Consumer,
 	sequence: u64,
 	frame_start: u64,
+	/// The stream stops at a subscription's end frame, so its FIN cannot end the group.
+	capped: bool,
 	// Lite05+ delta-encodes per-frame timestamps within the group. The first
 	// frame's delta is absolute (against an implicit prev value of 0), every
 	// subsequent delta is signed against the previous frame.
@@ -4095,6 +4163,8 @@ enum GroupState<S: crate::transport::poll::Session> {
 		chunk: Option<bytes::Bytes>,
 		batch: Box<Objects>,
 		batch_pos: usize,
+		/// The `ietf` extension's object records, when negotiated.
+		records: Option<lite::ietf::Records>,
 	},
 	/// Every frame is written and the FIN sent: wait for the acknowledgement so a
 	/// late cancel or expiry can still reset the stream.
@@ -4109,6 +4179,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		ctx: Subscription<S>,
 		sequence: u64,
 		frame_start: u64,
+		capped: bool,
 		rank: Rank<GroupOf<S>>,
 		group: group::Consumer,
 	) -> Self {
@@ -4123,6 +4194,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			group,
 			sequence,
 			frame_start,
+			capped,
 			prev_ts: 0,
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
@@ -4212,21 +4284,36 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						sequence: self.sequence,
 						frame_start: self.frame_start,
 					};
-					if let Err(err) = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg)) {
-						// The header wrote nothing, so the group-stream reset has nothing to pin
-						// it to this subscription. The run loop reads the slot and resets the
-						// subscribe stream instead.
-						self.ctx.note_unencodable(&err);
-						self.state = GroupState::Done;
-						writer.abort(&err);
-						return Poll::Ready(Err(err));
-					}
+					let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
+					let records = header.and_then(|()| {
+						lite::ietf::Records::start(
+							&mut writer,
+							self.ctx.ietf,
+							&self.group,
+							self.capped,
+							self.ctx.timescale,
+							self.ctx.version,
+						)
+					});
+					let records = match records {
+						Ok(records) => records,
+						Err(err) => {
+							// The header wrote nothing, so the group-stream reset has nothing to pin
+							// it to this subscription. The run loop reads the slot and resets the
+							// subscribe stream instead.
+							self.ctx.note_unencodable(&err);
+							self.state = GroupState::Done;
+							writer.abort(&err);
+							return Poll::Ready(Err(err));
+						}
+					};
 					self.state = GroupState::Serve {
 						writer,
 						frame: None,
 						chunk: None,
 						batch: Box::default(),
 						batch_pos: 0,
+						records,
 					};
 				}
 				GroupState::Serve {
@@ -4235,6 +4322,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					chunk,
 					batch,
 					batch_pos,
+					records,
 				} => {
 					let mut cx = waiter.context();
 
@@ -4286,16 +4374,24 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									Poll::Pending => return Poll::Pending,
 								}
 							} else if *batch_pos < batch.len() {
+								let index = self.group.index() - batch.len() as u64 + *batch_pos as u64;
 								let batched = &mut batch[*batch_pos];
-								let buffered = buffer_frame_info(
-									writer,
-									batched.frame.timestamp,
-									batched.inflated,
-									batched.frame.payload.len() as u64,
-									self.ctx.timescale,
-									&mut self.prev_ts,
-									&self.ctx.runtime,
-								);
+								let buffered = records
+									.as_mut()
+									.map_or(Ok(()), |records| {
+										records.frame(writer, index, batched.fields.as_deref())
+									})
+									.and_then(|()| {
+										buffer_frame_info(
+											writer,
+											batched.frame.timestamp,
+											batched.inflated,
+											batched.frame.payload.len() as u64,
+											self.ctx.timescale,
+											&mut self.prev_ts,
+											&self.ctx.runtime,
+										)
+									});
 								if let Err(err) = buffered {
 									break 'serve Err(err);
 								}
@@ -4311,28 +4407,49 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										*batch_pos = 0;
 										continue;
 									}
-									Poll::Ready(Ok(_)) => break 'serve Ok(()),
+									// Taken, so the next pass finishes once the record flushed.
+									Poll::Ready(Ok(_)) => match records.take() {
+										Some(mut records) => match records.end(writer, &self.group) {
+											Ok(()) => continue,
+											Err(err) => break 'serve Err(err),
+										},
+										None => break 'serve Ok(()),
+									},
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => {}
 								}
 
 								match self.group.poll_next_frame(waiter) {
 									Poll::Ready(Ok(Some(next))) => {
-										let buffered = buffer_frame_info(
-											writer,
-											next.timestamp,
-											next.inflated,
-											next.size,
-											self.ctx.timescale,
-											&mut self.prev_ts,
-											&self.ctx.runtime,
-										);
+										let index = self.group.index() - 1;
+										let buffered = records
+											.as_mut()
+											.map_or(Ok(()), |records| {
+												records.frame(writer, index, next.fields.as_deref())
+											})
+											.and_then(|()| {
+												buffer_frame_info(
+													writer,
+													next.timestamp,
+													next.inflated,
+													next.size,
+													self.ctx.timescale,
+													&mut self.prev_ts,
+													&self.ctx.runtime,
+												)
+											});
 										if let Err(err) = buffered {
 											break 'serve Err(err);
 										}
 										*frame = Some(next);
 									}
-									Poll::Ready(Ok(None)) => break 'serve Ok(()),
+									Poll::Ready(Ok(None)) => match records.take() {
+										Some(mut records) => match records.end(writer, &self.group) {
+											Ok(()) => continue,
+											Err(err) => break 'serve Err(err),
+										},
+										None => break 'serve Ok(()),
+									},
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,
 								}
@@ -4551,6 +4668,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
+			ietf: false,
 		};
 
 		let track = track::Producer::new(
@@ -4596,6 +4714,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
+			ietf: false,
 		};
 
 		let track = track::Producer::new(
@@ -4645,6 +4764,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
+			ietf: false,
 		};
 
 		let track = track::Producer::new(
@@ -4694,6 +4814,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
+			ietf: false,
 		};
 
 		let track = track::Producer::new(
@@ -4761,6 +4882,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
+			ietf: false,
 		};
 
 		let track = track::Producer::new(
@@ -4837,6 +4959,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
+			ietf: false,
 		};
 
 		let track = track::Producer::new(
@@ -4885,6 +5008,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
+			ietf: false,
 		};
 
 		let track = track::Producer::new(
@@ -4932,6 +5056,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
+			ietf: false,
 		};
 
 		let track = track::Producer::new(
@@ -4991,6 +5116,7 @@ mod serve_group_test {
 			timescale: Some(crate::Timescale::MILLI),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
+			ietf: false,
 		};
 		let bounds = Bounds {
 			start_group: Some(0),
@@ -6121,6 +6247,7 @@ mod serve_group_test {
 				timescale: Some(crate::Timescale::MILLI),
 				runtime: crate::time::sim(),
 				outcomes: outcomes.clone(),
+				ietf: false,
 			};
 			let bounds = Bounds {
 				start_group: Some(start_group),
