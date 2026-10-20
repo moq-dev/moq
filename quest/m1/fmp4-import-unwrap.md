@@ -39,8 +39,12 @@ Decided with the maintainer on 2026-10-20:
   both modes land on the same catalog clock. Edit lists stay out of scope:
   both players already ignore `edts` today, and
   [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) applies them for both
-  modes. Keyframes follow the
-  `depends_on` rule moq-mux already applies ([moq-dev/moq#5078](https://github.com/moq-dev/moq/pull/5078)). The codec description
+  modes. Video keyframes follow the
+  `depends_on` rule moq-mux already applies ([moq-dev/moq#5078](https://github.com/moq-dev/moq/pull/5078)).
+  Audio does not: packagers flag every audio sample as sync, which would
+  open a group per packet. As in `fmp4::decode` (`container/fmp4/mod.rs`),
+  audio samples carry the bit clear and only the first sample of each source
+  fragment opens a group, so the source's segment grouping survives. The codec description
   comes from `stsd`.
 - `moq import hls` takes the same `--passthrough`. HLS and fMP4 export
   already re-mux `Legacy` tracks through `fmp4::Muxer`. The `Legacy` wire

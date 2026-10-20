@@ -31,13 +31,17 @@ Decided with the maintainer on 2026-10-20:
   Downstream bundlers split the chunk. Async wrappers inside hang were
   rejected because every caller turns async anyway.
 - Delete the public encoder (`createVideoInitSegment`,
-  `createAudioInitSegment`, `encodeDataSegment`, `encode.ts`). Nothing
-  outside tests calls it, and publish never writes CMAF. Tests read the
+  `createAudioInitSegment`, `encodeDataSegment`, `encode.ts`). Only tests
+  and the nightly browser benchmark call it, and publish never writes CMAF.
+  `bench/browser/page/cmaf.ts` keeps its decode phase on fixture input and
+  drops its encode phase. Tests read the
   fixtures in `rs/moq-mux/src/container/fmp4/test_data/`, so both languages
   check the same files, plus a few checked-in fragments. Consumer tests that
   only exercise jitter, ordering and skips switch to the Legacy format.
 - Breaking for `@moq/hang` and maybe `@moq/watch`: add `## Unreleased`
-  entries to their `MIGRATE.md`.
+  entries to their `MIGRATE.md`. Point `js/hang/README.md` and
+  `doc/lib/js/hang.md`, which still show `Container.Cmaf` and the encoder,
+  at `@moq/hang/cmaf`.
 - Verify the split with `sh/size/bundles.ts`. The watch first load drops the
   cml and `cmaf` bytes, and a CMAF-only chunk appears behind a dynamic
   import.
