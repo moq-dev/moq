@@ -20,8 +20,12 @@ Then confirm it, and record the numbers in the PR that closes this:
   `release-nix.yml` legs, and `nix run github:moq-dev/moq/<tag>#moq-relay
   --accept-flake-config` substitutes on a clean machine.
 - Dev shell upload time and both bucket sizes after a month, against the
-  30-day expiry in `infra/nix/lifecycle.json`. Switch to a closure-aware
-  collector (niks3) only if expiry makes CI fall back to source builds often.
+  30-day expiry in `infra/nix/lifecycle.json`. A path expires 30 days after
+  its upload even while CI still reads it, and only the next warm restores
+  it, which runs on a flake or `nix/**` change or a dispatch. Look for jobs
+  that fell back to source builds in that window. If they recur, add a daily
+  schedule to `cache.yml` (and alert on its scheduled failures) or switch to
+  a closure-aware collector (niks3).
 - Delete the `CACHIX_AUTH_TOKEN` secret and the `kixelated` Cachix cache once
   the maintainer decides downstream flakes have had long enough to switch.
 
