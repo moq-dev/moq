@@ -75,10 +75,9 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     stale "caller's promise" doc. `track::Producer` keeps `Clone`: several
     writers creating groups is legitimate, and `claim_sequence` already
     refuses a duplicate sequence.
-    - Dropping `Clone` and the crate-private non-writing handle moved to
-      [One group writer](/quest/m1/public-model/group-writer.md), which
-      names the handle `group::Handle` and deletes `FrameOpen` (decided
-      2026-10-18, #5892), so the backstop above goes. This item keeps the
+    - #6020 dropped `Clone`, added the crate-private non-writing
+      `group::Handle`, and deleted `FrameOpen` (decided 2026-10-18, #5892),
+      so the backstop above goes. This item keeps the
       public owned chunked writer. Its callers that hold a
       `&mut group::Producer` (hang's `Frame::write_to`, moq-mux's LOC and
       fMP4 encoders) cannot call a consuming `create_frame(self)`; weigh
@@ -205,10 +204,6 @@ JS items (`js/net/src/`): mirror each Rust decision under the same name.
 Tests: each public call gets a mock-time test in its language, and the
 built-in subscribers move onto the public calls, so their existing suites
 cover the behavior.
-
-## Required
-
-- [One group writer](/quest/m1/public-model/group-writer.md) - the non-Clone writer the owned chunked writer builds on
 
 ## Closes
 
