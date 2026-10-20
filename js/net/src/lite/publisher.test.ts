@@ -740,6 +740,21 @@ test("lite draft-06: a cut group is dropped early, once", async () => {
 	}
 });
 
+// A sent datagram is accounted for, so the end sweep does not drop it, as the Rust publisher does.
+test("lite draft-06: the end sweep does not drop a sent datagram", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
+	try {
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+		sub.track.insertDatagram(1, Timestamp.fromMillis(1), new Uint8Array([1]));
+		await flush();
+		sub.track.close();
+		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
+	} finally {
+		await sub.close();
+	}
+});
+
 // A cut this subscription already dropped stays dropped: the subscriber accounted for it, so
 // a group the publisher re-creates under it afterwards is not served.
 test("lite draft-06: a cut dropped then re-created is not served", async () => {

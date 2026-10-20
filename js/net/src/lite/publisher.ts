@@ -768,6 +768,12 @@ export class Publisher {
 		// subscription; awaited during teardown so it doesn't outlive the subscription.
 		let datagrams = Promise.resolve();
 		let controls: SubscriptionControls | undefined;
+		// Lite-05 and later name every sequence below the end that this subscription never
+		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
+		// for a group that will not come. The sequences served (as a group or a datagram) or
+		// dropped. A gap that never arrived stays until the end sweep names it: this side
+		// cannot tell when the subscriber stopped waiting for it. Undefined on other versions.
+		const served: Run[] | undefined = supportsTrackStream(this.version) ? [] : undefined;
 
 		try {
 			// Older drafts carry no timestamps.
@@ -801,7 +807,7 @@ export class Publisher {
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
 			if (this.#datagramWriter) {
-				datagrams = this.#runDatagrams(msg.id, track, timescale);
+				datagrams = this.#runDatagrams(msg.id, track, timescale, served);
 			}
 
 			controls = new SubscriptionControls({
@@ -826,6 +832,7 @@ export class Publisher {
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				timescale,
+				served,
 				bounds: {
 					startGroup: msg.startGroup,
 					startFrame: msg.startFrame,
@@ -989,9 +996,15 @@ export class Publisher {
 		track: track.Subscriber,
 		stream: Writer,
 		controls: SubscriptionControls,
-		serving: { sub: bigint; broadcast: Path.Valid; timescale: Timescale | undefined; bounds: FrameBounds },
+		serving: {
+			sub: bigint;
+			broadcast: Path.Valid;
+			timescale: Timescale | undefined;
+			served: Run[] | undefined;
+			bounds: FrameBounds;
+		},
 	): Promise<boolean> {
-		const { sub, broadcast, timescale, bounds } = serving;
+		const { sub, broadcast, timescale, served, bounds } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = supportsTrackStream(this.version);
@@ -1000,12 +1013,6 @@ export class Publisher {
 		let startSequence: number | undefined;
 		let endSent = false;
 
-		// Lite-05 and later name every sequence below the end that this subscription never
-		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
-		// for a group that will not come. The sequences served or dropped. A gap that never
-		// arrived stays until the end sweep names it: this side cannot tell when the
-		// subscriber stopped waiting for it. Undefined on other versions.
-		const served: Run[] | undefined = emitRange ? [] : undefined;
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped yet.
 		const drop = async (start: number, end: number): Promise<boolean> => {
 			if (!served) return true;
@@ -1391,7 +1398,12 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runDatagrams(sub: bigint, track: track.Subscriber, timescale: Timescale | undefined) {
+	async #runDatagrams(
+		sub: bigint,
+		track: track.Subscriber,
+		timescale: Timescale | undefined,
+		served: Run[] | undefined,
+	) {
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
 		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
@@ -1411,6 +1423,8 @@ export class Publisher {
 					continue;
 				}
 
+				// A sent datagram counts as delivered even if it is lost, so the end sweep skips it.
+				if (served) insertRun(served, datagram.sequence, datagram.sequence + 1);
 				await writer.ready;
 				await writer.write(body);
 			}
