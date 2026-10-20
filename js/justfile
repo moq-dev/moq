@@ -34,6 +34,10 @@ check-changed list:
 workers:
     ../sh/js/workers.sh
 
+# Audit every Bun lockfile. Nightly: advisories land without a diff.
+audit:
+    bash ../sh/js/audit.sh
+
 # Auto-fix lint and formatting issues in workspaces, harnesses, docs and demos.
 fix:
     bun install

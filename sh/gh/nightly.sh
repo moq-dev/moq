@@ -2,7 +2,7 @@
 # Keep benchmark builds together while unrelated Nightly workloads run independently.
 set -euo pipefail
 
-usage='usage: just gh nightly rust-test|rust-bench|js'
+usage='usage: just gh nightly rust-test|rust-bench|rust-extra|rust-uring|js'
 if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
@@ -10,7 +10,7 @@ fi
 # The measured groups write a report for the benchmark site; rust-test only runs.
 case "$1" in
     rust-test) report= ;;
-    rust-bench) report=rust ;;
+    rust-bench | rust-extra | rust-uring) report=rust ;;
     js) report=js ;;
     *)
         echo "$usage" >&2
@@ -85,6 +85,21 @@ case "$1" in
             --bench streams --bench receive --bench endpoint --bench wire
         # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
         criterion gst -p moq-gst --bench catalog
+        ;;
+    # Keep added coverage out of the existing forty-minute benchmark leg.
+    rust-extra)
+        # The allocation/window/play-buffer tables keep their stdout in the run;
+        # only Criterion estimates enter the trend report.
+        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux \
+            --bench protect --bench codec --bench table --bench allocations --bench window \
+            --bench writer --bench play_buffer --bench jitter
+        ;;
+    rust-uring)
+        # One run per target makes an unsupported/skipped ring fail report
+        # validation instead of hiding behind the Tokio target's measurements.
+        for target in udp_tokio udp_uring echo_quic session_lite unreachable_dials; do
+            criterion "uring-$target" -p moq-uring --bench "$target"
+        done
         ;;
     js)
         for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track resume interests priority; do
