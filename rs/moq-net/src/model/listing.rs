@@ -60,8 +60,8 @@ pub(super) struct ListingState {
 	/// Bumped whenever every reader is detached at once, so a reader of an earlier
 	/// answer releases nothing on drop.
 	generation: u64,
-	/// Live [`Lister`] handles. While any exists, readers wait for its answer to sync.
-	listers: usize,
+	/// Whether a [`Lister`] exists. While one does, readers wait for its answer to sync.
+	lister: bool,
 	/// Whether the handler's answer has synced.
 	answered: bool,
 	next_token: u64,
@@ -69,7 +69,7 @@ pub(super) struct ListingState {
 
 impl ListingState {
 	fn synced(&self) -> bool {
-		self.listers == 0 || self.answered
+		!self.lister || self.answered
 	}
 
 	fn each(&self, mut f: impl FnMut(&mut Queue)) {
@@ -437,8 +437,8 @@ impl Consumer {
 
 /// A handler's answer to the broadcast's listings, from [`Dynamic::lister`](super::Dynamic::lister).
 ///
-/// While one exists, readers wait for it to [`sync`](Self::synced) before reporting
-/// [`TracksEvent::Synced`]. Answer while [`poll_used`](Self::poll_used): list what the
+/// A broadcast has at most one. While it exists, readers wait for it to
+/// [`sync`](Self::synced) before reporting [`TracksEvent::Synced`]. Answer while [`poll_used`](Self::poll_used): list what the
 /// publisher behind the handler holds and keep it current, then [`clear`](Self::clear)
 /// once [`poll_unused`](Self::poll_unused). Dropping it clears what it listed.
 pub struct Lister {
@@ -446,14 +446,18 @@ pub struct Lister {
 }
 
 impl Lister {
-	pub(super) fn new(state: kio::Shared<BroadcastState>) -> Self {
+	/// Fails with [`Error::Duplicate`] while the broadcast has another.
+	pub(super) fn new(state: kio::Shared<BroadcastState>) -> Result<Self, Error> {
 		{
 			let mut state = state.lock();
+			if state.listing.lister {
+				return Err(Error::Duplicate);
+			}
 			let was = state.listing.synced();
-			state.listing.listers += 1;
+			state.listing.lister = true;
 			state.listing.resync(was);
 		}
-		Self { state }
+		Ok(Self { state })
 	}
 
 	fn poll_readers(&self, waiter: &kio::Waiter, used: bool) -> Poll<Result<(), Error>> {
@@ -510,11 +514,22 @@ impl Lister {
 		self.state.lock().listing.answer_clear();
 	}
 
+	/// End every current reader as if the broadcast ended, and withdraw the answer, as
+	/// when the publisher behind the handler ends its broadcast first. A later reader
+	/// asks again.
+	pub fn finish(&self) {
+		self.end(Ok(()));
+	}
+
 	/// Fail every current reader with `err` and withdraw the answer. A later reader
 	/// asks again.
 	pub fn abort(&self, err: Error) {
+		self.end(Err(err));
+	}
+
+	fn end(&self, end: Result<(), Error>) {
 		let mut state = self.state.lock();
-		state.listing.detach(Err(err));
+		state.listing.detach(end);
 		state.listing.answer_clear();
 	}
 }
@@ -523,11 +538,9 @@ impl Drop for Lister {
 	fn drop(&mut self) {
 		let mut state = self.state.lock();
 		let was = state.listing.synced();
-		state.listing.listers -= 1;
-		if state.listing.listers == 0 {
-			// Synced from here on, with only the producer's tracks.
-			state.listing.unanswer();
-		}
+		state.listing.lister = false;
+		// Synced from here on, with only the producer's tracks.
+		state.listing.unanswer();
 		state.listing.resync(was);
 	}
 }
@@ -743,7 +756,7 @@ mod tests {
 	fn readers_wait_for_the_lister_to_sync() {
 		let broadcast = Info::new().produce();
 		let _own = broadcast.create_track("own", None).unwrap();
-		let lister = broadcast.dynamic().lister();
+		let lister = broadcast.dynamic().lister().unwrap();
 		let waiter = kio::Waiter::noop();
 		assert!(lister.poll_used(&waiter).is_pending());
 
@@ -771,7 +784,7 @@ mod tests {
 	fn a_name_listed_by_both_is_reported_once() {
 		let broadcast = Info::new().produce();
 		let own = broadcast.create_track("a", None).unwrap();
-		let lister = broadcast.dynamic().lister();
+		let lister = broadcast.dynamic().lister().unwrap();
 		lister.add("a", track::Info::default()).unwrap();
 		lister.synced();
 		let mut tracks = broadcast.consume().tracks().unwrap();
@@ -785,7 +798,7 @@ mod tests {
 	#[test]
 	fn an_aborted_answer_fails_its_readers_and_a_later_reader_asks_again() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister();
+		let lister = broadcast.dynamic().lister().unwrap();
 		let waiter = kio::Waiter::noop();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		lister.add("up", track::Info::default()).unwrap();
@@ -811,7 +824,7 @@ mod tests {
 	#[test]
 	fn a_dropped_lister_withdraws_its_answer_and_syncs() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister();
+		let lister = broadcast.dynamic().lister().unwrap();
 		lister.add("up", track::Info::default()).unwrap();
 		let mut tracks = broadcast.consume().tracks().unwrap();
 		assert_eq!(drain(&mut tracks), ["+up"]);
@@ -819,10 +832,39 @@ mod tests {
 		assert_eq!(drain(&mut tracks), ["-up", "synced"]);
 	}
 
+	/// One answer per broadcast: a second handler's answer would share the first's sync
+	/// and outlive the handler that gave it.
+	#[test]
+	fn a_broadcast_has_one_lister() {
+		let broadcast = Info::new().produce();
+		let lister = broadcast.dynamic().lister().unwrap();
+		assert!(matches!(broadcast.dynamic().lister(), Err(Error::Duplicate)));
+		drop(lister);
+		broadcast.dynamic().lister().expect("the first lister left");
+	}
+
+	#[test]
+	fn a_finished_answer_ends_its_readers_and_a_later_reader_asks_again() {
+		let broadcast = Info::new().produce();
+		let lister = broadcast.dynamic().lister().unwrap();
+		let waiter = kio::Waiter::noop();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		lister.add("up", track::Info::default()).unwrap();
+		lister.synced();
+		assert_eq!(drain(&mut tracks), ["+up", "synced"]);
+		lister.finish();
+		assert_eq!(drain(&mut tracks), ["end"]);
+		assert!(matches!(lister.poll_unused(&waiter), Poll::Ready(Ok(()))));
+
+		let mut again = broadcast.consume().tracks().unwrap();
+		assert!(matches!(lister.poll_used(&waiter), Poll::Ready(Ok(()))));
+		assert_eq!(drain(&mut again), NONE, "the finished answer was withdrawn");
+	}
+
 	#[test]
 	fn a_cleared_answer_unsyncs_a_reader_still_waiting() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister();
+		let lister = broadcast.dynamic().lister().unwrap();
 		let _a = broadcast.create_track("a", None).unwrap();
 		let _b = broadcast.create_track("b", None).unwrap();
 		lister.synced();
@@ -837,7 +879,7 @@ mod tests {
 	#[test]
 	fn a_lister_sees_the_broadcast_end() {
 		let broadcast = Info::new().produce();
-		let lister = broadcast.dynamic().lister();
+		let lister = broadcast.dynamic().lister().unwrap();
 		broadcast.close();
 		assert!(matches!(
 			lister.poll_used(&kio::Waiter::noop()),

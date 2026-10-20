@@ -575,6 +575,7 @@ A removal of a Track already sent MAY precede SYNCED.
 
 The subscriber MUST close the session with a PROTOCOL_VIOLATION on a TRACKS_ADD for a name already listed on the stream, a TRACKS_REMOVE for a name not listed, a second SYNCED, or an unknown event type.
 A FIN before SYNCED means the Broadcast ended.
+On a FIN, a relay ends the listings it answers from that stream, even before the Broadcast's retraction arrives.
 A publisher MUST reset a Tracks Stream with NOT_FOUND when the route it would serve the path from covers it by a shorter prefix: a route claims capability, not inventory, so it names no Broadcast to list.
 A subscriber MAY skip the Track Stream for a Track it learned from TRACKS_ADD, since the properties are the same immutable ones.
 Each listed Track a subscriber holds counts against its bound on announcements (see [Resource Exhaustion](#resource-exhaustion)); past it, the subscriber resets the stream rather than hold more.

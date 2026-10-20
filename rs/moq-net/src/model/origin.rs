@@ -2895,7 +2895,9 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 	// The front serves its broadcast on demand: every track a reader names is
 	// handed here, and its readers read it from whichever source serves the path.
 	let mut dynamic = broadcast.dynamic();
-	let lister = dynamic.lister();
+	let lister = dynamic
+		.lister()
+		.expect("only the front answers its broadcast's listings");
 	let mut listing: Option<FrontListing> = None;
 	let mut front = Front::new(track::IDLE_LINGER);
 	let mut sources: HashMap<u64, broadcast::Consumer> = HashMap::new();
@@ -3661,7 +3663,20 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						lister.synced();
 					}
 					// The source ended: the front moves to another source, or ends with it.
-					Ok(None) => state.reader = None,
+					Ok(None)
+						if state
+							.source
+							.and_then(|id| sources.get(&id))
+							.is_none_or(|source| source.is_closing()) =>
+					{
+						state.reader = None
+					}
+					// The source's handler ended the listing on a live source, as a peer does
+					// once its broadcast ended: so does the front's, and a later reader asks again.
+					Ok(None) => {
+						listing = None;
+						lister.finish();
+					}
 					Err(err) => {
 						// Its readers fail, and a later reader asks again.
 						listing = None;
@@ -7869,6 +7884,28 @@ mod tests {
 
 		drop(source);
 		assert_eq!(listed(&mut tracks).await, "end");
+	}
+
+	/// A source's handler ending its listing while the source stays, as a session does on
+	/// its peer's FIN before any retraction, ends the front's listing too.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_front_ends_its_listing_with_its_sources() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let source = producer.publish("room/alice", Route::default()).unwrap();
+		let lister = source.dynamic().lister().unwrap();
+		lister.add("video", crate::track::Info::default()).unwrap();
+		lister.synced();
+
+		let front = consumer.request_broadcast("room/alice", None).await.unwrap();
+		let mut tracks = front.tracks().unwrap();
+		assert_eq!(listed(&mut tracks).await, "+video");
+		assert_eq!(listed(&mut tracks).await, "synced");
+
+		lister.finish();
+		assert_eq!(listed(&mut tracks).await, "end");
+		assert!(!front.is_closed(), "the listing's end is not the broadcast's");
 	}
 
 	/// A same-instance route taking the front over lists the same tracks: readers see

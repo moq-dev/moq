@@ -875,8 +875,9 @@ impl Dynamic {
 	/// Answer the broadcast's track listings, for a handler that knows the tracks it
 	/// would serve, such as a relay listing its upstream's. See [`Lister`].
 	///
-	/// A handler that serves any name on request takes none, so it lists nothing.
-	pub fn lister(&self) -> Lister {
+	/// A handler that serves any name on request takes none, so it lists nothing. One
+	/// answer per broadcast: fails with [`Error::Duplicate`] while another lister exists.
+	pub fn lister(&self) -> Result<Lister, Error> {
 		Lister::new(self.state.clone())
 	}
 

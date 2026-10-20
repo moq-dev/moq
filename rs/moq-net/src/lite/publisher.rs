@@ -1760,7 +1760,8 @@ enum Charge {
 	/// A subscription.
 	Subscribe,
 	/// A TRACKS stream listing the broadcast, charged under the empty track name on top
-	/// of any interest in a track of that name.
+	/// of any interest in a track of that name. Repeated listings share one slot: the
+	/// newest replaces the rest (see [`Listings`]), so a replacement fits at the cap.
 	Tracks,
 }
 
@@ -1793,7 +1794,7 @@ impl Interest {
 	}
 
 	fn cost(&self) -> usize {
-		self.tracks.max(self.subscribes) + self.listings
+		self.tracks.max(self.subscribes) + self.listings.min(1)
 	}
 }
 
@@ -7121,6 +7122,15 @@ mod tests {
 			drop(b);
 			drop(slots.acquire().expect("the slot was not returned"));
 		}
+
+		// A replacement listing of the broadcast shares the older one's slot.
+		let older = interests.charge(&room, "", Charge::Tracks).expect("the listing fits");
+		let newer = interests
+			.charge(&room, "", Charge::Tracks)
+			.expect("a replacement listing fits at the cap");
+		drop(older);
+		assert!(slots.acquire().is_err(), "the replacement lost its slot");
+		drop(newer);
 
 		// Two of a kind are two interests.
 		let _a = interests.charge(&room, "video", Charge::Subscribe).unwrap();

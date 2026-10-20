@@ -1566,16 +1566,8 @@ struct SourceServe<S: crate::transport::poll::Session> {
 	ended: bool,
 	/// Answers listings of the source with the peer's TRACKS.
 	lister: crate::broadcast::Lister,
-	listing: Listing<S>,
-}
-
-/// Where a source's answer to its listings stands.
-enum Listing<S: crate::transport::poll::Session> {
-	/// Nobody lists the source.
-	Idle,
-	Running(TracksRecv<S>),
-	/// The peer ended the listing with its broadcast: what it listed stays until nobody lists.
-	Ended,
+	/// The peer's listing, while anyone lists the source.
+	listing: Option<TracksRecv<S>>,
 }
 
 /// Forwards the peer's TRACKS listing of a source into the source's lister.
@@ -1645,8 +1637,11 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 	fn new(subscriber: Subscriber<S>, minted: MintedSource) -> Self {
 		let closed = subscriber.session.clone();
 		Self {
-			lister: minted.dynamic.lister(),
-			listing: Listing::Idle,
+			lister: minted
+				.dynamic
+				.lister()
+				.expect("only the source answers its broadcast's listings"),
+			listing: None,
 			subscriber,
 			validity: minted.validity,
 			path: minted.path,
@@ -1663,10 +1658,10 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 	/// Answer the source's listings while anyone lists it, from the peer's TRACKS.
 	fn poll_listing(&mut self, waiter: &kio::Waiter) {
 		// Taken out while it runs, since it reads the rest of the source.
-		let mut listing = std::mem::replace(&mut self.listing, Listing::Idle);
+		let mut listing = self.listing.take();
 		loop {
 			match &mut listing {
-				Listing::Idle => {
+				None => {
 					if !matches!(self.lister.poll_used(waiter), Poll::Ready(Ok(()))) {
 						break;
 					}
@@ -1678,32 +1673,36 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 					// Synced with this hop, which holds nothing yet: a relay never waits on its
 					// upstream, so the peer's tracks follow as live adds.
 					self.lister.synced();
-					listing = Listing::Running(TracksRecv {
+					listing = Some(TracksRecv {
 						session: self.subscriber.session.clone(),
 						stream: None,
 						listed: HashMap::new(),
 						synced: false,
 					});
 				}
-				Listing::Running(_) | Listing::Ended if self.lister.poll_unused(waiter).is_ready() => {
+				Some(_) if self.lister.poll_unused(waiter).is_ready() => {
 					// Dropping the stream resets it.
-					listing = Listing::Idle;
+					listing = None;
 					self.lister.clear();
 				}
-				Listing::Running(recv) => match recv.poll(self, waiter) {
+				Some(recv) => match recv.poll(self, waiter) {
 					Poll::Pending => break,
-					Poll::Ready(Ok(())) => listing = Listing::Ended,
+					// The peer's broadcast ended, whether or not its retraction has arrived:
+					// end the listing and let go of what it listed.
+					Poll::Ready(Ok(())) => {
+						listing = None;
+						self.lister.finish();
+					}
 					Poll::Ready(Err(err)) => {
 						let err = lite::error::control(&mut self.subscriber.session.clone(), err);
 						tracing::debug!(broadcast = %self.path, %err, "tracks failed");
 						if let Some(stream) = recv.stream.take() {
 							stream.writer.abort(&err);
 						}
-						listing = Listing::Idle;
+						listing = None;
 						self.lister.abort(err);
 					}
 				},
-				Listing::Ended => break,
 			}
 		}
 		self.listing = listing;
