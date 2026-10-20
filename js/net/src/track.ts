@@ -2012,8 +2012,10 @@ export class Subscriber {
 	 * the retained window.
 	 *
 	 * Reads here do not consume anything this one would deliver, which is what lets a
-	 * publisher read the cache alongside the cursor it is serving from. A routed track's
-	 * fork follows the same logical track across route swaps.
+	 * publisher read the cache alongside the cursor it is serving from. Resolving the track
+	 * again through the broadcast would not do: a dynamic serve is one request per peer
+	 * subscription, so that mints a second producer the application has to answer separately.
+	 * A routed track's fork follows the same logical track across route swaps.
 	 *
 	 * @internal Wire layers only.
 	 */

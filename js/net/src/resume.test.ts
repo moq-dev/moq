@@ -10,6 +10,7 @@ import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
 import type * as track from "./track.ts";
+import { unwanted } from "./util/demand.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
 const EPOCH = Epoch.parse("01900000-0000-7000-8000-000000000001");
@@ -160,9 +161,8 @@ test("a resumed fork has its own preferences and replay cursor", async () => {
 		expect((await narrowed)?.priority).toBe(2);
 		tb.write(2);
 		expect(drain(parent)).toEqual([2]);
-		const unused = tb.producer.demand().unused();
 		parent.close();
-		await unused;
+		await unwanted(tb.producer.demand());
 	} finally {
 		parent.close();
 		fork.close();
