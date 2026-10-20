@@ -10,7 +10,7 @@ type Step = {
 	env?: Record<string, string>;
 	"continue-on-error"?: boolean;
 };
-type Job = { name: string; steps: Step[] };
+type Job = { name: string; if?: string; steps: Step[] };
 const workflow = Bun.YAML.parse(await Bun.file(".github/workflows/check.yml").text()) as {
 	on: Record<string, unknown>;
 	jobs: Record<string, Job>;
@@ -25,7 +25,9 @@ for (const name of ["check", "test"]) {
 		const scope = job.steps[scopeIndex];
 		expect(scope.run).toBe(`just ci-select ${name} "$CI_BASE" >> "$GITHUB_OUTPUT"`);
 		// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
-		expect(scope.env?.CI_BASE).toBe("${{ github.event.merge_group.base_sha }}");
+		expect(scope.env?.CI_BASE).toBe(
+			"${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}",
+		);
 		expect(scope.if).toBeUndefined();
 		expect(scope["continue-on-error"]).toBeUndefined();
 		expect(job.steps.slice(0, scopeIndex).some((step) => step.uses === "./.github/actions/just")).toBe(true);
@@ -47,4 +49,16 @@ test("scope queries support both merge groups and release PRs without path filte
 	expect(workflow.on.merge_group).toEqual({ types: ["checks_requested"] });
 	expect(workflow.on.pull_request).toBeDefined();
 	expect(workflow.on.pull_request).not.toHaveProperty("paths");
+	expect(workflow.on.pull_request).not.toHaveProperty("branches");
+});
+
+// Main PRs must still report both required names, as skipped, and a PR
+// retargeted to release must run them, so `edited` triggers a fresh run.
+test("main PRs skip both jobs while the queue and release PRs run them", () => {
+	expect(workflow.on.pull_request).toEqual({ types: ["opened", "synchronize", "reopened", "edited", "closed"] });
+	for (const name of ["check", "test"]) {
+		expect(workflow.jobs[name].if).toBe(
+			"github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')",
+		);
+	}
 });
