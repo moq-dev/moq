@@ -38,6 +38,7 @@ mod multi_cdn;
 mod partial_group;
 mod quiet_catalog;
 mod received_rewind;
+mod refresh;
 mod rejoin;
 mod replacement;
 mod request_caps;

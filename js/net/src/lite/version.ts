@@ -406,6 +406,23 @@ export function hasAnnounceCompression(version: Version): boolean {
 	}
 }
 
+/** Whether TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE a wanted group. Added in lite-07.
+ * Older peers see a track that never refreshes. */
+export function hasRefresh(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";

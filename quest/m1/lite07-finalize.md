@@ -87,7 +87,6 @@ is published; older versions are unchanged.
 - [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - settles what lite-07's DROP Error Code means
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
-- [Refresh on the lite wire](/quest/m1/refresh/lite.md) - TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE the wanted group
 - [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
 - [TRACKS](/quest/m1/archive/tracks.md) - lite-07 carries the request listing a broadcast's tracks as they appear
 

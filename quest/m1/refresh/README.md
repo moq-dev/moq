@@ -62,7 +62,6 @@ Work owned by this README, after the children land:
 
 ## Required
 
-- [Lite wire](/quest/m1/refresh/lite.md) - lite-07 TRACK_INFO advertises the ratio and SUBSCRIBE_UPDATE carries the wanted group, so a join at any relay reaches the origin
 - [moq-json](/quest/m1/refresh/json.md) - snapshot and window groups roll on a qualifying join, reading the ratio from the track; `delta_ratio` and `op_ratio` become `deltas` and `ops` switches in every binding
 
 ## Related
