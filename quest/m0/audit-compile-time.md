@@ -19,23 +19,24 @@ Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
 
-Measured 2026-10-19 on source `cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95`
-(claim commit `b5b43d4db7f9a2107c16c0282587cbeb8fc17751` adds no source).
-The source hash above is recorded in the measurement logs; use
-`cdff3c8f9` when selecting this baseline. All experiments used the pinned Nix
-shell: Rust 1.98.1, LLVM 22.1.8, Linux x86_64, Ryzen 9 5900XT with 16 physical
-cores and 32 logical CPUs. Cargo, native build tools, and Nextest were bounded
-to two jobs or threads. These are single observations, not regression limits
-or evidence of an optimization.
+Measured 2026-10-19 on `cdff3c8f9` in the pinned Nix shell (Rust 1.98.1,
+LLVM 22.1.8, Linux x86_64, Ryzen 9 5900XT, 32 logical CPUs), with Cargo,
+native build tools, and Nextest bounded to two jobs. These are single
+observations, not regression limits or evidence of an optimization.
 
-Clean Cargo builds disabled mbx explicitly with `MBX_DISABLE=1` and used a new
-worktree-local `CARGO_TARGET_DIR=.scratch/cold-target`. The dev and release
-profiles both started without compiled artifacts for that profile; registry
-sources and the Nix shell were already installed. No shared cache was deleted,
-and no compiler, profile, feature, or build-metadata setting was changed. The
-dev build had a quiet-host window; release and subsequent runs shared the host
-with bounded builds in other worktrees. Do not compare their wall times as a
-before/after result.
+Scope: this audit owns per-crate build cost in one build (dev, release, and
+incremental). The [CI pipeline audit](/quest/m0/ci/audit.md) owns job-level CI
+cost: cache keys and hits, aws-lc-sys recompiling several times per cold job,
+both rustls backends in the gate, and `--timings` output in CI. Deduplicating
+or upgrading dependencies belongs to the
+[dependency audit](/quest/m0/audit-deps.md).
+
+Clean builds used `MBX_DISABLE=1` and a fresh `CARGO_TARGET_DIR`, with registry
+sources and the Nix shell already present; no cache, compiler, profile, or
+feature setting was changed. The dev build ran on a quiet host (one-minute load
+0.66 to 2.65); release and later runs shared it with bounded builds in other
+worktrees (load up to 6.14). Do not compare their wall times as a before/after
+result. Times exclude Nix startup.
 
 | Experiment | Process wall time | Result |
 | --- | ---: | --- |
@@ -46,15 +47,6 @@ before/after result.
 | Unchanged standalone moq-net build | 0.251 s | Passed |
 | Standalone moq-net rebuild after a comment-only edit | 8.025 s | Passed; trivial-edit baseline only |
 | Ordinary cache-enabled `just check` on that moq-net edit | 842.849 s | Failed at formatting; not a successful full-check baseline |
-
-Times exclude Nix startup. The first dev observer polled completion every two
-seconds, so its process time includes up to two seconds of observation delay;
-the remaining process times use a monotonic clock around process completion.
-Sampled one-minute load ranged from 0.66 to 2.65 during dev, and 1.32 to 6.14
-during release. The normal `just check` used mbx 1.23.0 without disabling its
-cache; it reported 820 hits, 72 misses, seven units not looked up, and four
-bypasses. It is a different cache and package-selection experiment from the
-clean builds.
 
 The default-member dev build compiled 681 Cargo units from 545 distinct
 package/version pairs. Longest observed units, in seconds:
@@ -78,31 +70,27 @@ CPU times. Final release binary work dominates the release observations, but
 these timings do not separate monomorphization, optimization, LTO, and linking.
 The existing release profile uses fat LTO and one codegen unit to keep shipping
 artifacts compact; no profile change is justified by this run alone.
+aws-lc-sys's build script is the largest dev unit; keep the crypto provider
+unchanged unless a separately justified decision permits it.
 
 The largest dev proc-macro unit was usage-derive at 6.02 seconds; serde_derive
-was 2.61 seconds. Fifty-one compiled dependency names had multiple versions.
-The three syn versions took 2.99, 2.41, and 2.53 seconds in separate Cargo
-units. Their reverse dependency graph is captured, but compatible versions
-cannot be assumed interchangeable. The default build omitted iroh, wgpu,
-cpal, and OpenH264; it did compile str0m, object_store, and the NVIDIA crates.
-Do not disable supported default functionality merely to make a build smaller.
+was 2.61 seconds. Fifty-one compiled dependency names had multiple versions;
+the three syn versions took 2.99, 2.41, and 2.53 seconds. The default build
+omitted iroh, wgpu, cpal, and OpenH264; it did compile str0m, object_store, and
+the NVIDIA crates. Do not disable supported default functionality merely to
+make a build smaller.
 
-The ordinary net-edit check selected 28 Rust packages including downstream C,
-FFI, GStreamer, and WASM crates. Test compilation took 7m46s; all 7,608 native
-tests passed, with 31 skipped, in 369.431 seconds. It then stopped at
-`cargo fmt --all --check`: the disposable comment probe had an extra blank
-line after the crate attribute. The probe was fully restored and is absent
-from the PR. No SLOW, FAIL, or TIMEOUT test verdict occurred. Rustdoc and later
-feature checks were not reached, so this run proves neither a complete
-`just check` pass nor its successful wall-time baseline.
+The cache-enabled net-edit `just check` used mbx 1.23.0 (820 hits, 72 misses,
+seven units not looked up, four bypasses) and selected 28 Rust packages,
+including downstream C, FFI, GStreamer, and WASM crates. Test compilation took
+7m46s; all 7,608 native tests passed, with 31 skipped, in 369.431 seconds. It
+then failed `cargo fmt --all --check` on the disposable probe, so rustdoc and
+later feature checks never ran. `mbx explain --last` had no recorded build, so
+those misses are unattributed.
 
-Raw process records, load samples, logs, probe patch, resolved dependency graph,
-and named Cargo HTML timing reports are retained in this run's worktree under
-`.scratch/`. HTML reports were copied to `.scratch/evidence/timings/` before
-discarding the isolated build artifacts. `cargo llvm-lines` was unavailable in
-the pinned shell. `mbx explain --last` returned no recorded build with session
-events enabled, so this run does not attribute cache misses to `COMMIT_ID` or
-any other unverified cause. No global cache configuration was changed.
+Raw logs and Cargo timing reports were local only; re-measure rather than
+trusting anything beyond these tables. `cargo llvm-lines` was unavailable in
+the pinned shell.
 
 Remaining work before completing this run:
 
@@ -112,9 +100,11 @@ Remaining work before completing this run:
    compiler/linker profiling before choosing a refactor. A thin-LTO experiment
    must compare shipping sizes and relevant runtime workloads on the same
    source; changing the release profile is a maintainer decision.
-3. Investigate avoidable repeated aws-lc-sys native compilation with actual
-   cache-miss evidence. Keep the crypto provider and its behavior unchanged
-   unless a separately justified decision permits changing them.
-4. Fix or settle the measured bottlenecks, then create the recurring m1
+3. Fix or settle the measured bottlenecks, then create the recurring m1
    successor as required above. The nightly size job already records release
    `Build` durations without comparing noisy hosted times (`sh/size/README.md`).
+
+## Related
+
+- [CI pipeline audit](/quest/m0/ci/audit.md) - owns job-level CI build cost and caching
+- [Dependency audit](/quest/m0/audit-deps.md) - owns deduplicating and upgrading dependencies
