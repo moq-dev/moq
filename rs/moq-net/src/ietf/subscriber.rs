@@ -12399,7 +12399,7 @@ mod stitch_tests {
 		let relayed = bytes::Bytes::copy_from_slice(decoder.bytes().unwrap());
 		let decoded = super::super::object::read(&relayed, version, Some(Timescale::MILLI)).unwrap();
 		assert_eq!(decoded.timestamp, Some(Timestamp::new(42, Timescale::MILLI).unwrap()));
-		assert_eq!(decoded.properties.values.len(), 1);
+		assert_eq!(super::super::object::listed(&decoded.properties).len(), 1);
 	}
 
 	fn object_stream(version: Version, first: bool, objects: &[(u64, &[u8], Option<u64>)]) -> Vec<u8> {
@@ -12553,7 +12553,9 @@ mod stitch_tests {
 			);
 			if let Some(end) = end_object {
 				assert_eq!(
-					end.properties.values.first().map(|property| property.id),
+					super::super::object::listed(&end.properties)
+						.first()
+						.map(|property| property.id),
 					legacy.then_some(0x3e)
 				);
 			}
@@ -12670,7 +12672,10 @@ mod stitch_tests {
 					.unwrap()
 					.unwrap();
 				assert_eq!(frame.fields.as_ref().unwrap().id, id);
-				assert_eq!(frame.fields.as_ref().unwrap().properties.values[0].id, 0x3e);
+				assert_eq!(
+					super::super::object::listed(&frame.fields.as_ref().unwrap().properties)[0].id,
+					0x3e
+				);
 			}
 
 			let tail = object_stream(version, false, &[(9, &[], None)]);

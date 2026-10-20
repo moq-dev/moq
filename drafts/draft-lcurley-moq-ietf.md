@@ -111,8 +111,9 @@ Object Record {
 `End` is 1 for the END_OF_GROUP record, which has no FRAME and is the last record on the stream: a receiver MUST reset the stream with a PROTOCOL_VIOLATION if anything follows it.
 
 **Properties**:
-The object's [properties](#properties), in a block of `Properties Length` bytes.
-A receiver MUST reset the stream if the length exceeds 65,536.
+The object's [properties](#properties), in `Properties Length` bytes.
+An empty one means the object has none.
+A receiver MUST reset the stream if the length exceeds 65,546, the largest Property Block beside a Flags byte and a Timestamp.
 
 In a plain group, every record has a `Skip` of 0 after the first, whose Object ID is the index of its frame, no properties, and `End` of 0.
 A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any other record in a plain group.
@@ -122,36 +123,35 @@ The Object ID is relay state beside it, so a plain subscriber still reads consec
 
 
 # Properties {#properties}
-A block of an object's properties.
-An empty block means the object has none.
+An object's properties: its mutable Timestamp, and every other property as one block in the encoding of the {{moqt}} draft it arrived on.
+A relay forwards the block to a peer of that encoding unchanged, so the block never grows on a hop, and holds it as received rather than as a decoded list many times its size.
 
 ~~~
 Properties {
   Flags (i)
-  Property (..) ...
-}
-
-Property {
-  ID (i)
-  [Value (i)]
-  [Length (i), Value (..)]
+  [Timestamp (i)]
+  Property Block (..)
 }
 ~~~
 
 **Flags**:
-Bit `0x1` is set when the publisher's {{moqt}} draft assigns property 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
-`Flags >> 1` names how the publisher serialized its Immutable Properties (0x0b): 0 for none, 1 for drafts 14 and 15, 2 for draft 16, 3 for draft 17, and 4 for draft 18 and later.
-A receiver MUST treat any other value as malformed.
-These let a relay refuse to forward a property to a draft that would read it differently.
 
-**Property**:
-Properties are listed in arrival order, each with its absolute ID.
-An even ID has an integer Value, and an odd ID a length-prefixed one.
-Immutable Properties (0x0b) are forwarded as the publisher's bytes.
-A block MUST contain exactly one when `Flags >> 1` is not 0, and none otherwise.
+- `0x1` **DELIVERY_TIMEOUT**: The publisher's {{moqt}} draft assigns property 0x06 to SUBGROUP_DELIVERY_TIMEOUT. It requires a Property Block.
+- `0x2` **TIMESTAMP**: The Timestamp follows.
+- `Flags >> 2` names the Property Block's encoding: 0 for no block, 1 for drafts 14 and 15 (absolute IDs and QUIC varints), 2 for draft 16 (delta IDs and QUIC varints), 3 for draft 17, and 4 for draft 18 and later.
 
-The Timestamp property (0x10) carries the object's timestamp in the track's Timescale ({{moql}} TRACK_INFO), whatever units the publisher used.
+A receiver MUST treat any other value as malformed, as it MUST a Flags of 0, which an empty Properties says instead.
+DELIVERY_TIMEOUT lets a relay refuse to forward property 0x06 to a draft that would read it differently.
+
+**Timestamp**:
+The object's mutable Timestamp property (0x10), in the track's Timescale ({{moql}} TRACK_INFO).
 It MUST be present whenever the object has one, since an absent Timestamp is relayed as absent.
+
+**Property Block**:
+The rest of the Properties: every other property of the object, serialized as the {{moqt}} drafts of its encoding serialize an object's properties, in ascending ID order.
+Immutable Properties (0x0b) are in the same encoding, as the publisher sent them.
+It MUST be present exactly when `Flags >> 2` is not 0, MUST NOT be longer than 65,536 bytes, and MUST NOT contain a mutable Timestamp.
+A receiver MUST treat a block its encoding's drafts would refuse as malformed.
 Other properties are opaque to this extension.
 
 
@@ -166,9 +166,23 @@ TRACK_PROPERTIES Message {
 }
 ~~~
 
-**Flags** and **Property**:
-As in [Properties](#properties), for the {{moqt}} Track Properties a relay forwards without interpreting.
-An empty message is a Flags of 0 and no properties.
+**Flags**:
+Bit `0x1` is DELIVERY_TIMEOUT, as in [Properties](#properties).
+`Flags >> 1` names how the publisher serialized its Immutable Properties (0x0b), with the codes of [Properties](#properties), or 0 for none.
+A message without properties MUST have a Flags of 0.
+
+**Property**:
+The {{moqt}} Track Properties a relay forwards without interpreting, in arrival order, each with its absolute ID.
+An even ID has an integer Value, and an odd ID a length-prefixed one.
+Immutable Properties are forwarded as the publisher's bytes, and there MUST be exactly one when `Flags >> 1` is not 0, and none otherwise.
+
+~~~
+Property {
+  ID (i)
+  [Value (i)]
+  [Length (i), Value (..)]
+}
+~~~
 
 A message MUST NOT carry more than 64 properties, nor any a relay interprets rather than forwards: MAX_CACHE_DURATION (0x04), TIMESCALE (0x08), DEFAULT_PUBLISHER_PRIORITY (0x0e), DEFAULT_PUBLISHER_GROUP_ORDER (0x22), and DYNAMIC_GROUPS (0x30).
 TRACK_INFO carries what a relay keeps of them, so a second copy could only contradict it.
@@ -210,8 +224,8 @@ A datagram with a non-zero Status carries no object: it has no Timestamp, even o
 
 
 # Security Considerations
-A peer sets how much state a receiver holds for each object, up to 65,536 bytes of properties.
-A receiver SHOULD charge it to the group's cache budget like a payload, including any overhead of its decoded form.
+A peer sets how much state a receiver holds for each object, up to a 65,536-byte Property Block.
+A receiver SHOULD hold the block as received, not decoded, and charge it to the group's cache budget like a payload.
 A TRACK_PROPERTIES message is bounded by its Message Length and the 64-property limit, and is held once per track.
 
 The extension adds no authority.

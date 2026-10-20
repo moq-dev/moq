@@ -1043,8 +1043,8 @@ struct RecordIngest {
 	prior: Option<u64>,
 	/// The record of the frame being read: its Object ID and properties block.
 	///
-	/// The block stays encoded until the frame is created, so the cache charges its decoded
-	/// form at once rather than a stalled stream holding it uncharged.
+	/// It is checked when the frame is created, which charges it to the cache, so a stalled
+	/// stream holds only the bytes it read.
 	pending: Option<(u64, bytes::Bytes)>,
 }
 
@@ -2527,16 +2527,16 @@ mod tests {
 		}
 	}
 
-	/// A properties block decodes to more heap than its wire bytes, so its decoded form is
-	/// what the cache charges, as the frame it describes is created.
+	/// A record's properties stay the bytes they arrived as, which the cache charges, rather
+	/// than a decoded list costing many times as much.
 	#[moq_clock::test]
-	async fn ietf_records_charge_their_decoded_properties() {
+	async fn ietf_records_hold_properties_at_their_wire_size() {
 		const COUNT: u64 = 1000;
-		// A relayed group's Object 0, whose block holds COUNT two-byte properties (0x20 = 1)
-		// after its Flags, then an empty frame.
-		let mut body = vec![0x1, 0, 1 + 2 * COUNT, 0];
-		for _ in 0..COUNT {
-			body.extend([0x20, 1]);
+		// A relayed group's Object 0, whose draft-18 block holds COUNT two-byte properties
+		// (0x20 = 1, then zero deltas), then an empty frame.
+		let mut body = vec![0x1, 0, 1 + 2 * COUNT, 4 << 2, 0x20, 1];
+		for _ in 1..COUNT {
+			body.extend([0, 1]);
 		}
 		body.push(0);
 		let (res, track, pool) = receive_ietf(&body).await;
@@ -2544,7 +2544,12 @@ mod tests {
 		let group = track.consume().peek_group(0).unwrap();
 		assert_eq!(group.frame_count(), 1);
 		let decoded = COUNT * size_of::<crate::model::object::Property>() as u64;
-		assert!(pool.used() >= decoded, "{} cached for {decoded} decoded", pool.used());
+		assert!(
+			(2 * COUNT..decoded / 2).contains(&pool.used()),
+			"{} cached for a {}-byte block",
+			pool.used(),
+			2 * COUNT
+		);
 	}
 
 	/// Receive group 5 starting at 500ms over `version`, on a received timed track whose

@@ -39,27 +39,35 @@ pub(super) fn check_status(version: Version, properties: &Properties) -> Result<
 	}
 }
 
-pub(super) struct Decoded {
+pub(crate) struct Decoded {
 	pub properties: Properties,
 	pub timestamp: Option<Timestamp>,
 	pub gap: Option<u64>,
 }
 
+/// The largest properties block an object may carry, which a relay forwards unchanged.
+pub(crate) const MAX_BLOCK: usize = super::group::MAX_OBJECT_EXTENSIONS;
+
 struct List {
-	properties: Properties,
+	/// In arrival order, without the mutable Timestamp. Values borrow the input.
+	values: Vec<Property>,
+	timestamp: Option<u64>,
 	time: Option<u64>,
 	gap: Option<u64>,
 	sealed_time: bool,
+	immutable: bool,
 }
 
 fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> {
 	let keys = encoding(version);
 	let mut decoder = Decoder::new(data, version.into());
 	let mut result = List {
-		properties: Properties::default(),
+		values: Vec::new(),
+		timestamp: None,
 		time: None,
 		gap: None,
 		sealed_time: false,
+		immutable: false,
 	};
 	let mut previous = 0u64;
 	while !decoder.is_empty() {
@@ -76,7 +84,7 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 			}
 			if id == 0x10 {
 				result.time = Some(value);
-				if result.properties.timestamp.replace(value).is_some() {
+				if result.timestamp.replace(value).is_some() {
 					return Err(Error::MalformedTrack);
 				}
 				continue;
@@ -87,10 +95,9 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 			if bytes.len() > u16::MAX as usize {
 				return Err(Error::MalformedTrack);
 			}
-			// A small cached property must not pin the reader's larger receive buffer.
-			let bytes = Bytes::copy_from_slice(bytes);
+			let bytes = data.slice_ref(bytes);
 			if id == 0x0b {
-				if immutable || result.properties.immutable.replace(keys).is_some() {
+				if immutable || std::mem::replace(&mut result.immutable, true) {
 					return Err(Error::MalformedTrack);
 				}
 				let nested = list(&bytes, version, true).map_err(|_| Error::MalformedTrack)?;
@@ -104,22 +111,107 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 			}
 			Value::Bytes(bytes)
 		};
-		result.properties.values.push(Property { id, value });
+		result.values.push(Property { id, value });
 	}
 	Ok(result)
 }
 
-pub(super) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>) -> Result<Decoded, Error> {
-	let mut parsed = list(data, version, false)?;
-	parsed.properties.timescale = timescale.filter(|_| parsed.time.is_some());
-	parsed.properties.sealed_time = parsed.sealed_time;
-	parsed.properties.delivery_timeout = has_delivery_timeout(version);
+/// Serialize `values` as `encoding` does, in ascending ID order. Equal IDs keep their order.
+fn serialize<'a>(values: impl IntoIterator<Item = &'a Property>, encoding: Encoding) -> Result<Vec<u8>, Error> {
+	let mut sorted: Vec<_> = values.into_iter().collect();
+	sorted.sort_by_key(|property| property.id);
+	let mut out = Vec::new();
+	let mut encoder = Encoder::new(&mut out, family(encoding).into());
+	let mut previous = 0;
+	for property in sorted {
+		encoder.varint(match encoding {
+			Encoding::Absolute => property.id,
+			Encoding::Delta { .. } | Encoding::DeltaQuic => property.id - previous,
+		})?;
+		previous = property.id;
+		match &property.value {
+			Value::Int(value) => encoder.varint(*value)?,
+			Value::Bytes(value) => encoder.bytes(value)?,
+		}
+	}
+	Ok(out)
+}
+
+/// Encode `values` as the block of an object whose properties arrived as `encoding`, or
+/// `None` without any.
+///
+/// Sorting a delta-encoded list, which arrives ascending, and dropping its Timestamp
+/// never grows it, so the block fits wherever the publisher's list did.
+pub(crate) fn block(
+	values: &[Property],
+	encoding: Encoding,
+	delivery_timeout: bool,
+) -> Result<Option<crate::model::object::Block>, Error> {
+	if values.is_empty() {
+		return Ok(None);
+	}
+	Ok(Some(crate::model::object::Block {
+		bytes: serialize(values, encoding)?.into(),
+		encoding,
+		immutable: values.iter().any(|property| property.id == 0x0b),
+		delivery_timeout,
+	}))
+}
+
+/// What a received [`Block`](crate::model::object::Block) holds beside its bytes.
+pub(crate) struct Checked {
+	pub immutable: bool,
+	pub sealed_time: bool,
+	pub gap: Option<u64>,
+}
+
+/// Validate a block received as `encoding`, as moq-transport ingress validates a list.
+///
+/// Its mutable Timestamp travels beside it, so one inside is malformed, as is an empty
+/// block, which is sent as none.
+pub(crate) fn check(bytes: &Bytes, encoding: Encoding) -> Result<Checked, Error> {
+	if bytes.is_empty() || bytes.len() > MAX_BLOCK {
+		return Err(Error::MalformedTrack);
+	}
+	let parsed = list(bytes, family(encoding), false)?;
+	if parsed.timestamp.is_some() {
+		return Err(Error::MalformedTrack);
+	}
+	Ok(Checked {
+		immutable: parsed.immutable,
+		sealed_time: parsed.sealed_time,
+		gap: parsed.gap,
+	})
+}
+
+/// Every property but the mutable Timestamp, decoded, for tests to inspect.
+#[cfg(test)]
+pub(crate) fn listed(properties: &Properties) -> Vec<Property> {
+	properties
+		.block
+		.as_ref()
+		.map_or_else(Vec::new, |block| values(block).unwrap())
+}
+
+/// Decode a block's properties, whose values borrow its bytes.
+pub(crate) fn values(block: &crate::model::object::Block) -> Result<Vec<Property>, Error> {
+	Ok(list(&block.bytes, family(block.encoding), false)?.values)
+}
+
+pub(crate) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>) -> Result<Decoded, Error> {
+	let parsed = list(data, version, false)?;
+	let properties = Properties {
+		timestamp: parsed.timestamp,
+		timescale: timescale.filter(|_| parsed.time.is_some()),
+		sealed_time: parsed.sealed_time,
+		block: block(&parsed.values, encoding(version), has_delivery_timeout(version))?,
+	};
 	let timestamp = match (parsed.time, timescale) {
 		(Some(value), Some(timescale)) => Some(Timestamp::new(value, timescale).map_err(|_| Error::MalformedTrack)?),
 		_ => None,
 	};
 	Ok(Decoded {
-		properties: parsed.properties,
+		properties,
 		timestamp,
 		gap: parsed.gap,
 	})
@@ -152,14 +244,6 @@ pub(crate) fn egress_time(properties: &Properties, timescale: Option<Timescale>)
 		.transpose()
 }
 
-/// What an Immutable Properties block in the `encoding` family seals.
-pub(crate) struct Sealed {
-	/// It holds a Timestamp.
-	pub time: bool,
-	/// Its Prior Object ID Gap, if any.
-	pub gap: Option<u64>,
-}
-
 /// A draft that serializes properties in the `encoding` family. Any draft in the family
 /// parses its keys and integers the same way.
 pub(super) fn family(encoding: Encoding) -> Version {
@@ -171,70 +255,51 @@ pub(super) fn family(encoding: Encoding) -> Version {
 	}
 }
 
-/// Parse an Immutable Properties block (0x0b) serialized in the `encoding` family.
-pub(crate) fn sealed(bytes: &Bytes, encoding: Encoding) -> Result<Sealed, Error> {
-	let nested = list(bytes, family(encoding), true).map_err(|_| Error::MalformedTrack)?;
-	Ok(Sealed {
-		time: nested.time.is_some(),
-		gap: nested.gap,
-	})
-}
-
 /// Serialize relayed properties for `version`, with Timestamps in the `timescale` the
 /// egress declares, if any.
-pub(super) fn write(properties: &Properties, version: Version, timescale: Option<Timescale>) -> Result<Vec<u8>, Error> {
-	if properties
-		.immutable
-		.is_some_and(|original| original != encoding(version))
-	{
-		return Err(Error::Unsupported);
-	}
+pub(crate) fn write(properties: &Properties, version: Version, timescale: Option<Timescale>) -> Result<Vec<u8>, Error> {
+	let target = encoding(version);
 	let timestamp = egress_time(properties, timescale)?;
-	// Across draft-19, forwarding 0x06 would give it a different meaning.
-	// A mutable one is dropped; a sealed one is refused.
-	let flipped = properties.delivery_timeout != has_delivery_timeout(version);
-	if flipped && sealed_key(properties, version, 0x06)? {
-		return Err(Error::Unsupported);
-	}
 	let timestamp = timestamp.map(|value| Property {
 		id: 0x10,
 		value: Value::Int(value),
 	});
-	let mut sorted: Vec<_> = properties
-		.values
-		.iter()
-		.filter(|property| property.id != 0x06 || !flipped)
-		.chain(timestamp.as_ref())
-		.collect();
-	// Delta keys require ascending order. Equal keys retain the publisher's order.
-	sorted.sort_by_key(|property| property.id);
-	let mut out = Vec::new();
-	let mut encoder = Encoder::new(&mut out, version.into());
-	let mut previous = 0;
-	for property in sorted {
-		encoder.varint(match encoding(version) {
-			Encoding::Absolute => property.id,
-			Encoding::Delta { .. } | Encoding::DeltaQuic => property.id - previous,
-		})?;
-		previous = property.id;
-		match &property.value {
-			Value::Int(value) => encoder.varint(*value)?,
-			Value::Bytes(value) => encoder.bytes(value)?,
-		}
+	let Some(block) = &properties.block else {
+		return serialize(&timestamp, target);
+	};
+	if block.immutable && block.encoding != target {
+		return Err(Error::Unsupported);
 	}
-	Ok(out)
+	// Across draft-19, forwarding 0x06 would give it a different meaning.
+	// A mutable one is dropped; a sealed one is refused.
+	let flipped = block.delivery_timeout != has_delivery_timeout(version);
+	// The common case: the block is already what this draft would send.
+	if timestamp.is_none() && !flipped && block.encoding == target {
+		return Ok(block.bytes.to_vec());
+	}
+	let values = values(block)?;
+	if flipped && sealed_key(&values, version, 0x06)? {
+		return Err(Error::Unsupported);
+	}
+	serialize(
+		values
+			.iter()
+			.filter(|property| property.id != 0x06 || !flipped)
+			.chain(&timestamp),
+		target,
+	)
 }
 
-/// Whether the immutable block holds a property with `id`.
-fn sealed_key(properties: &Properties, version: Version, id: u64) -> Result<bool, Error> {
-	let Some(sealed) = properties.values.iter().find(|property| property.id == 0x0b) else {
+/// Whether the immutable block among `values` holds a property with `id`.
+fn sealed_key(values: &[Property], version: Version, id: u64) -> Result<bool, Error> {
+	let Some(sealed) = values.iter().find(|property| property.id == 0x0b) else {
 		return Ok(false);
 	};
 	let Value::Bytes(bytes) = &sealed.value else {
 		return Err(Error::MalformedTrack);
 	};
 	let nested = list(bytes, version, true)?;
-	Ok(nested.properties.values.iter().any(|property| property.id == id))
+	Ok(nested.values.iter().any(|property| property.id == id))
 }
 
 #[cfg(test)]
@@ -304,7 +369,7 @@ mod tests {
 		drop(received);
 		assert!(dropped.load(Ordering::Relaxed));
 		assert_eq!(
-			decoded.properties.values[0].value,
+			listed(&decoded.properties)[0].value,
 			Value::Bytes(Bytes::from_static(&[42]))
 		);
 	}
@@ -344,14 +409,14 @@ mod tests {
 			let again = read(&Bytes::from(written), version, Some(Timescale::MICRO)).unwrap();
 			let micros = Timestamp::new(42_000, Timescale::MICRO).unwrap();
 			assert_eq!(again.timestamp, Some(micros), "{version}");
-			assert_eq!(again.properties.values.last().unwrap().value, Value::Int(7));
+			assert_eq!(listed(&again.properties).last().unwrap().value, Value::Int(7));
 
 			// An egress that declares no units drops it, as a plain frame there has none.
 			let written = write(&decoded.properties, version, None).unwrap();
 			let again = read(&Bytes::from(written), version, None).unwrap();
 			assert_eq!(again.properties.timestamp, None, "{version}");
-			assert_eq!(again.properties.values.len(), 1, "{version}");
-			assert_eq!(again.properties.values[0].value, Value::Int(7));
+			assert_eq!(listed(&again.properties).len(), 1, "{version}");
+			assert_eq!(listed(&again.properties)[0].value, Value::Int(7));
 			// An untimed ingress forwards it untouched.
 			let untimed = read(&bytes, version, None).unwrap();
 			assert_eq!(write(&untimed.properties, version, None).unwrap(), bytes);
