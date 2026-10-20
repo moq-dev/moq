@@ -135,7 +135,14 @@ impl ListingState {
 			Some(entry) => entry.own = Some(token),
 			None => {
 				let own = Some(token);
-				self.insert(name, Entry { info, own, answered: false });
+				self.insert(
+					name,
+					Entry {
+						info,
+						own,
+						answered: false,
+					},
+				);
 			}
 		}
 		token
@@ -231,7 +238,12 @@ pub(in crate::model) struct Unlist {
 
 impl Unlist {
 	/// List `name` now, from inside the broadcast's lock.
-	pub(super) fn list(state: &kio::Shared<BroadcastState>, listing: &mut ListingState, name: Arc<str>, info: &track::Info) -> Self {
+	pub(super) fn list(
+		state: &kio::Shared<BroadcastState>,
+		listing: &mut ListingState,
+		name: Arc<str>,
+		info: &track::Info,
+	) -> Self {
 		let token = listing.list_own(name.clone(), info.clone());
 		Self {
 			state: state.clone(),
@@ -395,11 +407,7 @@ impl Tracks {
 
 impl Drop for Tracks {
 	fn drop(&mut self) {
-		self.broadcast
-			.state
-			.lock()
-			.listing
-			.release(self.key, self.generation);
+		self.broadcast.state.lock().listing.release(self.key, self.generation);
 	}
 }
 
@@ -743,7 +751,10 @@ mod tests {
 		assert!(matches!(lister.poll_used(&waiter), Poll::Ready(Ok(()))));
 		assert_eq!(drain(&mut tracks), ["+own"], "not synced until the lister says so");
 		lister.add("up", track::Info::default()).unwrap();
-		assert!(matches!(lister.add("up", track::Info::default()), Err(Error::Duplicate)));
+		assert!(matches!(
+			lister.add("up", track::Info::default()),
+			Err(Error::Duplicate)
+		));
 		lister.synced();
 		assert_eq!(drain(&mut tracks), ["+up", "synced"]);
 
@@ -791,7 +802,10 @@ mod tests {
 		lister.synced();
 		assert_eq!(drain(&mut again), ["synced"]);
 		drop(tracks);
-		assert!(lister.poll_unused(&waiter).is_pending(), "a failed reader releases nothing");
+		assert!(
+			lister.poll_unused(&waiter).is_pending(),
+			"a failed reader releases nothing"
+		);
 	}
 
 	#[test]

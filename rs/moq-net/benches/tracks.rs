@@ -55,7 +55,9 @@ fn table(listings: usize, tracks: usize, broadcasts: usize) -> Table {
 	for _ in 0..broadcasts {
 		let broadcast = broadcast::Info::new().produce();
 		for i in 0..tracks {
-			table._tracks.push(broadcast.create_track(format!("t{i}"), None).unwrap());
+			table
+				._tracks
+				.push(broadcast.create_track(format!("t{i}"), None).unwrap());
 		}
 		let consumer = broadcast.consume();
 		let mut readers: Vec<Tracks> = (0..listings).map(|_| consumer.tracks().unwrap()).collect();

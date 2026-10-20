@@ -365,7 +365,9 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						lite::ControlType::Track => {
 							ControlState::TrackInfo(RequestServe::new(self.shared.clone(), stream))
 						}
-						lite::ControlType::Tracks => ControlState::Tracks(RequestServe::new(self.shared.clone(), stream)),
+						lite::ControlType::Tracks => {
+							ControlState::Tracks(RequestServe::new(self.shared.clone(), stream))
+						}
 						lite::ControlType::Probe => {
 							ControlState::Probe(ProbeServe::new(self.shared.clone(), self.runtime.clone(), stream))
 						}

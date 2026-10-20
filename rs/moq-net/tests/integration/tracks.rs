@@ -25,7 +25,10 @@ fn lite07() -> Version {
 
 /// The next event as `+name`, `-name`, `synced`, `end`, or `error: ..`.
 async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
-	match moq_clock::timeout(TIMEOUT, tracks.next()).await.expect("listing stalled") {
+	match moq_clock::timeout(TIMEOUT, tracks.next())
+		.await
+		.expect("listing stalled")
+	{
 		Ok(Some(TracksEvent::Added { name, .. })) => format!("+{name}"),
 		Ok(Some(TracksEvent::Removed { name })) => format!("-{name}"),
 		Ok(Some(TracksEvent::Synced)) => "synced".into(),
@@ -67,7 +70,11 @@ async fn a_session_lists_its_peers_tracks() {
 	let (subscriber, _pair) = connect(&publisher, 2, lite07()).await;
 	let remote = resolve(&subscriber).await;
 	let mut tracks = remote.tracks().unwrap();
-	assert_eq!(next(&mut tracks).await, "synced", "synced with this hop, which holds nothing yet");
+	assert_eq!(
+		next(&mut tracks).await,
+		"synced",
+		"synced with this hop, which holds nothing yet"
+	);
 	assert_eq!(next(&mut tracks).await, "+a");
 
 	let _b = broadcast.create_track("b", None).unwrap();
@@ -148,7 +155,10 @@ async fn lite06_cannot_list() {
 
 	let (subscriber, _pair) = connect(&publisher, 2, "moq-lite-06".parse().unwrap()).await;
 	let mut tracks = resolve(&subscriber).await.tracks().unwrap();
-	assert_eq!(next(&mut tracks).await, format!("error: {}", moq_net::Error::Unsupported));
+	assert_eq!(
+		next(&mut tracks).await,
+		format!("error: {}", moq_net::Error::Unsupported)
+	);
 }
 
 /// Each listed track counts against the session's `announces` cap: past it, the listing

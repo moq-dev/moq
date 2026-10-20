@@ -1590,11 +1590,7 @@ struct TracksRecv<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> TracksRecv<S> {
 	/// Apply the peer's events until it ends the listing, or the error that ends it.
-	fn poll(
-		&mut self,
-		source: &SourceServe<S>,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<(), Error>> {
+	fn poll(&mut self, source: &SourceServe<S>, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
 		let version = source.subscriber.version;
 		let stream = match &mut self.stream {

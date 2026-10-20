@@ -151,7 +151,10 @@ mod test {
 
 	#[test]
 	fn synced_is_an_empty_type_four() {
-		assert_eq!(TracksEvent::Synced.encode_bytes(Version::Lite07).unwrap(), &[0x04u8, 0x00][..]);
+		assert_eq!(
+			TracksEvent::Synced.encode_bytes(Version::Lite07).unwrap(),
+			&[0x04u8, 0x00][..]
+		);
 	}
 
 	#[test]

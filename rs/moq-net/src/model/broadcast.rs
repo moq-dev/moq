@@ -24,8 +24,8 @@ use super::{Requests, WeakCache};
 
 #[path = "listing.rs"]
 mod listing;
-pub use listing::{Lister, Tracks, TracksEvent};
 pub(super) use listing::{ListOnAccept, Unlist};
+pub use listing::{Lister, Tracks, TracksEvent};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
