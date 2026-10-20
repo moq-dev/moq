@@ -4685,6 +4685,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-carla-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ash",
+ "bytes",
+ "moq-mux",
+ "moq-net",
+ "moq-video",
+ "parking_lot",
+ "pollster",
+ "tracing",
+]
+
+[[package]]
 name = "moq-cli"
 version = "0.14.2"
 dependencies = [

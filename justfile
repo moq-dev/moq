@@ -29,6 +29,7 @@ mod drafts
 mod gh '.github'
 # Shortcuts to avoid `demo::` prefix.
 mod boy 'demo/boy'
+mod carla 'demo/carla'
 mod pub 'demo/pub'
 mod relay 'demo/relay'
 mod sub 'demo/sub'
