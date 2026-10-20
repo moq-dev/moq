@@ -25,7 +25,7 @@ always a follow-up with its `MIGRATE.md` entry, never an inline fix.
 
 The m0 run (2026-10-19) removed seven unused JS wire codec classes, internal
 aliases and token constants, module-local exports, two unused SVGs, one unused
-formatter, and four unused build dependencies. Rust's draft-17 PUBLISH_BLOCKED
+formatter, and two unused build dependencies. Rust's draft-17 PUBLISH_BLOCKED
 codec now compiles only for tests/fuzzing; six stale lite lint suppressions
 were removed. An all-features-only unused moq-stats benchmark import was
 also removed. Public entrypoints, Cargo features, flags, and wire behavior
@@ -46,6 +46,8 @@ Start by comparing the live tree against these baselines:
   MPEG-TS fixtures as TypeScript. Supply those entrypoints explicitly, inspect
   package `exports`, and search the whole tree before removing a finding.
   Preserve the TypeScript DOM override dependency; it is compiler-selected.
+  Preserve `rolldown` in every package whose Vite config loads
+  `js/common/vite-plugin-worklet.ts`; `js/common` has no manifest of its own.
   Keep the one-off analyzer outside the package dependency graph unless its
   false positives can be reduced enough for CI.
 - There were 144 Cargo feature declarations across 25 manifests. The
