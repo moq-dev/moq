@@ -1,8 +1,8 @@
 # Persistent GitHub Actions runner VM
 
 The `github-runner-vm` NixOS module runs each repository's runner in its own
-persistent KVM guest. The guest keeps its Nix store, mbx cache, checkout, and runner state
-across jobs and reboots. It has no host filesystem mounts or tailnet access.
+persistent KVM guest. The guest keeps its Nix store, home caches, and runner state
+across jobs and reboots. Restarting the runner clears its checkout and build directory. It has no host filesystem mounts or tailnet access.
 The firewall permits public IPv4 egress and blocks the host and private networks.
 
 Import `moq.nixosModules.github-runner-vm` into an x86\_64 NixOS host:
