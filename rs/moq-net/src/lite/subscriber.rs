@@ -512,7 +512,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		let mut subscribes = self.subscribes.lock();
 		// An unknown subscription's datagram is dropped below, however it parses.
 		let dg = lite::Datagram::decode(payload, self.version, ietf, |id| {
-			subscribes.get(&id).is_some_and(|entry| entry.timescale.is_some())
+			subscribes.get(&id).and_then(|entry| entry.timescale)
 		})?;
 		let Some(entry) = subscribes.get_mut(&dg.subscribe) else {
 			// Unknown or already-closed subscription: drop the datagram.
@@ -533,10 +533,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// A datagram says where the live feed is as well as a group does. Inserted first, so
 		// the copy goes live with it already showing.
 		let live = entry.producer.is_live();
-		let wire = dg.ietf.flatten().map(|mut wire| {
-			lite::ietf::stamp(&mut wire.properties, entry.timescale);
-			Arc::new(wire)
-		});
+		let wire = dg.ietf.flatten().map(Arc::new);
 		entry.producer.insert_wire_datagram(crate::model::datagram::Stored {
 			datagram: crate::Datagram {
 				sequence: dg.sequence,
@@ -1221,14 +1218,7 @@ impl FrameIngest {
 							let lite::ietf::Decoded { properties, gap } =
 								lite::ietf::decode_properties(&block, self.timescale, self.version)?;
 							group.mark_gap(id, gap)?;
-							if !lite::ietf::agrees(&properties, timestamp.map(|time| time.value())) {
-								return Poll::Ready(Err(Error::ProtocolViolation));
-							}
-							// Time alone, which the frame header carries already, is plain.
-							let plain = id == group.frame_count() as u64
-								&& properties.is_plain() && properties
-								.timestamp
-								.is_none_or(|time| Some(time) == timestamp.map(|time| time.value()));
+							let plain = id == group.frame_count() as u64 && properties.is_empty();
 							if !plain && !records.relayed {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
@@ -2541,8 +2531,8 @@ mod tests {
 	/// as the moq-transport subgroup it mirrors could hold none otherwise.
 	#[moq_clock::test]
 	async fn ietf_records_need_extensions_for_properties() {
-		// Object 0 with a draft-18 block holding 0x20 = 1, or with a Timestamp alone.
-		for record in [&[3, 4 << 2, 0x20, 1][..], &[2, 0x2, 7]] {
+		// Object 0 with a draft-18 block holding 0x20 = 1, or an untimed Timestamp.
+		for record in [&[3, 4 << 1, 0x20, 1][..], &[3, 4 << 1, 0x10, 7]] {
 			for (state, ok) in [(0x1 | 0x4, true), (0x1, false)] {
 				let mut body = vec![state, 0];
 				body.extend(record);
@@ -2553,29 +2543,30 @@ mod tests {
 		}
 	}
 
-	/// On a timed track, a relayed record's time, its mutable Timestamp or else a sealed one,
-	/// must be its frame's: lite egress sends one and moq-transport egress the other.
+	/// On a timed track, the frame holds an object's time, so a record cannot carry a second,
+	/// mutable Timestamp that could disagree with it. Records that say nothing of time, or
+	/// seal a Timestamp moq-transport egress cannot rewrite, cross beside the frame's.
 	#[moq_clock::test]
-	async fn ietf_records_agree_with_their_frame_time() {
+	async fn ietf_records_leave_time_to_their_frame() {
 		let frame = crate::coding::varint::zigzag(500);
+		// Each record after its Object code: Object 0 unless it says otherwise.
 		for (record, ok, reason) in [
-			(&[0][..], true, "nothing but the frame's"),
-			(&[3, 0x2, 500], true, "the frame's Timestamp"),
-			(&[3, 0x2, 499], false, "another Timestamp"),
-			(&[3, 4 << 2, 0x20, 1], false, "properties without a Timestamp"),
-			(
-				&[5, 0x2 | 4 << 2, 500, 0x20, 1],
-				true,
-				"properties and the frame's Timestamp",
-			),
-			(&[6, 4 << 2, 0x0b, 3, 0x10, 500], true, "the frame's Timestamp, sealed"),
-			(&[6, 4 << 2, 0x0b, 3, 0x10, 499], false, "another Timestamp, sealed"),
+			(&[0, 0][..], true, "nothing at all"),
+			(&[0, 4, 4 << 1, 0x10, 500], false, "a mutable Timestamp"),
+			(&[0, 3, 4 << 1, 0x20, 1], true, "properties without a Timestamp"),
+			(&[0, 6, 4 << 1, 0x0b, 3, 0x10, 499], true, "a sealed Timestamp"),
+			(&[1 << 1, 0], true, "Object 1 without properties"),
 		] {
-			let mut body = vec![0x1 | 0x4, 0];
+			let mut body = vec![0x1 | 0x4];
 			body.extend(record);
 			body.extend([frame, 0]);
-			let (res, ..) = receive_ietf(Some(Timescale::MILLI), &body).await;
+			let (res, track, _) = receive_ietf(Some(Timescale::MILLI), &body).await;
 			assert_eq!(res.is_ok(), ok, "{reason}: {res:?}");
+			if ok {
+				let mut group = track.consume().peek_group(0).unwrap();
+				let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+				assert_eq!(frame.timestamp, Some(Timestamp::from_millis(500).unwrap()), "{reason}");
+			}
 		}
 	}
 
@@ -2586,7 +2577,7 @@ mod tests {
 		const COUNT: u64 = 1000;
 		// A relayed group's Object 0, whose draft-18 block holds COUNT two-byte properties
 		// (0x20 = 1, then zero deltas), then an empty frame.
-		let mut body = vec![0x1 | 0x4, 0, 1 + 2 * COUNT, 4 << 2, 0x20, 1];
+		let mut body = vec![0x1 | 0x4, 0, 1 + 2 * COUNT, 4 << 1, 0x20, 1];
 		for _ in 1..COUNT {
 			body.extend([0, 1]);
 		}
@@ -6106,6 +6097,11 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 					}
 					let properties = ready!(stream.reader.poll_decode::<lite::ietf::TrackProperties>(&mut cx))?;
+					// Refused as moq-transport ingress refuses it: a track that needs a property
+					// we do not understand is neither processed nor forwarded.
+					if properties.0.as_ref().is_some_and(|properties| properties.mandatory()) {
+						return Poll::Ready(Err(Error::UnsupportedExtension));
+					}
 					let TrackInfoState::Properties { stream, mut info } =
 						std::mem::replace(&mut self.state, TrackInfoState::Open)
 					else {

@@ -319,7 +319,6 @@ impl TrackProperties {
 
 	/// Whether one is a Mandatory Track Property (0x4000-0x7FFF), which by definition is
 	/// one moq-net does not understand: the track must be neither processed nor forwarded.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn mandatory(&self) -> bool {
 		const MANDATORY: std::ops::RangeInclusive<u64> = 0x4000..=0x7fff;
 		self.values.iter().any(|property| MANDATORY.contains(&property.id))

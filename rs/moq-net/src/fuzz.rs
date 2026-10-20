@@ -159,8 +159,8 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 	};
 	let mut any = false;
 	for &ietf in ietf {
-		for timed in [true, false] {
-			let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, ietf, |_| timed) else {
+		for timescale in [Some(crate::Timescale::MILLI), None] {
+			let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, ietf, |_| timescale) else {
 				continue;
 			};
 			any = true;
@@ -170,7 +170,7 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 			};
 
 			let echo =
-				lite::Datagram::decode(first, version, ietf, |_| timed).expect("could not decode our own encoding");
+				lite::Datagram::decode(first, version, ietf, |_| timescale).expect("could not decode our own encoding");
 			assert_eq!(echo, decoded, "datagram did not survive a round trip");
 		}
 	}
@@ -478,9 +478,11 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| true)
-				.map(|_| 1)
-				.unwrap(),
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| {
+				Some(crate::Timescale::MILLI)
+			})
+			.map(|_| 1)
+			.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
 		}
 	}

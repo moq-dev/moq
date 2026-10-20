@@ -2079,7 +2079,7 @@ where
 		// timestamp only on drafts that can declare its units.
 		let timescale = timescale.filter(|_| ietf::Properties::sends_timescale(version));
 		let properties = if let Some(fields) = fields {
-			let properties = super::object::write(&fields.properties, version, timescale)?;
+			let properties = super::object::write(&fields.properties, timestamp, version, timescale)?;
 			(!properties.is_empty()).then_some(properties)
 		} else {
 			match timescale {
@@ -2466,9 +2466,12 @@ where
 			.info
 			.timescale
 			.filter(|_| ietf::Properties::sends_timescale(self.version));
-		let fields = group.frames.iter().filter_map(|frame| frame.fields.as_deref());
-		for fields in fields.chain(group.end_object.as_deref()) {
-			if let Err(err) = super::object::write(&fields.properties, self.version, timescale) {
+		let frames = group
+			.frames
+			.iter()
+			.filter_map(|frame| Some((frame.fields.as_deref()?, frame.timestamp)));
+		for (fields, frame) in frames.chain(group.end_object.as_deref().map(|end| (end, None))) {
+			if let Err(err) = super::object::write(&fields.properties, frame, self.version, timescale) {
 				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
 			}
 		}
@@ -4429,7 +4432,12 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						tracing::debug!(sequence, "dropping a datagram status this draft cannot carry");
 						continue;
 					}
-					let properties = match super::object::write(&wire.properties, self.version, self.timescale) {
+					let properties = match super::object::write(
+						&wire.properties,
+						datagram.datagram.timestamp,
+						self.version,
+						self.timescale,
+					) {
 						Ok(properties) => properties,
 						Err(err) => {
 							tracing::debug!(%err, sequence, "dropping a datagram whose properties cannot be forwarded");
@@ -5151,7 +5159,12 @@ fn buffer_object<W: crate::transport::poll::SendStream>(
 	writer.buffer_varint(object.delta)?;
 	if encoding.extensions {
 		let ext = match object.fields {
-			Some(fields) => super::object::write(&fields.properties, encoding.version, encoding.timescale)?,
+			Some(fields) => super::object::write(
+				&fields.properties,
+				object.timestamp,
+				encoding.version,
+				encoding.timescale,
+			)?,
 			None => {
 				let mut ext = Vec::new();
 				if let Some(timescale) = encoding.timescale {

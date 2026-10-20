@@ -113,7 +113,7 @@ Object Record {
 **Properties**:
 The object's [properties](#properties), in `Properties Length` bytes.
 An empty one means the object has none.
-A receiver MUST reset the stream if the length exceeds 65,546, the largest Property Block beside a Flags byte and a Timestamp.
+A receiver MUST reset the stream if the length exceeds 65,537, the largest Property Block beside a Flags byte.
 
 In a plain group, every record has a `Skip` of 0 after the first, whose Object ID is the index of its frame, no properties, and `End` of 0.
 A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any other record in a plain group.
@@ -123,40 +123,38 @@ The Object ID is relay state beside it, so a plain subscriber still reads consec
 
 
 # Properties {#properties}
-An object's properties: its mutable Timestamp, and every other property as one block in the encoding of the {{moqt}} draft it arrived on.
+An object's properties, as one block in the encoding of the {{moqt}} draft it arrived on.
 A relay forwards the block to a peer of that encoding unchanged, so the block never grows on a hop, and holds it as received rather than as a decoded list many times its size.
 
 ~~~
 Properties {
   Flags (i)
-  [Timestamp (i)]
   Property Block (..)
 }
 ~~~
 
 **Flags**:
 
-- `0x1` **DELIVERY_TIMEOUT**: The publisher's {{moqt}} draft assigns property 0x06 to SUBGROUP_DELIVERY_TIMEOUT. It requires a Property Block.
-- `0x2` **TIMESTAMP**: The Timestamp follows.
-- `Flags >> 2` names the Property Block's encoding: 0 for no block, 1 for drafts 14 and 15 (absolute IDs and QUIC varints), 2 for draft 16 (delta IDs and QUIC varints), 3 for draft 17, and 4 for draft 18 and later.
+- `0x1` **DELIVERY_TIMEOUT**: The publisher's {{moqt}} draft assigns property 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
+- `Flags >> 1` names the Property Block's encoding: 1 for drafts 14 and 15 (absolute IDs and QUIC varints), 2 for draft 16 (delta IDs and QUIC varints), 3 for draft 17, and 4 for draft 18 and later.
 
-A receiver MUST treat any other value as malformed, as it MUST a Flags of 0, which an empty Properties says instead.
+A receiver MUST treat any other encoding as malformed, including 0: an empty Properties says the object has none.
 DELIVERY_TIMEOUT lets a relay refuse to forward property 0x06 to a draft that would read it differently.
 
-**Timestamp**:
-The object's mutable Timestamp property (0x10), in the track's Timescale ({{moql}} TRACK_INFO).
-It MUST be present whenever the object has one, since an absent Timestamp is relayed as absent.
-
-On a timed track, an object's time is its mutable Timestamp, or else the one inside its Immutable Properties.
-Non-empty Properties MUST hold the FRAME's Timestamp as that time, or the datagram's for a datagram, since a {{moql}} subscriber reads one and a {{moqt}} subscriber the other.
-A receiver MUST reset the stream with a PROTOCOL_VIOLATION on a record that breaks this, and drop such a datagram.
-
 **Property Block**:
-The rest of the Properties: every other property of the object, serialized as the {{moqt}} drafts of its encoding serialize an object's properties, in ascending ID order.
+Every property of the object, serialized as the {{moqt}} drafts of its encoding serialize an object's properties, in ascending ID order.
 Immutable Properties (0x0b) are in the same encoding, as the publisher sent them.
-It MUST be present exactly when `Flags >> 2` is not 0, MUST NOT be longer than 65,536 bytes, and MUST NOT contain a mutable Timestamp.
+It MUST NOT be empty or longer than 65,536 bytes.
 A receiver MUST treat a block its encoding's drafts would refuse as malformed.
 Other properties are opaque to this extension.
+
+## Timestamps {#timestamps}
+On a timed track, the FRAME's Timestamp, or the datagram's for a datagram, is the object's time, and nothing else carries it.
+The Property Block MUST NOT contain a mutable Timestamp (0x10) there; a receiver MUST treat one as malformed.
+A relay forwarding the object to {{moqt}} restates the time as the mutable Timestamp, unless a Timestamp inside the Immutable Properties already says it.
+A sealed Timestamp is in the track's Timescale ({{moql}} TRACK_INFO), and a relay MUST NOT forward one to a peer of other units, which would change its meaning.
+
+On an untimed track there is no FRAME Timestamp, so a mutable Timestamp stays in the Property Block as an opaque property.
 
 
 # Track Stream {#track}
@@ -191,6 +189,9 @@ Property {
 A message MUST NOT carry more than 64 properties, nor any a relay interprets rather than forwards: MAX_CACHE_DURATION (0x04), TIMESCALE (0x08), DEFAULT_PUBLISHER_PRIORITY (0x0e), DEFAULT_PUBLISHER_GROUP_ORDER (0x22), and DYNAMIC_GROUPS (0x30).
 TRACK_INFO carries what a relay keeps of them, so a second copy could only contradict it.
 A message that breaks either rule is malformed.
+
+A relay neither processes nor forwards a track with a Mandatory Track Property (0x4000 to 0x7FFF), mutable or inside the Immutable Properties, so a publisher never sends one.
+A receiver refuses such a track as {{moqt}} ingress does, with an unsupported extension error.
 
 The receiver parses the keys inside the Immutable Properties from its value, which a relay MUST NOT restate as mutable.
 It SHOULD read them from the value when needed rather than hold them beside it, as a list of IDs can cost several times the value.

@@ -19,7 +19,7 @@ use super::{Message, Version};
 
 /// The largest record body a peer may make us buffer: the largest block moq-transport
 /// admits, beside a Flags byte and a Timestamp of at most 9 bytes.
-pub(crate) const MAX_PROPERTIES: usize = crate::ietf::object::MAX_BLOCK + 10;
+pub(crate) const MAX_PROPERTIES: usize = crate::ietf::object::MAX_BLOCK + 1;
 
 // Group State bits.
 const RELAYED: u64 = 0x1;
@@ -183,38 +183,18 @@ fn immutable(values: &[Property], encoding: Option<Encoding>) -> Result<Option<&
 	Ok(block)
 }
 
-/// The Flags bit saying a mutable Timestamp follows. Bit 0 is DELIVERY_TIMEOUT, and the
-/// block's encoding sits above both.
-const TIMESTAMPED: u64 = 0x2;
-
 /// Encode an object's properties as a record body, empty when it has none.
 ///
-/// `timestamp` replaces its mutable Timestamp, already in the units the receiver's track
-/// declares (see [`crate::ietf::object::egress_time`]). The block is sent as it is held.
-pub(crate) fn encode_properties(
-	properties: &Properties,
-	timestamp: Option<u64>,
-	version: Version,
-) -> Result<Vec<u8>, EncodeError> {
+/// The block is sent as it is held. A timed track's mutable Timestamp is the frame's, so
+/// it is never sent here.
+pub(crate) fn encode_properties(properties: &Properties, version: Version) -> Result<Vec<u8>, EncodeError> {
 	let mut out = Vec::new();
-	let block = properties.block.as_ref();
-	if timestamp.is_none() && block.is_none() {
+	let Some(block) = &properties.block else {
 		return Ok(out);
-	}
+	};
 	let w = &mut Encoder::new(&mut out, version.into());
-	let mut flags = block.map_or(0, |block| {
-		u64::from(block.delivery_timeout) | encoding_code(Some(block.encoding)) << 2
-	});
-	if timestamp.is_some() {
-		flags |= TIMESTAMPED;
-	}
-	w.varint(flags)?;
-	if let Some(timestamp) = timestamp {
-		w.varint(timestamp)?;
-	}
-	if let Some(block) = block {
-		w.slice(&block.bytes);
-	}
+	w.varint(encode_flags(block.delivery_timeout, Some(block.encoding)))?;
+	w.slice(&block.bytes);
 	Ok(out)
 }
 
@@ -224,8 +204,8 @@ pub(crate) struct Decoded {
 	pub gap: Option<u64>,
 }
 
-/// Decode an object's record body, whose Timestamps are in `timescale`, the units the
-/// track declares.
+/// Decode an object's record body on a track in `timescale`, the units the track
+/// declares, which its sealed Timestamp is in.
 ///
 /// Only the canonical form is accepted, so what decodes re-encodes to the same bytes.
 pub(crate) fn decode_properties(
@@ -233,53 +213,31 @@ pub(crate) fn decode_properties(
 	timescale: Option<Timescale>,
 	version: Version,
 ) -> Result<Decoded, DecodeError> {
-	let mut properties = Properties::default();
 	if body.is_empty() {
-		return Ok(Decoded { properties, gap: None });
+		return Ok(Decoded {
+			properties: Properties::default(),
+			gap: None,
+		});
 	}
 	let r = &mut Decoder::new(body, version.into());
-	let flags = r.varint()?;
-	let encoding = decode_encoding(flags >> 2)?;
-	if flags & TIMESTAMPED != 0 {
-		properties.timestamp = Some(r.varint()?);
-	}
-	let bytes = &body[body.len() - r.remaining()..];
-	let mut gap = None;
-	match encoding {
-		Some(encoding) => {
-			// A small cached block must not pin the reader's larger receive buffer.
-			let bytes = Bytes::copy_from_slice(bytes);
-			let checked = crate::ietf::object::check(&bytes, encoding).map_err(|_| DecodeError::InvalidValue)?;
-			properties.sealed_time = checked.sealed_time;
-			gap = checked.gap;
-			properties.block = Some(crate::model::object::Block {
+	let (delivery_timeout, encoding) = decode_flags(r.varint()?)?;
+	// An empty body is how nothing at all is sent.
+	let encoding = encoding.ok_or(DecodeError::InvalidValue)?;
+	// A small cached block must not pin the reader's larger receive buffer.
+	let bytes = Bytes::copy_from_slice(&body[body.len() - r.remaining()..]);
+	let checked = crate::ietf::object::check(&bytes, encoding, timescale).map_err(|_| DecodeError::InvalidValue)?;
+	Ok(Decoded {
+		properties: Properties {
+			sealed_time: checked.sealed_time,
+			block: Some(crate::model::object::Block {
 				bytes,
 				encoding,
 				immutable: checked.immutable,
-				delivery_timeout: flags & DELIVERY_TIMEOUT != 0,
-			});
-		}
-		// Nothing but a Timestamp: DELIVERY_TIMEOUT describes a block, and an empty body
-		// is how nothing at all is sent.
-		None if !bytes.is_empty() || flags != TIMESTAMPED => return Err(DecodeError::InvalidValue),
-		None => {}
-	}
-	stamp(&mut properties, timescale);
-	Ok(Decoded { properties, gap })
-}
-
-/// Record that `properties` carry their Timestamps in `timescale`, the units the track
-/// declares, when they carry any.
-pub(crate) fn stamp(properties: &mut Properties, timescale: Option<Timescale>) {
-	properties.timescale = timescale.filter(|_| properties.time().is_some());
-}
-
-/// Whether relayed `properties` agree with the Timestamp a timed track's `frame` carries.
-///
-/// Lite egress sends the frame's and moq-transport egress the properties', so properties
-/// that say anything must hold the frame's as their time, mutable or else sealed.
-pub(crate) fn agrees(properties: &Properties, frame: Option<u64>) -> bool {
-	frame.is_none() || (properties.block.is_none() && properties.timestamp.is_none()) || properties.time() == frame
+				delivery_timeout,
+			}),
+		},
+		gap: checked.gap,
+	})
 }
 
 /// A group stream's object records on egress, sent before each frame once the extension
@@ -288,7 +246,7 @@ pub(crate) fn agrees(properties: &Properties, frame: Option<u64>) -> bool {
 pub(crate) struct Records {
 	/// The previous record's Object ID, `None` before the first.
 	prior: Option<u64>,
-	/// The units the track declares, which mutable Timestamps convert to.
+	/// The units the track declares, which a sealed Timestamp must already be in.
 	timescale: Option<Timescale>,
 	version: Version,
 }
@@ -358,8 +316,15 @@ impl Records {
 		self.prior = Some(id);
 		let block = match fields {
 			Some(fields) => {
-				let timestamp = crate::ietf::object::egress_time(&fields.properties, self.timescale)?;
-				encode_properties(&fields.properties, timestamp, self.version)?
+				// A sealed Timestamp keeps its units, which the receiver reads as the track's.
+				if fields
+					.properties
+					.sealed_time
+					.is_some_and(|sealed| self.timescale != Some(sealed.scale()))
+				{
+					return Err(Error::Unsupported);
+				}
+				encode_properties(&fields.properties, self.version)?
 			}
 			None => Vec::new(),
 		};
@@ -444,17 +409,13 @@ pub(crate) fn encode_datagram(
 	if let Some(status) = wire.status {
 		w.varint(status)?;
 	}
-	w.bytes(&encode_properties(
-		&wire.properties,
-		wire.properties.timestamp,
-		version,
-	)?)
+	w.bytes(&encode_properties(&wire.properties, version)?)
 }
 
-/// Decode a datagram's relay state. Its properties' units are the track's, which the
-/// caller [`stamp`]s.
+/// Decode a datagram's relay state on a track in `timescale`.
 pub(crate) fn decode_datagram(
 	r: &mut Decoder<'_>,
+	timescale: Option<Timescale>,
 	version: Version,
 ) -> Result<Option<crate::model::datagram::Wire>, DecodeError> {
 	let state = r.varint()?;
@@ -468,7 +429,7 @@ pub(crate) fn decode_datagram(
 	let priority = (state & PRIORITY != 0).then(|| r.u8()).transpose()?;
 	let status = (state & STATUS != 0).then(|| r.varint()).transpose()?;
 	let block = r.bytes()?;
-	let properties = decode_properties(block, None, version)?.properties;
+	let properties = decode_properties(block, timescale, version)?.properties;
 	Ok(Some(crate::model::datagram::Wire {
 		object_id,
 		priority,
@@ -548,42 +509,45 @@ mod tests {
 			},
 		];
 		let properties = Properties {
-			timestamp: Some(1_000),
-			timescale: Some(Timescale::MILLI),
-			sealed_time: Some(77),
+			sealed_time: Some(crate::Timestamp::new(77, Timescale::MILLI).unwrap()),
 			block: crate::ietf::object::block(&values, Encoding::DeltaQuic, true).unwrap(),
 		};
-		let body = encode_properties(&properties, properties.timestamp, V).unwrap();
+		let body = encode_properties(&properties, V).unwrap();
 		let decoded = decode_properties(&body, Some(Timescale::MILLI), V).unwrap();
 		assert_eq!(decoded.properties, properties);
 		assert_eq!(decoded.gap, Some(2));
 
-		// None at all is an empty body, and a Timestamp alone needs no block.
-		assert!(encode_properties(&Properties::default(), None, V).unwrap().is_empty());
+		// None at all is an empty body.
+		assert!(encode_properties(&Properties::default(), V).unwrap().is_empty());
 		let empty = decode_properties(&[], Some(Timescale::MILLI), V).unwrap();
 		assert_eq!(empty.properties, Properties::default());
-		let timed = decode_properties(&[TIMESTAMPED as u8, 7], None, V).unwrap();
-		assert_eq!(timed.properties.timestamp, Some(7));
-		assert_eq!(
-			encode_properties(&timed.properties, Some(7), V).unwrap(),
-			[TIMESTAMPED as u8, 7]
-		);
+
+		// An untimed track's Timestamp has no frame to hold it, so it stays in the block.
+		let untimed = [4 << 1, 0x10, 7];
+		let decoded = decode_properties(&untimed, None, V).unwrap();
+		assert_eq!(encode_properties(&decoded.properties, V).unwrap(), untimed);
 	}
 
 	/// Only the canonical form decodes, so whatever decodes re-encodes to the same bytes.
 	#[test]
 	fn properties_refuse_what_is_not_canonical() {
-		let delta = 4 << 2;
+		let delta = 4 << 1;
 		for (body, reason) in [
 			(&[0][..], "flags saying nothing"),
 			(&[DELIVERY_TIMEOUT as u8][..], "DELIVERY_TIMEOUT without a block"),
 			(&[delta][..], "an encoding with an empty block"),
-			(&[5 << 2, 0x20, 1][..], "an unknown encoding"),
-			(&[delta, 0x10, 5][..], "a mutable Timestamp inside the block"),
+			(&[5 << 1, 0x20, 1][..], "an unknown encoding"),
+			(
+				&[delta, 0x10, 5][..],
+				"a timed track's mutable Timestamp, which its frame holds",
+			),
 			(&[0, 0x20, 1][..], "a block without an encoding"),
 			(&[delta, 0x0b, 2, 0x0b, 0][..], "a nested Immutable Properties"),
 		] {
-			assert!(decode_properties(body, None, V).is_err(), "accepted {reason}");
+			assert!(
+				decode_properties(body, Some(Timescale::MILLI), V).is_err(),
+				"accepted {reason}"
+			);
 		}
 	}
 
@@ -603,16 +567,18 @@ mod tests {
 			}
 			let list = Bytes::from(list);
 			let decoded = crate::ietf::object::read(&list, version, Some(Timescale::MILLI)).unwrap();
+			let frame = decoded.timestamp;
 			let properties = decoded.properties;
 			let block = properties.block.as_ref().unwrap();
 			assert!(block.bytes.len() < list.len(), "{version}");
 			assert_eq!(properties.heap(), block.bytes.len() as u64, "{version}: decoded state");
 
-			let body = encode_properties(&properties, properties.timestamp, V).unwrap();
+			let body = encode_properties(&properties, V).unwrap();
 			assert!(body.len() <= MAX_PROPERTIES, "{version}: {} bytes", body.len());
 			let received = decode_properties(&body, Some(Timescale::MILLI), V).unwrap();
 			assert_eq!(received.properties, properties, "{version}");
-			let written = crate::ietf::object::write(&received.properties, version, Some(Timescale::MILLI)).unwrap();
+			let written =
+				crate::ietf::object::write(&received.properties, frame, version, Some(Timescale::MILLI)).unwrap();
 			assert_eq!(written, list, "{version}: the hop changed the list");
 		}
 	}
@@ -725,13 +691,16 @@ mod tests {
 		};
 		let mut buf = Vec::new();
 		encode_datagram(&mut Encoder::new(&mut buf, V.into()), Some(&wire), V).unwrap();
-		let decoded = decode_datagram(&mut Decoder::new(&buf, V.into()), V).unwrap();
+		let decoded = decode_datagram(&mut Decoder::new(&buf, V.into()), None, V).unwrap();
 		assert_eq!(decoded, Some(wire));
 
 		let mut plain = Vec::new();
 		encode_datagram(&mut Encoder::new(&mut plain, V.into()), None, V).unwrap();
 		assert_eq!(plain, [0]);
-		assert_eq!(decode_datagram(&mut Decoder::new(&plain, V.into()), V).unwrap(), None);
+		assert_eq!(
+			decode_datagram(&mut Decoder::new(&plain, V.into()), None, V).unwrap(),
+			None
+		);
 	}
 
 	/// A retained datagram holds its properties as the bytes they arrived as, not a decoded
@@ -743,13 +712,15 @@ mod tests {
 		for _ in 1..COUNT {
 			block.extend([0, 1]);
 		}
-		let mut body = vec![4 << 2];
+		let mut body = vec![4 << 1];
 		body.extend(&block);
 		let mut buf = Vec::new();
 		let w = &mut Encoder::new(&mut buf, V.into());
 		w.varint(RELAYED).unwrap();
 		w.bytes(&body).unwrap();
-		let wire = decode_datagram(&mut Decoder::new(&buf, V.into()), V).unwrap().unwrap();
+		let wire = decode_datagram(&mut Decoder::new(&buf, V.into()), None, V)
+			.unwrap()
+			.unwrap();
 		assert_eq!(wire.properties.heap(), block.len() as u64);
 		assert!(wire.properties.heap() < (COUNT * size_of::<Property>()) as u64 / 10);
 	}
@@ -918,9 +889,7 @@ mod hop_tests {
 			let first = crate::model::object::Fields {
 				id: 6,
 				properties: Properties {
-					timestamp: Some(0),
 					block: block(&[property(0x20, 1), property(GAP, 6)]),
-					timescale: Some(Timescale::MILLI),
 					..Default::default()
 				},
 			};
@@ -952,9 +921,7 @@ mod hop_tests {
 			let second = crate::model::object::Fields {
 				id: 9,
 				properties: Properties {
-					timestamp: Some(1),
 					block: block(&[property(GAP, 2)]),
-					timescale: Some(Timescale::MILLI),
 					..Default::default()
 				},
 			};
@@ -991,6 +958,51 @@ mod hop_tests {
 					assert!(info.properties.is_none());
 				}
 			}
+		}
+	}
+
+	/// A track with a Mandatory Track Property, mutable or sealed, is refused across the hop
+	/// as moq-transport ingress refuses it: one we do not understand is neither processed
+	/// nor forwarded.
+	#[moq_clock::test]
+	async fn mandatory_track_properties_are_refused() {
+		let mut sealed = Vec::new();
+		let e = &mut Encoder::new(&mut sealed, crate::ietf::Version::Draft22.into());
+		e.varint(0x4000).unwrap();
+		e.varint(1).unwrap();
+		for (values, immutable) in [
+			(vec![property(0x4000, 1)], None),
+			(
+				vec![Property {
+					id: IMMUTABLE,
+					value: Value::Bytes(sealed.into()),
+				}],
+				Some(Encoding::Delta { seven: true }),
+			),
+		] {
+			let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+			let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
+			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
+			info.properties = Some(Arc::new(crate::model::object::TrackProperties {
+				values,
+				immutable,
+				..Default::default()
+			}));
+			let _track = broadcast.create_track("video", info).unwrap();
+
+			let (downstream, _sessions) = test_hop(&upstream, "room", [true, true]).await;
+			let broadcast = moq_clock::timeout(TIMEOUT, downstream.consume().request_broadcast("room", None))
+				.await
+				.expect("no broadcast")
+				.unwrap();
+			let res = moq_clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
+				.await
+				.expect("no answer");
+			assert!(
+				matches!(res, Err(crate::Error::UnsupportedExtension)),
+				"{immutable:?}: {:?}",
+				res.err()
+			);
 		}
 	}
 

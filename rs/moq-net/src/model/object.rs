@@ -1,7 +1,7 @@
 //! Private relay metadata; public readers see only the frame or datagram payload.
 use bytes::Bytes;
 
-use crate::Timescale;
+use crate::Timestamp;
 
 /// How the publisher serialized the keys inside immutable properties.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,30 +26,21 @@ pub(crate) struct Property {
 	pub value: Value,
 }
 
-/// An object's relay properties. The common Timestamp is a field; every other property
-/// stays in its encoded [`Block`].
+/// An object's relay properties, held as one encoded [`Block`].
+///
+/// On a timed track, the mutable Timestamp is never held: it is the frame's, which egress
+/// restates. On an untimed one it has no units, so it stays in the block like any other.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 // private: passthrough
 pub(crate) struct Properties {
-	pub timestamp: Option<u64>,
-	/// The units of the Timestamps, when the track declared any. The cache keeps the track
-	/// in its own units, so egress converts mutable ones to the units it declares.
-	pub timescale: Option<Timescale>,
-	/// The Timestamp the immutable block holds, if any, which keeps its ingress units.
-	pub sealed_time: Option<u64>,
-	/// Every property but the mutable Timestamp, if there are any.
+	/// The Timestamp the block's Immutable Properties hold on a timed track, which keeps
+	/// its ingress units.
+	pub sealed_time: Option<Timestamp>,
+	/// The properties, if there are any.
 	pub block: Option<Block>,
 }
 
-impl Properties {
-	/// The object's time as moq-transport ingress takes it: the mutable Timestamp, or else
-	/// the sealed one.
-	pub fn time(&self) -> Option<u64> {
-		self.timestamp.or(self.sealed_time)
-	}
-}
-
-/// An object's properties other than its mutable Timestamp, as one encoded list.
+/// An object's properties, but for a timed track's mutable Timestamp, as one encoded list.
 ///
 /// Kept encoded because a decoded list costs many times its wire size, and a relay holds
 /// one per cached object. Egress decodes it only to re-encode for another draft.
@@ -68,13 +59,8 @@ pub(crate) struct Block {
 
 impl Properties {
 	#[cfg(feature = "async")]
-	pub fn is_plain(&self) -> bool {
-		self.block.is_none()
-	}
-
-	#[cfg(feature = "async")]
 	pub fn is_empty(&self) -> bool {
-		self.timestamp.is_none() && self.block.is_none()
+		self.block.is_none()
 	}
 
 	pub fn heap(&self) -> u64 {

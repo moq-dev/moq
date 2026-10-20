@@ -4816,9 +4816,7 @@ where
 			return Ok(Fetched::Frame);
 		}
 		let timestamp = object_time(timescale, decoded.timestamp)?;
-		let plain = id == producer.frame_count() as u64
-			&& decoded.properties.is_plain()
-			&& decoded.properties.timestamp == timestamp.map(|time| time.value());
+		let plain = id == producer.frame_count() as u64 && decoded.properties.is_empty();
 		let fields = (!plain).then(|| {
 			std::sync::Arc::new(crate::model::object::Fields {
 				id,
@@ -5549,9 +5547,7 @@ impl GroupIngest {
 	fn header(&mut self, group: &group::Producer, info: frame::Info) -> Result<frame::Header, Error> {
 		let id = self.prior_object.expect("payload follows object ID");
 		group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
-		let plain = id == group.frame_count() as u64
-			&& self.properties.is_plain()
-			&& self.properties.timestamp == info.timestamp.map(|time| time.value());
+		let plain = id == group.frame_count() as u64 && self.properties.is_empty();
 		let fields = (!plain).then(|| {
 			std::sync::Arc::new(crate::model::object::Fields {
 				id,

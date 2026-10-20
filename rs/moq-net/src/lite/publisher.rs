@@ -3279,14 +3279,16 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		let ietf = match (self.ietf, &datagram.wire) {
 			(false, _) => None,
 			(true, None) => Some(None),
-			(true, Some(wire)) => {
-				let mut wire = wire.as_ref().clone();
-				let Ok(timestamp) = crate::ietf::object::egress_time(&wire.properties, self.timescale) else {
-					return false;
-				};
-				wire.properties.timestamp = timestamp;
-				Some(Some(wire))
+			// A sealed Timestamp keeps its units, which the receiver reads as the track's.
+			(true, Some(wire))
+				if wire
+					.properties
+					.sealed_time
+					.is_some_and(|sealed| self.timescale != Some(sealed.scale())) =>
+			{
+				return false;
 			}
+			(true, Some(wire)) => Some(Some(wire.as_ref().clone())),
 		};
 		let sequence = datagram.sequence;
 		let body = lite::Datagram {
