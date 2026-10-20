@@ -351,9 +351,10 @@ pub(crate) struct TrackState {
 	// the read guard a first frame holds, so it needs its own lock, never contended.
 	bounds: Mutex<BTreeMap<u64, Timestamp>>,
 
-	// Where each cached group's frame 0 presented, by sequence, received groups too: what
-	// a time anchor resolves against without walking groups that have not started. Filled
-	// through the read guard a first frame holds, like `bounds`.
+	// Where each cached group's frame 0 presented, by sequence, received groups too, and
+	// each buffered datagram's: what a time anchor resolves against without walking groups
+	// that have not started. Filled through the read guard a first frame holds, like
+	// `bounds`; datagrams hold at most `MAX_DATAGRAMS` entries beyond the cached groups.
 	starts: Mutex<BTreeMap<u64, Timestamp>>,
 
 	// The sequence and start of the highest-sequence group that left the cache holding a
@@ -962,15 +963,40 @@ impl TrackState {
 
 	/// Push a datagram, dropping the oldest when the send buffer is full.
 	fn push_datagram(&mut self, datagram: super::datagram::Stored) {
-		if self.datagrams.len() == MAX_DATAGRAMS {
-			self.datagrams.pop_front();
+		if self.datagrams.len() == MAX_DATAGRAMS
+			&& let Some(oldest) = self.datagrams.pop_front()
+		{
+			self.unindex_datagram(oldest.sequence);
 			self.datagram_offset += 1;
 		}
 		let sequence = datagram.sequence;
+		let start = datagram.timestamp;
 		self.datagrams.push_back(datagram);
 		let now = self.cache.pool().now_wall();
 		self.record_arrival(sequence, now);
+		// A datagram is its group's frame 0, so it says where that group starts: a time
+		// end must not count the sequence as arrived without knowing, since the same group
+		// may still stream.
+		if let Some(start) = start {
+			self.starts
+				.get_mut()
+				.unwrap_or_else(PoisonError::into_inner)
+				.entry(sequence)
+				.or_insert(start);
+			self.cache.wakes().started(sequence);
+		}
 		self.shown(sequence);
+	}
+
+	/// A datagram left the send buffer: forget where its group starts, unless the group is
+	/// cached and indexes its own start.
+	fn unindex_datagram(&mut self, sequence: u64) {
+		if !self.lookup.contains_key(&sequence) {
+			self.starts
+				.get_mut()
+				.unwrap_or_else(PoisonError::into_inner)
+				.remove(&sequence);
+		}
 	}
 
 	/// Find the smallest-sequence cached group in `window` satisfying
@@ -1569,10 +1595,13 @@ impl TrackState {
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
 			.retain(|sequence, _| lookup.contains_key(sequence));
+		let datagrams = &self.datagrams;
 		self.starts
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
-			.retain(|sequence, _| lookup.contains_key(sequence));
+			.retain(|sequence, _| {
+				lookup.contains_key(sequence) || datagrams.iter().any(|datagram| datagram.sequence == *sequence)
+			});
 	}
 
 	/// Take `sequence` out of the cache, keeping the withheld count in step.
@@ -1583,10 +1612,12 @@ impl TrackState {
 			.get_mut()
 			.unwrap_or_else(PoisonError::into_inner)
 			.remove(&sequence);
-		self.starts
-			.get_mut()
-			.unwrap_or_else(PoisonError::into_inner)
-			.remove(&sequence);
+		if !self.holds_datagram(sequence) {
+			self.starts
+				.get_mut()
+				.unwrap_or_else(PoisonError::into_inner)
+				.remove(&sequence);
+		}
 		Some(slot)
 	}
 
@@ -2136,7 +2167,9 @@ impl TrackState {
 			.find(|(_, slot)| slot.is_shown())
 			.map(|(sequence, _)| *sequence);
 		self.datagram_offset += self.datagrams.len();
-		self.datagrams.clear();
+		for datagram in std::mem::take(&mut self.datagrams) {
+			self.unindex_datagram(datagram.sequence);
+		}
 	}
 
 	/// The route answered with its largest position (`None` for nothing yet): the cache
@@ -15493,6 +15526,38 @@ mod test {
 
 	/// A datagram is a whole group of one frame, so its own timestamp says whether it falls
 	/// inside a time end, without one ever settling from the groups.
+	/// A datagram arriving in a gap says where its group starts, so a time end does not
+	/// settle as if the gap held a group inside it: the same group may still stream.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_datagram_in_a_gap_places_its_group_against_a_time_end() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Absolute(Position::group(0)),
+			end: Some(Anchor::Time(at(3500))),
+		}]));
+		let mut zero = producer.append_group().unwrap();
+		zero.write_frame(at(3000), &b"x"[..]).unwrap();
+		zero.finish().unwrap();
+		producer.insert_datagram(1, at(3600), &b"x"[..]).unwrap();
+		let mut two = producer.create_group(group::Info { sequence: 2 }).unwrap();
+		two.write_frame(at(4000), &b"x"[..]).unwrap();
+		two.finish().unwrap();
+		assert_eq!(drain(&mut subscriber), vec![0]);
+		assert_eq!(
+			subscriber.resolved_ranges(),
+			vec![Some(Resolved { start: 0, end: Some(1) })],
+			"the end falls before the datagram, which starts past it"
+		);
+
+		// The same group streams after its datagram: it starts past the end too.
+		let mut one = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		one.write_frame(at(3600), &b"x"[..]).unwrap();
+		one.finish().unwrap();
+		assert_eq!(drain(&mut subscriber), Vec::<u64>::new());
+	}
+
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_datagram_is_judged_against_a_time_end_by_its_timestamp() {
