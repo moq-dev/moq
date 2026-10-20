@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cross-language media interop test against THIS checkout.
 #
-# Unlike the standalone moq-dev/smoke repo (which installs each client from its
+# Unlike test/smoke (which installs each client from its
 # public registry to catch packaging breakage), this builds every client from
 # the workspace source. It proves the code in the tree interoperates across
 # implementations before anything is published: a relay built from rs/moq-relay,
@@ -69,7 +69,7 @@ TAIL_ONLY=0
 PROFILE="${INTEROP_PROFILE:-debug}"
 
 # Binaries under test. Built from source below unless overridden to point at a
-# prebuilt (mirrors the standalone moq-dev/smoke repo's RELAY_BIN/MOQ_BIN escape hatch).
+# prebuilt (mirrors test/smoke's RELAY_BIN/MOQ_BIN escape hatch).
 RELAY="${RELAY_BIN:-}"
 MOQ="${MOQ_BIN:-}"
 
