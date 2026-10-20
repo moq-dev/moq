@@ -32,7 +32,7 @@ times on a loaded machine, as the first round did. moq-tokio's
 known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
 
 Added 2026-10-19 (maintainer): three more, the redial pair first since CI
-hit it.
+hit it. The same day's test cost audit added the macOS QUIC connects.
 
 Public API: none. Wire: none.
 
@@ -41,6 +41,7 @@ Public API: none. Wire: none.
 - [moq-tokio redial tests](/quest/m1/test-flakes-2/tokio-redial.md) - the two redial tests stop assuming a dropped port stays free and stop racing 10 s deadlines
 - [moq-ffi cancel during connect](/quest/m1/test-flakes-2/ffi-cancel-connect.md) - `client_cancel_aborts_a_pending_connect` orders its cancel deterministically, fixing the code if the race is real
 - [Flapping-peer reorder seed](/quest/m1/test-flakes-2/flapping-peer-reorder.md) - replay one drill seed on current main, and fix it or delete the quest
+- [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md) - moq-tokio's loopback QUIC tests stop timing out on the macOS Platform job
 
 ## Related
 
