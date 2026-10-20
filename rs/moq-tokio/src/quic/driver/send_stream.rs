@@ -384,14 +384,16 @@ impl Drop for SendStream {
         // clean up any previously registered wakers
         conn.blocked_writers.remove(&self.stream);
 
-        if self.finished || conn.error.is_some() || (self.is_0rtt && conn.check_0rtt().is_err()) {
+        if conn.error.is_some() || (self.is_0rtt && conn.check_0rtt().is_err()) {
             return;
         }
         // Fails harmlessly when already reset.
         let mut stream = conn.inner.send_stream(self.stream);
         let reset = match stream.stopped() {
-            // Echo the code, as RFC 9000 section 3.5 asks. The peer reads nothing more anyway.
+            // Echo the code, as RFC 9000 section 3.5 asks, even after `finish`: the peer reads
+            // nothing more, so retransmitting the rest is wasted.
             Ok(Some(code)) => stream.reset(code),
+            _ if self.finished => return,
             _ => {
                 let (offset, code) = self.drop_reset;
                 let offset = offset.min(stream.offset());
