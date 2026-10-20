@@ -125,6 +125,44 @@ test("parse - secret too short", () => {
 	}).toThrow();
 });
 
+test("parse - a field with non-base64 characters is refused, whatever its length", () => {
+	// Long enough to pass the 32-byte check if the bad characters were silently zeroed.
+	const invalidKey = { ...testKey, k: `${testKey.k.slice(0, -2)}!!` };
+
+	expect(() => Key.parse(encodeJwk(invalidKey))).toThrow();
+});
+
+test("parse - accepts a JWK in standard padded base64", () => {
+	// The note survives as "+" and "/" in standard base64, and the kid length forces padding.
+	const json = JSON.stringify({ ...testKey, kid: "key-1", note: "~~~???" });
+	const encoded = Buffer.from(json).toString("base64");
+	expect(encoded).toMatch(/\+/);
+	expect(encoded).toMatch(/\//);
+	expect(encoded).toMatch(/=$/);
+
+	const key = Key.parse(encoded);
+	expect(key.kid).toBe("key-1");
+	expect((key as { k?: string }).k).toBe(testKey.k);
+});
+
+test("generate - an HMAC secret is unpadded base64url that round-trips", async () => {
+	for (const [alg, bytes] of [
+		["HS256", 32],
+		["HS384", 48],
+		["HS512", 64],
+	] as const) {
+		const key = await Key.generate(alg, "generated");
+		const k = (key as { k: string }).k;
+		expect(k).toMatch(/^[A-Za-z0-9_-]+$/);
+		expect(base64url.decode(k).byteLength).toBe(bytes);
+
+		const parsed = Key.parse(encodeJwk(key));
+		expect(parsed).toEqual(key);
+		const claims = await Key.verify(parsed, await Key.sign(key, testClaims));
+		expect(claims.root).toBe(testClaims.root);
+	}
+});
+
 test("parse - missing required fields", () => {
 	const invalidKey = {
 		alg: "HS256",

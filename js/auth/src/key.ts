@@ -1,4 +1,3 @@
-import * as base64 from "@hexagon/base64";
 import { wall } from "@moq/clock";
 import * as z from "@zod/mini";
 import * as jose from "jose";
@@ -280,12 +279,10 @@ async function generateHmacKey(alg: Algorithm, byteLength: number, kid: KeyId): 
 	const bytes = new Uint8Array(byteLength);
 	crypto.getRandomValues(bytes);
 
-	const k = base64.fromArrayBuffer(bytes.buffer, true);
-
 	return {
 		kty: "oct",
 		alg,
-		k,
+		k: jose.base64url.encode(bytes),
 		kid,
 		key_ops: ["sign", "verify"],
 	};
@@ -515,14 +512,9 @@ function decodeBase64Flexible(value: string): Uint8Array | null {
 	}
 
 	try {
-		// First decode as URL
-		return new Uint8Array(base64.toArrayBuffer(trimmed, true));
+		// Accept standard base64 too by mapping it onto the base64url alphabet.
+		return jose.base64url.decode(trimmed.replaceAll("+", "-").replaceAll("/", "_"));
 	} catch {
-		try {
-			// Fallback to standard base64
-			return new Uint8Array(base64.toArrayBuffer(trimmed, false));
-		} catch {
-			return null;
-		}
+		return null;
 	}
 }
