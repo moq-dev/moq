@@ -73,7 +73,9 @@ if(MOQ_FFI_DIR)
     endforeach()
     set(_build_ffi "")
 else()
-    set(_build_ffi COMMAND cargo build --locked --package moq-ffi ${_cargo_flags})
+    # The OpenH264 software fallback is opt-in in Rust; the C++ package ships it, like the
+    # prebuilt input does.
+    set(_build_ffi COMMAND cargo build --locked --package moq-ffi --features openh264 ${_cargo_flags})
     set(_ffi_byproducts "${MOQ_FFI_LIB}" "${_metadata}")
 endif()
 
@@ -129,8 +131,7 @@ foreach(_line IN LISTS _lines)
 endforeach()
 
 # The bindings compile here at the including project's CMAKE_CXX_STANDARD (else the compiler's
-# default, at least C++17) and with its flags; see src/moq.cpp. A standard raised only on a
-# consumer's own target does not reach this library.
+# default, at least C++17) and with its flags.
 # Named moq-cpp so an in-tree build can sit beside moq-c's `moq` target.
 add_library(moq-cpp STATIC src/moq.cpp)
 add_library(moq::cpp ALIAS moq-cpp)

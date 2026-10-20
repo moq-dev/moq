@@ -47,6 +47,47 @@ pub enum Binding {
 	InBand,
 }
 
+/// One connection's cumulative wire counters, which its transport updates as it sends and receives.
+///
+/// Clones share the counters, so stats read them without polling the session or keeping the
+/// connection alive, and the final totals stay readable after it closes. Each counter is
+/// independent: a transport records the ones it tracks, and the rest stay zero.
+#[derive(Clone, Debug, Default)]
+pub struct Wire(std::sync::Arc<WireCounters>);
+
+#[derive(Debug, Default)]
+struct WireCounters {
+	sent_bytes: std::sync::atomic::AtomicU64,
+	received_bytes: std::sync::atomic::AtomicU64,
+}
+
+impl Wire {
+	/// Create counters that start at zero.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// The bytes sent so far, including transport framing and retransmissions.
+	pub fn sent_bytes(&self) -> u64 {
+		self.0.sent_bytes.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// The bytes received so far, including transport framing.
+	pub fn received_bytes(&self) -> u64 {
+		self.0.received_bytes.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Record the cumulative bytes sent so far.
+	pub fn set_sent_bytes(&self, total: u64) {
+		self.0.sent_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// Record the cumulative bytes received so far.
+	pub fn set_received_bytes(&self, total: u64) {
+		self.0.received_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+}
+
 /// Connection-level statistics.
 ///
 /// Methods return `Option`: `None` means the implementation doesn't track
@@ -163,30 +204,39 @@ pub mod poll {
 		/// Poll for a bidirectional stream created by the peer.
 		fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<BiStreams<Self>, Self::Error>>;
 
-		/// Poll to open a unidirectional stream, which blocks while there are too many
-		/// concurrent streams.
-		fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>>;
+		/// Poll to open a unidirectional stream scheduled by `options`, which blocks while
+		/// there are too many concurrent streams.
+		fn poll_open_uni(
+			&mut self,
+			cx: &mut Context<'_>,
+			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
+		) -> Poll<Result<Self::SendStream, Self::Error>>;
 
-		/// Poll to open a bidirectional stream, which blocks while there are too many
-		/// concurrent streams.
-		fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<BiStreams<Self>, Self::Error>>;
+		/// Poll to open a bidirectional stream, its sending half scheduled by `options`, which
+		/// blocks while there are too many concurrent streams.
+		fn poll_open_bi(
+			&mut self,
+			cx: &mut Context<'_>,
+			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
+		) -> Poll<Result<BiStreams<Self>, Self::Error>>;
 
 		/// Open a send group at `priority`, or `None` when the transport orders streams by
 		/// their own priority alone.
 		///
-		/// Streams that [join](SendStream::set_group) a group share bytes with the session's
+		/// Streams that join a group, through [`SendOptions`] or [`SendStream::set_group`], and
+		/// datagrams sent in it share bytes with the session's
 		/// other groups: a higher priority group preempts every lower one, and groups of equal
 		/// priority get an equal share of bytes however many streams each has queued. Streams
 		/// outside every group go before all of them. The group is released once its last
 		/// handle is dropped and its streams finish.
 		fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group>;
 
-		/// Send a datagram in `group` at `order`, best-effort.
+		/// Send a datagram scheduled by `options`, best-effort.
 		///
-		/// `order` ranks the datagram among the group's streams like a stream's own
-		/// [priority](SendStream::set_priority), and a datagram goes ahead of a stream of equal
-		/// order. Without a group it is ranked among the ungrouped streams. A transport that
-		/// cannot rank datagrams against streams ignores both.
+		/// The datagram is ranked among its group's streams by its priority, like a stream's
+		/// own [priority](SendStream::set_priority), and goes ahead of a stream of equal
+		/// priority. Without a group it is ranked among the ungrouped streams. A transport that
+		/// cannot rank datagrams against streams ignores `options`.
 		///
 		/// Never blocks: a transport with no room drops a queued datagram, the lowest priority
 		/// first where it can tell, exactly as the network is allowed to.
@@ -199,8 +249,7 @@ pub mod poll {
 		fn send_datagram(
 			&mut self,
 			payload: Bytes,
-			group: Option<&<Self::SendStream as SendStream>::Group>,
-			order: i64,
+			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Result<(), Self::Error>;
 
 		/// Poll for a datagram from the network.
@@ -237,6 +286,11 @@ pub mod poll {
 		/// rather than defaulted for the same reason as [`protocol`](Self::protocol).
 		fn stats(&self) -> impl Stats;
 
+		/// Return the wire counters this transport updates, or `None` when it tracks none.
+		fn wire(&self) -> Option<super::Wire> {
+			None
+		}
+
 		/// Accept the next unidirectional stream opened by the peer.
 		fn accept_uni(&mut self) -> AcceptUni<'_, Self> {
 			AcceptUni(self)
@@ -247,14 +301,22 @@ pub mod poll {
 			AcceptBi(self)
 		}
 
-		/// Open a unidirectional stream, waiting for stream credit if necessary.
-		fn open_uni(&mut self) -> OpenUni<'_, Self> {
-			OpenUni(self)
+		/// Open a unidirectional stream scheduled by `options`, waiting for stream credit if
+		/// necessary.
+		fn open_uni<'a>(
+			&'a mut self,
+			options: SendOptions<'a, <Self::SendStream as SendStream>::Group>,
+		) -> OpenUni<'a, Self> {
+			OpenUni { session: self, options }
 		}
 
-		/// Open a bidirectional stream, waiting for stream credit if necessary.
-		fn open_bi(&mut self) -> OpenBi<'_, Self> {
-			OpenBi(self)
+		/// Open a bidirectional stream, its sending half scheduled by `options`, waiting for
+		/// stream credit if necessary.
+		fn open_bi<'a>(
+			&'a mut self,
+			options: SendOptions<'a, <Self::SendStream as SendStream>::Group>,
+		) -> OpenBi<'a, Self> {
+			OpenBi { session: self, options }
 		}
 
 		/// Receive the next datagram from the peer.
@@ -292,12 +354,32 @@ pub mod poll {
 	poll_future!(
 		/// A pending [`Session::accept_bi`].
 		AcceptBi, Session, poll_accept_bi, Result<BiStreams<S>, S::Error>);
-	poll_future!(
+	/// One in-flight open, which polls with the same options until it resolves.
+	macro_rules! open_future {
+		($(#[$doc:meta])* $name:ident, $poll:ident, $out:ty) => {
+			$(#[$doc])*
+			pub struct $name<'a, S: Session> {
+				session: &'a mut S,
+				options: SendOptions<'a, <S::SendStream as SendStream>::Group>,
+			}
+
+			impl<S: Session> Future for $name<'_, S> {
+				type Output = $out;
+
+				fn poll(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+					let this = self.get_mut();
+					this.session.$poll(cx, this.options)
+				}
+			}
+		};
+	}
+
+	open_future!(
 		/// A pending [`Session::open_uni`].
-		OpenUni, Session, poll_open_uni, Result<S::SendStream, S::Error>);
-	poll_future!(
+		OpenUni, poll_open_uni, Result<S::SendStream, S::Error>);
+	open_future!(
 		/// A pending [`Session::open_bi`].
-		OpenBi, Session, poll_open_bi, Result<BiStreams<S>, S::Error>);
+		OpenBi, poll_open_bi, Result<BiStreams<S>, S::Error>);
 	poll_future!(
 		/// A pending [`Session::recv_datagram`].
 		RecvDatagram, Session, poll_recv_datagram, Result<Bytes, S::Error>);
@@ -337,6 +419,35 @@ pub mod poll {
 	/// The send group of a session's streams.
 	#[cfg(feature = "async")]
 	pub(crate) type GroupOf<S> = <<S as Session>::SendStream as SendStream>::Group;
+
+	/// How an outgoing stream or datagram is scheduled, like W3C WebTransport's send options.
+	///
+	/// The default is ungrouped at priority 0.
+	#[derive(Debug)]
+	pub struct SendOptions<'a, G> {
+		/// The send group to join, from [`Session::send_group`], or `None` for the ungrouped
+		/// streams that go before every group.
+		pub group: Option<&'a G>,
+		/// The priority within the group, like [`SendStream::set_priority`]: higher goes first.
+		pub priority: i64,
+	}
+
+	impl<G> Default for SendOptions<'_, G> {
+		fn default() -> Self {
+			Self {
+				group: None,
+				priority: 0,
+			}
+		}
+	}
+
+	impl<G> Clone for SendOptions<'_, G> {
+		fn clone(&self) -> Self {
+			*self
+		}
+	}
+
+	impl<G> Copy for SendOptions<'_, G> {}
 
 	/// A transport's send group, from [`Session::send_group`].
 	///
@@ -711,5 +822,43 @@ mod tests {
 			read.poll_read_buf(&mut cx, &mut empty),
 			Poll::Ready(Ok(Some(0)))
 		));
+	}
+
+	#[test]
+	fn default_read_buf_caps_the_initialized_slice_on_ready_and_pending() {
+		struct ReadSpan(bool);
+		impl super::poll::RecvStream for ReadSpan {
+			type Error = crate::Error;
+			fn poll_read(&mut self, _: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+				assert_eq!(
+					dst.len(),
+					64 * 1024,
+					"one poll must not initialize the whole spare capacity"
+				);
+				assert!(dst.iter().all(|byte| *byte == 0));
+				if self.0 {
+					return Poll::Pending;
+				}
+				dst.fill(7);
+				Poll::Ready(Ok(Some(dst.len())))
+			}
+			fn stop(&mut self, _: u32) {}
+			fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+				Poll::Pending
+			}
+		}
+		for pending in [false, true] {
+			let mut buf = BytesMut::with_capacity(256 * 1024);
+			let mut cx = Context::from_waker(std::task::Waker::noop());
+			let result = ReadSpan(pending).poll_read_buf(&mut cx, &mut buf);
+			if pending {
+				assert!(result.is_pending());
+				assert!(buf.is_empty());
+			} else {
+				assert!(matches!(result, Poll::Ready(Ok(Some(65536)))));
+				assert_eq!(buf.len(), 64 * 1024);
+				assert!(buf.iter().all(|byte| *byte == 7));
+			}
+		}
 	}
 }

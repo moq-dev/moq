@@ -42,9 +42,5 @@ relay reaches the origin's `wanted`, a join under it does not, and
 concurrent joins send one SUBSCRIBE_UPDATE. Use simulated time. Run
 `just test interop --all`.
 
-Public API: none beyond [core](/quest/m1/refresh/core.md). Wire: two new
-lite-07 fields.
-
-## Required
-
-- [Core](/quest/m1/refresh/core.md) - the model signal and ratio this carries
+Public API: none beyond `Demand::wanted` and `track::Info::refresh`. Wire: two
+new lite-07 fields.

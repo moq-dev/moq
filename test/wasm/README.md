@@ -87,11 +87,13 @@ uncovered here.
   over SETUP) and `ietf` (nothing left to negotiate).
 - **reads a published broadcast** -- announce, subscribe, and read two
   consecutive groups, checking every frame byte for byte. One frame is 128 KiB,
-  which is what exercises the chunked read path in the transport adapter.
+  which is what exercises the chunked read path in the transport adapter. The
+  reader asks for each next group, so the real-time subscription never drops one
+  superseded mid-read, which a timer-paced publisher on a loaded runner did.
 - **refuses a track the publisher does not serve** -- the refusal has to
-  surface, as a rejected `subscribe` (lite-06, which looks a track's info up
-  first) or as a track that yields no group (IETF, lite-02). A hang fails on the
-  case timeout.
+  surface as an error, from `subscribe` (lite-06, which looks a track's info up
+  first) or from `recvGroup` (IETF and lite-02 can accept first). A group or a
+  clean end fails, and a hang fails on the case timeout.
 - **free() rejects a pending consume** -- freeing a session closes it, so a
   `consume` still waiting on an unannounced path has to reject. A fresh session
   then has to connect, which a corrupted wasm heap would not.
@@ -170,3 +172,15 @@ WASM-to-JS measurements are separate, unverified results here. Full network
 sequences above 2^53 need a native publisher and a JS model that can represent
 them before adoption. WASM frame timestamps and complete publish/backpressure
 API parity remain explicit gaps too.
+
+## Generated bindings
+
+```bash
+just test wasm-baseline --uniffi
+```
+
+`--uniffi` adds moq-ffi, bound by UniFFI over ubrn's `wasm2` player, as a third
+baseline backend. It also runs parity cases and per-call timings in `uniffi/` against
+every relay, once normally and once under a strict CSP. It builds from a scratch
+checkout, since ubrn needs a UniFFI pin that does not land.
+[generator.md](generator.md) is the report that chose this binding.

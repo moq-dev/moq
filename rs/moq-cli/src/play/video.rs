@@ -473,6 +473,7 @@ mod tests {
 			args: Args {
 				delay: Delay::Fixed(delay),
 				catalog_format: None,
+				metrics: None,
 				select: Default::default(),
 			},
 			video: Default::default(),
@@ -1013,8 +1014,8 @@ mod tests {
 			producer.write(frame(ms, ms == 0)).unwrap();
 		}
 		producer.discontinuity().unwrap();
-		for ms in [0, 33, 66] {
-			producer.write(frame(ms, ms == 0)).unwrap();
+		for ms in [100, 133, 166] {
+			producer.write(frame(ms, ms == 100)).unwrap();
 		}
 		producer.finish().unwrap();
 		let decoder = Buffered::new(2);

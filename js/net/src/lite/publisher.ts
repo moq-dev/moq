@@ -1,6 +1,8 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import { Gate } from "../auth_gate.ts";
+import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
@@ -44,7 +46,7 @@ import {
 	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
-	hasStreamCount,
+	hasTrackStream,
 	resolvesStart,
 	Version,
 	waitsForSubscriberFin,
@@ -110,20 +112,6 @@ interface RunGroup {
 
 	/** Last frame to send (inclusive), or undefined for the rest of the group. */
 	end?: number;
-}
-
-// The TRACK stream, implicit SUBSCRIBE acceptance, and SUBSCRIBE_START/END are
-// all lite-05+.
-function supportsTrackStream(version: Version): boolean {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-			return false;
-		default:
-			return true;
-	}
 }
 
 /**
@@ -303,10 +291,20 @@ class SubscriptionControls {
 	}
 }
 
+// The later of two locations, either of which may be unknown.
+function newer(a: track.Location | undefined, b: track.Location | undefined): track.Location | undefined {
+	if (!a || !b) return a ?? b;
+	return b.group > a.group || (b.group === a.group && b.frame > a.frame) ? b : a;
+}
+
 // Register both readiness sources in the same turn after the caller observed neither ready.
 // The winner disposes both registrations, so an idle subscription accumulates nothing no
 // matter how many times it wakes.
-function waitForSubscription(controls: SubscriptionControls, subscriber: track.Subscriber): Promise<void> {
+function waitForSubscription(
+	controls: SubscriptionControls,
+	subscriber: track.Subscriber,
+	drops: Signal<number>,
+): Promise<void> {
 	return new Promise((resolve) => {
 		let settled = false;
 		const dispose: Dispose[] = [];
@@ -317,6 +315,7 @@ function waitForSubscription(controls: SubscriptionControls, subscriber: track.S
 			resolve();
 		};
 		dispose.push(controls.changed(wake), hooks.groupChanged(subscriber, wake));
+		dispose.push(drops.changed(wake));
 	});
 }
 
@@ -352,7 +351,7 @@ function carriesMaxDelay(version: Version): boolean {
 function positionCursor(track: track.Subscriber, version: Version, startGroup: number | undefined) {
 	if (resolvesStart(version) || startGroup !== undefined) return;
 
-	const latest = track.latest();
+	const latest = hooks.latestSequence(track);
 	if (latest !== undefined) hooks.replaceGroups(track, { start: { included: latest } });
 }
 
@@ -398,6 +397,8 @@ export class Publisher {
 	// withdraws what it no longer covers. Undefined until the peer answers, and forever on a
 	// version without AUTH, which allows everything.
 	#grant?: Getter<Grant | undefined>;
+	// Holds every incoming request to that grant from dispatch to its end.
+	#gate: Gate;
 
 	// Resolves once the tokens this session presented at setup are answered, so nothing is
 	// announced before the grant it would be checked against.
@@ -435,6 +436,7 @@ export class Publisher {
 		this.#interests = new Interests(new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" }));
 		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = auth?.grant;
+		this.#gate = new Gate(auth?.grant);
 		this.#ready = auth?.ready ?? Promise.resolve();
 		this.version = version;
 		this.hop = hop;
@@ -681,7 +683,7 @@ export class Publisher {
 		// broadcast resolves is never missed.
 		const revoked = unauthorized(msg.broadcast);
 		let serving: track.Subscriber | undefined;
-		const watch = this.#watch(msg.broadcast, () => {
+		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`publish revoked: broadcast=${msg.broadcast} track=${msg.track}`);
 			serving?.close(revoked);
 			stream.abort(revoked);
@@ -694,19 +696,6 @@ export class Publisher {
 			watch.dispose();
 			interest.release();
 		}
-	}
-
-	// Watch whether our grant still lets us publish `broadcast`, calling `onRevoke` once
-	// it does not. Arm it before the request's first check.
-	#watch(broadcast: Path.Valid, onRevoke: () => void): { revoked: () => boolean; dispose: () => void } {
-		let revoked = false;
-		const dispose =
-			this.#grant?.subscribe(() => {
-				if (revoked || !this.#denied(broadcast)) return;
-				revoked = true;
-				onRevoke();
-			}) ?? (() => {});
-		return { revoked: () => revoked || this.#denied(broadcast), dispose };
 	}
 
 	async #serveSubscribe(
@@ -767,12 +756,18 @@ export class Publisher {
 		// subscription; awaited during teardown so it doesn't outlive the subscription.
 		let datagrams = Promise.resolve();
 		let controls: SubscriptionControls | undefined;
+		// Lite-05 and later name every sequence below the end that this subscription never
+		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
+		// for a group that will not come. The sequences served (as a group or a datagram) or
+		// dropped. A gap that never arrived stays until the end sweep names it: this side
+		// cannot tell when the subscriber stopped waiting for it. Undefined on other versions.
+		const served: Run[] | undefined = hasTrackStream(this.version) ? [] : undefined;
 
 		try {
 			// Older drafts carry no timestamps.
 			let timescale: Timescale | undefined;
 
-			if (supportsTrackStream(this.version)) {
+			if (hasTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
 				// properties live in TRACK_INFO), and the resolved range arrives as
 				// SUBSCRIBE_START / SUBSCRIBE_END emitted from #runTrack.
@@ -800,7 +795,7 @@ export class Publisher {
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
 			if (this.#datagramWriter) {
-				datagrams = this.#runDatagrams(msg.id, track, timescale);
+				datagrams = this.#runDatagrams(msg.id, track, timescale, served);
 			}
 
 			controls = new SubscriptionControls({
@@ -825,6 +820,7 @@ export class Publisher {
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				timescale,
+				served,
 				bounds: {
 					startGroup: msg.startGroup,
 					startFrame: msg.startFrame,
@@ -861,7 +857,7 @@ export class Publisher {
 	async runFetch(msg: Fetch, stream: Stream) {
 		this.#fetches.acquire();
 		try {
-			if (!supportsTrackStream(this.version)) {
+			if (!hasTrackStream(this.version)) {
 				stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
 				return;
 			}
@@ -869,7 +865,7 @@ export class Publisher {
 			// open as long as its track, so a check at accept alone would keep serving after a shrink.
 			const revoked = unauthorized(msg.broadcast);
 			let fetched: group.Consumer | undefined;
-			const watch = this.#watch(msg.broadcast, () => {
+			const watch = this.#gate.watch(msg.broadcast, () => {
 				console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
 				fetched?.close(revoked);
 				stream.abort(revoked);
@@ -956,10 +952,6 @@ export class Publisher {
 					start: msg.startFrame,
 					end: msg.endFrame,
 				});
-				// A budget giving up on a drained group ends its read cleanly, but a FIN would
-				// tell the requester the group is whole.
-				if (hooks.groupExpired(group))
-					throw new StreamError(StreamCode.Old, { message: "fetch exceeded its max delay" });
 				console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
 				stream.close();
 				group.close();
@@ -992,28 +984,23 @@ export class Publisher {
 		track: track.Subscriber,
 		stream: Writer,
 		controls: SubscriptionControls,
-		serving: { sub: bigint; broadcast: Path.Valid; timescale: Timescale | undefined; bounds: FrameBounds },
+		serving: {
+			sub: bigint;
+			broadcast: Path.Valid;
+			timescale: Timescale | undefined;
+			served: Run[] | undefined;
+			bounds: FrameBounds;
+		},
 	): Promise<boolean> {
-		const { sub, broadcast, timescale, bounds } = serving;
+		const { sub, broadcast, timescale, served, bounds } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
-		const emitRange = supportsTrackStream(this.version);
+		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startSequence: number | undefined;
 		let endSent = false;
 
-		// Lite-07+ counts the group streams in SUBSCRIBE_END, so it goes out only once every
-		// served group has opened its stream or given up, and a cap holding groups back
-		// delays it until they are released.
-		const countStreams = hasStreamCount(this.version);
-
-		// Lite-05 and lite-06 name every sequence below the end that this subscription never
-		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
-		// for a group that will not come. The sequences served or dropped. A gap that never
-		// arrived stays until the end sweep names it: this side cannot tell when the
-		// subscriber stopped waiting for it. Undefined on other versions.
-		const served: Run[] | undefined = emitRange && !countStreams ? [] : undefined;
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped yet.
 		const drop = async (start: number, end: number): Promise<boolean> => {
 			if (!served) return true;
@@ -1025,8 +1012,6 @@ export class Publisher {
 			}
 			return true;
 		};
-		let streams = 0;
-		const opening = new Set<Promise<unknown>>();
 
 		// The track's exclusive final boundary. A Rust subscriber feeds SUBSCRIBE_END
 		// straight into finish_at, so it must name the track's boundary (which counts
@@ -1037,22 +1022,15 @@ export class Publisher {
 		// stream FIN says where it stops.
 		const boundary = () => {
 			const end = track.end();
-			return end ? finalSequence(end) : (track.latest() ?? -1) + 1;
+			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1) + 1;
 		};
 
-		// Before lite-07, SUBSCRIBE_END names that boundary, which a cap can hold groups back
-		// from, so it goes out as soon as the producer finishes and the subscription keeps
-		// serving whatever a later cap raise releases (see the Rust publisher's Recv::Boundary).
+		// Declare the boundary immediately; groups below it can still be in flight.
 		const sendEnd = async (): Promise<boolean> => {
 			endSent = true;
 			if (!emitRange) return true;
 			return controls.response(
-				(async () => {
-					// A group that gives up before its stream opens is never counted.
-					if (countStreams) while (opening.size > 0) await Promise.all(opening);
-					const end = new SubscribeEnd(boundary(), streams);
-					await encodeSubscribeResponse(stream, { end }, this.version);
-				})(),
+				encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version),
 			);
 		};
 
@@ -1061,6 +1039,8 @@ export class Publisher {
 
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
+		const drops = new Signal(0);
+		const pendingDrops: SubscribeDrop[] = [];
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -1072,6 +1052,14 @@ export class Publisher {
 		});
 		try {
 			for (;;) {
+				if (pendingDrops.length > 0) {
+					for (const dropped of pendingDrops.splice(0)) {
+						if (
+							!(await controls.response(encodeSubscribeResponse(stream, { drop: dropped }, this.version)))
+						)
+							return false;
+					}
+				}
 				// Control before data, matching the Rust publisher: every control decoded while
 				// the loop was parked applies to the next pop, never to one already made. This
 				// drain is synchronous, so nothing the decoder holds can land between the pop
@@ -1096,7 +1084,7 @@ export class Publisher {
 								update.startGroup === undefined &&
 								requested !== undefined &&
 								!resolvesStart(this.version)
-									? (track.latest() ?? 0)
+									? (hooks.latestSequence(track) ?? 0)
 									: update.startGroup;
 							hooks.replaceGroups(track, {
 								start: start === undefined ? undefined : { included: start },
@@ -1129,7 +1117,12 @@ export class Publisher {
 				// Exactly-once arrival-order serving. This synchronous package-internal pop
 				// and frameRange call are the operation's linearization point.
 				// Popping or filtering a group removes the subscriber's view of its edge.
-				const largest = !startSent && hasLargest(this.version) ? track.largest() : undefined;
+				// A relay can hold just the first group of a backlog its source already
+				// answered past, so the source's largest says where the live feed is.
+				const largest =
+					!startSent && hasLargest(this.version)
+						? newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest)
+						: undefined;
 				const recv = hooks.tryRecvGroup(track, startSent);
 				switch (recv.kind) {
 					case "error":
@@ -1163,23 +1156,21 @@ export class Publisher {
 								continue;
 							}
 						}
-						// Before lite-07, an end declared ahead of the live edge goes out as
-						// soon as it is known, while the remaining groups are still being
-						// produced. The lite-07 count is not final until those groups open.
-						if (!endSent && !countStreams && track.end() !== undefined) {
+						// A declared end goes out while lower groups are still being produced.
+						if (!endSent && track.end() !== undefined) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						await waitForSubscription(controls, track);
+						await waitForSubscription(controls, track, drops);
 						continue;
 					case "boundary":
 						// The producer finished but is still holding groups above the cap.
 						// Declare the boundary, then wait for an update to release them.
-						if (!endSent && !countStreams) {
+						if (!endSent) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
-						await waitForSubscription(controls, track);
+						await waitForSubscription(controls, track, drops);
 						continue;
 					case "done": {
 						// Name every sequence from the start to the end this subscription never
@@ -1200,6 +1191,7 @@ export class Publisher {
 						const end = await Promise.race([Promise.all(groups).then(() => drained), controls.ended]);
 						if (end instanceof Error) throw end;
 						if (end !== drained) return false;
+						if (pendingDrops.length > 0) continue;
 						finished = true;
 						return true;
 					}
@@ -1244,19 +1236,17 @@ export class Publisher {
 					start: range.start,
 					end: range.end,
 				};
-				// `opening` settles when the stream opens so the lite-07 count can be sent.
-				// `groups` covers the serve too, so the FIN still waits for every stream to
-				// finish or reset, including one that has not opened yet.
+				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
 				const opened = this.#openGroup(options);
 				const task = opened.then(async (writer) => {
-					if (!writer) return;
-					streams += 1;
-					await this.#serveGroup(writer, options);
+					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
+					if (emitRange && failed instanceof Error) {
+						pendingDrops.push(new SubscribeDrop({ start: group.sequence, end: group.sequence, error: 0 }));
+						drops.update((revision) => revision + 1);
+					}
 				});
 				groups.add(task);
 				void task.finally(() => groups.delete(task));
-				opening.add(opened);
-				void opened.finally(() => opening.delete(opened));
 			}
 		} finally {
 			if (!finished) unsubscribe();
@@ -1280,7 +1270,7 @@ export class Publisher {
 		hold.signal.addEventListener("abort", () => interest.release(), { once: true });
 		// Armed before the first check and held until the answer is acknowledged, so a grant
 		// that shrinks while the answer is blocked on flow control resets it, never sends it.
-		const watch = this.#watch(msg.broadcast, () => {
+		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`track info revoked: broadcast=${msg.broadcast} track=${msg.track}`);
 			hold.abort();
 			stream.writer.reset(unauthorized(msg.broadcast));
@@ -1321,12 +1311,6 @@ export class Publisher {
 		} finally {
 			watch.dispose();
 		}
-	}
-
-	// Whether our grant excludes publishing this broadcast. No grant yet allows it.
-	#denied(broadcast: Path.Valid): boolean {
-		const grant = this.#grant?.peek();
-		return grant !== undefined && !grant.publish.matches(broadcast);
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.
@@ -1402,7 +1386,12 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runDatagrams(sub: bigint, track: track.Subscriber, timescale: Timescale | undefined) {
+	async #runDatagrams(
+		sub: bigint,
+		track: track.Subscriber,
+		timescale: Timescale | undefined,
+		served: Run[] | undefined,
+	) {
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
 		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
@@ -1422,6 +1411,8 @@ export class Publisher {
 					continue;
 				}
 
+				// A sent datagram counts as delivered even if it is lost, so the end sweep skips it.
+				if (served) insertRun(served, datagram.sequence, datagram.sequence + 1);
 				await writer.ready;
 				await writer.write(body);
 			}
@@ -1465,11 +1456,11 @@ export class Publisher {
 
 	/**
 	 * Opens the unidirectional stream for one group, or closes the group and resolves
-	 * `undefined` when it cannot get one.
+	 * an error when it cannot get one.
 	 *
 	 * @internal
 	 */
-	async #openGroup(options: RunGroup): Promise<Writer | undefined> {
+	async #openGroup(options: RunGroup): Promise<Writer | Error> {
 		const { group, priority, unsubscribed, start } = options;
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
@@ -1485,11 +1476,16 @@ export class Publisher {
 				cancel: unsubscribed,
 				waitUntilAvailable: false,
 			});
-			if (!stream) group.close(new Error("no stream slot"));
+			if (!stream) {
+				const failed = new Error("no stream slot");
+				group.close(failed);
+				return failed;
+			}
 			return stream;
 		} catch (err: unknown) {
-			group.close(error(err));
-			return undefined;
+			const failed = error(err);
+			group.close(failed);
+			return failed;
 		}
 	}
 
@@ -1555,11 +1551,13 @@ export class Publisher {
 
 			stream.close();
 			group.close();
-			await acknowledged(stream);
+			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
+			return await stream.closed.then(() => undefined, error);
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);
 			group.close(e);
+			return e;
 		} finally {
 			priority.remove(stream);
 		}
@@ -1683,9 +1681,9 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async runEnforce(setupAnswered: Promise<void>): Promise<void> {
+	async runEnforce(setupAnswered: Promise<void>, auth?: AuthSession): Promise<void> {
 		if (!this.#grant) return;
-		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered });
+		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered, auth });
 	}
 
 	/**

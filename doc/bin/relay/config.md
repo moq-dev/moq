@@ -37,6 +37,7 @@ allow.uid = [1001]
 [listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
 auth = false                         # Decline MoQ Auth (draft 17+).
 solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
+epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch (draft 17+).
 ```
 
 `timeout` bounds the whole handshake, transport through MoQ SETUP, so a peer
@@ -55,17 +56,24 @@ Transport tuning, applied to accepted and dialed connections alike.
 
 ```toml
 [quic]
-congestion_control = "delay"         # "delay" (BBR, the default) or "loss" (CUBIC).
-max_streams = 10000                  # Concurrent streams per connection, bidi and uni. Default.
+congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
+max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 67108864            # Whole-connection window, in bytes. Default (64 MiB).
-stream_receive_window = 8388608      # Per-stream window. Omit for the backend default.
-send_window = 33554432               # Unacknowledged outgoing data. Omit for the backend default.
+stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
+send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
+keylog = false                       # Write TLS secrets to the file SSLKEYLOGFILE names. Default.
 ```
+
+`congestion_control = "none"` runs no congestion control and no pacing. It is
+meant for tests and controlled links, where nothing else shares the path.
+
+`SSLKEYLOGFILE` alone writes nothing: set `keylog = true` too, and only while
+debugging, since the file decrypts every captured session.
 
 `idle_timeout` is how long a peer that vanished without a close keeps its
 sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
@@ -95,7 +103,20 @@ fetches = 10000                      # Independent simultaneous FETCH requests.
 announces = 100000
 subscriptions = 10000
 fetches = 10000
+
+[peer.quic]
+max_streams = 100000                 # Concurrent QUIC streams per direction.
+receive_window = 671088640           # Connection-wide receive window (640 MiB).
+send_window = 671088640              # Unacknowledged outgoing data (640 MiB).
 ```
+
+`[peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
+any other `[quic]` key is refused. They replace the `[quic]` values for a
+peer's QUIC connection once its grant is known, before the SETUP reply. Links
+the relay dials get them from the handshake on. A link carrying a whole cluster is then
+not throttled by `[quic]` limits sized for one viewer, for example
+`--peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
+their transport's own limits.
 
 These are the defaults. For example, `--peer-subscriptions=50000` raises the
 subscription cap on cluster links. `--session-fetches` and `--peer-fetches`
@@ -132,8 +153,8 @@ first cores, so two relays on one host, or one limited to fewer CPUs than the
 host has, would crowd onto them. Turn it on for a host the relay has to itself.
 
 `io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
-shares the same reloadable TLS identity, serves moq-lite only, and refuses
-`mtu_discovery`. A setting the build or host cannot deliver refuses to
+shares the same reloadable TLS identity, serves every configured version
+like the shared runtime, and refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
 start rather than being ignored. If io\_uring workers fail to start naming
 `RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 
@@ -262,7 +283,8 @@ tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
 extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
-extensions.solicit = false           # Decline MoQ Solicit. Both default to on, as in [listen.extensions].
+extensions.solicit = false           # Decline MoQ Solicit.
+extensions.epoch = false             # Decline MoQ Epoch. All default to on, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
@@ -303,7 +325,7 @@ relay dials and LAN peers it admits), which is what makes billing per customer o
 Each run, and each group returning after its linger, announces under a fresh
 [epoch](/concept/moq-lite#publisher-epochs), so a restart is a new broadcast at
 the same path. Each group's totals count everything since its epoch began, so
-billing reads those; per-path traffic and per-root sessions and HTTP requests are for
+billing reads those; per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
 [Stats](/concept/stats) describes the paths, tracks, and encodings; read them

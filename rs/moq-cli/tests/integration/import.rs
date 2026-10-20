@@ -27,11 +27,16 @@ async fn running<T>(child: &mut Child, what: &str, step: impl Future<Output = T>
 
 /// Start `moq import ts`, publishing `demo` from stdin to the relay at `url`.
 fn import(url: &str, fingerprint: &str) -> Child {
+	import_as(url, fingerprint, &[], "demo")
+}
+
+/// Start `moq <global> import ts`, publishing `name` from stdin to the relay at `url`.
+fn import_as(url: &str, fingerprint: &str, global: &[&str], name: &str) -> Child {
 	let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"));
 	// A `MOQ_*` variable in the developer's shell must not reconfigure the child.
-	for (name, _) in std::env::vars_os() {
-		if name.to_string_lossy().starts_with("MOQ_") {
-			command.env_remove(name);
+	for (var, _) in std::env::vars_os() {
+		if var.to_string_lossy().starts_with("MOQ_") {
+			command.env_remove(var);
 		}
 	}
 	command
@@ -41,12 +46,10 @@ fn import(url: &str, fingerprint: &str) -> Child {
 			"--connect-tls-fingerprint",
 			fingerprint,
 			"--broadcast",
-			"demo",
-			"import",
-			"--max-age",
-			MAX_AGE,
-			"ts",
+			name,
 		])
+		.args(global)
+		.args(["import", "--max-age", MAX_AGE, "ts"])
 		.stdin(Stdio::piped())
 		.kill_on_drop(true)
 		.spawn()

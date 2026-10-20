@@ -43,7 +43,9 @@ Use it for dates, rather than measuring elapsed time. A Rust wall-time
 boundary must convert its units explicitly. A new `Manual` starts at instant
 zero and 2025-01-01 UTC. `advance()` moves both readings; `stepWall()` changes
 only wall time. `advanceAsync()` also drains due timers and the microtasks
-they schedule, so assertions observe their effects.
+they schedule, so assertions observe their effects. `fire()` waits for a timer
+to be armed, even by a later host task such as I/O, then advances exactly to the
+earliest deadline the same way; it never resolves if nothing arms one.
 
 `origin()` reads the wall time at instant zero, which maps an instant onto
 wall time without the jitter of subtracting two live reads. On the host it is

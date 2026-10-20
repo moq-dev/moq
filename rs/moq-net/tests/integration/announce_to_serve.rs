@@ -78,7 +78,7 @@ fn outcome(result: &Result<moq_net::broadcast::Consumer, String>) -> String {
 /// group's frames and then how the subscription ended. Read continuously, as a
 /// real subscriber would, so the subscription is driven the whole time.
 async fn read(broadcast: &moq_net::broadcast::Consumer, name: &str) -> mpsc::UnboundedReceiver<String> {
-	let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+	let subscription = moq_net::track::Subscription::default().with_groups(0..);
 	let mut sub = broadcast
 		.track(name)
 		.unwrap()
@@ -162,7 +162,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	// A track in flight across the unannounce.
 	let mut reader = read(&first, "video").await;
-	moq_clock::timeout(SETTLE, track.demand().used())
+	moq_clock::timeout(SETTLE, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -202,7 +202,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	let audio = broadcast.create_track("audio", timed()).unwrap();
 	let mut reader = read(&again, "audio").await;
-	moq_clock::timeout(SETTLE, audio.demand().used())
+	moq_clock::timeout(SETTLE, crate::support::wanted(audio.demand()))
 		.await
 		.expect("no subscriber appeared after reannouncing")
 		.unwrap();

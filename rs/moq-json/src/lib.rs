@@ -17,10 +17,13 @@
 //! when something else already owns the track, such as a `moq_mux::container::Producer` also
 //! managing a timeline and a catalog estimate.
 
+#![warn(missing_docs)]
+
 mod diff;
 mod merge;
 pub mod snapshot;
 pub mod stream;
+mod strict;
 pub mod window;
 
 pub use crate::diff::{Diff, diff};
@@ -88,6 +91,10 @@ pub enum Error {
 	/// A decoded frame or reconstructed snapshot exceeded its configured byte budget.
 	#[error("decoded JSON exceeded {0} bytes")]
 	TooLarge(usize),
+
+	/// A decoded frame repeated a key within one JSON object, which parsers resolve differently.
+	#[error("duplicate JSON object key")]
+	DuplicateKey,
 }
 
 impl From<serde_json::Error> for Error {

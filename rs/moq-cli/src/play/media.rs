@@ -258,10 +258,12 @@ impl<O: Output> Media<O> {
 									.with_max_delay(max_delay),
 							)
 							.await?;
-						// Start at the local live edge without asking the shared publisher
-						// subscription to rewind to a cached sequence.
-						if let Some(latest) = track.latest() {
-							subscriber.set_groups(latest..);
+						// Start at the live edge without asking the shared publisher
+						// subscription to rewind to a cached sequence. The edge is known only
+						// once the feed is live, so wait for it rather than read the backlog of
+						// a warm copy still waiting on its source; the wait ends with the track.
+						if let Some(largest) = subscriber.largest().await {
+							subscriber.set_groups(largest.group..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;
 						Ok::<_, anyhow::Error>((moq_mux::container::Consumer::new(subscriber, format), decoder))
@@ -663,7 +665,8 @@ async fn play_audio<O: Output>(
 			// so a deeper target could never fill. The advertised floor needs the cap,
 			// being a number the publisher declared about itself, unbounded. The budget
 			// is also what the sink's ring was sized to hold.
-			let target = samples(delay.min(max_delay).max(AUDIO_BUFFER_MIN));
+			let held = delay.min(max_delay).max(AUDIO_BUFFER_MIN);
+			let target = samples(held);
 			let fit = fit(dry, buffered, target, slack, timing.silence + length as u64);
 			dry = false;
 
@@ -682,10 +685,11 @@ async fn play_audio<O: Output>(
 			// is the only half of the pipeline that cannot skip ahead. A move has to
 			// wake the window: it is asleep on a deadline computed from the old anchor,
 			// and every queued frame is due earlier now.
-			let moved = presentation
-				.lock()
-				.unwrap()
-				.audio(timing.end, sink.buffered(), Instant::now());
+			let moved = {
+				let mut presentation = presentation.lock().unwrap();
+				presentation.hold(held);
+				presentation.audio(timing.end, sink.buffered(), Instant::now())
+			};
 			if moved {
 				changed.notify_one();
 				output.send(Event::Wake);
@@ -863,17 +867,17 @@ mod tests {
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
 			Buffered(Vec::new()),
 		));
-		let picture = |index: u64| moq_mux::container::Frame {
+		let picture = |index: u64, keyframe: bool| moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(index * 20).unwrap(),
 			duration: Some(moq_net::Timestamp::from_millis(20).unwrap()),
-			keyframe: index == 0,
+			keyframe,
 			payload: Bytes::from_static(b"picture"),
 		};
 		for index in 0..3 {
 			let mut pcm = packet(index, 0.25);
 			pcm.keyframe = index == 0;
 			audio.write(pcm).unwrap();
-			video.write(picture(index)).unwrap();
+			video.write(picture(index, index == 0)).unwrap();
 			tokio::time::sleep(PACKET_DURATION).await;
 		}
 		if audio_end {
@@ -884,12 +888,12 @@ mod tests {
 		}
 		for index in 0..3 {
 			if audio_end || index == 0 {
-				let mut pcm = packet(if audio_end { index } else { index + 3 }, 0.5);
+				let mut pcm = packet(index + 3, 0.5);
 				pcm.keyframe = index == 0;
 				audio.write(pcm).unwrap();
 			}
 			if video_end || index == 0 {
-				video.write(picture(if video_end { index } else { index + 3 })).unwrap();
+				video.write(picture(index + 3, video_end && index == 0)).unwrap();
 			}
 		}
 		if audio_end {
@@ -906,7 +910,7 @@ mod tests {
 					audio.write(packet(index, 0.5)).unwrap();
 				}
 				if !video_end {
-					video.write(picture(index)).unwrap();
+					video.write(picture(index, false)).unwrap();
 				}
 			}
 			tokio::task::yield_now().await;
@@ -1212,7 +1216,7 @@ mod tests {
 		video.discontinuity().unwrap();
 		// A burst longer than the age budget evicts this replacement's only keyframe.
 		for index in 0..15 {
-			video.write(picture(index * 20, index == 0)).unwrap();
+			video.write(picture(1_000 + index * 20, index == 0)).unwrap();
 		}
 		video.discontinuity().unwrap();
 		for index in 0..3 {
@@ -1270,6 +1274,7 @@ mod tests {
 			broadcast: "room".to_string(),
 			args: Args {
 				catalog_format: None,
+				metrics: None,
 				delay: Delay::Fixed(delay),
 				select: Default::default(),
 			},

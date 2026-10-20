@@ -35,6 +35,7 @@ export interface Rank {
 	position?: number;
 }
 
+// private: plumbing
 /**
  * The transport send order for a group, where HIGHER values are transmitted first.
  *
@@ -56,6 +57,7 @@ function clamp(value: number, max: number): number {
 	return Math.min(Math.max(Math.trunc(value), 0), max);
 }
 
+// private: plumbing
 /**
  * Ranks one subscription's group streams against each other, and re-ranks them whenever the
  * set changes or the subscription is updated.

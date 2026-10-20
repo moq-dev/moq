@@ -41,6 +41,7 @@ struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
 	tls_disable_verify: bool,
+	quic_keylog: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +49,7 @@ struct ResolvedSettings {
 	url: url::Url,
 	broadcast: String,
 	tls_disable_verify: bool,
+	quic_keylog: bool,
 }
 
 impl TryFrom<Settings> for ResolvedSettings {
@@ -62,6 +64,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.context("broadcast property is required")?
 				.clone(),
 			tls_disable_verify: value.tls_disable_verify,
+			quic_keylog: value.quic_keylog,
 		})
 	}
 }
@@ -214,7 +217,9 @@ fn connect(
 	let _rt = RUNTIME.enter();
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	let client = config.init(Default::default())?.with_subscriber(origin);
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.keylog = Some(settings.quic_keylog);
+	let client = config.init(quic)?.with_subscriber(origin);
 	let connection = client.connect(settings.url.clone());
 	Ok((client, connection, consumer))
 }
@@ -256,6 +261,14 @@ impl ObjectImpl for MoqSrc {
 					.default_value(false)
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecBoolean::builder("quic-keylog")
+					.nick("QUIC TLS key log")
+					.blurb(
+						"Danger: write TLS session secrets to the file SSLKEYLOGFILE names; without it the start fails",
+					)
+					.default_value(false)
+					.mutable_ready()
+					.build(),
 			]
 		});
 		PROPS.as_ref()
@@ -285,6 +298,7 @@ impl ObjectImpl for MoqSrc {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
 			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
+			"quic-keylog" => settings.quic_keylog = value.get().unwrap(),
 			_ => unreachable!(),
 		}
 	}
@@ -295,6 +309,7 @@ impl ObjectImpl for MoqSrc {
 			"url" => settings.url.to_value(),
 			"broadcast" => settings.broadcast.to_value(),
 			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
+			"quic-keylog" => settings.quic_keylog.to_value(),
 			_ => unreachable!(),
 		}
 	}
@@ -1954,14 +1969,13 @@ mod session_tests {
 		// has: that edge says the session reconciled the removal, which a fixed beat can only
 		// guess at. Answering before it lands is a pump that legitimately goes live, so the
 		// wait is what the assertion below is about.
+		let mut demand = request.demand();
+		let unwanted = async {
+			while demand.wanted_changed().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
 		super::RUNTIME
-			.block_on(async {
-				tokio::time::timeout(
-					Duration::from_secs(10),
-					moq_net::kio::wait(|waiter| request.demand().poll_unused(waiter)),
-				)
-				.await
-			})
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), unwanted).await })
 			.expect("the cancelled pump never dropped its subscription")
 			.expect("the pending request is still open");
 
@@ -2485,7 +2499,24 @@ mod session_tests {
 			url: "https://127.0.0.1:1".parse().unwrap(),
 			broadcast: "test".into(),
 			tls_disable_verify: false,
+			quic_keylog: false,
 		}
+	}
+
+	/// `quic-keylog` reaches the client's QUIC config, which refuses it without `SSLKEYLOGFILE`.
+	#[test]
+	fn keylog_reaches_the_client() {
+		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
+		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		let keylog = ResolvedSettings {
+			quic_keylog: true,
+			..unreachable()
+		};
+		let err = super::connect(&keylog)
+			.err()
+			.expect("a keylog without SSLKEYLOGFILE must be refused");
+		assert!(err.to_string().contains("SSLKEYLOGFILE"), "{err}");
+		assert!(super::connect(&unreachable()).is_ok());
 	}
 
 	fn is_closed(connection: &moq_tokio::Connection) -> bool {
@@ -3136,6 +3167,16 @@ mod session_tests {
 		);
 	}
 
+	/// What a [`Relay`] does with each new session.
+	#[derive(Clone, Copy)]
+	enum Admit {
+		Serve,
+		/// Drop the connection unanswered, as a relay that is down would.
+		Down,
+		/// Reject the session as forbidden.
+		Refuse,
+	}
+
 	/// A relay on loopback: an origin served over plain TCP to every session, which may also
 	/// publish into it.
 	struct Relay {
@@ -3143,21 +3184,22 @@ mod session_tests {
 		url: url::Url,
 		task: tokio::task::JoinHandle<()>,
 		close: tokio::sync::mpsc::UnboundedSender<moq_net::Error>,
+		/// Set before a `close` so the redial meets it. The listener stays bound throughout:
+		/// rebinding a freed port races its release and other tests binding port 0.
+		admit: std::sync::Arc<Mutex<Admit>>,
 	}
 
 	impl Relay {
 		fn new() -> Self {
-			Self::bind("127.0.0.1:0".parse().unwrap(), false)
-		}
-
-		fn bind(addr: std::net::SocketAddr, refuse: bool) -> Self {
 			super::RUNTIME.block_on(async {
 				let origin = moq_tokio::origin::spawn();
 				let mut config = moq_tokio::listen::Config::default();
-				config.tcp.bind = Some(addr);
+				config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 				let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 				let port = server.tcp_local_addr().unwrap().port();
 				let serving = origin.clone();
+				let admit = std::sync::Arc::new(Mutex::new(Admit::Serve));
+				let admitting = admit.clone();
 				let (close, mut closing) = tokio::sync::mpsc::unbounded_channel::<moq_net::Error>();
 				let task = tokio::spawn(async move {
 					let mut sessions: Vec<moq_net::Session> = Vec::new();
@@ -3168,10 +3210,15 @@ mod session_tests {
 							}
 							request = server.accept() => {
 								let Some(request) = request else { break };
-								if refuse {
-									request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap();
-								} else if let Ok((session, _driver)) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
-									sessions.push(session);
+								let admit = *admitting.lock().unwrap();
+								match admit {
+									Admit::Serve => {
+										if let Ok((session, _driver)) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
+											sessions.push(session);
+										}
+									}
+									Admit::Down => drop(request),
+									Admit::Refuse => request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap(),
 								}
 							}
 						}
@@ -3182,6 +3229,7 @@ mod session_tests {
 					url: format!("tcp://127.0.0.1:{port}/").parse().unwrap(),
 					task,
 					close,
+					admit,
 				}
 			})
 		}
@@ -3280,7 +3328,6 @@ mod session_tests {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
 		let url = relay.url.clone();
-		let addr = format!("127.0.0.1:{}", url.port().unwrap()).parse().unwrap();
 		let (pipeline, output) = pipeline(&url);
 		let sink = glib::Object::builder::<crate::sink::MoqSink>()
 			.property("url", url.as_str())
@@ -3322,11 +3369,12 @@ mod session_tests {
 		};
 		play();
 		let held = pipeline.by_name("src").unwrap().src_pads();
-		relay.stop();
+		*relay.admit.lock().unwrap() = Admit::Down;
+		relay.close.send(moq_net::Error::GoingAway).unwrap();
 		// Real sockets use the real clock: this exercises the deployed 10s retry budget.
 		std::thread::sleep(Duration::from_secs(11));
 		while pull(Duration::ZERO).is_some() {}
-		let replacement = Relay::bind(addr, false);
+		*relay.admit.lock().unwrap() = Admit::Serve;
 		play();
 		assert_eq!(
 			pipeline.by_name("src").unwrap().src_pads(),
@@ -3335,25 +3383,24 @@ mod session_tests {
 		);
 		sink.set_state(gst::State::Null).unwrap();
 		assert_played_cleanly(pipeline);
-		replacement.stop();
+		relay.stop();
 	}
 
 	#[test]
 	fn a_refused_redial_posts_a_bus_error_after_playback() {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
-		let addr = format!("127.0.0.1:{}", relay.url.port().unwrap()).parse().unwrap();
 		let mut publisher = Publisher::new(&relay.origin, epoch(), video_rendition());
 		let (pipeline, sink) = pipeline(&relay.url);
 		rendered(&sink, &mut publisher, 1);
-		relay.stop();
-		let refusing = Relay::bind(addr, true);
+		*relay.admit.lock().unwrap() = Admit::Refuse;
+		relay.close.send(moq_net::Error::GoingAway).unwrap();
 		let error = pipeline
 			.bus()
 			.unwrap()
 			.timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error]);
 		pipeline.set_state(gst::State::Null).unwrap();
-		refusing.stop();
+		relay.stop();
 		let error = error.expect("refused redial did not fail the pipeline");
 		let gst::MessageView::Error(error) = error.view() else {
 			unreachable!()

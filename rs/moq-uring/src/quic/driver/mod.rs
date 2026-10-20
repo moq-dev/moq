@@ -16,7 +16,7 @@ mod stream;
 
 pub use connection::Connection;
 pub use endpoint::Endpoint;
-pub use group::SendGroup;
+pub use group::{SendGroup, SendOptions};
 pub use stream::{Credit, RecvStream, SendStream};
 
 pub(crate) use connection::{End, Shared};
@@ -53,15 +53,6 @@ fn ecn_from_quic(ecn: moq_quic::EcnCodepoint) -> udp::Ecn {
 		moq_quic::EcnCodepoint::Ect1 => udp::Ecn::Ect1,
 		moq_quic::EcnCodepoint::Ce => udp::Ecn::Ce,
 	}
-}
-
-/// Map a moq-quic deadline onto the worker's timers.
-///
-/// moq-quic counts on moq-clock's instants while the worker's timers still take
-/// std's, until the worker becomes a moq-clock backend. A deadline already past
-/// maps to now, which fires at once either way.
-fn to_std(at: moq_clock::Instant) -> std::time::Instant {
-	std::time::Instant::now() + at.saturating_duration_since(moq_clock::Instant::now())
 }
 
 impl From<moq_quic::ConnectionError> for Error {
@@ -288,6 +279,7 @@ fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Err
 		Congestion::Loss => Arc::new(moq_quic::congestion::CubicConfig::default())
 			as Arc<dyn moq_quic::congestion::ControllerFactory + Send + Sync>,
 		Congestion::Delay => Arc::new(moq_quic::congestion::Bbr3Config::default()),
+		Congestion::None => Arc::new(moq_quic::congestion::Unlimited),
 	});
 	Ok(transport)
 }

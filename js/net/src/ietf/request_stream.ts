@@ -1,13 +1,19 @@
 import { race } from "@moq/signals";
 import { ProtocolViolation, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
-import type { Reader, Stream } from "../stream.ts";
-import { type RequestCondition, toRequestCode } from "./error.ts";
+import type { Reader, Stream, Writer } from "../stream.ts";
+import { type RequestCondition, type RequestKind, toRequestCode } from "./error.ts";
+import { FetchError } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import * as Message from "./message.ts";
 import { Parameters } from "./parameters.ts";
+import { PublishError } from "./publish.ts";
+import { PublishNamespaceError } from "./publish_namespace.ts";
 import { RequestError } from "./request.ts";
+import { SubscribeError } from "./subscribe.ts";
+import { SubscribeNamespaceError } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
+import { TRACK_STATUS_ERROR_14 } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** Whether the draft treats the requester finishing its messages as cancellation. */
@@ -30,15 +36,63 @@ export async function cancelled(stream: Stream, version: IetfVersion): Promise<v
 	await race([read, stream.writer.closed]).catch(() => undefined);
 }
 
+/**
+ * Why a request is refused, and which one: only drafts 14-16 name the Request ID.
+ * @internal
+ */
+export interface Refusal {
+	requestId?: bigint;
+	condition: RequestCondition;
+	reasonPhrase: string;
+}
+
+// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into.
+const ERROR_14: Record<RequestKind, number> = {
+	subscribe: SubscribeError.id,
+	fetch: FetchError.id,
+	publish: PublishError.id,
+	publish_namespace: PublishNamespaceError.id,
+	subscribe_namespace: SubscribeNamespaceError.id,
+	track_status: TRACK_STATUS_ERROR_14,
+};
+
+async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, refusal: Refusal): Promise<void> {
+	await w.u53(version === Version.DRAFT_14 ? ERROR_14[kind] : RequestError.id);
+	await new RequestError({
+		requestId: version <= Version.DRAFT_16 ? refusal.requestId : undefined,
+		errorCode: toRequestCode(refusal.condition, kind, version),
+		reasonPhrase: refusal.reasonPhrase,
+	}).encode(w, version);
+}
+
+/**
+ * Refuse a request and end its stream.
+ * @internal
+ */
+export async function refuse(stream: Stream, version: IetfVersion, kind: RequestKind, refusal: Refusal): Promise<void> {
+	await writeRefusal(stream.writer, version, kind, refusal);
+	stream.close();
+}
+
+/**
+ * Refuse a REQUEST_UPDATE, leaving its request standing. Draft 14 answers no update.
+ * @internal
+ */
+export async function refuseUpdate(
+	w: Writer,
+	version: IetfVersion,
+	kind: RequestKind,
+	refusal: Refusal,
+): Promise<void> {
+	if (version !== Version.DRAFT_14) await writeRefusal(w, version, kind, refusal);
+}
+
 /** Refuse an unrecognized reserved namespace before it reaches the application. */
 export async function refuseReserved(stream: Stream, version: IetfVersion): Promise<void> {
-	await stream.writer.u53(RequestError.id);
-	await new RequestError({
-		requestId: undefined,
-		errorCode: toRequestCode("does_not_exist", "subscribe", version),
+	await refuse(stream, version, "subscribe", {
+		condition: "does_not_exist",
 		reasonPhrase: "reserved namespace does not exist",
-	}).encode(stream.writer, version);
-	stream.close();
+	});
 }
 
 /**
@@ -85,6 +139,12 @@ export async function namespaceUpdate(
 		if (type !== 0x02) throw new ProtocolViolation("expected namespace REQUEST_UPDATE");
 		return await Message.decode(reader, async (body) => {
 			const requestId = await body.u62();
+			// Drafts 14-16 define no namespace update. The update's own Request ID is all its
+			// refusal names; the target is what the adapter routed it by.
+			if (version <= Version.DRAFT_16) {
+				await body.readAll();
+				return { requestId, refused: "not_supported" };
+			}
 			const params = await Parameters.decode(body, version, "namespace-update");
 			return {
 				requestId,

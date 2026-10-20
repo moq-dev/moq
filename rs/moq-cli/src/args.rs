@@ -315,29 +315,6 @@ impl Invocation {
 			}
 		}
 
-		if self.moq.epoch.is_some() {
-			let mut publishes = false;
-			for command in &self.stages {
-				match command {
-					Command::Import(import) => {
-						if let Some(reason) = import.source.epoch_refusal() {
-							anyhow::bail!("--epoch makes instances one publisher of identical tracks, but {reason}");
-						}
-						publishes = true;
-					}
-					#[cfg(feature = "transcode")]
-					Command::Transcode(_) => anyhow::bail!(
-						"--epoch makes instances one publisher of identical tracks, but two `transcode` encoders never produce the same bytes"
-					),
-					_ => {}
-				}
-			}
-			anyhow::ensure!(
-				publishes,
-				"--epoch names what this process publishes, but nothing here publishes"
-			);
-		}
-
 		for command in &self.stages {
 			if let Command::Import(import) = command
 				&& import.stats
@@ -467,17 +444,6 @@ pub struct MoqSide {
 	#[usage(long = "name", hide = true)]
 	name: Option<String>,
 
-	/// Announce under this epoch (a UUIDv7) instead of minting a fresh one per run.
-	///
-	/// Relays resume a subscription only between routes with the same epoch, so
-	/// redundant publishers of one broadcast pass the same value and fail over
-	/// seamlessly. Leave it unset otherwise: a fresh epoch per run is what makes a
-	/// restarted publisher replace the old broadcast instead of resuming into it.
-	/// Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
-	/// accept it, since the other publishers' tracks differ between instances.
-	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
-	pub epoch: Option<hang::moq_net::Epoch>,
-
 	/// MoQ client config (`--connect`, `--connect-bind`, `--connect-tls-*`, ...).
 	#[usage(flatten)]
 	pub client: moq_tokio::connect::Config,
@@ -585,6 +551,15 @@ impl MoqSide {
 		anyhow::ensure!(
 			self.client.url.is_some() || self.serves() || self.cluster_dials(),
 			"a MoQ side is required: pass --connect <url> to dial a relay, a --listen option to self-host, --cluster-lan to mesh over the LAN, or --cluster-connect to join a cluster"
+		);
+		// The `--connect` client and the cluster's WAN dials each bind
+		// `--connect-bind` for QUIC, so a fixed port would collide halfway through startup.
+		#[cfg(feature = "quic")]
+		anyhow::ensure!(
+			!(self.client.url.is_some()
+				&& self.cluster_dials()
+				&& self.client.bind.is_some_and(|bind| bind.port() != 0)),
+			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-connect-api, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
 		);
 		#[cfg(feature = "cluster-lan")]
 		{
@@ -822,6 +797,8 @@ pub enum ImportSource {
 	Rtmp(crate::rtmp::Args),
 	/// SRT: pull a remote stream (`--connect`) or accept incoming publishes (`--listen`).
 	Srt(crate::srt::ImportArgs),
+	/// RTSP: pull an IP camera's stream (`--connect`), reconnecting on failure.
+	Rtsp(crate::rtsp::ImportArgs),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
 	Rtc(crate::rtc::Args),
 	/// Replay a recording from an object store, serving its groups on demand.
@@ -849,26 +826,6 @@ impl ImportSource {
 		})
 	}
 
-	/// Why `--epoch` can't name this source, or `None` when it can: the source must
-	/// announce once per run and derive its tracks from the input alone.
-	fn epoch_refusal(&self) -> Option<&'static str> {
-		match self {
-			Self::Ts(args) if args.program == Some(TsProgram::All) => {
-				Some("`import ts --program all` mints an epoch per program")
-			}
-			Self::Rtmp(_) | Self::Srt(_) => Some("the RTMP and SRT imports mint an epoch per connection"),
-			Self::Rtc(rtc) if rtc.listen.is_some() => Some("the WHIP listener mints an epoch per connection"),
-			Self::Rtc(_) => Some("`import rtc --connect` timestamps frames from its own RTP session"),
-			Self::Avc3 => Some("`import avc3` timestamps frames from their arrival on stdin"),
-			Self::Archive(_) => {
-				Some("`import archive` rewrites the catalog and timeline groups it replays under the live names")
-			}
-			#[cfg(feature = "capture")]
-			Self::Capture(_) => Some("two `import capture` encoders never produce the same bytes"),
-			Self::Ts(_) | Self::Fmp4 | Self::Flv | Self::Hls(_) => None,
-		}
-	}
-
 	/// Why `--stats` can't report this source, or `None` when it can: the CLI builds the one
 	/// catalog of a stdin import, whose tracks `moq-mux` counts.
 	fn stats_refusal(&self) -> Option<&'static str> {
@@ -876,12 +833,12 @@ impl ImportSource {
 			Self::Ts(args) if args.program == Some(TsProgram::All) => {
 				Some("`import ts --program all` builds a catalog per program")
 			}
-			Self::Hls(_) | Self::Rtmp(_) | Self::Srt(_) | Self::Rtc(_) | Self::Archive(_) => {
+			Self::Hls(_) | Self::Rtmp(_) | Self::Srt(_) | Self::Rtsp(_) | Self::Rtc(_) | Self::Archive(_) => {
 				Some("the gateway and archive imports build their own catalogs")
 			}
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => Some("`import capture` encodes, and its encoders do not count yet"),
-			_ => None,
+			Self::Avc3 | Self::Fmp4 | Self::Ts(_) | Self::Flv => None,
 		}
 	}
 }
@@ -990,7 +947,7 @@ pub struct Export {
 	/// Publish feedback where the broadcast's catalog solicits it: a `<NAME>.echo` broadcast
 	/// under the catalog's `echo` path, reporting what each rendition this export reads has
 	/// received. One path segment, not starting with `.`. The stdout container exports only.
-	#[usage(long)]
+	#[usage(long, value_name = "NAME")]
 	pub echo: Option<crate::report::EchoName>,
 
 	/// The single sink draining the Origin.
@@ -1501,6 +1458,7 @@ mod tests {
 			["ts", "--program", "all"].as_slice(),
 			&["hls", "http://origin/master.m3u8"],
 			&["rtmp", "--listen", "127.0.0.1:1935"],
+			&["rtsp", "--connect", "rtsp://camera/stream"],
 		] {
 			let err = import(source).validate().unwrap_err().to_string();
 			assert!(err.contains("--stats"), "{source:?}: {err}");
@@ -1693,55 +1651,19 @@ mod tests {
 		}
 	}
 
-	/// `--epoch` reaches the importers that announce once per run and derive their tracks
-	/// from the input alone, and is refused everywhere else: an ingest that announces per
-	/// connection, a publisher whose timestamps or bytes come from the instance, or no
-	/// publisher at all.
 	#[test]
-	fn epoch_applies_only_to_a_once_per_run_publisher() {
-		let _env = crate::test_env::EnvGuard::clear(&["MOQ_EPOCH"]);
+	fn independent_importers_cannot_select_a_shared_epoch() {
 		let epoch = hang::moq_net::Epoch::mint().to_string();
-		let parse = |stage: &[&str]| {
-			let argv = ["moq", "--connect", "http://relay/anon", "--epoch", &epoch].into_iter();
-			Invocation::try_parse_from(argv.chain(stage.iter().copied())).expect("parse")
-		};
-
-		let cli = parse(&["import", "fmp4"]);
-		cli.validate().expect("a stdin import takes an epoch");
-		assert_eq!(cli.moq.epoch.map(|epoch| epoch.to_string()), Some(epoch.clone()));
-
-		for accepted in [
-			&["import", "ts"][..],
-			&["import", "ts", "--program", "1"],
-			&["import", "ts", "--passthrough"],
-			&["import", "flv"],
-			&["import", "hls", "https://example.com/live.m3u8"],
-		] {
-			parse(accepted)
-				.validate()
-				.unwrap_or_else(|err| panic!("{accepted:?} refused --epoch: {err:#}"));
-		}
-
-		for refused in [
-			&["import", "rtmp", "--listen", "[::]:1935"][..],
-			&["import", "rtmp", "--connect", "rtmp://example.com/live/key"],
-			&["import", "srt", "--connect", "srt://example.com:9000"],
-			&["import", "rtc", "--listen", "[::]:8080"],
-			&["import", "rtc", "--connect", "https://example.com/whep"],
-			&["import", "ts", "--program", "all"],
-			&["import", "avc3"],
-			&["import", "archive", "file:///tmp/recording"],
-			#[cfg(feature = "capture")]
-			&["import", "capture"],
-			#[cfg(feature = "transcode")]
-			&["transcode"],
-			&["export", "fmp4"],
-		] {
-			assert!(parse(refused).validate().is_err(), "{refused:?} accepted --epoch");
-		}
-
-		let malformed = Invocation::try_parse_from(["moq", "--epoch", "42", "import", "fmp4"]);
-		assert!(malformed.is_err(), "--epoch accepted a value that is not a UUIDv7");
+		let refused = Invocation::try_parse_from([
+			"moq",
+			"--connect",
+			"http://relay/anon",
+			"--epoch",
+			&epoch,
+			"import",
+			"ts",
+		]);
+		assert!(refused.is_err(), "independent importers cannot claim identical content");
 	}
 
 	/// A stage carries config of its own, and the check has to reach it.
@@ -2406,7 +2328,6 @@ mod tests {
 			&["--auth-public", "**"],
 			&["--stats-enabled"],
 			&["--drain-timeout", "500ms"],
-			&["--epoch", "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b"],
 		];
 		let dial: &[&[&str]] = &[
 			&["--connect", "https://relay.example"],
@@ -2470,6 +2391,51 @@ mod tests {
 			.unserved()
 			.expect("a listener reads it");
 		parse(&[]).unserved().expect("nothing to refuse");
+	}
+
+	/// `--connect` and a WAN cluster peer each bind `--connect-bind` for QUIC, so a
+	/// fixed port is refused before anything binds; port 0 or either side alone is
+	/// fine, and a build without QUIC binds nothing to collide.
+	#[test]
+	fn a_fixed_connect_bind_serves_one_dialer() {
+		let parse = |flags: &[&str]| {
+			let args = ["moq"].iter().chain(flags).chain(&["import", "ts"]).copied();
+			Invocation::try_parse_from(args).expect("parse")
+		};
+		for peer in [
+			["--cluster-connect", "https://relay.example"],
+			["--cluster-connect-api", "https://api.example/peers"],
+		] {
+			let both = [
+				&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:4443"][..],
+				&peer,
+			]
+			.concat();
+			let result = parse(&both).moq.validate();
+			if cfg!(feature = "quic") {
+				let err = result.unwrap_err().to_string();
+				assert!(err.contains("--connect-bind") && err.contains(peer[0]), "{err}");
+			} else {
+				result.expect("without QUIC nothing binds the fixed port");
+			}
+
+			let ephemeral = [
+				&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:0"][..],
+				&peer,
+			]
+			.concat();
+			parse(&ephemeral).moq.validate().expect("an ephemeral bind serves both");
+
+			let cluster_only = [&["--connect-bind", "127.0.0.1:4443"][..], &peer].concat();
+			parse(&cluster_only)
+				.moq
+				.validate()
+				.expect("the cluster alone owns a fixed bind");
+		}
+		parse(&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:4443"])
+			.moq
+			.validate()
+			.expect("--connect alone owns a fixed bind");
 	}
 
 	/// `--cluster-connect` / `--cluster-connect-api` attach the process as a

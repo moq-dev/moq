@@ -77,9 +77,9 @@ pub(crate) enum Push {
 ///
 /// A track starts on a whole group. Until a frame of it has gone out, a loss (a frame
 /// dropped here, or the rest of a group its source cut short) takes everything the track
-/// holds with it, and the track starts at its next sync frame. Whole groups missing after one
-/// that ended take nothing: a joiner whose zero-budget live-edge pick has the
-/// publisher cut its group short starts at the next group rather than on the cut-off start.
+/// holds with it, and the track starts at its next sync frame, so a joiner whose start group
+/// was cut short starts at the next group rather than on the cut-off start. Whole groups
+/// missing after one that ended take nothing.
 /// What goes before a track's first frame out is [`Buffer::trimmed`], not lost; what drops
 /// after it is [`Buffer::dropped`].
 ///
@@ -210,6 +210,8 @@ struct Acquire<K, T> {
 	/// Its tracks, and whether each is partway through a group, so its next sync frame
 	/// starts the next one.
 	tracks: BTreeMap<K, bool>,
+	/// A track crossed a group boundary while these frames were being read.
+	grouped: bool,
 }
 
 impl<K: Ord, T> Acquire<K, T> {
@@ -471,7 +473,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	}
 
 	/// Hold a frame for the generation being acquired, starting one if none is, and anchor it
-	/// once a track starts a new group. Without a delay, or replaying, it anchors at once.
+	/// when output is polled after a track starts a new group. Without a delay, or replaying,
+	/// it anchors at once.
 	fn hold(&mut self, key: K, arrival: Arrival<T>) {
 		let generation = self.clock.map_or(0, |clock| clock.generation + 1);
 		let acquire = self.acquire.get_or_insert_with(|| Acquire {
@@ -479,15 +482,15 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			since: arrival.read,
 			frames: Vec::new(),
 			tracks: BTreeMap::new(),
+			grouped: false,
 		});
 		let mid = acquire.tracks.entry(key.clone()).or_default();
-		let grouped = arrival.sync && *mid;
+		acquire.grouped |= arrival.sync && *mid;
 		*mid |= !arrival.sync;
-		let now = arrival.read;
 		acquire.frames.push((key, arrival));
-		let acquire = self.acquire.as_ref().expect("just held");
-		let heard = self.heard(acquire);
-		if (grouped && heard) || self.replay || self.delay.is_zero() || self.ends(acquire) <= now {
+		// A live fill must read every track's available frames before choosing the clock.
+		// Otherwise the first track crossing a group boundary anchors on a partial backlog.
+		if self.replay || self.delay.is_zero() {
 			self.acquired();
 		}
 	}
@@ -810,7 +813,13 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// When the acquisition under way ends, unless a track starts a new group first.
 	fn acquired_by(&self) -> Option<Instant> {
-		self.acquire.as_ref().map(|acquire| self.ends(acquire))
+		self.acquire.as_ref().map(|acquire| {
+			if acquire.grouped && self.heard(acquire) {
+				acquire.since
+			} else {
+				self.ends(acquire)
+			}
+		})
 	}
 
 	/// Whether every track it expects has delivered a frame to `acquire`, or, once a clock has
@@ -1089,6 +1098,48 @@ mod tests {
 	/// Every frame due by now, in order.
 	fn due(buffer: &mut Buffer<u16, &'static str>) -> Vec<&'static str> {
 		released(buffer).into_iter().map(|(item, _)| item).collect()
+	}
+
+	/// A fill reads each track's available backlog before acquisition selects a clock.
+	#[tokio::test(start_paused = true)]
+	async fn acquisition_observes_every_tracks_available_frames() {
+		for order in [[1, 2], [2, 1]] {
+			let start = moq_clock::now();
+			let mut buffer = Buffer::new(Duration::from_millis(500));
+			buffer.expect([1, 2]);
+			// The held first frames reach the jitter buffer before the rest of the fill.
+			for track in [1, 2] {
+				buffer.push(track, arrival(start, 0, "first")).unwrap();
+			}
+			for track in order {
+				// Video runs ahead of audio. Acquiring partway through either track
+				// sees an incomplete backlog and can trim a different starting group.
+				let end = if track == 1 { 1_200 } else { 800 };
+				for decode in (40..=end).step_by(40) {
+					assert!(
+						!buffer.full(&track),
+						"the fill must observe the whole backlog: {order:?}"
+					);
+					buffer
+						.push(
+							track,
+							Arrival {
+								sync: decode % 600 == 0,
+								..arrival(start, decode, "backlog")
+							},
+						)
+						.unwrap();
+				}
+			}
+			assert!(due(&mut buffer).is_empty());
+			assert_eq!(buffer.at(ms(800)), Some(start + Duration::from_millis(500)));
+			tokio::time::advance(Duration::from_millis(500)).await;
+			let first = buffer.poll_next(&kio::Waiter::noop());
+			assert!(
+				matches!(first, Poll::Ready(Ready { track: 1, .. })),
+				"video begins on its 600 ms group"
+			);
+		}
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1988,9 +2039,12 @@ mod tests {
 		buffer.push(1, video(next, 240, true, "v240")).unwrap();
 		buffer.push(1, video(next, 280, false, "v280")).unwrap();
 		assert!(due(&mut buffer).is_empty());
-		assert_eq!(buffer.next_deadline(), Some(next + DELAY));
-		tokio::time::advance(DELAY).await;
+		// Both frames were available together: v280, not its group's v240, is freshest.
+		assert_eq!(buffer.next_deadline(), Some(start + DELAY));
+		tokio::time::advance(Duration::from_millis(60)).await;
 		assert_eq!(due(&mut buffer), ["v240"]);
+		tokio::time::advance(Duration::from_millis(40)).await;
+		assert_eq!(due(&mut buffer), ["v280"]);
 		assert_eq!(buffer.dropped(), 0, "trimming the join is not a loss");
 		assert_eq!(buffer.trimmed(), 6);
 	}

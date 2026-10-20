@@ -22,7 +22,7 @@ pub(super) fn poll_cancel<S: crate::transport::poll::Session>(
 ) -> Poll<Result<(), Error>> {
 	if !*finished {
 		let closed = match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => poll_legacy_end(stream, cx),
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => poll_legacy_end(stream, version, cx),
 			_ => stream.reader.poll_closed(cx),
 		};
 		match closed {
@@ -69,19 +69,50 @@ pub(super) fn poll_withdrawn<S: crate::transport::poll::Session>(
 
 /// Poll a draft 14-16 virtual request stream until the requester ends the request.
 ///
-/// An update modifies the request rather than ending it, so it is skipped. Any other
-/// message is `Err(Cancel)`, and the stream finishing is `Ok(())`.
+/// An update modifies the request rather than ending it, and the requests watched here
+/// apply none, so each is refused with [`refuse_update`] and the request stays open. Any
+/// other message is `Err(Cancel)`, and the stream finishing is `Ok(())`.
 pub(super) fn poll_legacy_end<S: crate::transport::poll::Session>(
 	stream: &mut Stream<S, Version>,
+	version: Version,
 	cx: &mut Context<'_>,
 ) -> Poll<Result<(), Error>> {
 	loop {
+		// A refusal goes out before the next message is read.
+		ready!(stream.writer.poll_flush(cx))?;
 		match ready!(stream.reader.poll_decode_maybe::<FollowUp>(cx))? {
-			Some(FollowUp::Update(_)) => {}
+			Some(FollowUp::Update(body)) => refuse_update(&mut stream.writer, &body, version)?,
 			Some(FollowUp::End) => return Poll::Ready(Err(Error::Cancel)),
 			None => return Poll::Ready(Ok(())),
 		}
 	}
+}
+
+/// Buffer the answer to a draft 14-16 update aimed at a request that takes none.
+///
+/// Draft 14 answers no update. Drafts 15 and 16 answer each with exactly one REQUEST_OK or
+/// REQUEST_ERROR naming the update's own Request ID, and a refusal leaves any request but a
+/// subscription standing, so NOT_SUPPORTED is the whole answer.
+pub(super) fn refuse_update<S: crate::transport::poll::SendStream>(
+	writer: &mut crate::coding::Writer<S, Version>,
+	body: &super::Body,
+	version: Version,
+) -> Result<(), Error> {
+	if version == Version::Draft14 {
+		return Ok(());
+	}
+	let request_id = super::RequestId::decode(&mut body.decoder(version), version).map_err(DecodeError::complete)?;
+	writer.buffer_varint(super::RequestError::ID)?;
+	writer.buffer(&super::RequestError {
+		request_id: Some(request_id),
+		error_code: super::error::request::to_code(
+			&Error::Unsupported,
+			super::error::request::Kind::Subscribe,
+			version,
+		),
+		reason_phrase: "update not supported".into(),
+		retry_interval: 0,
+	})
 }
 
 /// A message the adapter routed onto a draft 14-16 request after the request itself.
@@ -187,12 +218,47 @@ pub(super) async fn reject<S: crate::transport::poll::Session>(
 	Ok(())
 }
 
+/// Write the error refusing a `kind` request with `err`, as the negotiated draft spells it.
+///
+/// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into, so
+/// only the message type changes; draft-17 then drops the Request ID.
+pub(super) async fn write_error<S: crate::transport::poll::SendStream>(
+	writer: &mut crate::coding::Writer<S, Version>,
+	kind: super::error::request::Kind,
+	request_id: super::RequestId,
+	err: &Error,
+	reason: &str,
+	version: Version,
+) -> Result<(), Error> {
+	use super::error::request::Kind;
+
+	let id = match (version, kind) {
+		(Version::Draft14, Kind::Subscribe) => super::SubscribeError::ID,
+		(Version::Draft14, Kind::Fetch) => super::FetchError::ID,
+		(Version::Draft14, Kind::Publish) => super::PublishError::ID,
+		(Version::Draft14, Kind::PublishNamespace) => super::PublishNamespaceError::ID,
+		(Version::Draft14, Kind::SubscribeNamespace) => super::SubscribeNamespaceError::ID,
+		(Version::Draft14, Kind::TrackStatus) => super::TRACK_STATUS_ERROR_14,
+		_ => super::RequestError::ID,
+	};
+	writer.buffer_varint(id)?;
+	writer
+		.encode(&super::RequestError {
+			request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16).then_some(request_id),
+			error_code: super::error::request::to_code(err, kind, version),
+			reason_phrase: reason.into(),
+			retry_interval: 0,
+		})
+		.await
+}
+
 /// A framed subscription update, preserving omitted preferences.
 #[derive(Debug)]
 pub(super) struct Update {
 	/// The first Request ID: the update's own on drafts 14-16, which their answer names.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
+	pub(super) max_age: Option<u64>,
 	/// Why the update is refused, which fails the subscription: [`Error::Unsupported`], a
 	/// [`DecodeError::MalformedAuthToken`] for tokens that repeat, or a
 	/// [`DecodeError::MultipleAuthTokens`] for more than one token.
@@ -215,7 +281,7 @@ impl Update {
 
 	/// Decode the message body, after its type and length.
 	fn decode_body(data: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		use super::{Fill, Filter, Location, Opaque, Parameters, RequestId};
+		use super::{Fill, Filter, Location, Opaque, RequestId};
 		let request_id = RequestId::decode(data, version)?;
 		match version {
 			Version::Draft14 => {
@@ -228,7 +294,10 @@ impl Update {
 				let _end_group = data.varint()?;
 				let priority = data.u8()?;
 				let forward = data.bool()?;
-				let tokens = Parameters::skip_request(data)?;
+				decode_params!(data, version,
+					0x03 => tokens: Vec<super::token::RequestToken>,
+					super::max_age::PARAMETER => max_age: Option<u64>,
+				);
 				if !data.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
@@ -236,6 +305,7 @@ impl Update {
 				return Ok(Self {
 					request_id,
 					priority: Some(priority),
+					max_age: super::max_age::validate(max_age)?,
 					refused,
 					authorization_token,
 					new_group: None,
@@ -264,6 +334,7 @@ impl Update {
 			0x28 => property_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x29 => track_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x32 => new_group: Option<u64> where super::subscribe::has_new_group_request(version),
+			super::max_age::PARAMETER => max_age: Option<u64>,
 		);
 		if !data.is_empty() {
 			return Err(DecodeError::InvalidValue);
@@ -283,6 +354,7 @@ impl Update {
 		Ok(Self {
 			request_id,
 			priority,
+			max_age: super::max_age::validate(max_age)?,
 			refused,
 			authorization_token,
 			new_group,
@@ -365,6 +437,60 @@ impl Decode<Version> for NamespaceUpdate {
 mod tests {
 	use super::*;
 
+	/// On drafts 14-16 an update aimed at a request that applies none, such as a FETCH or
+	/// SUBSCRIBE_NAMESPACE, keeps the request open. Drafts 15 and 16 refuse it with a
+	/// REQUEST_ERROR naming the update, and a later cancellation still ends the request.
+	#[moq_clock::test]
+	async fn legacy_update_is_answered_without_ending_the_request() {
+		use crate::lite::test_transport::ScriptedSession;
+
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			// Own Request ID 10, target 0, no parameters. Draft 14 carries its fixed start,
+			// end group, priority and forward first.
+			let body: &[u8] = match version {
+				Version::Draft14 => &[10, 0, 0, 0, 0, 128, 1, 0],
+				_ => &[10, 0, 0],
+			};
+			let mut update = vec![super::super::SubscribeUpdate::ID as u8, 0, body.len() as u8];
+			update.extend_from_slice(body);
+			let mut session = ScriptedSession::new(update);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut finished = false;
+
+			let polled = futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+				&mut stream,
+				&mut finished,
+				version,
+				cx
+			)));
+			assert!(polled.is_pending(), "{version}: the update ended the request");
+
+			let written = session.log.writes.lock().unwrap().clone();
+			match version {
+				Version::Draft14 => assert!(written.is_empty(), "{version}: {written:?}"),
+				// [type, length (2), Request ID, NOT_SUPPORTED, ...]
+				_ => assert_eq!(
+					(written[0], written[3], written[4]),
+					(super::super::RequestError::ID as u8, 10, 0x3),
+					"{version}: {written:?}"
+				),
+			}
+
+			// UNSUBSCRIBE, or any message but an update, ends the request.
+			session.push(&[super::super::Unsubscribe::ID as u8, 0, 1, 0]);
+			let polled = futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+				&mut stream,
+				&mut finished,
+				version,
+				cx
+			)));
+			assert!(
+				matches!(polled, Poll::Ready(Err(Error::Cancel))),
+				"{version}: {polled:?}"
+			);
+		}
+	}
+
 	#[test]
 	fn delivery_timeouts_on_subscription_updates_are_accepted() {
 		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
@@ -400,5 +526,104 @@ mod tests {
 		let update = crate::coding::decode_buf(&mut buf, Version::Draft18, Update::decode_body).unwrap();
 		assert_eq!(update.priority, Some(5));
 		assert!(update.refused.is_none());
+	}
+
+	/// Draft-14's per-request error messages share REQUEST_ERROR's body, so the shared writer
+	/// must put the same bytes on the wire as each legacy message does.
+	#[moq_clock::test]
+	async fn draft14_errors_match_their_legacy_messages() {
+		use super::super::error::request::{Kind, to_code};
+		use super::super::{
+			FetchError, PublishError, PublishNamespaceError, RequestId, SubscribeError, SubscribeNamespaceError,
+		};
+		use crate::lite::test_transport::{Log, SinkSend};
+
+		let version = Version::Draft14;
+		let (request_id, err, reason) = (RequestId(6), Error::NotFound, "gone");
+
+		for kind in [
+			Kind::Subscribe,
+			Kind::Fetch,
+			Kind::Publish,
+			Kind::PublishNamespace,
+			Kind::SubscribeNamespace,
+			Kind::TrackStatus,
+		] {
+			let shared = Log::default();
+			let mut writer = crate::coding::Writer::new(SinkSend::new(shared.clone()), version);
+			write_error(&mut writer, kind, request_id, &err, reason, version)
+				.await
+				.unwrap();
+
+			let legacy = Log::default();
+			let mut writer = crate::coding::Writer::new(SinkSend::new(legacy.clone()), version);
+			let error_code = to_code(&err, kind, version);
+			let reason_phrase = reason.into();
+			match kind {
+				Kind::Subscribe => {
+					writer
+						.encode_message(&SubscribeError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::Fetch => {
+					writer
+						.encode_message(&FetchError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::Publish => {
+					writer
+						.encode_message(&PublishError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::PublishNamespace => {
+					writer
+						.encode_message(&PublishNamespaceError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::SubscribeNamespace => {
+					writer
+						.encode_message(&SubscribeNamespaceError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				// TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body under its own type.
+				Kind::TrackStatus => {
+					writer.buffer_varint(super::super::TRACK_STATUS_ERROR_14).unwrap();
+					writer
+						.encode(&SubscribeError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+			}
+			.unwrap();
+
+			assert_eq!(
+				*shared.writes.lock().unwrap(),
+				*legacy.writes.lock().unwrap(),
+				"{kind:?}"
+			);
+		}
 	}
 }

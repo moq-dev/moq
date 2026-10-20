@@ -91,7 +91,10 @@ impl Status {
 }
 
 /// Convert only transport metrics actually supplied by the active backend into the public property.
-fn connection_stats_structure(stats: moq_net::session::Stats) -> gst::Structure {
+fn connection_stats_structure(
+	stats: moq_net::session::Stats,
+	recv_rate: Option<moq_net::bandwidth::Rate>,
+) -> gst::Structure {
 	let mut structure = gst::Structure::new_empty("moq-connection-stats");
 	if let Some(rtt) = stats.rtt {
 		structure.set("rtt-us", u64::try_from(rtt.as_micros()).unwrap_or(u64::MAX));
@@ -103,7 +106,7 @@ fn connection_stats_structure(stats: moq_net::session::Stats) -> gst::Structure 
 		),
 		(
 			"estimated-recv-rate-bps",
-			stats.estimated_recv_rate.map(moq_net::bandwidth::Rate::as_bps),
+			recv_rate.map(moq_net::bandwidth::Rate::as_bps),
 		),
 		("bytes-sent", stats.bytes_sent),
 		("bytes-received", stats.bytes_received),
@@ -140,6 +143,8 @@ pub struct ResolvedSettings {
 	pub quic_idle_timeout: Option<std::time::Duration>,
 	/// QUIC keep-alive override, including zero to disable it.
 	pub quic_keep_alive: Option<std::time::Duration>,
+	/// Write TLS session secrets to the file `SSLKEYLOGFILE` names.
+	pub quic_keylog: bool,
 }
 
 /// Builds the connect configuration with the sink's TLS and backoff overrides.
@@ -161,6 +166,7 @@ pub(super) fn quic_config(settings: &ResolvedSettings) -> moq_tokio::quic::Confi
 	if let Some(keep_alive) = settings.quic_keep_alive {
 		config.keep_alive = Some(keep_alive);
 	}
+	config.keylog = Some(settings.quic_keylog);
 	config
 }
 
@@ -358,7 +364,9 @@ impl Session {
 
 	/// Snapshot the current connection statistics, or None while disconnected.
 	pub fn connection_stats(&self) -> Option<gst::Structure> {
-		self.connection_stats.stats().map(connection_stats_structure)
+		self.connection_stats
+			.stats()
+			.map(|stats| connection_stats_structure(stats, self.recv_bandwidth.peek()))
 	}
 
 	/// Cumulative connects and disconnects recorded by the reconnect loop.
@@ -523,7 +531,7 @@ mod tests {
 		stats.rtt = Some(std::time::Duration::ZERO);
 		stats.bytes_sent = Some(0);
 		stats.packets_lost = Some(7);
-		let structure = connection_stats_structure(stats);
+		let structure = connection_stats_structure(stats, None);
 		assert_eq!(structure.get::<u64>("rtt-us"), Ok(0));
 		assert_eq!(structure.get::<u64>("bytes-sent"), Ok(0));
 		assert_eq!(structure.get::<u64>("packets-lost"), Ok(7));
@@ -550,6 +558,7 @@ mod tests {
 			tls_disable_verify: false,
 			quic_idle_timeout: None,
 			quic_keep_alive: None,
+			quic_keylog: false,
 		};
 		let (session, registration, broadcast, _) = Session::start(settings, glib::WeakRef::new()).unwrap();
 		registration.mark_registered();

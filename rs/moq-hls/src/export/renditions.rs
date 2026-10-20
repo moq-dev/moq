@@ -28,7 +28,8 @@ type Key = (Kind, String);
 /// A change to the rendition set, yielded by [`Consumer::next`].
 #[non_exhaustive]
 pub enum Event {
-	/// A rendition appeared (or was reconfigured: a `Removed` for the old one precedes it).
+	/// A rendition appeared, with its own timeline advertised (or was reconfigured: a `Removed`
+	/// for the old one precedes it).
 	Added(Arc<Rendition>),
 	/// A rendition disappeared (removed from the catalog, or replaced by a reconfigure).
 	Removed {
@@ -501,13 +502,17 @@ impl Producer {
 	///
 	/// Renditions are only servable when the catalog advertises its timelines (its root `archive`
 	/// entry): without one there is nothing to render playlists from, so the whole catalog is
-	/// skipped with a warning.
+	/// skipped with a warning. A rendition joins the set only once the archive indexes its own
+	/// timeline, which a publisher may declare after the rendition's init: until then every
+	/// segment would be a gap, so it is neither listed nor reported as [`Event::Added`].
 	///
 	/// `source` holds the broadcast the snapshot was read from, so each rendition serves media
 	/// from that same broadcast rather than whatever is at the path by the time it is asked. A
 	/// rendition whose `broadcast` reference escapes above the origin root names no broadcast at
 	/// all, so it is dropped with a warning rather than served.
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
+		use hang::catalog::Reference as _;
+
 		let Some(archive) = catalog.archive.clone() else {
 			if !catalog.video.renditions.is_empty() || !catalog.audio.renditions.is_empty() {
 				tracing::warn!("catalog advertises no archive; its renditions can't be served as HLS");
@@ -556,6 +561,9 @@ impl Producer {
 				rendition.refresh(video.bitrate, video.framerate, video.enabled);
 				continue;
 			}
+			if !section.timelines.contains_key(video.track(name)) {
+				continue;
+			}
 			let rendition = match Rendition::video(name.clone(), video, source, section.clone(), clock) {
 				Ok(rendition) => Arc::new(rendition),
 				Err(err) => {
@@ -570,6 +578,9 @@ impl Producer {
 			let key = (Kind::Audio, name.clone());
 			if let Some(rendition) = current.renditions.get(&key) {
 				rendition.refresh(audio.bitrate, None, audio.enabled);
+				continue;
+			}
+			if !section.timelines.contains_key(audio.track(name)) {
 				continue;
 			}
 			let rendition = match Rendition::audio(name.clone(), audio, source, section.clone(), clock) {

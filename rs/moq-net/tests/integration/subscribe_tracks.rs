@@ -79,7 +79,7 @@ async fn setup(version: Version) -> Setup {
 		}
 	});
 
-	moq_clock::timeout(TIMEOUT, track.demand().used())
+	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -106,7 +106,12 @@ async fn deliver(setup: &mut Setup, payload: &'static [u8]) {
 /// Send SUBSCRIBE_TRACKS from the server to the publishing client, returning every byte
 /// of the reply once the client ends the stream.
 async fn subscribe_tracks(pair: &MockPair) -> Vec<u8> {
-	let (mut send, mut recv) = pair.server_transport.clone().open_bi().await.expect("open_bi");
+	let (mut send, mut recv) = pair
+		.server_transport
+		.clone()
+		.open_bi(Default::default())
+		.await
+		.expect("open_bi");
 	send.write(SUBSCRIBE_TRACKS).await.expect("write");
 
 	let mut reply = Vec::new();
@@ -148,7 +153,13 @@ async fn subscribe_tracks_is_refused_per_request() {
 #[moq_clock::test]
 async fn subscribe_tracks_before_draft_18_closes_the_session() {
 	let setup = setup("moq-transport-17".parse().unwrap()).await;
-	let (mut send, _recv) = setup.pair.server_transport.clone().open_bi().await.expect("open_bi");
+	let (mut send, _recv) = setup
+		.pair
+		.server_transport
+		.clone()
+		.open_bi(Default::default())
+		.await
+		.expect("open_bi");
 	send.write(SUBSCRIBE_TRACKS).await.expect("write");
 
 	moq_clock::timeout(TIMEOUT, setup.pair.client.closed())

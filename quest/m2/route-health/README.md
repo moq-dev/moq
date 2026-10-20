@@ -77,6 +77,5 @@ Add a route-health section to the routing concept page.
 ## Related
 
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - reachability and advertisement freshness, distinct from delivery health
-- [Live largest location](/quest/m1/largest.md) - reported source position is not delivered payload
 - [Link quality](/quest/m2/link-quality.md) - optional metric repricing, not this local delivery-health decision
 - [Routing guide](/quest/m1/routing-guide.md) - priorities, health, and epoch-only continuity explained together

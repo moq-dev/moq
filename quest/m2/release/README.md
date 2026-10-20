@@ -17,8 +17,9 @@ bumps and tags happen at this cut, not in the milestone-planning PR.
 Run the release's compatibility, package, draft, and all-language interop
 checks on the candidate. Publish finalized lite-07 with first-party clients
 preferring it and falling back to supported older versions. Verify artifacts
-from their registries before downstream pin migrations. Existing upgrade and
-identity guides describe public API, wire, archive-format, and legacy limits.
+from their registries before downstream pin migrations. Package `MIGRATE.md`
+files describe public API breaks; the upgrade and identity guides describe
+wire, archive-format, and legacy limits.
 
 Downstream staging, mixed-version upgrade/rollback, canaries, and broad rollout
 follow publication and require their own operator authorization. Do not mark
@@ -27,6 +28,8 @@ production stability proven merely because upstream artifacts published.
 ## Required
 
 - [API-diff check](/quest/m2/release/migrate-audit.md) - PRs into release diff the public API; backports refuse breaks, the cut confirms MIGRATE.md coverage
+- [API shape review](/quest/m2/release/api-review.md) - every new or changed public API reviewed for a better shape before the cut
+- [Feature review](/quest/m2/release/feature-review.md) - every major work line since the last release judged end to end before the cut
 - [Cut and publish](/quest/m2/release/cut.md) - independently executable after m1; release-triggered publication
 - [Published catalog readers](/quest/m2/release/catalog-readers.md) - released Go and JS clients accept the current Rust publisher's live catalog in smoke; an earlier release-line patch may satisfy it
 - [Published assets](/quest/m2/release/assets-release.md) - npm carries hostable worklets

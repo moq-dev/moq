@@ -67,9 +67,8 @@ pub trait UdpSender: Send + Sync + Debug + 'static {
     /// A single [`UdpSender`] will be re-used, even if `poll_send` returns `Poll::Ready` once,
     /// unlike [`Future::poll`], so calling it again after readiness should not panic.
     ///
-    /// An error matching [`moq_sock::udp::is_unreachable_err`] fails a handshaking connection
-    /// with `NO_VIABLE_PATH` and counts as loss once it is established; any other error closes
-    /// the connection.
+    /// An error matching [`moq_sock::udp::is_unreachable_err`] reaches
+    /// [`moq_quic::Connection::handle_unreachable`]; any other error closes the connection.
     fn poll_send(
         self: Pin<&mut Self>,
         transmit: &Transmit<'_>,
@@ -166,13 +165,7 @@ where
                 // registers us for a wakeup, or the send succeeds if this really was just a
                 // transient failure.
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                // No route to the destination: retransmitting cannot help, so the connection
-                // decides whether to give up on the peer.
-                Err(e) if moq_sock::udp::is_unreachable_err(&e) => return Poll::Ready(Err(e)),
-                Err(e) => {
-                    log_sendmsg_error(this.last_send_error, &e, transmit);
-                    return Poll::Ready(Ok(()));
-                }
+                Err(e) => return Poll::Ready(send_failed(this.last_send_error, e, transmit)),
                 Ok(()) => return Poll::Ready(Ok(())),
             }
         }
@@ -186,22 +179,30 @@ where
 /// Limits I/O error logging to one message per minute.
 const IO_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
-fn log_sendmsg_error(
+/// What a failed send, other than `WouldBlock`, means for [`UdpSender::poll_send`]
+///
+/// No route to the destination comes back, since retransmitting cannot help and the connection
+/// decides whether to give up on the peer. Anything else is logged at most once per
+/// [`IO_ERROR_LOG_INTERVAL`] and treated as loss, which UDP always allows.
+pub(crate) fn send_failed(
     last_send_error: &mut Option<Instant>,
-    error: &io::Error,
+    error: io::Error,
     transmit: &Transmit<'_>,
-) {
+) -> io::Result<()> {
+    if moq_sock::udp::is_unreachable_err(&error) {
+        return Err(error);
+    }
     #[cfg(unix)]
     // Unix `EMSGSIZE` is expected for MTU probes.
-    if moq_sock::udp::is_msg_size_err(error) {
-        return;
+    if moq_sock::udp::is_msg_size_err(&error) {
+        return Ok(());
     }
 
     let now = Instant::now();
     if last_send_error
         .is_some_and(|last| now.saturating_duration_since(last) <= IO_ERROR_LOG_INTERVAL)
     {
-        return;
+        return Ok(());
     }
     *last_send_error = Some(now);
 
@@ -214,6 +215,7 @@ fn log_sendmsg_error(
         transmit.contents.len(),
         transmit.segment_size
     );
+    Ok(())
 }
 
 /// Parts of the [`UdpSender`] trait that aren't asynchronous or require storing wakers.

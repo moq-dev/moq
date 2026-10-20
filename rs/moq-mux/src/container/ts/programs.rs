@@ -44,10 +44,13 @@ struct Program {
 impl Program {
 	/// Announce the broadcast once its catalog has gone out.
 	fn announce_if_listed(&mut self) -> anyhow::Result<bool> {
-		let Some((route, listed)) = &self.pending else {
+		let Some((route, listed)) = &mut self.pending else {
 			return Ok(true);
 		};
-		if listed.latest().is_none() {
+		if !matches!(
+			listed.poll_largest(&kio::Waiter::noop()),
+			std::task::Poll::Ready(Some(_))
+		) {
 			return Ok(false);
 		}
 		self.broadcast
@@ -147,17 +150,21 @@ impl Programs {
 
 	/// Finish each program's tracks, then its catalog while it still lists them.
 	///
+	/// Returns each program's [`Finish`](moq_net::broadcast::Finish), which keeps it servable
+	/// until its media is stale; dropping one closes that program.
 	/// Fails when the input ended before its PAT listed a program or any program declared a track.
-	pub fn finish(&mut self) -> anyhow::Result<()> {
+	pub fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Finish>> {
 		anyhow::ensure!(!self.programs.is_empty(), "input ended before its PAT listed a program");
 		let mut announced = false;
+		let mut finished = Vec::with_capacity(self.programs.len());
 		for program in &mut self.programs {
 			program.import.finish()?;
 			announced |= program.announce_if_listed()?;
 			program.catalog.finish()?;
+			finished.push(program.broadcast.clone().finish());
 		}
 		anyhow::ensure!(announced, "input ended before any program declared a track");
-		Ok(())
+		Ok(finished)
 	}
 
 	/// Abort every program's catalog and media tracks with `err`. Consumes the importer.
@@ -277,7 +284,7 @@ mod test {
 		for chunk in input.chunks(100) {
 			programs.decode(chunk).unwrap();
 		}
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		assert_eq!(programs.programs.len(), 50);
 
 		let consumer = origin.consume().request_broadcast("event/50.hang", None).await.unwrap();
@@ -334,7 +341,7 @@ mod test {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
 		programs.decode(&two_section_pat()).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		assert_eq!(programs.programs.len(), 2);
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 		assert_eq!(renditions(&origin, "event/2.hang").await, 1);
@@ -347,7 +354,7 @@ mod test {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
 		programs.decode(&two_section_pat()).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		let epochs: Vec<_> = programs
 			.programs
 			.iter()
@@ -381,7 +388,7 @@ mod test {
 		for packet in packets {
 			programs.decode(packet).unwrap();
 		}
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		assert!(
 			programs
 				.programs
@@ -399,7 +406,7 @@ mod test {
 		let mut null = vec![0x47, 0x1f, 0xff, 0x10];
 		null.resize(188, 0xff);
 		programs.decode(&null).unwrap();
-		let err = programs.finish().expect_err("no PAT");
+		let Err(err) = programs.finish() else { panic!("no PAT") };
 		assert!(err.to_string().contains("PAT"), "{err:#}");
 	}
 
@@ -412,7 +419,9 @@ mod test {
 		let input = two_programs();
 		programs.decode(&input[..3 * 188]).unwrap();
 
-		let err = programs.finish().expect_err("the PMTs have no configured media");
+		let Err(err) = programs.finish() else {
+			panic!("the PMTs have no configured media")
+		};
 		assert!(err.to_string().contains("declared a track"), "{err:#}");
 		assert!(
 			programs
@@ -475,7 +484,7 @@ mod test {
 			"no program is known before the PAT is whole"
 		);
 		programs.decode(&input[100..]).unwrap();
-		programs.finish().unwrap();
+		let _finished = programs.finish().unwrap();
 		let after = std::time::SystemTime::now();
 
 		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {

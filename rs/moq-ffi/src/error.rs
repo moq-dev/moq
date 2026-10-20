@@ -296,6 +296,10 @@ pub enum MoqError {
 	/// A configuration record held a value the constructor cannot use.
 	#[error("config: {reason}")]
 	Config { reason: String },
+
+	/// A catalog needs a newer moq-hang draft than this build reads; upgrade to read it.
+	#[error("unsupported catalog version {version}")]
+	UnsupportedCatalog { version: u64 },
 }
 
 impl From<moq_net::Error> for MoqError {
@@ -346,6 +350,7 @@ impl From<hang::Error> for MoqError {
 	fn from(err: hang::Error) -> Self {
 		match err {
 			hang::Error::Moq(err) => err.into(),
+			hang::Error::UnsupportedVersion(version) => Self::UnsupportedCatalog { version },
 			err => Self::Media {
 				reason: err.to_string(),
 			},
@@ -441,6 +446,15 @@ mod tests {
 		assert_eq!(error.scope, super::MoqErrorScope::Session);
 		assert_eq!(error.code, moq_net::SessionError::TooManyRequests.to_code());
 		assert_eq!(error.kind, super::MoqProtocolKind::TooManyRequests);
+	}
+
+	#[test]
+	fn unsupported_catalog_survives_the_mux() {
+		let error = moq_mux::Error::Hang(hang::Error::UnsupportedVersion(5));
+		assert!(matches!(
+			MoqError::from(error),
+			MoqError::UnsupportedCatalog { version: 5 }
+		));
 	}
 
 	#[test]

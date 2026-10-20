@@ -10,9 +10,12 @@ on:
   # Nightly: catch an interop regression in the current tree before a user does.
   schedule:
     - cron: "0 8 * * *"
-  # On PRs that touch the harness itself, so a change to the interop test is
-  # validated before it merges. Source regressions still surface nightly.
+  # On release PRs that touch the harness itself, so a backported change to the
+  # interop test is validated before it merges. Main PRs skip it; the schedule
+  # above covers main. `edited` catches a main PR retargeted to release.
   pull_request:
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "test/lib/**"
       - "test/p2p/**"
@@ -146,6 +149,15 @@ jobs:
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      # Run independently so an unrelated cold-start failure cannot hide the
+      # codec replacement and same-track coded-size growth measurements.
+      - name: Media track identity changes
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test media --media-cases rename
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
       # A failing harness run keeps its directory, holding the process logs, the
       # relay config, and a Playwright trace of the failing page. Upload it for a
       # short while so a red cell is diagnosable; a passing run deletes its own.
@@ -153,7 +165,7 @@ jobs:
       # throwaway test ones.
       - name: Upload failure artifacts
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: interop-failure
           path: ${{ runner.temp }}/moq-test-runs

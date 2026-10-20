@@ -4,8 +4,8 @@
 //! The in-process mesh (two origins, broadcasts both ways over a
 //! fingerprint-pinned `/.cluster` session) lives in
 //! `cluster::tests::lan_cluster_path_carries_broadcasts_both_ways`.
-//! This file is the live-mDNS recipe, ignored because CI runners often block
-//! multicast even after announce succeeds.
+//! This file is the live-mDNS recipe, ignored because it multicasts on the
+//! host network; nightly runs it with `just rs multicast`.
 //!
 //! ```text
 //! moq-relay --listen 127.0.0.1:4443 --listen-tls-generate localhost \
@@ -21,9 +21,10 @@ use std::time::Duration;
 use moq_relay::cluster;
 
 /// Two clusters that can advertise (fingerprint + node) start without a secret.
-/// Binding mDNS is the recipe's gate; skip when the host cannot announce.
+/// Binding mDNS is the recipe's gate; skip when the host cannot announce,
+/// unless MOQ_STRICT makes that a failure.
 #[tokio::test]
-#[ignore = "needs multicast on the host network; run with --run-ignored"]
+#[ignore = "needs multicast on the host network; run by just rs multicast"]
 async fn moq_import_cluster_lan_beside_a_relay() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -41,7 +42,6 @@ async fn moq_import_cluster_lan_beside_a_relay() {
 
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.fingerprint = vec![fingerprint.clone()];
-	let client = connect.clone().init(Default::default()).expect("client");
 
 	let mut lan = cluster::LanConfig::default();
 	lan.enabled = true;
@@ -51,13 +51,14 @@ async fn moq_import_cluster_lan_beside_a_relay() {
 
 	let cluster = cluster::Cluster::new(cluster::Options::new(config))
 		.expect("cluster")
-		.with_client(client)
 		.with_connect(connect, Default::default())
 		.with_advertise(cluster::LanAdvertise::new(port).with_fingerprint(fingerprint));
 
 	match tokio::time::timeout(Duration::from_secs(10), cluster.start()).await {
 		Ok(Ok(_)) => {}
-		Ok(Err(err)) if format!("{err:#}").contains("no network interface") => {
+		Ok(Err(err))
+			if format!("{err:#}").contains("no network interface") && std::env::var_os("MOQ_STRICT").is_none() =>
+		{
 			eprintln!("skipping: {err:#}");
 		}
 		Ok(Err(err)) => panic!("cluster start: {err:#}"),

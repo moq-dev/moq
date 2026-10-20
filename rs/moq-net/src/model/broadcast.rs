@@ -3,7 +3,9 @@
 //! A [Producer] creates tracks on demand: a [Consumer] subscribes by name, and the
 //! producer either serves a track it already has or is handed a [`track::Request`] to
 //! fill. Both handles are refcounted clones of one broadcast, which ends on
-//! [`Producer::close`] or when the last producer drops.
+//! [`Producer::close`], when the last producer drops, or when the [`Finish`] that
+//! [`Producer::finish`] returns drops, having kept its finished tracks up until their
+//! media is stale.
 //!
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
 use crate::{cache, stats, track};
@@ -11,6 +13,7 @@ use std::{
 	collections::HashMap,
 	sync::Arc,
 	task::{Poll, ready},
+	time::Duration,
 };
 
 use crate::Error;
@@ -192,7 +195,9 @@ impl BroadcastState {
 /// # Lifetime
 ///
 /// A broadcast lives until [`Self::close`] or until the last [`Producer`] (or
-/// [`Dynamic`]) drops, whichever comes first; both end it the same way. Children
+/// [`Dynamic`]) drops, whichever comes first; both end it the same way. A publisher
+/// whose input ended cleanly calls [`Self::finish`] instead, so a subscriber still
+/// catching up can drain what it published. Children
 /// do *not* keep it alive: cloning a [`Consumer`] or holding a [`track::Producer`]
 /// does nothing for the broadcast's lifetime.
 #[derive(Clone)]
@@ -229,14 +234,14 @@ impl Producer {
 
 	/// Attach an ingress stats scope, inherited by the tracks created on this
 	/// broadcast. Set by a tagged `origin::Producer` at `create_broadcast`.
-	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
+	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self
 	}
 
 	/// Attach the advertisement of this broadcast's exact path. Set by
 	/// `origin::Producer::create_broadcast`; a standalone broadcast has none.
-	pub(crate) fn with_announcer(self, announcer: Announcer) -> Self {
+	pub(super) fn with_announcer(self, announcer: Announcer) -> Self {
 		*self.alive.announcer.lock() = Some(announcer);
 		self
 	}
@@ -420,17 +425,43 @@ impl Producer {
 		self.alive.close();
 	}
 
+	/// End the broadcast cleanly, keeping it servable until its media goes stale.
+	///
+	/// A subscriber still catching up, one that read the final catalog late or is draining a
+	/// backlog, can still request and drain the finished tracks. The returned [`Finish`] keeps
+	/// the broadcast announced and holds every track finished by now, so their producers can
+	/// drop. A held track takes no more groups, not even one below its end, so nothing lands
+	/// after the linger is fixed. Keep it for its [`linger`](Finish::linger), then drop it to [close](Self::close)
+	/// the broadcast; `Finish::wait` does both on a runtime. Dropping it early is how an
+	/// interrupt ends the linger.
+	pub fn finish(self) -> Finish {
+		let held: Vec<track::Hold> = self
+			.state
+			.lock()
+			.tracks
+			.values()
+			.filter_map(track::TrackWeak::hold_finished)
+			.collect();
+		let linger = held.iter().filter_map(|hold| hold.max_age).max().unwrap_or_default();
+		Finish {
+			producer: self,
+			_held: held,
+			linger,
+		}
+	}
+
 	/// Whether any [`Consumer`] handle exists, unlike [`Self::demand`], which counts tracks.
-	pub(crate) fn is_held(&self) -> bool {
+	pub(super) fn is_held(&self) -> bool {
 		self.alive.token.is_used()
 	}
 
 	/// `Ready(Ok)` once a [`Consumer`] handle exists, `Ready(Err)` once the broadcast ended.
-	pub(crate) fn poll_held(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
+	pub(super) fn poll_held(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
 		self.alive.token.poll_used(waiter)
 	}
 
 	/// `Ready(Ok)` once no [`Consumer`] handle is left, `Ready(Err)` once the broadcast ended.
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_unheld(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
 		self.alive.token.poll_unused(waiter)
 	}
@@ -438,6 +469,7 @@ impl Producer {
 	/// [`Self::close`], unless a [`Consumer`] holds the broadcast or a track it asked for
 	/// still waits for a handler. Atomic with minting a consumer, so a holder either keeps
 	/// the broadcast or only ever sees it closed. Returns whether the broadcast is closed.
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn close_unheld(&self) -> bool {
 		self.alive.close_unheld()
 	}
@@ -445,6 +477,72 @@ impl Producer {
 	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+}
+
+/// A cleanly ended broadcast, still announced and serving its finished tracks.
+///
+/// Returned by [`Producer::finish`]. Dropping it closes the broadcast, then lets the held
+/// tracks go, so a late lookup answers [`Error::Unroutable`].
+pub struct Finish {
+	producer: Producer,
+	// Dropped after `Drop::drop` closes the broadcast.
+	_held: Vec<track::Hold>,
+	linger: Duration,
+}
+
+impl Finish {
+	/// How long to keep this handle: the longest [`max_age`](track::Info::max_age) of the
+	/// held tracks, each capped by the broadcast's [`cache_duration`](Info::cache_duration).
+	/// Tracks still live, including one whose declared end the live edge has yet to reach
+	/// or with a group still open, and tracks without a max-age, add nothing.
+	pub fn linger(&self) -> Duration {
+		self.linger
+	}
+
+	/// `Ready` once the broadcast closed elsewhere, so the linger is over early.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.producer.alive.token.poll_closed(waiter)
+	}
+
+	/// Keep the broadcast up for [`Self::linger`] on the ambient runtime's clock, or until it
+	/// closes elsewhere, then close it. The linger counts from the first poll.
+	#[cfg(feature = "async")]
+	pub async fn wait(self) {
+		let linger = Linger {
+			finish: self,
+			until: None,
+		};
+		crate::time::run(linger).await;
+	}
+}
+
+impl Drop for Finish {
+	fn drop(&mut self) {
+		// Closed before `_held` drops, so no lookup finds a track after the linger.
+		self.producer.close();
+	}
+}
+
+/// Drives [`Finish::wait`] with the time it is polled with.
+#[cfg(feature = "async")]
+struct Linger {
+	finish: Finish,
+	// Set on the first poll; `Some(None)` when the linger overflows the clock.
+	until: Option<Option<crate::time::Instant>>,
+}
+
+#[cfg(feature = "async")]
+impl crate::time::Driver for Linger {
+	fn poll(&mut self, now: crate::time::Instant, waiter: &kio::Waiter) -> Result<Option<crate::time::Instant>, Error> {
+		if self.finish.poll_closed(waiter).is_ready() {
+			return Err(Error::Closed);
+		}
+		let linger = self.finish.linger;
+		match *self.until.get_or_insert_with(|| now.checked_add(linger)) {
+			Some(until) if now >= until => Err(Error::Closed),
+			until => Ok(until),
+		}
 	}
 }
 
@@ -538,6 +636,7 @@ impl Drop for Alive {
 /// Whether a path request still names the source that handed out its track.
 #[derive(Clone, Default)]
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
+// pending: /quest/m1/public-model/answer.md
 pub(crate) enum RequestValidity {
 	#[default]
 	Unrestricted,
@@ -549,11 +648,13 @@ pub(crate) enum RequestValidity {
 
 impl RequestValidity {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn token(route: Option<kio::Consumer<()>>) -> Self {
 		route.map(Self::Route).unwrap_or_default()
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn for_source(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
@@ -563,6 +664,7 @@ impl RequestValidity {
 
 	/// Capture one selection period so a pending request never revives after a replacement.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn start(&self) -> Self {
 		match self {
 			Self::Selected(selected) => Self::Period(selected.current(), selected.clone()),
@@ -571,6 +673,7 @@ impl RequestValidity {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
@@ -586,6 +689,7 @@ impl RequestValidity {
 	}
 
 	#[cfg(feature = "async")]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) async fn run<T>(
 		&self,
 		future: impl std::future::Future<Output = Result<T, crate::Error>>,
@@ -619,6 +723,7 @@ impl Producer {
 /// A peer's retraction and a dead session end the source the same way: a broadcast
 /// carries no end cause past this hop. Shared by the lite and IETF subscribers.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
+// pending: /quest/m1/public-model/answer.md
 pub(crate) struct SourceGuard(Producer);
 
 impl SourceGuard {
@@ -826,7 +931,7 @@ impl Clone for Consumer {
 impl Consumer {
 	/// Attach an egress stats scope, inherited by the tracks subscribed through this
 	/// handle. Set by a tagged `origin::Consumer` at the broadcast handoff.
-	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
+	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self
 	}
@@ -838,7 +943,7 @@ impl Consumer {
 	/// references resolve against is where the *reader* found the broadcast, not where its
 	/// producer happened to create it. Free when the two already agree, which is the case
 	/// for a broadcast created at the path an unrooted cursor asks for.
-	pub(crate) fn with_path(mut self, path: crate::PathOwned) -> Self {
+	pub(super) fn with_path(mut self, path: crate::PathOwned) -> Self {
 		if self.info.path != path {
 			let mut info = (*self.info).clone();
 			info.path = path;
@@ -848,7 +953,7 @@ impl Consumer {
 	}
 
 	/// Stamp the epoch of the route this handle was resolved through, overriding [`Info::epoch`].
-	pub(crate) fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
+	pub(super) fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
 		if self.info.epoch != epoch {
 			let mut info = (*self.info).clone();
 			info.epoch = epoch;
@@ -894,31 +999,42 @@ impl Consumer {
 	}
 
 	/// Join the demand of the track serving `name`, requesting it from a [`Dynamic`]
-	/// when nothing serves it yet. Errors as [`Self::track`] does.
-	pub(crate) fn resolve_track(&self, name: &str) -> Result<kio::Consumer<track::TrackState>, Error> {
-		let mut state = self.state.lock();
+	/// when nothing serves it yet. Registers the subscription before exposing demand.
+	/// Errors as [`Self::track`] does.
+	pub(super) fn resolve_track(
+		&self,
+		name: &str,
+		subscription: Option<&track::Subscription>,
+	) -> Result<(kio::Consumer<track::TrackState>, Option<track::Preferences>), Error> {
+		let mut state = loop {
+			let mut state = self.state.lock();
 
-		if state.closing {
-			return Err(Error::Unroutable);
-		}
-
-		// Reuse a live producer if one is already publishing the track. `get` drops a
-		// closed entry and returns `None`, so we fall through to a fresh request.
-		if let Some(weak) = state.tracks.get(name) {
-			match weak.try_consume() {
-				Some(consumer) => return Ok(consumer),
-				// It closed between the liveness probe and the count bump (an idle
-				// teardown committing under us). Reclaim it and request the track
-				// again, rather than handing back a consumer of a dead track.
-				None => {
-					state.tracks.remove(name);
-				}
+			if state.closing {
+				return Err(Error::Unroutable);
 			}
-		}
+
+			// Reuse a live producer if one is already publishing the track. `get` drops a
+			// closed entry and returns `None`, so we fall through to a fresh request.
+			let Some(weak) = state.tracks.get(name) else {
+				break state;
+			};
+			// Join outside the lock: the subscription and the first consumer wake the
+			// serving session, which may re-enter this broadcast. The track's own lock
+			// still orders the join against its idle teardown.
+			drop(state);
+			if let Some(resolved) = weak.try_consume(subscription) {
+				return Ok(resolved);
+			}
+			// It closed between the liveness probe and the count bump (an idle teardown
+			// committing under us). Look again: `get` reclaims it and the track is
+			// requested again, rather than handing back a consumer of a dead track.
+		};
 
 		if let Some(pending) = state.requests.join(name) {
-			// Coalesce onto a queued request for the same name.
-			return Ok(pending.join());
+			// Coalesce onto a queued request for the same name. Joining under the lock
+			// wakes no subscription observer: only a handler that popped the request
+			// can watch its subscriptions, and popping moves it to `tracks`.
+			return Ok(pending.join(subscription));
 		}
 
 		// Allocate the name once and share the same Arc across the request, the
@@ -926,7 +1042,7 @@ impl Consumer {
 		// cache pool through its `Arc<Info>`, same as a producer-created track.
 		let name: Arc<str> = name.into();
 		let request = track::Request::new(self.info.clone(), name.clone()).with_sequence(state.sequence(&name));
-		let consumer = request.join();
+		let resolved = request.join(subscription);
 
 		// With no handler alive to serve it, the request is dropped: `NotFound` beats
 		// handing back a consumer that would only resolve `Dropped`.
@@ -934,12 +1050,12 @@ impl Consumer {
 			return Err(Error::NotFound);
 		}
 
-		Ok(consumer)
+		Ok(resolved)
 	}
 
 	/// Read the track serving `name` now, without joining its demand or requesting it.
 	/// Once the broadcast has ended, `ended` stands in for a track it no longer serves.
-	pub(crate) fn peek_track(
+	pub(super) fn peek_track(
 		&self,
 		name: &str,
 		ended: Option<&kio::ConsumerWeak<track::TrackState>>,
@@ -977,7 +1093,7 @@ impl Consumer {
 	/// Whether the broadcast has ended, observed under the state lock. The origin's
 	/// dispatcher treats a rejection from such a source as imminent detach rather
 	/// than a strike.
-	pub(crate) fn is_closing(&self) -> bool {
+	pub(super) fn is_closing(&self) -> bool {
 		self.state.read().closing
 	}
 
@@ -999,7 +1115,7 @@ impl Consumer {
 	///
 	/// Used to deduplicate dynamically-served broadcasts in the origin: a live weak yields
 	/// a shared clone, a closed one is discarded so the next request re-serves.
-	pub(crate) fn weak(&self) -> WeakConsumer {
+	pub(super) fn weak(&self) -> WeakConsumer {
 		WeakConsumer {
 			info: self.info.clone(),
 			alive: self.alive.weak(),
@@ -1015,7 +1131,7 @@ impl Consumer {
 /// Only the `alive` handle needs to be weak; a [`kio::Shared`] carries no liveness,
 /// so holding the state outright pins nothing.
 #[derive(Clone)]
-pub(crate) struct WeakConsumer {
+pub(super) struct WeakConsumer {
 	info: Arc<Info>,
 	alive: kio::ConsumerWeak<()>,
 	state: kio::Shared<BroadcastState>,
@@ -1142,6 +1258,105 @@ mod test {
 	use std::time::Duration;
 
 	#[test]
+	fn a_subscription_is_registered_before_its_request_is_visible() {
+		struct Serve {
+			dynamic: std::sync::Mutex<Dynamic>,
+			request: std::sync::Mutex<Option<track::Request>>,
+			subscription: std::sync::Mutex<Option<Option<track::Subscription>>>,
+		}
+		impl std::task::Wake for Serve {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				let Poll::Ready(Ok(request)) = self.dynamic.lock().unwrap().poll_requested_track(&kio::Waiter::noop())
+				else {
+					return;
+				};
+				*self.subscription.lock().unwrap() = Some(request.subscription());
+				*self.request.lock().unwrap() = Some(request);
+			}
+		}
+
+		let producer = Info::new().produce();
+		let serve = Arc::new(Serve {
+			dynamic: std::sync::Mutex::new(producer.dynamic()),
+			request: Default::default(),
+			subscription: Default::default(),
+		});
+		let consumer = producer.consume().track("catalog").unwrap();
+		let waiter = kio::Waiter::new(std::task::Waker::from(serve.clone()));
+		assert!(serve.dynamic.lock().unwrap().poll_requested_track(&waiter).is_pending());
+		let expected = track::Subscription::default().with_priority(3);
+		let _pending = consumer.subscribe(expected.clone());
+		assert_eq!(*serve.subscription.lock().unwrap(), Some(Some(expected)));
+	}
+
+	#[test]
+	fn a_subscription_is_registered_before_its_demand_is_visible() {
+		struct Inspect {
+			track: track::Producer,
+			seen: std::sync::Mutex<Option<Option<track::Subscription>>>,
+		}
+		impl std::task::Wake for Inspect {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				*self.seen.lock().unwrap() = Some(self.track.subscription());
+			}
+		}
+
+		for lookup in [false, true] {
+			let producer = Info::new().produce();
+			let inspect = Arc::new(Inspect {
+				track: producer.create_track("catalog", None).unwrap(),
+				seen: Default::default(),
+			});
+			let waiter = kio::Waiter::new(std::task::Waker::from(inspect.clone()));
+			assert_eq!(inspect.track.demand().poll_state(&waiter), track::DemandState::Idle);
+			let consumer = if lookup {
+				producer.consume().track("catalog").unwrap()
+			} else {
+				inspect.track.consume()
+			};
+			let expected = track::Subscription::default().with_priority(3);
+			let _pending = consumer.subscribe(expected.clone());
+			assert_eq!(*inspect.seen.lock().unwrap(), Some(Some(expected)), "lookup: {lookup}");
+		}
+	}
+
+	#[test]
+	fn a_subscription_wakes_its_observers_outside_the_broadcast_lock() {
+		struct Reenter {
+			broadcast: Consumer,
+			woken: std::sync::atomic::AtomicBool,
+		}
+		impl std::task::Wake for Reenter {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				// Deadlocks if the subscribe that woke us still holds the broadcast lock.
+				let _ = self.broadcast.track("other");
+				self.woken.store(true, std::sync::atomic::Ordering::Relaxed);
+			}
+		}
+
+		let producer = Info::new().produce();
+		let mut track = producer.create_track("catalog", None).unwrap();
+		let reenter = Arc::new(Reenter {
+			broadcast: producer.consume(),
+			woken: Default::default(),
+		});
+		let waiter = kio::Waiter::new(std::task::Waker::from(reenter.clone()));
+		assert!(track.poll_subscription_changed(&waiter).is_pending());
+		let consumer = producer.consume().track("catalog").unwrap();
+		let _pending = consumer.subscribe(track::Subscription::default().with_priority(3));
+		assert!(reenter.woken.load(std::sync::atomic::Ordering::Relaxed));
+	}
+
+	#[test]
 	fn unique_names_are_never_reused() {
 		let producer = Info::new().produce();
 		let name = producer.unique_name(".opus");
@@ -1173,9 +1388,30 @@ mod test {
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
 		track.append_group().unwrap();
 		let handle = consumer.track("a").unwrap();
-		assert_eq!(handle.latest(), Some(0));
+		assert_eq!(handle.latest_sequence(), Some(0));
 		drop(track);
-		assert_eq!(handle.latest(), None);
+		assert_eq!(handle.latest_sequence(), None);
+	}
+
+	/// A handle's largest reads the instance its open broadcast serves now, without asking
+	/// for it, and ends once nothing is served under the name.
+	#[test]
+	fn a_handle_follows_the_largest_its_broadcast_serves() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.create_track("a", crate::track::Info::default()).unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(None, &b"a"[..]).unwrap();
+		let mut handle = consumer.track("a").unwrap();
+		let waiter = kio::Waiter::noop();
+		assert_eq!(
+			handle.poll_largest(&waiter),
+			std::task::Poll::Ready(Some(crate::track::Position { group: 0, frame: 0 }))
+		);
+		assert!(handle.poll_largest(&waiter).is_pending(), "nothing newer yet");
+		drop(group);
+		drop(track);
+		assert_eq!(handle.poll_largest(&waiter), std::task::Poll::Ready(None));
 	}
 
 	/// Once the broadcast ends, a handle keeps reading the track it saw when it was made.
@@ -1188,7 +1424,7 @@ mod test {
 		let handle = consumer.track("a").unwrap();
 		producer.close();
 		drop(track);
-		assert_eq!(handle.latest(), Some(0));
+		assert_eq!(handle.latest_sequence(), Some(0));
 	}
 
 	#[test]
@@ -1530,6 +1766,36 @@ mod test {
 		);
 	}
 
+	/// A replacement continues the name's timeline, so its groups can't start before the
+	/// highest one an earlier producer checked, while a new broadcast starts over.
+	#[test]
+	fn replacement_refuses_a_rewind_past_its_predecessor() {
+		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
+		let producer = Info::new().produce();
+
+		let first = producer.create_track("media", crate::track::Info::timed()).unwrap();
+		let mut group = first.append_group().unwrap();
+		group.write_frame(at(1000), b"a".as_slice()).unwrap();
+		group.finish().unwrap();
+		drop((group, first));
+
+		let second = producer.create_track("media", crate::track::Info::timed()).unwrap();
+		let mut group = second.create_group(crate::group::Info { sequence: 1 }).unwrap();
+		assert!(matches!(
+			group.write_frame(at(500), b"b".as_slice()),
+			Err(Error::TimestampMismatch)
+		));
+		group.write_frame(at(1000), b"b".as_slice()).unwrap();
+
+		let next = Info::new().produce();
+		let track = next.create_track("media", crate::track::Info::timed()).unwrap();
+		track
+			.append_group()
+			.unwrap()
+			.write_frame(at(500), b"c".as_slice())
+			.unwrap();
+	}
+
 	/// Names requested but never served leave nothing behind, so a peer asking for
 	/// arbitrary names cannot grow the broadcast.
 	#[test]
@@ -1557,24 +1823,18 @@ mod test {
 		let consumer1 = c1_fut.await.unwrap();
 
 		// The producer should NOT be unused yet because there's a consumer.
-		assert!(
-			producer1.demand().unused().now_or_never().is_none(),
-			"track producer should be used"
-		);
+		assert!(producer1.demand().wanted().is_some(), "track producer should be used");
 
 		// A second subscriber reuses the live producer (fast path / dedup).
 		let consumer2 = bc.track("unknown_track").unwrap().subscribe(None).await.unwrap();
 		consumer2.assert_is_clone(&consumer1);
 
 		drop(consumer1);
-		assert!(
-			producer1.demand().unused().now_or_never().is_none(),
-			"track producer should be used"
-		);
+		assert!(producer1.demand().wanted().is_some(), "track producer should be used");
 
 		drop(consumer2);
 		assert!(
-			producer1.demand().unused().now_or_never().is_some(),
+			producer1.demand().wanted().is_none(),
 			"track producer should be unused after all consumers are dropped"
 		);
 
@@ -1595,7 +1855,7 @@ mod test {
 		let consumer4 = c4_fut.await.unwrap();
 		drop(consumer4);
 		assert!(
-			producer2.demand().unused().now_or_never().is_some(),
+			producer2.demand().wanted().is_none(),
 			"new track producer should be unused after its consumer is dropped"
 		);
 	}
@@ -1884,7 +2144,7 @@ mod test {
 		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
 
 		// The unused wake a teardown acts on.
-		assert!(track.demand().poll_unused(&kio::Waiter::noop()).is_ready());
+		assert!(track.demand().wanted().is_none());
 
 		// Demand returns in the gap before it commits.
 		let viewer = consumer.track("video").unwrap().subscribe(None);
@@ -1919,5 +2179,183 @@ mod test {
 		assert!(!track.demand().is_used());
 		assert!(track.abort_unused(Error::Cancel).is_ok());
 		producer.close();
+	}
+
+	/// A finished broadcast keeps serving its finished tracks after their producers drop,
+	/// so a late subscriber still gets the media, and closes once the longest max-age passes.
+	/// A live track, a track whose declared end is still ahead of its live edge, and a track
+	/// without a max-age add nothing to the wait.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn finish_serves_finished_tracks_until_stale() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let secs = |secs| crate::track::Info::timed().with_max_age(Duration::from_secs(secs));
+		let video = producer.create_track("video", secs(2)).unwrap();
+		let audio = producer.create_track("audio", secs(5)).unwrap();
+		let catalog = producer.create_track("catalog", None).unwrap();
+		let live = producer.create_track("live", secs(60)).unwrap();
+		let mut tail = producer.create_track("tail", secs(60)).unwrap();
+		for track in [&video, &audio, &catalog, &tail] {
+			track.append_group().unwrap().finish().unwrap();
+		}
+		for track in [&video, &audio, &catalog] {
+			track.finish().unwrap();
+		}
+		tail.finish_at(crate::track::Position::group(2)).unwrap();
+
+		let start = moq_clock::now();
+		let finish = producer.finish();
+		assert_eq!(finish.linger(), Duration::from_secs(5));
+		let finish = moq_clock::sim::spawn(finish.wait());
+		drop((video, audio, catalog));
+
+		moq_clock::sleep(Duration::from_secs(4)).await;
+		let mut late = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+		late.assert_group();
+		assert!(!consumer.is_closed());
+
+		finish.await.unwrap();
+		assert_eq!(moq_clock::now() - start, Duration::from_secs(5));
+		assert!(consumer.is_closed());
+		assert!(matches!(consumer.track("audio"), Err(Error::Unroutable)));
+		live.finish().unwrap();
+		drop(tail);
+	}
+
+	/// Dropping the handle, the library's interrupt, closes the broadcast at once, even
+	/// while another producer handle is alive.
+	#[test]
+	fn dropping_finish_closes_early() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer
+			.create_track(
+				"video",
+				crate::track::Info::timed().with_max_age(Duration::from_secs(30)),
+			)
+			.unwrap();
+		track.finish().unwrap();
+
+		let finish = producer.clone().finish();
+		assert!(!consumer.is_closed());
+		drop(finish);
+		assert!(consumer.is_closed());
+	}
+
+	/// The linger is the local retention window, so an origin's `cache_duration` below a
+	/// track's max-age ends it sooner.
+	#[test]
+	fn finish_clamps_the_linger_to_the_cache_duration() {
+		let producer = Info {
+			cache_duration: Duration::from_secs(5),
+			..Default::default()
+		}
+		.produce();
+		let secs = |secs| crate::track::Info::timed().with_max_age(Duration::from_secs(secs));
+		let tracks = [("video", 30), ("audio", 2)].map(|(name, age)| producer.create_track(name, secs(age)).unwrap());
+		for track in &tracks {
+			track.finish().unwrap();
+		}
+		assert_eq!(producer.finish().linger(), Duration::from_secs(5));
+	}
+
+	/// A track with a group still open takes frames past the linger, so it is not held.
+	#[test]
+	fn finish_skips_a_track_with_an_open_group() {
+		let producer = Info::new().produce();
+		let track = producer
+			.create_track(
+				"video",
+				crate::track::Info::timed().with_max_age(Duration::from_secs(30)),
+			)
+			.unwrap();
+		let _group = track.append_group().unwrap();
+		track.finish().unwrap();
+		assert_eq!(producer.finish().linger(), Duration::ZERO);
+	}
+
+	/// A held track takes no more groups, even one below its end, so nothing lands after
+	/// the linger was fixed.
+	#[test]
+	fn finish_seals_the_held_tracks() {
+		let producer = Info::new().produce();
+		let track = producer
+			.create_track(
+				"video",
+				crate::track::Info::timed().with_max_age(Duration::from_secs(30)),
+			)
+			.unwrap();
+		track
+			.create_group(crate::group::Info { sequence: 2 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		track.finish().unwrap();
+		track
+			.create_group(crate::group::Info { sequence: 1 })
+			.unwrap()
+			.finish()
+			.unwrap();
+
+		let _finish = producer.finish();
+		assert!(matches!(
+			track.create_group(crate::group::Info { sequence: 0 }),
+			Err(Error::Closed)
+		));
+	}
+
+	/// A caller without a runtime keeps the handle until its own clock passes the linger,
+	/// serving the finished track until then, and drops it to close the broadcast.
+	#[test]
+	fn a_runtime_free_caller_drops_finish_on_its_own_clock() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer
+			.create_track(
+				"video",
+				crate::track::Info::timed().with_max_age(Duration::from_secs(3)),
+			)
+			.unwrap();
+		track.append_group().unwrap().finish().unwrap();
+		track.finish().unwrap();
+
+		let start = crate::time::Instant::now();
+		let finish = producer.finish();
+		drop(track);
+		let deadline = start + finish.linger();
+		let mut now = start;
+		while now < deadline {
+			assert!(finish.poll_closed(&kio::Waiter::noop()).is_pending());
+			assert!(consumer.track("video").is_ok(), "served {:?} in", now - start);
+			now += Duration::from_secs(1);
+		}
+		drop(finish);
+		assert!(consumer.is_closed());
+		assert!(matches!(consumer.track("video"), Err(Error::Unroutable)));
+	}
+
+	/// A close elsewhere ends the linger early, for a poller and for [`Finish::wait`].
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn closing_elsewhere_ends_the_linger() {
+		let producer = Info::new().produce();
+		let track = producer
+			.create_track(
+				"video",
+				crate::track::Info::timed().with_max_age(Duration::from_secs(30)),
+			)
+			.unwrap();
+		track.finish().unwrap();
+		let other = producer.clone();
+		let finish = producer.finish();
+		assert!(finish.poll_closed(&kio::Waiter::noop()).is_pending());
+
+		let start = moq_clock::now();
+		let wait = moq_clock::sim::spawn(finish.wait());
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		other.close();
+		wait.await.unwrap();
+		assert_eq!(moq_clock::now() - start, Duration::from_secs(1));
 	}
 }

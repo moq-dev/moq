@@ -15,9 +15,9 @@ use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
-    Dir, Duration, EndpointConfig, Frame, Instant, MAX_CID_SIZE, MAX_STREAM_COUNT,
-    MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError,
-    TransportErrorCode, VarInt,
+    Dir, Duration, EndpointConfig, Frame, Instant, Limits, LimitsError, MAX_CID_SIZE,
+    MAX_STREAM_COUNT, MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit,
+    TransportError, TransportErrorCode, VarInt,
     cid_queue::CidQueue,
     coding::BufMutExt,
     config::{ServerConfig, TransportConfig},
@@ -93,9 +93,8 @@ pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 mod streams;
 pub(crate) use streams::StreamsState;
 pub use streams::{
-    Checkpoint, Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream,
-    SendDomain, SendGroup, SendGroups, SendStream, ShouldTransmit, StreamEvent, Streams,
-    WriteError, Written,
+    Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream, SendGroup,
+    SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
 };
 
 mod timer;
@@ -244,8 +243,6 @@ pub struct Connection {
     //
     /// Whether the most recently received packet had an ECN codepoint set
     receiving_ecn: bool,
-    /// Number of packets authenticated
-    total_authed_packets: u64,
     /// Whether the last `poll_transmit` call ran out of data because there was
     /// no outgoing application data.
     app_limited: bool,
@@ -366,7 +363,6 @@ impl Connection {
 
             app_limited: false,
             receiving_ecn: false,
-            total_authed_packets: 0,
 
             streams: StreamsState::new(
                 side,
@@ -561,6 +557,20 @@ impl Connection {
             _ => false,
         };
 
+        // A client is `Connected` before the server has its Finished: it may still be queued
+        // behind the pacer, or lost. A close that replaces it leaves the server unable to complete
+        // its handshake, so it only reads an Initial or Handshake close, which carries no
+        // application code (RFC 9000 §10.2.3). So the Handshake packet carries the unacknowledged
+        // Finished instead, and the server reads the 1-RTT close behind it.
+        let finish_first = close
+            && self.side.is_client()
+            && self.highest_space == SpaceId::Data
+            && self.spaces[SpaceId::Handshake].crypto.is_some()
+            && self.spaces[SpaceId::Handshake]
+                .unacked_crypto()
+                .next()
+                .is_some();
+
         // Check whether we need to send an ACK_FREQUENCY frame
         if let Some(config) = &self.config.ack_frequency_config {
             self.spaces[SpaceId::Data].pending.ack_frequency = self
@@ -606,7 +616,9 @@ impl Connection {
 
             // Is there data or a close message to send in this space?
             let can_send = self.space_can_send(space_id, frame_space_1rtt);
-            if can_send.is_empty() && (!close || self.spaces[space_id].crypto.is_none()) {
+            if (can_send.is_empty() && (!close || self.spaces[space_id].crypto.is_none()))
+                || (finish_first && space_id == SpaceId::Initial)
+            {
                 space_idx += 1;
                 continue;
             }
@@ -877,7 +889,30 @@ impl Connection {
                     );
                 }
 
-                if buf.len() + frame::ConnectionClose::SIZE_BOUND <= builder.max_size {
+                // All or nothing: part of the flight would not complete the handshake. A flight
+                // too big for one packet (a large client certificate chain) keeps the plain close.
+                // It must also leave room to coalesce the 1-RTT close, or a one-datagram budget
+                // resends this packet on every poll and never reaches the close. Both spaces share
+                // the negotiated suite, so the 1-RTT tag is as long as this one.
+                // Nothing is dequeued, so a close resent for a lost flight carries it again.
+                let finished = &self.spaces[space_id];
+                let carry_finished = finish_first
+                    && space_id == SpaceId::Handshake
+                    && buf.len()
+                        + finished
+                            .unacked_crypto()
+                            .map(|frame| frame::Crypto::SIZE_BOUND + frame.data.len())
+                            .sum::<usize>()
+                        + MIN_PACKET_SPACE
+                        + builder.tag_len
+                        <= builder.max_size;
+                if carry_finished {
+                    for frame in finished.unacked_crypto() {
+                        trace!("CRYPTO: off {} len {}", frame.offset, frame.data.len());
+                        frame.encode(buf);
+                        self.stats.frame_tx.crypto += 1;
+                    }
+                } else if buf.len() + frame::ConnectionClose::SIZE_BOUND <= builder.max_size {
                     let max_frame_size = builder.max_size - buf.len();
                     match &self.state {
                         State::Closed(state::Closed { reason }) => {
@@ -1353,6 +1388,18 @@ impl Connection {
         )
     }
 
+    /// Report that a send to the peer found no route, such as `ENETUNREACH`
+    ///
+    /// A handshake can never finish, so it fails at once with `NO_VIABLE_PATH`, sending no
+    /// CONNECTION_CLOSE the peer could not receive anyway. An established connection is left
+    /// alone, since a route that drops for a moment (a client switching networks) comes back, so
+    /// the datagram is just lost.
+    pub fn handle_unreachable(&mut self) {
+        if self.state.is_handshake() {
+            self.kill(TransportError::NO_VIABLE_PATH("no route to the peer").into());
+        }
+    }
+
     fn close_inner(&mut self, now: Instant, reason: Close) {
         let was_closed = self.state.is_closed();
         if !was_closed {
@@ -1556,6 +1603,25 @@ impl Connection {
         if self.streams.set_receive_window(receive_window) {
             self.spaces[SpaceId::Data].pending.max_data = true;
         }
+    }
+
+    /// Change every limit `limits` sets, leaving the others as they are
+    ///
+    /// Errors, changing nothing, on limits [`Limits::validate`] refuses.
+    pub fn set_limits(&mut self, limits: Limits) -> Result<(), LimitsError> {
+        limits.validate()?;
+        if let Some(window) = limits.receive_window {
+            self.set_receive_window(VarInt::from_u64(window.get()).expect("validated"));
+        }
+        if let Some(window) = limits.send_window {
+            self.set_send_window(window.get());
+        }
+        if let Some(streams) = limits.max_streams {
+            let streams = VarInt::from_u64(streams.get()).expect("validated");
+            self.set_max_concurrent_streams(Dir::Bi, streams);
+            self.set_max_concurrent_streams(Dir::Uni, streams);
+        }
+        Ok(())
     }
 
     fn on_ack_received(
@@ -2118,7 +2184,6 @@ impl Connection {
         spin: bool,
         is_1rtt: bool,
     ) {
-        self.total_authed_packets += 1;
         self.reset_keep_alive(now);
         self.reset_idle_timeout(now, space_id);
         self.permit_idle_reset = true;
@@ -2631,9 +2696,12 @@ impl Connection {
     ) {
         // State transitions for error cases
         if let Err(ConnectionError::Reset) = result
-            && matches!(self.state, State::Draining | State::Drained)
+            && matches!(
+                self.state,
+                State::Closed(_) | State::Draining | State::Drained
+            )
         {
-            // Preserve the original close reason once draining has begun.
+            // Preserve the original close reason once the connection has closed.
             self.state = State::Drained;
         } else if let Err(conn_err) = result {
             self.error = Some(conn_err.clone());
@@ -2729,6 +2797,9 @@ impl Connection {
             State::Draining | State::Drained => return Ok(()),
             State::Handshake(state) => state,
         };
+        // Whether a server Initial was processed or a Retry accepted. Packets the client discards
+        // never count, or a forged Retry would make it ignore the genuine one.
+        let processed_server_packet = state.rem_cid_set || self.retry_src_cid.is_some();
 
         match packet.header {
             Header::Retry {
@@ -2738,7 +2809,7 @@ impl Connection {
                     return Err(TransportError::PROTOCOL_VIOLATION("client sent Retry").into());
                 }
 
-                if self.total_authed_packets > 1
+                if processed_server_packet
                             || packet.payload.len() <= 16 // token + 16 byte tag
                             || !self.crypto.is_valid_retry(
                                 self.rem_cids.active(),
@@ -2925,7 +2996,8 @@ impl Connection {
                 Ok(())
             }
             Header::VersionNegotiate { .. } => {
-                if self.total_authed_packets > 1 {
+                // RFC 9000 6.2: discard once any other packet was processed
+                if processed_server_packet {
                     return Ok(());
                 }
                 let supported = packet

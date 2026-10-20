@@ -106,6 +106,14 @@ async fn drain_with<S: crate::catalog::Stream>(exporter: Export<S>) -> BytesMut
 where
 	S::Ext: tscat::Catalog,
 {
+	drain_stats(exporter).await.0
+}
+
+/// `drain_with`, also returning the exporter's stats once drained.
+async fn drain_stats<S: crate::catalog::Stream>(exporter: Export<S>) -> (BytesMut, super::stats::Export)
+where
+	S::Ext: tscat::Catalog,
+{
 	let mut exporter = exporter.with_delay(RECORDING_MAX_AGE).with_replay();
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
@@ -115,7 +123,7 @@ where
 		};
 		out.extend_from_slice(&frame.payload);
 	}
-	out
+	(out, exporter.stats())
 }
 
 /// An adaptation-field-only single-packet frame: the exporter's PCR carriage.
@@ -1492,160 +1500,6 @@ async fn export_pcr_backfills_a_coarse_cadence() {
 	}
 }
 
-/// AC-3 passed through as DVB private data (stream_type 0x06 with the AC-3 descriptor) can
-/// carry several sync frames in one PES, more than a receiver's 5,696-byte buffer holds at
-/// once. The export splits it into its sync frames, each presented a frame after the last, so
-/// each is due and decoded on its own.
-#[tokio::test(start_paused = true)]
-async fn export_splits_a_multi_frame_ac3_pes() {
-	let frames = exported_ac3(ac3_sync().repeat(3)).await;
-	assert_eq!(frames.len(), 3, "every sync frame: {frames:?}");
-	for (k, &(pts, bytes)) in frames.iter().enumerate() {
-		assert_eq!(bytes, 128, "frame {k} carries one sync frame");
-		assert_eq!(
-			pts,
-			frames[0].0 + k as u64 * 2_880,
-			"frame {k} is presented 32 ms after the last"
-		);
-	}
-}
-
-/// A sync frame cut short of the length its header gives, as a source stopped mid-frame
-/// leaves at the end of its last PES, is no use to a decoder, so the export drops it rather
-/// than pass the PES on whole: after whole frames, or alone.
-#[tokio::test(start_paused = true)]
-async fn export_drops_a_trailing_partial_ac3_frame() {
-	let mut payload = ac3_sync().repeat(2);
-	payload.extend_from_slice(&ac3_sync()[..60]);
-	let frames = exported_ac3(payload).await;
-	assert_eq!(frames.len(), 2, "the whole frames: {frames:?}");
-	assert!(frames.iter().all(|&(_, bytes)| bytes == 128), "{frames:?}");
-
-	let frames = exported_ac3(ac3_sync()[..60].to_vec()).await;
-	assert!(frames.is_empty(), "a lone cut frame goes nowhere: {frames:?}");
-}
-
-/// A source that leaves `data_alignment_indicator` clear splits AC-3 sync frames across PES,
-/// each PES's PTS timing the first frame that begins in it. The export puts each frame back
-/// together, byte for byte and presented a frame after the last.
-#[tokio::test(start_paused = true)]
-async fn export_reassembles_ac3_frames_split_across_pes() {
-	let stream: Vec<u8> = (0..6).flat_map(ac3_frame).collect();
-	// Cut mid-frame into frames 0-1, 1-3 and 3-5, timed by frames 0, 2 and 4.
-	let frames = exported_ac3_frames(vec![
-		Ac3Write::Pes(0, stream[..200].to_vec()),
-		Ac3Write::Pes(64, stream[200..500].to_vec()),
-		Ac3Write::Pes(128, stream[500..].to_vec()),
-	])
-	.await;
-	assert_eq!(frames.len(), 6, "every sync frame");
-	for (k, (pts, bytes)) in frames.iter().enumerate() {
-		assert_eq!(*bytes, ac3_frame(k as u8), "frame {k} whole and in order");
-		assert_eq!(
-			*pts,
-			frames[0].0 + k as u64 * 2_880,
-			"frame {k} is presented 32 ms after the last"
-		);
-	}
-}
-
-/// A frame's header may itself straddle PES, across one boundary or two, and the frame still
-/// goes out whole at the time of the PES it began in.
-#[tokio::test(start_paused = true)]
-async fn export_reassembles_an_ac3_header_split_across_pes() {
-	let stream: Vec<u8> = (0..2).flat_map(ac3_frame).collect();
-	let cuts = [
-		vec![
-			Ac3Write::Pes(0, stream[..3].to_vec()),
-			Ac3Write::Pes(32, stream[3..].to_vec()),
-		],
-		vec![
-			Ac3Write::Pes(0, stream[..2].to_vec()),
-			Ac3Write::Pes(16, stream[2..5].to_vec()),
-			Ac3Write::Pes(32, stream[5..].to_vec()),
-		],
-	];
-	for input in cuts {
-		let timed = exported_ac3_frames(input).await;
-		let frames: Vec<&Vec<u8>> = timed.iter().map(|(_, bytes)| bytes).collect();
-		assert_eq!(frames, [&ac3_frame(0), &ac3_frame(1)]);
-		assert_eq!(timed[1].0 - timed[0].0, 2_880);
-	}
-}
-
-/// The first PES read may begin mid-frame, and a PES may go missing. The bytes ahead of the
-/// first sync frame, and a frame the gap cut, are no use to a decoder, so the export drops them
-/// and carries on from the next sync frame at the time its PES gives it.
-#[tokio::test(start_paused = true)]
-async fn export_drops_ac3_fragments_at_a_join_or_a_gap() {
-	let stream: Vec<u8> = (0..6).flat_map(ac3_frame).collect();
-	// Joined 60 bytes into frame 0; the PES carrying the rest of frame 2 and most of 3 is lost.
-	let timed = exported_ac3_frames(vec![
-		Ac3Write::Pes(32, stream[60..300].to_vec()),
-		Ac3Write::Pes(128, stream[500..].to_vec()),
-	])
-	.await;
-	let frames: Vec<&Vec<u8>> = timed.iter().map(|(_, bytes)| bytes).collect();
-	assert_eq!(frames, [&ac3_frame(1), &ac3_frame(4), &ac3_frame(5)]);
-	assert_eq!(timed[1].0 - timed[0].0, 3 * 2_880, "frame 4 at its PES's PTS");
-	assert_eq!(timed[2].0 - timed[1].0, 2_880);
-}
-
-/// A sync word in the bytes ahead of the first frame at a join can pass for a header whose
-/// frame runs past the PES. The export takes it for a frame only when nothing better turns up,
-/// and here takes the sync frames the next sync word confirms after it.
-#[tokio::test(start_paused = true)]
-async fn export_skips_an_unconfirmed_ac3_sync_word_at_a_join() {
-	// A 640 kb/s header, 2,560 bytes long, in the tail of a frame begun before the join.
-	let mut payload = vec![0x0b, 0x77, 0x00, 0x00, 0x25, 0x40, 0x40];
-	payload.resize(40, 0x00);
-	payload.extend((1..3).flat_map(ac3_frame));
-	let timed = exported_ac3_frames(vec![Ac3Write::Pes(0, payload)]).await;
-	let frames: Vec<&Vec<u8>> = timed.iter().map(|(_, bytes)| bytes).collect();
-	assert_eq!(frames, [&ac3_frame(1), &ac3_frame(2)]);
-}
-
-/// A declared marker breaks the timeline even where the timestamps run on, so a frame left
-/// unfinished before it is dropped rather than completed with the first bytes after it. A
-/// data track declares the break by skipping a sequence after its group ended, so nothing it
-/// held before the break is trimmed.
-#[tokio::test(start_paused = true)]
-async fn export_drops_an_ac3_frame_cut_by_a_marker() {
-	let stream: Vec<u8> = (0..4).flat_map(ac3_frame).collect();
-	let timed = exported_ac3_frames(vec![
-		Ac3Write::Pes(0, stream[..200].to_vec()),
-		Ac3Write::Marker,
-		Ac3Write::Pes(64, stream[256..].to_vec()),
-	])
-	.await;
-	let frames: Vec<&Vec<u8>> = timed.iter().map(|(_, bytes)| bytes).collect();
-	assert_eq!(frames, [&ac3_frame(0), &ac3_frame(2), &ac3_frame(3)]);
-}
-
-/// AC-3 sync frames that run on share a PES, as many as DVB's 5,696-byte B holds with the
-/// PES header (ISO 13818-1 2.4.2.3), and still decode in order 32 ms apart.
-#[tokio::test(start_paused = true)]
-async fn export_packs_ac3_frames_up_to_their_buffer() {
-	let stream: Vec<u8> = (0..100).flat_map(ac3_frame).collect();
-	let pes = exported_ac3_pes(vec![Ac3Write::Pes(0, stream.clone())]).await;
-	// 44 of the 128-byte frames to a PES, and the first frame alone, sent as it starts.
-	assert!(
-		pes.len() <= 100usize.div_ceil(44) + 1,
-		"{} PES for 100 frames",
-		pes.len()
-	);
-	for (_, payload) in &pes {
-		assert!(14 + payload.len() <= 5_696, "a {}-byte PES overflows B", payload.len());
-	}
-	let bytes: Vec<u8> = pes.into_iter().flat_map(|(_, payload)| payload).collect();
-	assert_eq!(bytes, stream, "every frame whole and in order");
-	let timed = exported_ac3_frames(vec![Ac3Write::Pes(0, stream)]).await;
-	assert!(
-		timed.windows(2).all(|pair| pair[1].0 - pair[0].0 == 2_880),
-		"32 ms apart"
-	);
-}
-
 /// A 32 kb/s 48 kHz 2/0 AC-3 sync frame: 128 bytes, 1,536 samples (32 ms).
 fn ac3_sync() -> Vec<u8> {
 	let mut sync = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
@@ -1658,131 +1512,6 @@ fn ac3_frame(k: u8) -> Vec<u8> {
 	let mut frame = ac3_sync();
 	frame[7..].fill(k + 1);
 	frame
-}
-
-/// Export one PES of `payload` on an AC-3 passthrough PID beside bbb's media, and return the
-/// PTS of every sync frame on that PID and how many bytes each carries.
-async fn exported_ac3(payload: Vec<u8>) -> Vec<(u64, usize)> {
-	exported_ac3_frames(vec![Ac3Write::Pes(0, payload)])
-		.await
-		.into_iter()
-		.map(|(pts, bytes)| (pts, bytes.len()))
-		.collect()
-}
-
-/// What [`exported_ac3_pes`] writes to the AC-3 track.
-enum Ac3Write {
-	/// A PES presented this many ms after the first.
-	Pes(u64, Vec<u8>),
-	/// A declared marker: a break in the timeline.
-	Marker,
-}
-
-/// Export `input` on an AC-3 passthrough PID beside bbb's media, and return the PTS and
-/// payload of every PES on that PID.
-async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
-	const AC3_PID: u16 = 0x104;
-	let data = include_bytes!("test_data/bbb.ts");
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(
-		&mut broadcast,
-		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
-	)
-	.unwrap();
-	// Reserve before the hand-written track below, so its catalog edit is withheld and the
-	// import still places the clock, keeping bbb's PTS that track is stamped against.
-	let reserved = catalog.reserve();
-	let ac3_track = broadcast
-		.unique_track(".ac3", hang::container::track_info(hang::catalog::PRIORITY.audio))
-		.unwrap();
-	{
-		let mut track = tscat::Track::new(AC3_PID);
-		track.verbatim = Some(tscat::Verbatim::new(0x06, tscat::Framing::Pes));
-		track.descriptors = vec![tscat::Descriptor {
-			tag: 0x6a,
-			data: Bytes::from_static(&[0x00]),
-		}];
-		catalog
-			.modify()
-			.unwrap()
-			.ext
-			.mpegts
-			.tracks
-			.insert(ac3_track.name().to_string(), track);
-	}
-	let mut ac3 = Producer::new(ac3_track, HangContainer::Legacy(crate::container::Kind::Data));
-	// Just after bbb's first keyframe at 1.4 s, so it survives the tune-in alignment.
-	for write in input {
-		match write {
-			Ac3Write::Pes(ms, payload) => ac3
-				.write(Frame {
-					timestamp: Timestamp::from_millis(1_410 + ms).unwrap(),
-					duration: None,
-					payload: Bytes::from(payload),
-					keyframe: true,
-				})
-				.unwrap(),
-			Ac3Write::Marker => ac3.discontinuity().unwrap(),
-		}
-	}
-	ac3.cut(None).unwrap();
-	ac3.finish().unwrap();
-
-	let mut import = crate::container::ts::Import::new(broadcast, reserved);
-	import.decode(&BytesMut::from(&data[..])).unwrap();
-	import.finish().unwrap();
-	let ts = drain_with(
-		open_ts(
-			crate::source::announced(&consumer).await,
-			crate::catalog::CatalogFormat::Hang,
-		)
-		.await
-		.unwrap(),
-	)
-	.await;
-
-	// The PTS of every PES on the AC-3 PID, and its payload.
-	let mut pes: Vec<(u64, Vec<u8>)> = Vec::new();
-	for packet in ts.as_chunks::<188>().0 {
-		let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
-		if pid != AC3_PID || packet[3] & 0x10 == 0 {
-			continue;
-		}
-		let start = 4 + if packet[3] & 0x20 != 0 {
-			usize::from(packet[4]) + 1
-		} else {
-			0
-		};
-		let body = &packet[start..];
-		if packet[1] & 0x40 != 0 {
-			let b = &body[9..14];
-			let pts = u64::from((b[0] >> 1) & 7) << 30
-				| u64::from(b[1]) << 22
-				| u64::from(b[2] >> 1) << 15
-				| u64::from(b[3]) << 7
-				| u64::from(b[4] >> 1);
-			pes.push((pts, body[9 + usize::from(body[8])..].to_vec()));
-		} else if let Some(last) = pes.last_mut() {
-			last.1.extend_from_slice(body);
-		}
-	}
-	pes
-}
-
-/// Export `input` as [`exported_ac3_pes`] does, and return each sync frame on the AC-3 PID,
-/// timed by its PES's PTS and the frames ahead of it there.
-async fn exported_ac3_frames(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
-	let mut frames = Vec::new();
-	for (mut pts, mut payload) in exported_ac3_pes(input).await {
-		while !payload.is_empty() {
-			let header = crate::codec::ac3::parse_header(&payload).expect("the PES carries whole sync frames");
-			let rest = payload.split_off(header.len);
-			frames.push((pts, std::mem::replace(&mut payload, rest)));
-			pts += header.samples * 90_000 / u64::from(header.sample_rate);
-		}
-	}
-	frames
 }
 
 /// Full SCTE-35 round-trip: import `bbb.ts` (real H.264 + AAC) into a broadcast
@@ -1922,16 +1651,115 @@ async fn export_scte35_roundtrip() {
 	);
 }
 
-/// PES-framed verbatim round-trip: import `bbb.ts` (real H.264 + AAC, whose video
-/// supplies the media clock the exporter needs) alongside a private PES-framed
-/// stream (stream_type 0x06) carried verbatim, export to TS, then re-import and
-/// assert the PID, framing, stream_id, and payload all survive. Exercises the
-/// exporter's PES re-emit path; `private_pes_carried_verbatim` only covers import.
+/// An opaque PMT byte is signalling, not a codec the exporter must recognize.
 #[tokio::test(start_paused = true)]
-async fn export_pes_verbatim_roundtrip() {
+async fn export_unknown_pes_stream_type() {
+	assert_unknown_stream_type(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_unknown_section_stream_type() {
+	assert_unknown_stream_type(false).await;
+}
+
+/// Export a track of stream type 0x99, carried as whole PES packets or as sections.
+async fn assert_unknown_stream_type(pes: bool) {
+	const PID: u16 = 0x104;
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let reserved = catalog.reserve();
+	let track = broadcast
+		.unique_track(".opaque", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	let mut entry = tscat::Track::new(PID);
+	let payload = match pes {
+		true => {
+			entry.pes_packet = Some(tscat::PesPacket::new(0x99));
+			Bytes::from(pes_with(0xbd, 0x84, 0x00, &[], 0, b"opaque"))
+		}
+		false => {
+			entry.verbatim = Some(tscat::Verbatim::new(0x99, tscat::Framing::Section));
+			Bytes::from_static(CUE)
+		}
+	};
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.tracks
+		.insert(track.name().into(), entry);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	producer
+		.write(Frame {
+			timestamp: Timestamp::from_millis(1410).unwrap(),
+			duration: None,
+			payload,
+			keyframe: true,
+		})
+		.unwrap();
+	producer.finish().unwrap();
+
+	// Import real media to supply the program clock without interpreting the opaque track.
+	let mut import = crate::container::ts::Import::new(broadcast, reserved);
+	import
+		.decode(&BytesMut::from(&include_bytes!("test_data/bbb.ts")[..]))
+		.unwrap();
+	import.finish().unwrap();
+	let ts = drain_with(
+		open_ts(
+			crate::source::announced(&consumer).await,
+			crate::catalog::CatalogFormat::Hang,
+		)
+		.await
+		.unwrap(),
+	)
+	.await;
+	assert_packet_aligned(&ts);
+	let packet = ts
+		.as_chunks::<188>()
+		.0
+		.iter()
+		.find(|packet| packet[1] & 0x40 != 0 && packet[1] & 0x1f == 0x10 && packet[2] == 0)
+		.expect("PMT on PID 0x1000");
+	let payload = 4 + if packet[3] & 0x20 != 0 {
+		1 + usize::from(packet[4])
+	} else {
+		0
+	};
+	let start = payload + 1 + usize::from(packet[payload]);
+	let length = 3 + (usize::from(packet[start + 1] & 0x0f) << 8 | usize::from(packet[start + 2]));
+	let section = &packet[start..start + length];
+	assert!(super::psi::crc_ok(section));
+	let pmt = super::psi::Pmt::parse(section).unwrap();
+	assert_eq!(
+		pmt.streams
+			.iter()
+			.find(|stream| stream.pid.as_u16() == PID)
+			.unwrap()
+			.stream_type,
+		0x99
+	);
+	assert!(
+		ts.as_chunks::<188>().0.iter().any(|packet| {
+			(u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])) == PID && packet[3] & 0x10 != 0
+		}),
+		"opaque payload must also be emitted"
+	);
+}
+
+/// Whole-PES round-trip: import `bbb.ts` (real H.264 + AAC, whose video supplies the media
+/// clock the exporter needs) alongside a `pesPacket` track (stream_type 0x06), export to TS,
+/// then re-import and assert the PID, stream type, and every PES byte survive.
+#[tokio::test(start_paused = true)]
+async fn export_pes_packet_roundtrip() {
 	const DATA_PID: u16 = 0x104;
-	const STREAM_ID: u8 = 0xc0;
-	const PAYLOAD: &[u8] = &[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02];
+	let pes = pes_with(0xbd, 0x84, 0x00, &[], 0, &[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]);
 
 	let data = include_bytes!("test_data/bbb.ts");
 
@@ -1946,17 +1774,15 @@ async fn export_pes_verbatim_roundtrip() {
 	// import still places the clock, keeping bbb's PTS that track is stamped against.
 	let reserved = catalog.reserve();
 
-	// Build the verbatim PES track BEFORE moving `broadcast` into `Import`; the
+	// Build the PES track BEFORE moving `broadcast` into `Import`; the
 	// producer stays alive so the exporter can subscribe to the retained track.
 	let data_track = broadcast
 		.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.video))
 		.unwrap();
 	let data_name = data_track.name().to_string();
 	{
-		let mut verbatim = tscat::Verbatim::new(0x06, tscat::Framing::Pes);
-		verbatim.stream_id = Some(STREAM_ID);
 		let mut track = tscat::Track::new(DATA_PID);
-		track.verbatim = Some(verbatim);
+		track.pes_packet = Some(tscat::PesPacket::new(0x06));
 		catalog
 			.modify()
 			.unwrap()
@@ -1972,7 +1798,7 @@ async fn export_pes_verbatim_roundtrip() {
 		.write(Frame {
 			timestamp: Timestamp::from_millis(1410).unwrap(),
 			duration: None,
-			payload: Bytes::from_static(PAYLOAD),
+			payload: Bytes::from(pes.clone()),
 			keyframe: true,
 		})
 		.unwrap();
@@ -1996,7 +1822,7 @@ async fn export_pes_verbatim_roundtrip() {
 	.await;
 	assert_packet_aligned(&ts);
 
-	// Re-import the exported TS and recover the verbatim PES stream.
+	// Re-import the exported TS and recover the PES stream.
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(
@@ -2014,12 +1840,9 @@ async fn export_pes_verbatim_roundtrip() {
 		.mpegts
 		.tracks
 		.iter()
-		.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x06))
-		.expect("verbatim PES survived the round-trip");
+		.find(|(_, t)| t.pes_packet.as_ref().is_some_and(|p| p.stream_type == 0x06))
+		.expect("the PES track survived the round-trip");
 	assert_eq!(track.pid, DATA_PID, "PES PID preserved");
-	let verbatim = track.verbatim.as_ref().unwrap();
-	assert_eq!(verbatim.framing, tscat::Framing::Pes, "PES framing preserved");
-	assert_eq!(verbatim.stream_id, Some(STREAM_ID), "PES stream_id preserved");
 	let name = name.clone();
 
 	let track = consumer2
@@ -2033,12 +1856,8 @@ async fn export_pes_verbatim_roundtrip() {
 		.read_frame()
 		.await
 		.unwrap()
-		.expect("no verbatim PES frame after round-trip");
-	assert_eq!(
-		frame.payload.as_ref(),
-		PAYLOAD,
-		"verbatim PES payload round-trips byte-for-byte"
-	);
+		.expect("no PES frame after round-trip");
+	assert_eq!(frame.payload.as_ref(), &pes[..], "the PES round-trips byte-for-byte");
 }
 
 // SCTE-35 cues are clocked on video, so the exporter rejects a cue program with no video
@@ -2924,7 +2743,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 		}
 		assert!(
 			ingested.iter().all(|(_, ts)| *ts != Timestamp::ZERO),
-			"{source}: cues stamped with the video PTS, not zero"
+			"{source}: cues stamped with their PCR placement"
 		);
 
 		// Export and re-ingest.
@@ -2996,7 +2815,7 @@ async fn read_si_groups(consumer: &moq_net::broadcast::Consumer, name: &str) -> 
 		.unwrap()
 		.subscribe(
 			moq_net::track::Subscription::default()
-				.with_start(moq_net::track::Position::group(0))
+				.with_groups(0..)
 				.with_max_delay(Duration::from_secs(5)),
 		)
 		.await
@@ -5675,10 +5494,9 @@ async fn tune_in_does_not_wait_on_dropped_audio() {
 	assert!(!out.is_empty(), "the tune-in waited on audio it had dropped");
 }
 
-/// A join whose first group the publisher cuts short, as a zero-budget live-edge subscribe
-/// is cut when the next group lands before the raised budget reaches it (moq-dev/moq#5565),
-/// starts at the next group: nothing of the cut-off start goes out, the next keyframe leads
-/// the audio, and the rest is intact.
+/// A join whose first group the publisher cuts short (moq-dev/moq#5565) starts at the next
+/// group: nothing of the cut-off start goes out, the next keyframe leads the audio, and the
+/// rest is intact.
 #[tokio::test(start_paused = true)]
 async fn a_start_group_cut_short_starts_at_the_next() {
 	use crate::container::Container as _;
@@ -6538,21 +6356,32 @@ async fn debounce_opens_without_a_media_clock() {
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 
 	let name = rig.catalog.snapshot().ext.mpegts.si[&0x0011][&0x42].track.clone();
-	let track = rig.consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-	assert_eq!(track.latest(), Some(0), "the first snapshot cut immediately");
+	let mut track = rig.consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+	assert_eq!(
+		track.largest().await.map(|position| position.group),
+		Some(0),
+		"the first snapshot cut immediately"
+	);
 
 	// A revision inside the window is coalesced...
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 2)[..]))
 		.unwrap();
-	assert_eq!(track.latest(), Some(0), "a revision inside the window is held");
+	assert!(
+		track.poll_largest(&kio::Waiter::noop()).is_pending(),
+		"a revision inside the window is held"
+	);
 
 	// ...and publishes once the window passes on the host clock, no finish, no PTS.
 	tokio::time::advance(Duration::from_millis(1200)).await;
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 3)[..]))
 		.unwrap();
-	assert_eq!(track.latest(), Some(1), "the held revision cut after the window");
+	assert_eq!(
+		track.largest().await.map(|position| position.group),
+		Some(1),
+		"the held revision cut after the window"
+	);
 }
 
 /// Every PCR packet in transport order: its packet index in the stream, its value
@@ -7822,14 +7651,16 @@ async fn a_timeline_restarting_at_zero_fails_the_export() {
 		.unwrap()
 		.with_delay(Duration::from_millis(500));
 	let start = tokio::time::Instant::now();
-	// One-second groups of 20 ms frames for 10 s, then a group back at zero.
+	// One-second groups of 20 ms frames for 10 s, then a group back at zero. The track refuses
+	// a group whose first frame rewinds, so that group opens at the previous start.
 	for sequence in 0..11u64 {
 		tokio::time::sleep_until(start + Duration::from_secs(sequence)).await;
 		let base = if sequence < 10 { sequence * 1_000 } else { 0 };
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 		for k in 0..50u64 {
+			let millis = if sequence == 10 && k == 0 { 9_000 } else { base + k * 20 };
 			let frame = Frame {
-				timestamp: Timestamp::from_millis(base + k * 20).unwrap(),
+				timestamp: Timestamp::from_millis(millis).unwrap(),
 				duration: None,
 				payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
 				keyframe: k == 0,
@@ -8916,6 +8747,92 @@ async fn a_follower_keeps_lingering_when_a_return_goes_before_it_resolves() {
 	assert_eq!(start.elapsed(), linger);
 }
 
+/// Announce `epoch` at `live`, refusing every track request with `NotFound` until the
+/// returned task is aborted, which ends the broadcast.
+fn publish_refusing(origin: &moq_net::origin::Producer, epoch: &moq_net::Epoch) -> tokio::task::JoinHandle<()> {
+	let broadcast = origin
+		.publish("live", moq_net::origin::Route::default().with_epoch(epoch.clone()))
+		.unwrap();
+	let mut dynamic = broadcast.dynamic();
+	tokio::spawn(async move {
+		let _broadcast = broadcast;
+		while let Ok(request) = dynamic.requested_track().await {
+			request.reject(moq_net::Error::NotFound);
+		}
+	})
+}
+
+/// A replacement that refuses its catalog while still announced is no return: the follower
+/// keeps lingering, and follows the next instance to serve.
+#[tokio::test(start_paused = true)]
+async fn a_follower_keeps_lingering_through_a_refused_return() {
+	let origin = crate::source::produce_origin();
+	let first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let linger = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_linger(linger).with_stitch(true);
+	let start = tokio::time::Instant::now();
+	finish(first);
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"lingering"
+	);
+
+	// Replaced, but the replacement refuses its catalog request.
+	let refusing = publish_refusing(&origin, &moq_net::Epoch::mint());
+	assert!(
+		tokio::time::timeout(Duration::from_secs(2), follower.next())
+			.await
+			.is_err(),
+		"the refusal keeps it lingering"
+	);
+	refusing.abort();
+
+	let mut second = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	std::ops::DerefMut::deref_mut(&mut second.1.modify().unwrap());
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"following the next replacement"
+	);
+	assert!(follower.export().cataloged(), "the replacement served its catalog");
+	finish(second);
+	let end = follower.next().await;
+	assert!(matches!(end, Ok(None)), "the replacement's clean end: {end:?}");
+	assert_eq!(start.elapsed(), Duration::from_secs(4) + linger);
+}
+
+/// A return that stays announced but refuses its catalog fails the follower only once the
+/// linger runs out, with that refusal rather than the original clean end.
+#[tokio::test(start_paused = true)]
+async fn a_follower_reports_a_refused_return_at_the_linger() {
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let first = publish_bare(&origin, Some(&epoch));
+	let linger = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_linger(linger);
+	let start = tokio::time::Instant::now();
+	finish(first);
+
+	assert!(
+		tokio::time::timeout(Duration::from_secs(1), follower.next())
+			.await
+			.is_err(),
+		"lingering"
+	);
+	let _refusing = publish_refusing(&origin, &epoch);
+	let end = tokio::time::timeout(linger * 3, follower.next())
+		.await
+		.expect("the linger bounds the wait");
+	assert!(
+		matches!(end, Err(crate::Error::Moq(moq_net::Error::NotFound))),
+		"the refusal surfaces at the linger: {end:?}"
+	);
+	assert_eq!(start.elapsed(), linger);
+}
+
 /// A stitch whose replacement goes before it resolves is no switch yet: the export stays on
 /// its own instance and follows the next replacement instead.
 #[tokio::test(start_paused = true)]
@@ -9351,6 +9268,43 @@ async fn a_midstream_stitch_catalog_expires_at_the_linger() {
 			assert!(err.to_string().contains("catalog"), "{err}");
 		}
 	}
+}
+
+/// Re-pricing a replacement while a stitch resolves it is the same instance: it neither
+/// restarts the resolve nor extends the linger bound.
+#[tokio::test(start_paused = true)]
+async fn a_midstream_stitch_bound_survives_route_updates() {
+	let origin = crate::source::produce_origin();
+	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let linger = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
+	let start = tokio::time::Instant::now();
+	let second = origin
+		.publish(
+			"live",
+			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+		)
+		.unwrap();
+	let _unanswered = second.dynamic();
+	let reprice = async {
+		let mut cost = 0u64;
+		loop {
+			tokio::time::sleep(Duration::from_secs(1)).await;
+			cost += 1;
+			second.announce(second.route().unwrap().with_cost(cost)).unwrap();
+		}
+	};
+	let end = tokio::time::timeout(linger * 3, async {
+		tokio::select! {
+			end = follower.next() => end,
+			() = reprice => unreachable!("re-pricing never stops"),
+		}
+	})
+	.await
+	.expect("updates extended the stitch bound");
+	let err = end.expect_err("the stitch fails at its linger");
+	assert!(err.to_string().contains("catalog"), "{err}");
+	assert_eq!(start.elapsed(), linger);
 }
 
 /// A catalog ready before the bound completes the switch, including zero linger.
@@ -10168,7 +10122,7 @@ async fn placed_pes_refuses_a_malformed_frame() {
 async fn placed_pes_refuses_an_ambiguous_entry() {
 	let pes = || vec![(1_000, pes_with(0xbd, 0x84, 0x00, &[], 0, b"payload"))];
 	let mut both = Placed::new(pes());
-	both.entry.verbatim = Some(tscat::Verbatim::new(0x06, tscat::Framing::Pes));
+	both.entry.verbatim = Some(tscat::Verbatim::new(0x06, tscat::Framing::Section));
 	let err = export_placed(both).await.unwrap_err();
 	assert!(err.to_string().contains("names both"), "{err}");
 
@@ -10181,8 +10135,7 @@ async fn placed_pes_refuses_an_ambiguous_entry() {
 	assert!(err.to_string().contains("media rendition"), "{err}");
 }
 
-/// DVB AC-3 carried whole keeps every sync frame of a PES in it, unsplit, where the legacy
-/// `pes` framing cuts the PES into its frames.
+/// DVB AC-3 carried whole keeps every sync frame of a PES in it, unsplit.
 #[tokio::test(start_paused = true)]
 async fn placed_ac3_pes_keeps_its_sync_frames_together() {
 	let payload: Vec<u8> = (0..3).flat_map(ac3_frame).collect();
@@ -10195,4 +10148,115 @@ async fn placed_ac3_pes_keeps_its_sync_frames_together() {
 	let out = placed_out(&export_placed(placed).await.unwrap());
 	assert_eq!(out.len(), 1);
 	assert_eq!(out[0].bytes, pes);
+}
+
+/// Section placement is an arrival, so cues beside the tune-in keyframe precede its PTS.
+#[tokio::test(start_paused = true)]
+async fn placed_section_survives_tune_in_beside_the_keyframe() {
+	let mut input = Placed::new(vec![(500, CUE.to_vec()), (1_500, CUE.to_vec()), (2_500, CUE.to_vec())]);
+	input.video = (0..25).map(|k| 2_000 + 40 * k).collect();
+	input.entry.pes_packet = None;
+	input.entry.verbatim = Some(tscat::Verbatim::new(0x86, tscat::Framing::Section));
+	let slices = export_placed(input).await.unwrap();
+	let starts: Vec<_> = slices
+		.iter()
+		.filter(|slice| {
+			slice.payload.as_chunks::<188>().0.iter().any(|packet| {
+				(u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])) == PLACED_PID && packet[1] & 0x40 != 0
+			})
+		})
+		.map(slice_pcr)
+		.collect();
+	assert_eq!(
+		starts,
+		vec![1_500_000_000, 2_500_000_000],
+		"only the cue before the keyframe departs is dropped"
+	);
+}
+
+/// A cue's first section byte keeps its source position when remuxed onto a new constant rate.
+#[tokio::test(start_paused = true)]
+async fn placed_sections_keep_their_source_positions() {
+	const RATE: u64 = 2_000_000;
+	const PID: u16 = 0x21;
+	let data = include_bytes!("test_data/scte35/ffmpeg.ts");
+	let mut clocks = Vec::new();
+	let mut starts = Vec::new();
+	for (k, packet) in data.as_chunks::<188>().0.iter().enumerate() {
+		if let Some(pcr) = super::import::pcr(packet) {
+			clocks.push(((k * 188 + 10) as u64, pcr));
+		}
+		let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+		if pid == PID && packet[1] & 0x40 != 0 {
+			let payload = 4 + if packet[3] & 0x20 != 0 {
+				1 + usize::from(packet[4])
+			} else {
+				0
+			};
+			starts.push((k * 188 + payload + 1 + usize::from(packet[payload])) as u64);
+		}
+	}
+	let source: Vec<_> = starts
+		.iter()
+		.map(|&at| {
+			let before = clocks.iter().rposition(|&(byte, _)| byte <= at).unwrap();
+			let (a, b) = match clocks.get(before + 1) {
+				Some(&after) => (clocks[before], after),
+				None => (clocks[before - 1], clocks[before]),
+			};
+			(a.1 + (at - a.0) * (b.1 - a.1) / (b.0 - a.0)) / 27
+		})
+		.collect();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(data).unwrap();
+	import.finish().unwrap();
+	let name = scte_track(&catalog.snapshot()).unwrap();
+	let cues = read_cues(&consumer, &name).await;
+	assert_eq!(
+		cues.iter().map(|(_, time)| time.as_micros() as u64).collect::<Vec<_>>(),
+		source
+	);
+	let mut exporter = open_ts(
+		crate::source::announced(&consumer).await,
+		crate::catalog::CatalogFormat::Hang,
+	)
+	.await
+	.unwrap()
+	.with_delay(RECORDING_MAX_AGE)
+	.with_replay()
+	.with_mux_rate(RATE);
+	let mut output = Vec::new();
+	while let Ok(Some(slice)) = tokio::time::timeout(DRAIN, exporter.next())
+		.await
+		.map(|next| next.unwrap())
+	{
+		for (k, packet) in slice.payload.as_chunks::<188>().0.iter().enumerate() {
+			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+			if pid == PID && packet[1] & 0x40 != 0 {
+				let payload = 4 + if packet[3] & 0x20 != 0 {
+					1 + usize::from(packet[4])
+				} else {
+					0
+				};
+				let byte = k * 188 + payload + 1 + usize::from(packet[payload]);
+				output.push(slice_pcr(&slice) + byte as u128 * 8 * 1_000_000_000 / u128::from(RATE));
+			}
+		}
+	}
+	assert_eq!(output.len(), source.len());
+	let packet = 188 * 8 * 1_000_000_000 / u128::from(RATE);
+	for (&first, &source) in output.iter().zip(&source) {
+		let place = u128::from(source) * 1_000;
+		assert!(
+			first >= place && first < place + packet,
+			"source first byte at {place} ns, export at {first} ns"
+		);
+	}
 }

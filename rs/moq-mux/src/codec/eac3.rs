@@ -28,6 +28,31 @@ const CHANNELS: [u32; 8] = [2, 1, 2, 3, 3, 4, 4, 5];
 
 /// Parse an E-AC-3 sync frame header from the start of `data` (needs >= 6 bytes).
 pub(crate) fn parse_header(data: &[u8]) -> legacy::Result<legacy::Header> {
+	let header = sync_header(data)?;
+	// A dependent substream (strmtyp 1) extends a prior program to 7.1+, and a
+	// nonzero substreamid carries additional programs in the same PID. Either
+	// would make this track's channel count a lie, so they are rejected rather
+	// than mis-described.
+	let strmtyp = data[2] >> 6;
+	if strmtyp == 1 {
+		return Err(legacy::Error::Eac3DependentSubstream);
+	}
+	let substreamid = (data[2] >> 3) & 0x07;
+	if substreamid != 0 {
+		return Err(legacy::Error::Eac3AdditionalSubstream(substreamid));
+	}
+	Ok(header)
+}
+
+/// Whether the sync frame at the start of `data` (needs >= 3 bytes) begins an access unit:
+/// independent substream 0, which every substream after it until the next one extends
+/// (ETSI TS 102 366 E.1.3.1.2).
+pub(crate) fn begins_unit(data: &[u8]) -> bool {
+	data[2] >> 6 != 1 && (data[2] >> 3) & 0x07 == 0
+}
+
+/// Parse a sync frame's bounds and duration without assigning its substream to an audio track.
+pub(crate) fn sync_header(data: &[u8]) -> legacy::Result<legacy::Header> {
 	if data.len() < 6 {
 		return Err(legacy::Error::Eac3HeaderTooShort);
 	}
@@ -42,20 +67,8 @@ pub(crate) fn parse_header(data: &[u8]) -> legacy::Result<legacy::Header> {
 		return Err(legacy::Error::Eac3NotEac3Bsid(bsid));
 	}
 
-	// A dependent substream (strmtyp 1) extends a prior program to 7.1+, and a
-	// nonzero substreamid carries additional programs in the same PID. Either
-	// would make this track's channel count a lie, so they are rejected rather
-	// than mis-described.
-	let strmtyp = data[2] >> 6;
-	if strmtyp == 3 {
+	if data[2] >> 6 == 3 {
 		return Err(legacy::Error::Eac3ReservedStreamType);
-	}
-	if strmtyp == 1 {
-		return Err(legacy::Error::Eac3DependentSubstream);
-	}
-	let substreamid = (data[2] >> 3) & 0x07;
-	if substreamid != 0 {
-		return Err(legacy::Error::Eac3AdditionalSubstream(substreamid));
 	}
 
 	let frmsiz = (((data[2] & 0x07) as usize) << 8) | data[3] as usize;

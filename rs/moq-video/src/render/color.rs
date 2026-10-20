@@ -1,22 +1,7 @@
 //! The YUV -> RGB conversion the shader applies, as the shader's uniform.
 
 use crate::Color;
-
-/// The luma/chroma weights (`kr`, `kb`) a matrix is derived from.
-///
-/// Lives here rather than on [`Color`] because deriving the matrix is the
-/// shader's business; the enum itself only names a space.
-fn weights(color: Color) -> (f32, f32) {
-	match color {
-		Color::Bt601Limited | Color::Bt601Full => (0.299, 0.114),
-		Color::Bt709Limited | Color::Bt709Full => (0.2126, 0.0722),
-	}
-}
-
-/// Whether luma is 16..235 rather than 0..255.
-fn limited(color: Color) -> bool {
-	matches!(color, Color::Bt601Limited | Color::Bt709Limited)
-}
+use crate::color::Range;
 
 /// The uniform the shader multiplies each sample by: a column-major 3x3 matrix
 /// padded to WGSL's 16-byte column stride, then the offsets to subtract from
@@ -26,7 +11,7 @@ fn limited(color: Color) -> bool {
 /// magic constants means a new color space is two numbers, and the limited
 /// range scaling stays in one place.
 pub(super) fn uniform(color: Color) -> [f32; 16] {
-	let (kr, kb) = weights(color);
+	let (kr, kb) = color.matrix.weights();
 	let kg = 1.0 - kr - kb;
 	// The inverse of the RGB -> YCbCr matrix, which is fully determined by
 	// kr/kb: Cb and Cr are the blue/red difference scaled into +-0.5.
@@ -36,8 +21,8 @@ pub(super) fn uniform(color: Color) -> [f32; 16] {
 	// Limited range: luma spans 219 of 255 codes starting at 16, chroma 224
 	// centered on 128. Stretch both back to 0..1 so the matrix output is
 	// full-range RGB.
-	let y_offset = match limited(color) {
-		true => {
+	let y_offset = match color.range {
+		Range::Limited => {
 			let (luma, chroma) = (255.0 / 219.0, 255.0 / 224.0);
 			y *= luma;
 			cb *= chroma;
@@ -46,7 +31,7 @@ pub(super) fn uniform(color: Color) -> [f32; 16] {
 			cr_g *= chroma;
 			16.0 / 255.0
 		}
-		false => 0.0,
+		Range::Full => 0.0,
 	};
 
 	#[rustfmt::skip]
@@ -89,7 +74,7 @@ mod tests {
 	#[test]
 	fn limited_range_black_and_white_reach_the_full_rgb_range() {
 		// The whole point of the range scaling: code 16 is black, 235 is white.
-		for color in [Color::Bt601Limited, Color::Bt709Limited] {
+		for color in [Color::BT601, Color::BT709] {
 			assert_rgb(convert(color, [16.0 / 255.0, 0.5, 0.5]), [0.0, 0.0, 0.0]);
 			assert_rgb(convert(color, [235.0 / 255.0, 0.5, 0.5]), [1.0, 1.0, 1.0]);
 		}
@@ -97,7 +82,10 @@ mod tests {
 
 	#[test]
 	fn full_range_maps_zero_and_one_straight_through() {
-		for color in [Color::Bt601Full, Color::Bt709Full] {
+		for color in [
+			Color::BT601.with_range(Range::Full),
+			Color::BT709.with_range(Range::Full),
+		] {
 			assert_rgb(convert(color, [0.0, 0.5, 0.5]), [0.0, 0.0, 0.0]);
 			assert_rgb(convert(color, [1.0, 0.5, 0.5]), [1.0, 1.0, 1.0]);
 		}
@@ -108,16 +96,20 @@ mod tests {
 		// Encode each primary to YUV with the forward matrix, then check the
 		// shader's inverse brings it back. Catches a transposed or mis-scaled
 		// column, which a grayscale-only test would miss.
-		for color in [Color::Bt601Full, Color::Bt709Full, Color::Bt709Limited] {
-			let (kr, kb) = weights(color);
+		for color in [
+			Color::BT601.with_range(Range::Full),
+			Color::BT709.with_range(Range::Full),
+			Color::BT709,
+		] {
+			let (kr, kb) = color.matrix.weights();
 			let kg = 1.0 - kr - kb;
-			let (scale, offset) = match limited(color) {
-				true => (219.0 / 255.0, 16.0 / 255.0),
-				false => (1.0, 0.0),
+			let (scale, offset) = match color.range {
+				Range::Limited => (219.0 / 255.0, 16.0 / 255.0),
+				Range::Full => (1.0, 0.0),
 			};
-			let chroma_scale = match limited(color) {
-				true => 224.0 / 255.0,
-				false => 1.0,
+			let chroma_scale = match color.range {
+				Range::Limited => 224.0 / 255.0,
+				Range::Full => 1.0,
 			};
 
 			for rgb in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.3, 0.6, 0.9]] {

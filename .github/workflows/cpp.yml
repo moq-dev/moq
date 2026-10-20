@@ -12,10 +12,14 @@ permissions:
   contents: read
 
 on:
+  workflow_call:
   pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
+    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
+    # retargeted to release. `closed` is here only so merging/closing a PR
+    # cancels its in-flight run via the concurrency group below; the job itself
+    # is skipped on close.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited, closed]
     paths:
       - "cpp/moq/**"
       - "cpp/justfile"
@@ -50,7 +54,7 @@ jobs:
       - uses: ./.github/actions/just
 
       - name: Install uniffi-bindgen-cpp
-        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.5+v0.32.2
 
       - name: Check
         run: just cpp check

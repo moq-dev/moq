@@ -61,7 +61,7 @@ impl<T: serde::Serialize> Pair<T> {
 		let used = [&self.plain, &self.compressed]
 			.into_iter()
 			.flatten()
-			.any(|track| track.demand().is_used());
+			.any(|track| track.demand().wanted().is_some());
 		if used {
 			self.write(value);
 		}
@@ -114,7 +114,8 @@ fn transport(connection: Option<&Monitor>, direction: Direction) -> hang::stats:
 	if let Some(stats) = connection.and_then(Monitor::stats) {
 		let rate = match direction {
 			Direction::Send => stats.estimated_send_rate,
-			Direction::Receive => stats.estimated_recv_rate,
+			// A receive estimate costs PROBE traffic, which an export does not request just to report.
+			Direction::Receive => None,
 		};
 		transport.rtt = stats.rtt;
 		transport.rate = rate.map(moq_net::bandwidth::Rate::as_bps);
@@ -233,6 +234,16 @@ impl std::str::FromStr for EchoName {
 	}
 }
 
+/// Where an `export --echo` publishes its feedback, under what name, and over which connection.
+pub struct EchoTarget {
+	/// The origin the feedback broadcast is published into.
+	pub origin: moq_net::origin::Producer,
+	/// The path segment the feedback is published at, before `.echo`.
+	pub name: EchoName,
+	/// The connection whose transport the feedback reports, when one was dialed.
+	pub connection: Option<Monitor>,
+}
+
 /// The feedback broadcast in force: where it is published and its snapshot tracks.
 struct Feedback {
 	path: moq_net::PathOwned,
@@ -247,30 +258,20 @@ struct Feedback {
 /// reconciles it: a removed section or a changed path retracts the broadcast it replaces. It
 /// follows the catalog of the instance the export first reads, and ends when the export does.
 pub struct Echo {
-	origin: moq_net::origin::Producer,
+	target: EchoTarget,
 	source: moq_mux::Source,
 	format: CatalogFormat,
-	name: EchoName,
-	connection: Option<Monitor>,
 	sections: Sections,
 	feedback: Option<Feedback>,
 }
 
 impl Echo {
-	/// Feedback for the export reading `source`, published into `origin`.
-	pub fn new(
-		origin: moq_net::origin::Producer,
-		source: moq_mux::Source,
-		format: CatalogFormat,
-		name: EchoName,
-		connection: Option<Monitor>,
-	) -> Self {
+	/// Feedback at `target` for the export reading `source` through a `format` catalog.
+	pub fn new(target: EchoTarget, source: moq_mux::Source, format: CatalogFormat) -> Self {
 		Self {
-			origin,
+			target,
 			source,
 			format,
-			name,
-			connection,
 			sections: Sections::default(),
 			feedback: None,
 		}
@@ -316,7 +317,7 @@ impl Echo {
 			if prefix.is_none() {
 				tracing::warn!(path = %echo.path.as_str(), "the catalog solicits feedback above the connection root");
 			}
-			Some(prefix?.join(format!("{}{}", self.name.0, hang::echo::SUFFIX).as_str()))
+			Some(prefix?.join(format!("{}{}", self.target.name.0, hang::echo::SUFFIX).as_str()))
 		});
 		if self.feedback.as_ref().map(|feedback| &feedback.path) == target.as_ref() {
 			return;
@@ -336,9 +337,10 @@ impl Echo {
 	}
 
 	fn publish(&self, path: &moq_net::PathOwned) -> anyhow::Result<Feedback> {
-		let mut broadcast = self.origin.create_broadcast(path)?;
+		let mut broadcast = self.target.origin.create_broadcast(path)?;
 		let tracks = Pair::create(&mut broadcast, hang::echo::TRACK)?;
-		broadcast.announce(moq_net::origin::Route::default())?;
+		// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
+		broadcast.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
 		Ok(Feedback {
 			path: path.clone(),
 			_broadcast: broadcast,
@@ -351,7 +353,7 @@ impl Echo {
 			return;
 		};
 		let mut snapshot = hang::echo::Snapshot::default();
-		snapshot.transport = transport(self.connection.as_ref(), Direction::Receive);
+		snapshot.transport = transport(self.target.connection.as_ref(), Direction::Receive);
 		snapshot.renditions = self.source.stats();
 		snapshot.ext = self.sections.get();
 		feedback.tracks.update(&snapshot);

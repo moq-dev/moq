@@ -1,4 +1,4 @@
-import { wall } from "@moq/clock";
+import { Instant, Nano, now, wall } from "@moq/clock";
 import { type Dispose, type Getter, Once, Signal } from "@moq/signals";
 import {
 	type Auth,
@@ -57,6 +57,11 @@ function union(grants: Iterable<Grant>): Grant {
 		if (grant.expires !== undefined) expires = Math.min(expires ?? grant.expires, grant.expires);
 	}
 	return { publish, subscribe, expires };
+}
+
+// The transport closed under the stream, which ends the whole session rather than one token.
+function transportClosed(err: unknown): boolean {
+	return typeof err === "object" && err !== null && "source" in err && err.source === "session";
 }
 
 function cancel(): StreamError {
@@ -286,10 +291,14 @@ export class AuthSession implements Handle {
 	#ended = new Signal(0);
 
 	#union = new Signal<Grant | undefined>(undefined);
+	// The union until the session ends, which is not a revocation: what the session covered
+	// ends with the session's own error, not as unauthorized.
+	#scope = new Signal<Grant | undefined>(undefined);
 	// The peer replied to some token, so the union is known even when empty.
 	#replied = false;
 	#tokens = new Set<Presented>();
 	#setupPending = new Signal(0);
+	#pending = new Signal(0);
 	#acceptor: "undecided" | "default" | RequestQueue = "undecided";
 	#closed = false;
 
@@ -310,6 +319,11 @@ export class AuthSession implements Handle {
 
 	get grant(): Getter<Grant | undefined> {
 		return this.#union;
+	}
+
+	/** The grant this session enforces: {@link grant}, kept as it was once the session ends. */
+	get scope(): Getter<Grant | undefined> {
+		return this.#scope;
 	}
 
 	/** Whether this session exchanges tokens at all. */
@@ -361,6 +375,63 @@ export class AuthSession implements Handle {
 		while (this.#setupPending.peek() > 0) await this.#setupPending.changed();
 	}
 
+	/**
+	 * Wait for presented tokens that might admit this path, without delaying a covered path.
+	 * Resolves false once `until`, the request's own lifetime, settles first, so an abandoned
+	 * request never waits on a token that may never be answered. `until` is called only once
+	 * the request has to wait.
+	 */
+	async ready(
+		path: Path.Valid,
+		direction: "publish" | "subscribe",
+		{ signal, until }: { signal?: AbortSignal; until?: () => PromiseLike<unknown> } = {},
+	): Promise<boolean> {
+		let started: Instant | undefined;
+		let ended = false;
+		let wake: (() => void) | undefined;
+		const end = () => {
+			ended = true;
+			wake?.();
+		};
+		try {
+			while (this.#pending.peek() > 0 && !this.#union.peek()?.[direction].matches(path)) {
+				if (ended) return false;
+				if (started === undefined) {
+					started = now();
+					until?.().then(end, end);
+				}
+				signal?.throwIfAborted();
+				await new Promise<void>((resolve, reject) => {
+					const cleanup = () => {
+						pending();
+						grant();
+						wake = undefined;
+						signal?.removeEventListener("abort", abort);
+					};
+					const done = () => {
+						cleanup();
+						resolve();
+					};
+					const abort = () => {
+						cleanup();
+						reject(signal?.reason);
+					};
+					const pending = this.#pending.changed(done);
+					const grant = this.#union.changed(done);
+					wake = done;
+					signal?.addEventListener("abort", abort, { once: true });
+				});
+			}
+			return true;
+		} finally {
+			if (started !== undefined) {
+				console.debug(
+					`request waited for authorization: path=${path} waited=${Nano.toMilli(Instant.durationSince(now(), started))}ms`,
+				);
+			}
+		}
+	}
+
 	/** Answer one of the peer's token streams, for the life of its token. */
 	async serve(stream: Stream): Promise<void> {
 		const wire = this.#wire;
@@ -374,7 +445,7 @@ export class AuthSession implements Handle {
 				err instanceof StreamError ||
 				err instanceof SessionError ||
 				err instanceof Unsupported ||
-				(typeof err === "object" && err !== null && "source" in err && err.source === "session")
+				transportClosed(err)
 			)
 				throw err;
 			throw new ProtocolViolation("malformed AUTH", { cause: err });
@@ -404,6 +475,7 @@ export class AuthSession implements Handle {
 	close() {
 		if (this.#closed) return;
 		this.#closed = true;
+		this.#pending.set(0);
 		for (const token of this.#tokens) token.end(new Error("session closed"));
 		this.#tokens.clear();
 		this.#recompute();
@@ -414,6 +486,7 @@ export class AuthSession implements Handle {
 		const presented = new Presented(token, setup);
 		this.#track(presented);
 		if (setup) this.#setupPending.update((n) => n + 1);
+		if (token.byteLength > 0) this.#pending.update((n) => n + 1);
 		void this.#run(wire, presented);
 		return presented;
 	}
@@ -430,6 +503,7 @@ export class AuthSession implements Handle {
 
 	async #run(wire: AuthWire, token: Presented) {
 		let result: Error | null = null;
+		let closed = false;
 		try {
 			const stream = await wire.present(token.token);
 			token.stream = stream;
@@ -444,7 +518,7 @@ export class AuthSession implements Handle {
 						err instanceof StreamError ||
 						err instanceof SessionError ||
 						err instanceof Unsupported ||
-						(typeof err === "object" && err !== null && "source" in err && err.source === "session")
+						transportClosed(err)
 					)
 						throw err;
 					throw new ProtocolViolation("malformed AUTH reply", { cause: err });
@@ -473,6 +547,7 @@ export class AuthSession implements Handle {
 				break;
 			}
 		} catch (err: unknown) {
+			closed = transportClosed(err);
 			if (token.withdrawn) {
 				result = null;
 			} else if (!token.isAnswered && err instanceof StreamError) {
@@ -492,7 +567,10 @@ export class AuthSession implements Handle {
 		const unanswered = !token.isAnswered;
 		token.end(result);
 		if (unanswered && token.setup) this.#setupPending.update((n) => n - 1);
+		if (unanswered && token.token.byteLength > 0 && !this.#closed) this.#pending.update((n) => n - 1);
 		this.#tokens.delete(token);
+		// Closed before the union shrinks, so the scope never reads it as a revocation.
+		if (closed) this.close();
 		this.#recompute();
 	}
 
@@ -500,6 +578,7 @@ export class AuthSession implements Handle {
 		if (token.isAnswered) return;
 		token.answer();
 		if (token.setup) this.#setupPending.update((n) => n - 1);
+		if (token.token.byteLength > 0 && !this.#closed) this.#pending.update((n) => n - 1);
 	}
 
 	#recompute() {
@@ -512,6 +591,7 @@ export class AuthSession implements Handle {
 		if (granted.length === 0 && !this.#replied) return;
 		const next = union(granted);
 		if (!grantsEqual(next, this.#union.peek())) this.#union.set(next);
+		if (!this.#closed && !grantsEqual(next, this.#scope.peek())) this.#scope.set(next);
 	}
 }
 
@@ -532,12 +612,14 @@ export async function enforceGrant({
 	advertised,
 	grant,
 	setupAnswered,
+	auth,
 }: {
 	quic: WebTransport;
 	/** The broadcasts this side publishes, undefined once the origin ends. */
 	advertised: Getter<ReadonlyMap<Path.Valid, unknown> | undefined>;
 	grant: Getter<Grant | undefined>;
 	setupAnswered: Promise<void>;
+	auth?: AuthSession;
 }): Promise<void> {
 	const closed = quic.closed.then(
 		() => "closed" as const,
@@ -571,6 +653,13 @@ export async function enforceGrant({
 			for (const path of table.keys()) {
 				if (live.has(path)) continue;
 				if (!current.publish.matches(path)) {
+					await auth?.ready(path, "publish");
+					// A broadcast withdrawn during the wait is no longer ours to judge.
+					if (!advertised.peek()?.has(path)) continue;
+					if (grant.peek()?.publish.matches(path)) {
+						live.add(path);
+						continue;
+					}
 					console.error(`publishing outside our grant; closing the session: broadcast=${path}`);
 					quic.close({
 						closeCode: SessionCode.Unauthorized,

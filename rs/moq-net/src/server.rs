@@ -194,6 +194,7 @@ impl Server {
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			crate::session::Handles {
+				stats: self.stats.clone(),
 				goaway: start.goaway,
 				auth: start.auth,
 				estimate: Some(start.estimate),
@@ -441,6 +442,7 @@ impl Server {
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&params, v)?,
 					hidden: ietf::hidden::from_setup(&params, v),
+					max_age: ietf::max_age::from_setup(&params, v),
 					active_count: ietf::active_count::from_setup(&params, v),
 					..Default::default()
 				};
@@ -649,6 +651,7 @@ where
 				None,
 				crate::driver::Protocol::Ietf(protocol),
 				crate::session::Handles {
+					stats: server.stats.clone(),
 					goaway,
 					auth,
 					estimate: None,
@@ -713,6 +716,7 @@ where
 						ietf::solicit::into_setup(&mut parameters, v);
 					}
 					ietf::hidden::into_setup(&mut parameters, v);
+					ietf::max_age::into_setup(&mut parameters, v);
 					ietf::active_count::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
 				}
@@ -784,7 +788,12 @@ where
 				version,
 				recv_bw,
 				protocol,
-				crate::session::Handles { goaway, auth, estimate },
+				crate::session::Handles {
+					stats: server.stats.clone(),
+					goaway,
+					auth,
+					estimate,
+				},
 			))
 		}
 		.maybe_boxed()
@@ -1060,12 +1069,14 @@ mod tests {
 		fn poll_open_bi(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			std::task::Poll::Pending
 		}
 		fn poll_open_uni(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> std::task::Poll<Result<Self::SendStream, Self::Error>> {
 			std::task::Poll::Pending
 		}
@@ -1076,8 +1087,7 @@ mod tests {
 		fn send_datagram(
 			&mut self,
 			_: Bytes,
-			_: Option<&crate::transport::poll::Ungrouped>,
-			_: i64,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Result<(), Self::Error> {
 			Ok(())
 		}

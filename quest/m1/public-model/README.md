@@ -23,7 +23,9 @@ Rules every child follows:
   made unnecessary. Each child lists its public API additions and removals
   in its PR for review.
 - Deliberately private, marked in a comment on the item so the next
-  inventory skips it:
+  inventory skips it (`// private: passthrough`, `tuning`,
+  `capability gap`, `test`, or `plumbing`; `sh/rs/model-markers.py`
+  enforces the marks):
   - "moq-transport passthrough only" (decided 2026-10-13; subgroups were
     dropped from it in #5704): object IDs and `skip`, object and unknown track properties, END_OF_GROUP status
     objects, datagram object IDs, dynamic groups, and upstream request
@@ -34,10 +36,15 @@ Rules every child follows:
   - "capability gap": a built-in behavior a third party can observe but
     not reproduce yet, kept private by a recorded decision that names what
     would close it (the idle copy in [ingest](/quest/m1/public-model/ingest.md)).
+  - "plumbing" (JS only): session or wire plumbing hosted beside the model,
+    such as `wire.ts` `Established`, `wireOf`, `tail.ts`, `consume.ts`, and
+    `priority.ts`.
+- An item still owed public carries `// pending: <its child quest>`. Delete
+  the mark as the item goes public; the lint fails on a mark left behind, or
+  on one naming a deleted quest.
 - Items replaced by another quest's new API wait for that quest instead of
   growing a public shape it deletes: fetch and per-group requests
-  ([Model ranges](/quest/m1/subscribe-ranges/model.md)), largest and
-  liveness ([Live largest location](/quest/m1/largest.md)), announce
+  ([Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)), announce
   interest ([Rust lazy discovery](/quest/m1/lazy-discovery/rust.md)).
 
 Inventory method, to rerun before each child starts (counts drift). Rust:
@@ -85,8 +92,7 @@ Work owned by this README, after the children land:
 
 - Rerun the inventory and confirm every `pub(crate)` left in `model/` is a
   marked passthrough, tuning, capability-gap, or test-only item, so the
-  "pending" marks from [Narrow the model](/quest/m1/public-model/narrow.md)
-  are all gone.
+  `// pending:` marks are all gone.
 - Prove the result with a toy transport that uses only the public API: an
   integration test under `rs/moq-net/tests/` (outside the crate, so the
   compiler enforces it) and a JS test importing only the package entrypoint.
@@ -95,7 +101,7 @@ Work owned by this README, after the children land:
 
 ## Required
 
-- [Narrow the model](/quest/m1/public-model/narrow.md) - a new model item a session reaches fails to compile until it is made public or marked, while the other children are in flight
+- [One group writer](/quest/m1/public-model/group-writer.md) - `group::Producer` is not `Clone`; the model and sessions hold a crate-private handle that cannot write or finish
 - [Public ingest](/quest/m1/public-model/ingest.md) - a custom subscriber writes received groups, frames, starts, and ends into a track through public calls
 - [Public serving](/quest/m1/public-model/serve.md) - a custom publisher reads a track's start, cursor, and group expiry for its wire through public calls
 - [Public routes and answering](/quest/m1/public-model/answer.md) - a custom relay ingests routes, answers broadcast and track requests on demand, and advertises without echoing a peer's routes back

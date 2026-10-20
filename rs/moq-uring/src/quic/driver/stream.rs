@@ -8,7 +8,7 @@
 use std::task::{Context, Poll, ready};
 
 use bytes::{Buf, Bytes, BytesMut};
-use moq_quic::{Checkpoint, StreamId, VarInt};
+use moq_quic::{StreamId, VarInt};
 
 use super::super::Error;
 use super::{End, Shared};
@@ -51,9 +51,9 @@ impl SendStream {
 		self.fin || self.reset
 	}
 
-	/// Mark the data written so far, for a later [`reset_code`](Self::reset_code) to deliver.
-	pub(crate) fn checkpoint(&self) -> Checkpoint {
-		self.shared.conn.borrow_mut().send_stream(self.id).checkpoint()
+	/// How many bytes were written so far, for a later [`reset_code`](Self::reset_code) to deliver.
+	pub(crate) fn offset(&self) -> u64 {
+		self.shared.conn.borrow_mut().send_stream(self.id).offset()
 	}
 
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
@@ -80,16 +80,16 @@ impl SendStream {
 
 	/// [`reset`](web_transport_trait::poll::SendStream::reset) with a
 	/// full-width code, for the WebTransport HTTP/3 error mapping, that still
-	/// delivers the data before `checkpoint`, one this stream took.
-	pub(crate) fn reset_code(&mut self, code: u64, checkpoint: Option<Checkpoint>) {
+	/// delivers the first `offset` bytes.
+	pub(crate) fn reset_code(&mut self, code: u64, offset: Option<u64>) {
 		if self.reset {
 			return;
 		}
 		let code = VarInt::from_u64(code).unwrap_or(VarInt::MAX);
 		let mut conn = self.shared.conn.borrow_mut();
 		// Err means the stream is already gone, which is what we wanted.
-		let _ = match checkpoint {
-			Some(checkpoint) => checkpoint.reset(&mut conn, code),
+		let _ = match offset {
+			Some(offset) => conn.send_stream(self.id).reset_at(offset, code),
 			None => conn.send_stream(self.id).reset(code),
 		};
 		drop(conn);

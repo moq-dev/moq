@@ -1,12 +1,13 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { GroupTooLarge, NotFound } from "./error.ts";
+import { GroupTooLarge, NotFound, TimestampMismatch } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { TrackSequences } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
+import { unwanted } from "./util/demand.ts";
 import { wireOf } from "./wire.ts";
 
 // The public API mints consumers internally (Producer.consume, the wire layers); tests act
@@ -53,6 +54,29 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	producer.close();
 	consumer.track("video").subscribe();
 	expect((await pendingRequest(consumer))?.name).toBe("video");
+});
+
+// A replacement continues the name's timeline, so its groups can't start before the highest one an
+// earlier producer checked, while a new broadcast starts over.
+test("a replacement producer refuses a rewind past its predecessor", () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	first.appendGroup().writeFrame(textFrame("a", Timestamp.fromMillis(1000)));
+	first.close();
+
+	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	const group = new GroupProducer(1);
+	second.writeGroup(group);
+	expect(() => group.writeFrame(textFrame("b", Timestamp.fromMillis(500)))).toThrow(TimestampMismatch);
+	group.writeFrame(textFrame("b", Timestamp.fromMillis(1000)));
+
+	const next = new BroadcastProducer();
+	const track = next.createTrack("media", { timescale: Timescale.MILLI });
+	track.appendGroup().writeFrame(textFrame("c", Timestamp.fromMillis(500)));
+
+	second.close();
+	broadcast.close();
+	next.close();
 });
 
 // A name keeps one sequence namespace across producer replacements. The application owns where a
@@ -259,7 +283,7 @@ test("an info lookup joining a subscription's request stays demand after the sub
 	// Flush every pending notification, so only the lookup is left holding demand.
 	subscriber.close();
 	await new Promise((resolve) => setTimeout(resolve, 0));
-	expect(request.demand().used.peek()).toBe(false);
+	expect(request.demand().wanted.peek()).toBeUndefined();
 	expect(demand.used.peek()).toBe(true);
 
 	request.accept({ timescale: Timescale.MILLI });
@@ -761,12 +785,12 @@ test("broadcast demand watches static and pending tracks rather than broadcast h
 	const request = await pulled;
 	if (!request) throw new Error("expected request");
 	const requested = request.demand();
-	expect(requested.used.peek()).toBe(true);
+	expect(requested.wanted.peek()).toBeDefined();
 	first.close();
 	await Promise.resolve();
 	expect(demand.used.peek()).toBe(true);
 	second.close();
-	await requested.unused();
+	await unwanted(requested);
 	await demand.unused();
 	expect(demand.used.peek()).toBe(false);
 	request.reject();
@@ -801,7 +825,7 @@ test("a pending track info query counts as broadcast demand", async () => {
 	const request = await pending;
 	if (!request) throw new Error("expected request");
 	// Nobody subscribes to the queried track itself.
-	expect(request.demand().used.peek()).toBe(false);
+	expect(request.demand().wanted.peek()).toBeUndefined();
 	request.accept({ timescale: Timescale.MILLI, priority: 2 });
 	expect((await info).priority).toBe(2);
 	await demand.unused();

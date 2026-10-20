@@ -20,6 +20,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
+use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 
 // ---- C-visible types ----
@@ -182,7 +183,7 @@ pub struct moq_video_frame {
 #[derive(Default)]
 pub struct Video {
 	producers: NonZeroSlab<Shared<VideoEncoder>>,
-	consumer_tasks: NonZeroSlab<Option<VideoTaskEntry>>,
+	consumer_tasks: NonZeroSlab<Task>,
 	frames: NonZeroSlab<Arc<VideoFrame>>,
 }
 
@@ -354,17 +355,6 @@ fn finalize(
 			Err(err.into())
 		}
 	}
-}
-
-/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
-///
-/// Same lifetime contract as the audio decoder: the task delivers one final
-/// terminal callback and then removes itself, so `user_data` stays valid until
-/// that callback fires. `close` is an `Option` so `consume_close` can drop just
-/// the sender without removing the entry.
-struct VideoTaskEntry {
-	close: Option<oneshot::Sender<()>>,
-	callback: OnStatus,
 }
 
 impl VideoEncoder {
@@ -545,31 +535,20 @@ impl Video {
 			driver,
 		} = rendition;
 
-		let channel = oneshot::channel();
-		let entry = VideoTaskEntry {
-			close: Some(channel.0),
-			callback: on_frame,
-		};
-		let id = self.consumer_tasks.insert(Some(entry))?;
-
 		// `Consumer::new` subscribes (blocking on SUBSCRIBE_OK), so run it inside
 		// the task to keep this entrypoint non-blocking.
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(async move {
-				let consumer = moq_video::decode::Consumer::new(&broadcast, &catalog, name, options).await?;
-				Self::run(on_frame, consumer, channel.1, output).await
-			}))
-			.await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().video.consumer_tasks.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.consumer_tasks.spawn(
+			on_frame,
+			|state| &mut state.video.consumer_tasks,
+			|close| async move {
+				driver
+					.watch(async move {
+						let consumer = moq_video::decode::Consumer::new(&broadcast, &catalog, name, options).await?;
+						Self::run(on_frame, consumer, close, output).await
+					})
+					.await
+			},
+		)
 	}
 
 	async fn run(
@@ -600,15 +579,7 @@ impl Video {
 	}
 
 	pub fn consume_close(&mut self, id: Id) -> Result<(), Error> {
-		// Signal shutdown; the task delivers a final callback and removes itself.
-		self.consumer_tasks
-			.get_mut(id)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::TrackNotFound)?
-			.close
-			.take()
-			.ok_or(Error::TrackNotFound)?;
-		Ok(())
+		self.consumer_tasks.close(id, Error::TrackNotFound)
 	}
 
 	/// Resolve a frame handle, so the caller can convert it with the global lock
@@ -947,7 +918,7 @@ pub unsafe extern "C" fn moq_decode_video(
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };
 
 		let mut state = State::lock();
-		let rendition = state.consume.video_rendition(catalog, index as usize)?;
+		let rendition = state.consume.rendition(catalog, index as usize)?;
 
 		let State { video, .. } = &mut *state;
 		video.consume(rendition, options, output, on_frame)

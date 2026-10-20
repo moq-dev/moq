@@ -72,9 +72,6 @@ class SmokeTest {
                     assertFailsWith<MoqException.Codec> {
                         ContainerProducer(other, ContainerInit(ContainerFormat.FMP4, byteArrayOf(), timebase))
                     }
-                    assertFailsWith<MoqException.Codec> {
-                        ContainerStreamProducer(other, ContainerStreamInit(ContainerFormat.FMP4, timebase))
-                    }
                     owner.end()
                     assertFailsWith<MoqException.Closed> { Timebase(owner) }
                 }
@@ -140,6 +137,21 @@ class SmokeTest {
         assertFailsWith<MoqException.Config> {
             Moq.connect("https://localhost:0/test", ClientConfig(versions = listOf("moq-lite-99")))
         }
+    }
+
+    /** A settings UI reads its defaults and menus from the library rather than repeating them. */
+    @Test
+    fun `client defaults and versions come from the library`() {
+        val defaults = clientDefaults()
+        assertNotNull(defaults.quic.maxStreams)
+        assertNotNull(defaults.quic.idleTimeout)
+        assertNotNull(defaults.timeout)
+        assertNull(defaults.quic.congestionControl)
+        assertTrue(versions().isNotEmpty())
+        val congestion: CongestionControl = CongestionControl.DELAY
+        assertEquals(congestion, QuicConfig(congestionControl = congestion).congestionControl)
+        // Dialing with the reported defaults is the same as dialing with none.
+        Client(defaults).close()
     }
 
     /**
@@ -238,6 +250,27 @@ class SmokeTest {
             assertEquals(0uL, fetched.sequence())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
+        }
+    }
+
+    @Test
+    fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
+            for (ms in 0uL until 3uL) {
+                val group = track.appendGroup()
+                group.writeFrame(Frame(payload = "x".encodeToByteArray(), timestampUs = ms * 1_000uL))
+                group.finish()
+            }
+            val consumer = track.consume(
+                Subscription(
+                    maxDelayUs = 10_000_000uL,
+                    ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
+                    order = Order.ASCENDING,
+                ),
+            )
+            val sequences = List(3) { checkNotNull(consumer.recvGroup()).sequence() }
+            assertEquals(listOf(0uL, 1uL, 2uL), sequences)
         }
     }
 
@@ -360,7 +393,6 @@ class SmokeTest {
         fun stats(rttUs: ULong?) = ConnectionStats(
             rttUs = rttUs,
             estimatedSendRateBps = null,
-            estimatedRecvRateBps = null,
             bytesSent = null,
             bytesReceived = null,
             bytesLost = null,
@@ -393,12 +425,28 @@ class SmokeTest {
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             assertEquals("status", demand.name())
-            assertEquals(false, demand.isUsed())
+            assertEquals(null, demand.wanted())
 
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
-            demand.used()
+            while (demand.wantedChanged() == null) {}
             consumer.cancel()
-            demand.unused()
+            while (demand.wantedChanged() != null) {}
+        }
+    }
+
+    @Test
+    fun `cancelling a flow collection cancels its native handle`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
+            val demand: TrackDemand = producer.demand()
+            producer.update(Status(state = "live"))
+
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
+            while (demand.wantedChanged() == null) {}
+            // `first` cancels the collection, which must release the subscription without an explicit cancel.
+            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first())
+            while (demand.wantedChanged() != null) {}
         }
     }
 

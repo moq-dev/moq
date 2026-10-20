@@ -38,7 +38,3 @@ It is not a small change: `poll_open_uni` would have to hold a half-open stream 
 Present the viable ownership choices and a recommendation to the maintainer before implementing. Regression cases: concurrent openers, credit starvation, dropped open futures, and finish then drop.
 
 Decided 2026-10-08: the open-contract planning quest merged in here, and the quest moved to m3. No in-tree caller hits the wart and io_uring ships in no package.
-
-## Closes
-
-- [#3129](https://github.com/moq-dev/moq/issues/3129) - close this issue when the quest finishes

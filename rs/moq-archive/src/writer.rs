@@ -40,11 +40,11 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use hang::timeline::{Position, Record};
+use moq_clock::Instant;
 use moq_mux::timeline::{self, Segmenter};
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
 use object_store::ObjectStore;
 use tokio::sync::{mpsc, watch};
-use tokio::time::Instant;
 
 use crate::recover::{Resume, checkpoint, recover};
 use crate::segment::{Frame, Group, Object};
@@ -318,7 +318,7 @@ impl<S: ObjectStore> Writer<S> {
 				_ = source.closed(), if !closed => closed = true,
 				// Also once commands closed: an enrollment in flight still settles its count.
 				_ = enrolling.changed(), if idle => {}
-				_ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+				_ = moq_clock::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
 					let (_, expired) = deletions.pop_front().unwrap();
 					delete(&shared.store, &mut pruned, expired).await;
 				}
@@ -328,7 +328,7 @@ impl<S: ObjectStore> Writer<S> {
 		// Complete expirations already committed to the timelines; nothing new expires after the
 		// final records.
 		for (deadline, expired) in deletions {
-			tokio::time::sleep_until(deadline).await;
+			moq_clock::sleep_until(deadline).await;
 			delete(&shared.store, &mut pruned, expired).await;
 		}
 
@@ -1048,6 +1048,7 @@ fn recorded_end(resume: &Resume, timescale: Option<Timescale>) -> Result<Option<
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use futures::TryStreamExt;
 	use object_store::memory::InMemory;
@@ -1642,56 +1643,6 @@ mod tests {
 				Error::Id(1 << 53)
 			)))
 		);
-	}
-
-	#[tokio::test]
-	async fn a_decreasing_timestamp_fails_the_recording() {
-		let source = broadcast::Info::new().produce();
-		let video = track(&source, "video");
-
-		let store = Store::new(InMemory::new(), "rec");
-		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
-		writer.control().track("video", media()).await.unwrap();
-
-		group(&video, 0, &[1000]);
-		group(&video, 1, &[500]);
-		video.finish().unwrap();
-		source.close();
-
-		assert_eq!(
-			writer.run().await,
-			Err(Error::Source("track video group 1: timestamp 500 precedes 1000".into()))
-		);
-	}
-
-	/// A malformed group fails the recording only after committing everything reported before
-	/// it, including the open record, so the archive stays readable up to the bad frame.
-	#[tokio::test]
-	async fn a_failed_recording_flushes_what_was_reported() {
-		let source = broadcast::Info::new().produce();
-		let video = track(&source, "video");
-
-		let store = Store::new(InMemory::new(), "rec");
-		let writer = Writer::new(store.clone(), source.consume(), Config::default())
-			.await
-			.unwrap();
-		writer.control().track("video", media()).await.unwrap();
-
-		group(&video, 0, &[0]);
-		group(&video, 1, &[1000]);
-		// Under the minimum, so groups 1 and 2 share the record still open at the failure.
-		group(&video, 2, &[1500]);
-		group(&video, 3, &[1200]);
-
-		assert_eq!(
-			writer.run().await,
-			Err(Error::Source(
-				"track video group 3: timestamp 1200 precedes 1500".into()
-			))
-		);
-		let records = window(&store, "video").await;
-		assert_eq!(groups(&records), vec![(0, 0), (1, 2)]);
-		check_objects(&store, "video", &records).await;
 	}
 
 	/// Stopping a recording whose source is still live finishes every timeline and ends `run`.

@@ -11,14 +11,13 @@ use std::{
 	time::Duration,
 };
 
-use crate::transport::poll::GroupOf;
 use crate::transport::poll::SendGroup as _;
+use crate::transport::poll::{GroupOf, SendOptions};
 
 use crate::{
 	AsPath, DecodeError, Error, Timescale, Timestamp,
 	coding::{Decode as _, Encode as _, Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
-	model::NewGroup,
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
 	util::{MaybeBoxedExt, MaybeSendBox},
@@ -27,10 +26,9 @@ use crate::{
 use super::{Message, Version, cluster, error::request, peer, request_update};
 
 /// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
+const MAX_SAFE_DELAY_MS: u64 = super::max_age::MAX_MILLIS;
 
-/// Build the serving-side subscription for a peer whose wire protocol carries no
-/// max delay preference. The receiver applies its own budget after the transfer.
+/// Preserve retained groups when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
@@ -48,19 +46,40 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 /// Declaring the timescale is what opts the track into timestamps; every object Timestamp
 /// is in these units. We serve the newest group first by default, matching moq-lite. A draft
 /// without room for a property drops it on encode.
-fn track_properties(info: &track::Info, wanted: bool) -> ietf::Properties {
+///
+/// Fails with [`Error::Unsupported`] for Immutable Properties the draft cannot carry:
+/// rewriting them for its encoding would break them, and forwarding them unchanged would
+/// change their meaning.
+fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Result<ietf::Properties, Error> {
 	if !wanted {
-		return ietf::Properties::default();
+		return Ok(ietf::Properties::default());
 	}
-	ietf::Properties {
+	let mut unknown = info.properties.as_deref().cloned().unwrap_or_default();
+	let block = !matches!(version, Version::Draft14 | Version::Draft15);
+	if block
+		&& unknown
+			.immutable
+			.is_some_and(|ingress| ingress != super::object::encoding(version))
+	{
+		return Err(Error::Unsupported);
+	}
+	// Across draft-19, forwarding 0x06 would give it a different meaning, as for object
+	// properties. A mutable one is dropped; a sealed one is refused.
+	if !unknown.values.is_empty() && unknown.delivery_timeout != super::object::has_delivery_timeout(version) {
+		if block && unknown.sealed.contains(&0x06) {
+			return Err(Error::Unsupported);
+		}
+		unknown.values.retain(|property| property.id != 0x06);
+	}
+	Ok(ietf::Properties {
 		max_cache_duration: info.max_age,
 		timescale: info.timescale,
 		priority: Some(super::priority::to_wire(info.priority)),
 		group_order: Some(GroupOrder::Descending),
-		// Advertised only where an upstream session carries the request back to the
-		// original publisher; a local track has nothing to answer it.
-		dynamic_groups: info.dynamic_groups,
-	}
+		// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
+		dynamic_groups: info.refresh.is_some(),
+		unknown,
+	})
 }
 
 /// The rendezvous cap is zero, but asking to wait still makes a missing publisher a timeout.
@@ -211,11 +230,6 @@ async fn read_fetch(
 			break;
 		}
 	}
-	// Retention giving up on the group ends its read cleanly, but the prefix is not the
-	// group: answering it would let the requester cache it as whole.
-	if group.latency_expired() {
-		return Err(Error::Old);
-	}
 	// A bounded range can reach the group's end without reading its terminal None, and a
 	// start past the end is already there.
 	let complete = !overshot
@@ -310,11 +324,10 @@ enum Advert {
 	/// Nothing: every route loops through the peer or us, or none is announced.
 	#[default]
 	None,
-	/// The namespace, with no routing information: the peer did not negotiate the MoQ
-	/// Cluster extension, so there is nowhere to put a path or a cost.
-	Plain,
-	/// The namespace, with the path it traversed and that path's accumulated cost.
-	Cluster(cluster::Advert),
+	/// The namespace, with the parameters of the extensions the peer negotiated: the path
+	/// it traversed and that path's accumulated cost (MoQ Cluster), and the instance it
+	/// serves (MoQ Epoch). Empty when the peer negotiated neither.
+	Some(ietf::AdvertParams),
 }
 
 impl Advert {
@@ -324,10 +337,10 @@ impl Advert {
 	}
 
 	/// The parameters to put on the wire, as the message structs carry them.
-	fn params(&self) -> Option<cluster::Advert> {
+	fn params(&self) -> ietf::AdvertParams {
 		match self {
-			Self::Cluster(advert) => Some(advert.clone()),
-			_ => None,
+			Self::Some(params) => params.clone(),
+			Self::None => Default::default(),
 		}
 	}
 }
@@ -449,10 +462,15 @@ struct Namespaces<S: crate::transport::poll::Session> {
 	woken: Arc<Woken>,
 	/// What we may advertise: our grant (MoQ Auth) and the ceiling on the peer.
 	permit: crate::auth::Permit,
+	/// The dispatcher-owned gate for a solicited namespace request.
+	gate: Option<crate::auth::Gate>,
 	/// The auth epoch last applied to `permit`.
 	epoch: u64,
 	/// Whether this discovery cursor includes hidden namespaces.
 	hidden: bool,
+	/// Whether the peer negotiated MoQ Epoch, so an advertisement names its route's
+	/// instance.
+	epochs: bool,
 }
 
 impl<S: crate::transport::poll::Session> Namespaces<S> {
@@ -466,8 +484,18 @@ impl<S: crate::transport::poll::Session> Namespaces<S> {
 			inflight: VecDeque::new(),
 			woken: Default::default(),
 			permit: Default::default(),
+			gate: None,
 			epoch: 0,
 			hidden: false,
+			epochs: false,
+		}
+	}
+
+	/// What the peer negotiated for an advertisement's parameters.
+	fn negotiated(&self) -> ietf::Negotiated {
+		ietf::Negotiated {
+			cluster: self.peer.negotiated(),
+			epoch: self.epochs,
 		}
 	}
 
@@ -504,9 +532,11 @@ impl Served {
 			// PUBLISH_DONE is the only place the subscriber learns why its renewal failed.
 			Self::UpdateFailed(err) if version == Version::Draft14 => Self::Track(Err(err.clone())).status(version),
 			Self::Track(Ok(())) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
-			Self::Track(Err(Error::Unauthorized | Error::Session(crate::SessionError::Unauthorized))) => {
-				(ietf::PublishDoneStatus::Unauthorized, "not granted")
-			}
+			Self::Track(Err(
+				Error::Unauthorized
+				| Error::Session(crate::SessionError::Unauthorized)
+				| Error::Stream(crate::StreamError::Unauthorized),
+			)) => (ietf::PublishDoneStatus::Unauthorized, "not granted"),
 			// PUBLISH_DONE registers no token expiry, and its EXPIRED means the subscription's
 			// own lifetime ran out, so an expired token is reported as no longer granted.
 			Self::Track(Err(Error::Expired | Error::Session(crate::SessionError::Expired))) => {
@@ -539,7 +569,7 @@ enum NamespaceEvent {
 
 /// What came back for an update in flight.
 enum Answer {
-	/// The peer's REQUEST_OK or REQUEST_ERROR.
+	/// The peer's REQUEST_OK or REQUEST_ERROR, or a draft-16 PUBLISH_NAMESPACE_CANCEL.
 	Message(super::request_stream::Framed),
 	/// The peer ended the request instead, a cancel from draft 17.
 	Ended,
@@ -616,6 +646,12 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	pub(super) fetches: crate::session::Slots,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,
+}
+
+/// Authorization selected by dispatch: a standalone path or a live parent subscription.
+enum FetchGate {
+	Standalone(crate::auth::Gate),
+	Joining { id: RequestId, auth: crate::auth::Handle },
 }
 
 struct Serve(Arc<AtomicUsize>);
@@ -751,32 +787,42 @@ where
 	///
 	/// The origin's announce cursor already filters routes through the peer
 	/// (control-plane split horizon); this only shapes what the wire can carry.
-	fn select(&self, route: &crate::origin::Route, peer: &cluster::Peer) -> Advert {
+	/// `epochs` says the peer negotiated MoQ Epoch, so the route's instance travels too.
+	fn select(&self, route: &crate::origin::Route, peer: &cluster::Peer, epochs: bool) -> Advert {
 		// A route that already passed through us is a reflection. The origin
 		// filters these on receive, so this is defensive.
 		if self.self_origin != crate::Hop::UNKNOWN && route.hops.contains(&self.self_origin) {
 			return Advert::None;
 		}
 
+		// Forwarded unchanged, and never invented for a route that arrived without one.
+		let epoch = route.epoch.clone().filter(|_| epochs);
 		if !peer.negotiated() {
-			return Advert::Plain;
+			return Advert::Some(ietf::AdvertParams { cluster: None, epoch });
 		}
 
 		let cost = route.cost.value();
 		// Our own Hop ID is always the last entry, so the peer reconstructs the full
 		// path. A chain with no room left is a loop in all but name.
 		match cluster::Advert::forward(&route.hops, cost, self.self_origin) {
-			Ok(advert) => Advert::Cluster(advert),
+			Ok(advert) => Advert::Some(ietf::AdvertParams {
+				cluster: Some(advert),
+				epoch,
+			}),
 			Err(_) => Advert::None,
 		}
 	}
 
 	/// Handle an incoming bidi stream dispatched by the session.
+	///
+	/// `epochs` says both sides negotiated MoQ Epoch: a request naming an instance on a
+	/// session that did not breaks the session.
 	pub fn handle_stream(
 		&self,
 		id: u64,
 		body: ietf::Body,
 		stream: Stream<S, Version>,
+		epochs: bool,
 	) -> Result<MaybeSendBox<'static, ()>, Error> {
 		let this = self.clone();
 		let mut data = body.decoder(this.version);
@@ -800,8 +846,16 @@ where
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
+				if msg.epoch.is_some() && !epochs {
+					return Err(Error::ProtocolViolation);
+				}
 				tracing::debug!(message = ?msg, "received subscribe");
-				let task = this.run_subscribe_stream(stream, msg);
+				let gate = crate::auth::Gate::new(
+					this.auth.clone(),
+					msg.track_namespace.to_owned(),
+					crate::auth::Direction::Publish,
+				);
+				let task = this.serve_subscribe_stream(stream, msg, gate);
 				async move {
 					let _serve = serve;
 					if let Err(err) = task.await {
@@ -824,10 +878,14 @@ where
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
+				if msg.epoch.is_some() && !epochs {
+					return Err(Error::ProtocolViolation);
+				}
 				tracing::debug!(message = ?msg, "received fetch");
+				let gate = this.fetch_gate(&msg);
 				async move {
 					let _serve = serve;
-					if let Err(err) = this.run_fetch_stream(stream, msg).await {
+					if let Err(err) = this.serve_fetch_stream(stream, msg, gate).await {
 						tracing::debug!(%err, "fetch stream error");
 					}
 				}
@@ -868,16 +926,21 @@ where
 					let request_id = msg.request_id;
 					return Ok(async move {
 						let reason = "SUBSCRIBE_NAMESPACE for PUBLISH is not supported";
-						if let Err(err) = this.reject_namespace_request(stream, Some(request_id), reason).await {
+						if let Err(err) = this.reject_namespace_request(stream, request_id, reason).await {
 							tracing::debug!(%err, "subscribe_namespace refusal failed");
 						}
 					}
 					.maybe_boxed());
 				}
 				tracing::debug!(message = ?msg, "received subscribe_namespace");
+				let gate = crate::auth::Gate::new(
+					this.auth.clone(),
+					msg.namespace.to_owned(),
+					crate::auth::Direction::Publish,
+				);
 				async move {
 					let mut session = this.session.clone();
-					match this.run_subscribe_namespace_stream(stream, msg).await {
+					match this.serve_subscribe_namespace_stream(stream, msg, gate).await {
 						// Such as a malformed answer to an advertisement this request solicited.
 						Err(err) if super::subscriber::is_protocol_violation(&err) => session.close(
 							super::error::to_session_code(&crate::SessionError::from(&err)),
@@ -890,15 +953,14 @@ where
 				.maybe_boxed()
 			}
 			// SUBSCRIBE_TRACKS asks for every track under a prefix via PUBLISH, which we
-			// never send. Read its prefix to recognize reserved namespaces; replies carry no
-			// Request ID, so there is nothing to decode before refusing.
+			// never send. Read its prefix to recognize reserved namespaces before refusing.
 			ietf::SUBSCRIBE_TRACKS_ID
 				if !matches!(
 					this.version,
 					Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
 				) =>
 			{
-				RequestId::decode(&mut data, this.version)?;
+				let request_id = RequestId::decode(&mut data, this.version)?;
 				let namespace = super::namespace::decode_namespace(&mut data)?;
 				if let Some(error) = super::namespace::refusal(&namespace, this.version) {
 					return Ok(async move {
@@ -910,7 +972,7 @@ where
 				}
 				async move {
 					let reason = "SUBSCRIBE_TRACKS is not supported";
-					if let Err(err) = this.reject_namespace_request(stream, None, reason).await {
+					if let Err(err) = this.reject_namespace_request(stream, request_id, reason).await {
 						tracing::debug!(%err, "subscribe_tracks refusal failed");
 					}
 				}
@@ -930,9 +992,17 @@ where
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
+				if msg.epoch.is_some() && !epochs {
+					return Err(Error::ProtocolViolation);
+				}
 				tracing::debug!(message = ?msg, "received track_status");
+				let gate = crate::auth::Gate::new(
+					this.auth.clone(),
+					msg.track_namespace.to_owned(),
+					crate::auth::Direction::Publish,
+				);
 				async move {
-					if let Err(err) = this.run_track_status_stream(stream, msg).await {
+					if let Err(err) = this.serve_track_status_stream(stream, msg, gate).await {
 						tracing::debug!(%err, "track_status stream error");
 					}
 				}
@@ -967,10 +1037,25 @@ where
 	}
 
 	/// Handle a SUBSCRIBE on its bidi stream.
+	#[cfg(test)]
 	fn run_subscribe_stream(
+		self,
+		stream: Stream<S, Version>,
+		msg: ietf::Subscribe<'_>,
+	) -> impl std::future::Future<Output = Result<(), Error>> {
+		let gate = crate::auth::Gate::new(
+			self.auth.clone(),
+			msg.track_namespace.to_owned(),
+			crate::auth::Direction::Publish,
+		);
+		self.serve_subscribe_stream(stream, msg, gate)
+	}
+
+	fn serve_subscribe_stream(
 		self,
 		mut stream: Stream<S, Version>,
 		msg: ietf::Subscribe<'_>,
+		gate: crate::auth::Gate,
 	) -> impl std::future::Future<Output = Result<(), Error>> {
 		// Register during dispatch, before either request task can be polled.
 		let join = (!Filter::is_draft20(self.version)).then(|| self.register_join(msg.request_id));
@@ -992,17 +1077,18 @@ where
 			// this request alone (MoQ request-token), even where the limit covers it. What the
 			// peer granted us bounds what we send either way, and never stands in for our
 			// authorization of it.
-			let path = msg.track_namespace.as_str();
 			let token = match &msg.authorization_token {
 				Some(token)
-					if self.auth.within_grant(crate::auth::Direction::Publish, path)
-						&& self.auth.token_decides(crate::auth::Direction::Publish) =>
+					if self
+						.auth
+						.within_grant(crate::auth::Direction::Publish, msg.track_namespace.as_str())
+						&& gate.token_decides() =>
 				{
 					Some(token.0.clone())
 				}
 				_ => None,
 			};
-			if token.is_none() && !self.auth.allows(crate::auth::Direction::Publish, path) {
+			if token.is_none() && !gate.allows() {
 				let err = Error::Unauthorized;
 				return self.reject_subscribe(stream, request_id, &err, "not granted").await;
 			}
@@ -1047,7 +1133,7 @@ where
 			// once the limit does too.
 			let (mut gate, request_grant) = match token {
 				Some(token) => {
-					let verdict = self.auth.verify_request(token, Some(slot.clone()));
+					let verdict = gate.verify(token, Some(slot.clone()));
 					// The subscriber cancelling or the session closing withdraws the token.
 					let mut session = self.session.clone();
 					let verified = kio::wait(|waiter| {
@@ -1072,14 +1158,7 @@ where
 						Some(slot.clone()),
 					);
 					match admitted {
-						Ok(grant) => (
-							crate::auth::Gate::granted(
-								self.auth.clone(),
-								msg.track_namespace.to_owned(),
-								crate::auth::Direction::Publish,
-							),
-							Some(grant),
-						),
+						Ok(grant) => (gate.named(), Some(grant)),
 						Err(refusal) => {
 							return self
 								.reject_subscribe(stream, request_id, &refusal.error, &refusal.reason)
@@ -1087,14 +1166,7 @@ where
 						}
 					}
 				}
-				None => (
-					crate::auth::Gate::new(
-						self.auth.clone(),
-						msg.track_namespace.to_owned(),
-						crate::auth::Direction::Publish,
-					),
-					None,
-				),
+				None => (gate, None),
 			};
 			let _slot = slot;
 
@@ -1103,6 +1175,9 @@ where
 			// releasing what it holds upstream, and only then is the peer told. `acked` holds the
 			// group stream count once SUBSCRIBE_OK is buffered, which decides how.
 			let mut acked: Option<Arc<AtomicU64>> = None;
+			// An instance never comes back, so a request pinned to a gone one is missing, not
+			// worth waiting for.
+			let rendezvous = msg.rendezvous && msg.epoch.is_none();
 			let subscribed = {
 				let serve = async {
 					// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
@@ -1111,10 +1186,11 @@ where
 					// We just received a subscribe for this exact namespace, so the peer must have
 					// already seen the announcement. `request_broadcast` resolves it immediately, or
 					// falls back to the route covering it (an `origin::Dynamic`), if any.
+					// Pinned to the instance it names, if any: another is refused, never served.
 					let broadcast = match self
 						.serving_origin()
 						.await
-						.request_broadcast(&msg.track_namespace, None)
+						.request_broadcast(&msg.track_namespace, msg.epoch.clone())
 						.await
 					{
 						Ok(broadcast) => broadcast,
@@ -1124,7 +1200,7 @@ where
 						Err(err) => {
 							return Ok(Subscribed::Refused(
 								err.to_string(),
-								rendezvous_error(err, msg.rendezvous, false),
+								rendezvous_error(err, rendezvous, false),
 							));
 						}
 					};
@@ -1134,16 +1210,30 @@ where
 						Err(err) => {
 							return Ok(Subscribed::Refused(
 								err.to_string(),
-								rendezvous_error(err, msg.rendezvous, true),
+								rendezvous_error(err, rendezvous, true),
 							));
 						}
 					};
 
 					let order = msg.group_order.to_order();
+					// A live SUBSCRIBE's NEW_GROUP_REQUEST asks nothing more: subscribing is itself
+					// a join, which the track's refresh ratio judges.
 					let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
-					// Set before subscribing, so a relay that has no upstream subscription yet
-					// carries it on the SUBSCRIBE it opens, as the draft requires.
-					subscription.new_group = msg.new_group.and_then(|value| NewGroup::new(value, None));
+					if let Some(max_age) = msg.max_age {
+						subscription.max_delay = Duration::from_millis(max_age);
+					}
+					// A range that resolves without the live edge has a fixed start, which is no
+					// join: bound the subscription before subscribing so the ratio never judges it.
+					// From the start of its group, so a relay's copy holds the group's head for
+					// its other readers, as a live join would; the resolved range trims below.
+					let fixed = subscribe_range(&msg, LiveEdge::default(), self.version);
+					if let Some(start) = fixed.start {
+						ServeRange {
+							start: Some(Location { object: 0, ..start }),
+							..fixed
+						}
+						.apply(&mut subscription);
+					}
 
 					// Subscribe before resolving the filter: on a routed broadcast the live edge only
 					// becomes readable once the subscription's demand attaches a route, so the edge
@@ -1154,7 +1244,7 @@ where
 						Err(err) => {
 							return Ok(Subscribed::Refused(
 								err.to_string(),
-								rendezvous_error(err, msg.rendezvous, true),
+								rendezvous_error(err, rendezvous, true),
 							));
 						}
 					};
@@ -1169,16 +1259,7 @@ where
 					// cover the group with no gap and no overlap.
 					let edge = live_edge(&cache);
 					let range = subscribe_range(&msg, edge, self.version);
-					subscription.start = range.start.map(|start| track::Position {
-						group: start.group,
-						frame: start.object,
-					});
-					subscription.end = range.end.and_then(|end| match end.object {
-						Some(object) => track::Position::after(end.group, object),
-						None => track::Position::after_group(end.group),
-					});
-					// The live edge is only known once subscribed.
-					subscription.new_group = msg.new_group.and_then(|value| NewGroup::new(value, edge.latest));
+					range.apply(&mut subscription);
 					let _ = track.update(subscription);
 					// A Timestamp goes out wherever the draft can declare its units and the track
 					// has them. A subscriber that opted out of this SUBSCRIBE_OK's properties learns
@@ -1189,6 +1270,15 @@ where
 						.info()
 						.timescale
 						.filter(|_| ietf::Properties::sends_timescale(self.version));
+					let mut properties = match track_properties(track.info(), msg.properties_wanted, self.version) {
+						Ok(properties) => properties,
+						Err(err) => return Ok(Subscribed::Refused(err.to_string(), err)),
+					};
+					// Through draft-15 this restates the order the subscription is served in.
+					// Later drafts carry the publisher's default instead.
+					if matches!(self.version, Version::Draft14 | Version::Draft15) {
+						properties.group_order = Some(order.into());
+					}
 
 					// Serve the track while reading updates; only abrupt closure cancels on
 					// draft-19+. A fill or joining FETCH ranks in the same subscription as the group
@@ -1196,6 +1286,12 @@ where
 					let mut track_serve =
 						TrackServe::new(self.session.clone(), track, request_id, self.version, range, timescale)
 							.ranked(self.priority.clone());
+					// A fixed start is no join, so its NEW_GROUP_REQUEST asks as an update's would.
+					if fixed.start.is_some()
+						&& let Some(value) = msg.new_group
+					{
+						track_serve.request_new_group(value);
+					}
 
 					// Draft-20 replaced joining FETCH with subscription fills. Older drafts save
 					// the same boundary used by the subscription so the two streams never overlap.
@@ -1238,15 +1334,7 @@ where
 							track_alias: request_id.0,
 							// The subscription floor and FETCH/FILL cap use this same snapshot.
 							largest: edge.largest,
-							properties: {
-								let mut properties = track_properties(track_serve.track.info(), msg.properties_wanted);
-								// Through draft-15 this restates the order the subscription is served
-								// in. Later drafts carry the publisher's default instead.
-								if matches!(self.version, Version::Draft14 | Version::Draft15) {
-									properties.group_order = Some(order.into());
-								}
-								properties
-							},
+							properties,
 						})
 						.await?;
 
@@ -1605,7 +1693,7 @@ where
 				))
 			}
 			// The draft forbids it on a track that did not advertise DYNAMIC_GROUPS.
-			None if update.new_group.is_some() && !serve.track.info().dynamic_groups => Some((
+			None if update.new_group.is_some() && serve.track.info().refresh.is_none() => Some((
 				"NEW_GROUP_REQUEST on a track without DYNAMIC_GROUPS",
 				Error::Unsupported,
 			)),
@@ -1625,8 +1713,13 @@ where
 				.set_priority(super::priority::from_wire(priority))
 				.map_err(failed)?;
 		}
+		if let Some(max_age) = update.max_age {
+			let mut subscription = serve.track.subscription();
+			subscription.max_delay = Duration::from_millis(max_age);
+			serve.track.update(subscription).map_err(failed)?;
+		}
 		if let Some(value) = update.new_group {
-			serve.request_new_group(value).map_err(failed)?;
+			serve.request_new_group(value);
 		}
 		if let (Some(token), Some(grant)) = (update.authorization_token, request_grant) {
 			renewal.verify(grant.verify_renewal(&self.auth, token.0), update.request_id);
@@ -1687,43 +1780,8 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::Subscribe, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				writer.buffer_varint(ietf::SubscribeError::ID)?;
-				writer
-					.encode(&ietf::SubscribeError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				writer.buffer_varint(ietf::RequestError::ID)?;
-				writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				writer.buffer_varint(ietf::RequestError::ID)?;
-				writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
-		Ok(())
+		super::request_stream::write_error(writer, request::Kind::Subscribe, request_id, err, reason, self.version)
+			.await
 	}
 
 	/// Serve a draft-20 fill on its own fetch stream: the requested range, read from the
@@ -1756,8 +1814,10 @@ where
 			FillServe::Unsupported => None,
 		};
 
+		let mut rank = rank;
+		let options = rank.as_mut().map(Rank::options).unwrap_or_default();
 		let mut session = self.session.clone();
-		let stream = match session.open_uni().await {
+		let stream = match session.open_uni(options).await {
 			Ok(stream) => stream,
 			Err(err) => {
 				tracing::debug!(err = %Error::from_transport(err), fill = %request_id, "fill stream failed to open");
@@ -2072,7 +2132,35 @@ where
 	/// The answer is buffered before replying: FETCH_OK names where the response ends,
 	/// which a range running past the track only learns by reading it, and a refusal can
 	/// still replace it until then.
-	async fn run_fetch_stream(mut self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
+	fn fetch_gate(&self, msg: &ietf::Fetch<'_>) -> FetchGate {
+		match &msg.fetch_type {
+			FetchType::Standalone { namespace, .. } | FetchType::Filtered { namespace, .. } => FetchGate::Standalone(
+				crate::auth::Gate::new(self.auth.clone(), namespace.to_owned(), crate::auth::Direction::Publish),
+			),
+			FetchType::RelativeJoining {
+				subscriber_request_id, ..
+			}
+			| FetchType::AbsoluteJoining {
+				subscriber_request_id, ..
+			} => FetchGate::Joining {
+				id: *subscriber_request_id,
+				auth: self.auth.clone(),
+			},
+		}
+	}
+
+	#[cfg(test)]
+	async fn run_fetch_stream(self, stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
+		let gate = self.fetch_gate(&msg);
+		self.serve_fetch_stream(stream, msg, gate).await
+	}
+
+	async fn serve_fetch_stream(
+		mut self,
+		mut stream: Stream<S, Version>,
+		msg: ietf::Fetch<'_>,
+		admission: FetchGate,
+	) -> Result<(), Error> {
 		let _slot = match self.fetches.acquire() {
 			Ok(slot) => slot,
 			Err(err) => {
@@ -2118,6 +2206,9 @@ where
 				)
 				.await;
 		}
+
+		// Pinned to the instance it names, if any: another is refused, never served.
+		let epoch = msg.epoch.clone();
 
 		// Draft-20's LOCATION_FILTER is answered as the standalone range it spells.
 		let fetch_type = match msg.fetch_type {
@@ -2173,13 +2264,14 @@ where
 				start,
 				end,
 			} => {
-				if !self.auth.allows(crate::auth::Direction::Publish, namespace.as_str()) {
+				let FetchGate::Standalone(mut gate) = admission else {
+					return Err(Error::Unauthorized);
+				};
+				if !gate.allows() {
 					return self
 						.reject_fetch(stream, msg.request_id, &Error::Unauthorized, "not granted")
 						.await;
 				}
-				let gate =
-					crate::auth::Gate::new(self.auth.clone(), namespace.to_owned(), crate::auth::Direction::Publish);
 
 				// An End Object of 0 asks for the whole End Group.
 				let end = match end.object {
@@ -2194,7 +2286,10 @@ where
 
 				// The peer must have seen the announcement to name this namespace, so this
 				// resolves like a SUBSCRIBE does.
-				let broadcast = match self.serving_origin().await.request_broadcast(&namespace, None).await {
+				let broadcast = match gate
+					.guard(async { self.serving_origin().await.request_broadcast(&namespace, epoch).await })
+					.await
+				{
 					Ok(broadcast) => broadcast,
 					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 				};
@@ -2221,19 +2316,21 @@ where
 			| FetchType::AbsoluteJoining {
 				subscriber_request_id, ..
 			} => {
+				let FetchGate::Joining { id, auth } = admission else {
+					return Err(Error::Unauthorized);
+				};
+				debug_assert_eq!(id, subscriber_request_id);
 				let (end, cache, namespace, ranking, token) =
 					match self.joined(&mut stream, subscriber_request_id).await? {
 						Ok(joined) => joined,
 						Err((err, reason)) => return self.reject_fetch(stream, msg.request_id, &err, reason).await,
 					};
-				// The cache outlives the subscription, so the fetch holds its own gate rather
-				// than trusting the subscription's to stop it. One the subscription's request
-				// token authorized is held to the peer's grant alone, as the subscription is.
-				let gate = match token {
-					true => crate::auth::Gate::granted(self.auth.clone(), namespace, crate::auth::Direction::Publish),
-					false => crate::auth::Gate::new(self.auth.clone(), namespace, crate::auth::Direction::Publish),
-				};
-				lapses_with = token.then_some(subscriber_request_id);
+				// The cache outlives the subscription, so the fetch holds its own gate and ends
+				// with the subscription rather than trusting the cache. One the subscription's
+				// request token authorized is held to the peer's grant alone, as the subscription is.
+				let gate = crate::auth::Gate::new(auth, namespace, crate::auth::Direction::Publish);
+				let gate = if token { gate.named() } else { gate };
+				lapses_with = Some(subscriber_request_id);
 				let start = match fetch_type {
 					FetchType::RelativeJoining { group_offset, .. } => end.group.saturating_sub(group_offset),
 					FetchType::AbsoluteJoining { group_id, .. } if group_id <= end.group => group_id,
@@ -2337,6 +2434,10 @@ where
 				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
 			}
 		}
+		let properties = match track_properties(&group.info, msg.properties_wanted, self.version) {
+			Ok(properties) => properties,
+			Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
+		};
 		let draft20 = Filter::is_draft20(self.version);
 		let end_of_track = !joined && group.complete && track.final_sequence() == group.sequence.checked_add(1);
 		// Draft-20 caps the response at Largest Object, and refuses a start past it (section
@@ -2435,12 +2536,17 @@ where
 					},
 					end_of_track,
 					end_location,
-					properties: track_properties(&group.info, msg.properties_wanted),
+					properties,
 				})
 				.await?;
 
-			let uni = self.session.open_uni().await.map_err(Error::from_transport)?;
-			let mut writer = Writer::new(Ranked::new(uni, Some(ranking.rank(start))), self.version);
+			let mut rank = ranking.rank(start);
+			let uni = self
+				.session
+				.open_uni(rank.options())
+				.await
+				.map_err(Error::from_transport)?;
+			let mut writer = Writer::new(Ranked::new(uni, Some(rank)), self.version);
 			writer.varint(FetchHeader::TYPE).await?;
 			writer
 				.encode(&FetchHeader {
@@ -2448,7 +2554,9 @@ where
 				})
 				.await?;
 			let mut prior = None;
+			let mut budget = kio::coop::Budget::new(32);
 			for (ordinal, frame) in (group.first..).zip(group.frames) {
+				kio::wait(|waiter| budget.poll_yield(waiter)).await;
 				let object = frame.fields.as_ref().map_or(ordinal, |fields| fields.id);
 				let position = fetch_prior(self.version, prior, object)?;
 				prior = Some(object);
@@ -2598,39 +2706,48 @@ where
 	/// The track resolves as it would for a SUBSCRIBE, so a relay asks its upstream for a
 	/// track it does not hold yet and the answer waits on that. The Largest Location is
 	/// whatever the cache holds now: nothing waits for a fresher one.
-	async fn run_track_status_stream(
+	#[cfg(test)]
+	fn run_track_status_stream(
+		self,
+		stream: Stream<S, Version>,
+		msg: ietf::TrackStatus<'_>,
+	) -> impl std::future::Future<Output = Result<(), Error>> {
+		let gate = crate::auth::Gate::new(
+			self.auth.clone(),
+			msg.track_namespace.to_owned(),
+			crate::auth::Direction::Publish,
+		);
+		self.serve_track_status_stream(stream, msg, gate)
+	}
+
+	async fn serve_track_status_stream(
 		self,
 		mut stream: Stream<S, Version>,
 		msg: ietf::TrackStatus<'_>,
+		mut gate: crate::auth::Gate,
 	) -> Result<(), Error> {
 		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
 			return super::request_stream::reject(stream, error).await;
 		}
 		let request_id = msg.request_id;
 
-		// Answer only for what our grant lets us publish (MoQ Auth): checked before the
-		// track resolves, and held until the answer.
-		if !self
-			.auth
-			.allows(crate::auth::Direction::Publish, msg.track_namespace.as_str())
-		{
+		if !gate.allows() {
 			return self.reject_track_status(stream, request_id, &Error::Unauthorized).await;
 		}
-		let mut gate = crate::auth::Gate::new(
-			self.auth.clone(),
-			msg.track_namespace.to_owned(),
-			crate::auth::Direction::Publish,
-		);
-
-		let broadcast = match self
-			.serving_origin()
-			.await
-			.request_broadcast(&msg.track_namespace, None)
+		let broadcast = match gate
+			.guard(async {
+				// Pinned to the instance it names, if any: another is refused, never served.
+				self.serving_origin()
+					.await
+					.request_broadcast(&msg.track_namespace, msg.epoch.clone())
+					.await
+			})
 			.await
 		{
 			Ok(broadcast) => broadcast,
 			Err(err) => return self.reject_track_status(stream, request_id, &err).await,
 		};
+
 		let track = match broadcast.track(&msg.track_name) {
 			Ok(track) => track,
 			Err(err) => return self.reject_track_status(stream, request_id, &err).await,
@@ -2652,8 +2769,8 @@ where
 			})
 			.await
 		};
-		let info = match info {
-			Some(Ok(info)) => info,
+		let properties = match info.map(|info| track_properties(&info?, msg.properties_wanted, self.version)) {
+			Some(Ok(properties)) => properties,
 			Some(Err(err)) => return self.reject_track_status(stream, request_id, &err).await,
 			None => return Ok(()),
 		};
@@ -2667,7 +2784,7 @@ where
 					_ => None,
 				},
 				largest: live_edge(&track).largest,
-				properties: track_properties(&info, msg.properties_wanted),
+				properties,
 			};
 			stream.writer.varint(ietf::TrackStatusOk::id(self.version)).await?;
 			stream.writer.encode(&ok).await?;
@@ -2700,53 +2817,23 @@ where
 		request_id: RequestId,
 		err: &Error,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::TrackStatus, self.version);
-		let reason_phrase = err.to_string().into();
-		if self.version == Version::Draft14 {
-			// TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body.
-			stream.writer.varint(ietf::TRACK_STATUS_ERROR_14).await?;
-			stream
-				.writer
-				.encode(&ietf::SubscribeError {
-					request_id,
-					error_code,
-					reason_phrase,
-				})
-				.await?;
-		} else {
-			stream.writer.varint(ietf::RequestError::ID).await?;
-			stream
-				.writer
-				.encode(&ietf::RequestError {
-					request_id: matches!(self.version, Version::Draft15 | Version::Draft16).then_some(request_id),
-					error_code,
-					reason_phrase,
-					retry_interval: 0,
-				})
-				.await?;
-		}
+		let (kind, reason) = (request::Kind::TrackStatus, err.to_string());
+		super::request_stream::write_error(&mut stream.writer, kind, request_id, err, &reason, self.version).await?;
 		let _ = stream.writer.close().await;
 		Ok(())
 	}
 
 	/// Refuse a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS that asks for PUBLISH, which we
-	/// never send. Only draft-16 replies carry the Request ID; draft-17+ replies never do.
+	/// never send. Both exist only from draft-16, so the reply is always REQUEST_ERROR.
 	async fn reject_namespace_request(
 		&self,
 		mut stream: Stream<S, Version>,
-		request_id: Option<RequestId>,
+		request_id: RequestId,
 		reason: &str,
 	) -> Result<(), Error> {
-		stream.writer.varint(ietf::RequestError::ID).await?;
-		stream
-			.writer
-			.encode(&ietf::RequestError {
-				request_id: request_id.filter(|_| self.version == Version::Draft16),
-				error_code: request::to_code(&Error::Unsupported, request::Kind::SubscribeNamespace, self.version),
-				reason_phrase: reason.into(),
-				retry_interval: 0,
-			})
-			.await?;
+		let kind = request::Kind::SubscribeNamespace;
+		let err = &Error::Unsupported;
+		super::request_stream::write_error(&mut stream.writer, kind, request_id, err, reason, self.version).await?;
 		let _ = stream.writer.close().await;
 		Ok(())
 	}
@@ -2760,56 +2847,9 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		self.write_fetch_error(&mut stream.writer, request_id, err, reason)
-			.await?;
-
+		let kind = request::Kind::Fetch;
+		super::request_stream::write_error(&mut stream.writer, kind, request_id, err, reason, self.version).await?;
 		let _ = stream.writer.close().await;
-		Ok(())
-	}
-
-	async fn write_fetch_error(
-		&self,
-		writer: &mut Writer<S::SendStream, Version>,
-		request_id: RequestId,
-		err: &Error,
-		reason: &str,
-	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::Fetch, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				writer.varint(ietf::FetchError::ID).await?;
-				writer
-					.encode(&ietf::FetchError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				writer.varint(ietf::RequestError::ID).await?;
-				writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				writer.varint(ietf::RequestError::ID).await?;
-				writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
 		Ok(())
 	}
 
@@ -2831,6 +2871,7 @@ where
 		let Some((advert, auth)) = self.offer(ns, suffix, path) else {
 			return Ok(());
 		};
+		let negotiated = ns.negotiated();
 		let Namespaces {
 			target,
 			watched,
@@ -2847,13 +2888,22 @@ where
 		let request = requests.get_mut(suffix);
 		let held_auth = request.as_ref().and_then(|request| request.auth.clone());
 		let unchanged = advert == watch.sent && auth == held_auth;
+		// The epoch names the advertisement's instance for as long as it stands, so an
+		// update never changes it (MoQ Epoch). One instance named by an epoch is replaced
+		// by another in place, the new advertised before the old is withdrawn, so the peer
+		// never sees the namespace absent. Gaining or losing an epoch withdraws and
+		// advertises afresh.
+		let (held_epoch, epoch) = (watch.sent.params().epoch, advert.params().epoch);
+		let renamed = wanted && held && held_epoch != epoch;
+		let replaced = renamed && held_epoch.is_some() && epoch.is_some();
 		// moq-transport renames a request's auth with REQUEST_UPDATE, but cannot name one on
-		// a request that had none, nor drop one, and before draft-17 cannot update a
+		// a request that had none, nor drop one, and before draft-16 cannot update a
 		// namespace at all: those withdraw the request and make it again.
-		let restart = held_auth != auth
-			&& (held_auth.is_none()
-				|| auth.is_none()
-				|| matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16));
+		let restart = renamed
+			|| held_auth != auth
+				&& (held_auth.is_none()
+					|| auth.is_none()
+					|| matches!(self.version, Version::Draft14 | Version::Draft15));
 
 		// An update already waiting or in flight carries whatever is current once it goes
 		// out, and its answer brings the loop back here for anything after that.
@@ -2898,8 +2948,21 @@ where
 						}
 						self.withdraw_namespace(target, requests, suffix.clone()).await?;
 					}
+					(true, Some(_)) if replaced => {
+						// Separate streams are unordered, so the old one goes only once the
+						// peer answered the new one, refused or not: it serves another
+						// instance either way.
+						tracing::debug!(broadcast = %absolute, "publish_namespace for another epoch");
+						let old = requests.remove(suffix);
+						refused = self
+							.advertise_namespace(requests, path, suffix.clone(), advert.params(), auth)
+							.await?;
+						if let Some(old) = old {
+							self.end_request(old).await;
+						}
+					}
 					(true, Some(_)) => {
-						tracing::debug!(broadcast = %absolute, "publish_namespace restart for its auth");
+						tracing::debug!(broadcast = %absolute, renamed, "publish_namespace restart");
 						self.withdraw_namespace(target, requests, suffix.clone()).await?;
 						refused = self
 							.advertise_namespace(requests, path, suffix.clone(), advert.params(), auth)
@@ -2923,13 +2986,24 @@ where
 			Target::Inline(stream) => {
 				match (advert.wanted(), held) {
 					(true, _) => {
+						// A repeat under another epoch replaces the instance in place.
+						if renamed && !replaced {
+							tracing::debug!(broadcast = %absolute, "namespace_done for an epoch gained or lost");
+							stream.writer.varint(ietf::NamespaceDone::ID).await?;
+							stream
+								.writer
+								.encode(&ietf::NamespaceDone {
+									suffix: suffix.as_path(),
+								})
+								.await?;
+						}
 						tracing::debug!(broadcast = %absolute, "namespace");
 						stream.writer.varint(ietf::Namespace::ID).await?;
 						stream
 							.writer
 							.encode(&ietf::Namespace {
 								suffix: suffix.as_path(),
-								cluster: advert.params(),
+								params: negotiated.extended().then(|| advert.params()),
 							})
 							.await?;
 					}
@@ -2970,7 +3044,7 @@ where
 		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
 		path: &crate::PathOwned,
 		suffix: crate::PathOwned,
-		cluster: Option<cluster::Advert>,
+		params: ietf::AdvertParams,
 		auth: Option<crate::auth::Auth>,
 	) -> Result<Refused, Error> {
 		let request_id = self.control.next_request_id(&self.runtime).await?;
@@ -2990,7 +3064,7 @@ where
 			.encode(&ietf::PublishNamespace {
 				request_id,
 				track_namespace: path.as_path(),
-				cluster,
+				params,
 				authorization_token: auth.as_ref().and_then(|auth| self.request_token(auth)),
 			})
 			.await?;
@@ -3064,7 +3138,7 @@ where
 	) -> Option<(Advert, Option<crate::auth::Auth>)> {
 		let watch = ns.watched.get(suffix)?;
 		let advert = match ns.permitted(path) {
-			true => self.select(&watch.route, &ns.peer),
+			true => self.select(&watch.route, &ns.peer, ns.epochs),
 			false => Advert::None,
 		};
 		let auth = match (&ns.target, advert.wanted()) {
@@ -3134,11 +3208,11 @@ where
 			return Ok(());
 		};
 		request.queued = false;
-		let mut update = match (advert.params(), watch.sent.params()) {
+		let mut update = match (advert.params().cluster, watch.sent.params().cluster) {
 			(Some(next), Some(held)) => ietf::PublishNamespaceUpdate::between(request_id, &held, &next),
 			_ => ietf::PublishNamespaceUpdate {
 				request_id,
-				namespace_request_id: None,
+				namespace_request_id: (self.version == Version::Draft16).then_some(request.request_id),
 				hops: None,
 				cost: None,
 				authorization_token: None,
@@ -3252,8 +3326,18 @@ where
 		let refused = match answer {
 			Answer::Late => {
 				tracing::debug!(broadcast = %absolute, "no answer to the update");
-				// Abrupt: a peer that never answers is not owed the FIN handshake.
-				ns.requests.remove(&suffix);
+				match self.version {
+					// Dropping a request riding the control stream tells the peer nothing, so
+					// it would hold the namespace beside the one advertised next.
+					Version::Draft16 => {
+						self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
+							.await?
+					}
+					// Abrupt: a peer that never answers is not owed the FIN handshake.
+					_ => {
+						ns.requests.remove(&suffix);
+					}
+				}
 				Refused::No
 			}
 			Answer::Ended => {
@@ -3283,10 +3367,28 @@ where
 					ietf::RequestError::ID => {
 						let msg: ietf::RequestError = body.message(self.version)?;
 						tracing::warn!(message = ?msg, "publish_namespace update error");
-						// The peer closed its side; closing ours completes the withdrawal.
-						self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
-							.await?;
+						match self.version {
+							// The peer follows its refusal with PUBLISH_NAMESPACE_CANCEL, and draft
+							// 16 sends no PUBLISH_NAMESPACE_DONE after a cancel.
+							Version::Draft16 => {
+								ns.requests.remove(&suffix);
+							}
+							// The peer closed its side; closing ours completes the withdrawal.
+							_ => {
+								self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
+									.await?
+							}
+						}
 						self.refusal(msg.retry_interval)
+					}
+					// Draft-16 carries its cancel as a message, which can beat the answer.
+					ietf::PublishNamespaceCancel::ID if self.version == Version::Draft16 => {
+						let msg: ietf::PublishNamespaceCancel = body.message(self.version)?;
+						tracing::debug!(broadcast = %absolute, message = ?msg, "update cancelled");
+						// The peer already let it go, and draft 16 sends no
+						// PUBLISH_NAMESPACE_DONE after a cancel.
+						ns.requests.remove(&suffix);
+						Refused::No
 					}
 					_ => return Err(Error::UnexpectedMessage),
 				}
@@ -3374,28 +3476,8 @@ where
 	) -> Result<(), Error> {
 		match target {
 			Target::Requests(_) => {
-				if let Some(mut request) = requests.remove(&suffix) {
-					// Draft-17+ withdraws by cancelling the request in both directions; a FIN
-					// is only allowed to end SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS.
-					if !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-						request.stream.reader.abort(&Error::Cancel);
-						request.stream.writer.abort(&Error::Cancel);
-						return Ok(());
-					}
-
-					// Best effort: the peer may already be gone.
-					let _ = request
-						.stream
-						.writer
-						.encode_message(&ietf::PublishNamespaceDone {
-							track_namespace: request.path.as_path(),
-							request_id: request.request_id,
-						})
-						.await;
-
-					// The withdrawal rides this request's own stream, which drops with it, so
-					// it needs the acknowledgement before the drop-time reset can discard it.
-					let _ = request.stream.writer.close().await;
+				if let Some(request) = requests.remove(&suffix) {
+					self.end_request(request).await;
 				}
 			}
 			Target::Inline(stream) => {
@@ -3409,6 +3491,30 @@ where
 			}
 		}
 		Ok(())
+	}
+
+	/// Withdraw one PUBLISH_NAMESPACE request, best effort: the peer may already be gone.
+	async fn end_request(&self, mut request: NamespaceRequest<S>) {
+		// Draft-17+ withdraws by cancelling the request in both directions; a FIN is only
+		// allowed to end SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS.
+		if !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+			request.stream.reader.abort(&Error::Cancel);
+			request.stream.writer.abort(&Error::Cancel);
+			return;
+		}
+
+		let _ = request
+			.stream
+			.writer
+			.encode_message(&ietf::PublishNamespaceDone {
+				track_namespace: request.path.as_path(),
+				request_id: request.request_id,
+			})
+			.await;
+
+		// The withdrawal rides this request's own stream, which drops with it, so it needs
+		// the acknowledgement before the drop-time reset can discard it.
+		let _ = request.stream.writer.close().await;
 	}
 
 	/// Close out every open PUBLISH_NAMESPACE request. A no-op for a loop whose entries
@@ -3432,7 +3538,7 @@ where
 	/// peer that would rather ask says so with the MoQ Solicit extension
 	/// ([`solicit`](super::solicit)),
 	/// and then this loop does nothing.
-	/// On draft-16 and later [`Self::run_subscribe_namespace_stream`] also carries every
+	/// On draft-16 and later [`Self::serve_subscribe_namespace_stream`] also carries every
 	/// match, so a peer that did not ask hears each namespace both ways. A NAMESPACE is
 	/// discovery only, not a second route.
 	pub async fn run_publish_namespaces(self) -> Result<(), Error> {
@@ -3450,7 +3556,8 @@ where
 			.excluding(&peer)
 			.discovery(!self.peer_setup.get().await.hidden || self.origin.includes_hidden());
 
-		let ns = Namespaces::new(peer, Target::Requests(None));
+		let mut ns = Namespaces::new(peer, Target::Requests(None));
+		ns.epochs = self.peer_setup.get().await.epoch;
 		self.run_namespaces(origin.announced(), crate::Path::empty().to_owned(), ns, Vec::new())
 			.await
 	}
@@ -3463,10 +3570,25 @@ where
 	/// this stream, whatever the peer's SETUP said. Draft-14 and 15 predate that
 	/// message and still answer with PUBLISH_NAMESPACE only for what
 	/// [`Self::run_publish_namespaces`] does not already say.
+	#[cfg(test)]
 	async fn run_subscribe_namespace_stream(
+		self,
+		stream: Stream<S, Version>,
+		msg: ietf::SubscribeNamespace<'_>,
+	) -> Result<(), Error> {
+		let gate = crate::auth::Gate::new(
+			self.auth.clone(),
+			msg.namespace.to_owned(),
+			crate::auth::Direction::Publish,
+		);
+		self.serve_subscribe_namespace_stream(stream, msg, gate).await
+	}
+
+	async fn serve_subscribe_namespace_stream(
 		self,
 		mut stream: Stream<S, Version>,
 		msg: ietf::SubscribeNamespace<'_>,
+		gate: crate::auth::Gate,
 	) -> Result<(), Error> {
 		if let Some(error) = super::namespace::refusal(&msg.namespace, self.version) {
 			return super::request_stream::reject(stream, error).await;
@@ -3528,14 +3650,14 @@ where
 		let (initial, active) = match declared.active_count {
 			true => {
 				if declared.auth {
-					kio::wait(|waiter| self.auth.poll_setup_answered(waiter)).await;
+					kio::wait(|waiter| gate.poll_setup_answered(waiter)).await;
 				}
-				let (permit, _) = self.permit_now();
+				let (permit, _) = self.permit_now(Some(&gate));
 				let initial = Self::snapshot(&mut announced);
 				let count = initial
 					.iter()
 					.filter(|update| permit.matches(prefix.join(&update.prefix).as_str()))
-					.filter(|update| self.select(&update.route, &peer).wanted())
+					.filter(|update| self.select(&update.route, &peer, declared.epoch).wanted())
 					.count();
 				(initial, Some(count as u64))
 			}
@@ -3583,17 +3705,22 @@ where
 		};
 
 		let mut ns = Namespaces::new(peer, target);
+		ns.gate = Some(gate);
 		ns.hidden = !declared.hidden || msg.hidden || self.origin.includes_hidden();
+		ns.epochs = declared.epoch;
 		self.run_namespaces(announced, prefix, ns, initial).await
 	}
 
 	/// Our publish permit as it stands now, with the auth epoch it was read at.
-	fn permit_now(&self) -> (crate::auth::Permit, u64) {
+	fn permit_now(&self, gate: Option<&crate::auth::Gate>) -> (crate::auth::Permit, u64) {
 		let mut epoch = 0;
-		match self
-			.auth
-			.poll_permit(crate::auth::Direction::Publish, &mut epoch, &kio::Waiter::noop())
-		{
+		let permit = match gate {
+			Some(gate) => gate.poll_permit(&mut epoch, &kio::Waiter::noop()),
+			None => self
+				.auth
+				.poll_permit(crate::auth::Direction::Publish, &mut epoch, &kio::Waiter::noop()),
+		};
+		match permit {
 			Poll::Ready(permit) => (permit, epoch),
 			Poll::Pending => (Default::default(), 0),
 		}
@@ -3644,7 +3771,7 @@ where
 		if self.peer_setup.get().await.auth {
 			kio::wait(|waiter| self.auth.poll_setup_answered(waiter)).await;
 		}
-		(ns.permit, ns.epoch) = self.permit_now();
+		(ns.permit, ns.epoch) = self.permit_now(ns.gate.as_ref());
 		for update in initial {
 			self.apply_update(&mut ns, &prefix, update, true).await?;
 		}
@@ -3681,6 +3808,7 @@ where
 					inflight,
 					woken,
 					updates,
+					gate,
 					..
 				} = &mut ns;
 				kio::wait(|waiter| {
@@ -3689,7 +3817,11 @@ where
 					}
 					// A grant change applies before the next update, so a namespace it no
 					// longer covers is withdrawn rather than re-sent.
-					if let Poll::Ready(permit) = self.auth.poll_permit(crate::auth::Direction::Publish, epoch, waiter) {
+					let permit = match gate {
+						Some(gate) => gate.poll_permit(epoch, waiter),
+						None => self.auth.poll_permit(crate::auth::Direction::Publish, epoch, waiter),
+					};
+					if let Poll::Ready(permit) = permit {
 						return Poll::Ready(NamespaceEvent::Regrant(permit));
 					}
 					let mut cx = waiter.context();
@@ -3842,8 +3974,10 @@ where
 				}
 				NamespaceEvent::Update(Some((update, active, restart))) => {
 					// moq-transport has no restart: the peer sees the namespace end and start
-					// again, and resubscribes.
-					if restart {
+					// again, and resubscribes. One that tells instances apart (MoQ Epoch) takes
+					// another epoch in place instead, which `sync_namespace` makes before it
+					// breaks the old.
+					if restart && !Self::replaces(&ns, &update) {
 						self.apply_update(&mut ns, &prefix, update.clone(), false).await?;
 					}
 					self.apply_update(&mut ns, &prefix, update, active).await?;
@@ -3855,6 +3989,16 @@ where
 		self.withdraw_requests(&mut ns.target, &mut ns.requests).await;
 
 		res
+	}
+
+	/// Whether a restart onto `update` replaces one instance the peer holds by epoch with
+	/// another, rather than ending the advertisement.
+	fn replaces(ns: &Namespaces<S>, update: &crate::announce::Announce) -> bool {
+		let held = ns
+			.watched
+			.get(&update.prefix)
+			.and_then(|watch| watch.sent.params().epoch);
+		ns.epochs && held.is_some() && update.route.epoch.is_some() && held != update.route.epoch
 	}
 
 	/// Reconcile what the peer holds with one route (un)announce.
@@ -3940,7 +4084,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		match range.start {
 			Some(start) => track.start_at(start.group),
 			None => {
-				if let Some(latest) = track.latest() {
+				if let Some(latest) = track.latest_sequence() {
 					track.start_at(latest);
 				}
 			}
@@ -4003,17 +4147,14 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		Ok(())
 	}
 
-	/// Hold the subscriber's NEW_GROUP_REQUEST until a group answers it; the upstream
-	/// session decides whether it goes further. One a held group answers asks nothing.
-	fn request_new_group(&mut self, value: u64) -> Result<(), Error> {
-		let Some(request) = NewGroup::new(value, self.track.latest()) else {
-			return Ok(());
-		};
-		let mut subscription = self.track.subscription();
-		// Merged like requests from different subscribers, so a later, weaker request does
-		// not drop a stronger one still held.
-		subscription.new_group = subscription.new_group.max(Some(request));
-		self.track.update(subscription)
+	/// The subscriber's NEW_GROUP_REQUEST counts as a join, judged by the track's refresh
+	/// ratio rather than forwarded as is: every hop's cache holds the same group. One
+	/// naming a group already held asks nothing, since that group is on its way.
+	fn request_new_group(&self, value: u64) {
+		if value != 0 && self.track.latest_sequence().is_some_and(|latest| value <= latest) {
+			return;
+		}
+		self.track.join();
 	}
 
 	/// Group streams opened so far.
@@ -4044,17 +4185,16 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// Send the original terminal on a separate stream when its group already sent FIN,
 	/// ranked as the group it ends.
 	async fn write_end_of_track(&mut self, end: track::Position) -> Result<(), Error> {
-		let stream = std::future::poll_fn(|cx| self.session.poll_open_uni(cx))
+		let mut rank = self.ranking.rank(Location {
+			group: end.group,
+			object: end.frame,
+		});
+		let options = rank.options();
+		let stream = std::future::poll_fn(|cx| self.session.poll_open_uni(cx, options))
 			.await
 			.map_err(Error::from_transport)?;
 		self.opened.fetch_add(1, Ordering::Relaxed);
-		let stream = Ranked::new(
-			stream,
-			Some(self.ranking.rank(Location {
-				group: end.group,
-				object: end.frame,
-			})),
-		);
+		let stream = Ranked::new(stream, Some(rank));
 		let mut writer = Writer::new(stream, self.version);
 		writer.buffer(&ietf::GroupHeader {
 			track_alias: self.request_id.0,
@@ -4278,8 +4418,11 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			}
 			// Ranked like a stream carrying the group from its start, so it merges into the
 			// subscription's group order and wins a tie with that group's stream.
-			let order = crate::priority::in_group(sequence, 0, self.ranking.order);
-			let _ = self.session.send_datagram(body, self.ranking.group.as_ref(), order);
+			let options = SendOptions {
+				group: self.ranking.group.as_ref(),
+				priority: crate::priority::in_group(sequence, 0, self.ranking.order),
+			};
+			let _ = self.session.send_datagram(body, options);
 		}
 		Ok(())
 	}
@@ -4335,10 +4478,8 @@ struct Ranked<T: crate::transport::poll::SendStream> {
 }
 
 impl<T: crate::transport::poll::SendStream> Ranked<T> {
-	fn new(mut stream: T, mut rank: Option<Rank<T::Group>>) -> Self {
-		if let Some(rank) = &mut rank {
-			rank.place(&mut stream);
-		}
+	/// Wrap a stream opened with its rank's [options](Rank::options).
+	fn new(stream: T, rank: Option<Rank<T::Group>>) -> Self {
 		Self {
 			stream,
 			rank,
@@ -4422,14 +4563,17 @@ impl<G> Rank<G> {
 		Self::Queue(Queued::solo(priority))
 	}
 
-	/// Put a newly opened stream in its place.
-	fn place<T: crate::transport::poll::SendStream<Group = G>>(&mut self, stream: &mut T) {
+	/// Where a newly opened stream goes.
+	fn options(&mut self) -> SendOptions<'_, G> {
 		match self {
-			Self::Group { group, order } => {
-				stream.set_group(group);
-				stream.set_priority(*order);
-			}
-			Self::Queue(queued) => stream.set_priority(queued.handle.send_order().into()),
+			Self::Group { group, order } => SendOptions {
+				group: Some(&*group),
+				priority: *order,
+			},
+			Self::Queue(queued) => SendOptions {
+				group: None,
+				priority: queued.handle.send_order().into(),
+			},
 		}
 	}
 
@@ -4596,7 +4740,8 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						self.state = GroupState::Done;
 						return Poll::Ready(Err(Error::Old));
 					}
-					let stream = match ready!(self.session.poll_open_uni(&mut cx)) {
+					// The current rank, which already includes anything `moved` saw.
+					let stream = match ready!(self.session.poll_open_uni(&mut cx, self.rank.options())) {
 						Ok(stream) => stream,
 						Err(err) => {
 							self.state = GroupState::Done;
@@ -4604,9 +4749,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						}
 					};
 					self.opened.fetch_add(1, Ordering::Relaxed);
-					let mut stream = stream;
-					// The current rank, which already includes anything `moved` saw.
-					self.rank.place(&mut stream);
 					moved = None;
 
 					let mut writer = Writer::new(stream, self.version);
@@ -5336,7 +5478,8 @@ mod group_priority_test {
 
 	/// Drive `serve` beside a sibling that only counts its turns, until `done`, checking every
 	/// poll stays under `most` by `progress` and leaves the sibling its turn.
-	fn serve_beside_a_sibling(
+	/// Each task-set pass returns to the executor so its children's yields reach the task.
+	async fn serve_beside_a_sibling(
 		mut serve: TrackServe<SinkSession>,
 		mut produce: impl FnMut() -> bool + 'static,
 		progress: impl Fn() -> usize,
@@ -5363,22 +5506,26 @@ mod group_priority_test {
 			serve.poll(waiter).map(|res| res.expect("serve"))
 		}));
 
-		let owner = kio::Waiter::noop();
 		let mut polls = 0;
-		while progress() < done {
+		kio::wait(|owner| {
+			if progress() >= done {
+				return Poll::Ready(());
+			}
 			let before = progress();
-			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			assert!(tasks.poll(owner).is_pending(), "the serve never ends");
 			polls += 1;
 			let made = progress() - before;
 			assert!(made <= most, "one poll made {made} progress");
 			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
 			assert!(polls <= 2 * done as u64, "the serve stalled");
-		}
+			Poll::Pending
+		})
+		.await;
 	}
 
 	/// A track that always has another group ready yields within its budget.
-	#[test]
-	fn a_busy_track_yields_to_its_siblings() {
+	#[moq_clock::test]
+	async fn a_busy_track_yields_to_its_siblings() {
 		/// `TrackServe`'s passes per poll; each starts at most one group.
 		const BUDGET: usize = 32;
 		const GROUPS: u64 = 10_000;
@@ -5421,7 +5568,8 @@ mod group_priority_test {
 			|| opened.load(Ordering::Relaxed) as usize,
 			BUDGET,
 			GROUPS as usize,
-		);
+		)
+		.await;
 	}
 
 	/// On a transport with send groups, a subscription opens one at its priority and its
@@ -5558,7 +5706,8 @@ mod group_priority_test {
 			|| log.writes.lock().unwrap().len(),
 			2 * (BUDGET + 1) * 2 * PAYLOAD,
 			FRAMES * PAYLOAD,
-		);
+		)
+		.await;
 	}
 
 	/// Serve one group at `version` with `timescale` and return the header plus what follows it.
@@ -5942,8 +6091,13 @@ mod serve_tests {
 
 	/// The same, with the track described by `info`.
 	fn serve_track(version: Version, info: crate::track::Info) -> Serve {
+		serve_route(version, info, crate::origin::Route::default())
+	}
+
+	/// The same, with the broadcast announced on `route`.
+	fn serve_route(version: Version, info: crate::track::Info, route: crate::origin::Route) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+		let broadcast = origin.publish("room", route).unwrap();
 		let track = broadcast.create_track("video", info).unwrap();
 
 		let session = ScriptedSession::per_stream(vec![Vec::new()]);
@@ -6079,6 +6233,7 @@ mod serve_tests {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
+				epoch: None,
 			}
 			.encode_msg(&mut Encoder::new(&mut fetch_body, version.into()), version)
 			.unwrap();
@@ -6088,7 +6243,10 @@ mod serve_tests {
 				(ietf::Fetch::ID, bytes::Bytes::from(fetch_body)),
 			] {
 				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
-				let task = h.publisher.handle_stream(id, ietf::Body(body.clone()), stream).unwrap();
+				let task = h
+					.publisher
+					.handle_stream(id, ietf::Body(body.clone()), stream, false)
+					.unwrap();
 				assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 1, "count before polling");
 				drop(task);
 				assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 0, "release a cancelled task");
@@ -6096,14 +6254,17 @@ mod serve_tests {
 				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
 				assert!(
 					h.publisher
-						.handle_stream(id, ietf::Body(bytes::Bytes::new()), stream)
+						.handle_stream(id, ietf::Body(bytes::Bytes::new()), stream, false)
 						.is_err()
 				);
 				assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 0, "release malformed input");
 
 				if id == ietf::Fetch::ID {
 					let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
-					h.publisher.handle_stream(id, ietf::Body(body), stream).unwrap().await;
+					h.publisher
+						.handle_stream(id, ietf::Body(body), stream, false)
+						.unwrap()
+						.await;
 					assert_eq!(h.publisher.owed.load(Ordering::Relaxed), 0, "release a completed fetch");
 				}
 			}
@@ -6442,6 +6603,17 @@ mod serve_tests {
 			Served::UpdateFailed(Error::Unauthorized).status(Version::Draft14).0,
 			ietf::PublishDoneStatus::Unauthorized
 		);
+		// A revocation bridged from upstream, however it was received, is still one.
+		for err in [
+			Error::Unauthorized,
+			Error::Session(crate::SessionError::Unauthorized),
+			Error::Stream(crate::StreamError::Unauthorized),
+		] {
+			assert_eq!(
+				Served::Track(Err(err)).status(Version::Draft16).0,
+				ietf::PublishDoneStatus::Unauthorized
+			);
+		}
 	}
 
 	/// Draft-21 §9.5: a failed REQUEST_UPDATE is answered with REQUEST_ERROR, then the
@@ -6527,6 +6699,7 @@ mod serve_tests {
 			Version::Draft14 => {
 				let mut body = Vec::new();
 				ietf::SubscribeUpdate {
+					max_age: None,
 					new_group: None,
 					request_id: RequestId(UPDATE_ID.into()),
 					subscription_request_id: Some(RequestId(0)),
@@ -6637,6 +6810,7 @@ mod serve_tests {
 	fn new_group_update(version: Version, id: u64, value: u64) -> Vec<u8> {
 		let mut body = Vec::new();
 		ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: Some(value),
 			request_id: RequestId(id),
 			subscription_request_id: matches!(version, Version::Draft15 | Version::Draft16).then_some(RequestId(0)),
@@ -6671,124 +6845,131 @@ mod serve_tests {
 		ietf::SubscribeOk::decode_msg(&mut Decoder::new(&rest[2..2 + size], version.into()), version).unwrap()
 	}
 
-	/// A SUBSCRIBE's NEW_GROUP_REQUEST for 0 reaches the track still 0, so a relay behind
-	/// the original publisher forwards what was asked, but answered only by a group past
-	/// the latest. SUBSCRIBE_OK advertises DYNAMIC_GROUPS only for a track that supports it.
-	#[moq_clock::test]
-	async fn a_subscribe_new_group_request_reaches_the_track() {
-		for (version, dynamic_groups) in [
-			(Version::Draft15, true),
-			(Version::Draft15, false),
-			(Version::Draft16, true),
-			(Version::Draft16, false),
-			(Version::Draft22, true),
-			(Version::Draft22, false),
-		] {
-			let h = serve_track(
-				version,
-				crate::track::Info {
-					dynamic_groups,
-					..crate::track::Info::timed()
-				},
-			);
-			let _group = h.track.create_group(group::Info { sequence: 4 }).unwrap();
-			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
-			let msg = ietf::Subscribe {
-				new_group: Some(0),
-				..subscribe(Filter::NextObject, None)
-			};
-			let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
-			serve_until(serve.as_mut(), "the request reached the track past group 4", || {
-				h.track.new_group() == Some(NewGroup { value: 0, first: 5 })
-			})
-			.await;
-			assert_eq!(
-				subscribe_ok(&h.log, version).properties.dynamic_groups,
-				dynamic_groups,
-				"{version}"
-			);
-		}
+	/// Group 4 of `h`'s track: a 3 byte first frame and a 5 byte delta, over a refresh
+	/// ratio of 1.
+	fn refresh_group(h: &Serve) -> group::Producer {
+		let mut group = h.track.create_group(group::Info { sequence: 4 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"key".as_slice()).unwrap();
+		group.write_frame(Timestamp::ZERO, b"delta".as_slice()).unwrap();
+		group
 	}
 
-	/// An update's NEW_GROUP_REQUEST is recorded on a track with DYNAMIC_GROUPS and
-	/// answered with REQUEST_OK.
+	/// A SUBSCRIBE is a join, with or without NEW_GROUP_REQUEST: a track opted in to refresh
+	/// wants the group past one over its ratio, and SUBSCRIBE_OK advertises DYNAMIC_GROUPS.
 	#[moq_clock::test]
-	async fn a_new_group_update_reaches_a_dynamic_track() {
+	async fn a_subscribe_joins_under_the_refresh_ratio() {
 		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
-			let h = serve_track(
-				version,
-				crate::track::Info {
-					dynamic_groups: true,
-					..crate::track::Info::timed()
-				},
-			);
-			let mut session = ScriptedSession::new(new_group_update(version, 10, 9));
-			let mut stream = Stream::open(&mut session, version).await.unwrap();
-			let mut serving = TrackServe::new(
-				h.session.clone(),
-				h.track.subscribe(None),
-				RequestId(0),
-				version,
-				ServeRange::default(),
-				None,
-			);
-			let mut finished = false;
-			let mut run =
-				std::pin::pin!(
-					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+			for refresh in [Some(1), None] {
+				let h = serve_track(version, crate::track::Info::timed().with_refresh(refresh));
+				let _group = refresh_group(&h);
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				let msg = ietf::Subscribe {
+					new_group: Some(0),
+					..subscribe(Filter::NextObject, None)
+				};
+				let wanted = if refresh.is_some() { 5 } else { 0 };
+				let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+				serve_until(serve.as_mut(), "the join reached the track", || {
+					h.track.demand().wanted() == Some(wanted) && !h.log.trail().is_empty()
+				})
+				.await;
+				assert_eq!(
+					subscribe_ok(&h.log, version).properties.dynamic_groups,
+					refresh.is_some(),
+					"{version}"
 				);
-			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
-			assert_eq!(h.track.new_group(), Some(NewGroup { value: 9, first: 0 }), "{version}");
-			// Draft 16 names the update it answers; later drafts answer on its own stream.
-			let written = session.log.writes.lock().unwrap().clone();
-			assert_eq!(written[0], ietf::RequestOk::ID as u8, "{version}: {written:?}");
-			if version == Version::Draft16 {
-				assert_eq!(written[3], 10, "{version}: {written:?}");
 			}
 		}
 	}
 
-	/// A weaker request on the same subscription keeps the stronger one it still holds.
+	/// An absolute filter has a fixed start, so its SUBSCRIBE is no join even over the ratio.
 	#[moq_clock::test]
-	async fn a_later_update_keeps_the_stronger_request() {
-		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
-			let h = serve_track(
-				version,
-				crate::track::Info {
-					dynamic_groups: true,
-					..crate::track::Info::timed()
-				},
-			);
-			let mut session =
-				ScriptedSession::new([new_group_update(version, 10, 9), new_group_update(version, 12, 0)].concat());
-			let mut stream = Stream::open(&mut session, version).await.unwrap();
-			let mut serving = TrackServe::new(
-				h.session.clone(),
-				h.track.subscribe(None),
-				RequestId(0),
-				version,
-				ServeRange::default(),
-				None,
-			);
-			let mut finished = false;
-			let mut run =
-				std::pin::pin!(
-					h.publisher
-						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
-				);
-			assert!(
-				futures::poll!(run.as_mut()).is_pending(),
-				"{version}: an update ended it"
-			);
-			assert_eq!(h.track.new_group(), Some(NewGroup { value: 9, first: 0 }), "{version}");
+	async fn an_absolute_subscribe_is_no_join() {
+		let version = Version::Draft22;
+		let h = serve_track(version, crate::track::Info::timed().with_refresh(1));
+		let _group = refresh_group(&h);
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		let msg = subscribe(
+			Filter::Absolute {
+				start: Location { group: 4, object: 0 },
+				end: None,
+			},
+			None,
+		);
+		let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+		serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !h.log.trail().is_empty()).await;
+		assert_eq!(h.track.demand().wanted(), Some(0));
+	}
+
+	/// An absolute SUBSCRIBE carrying NEW_GROUP_REQUEST asks as an update would: past a group
+	/// the track holds, it is a join under the ratio.
+	#[moq_clock::test]
+	async fn an_absolute_subscribe_with_a_new_group_request_joins() {
+		let version = Version::Draft22;
+		for (value, wanted) in [(0, 5), (5, 5), (4, 0)] {
+			let h = serve_track(version, crate::track::Info::timed().with_refresh(1));
+			let _group = refresh_group(&h);
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let msg = ietf::Subscribe {
+				new_group: Some(value),
+				..subscribe(
+					Filter::Absolute {
+						start: Location { group: 4, object: 0 },
+						end: None,
+					},
+					None,
+				)
+			};
+			let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+			serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !h.log.trail().is_empty()).await;
+			assert_eq!(h.track.demand().wanted(), Some(wanted), "{value}");
 		}
 	}
 
-	/// A track without DYNAMIC_GROUPS cannot honor a NEW_GROUP_REQUEST update, which fails
-	/// the subscription like any update it cannot apply.
+	/// An update's NEW_GROUP_REQUEST is a join on a track opted in to refresh, answered with
+	/// REQUEST_OK. One naming a group the track holds asks nothing.
 	#[moq_clock::test]
-	async fn a_new_group_update_without_dynamic_groups_fails() {
+	async fn a_new_group_update_joins_a_refreshing_track() {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
+			for (value, wanted) in [(0, 5), (5, 5), (4, 0)] {
+				let h = serve_track(version, crate::track::Info::timed().with_refresh(1));
+				let mut session = ScriptedSession::new(new_group_update(version, 10, value));
+				let mut stream = Stream::open(&mut session, version).await.unwrap();
+				// Subscribed before the group, so only the update can ask for a new one.
+				let subscriber = h.track.subscribe(None);
+				let _group = refresh_group(&h);
+				let mut serving = TrackServe::new(
+					h.session.clone(),
+					subscriber,
+					RequestId(0),
+					version,
+					ServeRange::default(),
+					None,
+				);
+				let mut finished = false;
+				let mut run = std::pin::pin!(h.publisher.run_subscription(
+					&mut stream,
+					&mut serving,
+					&mut finished,
+					async {},
+					None
+				));
+				assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
+				assert_eq!(h.track.demand().wanted(), Some(wanted), "{version} {value}");
+				// Draft 16 names the update it answers; later drafts answer on its own stream.
+				let written = session.log.writes.lock().unwrap().clone();
+				assert_eq!(written[0], ietf::RequestOk::ID as u8, "{version}: {written:?}");
+				if version == Version::Draft16 {
+					assert_eq!(written[3], 10, "{version}: {written:?}");
+				}
+			}
+		}
+	}
+
+	/// A track without refresh cannot honor a NEW_GROUP_REQUEST update, which fails the
+	/// subscription like any update it cannot apply.
+	#[moq_clock::test]
+	async fn a_new_group_update_without_refresh_fails() {
 		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
 			let h = serve(version);
 			let mut session = ScriptedSession::new(new_group_update(version, 10, 9));
@@ -6810,7 +6991,6 @@ mod serve_tests {
 				matches!(served, Some(Served::UpdateFailed(Error::Unsupported))),
 				"{version}: {served:?}"
 			);
-			assert_eq!(h.track.new_group(), None, "{version}");
 		}
 	}
 
@@ -6821,6 +7001,7 @@ mod serve_tests {
 			Version::Draft14 => {
 				let mut body = Vec::new();
 				ietf::SubscribeUpdate {
+					max_age: None,
 					new_group: None,
 					request_id: RequestId(2),
 					subscription_request_id: Some(RequestId(0)),
@@ -6943,7 +7124,12 @@ mod serve_tests {
 				let closed = h
 					.publisher
 					.clone()
-					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+					.handle_stream(
+						ietf::TrackStatus::ID,
+						ietf::Body(bytes::Bytes::from(body)),
+						stream,
+						false,
+					)
 					.err();
 				assert!(matches!(closed, Some(Error::WrongSize)), "{version}: {closed:?}");
 			}
@@ -7226,6 +7412,7 @@ mod serve_tests {
 
 	fn subscribe(filter: Filter, fill: Option<ietf::Fill>) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(REQUEST_ID),
 			track_namespace: crate::Path::new("room"),
@@ -7239,6 +7426,7 @@ mod serve_tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		}
 	}
 
@@ -7347,6 +7535,175 @@ mod serve_tests {
 		}
 	}
 
+	/// The refusal of request [`REQUEST_ID`] as gone, as draft-17 and later frame it.
+	async fn unroutable(version: Version) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		writer.varint(ietf::RequestError::ID).await.unwrap();
+		writer
+			.encode(&ietf::RequestError {
+				request_id: None,
+				error_code: 0x10,
+				reason_phrase: Error::Unroutable.to_string().into(),
+				retry_interval: 0,
+			})
+			.await
+			.unwrap();
+		log.writes.lock().unwrap().clone()
+	}
+
+	/// Each request MoQ Epoch pins to an instance, naming `epoch`, encoded for `version`.
+	fn pinned_requests(version: Version, epoch: &crate::Epoch) -> [(u64, Vec<u8>); 3] {
+		let mut subscribe = subscribe(Filter::NextObject, None);
+		subscribe.epoch = Some(epoch.clone());
+		let fetch = ietf::Fetch {
+			request_id: RequestId(REQUEST_ID),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Ascending,
+			fetch_type: fetch_range(
+				version,
+				"video",
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 1 },
+			),
+			range_filters: false,
+			fill_timeout: false,
+			properties_wanted: true,
+			epoch: Some(epoch.clone()),
+		};
+		let status = ietf::TrackStatus {
+			request_id: RequestId(REQUEST_ID),
+			track_namespace: crate::Path::new("room"),
+			track_name: "video".into(),
+			properties_wanted: true,
+			epoch: Some(epoch.clone()),
+		};
+		let mut bodies: [Vec<u8>; 3] = Default::default();
+		subscribe
+			.encode_msg(&mut Encoder::new(&mut bodies[0], version.into()), version)
+			.unwrap();
+		fetch
+			.encode_msg(&mut Encoder::new(&mut bodies[1], version.into()), version)
+			.unwrap();
+		status
+			.encode_msg(&mut Encoder::new(&mut bodies[2], version.into()), version)
+			.unwrap();
+		let [subscribe, fetch, status] = bodies;
+		[
+			(ietf::Subscribe::ID, subscribe),
+			(ietf::Fetch::ID, fetch),
+			(ietf::TrackStatus::ID, status),
+		]
+	}
+
+	/// MoQ Epoch pins SUBSCRIBE, FETCH and TRACK_STATUS to the instance they name: the
+	/// broadcast under the path now being another instance, or one with no epoch at all,
+	/// refuses them as gone instead of serving another instance's content.
+	#[moq_clock::test]
+	async fn a_request_for_another_instance_is_refused() {
+		for version in [Version::Draft17, Version::Draft20, Version::Draft22] {
+			let served = crate::Epoch::mint();
+			let stale = crate::Epoch::mint();
+			let pinned = crate::origin::Route::default().with_epoch(served.clone());
+			for (name, route, named, refused) in [
+				("another epoch", pinned.clone(), &stale, true),
+				("no epoch", crate::origin::Route::default(), &stale, true),
+				("its epoch", pinned, &served, false),
+			] {
+				let mut h = serve_route(version, crate::track::Info::timed(), route.clone());
+				publish_groups(&mut h, 0);
+				settle().await;
+				let expected = unroutable(version).await;
+				for (id, body) in pinned_requests(version, named) {
+					let mark = h.log.writes.lock().unwrap().len();
+					let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+					let mut task = h
+						.publisher
+						.clone()
+						.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream, true)
+						.unwrap();
+					// A served SUBSCRIBE parks at the live edge, so poll rather than await.
+					for _ in 0..50 {
+						if futures::poll!(task.as_mut()).is_ready() {
+							break;
+						}
+						settle().await;
+					}
+					let wire = h.log.writes.lock().unwrap()[mark..].to_vec();
+					let found = wire.windows(expected.len()).any(|window| window == expected.as_slice());
+					assert_eq!(found, refused, "{version} {name}: request {id:#x}");
+				}
+			}
+		}
+	}
+
+	/// A SUBSCRIBE pinned to a gone instance is refused as missing even when it asks to
+	/// wait: an instance never comes back, so there is nothing to rendezvous with.
+	#[moq_clock::test]
+	async fn a_pinned_request_never_waits_for_its_instance() {
+		for version in [Version::Draft17, Version::Draft20, Version::Draft22] {
+			let stale = crate::Epoch::mint();
+			let pinned = crate::origin::Route::default().with_epoch(crate::Epoch::mint());
+			for (name, route) in [("another epoch", pinned), ("no epoch", crate::origin::Route::default())] {
+				let mut h = serve_route(version, crate::track::Info::timed(), route);
+				publish_groups(&mut h, 0);
+				settle().await;
+				let expected = unroutable(version).await;
+
+				// Built by hand: we never send RENDEZVOUS_TIMEOUT ourselves.
+				let encode = |body: &mut Vec<u8>| -> Result<(), crate::coding::EncodeError> {
+					let w = &mut Encoder::new(body, version.into());
+					RequestId(REQUEST_ID).encode(w, version)?;
+					if version == Version::Draft17 {
+						w.varint(0)?; // required_request_id_delta
+					}
+					super::super::namespace::encode_namespace(w, &crate::Path::new("room"))?;
+					w.string("video")?;
+					encode_params!(w, version,
+						0x04 => 7u64,
+						super::super::epoch::EPOCH_PARAM => Some(stale.clone()),
+					);
+					Ok(())
+				};
+				let mut body = Vec::new();
+				encode(&mut body).unwrap();
+
+				let mark = h.log.writes.lock().unwrap().len();
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				h.publisher
+					.clone()
+					.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, true)
+					.unwrap()
+					.await;
+				let wire = h.log.writes.lock().unwrap()[mark..].to_vec();
+				assert!(
+					wire.windows(expected.len()).any(|window| window == expected.as_slice()),
+					"{version} {name}"
+				);
+			}
+		}
+	}
+
+	/// An EPOCH on a request breaks a session that did not negotiate MoQ Epoch: the peer
+	/// cannot have learned an instance it was never told about.
+	#[moq_clock::test]
+	async fn an_epoch_without_the_extension_is_a_violation() {
+		for version in [Version::Draft17, Version::Draft22] {
+			let h = serve(version);
+			for (id, body) in pinned_requests(version, &crate::Epoch::mint()) {
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				let result = h
+					.publisher
+					.clone()
+					.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream, false);
+				assert!(
+					matches!(result, Err(Error::ProtocolViolation)),
+					"{version}: request {id:#x}"
+				);
+			}
+		}
+	}
+
 	const ALL_VERSIONS: [Version; 9] = [
 		Version::Draft14,
 		Version::Draft15,
@@ -7365,6 +7722,7 @@ mod serve_tests {
 			track_namespace: crate::Path::new(namespace),
 			track_name: "video".into(),
 			properties_wanted: wanted,
+			epoch: None,
 		};
 		let mut body = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
@@ -7389,7 +7747,12 @@ mod serve_tests {
 				let body = track_status("room", wanted, version);
 				h.publisher
 					.clone()
-					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+					.handle_stream(
+						ietf::TrackStatus::ID,
+						ietf::Body(bytes::Bytes::from(body)),
+						stream,
+						false,
+					)
 					.unwrap()
 					.await;
 				assert!(h.log.resets().is_empty(), "{version}: the answer was reset");
@@ -7410,7 +7773,7 @@ mod serve_tests {
 					Version::Draft16 | Version::Draft17 => ietf::Properties::default(),
 					// Only draft-20 can carry the opt-out.
 					_ if !wanted && Filter::is_draft20(version) => ietf::Properties::default(),
-					_ => track_properties(&track::Info::timed(), true),
+					_ => track_properties(&track::Info::timed(), true, version).unwrap(),
 				};
 				assert_eq!(
 					ok,
@@ -7469,7 +7832,12 @@ mod serve_tests {
 			let mut answer = std::pin::pin!(
 				h.publisher
 					.clone()
-					.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+					.handle_stream(
+						ietf::TrackStatus::ID,
+						ietf::Body(bytes::Bytes::from(body)),
+						stream,
+						false
+					)
 					.unwrap()
 			);
 			assert!(futures::poll!(answer.as_mut()).is_pending(), "{version}");
@@ -7553,6 +7921,7 @@ mod serve_tests {
 					track_namespace: crate::Path::new("room"),
 					track_name: "video".into(),
 					properties_wanted: true,
+					epoch: None,
 				},
 			));
 			for _ in 0..100 {
@@ -7590,7 +7959,12 @@ mod serve_tests {
 		let mark = h.log.writes.lock().unwrap().len();
 		h.publisher
 			.clone()
-			.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
+			.handle_stream(
+				ietf::TrackStatus::ID,
+				ietf::Body(bytes::Bytes::from(body)),
+				stream,
+				false,
+			)
 			.unwrap()
 			.await;
 		refusal_code(&h.log.writes.lock().unwrap()[mark..], version)
@@ -7664,7 +8038,7 @@ mod serve_tests {
 		let mark = h.log.writes.lock().unwrap().len();
 		h.publisher
 			.clone()
-			.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream)
+			.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream, false)
 			.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}"))
 			.await;
 		assert!(h.log.resets().is_empty(), "{version}: refusal was reset");
@@ -7717,6 +8091,7 @@ mod serve_tests {
 								properties_wanted: true,
 								range_filters: true,
 								fill_timeout: false,
+								epoch: None,
 							},
 						)
 						.await
@@ -7779,7 +8154,7 @@ mod serve_tests {
 				let mut serving = std::pin::pin!(
 					h.publisher
 						.clone()
-						.handle_stream(ietf::TrackStatus::ID, ietf::Body(body.into()), stream)
+						.handle_stream(ietf::TrackStatus::ID, ietf::Body(body.into()), stream, false)
 						.unwrap()
 				);
 				let done = futures::poll!(serving.as_mut());
@@ -7807,7 +8182,7 @@ mod serve_tests {
 				.unwrap();
 			h.publisher
 				.clone()
-				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream)
+				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, false)
 				.unwrap_or_else(|e| panic!("{version}: the request was not started: {e}"))
 				.await;
 			assert_eq!(
@@ -7953,7 +8328,7 @@ mod serve_tests {
 			let task = h
 				.publisher
 				.clone()
-				.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream)
+				.handle_stream(id, ietf::Body(bytes::Bytes::from(body)), stream, false)
 				.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}"));
 			let mut task = std::pin::pin!(task);
 			let mut done = false;
@@ -8007,7 +8382,7 @@ mod serve_tests {
 			assert!(
 				h.publisher
 					.clone()
-					.handle_stream(ietf::SubscribeNamespaceLegacy::ID, body, stream)
+					.handle_stream(ietf::SubscribeNamespaceLegacy::ID, body, stream, false)
 					.is_err(),
 				"{version}: Subscribe Options 0x03 kept the session open"
 			);
@@ -8359,6 +8734,7 @@ mod serve_tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted: true,
+					epoch: None,
 				},
 			)
 			.await?;
@@ -8436,7 +8812,7 @@ mod serve_tests {
 			}
 			let properties = match ietf::Properties::sends_timescale(version) {
 				false => ietf::Properties::default(),
-				true => track_properties(&track::Info::timed(), true),
+				true => track_properties(&track::Info::timed(), true, version).unwrap(),
 			};
 			assert_eq!(ok.properties, properties, "{version}: wrong properties");
 			assert_eq!(
@@ -8528,7 +8904,7 @@ mod serve_tests {
 			.unwrap();
 		let mut serving = h
 			.publisher
-			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
+			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream, false)
 			.unwrap();
 		let mut fetching = Box::pin(joining_fetch(&h, 0));
 		assert!(
@@ -8563,7 +8939,7 @@ mod serve_tests {
 			.unwrap();
 		let mut serving = h
 			.publisher
-			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
+			.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream, false)
 			.unwrap();
 		match futures::future::select(&mut fetching, &mut serving).await {
 			futures::future::Either::Left((response, _)) => {
@@ -8586,7 +8962,7 @@ mod serve_tests {
 				.unwrap();
 			let serving = h
 				.publisher
-				.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream)
+				.handle_stream(ietf::Subscribe::ID, ietf::Body(bytes::Bytes::from(data)), stream, false)
 				.unwrap();
 			let mut fetching = Box::pin(joining_fetch(&h, 0));
 			assert!(futures::poll!(fetching.as_mut()).is_pending());
@@ -8826,6 +9202,49 @@ mod serve_tests {
 		run_fetch(h, fetch_type, group_order, true).await
 	}
 
+	#[moq_clock::test]
+	async fn a_cached_standalone_fetch_yields_while_writing() {
+		for version in FETCH_DRAFTS {
+			let h = serve(version);
+			let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+			for _ in 0..256 {
+				group.write_frame(timestamp(), vec![7; 1024]).unwrap();
+			}
+			group.finish().unwrap();
+			settle().await;
+
+			let done = std::rc::Rc::new(std::cell::Cell::new(false));
+			let saw_payload = std::rc::Rc::new(std::cell::Cell::new(false));
+			let sibling = moq_clock::sim::spawn({
+				let done = done.clone();
+				let saw_payload = saw_payload.clone();
+				let log = h.log.clone();
+				async move {
+					while !done.get() {
+						if log.writes.lock().unwrap().len() > 1024 {
+							saw_payload.set(true);
+						}
+						moq_clock::sim::yield_now().await;
+					}
+				}
+			});
+			let wire = standalone_fetch(
+				&h,
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 256 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			done.set(true);
+			sibling.await.unwrap();
+			assert!(wire.len() > 256 * 1024);
+			assert!(
+				saw_payload.get(),
+				"{version}: writing the cached group starved its sibling"
+			);
+		}
+	}
+
 	/// A standalone FETCH of `room/<track>`, spelled as [`standalone_fetch`] describes.
 	fn fetch_range(version: Version, track: &'static str, start: Location, end: Location) -> FetchType<'static> {
 		let namespace = crate::Path::new("room");
@@ -8873,6 +9292,7 @@ mod serve_tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted,
+					epoch: None,
 				},
 			)
 			.await
@@ -8997,7 +9417,7 @@ mod serve_tests {
 				let expected = match ietf::Properties::sends_timescale(version) {
 					// Drafts 14-16 write no properties, as their SUBSCRIBE_OK does not.
 					false => ietf::Properties::default(),
-					true => track_properties(&info, wanted),
+					true => track_properties(&info, wanted, version).unwrap(),
 				};
 				assert_eq!(ok.properties, expected, "{version} wanted={wanted}");
 
@@ -9018,6 +9438,170 @@ mod serve_tests {
 				}
 			}
 		}
+	}
+
+	/// The Track Properties block a publisher upstream of a relay sent on `version`: an even
+	/// property the draft defines but moq-net does not implement (OBJECT_DELIVERY_TIMEOUT),
+	/// and an odd one from the application range.
+	fn unknown_properties(version: Version) -> ietf::Properties {
+		let mut block = Vec::new();
+		let mut w = Encoder::new(&mut block, version.into());
+		w.varint(0x02).unwrap();
+		w.varint(5000).unwrap();
+		w.varint(0x3801 - 0x02).unwrap();
+		w.bytes(b"opaque").unwrap();
+		let properties =
+			crate::coding::decode_buf(&mut bytes::Bytes::from(block), version, ietf::Properties::decode).unwrap();
+		assert_eq!(properties.unknown.values.len(), 2, "{version}");
+		properties
+	}
+
+	/// Every answer describing the track forwards the properties moq-net does not interpret
+	/// unchanged, beside the ones it does, on every draft with a Track Properties block.
+	#[moq_clock::test]
+	async fn unknown_track_properties_are_forwarded() {
+		for version in [Version::Draft16, Version::Draft17, Version::Draft22] {
+			let upstream = unknown_properties(version);
+			let info = track::Info {
+				properties: Some(Arc::new(upstream.unknown.clone())),
+				..track::Info::timed()
+			};
+
+			let mut h = serve_track(version, info.clone());
+			run_live(&mut h, subscribe(Filter::NextObject, None)).await;
+			assert_eq!(
+				subscribe_ok(&h.log, version).properties.unknown,
+				upstream.unknown,
+				"{version}: SUBSCRIBE_OK"
+			);
+
+			let h = serve_track(version, info.clone());
+			let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+			group.write_frame(timestamp(), b"a".as_slice()).unwrap();
+			group.finish().unwrap();
+			settle().await;
+			let range = fetch_range(
+				version,
+				"video",
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 0 },
+			);
+			let (ok, _) = fetch_answer(run_fetch(&h, range, GroupOrder::Ascending, true).await, version);
+			assert_eq!(ok.properties.unknown, upstream.unknown, "{version}: FETCH_OK");
+
+			// Drafts 16 and 17 answer TRACK_STATUS with REQUEST_OK, which has no block.
+			if version == Version::Draft22 {
+				let h = serve_track(version, info);
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				h.publisher
+					.clone()
+					.handle_stream(
+						ietf::TrackStatus::ID,
+						ietf::Body(track_status("room", true, version).into()),
+						stream,
+						false,
+					)
+					.unwrap()
+					.await;
+				let wire = h.log.writes.lock().unwrap().clone();
+				let mut buf = Decoder::new(&wire, version.into());
+				assert_eq!(buf.varint().unwrap(), ietf::TrackStatusOk::id(version));
+				let ok = ietf::TrackStatusOk::decode(&mut buf, version).unwrap();
+				assert_eq!(ok.properties.unknown, upstream.unknown, "{version}: TRACK_STATUS_OK");
+			}
+		}
+	}
+
+	/// Immutable Properties keep the bytes their publisher sealed, so they are forwarded
+	/// only to a draft that encodes them the same way, and refused elsewhere.
+	#[moq_clock::test]
+	async fn immutable_track_properties_keep_their_encoding() {
+		// Sealed: OBJECT_DELIVERY_TIMEOUT = 42 and DYNAMIC_GROUPS = 1.
+		let block = [0x0b, 4, 0x02, 42, 0x2e, 1];
+		let upstream = crate::coding::decode_buf(
+			&mut bytes::Bytes::copy_from_slice(&block),
+			Version::Draft22,
+			ietf::Properties::decode,
+		)
+		.unwrap();
+		assert!(upstream.dynamic_groups);
+		let info = track::Info {
+			refresh: Some(0),
+			properties: Some(Arc::new(upstream.unknown.clone())),
+			..track::Info::timed()
+		};
+
+		let mut h = serve_track(Version::Draft22, info.clone());
+		run_live(&mut h, subscribe(Filter::NextObject, None)).await;
+		// DYNAMIC_GROUPS stays sealed: restating it as mutable too would fail this decode.
+		let ok = subscribe_ok(&h.log, Version::Draft22);
+		assert!(ok.properties.dynamic_groups);
+		assert_eq!(ok.properties.unknown, upstream.unknown);
+		// Its key is delta-encoded against TIMESCALE now, but the sealed bytes are verbatim.
+		assert_eq!(occurrences(&h.log, &block[1..]), 1);
+
+		// Draft 17 forbids the 7-byte varints draft 18 allows, and draft 16 has QUIC varints.
+		for version in [Version::Draft16, Version::Draft17] {
+			let h = serve_track(version, info.clone());
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			h.publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+				.await
+				.unwrap();
+			let wire = h.log.writes.lock().unwrap().clone();
+			let mut buf = Decoder::new(&wire, version.into());
+			assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version}");
+			let error = ietf::RequestError::decode(&mut buf, version).unwrap();
+			assert_eq!(
+				error.error_code,
+				request::to_code(&Error::Unsupported, request::Kind::Subscribe, version),
+				"{version}"
+			);
+		}
+	}
+
+	/// Draft 19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a track property 0x06 crosses
+	/// that boundary as an object property does: dropped when mutable, refused when sealed.
+	#[test]
+	fn track_property_0x06_does_not_cross_draft_19() {
+		let upstream = |block: &[u8]| {
+			let properties = crate::coding::decode_buf(
+				&mut bytes::Bytes::copy_from_slice(block),
+				Version::Draft18,
+				ietf::Properties::decode,
+			)
+			.unwrap();
+			track::Info {
+				properties: Some(Arc::new(properties.unknown)),
+				..Default::default()
+			}
+		};
+		let ids = |properties: ietf::Properties| properties.unknown.values.iter().map(|p| p.id).collect::<Vec<_>>();
+
+		// 0x06 = 42, 0x3801 = "hi"
+		let mut block = Vec::new();
+		let mut w = Encoder::new(&mut block, Version::Draft18.into());
+		w.varint(0x06).unwrap();
+		w.varint(42).unwrap();
+		w.varint(0x3801 - 0x06).unwrap();
+		w.bytes(b"hi").unwrap();
+		let mutable = upstream(&block);
+		assert_eq!(
+			ids(track_properties(&mutable, true, Version::Draft18).unwrap()),
+			[0x06, 0x3801]
+		);
+		assert_eq!(
+			ids(track_properties(&mutable, true, Version::Draft22).unwrap()),
+			[0x3801]
+		);
+
+		let sealed = upstream(&[0x0b, 2, 0x06, 42]);
+		assert!(track_properties(&sealed, true, Version::Draft18).is_ok());
+		assert!(matches!(
+			track_properties(&sealed, true, Version::Draft22),
+			Err(Error::Unsupported)
+		));
 	}
 
 	/// A range ending inside its group stops at its End Object, which draft 20 counts
@@ -9540,6 +10124,7 @@ mod serve_tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted: true,
+					epoch: None,
 				},
 			));
 			// Driven until FETCH_OK is out, so the fetch is parked on uni stream credit.
@@ -9641,6 +10226,7 @@ mod serve_tests {
 						range_filters: false,
 						fill_timeout: false,
 						properties_wanted: true,
+						epoch: None,
 					},
 				));
 				// Driven until FETCH_OK is out, so the fetch is parked on uni stream credit.
@@ -9685,12 +10271,14 @@ mod serve_tests {
 		}
 	}
 
-	/// A joining FETCH on a subscription its own request token authorized holds no authority
-	/// of its own: revoking the token ends the subscription, and the fetch with it, even one
-	/// parked on stream credit after FETCH_OK.
+	/// A joining FETCH holds no authority of its own: revocation or dropping its parent
+	/// ends it even while stream credit blocks the response after FETCH_OK.
 	#[moq_clock::test]
-	async fn a_joining_fetch_ends_with_its_token_subscription() {
-		for version in JOINING_DRAFTS {
+	async fn a_joining_fetch_ends_with_its_subscription() {
+		for (version, token) in JOINING_DRAFTS
+			.into_iter()
+			.flat_map(|version| [false, true].map(|token| (version, token)))
+		{
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
 			let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
@@ -9706,7 +10294,10 @@ mod serve_tests {
 			let auth = crate::auth::Handle::new(false);
 			let mut requests = auth.requests().unwrap();
 			// A limit of nothing, so only the token admits the subscription.
-			auth.authorize(&crate::auth::Grant::default());
+			auth.authorize(&match token {
+				true => crate::auth::Grant::default(),
+				false => crate::auth::Grant::all(),
+			});
 			let publisher = Publisher::new(
 				crate::time::sim(),
 				session.clone(),
@@ -9719,13 +10310,22 @@ mod serve_tests {
 			.with_auth(auth.clone());
 
 			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
-			let mut subscription = std::pin::pin!(publisher.clone().run_subscribe_stream(stream, token_subscribe()));
-			let accepted = async { requests.next().await.expect("a request") };
-			let request = match futures::future::select(std::pin::pin!(accepted), subscription.as_mut()).await {
-				futures::future::Either::Left((request, _)) => request,
-				futures::future::Either::Right((res, _)) => panic!("{version}: subscription ended: {res:?}"),
+			let mut msg = token_subscribe();
+			if !token {
+				msg.authorization_token = None;
+			}
+			let mut subscription = Box::pin(publisher.clone().run_subscribe_stream(stream, msg));
+			let enforced = if token {
+				let accepted = async { requests.next().await.expect("a request") };
+				let request = match futures::future::select(std::pin::pin!(accepted), subscription.as_mut()).await {
+					futures::future::Either::Left((request, _)) => request,
+					futures::future::Either::Right((res, _)) => panic!("{version}: subscription ended: {res:?}"),
+				};
+				Some(request.accept(crate::auth::Grant::all()))
+			} else {
+				None
 			};
-			let enforced = request.accept(crate::auth::Grant::all());
+
 			let joined = publisher.joins.wait(|joins| match joins.get(&RequestId(REQUEST_ID)) {
 				Some(Some(_)) => Poll::Ready(()),
 				_ => Poll::Pending,
@@ -9750,6 +10350,7 @@ mod serve_tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted: true,
+					epoch: None,
 				},
 			));
 			for _ in 0..100 {
@@ -9767,10 +10368,16 @@ mod serve_tests {
 				"{version}: FETCH_OK never went out"
 			);
 
-			enforced.revoke(crate::SessionError::Unauthorized, "revoked");
-			let _ = moq_clock::timeout(std::time::Duration::from_secs(1), subscription.as_mut())
-				.await
-				.unwrap_or_else(|_| panic!("{version}: the revoked subscription kept serving"));
+			if let Some(enforced) = enforced {
+				enforced.revoke(crate::SessionError::Unauthorized, "revoked");
+				let _ = moq_clock::timeout(std::time::Duration::from_secs(1), subscription.as_mut())
+					.await
+					.unwrap_or_else(|_| panic!("{version}: the revoked subscription kept serving"));
+			} else {
+				// Session authorization stays valid, and the cache stays alive.
+				drop(subscription);
+			}
+
 			let res = moq_clock::timeout(std::time::Duration::from_secs(1), fetch)
 				.await
 				.unwrap_or_else(|_| panic!("{version}: the fetch outlived its subscription"));
@@ -9994,6 +10601,7 @@ mod serve_tests {
 							range_filters: false,
 							fill_timeout: false,
 							properties_wanted: true,
+							epoch: None,
 						},
 					)
 					.await
@@ -10038,6 +10646,7 @@ mod serve_tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted: true,
+					epoch: None,
 				},
 			)
 			.await
@@ -10355,6 +10964,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(0x40),
 			subscription_request_id,
@@ -10667,6 +11277,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(rid),
 			subscription_request_id,
@@ -10693,6 +11304,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(rid),
 			subscription_request_id,
@@ -11886,8 +12498,7 @@ mod tests {
 		slot
 	}
 
-	/// moq-transport cannot carry the receiver's max delay budget, so the serving
-	/// subscription must preserve everything the producer still retains.
+	/// An absent max age preserves everything the producer still retains.
 	#[test]
 	fn serving_subscription_keeps_retained_backlog() {
 		let producer = track::Producer::new(
@@ -11985,7 +12596,7 @@ mod tests {
 		let local = announced.assert_next_active("from/us");
 		announced.assert_next_wait();
 
-		assert_eq!(publisher.select(&local, &peer), Advert::Plain);
+		assert_eq!(publisher.select(&local, &peer, false), Advert::Some(Default::default()));
 	}
 
 	/// An anonymous chain received from an identified peer keeps the 0 on the wire
@@ -12320,6 +12931,89 @@ mod tests {
 			1,
 			"re-offered a namespace the peer asked not to be offered again"
 		);
+	}
+
+	/// MoQ Epoch: a restart onto another epoch advertises the new instance before it
+	/// withdraws the old, and only once the peer accepted it, since the two streams are
+	/// unordered. The peer never sees the namespace absent. A peer without the extension
+	/// cannot tell the two apart, so it still sees the old one withdrawn first.
+	#[moq_clock::test]
+	async fn another_epoch_is_advertised_before_the_old_is_withdrawn() {
+		use crate::lite::test_transport::Sent;
+		const VERSION: Version = Version::Draft17;
+
+		for epochs in [true, false] {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let _old = origin
+				.announce("cam", crate::origin::Route::default().with_epoch(crate::Epoch::mint()))
+				.unwrap();
+			settle().await;
+
+			let ok = publish_namespace_ok(VERSION).await;
+			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok.clone(), ok]);
+			let log = session.log.clone();
+			let declared = peer::PeerSetup::default();
+			declared.set(peer::Peer {
+				solicit: Some(false),
+				epoch: epochs,
+				..Default::default()
+			});
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				session,
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				declared,
+				VERSION,
+			);
+
+			let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+			let mut _new = None;
+			for count in [1, 2] {
+				for _ in 0..100 {
+					assert!(futures::poll!(run.as_mut()).is_pending());
+					if occurrences(&log, b"cam") >= count {
+						break;
+					}
+					settle().await;
+				}
+				assert_eq!(occurrences(&log, b"cam"), count, "epochs: {epochs}");
+				if count == 1 {
+					// A newer epoch outranks the old at the same path: a restart.
+					let route = crate::origin::Route::default().with_epoch(crate::Epoch::mint());
+					_new = Some(origin.announce("cam", route).unwrap());
+				}
+			}
+			for _ in 0..10 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				settle().await;
+			}
+
+			// Where each advertisement went out, and where the first one was withdrawn.
+			let trail = log.trail();
+			let advertised: Vec<(usize, usize)> = trail
+				.iter()
+				.enumerate()
+				.filter_map(|(at, (stream, sent))| match sent {
+					Sent::Write(bytes) if bytes.windows(3).any(|window| window == b"cam") => Some((at, *stream)),
+					_ => None,
+				})
+				.collect();
+			let [(_, old), (made, new)] = advertised[..] else {
+				panic!("epochs: {epochs}: expected two advertisements, got {advertised:?}");
+			};
+			assert_ne!(old, new, "epochs: {epochs}: one request carried both");
+			let broken = trail
+				.iter()
+				.position(|(stream, sent)| *stream == old && matches!(sent, Sent::Reset(_)))
+				.unwrap_or_else(|| panic!("epochs: {epochs}: the old advertisement was never withdrawn"));
+			assert_eq!(
+				made < broken,
+				epochs,
+				"epochs: {epochs}: advertised at {made}, withdrew at {broken}"
+			);
+		}
 	}
 
 	async fn publish_namespace_ok(version: Version) -> Vec<u8> {
@@ -13108,10 +13802,44 @@ mod tests {
 			},
 			solicit,
 			hidden: false,
+			max_age: false,
 			auth: false,
 			active_count: false,
+			epoch: false,
 		});
 		slot
+	}
+
+	/// PUBLISH_NAMESPACE_DONE withdrawing the first request, "cam".
+	async fn publish_namespace_done(version: Version) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		writer.varint(ietf::PublishNamespaceDone::ID).await.unwrap();
+		writer
+			.encode(&ietf::PublishNamespaceDone {
+				track_namespace: crate::Path::new("cam"),
+				request_id: RequestId(1),
+			})
+			.await
+			.unwrap();
+		log.writes.lock().unwrap().clone()
+	}
+
+	/// PUBLISH_NAMESPACE_CANCEL letting go of the first request, "cam".
+	async fn publish_namespace_cancel(version: Version) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		writer.varint(ietf::PublishNamespaceCancel::ID).await.unwrap();
+		writer
+			.encode(&ietf::PublishNamespaceCancel {
+				track_namespace: crate::Path::new("cam"),
+				request_id: RequestId(1),
+				error_code: 0,
+				reason_phrase: "gone".into(),
+			})
+			.await
+			.unwrap();
+		log.writes.lock().unwrap().clone()
 	}
 
 	/// The bytes of one REQUEST_UPDATE, framed as the publisher writes it.
@@ -13420,10 +14148,77 @@ mod tests {
 
 	/// A route's auth rides its PUBLISH_NAMESPACE as the request's token, and swapping it
 	/// renews the request in place: REQUEST_UPDATE on the same stream, carrying only the
-	/// new token.
+	/// new token. Draft-16 names the request in the update.
 	#[moq_clock::test]
 	async fn swapping_a_route_auth_is_a_request_update() {
-		const VERSION: Version = Version::Draft19;
+		swaps_a_route_auth(Version::Draft16).await;
+		swaps_a_route_auth(Version::Draft19).await;
+	}
+
+	async fn swaps_a_route_auth(version: Version) {
+		let origin = unheld_origin();
+		let auth = crate::auth::Handle::ietf(false);
+		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
+		let second = auth
+			.present(bytes::Bytes::from_static(b"second-secret"), false)
+			.unwrap();
+		let cam = origin
+			.announce("cam", crate::origin::Route::default().with_auth(first))
+			.unwrap();
+		settle().await;
+
+		let ok = publish_namespace_ok(version).await;
+		let (publisher, log) = auth_publisher(&origin, &auth, vec![[ok.clone(), ok].concat()], version);
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		poll_until(&mut run, &log, b"cam", 1).await;
+		assert_eq!(
+			occurrences(&log, b"cam"),
+			1,
+			"{version}: the advertisement never went out"
+		);
+		assert_eq!(
+			occurrences(&log, b"first-secret"),
+			1,
+			"{version}: PUBLISH_NAMESPACE carries the auth"
+		);
+
+		cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
+		let expected = request_update(
+			version,
+			&ietf::PublishNamespaceUpdate {
+				request_id: RequestId(3),
+				namespace_request_id: (version == Version::Draft16).then_some(RequestId(1)),
+				hops: None,
+				cost: None,
+				authorization_token: Some(auth_token(b"second-secret")),
+			},
+		)
+		.await;
+		poll_until(&mut run, &log, &expected, 1).await;
+
+		assert_eq!(
+			occurrences(&log, &expected),
+			1,
+			"{version}: REQUEST_UPDATE with the new token"
+		);
+		// Let its answer land, which leaves the request standing.
+		for _ in 0..10 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		assert_eq!(
+			occurrences(&log, b"cam"),
+			1,
+			"{version}: PUBLISH_NAMESPACE was not repeated"
+		);
+		assert_eq!(log.bi_opens(), 1, "{version}: the update rode the request's own stream");
+	}
+
+	/// A draft-16 peer's PUBLISH_NAMESPACE_CANCEL can beat its answer to our update. It
+	/// withdraws only that namespace, which is offered again, and the loop carries on.
+	#[moq_clock::test]
+	async fn a_draft_16_cancel_ahead_of_the_answer_ends_only_its_request() {
+		const VERSION: Version = Version::Draft16;
 
 		let origin = unheld_origin();
 		let auth = crate::auth::Handle::ietf(false);
@@ -13437,33 +14232,69 @@ mod tests {
 		settle().await;
 
 		let ok = publish_namespace_ok(VERSION).await;
-		let (publisher, log) = auth_publisher(&origin, &auth, vec![[ok.clone(), ok].concat()], VERSION);
+		let cancel = publish_namespace_cancel(VERSION).await;
+		let (publisher, log) = auth_publisher(&origin, &auth, vec![[ok.clone(), cancel].concat(), ok], VERSION);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
-		poll_until(&mut run, &log, b"cam", 1).await;
-		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
-		assert_eq!(
-			occurrences(&log, b"first-secret"),
-			1,
-			"PUBLISH_NAMESPACE carries the auth"
-		);
+		poll_until(&mut run, &log, b"first-secret", 1).await;
 
 		cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
-		let expected = request_update(
-			VERSION,
-			&ietf::PublishNamespaceUpdate {
-				request_id: RequestId(3),
-				namespace_request_id: None,
-				hops: None,
-				cost: None,
-				authorization_token: Some(auth_token(b"second-secret")),
-			},
-		)
-		.await;
-		poll_until(&mut run, &log, &expected, 1).await;
+		poll_until(&mut run, &log, b"cam", 2).await;
 
-		assert_eq!(occurrences(&log, &expected), 1, "REQUEST_UPDATE with the new token");
-		assert_eq!(occurrences(&log, b"cam"), 1, "PUBLISH_NAMESPACE was not repeated");
-		assert_eq!(log.bi_opens(), 1, "the update rode the request's own stream");
+		assert_eq!(occurrences(&log, b"cam"), 2, "the namespace was not offered again");
+		assert_eq!(log.bi_opens(), 2, "a fresh request after the cancel");
+		assert_eq!(
+			occurrences(&log, &publish_namespace_done(VERSION).await),
+			0,
+			"PUBLISH_NAMESPACE_DONE after the peer's cancel"
+		);
+	}
+
+	/// A draft-16 peer refuses an update with REQUEST_ERROR and then PUBLISH_NAMESPACE_CANCEL.
+	/// Draft 16 sends no PUBLISH_NAMESPACE_DONE after a cancel, so the namespace is only
+	/// offered again once the refusal's wait is out.
+	#[moq_clock::test]
+	async fn a_refused_draft_16_update_sends_no_done() {
+		const VERSION: Version = Version::Draft16;
+
+		let origin = unheld_origin();
+		let auth = crate::auth::Handle::ietf(false);
+		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
+		let second = auth
+			.present(bytes::Bytes::from_static(b"second-secret"), false)
+			.unwrap();
+		let cam = origin
+			.announce("cam", crate::origin::Route::default().with_auth(first))
+			.unwrap();
+		settle().await;
+
+		let ok = publish_namespace_ok(VERSION).await;
+		let refusal = publish_namespace_error(VERSION, 50).await;
+		let cancel = publish_namespace_cancel(VERSION).await;
+		let (publisher, log) = auth_publisher(
+			&origin,
+			&auth,
+			vec![[ok.clone(), refusal, cancel].concat(), ok],
+			VERSION,
+		);
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		poll_until(&mut run, &log, b"first-secret", 1).await;
+
+		cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"cam") >= 2 {
+				break;
+			}
+			tick().await;
+		}
+
+		assert_eq!(occurrences(&log, b"cam"), 2, "the namespace was not offered again");
+		assert_eq!(log.bi_opens(), 2, "a fresh request after the refusal");
+		assert_eq!(
+			occurrences(&log, &publish_namespace_done(VERSION).await),
+			0,
+			"PUBLISH_NAMESPACE_DONE after the peer's refusal"
+		);
 	}
 
 	/// An auth another handle issued is not this session's to present: the route is
@@ -13521,7 +14352,7 @@ mod tests {
 		assert_eq!(log.bi_opens(), 2, "a fresh stream for the fresh request");
 	}
 
-	/// Before draft-17 a namespace cannot be updated, so a renewal withdraws the request
+	/// Before draft-16 a namespace cannot be updated, so a renewal withdraws the request
 	/// and makes it again with the new token.
 	#[moq_clock::test]
 	async fn a_draft_14_renewal_restarts_the_request() {
@@ -13632,6 +14463,13 @@ mod tests {
 		poll_until(&mut run, &log, b"first", 1).await;
 		cam.update(crate::origin::Route::default().with_auth(present(b"second")))
 			.unwrap();
+		poll_until(&mut run, &log, b"second", 1).await;
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		assert_eq!(log.resets().len(), 1, "the reset request was not withdrawn");
+
+		// The advertisement comes back on the retry, jittered up to RETRY_BASE, which
+		// outlasts poll_until.
+		moq_clock::sleep(RETRY_BASE).await;
 		poll_until(&mut run, &log, b"second", 2).await;
 		assert_eq!(
 			occurrences(&log, b"second"),
@@ -13642,11 +14480,15 @@ mod tests {
 	}
 
 	/// An update the peer never answers drops its request once the timeout passes, and
-	/// the retry advertises the namespace afresh under the current auth.
+	/// the retry advertises the namespace afresh under the current auth. Draft-16's request
+	/// rides the control stream, where only PUBLISH_NAMESPACE_DONE withdraws it.
 	#[moq_clock::test]
 	async fn an_unanswered_renewal_advertises_again() {
-		const VERSION: Version = Version::Draft19;
+		advertises_again_unanswered(Version::Draft16).await;
+		advertises_again_unanswered(Version::Draft19).await;
+	}
 
+	async fn advertises_again_unanswered(version: Version) {
 		let origin = unheld_origin();
 		let auth = crate::auth::Handle::ietf(false);
 		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
@@ -13655,8 +14497,8 @@ mod tests {
 			.unwrap();
 		settle().await;
 
-		let ok = publish_namespace_ok(VERSION).await;
-		let (publisher, log) = auth_publisher(&origin, &auth, vec![ok.clone(), ok], VERSION);
+		let ok = publish_namespace_ok(version).await;
+		let (publisher, log) = auth_publisher(&origin, &auth, vec![ok.clone(), ok], version);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"first", 1).await;
 		cam.update(crate::origin::Route::default().with_auth(present(b"second")))
@@ -13674,8 +14516,12 @@ mod tests {
 		assert_eq!(
 			occurrences(&log, b"second"),
 			2,
-			"the unanswered renewal was never retried"
+			"{version}: the unanswered renewal was never retried"
 		);
+		if version == Version::Draft16 {
+			let done = publish_namespace_done(version).await;
+			assert_eq!(occurrences(&log, &done), 1, "the peer was never told to let it go");
+		}
 	}
 
 	/// moq-transport has no restart: another source winning a namespace without an epoch
@@ -14005,6 +14851,7 @@ mod tests {
 			.run_subscribe_stream(
 				stream,
 				ietf::Subscribe {
+					max_age: None,
 					new_group: None,
 					request_id: RequestId(1),
 					track_namespace: crate::Path::new("nothing/here"),
@@ -14018,6 +14865,7 @@ mod tests {
 					rendezvous: false,
 					range_filters: false,
 					authorization_token: None,
+					epoch: None,
 				},
 			)
 			.await
@@ -14044,6 +14892,7 @@ mod tests {
 					range_filters: false,
 					fill_timeout: false,
 					properties_wanted: true,
+					epoch: None,
 				},
 			)
 			.await
@@ -14136,7 +14985,7 @@ struct LiveEdge {
 
 /// Snapshot the live edge of a track.
 fn live_edge(track: &track::Consumer) -> LiveEdge {
-	let Some(latest) = track.latest() else {
+	let Some(latest) = track.latest_sequence() else {
 		return LiveEdge::default();
 	};
 
@@ -14215,6 +15064,22 @@ struct ServeRange {
 	/// open once the range is exhausted; draft-20 removed the notion of a filter ending
 	/// a subscription.
 	end: Option<EndLocation>,
+}
+
+impl ServeRange {
+	/// Bound `subscription` to this range.
+	fn apply(&self, subscription: &mut Subscription) {
+		subscription.set_bounds(
+			self.start.map(|start| track::Position {
+				group: start.group,
+				frame: start.object,
+			}),
+			self.end.and_then(|end| match end.object {
+				Some(object) => track::Position::after(end.group, object),
+				None => track::Position::after_group(end.group),
+			}),
+		);
+	}
 }
 
 /// The slice of one group a subscription's [`ServeRange`] selects.
@@ -14360,6 +15225,7 @@ mod range_tests {
 
 	fn subscribe(filter: Filter) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("broadcast"),
@@ -14373,6 +15239,7 @@ mod range_tests {
 			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
+			epoch: None,
 		}
 	}
 

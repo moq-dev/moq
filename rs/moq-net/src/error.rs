@@ -235,9 +235,10 @@ pub enum StreamError {
 	#[error("group too large")]
 	GroupTooLarge,
 
-	/// A frame's timestamp doesn't match its track: missing on a timed track, present on
-	/// an untimed one, or out of range for the track's timescale.
-	#[error("frame timestamp doesn't match track timescale")]
+	/// A frame's timestamp doesn't fit its track: missing on a timed track, present on an
+	/// untimed one, out of range for the track's timescale, or starting a group earlier
+	/// than the group before it.
+	#[error("frame timestamp doesn't fit its track")]
 	TimestampMismatch,
 
 	/// The grant does not cover this subscription, fetch, or announcement, or no longer
@@ -490,9 +491,10 @@ pub enum Error {
 	#[error("frame already open")]
 	FrameOpen,
 
-	/// A frame's timestamp doesn't match its track: it's missing on a timed track,
-	/// present on an untimed track, or out of range for the track's timescale.
-	#[error("frame timestamp doesn't match track timescale")]
+	/// A frame's timestamp doesn't fit its track: it's missing on a timed track, present
+	/// on an untimed track, out of range for the track's timescale, or starts a group
+	/// earlier than the group before it.
+	#[error("frame timestamp doesn't fit its track")]
 	TimestampMismatch,
 
 	/// The group was evicted by its own track to pay eviction debt under memory
@@ -517,6 +519,10 @@ pub enum Error {
 	/// The peer could not parse the track's content.
 	#[error("malformed track")]
 	MalformedTrack,
+
+	/// The track requires a moq-transport property this endpoint does not understand.
+	#[error("unsupported extension")]
+	UnsupportedExtension,
 
 	/// The stream was torn down because the session closed. The specific reason travels on
 	/// the session close, not here.
@@ -645,7 +651,25 @@ impl From<&Error> for SessionError {
 			// (a session 0x4 would become the stream's GOING_AWAY), and the draft already
 			// says an unrecognized code is an unspecified error. Send that instead.
 			Error::Remote(_) => Self::Internal,
-			_ => Self::Internal,
+			// Our own transport failed: there is no code to say so.
+			Error::Transport(_) | Error::IdleTimeout => Self::Internal,
+			// Stream-scoped conditions have no session code.
+			Error::Old
+			| Error::Evicted
+			| Error::Lagged
+			| Error::NotFound
+			| Error::NotFetchable
+			| Error::InvalidRange
+			| Error::InvalidJoiningRequestId
+			| Error::Unroutable
+			| Error::FrameTooLarge
+			| Error::GroupTooLarge
+			| Error::FrameOpen
+			| Error::TimestampMismatch
+			| Error::MalformedTrack
+			| Error::UnsupportedExtension => Self::Internal,
+			// A producer dropped without an end is a bug here, so it is never given a meaning.
+			Error::Dropped => Self::Internal,
 		}
 	}
 }
@@ -660,8 +684,10 @@ impl From<&Error> for StreamError {
 			Error::Stream(err) => err.clone(),
 			// App codes share the 64+ range in both registries.
 			Error::Session(SessionError::App(app)) => Self::App(*app),
-			// A session-scoped code has no meaning in this registry; don't forward the number.
-			Error::Session(_) => Self::Internal,
+			// A stream that can still be reset outlived the session that failed, so that was
+			// another one: the route this stream was served through. The path lost its route;
+			// this session is fine, and the failed session's code means nothing here.
+			Error::Session(_) | Error::Transport(_) | Error::IdleTimeout => Self::Unroutable,
 			Error::Cancel | Error::Closed => Self::Cancel,
 			Error::SessionClosed => Self::Session(SessionError::Cancel),
 			Error::Decode(coding::DecodeError::Session(err)) => Self::Session(err.clone()),
@@ -695,10 +721,21 @@ impl From<&Error> for StreamError {
 			Error::Version
 			| Error::UnknownAlpn(_)
 			| Error::TooManyParameters
+			| Error::TooManyRequests
+			| Error::Duplicate
 			| Error::GoawayTimeout
 			| Error::ProtocolViolation
 			| Error::UnexpectedMessage => Self::Session(SessionError::from(err)),
-			_ => Self::Internal,
+			// No stream code says so: an unknown stream type, a request only moq-transport
+			// can make, or a fault on our own side.
+			Error::Unsupported
+			| Error::UnsupportedExtension
+			| Error::InvalidRange
+			| Error::InvalidJoiningRequestId
+			| Error::FrameOpen
+			| Error::Encode(_) => Self::Internal,
+			// A producer dropped without an end is a bug here, so it is never given a meaning.
+			Error::Dropped => Self::Internal,
 		}
 	}
 }
@@ -889,17 +926,26 @@ mod tests {
 			64 + 7
 		);
 
-		// An unregistered code carries no registry, so it must not be re-sent as a number
-		// that means something here: session 0x4 and 0x5 are GOING_AWAY and TOO_FAR_BEHIND
-		// on a stream. Downgrade to the unspecified-error code instead.
-		for code in [0x4, 0x5, 0x1f] {
+		// An upstream session's close must not be re-sent as a number that means something
+		// here: session 0x4 and 0x5 are GOING_AWAY and TOO_FAR_BEHIND on a stream. The
+		// downstream session is healthy; only the path lost its route.
+		for code in [0x0, 0x4, 0x5, 0x1f] {
 			let crossed = StreamError::from(&Error::from(SessionError::from_code(code)));
 			assert_eq!(
 				crossed,
-				StreamError::Internal,
+				StreamError::Unroutable,
 				"session {code:#x} leaked into the stream space"
 			);
 		}
+		assert_eq!(
+			StreamError::from(&Error::Transport("reset".into())),
+			StreamError::Unroutable
+		);
+		assert_eq!(StreamError::from(&Error::IdleTimeout), StreamError::Unroutable);
+
+		// A producer dropped without an end is a bug, never given a meaning.
+		assert_eq!(StreamError::from(&Error::Dropped), StreamError::Internal);
+		assert_eq!(SessionError::from(&Error::Dropped), SessionError::Internal);
 	}
 
 	// The registry a code is read with depends on what failed, and picking the wrong one

@@ -7,7 +7,8 @@ set -euo pipefail
 # runtime with the same number of independent Tokio/epoll and io_uring workers
 # on the current tree. The current load generator drives every relay so the
 # workloads stay identical. `--audio` isolates the audio grouping/load-shape matrix.
-# `--lock` records relay worker off-CPU stacks to attribute std mutex waits.
+# `--profile` captures relay profiles: std mutex waits by stack (lock), CPU stacks
+# (cpu), or jemalloc heap snapshots and allocation churn (heap).
 # `--shard` sweeps the QUIC shard count against the connection count.
 
 MODE=${1:-}
@@ -46,14 +47,41 @@ usable_cpus() {
     env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc
 }
 case $MODE in
+    --criterion)
+        BASE=
+        CRITERION_CARGO_ARGS=()
+        CRITERION_FILTER_ARGS=()
+        parsing_filters=false
+        for argument in "${@:2}"; do
+            if [[ $argument == -- && $parsing_filters == false ]]; then
+                parsing_filters=true
+            elif [[ $parsing_filters == true ]]; then
+                CRITERION_FILTER_ARGS+=("$argument")
+            else
+                CRITERION_CARGO_ARGS+=("$argument")
+            fi
+        done
+        ;;
     --audio)
         BASE=
         ;;
-    --lock)
+    --profile)
         BASE=
-        LOCK_WORKLOAD=${MOQ_BENCH_LOCK_WORKLOAD:-fanout}
-        LOCK_WORKERS=${MOQ_BENCH_LOCK_WORKERS:-1 4 16}
-        # Without frame pointers, perf's DWARF unwinder stops at the first relay frame.
+        PROFILE_MODES=${MOQ_BENCH_PROFILE:-}
+        PROFILE_WORKLOAD=${MOQ_BENCH_PROFILE_WORKLOAD:-fanout}
+        PROFILE_WORKERS=${MOQ_BENCH_PROFILE_WORKERS:-1 4 16}
+        if [[ -z $PROFILE_MODES ]]; then
+            printf 'MOQ_BENCH_PROFILE must name one or more of: lock cpu heap\n' >&2
+            exit 1
+        fi
+        for value in $PROFILE_MODES; do
+            if [[ ! $value =~ ^(lock|cpu|heap)$ ]]; then
+                printf 'unknown profile mode %q; expected lock, cpu, or heap\n' "$value" >&2
+                exit 1
+            fi
+        done
+        # Without frame pointers, perf's DWARF unwinder stops at the first relay frame,
+        # and CPU stacks unwind by frame pointer alone.
         export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes"
         ;;
     --shard)
@@ -180,11 +208,20 @@ criterion_targets() {
                 .packages[] as $package
                 | $package.targets[]
                 | select(any(.kind[]; . == "bench"))
-                | [($package.manifest_path | ltrimstr($root)), .name]
+                | [($package.manifest_path | ltrimstr($root)), .name, (.["required-features"] // [] | join(","))]
                 | @tsv
             ' |
             sort
     )
+}
+
+# The features a bench target requires, comma-separated; cargo refuses to build it without them.
+target_features() {
+    local checkout=$1
+    local manifest=$2
+    local target=$3
+    criterion_targets "$checkout" |
+        awk -F '\t' -v manifest="$manifest" -v target="$target" '$1 == manifest && $2 == target { print $3; exit }'
 }
 
 target_dir() {
@@ -208,7 +245,7 @@ run_criterion() {
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
     fi
-    while IFS=$'\t' read -r manifest target; do
+    while IFS=$'\t' read -r manifest target _; do
         run_criterion_target "$checkout" "$manifest" "$target" "$@"
     done <"$target_list"
 }
@@ -217,18 +254,20 @@ run_criterion_target() {
     local checkout=$1
     local manifest=$2
     local target=$3
+    local features
     shift 3
+    features=$(target_features "$checkout" "$manifest" "$target") || return 1
     (
         cd "$checkout" || exit 1
         CARGO_TARGET_DIR=$(target_dir "$checkout") \
-            cargo bench --locked --manifest-path "$manifest" --bench "$target" -- \
+            cargo bench --locked --manifest-path "$manifest" --bench "$target" ${features:+--features "$features"} -- \
             "${CRITERION_ARGS[@]}" "$@"
     )
 }
 
 criterion_cases() {
     local checkout=$1
-    local manifest target benchmark
+    local manifest target features benchmark
     local listing=$RUN/criterion-listing
     local target_list=$RUN/criterion-targets
 
@@ -239,11 +278,11 @@ criterion_cases() {
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
     fi
-    while IFS=$'\t' read -r manifest target; do
+    while IFS=$'\t' read -r manifest target features; do
         if ! (
             cd "$checkout" || exit 1
             CARGO_TARGET_DIR=$(target_dir "$checkout") \
-                cargo bench --locked --manifest-path "$manifest" --bench "$target" -- --list
+                cargo bench --locked --manifest-path "$manifest" --bench "$target" ${features:+--features "$features"} -- --list
         ) | sed -n 's/: benchmark$//p' >"$listing"; then
             return 1
         fi
@@ -590,56 +629,131 @@ run_shard_sweep() {
     done
 }
 
-run_lock_profile() {
+run_profiles() {
     if [[ $(uname -s) != Linux ]]; then
-        printf 'lock profiling needs Linux for perf and /proc schedstat\n' >&2
+        printf 'relay profiling needs Linux for perf and /proc\n' >&2
         return 1
     fi
-    # Refuse before the build when the kernel would refuse the capture.
-    python3 "$ROOT/bench/profile.py" check
+    # Refuse before the build when the host would refuse a capture.
+    local mode
+    for mode in $PROFILE_MODES; do
+        python3 "$ROOT/bench/profile.py" check "$mode"
+    done
     generate_certificate
 
+    for mode in $PROFILE_MODES; do
+        run_profile "$mode"
+    done
+}
+
+# Each profiled run follows an unprofiled control on the same binary, so the
+# throughput and CPU difference shows the profiler's overhead.
+run_profile() {
+    local mode=$1
+    local -a features=()
+    # The heap mode reads jemalloc's own profiles; the others keep the default allocator.
+    if [[ $mode == heap ]]; then
+        features=(--features moq-relay/jemalloc)
+    fi
+
     printf 'Building the relay with the profiling profile and frame pointers...\n'
-    CARGO_TARGET_DIR=$TARGET/profile cargo build --locked --profile profiling -p moq-relay -p moq-bench
+    CARGO_TARGET_DIR=$TARGET/profile cargo build --locked --profile profiling -p moq-relay -p moq-bench "${features[@]}"
     LOAD_BIN=$TARGET/profile/profiling/moq-bench
     HOST_BIN=$TARGET/profile/profiling/moq-bench-host
     local relay=$TARGET/profile/profiling/moq-relay
 
-    printf '\nLock wait: %s, tokio workers; each profiled run follows an unprofiled control\n' "$LOCK_WORKLOAD"
-    printf '%-8s %5s %8s %13s %13s %10s %10s %13s %9s\n' \
-        workers idle switches control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
-    local workers
-    for workers in $LOCK_WORKERS; do
-        run_workload "control-$workers" "$relay" "$LOCK_WORKLOAD" tokio-workers "$workers"
-        PROFILE_LOCK=true
-        run_workload "lock-$workers" "$relay" "$LOCK_WORKLOAD" tokio-workers "$workers"
-        PROFILE_LOCK=
-        jq -r -s '[
-            .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores, (.[2].idle | length),
-            ([.[2].workers[].switches] | min),
-            ([.[2].workers[].mutex_wait_ns] | add / 1000000),
-            ([.[2].workers[].mutex_wait_ns] | add) / ([.[2].workers[].cpu_ns] | add)
-        ] | @tsv' "$RUN/relay/control-$workers/$LOCK_WORKLOAD/summary.json" \
-            "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/summary.json" \
-            "$RUN/relay/lock-$workers/$LOCK_WORKLOAD/lock/lock.json" |
-            while IFS=$'\t' read -r control profiled control_cpu profiled_cpu idle switches wait share; do
-                printf '%-8s %5s %8s %13.1f %13.1f %10.3f %10.3f %13.1f %9.4f\n' \
-                    "$workers" "$idle" "$switches" "$control" "$profiled" "$control_cpu" "$profiled_cpu" "$wait" "$share"
-            done
+    local workers control profiled
+    case $mode in
+        lock)
+            printf '\nLock wait: %s, tokio workers\n' "$PROFILE_WORKLOAD"
+            printf '%-8s %5s %8s %13s %13s %10s %10s %13s %9s\n' \
+                workers idle switches control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
+            ;;
+        cpu)
+            printf '\nCPU stacks: %s, tokio workers, sampled at 999 Hz\n' "$PROFILE_WORKLOAD"
+            printf '%-8s %13s %13s %10s %10s %9s %11s\n' \
+                workers control-fps profiled-fps control-CPU profiled-CPU samples sampled-CPU
+            ;;
+        heap)
+            printf '\nHeap: %s, tokio workers, jemalloc retained MiB and churn over the steady window\n' "$PROFILE_WORKLOAD"
+            printf '%-8s %13s %13s %10s %10s %10s %10s %9s %9s %9s %11s %10s\n' \
+                workers control-fps profiled-fps control-CPU profiled-CPU control-RSS profiled-RSS \
+                before steady teardown churn-MiB/s allocs/s
+            ;;
+    esac
+    for workers in $PROFILE_WORKERS; do
+        run_workload "control-$mode-$workers" "$relay" "$PROFILE_WORKLOAD" tokio-workers "$workers"
+        PROFILE=$mode
+        run_workload "$mode-$workers" "$relay" "$PROFILE_WORKLOAD" tokio-workers "$workers"
+        PROFILE=
+        control=$RUN/relay/control-$mode-$workers/$PROFILE_WORKLOAD/summary.json
+        profiled=$RUN/relay/$mode-$workers/$PROFILE_WORKLOAD
+        case $mode in
+            lock)
+                jq -r -s '[
+                    .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores, (.[2].idle | length),
+                    ([.[2].workers[].switches] | min),
+                    ([.[2].workers[].mutex_wait_ns] | add / 1000000),
+                    ([.[2].workers[].mutex_wait_ns] | add) / ([.[2].workers[].cpu_ns] | add)
+                ] | @tsv' "$control" "$profiled/summary.json" "$profiled/lock/lock.json" |
+                    while IFS=$'\t' read -r control_fps profiled_fps control_cpu profiled_cpu idle switches wait share; do
+                        printf '%-8s %5s %8s %13.1f %13.1f %10.3f %10.3f %13.1f %9.4f\n' "$workers" "$idle" "$switches" \
+                            "$control_fps" "$profiled_fps" "$control_cpu" "$profiled_cpu" "$wait" "$share"
+                    done
+                ;;
+            cpu)
+                jq -r -s '[
+                    .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores, .[2].samples, .[2].sampled_cores
+                ] | @tsv' "$control" "$profiled/summary.json" "$profiled/cpu/cpu.json" |
+                    while IFS=$'\t' read -r control_fps profiled_fps control_cpu profiled_cpu samples sampled; do
+                        printf '%-8s %13.1f %13.1f %10.3f %10.3f %9s %11.3f\n' "$workers" \
+                            "$control_fps" "$profiled_fps" "$control_cpu" "$profiled_cpu" "$samples" "$sampled"
+                    done
+                ;;
+            heap)
+                jq -r -s '[
+                    .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores,
+                    (.[0].rss_bytes / 1048576), (.[1].rss_bytes / 1048576),
+                    (.[2].retained_bytes | .before, .["steady-end"], .teardown | . / 1048576),
+                    (.[2].churn_bytes_per_s / 1048576), .[2].churn_allocs_per_s
+                ] | @tsv' "$control" "$profiled/summary.json" "$profiled/heap/heap.json" |
+                    while IFS=$'\t' read -r control_fps profiled_fps control_cpu profiled_cpu control_rss profiled_rss \
+                        before steady teardown churn allocs; do
+                        printf '%-8s %13.1f %13.1f %10.3f %10.3f %10.1f %10.1f %9.1f %9.1f %9.1f %11.1f %10.0f\n' \
+                            "$workers" "$control_fps" "$profiled_fps" "$control_cpu" "$profiled_cpu" \
+                            "$control_rss" "$profiled_rss" "$before" "$steady" "$teardown" "$churn" "$allocs"
+                    done
+                ;;
+        esac
     done
-    printf '\nMutex stacks (flamegraph folded format): %s/relay/lock-*/%s/lock/mutex.folded\n' "$RUN" "$LOCK_WORKLOAD"
+    case $mode in
+        lock) printf '\nMutex stacks (flamegraph folded format): %s/relay/lock-*/%s/lock/mutex.folded\n' "$RUN" "$PROFILE_WORKLOAD" ;;
+        cpu) printf '\nCPU stacks (flamegraph folded format): %s/relay/cpu-*/%s/cpu/cpu.folded\n' "$RUN" "$PROFILE_WORKLOAD" ;;
+        heap) printf '\nHeap stacks (flamegraph folded format): %s/relay/heap-*/%s/heap/{churn,retained,teardown}.folded\n' \
+            "$RUN" "$PROFILE_WORKLOAD" ;;
+    esac
 }
 
 cd "$ROOT"
 
-if [[ $MODE == --audio ]]; then
+if [[ $MODE == --criterion ]]; then
+    # Each invocation owns fresh results; previous runs cannot become new points.
+    python3 -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))' \
+        "$RUN/criterion-command.json" "${@:2}"
+    if [[ -n ${MOQ_BENCH_RUNS:-} ]]; then
+        printf '%s\n' "$RUN" >>"$MOQ_BENCH_RUNS"
+    fi
+    CARGO_TARGET_DIR=$CURRENT_TARGET cargo bench --locked ${CRITERION_CARGO_ARGS[@]+"${CRITERION_CARGO_ARGS[@]}"} -- \
+        --quick --warm-up-time 0.05 --measurement-time 0.2 --noplot ${CRITERION_FILTER_ARGS[@]+"${CRITERION_FILTER_ARGS[@]}"}
+    exit 0
+elif [[ $MODE == --audio ]]; then
     run_audio_comparison
     exit 0
 elif [[ $MODE == --runtime ]]; then
     run_runtime_comparison
     exit 0
-elif [[ $MODE == --lock ]]; then
-    run_lock_profile
+elif [[ $MODE == --profile ]]; then
+    run_profiles
     exit 0
 elif [[ $MODE == --shard ]]; then
     run_shard_sweep

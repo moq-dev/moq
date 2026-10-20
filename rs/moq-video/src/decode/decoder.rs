@@ -20,6 +20,7 @@
 //! sets could not be decoded anyway, so the lenient reading only ever turns an
 //! error into a picture.
 
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
@@ -29,7 +30,7 @@ use moq_mux::codec::{annexb, h264, h265};
 use moq_net::Timestamp;
 
 use super::backend::{self, Backend, Codec};
-use crate::{Error, Frame, Output, Size, Surface};
+use crate::{Color, Error, Frame, Output, Size, Surface};
 
 /// Which decoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
@@ -141,9 +142,19 @@ impl Conversion {
 /// ```
 pub struct Decoder {
 	backend: Box<dyn Backend>,
+	codec: Codec,
 	conversion: Conversion,
 	output: Output,
 	got_keyframe: bool,
+	/// The space the stream's pictures are in: what the last keyframe's SPS
+	/// signalled, or the guess for the catalog's coded size. Labels the pictures
+	/// a backend hands back unlabelled, which keeps their space once a decoder
+	/// scale or a resize moves them across 576 lines.
+	color: Option<Color>,
+	/// Spaces later keyframes switched to, each from that keyframe's timestamp.
+	/// A reordering backend can still be holding pictures from before the
+	/// switch, which keep the old space until output reaches the keyframe.
+	switches: VecDeque<(Timestamp, Option<Color>)>,
 	/// Keeps direct use bound to the constructing thread, regardless of backend.
 	_thread_bound: PhantomData<Rc<()>>,
 }
@@ -215,9 +226,12 @@ impl Decoder {
 		tracing::debug!(decoder = backend.name(), "opened video decoder");
 		Ok(Self {
 			backend,
+			codec,
 			conversion,
 			output: config.output,
 			got_keyframe: false,
+			color: declared(catalog),
+			switches: VecDeque::new(),
 			_thread_bound: PhantomData,
 		})
 	}
@@ -243,6 +257,12 @@ impl Decoder {
 		}
 
 		let access_unit = self.conversion.access_unit(payload, keyframe)?;
+		if keyframe
+			&& let Some(color) = super::vui::signalled(self.codec, &access_unit)
+			&& self.switches.back().map_or(self.color, |(_, color)| *color) != color
+		{
+			self.switches.push_back((timestamp, color));
+		}
 		let frames = self.backend.decode(access_unit, timestamp, keyframe)?;
 		self.deliver(frames)
 	}
@@ -255,7 +275,12 @@ impl Decoder {
 	pub fn flush(&mut self) -> Result<Vec<Frame>, Error> {
 		self.got_keyframe = false;
 		let frames = self.backend.flush()?;
-		self.deliver(frames)
+		let frames = self.deliver(frames)?;
+		// Nothing is held any more, so a switch no picture reached still applies.
+		if let Some((_, color)) = self.switches.drain(..).next_back() {
+			self.color = color;
+		}
+		Ok(frames)
 	}
 
 	/// Put the backend's pictures in the representation [`Config::output`]
@@ -265,15 +290,75 @@ impl Decoder {
 	/// about it when decoding to the CPU directly is cheaper than downloading
 	/// afterwards (VAAPI). A surface with no CPU path fails here rather than
 	/// arriving GPU-resident at a caller that said it could not take one.
-	fn deliver(&self, frames: Vec<Frame>) -> Result<Vec<Frame>, Error> {
-		match self.output {
-			Output::Native => Ok(frames),
-			Output::Cpu => frames
-				.into_iter()
-				.map(|frame| Ok(Frame::new(Surface::I420(frame.surface.into_i420()?), frame.timestamp)))
-				.collect(),
-		}
+	fn deliver(&mut self, frames: Vec<Frame>) -> Result<Vec<Frame>, Error> {
+		frames
+			.into_iter()
+			.map(|frame| {
+				// Output is in presentation order, and nothing decoded after a
+				// keyframe is shown before it, so a picture's timestamp says which
+				// side of a switch it is on.
+				while let Some(&(at, color)) = self.switches.front()
+					&& frame.timestamp >= at
+				{
+					self.color = color;
+					self.switches.pop_front();
+				}
+				let mut surface = match self.output {
+					Output::Native => frame.surface,
+					Output::Cpu => Surface::I420(frame.surface.into_i420()?),
+				};
+				if let Some(color) = self.color {
+					surface.label(color);
+				}
+				Ok(Frame::new(surface, frame.timestamp))
+			})
+			.collect()
 	}
+}
+
+/// The space the catalog declares for the stream, until a keyframe says.
+///
+/// H.264 and H.265 signal theirs in every keyframe, so this only lasts for
+/// AV1 and VP9 on a backend that reports none. Their codec strings default an
+/// omitted colour to BT.709 limited, so that pairing says nothing and the
+/// coded size's guess stands in; any other was written on purpose.
+fn declared(catalog: &VideoConfig) -> Option<Color> {
+	use crate::color::{CodePoints, Range};
+
+	let coded = catalog
+		.coded_width
+		.zip(catalog.coded_height)
+		.map(|(width, height)| Size::new(width, height));
+	let (primaries, transfer, matrix, full_range) = match &catalog.codec {
+		VideoCodec::VP9(vp9) => (
+			vp9.color_primaries,
+			vp9.transfer_characteristics,
+			vp9.matrix_coefficients,
+			vp9.full_range,
+		),
+		VideoCodec::AV1(av1) => (
+			av1.color_primaries,
+			av1.transfer_characteristics,
+			av1.matrix_coefficients,
+			av1.full_range,
+		),
+		_ => return coded.map(Color::infer),
+	};
+	if (primaries, transfer, matrix, full_range) == (1, 1, 1, false) {
+		return coded.map(Color::infer);
+	}
+	let codes = CodePoints {
+		primaries,
+		transfer,
+		matrix,
+	};
+	let range = match full_range {
+		true => Range::Full,
+		false => Range::Limited,
+	};
+	// An unspecified field among declared ones takes the guess for the coded
+	// size, or for SD when the catalog has none.
+	Color::from_code_points(Some(codes), range, coded.unwrap_or_default())
 }
 
 fn is_supported_av1(av1: &AV1) -> bool {
@@ -624,6 +709,85 @@ mod tests {
 		assert_eq!(types.first(), Some(&32), "{types:?}");
 		assert!(types.contains(&33) && types.contains(&34), "{types:?}");
 		assert_eq!(types.last(), Some(&20), "{types:?}");
+	}
+
+	/// A reordering backend still holds the old sequence's last picture when a
+	/// keyframe switches space, and that picture keeps the space it was coded
+	/// in.
+	#[test]
+	#[cfg(feature = "openh264")]
+	fn a_held_picture_keeps_the_space_it_was_coded_in() {
+		use crate::Color;
+
+		let size = crate::Size::new(64, 64);
+		let keyframe = |color: Color| {
+			let mut encoder = Encoder::new(&EncodeConfig {
+				kind: EncodeKind::Software,
+				color: Some(color),
+				..EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+			})
+			.unwrap();
+			encoder.cut().unwrap();
+			let i420 = I420::new(size, vec![0x80; I420::len(size).unwrap()]).unwrap();
+			let frame = Frame::new(
+				Surface::I420(i420.with_color(color)),
+				Timestamp::from_micros(0).unwrap(),
+			);
+			encoder.encode(&frame).unwrap().remove(0).payload
+		};
+		let (first, second) = (
+			Timestamp::from_micros(0).unwrap(),
+			Timestamp::from_micros(33_333).unwrap(),
+		);
+
+		let kind = super::Kind::Named(probe::BUFFERED_NAME.into());
+		let mut decoder = super::Decoder::new(&probe_catalog(), &decode_config(kind)).unwrap();
+		assert!(decoder.decode(&keyframe(Color::BT709), first, true).unwrap().is_empty());
+		let held = decoder.decode(&keyframe(Color::BT601), second, true).unwrap();
+		assert_eq!(held.len(), 1);
+		assert_eq!(held[0].timestamp, first);
+		assert_eq!(held[0].surface.color(), Some(Color::BT709));
+		let tail = decoder.flush().unwrap();
+		assert_eq!(tail[0].timestamp, second);
+		assert_eq!(tail[0].surface.color(), Some(Color::BT601));
+	}
+
+	/// A VP9 catalog that declares BT.2020 PQ labels the pictures a backend
+	/// hands back unlabelled with it, rather than the coded size's guess; one
+	/// with the codec string's defaults keeps the guess.
+	#[test]
+	fn a_declared_vp9_space_labels_the_pictures() {
+		use crate::Color;
+		use crate::color::{Matrix, Primaries, Range, Transfer};
+
+		// SD, so the guess (BT.601) differs from the codec string's default.
+		let color = |vp9: hang::catalog::VP9| {
+			let mut catalog = hang::catalog::VideoConfig::new(hang::catalog::VP9 { bit_depth: 8, ..vp9 });
+			catalog.coded_width = Some(640);
+			catalog.coded_height = Some(480);
+			let kind = super::Kind::Named(probe::BUFFERED_NAME.into());
+			let mut decoder = super::Decoder::new(&catalog, &decode_config(kind)).unwrap();
+			let payload = bytes::Bytes::from_static(&[0]);
+			decoder
+				.decode(&payload, Timestamp::from_micros(0).unwrap(), true)
+				.unwrap();
+			decoder.flush().unwrap().remove(0).surface.color()
+		};
+
+		let pq = hang::catalog::VP9 {
+			color_primaries: 9,
+			transfer_characteristics: 16,
+			matrix_coefficients: 9,
+			..Default::default()
+		};
+		let expected = Color {
+			matrix: Matrix::Bt2020,
+			range: Range::Limited,
+			primaries: Primaries::Bt2020,
+			transfer: Transfer::Pq,
+		};
+		assert_eq!(color(pq), Some(expected));
+		assert_eq!(color(Default::default()), Some(Color::BT601));
 	}
 
 	/// An inline-H.264 catalog the test probes accept.

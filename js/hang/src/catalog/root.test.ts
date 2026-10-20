@@ -3,7 +3,7 @@ import * as z from "@zod/mini";
 import { ARCHIVE_VERSION, ArchiveSchema } from "./archive.ts";
 import { u53 } from "./integers.ts";
 import type { RelativeBroadcast } from "./path.ts";
-import { checkRenditions, DuplicateRendition, RootSchema } from "./root.ts";
+import { checkRenditions, DuplicateRendition, minVersion, RootSchema, UnsupportedVersion, VERSION } from "./root.ts";
 import { track } from "./track.ts";
 
 // The base catalog carries the media sections (`video`/`audio`) and the data track sections
@@ -257,6 +257,36 @@ test("one track name in two broadcasts keeps both renditions", () => {
 test("an ID used by both video and audio is refused", () => {
 	const parsed = RootSchema.parse({ video: { renditions: { main: avc } }, audio: { renditions: { main: opus } } });
 	expect(() => checkRenditions(parsed)).toThrow(DuplicateRendition);
+});
+
+// A newer draft may reshape a section, so the version is refused before any section is read,
+// wherever it sits in the object, including through an extended schema.
+test("a newer catalog version is refused", () => {
+	const reshaped = { video: { renditions: { hd: { codec: 42 } } }, version: 5 };
+	expect(() => RootSchema.parse(reshaped)).toThrow(UnsupportedVersion);
+	const ExtendedSchema = z.extend(RootSchema, { scte35: z.optional(z.string()) });
+	expect(() => ExtendedSchema.parse(reshaped)).toThrow(UnsupportedVersion);
+});
+
+test("a supported catalog version is read", () => {
+	for (const version of [undefined, 3, VERSION]) expect(RootSchema.parse({ version }).version).toBe(version);
+	for (const version of ["4", -1, 4.5]) {
+		expect(() => RootSchema.parse({ version })).toThrow(z.core.$ZodError);
+	}
+});
+
+// Only a field an older reader would misread raises the version.
+test("the catalog version is needed only for misread fields", () => {
+	const audio = { ...opus, warmup: 80 };
+	const root = (hd: object) =>
+		RootSchema.parse({ video: { renditions: { hd } }, audio: { renditions: { en: audio } } });
+
+	expect(minVersion(root(avc))).toBeUndefined();
+	expect(minVersion(root({ ...avc, track: "hd" }))).toBeUndefined();
+	expect(minVersion(root({ ...avc, track: "video" }))).toBe(4);
+	expect(minVersion(root({ ...avc, warmup: 500 }))).toBe(4);
+	const data = RootSchema.parse({ json: { tracks: { chat: { mode: "stream", track: "chat.json" } } } });
+	expect(minVersion(data)).toBe(4);
 });
 
 test("shared stats and echo discovery round trips without changing old catalogs", async () => {

@@ -10,6 +10,15 @@ import moq
 import moq_ffi
 import pytest
 
+# Every group from the first, rather than only what the live edge still reaches.
+FROM_GROUP_0 = [moq.Range(start=cast(moq.Anchor, moq.Anchor.ABSOLUTE(group=0, frame=0)))]
+
+
+async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
+    """Wait until some subscriber wants the track, or none does."""
+    while (await demand.wanted_changed() is not None) != wanted:
+        pass
+
 
 def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProducer:
     broadcast = origin.create_broadcast(path)
@@ -122,6 +131,7 @@ def test_protocol_error_helper_covers_known_app_and_unknown():
     cases = [
         (moq.ErrorScope.SESSION, 0x2, moq.ProtocolKind.UNAUTHORIZED, True),
         (moq.ErrorScope.SESSION, 0x18, moq.ProtocolKind.EXPIRED, True),
+        (moq.ErrorScope.STREAM, 0x3B, moq.ProtocolKind.UNAUTHORIZED, True),
         (moq.ErrorScope.SESSION, 0x7, moq.ProtocolKind.TOO_MANY_REQUESTS, False),
         (moq.ErrorScope.SESSION, 64 + 404, moq.ProtocolKind.APP, False),
         (moq.ErrorScope.SESSION, 0x1F, moq.ProtocolKind.UNKNOWN, False),
@@ -512,23 +522,23 @@ async def test_json_producers_report_demand():
     snapshot_demand = snapshot.demand()
     stream_demand = stream.demand()
     assert snapshot_demand.name == "status"
-    assert not snapshot_demand.is_used()
+    assert snapshot_demand.wanted() is None
 
     consumer = broadcast.consume()
     snapshot_consumer = moq.json.SnapshotConsumer(await consumer.subscribe_track("status"), compression=True)
     stream_consumer = moq.json.StreamConsumer(await consumer.subscribe_track("events"))
-    await asyncio.wait_for(snapshot_demand.used(), timeout=5.0)
-    await asyncio.wait_for(stream_demand.used(), timeout=5.0)
-    assert snapshot_demand.is_used()
+    await asyncio.wait_for(until_wanted(snapshot_demand), timeout=5.0)
+    await asyncio.wait_for(until_wanted(stream_demand), timeout=5.0)
+    assert snapshot_demand.wanted() == 0
 
     snapshot_consumer.cancel()
     stream_consumer.cancel()
-    await asyncio.wait_for(snapshot_demand.unused(), timeout=5.0)
-    await asyncio.wait_for(stream_demand.unused(), timeout=5.0)
+    await asyncio.wait_for(until_wanted(snapshot_demand, False), timeout=5.0)
+    await asyncio.wait_for(until_wanted(stream_demand, False), timeout=5.0)
 
     snapshot.finish()
     with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
-        await asyncio.wait_for(snapshot_demand.used(), timeout=5.0)
+        await asyncio.wait_for(until_wanted(snapshot_demand), timeout=5.0)
 
 
 async def test_dynamic_track_request():
@@ -542,7 +552,7 @@ async def test_dynamic_track_request():
     request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
     assert request.name == "events"
     demand = request.demand()
-    assert demand.is_used()
+    assert demand.wanted() is not None
 
     # Accept the request as a raw track (which unblocks the subscribe), then write.
     track = request.accept()
@@ -555,12 +565,12 @@ async def test_dynamic_track_request():
     assert frame.payload == payload
 
     track_consumer.cancel()
-    await asyncio.wait_for(demand.unused(), timeout=5.0)
+    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
     track.finish()
     broadcast.close()
     del track
     with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
-        await asyncio.wait_for(demand.used(), timeout=5.0)
+        await asyncio.wait_for(until_wanted(demand), timeout=5.0)
 
 
 async def test_media_subscribe_refuses_a_non_rendition():
@@ -856,7 +866,7 @@ async def test_raw_multiple_frames():
 
     async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
-        subscription = moq.Subscription(max_delay=timedelta(seconds=1), group_start=0)
+        subscription = moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0)
         raw_consumer = await broadcast_consumer.subscribe_track("commands", subscription)
 
         messages = [
@@ -882,7 +892,7 @@ async def test_raw_producer_consume_direct():
     """Consume a raw track directly from the producer, no origin/broadcast plumbing."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("direct")
-    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), group_start=0))
+    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0))
 
     track.write_frame(b"hello")
     track.write_frame(b"world")
@@ -895,6 +905,30 @@ async def test_raw_producer_consume_direct():
             break
 
     assert received == [b"hello", b"world"]
+
+
+async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
+    """An ascending subscription reaching back over a cached backlog reads it oldest first."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("backlog", moq.TrackInfo(timescale=1_000_000))
+    for ms in range(3):
+        group = track.append_group()
+        group.write_frame(b"x", timedelta(milliseconds=ms))
+        group.finish()
+
+    consumer = track.consume(
+        moq.Subscription(
+            max_delay=timedelta(seconds=10),
+            ranges=[moq.Range(start=cast(moq.Anchor, moq.Anchor.RELATIVE(groups=2)))],
+            order=moq.Order.ASCENDING,
+        )
+    )
+    sequences = []
+    for _ in range(3):
+        group = await asyncio.wait_for(consumer.recv_group(), timeout=5.0)
+        assert group is not None
+        sequences.append(group.sequence)
+    assert sequences == [0, 1, 2]
 
 
 async def test_raw_group_producer_consume_direct():
@@ -940,7 +974,7 @@ async def test_raw_group_sequence():
     async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track(
-            "seq", moq.Subscription(max_delay=timedelta(seconds=1), group_start=0)
+            "seq", moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0)
         )
 
         sent_sequences = []
@@ -972,7 +1006,7 @@ async def test_default_iteration_is_sequence_order():
     broadcast = create_announced(origin, "track/ordering")
     raw = broadcast.publish_track("ordering")
 
-    subscription = moq.Subscription(max_delay=timedelta(seconds=1), group_start=0)
+    subscription = moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0)
     seq_consumer = raw.consume(subscription)
     arr_consumer = raw.consume(subscription)
 
@@ -1120,7 +1154,7 @@ async def test_read_frame_one_per_group():
     """read_frame() returns the first frame of each successive group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status")
-    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), group_start=0))
+    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0))
 
     track.write_frame(b"ready")
     track.write_frame(b"running")
@@ -1164,7 +1198,7 @@ async def test_read_frame_skips_remaining_frames_in_group():
     """read_frame() only returns the first frame of a multi-frame group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("mixed")
-    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), group_start=0))
+    consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), ranges=FROM_GROUP_0))
 
     group = track.append_group()
     group.write_frame(b"first")
@@ -1550,10 +1584,6 @@ def test_container_timebase_belongs_to_one_broadcast():
     with pytest.raises(moq.Error.Codec, match="another broadcast"):
         moq.media.ContainerProducer(
             other, moq.media.ContainerInit(moq.media.ContainerFormat.FMP4, b"", timebase=timebase)
-        )
-    with pytest.raises(moq.Error.Codec, match="another broadcast"):
-        moq.media.ContainerStreamProducer(
-            other, moq.media.ContainerStreamInit(moq.media.ContainerFormat.FMP4, timebase=timebase)
         )
     owner.close()
     with pytest.raises(moq.Error.Closed):

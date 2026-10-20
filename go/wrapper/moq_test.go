@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -740,6 +741,58 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 }
 
+func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("backlog", timedInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		group, err := track.AppendGroup()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := group.WriteFrame(moq.Frame{Payload: []byte("x"), Timestamp: ts(time.Duration(i) * time.Millisecond)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := group.Finish(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	order := moq.OrderAscending
+	consumer, err := track.Consume(&moq.Subscription{
+		MaxDelay: 10 * time.Second,
+		Ranges:   []moq.Range{{Start: moq.AnchorRelative{Groups: 2}}},
+		Order:    &order,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Cancel()
+
+	var sequences []uint64
+	for range 3 {
+		group, err := consumer.RecvGroup(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if group == nil {
+			t.Fatal("expected a group")
+		}
+		sequences = append(sequences, group.Sequence())
+	}
+	if !slices.Equal(sequences, []uint64{0, 1, 2}) {
+		t.Fatalf("sequences = %v, want [0 1 2]", sequences)
+	}
+}
+
 func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -1208,8 +1261,8 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if err := demand.Used(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Used error = %v, want context.DeadlineExceeded", err)
+	if err := untilWanted(ctx, demand, true); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("untilWanted error = %v, want context.DeadlineExceeded", err)
 	}
 
 	readCtx, readCancel := context.WithTimeout(context.Background(), testTimeout)
@@ -1220,7 +1273,7 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer consumer.Cancel()
-	if err := demand.Used(readCtx); err != nil {
+	if err := untilWanted(readCtx, demand, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1542,4 +1595,17 @@ func ts(d time.Duration) *time.Duration { return &d }
 func timedInfo() *moq.TrackInfo {
 	scale := uint64(1_000_000)
 	return &moq.TrackInfo{Priority: 127, Timescale: &scale}
+}
+
+// untilWanted blocks until some subscriber wants the track, or none does.
+func untilWanted(ctx context.Context, demand *moq.TrackDemand, wanted bool) error {
+	for {
+		next, err := demand.WantedChanged(ctx)
+		if err != nil {
+			return err
+		}
+		if (next != nil) == wanted {
+			return nil
+		}
+	}
 }

@@ -268,6 +268,15 @@ pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::or
 	origin.excluding(peer)
 }
 
+/// A session's snapshot of its peer's initial announcements, for the synced bench.
+/// Drop it to land the snapshot.
+pub struct Snapshot(#[allow(dead_code)] crate::model::Snapshot);
+
+/// Start a snapshot under `prefix`, as a session requesting announcements there does.
+pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
+	Snapshot(origin.snapshot(prefix))
+}
+
 /// Add `n` publisher-side payload bytes on `(path, tier)`, creating the entry
 /// when the path is tracked. The stats producer bench marks a share of held
 /// paths changed this way, without a media frame. A later [`crate::stats::Registry::report`]
@@ -279,6 +288,27 @@ pub fn bump_publisher_bytes(
 	n: u64,
 ) {
 	registry.bump_publisher_bytes(path, tier, n);
+}
+
+/// A payload-byte meter for the stats write-path benchmark.
+pub struct Meter(crate::stats::Meter);
+
+impl Meter {
+	/// Add publisher-side payload bytes.
+	pub fn bytes(&self, n: u64) {
+		self.0.bytes(n);
+	}
+}
+
+/// Build a session-local payload meter without exposing the model's private stats carriers.
+pub fn session_meter(registry: &crate::stats::Registry, tier: crate::stats::Tier, label: &str, path: &str) -> Meter {
+	let session = registry.tier(tier).session(label);
+	Meter(session.egress(path).meter())
+}
+
+/// Build the original per-path-only payload meter as the benchmark baseline.
+pub fn path_meter(registry: &crate::stats::Registry, tier: &crate::stats::Tier, path: &str) -> Meter {
+	Meter(registry.publisher_meter(path, tier))
 }
 
 /// Encode `announced` as a fresh [`AnnounceWriter`] stream.
@@ -604,6 +634,7 @@ impl Default for Messages {
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {
+				max_age: None,
 				new_group: None,
 				request_id: ietf::RequestId(2),
 				track_namespace: Path::new("room/alice"),
@@ -617,6 +648,7 @@ impl Default for Messages {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
+				epoch: None,
 			},
 			// Draft-17+ carries the request id in the control message framing instead.
 			ietf_ok: ietf::SubscribeOk {
@@ -942,6 +974,7 @@ pub fn seeds() -> Vec<Seed> {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
+				epoch: None,
 			};
 			fetch.encode_bytes(*version).ok()
 		}) else {
@@ -1250,47 +1283,6 @@ impl RequestValidity {
 		match self.0.start() {
 			crate::model::broadcast::RequestValidity::Period(route, _) => route,
 			_ => unreachable!("a source watch always captures a route lease"),
-		}
-	}
-}
-
-/// A relay's tracks, each with its downstream subscribers, for the private
-/// NEW_GROUP_REQUEST benchmark.
-pub struct NewGroups {
-	tracks: Vec<(track::Producer, Vec<track::Subscriber>, Option<crate::model::NewGroup>)>,
-	_broadcast: broadcast::Producer,
-}
-
-impl NewGroups {
-	/// `tracks` tracks of `subscribers` subscribers each, none of them asking for a group.
-	pub fn new(tracks: usize, subscribers: usize) -> Self {
-		let broadcast = broadcast::Producer::new(broadcast::Info::default());
-		let tracks = (0..tracks)
-			.map(|i| {
-				let track = broadcast.create_track(format!("{i}"), None).unwrap();
-				let subscribers = (0..subscribers).map(|_| track.subscribe(None)).collect();
-				(track, subscribers, None)
-			})
-			.collect();
-		Self {
-			tracks,
-			_broadcast: broadcast,
-		}
-	}
-
-	/// One subscriber of one track asks for `value`, returning the request its upstream
-	/// subscription now sees, or `None` if that did not change.
-	pub fn request(&mut self, track: usize, subscriber: usize, value: u64) -> Option<u64> {
-		let (producer, subscribers, asked) = &mut self.tracks[track];
-		subscribers[subscriber]
-			.update(track::Subscription {
-				new_group: crate::model::NewGroup::new(value, None),
-				..Default::default()
-			})
-			.unwrap();
-		match producer.poll_new_group(asked, &kio::Waiter::noop()) {
-			std::task::Poll::Ready(Ok(new_group)) => new_group.map(|new_group| new_group.value),
-			_ => None,
 		}
 	}
 }

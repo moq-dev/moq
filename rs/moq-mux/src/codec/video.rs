@@ -8,6 +8,68 @@
 
 use crate::catalog::VideoHint;
 
+/// The predefined sample aspects shared by H.264 and H.265 (their VUI Table E-1).
+pub(super) fn sample_aspect(idc: u8) -> Option<(u32, u32)> {
+	Some(match idc {
+		1 => (1, 1),
+		2 => (12, 11),
+		3 => (10, 11),
+		4 => (16, 11),
+		5 => (40, 33),
+		6 => (24, 11),
+		7 => (20, 11),
+		8 => (32, 11),
+		9 => (80, 33),
+		10 => (18, 11),
+		11 => (15, 11),
+		12 => (64, 33),
+		13 => (160, 99),
+		14 => (4, 3),
+		15 => (3, 2),
+		16 => (2, 1),
+		_ => return None,
+	})
+}
+
+/// Resolve non-square samples to the whole picture's reduced display aspect.
+pub(super) fn display_aspect(width: u32, height: u32, sample: (u32, u32)) -> Option<(u32, u32)> {
+	let (sample_width, sample_height) = sample;
+	if width == 0 || height == 0 || sample_width == 0 || sample_height == 0 || sample_width == sample_height {
+		return None;
+	}
+	reduce_aspect(
+		u128::from(width) * u128::from(sample_width),
+		u128::from(height) * u128::from(sample_height),
+	)
+}
+
+/// Reduce positive display dimensions to the catalog's integer ratio without truncating.
+pub(crate) fn reduce_aspect(width: u128, height: u128) -> Option<(u32, u32)> {
+	if width == 0 || height == 0 {
+		return None;
+	}
+	let (mut divisor, mut remainder) = (width, height);
+	while remainder != 0 {
+		(divisor, remainder) = (remainder, divisor % remainder);
+	}
+	Some((
+		u32::try_from(width / divisor).ok()?,
+		u32::try_from(height / divisor).ok()?,
+	))
+}
+
+/// Fill a missing display aspect from container metadata, retaining and diagnosing SPS conflicts.
+pub(crate) fn fill_display_aspect(config: &mut hang::catalog::VideoConfig, aspect: (u32, u32), source: &str) {
+	if let (Some(width), Some(height)) = (config.display_aspect_width, config.display_aspect_height) {
+		if u64::from(width) * u64::from(aspect.1) != u64::from(height) * u64::from(aspect.0) {
+			tracing::warn!(kept = ?(width, height), other = ?aspect, source, "display aspect disagrees with the stream; keeping the stream's");
+		}
+	} else {
+		config.display_aspect_width = Some(aspect.0);
+		config.display_aspect_height = Some(aspect.1);
+	}
+}
+
 type Track = crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>;
 
 /// The reordering a video sequence header declares.
@@ -58,12 +120,21 @@ pub(crate) struct Catalog {
 	hint: VideoHint,
 	/// The last config published, so an unchanged re-resolve doesn't re-mirror the rendition.
 	last: Option<hang::catalog::VideoConfig>,
+	/// The last config resolved, before the overlays, so new HDR metadata can republish it.
+	resolved: Option<hang::catalog::VideoConfig>,
+	/// The static HDR metadata the bitstream carried in band, overlaid onto every config.
+	hdr: crate::codec::color::Hdr,
 }
 
 impl Catalog {
 	/// Hold `hint` for every publish.
 	pub(crate) fn new(hint: VideoHint) -> Self {
-		Self { hint, last: None }
+		Self {
+			hint,
+			last: None,
+			resolved: None,
+			hdr: Default::default(),
+		}
 	}
 
 	/// The config the hint alone resolves to, for importers that publish the catalog before parsing
@@ -82,6 +153,8 @@ impl Catalog {
 	/// publish. A changed config just re-mirrors the rendition; there are no fixed tracks to
 	/// reject a reconfiguration.
 	pub(crate) fn publish(&mut self, track: &mut Track, mut config: hang::catalog::VideoConfig) -> crate::Result<()> {
+		self.resolved = Some(config.clone());
+		self.hdr.apply(&mut config.color);
 		self.hint.apply(&mut config);
 		if self.last.as_ref() == Some(&config) {
 			return Ok(());
@@ -90,5 +163,32 @@ impl Catalog {
 		track.set(config.clone())?;
 		self.last = Some(config);
 		Ok(())
+	}
+
+	/// Overlay the HDR metadata a keyframe carried in band, republishing the last config if it changed.
+	///
+	/// `sequence` marks a keyframe that starts a new coded sequence (a new SPS or sequence header):
+	/// its metadata replaces the old rather than merging, so an HDR-to-SDR switch drops stale HDR10
+	/// values, and it is left for the new config's publish.
+	pub(crate) fn hdr(
+		&mut self,
+		track: &mut Track,
+		hdr: crate::codec::color::Hdr,
+		sequence: bool,
+	) -> crate::Result<()> {
+		if sequence {
+			self.hdr = hdr;
+			return Ok(());
+		}
+		let mut next = self.hdr;
+		next.update(hdr);
+		if next == self.hdr {
+			return Ok(());
+		}
+		self.hdr = next;
+		match self.resolved.clone() {
+			Some(config) => self.publish(track, config),
+			None => Ok(()),
+		}
 	}
 }

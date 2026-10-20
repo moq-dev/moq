@@ -1,11 +1,13 @@
 mod av1;
 mod codec;
+mod color;
 mod h264;
 mod h265;
 mod vp9;
 
 pub use av1::*;
 pub use codec::*;
+pub use color::*;
 pub use h264::*;
 pub use h265::*;
 pub use vp9::*;
@@ -148,7 +150,9 @@ impl Video {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Display {
+	/// Width in pixels.
 	pub width: u32,
+	/// Height in pixels.
 	pub height: u32,
 }
 
@@ -214,6 +218,7 @@ pub struct VideoConfig {
 	/// The picture resizes in band at a keyframe below these ceilings, unless the
 	/// `description` pins it. Absent means unknown; a publisher may fill it once.
 	pub coded_width: Option<u32>,
+	/// The height counterpart of `coded_width`.
 	pub coded_height: Option<u32>,
 
 	/// The aspect ratio the whole picture is displayed at, as WebCodecs'
@@ -226,10 +231,16 @@ pub struct VideoConfig {
 	/// rename to `displayAspect*`; the current name is what we emit.
 	#[serde(alias = "displayRatioWidth")]
 	pub display_aspect_width: Option<u32>,
+	/// The height counterpart of `display_aspect_width`.
 	#[serde(alias = "displayRatioHeight")]
 	pub display_aspect_height: Option<u32>,
 
-	// TODO color space
+	/// The colour the decoded pixels carry, so a renderer need not guess or reparse the bitstream.
+	///
+	/// Live state, not identity: a publisher may fill it in once the bitstream reveals it.
+	#[serde(default)]
+	pub color: Option<Color>,
+
 	/// The maximum bitrate of the video track, if known.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
@@ -318,6 +329,7 @@ impl VideoConfig {
 			coded_height: None,
 			display_aspect_width: None,
 			display_aspect_height: None,
+			color: None,
 			bitrate: None,
 			enabled: true,
 			preference: 0,

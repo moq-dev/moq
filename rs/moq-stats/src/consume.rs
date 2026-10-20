@@ -4,8 +4,8 @@ use moq_net::stats::{Role, Tier};
 use moq_net::{AsPath, broadcast};
 
 use crate::{
-	PresenceFrame, Result, SessionsFrame, TotalsFrame, TrafficFrame, presence_track, sessions_track, totals_track,
-	traffic_track,
+	PrefixFrame, PresenceFrame, Result, SessionsFrame, TotalsFrame, TrafficFrame, prefix_track, presence_track,
+	sessions_track, totals_track, traffic_track,
 };
 
 /// Configuration for a [`Consumer`]. Construct with [`Config::new`]
@@ -36,9 +36,10 @@ impl Config {
 /// yielding typed frames per track.
 ///
 /// Subscribe to the tracks you care about with [`Self::totals`],
-/// [`Self::traffic`], [`Self::sessions`], and [`Self::presence`]. A named
-/// tier's tracks are held open with an empty frame until the tier records, and
-/// a root's presence track is produced only while subscribed.
+/// [`Self::traffic`], [`Self::sessions`], [`Self::presence`], and
+/// [`Self::prefix`]. A named tier's tracks are held open with an empty frame
+/// until the tier records, and a label's presence track and a prefix's track
+/// are produced only while subscribed.
 pub struct Consumer {
 	broadcast: broadcast::Consumer,
 	config: Config,
@@ -77,12 +78,22 @@ impl Consumer {
 		})
 	}
 
-	/// Subscribe to the presence track for auth `root`, awaiting the
+	/// Subscribe to the presence track for `label`, awaiting the
 	/// subscription handshake. Fails with
-	/// [`NotFound`](moq_net::Error::NotFound) for a root outside the group.
-	pub async fn presence(&self, root: impl AsPath) -> Result<Presence> {
-		let name = presence_track(root, self.config.compression);
+	/// [`NotFound`](moq_net::Error::NotFound) for a label outside the group.
+	pub async fn presence(&self, label: impl AsPath) -> Result<Presence> {
+		let name = presence_track(label, self.config.compression);
 		Ok(Presence {
+			inner: self.subscribe(&name).await?,
+		})
+	}
+
+	/// Subscribe to the prefix track for broadcast prefix `path`, awaiting the
+	/// subscription handshake. Fails with
+	/// [`NotFound`](moq_net::Error::NotFound) for a prefix outside the group.
+	pub async fn prefix(&self, path: impl AsPath) -> Result<Prefix> {
+		let name = prefix_track(path, self.config.compression);
+		Ok(Prefix {
 			inner: self.subscribe(&name).await?,
 		})
 	}
@@ -135,7 +146,7 @@ impl Totals {
 	}
 }
 
-/// A typed reader over one root's presence track; see [`Traffic`].
+/// A typed reader over one label's presence track; see [`Traffic`].
 pub struct Presence {
 	inner: moq_json::snapshot::Consumer<PresenceFrame>,
 }
@@ -144,6 +155,21 @@ impl Presence {
 	/// The next frame, or `None` once the track ends (the producer went away
 	/// or its group unannounced).
 	pub async fn next(&mut self) -> Result<Option<PresenceFrame>> {
+		Ok(self.inner.next().await?)
+	}
+}
+
+/// A typed reader over one broadcast prefix's track; see [`Traffic`].
+pub struct Prefix {
+	inner: moq_json::snapshot::Consumer<PrefixFrame>,
+}
+
+impl Prefix {
+	/// The next frame, or `None` once the track ends (the producer went away
+	/// or its group unannounced). Fails with
+	/// [`FrameTooLarge`](moq_net::Error::FrameTooLarge) once the frame outgrows
+	/// the cache.
+	pub async fn next(&mut self) -> Result<Option<PrefixFrame>> {
 		Ok(self.inner.next().await?)
 	}
 }
@@ -197,7 +223,7 @@ mod tests {
 	}
 
 	/// A tagged egress feed into a producer's registry, holding the handles needed
-	/// to write more traffic incrementally. Presence is recorded under `root`.
+	/// to write more traffic incrementally. Presence is recorded under `label`.
 	struct Feed {
 		track: track::Producer,
 		sub: track::Subscriber,
@@ -218,8 +244,8 @@ mod tests {
 		}
 	}
 
-	async fn feed(producer: &Producer, tier: Tier, root: &str, path: &str) -> Feed {
-		let ctx = producer.registry().tier(tier).session(root);
+	async fn feed(producer: &Producer, tier: Tier, label: &str, path: &str) -> Feed {
+		let ctx = producer.registry().tier(tier).session(label);
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
@@ -313,5 +339,15 @@ mod tests {
 		let mut presence = presence.await.expect("subscribe presence");
 		let frame = presence.next().await.expect("read").expect("frame");
 		assert_eq!(frame.get("").expect("default tier").active(), 1);
+
+		// So is a prefix track.
+		let mut prefix = std::pin::pin!(compressed.prefix("foo"));
+		assert!(futures::poll!(prefix.as_mut()).is_pending());
+		drive_tick().await;
+		let mut prefix = prefix.await.expect("subscribe prefix");
+		let frame = prefix.next().await.expect("read").expect("frame");
+		let tier = frame.get("").expect("default tier");
+		assert_eq!(tier.publisher.bytes, 50);
+		assert_eq!(tier.children["bar"].publisher.bytes, 50);
 	}
 }

@@ -14,7 +14,6 @@ final class SmokeTests: XCTestCase {
         let other = try BroadcastProducer()
         let timebase = try Media.Timebase(broadcast: owner)
         XCTAssertThrowsError(try Media.ContainerProducer(broadcast: other, initData: Media.ContainerInit(format: .fmp4, data: Data(), timebase: timebase)))
-        XCTAssertThrowsError(try Media.ContainerStreamProducer(broadcast: other, initData: Media.ContainerStreamInit(format: .fmp4, timebase: timebase)))
         try owner.close()
         XCTAssertThrowsError(try Media.Timebase(broadcast: owner))
         try other.close()
@@ -36,6 +35,27 @@ final class SmokeTests: XCTestCase {
             XCTAssertEqual(details.code, 468)
             XCTAssertEqual(details.kind, .app)
         }
+    }
+
+    func testAscendingSubscriptionReadsACachedBacklogOldestFirst() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "backlog", info: TrackInfo(timescale: 1_000_000))
+        for ms: UInt64 in 0..<3 {
+            let group = try track.appendGroup()
+            try group.writeFrame(Data("x".utf8), timestampUs: ms * 1_000)
+            try group.finish()
+        }
+        let consumer = try track.consume(subscription: Subscription(
+            maxDelayUs: 10_000_000,
+            ranges: [Subscription.Range(start: .relative(groups: 2))],
+            order: .ascending
+        ))
+        var sequences: [UInt64] = []
+        for _ in 0..<3 {
+            let group = try await consumer.recvGroup()
+            sequences.append(try XCTUnwrap(group).sequence)
+        }
+        XCTAssertEqual(sequences, [0, 1, 2])
     }
 
     /// An error's description is the Rust error message.
@@ -307,21 +327,21 @@ final class SmokeTests: XCTestCase {
         let snapshotDemand = try snapshot.demand()
         let streamDemand = try stream.demand()
         XCTAssertEqual(snapshotDemand.name, "status")
-        XCTAssertFalse(snapshotDemand.isUsed)
+        XCTAssertNil(snapshotDemand.wanted)
         let consumer = try broadcast.consume()
 
         let snapshotConsumer = try Json.SnapshotConsumer<[String: Int]>(
             track: try await consumer.subscribeTrack(name: "status"))
         let streamConsumer = try Json.StreamConsumer<[String: Int]>(
             track: try await consumer.subscribeTrack(name: "events"))
-        try await snapshotDemand.used()
-        try await streamDemand.used()
-        XCTAssertTrue(snapshotDemand.isUsed)
+        while try await snapshotDemand.wantedChanged() == nil {}
+        while try await streamDemand.wantedChanged() == nil {}
+        XCTAssertEqual(snapshotDemand.wanted, 0)
 
         snapshotConsumer.cancel()
         streamConsumer.cancel()
-        try await snapshotDemand.unused()
-        try await streamDemand.unused()
+        while try await snapshotDemand.wantedChanged() != nil {}
+        while try await streamDemand.wantedChanged() != nil {}
 
         try broadcast.close()
     }

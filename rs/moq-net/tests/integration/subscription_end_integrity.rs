@@ -83,7 +83,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let (go_tx, go_rx) = futures::channel::oneshot::channel::<()>();
 
 	let reader = moq_clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+		let subscription = moq_net::track::Subscription::default().with_groups(0..);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -113,7 +113,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		}
 	});
 
-	moq_clock::timeout(TIMEOUT, track.demand().used())
+	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -225,7 +225,7 @@ async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<m
 	// Subscribing resolves only once the publisher serves the track, which it does
 	// only after seeing the subscription, so the reader runs concurrently.
 	let reader = moq_clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+		let subscription = moq_net::track::Subscription::default().with_groups(0..);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
@@ -252,7 +252,9 @@ async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<m
 		}
 	});
 
-	track.demand().used().await.expect("no subscriber appeared");
+	crate::support::wanted(track.demand())
+		.await
+		.expect("no subscriber appeared");
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, HEAD[0]).unwrap();
 	settle().await;

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use super::state::StreamsState;
-use super::{SendDomain, SendGroup, SendGroups, SendStream, Streams};
+use super::{SendDomain, SendGroup, SendGroups, SendOptions, SendStream, Streams};
 use crate::{
     Dir, Side, StreamId, VarInt,
     connection::{State as ConnState, spaces::Retransmits},
@@ -90,7 +90,7 @@ impl Sender {
     }
 
     fn group(&mut self, priority: i64) -> SendGroup {
-        self.groups().open(priority, None)
+        self.groups().open(priority)
     }
 
     fn send(&mut self, id: StreamId) -> SendStream<'_> {
@@ -108,11 +108,8 @@ impl Sender {
             state: &mut self.state,
             conn_state: &self.conn,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, SendOptions { group, priority })
         .unwrap();
-        let mut stream = self.send(id);
-        stream.set_group(group).unwrap();
-        stream.set_priority(priority).unwrap();
         self.write(id, bytes);
         id
     }
@@ -121,8 +118,8 @@ impl Sender {
         assert_eq!(self.send(id).write(&vec![0; bytes]), Ok(bytes));
     }
 
-    /// Queue a `bytes` payload datagram in `group` at `order`, returning its tag.
-    fn datagram(&mut self, group: Option<&SendGroup>, order: i64, bytes: usize) -> u64 {
+    /// Queue a `bytes` payload datagram in `group` at `priority`, returning its tag.
+    fn datagram(&mut self, group: Option<&SendGroup>, priority: i64, bytes: usize) -> u64 {
         let tag = self.tag;
         self.tag += 1;
         let mut data = BytesMut::with_capacity(bytes);
@@ -133,7 +130,7 @@ impl Sender {
         };
         assert!(
             self.state
-                .queue_datagram(datagram, group, order, usize::MAX)
+                .queue_datagram(datagram, SendOptions { group, priority }, usize::MAX)
         );
         tag
     }
@@ -451,13 +448,13 @@ fn domains_share_bytes_and_confine_priority() {
     let quiet = sender.groups().open_domain();
 
     let crowded_groups: Vec<_> = (0..10)
-        .map(|priority| sender.groups().open(priority, Some(&crowded)))
+        .map(|priority| sender.groups().open_in(priority, &crowded))
         .collect();
     let crowded_streams: Vec<_> = crowded_groups
         .iter()
         .map(|group| sender.open(Some(group), 0, 1_000_000))
         .collect();
-    let quiet_group = sender.groups().open(-100, Some(&quiet));
+    let quiet_group = sender.groups().open_in(-100, &quiet);
     let quiet_stream = sender.open(Some(&quiet_group), 0, 1_000_000);
 
     sender.drain(200);
@@ -475,7 +472,7 @@ fn domains_share_bytes_and_confine_priority() {
 fn the_default_domain_is_one_share() {
     let mut sender = Sender::new();
     let domain = sender.groups().open_domain();
-    let inside = sender.groups().open(0, Some(&domain));
+    let inside = sender.groups().open_in(0, &domain);
     let outside: Vec<SendGroup> = (0..3).map(|_| sender.group(0)).collect();
     let inside = sender.open(Some(&inside), 0, 1_000_000);
     let outside: Vec<_> = outside
@@ -493,7 +490,7 @@ fn the_default_domain_is_one_share() {
 fn reset_frees_a_released_group() {
     let mut sender = Sender::new();
     let domain: SendDomain = sender.groups().open_domain();
-    let group = sender.groups().open(0, Some(&domain));
+    let group = sender.groups().open_in(0, &domain);
     let reset = sender.open(Some(&group), 0, 10_000);
     let finished = sender.open(Some(&group), 1, 100);
     sender.send(finished).finish().unwrap();
@@ -526,7 +523,7 @@ fn reliable_reset_sends_its_prefix_then_frees_its_group() {
     sender.send(finished).finish().unwrap();
     sender.groups().close(group);
 
-    sender.send(reset).reset_to(0u32.into(), 3_000).unwrap();
+    sender.send(reset).reset_at(3_000, 0u32.into()).unwrap();
     assert!(sender.state.can_send_stream_data());
     sender.drain(100);
     assert_eq!(sender.bytes(&[reset]), 3_000, "only the reliable prefix");
@@ -558,7 +555,7 @@ fn stop_sending_drops_a_reliable_prefix_from_the_schedule() {
     let mut sender = Sender::new();
     let group = sender.group(0);
     let reset = sender.open(Some(&group), 0, 10_000);
-    sender.send(reset).reset_to(0u32.into(), 3_000).unwrap();
+    sender.send(reset).reset_at(3_000, 0u32.into()).unwrap();
     assert!(sender.state.can_send_stream_data());
 
     assert_eq!(
@@ -676,8 +673,8 @@ fn saturated_datagram_domains_share_bytes() {
     let mut sender = Sender::new();
     let small = sender.groups().open_domain();
     let large = sender.groups().open_domain();
-    let small = sender.groups().open(0, Some(&small));
-    let large = sender.groups().open(9, Some(&large));
+    let small = sender.groups().open_in(0, &small);
+    let large = sender.groups().open_in(9, &large);
     let small: Vec<_> = (0..2_000)
         .map(|seq| sender.datagram(Some(&small), seq, 50))
         .collect();

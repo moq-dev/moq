@@ -274,13 +274,23 @@ fn unapplied(phases: &[(Profile, u64)], stats: &Stats) -> Vec<&'static str> {
 
 /// `profile` as the run opens and as each of `steps` leaves it, paired with the
 /// datagrams `counts` says that phase treated.
-fn phased(profile: &Profile, steps: &[Step], counts: &BTreeMap<usize, u64>) -> Vec<(Profile, u64)> {
-	let count = |phase: usize| counts.get(&phase).copied().unwrap_or(0);
+///
+/// The datagrams an ingress burst kept from loss pair with a lossless copy of
+/// their phase, since they were no chance for loss to act.
+fn phased(profile: &Profile, steps: &[Step], counts: &BTreeMap<usize, Treated>) -> Vec<(Profile, u64)> {
 	let mut profile = profile.clone();
-	let mut phases = vec![(profile.clone(), count(0))];
-	for (index, step) in steps.iter().enumerate() {
-		step.apply(&mut profile);
-		phases.push((profile.clone(), count(index + 1)));
+	let mut phases = Vec::new();
+	for index in 0..=steps.len() {
+		if index > 0 {
+			steps[index - 1].apply(&mut profile);
+		}
+		let treated = counts.get(&index).copied().unwrap_or_default();
+		let lossless = Profile {
+			loss: 0.0,
+			..profile.clone()
+		};
+		phases.push((profile.clone(), treated.exposed));
+		phases.push((lossless, treated.exempt));
 	}
 	phases
 }
@@ -480,13 +490,16 @@ impl Shaper {
 		})
 	}
 
-	/// Collect the next active link's surviving ingress until its rate bucket must overflow.
+	/// Collect the next active link's ingress until its rate bucket must overflow.
 	///
 	/// Armed after a handshake, this accounts the collected datagrams at one instant,
-	/// regardless of scheduling gaps. The chosen direction needs a fixed rate profile;
-	/// other flows and the opposite direction keep forwarding. A shared link collects
-	/// all its clients together. Holding enough bytes
-	/// requires transport credit beyond the bucket's burst plus queue allowance.
+	/// regardless of scheduling gaps. Collected datagrams are never lost, so the
+	/// gate opens on what the sender offers, not on the loss draws, and
+	/// [`Shaper::verify`] never counts them as chances for loss. The chosen
+	/// direction needs a fixed rate profile; other flows and the opposite direction
+	/// keep forwarding. A shared link collects all its clients together. Holding
+	/// enough bytes requires transport credit beyond the bucket's burst plus queue
+	/// allowance.
 	#[cfg(any(test, feature = "test"))]
 	pub fn burst(&self, direction: ingress::Direction) -> anyhow::Result<ingress::Burst> {
 		let (index, profile, options) = match direction {
@@ -641,9 +654,18 @@ struct Tally {
 	delayed: AtomicU64,
 	reordered: AtomicU64,
 	/// Datagrams treated in each phase: 0 before the first step, n after the nth.
-	phases: Mutex<BTreeMap<usize, u64>>,
+	phases: Mutex<BTreeMap<usize, Treated>>,
 	/// Datagrams a batch held past when they would otherwise have left.
 	batched: AtomicU64,
+}
+
+/// The datagrams one phase treated.
+#[derive(Clone, Copy, Debug, Default)]
+struct Treated {
+	/// Those loss could drop.
+	exposed: u64,
+	/// Those an ingress burst collected, which loss never drops.
+	exempt: u64,
 }
 
 impl Tally {
@@ -955,13 +977,15 @@ struct Parcel {
 	dest: SocketAddr,
 }
 
-/// One direction of one flow, or of every flow on a shared path: the decisions
-/// and the state they depend on.
+/// The seeded decisions for one datagram.
 struct Draw {
+	lose: bool,
 	skip: bool,
 	spread: f64,
 }
 
+/// One direction of one flow, or of every flow on a shared path: the decisions
+/// and the state they depend on.
 struct Link {
 	#[cfg(any(test, feature = "test"))]
 	stream: u64,
@@ -1017,8 +1041,8 @@ impl Link {
 	}
 
 	/// Apply every step the run has reached by `now`, in order, and record the
-	/// phase a datagram arriving then sees.
-	fn step(&mut self, now: Instant, tally: &Tally) {
+	/// phase a datagram arriving then sees, and whether loss can drop it.
+	fn step(&mut self, now: Instant, tally: &Tally, exempt: bool) {
 		while let Some(step) = self.steps.get(self.stepped) {
 			// A step past what the clock can hold is one the run never reaches.
 			if self.start.checked_add(step.at).is_none_or(|at| at > now) {
@@ -1028,46 +1052,25 @@ impl Link {
 			self.stepped += 1;
 		}
 		// Applying a step is no evidence it acted, so count the datagrams each phase treated.
-		*tally.phases.lock().unwrap().entry(self.stepped).or_default() += 1;
+		let mut phases = tally.phases.lock().unwrap();
+		let treated = phases.entry(self.stepped).or_default();
+		if exempt {
+			treated.exempt += 1;
+		} else {
+			treated.exposed += 1;
+		}
 	}
 
 	/// Treat a datagram and queue it to leave by `socket` for `dest`.
 	fn push(&mut self, now: Instant, datagram: Vec<u8>, socket: &Arc<UdpSocket>, dest: SocketAddr, tally: &Tally) {
 		#[cfg(any(test, feature = "test"))]
 		if let Some(state) = self.ingress.selected(self.stream) {
-			let Some(draw) = self.draw(now, tally) else {
-				return;
-			};
-			let packet = ingress::Held {
-				datagram,
-				socket: socket.clone(),
-				dest,
-				draw,
-			};
-			let released = state
-				.lock()
-				.expect("ingress poisoned")
-				.hold(self.profile.rate.as_ref().expect("validated rate"), packet);
-			if let Some(released) = released {
-				for packet in released.packets {
-					if let Some((at, delayed)) = self.schedule(now, packet.datagram.len(), packet.draw, tally) {
-						let _ = self.queue.send(Parcel {
-							arrived: now,
-							at,
-							delayed,
-							datagram: packet.datagram,
-							socket: packet.socket,
-							dest: packet.dest,
-						});
-					}
-				}
-				state.lock().expect("ingress poisoned").finished = true;
-				if let Some(done) = released.done {
-					let _ = done.send(());
-				}
-			}
-			return;
+			return self.gate(&state, now, datagram, socket, dest, tally);
 		}
+		self.forward(now, datagram, socket, dest, tally);
+	}
+
+	fn forward(&mut self, now: Instant, datagram: Vec<u8>, socket: &Arc<UdpSocket>, dest: SocketAddr, tally: &Tally) {
 		let Some((at, delayed)) = self.treat(now, datagram.len(), tally) else {
 			return;
 		};
@@ -1082,15 +1085,69 @@ impl Link {
 		});
 	}
 
+	/// Hold a datagram at the ingress burst that selected this link.
+	#[cfg(any(test, feature = "test"))]
+	fn gate(
+		&mut self,
+		state: &Mutex<ingress::State>,
+		now: Instant,
+		datagram: Vec<u8>,
+		socket: &Arc<UdpSocket>,
+		dest: SocketAddr,
+		tally: &Tally,
+	) {
+		// Held across the draw, so a burst dropped since it selected this link
+		// cannot exempt a datagram it never holds.
+		let mut burst = state.lock().expect("ingress poisoned");
+		if burst.cancelled {
+			drop(burst);
+			return self.forward(now, datagram, socket, dest, tally);
+		}
+		// Draw as usual so later datagrams see the same seeded stream, but keep
+		// a lost one: the gate holds the acknowledgments a sender needs to replace
+		// it, so a gate waiting on surviving bytes could wait out the connection.
+		let draw = self.draw(now, tally, true);
+		let packet = ingress::Held {
+			datagram,
+			socket: socket.clone(),
+			dest,
+			draw,
+		};
+		let Some(released) = burst.hold(self.profile.rate.as_ref().expect("validated rate"), packet) else {
+			return;
+		};
+		burst.finished = true;
+		drop(burst);
+		for packet in released.packets {
+			if let Some((at, delayed)) = self.schedule(now, packet.datagram.len(), packet.draw, tally) {
+				let _ = self.queue.send(Parcel {
+					arrived: now,
+					at,
+					delayed,
+					datagram: packet.datagram,
+					socket: packet.socket,
+					dest: packet.dest,
+				});
+			}
+		}
+		if let Some(done) = released.done {
+			let _ = done.send(());
+		}
+	}
+
 	/// When a datagram of `size` bytes arriving `now` leaves, and whether it was
 	/// counted as delayed, or `None` when it is dropped.
 	fn treat(&mut self, now: Instant, size: usize, tally: &Tally) -> Option<(Instant, bool)> {
-		let draw = self.draw(now, tally)?;
+		let draw = self.draw(now, tally, false);
+		if draw.lose {
+			bump(&tally.lost);
+			return None;
+		}
 		self.schedule(now, size, draw, tally)
 	}
 
-	fn draw(&mut self, now: Instant, tally: &Tally) -> Option<Draw> {
-		self.step(now, tally);
+	fn draw(&mut self, now: Instant, tally: &Tally, exempt: bool) -> Draw {
+		self.step(now, tally, exempt);
 		bump(&tally.packets);
 
 		// Every draw happens for every datagram, whatever the profile, so one
@@ -1102,19 +1159,14 @@ impl Link {
 			Jitter::Gaussian => gaussian(&mut self.rng),
 		};
 
-		if lose {
-			bump(&tally.lost);
-			return None;
-		}
-
-		Some(Draw { skip, spread })
+		Draw { lose, skip, spread }
 	}
 
 	fn schedule(
 		&mut self,
 		now: Instant,
 		size: usize,
-		Draw { skip, spread }: Draw,
+		Draw { skip, spread, .. }: Draw,
 		tally: &Tally,
 	) -> Option<(Instant, bool)> {
 		let mut depart = now;
@@ -1212,8 +1264,95 @@ mod tests {
 		assert!(received.try_recv().is_err());
 	}
 
+	/// A burst dropped after it selected a datagram, before the gate held it,
+	/// forwarded a datagram drawn for loss as if the gate had kept it.
 	#[tokio::test(start_paused = true)]
-	async fn ingress_preserves_loss_draws_and_cancellation_releases_held_packets() {
+	async fn an_ingress_burst_cancelled_mid_selection_leaves_loss_acting() {
+		let profile = Profile {
+			loss: 1.0,
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let (send, mut received) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &Options::default(), 42, 0, start, send);
+		let burst = link.ingress.arm().unwrap();
+		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
+		let tally = Tally::default();
+		let state = link.ingress.selected(link.stream).unwrap();
+		drop(burst);
+		link.gate(&state, start, vec![0; 1000], &socket, LOCALHOST, &tally);
+		assert_eq!(tally.lost.load(Ordering::Relaxed), 1);
+		assert!(received.try_recv().is_err(), "a datagram drawn for loss was forwarded");
+	}
+
+	/// A gate that waited on surviving bytes never opened when loss took what a
+	/// sender could offer without the acknowledgments the gate holds back.
+	#[tokio::test(start_paused = true)]
+	async fn an_ingress_burst_opens_on_what_the_sender_offers_despite_loss() {
+		let profile = Profile {
+			loss: 1.0,
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let (send, mut received) = mpsc::unbounded_channel();
+		let start = Instant::now();
+		let mut link = Link::new(&profile, &Options::default(), 42, 0, start, send);
+		let burst = link.ingress.arm().unwrap();
+		let socket = Arc::new(UdpSocket::bind(LOCALHOST).await.unwrap());
+		let tally = Tally::default();
+		for _ in 0..3 {
+			link.push(start, vec![0; 1000], &socket, LOCALHOST, &tally);
+		}
+		tokio::time::timeout(Duration::from_secs(1), burst.completed())
+			.await
+			.expect("the gate never opened")
+			.unwrap();
+		assert_eq!(tally.lost.load(Ordering::Relaxed), 0);
+		assert_eq!(tally.overflowed.load(Ordering::Relaxed), 1);
+		for _ in 0..2 {
+			assert!(received.try_recv().is_ok());
+		}
+
+		// Past the gate, loss acts again.
+		link.push(start, vec![0; 1000], &socket, LOCALHOST, &tally);
+		assert_eq!(tally.lost.load(Ordering::Relaxed), 1);
+		assert!(received.try_recv().is_err());
+	}
+
+	/// Datagrams a gate kept from loss were never a chance for loss to act, so a
+	/// run whose lossy traffic all went through the gate still verifies.
+	#[tokio::test(start_paused = true)]
+	async fn an_ingress_burst_is_no_chance_for_loss_to_act() {
+		let profile = Profile {
+			loss: 1.0,
+			rate: Some(Rate {
+				bits_per_second: 8000,
+				burst: 1000,
+				queue: Duration::from_secs(1),
+			}),
+			..Default::default()
+		};
+		let (shaper, client) = setup(42, profile, Profile::default()).await;
+		let burst = shaper.burst(ingress::Direction::Up).unwrap();
+		for _ in 0..3 {
+			client.send(&[0; 1000]).await.unwrap();
+		}
+		burst.completed().await.unwrap();
+		let stats = shaper.verify().unwrap();
+		assert_eq!((stats.up.packets, stats.up.lost), (3, 0));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn ingress_preserves_draws_and_cancellation_releases_held_packets() {
 		let profile = Profile {
 			loss: 0.25,
 			rate: Some(Rate {
@@ -1239,7 +1378,7 @@ mod tests {
 			plain.push(now, vec![0; 1000], &socket, LOCALHOST, &b);
 		}
 		burst.completed().await.unwrap();
-		assert_eq!(a.lost.load(Ordering::Relaxed), b.lost.load(Ordering::Relaxed));
+		assert!(a.lost.load(Ordering::Relaxed) <= b.lost.load(Ordering::Relaxed));
 		assert_eq!(gated.rng.random::<u64>(), plain.rng.random::<u64>());
 		assert!(a.overflowed.load(Ordering::Relaxed) > 0);
 
@@ -1615,6 +1754,11 @@ mod tests {
 	#[test]
 	fn a_phase_is_charged_only_its_own_traffic() {
 		let ms = Duration::from_millis;
+		let exposed = |counts: [(usize, u64); 2]| {
+			counts
+				.map(|(phase, exposed)| (phase, Treated { exposed, exempt: 0 }))
+				.into()
+		};
 		let lossy = Profile {
 			loss: 0.02,
 			..Default::default()
@@ -1625,7 +1769,7 @@ mod tests {
 			..Default::default()
 		}];
 		// One datagram survived the 2% loss, then the loss stepped off for a thousand.
-		let phases = phased(&lossy, &steps, &BTreeMap::from([(0, 1), (1, 1000)]));
+		let phases = phased(&lossy, &steps, &exposed([(0, 1), (1, 1000)]));
 		let stats = Stats {
 			up: Counters {
 				packets: 1001,
@@ -1636,7 +1780,7 @@ mod tests {
 		assert!(unapplied(&phases, &stats).is_empty());
 
 		// The same thousand under the loss still fail.
-		let phases = phased(&lossy, &steps, &BTreeMap::from([(0, 1000), (1, 1)]));
+		let phases = phased(&lossy, &steps, &exposed([(0, 1000), (1, 1)]));
 		assert_eq!(unapplied(&phases, &stats), ["loss"]);
 	}
 

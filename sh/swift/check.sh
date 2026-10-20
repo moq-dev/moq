@@ -54,7 +54,8 @@ CARGO_PROFILE=()
 [[ "$PROFILE" == "release" ]] && CARGO_PROFILE=(--release)
 
 echo "swift check: building moq-ffi for $HOST_TARGET..."
-cargo build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi \
+# `openh264`, as release builds ship it: the software encoder the tests rely on.
+cargo build --locked ${CARGO_PROFILE[@]+"${CARGO_PROFILE[@]}"} --package moq-ffi --features openh264 \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE_DIR/Cargo.toml" --no-deps |
@@ -98,4 +99,4 @@ bash "$WORKSPACE_DIR/doc/lib/samples.sh" swift "$WORKSPACE_DIR/doc/lib/swift/ind
 # swift/Package.swift already declares a path-based MoqFFIBinary pointing
 # at the xcframework laid out above, so no manifest mutation is needed.
 cd "$SWIFT_DIR"
-env ${xcode_sdk_env[@]+"${xcode_sdk_env[@]}"} swift test
+env ${xcode_sdk_env[@]+"${xcode_sdk_env[@]}"} swift test "$@"

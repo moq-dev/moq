@@ -2,17 +2,8 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
+use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, State, moq_announce_event, moq_announce_kind, moq_string};
-
-/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
-///
-/// `close` is an `Option` so `*_close` can drop just the sender without
-/// removing the entry. The task delivers one final terminal callback and then
-/// removes itself, so `user_data` stays valid until that callback fires.
-struct TaskEntry {
-	close: Option<oneshot::Sender<()>>,
-	callback: OnStatus,
-}
 
 /// Global state managing all active resources.
 ///
@@ -29,10 +20,10 @@ pub struct Origin {
 	announced: NonZeroSlab<AnnouncedRecord>,
 
 	/// Announcement listener tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
-	announced_task: NonZeroSlab<Option<TaskEntry>>,
+	announced_task: NonZeroSlab<Task>,
 
 	/// Pending consume-until-announced tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
-	consume_task: NonZeroSlab<Option<TaskEntry>>,
+	consume_task: NonZeroSlab<Task>,
 
 	/// Served routes from [Self::dynamic], retracted when the handle is closed.
 	dynamic: NonZeroSlab<Option<DynamicEntry>>,
@@ -161,26 +152,11 @@ impl Origin {
 			.scope("", &moq_net::Patterns::from(scope))?
 			.with_hidden(hidden)
 			.announced();
-		let channel = oneshot::channel();
-
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_announce,
-		};
-		let id = self.announced_task.insert(Some(entry))?;
-
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_announced(on_announce, consumer, channel.1))).await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().origin.announced_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.announced_task.spawn(
+			on_announce,
+			|state| &mut state.origin.announced_task,
+			|close| async move { driver.watch(Self::run_announced(on_announce, consumer, close)).await },
+		)
 	}
 
 	async fn run_announced(
@@ -231,49 +207,28 @@ impl Origin {
 	}
 
 	pub fn announced_close(&mut self, announced: Id) -> Result<(), Error> {
-		// Signal shutdown; the task delivers a final callback and removes itself.
-		self.announced_task
-			.get_mut(announced)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::AnnouncementNotFound)?
-			.close
-			.take()
-			.ok_or(Error::AnnouncementNotFound)?;
-		Ok(())
+		self.announced_task.close(announced, Error::AnnouncementNotFound)
 	}
 
-	/// Wait until the broadcast at `path` is announced, then deliver its handle via the callback.
+	/// Follow the broadcast at `path`, delivering each publisher instance's handle via the callback.
 	///
-	/// The callback fires the broadcast handle (> 0) once announced, then a terminal `0`. On error
-	/// or cancellation it fires a single terminal code (`0` on close, negative on error). Returns a
-	/// task handle for cancellation via [`Self::consume_announced_close`].
+	/// The callback fires a broadcast handle (> 0) for each instance serving the path, until a
+	/// single terminal code (`0` on close, negative on error). Returns a task handle for
+	/// cancellation via [`Self::consume_announced_close`].
 	pub fn consume_announced(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
 		let consumer = origin.consume_owned();
-		let channel = oneshot::channel();
-
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_broadcast,
-		};
-		let id = self.consume_task.insert(Some(entry))?;
-
-		tokio::spawn(async move {
-			let res =
-				crate::ffi::run(driver.watch(Self::run_consume_announced(on_broadcast, consumer, path, channel.1)))
-					.await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().origin.consume_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.consume_task.spawn(
+			on_broadcast,
+			|state| &mut state.origin.consume_task,
+			|close| async move {
+				driver
+					.watch(Self::run_consume_announced(on_broadcast, consumer, path, close))
+					.await
+			},
+		)
 	}
 
 	async fn run_consume_announced(
@@ -282,27 +237,80 @@ impl Origin {
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// `routed_broadcast` rides out the churn between something covering the path
-		// and the path actually resolving (failover, an advertise-only announce
-		// racing its handler). `biased` so a pending close always wins.
-		let broadcast = tokio::select! {
-			biased;
-			_ = &mut close => return Ok(()),
-			resolved = consumer.routed_broadcast(path.as_str()) => match resolved {
-				Ok(broadcast) => broadcast,
-				// An unreachable path and a closed origin both mean no broadcast
-				// can ever arrive here.
-				Err(moq_net::Error::Unauthorized | moq_net::Error::Closed) => {
-					return Err(Error::BroadcastNotFound);
-				}
-				Err(err) => return Err(err.into()),
-			},
+		// An unreachable path and a closed origin both mean no broadcast can ever arrive here.
+		let mut follow = match consumer.follow(path.as_str()) {
+			Ok(follow) => follow,
+			Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
+			Err(err) => return Err(err.into()),
+		};
+		let mut unseen = false;
+		let mut delivered = false;
+		// The handle delivered last, until the caller frees it or the path goes offline. An id
+		// rather than the broadcast, so it never keeps an instance the caller freed from retiring.
+		let mut last: Option<Id> = None;
+		// The origin closing ends the wait, cleanly once a handle was delivered.
+		let closed = |delivered: bool| match delivered {
+			true => Ok(()),
+			false => Err(Error::BroadcastNotFound),
 		};
 
-		// Hold the lock only to buffer the broadcast; release it before the callback.
-		let broadcast_id = State::lock().consume.start(broadcast, Some(consumer))?;
-		callback.call(broadcast_id);
-		Ok(())
+		// Deliver each publisher instance serving the path: the first, then each one that takes
+		// over or returns. `biased` so a pending close always wins.
+		loop {
+			// Apply every change on hand before resolving, so a burst of them delivers only the
+			// instance serving the path now.
+			if settle(&mut follow, &mut unseen, &mut last).is_none() {
+				return closed(delivered);
+			}
+			if !unseen {
+				let event = tokio::select! {
+					biased;
+					_ = &mut close => return Ok(()),
+					event = follow.next() => event,
+				};
+				let Some(event) = event else {
+					return closed(delivered);
+				};
+				apply(&mut unseen, &mut last, event);
+				continue;
+			}
+
+			// `routed_broadcast` rides out the churn between something covering the path
+			// and the path actually resolving (failover, an advertise-only announce
+			// racing its handler).
+			let broadcast = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				resolved = consumer.routed_broadcast(path.as_str()) => match resolved {
+					Ok(broadcast) => broadcast,
+					Err(moq_net::Error::Closed) => return closed(delivered),
+					Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
+					Err(err) => return Err(err.into()),
+				},
+			};
+
+			// A change that came through while resolving may predate the answer, such as an end
+			// and a start for the instance it resolved. Resolve afresh once caught up.
+			match settle(&mut follow, &mut unseen, &mut last) {
+				None => return closed(delivered),
+				Some(true) => continue,
+				Some(false) => unseen = false,
+			}
+
+			// Hold the lock only to buffer the broadcast; release it before the callback.
+			let broadcast_id = {
+				let mut state = State::lock();
+				// Resolving can run ahead of the follower: a takeover resolves at once while its
+				// restart is held, and that restart then names the instance already delivered.
+				if last.is_some_and(|last| state.consume.holds(last, &broadcast)) {
+					continue;
+				}
+				state.consume.start(broadcast, Some(consumer.clone()))?
+			};
+			last = Some(broadcast_id);
+			delivered = true;
+			callback.call(broadcast_id);
+		}
 	}
 
 	/// Request the broadcast at `path`, delivering its handle once it can be served.
@@ -317,26 +325,15 @@ impl Origin {
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
 		let consumer = origin.consume_owned();
-		let channel = oneshot::channel();
-
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_broadcast,
-		};
-		let id = self.consume_task.insert(Some(entry))?;
-
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_request(on_broadcast, consumer, path, channel.1))).await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().origin.consume_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.consume_task.spawn(
+			on_broadcast,
+			|state| &mut state.origin.consume_task,
+			|close| async move {
+				driver
+					.watch(Self::run_request(on_broadcast, consumer, path, close))
+					.await
+			},
+		)
 	}
 
 	async fn run_request(
@@ -362,15 +359,7 @@ impl Origin {
 	}
 
 	pub fn consume_announced_close(&mut self, task: Id) -> Result<(), Error> {
-		// Signal shutdown; the task delivers a final callback and removes itself.
-		self.consume_task
-			.get_mut(task)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::NotFound)?
-			.close
-			.take()
-			.ok_or(Error::NotFound)?;
-		Ok(())
+		self.consume_task.close(task, Error::NotFound)
 	}
 
 	/// Create an unannounced broadcast at `path` on an origin.
@@ -496,6 +485,32 @@ impl Origin {
 		self.active.remove(origin).ok_or(Error::OriginNotFound)?;
 		Ok(())
 	}
+}
+
+/// Apply every change on hand, returning whether any came through, or `None` once the origin
+/// closed.
+fn settle(follow: &mut moq_net::announce::Follow, unseen: &mut bool, last: &mut Option<Id>) -> Option<bool> {
+	let mut changed = false;
+	while let std::task::Poll::Ready(event) = follow.poll_next(&kio::Waiter::noop()) {
+		changed |= apply(unseen, last, event?);
+	}
+	Some(changed)
+}
+
+/// Apply one change to the path, returning whether it is one.
+fn apply(unseen: &mut bool, last: &mut Option<Id>, event: moq_net::announce::Event) -> bool {
+	match event {
+		moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => *unseen = true,
+		// An end is a gap that ended every request on the old route, so whatever serves the path
+		// next is delivered, even the same instance coming back.
+		moq_net::announce::Event::End(_) => {
+			*unseen = false;
+			*last = None;
+		}
+		// The same instance over another route, which its subscriptions ride out.
+		moq_net::announce::Event::Update(_) => return false,
+	}
+	true
 }
 
 #[cfg(test)]

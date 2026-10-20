@@ -304,6 +304,11 @@ impl Completion {
 		}
 	}
 
+	/// Whether the caller is still writing, rather than having finished.
+	pub(super) fn writing(&self) -> bool {
+		self.state.load(Ordering::Acquire) == 0
+	}
+
 	pub(super) fn played(&self, cons: &ResamplingCons<f32>) {
 		if self.state.load(Ordering::Acquire) == 1 && (!cons.input_stream_ready() || cons.occupied_seconds() == 0.0) {
 			self.state.store(2, Ordering::Release);
@@ -558,7 +563,7 @@ mod tests {
 		let (mut sink, mut registration) = new(0, 48_000, Layout::Stereo, Input::default(), shared, engine).unwrap();
 		let (commands, rx) = std::sync::mpsc::sync_channel(8);
 		let (retired, _rx) = std::sync::mpsc::sync_channel(8);
-		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo).unwrap();
+		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		registration.attach(&commands);
 		let mut out = [0.0; 960];
 		mixer.fill(&mut out, Duration::from_millis(100));
@@ -589,6 +594,61 @@ mod tests {
 		assert!(Pin::new(&mut drain).poll(&mut cx).is_ready());
 	}
 
+	#[test]
+	fn a_writing_sink_running_dry_is_a_gap_and_a_finished_tail_plays_out() {
+		let shared = Arc::new(Shared::default());
+		let mut observer = super::super::Observer::new(shared.observe.clone()).unwrap();
+		let engine = Arc::new(super::super::Handle {
+			commands: super::super::driver::Commands::default(),
+		});
+		let input = Input {
+			latency: Duration::from_millis(1),
+			..Default::default()
+		};
+		let (mut sink, mut registration) = new(0, 48_000, Layout::Stereo, input, shared.clone(), engine).unwrap();
+		let (commands, rx) = std::sync::mpsc::sync_channel(8);
+		let (retired, _rx) = std::sync::mpsc::sync_channel(8);
+		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, shared.observe.clone()).unwrap();
+		registration.attach(&commands);
+		let mut out = [0.0; 1024];
+		mixer.fill(&mut out, Duration::ZERO);
+		assert!(observer.read().unwrap().stalled, "nothing written yet");
+
+		let tone: Vec<_> = [0.25f32; 2048].iter().flat_map(|s| s.to_le_bytes()).collect();
+		let _ = sink.write(&tone).unwrap();
+		for _ in 0..4 {
+			mixer.fill(&mut out, Duration::ZERO);
+		}
+		let _ = sink.write(&tone).unwrap();
+		mixer.fill(&mut out, Duration::ZERO);
+		let observation = observer.read().unwrap();
+		assert!(!observation.stalled);
+		assert_eq!(observation.gaps.len(), 1, "the sink ran dry once: {observation:?}");
+
+		// A finished sink still plays its tail: no stall while it lasts.
+		let _drain = sink.finish();
+		mixer.fill(&mut out, Duration::ZERO);
+		let observation = observer.read().unwrap();
+		assert!(!observation.stalled && observation.stalls.is_empty(), "{observation:?}");
+		let tail = observation.clock;
+
+		for _ in 0..4 {
+			mixer.fill(&mut out, Duration::ZERO);
+		}
+		observer.finish();
+		mixer.fill(&mut out, Duration::ZERO);
+		// Once the tail runs out nothing plays. The gap where it ran out lands in
+		// the buffer before the stall, which the analyzer attributes to the stall.
+		let observation = observer.read().unwrap();
+		assert!(observation.stalled, "{observation:?}");
+		let ([gap], [stall]) = (&observation.gaps[..], &observation.stalls[..]) else {
+			panic!("one gap and one stall: {observation:?}");
+		};
+		let buffer = Duration::from_secs_f64(512.0 / 48_000.0);
+		assert!(stall.at >= tail, "{observation:?}");
+		assert!(gap.at <= stall.at && stall.at - gap.at < buffer, "{observation:?}");
+	}
+
 	/// The resampler only converts whole blocks and its filter lags the input, so
 	/// a track whose rate differs from the device's must have its tail pushed
 	/// through on finish: both a partial final block and one that ends exactly on
@@ -616,7 +676,7 @@ mod tests {
 		let (mut sink, mut registration) = new(0, 48_000, Layout::Stereo, input, shared, engine).unwrap();
 		let (commands, rx) = std::sync::mpsc::sync_channel(8);
 		let (retired, _rx) = std::sync::mpsc::sync_channel(8);
-		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo).unwrap();
+		let mut mixer = mixer::Mixer::new(rx, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		registration.attach(&commands);
 		let mut out = [0.0; 960];
 		mixer.fill(&mut out, Duration::ZERO);
