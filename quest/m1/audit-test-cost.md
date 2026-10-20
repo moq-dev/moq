@@ -47,8 +47,9 @@ What the m0 run (2026-10-19) learned; check these first:
   calling it a flake.
 - Fixed by the m0 run: the ACME rate-limit test's released port, the stats
   session graph's recursive Send proof (send-depth and fuzz), bench/ffi-gen's
-  stale wasm-bindgen lock, the Nightly JS benchmark stall, the CI selection
-  test's feature count, and the stats producer benchmark lint.
+  stale wasm-bindgen lock, moq-uring's fixed 1 ms calibration slack, the
+  Nightly JS benchmark stall, the CI selection test's feature count, and the
+  stats producer benchmark lint.
 - Planned by the m0 run: [redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md),
   [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md), and
   [nightly media players](/quest/m1/media-engines-nightly.md). Owned
