@@ -31,6 +31,17 @@ let
     second = 1;
   };
   valid = evaluate ids { };
+  mixedNetworking = valid.extendModules {
+    modules = [
+      {
+        networking.networkmanager.enable = true;
+        systemd.network.networks.secondary = {
+          matchConfig.Name = "eth1";
+          linkConfig.RequiredForOnline = "routable";
+        };
+      }
+    ];
+  };
   matchingNat = evaluate ids { externalInterface = "eth0"; };
   wrongUplink = evaluate ids { externalInterface = "eth1"; };
   fixedAddress = evaluate ids { externalIP = "203.0.113.1"; };
@@ -45,6 +56,9 @@ assert pkgs.lib.assertMsg (pkgs.lib.all (item: item.assertion) valid.config.asse
   )
 );
 assert pkgs.lib.all (item: item.assertion) matchingNat.config.assertions;
+assert !valid.config.networking.firewall.filterForward;
+assert mixedNetworking.config.systemd.network.wait-online.enable;
+assert !valid.config.systemd.network.wait-online.enable;
 assert pkgs.lib.all (
   name: valid.config.systemd.services.${name}.serviceConfig.Restart == "always"
 ) (builtins.attrNames ids);

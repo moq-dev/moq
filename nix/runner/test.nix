@@ -29,7 +29,19 @@ pkgs.testers.runNixOSTest {
     startup = { lib, ... }: {
       imports = [ hostModule ];
       networking.networkmanager.enable = true;
-      networking.networkmanager.unmanaged = [ "interface-name:eth0" ];
+      networking.networkmanager.unmanaged = [
+        "interface-name:eth0"
+        "interface-name:eth2"
+      ];
+      virtualisation.vlans = [
+        1
+        2
+      ];
+      systemd.network.networks."10-secondary" = {
+        matchConfig.Name = "eth2";
+        address = [ "192.168.2.250/24" ];
+        linkConfig.RequiredForOnline = "routable";
+      };
       networking.networkmanager.ensureProfiles.profiles.uplink = {
         connection = {
           id = "uplink";
@@ -38,7 +50,7 @@ pkgs.testers.runNixOSTest {
         };
         ipv4 = {
           method = "manual";
-          address1 = "192.168.1.4/24";
+          address1 = "192.168.1.250/24";
         };
         ipv6.method = "disabled";
       };
@@ -153,7 +165,8 @@ pkgs.testers.runNixOSTest {
     with subtest("the carrier-less TAP is configured without blocking the host uplink"):
         startup.wait_for_unit("network-online.target")
         startup.succeed("systemctl is-active NetworkManager-wait-online.service")
-        startup.fail("systemctl is-enabled systemd-networkd-wait-online.service")
+        startup.succeed("systemctl is-active systemd-networkd-wait-online.service")
+        startup.succeed("ip -4 -o address show dev eth2 | grep -F '192.168.2.250/24'")
         startup.succeed("test $(cat /sys/class/net/tap-queue-ci/carrier) = 0")
         startup.succeed("ip -4 -o address show dev tap-queue-ci | grep -F '10.231.0.1/30'")
         startup.succeed("test $(cat /sys/class/net/tap-other-ci/carrier) = 0")
@@ -179,6 +192,13 @@ pkgs.testers.runNixOSTest {
     router.succeed("ip route add 203.0.113.1/32 dev uplink0; ip route add 100.100.100.1/32 dev uplink0")
     guest.succeed("ip route replace default via 10.231.0.1 dev eth1")
 
+    with subtest("unrelated host forwarding remains available"):
+        router.succeed("ip netns add transit; ip link add transit0 type veth peer name transit1 netns transit")
+        router.succeed("ip addr add 10.232.0.1/30 dev transit0; ip link set transit0 up")
+        router.succeed("ip -n transit addr add 10.232.0.2/30 dev transit1; ip -n transit link set transit1 up; ip -n transit route add default via 10.232.0.1")
+        internet.succeed("ip route add 10.232.0.0/30 via 192.168.2.1")
+        router.succeed("ip netns exec transit ${pkgs.curl}/bin/curl --fail --connect-timeout 5 http://203.0.113.1:8080/")
+
     with subtest("both guests reach public networks while host and sibling guests stay isolated"):
         router.succeed("curl --fail http://10.231.1.2:8080/")
         router.succeed("curl --fail http://10.231.0.2:8080/")
@@ -201,8 +221,8 @@ pkgs.testers.runNixOSTest {
         guest.succeed("${
           pkgs.python3.withPackages (p: [ p.scapy ])
         }/bin/python3 ${./spoof-test.py} attack")
-        # This response traverses the attacker's same transmit queue after its spoof.
-        guest.succeed("curl --fail http://203.0.113.1:8080/")
+        # Observe the spoof being dropped before releasing the legitimate reply.
+        router.wait_until_succeeds("nft list chain inet github-runner-queue-ci input | grep -E 'ip saddr != 10.231.0.2 counter packets [1-9]'")
         other.succeed("${pkgs.python3}/bin/python3 ${./spoof-test.py} finish")
         router.wait_for_file("/tmp/udp-result")
         router.succeed("test $(cat /tmp/udp-result) = finish")

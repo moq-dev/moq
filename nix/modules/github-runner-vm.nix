@@ -72,9 +72,17 @@ let
       networking.networkmanager.unmanaged = [ "interface-name:${tap}" ];
       systemd.network = {
         enable = true;
-        # When NetworkManager owns the uplink, it also owns online readiness.
-        # The TAP cannot gain carrier until QEMU starts.
-        wait-online.enable = lib.mkIf config.networking.networkmanager.enable false;
+        # TAP-only networkd has no link that can satisfy wait-online. Preserve
+        # readiness tracking as soon as the host has another required link.
+        wait-online.enable = lib.mkDefault (
+          lib.any (
+            network:
+            !(lib.elem (network.linkConfig.RequiredForOnline or null) [
+              false
+              "no"
+            ])
+          ) (lib.attrValues config.systemd.network.networks)
+        );
         netdevs."30-${name}" = {
           netdevConfig = {
             Kind = "tap";
@@ -97,7 +105,6 @@ let
         enable = true;
         internalInterfaces = [ tap ];
       };
-      networking.firewall.filterForward = true;
       networking.nftables = {
         enable = true;
         tables."github-runner-${name}" = {
