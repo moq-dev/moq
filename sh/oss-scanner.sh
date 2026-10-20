@@ -11,7 +11,9 @@ ref=${1:-$(git rev-parse --abbrev-ref HEAD)}
 repo=${2:-https://github.com/moq-dev/moq}
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+# tools/check keeps the finished image for its shell, and a failed build skips
+# its own cleanup of the stages before it; at ~20 GB they would fill the disk.
+trap 'docker image rm --force oss-scanner-check/{target,tools,built}:moq >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
 
 git clone --quiet --depth 1 https://github.com/anthropics/oss-scanner "$work/oss-scanner"
 
@@ -26,9 +28,4 @@ dockerfile: .oss-scanner/Dockerfile
 threat_model: .oss-scanner/threat_model.md
 EOF
 
-status=0
-uv run --no-project --with pyyaml python3 "$work/oss-scanner/tools/check" --no-shell --dir "$work/check" "$work/project/moq" || status=$?
-
-# tools/check keeps the finished image for its shell; at ~20 GB it would fill the disk.
-docker image rm --force oss-scanner-check/built:moq >/dev/null 2>&1 || true
-exit "$status"
+uv run --no-project --with pyyaml python3 "$work/oss-scanner/tools/check" --no-shell --dir "$work/check" "$work/project/moq"
