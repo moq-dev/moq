@@ -29,7 +29,7 @@ incremental). The [CI pipeline audit](/quest/m0/ci/audit.md) owns job-level CI
 cost: cache keys and hits, aws-lc-sys recompiling several times per cold job,
 both rustls backends in the gate, and `--timings` output in CI. Deduplicating
 or upgrading dependencies belongs to the
-[dependency audit](/quest/m0/audit-deps.md).
+[dependency audit](/quest/m1/audit-deps.md).
 
 Clean builds used `MBX_DISABLE=1` and a fresh `CARGO_TARGET_DIR`, with registry
 sources and the Nix shell already present; no cache, compiler, profile, or
@@ -107,4 +107,4 @@ Remaining work before completing this run:
 ## Related
 
 - [CI pipeline audit](/quest/m0/ci/audit.md) - owns job-level CI build cost and caching
-- [Dependency audit](/quest/m0/audit-deps.md) - owns deduplicating and upgrading dependencies
+- [Dependency audit](/quest/m1/audit-deps.md) - owns deduplicating and upgrading dependencies
