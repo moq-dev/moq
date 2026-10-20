@@ -17,6 +17,7 @@ from moq_ffi import (
 )
 
 from ._records import _from_us, _opt_us, _to_us
+from ._stream import _Stream
 from .media import Audio, AudioInit, CatalogProducer
 from .publish import TrackDemand
 from .session import Bandwidth, Reservation
@@ -146,7 +147,7 @@ class Producer:
         self._inner.finish()
 
 
-class Consumer:
+class Consumer(_Stream[Frame]):
     """Async iterator of decoded PCM frames. Construct with :meth:`subscribe`.
 
     The layout is fixed by the :class:`DecoderOutput` passed at subscribe time;
@@ -163,20 +164,9 @@ class Consumer:
     def __init__(self, inner: MoqAudioConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Frame:
+    async def _next(self) -> Frame | None:
         value = await self._inner.next()
-        if value is None:
-            raise StopAsyncIteration
-        return Frame._from_ffi(value)
+        return None if value is None else Frame._from_ffi(value)
 
     @property
     def delay(self) -> timedelta:

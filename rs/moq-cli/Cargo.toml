@@ -143,7 +143,7 @@ tokio = { workspace = true, features = ["full"] }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-usage = { workspace = true, features = ["completions", "config"] }
+usage-rs = { workspace = true, features = ["completions", "config"] }
 winit = { version = "0.30.13", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -156,6 +156,8 @@ moq-json = { path = "../moq-json" }
 moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
 # The scripted RTSP server `import rtsp` pulls from.
 moq-rtsp = { path = "../moq-rtsp", features = ["test-support"] }
+# Applies the finite bufferbloat queue to redundant-ingest acceptance tests.
+moq-shaper = { path = "../moq-shaper" }
 # Writes the PAT and PMTs, CRCs included, of the two-program input `import ts --program all` splits.
 mpeg2ts = "0.6.0"
 tempfile = { workspace = true }

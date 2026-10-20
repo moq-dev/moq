@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:moq/audio.dart' as moq_audio;
@@ -186,7 +187,8 @@ void main() {
 
     // Routed subscriptions pull their source lazily when the consumer is first read.
     final nextGroup = consumer.nextGroup();
-    await track.demand().used().timeout(timeout);
+    final demand = track.demand();
+    while (await demand.wantedChanged().timeout(timeout) == null) {}
 
     final producer = track.appendGroup();
     producer.writeFrame(
@@ -235,6 +237,7 @@ void main() {
         gso: false,
         mtuDiscovery: true,
         congestionControl: CongestionControl.loss,
+        keylog: false,
         reconnect: false,
         backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
         websocketEnabled: false,
@@ -282,6 +285,26 @@ void main() {
       throwsA(isA<ConfigMoqException>()),
     );
   });
+
+  test(
+    'keylog without SSLKEYLOGFILE fails the listen',
+    () {
+      expect(
+        Server.listen(
+          options: const ListenOptions(
+            bind: '127.0.0.1:0',
+            tlsGenerate: ['localhost'],
+            keylog: true,
+          ),
+        ),
+        throwsA(isA<ConfigMoqException>()),
+      );
+    },
+    // dart:io cannot unset a variable, so a run that inherits one skips.
+    skip: (Platform.environment['SSLKEYLOGFILE'] ?? '').isNotEmpty
+        ? 'SSLKEYLOGFILE is set'
+        : false,
+  );
 
   test('closing a server releases its port', () async {
     final first = await Server.listen(
@@ -421,7 +444,10 @@ void main() {
     final broadcast = MoqBroadcastProducer();
     final producer = moq_json.SnapshotProducer(
       broadcast: broadcast,
-      track: broadcast.publishTrack(name: 'status', info: null),
+      track: broadcast.publishTrack(
+        name: 'status',
+        info: MoqTrackInfo(timescale: 1000000),
+      ),
       config: moq_json.SnapshotConfig(),
     );
     final track = await broadcast
@@ -433,9 +459,19 @@ void main() {
       config: moq_json.SnapshotConfig(),
     );
 
-    producer.update(value: jsonEncode({'state': 'live'}));
-    final value = await consumer.next().timeout(timeout);
-    expect(jsonDecode(value!), {'state': 'live'});
+    for (var n = 1; n <= 4; n++) {
+      producer.update(value: jsonEncode({'n': n}), timestampUs: n * 1000);
+    }
+
+    // next() yields every state in order; latest() skips the buffered third.
+    moq_json.Value? value = await consumer.next().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 1});
+    expect(value.timestampUs, 1000);
+    value = await consumer.next().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 2});
+    value = await consumer.latest().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 4});
+    expect(value.timestampUs, 4000);
 
     consumer.cancel();
     producer.finish();

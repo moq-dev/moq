@@ -4,6 +4,28 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON consumers return `JsonValue` (#5677)
+
+`JsonSnapshotConsumer::next()` and `JsonStreamConsumer::next()` return `JsonValue` (`value`, `timestamp_us`) instead of a string; `timestamp_us` is empty when untimed.
+A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+Timestamps are rounded down to a whole microsecond.
+
+### Ranges filter reads (#5929)
+
+A subscription now reads only the groups its own `ranges` cover.
+
+### Track demand reports the wanted group (#5930)
+
+`TrackDemand::is_used`, `used`, and `unused` are gone.
+`wanted()` returns `std::nullopt` while nobody subscribes, otherwise the group subscribers want next, and `wanted_changed()` waits for it to change (the first call returns at once).
+Loop on `wanted_changed()` until it returns a value where you awaited `used()`, and `std::nullopt` where you awaited `unused()`.
+`TrackInfo` gains `refresh`, the ratio past which a joining subscriber asks for a new group.
+
+### `CongestionControl` gained `kNone` (#5926)
+
+`moq::CongestionControl::kNone` runs no congestion control and no pacing, for tests and controlled links.
+A `switch` without a `default` needs one more case.
+
 ### Container byte streams use `MediaContainerProducer` (#5919)
 
 `moq::MediaContainerStreamProducer` and `moq::ContainerStreamInit` are gone: a container recovers its own framing, so `moq::MediaContainerProducer` takes chunks split anywhere.
@@ -12,6 +34,11 @@ Pass empty `data` and write the stream through it.
 ```cpp
 auto stream = ok(moq::MediaContainerProducer::init(broadcast, {moq::ContainerFormat::kFmp4, {}}));
 ```
+
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `QuicConfig::keylog` to `true` as well to capture them; without `SSLKEYLOGFILE` the client or server refuses to build.
 
 ### Subscriptions carry group ranges (#5732)
 

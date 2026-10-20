@@ -43,5 +43,3 @@ unpublished package removals. Wire: none.
 ## Related
 
 - [#2907](https://github.com/moq-dev/moq/issues/2907) - reassess against the replacement before retiring WASM paths
-- [#2822](https://github.com/moq-dev/moq/issues/2822) - reassess against the replacement before retiring WASM paths
-- [#2835](https://github.com/moq-dev/moq/issues/2835) - reassess against the replacement before retiring WASM paths

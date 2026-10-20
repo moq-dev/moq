@@ -10,6 +10,10 @@
 //! finish, so it panics rather than hang, unless a task awaits [`idle`], which
 //! completes at exactly that point.
 //!
+//! A task poll that makes more than 4096 ready kio polls panics with the caller's
+//! source location, so a loop that forgets to yield fails instead of starving its siblings.
+//! Each `kio::Tasks` child poll counts on its own, like a spawned task.
+//!
 //! Caller-driven state machines take time from their caller:
 //! [`drive`](crate::drive) polls one with the simulated instant, and [`attach`]
 //! keeps a [`Deadlines`] queue in step.
@@ -37,6 +41,11 @@ thread_local! {
 }
 
 type Task = Pin<Box<dyn Future<Output = ()>>>;
+
+fn poll<F: Future + ?Sized>(future: Pin<&mut F>, cx: &mut Context<'_>) -> Poll<F::Output> {
+	let _scope = kio::coop::scope();
+	future.poll(cx)
+}
 
 struct Runtime {
 	/// Tells this run from earlier ones on the thread, so a timer finds its own.
@@ -177,7 +186,8 @@ impl Drop for Enter {
 /// # Panics
 ///
 /// When called inside another `run`, and when every task is parked with no timer
-/// armed and none awaits [`idle`], which is a deadlock.
+/// armed and none awaits [`idle`], which is a deadlock. Also when one root poll
+/// exceeds the ready kio poll limit, or a detached task panics.
 pub fn run<F: IntoFuture>(future: F) -> F::Output {
 	static RUNS: AtomicU64 = AtomicU64::new(0);
 	let runtime = Rc::new(Runtime {
@@ -213,7 +223,7 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 	// itself cannot starve the root: `FuturesUnordered` yields after one pass.
 	let output = loop {
 		if root.0.swap(false, Ordering::SeqCst)
-			&& let Poll::Ready(output) = future.as_mut().poll(&mut root_cx)
+			&& let Poll::Ready(output) = poll(future.as_mut(), &mut root_cx)
 		{
 			break output;
 		}
@@ -529,10 +539,8 @@ where
 		state.0.borrow_mut().task = Some(cx.waker().clone());
 
 		let running = future.as_mut().expect("task polled after completion");
-		let output = match std::panic::AssertUnwindSafe(running.as_mut())
-			.catch_unwind()
-			.poll_unpin(cx)
-		{
+		let running = std::future::poll_fn(|cx| poll(running.as_mut(), cx));
+		let output = match std::panic::AssertUnwindSafe(running).catch_unwind().poll_unpin(cx) {
 			Poll::Pending => return Poll::Pending,
 			Poll::Ready(output) => output,
 		};
@@ -569,6 +577,105 @@ impl<T> Drop for Cancel<T> {
 mod tests {
 	use super::*;
 	use crate::{Deadline, Deadlines, Elapsed, MissedTickBehavior};
+
+	fn spin() {
+		let producer = kio::Producer::new(());
+		let consumer = producer.consume();
+		let waiter = kio::Waiter::noop();
+		for _ in 0..10_000 {
+			assert!(consumer.poll(&waiter, |_| Poll::Ready(())).is_ready());
+		}
+	}
+
+	#[test]
+	#[should_panic(expected = "kio Ready poll limit")]
+	fn a_spinning_root_fails() {
+		run(async { spin() });
+	}
+
+	#[test]
+	#[should_panic(expected = "kio Ready poll limit")]
+	fn a_spinning_spawned_task_fails() {
+		run(async {
+			drop(spawn(async { spin() }));
+			yield_now().await;
+		});
+	}
+
+	#[crate::test]
+	async fn a_budgeted_loop_lets_a_sibling_run() {
+		let turns = Rc::new(Cell::new(0));
+		let sibling = spawn({
+			let turns = turns.clone();
+			async move {
+				turns.set(turns.get() + 1);
+			}
+		});
+		let producer = kio::Producer::new(());
+		let consumer = producer.consume();
+		let mut budget = kio::coop::Budget::new(32);
+		for _ in 0..10_000 {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
+			assert!(
+				kio::wait(|waiter| consumer.poll(waiter, |_| Poll::Ready(())))
+					.await
+					.is_ok()
+			);
+		}
+		assert_eq!(turns.get(), 1, "the sibling ran before the loop finished");
+		sibling.await.unwrap();
+	}
+
+	#[crate::test]
+	async fn pending_polls_do_not_count_as_work() {
+		let producer = kio::Producer::new(());
+		let consumer = producer.consume();
+		let waiter = kio::Waiter::noop();
+		for _ in 0..10_000 {
+			assert!(consumer.poll(&waiter, |_| Poll::<()>::Pending).is_pending());
+		}
+	}
+
+	#[test]
+	fn a_failed_run_restores_poll_accounting() {
+		assert!(std::panic::catch_unwind(|| run(async { spin() })).is_err());
+		spin();
+		run(async {});
+	}
+
+	#[crate::test]
+	async fn a_large_task_set_counts_each_child_alone() {
+		let producer = kio::Producer::new(());
+		let mut tasks = kio::Tasks::new();
+		for _ in 0..10_000 {
+			let consumer = producer.consume();
+			tasks.push(move |waiter: &kio::Waiter| consumer.poll(waiter, |_| Poll::Ready(())).map(drop));
+		}
+		kio::wait(|waiter| tasks.poll(waiter)).await;
+	}
+
+	#[test]
+	#[should_panic(expected = "kio Ready poll limit")]
+	fn a_spinning_task_set_child_fails() {
+		run(async {
+			let mut tasks = kio::Tasks::new();
+			tasks.push(|_: &kio::Waiter| {
+				spin();
+				Poll::Ready(())
+			});
+			kio::wait(|waiter| tasks.poll(waiter)).await;
+		});
+	}
+
+	#[test]
+	fn a_task_set_outside_the_simulator_counts_nothing() {
+		let mut tasks = kio::Tasks::new();
+		tasks.push(|_: &kio::Waiter| {
+			spin();
+			Poll::Ready(())
+		});
+		assert!(tasks.poll(&kio::Waiter::noop()).is_ready());
+	}
 
 	fn at(secs: u64) -> Instant {
 		Instant::ZERO + Duration::from_secs(secs)

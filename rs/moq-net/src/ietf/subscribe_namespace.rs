@@ -318,13 +318,15 @@ impl Message for Namespace<'_> {
 
 /// PUBLISH_BLOCKED message (0x0F): draft-17 only
 /// Indicates a track within a namespace is blocked from publishing.
+// The session does not dispatch this draft-17 message; keep its codec for fuzz coverage.
+#[cfg(any(test, feature = "fuzz"))]
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Will be used in Phase 3 bidi stream handling
 pub struct PublishBlocked<'a> {
 	pub suffix: Path<'a>,
 	pub track_name: Cow<'a, str>,
 }
 
+#[cfg(any(test, feature = "fuzz"))]
 impl Message for PublishBlocked<'_> {
 	const ID: u64 = 0x0F;
 

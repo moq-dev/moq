@@ -45,7 +45,7 @@ mod linux {
 	}
 
 	/// Sample CPU, memory, and context-switch counters for a running process.
-	#[derive(usage::Cli, Debug)]
+	#[derive(usage_rs::Cli, Debug)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(name = "moq-bench-host", version = env!("CARGO_PKG_VERSION"))]
 	#[usage(completion)]
@@ -67,7 +67,7 @@ mod linux {
 		duration: Option<crate::duration::Duration>,
 
 		/// Write JSON lines to this file instead of stdout. Truncates on start.
-		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jsonl", "json"))]
+		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jsonl", "json"))]
 		pub output: Option<std::path::PathBuf>,
 
 		/// Include a per-thread breakdown in every sample. Costs one /proc read per
@@ -342,7 +342,7 @@ mod linux {
 		fn zero_interval_rejected() {
 			let argv = [std::ffi::OsStr::new("--interval"), std::ffi::OsStr::new("0s")];
 			let err = Args::parse_from(&argv).unwrap_err();
-			let err = usage::render_failure(Args::spec(), &argv, &err);
+			let err = usage_rs::render_failure(Args::spec(), &argv, &err);
 			assert!(err.contains("greater than 0s"), "unexpected error: {err}");
 
 			// Nonzero still parses, and the default holds.

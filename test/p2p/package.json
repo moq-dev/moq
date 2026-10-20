@@ -10,7 +10,7 @@
 		"@moq/p2p": "workspace:*"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.2",
+		"@types/bun": "^1.4.3",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
 		"playwright": "^1.64.0",
 		"typescript": "7.0.2",

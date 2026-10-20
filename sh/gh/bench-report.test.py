@@ -92,6 +92,13 @@ class ReportTest(unittest.TestCase):
         (chart / 'data.js').write_text('history')
         report.index(self.root)
         self.assertIn('costs/', (chart.parent / 'index.html').read_text())
+        relays = self.root / 'relays'
+        relays.mkdir()
+        (relays / 'index.html').write_text('<title>Relay smoke</title>')
+        report.index(self.root)
+        landing = (self.root / 'index.html').read_text()
+        self.assertIn('<a href="bench/">MoQ benchmarks</a>', landing)
+        self.assertIn('<a href="relays/">Relay smoke</a>', landing)
         self.assertEqual((chart / 'data.js').read_text(), 'history')
         self.assertTrue((self.root / '.nojekyll').exists())
 

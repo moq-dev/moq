@@ -8,6 +8,7 @@ export * as Epoch from "./epoch.ts";
 export * from "./fetch.ts";
 export * from "./goaway.ts";
 export * from "./hidden.ts";
+export * from "./max_age.ts";
 export * from "./object.ts";
 export * from "./parameters.ts";
 export * from "./publish.ts";

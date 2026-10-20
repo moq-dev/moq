@@ -16,6 +16,7 @@ pub(crate) mod error;
 mod fetch;
 mod goaway;
 mod group;
+pub(crate) mod ietf;
 mod info;
 pub mod message;
 mod parameters;
@@ -39,11 +40,8 @@ mod version;
 pub use announce::*;
 pub use auth::*;
 pub(crate) use compress::*;
-#[allow(unused_imports)]
 pub use datagram::*;
-#[allow(unused_imports)]
 pub use fetch::*;
-#[allow(unused_imports)]
 pub use goaway::*;
 pub use group::*;
 pub use info::*;
@@ -54,12 +52,10 @@ pub use probe::*;
 use publisher::*;
 #[cfg(feature = "async")]
 pub(super) use session::*;
-#[allow(unused_imports)]
 pub use setup::*;
 pub use stream::*;
 pub use subscribe::*;
 #[cfg(feature = "async")]
 use subscriber::*;
-#[allow(unused_imports)]
 pub use track::*;
 pub use version::Version;
