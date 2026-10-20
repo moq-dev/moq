@@ -1,4 +1,4 @@
-import { wall } from "@moq/clock";
+import { Instant, Nano, now, wall } from "@moq/clock";
 import { type Dispose, type Getter, Once, Signal } from "@moq/signals";
 import {
 	type Auth,
@@ -38,6 +38,8 @@ export interface AuthWire {
 	read(stream: Stream): Promise<WireReply | undefined>;
 	/** The token the peer presents on a stream it opened. */
 	accept(stream: Stream): Promise<Uint8Array>;
+	/** Wait for the presenter to withdraw while validating follow-up messages. */
+	withdrawn(stream: Stream): Promise<void>;
 	/** Tell the presenter a grant. Throws {@link Unsupported} when this wire cannot represent it. */
 	grant(stream: Stream, grant: WireGrant): Promise<void>;
 	/** Refuse or revoke the presenter's token. */
@@ -172,11 +174,8 @@ class IssuedGrant implements Issued {
 		this.#stream = stream;
 		this.#wire = wire;
 		// The presenter withdraws by closing or cancelling its side.
-		this.closed = stream.reader
-			.done()
-			.then((done) => {
-				if (!done) throw new ProtocolViolation("additional message on an AUTH stream");
-			})
+		this.closed = wire
+			.withdrawn(stream)
 			.then(
 				() => null,
 				(err: unknown) => (err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
@@ -298,6 +297,7 @@ export class AuthSession implements Handle {
 	#replied = false;
 	#tokens = new Set<Presented>();
 	#setupPending = new Signal(0);
+	#pending = new Signal(0);
 	#acceptor: "undecided" | "default" | RequestQueue = "undecided";
 	#closed = false;
 
@@ -374,6 +374,63 @@ export class AuthSession implements Handle {
 		while (this.#setupPending.peek() > 0) await this.#setupPending.changed();
 	}
 
+	/**
+	 * Wait for presented tokens that might admit this path, without delaying a covered path.
+	 * Resolves false once `until`, the request's own lifetime, settles first, so an abandoned
+	 * request never waits on a token that may never be answered. `until` is called only once
+	 * the request has to wait.
+	 */
+	async ready(
+		path: Path.Valid,
+		direction: "publish" | "subscribe",
+		{ signal, until }: { signal?: AbortSignal; until?: () => PromiseLike<unknown> } = {},
+	): Promise<boolean> {
+		let started: Instant | undefined;
+		let ended = false;
+		let wake: (() => void) | undefined;
+		const end = () => {
+			ended = true;
+			wake?.();
+		};
+		try {
+			while (this.#pending.peek() > 0 && !this.#union.peek()?.[direction].matches(path)) {
+				if (ended) return false;
+				if (started === undefined) {
+					started = now();
+					until?.().then(end, end);
+				}
+				signal?.throwIfAborted();
+				await new Promise<void>((resolve, reject) => {
+					const cleanup = () => {
+						pending();
+						grant();
+						wake = undefined;
+						signal?.removeEventListener("abort", abort);
+					};
+					const done = () => {
+						cleanup();
+						resolve();
+					};
+					const abort = () => {
+						cleanup();
+						reject(signal?.reason);
+					};
+					const pending = this.#pending.changed(done);
+					const grant = this.#union.changed(done);
+					wake = done;
+					signal?.addEventListener("abort", abort, { once: true });
+				});
+			}
+			return true;
+		} finally {
+			if (started !== undefined) {
+				console.debug(
+					`request waited for authorization: path=${path} waited=${Nano.toMilli(Instant.durationSince(now(), started))}ms`,
+				);
+			}
+		}
+	}
+
 	/** Answer one of the peer's token streams, for the life of its token. */
 	async serve(stream: Stream): Promise<void> {
 		const wire = this.#wire;
@@ -417,6 +474,7 @@ export class AuthSession implements Handle {
 	close() {
 		if (this.#closed) return;
 		this.#closed = true;
+		this.#pending.set(0);
 		for (const token of this.#tokens) token.end(new Error("session closed"));
 		this.#tokens.clear();
 		this.#recompute();
@@ -427,6 +485,7 @@ export class AuthSession implements Handle {
 		const presented = new Presented(token, setup);
 		this.#track(presented);
 		if (setup) this.#setupPending.update((n) => n + 1);
+		if (token.byteLength > 0) this.#pending.update((n) => n + 1);
 		void this.#run(wire, presented);
 		return presented;
 	}
@@ -480,8 +539,11 @@ export class AuthSession implements Handle {
 				}
 				console.warn("auth token refused", reply.refused);
 				// A refused setup token leaves an empty union, not an unknown (unrestricted)
-				// one. A grant the acceptor could not tell is unknown, not empty.
-				if (!(reply.refused instanceof Unsupported)) this.#replied = true;
+				// one. A grant the acceptor could not tell, or never judged, is unknown, not empty.
+				const unjudged =
+					reply.refused instanceof Unsupported ||
+					(reply.refused instanceof StreamError && reply.refused.code === StreamCode.GoingAway);
+				if (!unjudged) this.#replied = true;
 				result = reply.refused;
 				stream.close();
 				break;
@@ -507,6 +569,7 @@ export class AuthSession implements Handle {
 		const unanswered = !token.isAnswered;
 		token.end(result);
 		if (unanswered && token.setup) this.#setupPending.update((n) => n - 1);
+		if (unanswered && token.token.byteLength > 0 && !this.#closed) this.#pending.update((n) => n - 1);
 		this.#tokens.delete(token);
 		// Closed before the union shrinks, so the scope never reads it as a revocation.
 		if (closed) this.close();
@@ -517,6 +580,7 @@ export class AuthSession implements Handle {
 		if (token.isAnswered) return;
 		token.answer();
 		if (token.setup) this.#setupPending.update((n) => n - 1);
+		if (token.token.byteLength > 0 && !this.#closed) this.#pending.update((n) => n - 1);
 	}
 
 	#recompute() {
@@ -550,12 +614,14 @@ export async function enforceGrant({
 	advertised,
 	grant,
 	setupAnswered,
+	auth,
 }: {
 	quic: WebTransport;
 	/** The broadcasts this side publishes, undefined once the origin ends. */
 	advertised: Getter<ReadonlyMap<Path.Valid, unknown> | undefined>;
 	grant: Getter<Grant | undefined>;
 	setupAnswered: Promise<void>;
+	auth?: AuthSession;
 }): Promise<void> {
 	const closed = quic.closed.then(
 		() => "closed" as const,
@@ -589,6 +655,13 @@ export async function enforceGrant({
 			for (const path of table.keys()) {
 				if (live.has(path)) continue;
 				if (!current.publish.matches(path)) {
+					await auth?.ready(path, "publish");
+					// A broadcast withdrawn during the wait is no longer ours to judge.
+					if (!advertised.peek()?.has(path)) continue;
+					if (grant.peek()?.publish.matches(path)) {
+						live.add(path);
+						continue;
+					}
 					console.error(`publishing outside our grant; closing the session: broadcast=${path}`);
 					quic.close({
 						closeCode: SessionCode.Unauthorized,

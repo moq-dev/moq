@@ -22,6 +22,7 @@ export const VERSION = 4;
 
 /** A catalog needs a newer moq-hang draft than this reader implements. */
 export class UnsupportedVersion extends Error {
+	/** The catalog version that was read. */
 	readonly version: number;
 
 	constructor(version: number) {
@@ -114,6 +115,7 @@ export const MAX_RENDITIONS = 64;
 
 /** A catalog update announced more media renditions than a reader will retain. */
 export class TooManyRenditions extends Error {
+	/** How many renditions the catalog lists. */
 	readonly count: number;
 
 	constructor(count: number) {
@@ -125,6 +127,7 @@ export class TooManyRenditions extends Error {
 
 /** A catalog update used one rendition ID for both a video and an audio rendition. */
 export class DuplicateRendition extends Error {
+	/** The rendition ID used for both video and audio. */
 	readonly id: string;
 
 	constructor(id: string) {

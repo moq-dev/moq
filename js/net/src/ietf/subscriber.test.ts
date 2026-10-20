@@ -2273,6 +2273,86 @@ test.each(["done", "fin"] as const)("a counted set cut short by %s closes the se
 	}
 });
 
+for (const negotiated of [false, true]) {
+	test(`subscriber max age is sent only to a declaring peer: ${negotiated}`, async () => {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const subscriber = new Subscriber({
+			session: new NativeSession(pair.server, VERSION, true),
+			maxAge: negotiated,
+		});
+		const track = subscriber
+			.consume(Path.from("room"))
+			.track("video")
+			.subscribe({ maxDelay: Milli(250) });
+		const peer = await nextStream(pair.client);
+		if (!peer) throw new Error("no subscribe stream");
+		expect(await peer.reader.u53()).toBe(Subscribe.id);
+		const request = await Subscribe.decode(peer.reader, VERSION);
+		expect(request.maxAge).toBe(negotiated ? 250 : undefined);
+		await peer.writer.u53(SubscribeOk.id);
+		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
+		await track.info();
+		// The aggregate can change before SUBSCRIBE_OK: the first update must catch it.
+		const tolerant = track.fork({ maxDelay: Milli(900), priority: 9 });
+		expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
+		const update = await SubscribeUpdate.decode(peer.reader, VERSION);
+		expect(update.parameters.maxAge).toBe(negotiated ? 900 : undefined);
+		expect(update.parameters.subscriberPriority).toBe(246);
+		tolerant.close();
+		track.close();
+		peer.close();
+	});
+}
+/**
+ * Draft 16 answers every update, and the adapter routes the answer back by the update's own
+ * request ID, so one update is in flight at a time and the next waits for it.
+ */
+test("a draft 16 subscription update waits for the last one's answer", async () => {
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPN.DRAFT_16);
+	const control = await Stream.open(pair.server, { version });
+	const session = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+	void session.run().catch(() => void 0);
+	const subscriber = new Subscriber({ session });
+	const peer = await nextStream(pair.client);
+	if (!peer) throw new Error("missing control stream");
+	peer.reader.version = version;
+	peer.writer.version = version;
+
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe({ priority: 1 });
+	try {
+		expect(await peer.reader.u53()).toBe(Subscribe.id);
+		const request = await Subscribe.decode(peer.reader, version);
+		await peer.writer.u53(SubscribeOk.id);
+		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
+		await track.info();
+
+		const higher = track.fork({ priority: 9 });
+		expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
+		const first = await SubscribeUpdate.decode(peer.reader, version);
+		const highest = track.fork({ priority: 20 });
+		let sent = false;
+		const next = peer.reader.u53().then((id) => {
+			sent = true;
+			return id;
+		});
+		// The mock transport schedules nothing on timers, so settled promise chains are final.
+		for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+		expect(sent).toBe(false);
+
+		await peer.writer.u53(RequestOk.id);
+		await new RequestOk({ requestId: first.ownRequestId }).encode(peer.writer, version);
+		expect(await next).toBe(SubscribeUpdate.id);
+		const second = await SubscribeUpdate.decode(peer.reader, version);
+		expect(second.parameters.subscriberPriority).toBe(235);
+		higher.close();
+		highest.close();
+	} finally {
+		track.close();
+		session.close();
+	}
+});
+
 /** Advertise `path` inline under `epoch`, on a session that negotiated MoQ Epoch alone. */
 async function inlineEpoch(stream: Stream, path: Path.Valid, epoch: Epoch.Valid): Promise<void> {
 	await stream.writer.u53(SubscribeNamespaceEntry.id);

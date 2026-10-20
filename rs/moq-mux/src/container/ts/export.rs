@@ -850,8 +850,9 @@ enum SiState {
 	Requesting(crate::Binding, String),
 	/// Waiting for the subscription to resolve.
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
-	/// The resolved subscription, reading snapshot groups.
-	Active(moq_net::track::Ordered),
+	/// The resolved subscription, reading snapshot groups. Boxed: a reader is far larger
+	/// than the other states.
+	Active(Box<moq_net::track::Ordered>),
 	/// The track ended or failed; the last complete snapshot keeps re-emitting,
 	/// mirroring how a real mux repeats its tables between (absent) revisions.
 	Done,
@@ -937,7 +938,7 @@ impl SiTrack {
 				}
 			};
 			self.state = match resolved {
-				Ok(track) => SiState::Active(track.ordered()),
+				Ok(track) => SiState::Active(Box::new(track.ordered())),
 				Err(err) => {
 					tracing::warn!(%err, "SI subscription failed; carrying the last snapshot");
 					SiState::Done

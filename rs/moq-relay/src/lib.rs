@@ -10,9 +10,12 @@
 //! which keeps the listeners, workers, and shutdown joins. `main.rs` is a thin
 //! wrapper over the two.
 
+#![warn(missing_docs)]
+
 pub mod acme;
 pub mod auth;
 pub mod cache;
+/// Joining other relays into a cluster that shares one origin.
 pub mod cluster;
 mod config;
 mod connection;
@@ -39,6 +42,7 @@ mod test_env;
 mod test_support;
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 pub mod uring;
+/// The HTTP/HTTPS server: health, certificate fingerprint, announcements, fetch, and WebSocket sessions.
 pub mod web;
 #[cfg(feature = "websocket")]
 mod websocket;

@@ -1128,8 +1128,8 @@ where
 		tracing::debug!(%prefix, "subscribe_namespace sent");
 
 		// Read response
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		let count = match type_id {
@@ -1191,6 +1191,7 @@ where
 				negotiated,
 				&mut live,
 				Initial { initial, snapshot },
+				&mut messages,
 			)
 			.await;
 		for (path, advert) in live {
@@ -1206,6 +1207,7 @@ where
 	/// `live` tracks the suffixes this stream has advertised, so a repeat is recognized
 	/// as an update rather than a second advertisement, and the caller can release
 	/// whatever is still held when the stream ends.
+	#[allow(clippy::too_many_arguments)]
 	async fn run_namespace_entries<T: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<T, Version>,
@@ -1214,19 +1216,19 @@ where
 		negotiated: ietf::Negotiated,
 		live: &mut HashMap<PathOwned, Advertisement>,
 		mut initial: Initial,
+		messages: &mut super::request_stream::Messages<S>,
 	) -> Result<(), Error> {
 		loop {
 			// Every counted NAMESPACE is in the origin by now, dropped ones included.
 			if initial.initial == 0 {
 				initial.snapshot = None;
 			}
-			let type_id = match stream.reader.varint_maybe().await? {
-				Some(id) => id,
+			let super::request_stream::Framed(type_id, body) = match messages.next(&mut stream.reader).await? {
+				Some(message) => message,
 				// A stream ending inside the counted set cut it short.
 				None if initial.initial > 0 => return Err(Error::ProtocolViolation),
 				None => break,
 			};
-			let body: ietf::Body = stream.reader.decode().await?;
 			let mut data = body.decoder(self.version);
 
 			match type_id {
@@ -1695,6 +1697,7 @@ where
 		// does, and the caller's guard ends it when the old grant does. Messages behind a
 		// pending verdict wait in `renewal`, handled in order once it resolves.
 		let mut renewal = request_update::Renewal::<(u64, ietf::Body)>::default();
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		// Draft-19+ only: the peer finished its send direction, which does not withdraw the
 		// advertisement there, so stop reading and keep watching the writer.
 		let mut finished = false;
@@ -1734,10 +1737,7 @@ where
 					// Keep reading while a verdict is pending, so a withdrawal still ends the
 					// announce: a buffered update must not mask a later terminal.
 					if !finished {
-						return match stream
-							.reader
-							.poll_decode_maybe::<super::request_stream::Framed>(&mut cx)
-						{
+						return match messages.poll_next(&mut stream.reader, &mut cx) {
 							Poll::Ready(Ok(Some(super::request_stream::Framed(id, body)))) => {
 								Poll::Ready(Turn::Message(id, body))
 							}
@@ -1758,7 +1758,18 @@ where
 						// Its request ID is spent on arrival, so one dropped with the queue stays spent.
 						if self.version != Version::Draft16 {
 							let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
-							self.spend(update_id)?;
+							if let Err(err) = self.spend(update_id) {
+								if matches!(err, Error::GoingAway) {
+									return Ok(Withdraw::Cancel(
+										update_id,
+										crate::auth::Refusal {
+											error: err,
+											reason: "going away".to_string(),
+										},
+									));
+								}
+								return Err(err);
+							}
 							spent.insert(update_id);
 						}
 						// Decoded on arrival too, so a session-fatal update still closes the session
@@ -1858,8 +1869,20 @@ where
 			// adapter already spent it when it routed the update here, and a queued one was
 			// spent when it arrived.
 			let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
-			if self.version != Version::Draft16 && !spent.remove(&update_id) {
-				self.spend(update_id)?;
+			if self.version != Version::Draft16
+				&& !spent.remove(&update_id)
+				&& let Err(err) = self.spend(update_id)
+			{
+				if matches!(err, Error::GoingAway) {
+					return Ok(Withdraw::Cancel(
+						update_id,
+						crate::auth::Refusal {
+							error: err,
+							reason: "going away".to_string(),
+						},
+					));
+				}
+				return Err(err);
 			}
 			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
 				// A token refusal rejects the update, which withdraws the advertisement as
@@ -2055,6 +2078,9 @@ where
 	/// Spend a peer's request ID, closing the session on one it already used.
 	fn spend(&self, id: RequestId) -> Result<(), Error> {
 		if let Err(err) = self.control.accept(id) {
+			if matches!(err, Error::GoingAway) {
+				return Err(err);
+			}
 			self.session.clone().close(
 				super::error::to_session_code(&crate::SessionError::from(&err)),
 				"invalid request ID",
@@ -2102,46 +2128,15 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::PublishNamespace, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				stream.writer.buffer_varint(ietf::PublishNamespaceError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::PublishNamespaceError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.buffer_varint(ietf::RequestError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				stream.writer.buffer_varint(ietf::RequestError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
-		Ok(())
+		super::request_stream::write_error(
+			&mut stream.writer,
+			request::Kind::PublishNamespace,
+			request_id,
+			err,
+			reason,
+			self.version,
+		)
+		.await
 	}
 
 	/// Refuse a PUBLISH on the bidi stream that carries it.
@@ -2152,46 +2147,15 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::Publish, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				stream.writer.varint(ietf::PublishError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::PublishError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.varint(ietf::RequestError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				stream.writer.varint(ietf::RequestError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
-		Ok(())
+		super::request_stream::write_error(
+			&mut stream.writer,
+			request::Kind::Publish,
+			request_id,
+			err,
+			reason,
+			self.version,
+		)
+		.await
 	}
 
 	/// Attach the route for one newly advertised namespace, returning the id that names
@@ -2644,9 +2608,25 @@ where
 			Some(live) => crate::auth::Gate::announced(auth, path, direction, live),
 			None => crate::auth::Gate::new(auth, path, direction),
 		};
-		if !gate.allows() {
-			request.reject(Error::Unauthorized);
-			return;
+		// Nobody wanting the track any more ends a wait on a token that may never be answered.
+		loop {
+			let admitted = kio::wait(|waiter| {
+				if gate.poll_ready(waiter).is_ready() {
+					return Poll::Ready(Some(gate.poll_denied(waiter).is_pending()));
+				}
+				crate::util::poll_unwanted(&mut request.demand(), waiter).map(|_| None)
+			})
+			.await;
+			match admitted {
+				Some(true) => break,
+				Some(false) => {
+					request.reject(Error::Unauthorized);
+					return;
+				}
+				None if request.reject_unused(Error::Cancel) => return,
+				// Demand returned in the gap.
+				None => continue,
+			}
 		}
 
 		let track_name = request.name().to_owned();
@@ -2659,19 +2639,16 @@ where
 		// SUBSCRIBEs: its TRACK_STATUS answer cannot say whether the track is timed.
 		let mut target = match request.subscription() {
 			None if ietf::TrackStatusOk::describes_track(self.version) => {
-				match self.track_status(&broadcast_path, &track_name, request).await {
-					Some(Target::Resume(idle)) => {
-						let Some(next) = self
-							.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
-							.await
-						else {
-							return;
-						};
-						Target::Resume(next)
-					}
-					Some(target) => target,
-					None => return,
-				}
+				let Some(idle) = self.track_status(&broadcast_path, &track_name, request).await else {
+					return;
+				};
+				let Some(next) = self
+					.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
+					.await
+				else {
+					return;
+				};
+				Target::Resume(next)
 			}
 			_ => Target::Request(request),
 		};
@@ -2767,8 +2744,17 @@ where
 		// Write Subscribe message. The aggregate is read now: a subscriber can join while
 		// the request ID and stream were awaited. Updates follow its priority from here, but
 		// no draft lets one change the order.
+		let max_age_supported = self.peer_setup.get().await.max_age;
 		let aggregate = target.subscription();
 		let priority = aggregate.as_ref().map(|s| s.priority).unwrap_or(0);
+		let max_age = max_age_supported.then(|| {
+			super::max_age::millis(
+				aggregate
+					.as_ref()
+					.map(|s| s.max_delay)
+					.unwrap_or(Duration::from_millis(super::max_age::MAX_MILLIS)),
+			)
+		});
 		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		// Without an Established subscription, a relay includes the request it holds.
 		let new_group = target
@@ -2779,6 +2765,7 @@ where
 			stream
 				.writer
 				.encode(&ietf::Subscribe {
+					max_age,
 					new_group,
 					request_id,
 					track_namespace: broadcast_path.to_owned(),
@@ -2836,9 +2823,10 @@ where
 			Gone,
 		}
 
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let mut retired = false;
 		let setup = {
-			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
+			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream, &mut messages));
 			loop {
 				let setup = kio::wait(|waiter| {
 					let response = waiter.poll_future(response.as_mut());
@@ -3084,6 +3072,8 @@ where
 		// The group the track's consumers want, `None` once nobody does.
 		let mut wanted = None;
 		// The subscriber priority upstream holds, and the one the aggregate now asks for.
+		let mut sent_max_age = max_age;
+		let mut wanted_max_age = max_age;
 		let mut sent_priority = priority;
 		let mut priority = priority;
 		// Draft-14's SUBSCRIBE_UPDATE repeats the bounds it leaves alone, and must not move the
@@ -3092,11 +3082,11 @@ where
 			group: largest.group,
 			object: largest.object.saturating_add(1),
 		});
-		// REQUEST_UPDATEs sent and not yet answered. Drafts 14-16 answer on the control
-		// stream by the update's own Request ID, which reaches no subscription, so only
-		// later drafts count them.
+		// REQUEST_UPDATEs sent and not yet answered. Draft-14 answers none, and draft-15's
+		// answer names only the update's own Request ID, which reaches no subscription, so
+		// only draft-16 on count them; the adapter routes draft-16's back by that ID.
 		let unanswered = AtomicU64::new(0);
-		let answered_here = !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16);
+		let answered_here = !matches!(self.version, Version::Draft14 | Version::Draft15);
 
 		let mut fetch_done = fetching.is_none();
 		// Our grant stopped covering the track, which is aborted rather than kept lingering.
@@ -3105,7 +3095,12 @@ where
 		// Nobody subscribing at all (only fetches asked) needs no subscription.
 		let mut subscribed = track.subscription().is_some();
 		let idle = {
-			let mut done = std::pin::pin!(Self::read_publish_done(&mut stream.reader, self.version, &unanswered));
+			let mut done = std::pin::pin!(Self::read_publish_done(
+				&mut stream.reader,
+				self.version,
+				&unanswered,
+				&mut messages
+			));
 			loop {
 				let end = kio::wait(|waiter| {
 					if gate.poll_denied(waiter).is_ready() {
@@ -3137,6 +3132,9 @@ where
 						subscribed = subscription.is_some();
 						if let Some(subscription) = subscription {
 							priority = subscription.priority;
+							if max_age_supported {
+								wanted_max_age = Some(super::max_age::millis(subscription.max_delay));
+							}
 						}
 					}
 					loop {
@@ -3169,9 +3167,10 @@ where
 					let update = Update {
 						start_location,
 						priority: (priority != sent_priority).then_some(priority),
+						max_age: wanted_max_age.filter(|_| wanted_max_age != sent_max_age),
 						new_group,
 					};
-					match update.priority.is_some() || update.new_group.is_some() {
+					match update.priority.is_some() || update.max_age.is_some() || update.new_group.is_some() {
 						true => Poll::Ready(End::Update(update)),
 						false => Poll::Pending,
 					}
@@ -3180,11 +3179,14 @@ where
 
 				match end {
 					End::Update(update) => {
-						let (asked, new_group) = (update.priority, update.new_group);
+						let (asked, new_group, asked_age) = (update.priority, update.new_group, update.max_age);
 						if let Err(err) = self.write_update(&mut stream.writer, request_id, update).await {
 							tracing::debug!(%err, "failed to update the subscription");
 							let _ = track.clone().abort(err);
 							break false;
+						}
+						if asked_age.is_some() {
+							sent_max_age = asked_age;
 						}
 						if let Some(asked) = asked {
 							sent_priority = asked;
@@ -3404,17 +3406,15 @@ where
 		reader: &mut Reader<S::RecvStream, Version>,
 		version: Version,
 		unanswered: &AtomicU64,
+		messages: &mut super::request_stream::Messages<S>,
 	) -> Result<u64, Error> {
 		// A refused update is followed by PUBLISH_DONE, which ends the subscription. Its
 		// count stays, so no further update goes out meanwhile, and no answer is owed.
 		let mut refused = false;
 		loop {
-			let type_id = match reader.varint_maybe().await? {
-				Some(type_id) => type_id,
-				None => return Err(Error::ProtocolViolation),
-			};
+			let super::request_stream::Framed(type_id, body) = messages.message(reader).await?;
 			if type_id == ietf::PublishDone::ID {
-				let msg: ietf::PublishDone = reader.decode().await?;
+				let msg: ietf::PublishDone = body.message(version)?;
 				tracing::debug!(message = ?msg, "received publish done");
 				msg.end(version)?;
 				return Ok(msg.stream_count);
@@ -3424,7 +3424,6 @@ where
 			if !answer {
 				return Err(Error::UnexpectedMessage);
 			}
-			let body: ietf::Body = reader.decode().await?;
 			let mut data = body.decoder(version);
 			match type_id {
 				ietf::RequestOk::ID => {
@@ -3453,6 +3452,7 @@ where
 		writer.varint(ietf::SubscribeUpdate::ID).await?;
 		writer
 			.encode(&ietf::SubscribeUpdate {
+				max_age: update.max_age,
 				request_id,
 				subscription_request_id: matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 					.then_some(subscription),
@@ -3644,8 +3644,9 @@ where
 				})
 				.map(drop)
 		};
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let accepted = {
-			let mut response = std::pin::pin!(self.read_fetch_response(&mut stream));
+			let mut response = std::pin::pin!(self.read_fetch_response(&mut stream, &mut messages));
 			kio::wait(|waiter| {
 				if cancelled(waiter).is_ready() {
 					return Poll::Ready(false);
@@ -3657,8 +3658,31 @@ where
 			.await
 		};
 		if accepted {
-			// The request stays open while the subscription still needs its fill.
-			kio::wait(cancelled).await;
+			// The request stays open while the subscription still needs its fill. From draft 18
+			// it may carry a GOAWAY meanwhile; before that, nothing follows the answer here.
+			let mut finished = matches!(
+				self.version,
+				Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+			);
+			let mut failed = false;
+			kio::wait(|waiter| {
+				if !finished {
+					let mut cx = waiter.context();
+					match messages.poll_end(&mut stream.reader, &mut cx) {
+						Poll::Ready(Ok(())) => finished = true,
+						Poll::Ready(Err(_)) => {
+							failed = true;
+							return Poll::Ready(());
+						}
+						Poll::Pending => {}
+					}
+				}
+				cancelled(waiter)
+			})
+			.await;
+			if failed {
+				settle_join_live(&fill, live);
+			}
 		} else {
 			settle_join_live(&fill, live);
 		}
@@ -3668,9 +3692,12 @@ where
 
 	/// `true` when the publisher answered FETCH_OK. A FETCH_ERROR / REQUEST_ERROR is a
 	/// refusal, not a session error: the live subscription continues.
-	async fn read_fetch_response(&self, stream: &mut Stream<S, Version>) -> Result<bool, Error> {
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+	async fn read_fetch_response(
+		&self,
+		stream: &mut Stream<S, Version>,
+		messages: &mut super::request_stream::Messages<S>,
+	) -> Result<bool, Error> {
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		match type_id {
@@ -3690,10 +3717,13 @@ where
 		}
 	}
 
-	async fn read_subscribe_response(&self, stream: &mut Stream<S, Version>) -> Result<Option<Accepted>, Error> {
+	async fn read_subscribe_response(
+		&self,
+		stream: &mut Stream<S, Version>,
+		messages: &mut super::request_stream::Messages<S>,
+	) -> Result<Option<Accepted>, Error> {
 		// Read type_id + size + body from the stream
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		match type_id {
@@ -3730,18 +3760,15 @@ where
 		}
 	}
 
-	/// Learn a track nobody subscribes to from TRACK_STATUS, and accept it as a copy with no
-	/// subscription ([`Target::Resume`]), which [`Self::linger`] serves fetches from and
-	/// subscribes once someone does. A publisher that does not implement TRACK_STATUS hands
-	/// the request back ([`Target::Request`]) to be learned from SUBSCRIBE. `None` once the
-	/// request was refused or abandoned: a publisher that refuses the track's status refuses
-	/// the fetch-only request too.
+	/// Learn a track nobody subscribes to from TRACK_STATUS, accepting an idle copy that
+	/// [`Self::linger`] serves fetches from and subscribes once someone does. `None` once
+	/// refused or abandoned: a refused status fails the query-only or fetch-only request.
 	async fn track_status(
 		&mut self,
 		broadcast_path: &Path<'_>,
 		track_name: &str,
 		request: track::Request,
-	) -> Option<Target> {
+	) -> Option<Idle> {
 		let validity = self.validity.start();
 		// An allocated ID is always sent, as in `subscribe_once`.
 		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
@@ -3822,12 +3849,6 @@ where
 		};
 		let ok = match ok {
 			Ok(ok) => ok,
-			// NOT_SUPPORTED refuses the method, not the track. The origin queries a track before
-			// its first reader's subscription lands, so this is often a subscriber's request.
-			Err(Error::Unsupported) => {
-				tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status not supported, subscribing");
-				return Some(Target::Request(request));
-			}
 			Err(err) => {
 				tracing::debug!(%err, broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status refused");
 				request.reject(err);
@@ -3841,19 +3862,19 @@ where
 		track.received();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
-		Some(Target::Resume(Idle {
+		Some(Idle {
 			demand: track.demand(),
 			track,
 			dynamic,
 			timescale: ok.properties.timescale,
-		}))
+		})
 	}
 
 	/// Read the answer to a TRACK_STATUS: TRACK_STATUS_OK, or the publisher's refusal as an
 	/// error.
 	async fn read_track_status_response(&self, stream: &mut Stream<S, Version>) -> Result<ietf::TrackStatusOk, Error> {
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		let code = match type_id {
@@ -4898,11 +4919,12 @@ where
 			Ok::<_, Error>(())
 		}
 		.await;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let mut retired = false;
 		let res = match res {
 			Err(err) => Some(Err(err)),
 			Ok(()) => {
-				let mut response = std::pin::pin!(self.read_group_fetch_response(&mut stream));
+				let mut response = std::pin::pin!(self.read_group_fetch_response(&mut stream, &mut messages));
 				kio::wait(|waiter| {
 					let response = waiter.poll_future(response.as_mut());
 					if let Poll::Ready(Err(err)) = response {
@@ -5033,7 +5055,7 @@ where
 					Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 						super::request_stream::poll_legacy_end(&mut stream, self.version, &mut cx)
 					}
-					_ => stream.reader.poll_closed(&mut cx),
+					_ => messages.poll_end(&mut stream.reader, &mut cx),
 				};
 				match closed {
 					Poll::Ready(Err(err)) => return Poll::Ready(Some(err)),
@@ -5093,9 +5115,12 @@ where
 	}
 
 	/// Read the answer to a group FETCH: FETCH_OK, or the publisher's refusal as an error.
-	async fn read_group_fetch_response(&self, stream: &mut Stream<S, Version>) -> Result<ietf::FetchOk, Error> {
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+	async fn read_group_fetch_response(
+		&self,
+		stream: &mut Stream<S, Version>,
+		messages: &mut super::request_stream::Messages<S>,
+	) -> Result<ietf::FetchOk, Error> {
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		match type_id {
@@ -5680,8 +5705,13 @@ mod tests {
 		let mut session = ScriptedSession::eof(responses);
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		let mut reader = Reader::new(recv, Version::Draft19);
-		let result =
-			Subscriber::<ScriptedSession>::read_publish_done(&mut reader, Version::Draft19, &AtomicU64::new(0)).await;
+		let result = Subscriber::<ScriptedSession>::read_publish_done(
+			&mut reader,
+			Version::Draft19,
+			&AtomicU64::new(0),
+			&mut crate::ietf::request_stream::Messages::new(session.clone(), true),
+		)
+		.await;
 		if clean {
 			assert_eq!(result.unwrap(), 0);
 		} else {
@@ -6705,7 +6735,7 @@ mod tests {
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
-			peer::PeerSetup::default(),
+			peer::PeerSetup::declared(peer::Peer::default()),
 			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
@@ -6744,6 +6774,120 @@ mod tests {
 		);
 	}
 
+	/// A subscriber whose session presented a token still unanswered, over a peer that
+	/// accepts streams and says nothing.
+	fn waiting_on_auth(
+		version: Version,
+	) -> (
+		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		crate::lite::test_transport::Log,
+		crate::auth::Handle,
+		Vec<crate::auth::Auth>,
+		crate::util::TaskSet,
+	) {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
+		let auth = crate::auth::Handle::new(true);
+		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
+		auth.granted(setup.id(), crate::auth::Grant::default());
+		let unanswered = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
+		let (tasks, task_set) = crate::util::TaskSet::new();
+		let subscriber = Subscriber::new(
+			crate::time::sim(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		)
+		.with_auth(auth.clone());
+		(subscriber, log, auth, vec![setup, unanswered], task_set)
+	}
+
+	/// A subscribe whose readers leave while it waits on a token ends, rather than holding
+	/// its task and track until a token that may never be answered.
+	#[moq_clock::test]
+	async fn an_abandoned_subscribe_stops_waiting_for_auth() {
+		const VERSION: Version = Version::Draft16;
+		let (mut subscriber, log, _auth, _tokens, _task_set) = waiting_on_auth(VERSION);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		let mut serving = moq_clock::sim::spawn(async move {
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
+		});
+		assert!(
+			moq_clock::timeout(std::time::Duration::from_secs(1), &mut serving)
+				.await
+				.is_err(),
+			"finished while the track was wanted"
+		);
+
+		drop(subscription);
+		drop(track);
+		drop(consumer);
+		moq_clock::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("an abandoned subscribe kept waiting on its token")
+			.unwrap();
+		assert!(
+			!control_message_types(&log, VERSION).contains(&ietf::Subscribe::ID),
+			"an abandoned subscribe reached the wire",
+		);
+	}
+
+	/// A subscribe under an announced route that is withdrawn while it waits on a token
+	/// ends, judged against the union as it stands, so routing can recover.
+	#[moq_clock::test]
+	async fn a_withdrawn_route_ends_a_subscribe_waiting_for_auth() {
+		const VERSION: Version = Version::Draft16;
+		let (mut subscriber, log, _auth, _tokens, _task_set) = waiting_on_auth(VERSION);
+
+		let producer = crate::broadcast::Info::default().produce();
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let track = consumer.track("video").unwrap();
+		let subscription = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+
+		let route = kio::Producer::<()>::default();
+		let live = route.consume();
+		let mut serving = moq_clock::sim::spawn(async move {
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, Some(live), request)
+				.await;
+		});
+		assert!(
+			moq_clock::timeout(std::time::Duration::from_secs(1), &mut serving)
+				.await
+				.is_err(),
+			"finished while the route stood"
+		);
+
+		drop(route);
+		moq_clock::timeout(std::time::Duration::from_secs(1), serving)
+			.await
+			.expect("a withdrawn route kept the subscribe waiting on its token")
+			.unwrap();
+		assert!(
+			!control_message_types(&log, VERSION).contains(&ietf::Subscribe::ID),
+			"a subscribe outside the union reached the wire",
+		);
+		drop(subscription);
+	}
+
 	/// A publisher can be serving before its SUBSCRIBE_OK arrives, since data streams are
 	/// independent of the request stream. If the last consumer leaves in that window, the
 	/// subscriber still owes it a cancellation: walking away silently is what leaves it
@@ -6763,7 +6907,7 @@ mod tests {
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
-			peer::PeerSetup::default(),
+			peer::PeerSetup::declared(peer::Peer::default()),
 			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
@@ -6826,7 +6970,7 @@ mod tests {
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
-			peer::PeerSetup::default(),
+			peer::PeerSetup::declared(peer::Peer::default()),
 			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
@@ -6886,7 +7030,7 @@ mod tests {
 				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				Control::new(None, false),
 				None,
-				peer::PeerSetup::default(),
+				peer::PeerSetup::declared(peer::Peer::default()),
 				crate::Hop::new(1).unwrap(),
 				None,
 				VERSION,
@@ -7017,7 +7161,7 @@ mod tests {
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			control,
 			None,
-			peer::PeerSetup::default(),
+			peer::PeerSetup::declared(peer::Peer::default()),
 			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
@@ -7091,7 +7235,7 @@ mod tests {
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
-			peer::PeerSetup::default(),
+			peer::PeerSetup::declared(peer::Peer::default()),
 			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
@@ -7212,7 +7356,7 @@ mod tests {
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
-			peer::PeerSetup::default(),
+			peer::PeerSetup::declared(peer::Peer::default()),
 			crate::Hop::new(1).unwrap(),
 			None,
 			version,
@@ -7320,7 +7464,7 @@ mod tests {
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
-			peer::PeerSetup::default(),
+			peer::PeerSetup::declared(peer::Peer::default()),
 			crate::Hop::new(1).unwrap(),
 			None,
 			version,
@@ -7390,73 +7534,198 @@ mod tests {
 		buf
 	}
 
-	/// A publisher without TRACK_STATUS still serves the track: its NOT_SUPPORTED refuses
-	/// the method, so the request is learned from SUBSCRIBE instead. The origin queries a new
-	/// track before its first reader's subscription lands, so a reader reaching such a
-	/// publisher through a relay takes this path.
+	/// Serve the front's request on its wake, before the requesting call can return.
+	/// A peer that refuses TRACK_STATUS must still receive SUBSCRIBE for a catalog reader.
 	#[moq_clock::test]
-	async fn an_unsupported_track_status_subscribes_instead() {
+	async fn a_catalog_subscription_never_requests_track_status() {
+		use std::sync::{Arc, Mutex};
+		use std::task::{Context, Wake, Waker};
+
+		struct Peer {
+			version: Version,
+			dynamic: Mutex<Option<broadcast::Dynamic>>,
+			park: Mutex<kio::Park>,
+			log: Mutex<Option<crate::lite::test_transport::Log>>,
+		}
+		impl Wake for Peer {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				let (dynamic, request) = {
+					let mut dynamic = self.dynamic.lock().unwrap();
+					let Some(serving) = dynamic.as_mut() else { return };
+					let mut park = self.park.lock().unwrap();
+					let waker = Waker::from(self.clone());
+					let waiter = park.hold(&Context::from_waker(&waker));
+					let Poll::Ready(Ok(request)) = serving.poll_requested_track(waiter) else {
+						return;
+					};
+					*park = kio::Park::default();
+					(dynamic.take().unwrap(), request)
+				};
+				let version = self.version;
+				// The subscriber chooses its wire request from this snapshot. Answer a
+				// TRACK_STATUS with the undefined code used by the refusing peer.
+				let answer = if request.subscription().is_none() {
+					message(
+						ietf::RequestError::ID,
+						&ietf::RequestError {
+							request_id: None,
+							error_code: u32::MAX.into(),
+							reason_phrase: "TRACK_STATUS is refused".into(),
+							retry_interval: 0,
+						},
+						version,
+					)
+				} else {
+					message(
+						ietf::SubscribeOk::ID,
+						&ietf::SubscribeOk {
+							request_id: None,
+							track_alias: 7,
+							largest: None,
+							properties: Default::default(),
+						},
+						version,
+					)
+				};
+				let session = crate::lite::test_transport::ScriptedSession::new(answer);
+				*self.log.lock().unwrap() = Some(session.log.clone());
+				let mut serving = Box::pin(async move {
+					let (tasks, _task_set) = crate::util::TaskSet::new();
+					let mut subscriber = Subscriber::new(
+						crate::time::sim(),
+						session,
+						crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce(),
+						Control::new(None, false),
+						None,
+						peer::PeerSetup::declared(peer::Peer::default()),
+						crate::Hop::new(2).unwrap(),
+						None,
+						version,
+						tasks,
+						Default::default(),
+					);
+					subscriber
+						.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+						.await;
+				});
+				// Run the request classification before the front can add demand after
+				// its query. The simulator takes over only once the wire work parks.
+				if std::future::Future::poll(serving.as_mut(), &mut Context::from_waker(Waker::noop())).is_pending() {
+					drop(moq_clock::sim::spawn(serving));
+				}
+			}
+		}
+
 		for version in [Version::Draft18, Version::Draft19, Version::Draft22] {
-			let refused = message(
-				ietf::RequestError::ID,
-				&ietf::RequestError {
-					request_id: None,
-					error_code: request::to_code(&Error::Unsupported, request::Kind::TrackStatus, version),
-					reason_phrase: "TRACK_STATUS is not supported".into(),
-					retry_interval: 0,
-				},
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let source = origin.publish("broadcast", Default::default()).unwrap();
+			let resolved = origin.consume().request_broadcast("broadcast", None).await.unwrap();
+			let peer = Arc::new(Peer {
 				version,
-			);
-			let subscribe_ok = message(
-				ietf::SubscribeOk::ID,
-				&ietf::SubscribeOk {
-					request_id: None,
-					track_alias: 7,
-					largest: None,
-					properties: Default::default(),
-				},
-				version,
-			);
-			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![refused, subscribe_ok]);
-			let log = session.log.clone();
-			let (tasks, _task_set) = crate::util::TaskSet::new();
-			let mut subscriber = Subscriber::new(
-				crate::time::sim(),
-				session,
-				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-				Control::new(None, false),
-				None,
-				peer::PeerSetup::default(),
-				crate::Hop::new(1).unwrap(),
-				None,
-				version,
-				tasks,
-				Default::default(),
-			);
-
-			let producer = crate::broadcast::Info::default().produce();
-			let mut dynamic = producer.dynamic();
-			let consumer = producer.consume();
-			let track = consumer.track("video").unwrap();
-			let mut query = std::pin::pin!(track.query());
-			assert!(futures::poll!(query.as_mut()).is_pending());
-			let request = dynamic.requested_track().await.expect("no track requested");
-
-			let serving = moq_clock::sim::spawn(async move {
-				subscriber
-					.run_subscribe(Path::new("broadcast"), dynamic, None, request)
-					.await;
+				dynamic: Mutex::new(Some(source.dynamic())),
+				park: Default::default(),
+				log: Default::default(),
 			});
-			settle().await;
-
-			assert!(query.await.is_ok(), "{version}: NOT_SUPPORTED refused the track");
-			assert!(track.subscribe(None).await.is_ok(), "{version}: the reader was refused");
+			peer.wake_by_ref();
+			let result = resolved.track("catalog").unwrap().subscribe(None).await;
+			let log = peer.log.lock().unwrap();
 			assert_eq!(
-				control_message_types(&log, version)[..2],
-				[ietf::TrackStatus::ID, ietf::Subscribe::ID],
-				"{version}"
+				control_message_types(log.as_ref().expect("the front asked its source"), version),
+				[ietf::Subscribe::ID],
+				"{version}: a subscribing reader sent TRACK_STATUS"
 			);
-			serving.abort();
+			assert!(result.is_ok(), "{version}: the catalog reader was refused");
+		}
+	}
+
+	/// Query-only and fetch-only demand fail with the peer's TRACK_STATUS refusal,
+	/// including NOT_SUPPORTED and undefined codes, without opening a subscription.
+	#[moq_clock::test]
+	async fn a_refused_track_status_never_subscribes() {
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft18,
+			Version::Draft19,
+			Version::Draft22,
+		] {
+			for code in [3, u64::from(u32::MAX)] {
+				for fetching in [false, true] {
+					let refused = if version == Version::Draft14 {
+						message(
+							ietf::TRACK_STATUS_ERROR_14,
+							&ietf::SubscribeError {
+								request_id: RequestId(0),
+								error_code: code,
+								reason_phrase: "TRACK_STATUS is refused".into(),
+							},
+							version,
+						)
+					} else {
+						message(
+							ietf::RequestError::ID,
+							&ietf::RequestError {
+								request_id: matches!(version, Version::Draft15 | Version::Draft16)
+									.then_some(RequestId(0)),
+								error_code: code,
+								reason_phrase: "TRACK_STATUS is refused".into(),
+								retry_interval: 0,
+							},
+							version,
+						)
+					};
+					let session = crate::lite::test_transport::ScriptedSession::new(refused);
+					let log = session.log.clone();
+					let (tasks, _task_set) = crate::util::TaskSet::new();
+					let mut subscriber = Subscriber::new(
+						crate::time::sim(),
+						session,
+						crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+						Control::new(None, false),
+						None,
+						peer::PeerSetup::declared(peer::Peer::default()),
+						crate::Hop::new(1).unwrap(),
+						None,
+						version,
+						tasks,
+						Default::default(),
+					);
+
+					let producer = crate::broadcast::Info::default().produce();
+					let mut dynamic = producer.dynamic();
+					let consumer = producer.consume();
+					let track = consumer.track("video").unwrap();
+					let mut pending = Box::pin(async {
+						if fetching {
+							track.fetch_group(0, None).await.map(|_| ())
+						} else {
+							track.query().await.map(|_| ())
+						}
+					});
+					assert!(futures::poll!(pending.as_mut()).is_pending());
+					let request = dynamic.requested_track().await.expect("no track requested");
+					let mut serving =
+						Box::pin(subscriber.run_subscribe(Path::new("broadcast"), dynamic, None, request));
+					assert!(
+						futures::poll!(serving.as_mut()).is_ready(),
+						"{version}: refusal was not terminal"
+					);
+					match pending.await.expect_err("TRACK_STATUS was refused") {
+						Error::Unsupported => assert_eq!(code, 3),
+						Error::Remote(value) => assert_eq!(u64::from(value), code),
+						err => panic!("{version}, fetching: {fetching}: wrong refusal: {err:?}"),
+					}
+					assert_eq!(
+						control_message_types(&log, version),
+						[ietf::TrackStatus::ID],
+						"{version}"
+					);
+				}
+			}
 		}
 	}
 
@@ -7504,7 +7773,7 @@ mod tests {
 				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				Control::new(None, false),
 				None,
-				peer::PeerSetup::default(),
+				peer::PeerSetup::declared(peer::Peer::default()),
 				crate::Hop::new(1).unwrap(),
 				None,
 				version,
@@ -11177,6 +11446,8 @@ struct Update {
 	start_location: ietf::Location,
 	/// The aggregate subscriber priority, in the model's higher-first terms.
 	priority: Option<u8>,
+	/// Subscriber age budget, in milliseconds.
+	max_age: Option<u64>,
 	/// NEW_GROUP_REQUEST.
 	new_group: Option<u64>,
 }
@@ -11981,6 +12252,7 @@ mod stitch_tests {
 			ietf::Fetch::ID
 		} else {
 			ietf::Subscribe {
+				max_age: None,
 				new_group: None,
 				request_id: RequestId(3),
 				track_namespace: Path::new("room"),
@@ -12518,6 +12790,7 @@ mod stitch_tests {
 					version,
 				);
 				let subscribe = ietf::Subscribe {
+					max_age: None,
 					new_group: None,
 					request_id: RequestId(3),
 					track_namespace: Path::new("room"),
@@ -14267,7 +14540,7 @@ mod joining_fetch_tests {
 				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				control,
 				None,
-				peer::PeerSetup::default(),
+				peer::PeerSetup::declared(peer::Peer::default()),
 				crate::Hop::new(1).unwrap(),
 				None,
 				version,
@@ -15202,7 +15475,7 @@ mod new_group_tests {
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
-			peer::PeerSetup::default(),
+			peer::PeerSetup::declared(peer::Peer::default()),
 			crate::Hop::new(1).unwrap(),
 			None,
 			VERSION,
@@ -15503,7 +15776,7 @@ mod track_property_tests {
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
 			None,
-			peer::PeerSetup::default(),
+			peer::PeerSetup::declared(peer::Peer::default()),
 			crate::Hop::new(1).unwrap(),
 			None,
 			version,

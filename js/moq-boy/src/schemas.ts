@@ -9,7 +9,7 @@ export const GameStatsSchema = z.object({
 });
 
 /** A single latency component measurement. */
-export const LatencyEntrySchema = z.object({
+const LatencyEntrySchema = z.object({
 	label: z.string(),
 	ms: z.number().check(z.int(), z.nonnegative(), z.lte(4294967295)),
 });

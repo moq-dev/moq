@@ -17,7 +17,7 @@ and push.
   trust boundary. Keep it and the bucket key in GitHub Environments that
   `main` and the release tags can deploy from, and nothing else. Release tags
   are unprotected today (no tag ruleset), so restricting who can create them
-  comes first; a separate release Environment from the mbx one is fine. A
+  comes first; a separate release Environment from mbx's `cache-write` is fine. A
   leaked bucket key cannot make a client accept a path.
 - Serve the bucket like apt and rpm: a Worker in `infra/nix` with a checked-in
   `wrangler.jsonc` and custom domain, cache headers suited to `.narinfo`
@@ -38,4 +38,4 @@ and push.
 
 ## Related
 
-- [mbx on R2](/quest/m0/ci/mbx-r2.md) - shares the Environment and bootstrap pattern, not the bucket
+- [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - the mbx bucket's bootstrap in `infra/README.md` is the pattern; share it, not the bucket

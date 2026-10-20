@@ -152,6 +152,15 @@ func (p *StreamProducer) Finish() error {
 	return p.inner.Finish()
 }
 
+// rawMessage converts the result of a Next call, keeping (nil, nil) for the end.
+func rawMessage(value *string, err error) (*stdjson.RawMessage, error) {
+	if err != nil || value == nil {
+		return nil, err
+	}
+	decoded := stdjson.RawMessage(*value)
+	return &decoded, nil
+}
+
 // SnapshotConsumer receives the latest reconstructed JSON value.
 type SnapshotConsumer struct {
 	inner *ffi.MoqJsonSnapshotConsumer
@@ -173,12 +182,7 @@ func NewSnapshotConsumer(track *moq.TrackConsumer, options ConsumerOptions) (*Sn
 
 // Next returns the next JSON value, or nil when the track ends.
 func (c *SnapshotConsumer) Next(ctx context.Context) (*stdjson.RawMessage, error) {
-	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
-	if err != nil || value == nil {
-		return nil, err
-	}
-	decoded := stdjson.RawMessage(*value)
-	return &decoded, nil
+	return rawMessage(bridge.Call(ctx, c.inner.Cancel, c.inner.Next))
 }
 
 // All ranges over reconstructed JSON values until the track ends.
@@ -211,12 +215,7 @@ func NewStreamConsumer(track *moq.TrackConsumer, options ConsumerOptions) (*Stre
 
 // Next returns the next JSON record, or nil when the track ends.
 func (c *StreamConsumer) Next(ctx context.Context) (*stdjson.RawMessage, error) {
-	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
-	if err != nil || value == nil {
-		return nil, err
-	}
-	decoded := stdjson.RawMessage(*value)
-	return &decoded, nil
+	return rawMessage(bridge.Call(ctx, c.inner.Cancel, c.inner.Next))
 }
 
 // All ranges over every JSON record until the track ends.

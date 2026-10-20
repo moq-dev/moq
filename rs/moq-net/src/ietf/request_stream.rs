@@ -17,13 +17,14 @@ pub(super) fn fin_cancels(version: Version) -> bool {
 pub(super) fn poll_cancel<S: crate::transport::poll::Session>(
 	stream: &mut Stream<S, Version>,
 	finished: &mut bool,
+	messages: &mut Messages<S>,
 	version: Version,
 	cx: &mut Context<'_>,
 ) -> Poll<Result<(), Error>> {
 	if !*finished {
 		let closed = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => poll_legacy_end(stream, version, cx),
-			_ => stream.reader.poll_closed(cx),
+			_ => messages.poll_end(&mut stream.reader, cx),
 		};
 		match closed {
 			Poll::Ready(Ok(())) if !fin_cancels(version) => *finished = true,
@@ -204,6 +205,86 @@ impl GoAways {
 		}
 		Ok(())
 	}
+
+	/// Read the next `T`, consuming at most one GOAWAY before it.
+	pub fn poll_next<T: Decode<Version> + std::fmt::Debug, R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut crate::coding::Reader<R, Version>,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<Option<T>, Error>> {
+		loop {
+			match ready!(reader.poll_decode_maybe::<Next<T>>(cx))? {
+				Some(Next::GoAway { redirect }) => self.receive(redirect)?,
+				Some(Next::Message(message)) => return Poll::Ready(Ok(Some(message))),
+				None => return Poll::Ready(Ok(None)),
+			}
+		}
+	}
+}
+
+/// The messages on one request stream, keeping GOAWAY validation across response phases.
+pub(super) struct Messages<S> {
+	session: S,
+	goaways: GoAways,
+}
+
+impl<S: crate::transport::poll::Session> Messages<S> {
+	pub fn new(session: S, client: bool) -> Self {
+		Self {
+			session,
+			goaways: GoAways::new(client),
+		}
+	}
+
+	pub fn failed(&mut self, err: Error) -> Error {
+		if super::subscriber::is_protocol_violation(&err) {
+			self.session.close(
+				super::error::to_session_code(&crate::SessionError::from(&err)),
+				&err.to_string(),
+			);
+		}
+		err
+	}
+
+	pub fn receive(&mut self, redirect: bool) -> Result<(), Error> {
+		self.goaways.receive(redirect).map_err(|err| self.failed(err))
+	}
+
+	/// Read complete frames, consuming at most one GOAWAY without ending the request.
+	pub fn poll_next<R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut crate::coding::Reader<R, Version>,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<Option<Framed>, Error>> {
+		self.goaways.poll_next(reader, cx).map_err(|err| self.failed(err))
+	}
+
+	pub async fn next<R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut crate::coding::Reader<R, Version>,
+	) -> Result<Option<Framed>, Error> {
+		std::future::poll_fn(|cx| self.poll_next(reader, cx)).await
+	}
+
+	pub async fn message<R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut crate::coding::Reader<R, Version>,
+	) -> Result<Framed, Error> {
+		self.next(reader)
+			.await?
+			.ok_or_else(|| self.failed(Error::ProtocolViolation))
+	}
+
+	pub fn poll_end<R: crate::transport::poll::RecvStream>(
+		&mut self,
+		reader: &mut crate::coding::Reader<R, Version>,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<(), Error>> {
+		match ready!(self.poll_next(reader, cx))? {
+			None => Poll::Ready(Ok(())),
+			Some(_) => Poll::Ready(Err(self.failed(Error::UnexpectedMessage))),
+		}
+	}
 }
 
 /// Refuse a modern request with its complete REQUEST_ERROR, then finish the response.
@@ -218,13 +299,49 @@ pub(super) async fn reject<S: crate::transport::poll::Session>(
 	Ok(())
 }
 
+/// Write the error refusing a `kind` request with `err`, as the negotiated draft spells it.
+///
+/// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into, so
+/// only the message type changes; draft-17 then drops the Request ID.
+pub(super) async fn write_error<S: crate::transport::poll::SendStream>(
+	writer: &mut crate::coding::Writer<S, Version>,
+	kind: super::error::request::Kind,
+	request_id: super::RequestId,
+	err: &Error,
+	reason: &str,
+	version: Version,
+) -> Result<(), Error> {
+	use super::error::request::Kind;
+
+	let id = match (version, kind) {
+		(Version::Draft14, Kind::Subscribe) => super::SubscribeError::ID,
+		(Version::Draft14, Kind::Fetch) => super::FetchError::ID,
+		(Version::Draft14, Kind::Publish) => super::PublishError::ID,
+		(Version::Draft14, Kind::PublishNamespace) => super::PublishNamespaceError::ID,
+		(Version::Draft14, Kind::SubscribeNamespace) => super::SubscribeNamespaceError::ID,
+		(Version::Draft14, Kind::TrackStatus) => super::TRACK_STATUS_ERROR_14,
+		_ => super::RequestError::ID,
+	};
+	writer.buffer_varint(id)?;
+	writer
+		.encode(&super::RequestError {
+			request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16).then_some(request_id),
+			error_code: super::error::request::to_code(err, kind, version),
+			reason_phrase: reason.into(),
+			retry_interval: 0,
+		})
+		.await
+}
+
 /// A framed subscription update, preserving omitted preferences.
 #[derive(Debug)]
 pub(super) struct Update {
 	/// The first Request ID: the update's own on drafts 14-16, which their answer names.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
-	/// Why the update is refused, which fails the subscription: [`Error::Unsupported`], a
+	pub(super) max_age: Option<u64>,
+	/// Why the update is refused, which fails the subscription: [`Error::GoingAway`],
+	/// [`Error::Unsupported`], a
 	/// [`DecodeError::MalformedAuthToken`] for tokens that repeat, or a
 	/// [`DecodeError::MultipleAuthTokens`] for more than one token.
 	pub(super) refused: Option<Error>,
@@ -246,7 +363,7 @@ impl Update {
 
 	/// Decode the message body, after its type and length.
 	fn decode_body(data: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		use super::{Fill, Filter, Location, Opaque, Parameters, RequestId};
+		use super::{Fill, Filter, Location, Opaque, RequestId};
 		let request_id = RequestId::decode(data, version)?;
 		match version {
 			Version::Draft14 => {
@@ -259,7 +376,10 @@ impl Update {
 				let _end_group = data.varint()?;
 				let priority = data.u8()?;
 				let forward = data.bool()?;
-				let tokens = Parameters::skip_request(data)?;
+				decode_params!(data, version,
+					0x03 => tokens: Vec<super::token::RequestToken>,
+					super::max_age::PARAMETER => max_age: Option<u64>,
+				);
 				if !data.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
@@ -267,6 +387,7 @@ impl Update {
 				return Ok(Self {
 					request_id,
 					priority: Some(priority),
+					max_age: super::max_age::validate(max_age)?,
 					refused,
 					authorization_token,
 					new_group: None,
@@ -295,6 +416,7 @@ impl Update {
 			0x28 => property_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x29 => track_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x32 => new_group: Option<u64> where super::subscribe::has_new_group_request(version),
+			super::max_age::PARAMETER => max_age: Option<u64>,
 		);
 		if !data.is_empty() {
 			return Err(DecodeError::InvalidValue);
@@ -314,6 +436,7 @@ impl Update {
 		Ok(Self {
 			request_id,
 			priority,
+			max_age: super::max_age::validate(max_age)?,
 			refused,
 			authorization_token,
 			new_group,
@@ -396,6 +519,60 @@ impl Decode<Version> for NamespaceUpdate {
 mod tests {
 	use super::*;
 
+	#[moq_clock::test]
+	async fn request_messages_keep_goaway_state_across_response_phases() {
+		use crate::lite::test_transport::ScriptedSession;
+		for version in [Version::Draft18, Version::Draft19, Version::Draft21, Version::Draft22] {
+			// GOAWAY, REQUEST_OK, then another GOAWAY on the same stream.
+			let script = vec![0x10, 0, 2, 0, 0, 0x07, 0, 0, 0x10, 0, 2, 0, 0];
+			let mut session = ScriptedSession::eof(script);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut messages = Messages::new(session.clone(), true);
+			assert_eq!(messages.message(&mut stream.reader).await.unwrap().0, 0x07);
+			assert!(matches!(
+				messages.message(&mut stream.reader).await,
+				Err(Error::ProtocolViolation)
+			));
+			assert_eq!(session.log.closes()[0].0, 0x03, "{version}");
+		}
+	}
+
+	#[moq_clock::test]
+	async fn a_goaway_does_not_cancel_a_pending_request() {
+		use crate::lite::test_transport::ScriptedSession;
+		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+			let mut session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut messages = Messages::new(session.clone(), false);
+			let mut finished = false;
+			assert!(
+				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+					&mut stream,
+					&mut finished,
+					&mut messages,
+					version,
+					cx,
+				)))
+				.is_pending(),
+				"{version}"
+			);
+			assert!(session.log.closes().is_empty());
+			// A second GOAWAY is still session-fatal while the response is pending.
+			session.push(&[0x10, 0, 2, 0, 0]);
+			assert!(matches!(
+				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+					&mut stream,
+					&mut finished,
+					&mut messages,
+					version,
+					cx,
+				))),
+				Poll::Ready(Err(Error::ProtocolViolation))
+			));
+			assert_eq!(session.log.closes()[0].0, 0x03);
+		}
+	}
+
 	/// On drafts 14-16 an update aimed at a request that applies none, such as a FETCH or
 	/// SUBSCRIBE_NAMESPACE, keeps the request open. Drafts 15 and 16 refuse it with a
 	/// REQUEST_ERROR naming the update, and a later cancellation still ends the request.
@@ -415,10 +592,12 @@ mod tests {
 			let mut session = ScriptedSession::new(update);
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
 			let mut finished = false;
+			let mut messages = Messages::new(session.clone(), false);
 
 			let polled = futures::poll!(std::future::poll_fn(|cx| poll_cancel(
 				&mut stream,
 				&mut finished,
+				&mut messages,
 				version,
 				cx
 			)));
@@ -440,6 +619,7 @@ mod tests {
 			let polled = futures::poll!(std::future::poll_fn(|cx| poll_cancel(
 				&mut stream,
 				&mut finished,
+				&mut messages,
 				version,
 				cx
 			)));
@@ -485,5 +665,104 @@ mod tests {
 		let update = crate::coding::decode_buf(&mut buf, Version::Draft18, Update::decode_body).unwrap();
 		assert_eq!(update.priority, Some(5));
 		assert!(update.refused.is_none());
+	}
+
+	/// Draft-14's per-request error messages share REQUEST_ERROR's body, so the shared writer
+	/// must put the same bytes on the wire as each legacy message does.
+	#[moq_clock::test]
+	async fn draft14_errors_match_their_legacy_messages() {
+		use super::super::error::request::{Kind, to_code};
+		use super::super::{
+			FetchError, PublishError, PublishNamespaceError, RequestId, SubscribeError, SubscribeNamespaceError,
+		};
+		use crate::lite::test_transport::{Log, SinkSend};
+
+		let version = Version::Draft14;
+		let (request_id, err, reason) = (RequestId(6), Error::NotFound, "gone");
+
+		for kind in [
+			Kind::Subscribe,
+			Kind::Fetch,
+			Kind::Publish,
+			Kind::PublishNamespace,
+			Kind::SubscribeNamespace,
+			Kind::TrackStatus,
+		] {
+			let shared = Log::default();
+			let mut writer = crate::coding::Writer::new(SinkSend::new(shared.clone()), version);
+			write_error(&mut writer, kind, request_id, &err, reason, version)
+				.await
+				.unwrap();
+
+			let legacy = Log::default();
+			let mut writer = crate::coding::Writer::new(SinkSend::new(legacy.clone()), version);
+			let error_code = to_code(&err, kind, version);
+			let reason_phrase = reason.into();
+			match kind {
+				Kind::Subscribe => {
+					writer
+						.encode_message(&SubscribeError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::Fetch => {
+					writer
+						.encode_message(&FetchError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::Publish => {
+					writer
+						.encode_message(&PublishError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::PublishNamespace => {
+					writer
+						.encode_message(&PublishNamespaceError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				Kind::SubscribeNamespace => {
+					writer
+						.encode_message(&SubscribeNamespaceError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+				// TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body under its own type.
+				Kind::TrackStatus => {
+					writer.buffer_varint(super::super::TRACK_STATUS_ERROR_14).unwrap();
+					writer
+						.encode(&SubscribeError {
+							request_id,
+							error_code,
+							reason_phrase,
+						})
+						.await
+				}
+			}
+			.unwrap();
+
+			assert_eq!(
+				*shared.writes.lock().unwrap(),
+				*legacy.writes.lock().unwrap(),
+				"{kind:?}"
+			);
+		}
 	}
 }
