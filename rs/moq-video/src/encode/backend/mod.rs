@@ -174,6 +174,7 @@ struct Candidate {
 	open: fn(&Config) -> Result<Box<dyn Backend>, Error>,
 	/// Whether every encoder this opens honors a cut ([`Backend::can_cut`]), known before
 	/// opening one. V4L2 learns it from the driver at open, so it cannot promise.
+	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
 	cuts: bool,
 	#[cfg(target_os = "linux")]
 	vulkan: bool,
@@ -314,6 +315,7 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 
 /// Whether whichever backend [`open`] picks for `codec` + `kind` honors a cut, answered
 /// before opening one: every candidate it may fall to must promise it.
+#[cfg_attr(not(feature = "capture"), allow(dead_code))]
 pub(crate) fn always_cuts(codec: Codec, kind: &Kind) -> bool {
 	let attempts = attempts(codec, kind);
 	!attempts.is_empty() && attempts.iter().all(|attempt| attempt.candidate.cuts)
