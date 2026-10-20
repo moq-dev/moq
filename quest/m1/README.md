@@ -128,8 +128,11 @@ lands before the cut.
 
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
 
+- [Nightly media players](/quest/m1/media-engines-nightly.md) - the Firefox and WebKit player rows pass, or an engine that cannot play leaves the nightly matrix
+
 - [Dead code and API surface audit](/quest/m1/audit-dead-code.md) - repeat the removal audit before the next major release
 - [Test coverage audit](/quest/m1/audit-test-coverage.md) - repeat the coverage audit against the m0 baselines before the next major release
+- [Test and CI cost audit](/quest/m1/audit-test-cost.md) - the slowest, flakiest, and least valuable tests and CI jobs are fixed, deleted, or planned
 - [Documentation audit](/quest/m1/audit-docs.md) - stale pages, examples, links, and undocumented exports are fixed or planned
 
 ## Related

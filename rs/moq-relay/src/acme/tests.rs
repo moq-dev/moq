@@ -449,6 +449,22 @@ impl Running {
 	}
 }
 
+/// A port that refuses every connection for as long as the socket lives.
+///
+/// Bound but never listening, so a dial is refused at once. A released port
+/// would instead be free for another test process to bind, and a listener
+/// there that never answers stalls the dial past every budget.
+fn refusing() -> (tokio::net::TcpSocket, SocketAddr) {
+	let socket = tokio::net::TcpSocket::new_v4().unwrap();
+	socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+	let addr = socket.local_addr().unwrap();
+	assert!(
+		std::net::TcpListener::bind(addr).is_err(),
+		"no other listener can take the refusing port"
+	);
+	(socket, addr)
+}
+
 fn fingerprint(leaf: &CertificateDer<'_>) -> String {
 	hex::encode(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, leaf))
 }
@@ -529,11 +545,8 @@ async fn restart_reuses_only_a_matching_cache() {
 /// domain and the HTTPS listener.
 #[tokio::test]
 async fn unreachable_directory_fails_inside_the_budget() {
-	let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-	let url: Url = format!("http://{}/directory", closed.local_addr().unwrap())
-		.parse()
-		.unwrap();
-	drop(closed);
+	let (_refusing, closed) = refusing();
+	let url: Url = format!("http://{closed}/directory").parse().unwrap();
 	let dir = tempfile::tempdir().unwrap();
 	let mut config = relay_config(&url, dir.path(), &[DOMAIN]);
 	let budget = Duration::from_secs(2);
@@ -562,10 +575,9 @@ async fn unreachable_directory_fails_inside_the_budget() {
 #[tokio::test]
 async fn failed_validations_stop_short_of_the_rate_limit() {
 	let directory = Directory::start(false).await;
-	// Nothing listens here, so every validation fails like an unforwarded port 443.
-	let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-	*directory.state.target.lock().unwrap() = Some(closed.local_addr().unwrap());
-	drop(closed);
+	// Every validation is refused, like an unforwarded port 443.
+	let (_refusing, closed) = refusing();
+	*directory.state.target.lock().unwrap() = Some(closed);
 	let dir = tempfile::tempdir().unwrap();
 	let start = || async {
 		let mut config = relay_config(&directory.url, dir.path(), &[DOMAIN]);
