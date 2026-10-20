@@ -106,6 +106,12 @@ clock-bench:
     bun install --frozen-lockfile
     bun clock/bench/timers.ts
 
+# Sweep buffered JSON stream reads over record count, payload size, and compression.
+json-stream-bench:
+    bun install --frozen-lockfile
+    bunx tsc --noEmit --project json/bench/tsconfig.json
+    bun json/bench/stream.ts
+
 # Sweep decoder count against PCM callback size during audio warmup.
 audio-warmup-bench:
     bun install --frozen-lockfile

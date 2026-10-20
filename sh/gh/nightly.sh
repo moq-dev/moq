@@ -109,6 +109,7 @@ case "$1" in
         javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench
         javascript e2ee just js e2ee-bench
+        javascript json-stream just js json-stream-bench
         javascript signals just js signals-bench
         ;;
 esac

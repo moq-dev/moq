@@ -363,8 +363,8 @@ impl Track {
 			return Ok(());
 		}
 		let is_video = matches!(self.kind, Kind::Video(_));
-		// A placed PES is judged at release, against the keyframe's departure ([`Export::leads_video`]).
-		let aligned = !is_video && !matches!(self.kind, Kind::PesPacket { .. });
+		// A placed frame is judged at release, against the keyframe's departure ([`Export::leads_video`]).
+		let aligned = !is_video && !self.kind.placed();
 		loop {
 			if !input.waiting_for_header && input.jitter.full(&self.pid) {
 				break;
@@ -485,11 +485,11 @@ impl Track {
 	}
 
 	/// How far ahead of its decode time the track's units may go out under `delay`: as far
-	/// as [`schedule::ahead`] lets them, and nothing without a delay or for a placed PES,
+	/// as [`schedule::ahead`] lets them, and nothing without a delay or for a placed frame,
 	/// whose timestamp is when it goes out.
 	fn ahead(&self, delay: Duration) -> Duration {
-		// A placed PES goes out at its placement, never ahead of it.
-		if delay.is_zero() || matches!(self.kind, Kind::PesPacket { .. }) {
+		// A placed frame goes out at its placement, never ahead of it.
+		if delay.is_zero() || self.kind.placed() {
 			return Duration::ZERO;
 		}
 		let slots = schedule::ahead(self.buffer().as_ref(), schedule::slot(delay.as_nanos()));
@@ -729,6 +729,11 @@ enum Kind {
 }
 
 impl Kind {
+	/// Its timestamp is arrival on the program clock, rather than a decode deadline.
+	fn placed(&self) -> bool {
+		matches!(self, Self::PesPacket { .. } | Self::Verbatim { .. })
+	}
+
 	/// The track suffix [`Import`](super::Import) gives a PID carrying this kind, so a stream's
 	/// row is named alike at both edges.
 	fn suffix(&self) -> &'static str {
@@ -1191,7 +1196,8 @@ where
 			self.video_start = self.first_video_pts();
 			if let Some(start) = self.video_start {
 				for track in self.tracks.values_mut() {
-					if !matches!(track.kind, Kind::Video(_) | Kind::PesPacket { .. })
+					if !matches!(track.kind, Kind::Video(_))
+						&& !track.kind.placed()
 						&& track.pending.as_ref().is_some_and(|p| p.frame.timestamp < start)
 					{
 						track.pending = None;
@@ -1828,7 +1834,7 @@ where
 	/// out further ahead of its decode time than the other tracks, so what they release before
 	/// it presents ahead of it too.
 	///
-	/// A placed PES has no presentation to compare: it goes out at its placement, so it is
+	/// A placed frame has no presentation to compare: it goes out at its placement, so it is
 	/// dropped only when that comes before the keyframe departs. Both are release times a
 	/// delay before their jitter buffer keys, so it compares keys, and keeps whatever goes
 	/// out beside or after the keyframe even when its PTS is earlier.
@@ -1843,7 +1849,7 @@ where
 			}
 			return false;
 		}
-		let placed = matches!(kind, Kind::PesPacket { .. });
+		let placed = kind.placed();
 		if let Some(departed) = self.video_out {
 			return match placed {
 				true => queued.key < departed,
@@ -1946,9 +1952,7 @@ where
 		let mut tracks: Vec<&Track> = self.tracks.values().collect();
 		tracks.sort_by_key(|t| t.pid);
 
-		// Section-framed verbatim streams (SCTE-35, ...) are stamped on the video clock
-		// and carry no PTS for the PCR, so they need a video track; audio alone would
-		// leave them pinned to zero.
+		// Section-framed streams require a video track in the supported program layout.
 		let needs_clock = tracks.iter().any(|t| matches!(&t.kind, Kind::Verbatim { .. }));
 		let video = tracks.iter().find(|t| matches!(t.kind, Kind::Video(_)));
 		anyhow::ensure!(
@@ -2181,8 +2185,8 @@ where
 			}
 		}
 
-		if let Kind::PesPacket { stream_type } = kind {
-			return self.place(name, stream_type, &frame, out);
+		if kind.placed() {
+			return self.place(name, &frame, out);
 		}
 		match es_payload {
 			// Section-framed verbatim (SCTE-35, ...) rides in private sections, not PES;
@@ -2212,7 +2216,7 @@ where
 		self.push_unit(name, pid, decode, out, keyframe, Vec::new())
 	}
 
-	/// Queue `frame`, one whole PES packet, unchanged on `name`'s PID behind `tables`, its
+	/// Queue a whole PES or section unchanged on `name`'s PID behind `tables`, its
 	/// first byte going out at the frame's timestamp, the source's placement, and no earlier.
 	///
 	/// A PID the T-STD models holds the PES's bytes in its decoder buffer until they decode,
@@ -2220,27 +2224,52 @@ where
 	/// unit that begins in it, so each one after counts on from there and leaves at its own time.
 	/// The bytes ahead of the first end a frame an earlier PES began; they leave with it,
 	/// which only overstates what the buffer holds. A PES without a PTS holds nothing there.
-	fn place(&mut self, name: &str, stream_type: u8, frame: &Frame, tables: Vec<u8>) -> anyhow::Result<()> {
-		let pes = PesPacket::parse(&frame.payload, stream_type)
-			.with_context(|| format!("MPEG-TS track '{name}' carries a malformed PES packet"))?;
+	fn place(&mut self, name: &str, frame: &Frame, tables: Vec<u8>) -> anyhow::Result<()> {
 		let track = self.tracks.get(name).context("missing track")?;
+		let pes = match track.kind {
+			Kind::PesPacket { stream_type } => Some(
+				PesPacket::parse(&frame.payload, stream_type)
+					.with_context(|| format!("MPEG-TS track '{name}' carries a malformed PES packet"))?,
+			),
+			Kind::Verbatim { .. } => None,
+			_ => unreachable!("a placed track"),
+		};
 		let pid = track.pid;
 		let place = frame.timestamp.as_nanos();
-		let decode = pes.pts.map(|pts| unwrap_pts(pts, frame.timestamp));
-		let dolby = Dolby::described(&track.descriptors).filter(|_| stream_type == 0x06);
-		let frames = match (decode, dolby) {
-			(Some(decode), Some(codec)) => dolby_removals(codec, &frame.payload[pes.payload..], decode),
+		let decode = pes
+			.as_ref()
+			.and_then(|pes| pes.pts)
+			.map(|pts| unwrap_pts(pts, frame.timestamp));
+		let dolby = Dolby::described(&track.descriptors)
+			.filter(|_| matches!(track.kind, Kind::PesPacket { stream_type: 0x06 }));
+		let frames = match (&pes, decode, dolby) {
+			(Some(pes), Some(decode), Some(codec)) => dolby_removals(codec, &frame.payload[pes.payload..], decode),
 			_ => Vec::new(),
 		};
 		let buffer = track.buffer();
 		let mut out = std::mem::take(&mut self.tables);
 		out.extend_from_slice(&tables);
-		self.write_pes_packet(&mut out, pid, &frame.payload)?;
+		let prefix = match pes {
+			Some(_) => {
+				self.write_pes_packet(&mut out, pid, &frame.payload)?;
+				0
+			}
+			None => {
+				self.write_section(&mut out, pid, &frame.payload)?;
+				1
+			}
+		};
 		if let Some(buffer) = buffer {
 			self.schedule.set_buffer(pid, buffer);
 		}
-		self.schedule
-			.push_placed(pid, (place, decode.unwrap_or(place)), out, frame.keyframe, frames)
+		self.schedule.push_placed(
+			pid,
+			(place, decode.unwrap_or(place)),
+			prefix,
+			out,
+			frame.keyframe,
+			frames,
+		)
 	}
 
 	/// Mux an audio frame into `name`'s PES, sending the PES on first if the frame cannot join
