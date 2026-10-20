@@ -46,7 +46,9 @@ Decided by the maintainer on 2026-10-17 (see the
   then aborts the track with the recorded code (`StreamError::from_code`),
   failing loud as the source did rather than reading as live. The
   broadcast's `.end`, seen by the delimiter LIST, stops the search for
-  added tracks. Without markers the
+  added tracks. The producer writes every marker only once the broadcast
+  has ended, so a live consumer finishes tracks only then; until then an
+  ended track just stops growing, and a re-added one grows again. Without markers the
   archive is live and followed through refresh, which is how a producer
   that crashed or was stopped reads. This replaces the caller-driven
   `Reader::finish`.
@@ -74,7 +76,8 @@ cursor, and a track added mid-recording), history older than the source's max
 age still served, an untimed track, an interleaved group and datagram track
 replayed in its original forms, a completed archive whose replay ends at
 each track's recorded end (including mid-group), an errored track
-replaying its stored groups and then the recorded error, a growing archive
+replaying its stored groups and then the recorded error, a track removed
+and re-added under its name replaying both runs in sequence, a growing archive
 with no markers staying open, and an empty or unrecognized prefix refused loudly.
 
 Public API: `archive::Consumer` replaces `Reader`. Wire: none.

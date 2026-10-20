@@ -45,9 +45,9 @@ archive (per-track `.timeline.z` records named by the catalog's root
   for an untimed track, `<track>` percent-encoded as one
   segment), beside a small per-track `.info` holding its timescale and
   priority. Each stored sequence keeps its form, group or datagram. A
-  track's `end` records how it ended, clean or with its error code, and a
-  broadcast's `.end` follows once every listed track has one; without them
-  an archive reads as live. A served track advertises the archive's retention (no limit), not
+  track's `end` records how it ended, clean or with its error code, written
+  with the broadcast's `.end` once the broadcast's listing ends; without
+  them an archive reads as live. A served track advertises the archive's retention (no limit), not
   the source's max age, which would expire archived history. The key listing is the index: no index object,
   manifest, or timeline. The application picks each broadcast's key prefix
   (per path and epoch, say), so a resume in one epoch continues from the
