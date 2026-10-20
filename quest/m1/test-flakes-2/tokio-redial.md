@@ -24,4 +24,15 @@ the GStreamer tests. The 10 s deadlines add to it.
 - Confirm the second test's cause on its own; it may share the fixture or
   fail for a reason of its own.
 
+Checkpoint 2026-10-19: the first test's released-port assumption reproduced
+without load by rebinding its port before the connect. Its fixture now holds
+a listener that hangs up each accepted connection, and the test waits on the
+connection's existing state notifications instead of polling with sleeps.
+The regression also checks that another listener cannot bind its port.
+
+The fleet test remains unfinished: its listeners stay alive, and the CI job
+linked above currently reports both named tests passing. No independent cause
+has been established for that test. Keep this quest until its failure is
+reproduced and fixed, and loaded `just check` plus CI establish reliability.
+
 Public API: none. Wire: none.
