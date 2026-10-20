@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoQ Relay Interop</title>
+<meta name="description" content="Nightly publish/subscribe results for the published moq clients through public MoQ relays.">
+<!--
+  Rendered from results.json (latest run) and history.json (recent runs), both
+  written next to this page by report/build.sh. No build step, no dependencies.
+-->
+<style>
+:root {
+	--bg: #fbfbfa;
+	--fg: #1c1c1a;
+	--muted: #6b6b66;
+	--line: #e3e2de;
+	--card: #ffffff;
+	--pass: #1a7f37;
+	--partial: #b26b00;
+	--fail: #c9302c;
+	--skip: #a8a8a2;
+	--tag: #efeee9;
+	--shadow: 0 6px 24px rgb(0 0 0 / 0.12);
+	color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--bg: #141413;
+		--fg: #ecebe6;
+		--muted: #9a9a93;
+		--line: #2c2c29;
+		--card: #1c1c1a;
+		--pass: #4ac26b;
+		--partial: #e3a33b;
+		--fail: #f47067;
+		--skip: #5f5f59;
+		--tag: #2a2a27;
+		--shadow: 0 6px 24px rgb(0 0 0 / 0.5);
+		color-scheme: dark;
+	}
+}
+:root[data-theme="dark"] {
+	--bg: #141413;
+	--fg: #ecebe6;
+	--muted: #9a9a93;
+	--line: #2c2c29;
+	--card: #1c1c1a;
+	--pass: #4ac26b;
+	--partial: #e3a33b;
+	--fail: #f47067;
+	--skip: #5f5f59;
+	--tag: #2a2a27;
+	--shadow: 0 6px 24px rgb(0 0 0 / 0.5);
+	color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--fg);
+	font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 1100px; margin: 0 auto; padding: 32px 16px 64px; }
+h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 16px; margin: 40px 0 12px; }
+p { margin: 0 0 8px; }
+a { color: inherit; }
+.muted { color: var(--muted); }
+.meta { color: var(--muted); font-size: 13px; }
+.stats { display: flex; gap: 12px; flex-wrap: wrap; margin: 20px 0 8px; }
+.stat {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	padding: 10px 14px;
+	flex: 1 1 160px;
+	max-width: 240px;
+}
+.stat b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: 13px; }
+.scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+th { font-weight: 600; font-size: 12px; color: var(--muted); }
+th.score-col, td.score-col { text-align: center; width: 1%; }
+tr.ok td:first-child { box-shadow: inset 3px 0 0 var(--pass); }
+tr.partial td:first-child { box-shadow: inset 3px 0 0 var(--partial); }
+tr.bad td:first-child { box-shadow: inset 3px 0 0 var(--fail); }
+#latest td:first-child { white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+	th, td { padding: 8px; }
+	/* The version is in the tooltip and log dialog too; keep the scores on screen. */
+	#latest .ver-col { display: none; }
+}
+code { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+.name { font-weight: 600; }
+.host { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+.tag {
+	display: inline-block;
+	font-size: 11px;
+	padding: 1px 6px;
+	border-radius: 4px;
+	background: var(--tag);
+	color: var(--muted);
+	margin-left: 6px;
+	vertical-align: 1px;
+}
+.tag.required { color: var(--fg); }
+.ver { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.PASS { color: var(--pass); }
+.FAIL { color: var(--fail); }
+.SKIP { color: var(--skip); }
+.score {
+	display: inline-block;
+	min-width: 56px;
+	padding: 3px 10px;
+	border: 1px solid currentColor;
+	border-radius: 6px;
+	background: none;
+	font: 600 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+	font-variant-numeric: tabular-nums;
+	cursor: pointer;
+}
+.score + .score { margin-left: 4px; }
+.score.ok { color: var(--pass); }
+.score.partial { color: var(--partial); }
+.score.bad { color: var(--fail); }
+.score:hover, .score:focus-visible { background: var(--tag); outline: none; }
+.dots { display: flex; gap: 3px; }
+.dot { width: 10px; height: 18px; border-radius: 2px; background: var(--skip); opacity: 0.35; }
+.dot.ok { background: var(--pass); opacity: 1; }
+.dot.partial { background: var(--partial); opacity: 1; }
+.dot.bad { background: var(--fail); opacity: 1; }
+.dot.none { background: transparent; border: 1px dashed var(--line); opacity: 1; }
+.legend { margin-top: 10px; font-size: 13px; color: var(--muted); }
+#error { color: var(--fail); }
+
+#tip {
+	position: fixed;
+	z-index: 10;
+	max-width: min(520px, calc(100vw - 32px));
+	padding: 10px 12px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	box-shadow: var(--shadow);
+	font-size: 13px;
+	pointer-events: none;
+}
+#tip[hidden] { display: none; }
+.pairs { list-style: none; margin: 6px 0 0; padding: 0; }
+.pairs li { margin: 2px 0; }
+.reason { display: block; margin-left: 18px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+
+dialog {
+	width: min(960px, calc(100vw - 32px));
+	max-height: calc(100vh - 64px);
+	padding: 0;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--card);
+	color: var(--fg);
+	box-shadow: var(--shadow);
+}
+dialog::backdrop { background: rgb(0 0 0 / 0.4); }
+.dlg-head {
+	position: sticky;
+	top: 0;
+	display: flex;
+	gap: 12px;
+	align-items: start;
+	justify-content: space-between;
+	padding: 14px 16px;
+	background: var(--card);
+	border-bottom: 1px solid var(--line);
+}
+.dlg-head h3 { margin: 0; font-size: 16px; }
+.dlg-head button {
+	border: 1px solid var(--line);
+	border-radius: 6px;
+	background: var(--tag);
+	color: var(--fg);
+	padding: 4px 10px;
+	font: inherit;
+	cursor: pointer;
+}
+.dlg-body { padding: 8px 16px 16px; }
+details { border-bottom: 1px solid var(--line); padding: 8px 0; }
+details:last-child { border-bottom: 0; }
+summary { cursor: pointer; }
+summary .reason { margin-left: 22px; }
+.log h4 { margin: 10px 0 4px; font-size: 12px; color: var(--muted); font-weight: 600; }
+.log pre {
+	margin: 0;
+	max-height: 50vh;
+	overflow: auto;
+	padding: 8px 10px;
+	background: var(--bg);
+	border: 1px solid var(--line);
+	border-radius: 6px;
+	font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+</style>
+</head>
+<body>
+<main>
+	<h1>MoQ relay interop</h1>
+	<p class="muted">
+		The published <a href="https://github.com/moq-dev/moq">moq</a> clients publish an H.264 broadcast and subscribe to it
+		through each public relay in the
+		<a href="https://github.com/englishm/moq-interop-runner">moq-interop-runner</a> registry.
+		A cell passes when media bytes arrive at the subscriber. Only required relays can fail the
+		<a href="https://github.com/moq-dev/moq/tree/main/test/smoke">smoke</a> run.
+	</p>
+	<p class="meta" id="meta">Loading…</p>
+	<p id="error"></p>
+
+	<div class="stats" id="stats"></div>
+
+	<h2>Latest run</h2>
+	<div class="scroll"><table id="latest"></table></div>
+	<p class="legend" id="legend"></p>
+
+	<h2>History</h2>
+	<div class="scroll"><table id="history"></table></div>
+	<p class="legend">
+		One bar per nightly run, oldest to newest:
+		<span class="PASS">all</span>, <span style="color: var(--partial)">some</span> or
+		<span class="FAIL">none</span> of the publisher → subscriber pairs passed. Click a bar to open that CI run.
+	</p>
+</main>
+
+<div id="tip" role="tooltip" hidden></div>
+<dialog id="logs" aria-labelledby="logs-title">
+	<div class="dlg-head">
+		<div id="logs-title"></div>
+		<form method="dialog"><button type="submit">Close</button></form>
+	</div>
+	<div class="dlg-body" id="logs-body"></div>
+</dialog>
+
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const when = (iso) => new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+const mark = { PASS: "✓", FAIL: "✗", SKIP: "–" };
+const TRANSPORTS = ["WebTransport", "QUIC", "WebSocket"];
+
+// Every endpoint by URL, filled by renderLatest for the tooltip and log dialog.
+const endpoints = new Map();
+let latest;
+
+async function load(path) {
+	const res = await fetch(path, { cache: "no-store" });
+	if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+	return res.json();
+}
+
+// Pairs that actually ran (a SKIP is a client that can't dial the transport).
+function tally(cells) {
+	const ran = cells.filter((c) => c.status !== "SKIP");
+	return { passed: ran.filter((c) => c.status === "PASS").length, total: ran.length };
+}
+// `complete` is relays.sh's `ok` for the endpoints that ran: a matrix cut short
+// (smoke.sh died before its DONE marker) is never all-green, whatever it recorded.
+function grade({ passed, total }, complete = true) {
+	if (total === 0) return "none";
+	if (passed === 0) return "bad";
+	return passed === total && complete ? "ok" : "partial";
+}
+const sum = (ts) => ts.reduce((a, t) => ({ passed: a.passed + t.passed, total: a.total + t.total }), { passed: 0, total: 0 });
+const endpointTally = (e) => tally(Object.values(e.cells));
+const complete = (es) => es.every((e) => e.ok || endpointTally(e).total === 0);
+
+// One row per implementation. WebTransport, raw QUIC, and (for relays that opted
+// in) WebSocket are separate endpoints of the same relay.
+function relays(r) {
+	const byKey = new Map();
+	for (const e of r.endpoints) {
+		if (!byKey.has(e.key)) byKey.set(e.key, { key: e.key, name: e.name, required: e.required, endpoints: [] });
+		byKey.get(e.key).endpoints.push(e);
+	}
+	return [...byKey.values()].sort(
+		(a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.key.localeCompare(b.key),
+	);
+}
+
+function renderLatest(r) {
+	latest = r;
+	const run = r.run_url ? ` · <a href="${esc(r.run_url)}">CI run</a>` : "";
+	document.getElementById("meta").innerHTML = `Last run ${esc(when(r.generated))}${run}`;
+
+	const req = r.endpoints.filter((e) => e.required);
+	const opt = r.endpoints.filter((e) => !e.required);
+	const count = (xs) => `${xs.filter((e) => e.ok).length}/${xs.length}`;
+	const all = sum(r.endpoints.map(endpointTally));
+	const groups = relays(r);
+	document.getElementById("stats").innerHTML = [
+		[count(req), "required endpoints passing"],
+		[count(opt), "optional endpoints passing"],
+		[`${groups.filter((g) => g.endpoints.some((e) => e.ok)).length}/${groups.length}`, "relays with a passing endpoint"],
+		[`${all.passed}/${all.total}`, "publisher → subscriber pairs passing"],
+	].map(([n, l]) => `<div class="stat"><b>${esc(n)}</b><span>${esc(l)}</span></div>`).join("");
+
+	const head = `<tr><th>Relay</th><th class="ver-col">Version</th>${TRANSPORTS.map((t) => `<th class="score-col">${t}</th>`).join("")}</tr>`;
+	const rows = groups.map((g) => {
+		for (const e of g.endpoints) endpoints.set(e.url, e);
+		const hosts = [...new Set(g.endpoints.map((e) => hostOf(e.url)))];
+		const versions = [...new Set(g.endpoints.flatMap((e) => e.versions))];
+		const cols = TRANSPORTS.map((t) => {
+			const scores = g.endpoints.filter((e) => e.transport === t).map((e) => {
+				const s = endpointTally(e);
+				if (s.total === 0) return `<span class="muted">–</span>`;
+				return `<button class="score ${grade(s, e.ok)}" data-url="${esc(e.url)}" aria-label="${esc(`${e.transport} ${s.passed} of ${s.total} passing; show logs`)}">${s.passed}/${s.total}</button>`;
+			});
+			return `<td class="score-col">${scores.length ? scores.join("") : `<span class="muted">—</span>`}</td>`;
+		}).join("");
+		const tag = g.required ? `<span class="tag required">required</span>` : "";
+		return `<tr class="${grade(sum(g.endpoints.map(endpointTally)), complete(g.endpoints))}">
+			<td><span class="name">${esc(g.name)}</span>${tag}<br><span class="host">${hosts.map(esc).join(", ")}</span></td>
+			<td class="ver ver-col">${versions.length ? versions.map(esc).join("<br>") : `<span class="muted">—</span>`}</td>
+			${cols}</tr>`;
+	}).join("");
+	document.getElementById("latest").innerHTML = head + rows;
+
+	const clients = (i) => [...new Set(r.pairs.map((p) => p.split(" → ")[i]))].join(", ");
+	document.getElementById("legend").innerHTML =
+		`Each cell counts the publisher → subscriber pairs whose bytes flowed through that endpoint ` +
+		`(publishers: ${esc(clients(0))}; subscribers: ${esc(clients(1))}). ` +
+		`js-web is the browser and js-bun is the WebTransport polyfill. Both run only on WebTransport. ` +
+		`A client that does not belong on a transport is left out of that column. ` +
+		`WebSocket is its own column, and only for relays that opted in. ` +
+		`Hover a cell for what failed; click it for the logs.`;
+}
+
+function hostOf(url) {
+	try {
+		return new URL(url.replace(/^moqt:/, "https:")).host;
+	} catch {
+		return url;
+	}
+}
+
+function pairList(e, withReasons) {
+	return `<ul class="pairs">${latest.pairs.map((p) => {
+		const c = e.cells[p];
+		if (!c) return "";
+		const reason = withReasons && c.status !== "PASS" && c.reason ? `<span class="reason">${esc(c.reason)}</span>` : "";
+		return `<li><span class="${esc(c.status)}">${mark[c.status] ?? "?"}</span> ${esc(p)}${reason}</li>`;
+	}).join("")}</ul>`;
+}
+
+// ── tooltip ──────────────────────────────────────────────────────────────────
+const tip = document.getElementById("tip");
+
+function showTip(button) {
+	const e = endpoints.get(button.dataset.url);
+	if (!e) return;
+	tip.innerHTML = `<b>${esc(e.transport)}</b> <code>${esc(e.url)}</code>${pairList(e, true)}`;
+	tip.hidden = false;
+	const r = button.getBoundingClientRect();
+	const w = tip.offsetWidth;
+	const h = tip.offsetHeight;
+	const left = Math.max(16, Math.min(r.left + r.width / 2 - w / 2, innerWidth - w - 16));
+	const top = r.bottom + 8 + h < innerHeight ? r.bottom + 8 : Math.max(8, r.top - 8 - h);
+	tip.style.left = `${left}px`;
+	tip.style.top = `${top}px`;
+}
+const hideTip = () => (tip.hidden = true);
+
+document.addEventListener("mouseover", (ev) => {
+	const b = ev.target.closest?.(".score");
+	if (b) showTip(b);
+	else hideTip();
+});
+document.addEventListener("focusin", (ev) => ev.target.matches?.(".score") && showTip(ev.target));
+document.addEventListener("focusout", hideTip);
+addEventListener("scroll", hideTip, { passive: true });
+
+// ── log dialog ───────────────────────────────────────────────────────────────
+const dialog = document.getElementById("logs");
+const logCache = new Map();
+
+function fetchLog(path) {
+	if (!logCache.has(path)) {
+		logCache.set(path, fetch(`logs/${path}`, { cache: "no-store" })
+			.then((res) => (res.ok ? res.text() : Promise.reject(new Error(`HTTP ${res.status}`))))
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: strips ANSI color escapes from the logs
+			.then((text) => text.replace(/\x1b\[[0-9;]*m/g, "").trimEnd() || "(empty)")
+			.catch((err) => `(log unavailable: ${err.message})`));
+	}
+	return logCache.get(path);
+}
+
+async function fillLogs(details) {
+	if (details.dataset.loaded) return;
+	details.dataset.loaded = "1";
+	for (const pre of details.querySelectorAll("pre[data-log]")) {
+		pre.textContent = await fetchLog(pre.dataset.log);
+	}
+}
+
+function openLogs(url) {
+	const e = endpoints.get(url);
+	if (!e) return;
+	hideTip();
+	const t = endpointTally(e);
+	const run = latest.run_url ? ` · <a href="${esc(latest.run_url)}">full CI log</a>` : "";
+	document.getElementById("logs-title").innerHTML =
+		`<h3>${esc(e.name)} · ${esc(e.transport)} · ${t.passed}/${t.total}</h3>` +
+		`<code>${esc(e.url)}</code><div class="meta">${esc(e.versions.join(", ") || "no version negotiated")} · ${esc(when(latest.generated))}${run}</div>`;
+
+	const items = latest.pairs.map((p) => {
+		const c = e.cells[p];
+		if (!c || c.status === "SKIP") return "";
+		const [pub, sub] = p.split(" → ");
+		const logs = [
+			[c.sub_log, `subscriber (${sub}) log`],
+			[c.pub_log, `publisher (${pub}) log`],
+		].filter(([path]) => path);
+		const body = logs.length
+			? logs.map(([path, label]) => `<h4>${esc(label)}</h4><pre data-log="${esc(path)}">Loading…</pre>`).join("")
+			: `<p class="muted">No logs were kept for this run.</p>`;
+		const reason = c.status !== "PASS" && c.reason ? `<span class="reason">${esc(c.reason)}</span>` : "";
+		const ver = c.sub_version ? ` <span class="ver muted">${esc(c.sub_version)}</span>` : "";
+		return `<details${c.status === "FAIL" ? " open" : ""}><summary><span class="${esc(c.status)}">${mark[c.status]}</span> ${esc(p)}${ver}${reason}</summary><div class="log">${body}</div></details>`;
+	}).join("");
+	const body = document.getElementById("logs-body");
+	body.innerHTML = items || `<p class="muted">No client could dial this endpoint.</p>`;
+	for (const d of body.querySelectorAll("details")) {
+		d.addEventListener("toggle", () => d.open && fillLogs(d));
+		if (d.open) fillLogs(d);
+	}
+	dialog.showModal();
+}
+
+document.addEventListener("click", (ev) => {
+	const b = ev.target.closest?.(".score");
+	if (b) openLogs(b.dataset.url);
+});
+// Close on a backdrop click (the dialog element itself is the backdrop's target).
+dialog.addEventListener("click", (ev) => ev.target === dialog && dialog.close());
+
+// ── history ──────────────────────────────────────────────────────────────────
+function renderHistory(r, history) {
+	const runs = history.slice(-30);
+	const head = `<tr><th>Relay</th><th>Last ${runs.length} runs</th></tr>`;
+	const rows = relays(r).map((g) => {
+		const dots = runs.map((run) => {
+			// Older history entries only record pass/fail per endpoint; count those as 1/1 or 0/1.
+			const seen = g.endpoints.map((e) => run.endpoints[e.url]).filter(Boolean);
+			const t = sum(seen.map((h) => (h.total != null ? { passed: h.passed, total: h.total } : { passed: h.ok ? 1 : 0, total: 1 })));
+			const cls = seen.length ? grade(t, seen.every((h) => h.ok || h.total === 0)) : "none";
+			const versions = [...new Set(seen.flatMap((h) => h.versions ?? []))];
+			const tip = `${when(run.generated)}: ${seen.length ? `${t.passed}/${t.total} passing` : "not tested"}${versions.length ? ` (${versions.join(", ")})` : ""}`;
+			const dot = `<span class="dot ${cls}" title="${esc(tip)}"></span>`;
+			return run.run_url ? `<a href="${esc(run.run_url)}">${dot}</a>` : dot;
+		}).join("");
+		return `<tr><td><span class="name">${esc(g.name)}</span></td><td><div class="dots">${dots}</div></td></tr>`;
+	}).join("");
+	document.getElementById("history").innerHTML = head + rows;
+}
+
+(async () => {
+	try {
+		const r = await load("results.json");
+		renderLatest(r);
+		const history = await load("history.json").catch(() => []);
+		renderHistory(r, history);
+	} catch (err) {
+		document.getElementById("meta").textContent = "";
+		document.getElementById("error").textContent = `Failed to load results: ${err.message}`;
+	}
+})();
+</script>
+</body>
+</html>

@@ -2,12 +2,12 @@
 
 ## Goal
 
-Waiting on upstream Moxygen. moq-dev/smoke's Moxygen lane passes all six
+Waiting on upstream Moxygen. test/smoke's Moxygen lane passes all six
 cases through moq-relay on WebTransport and raw QUIC at draft-16, and its
 `continue-on-error` exception is removed.
 
-Check by running `just moxygen` in moq-dev/smoke, or by reading the latest
-Moxygen job there. Delete this quest once the lane passes and the exception
+Check by running `just test smoke moxygen`, or by reading the latest
+Moxygen job in the Smoke workflow. Delete this quest once the lane passes and the exception
 is gone.
 
 ## Plan
