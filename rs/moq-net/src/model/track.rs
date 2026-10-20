@@ -13218,6 +13218,47 @@ mod test {
 		assert!(subscriber.assert_group().sequence > 0, "evicted group is not delivered");
 	}
 
+	/// A plain reader inflating a finished compressed track pays the debt its inflated copies
+	/// add, though no writer is left to: the pool returns to its capacity.
+	#[test]
+	#[cfg(feature = "async")]
+	fn inflating_settles_the_pool_debt() {
+		let capacity = 1 << 20;
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let mut producer = Producer::new(broadcast, "test", Info::timed().with_compress(true));
+		let frame = bytes::Bytes::from(vec![0u8; 256 * 1024]);
+		let groups = 16;
+		for _ in 0..groups {
+			let mut group = producer.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, frame.clone()).unwrap();
+			group.finish().unwrap();
+		}
+		assert!(pool.used() < capacity, "the slices fit: {}", pool.used());
+
+		let consumer = producer.consume();
+		for sequence in 0..groups {
+			let Some(mut group) = consumer.peek_group(sequence) else {
+				continue;
+			};
+			match group.read_frame().now_or_never().expect("cached") {
+				Ok(Some(read)) => assert_eq!(read.payload.len(), frame.len()),
+				Ok(None) => panic!("group {sequence} ended without its frame"),
+				Err(err) => assert!(matches!(err, Error::Evicted), "group {sequence}: {err}"),
+			}
+		}
+		// The live edge and the group being read stay, whatever the budget.
+		let slack = 2 * (frame.len() as u64 + cache::ENTRY_OVERHEAD);
+		assert!(
+			pool.used() <= capacity + slack,
+			"inflated copies left the pool over capacity: {}",
+			pool.used()
+		);
+	}
+
 	/// The latest group is never in the eviction order, so it survives any budget.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]

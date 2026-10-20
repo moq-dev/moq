@@ -430,7 +430,8 @@ impl Inflate {
 	/// Inflate the slices, skipping any a concurrent reader already did, then read local
 	/// frames back with [`Self::get`]. `meter` counts the bytes this read inflated.
 	///
-	/// Locks per frame, so a release waits on at most one frame's inflation.
+	/// Locks per frame, so a release waits on at most one frame's inflation. Call with no
+	/// lock held, since settling the debt takes the track's.
 	fn run(&self, meter: &stats::Meter) {
 		for (index, (slice, size)) in (self.from..).zip(&self.slices) {
 			let mut state = self.plain.lock();
@@ -467,6 +468,9 @@ impl Inflate {
 				}
 			}
 		}
+		// The inflated bytes are written like a producer's, so they pay the pool's debt the
+		// same way: a finished track has no writer left to settle it.
+		self.plain.bill.settle();
 	}
 
 	/// Inflated local frame `local`, or why it is not.
@@ -1347,7 +1351,7 @@ impl Producer {
 			self.handle.cache.wakes().presented(latest);
 		}
 		self.stats.frames(count as u64);
-		self.stats.bytes(bytes);
+		self.stats.bytes(stored);
 		Ok(())
 	}
 
@@ -1363,7 +1367,7 @@ impl Producer {
 		// The buffer allocates on its first write, so refusing the frame costs nothing.
 		let buf = FrameBuf::new(frame.size as usize);
 		let info = self.open_frame(frame.into(), &buf)?;
-		let meter = self.stats.clone();
+		let meter = self.chunk_meter(None);
 		Ok(frame::Producer::new(self, buf, info).with_meter(meter))
 	}
 
@@ -1381,6 +1385,7 @@ impl Producer {
 		budget: &frame::Budget,
 	) -> Result<frame::ProducerOwned> {
 		let frame = frame.into();
+		let meter = self.chunk_meter(frame.inflated);
 		let size = frame.info.size as usize;
 		let reserved = budget.reserve(size);
 		let buf = match reserved {
@@ -1394,8 +1399,17 @@ impl Producer {
 				return Err(err);
 			}
 		};
-		let meter = self.stats.clone();
 		Ok(frame::ProducerOwned::new(self, buf, info, reserved).with_meter(meter))
+	}
+
+	/// The meter a streamed frame's chunks bump: none for a plain frame a compressed group
+	/// compresses on commit, which counts its stored slice then, as `bytes` counts payload
+	/// as stored.
+	fn chunk_meter(&self, inflated: Option<u64>) -> stats::Meter {
+		match self.handle.track.compress && inflated.is_none() {
+			true => stats::Meter::default(),
+			false => self.stats.clone(),
+		}
 	}
 
 	/// Open `buf` as the in-flight frame, returning its header in the track's timescale.
@@ -1536,6 +1550,7 @@ impl Producer {
 			}
 			state.cache += size;
 			now = state.charge.add(size);
+			self.stats.bytes(size);
 		} else if let (Some(flate), Some(inflated)) = (&mut state.flate, partial.as_ref().and_then(|p| p.inflated)) {
 			// Admitted against the budget when it opened.
 			flate.sizes.push_back(inflated);
@@ -4742,6 +4757,49 @@ mod test {
 		assert!(matches!(late.get(0), Err(Error::Evicted)));
 		assert_eq!(pool.used(), used, "a late inflater bills nothing past the release");
 		assert_eq!(inflated(), plain);
+	}
+
+	/// A compressed group meters `bytes` as stored, whether a frame is written whole, in a
+	/// batch, or in chunks.
+	#[test]
+	fn compressed_writes_meter_the_stored_bytes() {
+		let registry = stats::Registry::new(stats::Config::new());
+		let metered = || {
+			registry
+				.snapshot()
+				.traffic()
+				.into_iter()
+				.find(|(_, role, _)| *role == stats::Role::Publisher)
+				.map_or(0, |(_, _, traffic)| traffic.bytes)
+		};
+		let pool = cache::Pool::unbounded();
+		let meter = registry.publisher_meter("demo", &stats::Tier::default());
+		let mut group = compressed_group(&pool).with_meter(meter);
+
+		group.write_frame(None, verbose(0)).unwrap();
+		let mut batch = frame::Buffer::<2>::new();
+		for index in 1..3 {
+			batch
+				.push(Frame {
+					timestamp: None,
+					payload: verbose(index),
+				})
+				.unwrap();
+		}
+		group.write_frames(&mut batch).unwrap();
+		let mut frame = group.create_frame(untimed(verbose(3).len())).unwrap();
+		for chunk in verbose(3).chunks(100) {
+			frame.write(Bytes::copy_from_slice(chunk)).unwrap();
+		}
+		frame.finish().unwrap();
+		group.finish().unwrap();
+
+		let stored: u64 = (group.handle.state.read().frames.iter())
+			.map(|frame| frame.payload.len() as u64)
+			.sum();
+		let plain: u64 = (0..4).map(|index| verbose(index).len() as u64).sum();
+		assert!(stored < plain, "the frames compressed");
+		assert_eq!(metered(), stored);
 	}
 
 	/// The codec state counts toward the pool while it lives: the encoder until the group

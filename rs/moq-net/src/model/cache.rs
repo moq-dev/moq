@@ -1229,6 +1229,13 @@ impl Extra {
 		}
 	}
 
+	/// Settle the track's eviction debt, taking its lock: call with no group lock held.
+	pub(super) fn settle(&self) {
+		if let Some(track) = &self.track {
+			track.settle(None);
+		}
+	}
+
 	/// Bytes currently billed.
 	pub(super) fn size(&self) -> u64 {
 		self.bytes.load(Ordering::Relaxed)
