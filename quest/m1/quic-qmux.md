@@ -70,7 +70,17 @@ are no longer pursued): a session returns connection-level credit for every byte
 receives, whether the app reads it, drops the stream unread, or it arrives after
 STOP_SENDING, so a long-lived session never stalls on MAX_DATA; and `close()` delivers its
 APPLICATION_CLOSE frame before the transport drops, whenever the transport stays writable
-within the close bound. Test both. If
+within the close bound. Test both.
+
+Also decided 2026-10-20 (maintainer): an unfinished read ends once the session
+closes, after its buffered data, so a reader drains what already arrived and
+then sees the close instead of hanging. The moq-gst tests
+`a_closed_publisher_session_resumes_on_the_next_start` and
+`a_moqsink_restart_keeps_pads_when_caps_arrive_at_different_times`
+(`rs/moq-gst/src/source/imp.rs`) hang today with the qmux 0.6.3 teardown;
+both pass on the in-tree qmux before this lands.
+
+If
 [Rust request credit](/quest/m1/rs-request-credit.md) landed first, the session
 also implements its non-waiting open, so a request without stream credit fails
 at once on qmux too. Preserve rejection of
