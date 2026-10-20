@@ -885,7 +885,6 @@ fn spawn_export(
 				tasks.spawn(archive::export(origin.consume(), name, format, args));
 			}
 			ExportSink::Stats => {
-				let name = require_broadcast(name, "export stats")?;
 				tasks.spawn(report::print_stats(origin.consume(), name));
 			}
 			ExportSink::Echo => {
@@ -1381,5 +1380,20 @@ mod tests {
 		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
 		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
 		assert!(is_public_transport(moq_tokio::Transport::Quic, true));
+	}
+
+	/// A `--connect` URL can name the broadcast itself, leaving the stage's broadcast empty: the
+	/// connection root, which `export stats` reads like the other point exports.
+	#[tokio::test]
+	async fn export_stats_reads_the_connection_root() {
+		let invocation =
+			Invocation::try_parse_from(["moq", "--connect", "http://relay/event", "export", "stats"]).unwrap();
+		let Some(Command::Export(export)) = invocation.stages.into_iter().next() else {
+			panic!("parsed as something other than an export");
+		};
+		let origin = moq_tokio::origin::spawn();
+		let mut tasks = JoinSet::new();
+		spawn_export(&origin, export, String::new(), None, &mut tasks).expect("the root is a broadcast");
+		tasks.abort_all();
 	}
 }

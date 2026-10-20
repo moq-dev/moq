@@ -476,7 +476,8 @@ moq ... --broadcast viewers export echo
 
 Counters are cumulative for the life of the process: a rendition that ends
 keeps its final counts, and one that returns under the same ID continues them.
-A report keeps the first 1,024 rendition IDs it sees.
+A report holds 1,024 rendition IDs at most: past that, ended renditions make
+way for new ones.
 [Stats](/concept/stats#media-reports) has the schema.
 
 A TS import adds an `mpegts` section: each elementary stream's access units

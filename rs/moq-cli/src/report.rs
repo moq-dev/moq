@@ -477,8 +477,10 @@ async fn write_echo(
 	prefix: String,
 	mut stdout: impl tokio::io::AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
+	// Announcements leave hidden routes out unless asked, and a prefix naming one asks.
+	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
 	let prefix = moq_net::Path::new(&prefix).to_owned();
-	let mut announced = origin.announced();
+	let mut announced = origin.clone().with_hidden(hidden).announced();
 	let (lines, mut written) = tokio::sync::mpsc::channel::<String>(LINES);
 	let mut readers = HashMap::new();
 	loop {
@@ -594,5 +596,24 @@ mod tests {
 		feedback.update(&serde_json::json!({ "n": 2 })).unwrap();
 		let late = tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await;
 		assert!(late.is_err(), "a drained reader wrote {late:?}");
+	}
+
+	/// Feedback under a hidden prefix is found when that prefix is the one asked for.
+	#[tokio::test(start_paused = true)]
+	async fn a_hidden_prefix_finds_its_feedback() {
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin.create_broadcast(".viewers/alice.echo").unwrap();
+		let track = broadcast.create_track(hang::echo::TRACK, None).unwrap();
+		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
+		broadcast.announce(Default::default()).unwrap();
+
+		let (out, read) = tokio::io::duplex(4096);
+		let mut lines = BufReader::new(read).lines();
+		tokio::spawn(write_echo(origin.consume(), ".viewers".to_string(), out));
+
+		feedback.update(&serde_json::json!({ "n": 1 })).unwrap();
+		let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await;
+		let line = line.expect("no feedback read").unwrap().unwrap();
+		assert!(line.contains(r#""n":1"#), "{line}");
 	}
 }

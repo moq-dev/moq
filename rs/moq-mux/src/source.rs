@@ -82,7 +82,8 @@ impl Source {
 	///
 	/// Counters are cumulative for the life of the source, across resubscriptions and a
 	/// [`Follower`](crate::container::ts::Follower) switching instances, so a rendition no export
-	/// reads any more keeps its final counts. Fold this into an
+	/// reads any more keeps its final counts, until 1,024 renditions are held: then those no export
+	/// reads make way for new ones. Fold this into an
 	/// [`echo::Snapshot`](hang::echo::Snapshot) on the feedback interval.
 	pub fn stats(&self) -> std::collections::BTreeMap<String, hang::echo::Rendition> {
 		self.received.received()
