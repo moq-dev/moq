@@ -10,7 +10,7 @@
 
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use std::io;
-use std::net::{SocketAddr, TcpListener, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV6, TcpListener, UdpSocket};
 use std::sync::Once;
 use std::time::Duration;
 
@@ -119,8 +119,32 @@ pub fn udp(options: Udp) -> io::Result<UdpSocket> {
 	if options.reuse_port {
 		set_reuse_port(&socket)?;
 	}
-	socket.bind(&addr.into())?;
+	match addr {
+		SocketAddr::V6(addr) if addr.port() == 0 && socket.only_v6().is_ok_and(|only| !only) => {
+			bind_dual_stack_ephemeral(&socket, addr)?
+		}
+		_ => socket.bind(&addr.into())?,
+	}
 	Ok(socket.into())
+}
+
+/// Bind a dual-stack socket to an ephemeral port that is free on the IPv4 side too.
+///
+/// macOS picks a dual-stack ephemeral port checking only IPv6 sockets, so it can hand out
+/// a port an IPv4 socket already holds as `127.0.0.1`, which then receives every IPv4
+/// datagram meant for this one. An explicit port is checked against both families, so let
+/// the IPv4 side pick it and claim it here. Another socket can take the port in between,
+/// so draw a few times before giving up.
+fn bind_dual_stack_ephemeral(socket: &Socket, mut addr: SocketAddrV6) -> io::Result<()> {
+	let ipv4 = addr.ip().to_ipv4_mapped().unwrap_or(Ipv4Addr::UNSPECIFIED);
+	let mut attempts = 8;
+	loop {
+		addr.set_port(UdpSocket::bind((ipv4, 0))?.local_addr()?.port());
+		match socket.bind(&addr.into()) {
+			Err(err) if err.kind() == io::ErrorKind::AddrInUse && attempts > 1 => attempts -= 1,
+			result => return result,
+		}
+	}
 }
 
 /// Request [`UDP_BUFFER`] in both directions, best-effort.
@@ -366,6 +390,28 @@ mod tests {
 	/// A specific IPv6 address can't carry IPv4, so the socket must not claim to:
 	/// Windows rejects the QUIC driver's IPv4 socket options on a dual-stack `[::1]` socket.
 	/// Linux forces v6-only on such a bind itself, so only Windows can regress.
+	/// A dual-stack ephemeral port must be free on the IPv4 side too: a socket already
+	/// holding it as `127.0.0.1` would otherwise receive every IPv4 reply. macOS checks
+	/// only IPv6 sockets when it picks one, so draw many ports against many holders.
+	#[test]
+	fn udp_dual_stack_ephemeral_port_is_free_for_ipv4() {
+		let holders: Vec<UdpSocket> = (0..100).map(|_| UdpSocket::bind("127.0.0.1:0").unwrap()).collect();
+		let held: std::collections::HashSet<u16> = holders.iter().map(|s| s.local_addr().unwrap().port()).collect();
+
+		for _ in 0..4000 {
+			let socket = match udp(Udp::new("[::]:0".parse().unwrap())) {
+				Ok(socket) => socket,
+				Err(err) if skip_if_no_ipv6(&err) => return,
+				Err(err) => panic!("failed to bind IPv6 UDP socket: {err}"),
+			};
+			let port = socket.local_addr().unwrap().port();
+			assert!(
+				!held.contains(&port),
+				"dual-stack socket took port {port}, held by an IPv4 socket"
+			);
+		}
+	}
+
 	#[test]
 	fn udp_ipv6_loopback_is_v6_only() {
 		let socket = match udp(Udp::new("[::1]:0".parse().unwrap())) {
