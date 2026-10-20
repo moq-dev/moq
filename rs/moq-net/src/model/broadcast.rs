@@ -1314,7 +1314,7 @@ mod test {
 				seen: Default::default(),
 			});
 			let waiter = kio::Waiter::new(std::task::Waker::from(inspect.clone()));
-			assert!(inspect.track.demand().poll_used(&waiter).is_pending());
+			assert_eq!(inspect.track.demand().poll_state(&waiter), track::DemandState::Idle);
 			let consumer = if lookup {
 				producer.consume().track("catalog").unwrap()
 			} else {
