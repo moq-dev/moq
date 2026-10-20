@@ -61,8 +61,11 @@ Decided with the maintainer on 2026-10-17 (see the epic):
   no per-track wire field. moq-net reads no catalog. A peer's target is
   untrusted, but it only sets how high to probe: each probe scales the
   current estimate (BBR's 1.25x phase, padding's 2x cluster) and stays under
-  congestion control, so a huge target costs no more than one just above the
-  estimate. Clamp it to the session's rate cap where one exists
+  congestion control. Repeated cycles can still walk the estimate up to the
+  path's capacity, so a huge target costs the redundant bytes of probing that
+  far, held to the overhead budget [native](/quest/m1/probe-native.md) sets
+  before tuning; a peer that subscribes to more media can already cost the
+  sender that much. Clamp it to the session's rate cap where one exists
   ([rate grant](/quest/m2/rate-grant.md)) rather than adding a constant.
 - **Automatic, opt-out.** Targets are on by default; an application can
   override the session's target or disable probing.
