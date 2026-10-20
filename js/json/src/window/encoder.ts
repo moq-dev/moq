@@ -5,7 +5,7 @@ import { Group } from "@moq/net";
 const MAX_GROUP_FRAMES = 1024;
 
 /** Op ratio used when {@link Config.opRatio} is left unset. */
-export const DEFAULT_OP_RATIO = 8;
+const DEFAULT_OP_RATIO = 8;
 
 type Edit = { push: string } | { pop: number };
 

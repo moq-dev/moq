@@ -25,7 +25,10 @@ and `retries = 0` is deliberate. Mine nightly and merge-queue failures since
 the previous run with `gh run list` for new ones. A test that sleeps on the
 wall clock should mock time (AGENTS.md). Delete tests whose coverage another
 test already provides. Rank CI jobs by duration. [CI cost and
-latency](/quest/m0/ci/README.md) owns runner and cache infrastructure.
+latency](/quest/m0/ci/README.md) owns runner and cache infrastructure. While
+the one-time [CI pipeline audit](/quest/m0/ci/audit.md) is open it owns
+job-level costs and compile waste, and this run ranks individual tests;
+later runs pick job costs back up.
 
 Audit in progress (2026-10-19): Nightly runs
 [39266265648](https://github.com/moq-dev/moq/actions/runs/39266265648) and

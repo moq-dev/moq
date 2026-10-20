@@ -3234,8 +3234,14 @@ impl TrackWeak {
 	/// of [`Producer::abort_unused`]: a request either joins in time to decline the
 	/// teardown, or gets nothing and re-requests the track. It is never handed a track
 	/// that is already on its way out.
-	pub(super) fn try_consume(&self) -> Option<kio::Consumer<TrackState>> {
-		self.state.try_consume()
+	pub(super) fn try_consume(
+		&self,
+		subscription: Option<&Subscription>,
+	) -> Option<(kio::Consumer<TrackState>, Option<Preferences>)> {
+		// Register before the first consumer can wake the serving session, while
+		// still refusing a copy whose idle teardown already committed.
+		let preferences = subscription.map(|value| Preferences::register(self.state.read(), value.clone()));
+		Some((self.state.try_consume()?, preferences))
 	}
 
 	/// Read the cached track without joining its demand.
@@ -3569,20 +3575,22 @@ impl Consumer {
 
 	/// The track a request made now reads, joined to its consumer count. A broadcast
 	/// that cannot serve the name answers with a track closed with its error.
-	fn resolve(&self) -> kio::Consumer<TrackState> {
-		match &self.source {
-			Source::Track(state) => state.consume(),
-			Source::Broadcast(broadcast, current) => match broadcast.resolve_track(&self.name) {
-				Ok(state) => state,
-				Err(Error::Unroutable) if let Some(current) = current => current.consume(),
+	fn resolve(&self, subscription: Option<&Subscription>) -> (kio::Consumer<TrackState>, Option<Preferences>) {
+		let state = match &self.source {
+			Source::Track(state) => state.clone(),
+			Source::Broadcast(broadcast, current) => match broadcast.resolve_track(&self.name, subscription) {
+				Ok(resolved) => return resolved,
+				Err(Error::Unroutable) if let Some(current) = current => current.clone(),
 				Err(err) => {
 					let request = Request::new(self.broadcast.clone(), self.name.clone());
-					let state = request.state.consume();
+					let state = request.peek();
 					request.reject(err);
 					state
 				}
 			},
-		}
+		};
+		let preferences = subscription.map(|value| Preferences::register(state.read(), value.clone()));
+		(state.consume(), preferences)
 	}
 
 	/// Run `f` on the track instance this handle reads now, without joining its consumer
@@ -3624,8 +3632,8 @@ impl Consumer {
 	/// the floor that the budget convicts, so the default budget of zero delivers only
 	/// the latest group and a larger one reaches back over what it can still use.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
-		let state = self.resolve();
-		let subscription = Preferences::register(state.read(), subscription.into().unwrap_or_default());
+		let (state, subscription) = self.resolve(Some(&subscription.into().unwrap_or_default()));
+		let subscription = subscription.expect("a subscription was requested");
 
 		kio::Pending::new(Subscribing {
 			name: self.name.clone(),
@@ -3843,7 +3851,7 @@ impl Consumer {
 	/// handler request.
 	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
 		let options = options.into().unwrap_or_default();
-		let state = self.resolve();
+		let state = self.resolve(None).0;
 		let resume = state.read().routes.clone();
 
 		// One fetch per calling context, counted here (coalesced upstream work is
@@ -3915,7 +3923,7 @@ impl Consumer {
 		kio::Pending::new(Querying {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
-			state: self.resolve(),
+			state: self.resolve(None).0,
 			stats: self.stats.clone(),
 		})
 	}
@@ -4034,6 +4042,16 @@ pub struct Subscribing {
 }
 
 impl Subscribing {
+	/// Query the same track with this subscription already registered.
+	pub(super) fn query(&self) -> Querying {
+		Querying {
+			name: self.name.clone(),
+			broadcast: self.broadcast.clone(),
+			state: self.state.clone(),
+			stats: self.stats.clone(),
+		}
+	}
+
 	/// Poll until the peer confirms the subscription, yielding the [`Subscriber`].
 	/// Errors if the track is aborted or not found.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Subscriber>> {
@@ -5930,8 +5948,9 @@ impl Request {
 	}
 
 	/// Join the eventual track's demand, for a request made through its broadcast.
-	pub(super) fn join(&self) -> kio::Consumer<TrackState> {
-		self.state.consume()
+	pub(super) fn join(&self, subscription: Option<&Subscription>) -> (kio::Consumer<TrackState>, Option<Preferences>) {
+		let preferences = subscription.map(|value| Preferences::register(self.state.read(), value.clone()));
+		(self.state.consume(), preferences)
 	}
 
 	/// Read the eventual track without joining its demand.
