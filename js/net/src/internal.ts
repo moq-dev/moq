@@ -344,6 +344,12 @@ export const hooks: {
 	 * a higher one. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
+	// private: passthrough
+	/** Re-evaluate a live-edge join at this subscriber's copy. */
+	joinSubscriber: (subscriber: Subscriber) => void;
+	/** Re-evaluate a live-edge join at a producer. */
+	joinProducer: (producer: Producer) => void;
+
 	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * Declare the first group a wire subscription's live feed serves (lite SUBSCRIBE_START, or
@@ -351,10 +357,6 @@ export const hooks: {
 	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
 	 * `track.ts`.
 	 */
-	/** Re-evaluate a live-edge join at this subscriber's copy. */
-	joinSubscriber: (subscriber: Subscriber) => void;
-	/** Re-evaluate a live-edge join at a producer. */
-	joinProducer: (producer: Producer) => void;
 	startTrack: (producer: Producer, served: { start: number; requested?: number }) => void;
 	// pending: /quest/m1/public-model/ingest.md
 	/**
@@ -369,6 +371,7 @@ export const hooks: {
 	pendingTrackProducer: (request: Request) => Producer;
 	/** Have a producer write through a broadcast's sequence namespace for its name. */
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
+	// private: capability gap
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Location | undefined;
 	// private: capability gap
