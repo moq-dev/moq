@@ -33,8 +33,11 @@ unable to keep the header unless it does.
   2026-10-17 on #5817: a byte offset rather than a `Checkpoint` handle; an
   offset past the written data panics instead of being unrepresentable.
   Implement it in the moq-tokio and
-  moq-uring adapters. Backends that cannot do it (browser, qmux, iroh) report
-  that rather than silently sending a plain reset.
+  moq-uring adapters. Backends that cannot do it (browser, iroh, and qmux
+  until it runs on `moq-quic`) report that rather than silently sending a
+  plain reset. Whichever of this quest and
+  [quic-qmux](/quest/m1/quic-qmux.md) lands second implements the reset on
+  qmux's session through the shared `RESET_STREAM_AT` state.
 - The lite publisher checkpoints right after writing a group header and
   resets the group from that checkpoint.
 - QUIC negotiation alone cannot drop the grace. A peer's stack can advertise

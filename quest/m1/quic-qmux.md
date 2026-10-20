@@ -51,7 +51,10 @@ qmux runs over a reliable ordered transport, serialization acknowledges the
 committed prefix immediately, but the receiver must still delay the reset
 until that prefix is available. Remove the qmux prototype's local
 `RESET_STREAM_AT` state once the shared core owns it (moved here from
-reliable reset in the 2026-10-05 audit).
+reliable reset in the 2026-10-05 audit). If
+[A reset group keeps its header](/quest/m1/quic/group-reset.md) landed first,
+the session's `transport::poll::SendStream` implements its offset reset
+instead of reporting it unsupported.
 
 Carry the hierarchical send groups from the scheduler quest into qmux's
 record writer. Qmux over TCP, TLS, WebSocket, Unix sockets, and in-memory
