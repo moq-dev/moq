@@ -31,7 +31,7 @@ mod namespace;
 pub(crate) mod object;
 pub mod peer;
 mod priority;
-mod properties;
+pub(crate) mod properties;
 mod publish;
 mod publish_namespace;
 #[cfg(feature = "async")]

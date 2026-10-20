@@ -160,16 +160,20 @@ pub(crate) struct Sealed {
 	pub gap: Option<u64>,
 }
 
-/// Parse an Immutable Properties block (0x0b) serialized in the `encoding` family.
-pub(crate) fn sealed(bytes: &Bytes, encoding: Encoding) -> Result<Sealed, Error> {
-	// Any draft in the family parses its keys and integers the same way.
-	let version = match encoding {
+/// A draft that serializes properties in the `encoding` family. Any draft in the family
+/// parses its keys and integers the same way.
+pub(super) fn family(encoding: Encoding) -> Version {
+	match encoding {
 		Encoding::Absolute => Version::Draft14,
 		Encoding::DeltaQuic => Version::Draft16,
 		Encoding::Delta { seven: false } => Version::Draft17,
 		Encoding::Delta { seven: true } => Version::Draft18,
-	};
-	let nested = list(bytes, version, true).map_err(|_| Error::MalformedTrack)?;
+	}
+}
+
+/// Parse an Immutable Properties block (0x0b) serialized in the `encoding` family.
+pub(crate) fn sealed(bytes: &Bytes, encoding: Encoding) -> Result<Sealed, Error> {
+	let nested = list(bytes, family(encoding), true).map_err(|_| Error::MalformedTrack)?;
 	Ok(Sealed {
 		time: nested.time.is_some(),
 		gap: nested.gap,

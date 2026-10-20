@@ -151,7 +151,7 @@ Immutable Properties (0x0b) are forwarded as the publisher's bytes.
 A block MUST contain exactly one when `Flags >> 1` is not 0, and none otherwise.
 
 The Timestamp property (0x10) carries the object's timestamp in the track's Timescale ({{moql}} TRACK_INFO), whatever units the publisher used.
-A record MAY omit it when it equals the frame's timestamp.
+It MUST be present whenever the object has one, since an absent Timestamp is relayed as absent.
 Other properties are opaque to this extension.
 
 
@@ -162,18 +162,20 @@ When the extension is negotiated, the publisher sends a TRACK_PROPERTIES message
 TRACK_PROPERTIES Message {
   Message Length (i)
   Flags (i)
-  Sealed Count (i)
-  Sealed ID (i) ...
   Property (..) ...
 }
 ~~~
 
 **Flags** and **Property**:
 As in [Properties](#properties), for the {{moqt}} Track Properties a relay forwards without interpreting.
+An empty message is a Flags of 0 and no properties.
 
-**Sealed ID**:
-The IDs of the properties inside the Immutable Properties, which a relay MUST NOT restate as mutable.
-A message MUST NOT list any without an Immutable Properties property.
+A message MUST NOT carry more than 64 properties, nor any a relay interprets rather than forwards: MAX_CACHE_DURATION (0x04), TIMESCALE (0x08), DEFAULT_PUBLISHER_PRIORITY (0x0e), DEFAULT_PUBLISHER_GROUP_ORDER (0x22), and DYNAMIC_GROUPS (0x30).
+TRACK_INFO carries what a relay keeps of them, so a second copy could only contradict it.
+A message that breaks either rule is malformed.
+
+The receiver parses the keys inside the Immutable Properties from its value, which a relay MUST NOT restate as mutable.
+Track Properties never use the Immutable Properties family of drafts 14 and 15, so a `Flags >> 1` of 1 is malformed here.
 
 
 # Datagrams {#datagrams}
@@ -209,7 +211,8 @@ A datagram with a non-zero Status carries no object: it has no Timestamp, even o
 
 # Security Considerations
 A peer sets how much state a receiver holds for each object, up to 65,536 bytes of properties.
-A receiver SHOULD charge it to the group's cache budget like a payload.
+A receiver SHOULD charge it to the group's cache budget like a payload, including any overhead of its decoded form.
+A TRACK_PROPERTIES message is bounded by its Message Length and the 64-property limit, and is held once per track.
 
 The extension adds no authority.
 A relay applies the same authorization to a relayed group as to a plain one.

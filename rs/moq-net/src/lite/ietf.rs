@@ -147,10 +147,13 @@ fn encode_list<'a>(w: &mut Encoder<'_>, values: impl IntoIterator<Item = &'a Pro
 	Ok(())
 }
 
-/// Decode properties to the end of `r`, in the order they arrived.
-fn decode_list(r: &mut Decoder<'_>) -> Result<Vec<Property>, DecodeError> {
+/// Decode up to `max` properties to the end of `r`, in the order they arrived.
+fn decode_list(r: &mut Decoder<'_>, max: usize) -> Result<Vec<Property>, DecodeError> {
 	let mut values = Vec::new();
 	while !r.is_empty() {
+		if values.len() >= max {
+			return Err(DecodeError::TooMany);
+		}
 		let id = r.varint()?;
 		let value = match id % 2 {
 			0 => Value::Int(r.varint()?),
@@ -218,7 +221,8 @@ pub(crate) fn decode_properties(
 	}
 	let r = &mut Decoder::new(block, version.into());
 	(properties.delivery_timeout, properties.immutable) = decode_flags(r.varint()?)?;
-	let mut values = decode_list(r)?;
+	// The block's length bounds them, as for a moq-transport object.
+	let mut values = decode_list(r, usize::MAX)?;
 
 	let mut timestamps = values.iter().filter(|property| property.id == TIMESTAMP);
 	properties.timestamp = match timestamps.next() {
@@ -360,29 +364,28 @@ pub struct TrackProperties(pub Option<Arc<crate::model::object::TrackProperties>
 impl Message for TrackProperties {
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		let Some(properties) = &self.0 else {
-			w.varint(0)?;
 			return w.varint(0);
 		};
 		w.varint(encode_flags(properties.delivery_timeout, properties.immutable))?;
-		w.varint(properties.sealed.len() as u64)?;
-		for id in &properties.sealed {
-			w.varint(*id)?;
-		}
 		encode_list(w, &properties.values)
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
 		let (delivery_timeout, encoding) = decode_flags(r.varint()?)?;
-		let count = r.varint()?;
-		// Every ID takes at least a byte, so this bounds the allocation by the message.
-		if count > r.remaining() as u64 {
-			return Err(DecodeError::Short);
-		}
-		let sealed = (0..count).map(|_| r.varint()).collect::<Result<Vec<_>, _>>()?;
-		let values = decode_list(r)?;
-		if immutable(&values, encoding)?.is_none() && !sealed.is_empty() {
+		// No more than moq-transport ingress keeps, which is all a relay forwards.
+		let values = decode_list(r, crate::ietf::properties::MAX_PROPERTIES as usize)?;
+		// TRACK_INFO carries these, so a second copy could only contradict it.
+		if values
+			.iter()
+			.any(|property| crate::ietf::properties::understood(property.id))
+		{
 			return Err(DecodeError::InvalidValue);
 		}
+		// The sealed keys are the block's own, so they are parsed rather than trusted.
+		let sealed = match (immutable(&values, encoding)?, encoding) {
+			(Some(block), Some(encoding)) => crate::ietf::properties::sealed_ids(block, encoding)?,
+			_ => Vec::new(),
+		};
 		if values.is_empty() {
 			return Ok(Self(None));
 		}
@@ -593,6 +596,49 @@ mod tests {
 		let decoded =
 			<TrackProperties as crate::coding::Decode<Version>>::decode(&mut Decoder::new(&none, V.into()), V).unwrap();
 		assert!(decoded.0.is_none());
+	}
+
+	/// A peer cannot make a relay hold or forward more than moq-transport ingress would,
+	/// restate what TRACK_INFO carries, or claim sealed keys its block does not hold.
+	#[test]
+	fn track_properties_refuse_what_ingress_would_not_keep() {
+		let decode = |values: Vec<Property>, immutable: Option<Encoding>| {
+			let msg = TrackProperties(Some(Arc::new(crate::model::object::TrackProperties {
+				values,
+				immutable,
+				..Default::default()
+			})));
+			let buf = crate::coding::Encode::encode_bytes(&msg, V).unwrap();
+			<TrackProperties as crate::coding::Decode<Version>>::decode(&mut Decoder::new(&buf, V.into()), V)
+		};
+		let opaque = |id| Property {
+			id,
+			value: Value::Int(1),
+		};
+
+		let max = crate::ietf::properties::MAX_PROPERTIES;
+		assert!(decode((0..max).map(|i| opaque(0x40 + 2 * i)).collect(), None).is_ok());
+		assert!(
+			decode((0..=max).map(|i| opaque(0x40 + 2 * i)).collect(), None).is_err(),
+			"more than ingress keeps"
+		);
+		// TIMESCALE belongs to TRACK_INFO.
+		assert!(decode(vec![opaque(0x08)], None).is_err(), "an understood property");
+
+		// The sealed keys come from the block, never the sender.
+		let sealed = Property {
+			id: IMMUTABLE,
+			value: Value::Bytes(Bytes::from_static(&[0x20, 0x01, 0x04, 0x05])),
+		};
+		let decoded = decode(vec![sealed.clone()], Some(Encoding::Delta { seven: true }))
+			.unwrap()
+			.0
+			.unwrap();
+		assert_eq!(decoded.sealed, [0x20, 0x24]);
+		assert!(
+			decode(vec![sealed], Some(Encoding::Absolute)).is_err(),
+			"track properties never use absolute keys"
+		);
 	}
 
 	#[test]

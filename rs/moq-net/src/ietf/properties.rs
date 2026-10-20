@@ -19,7 +19,8 @@ use crate::model::object::{Property, TrackProperties, Value};
 
 use super::{GroupOrder, Version};
 
-const MAX_PROPERTIES: u64 = 64;
+/// The most Track Properties a message may carry, which also bounds what a relay forwards.
+pub(crate) const MAX_PROPERTIES: u64 = 64;
 /// Maximum byte value length per spec Section 1.4.3.
 const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
 
@@ -263,6 +264,30 @@ impl Properties {
 		seen.push(id);
 		Ok(true)
 	}
+}
+
+/// Whether moq-net applies the Track Property `id` itself, so a relay restates it from the
+/// track's info rather than forwarding the publisher's.
+pub(crate) fn understood(id: u64) -> bool {
+	matches!(
+		id,
+		MAX_CACHE_DURATION | TIMESCALE | DEFAULT_PUBLISHER_PRIORITY | DEFAULT_PUBLISHER_GROUP_ORDER | DYNAMIC_GROUPS
+	)
+}
+
+/// The keys a Track Properties' Immutable Properties `block` seals, serialized in the
+/// `encoding` family, checking the ones we understand as [`Properties::decode`] does.
+pub(crate) fn sealed_ids(block: &[u8], encoding: crate::model::object::Encoding) -> Result<Vec<u64>, DecodeError> {
+	// Track Properties start at draft-16, whose families all delta-encode their keys.
+	if encoding == crate::model::object::Encoding::Absolute {
+		return Err(DecodeError::InvalidValue);
+	}
+	let version = super::object::family(encoding);
+	sealed(
+		&mut Decoder::new(block, version.into()),
+		&mut Properties::default(),
+		&mut Vec::new(),
+	)
 }
 
 /// A DYNAMIC_GROUPS value, which is a boolean: anything but 0 or 1 is malformed.

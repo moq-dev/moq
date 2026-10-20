@@ -1041,8 +1041,11 @@ struct RecordIngest {
 	relayed: bool,
 	/// The previous record's Object ID, `None` before the first.
 	prior: Option<u64>,
-	/// The record of the frame being read: its Object ID, properties, and Prior Object ID Gap.
-	pending: Option<(u64, crate::model::object::Properties, Option<u64>)>,
+	/// The record of the frame being read: its Object ID and properties block.
+	///
+	/// The block stays encoded until the frame is created, so the cache charges its decoded
+	/// form at once rather than a stalled stream holding it uncharged.
+	pending: Option<(u64, bytes::Bytes)>,
 }
 
 enum IngestPhase {
@@ -1164,8 +1167,8 @@ impl FrameIngest {
 					if !records.relayed && (end || !block.is_empty()) {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
-					let decoded = lite::ietf::decode_properties(&block, self.timescale, self.version)?;
 					if end {
+						let decoded = lite::ietf::decode_properties(&block, self.timescale, self.version)?;
 						group.mark_gap(id, decoded.gap)?;
 						group.set_end_object(crate::model::object::Fields {
 							id,
@@ -1173,7 +1176,7 @@ impl FrameIngest {
 						})?;
 						self.phase = IngestPhase::Ended;
 					} else {
-						records.pending = Some((id, decoded.properties, decoded.gap));
+						records.pending = Some((id, block));
 						self.phase = IngestPhase::Timing;
 					}
 				}
@@ -1210,9 +1213,11 @@ impl FrameIngest {
 					// A frame that says nothing a plain frame would not keeps no fields.
 					let fields = match &mut self.records {
 						Some(records) => {
-							let (id, properties, gap) = records.pending.take().expect("a record precedes each frame");
+							let (id, block) = records.pending.take().expect("a record precedes each frame");
+							let lite::ietf::Decoded { properties, gap } =
+								lite::ietf::decode_properties(&block, self.timescale, self.version)?;
 							group.mark_gap(id, gap)?;
-							// The frame header already carries the time, so a record may omit it.
+							// Time alone, which the frame header carries already, is plain.
 							let plain = id == group.frame_count() as u64
 								&& properties.is_plain() && properties
 								.timestamp
@@ -2425,8 +2430,9 @@ mod tests {
 	}
 
 	/// Receive group 0 of an untimed track over a lite-07 session that negotiated the
-	/// `ietf` extension, its stream holding `body` after the GROUP header.
-	async fn receive_ietf(body: &[u64]) -> (Result<(), Error>, track::Producer) {
+	/// `ietf` extension, its stream holding `body` after the GROUP header. Also returns the
+	/// cache pool the track charges.
+	async fn receive_ietf(body: &[u64]) -> (Result<(), Error>, track::Producer, crate::cache::Pool) {
 		use crate::transport::poll::Session as _;
 
 		let version = Version::Lite07;
@@ -2460,8 +2466,12 @@ mod tests {
 			going_away: Default::default(),
 			auth: crate::auth::Handle::new(false),
 		});
+		let pool = crate::cache::Pool::unbounded();
 		let track = track::Producer::new(
-			std::sync::Arc::new(crate::broadcast::Info::default()),
+			std::sync::Arc::new(crate::broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
 			"video",
 			crate::track::Info::default().with_timescale(None),
 		);
@@ -2477,14 +2487,14 @@ mod tests {
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
 		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
-		(res, track)
+		(res, track, pool)
 	}
 
 	/// Object records: `(Skip << 1) | END`, the properties block's length, then the frame.
 	#[moq_clock::test]
 	async fn ietf_records_frame_a_group() {
 		// A plain group: Group State 0, then frame 0 with an empty record.
-		let (res, track) = receive_ietf(&[0, 0, 0, 1, u64::from(b'x')]).await;
+		let (res, track, _) = receive_ietf(&[0, 0, 0, 1, u64::from(b'x')]).await;
 		res.unwrap();
 		let mut group = track.consume().peek_group(0).unwrap();
 		assert_eq!(
@@ -2493,7 +2503,7 @@ mod tests {
 		);
 
 		// A relayed group starting at Object 4, then END_OF_GROUP at Object 6.
-		let (res, track) = receive_ietf(&[0x1, 4 << 1, 0, 1, u64::from(b'x'), (1 << 1) | 1, 0]).await;
+		let (res, track, _) = receive_ietf(&[0x1, 4 << 1, 0, 1, u64::from(b'x'), (1 << 1) | 1, 0]).await;
 		res.unwrap();
 		let group = track.consume().peek_group(0).unwrap();
 		assert_eq!(group.end_object().map(|end| end.id), Some(6));
@@ -2512,9 +2522,29 @@ mod tests {
 			(&[0x1, 1, 0, 0], "a byte after END_OF_GROUP"),
 			(&[0x1, 0, 0], "a stream ending inside a frame"),
 		] {
-			let (res, _) = receive_ietf(body).await;
+			let (res, ..) = receive_ietf(body).await;
 			assert!(res.is_err(), "accepted {reason}");
 		}
+	}
+
+	/// A properties block decodes to more heap than its wire bytes, so its decoded form is
+	/// what the cache charges, as the frame it describes is created.
+	#[moq_clock::test]
+	async fn ietf_records_charge_their_decoded_properties() {
+		const COUNT: u64 = 1000;
+		// A relayed group's Object 0, whose block holds COUNT two-byte properties (0x20 = 1)
+		// after its Flags, then an empty frame.
+		let mut body = vec![0x1, 0, 1 + 2 * COUNT, 0];
+		for _ in 0..COUNT {
+			body.extend([0x20, 1]);
+		}
+		body.push(0);
+		let (res, track, pool) = receive_ietf(&body).await;
+		res.unwrap();
+		let group = track.consume().peek_group(0).unwrap();
+		assert_eq!(group.frame_count(), 1);
+		let decoded = COUNT * size_of::<crate::model::object::Property>() as u64;
+		assert!(pool.used() >= decoded, "{} cached for {decoded} decoded", pool.used());
 	}
 
 	/// Receive group 5 starting at 500ms over `version`, on a received timed track whose
