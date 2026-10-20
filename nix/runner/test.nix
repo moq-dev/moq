@@ -81,13 +81,13 @@ pkgs.testers.runNixOSTest {
         ];
         ExecStart = lib.mkForce (
           pkgs.writeShellScript "cache-probe" ''
-            mkdir -p "$MBX_CACHE_DIR"
-          ulimit -l > "$MBX_CACHE_DIR/memlock"
-            if test -f "$MBX_CACHE_DIR/marker"; then
-              touch "$MBX_CACHE_DIR/reused"
-            fi
-            touch "$MBX_CACHE_DIR/marker"
-            exec ${pkgs.coreutils}/bin/sleep infinity
+              mkdir -p "$MBX_CACHE_DIR"
+            ulimit -l > "$MBX_CACHE_DIR/memlock"
+              if test -f "$MBX_CACHE_DIR/marker"; then
+                touch "$MBX_CACHE_DIR/reused"
+              fi
+              touch "$MBX_CACHE_DIR/marker"
+              exec ${pkgs.coreutils}/bin/sleep infinity
           ''
         );
       };
