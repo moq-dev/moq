@@ -56,4 +56,3 @@ FETCH, answered through the model's ranges. Run `just drafts check` and
 ## Required
 
 - [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the misses a relay fills upstream by range
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07's DROP for holes

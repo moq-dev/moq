@@ -12,6 +12,11 @@ A cap moved below the largest stays pending. Moving the bounds wakes a pending r
 Unbounded readers and `Track.Producer.largest()` are unchanged.
 To read the track's edge from a capped reader, lift the cap with `setGroups({})` first.
 
+### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
+
+Construct `SubscribeEnd(group)` without a stream count; remove reads of `.streams` and calls to `hasStreamCount()`.
+The unpublished `moq-lite-07-wip` wire restores `SUBSCRIBE_DROP` and removes Stream Count from `SUBSCRIBE_END`. Update both ends together; published lite versions keep their framing.
+
 ### `webtransport.protocols` is `versions` (#5979)
 
 Move the list to the top-level `versions` of `connect` or `Connection`, spelled as version names: `moq-transport-22`, not the ALPN `moqt-22`; lite names are unchanged.

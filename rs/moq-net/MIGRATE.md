@@ -13,6 +13,11 @@ Every `largest()`, `track::Producer` and `track::Consumer` included, now waits w
 Cached groups are still served meanwhile.
 To read the track's edge from a capped reader, lift the cap with `set_groups(..)` first.
 
+### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
+
+`lite::SubscribeEnd` now contains only `group`; remove `streams` from struct literals and stop calling `Version::has_stream_count()`.
+The unpublished `moq-lite-07-wip` wire restores `SUBSCRIBE_DROP` and removes Stream Count from `SUBSCRIBE_END`. Update both ends together; published lite versions keep their framing.
+
 ### Track demand reports the wanted group (#5930)
 
 `track::Demand::used`, `unused`, `is_used`, `poll_used`, and `poll_unused` are gone.
