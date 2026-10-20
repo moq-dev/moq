@@ -1851,7 +1851,7 @@ test("an update whose bound the wire can't carry fails the track", async () => {
 	}
 });
 
-test("a retired subscribe response type closes the session", async () => {
+test("an unknown subscribe response type closes the session", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -1860,8 +1860,8 @@ test("a retired subscribe response type closes the session", async () => {
 		await opened(0);
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await (await opened(1)).reading;
-		// lite-07 retired SUBSCRIBE_DROP (0x2), so it is no longer a response type.
-		streams[1].inbound.enqueue(new Uint8Array([2, 0]));
+		// An unassigned response type is a session protocol violation.
+		streams[1].inbound.enqueue(new Uint8Array([3, 0]));
 		expect(await track.closed).toBeInstanceOf(ProtocolViolation);
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);

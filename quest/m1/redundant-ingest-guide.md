@@ -31,10 +31,6 @@ Decided 2026-10-19 by the maintainer: a general page, not a TS section,
 since multiple routes are the non-obvious part. Link it from the relay
 cluster page and the `moq` publisher-runs section of `doc/bin/cli.md`.
 
-## Required
-
-- [Redundant importers run on distinct epochs](/quest/m0/broadcast-epoch/distinct-importer-epochs.md) - `--epoch` is removed and the failover behavior the page describes is tested
-
 ## Related
 
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - restart and takeover semantics the page links to
