@@ -1941,6 +1941,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
 		writer.buffer(&lite::TrackInfo {
+			refresh: info.refresh,
 			priority: info.priority,
 			max_age: info.max_age,
 			timescale: info.timescale,
@@ -3655,6 +3656,14 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// subscription. This is what lets relays pause an upstream subscription across
 	/// consumer churn without tearing it down.
 	fn update(&mut self, upd: lite::SubscribeUpdate) {
+		// Every update restates the wanted group. Past our largest it is a join, which
+		// repeats the pending ask; at or below it the group already exists.
+		if upd
+			.wanted_group
+			.is_some_and(|wanted| self.track.peek_largest().is_none_or(|largest| wanted > largest.group))
+		{
+			self.track.join();
+		}
 		if let Ok(mut value) = self.steer_tx.write() {
 			*value = Steer {
 				priority: upd.priority,
@@ -4962,6 +4971,42 @@ mod serve_group_test {
 		(TrackRun::new(ctx, track, bounds, steer), writer, log)
 	}
 
+	#[moq_clock::test]
+	async fn wanted_updates_ignore_stale_groups_and_recheck_the_ratio() {
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"refresh",
+			track::Info::default().with_refresh(1),
+		);
+		let subscriber = track.subscribe(None);
+		let (mut run, _, _) = lite_run(Version::Lite07, SinkSession::new(Log::default()), subscriber);
+		let mut group = track.append_group().unwrap();
+		group.write_frame(None, &b"key"[..]).unwrap();
+		group.write_frame(None, &b"more"[..]).unwrap();
+		group.finish().unwrap();
+		let update = |wanted_group| lite::SubscribeUpdate {
+			wanted_group,
+			priority: 0,
+			max_delay: Duration::ZERO,
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+			order: Order::Descending,
+		};
+		run.update(update(Some(0)));
+		assert_eq!(track.demand().wanted(), Some(0), "stale request is not a join");
+		run.update(update(Some(1)));
+		assert_eq!(track.demand().wanted(), Some(1));
+		let mut group = track.append_group().unwrap();
+		group.write_frame(None, &b"key"[..]).unwrap();
+		group.finish().unwrap();
+		run.update(update(Some(1)));
+		assert_eq!(track.demand().wanted(), Some(1), "answered request stays answered");
+		run.update(update(Some(2)));
+		assert_eq!(track.demand().wanted(), Some(1), "new hop judges its own ratio");
+	}
+
 	fn write_group(track: &mut track::Producer, sequence: u64, millis: u64) {
 		let mut group = track.create_group(group::Info { sequence }).unwrap();
 		group
@@ -5004,6 +5049,7 @@ mod serve_group_test {
 		assert!(log.priorities().is_empty(), "the session queue ranks no stream");
 
 		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
 			order: Order::Ascending,
 			priority: 7,
 			max_delay: Duration::ZERO,
@@ -5078,6 +5124,7 @@ mod serve_group_test {
 		}
 
 		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
 			order: Order::Ascending,
 			priority: 3,
 			max_delay: Duration::from_secs(3600),
@@ -5370,6 +5417,7 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, []);
 
 		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
@@ -5745,6 +5793,7 @@ mod serve_group_test {
 		assert_eq!(run.start, Some(5));
 
 		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
@@ -5787,6 +5836,7 @@ mod serve_group_test {
 
 		moq_clock::sim::advance(Duration::from_secs(2)).await;
 		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(1),
@@ -5832,6 +5882,7 @@ mod serve_group_test {
 		}
 
 		let update = |start_group| lite::SubscribeUpdate {
+			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(1),
@@ -5877,6 +5928,7 @@ mod serve_group_test {
 		}
 
 		let update = |start_group| lite::SubscribeUpdate {
+			wanted_group: None,
 			order: crate::track::Order::Ascending,
 			priority: 0,
 			max_delay: Duration::from_secs(10),
@@ -5924,6 +5976,7 @@ mod serve_group_test {
 		assert_eq!(settle(&mut run), 1);
 
 		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
@@ -5955,6 +6008,7 @@ mod serve_group_test {
 		);
 		let (mut run, mut writer, _log) = lite_run(Version::Lite05, SinkSession::new(Log::default()), subscriber);
 		run.update(lite::SubscribeUpdate {
+			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
@@ -6091,6 +6145,7 @@ mod serve_group_test {
 		assert_eq!(relay.opened(), 0, "the resume is past the only group");
 
 		relay.run.update(lite::SubscribeUpdate {
+			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(30),
@@ -6122,6 +6177,7 @@ mod serve_group_test {
 		assert_eq!(relay.opened(), 2, "groups 1 and 2 are at or above the floor");
 
 		relay.run.update(lite::SubscribeUpdate {
+			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(30),
@@ -6150,6 +6206,7 @@ mod serve_group_test {
 
 		// The subscriber moves its start past the held group before the source resolves.
 		let update = lite::SubscribeUpdate {
+			wanted_group: None,
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::ZERO,
@@ -6991,7 +7048,9 @@ mod tests {
 	}
 
 	/// SUBSCRIBE_UPDATE is not a close: an update arriving while the subscription
-	/// resolves keeps it waiting, and still applies once it starts.
+	/// resolves keeps it waiting, and the latest applies once it starts. Its wanted group
+	/// is state each update restates: past the largest it joins, and once that group
+	/// exists the same value asks for nothing more.
 	#[moq_clock::test]
 	async fn a_subscribe_update_is_not_a_close() {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
@@ -7028,7 +7087,8 @@ mod tests {
 			track: "video".into(),
 			priority: 1,
 			max_delay: Duration::ZERO,
-			start_group: None,
+			// A relay asks from its cached group, so the SUBSCRIBE is not a live-edge join.
+			start_group: Some(1),
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
@@ -7048,30 +7108,54 @@ mod tests {
 		let mut serve = RequestServe::<_, SubscribeServe<ScriptedSession>>::new(publisher.shared.clone(), stream);
 		assert!(!drive(&mut serve).await);
 
-		let update = lite::SubscribeUpdate {
+		let update = |wanted_group, priority| lite::SubscribeUpdate {
+			wanted_group,
 			order: crate::track::Order::Descending,
-			priority: 7,
+			priority,
 			max_delay: Duration::ZERO,
-			start_group: None,
+			start_group: Some(1),
 			end_group: None,
 			start_frame: 0,
 			end_frame: None,
 		};
-		session.push(&update.encode_bytes(version).unwrap());
+		session.push(&update(Some(2), 3).encode_bytes(version).unwrap());
+		session.push(&update(Some(2), 7).encode_bytes(version).unwrap());
 		assert!(!drive(&mut serve).await, "an update ended the subscription");
 
-		// Resolve the track: the run starts at the updated priority.
+		// Resolve the track with a group over the ratio: the run starts at the latest
+		// priority, and its restated wanted group joins.
 		let request = dynamic
 			.requested_track()
 			.now_or_never()
 			.expect("track requested")
 			.unwrap();
-		let _track = request.accept(crate::track::Info::timed());
+		let track = request.accept(crate::track::Info::timed().with_refresh(1));
+		let mut group = track.create_group(group::Info { sequence: 1 }).unwrap();
+		for frame in [&b"key"[..], b"abc", b"d"] {
+			group.write_frame(crate::Timestamp::ZERO, frame).unwrap();
+		}
+		group.finish().unwrap();
 		assert!(!drive(&mut serve).await, "the subscription ended");
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
 			panic!("the subscription is not running");
 		};
 		assert_eq!(run.steer_tx.read().priority, 7, "the update was lost");
+		assert_eq!(track.demand().wanted(), Some(2), "the refresh request was lost");
+
+		// The asked-for group arrives, over the ratio too. A restated wanted group is now
+		// stale, so it is not another join.
+		let mut group = track.create_group(group::Info { sequence: 2 }).unwrap();
+		for frame in [&b"key"[..], b"abc", b"d"] {
+			group.write_frame(crate::Timestamp::ZERO, frame).unwrap();
+		}
+		group.finish().unwrap();
+		session.push(&update(Some(2), 5).encode_bytes(version).unwrap());
+		assert!(!drive(&mut serve).await, "the subscription ended");
+		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
+			panic!("the subscription is not running");
+		};
+		assert_eq!(run.steer_tx.read().priority, 5, "the update was lost");
+		assert_eq!(track.demand().wanted(), Some(2), "a stale wanted group joined");
 	}
 
 	/// A subscription that always has another group ready yields within its budget, so a

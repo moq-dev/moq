@@ -33,7 +33,8 @@ jobs:
     # A close/merge run exists only to cancel the superseded in-flight build via
     # the concurrency group above.
     if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
-    runs-on: ubuntu-24.04-arm
+    # Leave the variable unset until the local runner is online and verified.
+    runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
     # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     # Backstop a hang instead of holding the runner for the 6-hour default.
@@ -58,7 +59,7 @@ jobs:
           CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
       - uses: ./.github/actions/nix
-        if: steps.scope.outputs.needed == 'true'
+        if: steps.scope.outputs.needed == 'true' && runner.environment != 'self-hosted'
       - uses: DeterminateSystems/flake-checker-action@786422608c7bded2bbc9741ad9f91356842bf520 # main
         if: steps.scope.outputs.needed == 'true'
 
@@ -88,7 +89,8 @@ jobs:
   test:
     name: Test
     if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
-    runs-on: ubuntu-24.04-arm
+    # Leave the variable unset until the local runner is online and verified.
+    runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
     # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 60
@@ -112,7 +114,7 @@ jobs:
           CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
       - uses: ./.github/actions/nix
-        if: steps.scope.outputs.needed == 'true'
+        if: steps.scope.outputs.needed == 'true' && runner.environment != 'self-hosted'
 
       # Reads and writes like the `check` job above.
       - name: Rust cache

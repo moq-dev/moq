@@ -1683,6 +1683,7 @@ mod tests {
 			tail: tail.clone(),
 			served: None,
 			end: None,
+			wanted: None,
 		})
 	}
 
@@ -2095,6 +2096,7 @@ mod tests {
 			tail: Default::default(),
 			served: None,
 			end: Some(lite::SubscribeEnd { group: 10 }),
+			wanted: None,
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -3480,6 +3482,57 @@ mod tests {
 		assert_eq!((msg.end_group, msg.end_frame), (Some(5), None));
 	}
 
+	/// Concurrent joins over the refresh ratio send one SUBSCRIBE_UPDATE upstream, a new
+	/// group past the largest sends the next, and every update restates the latest.
+	#[moq_clock::test]
+	async fn refresh_joins_coalesce_upstream() {
+		let h = Harness::new(Version::Lite07);
+		let request = h._broadcast.reserve_track("refresh").unwrap();
+		let mut serving = ServeLoop::new(&h.serve, request, track::Info::default().with_refresh(1), None);
+		let track = h._broadcast.consume().track("refresh").unwrap();
+		let _baseline = track.subscribe(None).await.unwrap();
+		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		assert!(matches!(serving.sub, Sub::Active(_)), "the reader opens the upstream");
+		let established = h.wire().len();
+
+		let arrive = |serving: &ServeLoop<SinkSession>, sequence| {
+			let mut group = serving.serving.receive_group(group::Info { sequence }).unwrap();
+			for frame in [&b"key"[..], b"abc", b"d"] {
+				group.write_frame(None, frame).unwrap();
+			}
+			group.finish().unwrap();
+		};
+		let wanted = |h: &Harness| {
+			let wire = h.wire();
+			let mut wire = &wire[established..];
+			let mut wanted = Vec::new();
+			while !wire.is_empty() {
+				let msg = crate::coding::decode_buf(&mut wire, Version::Lite07, lite::SubscribeUpdate::decode).unwrap();
+				wanted.extend(msg.wanted_group);
+			}
+			wanted
+		};
+
+		// The deltas outweigh the first frame, so every join asks for group 1.
+		arrive(&serving, 0);
+		let mut joins = Vec::new();
+		for _ in 0..8 {
+			joins.push(track.subscribe(None).await.unwrap());
+			assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		}
+		assert_eq!(wanted(&h), [1], "joins coalesce into one request");
+
+		arrive(&serving, 1);
+		joins.push(track.subscribe(None).await.unwrap());
+		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		assert_eq!(wanted(&h), [1, 2], "the requested group re-arms the next request");
+
+		// A parameter change restates the pending wanted group rather than clearing it.
+		let _urgent = track.subscribe(Subscription::default().with_priority(9)).await.unwrap();
+		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		assert_eq!(wanted(&h), [1, 2, 2], "every update restates the wanted group");
+	}
+
 	/// A buffered SUBSCRIBE_START describes the demand its SUBSCRIBE carried, so
 	/// it applies exactly while the current start matches that demand: an update
 	/// that moves the start makes it stale (applying it could reopen a range the
@@ -4721,6 +4774,8 @@ struct SubStream<S: crate::transport::poll::Session> {
 	served: Option<u64>,
 	/// The track's exclusive end (SUBSCRIBE_END), once declared.
 	end: Option<lite::SubscribeEnd>,
+	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
+	wanted: Option<u64>,
 }
 
 impl<S: crate::transport::poll::Session> SubStream<S> {
@@ -4742,6 +4797,9 @@ impl<S: crate::transport::poll::Session> SubStream<S> {
 	}
 }
 
+// One per track copy, which holds a live stream while anyone reads it, so boxing it
+// would add an allocation per upstream subscription without saving memory.
+#[allow(clippy::large_enum_variant)]
 enum Sub<S: crate::transport::poll::Session> {
 	None,
 	Active(SubStream<S>),
@@ -5352,14 +5410,14 @@ enum Begin<S: crate::transport::poll::Session> {
 	Establish(Establish<S>),
 }
 
-/// Buffer a SUBSCRIBE_UPDATE echoing the current params, varying only the end
-/// bound. The caller flushes.
+/// Buffer the current SUBSCRIBE parameters with an updated end. The caller flushes.
 fn buffer_update<S: crate::transport::poll::Session>(
 	active: &mut SubStream<S>,
 	end: Option<Position>,
 ) -> Result<(), Error> {
 	let bounds = WireBounds::new(active.start, end);
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
+		wanted_group: active.wanted,
 		priority: active.priority,
 		max_delay: active.max_delay,
 		start_group: bounds.start_group,
@@ -5479,6 +5537,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 			tail: self.tail.clone(),
 			served: None,
 			end: None,
+			wanted: None,
 		}
 	}
 }
@@ -5762,7 +5821,8 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					let model = track::Info::default()
 						.with_timescale(info.timescale)
 						.with_max_age(info.max_age)
-						.with_priority(info.priority);
+						.with_priority(info.priority)
+						.with_refresh(info.refresh);
 					return Poll::Ready(Ok((model, HeldTrack(stream))));
 				}
 			}
@@ -5792,6 +5852,7 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	/// through the producer's aggregate (including the resume floor after a source
 	/// change).
 	serving: track::Producer,
+	largest: Option<u64>,
 	/// Watches `serving`'s subscribers, to release the copy once nobody reads it.
 	demand: track::Demand,
 	/// Serve on-demand fetches of uncached groups from this session.
@@ -6000,6 +6061,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 		let serving = request.accept(info);
 		serving.received();
 		Self {
+			largest: None,
 			demand: serving.demand(),
 			serving,
 			dynamic,
@@ -6123,6 +6185,29 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						}
 						Poll::Ready(Err(err)) => return Poll::Ready(ServeEnd::GiveBack(err)),
 						Poll::Pending => {}
+					}
+
+					// The wanted group is subscription state: an update announces each new one
+					// past our largest, and every later update restates it. Joins asking for
+					// the same group coalesce into that one update.
+					if serve.subscriber.version.has_refresh() {
+						if let Poll::Ready(Some(largest)) = self.serving.poll_largest(waiter) {
+							self.largest = Some(largest.group);
+						}
+						let _ = self.demand.poll_wanted_changed(waiter);
+						if let Sub::Active(active) = &mut self.sub
+							&& let Some(largest) = self.largest
+							&& let Some(wanted) = self.demand.wanted().filter(|wanted| *wanted > largest)
+							&& active.wanted != Some(wanted)
+						{
+							active.wanted = Some(wanted);
+							if let Err(err) =
+								buffer_update(active, self.serving.subscription().and_then(|sub| sub.end()))
+							{
+								return Poll::Ready(ServeEnd::GiveBack(err));
+							}
+							continue;
+						}
 					}
 
 					// (2) In-flight fetches; completions just retire. The demand is settled,

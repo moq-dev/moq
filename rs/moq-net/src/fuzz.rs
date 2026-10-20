@@ -611,6 +611,7 @@ impl Default for Messages {
 				end_frame: None,
 			},
 			lite_update: lite::SubscribeUpdate {
+				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Duration::from_millis(500),
@@ -624,6 +625,7 @@ impl Default for Messages {
 				largest: None,
 			}),
 			lite_info: lite::TrackInfo {
+				refresh: None,
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
 				timescale: Some(crate::Timescale::MICRO),
