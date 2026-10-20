@@ -451,7 +451,7 @@ class SmokeTest {
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
             while (demand.wantedChanged() == null) {}
             // `first` cancels the collection, which must release the subscription without an explicit cancel.
-            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first())
+            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
             while (demand.wantedChanged() != null) {}
         }
     }
