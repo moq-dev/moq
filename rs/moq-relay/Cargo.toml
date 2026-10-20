@@ -61,6 +61,8 @@ bytesize = "2.4.2"
 futures = { workspace = true }
 hex = { workspace = true }
 http-body = "1.0.1"
+# A 1.0 prerelease: the latest stable (0.16) is still on reqwest 0.12 and
+# reqwest-middleware 0.4, while this line matches reqwest 0.13 below.
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 humantime = { workspace = true }
 hyper-util = { workspace = true }
@@ -88,7 +90,7 @@ toml = { workspace = true }
 tower-service = "0.3"
 tracing = { workspace = true }
 url = { workspace = true, features = ["serde"] }
-usage = { workspace = true, features = ["completions", "config"] }
+usage-rs = { workspace = true, features = ["completions", "config"] }
 web-transport-trait = { workspace = true }
 x509-parser = { workspace = true }
 

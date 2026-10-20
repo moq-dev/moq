@@ -118,7 +118,7 @@ pub struct Traffic {
 impl Traffic {
 	/// The next frame, or `None` once the track ends (the producer went away).
 	pub async fn next(&mut self) -> Result<Option<TrafficFrame>> {
-		Ok(self.inner.next().await?)
+		Ok(self.inner.latest().await?.map(|value| value.value))
 	}
 }
 
@@ -130,7 +130,7 @@ pub struct Sessions {
 impl Sessions {
 	/// The next frame, or `None` once the track ends (the producer went away).
 	pub async fn next(&mut self) -> Result<Option<SessionsFrame>> {
-		Ok(self.inner.next().await?)
+		Ok(self.inner.latest().await?.map(|value| value.value))
 	}
 }
 
@@ -142,7 +142,7 @@ pub struct Totals {
 impl Totals {
 	/// The next frame, or `None` once the track ends (the producer went away).
 	pub async fn next(&mut self) -> Result<Option<TotalsFrame>> {
-		Ok(self.inner.next().await?)
+		Ok(self.inner.latest().await?.map(|value| value.value))
 	}
 }
 
@@ -155,7 +155,7 @@ impl Presence {
 	/// The next frame, or `None` once the track ends (the producer went away
 	/// or its group unannounced).
 	pub async fn next(&mut self) -> Result<Option<PresenceFrame>> {
-		Ok(self.inner.next().await?)
+		Ok(self.inner.latest().await?.map(|value| value.value))
 	}
 }
 
@@ -170,7 +170,7 @@ impl Prefix {
 	/// [`FrameTooLarge`](moq_net::Error::FrameTooLarge) once the frame outgrows
 	/// the cache.
 	pub async fn next(&mut self) -> Result<Option<PrefixFrame>> {
-		Ok(self.inner.next().await?)
+		Ok(self.inner.latest().await?.map(|value| value.value))
 	}
 }
 

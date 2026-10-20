@@ -95,7 +95,6 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [Performance audit](/quest/m0/audit-perf.md) - benchmarks that regressed since the last run are explained, fixed, or planned, and unbenched hot paths get coverage
 - [Compile time audit](/quest/m0/audit-compile-time.md) - build-time hotspots are measured against a baseline and the worst are fixed or planned
-- [Dependency and alternatives audit](/quest/m0/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
 - [Artifact size audit](/quest/m0/audit-size.md) - binary, FFI, WASM, and bundle growth since the last run is explained, fixed, or planned
 - [Simplification audit](/quest/m0/audit-simplify.md) - overbuilt code and APIs are collapsed, merged, or narrowed into a net simpler whole
 - [Quest tree audit](/quest/m0/audit-quests.md) - the tree agrees with itself and with main
