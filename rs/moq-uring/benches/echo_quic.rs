@@ -1,4 +1,6 @@
 //! Echo a tokio QUIC peer through the io_uring worker while ablating UDP features.
+// Benchmarks measure themselves on the host clock.
+#![allow(clippy::disallowed_methods)]
 
 use criterion::{criterion_group, criterion_main};
 
@@ -82,7 +84,7 @@ mod linux {
 				let session = client.connect(request).await.expect("connect");
 				let payload = vec![0x5a; PAYLOAD];
 				while let Ok(done) = start_rx.recv() {
-					let (mut send, mut recv) = session.open_bi().await.expect("open stream");
+					let (mut send, mut recv) = session.open_bi(Default::default()).await.expect("open stream");
 					send.write_all(&payload).await.expect("write");
 					send.finish().expect("finish");
 					assert_eq!(recv.read_to_end(PAYLOAD + 1).await.expect("read").len(), PAYLOAD);

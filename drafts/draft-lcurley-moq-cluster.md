@@ -144,8 +144,9 @@ NAMESPACE Message (Cluster) {
 ~~~
 
 The added fields are encoded exactly as in PUBLISH_NAMESPACE.
-Negotiating this extension enables the block on every NAMESPACE, with a parameter count of 0 when it is empty; when another extension defines the same block an endpoint appends one block holding the parameters of both, not two blocks.
-An endpoint MUST NOT append the block when nothing negotiated it, and MUST NOT include HOP_PATH or ROUTE_COST unless this extension is.
+Other extensions, such as MoQ Epoch (draft-lcurley-moq-epoch), carry their NAMESPACE parameters in the same block.
+A session appends exactly one block to every NAMESPACE when it negotiated any extension that uses the block, holding the parameters of all of them in any order, with a count of 0 when none applies; it appends none when it negotiated none.
+An endpoint MUST NOT include HOP_PATH or ROUTE_COST unless this extension is negotiated.
 
 NAMESPACE_DONE ({{moqt}} Section 10.17) carries no state from this extension.
 
@@ -226,6 +227,7 @@ An advertisement lives as long as its stream, so an update on a new stream would
 An endpoint MUST NOT open a second stream for an advertisement it already maintains on the session.
 
 An update replaces the old parameters atomically, so a receiver MUST NOT tear down subscriptions or drop cached state because one arrived, even when the first HOP_PATH entry changed: the namespace still names the same content ({{publishers}}).
+An update never changes an advertisement's instance; under MoQ Epoch another instance is a new advertisement.
 
 The expected update is a ROUTE_COST change, which is how a relay signals that it started or stopped carrying the namespace.
 
@@ -261,6 +263,9 @@ Under this extension an advertisement is a path, so a session advertises a names
 
 A namespace names one broadcast whichever publisher serves it, so several publishers of it are redundant copies: their groups are one sequence, and a subscription moves between them without a gap.
 A publisher MUST NOT reuse a namespace for different content, and publishes a new instance under a new namespace instead.
+
+A session that negotiated MoQ Epoch names the instance instead: the namespace and EPOCH together name the content, so only advertisements with the same EPOCH are redundant copies, and a publisher MAY reuse the namespace for a new instance under a new EPOCH.
+A receiver MUST NOT move a subscription between advertisements with different EPOCHs, or between advertisements without one.
 A refusal never moves to another publisher ({{selection}}).
 A relay that moves to another publisher MUST update its advertisement to the new path ({{updating}}).
 
@@ -311,6 +316,7 @@ The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a le
 # Appendix A: Changelog
 
 ## moq-cluster-02
+- Exactly one NAMESPACE parameter block is appended when any extension that uses it is negotiated, holding the parameters of all of them. Under MoQ Epoch, only advertisements with the same EPOCH are redundant copies, and an update never changes the instance.
 - A namespace names one broadcast whichever publisher serves it, and a publisher MUST NOT reuse one for different content. A receiver MAY fail a subscription over between any of its advertisements, continuing from the first object the subscriber lacks instead of at a group boundary. Replaces the first-Hop-ID publisher identity.
 - Defined request resolution against the longest covering prefix; every refusal is terminal, including between several publishers of one namespace, and capacity is signaled only by withdrawing or re-pricing the advertisement.
 - A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.

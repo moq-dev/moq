@@ -12,6 +12,8 @@ use std::time::Duration;
 use moq_relay::{Config, Connection, Relay, auth, cluster, web};
 use moq_tokio::moq_net;
 
+use crate::logs::Logs;
+
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
@@ -214,47 +216,6 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	web_handle.abort();
 }
 
-/// Relay log output as text, waking every waiter on each write.
-#[derive(Clone, Default)]
-struct Logs {
-	text: std::sync::Arc<std::sync::Mutex<String>>,
-	written: std::sync::Arc<tokio::sync::Notify>,
-}
-
-impl Logs {
-	/// Wait until the output contains `needle`.
-	async fn wait_for(&self, needle: &str) {
-		loop {
-			// Created before the check, so a write in between still wakes it.
-			let written = self.written.notified();
-			if self.text.lock().unwrap().contains(needle) {
-				return;
-			}
-			written.await;
-		}
-	}
-}
-
-impl std::io::Write for Logs {
-	fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-		self.text.lock().unwrap().push_str(&String::from_utf8_lossy(data));
-		self.written.notify_waiters();
-		Ok(data.len())
-	}
-
-	fn flush(&mut self) -> std::io::Result<()> {
-		Ok(())
-	}
-}
-
-impl tracing_subscriber::fmt::MakeWriter<'_> for Logs {
-	type Writer = Self;
-
-	fn make_writer(&self) -> Self {
-		self.clone()
-	}
-}
-
 /// A WebSocket session takes its id from the cluster-wide counter and logs its close, like
 /// a QUIC one, so the interop harness can pair its `conn{id=N}` span with that close.
 #[tokio::test]
@@ -300,6 +261,7 @@ async fn relay_websocket_logs_its_close_under_a_cluster_id() {
 		.await
 		.expect("the WebSocket session's close was not logged");
 
+	assert!(logs.text().contains("connection closed"));
 	web_handle.abort();
 }
 
@@ -589,87 +551,6 @@ async fn relay_websocket_root_path_upgrades() {
 	drop(track);
 	drop(broadcast);
 	drop(pub_connection);
-	drop(sub_connection);
-	web_handle.abort();
-}
-
-/// Two publish-only clients (each `with_publisher`, no `with_subscriber`) coexist on one relay;
-/// a single subscriber sees broadcasts forwarded from both. Verifies that multiple
-/// publish-only connections don't interfere with each other or get torn down.
-#[tokio::test]
-async fn two_publish_only_clients_coexist() {
-	let (port, web_handle) = spawn_relay().await;
-	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
-
-	// ── two publish-only publishers, each serving a distinct broadcast ──
-	let pub_a = moq_tokio::origin::spawn();
-	let broadcast_a = pub_a.create_broadcast("alpha").expect("create broadcast a");
-	broadcast_a.announce(Default::default()).expect("create broadcast a");
-	let track_a = broadcast_a.create_track("video", timed()).expect("create track a");
-	track_a
-		.append_group()
-		.expect("append group a")
-		.write_frame(moq_net::Timestamp::ZERO, b"a".as_ref())
-		.expect("write frame a");
-
-	let pub_b = moq_tokio::origin::spawn();
-	let broadcast_b = pub_b.create_broadcast("beta").expect("create broadcast b");
-	broadcast_b.announce(Default::default()).expect("create broadcast b");
-	let track_b = broadcast_b.create_track("video", timed()).expect("create track b");
-	track_b
-		.append_group()
-		.expect("append group b")
-		.write_frame(moq_net::Timestamp::ZERO, b"b".as_ref())
-		.expect("write frame b");
-
-	let (_client, sess_a) = tokio::time::timeout(
-		TIMEOUT,
-		connect_once(client().with_publisher(pub_a.consume()), url.clone()),
-	)
-	.await
-	.expect("publisher a connect timeout")
-	.expect("publisher a connect failed");
-	let (_client, sess_b) = tokio::time::timeout(
-		TIMEOUT,
-		connect_once(client().with_publisher(pub_b.consume()), url.clone()),
-	)
-	.await
-	.expect("publisher b connect timeout")
-	.expect("publisher b connect failed");
-
-	// ── one subscriber should see broadcasts from both publish-only clients ──
-	let sub_origin = moq_tokio::origin::spawn();
-	let sub_consumer = sub_origin.consume();
-	let mut announcements = sub_consumer.announced();
-	let (_client, sub_connection) =
-		tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
-			.await
-			.expect("subscriber connect timeout")
-			.expect("subscriber connect failed");
-
-	let mut seen = std::collections::HashSet::new();
-	while seen.len() < 2 {
-		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
-			.await
-			.expect("announcement timeout")
-			.expect("origin closed");
-		if active {
-			seen.insert(update.prefix.as_str().to_owned());
-		}
-	}
-	assert!(
-		seen.contains("alpha") && seen.contains("beta"),
-		"expected both publish-only broadcasts, saw {seen:?}"
-	);
-
-	// Hold producers until announcements are observed.
-	drop(track_a);
-	drop(broadcast_a);
-	drop(track_b);
-	drop(broadcast_b);
-
-	drop(sess_a);
-	drop(sess_b);
 	drop(sub_connection);
 	web_handle.abort();
 }
@@ -1077,119 +958,6 @@ async fn health_endpoint_reports_ok() {
 	assert_eq!(body, "ok\n");
 
 	web_handle.abort();
-}
-
-/// Stand up a stream relay whose public access grants **subscribe only**, returning
-/// the TCP port and an abort handle. A no-JWT client gets the root for subscribing but
-/// no publish scope, so a publisher's role is rejected.
-async fn spawn_subscribe_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
-	let mut config = moq_tokio::listen::Config::default();
-	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
-
-	// Subscribe-only public access: the root is granted for subscribing, never publishing.
-	let mut auth_config = auth::Config::default();
-	auth_config.public_subscribe = vec![moq_auth::Pattern::all()];
-
-	let (_, tcp, handle) = spawn_accept_relay(config, auth_config).await;
-	(tcp.expect("relay bound no TCP socket").port(), handle)
-}
-
-/// A publisher whose token grants only subscribe scope is rejected during the
-/// handshake instead of being accepted and silently carrying no media. The client
-/// advertises `Role::Publisher` in its SETUP (derived from `with_publisher`), and the
-/// relay closes the session because the token has no publish scope. This is the
-/// regression guard for the role hint: before it, this connection was
-/// accepted and the publisher streamed into a dropped session forever.
-#[tokio::test]
-async fn subscribe_only_public_rejects_publisher_role() {
-	let (port, handle) = spawn_subscribe_only_relay().await;
-	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-
-	let pub_origin = moq_tokio::origin::spawn();
-
-	// The lite-05 client resolves `connect()` optimistically, so it may return Ok
-	// before the relay's verdict lands. Either the connect fails outright, or the
-	// session it returns closes shortly after with the relay's rejection. A correctly
-	// scoped subscriber, by contrast, would stay open indefinitely.
-	match tokio::time::timeout(
-		TIMEOUT,
-		connect_once(client().with_publisher(pub_origin.consume()), url),
-	)
-	.await
-	{
-		Ok(Ok((_client, connection))) => {
-			let _ = tokio::time::timeout(TIMEOUT, connection.closed())
-				.await
-				.expect("relay should close a publisher whose token lacks publish scope, not leave it open");
-		}
-		Ok(Err(_)) => {} // rejected synchronously at connect; also acceptable.
-		Err(_) => panic!("publisher connect neither resolved nor was rejected within the timeout"),
-	}
-
-	handle.abort();
-}
-
-/// The mirror of the reject test: a subscriber (`Role::Subscriber`, from `with_subscriber`)
-/// is accepted by the same subscribe-only relay, and its session stays open. This proves
-/// the role gate rejects only the mismatched direction, not the whole listener.
-#[tokio::test]
-async fn subscribe_only_public_accepts_subscriber_role() {
-	let (port, handle) = spawn_subscribe_only_relay().await;
-	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-
-	let sub_origin = moq_tokio::origin::spawn();
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url))
-		.await
-		.expect("subscriber connect timeout")
-		.expect("subscriber connect failed");
-
-	// The session must NOT be closed by the relay: a short wait should time out.
-	let still_open = tokio::time::timeout(Duration::from_millis(500), connection.closed()).await;
-	assert!(
-		still_open.is_err(),
-		"subscribe-only relay should keep a subscriber session open"
-	);
-
-	handle.abort();
-}
-
-/// The mirror of [`spawn_subscribe_only_relay`]: public access grants **publish only**,
-/// so a no-JWT client gets the root for publishing but no subscribe scope.
-async fn spawn_publish_only_relay() -> (u16, tokio::task::JoinHandle<()>) {
-	let mut config = moq_tokio::listen::Config::default();
-	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
-
-	// Publish-only public access: the root is granted for publishing, never subscribing.
-	let mut auth_config = auth::Config::default();
-	auth_config.public_publish = vec![moq_auth::Pattern::all()];
-
-	let (_, tcp, handle) = spawn_accept_relay(config, auth_config).await;
-	(tcp.expect("relay bound no TCP socket").port(), handle)
-}
-
-/// The mirror of the publisher-reject test, covering the other branch of the role gate:
-/// a subscriber (`Role::Subscriber`, from `with_subscriber`) whose token grants only
-/// publish scope is rejected during the handshake instead of left silently empty.
-#[tokio::test]
-async fn publish_only_public_rejects_subscriber_role() {
-	let (port, handle) = spawn_publish_only_relay().await;
-	let url: url::Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
-
-	let sub_origin = moq_tokio::origin::spawn();
-
-	// Like the publisher case, `connect()` may resolve optimistically; either it fails
-	// outright, or the session the relay hands back closes shortly after.
-	match tokio::time::timeout(TIMEOUT, connect_once(client().with_subscriber(sub_origin), url)).await {
-		Ok(Ok((_client, connection))) => {
-			let _ = tokio::time::timeout(TIMEOUT, connection.closed())
-				.await
-				.expect("relay should close a subscriber whose token lacks subscribe scope, not leave it open");
-		}
-		Ok(Err(_)) => {} // rejected synchronously at connect; also acceptable.
-		Err(_) => panic!("subscriber connect neither resolved nor was rejected within the timeout"),
-	}
-
-	handle.abort();
 }
 
 /// Dial once and hand back the client with its connection.

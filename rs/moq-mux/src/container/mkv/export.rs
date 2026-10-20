@@ -72,7 +72,7 @@ struct MkvTrack {
 	reorder: Option<(u64, u64)>,
 	source: ExportSource,
 	pending: Option<crate::jitter::Arrival<Frame>>,
-	empty: web_async::time::Instant,
+	empty: moq_clock::Instant,
 	finished: bool,
 	track_number: u64,
 	kind: TrackKind,
@@ -323,7 +323,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	#[cfg(test)]
-	pub(super) fn next_deadline(&self) -> Option<web_async::time::Instant> {
+	pub(super) fn next_deadline(&self) -> Option<moq_clock::Instant> {
 		self.jitter.next_deadline()
 	}
 
@@ -362,7 +362,7 @@ impl<S: Stream> Export<S> {
 							break;
 						}
 						Poll::Pending => {
-							track.empty = web_async::time::Instant::now();
+							track.empty = moq_clock::now();
 							break;
 						}
 					};
@@ -377,7 +377,7 @@ impl<S: Stream> Export<S> {
 					}
 					crate::jitter::Arrival {
 						arrived: track.empty,
-						read: web_async::time::Instant::now(),
+						read: moq_clock::now(),
 						decode: frame.timestamp,
 						restart: track.source.markers(),
 						skip: track.source.skips(),
@@ -469,7 +469,7 @@ impl<S: Stream> Export<S> {
 					reorder: None,
 					source,
 					pending: None,
-					empty: web_async::time::Instant::now(),
+					empty: moq_clock::now(),
 					finished: false,
 					track_number: next_track_number,
 					kind: TrackKind::Video,
@@ -495,7 +495,7 @@ impl<S: Stream> Export<S> {
 					reorder: None,
 					source,
 					pending: None,
-					empty: web_async::time::Instant::now(),
+					empty: moq_clock::now(),
 					finished: false,
 					track_number: next_track_number,
 					kind: TrackKind::Audio,
@@ -708,6 +708,9 @@ fn build_video_track_entry(
 	if let Some(h) = config.coded_height {
 		video_children.push(MatroskaSpec::PixelHeight(h as u64));
 	}
+	if let Some(colour) = config.color.as_ref().and_then(matroska_colour) {
+		video_children.push(colour);
+	}
 
 	let mut entry: Vec<MatroskaSpec> = vec![
 		MatroskaSpec::TrackNumber(track_number),
@@ -723,6 +726,45 @@ fn build_video_track_entry(
 	}
 
 	Ok(MatroskaSpec::TrackEntry(Master::Full(entry)))
+}
+
+/// The Matroska `Colour` element for a catalog colour, carrying only the fields it sets.
+pub(super) fn matroska_colour(color: &hang::catalog::Color) -> Option<MatroskaSpec> {
+	let mut children = Vec::new();
+	if let Some(v) = color.matrix {
+		children.push(MatroskaSpec::MatrixCoefficients(v.into()));
+	}
+	if let Some(range) = color.range {
+		children.push(MatroskaSpec::Range(match range {
+			hang::catalog::Range::Limited => 1,
+			hang::catalog::Range::Full => 2,
+		}));
+	}
+	if let Some(v) = color.transfer {
+		children.push(MatroskaSpec::TransferCharacteristics(v.into()));
+	}
+	if let Some(v) = color.primaries {
+		children.push(MatroskaSpec::Primaries(v.into()));
+	}
+	if let Some(light) = color.content_light {
+		children.push(MatroskaSpec::MaxCLL(light.max_cll.into()));
+		children.push(MatroskaSpec::MaxFALL(light.max_fall.into()));
+	}
+	if let Some(m) = color.mastering {
+		children.push(MatroskaSpec::MasteringMetadata(Master::Full(vec![
+			MatroskaSpec::PrimaryRChromaticityX(m.red.x),
+			MatroskaSpec::PrimaryRChromaticityY(m.red.y),
+			MatroskaSpec::PrimaryGChromaticityX(m.green.x),
+			MatroskaSpec::PrimaryGChromaticityY(m.green.y),
+			MatroskaSpec::PrimaryBChromaticityX(m.blue.x),
+			MatroskaSpec::PrimaryBChromaticityY(m.blue.y),
+			MatroskaSpec::WhitePointChromaticityX(m.white.x),
+			MatroskaSpec::WhitePointChromaticityY(m.white.y),
+			MatroskaSpec::LuminanceMax(m.max_luminance),
+			MatroskaSpec::LuminanceMin(m.min_luminance),
+		])));
+	}
+	(!children.is_empty()).then_some(MatroskaSpec::Colour(Master::Full(children)))
 }
 
 pub(super) fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> Result<MatroskaSpec> {

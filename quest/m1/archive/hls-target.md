@@ -3,9 +3,9 @@
 ## Goal
 
 A `moq-hls` media playlist advertises one `EXT-X-TARGETDURATION` for the
-whole run, taken from the reference timeline's declared duration, so every
-edge and every reload agree on it. Segments stay one-to-one with timeline
-records: the edge never skips, splits, or renumbers one.
+whole run, taken from the declared duration of the rendition's opt-in `hls`
+field, so every edge and every reload agree on it. Segments stay one-to-one
+with `hls` records: the edge never skips, splits, or renumbers one.
 
 ## Plan
 
@@ -17,23 +17,22 @@ and falls when that record is evicted. Codex flagged it
 The 09-28 audit reversed #4280's decision 4 (the observed maximum), and the
 09-29 planning settled the rest:
 
-- The target is `ceil` of the reference timeline's declared duration from
-  [Timelines declare their segment duration](/quest/m1/archive/declared-duration.md).
-  Until that timeline's entry is declared, the rendition has no playlist yet.
+- The target is `ceil` of the declared `hls` duration from
+  [Catalog HLS field](/quest/m1/archive/catalog-hls.md) (retargeted
+  2026-10-17 from the root `archive` map). Until it is declared, the rendition
+  has no playlist yet.
 - A segment whose rounded `EXTINF` exceeds the target (a GOP that overran the
   publisher's declared value) is listed anyway, with a rate-limited warning.
   This deliberately deviates from RFC 8216 4.3.3.1's MUST, because refusing
   the segment loses content, and splitting or skipping it at the edge breaks
   the stable media sequence numbers of RFC 8216 6.2.2. Document the
   deviation. hls.js tolerates it; Apple's mediastreamvalidator flags it.
-- A record the publisher split mid-group at its safety ceiling is listed as
-  its own segment. Stop merging split halves back into one range
-  (`a_frame_split_record_is_not_a_video_boundary` in `spans.rs`). This is legal
-  because moq-hls never emits `EXT-X-INDEPENDENT-SEGMENTS`, so a segment may
-  start without a keyframe.
-- A non-reference rendition keeps the reference record's `EXTINF`, even though
-  its keyframe-snapped content can run longer. The user decided this needs no
-  change.
+
+Decided 2026-10-17: renditions that opt into `hls` align their segments, so
+the old non-reference `EXTINF` rule (a keyframe-snapped rendition keeping the
+reference record's duration) and the split-record handling
+(`a_frame_split_record_is_not_a_video_boundary` in `spans.rs`) go away with
+Catalog HLS field rather than here.
 
 Replace `target_duration_follows_the_observed_segments` with tests that pin
 the declared target across a window whose segment durations vary, and that
@@ -45,4 +44,4 @@ keeps the original target.
 
 ## Required
 
-- [Timelines declare their segment duration](/quest/m1/archive/declared-duration.md) - the declared value the target is taken from
+- [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - the opt-in `hls` field whose declared duration sets the target

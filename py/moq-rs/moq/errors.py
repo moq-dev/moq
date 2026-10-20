@@ -38,7 +38,8 @@ def is_shutdown(err: BaseException) -> bool:
 
 
 def is_auth(err: BaseException) -> bool:
-    """True for HTTP 401/403, an expired token, and a protocol Unauthorized or Expired session close.
+    """True for HTTP 401/403, an expired token, a protocol Unauthorized or Expired
+    session close, and a track revocation.
 
     Unlike a transport failure, retrying without new credentials won't help, so
     callers should surface these rather than reconnect.

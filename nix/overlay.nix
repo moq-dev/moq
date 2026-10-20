@@ -125,7 +125,8 @@ let
 
   moqCArgs = moqCInfo // {
     src = cleanCargoSource;
-    cargoExtraArgs = "-p moq-c";
+    # Releases carry the OpenH264 software fallback, which is opt-in.
+    cargoExtraArgs = "-p moq-c --features openh264";
     nativeBuildInputs = with final; [
       pkg-config
       # moq-c is the only nix-built package that pulls moq-video, and its `vaapi`
@@ -279,7 +280,8 @@ in
     crateInfo ../rs/moq-boy/Cargo.toml
     // {
       src = cleanCargoSource;
-      cargoExtraArgs = "-p moq-boy --features jemalloc";
+      # moq-boy encodes 160x144, below every hardware encoder's minimum.
+      cargoExtraArgs = "-p moq-boy --features jemalloc,openh264";
       nativeBuildInputs = with final; [
         pkg-config
         clang

@@ -46,13 +46,7 @@ pub struct Client {
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
 	/// can't diverge between transports.
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(feature = "_transport")]
 	versions: moq_net::Versions,
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
@@ -144,13 +138,6 @@ impl Client {
 			moq: moq_net::Client::new()
 				.with_versions(versions.clone())
 				.with_extensions(config.extensions),
-			#[cfg(any(
-				feature = "quic",
-				feature = "iroh",
-				feature = "websocket",
-				feature = "tcp",
-				feature = "uds"
-			))]
 			versions,
 			connect: config.url,
 			timeout,
@@ -309,6 +296,39 @@ impl Client {
 	pub fn consume(self, origin: moq_net::origin::Producer) -> Option<Connection> {
 		let url = self.connect.clone()?;
 		Some(self.with_subscriber(origin).connect(url))
+	}
+
+	/// Run a MoQ client session over the data channel an [`crate::webrtc::Offerer`] opened.
+	///
+	/// Waits for ICE and the channel to come up, bounded by the connect timeout. A
+	/// peer link cannot be redialed, so there is no reconnect: the session ends with
+	/// the peer connection.
+	#[cfg(feature = "webrtc")]
+	pub async fn connect_webrtc(&self, peer: &crate::webrtc::Offerer) -> crate::Result<moq_net::Session> {
+		let protocol = peer.protocol();
+		if !self.versions.alpns().contains(&protocol) {
+			return Err(crate::webrtc::Error::Protocol(protocol.to_string()).into());
+		}
+
+		let attempt = async {
+			let opened = peer.channel().await?;
+			let config = opened.config;
+			let session = qmux::Session::connect(opened.channel, config)
+				.await
+				.map_err(crate::webrtc::Error::from)?;
+			// A data channel has no request URI, so a path would ride the SETUP; a peer link has none.
+			let transport = crate::transport::Session::new(session, moq_net::transport::Binding::InBand);
+			Ok::<_, Error>(connect_session(&self.moq, transport).await?)
+		};
+
+		let session = match self.timeout.is_zero() {
+			true => attempt.await?,
+			false => tokio::time::timeout(self.timeout, attempt)
+				.await
+				.map_err(|_| Error::ConnectTimeout(self.timeout))??,
+		};
+		tracing::info!(version = %session.version(), transport = %crate::Transport::WebRtc, "connected");
+		Ok(session)
 	}
 
 	/// Dial the given URL and complete the MoQ handshake.
@@ -763,20 +783,12 @@ fn race_error(quic: Error, websocket: Error) -> Error {
 	}
 }
 
-#[cfg(any(
-	feature = "quic",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp",
-	all(feature = "uds", unix)
-))]
+#[cfg(feature = "_transport")]
 async fn connect_session<S: moq_net::transport::poll::Boxable>(
 	client: &moq_net::Client,
 	transport: S,
 ) -> Result<moq_net::Session, moq_net::Error> {
-	let (session, driver) = client
-		.connect(tokio::time::Instant::now().into_std(), transport)
-		.await?;
+	let (session, driver) = client.connect(moq_net::time::now(), transport).await?;
 	use tracing::Instrument;
 	tokio::spawn(crate::panic::isolate(moq_net::time::run(driver)).instrument(tracing::Span::current()));
 	Ok(session)

@@ -130,7 +130,7 @@ The lowercase hyphenated text of a UUID version 7 with the RFC variant ({{RFC956
 Noncanonical text and other UUID versions or variants MUST be refused (`identity`).
 Each instance of a broadcast MUST mint an epoch that no other instance under the same credential has used or will use.
 Two instances MUST NOT share an epoch: they would derive the same keys and collide on nonces.
-An encrypting core MUST mint its producing epoch internally and MUST NOT accept an explicit or shared epoch for production.
+An encrypting core MUST mint its producing epoch internally.
 Binding a discovered epoch MUST yield a consume-only generation.
 Clones of a producing generation MUST share permanent track claims so reopening a physical track cannot reset its nonce counters.
 Its leading 48-bit timestamp makes epochs sort by creation time and its random bits make collisions negligible.
@@ -216,7 +216,8 @@ key      = HKDF-Expand(prk, key_info, 16)
 
 A given `(generation, physical_name, domain)` tuple has one key.
 Implementations MUST derive names from semantic names, then keys from the resulting physical names.
-A subscriber that learns a physical name from a decrypted catalog derives its key without ever knowing the semantic name.
+A subscriber derives the physical name of each track from its semantic name, then that track's keys.
+A physical name cannot be mapped back to its semantic name, so a publisher serves only the tracks whose semantic names it already knows.
 
 
 # Object Identity {#identity}
@@ -268,8 +269,9 @@ Those three varints are at most 24 bytes, so datagram plaintext MUST be at most 
 
 ## Catalogs
 A catalog is a track like any other: published under the physical name derived from its semantic name, with each snapshot or delta protected at its own group and frame identity.
-Hang {{hang}} `catalog.json` and `catalog.json.z` and MSF's `catalog` are semantic names; authorized clients derive those physical names from the generation, then learn the remaining opaque names from the decrypted catalog.
-A Hang rendition-map key in that catalog is the physical name of the track.
+Hang {{hang}} `catalog.json` and `catalog.json.z` and MSF's `catalog` are semantic names; authorized clients derive those physical names from the generation.
+The decrypted catalog is unchanged from its plaintext form: every track it references, including rendition-map keys, `track` fields, and application extensions, keeps its semantic name.
+A subscriber derives the physical name of each track it reads; neither side rewrites the catalog, so extensions need no profile support.
 
 If a representation is compressed, compression is applied to the catalog bytes before AEAD and reversed after decryption.
 Encrypting then compressing is forbidden: ciphertext does not compress, and the `.z` sibling would leak the uncompressed size ratio.
@@ -339,6 +341,7 @@ Authorized endpoints that hold the broadcast secret are trusted.
 Sender authenticity against another endpoint that also holds the secret is not a goal of `moq-e2ee-00`.
 
 A relay can still observe the opaque broadcast path, route epoch, opaque physical names, group and frame structure, timestamps, sizes, and traffic patterns.
+A subscription for a physical name the publisher does not serve fails as for any missing track, which tells a relay only that the name is not served.
 Padding and metadata-flow confidentiality are out of scope.
 
 The opaque segment hides the application's semantic broadcast name from a relay only while the application does not publish or otherwise expose the same name in plaintext.
@@ -369,6 +372,7 @@ This document requests no registrations.
 
 - Require internally minted producing epochs and consume-only bindings for discovered epochs.
 - Require canonical UUIDv7 epochs, carried on the route rather than in the path, leaving HKDF UUID inputs unchanged.
+- Keep semantic track names in the decrypted catalog; subscribers derive physical names from them.
 
 ## draft-lcurley-moq-e2ee-00
 {:numbered="false"}

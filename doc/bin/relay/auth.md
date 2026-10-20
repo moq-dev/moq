@@ -28,12 +28,20 @@ token, the declared role, and the verified client certificate. Nothing is
 parsed on the server's behalf: the `jwt` query parameter is a convention of
 `moq auth serve`, not of the relay. The grant answers with `publish` and
 `subscribe` pattern unions and optionally a `root` alias, read-only `mounts`,
-`expires`, a `revalidate` cadence, a stats `tier`, and `peer` / `upstream` to
+`expires`, a `revalidate` cadence, a stats `tier` and `label`, and `peer` / `upstream` to
 mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
-**Connect.** A 2xx with a grant admits. A 401 or 403 refuses. Anything else,
+**Connect.** A 2xx with a grant admits. A 403 can carry JSON such as
+`{"reason":"expired","root":"rooms/123","tier":"edge"}`. The reason is
+`refused`, `forbidden`, or `expired`; unknown reason strings read as `refused`.
+A legacy plain-text 401 or 403 still reads as `refused`. Optional `root` and
+`tier` attribute refusal counters, with an absent tier using the default.
+Only name a root from a verified credential, including an expired token whose
+signature and key scope were verified. Never copy the unverified dialed path
+into `root`: that would let callers create unbounded stats entries.
+Anything else,
 including a timeout or an unparseable body, refuses and logs an error, so
 nothing is admitted because the server was down. A grant that names nothing
 refuses, and so does one already expired: expiry is exact, with no grace for
@@ -52,8 +60,8 @@ flowing. A wider grant brings those paths back within the admitted root and
 SETUP role. A one-shot HTTP `/fetch` ends on a narrower grant instead. A
 changed `root`, `mounts`, `peer`, or `upstream`, or a 401 or 403, ends that
 credential's grant, which closes the session unless an
-[in-band](#in-band-renewal) credential still holds it. A changed `tier` keeps
-the session and moves its stats from then on. Any other failure retries with backoff and the session lives
+[in-band](#in-band-renewal) credential still holds it. A changed `tier` or
+`label` keeps the session and moves its later stats. Any other failure retries with backoff and the session lives
 until `expires`, so an outage always has the bound the server chose. A grant
 with `revalidate` must set `expires` for that reason. A session that
 reaches `expires` closes as `Expired` rather than `Unauthorized`, which also
@@ -179,6 +187,24 @@ everything. Put application data somewhere other than the token.
 
 Tokens and key scopes from the older `moq-token` format still work: each `put`
 and `get` prefix `p` reads as the subtree `p/**`.
+
+`publish` and `subscribe` can also carry an optional bitrate cap in bits per
+second, for example `{"path":"alice/**","rate":8000000}`. Omit `rate` for
+uncapped access; zero, fractional, and inexact JSON integers are refused.
+Key scopes bound paths and refuse a bitrate cap. Capped tokens and auth-server
+grants always use the object form so older readers refuse them in full.
+
+The relay currently refuses every capped grant because its transports cannot
+enforce it yet, including a cap introduced at revalidation or in-band renewal.
+HTTP `/fetch` and `/announced` always refuse caps: a request has no connection
+to meter. An embedder running its own gateway must enforce the cap or refuse
+the grant before forwarding media.
+
+Caps describe a per-connection limit, so N connections can spend N times the
+rate. Pair them with a short expiry and a per-token session limit for a budget,
+remembering that the auth server's session counts are approximate across
+restarts. Account for keyframe bursts and leave headroom above the encoder
+bitrate when choosing a limit.
 
 ### Path matching
 
@@ -343,7 +369,9 @@ An application that [embeds](/bin/relay/#embed) the relay can decide
 admissions itself, without the HTTP: leave `[auth]` empty and take
 `relay.admissions()` before `run`. Each `Admission` carries the same
 `moq_auth::Request` a server would read, and is answered with a lease or a
-refusal. A fixed lease never changes; a `lease::Producer` the application keeps
+refusal. Pass the shared `moq_auth::Refusal` in `auth::Error::Refused` to
+`Admission::refuse`, using the same verified-root rule as an HTTP server.
+A fixed lease never changes; a `lease::Producer` the application keeps
 re-checks, updates, and revokes on its own clock. The relay still closes the
 session at the grant's `expires`, and an admission left unanswered for ten
 seconds is refused. `Admission::attached()` marks a token presented

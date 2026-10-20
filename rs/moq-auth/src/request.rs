@@ -146,7 +146,7 @@ pub enum Transport {
 	Rtmp,
 	/// An SRT gateway session.
 	Srt,
-	/// A WebRTC gateway session, including WHIP and WHEP.
+	/// A WebRTC session: a WHIP or WHEP gateway, or MoQ over a data channel.
 	WebRtc,
 	/// A WebTransport connection over HTTP/3.
 	WebTransport,

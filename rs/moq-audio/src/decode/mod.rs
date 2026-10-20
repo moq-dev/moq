@@ -5,7 +5,7 @@
 //!
 //! Entry points, high to low level:
 //! - [`Consumer`] subscribes to a track and hands back decoded
-//!   [`Frame`](crate::Frame)s.
+//!   [`Read`] events.
 //! - [`Decoder`] decodes packets you supply (bring your own payloads) into
 //!   [`Decoded`] interleaved `f32` samples.
 //!
@@ -19,6 +19,6 @@ mod consumer;
 mod decoded;
 mod decoder;
 
-pub use consumer::{Consumer, Options, Output, Start};
+pub use consumer::{Consumer, Options, Output, Read, Start};
 pub use decoded::Decoded;
 pub use decoder::{Config, Decoder, Kind};

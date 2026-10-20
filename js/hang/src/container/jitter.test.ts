@@ -93,4 +93,24 @@ describe("Jitter", () => {
 		}
 		expect(far.measured).toBe(near.measured);
 	});
+
+	it("forks what it learned, but measures the replacement's arrivals against their own", () => {
+		// A path where every tenth frame lands 300ms late.
+		const warm = new Jitter();
+		for (let i = 0; i < 500; i++) {
+			warm.observe((i * 20 + (i % 10 === 0 ? 300 : 0)) as Milli, (i * 20) as Milli);
+		}
+		const learned = warm.measured;
+		expect(learned).toBeGreaterThan(100 as Milli);
+
+		const fork = warm.fork();
+		expect(fork.measured).toBe(learned);
+
+		// The replacement opens with a backlog: older media arriving at once, long after the warm
+		// track's frames. Measured against the warm track's arrivals it would read as seconds late.
+		for (let i = 0; i < 100; i++)
+			fork.observe((20_000 + Math.floor(i / 50) * 1000) as Milli, (8000 + i * 20) as Milli);
+		expect(fork.measured).toBeLessThanOrEqual(learned);
+		expect(warm.measured).toBe(learned);
+	});
 });

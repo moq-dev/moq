@@ -1,8 +1,7 @@
 name: Platform
 
-# The native macOS and Windows gates run once per main merge, in the merge queue,
-# rather than on every PR push. Release has no queue, so its PRs retain them. Every PR reports skipped OS checks without path filters,
-# allowing the same check names to be required before and inside the queue.
+# The native macOS and Windows gates run nightly on main (nightly.yml calls this)
+# and on every release PR, without path filters, so release can require their names.
 permissions:
   contents: read
 
@@ -24,14 +23,23 @@ on:
       - "**/justfile"
       - ".github/**"
   pull_request:
+    branches: [release]
     # `closed` only cancels an in-flight run. `edited` runs the gates when a main
     # PR is retargeted to release. Any edit reruns them, since a skipped rerun
-    # would post a passing context over a failed one; on main PRs that is free.
+    # would post a passing context over a failed one.
     types: [opened, synchronize, reopened, edited, closed]
-  merge_group:
-    types: [checks_requested]
   workflow_call:
+    inputs:
+      benchmarks:
+        description: Measure Swift against Rust baselines on this runner
+        type: boolean
+        default: false
   workflow_dispatch:
+    inputs:
+      benchmarks:
+        description: Measure Swift against Rust baselines on this runner
+        type: boolean
+        default: false
 
 concurrency:
   group: platform-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -47,7 +55,7 @@ jobs:
     # Require this check too: a failed selector otherwise skips its dependents,
     # and GitHub accepts skipped jobs as successful required checks.
     name: Platform scope
-    if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
+    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     outputs:
@@ -66,7 +74,7 @@ jobs:
       - name: Select platform checks
         id: scope
         env:
-          CI_BASE: ${{ (github.event_name != 'pull_request' && github.event_name != 'merge_group') && '--all' || github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
         run: just ci-select platform "$CI_BASE" >> "$GITHUB_OUTPUT"
 
   windows:
@@ -92,18 +100,18 @@ jobs:
       - uses: ./.github/actions/just
       - name: Install nextest
         if: needs.scope.outputs.rs == 'true'
-        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: nextest@0.9.146
       - name: Install uniffi-bindgen-cpp
         if: needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
         shell: bash
-        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.5+v0.32.2
       - name: Rust compile and tests
         if: needs.scope.outputs.rs == 'true'
         shell: bash
         env:
-          CI_BASE: ${{ (github.event_name != 'pull_request' && github.event_name != 'merge_group') && '--all' || github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
         run: |
           just rs windows "$CI_BASE"
           just rs windows-test
@@ -132,16 +140,16 @@ jobs:
       - uses: ./.github/actions/just
       - name: Install nextest
         if: needs.scope.outputs.rs == 'true'
-        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: nextest@0.9.146
       - name: Install uniffi-bindgen-cpp
         if: needs.scope.outputs.obs == 'true'
-        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.4+v0.32.2
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.5+v0.32.2
       - name: Rust compile and tests
         if: needs.scope.outputs.rs == 'true'
         env:
-          CI_BASE: ${{ (github.event_name != 'pull_request' && github.event_name != 'merge_group') && '--all' || github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
         run: |
           just rs macos "$CI_BASE"
           just rs macos-test
@@ -151,6 +159,16 @@ jobs:
       - name: Swift
         if: needs.scope.outputs.swift == 'true'
         run: just swift check
+      - name: Swift binding benchmark
+        if: inputs.benchmarks
+        run: just bench-ffi swift
+      - name: Preserve Swift benchmark
+        if: inputs.benchmarks && !cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-ffi-swift
+          path: target/bench/ffi/
+          if-no-files-found: error
       - name: OBS
         if: needs.scope.outputs.obs == 'true'
         run: just obs package --target aarch64-apple-darwin --output "$RUNNER_TEMP/obs"

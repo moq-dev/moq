@@ -21,17 +21,13 @@ fn credential() -> Credential {
 
 /// Each producer is its own publisher instance, so it gets its own epoch.
 fn produce(credential: &Credential, semantic: &str) -> moq_e2ee::track::Producer {
-	let generation = credential.produce();
-	let name = generation.name(semantic).unwrap();
 	// Advancing timestamps plus a zero max age keep only the newest group cached.
 	let info = moq_net::track::Info::default()
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_max_age(Duration::ZERO);
-	let net = moq_net::broadcast::Info::new()
-		.produce()
-		.create_track(name.as_str(), info)
-		.unwrap();
-	generation.produce(net).unwrap()
+	moq_e2ee::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), credential.produce())
+		.create_track(semantic, info)
+		.unwrap()
 }
 
 fn bench_protect(c: &mut Criterion) {

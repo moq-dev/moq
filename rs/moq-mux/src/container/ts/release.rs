@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
-use web_async::time::Instant;
+use moq_clock::Instant;
 
 use crate::catalog::{CatalogFormat, Stream};
 use crate::container::{ExportSource, Frame};
@@ -28,7 +28,7 @@ impl Readable {
 	fn new() -> Self {
 		Self {
 			state: Mutex::new(Availability {
-				empty: Instant::now(),
+				empty: moq_clock::now(),
 				first: None,
 				polling: false,
 				during: None,
@@ -51,7 +51,7 @@ impl Readable {
 		if pending {
 			// A notification racing the empty read belongs to the next batch.
 			state.first = state.during.take();
-			state.empty = Instant::now();
+			state.empty = moq_clock::now();
 		}
 		state.during = None;
 	}
@@ -70,7 +70,7 @@ impl Wake for Readable {
 	fn wake_by_ref(self: &Arc<Self>) {
 		let mut waiters = {
 			let mut state = self.state.lock().unwrap();
-			let now = Instant::now();
+			let now = moq_clock::now();
 			state.first.get_or_insert(now);
 			if state.polling {
 				state.during.get_or_insert(now);
@@ -91,8 +91,8 @@ impl Wake for Readable {
 /// releases fed the same objects write the same bytes. An object that arrives past its
 /// deadline is dropped and counted; the output shows a continuity error there, since nothing
 /// is rewritten, and carries on with the next object. A flagged forward jump, which the
-/// importer marks by skipping a group sequence, opens a new clock once it leaps further than
-/// the delay, so the output does not wait it out; the bytes carry the jump.
+/// importer declares with a discontinuity marker, opens a new clock, so the output does not
+/// wait it out; the bytes carry the jump.
 pub struct Release {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<()>>,
@@ -226,7 +226,7 @@ impl Release {
 				};
 				// A sink can leave arrived objects unread. The first notification after
 				// an empty read distinguishes that backlog from a late network burst.
-				let read = Instant::now();
+				let read = moq_clock::now();
 				let arrival = Arrival {
 					arrived: self.readable.arrived().min(read),
 					read,
@@ -298,7 +298,7 @@ mod tests {
 		let readable = Arc::new(Readable::new());
 		let input = kio::Waiter::new(Waker::from(readable.clone()));
 		let caller = kio::Waiter::noop();
-		let start = Instant::now();
+		let start = moq_clock::now();
 		readable.begin(&caller);
 		tokio::time::advance(Duration::from_millis(20)).await;
 		input.waker().wake_by_ref();
@@ -328,7 +328,7 @@ mod tests {
 		drop(caller);
 		assert_eq!(Arc::strong_count(&wakes), 1);
 		tokio::time::advance(Duration::from_millis(20)).await;
-		let arrived = Instant::now();
+		let arrived = moq_clock::now();
 		input.waker().wake_by_ref();
 		tokio::time::advance(Duration::from_secs(1)).await;
 		assert_eq!(readable.arrived(), arrived);

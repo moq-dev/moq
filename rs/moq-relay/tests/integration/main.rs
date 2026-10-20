@@ -7,12 +7,17 @@
 
 mod auth_embedder;
 mod auth_lifetime;
+mod cluster_close;
 mod cluster_idle;
 mod cluster_unknown;
+mod connection;
 mod embed;
 mod goaway_cluster;
 mod hidden_cluster;
 mod lan_mesh;
+mod logs;
+mod memory;
+mod peer_limits;
 mod public_rules;
 mod refusals;
 mod released_cli;
@@ -23,3 +28,4 @@ mod shutdown_signal;
 mod smoke;
 mod stack;
 mod upstream_links;
+mod wire_stats;

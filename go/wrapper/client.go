@@ -21,9 +21,20 @@ type clientConfig struct {
 	tlsFingerprints  []string
 	tlsCert          *string
 	tlsKey           *string
+	tlsHostName      *string
 	bind             *string
 	versions         []string
+	timeout          *time.Duration
+	race             *time.Duration
+	resolutionDelay  *time.Duration
 	quicMaxStreams   *uint64
+	quicIdleTimeout  *time.Duration
+	quicKeepAlive    *time.Duration
+	quicGSO          *bool
+	quicMTUDiscovery *bool
+	quicCongestion   *CongestionControl
+	quicQlog         *string
+	quicKeylog       *bool
 	websocketEnabled *bool
 	websocketDelay   *time.Duration
 	once             bool
@@ -33,17 +44,25 @@ type clientConfig struct {
 }
 
 func (c *clientConfig) ffi() (ffi.MoqClientConfig, error) {
-	delay, err := optMicros("websocket delay", c.websocketDelay)
-	if err != nil {
-		return ffi.MoqClientConfig{}, err
-	}
 	backoff, err := c.backoff.ffi()
 	if err != nil {
 		return ffi.MoqClientConfig{}, err
 	}
+	// Each duration converts on its own; the first negative one fails the whole config.
+	us := func(name string, d *time.Duration) *uint64 {
+		if err != nil {
+			return nil
+		}
+		var out *uint64
+		out, err = optMicros(name, d)
+		return out
+	}
 	cfg := ffi.MoqClientConfig{
-		Bind:     c.bind,
-		Versions: c.versions,
+		Bind:              c.bind,
+		Versions:          c.versions,
+		TimeoutUs:         us("connect timeout", c.timeout),
+		RaceUs:            us("race", c.race),
+		ResolutionDelayUs: us("resolution delay", c.resolutionDelay),
 		Tls: ffi.MoqClientTls{
 			Insecure:     c.tlsInsecure,
 			Roots:        c.tlsRoots,
@@ -51,11 +70,24 @@ func (c *clientConfig) ffi() (ffi.MoqClientConfig, error) {
 			Fingerprints: c.tlsFingerprints,
 			Cert:         c.tlsCert,
 			Key:          c.tlsKey,
+			HostName:     c.tlsHostName,
 		},
-		Quic:      ffi.MoqQuicConfig{MaxStreams: c.quicMaxStreams},
-		Websocket: ffi.MoqWebSocketConfig{Enabled: c.websocketEnabled, DelayUs: delay},
+		Quic: ffi.MoqQuicConfig{
+			MaxStreams:        c.quicMaxStreams,
+			IdleTimeoutUs:     us("QUIC idle timeout", c.quicIdleTimeout),
+			KeepAliveUs:       us("QUIC keep-alive", c.quicKeepAlive),
+			Gso:               c.quicGSO,
+			MtuDiscovery:      c.quicMTUDiscovery,
+			CongestionControl: c.quicCongestion,
+			Qlog:              c.quicQlog,
+			Keylog:            c.quicKeylog,
+		},
+		Websocket: ffi.MoqWebSocketConfig{Enabled: c.websocketEnabled, DelayUs: us("websocket delay", c.websocketDelay)},
 		Once:      c.once,
 		Backoff:   backoff,
+	}
+	if err != nil {
+		return ffi.MoqClientConfig{}, err
 	}
 	if c.publish != nil {
 		cfg.Publish = &c.publish.inner
@@ -160,6 +192,12 @@ func WithClientTLSKey(path string) ClientOption {
 	return func(c *clientConfig) { c.tlsKey = &path }
 }
 
+// WithTLSHostName verifies the certificate against this server name (SNI)
+// instead of the URL's host, so a relay can be dialed by IP.
+func WithTLSHostName(name string) ClientOption {
+	return func(c *clientConfig) { c.tlsHostName = &name }
+}
+
 // WithBind sets the local UDP socket bind address (default "[::]:0").
 func WithBind(addr string) ClientOption {
 	return func(c *clientConfig) { c.bind = &addr }
@@ -172,13 +210,70 @@ func WithVersions(versions ...string) ClientOption {
 	return func(c *clientConfig) { c.versions = offered }
 }
 
+// WithConnectTimeout bounds one connect attempt, dial and handshake together.
+// Zero waits forever, and a negative timeout fails Dial.
+func WithConnectTimeout(timeout time.Duration) ClientOption {
+	return func(c *clientConfig) { c.timeout = &timeout }
+}
+
+// WithRace sets the Happy Eyeballs stagger: how long before the next resolved
+// address is also dialed. Zero dials every address at once.
+func WithRace(delay time.Duration) ClientOption {
+	return func(c *clientConfig) { c.race = &delay }
+}
+
+// WithResolutionDelay sets how long IPv4 waits for the full DNS answer before
+// dialing alone (Happy Eyeballs).
+func WithResolutionDelay(delay time.Duration) ClientOption {
+	return func(c *clientConfig) { c.resolutionDelay = &delay }
+}
+
 // WithQUICMaxStreams caps the concurrent QUIC streams the peer may open toward
-// this connection (default 1024). MoQ opens a stream per group, and for a
+// this connection; 0 is refused. MoQ opens a stream per group, and for a
 // subscriber those arrive from the relay, so a client subscribing to many tracks
 // wants this raised. A publisher's own streams are bounded by the relay's
 // advertised limit, not this one. Ignored by the WebSocket fallback.
 func WithQUICMaxStreams(maxStreams uint64) ClientOption {
 	return func(c *clientConfig) { c.quicMaxStreams = &maxStreams }
+}
+
+// WithQUICIdleTimeout sets how long an idle connection survives before it is dropped.
+func WithQUICIdleTimeout(timeout time.Duration) ClientOption {
+	return func(c *clientConfig) { c.quicIdleTimeout = &timeout }
+}
+
+// WithQUICKeepAlive sets the keep-alive ping interval. Zero disables it.
+func WithQUICKeepAlive(interval time.Duration) ClientOption {
+	return func(c *clientConfig) { c.quicKeepAlive = &interval }
+}
+
+// WithQUICGSO toggles UDP generic segmentation offload, which batches sends into
+// one syscall. Unset leaves the choice to the backend.
+func WithQUICGSO(enabled bool) ClientOption {
+	return func(c *clientConfig) { c.quicGSO = &enabled }
+}
+
+// WithQUICMTUDiscovery toggles path MTU discovery. Unset leaves the choice to the backend.
+func WithQUICMTUDiscovery(enabled bool) ClientOption {
+	return func(c *clientConfig) { c.quicMTUDiscovery = &enabled }
+}
+
+// WithQUICCongestionControl picks the congestion control family. Unset leaves
+// the choice to the backend.
+func WithQUICCongestionControl(family CongestionControl) ClientOption {
+	return func(c *clientConfig) { c.quicCongestion = &family }
+}
+
+// WithQUICQlog writes qlog traces into dir, which must exist. Dial fails unless
+// QlogSupported.
+func WithQUICQlog(dir string) ClientOption {
+	return func(c *clientConfig) { c.quicQlog = &dir }
+}
+
+// WithQUICKeylog writes TLS session secrets to the file SSLKEYLOGFILE names, for
+// decrypting a capture. Off by default; on without SSLKEYLOGFILE fails the dial.
+func WithQUICKeylog(enabled bool) ClientOption {
+	return func(c *clientConfig) { c.quicKeylog = &enabled }
 }
 
 // WithWebSocketEnabled toggles the WebSocket fallback, which races QUIC for
@@ -280,8 +375,8 @@ func (c *Client) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	return c.consumer.Announced(options)
 }
 
-// AnnouncedBroadcast waits for a route covering path, then resolves the
-// broadcast there.
+// AnnouncedBroadcast follows path, resolving each publisher instance that serves
+// it.
 func (c *Client) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
 	return c.consumer.AnnouncedBroadcast(path)
 }

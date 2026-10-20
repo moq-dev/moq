@@ -39,9 +39,9 @@ impl<E: CatalogExt> Timebase<E> {
 	/// Place this timebase's `pts` at the wall-clock instant `wall`, instead of at the arrival of its
 	/// first frame.
 	///
-	/// For a source whose timestamps say when they happened (a program clock, a shared epoch), so
-	/// two importers of one stream publish identical timestamps whenever each starts. Like a first
+	/// For a source whose timestamps say when they happened, such as a program clock. Like a first
 	/// frame, this places the catalog's clock if it is not yet fixed and offsets onto it otherwise.
+	/// A placement alone publishes nothing: the clock goes out with the catalog's first track.
 	/// Refused once this timebase has an offset, and when the host's wall clock was unset, leaving no
 	/// wall to place it on.
 	pub fn place(&self, pts: moq_net::Timestamp, wall: std::time::SystemTime) -> crate::Result<()> {

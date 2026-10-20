@@ -10,20 +10,31 @@ site.
 
 ## Plan
 
+The pipeline landed in #5759 (`9fcb3f327`), including the shared history
+publisher and explicit Pages deployment. Through 2026-10-19 the publisher
+never finished: it built the full dev shell without the cachix substituter
+and hit its 15-minute timeout, so no `gh-pages` branch exists. It now skips
+the dev shell, taking only `just` from the pinned nixpkgs. Pages is still off
+(`gh api repos/moq-dev/moq/pages` returns 404): the maintainer switches it
+to **Source: GitHub Actions**, then verify the first Nightly deployment at
+<https://moq-dev.github.io/moq/bench/>. Until then the deploy step fails
+after the history push, so `gh-pages` still accumulates. The "Rust benchmark tests" job is not
+charted yet: its nextest benchmarks print no structured measurements.
+
 Decided with the maintainer on 2026-10-15:
 
 - **GitHub Pages via github-action-benchmark**: the nightly pushes each
   run's results to a `gh-pages` branch, and the action's built-in charts are
   the site. Its own alerting stays off; tracking is informational.
-- **Sources**: the binding benchmark's JSON and the "Rust benchmarks" and
-  "JS benchmarks" nightly jobs, converted to the action's input format where
-  they don't already emit one. Several are smoke runs today: most Rust
+- **Sources**: the binding benchmark's JSON and the "Rust benchmark tests",
+  "Rust bench targets" and "JS benchmarks" nightly jobs, converted to the
+  action's input format where they don't already emit one. Several are smoke runs today: most Rust
   Criterion targets run with `-- --test`, which measures nothing. Switch the
   charted targets to a measuring mode (or add a measurement pass), weighing
   the added nightly runtime, and check each JS bench reports a measurement
   before charting it. Nightly size history (today a 45-day
   artifact) is a natural extra series if it fits cheaply. The relay load
-  benches (`bench-audio`, `bench-lock`) and the audio-quality job's
+  benches (`bench-audio`, `bench-profile`) and the audio-quality job's
   benchmarks are out of scope here; they can join later through the same
   input format.
 - **One branch for everything**: [bench-ci](/quest/m2/bench-ci.md) records
@@ -35,5 +46,8 @@ Decided with the maintainer on 2026-10-15:
   on (or approve the `gh api` call) at that step.
 - Document the site URL, what each series means, and local reproduction in
   `bench/README.md`.
+
+Keep the landed publisher and documented local reproduction; verify the
+deployed reports before filling any remaining measurement gaps.
 
 Public API: none. Wire: none.

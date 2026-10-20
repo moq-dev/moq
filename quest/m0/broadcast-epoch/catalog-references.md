@@ -56,7 +56,7 @@ following does not authorize substituting a different requested epoch.
   restarts its pump.
 - Exporters: a late first announcement starts the rendition and End ends
   it. Restart behavior belongs to
-  [restart followers](/quest/m1/restart-followers.md).
+  [sink restart follow](/quest/m1/sink-restart-follow.md).
 - Share this in `moq_mux` (a `Source::follow`-style API; the shape is open)
   rather than per reader. `Source::bind` binds once today, as
   `failed_binding_does_not_retry_a_later_publisher` asserts; that changes.
@@ -91,4 +91,4 @@ guarantee and the selected legacy best-effort behavior.
 - [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - JS resolves the actual serving identity
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - held handles cannot emit unpinned requests after retirement
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - the same for the Rust publishers
-- [IETF epochs](/quest/m1/ietf-epochs.md) - verified catalog identity over negotiated IETF sessions
+- [MoQ Epoch](/drafts/draft-lcurley-moq-epoch.md) - verified catalog identity over negotiated IETF sessions

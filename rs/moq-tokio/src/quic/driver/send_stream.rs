@@ -10,7 +10,7 @@ use moq_quic::{ClosedStream, ConnectionError, FinishError, StreamId, Written};
 use thiserror::Error;
 
 use crate::quic::driver::{
-    VarInt,
+    SendGroup, VarInt,
     connection::{ConnectionRef, State},
 };
 
@@ -214,34 +214,55 @@ impl SendStream {
         Ok(())
     }
 
-    /// Mark the data written so far, so a later [`Checkpoint::reset()`] still delivers it.
-    pub fn checkpoint(&self) -> Checkpoint {
-        let mut conn = self.conn.state.lock("SendStream::checkpoint");
-        let inner = conn.inner.send_stream(self.stream).checkpoint();
-        Checkpoint {
-            conn: self.conn.clone(),
-            inner,
-            is_0rtt: self.is_0rtt,
+    /// Close the send stream immediately, but still deliver its first `offset` bytes.
+    ///
+    /// Like [`SendStream::reset()`], except the data before `offset` still reaches the peer.
+    /// A peer that accepts RESET_STREAM_AT reads it before the error. Otherwise the reset waits a
+    /// round trip until the peer acknowledges the data, and the peer's application may never read
+    /// it: see [`moq_quic::SendStream::reset_at`].
+    ///
+    /// # Panics
+    /// When `offset` is past the data written.
+    pub fn reset_at(&mut self, offset: u64, error_code: VarInt) -> Result<(), ClosedStream> {
+        let mut conn = self.conn.state.lock("SendStream::reset_at");
+        if self.is_0rtt && conn.check_0rtt().is_err() {
+            return Ok(());
         }
+        conn.inner
+            .send_stream(self.stream)
+            .reset_at(offset, error_code)?;
+        conn.wake();
+        Ok(())
     }
 
-    /// Set the priority of the send stream
+    /// Set the priority within the stream's send group, or session-wide when ungrouped
     ///
     /// Every send stream has an initial priority of 0. Locally buffered data from streams with
     /// higher priority will be transmitted before data from streams with lower priority. Changing
     /// the priority of a stream with pending data may only take effect after that data has been
     /// transmitted. Using many different priority levels per connection may have a negative
     /// impact on performance.
-    pub fn set_priority(&self, priority: i32) -> Result<(), ClosedStream> {
+    pub fn set_priority(&self, priority: i64) -> Result<(), ClosedStream> {
         let mut conn = self.conn.state.lock("SendStream::set_priority");
         conn.inner.send_stream(self.stream).set_priority(priority)?;
         Ok(())
     }
 
     /// Get the priority of the send stream
-    pub fn priority(&self) -> Result<i32, ClosedStream> {
+    pub fn priority(&self) -> Result<i64, ClosedStream> {
         let mut conn = self.conn.state.lock("SendStream::priority");
         conn.inner.send_stream(self.stream).priority()
+    }
+
+    /// Move the stream into a send group, or with `None` back to the ungrouped streams, which
+    /// go before every group
+    ///
+    /// # Panics
+    /// - when `group` belongs to another connection
+    pub fn set_group(&self, group: Option<&SendGroup>) -> Result<(), ClosedStream> {
+        let mut conn = self.conn.state.lock("SendStream::set_group");
+        let group = group.map(SendGroup::id);
+        conn.inner.send_stream(self.stream).set_group(group)
     }
 
     /// Completes when the peer stops the stream or reads the stream to completion
@@ -341,34 +362,6 @@ impl tokio::io::AsyncWrite for SendStream {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(self.get_mut().finish().map_err(Into::into))
-    }
-}
-
-/// The data written to a [`SendStream`] up to some point, which a reset can still deliver
-///
-/// Taken with [`SendStream::checkpoint()`]. It keeps the connection open, like the stream does.
-#[derive(Debug)]
-pub struct Checkpoint {
-    conn: ConnectionRef,
-    inner: moq_quic::Checkpoint,
-    is_0rtt: bool,
-}
-
-impl Checkpoint {
-    /// Close the send stream immediately, but still deliver everything written before the checkpoint.
-    ///
-    /// Like [`SendStream::reset()`], except the data before the checkpoint still reaches the peer.
-    /// A peer that accepts RESET_STREAM_AT reads it before the error. Otherwise the reset waits a
-    /// round trip until the peer acknowledges the data, and the peer's application may never read
-    /// it: see [`moq_quic::Checkpoint::reset`].
-    pub fn reset(self, error_code: VarInt) -> Result<(), ClosedStream> {
-        let mut conn = self.conn.state.lock("Checkpoint::reset");
-        if self.is_0rtt && conn.check_0rtt().is_err() {
-            return Ok(());
-        }
-        self.inner.reset(&mut conn.inner, error_code)?;
-        conn.wake();
-        Ok(())
     }
 }
 

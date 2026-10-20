@@ -17,16 +17,12 @@ use crate::quic::web::{CloseReason, ClosedStream, SessionError, WriteError};
 pub struct SendStream {
 	stream: crate::quic::driver::SendStream,
 	close: Arc<CloseReason>,
-	/// Taken after the WebTransport header this side wrote first, which a reset must still deliver.
-	header: Option<crate::quic::driver::Checkpoint>,
+	/// The end of the WebTransport header this side wrote first, which a reset must still deliver.
+	header: Option<u64>,
 }
 
 impl SendStream {
-	pub(crate) fn new(
-		stream: crate::quic::driver::SendStream,
-		close: Arc<CloseReason>,
-		header: Option<crate::quic::driver::Checkpoint>,
-	) -> Self {
+	pub(crate) fn new(stream: crate::quic::driver::SendStream, close: Arc<CloseReason>, header: Option<u64>) -> Self {
 		Self { stream, close, header }
 	}
 
@@ -53,7 +49,7 @@ impl SendStream {
 	pub fn reset(&mut self, code: u32) -> Result<(), ClosedStream> {
 		let code = self.close.encode_stream_code(code);
 		match self.header.take() {
-			Some(header) => header.reset(code).map_err(Into::into),
+			Some(header) => self.stream.reset_at(header, code).map_err(Into::into),
 			None => self.stream.reset(code).map_err(Into::into),
 		}
 	}
@@ -104,12 +100,20 @@ impl SendStream {
 		self.stream.finish().map_err(Into::into)
 	}
 
-	pub fn set_priority(&self, order: i32) -> Result<(), ClosedStream> {
-		self.stream.set_priority(order).map_err(Into::into)
+	/// Set the priority within the stream's send group, or session-wide when ungrouped.
+	pub fn set_priority(&self, priority: i64) -> Result<(), ClosedStream> {
+		self.stream.set_priority(priority).map_err(Into::into)
 	}
 
-	pub fn priority(&self) -> Result<i32, ClosedStream> {
+	/// Get the stream's priority. See [`crate::quic::driver::SendStream::priority`].
+	pub fn priority(&self) -> Result<i64, ClosedStream> {
 		self.stream.priority().map_err(Into::into)
+	}
+
+	/// Move the stream into a send group, or with `None` back out. See
+	/// [`crate::quic::driver::SendStream::set_group`].
+	pub fn set_group(&self, group: Option<&crate::quic::driver::SendGroup>) -> Result<(), ClosedStream> {
+		self.stream.set_group(group).map_err(Into::into)
 	}
 
 	/// Return the underlying QUIC stream ID.
@@ -144,7 +148,7 @@ impl web_transport_trait::SendStream for SendStream {
 	type Error = WriteError;
 
 	fn set_priority(&mut self, order: i32) {
-		Self::set_priority(self, order).ok();
+		Self::set_priority(self, order.into()).ok();
 	}
 
 	fn reset(&mut self, code: u32) {

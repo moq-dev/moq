@@ -111,7 +111,7 @@ until moq-ffi exposes one, and the browser's shared connection keeps its session
 private, so their cells check media alone. AUTH is only on the work-in-progress
 moq-lite-07, so the printing clients dial `moq-lite-07-wip` alone and a printing
 client that reports nothing never got its grant. The native JS subscribers dial
-WebTransport alone, since the WebSocket fallback cannot offer it. The rest keep
+WebTransport alone and offer it there. The rest keep
 their defaults, so the matrix also crosses versions through the relay, which
 accepts both.
 
@@ -239,7 +239,7 @@ Firefox and WebKit players explicitly use WebSocket; Chromium keeps normal
 transport selection. This does not measure Firefox's QUIC path.
 
 The capability report names the engine version and separately lists missing
-publisher and player APIs. Firefox 155 in Playwright 1.63 exposes WebTransport and
+publisher and player APIs. Firefox 157 in Playwright 1.64 exposes WebTransport and
 WebCodecs but lacks `MediaStreamTrackProcessor`, so it can play this fixture but
 cannot publish it. Capabilities are measured on every run rather than assumed
 from an engine name. Playwright WebKit is not Safari; Safari device/transport
@@ -282,6 +282,11 @@ Each run covers, against a real local relay:
   within 1.5s of the fixture's painted frame within 2s, both bounds about twice
   the worst seen in looped runs under CPU load. A rejoin and a reattach cross
   the same demand gap, so they must reach live the same way.
+- **codec identity and coded-size changes** - an AVC-to-VP8 change keeps the
+  broadcast and rendition ID while moving to a fresh track. Playback must keep
+  advancing and in sync through the change. A VP8 resize doubles the presented
+  dimensions on the same track. The pixels carry a source generation, so old
+  pictures cannot reappear after the new generation starts presenting.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
@@ -295,6 +300,11 @@ boundary and the canvas holding a frame up to one frame old.
 Each window opens once the player's audio buffer has filled and plays. Until
 then the player holds its first decoded frame, silent, for its sync delay, which
 rises past 400ms under load; that is startup, not a gap in playback.
+
+Run a focused lifecycle case with `just test media --media-cases rename`.
+It uses the same real fixture, player and content oracles while leaving cold-start
+grading and the unrelated negative controls to the default full run. A focused
+pass makes no claim about those omitted checks.
 
 The run ends with negative controls. Each injects a defect and names the
 assertion that has to catch it, and passes only by failing there:
@@ -349,7 +359,7 @@ clients/
 ## CI
 
 `.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
-PRs that touch `test/interop/`). A red cell means a real interop break in the
+release PRs that touch `test/interop/`). A red cell means a real interop break in the
 current tree.
 
 ## Subscription termination

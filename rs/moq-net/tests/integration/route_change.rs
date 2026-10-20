@@ -8,9 +8,10 @@
 //! every frame exactly once, in order, whether the route changes between groups or
 //! in the middle of one, and however it changes.
 //!
-//! Older wire versions cannot carry the epoch, so `R` cannot tell the two routes
-//! serve the same bytes: its subscription stays on its route and ends with it, while
-//! a better route restarts the path for new requests.
+//! moq-transport carries the epoch with the MoQ Epoch extension (draft-17+), so it
+//! behaves the same. Older wire versions cannot carry the epoch, so `R` cannot tell the
+//! two routes serve the same bytes: its subscription stays on its route and ends with
+//! it, while a better route restarts the path for new requests.
 //!
 //! Two publishers sharing one explicit epoch, a redundant pair, are one source the
 //! same way.
@@ -64,7 +65,7 @@ fn tagged(name: &str, group: u64, frame: u64) -> Vec<u8> {
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
-	moq_net_sim::sleep(Duration::from_millis(500)).await;
+	moq_clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// How the serving route goes away (or is beaten).
@@ -181,7 +182,7 @@ type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
 /// Read every group in full, reporting each frame as it arrives.
 fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 	let (tx, rx) = mpsc::unbounded();
-	moq_net_sim::spawn(async move {
+	moq_clock::sim::spawn(async move {
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
@@ -219,7 +220,7 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Vec<u8>) {
 
 /// [`next`], keeping the frame's timestamp.
 async fn next_timed(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timestamp>, Vec<u8>) {
-	let (group, frame) = moq_net_sim::timeout(Duration::from_secs(10), rx.next())
+	let (group, frame) = moq_clock::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
 		.expect("reader ended");
@@ -343,7 +344,7 @@ async fn route_dies_without_an_epoch(version: &str, trigger: Trigger) {
 	let mut group = topology.track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
 	settle().await;
-	match moq_net_sim::timeout(Duration::from_secs(10), rx.next())
+	match moq_clock::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
 	{
@@ -424,37 +425,37 @@ macro_rules! route_change_tests {
 				use super::*;
 
 				async fn run(trigger: Trigger, position: Position) {
-					moq_net_sim::timeout(TEST_TIMEOUT, route_change($version, trigger, position))
+					moq_clock::timeout(TEST_TIMEOUT, route_change($version, trigger, position))
 						.await
 						.expect("timed out");
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn disconnect_between_groups() {
 					run(Trigger::Disconnect, Position::BetweenGroups).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn disconnect_mid_group() {
 					run(Trigger::Disconnect, Position::MidGroup).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn unannounce_between_groups() {
 					run(Trigger::Unannounce, Position::BetweenGroups).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn unannounce_mid_group() {
 					run(Trigger::Unannounce, Position::MidGroup).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn better_route_between_groups() {
 					run(Trigger::BetterRoute, Position::BetweenGroups).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn better_route_mid_group() {
 					run(Trigger::BetterRoute, Position::MidGroup).await;
 				}
@@ -466,6 +467,9 @@ macro_rules! route_change_tests {
 
 route_change_tests! {
 	lite_07: "moq-lite-07-wip",
+	ietf_17: "moq-transport-17",
+	ietf_19: "moq-transport-19",
+	ietf_22: "moq-transport-22",
 }
 
 macro_rules! pinned_tests {
@@ -475,26 +479,26 @@ macro_rules! pinned_tests {
 				use super::*;
 
 				async fn run(trigger: Trigger) {
-					moq_net_sim::timeout(TEST_TIMEOUT, route_dies_without_an_epoch($version, trigger))
+					moq_clock::timeout(TEST_TIMEOUT, route_dies_without_an_epoch($version, trigger))
 						.await
 						.expect("timed out");
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn disconnect_ends_the_subscription() {
 					run(Trigger::Disconnect).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn unannounce_ends_the_subscription() {
 					run(Trigger::Unannounce).await;
 				}
 
 				/// A better route without an epoch wins new requests and announces as a
 				/// restart, while the incumbent's subscriptions continue.
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn better_route_keeps_the_incumbent() {
-					moq_net_sim::timeout(TEST_TIMEOUT, better_route_restarts($version))
+					moq_clock::timeout(TEST_TIMEOUT, better_route_restarts($version))
 						.await
 						.expect("timed out");
 				}
@@ -507,8 +511,8 @@ pinned_tests! {
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",
-	ietf_19: "moq-transport-19",
-	ietf_22: "moq-transport-22",
+	ietf_14: "moq-transport-14",
+	ietf_16: "moq-transport-16",
 }
 
 /// `P` feeds `A` slowly and `B` promptly, and `R` reads through `A` until that route dies
@@ -580,7 +584,7 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<Deliver
 	a_r.server.abort(Error::Cancel);
 	a_r.client.abort(Error::Cancel);
 	settle().await;
-	moq_net_sim::spawn(async move {
+	moq_clock::sim::spawn(async move {
 		let _keep = (broadcast, track, group, p_a, p_b, b_w, b_r, warm, a_r, p, a, b, r, w);
 		std::future::pending::<()>().await
 	});
@@ -589,7 +593,7 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<Deliver
 
 /// Lite carries the resume point upstream, so the rest of the group and the next one
 /// arrive in order.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn lite_resumes_after_a_lagging_route_dies() {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let mut rx = lagging_route_dies(version).await;
@@ -601,9 +605,9 @@ async fn lite_resumes_after_a_lagging_route_dies() {
 macro_rules! route_flap_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[moq_net_sim::test]
+			#[moq_clock::test]
 			async fn $name() {
-				moq_net_sim::timeout(TEST_TIMEOUT, route_flaps($version))
+				moq_clock::timeout(TEST_TIMEOUT, route_flaps($version))
 					.await
 					.expect("timed out");
 			}
@@ -613,6 +617,7 @@ macro_rules! route_flap_tests {
 
 route_flap_tests! {
 	flaps_lite_07: "moq-lite-07-wip",
+	flaps_ietf_22: "moq-transport-22",
 }
 
 /// How the incumbent of a redundant pair goes away.
@@ -724,9 +729,9 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 	drop(kept);
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn redundant_pair_fails_over_when_unreachable() {
-	moq_net_sim::timeout(
+	moq_clock::timeout(
 		TEST_TIMEOUT,
 		redundant_pair_fails_over("moq-lite-07-wip", Loss::Unreachable),
 	)
@@ -734,9 +739,9 @@ async fn redundant_pair_fails_over_when_unreachable() {
 	.expect("timed out");
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn redundant_pair_fails_over_when_the_incumbent_ends() {
-	moq_net_sim::timeout(TEST_TIMEOUT, redundant_pair_fails_over("moq-lite-07-wip", Loss::Ends))
+	moq_clock::timeout(TEST_TIMEOUT, redundant_pair_fails_over("moq-lite-07-wip", Loss::Ends))
 		.await
 		.expect("timed out");
 }
@@ -828,34 +833,34 @@ async fn replaced_behind_a_relay(version: &str, epoch: Option<moq_net::Epoch>, r
 	drop((dead, replicas));
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn replaced_without_an_epoch_ends_lite_06() {
-	moq_net_sim::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06", None, false))
+	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06", None, false))
 		.await
 		.expect("timed out");
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn replaced_without_an_epoch_ends_lite_07() {
-	moq_net_sim::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip", None, false))
+	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip", None, false))
 		.await
 		.expect("timed out");
 }
 
 /// The relay resumes a pair sharing an epoch, so nothing reaches `D`.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn pair_behind_a_relay_fails_over_lite_07() {
 	let epoch = Some(moq_net::Epoch::mint());
-	moq_net_sim::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip", epoch, true))
+	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip", epoch, true))
 		.await
 		.expect("timed out");
 }
 
 /// lite-06 carries no epoch, so the relay cannot tell the pair is one broadcast.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn pair_behind_a_relay_ends_lite_06() {
 	let epoch = Some(moq_net::Epoch::mint());
-	moq_net_sim::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06", epoch, false))
+	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06", epoch, false))
 		.await
 		.expect("timed out");
 }
@@ -877,7 +882,7 @@ async fn producer_replaced(version: &str) {
 		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.unwrap();
 	let (tx, mut producers) = mpsc::unbounded();
-	moq_net_sim::spawn(async move {
+	moq_clock::sim::spawn(async move {
 		while let Ok(request) = dynamic.requested_track().await {
 			if tx.unbounded_send(request.accept(timed())).is_err() {
 				return;
@@ -909,7 +914,7 @@ async fn producer_replaced(version: &str) {
 	// The encoder restarts: the old producer goes away mid-broadcast, and the resumed
 	// subscription asks for the track again.
 	first.abort(Error::Cancel).unwrap();
-	let second = moq_net_sim::timeout(Duration::from_secs(10), producers.next())
+	let second = moq_clock::timeout(Duration::from_secs(10), producers.next())
 		.await
 		.expect("the track was not requested again")
 		.unwrap();
@@ -938,9 +943,9 @@ async fn producer_replaced(version: &str) {
 macro_rules! producer_replaced_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[moq_net_sim::test]
+			#[moq_clock::test]
 			async fn $name() {
-				moq_net_sim::timeout(TEST_TIMEOUT, producer_replaced($version))
+				moq_clock::timeout(TEST_TIMEOUT, producer_replaced($version))
 					.await
 					.expect("timed out");
 			}

@@ -163,7 +163,7 @@ export class Connection implements Established {
 		});
 
 		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish, {
-			grant: this.#auth.grant,
+			grant: this.#auth.scope,
 			ready: this.#auth.setupAnswered(),
 		});
 		this.#subscriber = new Subscriber(
@@ -173,7 +173,9 @@ export class Connection implements Established {
 			this.#probe,
 			this.#peerSetup,
 			this.#goaway,
-			this.#auth.grant,
+			this.#auth.scope,
+			undefined,
+			this.#auth,
 		);
 		this.#client = client;
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
@@ -182,7 +184,7 @@ export class Connection implements Established {
 	}
 
 	/** Our tokens and grants; see {@link Established.auth}. */
-	get auth(): Auth.Auth {
+	get auth(): Auth.Handle {
 		return this.#auth;
 	}
 
@@ -232,7 +234,7 @@ export class Connection implements Established {
 		// Fail loud on a publication our grant never covers, once the peer has answered the
 		// credential we presented at setup.
 		if (this.#client && hasAuth(this.#version)) {
-			tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered()));
+			tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered(), this.#auth));
 		}
 
 		// Route incoming QUIC datagrams into their subscriptions (lite-05+; runDatagrams

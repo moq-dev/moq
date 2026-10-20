@@ -2,12 +2,13 @@ import { Once } from "@moq/signals";
 import { Mutex } from "async-mutex";
 import type { Drain } from "../connection/goaway.ts";
 import { error, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
-import { Reader, Stream, type Writer } from "../stream.ts";
+import { type OpenOptions, Reader, Stream, type Writer } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
+import { toRequestCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW } from "./request.ts";
+import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW, RequestError } from "./request.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** The peer used a request ID the draft closes the session for. */
@@ -26,14 +27,16 @@ export class RequestWindowError extends Error {
  * Implemented by both ControlStreamAdapter (v14-v16) and NativeSession (v17).
  */
 export interface Session {
-	openBi(): Stream | Promise<Stream>;
-	openNativeBi?(): Promise<Stream>;
+	openBi(options?: Partial<OpenOptions>): Stream | Promise<Stream>;
+	openNativeBi?(options?: Partial<OpenOptions>): Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
 	nextRequestId(signal?: AbortSignal): Promise<bigint | undefined>;
 	/** Spend a request ID the peer used without holding a request open, closing the session if it cannot. */
 	spendRequest(id: bigint): void;
 	close(): void;
 	readonly version: IetfVersion;
+	/** Whether we opened the session. */
+	readonly client: boolean;
 }
 
 /**
@@ -48,10 +51,12 @@ export class NativeSession implements Session {
 	// The peer's IDs, of the other parity. Draft 17 has no window, yet an ID stays spent.
 	#spent: SpentIds;
 	readonly version: IetfVersion;
+	readonly client: boolean;
 
 	constructor(quic: WebTransport, version: IetfVersion, client: boolean) {
 		this.#quic = quic;
 		this.version = version;
+		this.client = client;
 		this.#requestId = client ? 0n : 1n;
 		this.#spent = new SpentIds(client ? 1n : 0n);
 	}
@@ -65,8 +70,8 @@ export class NativeSession implements Session {
 		}
 	}
 
-	async openBi(): Promise<Stream> {
-		return Stream.open(this.#quic, { version: this.version });
+	async openBi(options?: Partial<OpenOptions>): Promise<Stream> {
+		return Stream.open(this.#quic, { ...options, version: this.version });
 	}
 
 	async acceptBi(): Promise<Stream | undefined> {
@@ -253,6 +258,10 @@ export class ControlStreamAdapter implements Session {
 	// SubscribeNamespace requestIds — for routing 0x08/0x0E entries that lack requestId (v14/v15)
 	#subscribeNamespaces = new Set<bigint>();
 
+	// Our updates' own request IDs on drafts 15 and 16, whose answer names that ID rather than
+	// the request it updated. Nothing waits on it, so it is consumed here.
+	#updates = new Set<bigint>();
+
 	// Incoming stream queue (for acceptBi)
 	#incomingQueue: Stream[] = [];
 	#incomingWaiters: ((stream: Stream | undefined) => void)[] = [];
@@ -291,7 +300,7 @@ export class ControlStreamAdapter implements Session {
 	#closed = false;
 
 	// Whether this side opened the session. Only a server may name a redirect.
-	#client: boolean;
+	readonly client: boolean;
 
 	constructor(
 		quic: WebTransport,
@@ -317,7 +326,7 @@ export class ControlStreamAdapter implements Session {
 		this.#peerMissing = version === Version.DRAFT_16 ? new MissingRuns() : undefined;
 		this.#requestId = client ? 0n : 1n;
 		this.#sendNext = version === Version.DRAFT_16 ? undefined : this.#requestId;
-		this.#client = client;
+		this.client = client;
 	}
 
 	/**
@@ -388,6 +397,7 @@ export class ControlStreamAdapter implements Session {
 						}
 					} else {
 						spent = this.#updateId(toFlush);
+						if (spent !== undefined && this.version !== Version.DRAFT_14) this.#updates.add(spent);
 					}
 
 					await this.#send(toFlush, spent);
@@ -402,8 +412,8 @@ export class ControlStreamAdapter implements Session {
 	/**
 	 * Open a real WebTransport bidi stream (for v16 SubscribeNamespace).
 	 */
-	async openNativeBi(): Promise<Stream> {
-		return Stream.open(this.#quic, { version: this.version });
+	async openNativeBi(options?: Partial<OpenOptions>): Promise<Stream> {
+		return Stream.open(this.#quic, { ...options, version: this.version });
 	}
 
 	/**
@@ -473,7 +483,7 @@ export class ControlStreamAdapter implements Session {
 					const msg = await GoAway.decodeBody(body, this.version);
 					if (this.goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
 					// A client may leave, but only the server may name where to go.
-					if (!this.#client && msg.newSessionUri !== "") {
+					if (!this.client && msg.newSessionUri !== "") {
 						throw new ProtocolViolation("client GOAWAY must not name a redirect");
 					}
 					this.goaway.set(msg.drain());
@@ -482,11 +492,20 @@ export class ControlStreamAdapter implements Session {
 
 				if (classified.route === Route.Update) {
 					this.spendRequest(classified.ownRequestId);
-					this.#pushMessage(classified.requestId, typeId, size, body);
+					// An update whose request is gone, or rides a stream of its own like draft 16's
+					// SUBSCRIBE_NAMESPACE, is still owed its one answer. Draft 14 answers no update.
+					if (
+						!this.#pushMessage(classified.requestId, typeId, size, body) &&
+						this.version !== Version.DRAFT_14
+					) {
+						void this.#refuseUpdate(classified.ownRequestId);
+					}
 					continue;
 				}
 
 				const { route, requestId } = classified;
+				if ((route === Route.Response || route === Route.ErrorResponse) && this.#updates.delete(requestId))
+					continue;
 
 				switch (route) {
 					case Route.NewRequest:
@@ -569,16 +588,36 @@ export class ControlStreamAdapter implements Session {
 		}
 	}
 
-	#pushMessage(requestId: bigint, typeId: number, size: number, body: Uint8Array) {
+	/** Deliver a message to its request's stream, returning whether one was open to take it. */
+	#pushMessage(requestId: bigint, typeId: number, size: number, body: Uint8Array): boolean {
 		const entry = this.#streams.get(requestId);
 		if (!entry) {
 			console.warn(`adapter: no stream for requestId=${requestId} typeId=0x${typeId.toString(16)}`);
-			return;
+			return false;
 		}
 		try {
 			entry.controller.enqueue(this.#encodeRaw(typeId, size, body));
+			return true;
 		} catch {
 			// Stream already closed
+			return false;
+		}
+	}
+
+	/** Refuse an update no request here can apply, naming its own Request ID. */
+	async #refuseUpdate(requestId: bigint): Promise<void> {
+		try {
+			await this.#writeMutex.runExclusive(async () => {
+				if (this.#closed) return;
+				await this.#writer.u53(RequestError.id);
+				await new RequestError({
+					requestId,
+					errorCode: toRequestCode("not_supported", "subscribe", this.version),
+					reasonPhrase: "update not supported",
+				}).encode(this.#writer, this.version);
+			});
+		} catch {
+			// The control stream closed under the refusal.
 		}
 	}
 
@@ -626,9 +665,9 @@ export class ControlStreamAdapter implements Session {
 			// section 9.5 assign an ID past the maximum to TOO_MANY_REQUESTS.
 			this.#refuse(SessionCode.TooManyRequests, "request id exceeds max");
 		}
-		// Even IDs are the client's. `#client` is this side, so the peer's IDs are the other parity.
+		// Even IDs are the client's. `client` is this side, so the peer's IDs are the other parity.
 		const even = (requestId & 1n) === 0n;
-		if (even === this.#client) {
+		if (even === this.client) {
 			this.#refuse(SessionCode.InvalidRequestId, "request id has the wrong parity");
 		}
 	}

@@ -23,8 +23,7 @@ hot-path survey, so quests don't re-litigate them:
   driver (Run to quiescence) measure their before and after on `moq-quic`.
 - `moq-uring`'s only backend is `moq-quic`. Every profile names its backend. The
   historical quiche-flavor numbers cited in
-  [Run to quiescence](/quest/m2/perf/uring-quiescence.md) and
-  [moq-uring on moq-clock](/quest/m1/time/uring.md) are re-measured on `moq-quic`.
+  [Run to quiescence](/quest/m2/perf/uring-quiescence.md) are re-measured on `moq-quic`.
 - Cross-thread wakeups are already cheap: one futex word per worker, at most
   one `futex(FUTEX_WAKE)` per park cycle, wake bursts coalesce through the
   `kio::Tasks` bitset. No eventfd, no MSG_RING, by design (`SINGLE_ISSUER`).
@@ -55,14 +54,16 @@ profiling recipe and One enter per turn rank next: they produce the numbers
 that decide the rest.
 
 Decided 2026-10-08: the CPU and allocation profile merged into the profiling
-recipe ([Relay profiling](/quest/m2/perf/lock-profile.md)), so the relay has
-one recipe with capture modes; #3199 moved to m2 beside 3200, since it is an
+recipe (`just bench-profile`), so the relay has one recipe with capture modes; #3199 moved to m2 beside 3200, since it is an
 equally unmeasured ring micro-opt; cache shard was deleted, since #5031's
 profile shows no pool contention.
 
-Decided 2026-10-10: #3122's per-turn clock read merged into
-[moq-uring on moq-clock](/quest/m1/time/uring.md), where the worker's turn
-sample becomes its `moq-clock` clock; it keeps #3122's measurement bar.
+#3122's per-turn clock read landed in
+[#5926](https://github.com/moq-dev/moq/pull/5926): the io_uring worker is a
+`moq-clock` backend that samples the clock once per turn, cutting
+`clock_gettime` from 44.7 to 1.05 calls per turn. `perf` was unavailable
+there, so [Profile the io_uring clock read](/quest/m2/perf/uring-clock-profile.md)
+owns the `[vdso]` share and relay CPU measurement.
 
 Decided 2026-10-14: kio channel contention ranks first. Its 215% lock wait on
 the default tokio runtime is the largest measured cost, and the lock-wait
@@ -72,13 +73,8 @@ optimization.
 ## Required
 
 - [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
-- [Relay profiling](/quest/m2/perf/lock-profile.md) - one recipe captures lock wait by stack (first), CPU stacks, and heap profiles, with no code in kio
-- [One enter per turn](/quest/m2/perf/uring-one-enter.md) - a parking turn pays one io_uring_enter, submits flush deferred completions, and SQEs per enter is a counter
+- [Relay allocations](/quest/m2/perf/relay-allocs.md) - fewer allocations per delivered frame, starting with per-stream session clones
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
-- [Remove moq-uring copies](/quest/m2/perf/uring-copies.md) - egress, stream send and receive, and datagram receive stop copying where the QUIC core already allows it, with before/after measurements on `moq-quic`
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
-
-## Related
-
-- [moq-uring on moq-clock](/quest/m1/time/uring.md) - one clock read per worker turn, formerly #3122
+- [Profile the io_uring clock read](/quest/m2/perf/uring-clock-profile.md) - a `perf` profile shows whether #5926's per-turn clock read cut the io_uring relay's `[vdso]` share and CPU

@@ -429,8 +429,10 @@ struct State {
 ///
 /// [`Request::respond`] builds the web
 /// flavor; [`Session::raw`] wraps a raw-QUIC [`Connection`] with the layering
-/// disabled. Clones share the session.
+/// disabled. Clones share the session; dropping the last closes the connection.
 pub struct Session {
+	// Capsule tasks retain Web/Connection, but only public session handles own this.
+	handles: Rc<()>,
 	conn: Connection,
 	web: Option<Rc<Web>>,
 	/// What [`protocol`](web_transport_trait::poll::Session::protocol)
@@ -443,17 +445,49 @@ pub struct Session {
 }
 
 impl Session {
+	/// The wire counters the connection updates as it sends and receives.
+	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
+		self.conn.wire()
+	}
+
+	/// Open a send group at `priority`, for streams to join with
+	/// [`SendStream::set_group`]. The HTTP/3 streams stay outside every
+	/// group, so they go first.
+	pub fn send_group(&self, priority: i64) -> super::SendGroup {
+		self.conn.send_group(priority)
+	}
+
+	/// Send a datagram scheduled by `options`, like one of its group's streams.
+	///
+	/// See [`Connection::send_datagram`].
+	pub fn send_datagram(&self, payload: Bytes, options: super::SendOptions<'_>) -> Result<(), Error> {
+		let Some(web) = &self.web else {
+			return self.conn.send_datagram(payload, options);
+		};
+		let mut framed = BytesMut::with_capacity(web.header_datagram.len() + payload.len());
+		framed.extend_from_slice(&web.header_datagram);
+		framed.extend_from_slice(&payload);
+		self.conn.send_datagram(framed.freeze(), options).map_err(unmap_err)
+	}
+
 	/// Wrap a raw-QUIC connection in a session, with no
 	/// WebTransport layering: streams and datagrams pass through untouched.
 	pub fn raw(conn: Connection) -> Self {
 		let protocol = web_transport_trait::poll::Session::protocol(&conn).map(str::to_owned);
 		Self {
+			handles: Rc::new(()),
 			conn,
 			web: None,
 			protocol,
 			opening_uni: None,
 			opening_bi: None,
 		}
+	}
+
+	/// Change the underlying connection's flow-control limits; see
+	/// [`Connection::set_limits`].
+	pub fn set_limits(&self, limits: super::Limits) -> Result<(), super::Error> {
+		self.conn.set_limits(limits)
 	}
 
 	/// Assemble the web flavor and spawn its capsule reader.
@@ -515,6 +549,7 @@ impl Session {
 			.spawn(async move { read_capsules(capsules, capsule_conn, recv).await });
 
 		Self {
+			handles: Rc::new(()),
 			conn,
 			web: Some(web),
 			protocol,
@@ -535,11 +570,20 @@ impl Session {
 impl Clone for Session {
 	fn clone(&self) -> Self {
 		Self {
+			handles: self.handles.clone(),
 			conn: self.conn.clone(),
 			web: self.web.clone(),
 			protocol: self.protocol.clone(),
 			opening_uni: None,
 			opening_bi: None,
+		}
+	}
+}
+
+impl Drop for Session {
+	fn drop(&mut self) {
+		if Rc::strong_count(&self.handles) == 1 {
+			web_transport_trait::poll::Session::close(self, 0, "dropped");
 		}
 	}
 }
@@ -650,14 +694,12 @@ impl web_transport_trait::poll::Session for Session {
 		Poll::Ready(result.map(|()| (send, recv)))
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		let Some(web) = &self.web else {
-			return web_transport_trait::poll::Session::poll_send_datagram(&mut self.conn, cx, payload);
-		};
-		let mut framed = Vec::with_capacity(web.header_datagram.len() + payload.len());
-		framed.extend_from_slice(&web.header_datagram);
-		framed.extend_from_slice(payload);
-		web_transport_trait::poll::Session::poll_send_datagram(&mut self.conn, cx, &framed).map_err(unmap_err)
+	fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Self::send_datagram(
+			self,
+			Bytes::copy_from_slice(payload),
+			Default::default(),
+		))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -802,7 +844,7 @@ pub struct SendStream {
 	inner: super::SendStream,
 	/// The end of the WebTransport header on a stream we opened, for a reset
 	/// to deliver.
-	header: Option<moq_quic::Checkpoint>,
+	header: Option<u64>,
 	web: bool,
 }
 
@@ -822,8 +864,19 @@ impl SendStream {
 		}
 	}
 
-	/// Write the WebTransport header of a stream we opened, checkpointing it
-	/// once it is all written.
+	/// Set the priority within the stream's send group, or session-wide when ungrouped.
+	pub fn set_priority(&mut self, priority: i64) {
+		self.inner.set_priority(priority);
+	}
+
+	/// Move the stream into a send group, or with `None` back out. See
+	/// [`super::SendStream::set_group`].
+	pub fn set_group(&mut self, group: Option<&super::SendGroup>) {
+		self.inner.set_group(group);
+	}
+
+	/// Write the WebTransport header of a stream we opened, noting where it
+	/// ends once it is all written.
 	fn poll_header(&mut self, cx: &mut Context<'_>, header: &mut Bytes) -> Poll<Result<(), Error>> {
 		if !self.web {
 			return Poll::Ready(Ok(()));
@@ -837,7 +890,7 @@ impl SendStream {
 			.map_err(|err| self.map(err))?;
 			header.advance(n);
 		}
-		self.header = Some(self.inner.checkpoint());
+		self.header = Some(self.inner.offset());
 		Poll::Ready(Ok(()))
 	}
 
@@ -866,7 +919,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	}
 
 	fn set_priority(&mut self, order: i32) {
-		web_transport_trait::poll::SendStream::set_priority(&mut self.inner, order);
+		self.inner.set_priority(order.into());
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
@@ -926,6 +979,13 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		match web_transport_trait::poll::RecvStream::poll_read(&mut self.inner, cx, dst) {
+			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
+			other => other,
+		}
+	}
+
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		match web_transport_trait::poll::RecvStream::poll_read_chunk(&mut self.inner, cx, max) {
 			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
 			other => other,
 		}

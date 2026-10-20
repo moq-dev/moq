@@ -31,7 +31,7 @@ struct Publisher {
 	client: Session,
 	server: Session,
 	server_transport: MockSession,
-	server_driver: moq_net_sim::JoinHandle<moq_net::Error>,
+	server_driver: moq_clock::sim::JoinHandle<moq_net::Error>,
 	/// The client's origin, which it publishes from.
 	origin: origin::Producer,
 	_broadcast: moq_net::broadcast::Producer,
@@ -59,7 +59,7 @@ async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &st
 	};
 	let server = async {
 		let (session, mut driver) = server.accept(now(), server_transport.clone()).await.unwrap();
-		let driver = moq_net_sim::spawn(moq_net_sim::drive(move |now, waiter| {
+		let driver = moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}));
 		(session, driver)
@@ -91,12 +91,12 @@ async fn until(announced: &mut announce::Consumer, path: &str, active: bool) {
 			}
 		}
 	};
-	moq_net_sim::timeout(TIMEOUT, wait)
+	moq_clock::timeout(TIMEOUT, wait)
 		.await
 		.unwrap_or_else(|_| panic!("{path} never became active={active}"));
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_panicking_session_leaves_the_others_serving() {
 	for version in ["moq-lite-07-wip", "moq-transport-20"] {
 		let version: Version = version.parse().unwrap();
@@ -110,7 +110,7 @@ async fn a_panicking_session_leaves_the_others_serving() {
 
 		broken.server_transport.panic_on_stats();
 		let _ = broken.server.stats();
-		let ended = moq_net_sim::timeout(TIMEOUT, broken.server_driver)
+		let ended = moq_clock::timeout(TIMEOUT, broken.server_driver)
 			.await
 			.expect("the driver never sampled the stats");
 		assert!(
@@ -119,7 +119,7 @@ async fn a_panicking_session_leaves_the_others_serving() {
 		);
 
 		until(&mut announced, "broken", false).await;
-		moq_net_sim::timeout(TIMEOUT, broken.server.closed())
+		moq_clock::timeout(TIMEOUT, broken.server.closed())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the panicked session never closed"));
 

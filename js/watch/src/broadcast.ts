@@ -74,7 +74,8 @@ export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
 // "error" means the origin refused the broadcast; `out.error` says why.
-type Status = "offline" | "loading" | "live" | "error";
+// "unsupported" means its catalog requires a newer player.
+type Status = "offline" | "loading" | "live" | "error" | "unsupported";
 
 // Signals the component reads. Whoever owns the backing Signal (the caller, or
 // another component whose output is wired in) does the writing.
@@ -285,6 +286,7 @@ export class Broadcast {
 			effect.set(this.#out.status, "error", "offline");
 			return;
 		}
+		effect.cleanup(() => this.#out.status.set("offline"));
 
 		const catalogFormat = effect.get(this.in.catalogFormat);
 		const name = effect.get(this.in.name);
@@ -294,19 +296,24 @@ export class Broadcast {
 		const format: CatalogFormat = catalogFormat ?? Catalog.detectFormat(name) ?? Catalog.DEFAULT_FORMAT;
 
 		if (format === "manual") {
-			// Mirror the caller-supplied catalog into the effective output. A caller-supplied
-			// catalog is rejected the same way a fetched one is, minus the throw: this runs in
-			// the effect body, where an exception would surface as an unhandled error.
+			// Parse the caller-supplied catalog into the effective output with the same schema and
+			// checks as a fetched one, minus the throw: this runs in the effect body, where an
+			// exception would surface as an unhandled error.
 			const catalog = effect.get(this.in.catalog);
 			let accepted: Catalog.Root | undefined;
+			let status: Status = "loading";
 			try {
-				accepted = catalog && Catalog.checkResolvable(Catalog.checkRenditions(catalog), name);
+				accepted =
+					catalog &&
+					Catalog.checkResolvable(Catalog.checkRenditions(Catalog.RootSchema.parse(catalog)), name);
+				if (accepted) status = "live";
 			} catch (err) {
+				if (err instanceof Catalog.UnsupportedVersion) status = "unsupported";
 				console.error("rejecting catalog", name, err);
 			}
 			this.#raw.set(accepted, true);
 			effect.cleanup(() => this.#raw.set(undefined, true));
-			this.#out.status.set(accepted ? "live" : "loading");
+			this.#out.status.set(status);
 			return;
 		}
 
@@ -339,6 +346,7 @@ export class Broadcast {
 		}
 
 		effect.spawn(async () => {
+			let status: Status = "offline";
 			try {
 				for (;;) {
 					const update = await effect.race(fetchNext());
@@ -350,12 +358,13 @@ export class Broadcast {
 					this.#out.status.set("live");
 				}
 			} catch (err) {
+				if (err instanceof Catalog.UnsupportedVersion) status = "unsupported";
 				if (err instanceof NetError.Stream)
 					console.debug("catalog subscription ended", this.in.name.peek(), err);
 				else console.error("error fetching catalog", this.in.name.peek(), err);
 			} finally {
 				this.#raw.set(undefined);
-				this.#out.status.set("offline");
+				this.#out.status.set(status);
 			}
 		});
 	}

@@ -42,6 +42,17 @@ impl Body {
 	pub fn decoder(&self, version: Version) -> Decoder<'_> {
 		Decoder::new(&self.0, version.into())
 	}
+
+	/// Decode the whole body as `M`, which must fill it exactly.
+	pub fn message<M: Message>(&self, version: Version) -> Result<M, DecodeError> {
+		let mut data = self.decoder(version);
+		// The body is complete, so running short inside it is malformed, not a wait for more.
+		let msg = M::decode_msg(&mut data, version).map_err(DecodeError::complete)?;
+		match data.is_empty() {
+			true => Ok(msg),
+			false => Err(DecodeError::TrailingBytes),
+		}
+	}
 }
 
 impl<T: Message> Decode<Version> for T {

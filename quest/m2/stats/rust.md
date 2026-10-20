@@ -38,6 +38,9 @@
   reconciles it: a removed `echo` section, a changed path, or no longer
   watching unannounces the old broadcast. A name that is not a single path segment is refused at
   parse time.
+- A viewer given `--echo` with `--catalog-format msf` refuses: the MSF
+  catalog does not carry an `echo` solicitation. Imports always emit the
+  MSF catalog beside hang, omitting `stats` and `echo` from MSF.
 - `moq export stats` and `moq export echo` are sinks that skip `.hang` media
   discovery, so they route around `catalog_format`.
 - `doc/bin/cli.md` documents the flags and sinks.
@@ -48,10 +51,6 @@
   broadcast yet, so [Encrypted native CLI](/quest/m2/e2ee/cli.md) refuses `--stats` and
   `--echo` when it adds one: they would publish rendition IDs and per-track
   counters in plaintext beside it.
-
-## Required
-
-- [Schema](/quest/m2/stats/schema.md) - the sections and snapshot types
 
 ## Related
 

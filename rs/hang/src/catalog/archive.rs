@@ -5,9 +5,33 @@ use serde::{Deserialize, Serialize};
 /// The moq epoch (2020-01-01T00:00:00Z) in Unix-epoch milliseconds.
 pub const MOQ_EPOCH_UNIX_MILLIS: u64 = 1_577_836_800_000;
 
+/// One indexed track's timeline and nominal record duration.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Timeline {
+	/// The MoQ track carrying this index's records.
+	pub track: String,
+
+	/// The nominal record duration in the archive's timescale, zero for sparse data, or `None` for
+	/// an untimed track, whose records carry no duration.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub duration: Option<u64>,
+}
+
+impl Timeline {
+	/// Declare `track` with its nominal `duration` in the archive timescale, `None` when untimed.
+	pub fn new(track: impl Into<String>, duration: impl Into<Option<u64>>) -> Self {
+		Self {
+			track: track.into(),
+			duration: duration.into(),
+		}
+	}
+}
+
 /// Discovers each track's timeline and any durable archive.
 ///
-/// A live publisher sets the timeline fields (`timelines`, `timescale`, `duration_max`) alone,
+/// A live publisher sets the timeline fields (`timelines`, `timescale`) alone,
 /// and a recording also names the replay broadcast and object store those spans live under.
 /// Every advertised span is FETCHable; with a store they are durable.
 #[serde_with::skip_serializing_none]
@@ -15,8 +39,8 @@ pub const MOQ_EPOCH_UNIX_MILLIS: u64 = 1_577_836_800_000;
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Archive {
-	/// Each indexed track's timeline track, keyed by the indexed track's name.
-	pub timelines: BTreeMap<String, String>,
+	/// Each indexed track's timeline declaration, keyed by the indexed track's name.
+	pub timelines: BTreeMap<String, Timeline>,
 
 	/// Units per second for every timeline's timestamps. Defaults to milliseconds.
 	#[serde(
@@ -24,9 +48,6 @@ pub struct Archive {
 		deserialize_with = "super::deserialize_timescale_or_default"
 	)]
 	pub timescale: u32,
-
-	/// The declared upper bound on a record's duration, in [`timescale`](Self::timescale) units.
-	pub duration_max: Option<u64>,
 
 	/// The MoQ broadcast the archive is served back from, relative to this catalog, if any.
 	#[serde(default)]
@@ -50,12 +71,11 @@ impl Archive {
 		1000
 	}
 
-	/// An archive with no timelines, duration bound, or durable storage.
+	/// An archive with no timelines or durable storage.
 	pub fn new() -> Self {
 		Self {
 			timelines: BTreeMap::new(),
 			timescale: Self::default_timescale(),
-			duration_max: None,
 			replay: None,
 			store: None,
 			version: None,
@@ -77,14 +97,17 @@ mod test {
 		let mut archive = Archive::new();
 		archive
 			.timelines
-			.insert("video".to_string(), "video.timeline.z".to_string());
+			.insert("video".to_string(), Timeline::new("video.timeline.z", 4_000));
 		archive
 	}
 
 	#[test]
 	fn live_publisher_is_timeline_fields_alone() {
 		let json = serde_json::to_string(&live()).unwrap();
-		assert_eq!(json, r#"{"timelines":{"video":"video.timeline.z"},"timescale":1000}"#);
+		assert_eq!(
+			json,
+			r#"{"timelines":{"video":{"track":"video.timeline.z","duration":4000}},"timescale":1000}"#
+		);
 		assert_eq!(serde_json::from_str::<Archive>(&json).unwrap(), live());
 	}
 
@@ -98,7 +121,21 @@ mod test {
 		let json = serde_json::to_string(&archive).unwrap();
 		assert_eq!(
 			json,
-			r#"{"timelines":{"video":"video.timeline.z"},"timescale":1000,"replay":"recordings/clip","store":"https://objects.example/rec/","version":2}"#
+			r#"{"timelines":{"video":{"track":"video.timeline.z","duration":4000}},"timescale":1000,"replay":"recordings/clip","store":"https://objects.example/rec/","version":2}"#
+		);
+		assert_eq!(serde_json::from_str::<Archive>(&json).unwrap(), archive);
+	}
+
+	#[test]
+	fn an_untimed_timeline_declares_no_duration() {
+		let mut archive = Archive::new();
+		archive
+			.timelines
+			.insert("data".to_string(), Timeline::new("data.timeline.z", None));
+		let json = serde_json::to_string(&archive).unwrap();
+		assert_eq!(
+			json,
+			r#"{"timelines":{"data":{"track":"data.timeline.z"}},"timescale":1000}"#
 		);
 		assert_eq!(serde_json::from_str::<Archive>(&json).unwrap(), archive);
 	}

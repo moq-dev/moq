@@ -30,7 +30,7 @@ iroh = ["moq-tokio/iroh"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
 jemalloc = ["moq-tokio/jemalloc"]
-quic = ["_quic", "moq-tokio/quic"]
+quic = ["_quic", "moq-tokio/quic", "dep:moq-quic"]
 # The tokio QUIC listener, and the thread-per-core worker group behind
 # `runtime.workers`. Not one to enable on its own: it names no backend, so
 # moq-tokio would have nothing to bind a socket with.
@@ -48,31 +48,38 @@ uds = ["moq-tokio/uds"]
 # This is off by default: the relay is useful without io_uring.
 io-uring = ["_uring", "moq-uring/quic"]
 # The listener machinery shared by the feature above.
-_uring = ["dep:moq-sock", "dep:moq-uring"]
+_uring = ["dep:moq-sock", "dep:moq-uring", "dep:moq-quic"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
+async-trait = { workspace = true }
+aws-lc-rs = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true }
 bytes = { workspace = true }
 bytesize = "2.4.2"
 futures = { workspace = true }
+hex = { workspace = true }
 http-body = "1.0.1"
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 humantime = { workspace = true }
 hyper-util = { workspace = true }
 moq-auth = { workspace = true, features = ["client"] }
+moq-clock = { workspace = true }
 moq-net = { workspace = true }
+# The flow-control limits both QUIC runtimes take, for widening a peer's connection.
+moq-quic = { workspace = true, optional = true }
 moq-stats = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
 reqwest = { workspace = true, features = ["rustls"] }
 reqwest-middleware = "0.5"
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
+rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "webpki-roots"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["json", "base64"] }
-stun-types = "2.0.3"
+stun-types = { workspace = true }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -83,6 +90,7 @@ tracing = { workspace = true }
 url = { workspace = true, features = ["serde"] }
 usage = { workspace = true, features = ["completions", "config"] }
 web-transport-trait = { workspace = true }
+x509-parser = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 moq-sock = { workspace = true, optional = true }
@@ -94,17 +102,22 @@ sd-notify = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
+# Clocks only the test moves, wall time included, so a grant's life is exact.
+moq-clock = { path = "../moq-clock", features = ["manual", "sim"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rand = { workspace = true }
-rcgen = "0.14"
+rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
 tempfile = { workspace = true }
+time = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Workers built inside a runtime with a manual clock installed run on that clock.
+moq-uring = { workspace = true, features = ["manual"] }
 # Which sockets the process still holds, so the embed tests can prove a stopped
 # relay closed its own without rebinding a port another test could take.
-[target.'cfg(target_os = "linux")'.dev-dependencies]
 socket2 = { workspace = true, features = ["all"] }
 
 # `raise(SIGINT)` at ourselves, so the shutdown test exercises the real signal
