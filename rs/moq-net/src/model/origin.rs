@@ -3608,6 +3608,21 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			}
 			Step::Table => select(&mut front, &sources, &mut seen, &mut resolved),
 			Step::Listing => {
+				// A route claiming a prefix names no broadcast, so a path it serves on request
+				// has no inventory to list.
+				let covering = front.serving_route().is_some_and(|route| {
+					shared
+						.read()
+						.routes
+						.covering(&path.as_path())
+						.find(|entry| entry.id == route)
+						.is_some_and(|entry| entry.prefix != path)
+				});
+				if covering {
+					listing = None;
+					lister.abort(Error::NotFound);
+					continue;
+				}
 				let state = listing.get_or_insert_default();
 				state.source = front.serving();
 				state.stale = state.listed.clone();
@@ -7888,6 +7903,24 @@ mod tests {
 
 		assert_eq!(listed(&mut tracks).await, "+c");
 		assert_eq!(listed(&mut tracks).await, "-a");
+	}
+
+	/// A path served on request through a covering prefix is not a broadcast anyone
+	/// announced, so it has nothing to list.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_front_through_a_covering_prefix_lists_nothing() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer.dynamic("room", Route::default()).unwrap();
+		let pending = consumer.request_broadcast("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let _video = upstream.create_track("video", None).unwrap();
+		queued(&server).await.accept(&upstream);
+		let front = pending.await.unwrap();
+
+		let mut tracks = front.tracks().unwrap();
+		assert_eq!(listed(&mut tracks).await, format!("error: {}", Error::NotFound));
 	}
 
 	/// At equal cost the local broadcast wins even over a route with no hops of its

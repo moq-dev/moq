@@ -55,6 +55,7 @@ mod subscription_end_integrity;
 mod support;
 mod synced;
 mod track_abort_over_session;
+mod tracks;
 mod track_info_cancel;
 mod track_stream_demand;
 mod track_tail;

@@ -1564,12 +1564,93 @@ struct SourceServe<S: crate::transport::poll::Session> {
 	tracks: kio::Tasks<TrackServeRun<S>>,
 	// The source ended: no more track requests will arrive.
 	ended: bool,
+	/// Answers listings of the source with the peer's TRACKS.
+	lister: crate::broadcast::Lister,
+	listing: Listing<S>,
+}
+
+/// Where a source's answer to its listings stands.
+enum Listing<S: crate::transport::poll::Session> {
+	/// Nobody lists the source.
+	Idle,
+	Running(TracksRecv<S>),
+	/// The peer ended the listing with its broadcast: what it listed stays until nobody lists.
+	Ended,
+}
+
+/// Forwards the peer's TRACKS listing of a source into the source's lister.
+struct TracksRecv<S: crate::transport::poll::Session> {
+	session: S,
+	stream: Option<Stream<S, Version>>,
+	/// What the peer lists, each holding an `announces` slot: discovery state the peer
+	/// makes us hold.
+	listed: HashMap<Arc<str>, crate::session::Slot>,
+	synced: bool,
+}
+
+impl<S: crate::transport::poll::Session> TracksRecv<S> {
+	/// Apply the peer's events until it ends the listing, or the error that ends it.
+	fn poll(
+		&mut self,
+		source: &SourceServe<S>,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<(), Error>> {
+		let mut cx = waiter.context();
+		let version = source.subscriber.version;
+		let stream = match &mut self.stream {
+			Some(stream) => stream,
+			None => {
+				let mut stream = ready!(Stream::poll_open(&mut self.session, version, &mut cx))?;
+				stream.writer.buffer(&lite::ControlType::Tracks)?;
+				stream.writer.buffer(&lite::Tracks {
+					broadcast: source.path.as_path(),
+					epoch: source.epoch.clone(),
+				})?;
+				self.stream.insert(stream)
+			}
+		};
+		ready!(stream.writer.poll_flush(&mut cx))?;
+		loop {
+			let Some(event) = ready!(stream.reader.poll_decode_maybe::<lite::TracksEvent>(&mut cx))? else {
+				return Poll::Ready(Ok(()));
+			};
+			match event {
+				lite::TracksEvent::Added { name, info } => {
+					let name: Arc<str> = name.as_ref().into();
+					if self.listed.contains_key(&name) {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					let slot = source.subscriber.announces.acquire()?;
+					let info = track::Info::default()
+						.with_timescale(info.timescale)
+						.with_max_age(info.max_age)
+						.with_priority(info.priority);
+					source.lister.add(name.clone(), info)?;
+					self.listed.insert(name, slot);
+				}
+				lite::TracksEvent::Removed { name } => {
+					if self.listed.remove(name.as_ref()).is_none() {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					source.lister.remove(&name)?;
+				}
+				lite::TracksEvent::Synced => {
+					// This hop synced its readers when the listing began; only the order matters here.
+					if std::mem::replace(&mut self.synced, true) {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+				}
+			}
+		}
+	}
 }
 
 impl<S: crate::transport::poll::Session> SourceServe<S> {
 	fn new(subscriber: Subscriber<S>, minted: MintedSource) -> Self {
 		let closed = subscriber.session.clone();
 		Self {
+			lister: minted.dynamic.lister(),
+			listing: Listing::Idle,
 			subscriber,
 			validity: minted.validity,
 			path: minted.path,
@@ -1581,6 +1662,55 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 			tracks: kio::Tasks::new(),
 			ended: false,
 		}
+	}
+
+	/// Answer the source's listings while anyone lists it, from the peer's TRACKS.
+	fn poll_listing(&mut self, waiter: &kio::Waiter) {
+		// Taken out while it runs, since it reads the rest of the source.
+		let mut listing = std::mem::replace(&mut self.listing, Listing::Idle);
+		loop {
+			match &mut listing {
+				Listing::Idle => {
+					if !matches!(self.lister.poll_used(waiter), Poll::Ready(Ok(()))) {
+						break;
+					}
+					if !self.subscriber.version.has_tracks() {
+						// An empty answer would claim the peer lists nothing.
+						self.lister.abort(Error::Unsupported);
+						continue;
+					}
+					// Synced with this hop, which holds nothing yet: a relay never waits on its
+					// upstream, so the peer's tracks follow as live adds.
+					self.lister.synced();
+					listing = Listing::Running(TracksRecv {
+						session: self.subscriber.session.clone(),
+						stream: None,
+						listed: HashMap::new(),
+						synced: false,
+					});
+				}
+				Listing::Running(_) | Listing::Ended if self.lister.poll_unused(waiter).is_ready() => {
+					// Dropping the stream resets it.
+					listing = Listing::Idle;
+					self.lister.clear();
+				}
+				Listing::Running(recv) => match recv.poll(self, waiter) {
+					Poll::Pending => break,
+					Poll::Ready(Ok(())) => listing = Listing::Ended,
+					Poll::Ready(Err(err)) => {
+						let err = lite::error::control(&mut self.subscriber.session.clone(), err);
+						tracing::debug!(broadcast = %self.path, %err, "tracks failed");
+						if let Some(stream) = recv.stream.take() {
+							stream.writer.abort(&err);
+						}
+						listing = Listing::Idle;
+						self.lister.abort(err);
+					}
+				},
+				Listing::Ended => break,
+			}
+		}
+		self.listing = listing;
 	}
 }
 
@@ -1596,6 +1726,7 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 				// Session gone.
 				return Poll::Ready(());
 			}
+			self.poll_listing(waiter);
 			if self.ended {
 				// Done once the tracks in flight are.
 				return self.tracks.poll(waiter);

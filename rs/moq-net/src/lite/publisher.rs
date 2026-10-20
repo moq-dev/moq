@@ -299,6 +299,7 @@ enum ControlState<S: crate::transport::poll::Session> {
 	Subscribe(RequestServe<S, SubscribeServe<S>>),
 	Fetch(RequestServe<S, FetchServe>),
 	TrackInfo(RequestServe<S, TrackInfoServe>),
+	Tracks(RequestServe<S, TracksServe>),
 	Probe(ProbeServe<S>),
 	Auth(AuthServe<S>),
 	/// Decoding the peer's GOAWAY, surfaced through [`crate::Session::draining`].
@@ -334,12 +335,13 @@ impl<S: crate::transport::poll::Session> Control<S> {
 					};
 					let version = self.shared.version;
 					// PROBE is lite-03+, GOAWAY lite-04+, the Track Stream and FETCH lite-05+, and the
-					// Auth Stream lite-07+.
+					// Auth and Tracks Streams lite-07+.
 					let kind = kind.filter(|kind| match kind {
 						lite::ControlType::Probe => !matches!(version, Version::Lite01 | Version::Lite02),
 						lite::ControlType::Goaway => version.has_goaway(),
 						lite::ControlType::Fetch | lite::ControlType::Track => version.has_track_stream(),
 						lite::ControlType::Auth => version.has_auth(),
+						lite::ControlType::Tracks => version.has_tracks(),
 						_ => true,
 					});
 
@@ -363,6 +365,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						lite::ControlType::Track => {
 							ControlState::TrackInfo(RequestServe::new(self.shared.clone(), stream))
 						}
+						lite::ControlType::Tracks => ControlState::Tracks(RequestServe::new(self.shared.clone(), stream)),
 						lite::ControlType::Probe => {
 							ControlState::Probe(ProbeServe::new(self.shared.clone(), self.runtime.clone(), stream))
 						}
@@ -375,6 +378,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 				ControlState::Subscribe(serve) => return serve.poll(waiter),
 				ControlState::Fetch(serve) => return serve.poll(waiter),
 				ControlState::TrackInfo(serve) => return serve.poll(waiter),
+				ControlState::Tracks(serve) => return serve.poll(waiter),
 				ControlState::Probe(serve) => return serve.poll(waiter),
 				ControlState::Auth(serve) => return serve.poll(waiter),
 				ControlState::Goaway { stream } => {
@@ -1751,6 +1755,9 @@ enum Charge {
 	Track,
 	/// A subscription.
 	Subscribe,
+	/// A TRACKS stream listing the broadcast, charged under the empty track name on top
+	/// of any interest in a track of that name.
+	Tracks,
 }
 
 /// A session's subscription cap, charged per track.
@@ -1768,6 +1775,7 @@ struct Interests {
 struct Interest {
 	tracks: usize,
 	subscribes: usize,
+	listings: usize,
 	slots: Vec<crate::session::Slot>,
 }
 
@@ -1776,11 +1784,12 @@ impl Interest {
 		match charge {
 			Charge::Track => &mut self.tracks,
 			Charge::Subscribe => &mut self.subscribes,
+			Charge::Tracks => &mut self.listings,
 		}
 	}
 
 	fn cost(&self) -> usize {
-		self.tracks.max(self.subscribes)
+		self.tracks.max(self.subscribes) + self.listings
 	}
 }
 
@@ -1888,6 +1897,67 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 			timescale: info.timescale,
 		})?;
 		Poll::Ready(Ok(ControlFlow::Break(())))
+	}
+}
+
+/// Answers a TRACKS stream: the broadcast's listed tracks, SYNCED, then each change,
+/// until the broadcast ends.
+struct TracksServe {
+	tracks: crate::broadcast::Tracks,
+}
+
+impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
+	const KIND: &'static str = "tracks";
+	const GRACEFUL: bool = false;
+	const CHARGE: Option<Charge> = Some(Charge::Tracks);
+	const HOLDS: bool = false;
+	type Message = lite::Tracks<'static>;
+	type Update = NoUpdate;
+
+	fn target(msg: &Self::Message) -> (&crate::Path<'static>, &str) {
+		(&msg.broadcast, "")
+	}
+
+	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch> {
+		msg.epoch.as_ref()
+	}
+
+	fn start(_: &Shared<S>, _: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
+		Ok(Self {
+			tracks: broadcast.tracks()?,
+		})
+	}
+
+	fn update(&mut self, update: NoUpdate) {
+		match update {}
+	}
+
+	fn poll(
+		&mut self,
+		_: &Shared<S>,
+		writer: &mut Writer<S::SendStream, Version>,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<ControlFlow<()>, Error>> {
+		// Pull an event only once the last is out, so a stalled requester's changes collapse
+		// in the listing's queue rather than pile up here.
+		ready!(writer.poll_flush(&mut waiter.context()))?;
+		let event = match ready!(self.tracks.poll_next(waiter))? {
+			Some(crate::broadcast::TracksEvent::Added { name, info }) => lite::TracksEvent::Added {
+				name: name.to_string().into(),
+				info: lite::TrackInfo {
+					priority: info.priority,
+					max_age: info.max_age,
+					timescale: info.timescale,
+				},
+			},
+			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
+				name: name.to_string().into(),
+			},
+			Some(crate::broadcast::TracksEvent::Synced) => lite::TracksEvent::Synced,
+			None => return Poll::Ready(Ok(ControlFlow::Break(()))),
+		};
+		writer.buffer(&event)?;
+		Poll::Ready(Ok(ControlFlow::Continue(())))
 	}
 }
 
@@ -6030,15 +6100,16 @@ mod tests {
 	async fn unknown_control_types_reset_only_their_stream() {
 		use kio::Task;
 		// An unassigned type everywhere, then types a version predates: PROBE before lite-03,
-		// GOAWAY before lite-04, FETCH and TRACK before lite-05, AUTH before lite-07.
+		// GOAWAY before lite-04, FETCH and TRACK before lite-05, AUTH and TRACKS before lite-07.
 		let cases = [
-			(Version::Lite06, 8),
-			(Version::Lite07, 8),
+			(Version::Lite06, 9),
+			(Version::Lite07, 9),
 			(Version::Lite02, lite::ControlType::Probe as u8),
 			(Version::Lite03, lite::ControlType::Goaway as u8),
 			(Version::Lite04, lite::ControlType::Fetch as u8),
 			(Version::Lite04, lite::ControlType::Track as u8),
 			(Version::Lite06, lite::ControlType::Auth as u8),
+			(Version::Lite06, lite::ControlType::Tracks as u8),
 		];
 		for (version, kind) in cases {
 			let mut session = ScriptedSession::new(vec![kind]);
