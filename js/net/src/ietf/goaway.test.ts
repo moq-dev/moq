@@ -1,10 +1,18 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
+import { SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { Producer as OriginProducer } from "../origin.ts";
+import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { wireOf } from "../wire.ts";
+import { NativeSession } from "./adapter.ts";
+import { AuthMessage, AuthOk, IetfAuthWire } from "./auth.ts";
 import { Connection } from "./connection.ts";
 import { GoAway } from "./goaway.ts";
+import { PublishNamespace } from "./publish_namespace.ts";
+import { RequestOk } from "./request.ts";
+import { SubscribeNamespace, SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { ALPN, Version } from "./version.ts";
 
 // Draft-17+ carry GOAWAY on the setup stream, with the peer's deadline. The session keeps
@@ -80,3 +88,218 @@ test("a zero GOAWAY timeout reads as no deadline", async () => {
 	const msg = new GoAway({ newSessionUri: "https://relay.example/next", timeout: 0n });
 	expect(msg.drain()).toEqual({ uri: "https://relay.example/next", timeout: undefined });
 });
+
+for (const [version, alpn] of [
+	[Version.DRAFT_15, ALPN.DRAFT_15],
+	[Version.DRAFT_17, ALPN.DRAFT_17],
+	[Version.DRAFT_18, ALPN.DRAFT_18],
+	[Version.DRAFT_21, ALPN.DRAFT_21],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
+] as const) {
+	for (const end of ["FIN", "reset", "STOP_SENDING"] as const) {
+		test(`${alpn} control stream ${end} is a protocol violation`, async () => {
+			const pair = createMockTransportPair(alpn);
+			const control = await Stream.open(pair.client, { version });
+			const peer = await Stream.accept(pair.server, version);
+			if (!peer) throw new Error("no control stream");
+			const connection = new Connection({
+				url: new URL("https://relay.example/"),
+				quic: pair.client,
+				control,
+				maxRequestId: 100n,
+				version,
+				client: true,
+			});
+			try {
+				if (end === "reset") peer.writer.reset(new StreamError(StreamCode.Cancel));
+				else if (end === "STOP_SENDING") peer.reader.stop(new StreamError(StreamCode.Cancel));
+				else peer.writer.close();
+				expect((await pair.server.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+			} finally {
+				connection.abort();
+			}
+		});
+	}
+}
+
+for (const [version, alpn] of [
+	[Version.DRAFT_18, ALPN.DRAFT_18],
+	[Version.DRAFT_21, ALPN.DRAFT_21],
+] as const) {
+	test(`${alpn} rejects queued duplicate GOAWAYs before exposing a drain`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.client, { version });
+		const peer = await Stream.accept(pair.server, version);
+		if (!peer) throw new Error("no control stream");
+		const connection = new Connection({
+			url: new URL("https://relay.example/"),
+			quic: pair.client,
+			control,
+			maxRequestId: 100n,
+			version,
+			client: true,
+		});
+		// A caller may close immediately on a redirect, so the protocol error must win.
+		void wireOf(connection).goaway.then(() => connection.abort());
+		const frame = version === Version.DRAFT_18 ? [0x10, 0, 3, 0, 0, 0] : [0x10, 0, 2, 0, 0];
+		try {
+			await peer.writer.write(new Uint8Array([...frame, ...frame]));
+			expect((await pair.server.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+			expect(wireOf(connection).goaway.peek()).toBeUndefined();
+		} finally {
+			connection.abort();
+		}
+	});
+}
+
+for (const [version, alpn] of [
+	[Version.DRAFT_18, ALPN.DRAFT_18],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
+] as const) {
+	test(`${alpn} AUTH replies handle GOAWAY across grants`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const wire = new IetfAuthWire(new NativeSession(pair.client, version, true));
+		const stream = await wire.present(new Uint8Array());
+		const peer = await Stream.accept(pair.server, version);
+		if (!peer) throw new Error("no AUTH stream");
+		try {
+			await peer.writer.u53(GoAway.id);
+			await new GoAway({ newSessionUri: "" }).encode(peer.writer, version);
+			await new AuthOk(new Path.Patterns(), new Path.Patterns()).encode(peer.writer, version);
+			expect(await wire.read(stream)).toEqual({
+				grant: { publish: new Path.Patterns(), subscribe: new Path.Patterns(), expires: undefined },
+			});
+			await peer.writer.u53(GoAway.id);
+			await new GoAway({ newSessionUri: "" }).encode(peer.writer, version);
+			await expect(wire.read(stream)).rejects.toThrow("second GOAWAY");
+		} finally {
+			pair.client.close();
+		}
+	});
+
+	test(`${alpn} an AUTH presenter can send GOAWAY before withdrawing`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const wire = new IetfAuthWire(new NativeSession(pair.client, version, true));
+		const stream = await Stream.open(pair.client, { version });
+		const peer = await Stream.accept(pair.server, version);
+		if (!peer) throw new Error("no AUTH stream");
+		try {
+			await new AuthMessage(1n, new Uint8Array()).encode(peer.writer, version);
+			expect(await stream.reader.u53()).toBe(AuthMessage.id);
+			await wire.accept(stream);
+			const withdrawn = wire.withdrawn(stream);
+			await peer.writer.u53(GoAway.id);
+			await new GoAway({ newSessionUri: "" }).encode(peer.writer, version);
+			peer.writer.close();
+			await withdrawn;
+		} finally {
+			pair.client.close();
+		}
+	});
+}
+
+for (const [version, alpn] of [
+	[Version.DRAFT_18, ALPN.DRAFT_18],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
+] as const) {
+	test(`${alpn} namespace discovery reads GOAWAY before its response and between entries`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.client, { version });
+		await Stream.accept(pair.server, version);
+		const connection = new Connection({
+			url: new URL("https://relay.example/"),
+			quic: pair.client,
+			control,
+			maxRequestId: 100n,
+			version,
+			client: true,
+		});
+		const announced = connection.announced();
+		try {
+			const request = await Stream.accept(pair.server, version);
+			if (!request) throw new Error("no namespace subscription");
+			expect(await request.reader.u53()).toBe(SubscribeNamespace.id);
+			await SubscribeNamespace.decode(request.reader, version);
+			await request.writer.u53(GoAway.id);
+			await new GoAway({ newSessionUri: "" }).encode(request.writer, version);
+			await request.writer.u53(RequestOk.id);
+			await new RequestOk({ requestId: undefined }).encode(request.writer, version);
+			await request.writer.u53(SubscribeNamespaceEntry.id);
+			await new SubscribeNamespaceEntry({ suffix: Path.from("room") }).encode(request.writer, version);
+			expect((await announced.next())?.prefix).toBe(Path.from("room"));
+			await request.writer.write(Uint8Array.of(0x10, 0, 2, 0, 0));
+			expect((await pair.server.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+		} finally {
+			announced.close();
+			connection.abort();
+		}
+	});
+
+	test(`${alpn} an idle advertisement still rejects a second GOAWAY`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.server, { version });
+		await Stream.accept(pair.client, version);
+		const origin = new OriginProducer();
+		origin.createBroadcast(Path.from("room")).announce();
+		const connection = new Connection({
+			url: new URL("https://relay.example/"),
+			quic: pair.server,
+			control,
+			maxRequestId: 100n,
+			version,
+			client: false,
+			publish: origin.consume(),
+		});
+		try {
+			const request = await Stream.accept(pair.client, version);
+			if (!request) throw new Error("no advertisement");
+			expect(await request.reader.u53()).toBe(PublishNamespace.id);
+			await PublishNamespace.decode(request.reader, version);
+			await request.writer.u53(RequestOk.id);
+			await new RequestOk({ requestId: undefined }).encode(request.writer, version);
+			await request.writer.write(Uint8Array.of(0x10, 0, 2, 0, 0, 0x10, 0, 2, 0, 0));
+			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+		} finally {
+			connection.abort();
+			origin.close();
+		}
+	});
+
+	for (const end of ["FIN", "reset"] as const) {
+		test(`${alpn} an idle advertisement whose answer ends by ${end} is offered again`, async () => {
+			const pair = createMockTransportPair(alpn);
+			const control = await Stream.open(pair.server, { version });
+			await Stream.accept(pair.client, version);
+			const origin = new OriginProducer();
+			origin.createBroadcast(Path.from("room")).announce();
+			const connection = new Connection({
+				url: new URL("https://relay.example/"),
+				quic: pair.server,
+				control,
+				maxRequestId: 100n,
+				version,
+				client: false,
+				publish: origin.consume(),
+			});
+			const offered = async () => {
+				const request = await Stream.accept(pair.client, version);
+				if (!request) throw new Error("no advertisement");
+				expect(await request.reader.u53()).toBe(PublishNamespace.id);
+				const msg = await PublishNamespace.decode(request.reader, version);
+				expect(msg.trackNamespace).toEqual(Path.from("room"));
+				return request;
+			};
+			try {
+				const first = await offered();
+				await first.writer.u53(RequestOk.id);
+				await new RequestOk({ requestId: undefined }).encode(first.writer, version);
+				if (end === "reset") first.writer.reset(new StreamError(StreamCode.Cancel));
+				else first.writer.close();
+				await offered();
+			} finally {
+				connection.abort();
+				origin.close();
+			}
+		});
+	}
+}

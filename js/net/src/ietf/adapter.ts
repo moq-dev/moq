@@ -1,14 +1,14 @@
-import { Once } from "@moq/signals";
+import { Once, race } from "@moq/signals";
 import { Mutex } from "async-mutex";
 import type { Drain } from "../connection/goaway.ts";
-import { error, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
+import { error, ProtocolViolation, SessionCode, SessionError, sessionClosed } from "../error.ts";
 import { type OpenOptions, Reader, Stream, type Writer } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
-import { toRequestCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW, RequestError } from "./request.ts";
+import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW } from "./request.ts";
+import { refuseUpdate } from "./request_stream.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** The peer used a request ID the draft closes the session for. */
@@ -258,9 +258,10 @@ export class ControlStreamAdapter implements Session {
 	// SubscribeNamespace requestIds — for routing 0x08/0x0E entries that lack requestId (v14/v15)
 	#subscribeNamespaces = new Set<bigint>();
 
-	// Our updates' own request IDs on drafts 15 and 16, whose answer names that ID rather than
-	// the request it updated. Nothing waits on it, so it is consumed here.
-	#updates = new Set<bigint>();
+	// Our updates' own request IDs on drafts 15 and 16 → the request each updated, since the
+	// answer names only the update. Draft 16's reaches that request's stream; draft 15's is
+	// consumed here, since nothing there reads one. An entry goes with its answer or its request.
+	#updates = new Map<bigint, bigint>();
 
 	// Incoming stream queue (for acceptBi)
 	#incomingQueue: Stream[] = [];
@@ -397,7 +398,12 @@ export class ControlStreamAdapter implements Session {
 						}
 					} else {
 						spent = this.#updateId(toFlush);
-						if (spent !== undefined && this.version !== Version.DRAFT_14) this.#updates.add(spent);
+						if (
+							spent !== undefined &&
+							registeredRequestId !== undefined &&
+							this.version !== Version.DRAFT_14
+						)
+							this.#updates.set(spent, registeredRequestId);
 					}
 
 					await this.#send(toFlush, spent);
@@ -465,76 +471,90 @@ export class ControlStreamAdapter implements Session {
 				void this.#acceptNativeBidis();
 			}
 
-			for (;;) {
-				const done = await this.#reader.done();
-				if (done) {
-					cause = new ProtocolViolation("control stream closed");
-					break;
-				}
-
-				const typeId = await this.#reader.u53();
-				const size = await this.#reader.u16();
-				const body = await this.#reader.read(size);
-
-				const classified = await this.#classify(typeId, body);
-
-				if (classified.route === Route.GoAway) {
-					// The session keeps serving: a GOAWAY asks us to migrate, not to stop reading.
-					const msg = await GoAway.decodeBody(body, this.version);
-					if (this.goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
-					// A client may leave, but only the server may name where to go.
-					if (!this.client && msg.newSessionUri !== "") {
-						throw new ProtocolViolation("client GOAWAY must not name a redirect");
+			const read = async () => {
+				for (;;) {
+					const done = await this.#reader.done();
+					if (done) {
+						throw new ProtocolViolation("control stream closed");
 					}
-					this.goaway.set(msg.drain());
-					continue;
-				}
 
-				if (classified.route === Route.Update) {
-					this.spendRequest(classified.ownRequestId);
-					// An update whose request is gone, or rides a stream of its own like draft 16's
-					// SUBSCRIBE_NAMESPACE, is still owed its one answer. Draft 14 answers no update.
-					if (
-						!this.#pushMessage(classified.requestId, typeId, size, body) &&
-						this.version !== Version.DRAFT_14
-					) {
-						void this.#refuseUpdate(classified.ownRequestId);
+					const typeId = await this.#reader.u53();
+					const size = await this.#reader.u16();
+					const body = await this.#reader.read(size);
+
+					const classified = await this.#classify(typeId, body);
+
+					if (classified.route === Route.GoAway) {
+						// The session keeps serving: a GOAWAY asks us to migrate, not to stop reading.
+						const msg = await GoAway.decodeBody(body, this.version);
+						if (this.goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+						// A client may leave, but only the server may name where to go.
+						if (!this.client && msg.newSessionUri !== "") {
+							throw new ProtocolViolation("client GOAWAY must not name a redirect");
+						}
+						this.goaway.set(msg.drain());
+						continue;
 					}
-					continue;
-				}
 
-				const { route, requestId } = classified;
-				if ((route === Route.Response || route === Route.ErrorResponse) && this.#updates.delete(requestId))
-					continue;
+					if (classified.route === Route.Update) {
+						this.spendRequest(classified.ownRequestId);
+						// An update whose request is gone, or rides a stream of its own like draft 16's
+						// SUBSCRIBE_NAMESPACE, is still owed its one answer. Draft 14 answers no update.
+						if (
+							!this.#pushMessage(classified.requestId, typeId, size, body) &&
+							this.version !== Version.DRAFT_14
+						) {
+							void this.#refuseUpdate(classified.ownRequestId);
+						}
+						continue;
+					}
 
-				switch (route) {
-					case Route.NewRequest:
-						this.#admitHeld(requestId);
-						this.#newRequest(typeId, size, body, requestId);
-						break;
-					case Route.Response:
-						this.#pushMessage(requestId, typeId, size, body);
-						break;
-					case Route.ErrorResponse:
-						this.#pushMessage(requestId, typeId, size, body);
-						this.#closeStream(requestId);
-						break;
-					case Route.CloseStream:
-						this.#closeStream(requestId);
-						break;
-					case Route.FollowUp:
-						this.#pushMessage(requestId, typeId, size, body);
-						break;
-					case Route.MaxRequestId:
-						this.#maxRequestId = requestId;
-						for (const resolve of this.#maxRequestIdResolves) resolve();
-						this.#maxRequestIdResolves.clear();
-						break;
+					const { route, requestId } = classified;
+					const updated = this.#updates.get(requestId);
+					if ((route === Route.Response || route === Route.ErrorResponse) && updated !== undefined) {
+						// A refused update leaves its request open: the answer is all it ends.
+						this.#updates.delete(requestId);
+						if (this.version === Version.DRAFT_16) this.#pushMessage(updated, typeId, size, body);
+						continue;
+					}
+
+					switch (route) {
+						case Route.NewRequest:
+							this.#admitHeld(requestId);
+							this.#newRequest(typeId, size, body, requestId);
+							break;
+						case Route.Response:
+							this.#pushMessage(requestId, typeId, size, body);
+							break;
+						case Route.ErrorResponse:
+							this.#pushMessage(requestId, typeId, size, body);
+							this.#closeStream(requestId);
+							break;
+						case Route.CloseStream:
+							this.#closeStream(requestId);
+							break;
+						case Route.FollowUp:
+							this.#pushMessage(requestId, typeId, size, body);
+							break;
+						case Route.MaxRequestId:
+							this.#maxRequestId = requestId;
+							for (const resolve of this.#maxRequestIdResolves) resolve();
+							this.#maxRequestIdResolves.clear();
+							break;
+					}
 				}
-			}
+			};
+			const stopped = this.#writer.closed.then(() => {
+				throw new ProtocolViolation("control stream stopped");
+			});
+			await race([read(), stopped]);
 		} catch (err: unknown) {
-			cause = error(err);
-			throw err;
+			// A closing session fails this stream too, which reports the session's error.
+			cause =
+				err instanceof ProtocolViolation || err instanceof RequestWindowError || sessionClosed(err)
+					? error(err)
+					: new ProtocolViolation(error(err).message, { cause: err });
+			throw cause;
 		} finally {
 			this.close(cause);
 		}
@@ -609,12 +629,11 @@ export class ControlStreamAdapter implements Session {
 		try {
 			await this.#writeMutex.runExclusive(async () => {
 				if (this.#closed) return;
-				await this.#writer.u53(RequestError.id);
-				await new RequestError({
+				await refuseUpdate(this.#writer, this.version, "subscribe", {
 					requestId,
-					errorCode: toRequestCode("not_supported", "subscribe", this.version),
+					condition: "not_supported",
 					reasonPhrase: "update not supported",
-				}).encode(this.#writer, this.version);
+				});
 			});
 		} catch {
 			// The control stream closed under the refusal.
@@ -643,6 +662,9 @@ export class ControlStreamAdapter implements Session {
 		const held = this.#open.delete(requestId);
 		this.#streams.delete(requestId);
 		this.#subscribeNamespaces.delete(requestId);
+		for (const [update, updated] of this.#updates) {
+			if (updated === requestId) this.#updates.delete(update);
+		}
 
 		const registered = this.#namespacesByRequestId.get(requestId);
 		if (registered !== undefined) {

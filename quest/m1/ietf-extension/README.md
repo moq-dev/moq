@@ -83,7 +83,7 @@ Work owned by this README, after the children land:
 
 ## Required
 
-- [Relay hops](/quest/m1/ietf-extension/lite.md) - the `ietf` SETUP extension carries every crate-private field across a lite-07 hop between relays
+- [Ingress-version provenance](/quest/m1/ietf-extension/lite.md) - a track crossing a lite-07 hop carries its moq-transport ingress version once, replacing per-block Encoding codes
 
 ## Related
 

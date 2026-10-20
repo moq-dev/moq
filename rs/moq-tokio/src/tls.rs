@@ -416,7 +416,7 @@ impl Peers {
 
 /// The dial side's TLS: who to trust, and the optional mTLS identity to present.
 #[serde_with::serde_as]
-#[derive(Clone, Default, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -439,7 +439,7 @@ pub struct Connect {
 		env = "MOQ_CONNECT_TLS_ROOT",
 		setting = "connect.tls.root"
 	)]
-	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
@@ -503,7 +503,7 @@ pub struct Connect {
 		env = "MOQ_CONNECT_TLS_CERT",
 		setting = "connect.tls.cert"
 	)]
-	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	pub cert: Option<PathBuf>,
 
 	/// PEM file containing the private key for mTLS.
@@ -517,7 +517,7 @@ pub struct Connect {
 		env = "MOQ_CONNECT_TLS_KEY",
 		setting = "connect.tls.key"
 	)]
-	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "key"))]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "key"))]
 	pub key: Option<PathBuf>,
 
 	/// Danger: Disable TLS certificate verification.
@@ -570,7 +570,7 @@ pub struct Connect {
 /// the flag but not the variable, and a deployment that configures a relay through
 /// the environment would otherwise slip past the check entirely. Not TOML fields:
 /// config files use the canonical names.
-#[derive(Clone, Default, Debug, usage::Args)]
+#[derive(Clone, Default, Debug, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 struct ConnectDeprecated {
 	#[usage(long = "tls-root", hide = true)]
@@ -1204,7 +1204,7 @@ pub fn init_android(env: &mut jni::Env, context: jni::objects::JObject) -> Resul
 ///
 /// In config files, each list field accepts either a single string or a TOML array.
 #[serde_with::serde_as]
-#[derive(usage::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -1216,7 +1216,7 @@ pub struct Listen {
 		env = "MOQ_LISTEN_TLS_CERT",
 		setting = "listen.tls.cert"
 	)]
-	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub cert: Vec<PathBuf>,
@@ -1228,7 +1228,7 @@ pub struct Listen {
 		env = "MOQ_LISTEN_TLS_KEY",
 		setting = "listen.tls.key"
 	)]
-	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "key"))]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "key"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub key: Vec<PathBuf>,
@@ -1299,7 +1299,7 @@ pub struct Listen {
 		env = "MOQ_LISTEN_TLS_ROOT",
 		setting = "listen.tls.root"
 	)]
-	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
@@ -1317,7 +1317,7 @@ pub struct Listen {
 /// `--tls-cert`); what they carry here is their original env var, which a Usage
 /// alias cannot. A relay configured through the environment would otherwise come
 /// up with no certificate at all.
-#[derive(Clone, Default, Debug, usage::Args)]
+#[derive(Clone, Default, Debug, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct ListenDeprecated {
 	#[usage(
@@ -3313,7 +3313,7 @@ async fn reload_certs(mut watcher: crate::watch::Files, certs: Arc<ServeCerts>, 
 mod legacy_tests {
 	use super::*;
 	/// A parser wrapping the sections, which derive `Args` rather than `Parser`.
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(settings)]
 	struct Cli {

@@ -849,8 +849,30 @@ test("a re-probe swaps the catalog entry in one update", async () => {
 	}
 });
 
-test("cut forces a keyframe, coalescing requests and spacing them at least 500ms apart", async () => {
+// Drive a live encoder over a recording `VideoEncoder` that outputs every frame it is handed, so the
+// track holds real groups: a keyframe of 100 bytes, each delta 60. `run` sends one frame per call
+// at `millis` of media time and reads back which frames were forced to be keyframes.
+async function recordKeyframes(
+	info: Partial<Moq.Track.Info>,
+	run: (ctx: {
+		encoder: Encoder;
+		track: Moq.Track.Producer;
+		send: (millis: number) => Promise<void>;
+	}) => Promise<void>,
+): Promise<number[]> {
 	const keys: number[] = [];
+
+	class Frame {
+		readonly timestamp: number;
+		constructor(timestamp: number) {
+			this.timestamp = timestamp;
+		}
+		clone(): Frame {
+			return new Frame(this.timestamp);
+		}
+		close(): void {}
+	}
+
 	class RecordingVideoEncoder {
 		state: CodecState = "unconfigured";
 		#output: VideoEncoderInit["output"];
@@ -869,9 +891,13 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 			this.#codec = config.codec;
 		}
 
-		// Records the test's frames only, not the probe's.
+		// Records the test's frames only, not the probe's, and outputs each a task later as WebCodecs does.
 		encode(frame: VideoFrame, options?: VideoEncoderEncodeOptions): void {
-			if (options?.keyFrame && frame instanceof Frame) keys.push(frame.timestamp / 1000);
+			if (!(frame instanceof Frame)) return;
+			const key = !!options?.keyFrame;
+			if (key) keys.push(frame.timestamp / 1000);
+			const chunk = { type: key ? "key" : "delta", timestamp: frame.timestamp, byteLength: key ? 100 : 60 };
+			queueMicrotask(() => this.#output({ ...chunk, copyTo: () => {} } as never, {} as never));
 		}
 
 		// Only the probe flushes; report the configured codec, as Chrome does.
@@ -894,17 +920,6 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 	const videoFrame = Object.getOwnPropertyDescriptor(globalThis, "VideoFrame");
 	Object.defineProperty(globalThis, "VideoFrame", { configurable: true, value: FakeVideoFrame, writable: true });
 
-	class Frame {
-		readonly timestamp: number;
-		constructor(timestamp: number) {
-			this.timestamp = timestamp;
-		}
-		clone(): Frame {
-			return new Frame(this.timestamp);
-		}
-		close(): void {}
-	}
-
 	const { Fanout } = await import("../fanout");
 	let controller!: ReadableStreamDefaultController<VideoFrame>;
 	const fanout = new Fanout(
@@ -916,7 +931,7 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 		{ clone: (frame) => frame.clone(), release: (frame) => frame.close() },
 	);
 
-	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO, ...info });
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
@@ -928,35 +943,19 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 	};
 	const encoder = new Encoder("video", {
 		enabled: true,
-		broadcast: { video: () => rendition } as never,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
 		capture: capture as never,
 	});
 
-	// One frame per 100ms of media time, after calling cut() when `cut` says so.
-	const send = async (millis: number, cut = false) => {
-		if (cut) encoder.cut();
+	const send = async (millis: number) => {
 		controller.enqueue(new Frame(millis * 1000) as unknown as VideoFrame);
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	};
 
 	try {
 		await settle();
-
-		// The opening keyframe serves a request made before it.
-		await send(0, true);
-		await send(100);
-		// Several requests before one frame produce one keyframe.
-		encoder.cut();
-		encoder.cut();
-		await send(600, true);
-		await send(700);
-		// Too soon after the last: deferred until 500ms have passed, not dropped.
-		await send(800, true);
-		await send(1000);
-		await send(1100);
-		await send(1200);
-
-		expect(keys).toEqual([0, 600, 1100]);
+		await run({ encoder, track, send });
+		return keys;
 	} finally {
 		encoder.close();
 		fanout.close();
@@ -966,6 +965,50 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 		if (videoFrame) Object.defineProperty(globalThis, "VideoFrame", videoFrame);
 		else Reflect.deleteProperty(globalThis, "VideoFrame");
 	}
+}
+
+test("cut forces a keyframe on the next frame, coalescing requests without spacing them", async () => {
+	const keys = await recordKeyframes({}, async ({ encoder, send }) => {
+		// The opening keyframe serves a request made before it.
+		encoder.cut();
+		await send(0);
+		await send(100);
+		// Several requests before one frame produce one keyframe.
+		encoder.cut();
+		encoder.cut();
+		await send(200);
+		// The very next frame can be cut again.
+		encoder.cut();
+		await send(300);
+		await send(400);
+	});
+	expect(keys).toEqual([0, 200, 300]);
+});
+
+test("a join over the refresh ratio forces a keyframe on the next frame", async () => {
+	const keys = await recordKeyframes({ refresh: 2 }, async ({ track, send }) => {
+		const watching = track.subscribe();
+		const joined: Moq.Track.Subscriber[] = [];
+		try {
+			await send(0);
+			await send(50);
+			// One 60 byte delta is under twice the 100 byte keyframe.
+			joined.push(track.subscribe());
+			await send(100);
+			await send(150);
+			await send(200);
+			// Four deltas are over it, 200ms after the keyframe.
+			joined.push(track.subscribe());
+			await send(250);
+			// A join after the fresh keyframe reads its group.
+			joined.push(track.subscribe());
+			await send(300);
+		} finally {
+			watching.close();
+			for (const subscriber of joined) subscriber.close();
+		}
+	});
+	expect(keys).toEqual([0, 250]);
 });
 
 test("a failed video encoder disables only its rendition and recovers on a fresh track", async () => {

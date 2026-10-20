@@ -16,6 +16,7 @@ pub(crate) mod error;
 mod fetch;
 mod goaway;
 mod group;
+pub(crate) mod ietf;
 mod info;
 pub mod message;
 mod parameters;

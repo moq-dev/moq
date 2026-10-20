@@ -216,7 +216,9 @@ exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
 to namespace prefixes. Older versions have no grant; the URL token keeps working
 everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
-authorization token. The token belongs to the session that added it, so after a
+authorization token. Naming a fresh token renews the announcement in place with
+`REQUEST_UPDATE` from draft 16, and re-announces it on drafts 14 and 15, so it
+can outlive the token it started with. The token belongs to the session that added it, so after a
 reconnect the application adds it again and re-announces. moq-lite has no
 per-request token, so there an announcement rides the session's scope.
 
@@ -242,10 +244,12 @@ On moq-lite 05 and later, a publisher explicitly reports groups that will not ar
 This lets a finished subscription settle without waiting for missing groups.
 Datagram delivery stays best effort.
 
-Ranges are a request, not a filter. A subscriber reads from where its lowest
-range starts, and may also get groups another subscriber of the same track
-asked for. A relay merges its subscribers' ranges into one upstream request,
-which today's wire versions carry as the single span covering them.
+Ranges are both a request and a filter. A subscriber reads only the groups its
+own ranges cover, resolved again whenever it replaces them, even when another
+subscriber of the same track asked for more. Widening them, including lowering
+the start, also serves the cached groups they newly cover, never one already
+served. A relay merges its subscribers' ranges into one upstream request, which
+today's wire versions carry as the single span covering them.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of

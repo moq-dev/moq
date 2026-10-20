@@ -86,6 +86,36 @@ async fn a_session_lists_its_peers_tracks() {
 	assert_eq!(next(&mut tracks).await, "end");
 }
 
+/// TRACKS_ADD carries the track's whole TRACK_INFO, Refresh included.
+#[moq_clock::test]
+async fn a_listing_carries_track_info() {
+	let publisher = produce_origin(1);
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let info = moq_net::track::Info::default()
+		.with_timescale(moq_net::Timescale::MILLI)
+		.with_max_age(Duration::from_secs(3))
+		.with_priority(9)
+		.with_refresh(4);
+	let _a = broadcast.create_track("a", info).unwrap();
+	broadcast.announce(Default::default()).unwrap();
+
+	let (subscriber, _pair) = connect(&publisher, 2, lite07()).await;
+	let mut tracks = resolve(&subscriber).await.tracks().unwrap();
+	assert_eq!(next(&mut tracks).await, "synced");
+	let event = moq_clock::timeout(TIMEOUT, tracks.next())
+		.await
+		.expect("listing stalled")
+		.unwrap();
+	let Some(TracksEvent::Added { name, info }) = event else {
+		panic!("expected an add, got {event:?}");
+	};
+	assert_eq!(&*name, "a");
+	assert_eq!(info.timescale, Some(moq_net::Timescale::MILLI));
+	assert_eq!(info.max_age, Some(Duration::from_secs(3)));
+	assert_eq!(info.priority, 9);
+	assert_eq!(info.refresh, Some(4));
+}
+
 /// A listed track is a track like any other: a SUBSCRIBE from the listing reads the
 /// group it already holds from the cache.
 #[moq_clock::test]

@@ -11,7 +11,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use crate::args::MoqSide;
 
 /// Follow the broadcasts announced on a relay as they start and end.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// Only follow paths under this prefix.

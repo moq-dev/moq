@@ -878,7 +878,7 @@ mod tests {
 	/// A parser wrapping the config, since it derives `Args` (a flattened `Parser`
 	/// registers an implicit group named after the struct, which collides once two
 	/// role configs are flattened together).
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(settings)]
 	struct Cli {

@@ -167,7 +167,7 @@ crate::error::from_message! {
 type Result<T> = std::result::Result<T, Error>;
 
 /// Settings for the shared iroh endpoint, used by both the client and server.
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -504,7 +504,7 @@ mod tests {
 	/// endpoint is the accepted-and-ignored failure in miniature.
 	#[tokio::test]
 	async fn bind_refuses_a_released_quic_spelling() {
-		#[derive(usage::Cli)]
+		#[derive(usage_rs::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(settings)]
 		struct Cli {

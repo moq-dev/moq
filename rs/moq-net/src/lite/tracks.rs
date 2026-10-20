@@ -127,6 +127,7 @@ mod test {
 	#[test]
 	fn events_roundtrip() {
 		let info = TrackInfo {
+			refresh: Some(4),
 			priority: 3,
 			max_age: Some(Duration::from_secs(2)),
 			timescale: Some(Timescale::MICRO),
@@ -138,6 +139,7 @@ mod test {
 			panic!("expected an add");
 		};
 		assert_eq!(name, "video");
+		assert_eq!(got.refresh, Some(4));
 		assert_eq!(got.priority, 3);
 		assert_eq!(got.max_age, Some(Duration::from_secs(2)));
 		assert_eq!(got.timescale, Some(Timescale::MICRO));
