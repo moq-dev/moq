@@ -24,5 +24,5 @@ closes this:
 
 ## Related
 
-- [Require platform gates](/quest/m0/ci/platform-queue.md) - the macOS and Windows jobs this cache serves
+- [Require the release gates](/quest/m0/ci/release-gates.md) - the macOS and Windows jobs this cache serves
 - [Nix cache](/quest/m0/ci/nix-cache.md) - the same R2 and Environment bootstrap for Nix
