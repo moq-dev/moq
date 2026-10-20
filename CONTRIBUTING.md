@@ -31,7 +31,7 @@ Fix any merge conflicts and failing CI checks.
 PRs into `main` get no cloud CI: they report **Check** and **Test** as skipped, and `just ci` runs the same gate locally.
 The merge queue runs Check and Test on the PR combined with the latest `main` and the PRs queued ahead of it.
 Enqueue with `gh pr merge <number>` once the review is clean.
-macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
+Both select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
 
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
 Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.

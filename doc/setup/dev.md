@@ -17,6 +17,7 @@ match CI. `just check` and `just fix` refuse to run outside it; set
 | `just fix` | Format and lint the packages this branch changed. |
 | `just check` | Compile, lint, and test the same scope. |
 | `just ci` | Run the merge queue's gate locally, strictly. PRs into `main` get no other CI, so run it before every push. |
+| `just gate` | `just ci` over every package, as nightly and release PRs run it. |
 | `just fix --all`, `just check --all` | The same, over every package. |
 | `just pub bbb <url>` | Publish Big Buck Bunny (also `tos`, `clock`, `gst`, `hls`). |
 | `just sub gst bbb <url>` | Play a broadcast through GStreamer. |

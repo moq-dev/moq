@@ -25,7 +25,9 @@ for (const name of ["check", "test"]) {
 		const scope = job.steps[scopeIndex];
 		expect(scope.run).toBe(`just ci-select ${name} "$CI_BASE" >> "$GITHUB_OUTPUT"`);
 		// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
-		expect(scope.env?.CI_BASE).toBe("${{ github.event.merge_group.base_sha }}");
+		expect(scope.env?.CI_BASE).toBe(
+			"${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}",
+		);
 		expect(scope.if).toBeUndefined();
 		expect(scope["continue-on-error"]).toBeUndefined();
 		expect(job.steps.slice(0, scopeIndex).some((step) => step.uses === "./.github/actions/just")).toBe(true);

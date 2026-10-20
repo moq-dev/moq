@@ -6,7 +6,9 @@ permissions:
 
 # The merge queue is the gate for main: its PRs report both jobs skipped, which
 # satisfies the required names, and contributors run `just ci` locally instead.
-# Release has no queue, so its PRs run both jobs.
+# Release has no queue, so its PRs run both jobs over every package (`just gate`,
+# via CI_BASE=--all): the diff-scoped queue can let a break into main, but none
+# may reach a release.
 on:
   pull_request:
     # `closed` only cancels an in-flight run. `edited` runs the jobs when a main
@@ -51,7 +53,7 @@ jobs:
         id: scope
         run: just ci-select check "$CI_BASE" >> "$GITHUB_OUTPUT"
         env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         if: steps.scope.outputs.needed == 'true'
@@ -79,17 +81,17 @@ jobs:
         uses: ./.github/actions/rust-cache
 
       # Half of the `just ci` a contributor runs before pushing, with the same
-      # MOQ_STRICT and nextest profile. It diffs against the merge group base
-      # SHA (or origin/$GITHUB_BASE_REF for a PR) and touches only the changed
-      # packages plus their dependents, so a one-crate PR compiles one crate and
-      # a quest-only PR runs only the lints. The pre-setup query and execution
+      # MOQ_STRICT and nextest profile. In the queue it diffs against the merge
+      # group base SHA and touches only the changed packages plus their
+      # dependents, so a one-crate PR compiles one crate and a quest-only PR
+      # runs only the lints; a release PR runs everything. The pre-setup query and execution
       # use the same impact map in sh/dispatch.sh; a Test job with no work ends
       # after the query while Check keeps its selected repository-wide lints.
       - name: Check
         if: steps.scope.outputs.needed == 'true'
         run: nix develop --command just ci check "$CI_BASE"
         env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
   test:
     name: Test
@@ -113,7 +115,7 @@ jobs:
         id: scope
         run: just ci-select test "$CI_BASE" >> "$GITHUB_OUTPUT"
         env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         if: steps.scope.outputs.needed == 'true'
@@ -138,4 +140,4 @@ jobs:
         if: steps.scope.outputs.needed == 'true'
         run: nix develop --command just ci test "$CI_BASE"
         env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}

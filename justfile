@@ -106,6 +106,13 @@ check $BASE="":
 ci $JOB="" $BASE="":
     MOQ_STRICT=1 NEXTEST_PROFILE=ci sh/dispatch.sh "ci${JOB:+-$JOB}" "$BASE"
 
+# `ci` and the queue select by diff, so a break outside the selection can reach
+# main; nightly and every release PR run `gate` so none reaches a release.
+
+# Run `ci` over every package: both halves, or JOB `check` or `test` alone.
+gate $JOB="":
+    just ci "$JOB" --all
+
 # Report what a CI job (`check`, `test`, `platform`) selects, before installing the dev shell or build caches.
 ci-select $JOB $BASE="":
     sh/dispatch.sh "ci-$JOB" "$BASE" --query
