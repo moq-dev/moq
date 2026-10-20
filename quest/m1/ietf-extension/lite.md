@@ -34,8 +34,10 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
     (`model::object::TrackProperties`), with its sealed keys.
   - Track info carries the ingress moq-transport version once, or none for a
     track published over moq-lite, which has no IETF provenance and no
-    properties to derive rules for. Immutable properties keep their
-    unchanged inner bytes. Downstream IETF egress
+    properties to derive rules for. Lite ingress refuses a track with no
+    version that carries any IETF field (track, object, or datagram
+    properties, or object IDs), including on a later object. Immutable
+    properties keep their unchanged inner bytes. Downstream IETF egress
     applies today's single-relay rules from that version: refuse an
     incompatible immutable encoding (drafts 14/15 carry no immutable track
     block, so egress there skips that check), and across draft 19, where
@@ -74,7 +76,8 @@ encoding provenance, and 0x06 provenance: a draft-18 publisher's object and
 track properties exit draft 19 with a mutable 0x06 dropped and a sealed one
 refused. Both drafts share an encoding family, so only the carried version
 distinguishes them. Cover a lite-published track crossing the same hop with
-no ingress version.
+no ingress version, and a malformed peer that sends properties on a
+versionless track, at track info and on a later frame and datagram.
 
 Public API: `setup::Extensions::ietf`. Wire: a new lite-07 SETUP extension
 and the framing above, only when negotiated.
