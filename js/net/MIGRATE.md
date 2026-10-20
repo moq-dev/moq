@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `largest()` reports within a reader's `setGroups` bounds
+
+`Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `setGroups` or `withGroups`, where they used to ignore the bounds.
+A largest past the cap or below the floor reports nothing; the cache never stands in for it.
+A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
+Unbounded readers and `Track.Producer.largest()` are unchanged.
+To read the track's edge from a capped reader, lift the cap with `setGroups({})` first.
+
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
 
 Construct `SubscribeEnd(group)` without a stream count; remove reads of `.streams` and calls to `hasStreamCount()`.

@@ -130,7 +130,7 @@ The lowercase hyphenated text of a UUID version 7 with the RFC variant ({{RFC956
 Noncanonical text and other UUID versions or variants MUST be refused (`identity`).
 Each instance of a broadcast MUST mint an epoch that no other instance under the same credential has used or will use.
 Two instances MUST NOT share an epoch: they would derive the same keys and collide on nonces.
-An encrypting core MUST mint its producing epoch internally and MUST NOT accept an explicit or shared epoch for production.
+An encrypting core MUST mint its producing epoch internally.
 Binding a discovered epoch MUST yield a consume-only generation.
 Clones of a producing generation MUST share permanent track claims so reopening a physical track cannot reset its nonce counters.
 Its leading 48-bit timestamp makes epochs sort by creation time and its random bits make collisions negligible.
