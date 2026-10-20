@@ -4,11 +4,9 @@ permissions:
   id-token: write
   contents: read
 
-# The merge queue is the gate for main: its PRs report both jobs skipped, which
-# satisfies the required names, and contributors run `just ci` locally instead.
-# Release has no queue, so its PRs run both jobs over every package (`just gate`,
-# via CI_BASE=--all): the diff-scoped queue can let a break into main, but none
-# may reach a release.
+# Main PRs report Check as skipped; the merge queue runs the Linux gate once.
+# Release PRs run the same gate over every package. The maintainer must remove
+# Test from the main ruleset before this change enters the queue.
 on:
   pull_request:
     # `closed` only cancels an in-flight run. `edited` runs the jobs when a main
@@ -26,8 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Test enforces default-feature clippy while compiling its binaries. Check
-  # runs the other lints, docs, and distinct feature/target builds in parallel.
+  # One checkout, dev shell, cache restore, and dispatcher for lints and tests.
   check:
     name: Check
     # A close/merge run exists only to cancel the superseded in-flight build via
@@ -45,7 +42,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history so `just ci check` can diff against the PR or merge group base.
+          # Full history so `just ci` can diff against the PR or merge group base.
           fetch-depth: 0
 
       - uses: ./.github/actions/just
@@ -54,7 +51,7 @@ jobs:
       # failure fails this job; an empty selection keeps its required name green.
       - name: Select work
         id: scope
-        run: just ci-select check "$CI_BASE" >> "$GITHUB_OUTPUT"
+        run: just ci-select "$CI_BASE" >> "$GITHUB_OUTPUT"
         env:
           CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
@@ -73,59 +70,9 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
-      # Half of the `just ci` a contributor runs before pushing, with the same
-      # MOQ_STRICT and nextest profile. In the queue it diffs against the merge
-      # group base SHA and touches only the changed packages plus their
-      # dependents, so a one-crate PR compiles one crate and a quest-only PR
-      # runs only the lints; a release PR runs everything. The pre-setup query and execution
-      # use the same impact map in sh/dispatch.sh; a Test job with no work ends
-      # after the query while Check keeps its selected repository-wide lints.
+      # The pre-setup query and execution use the same impact map.
       - name: Check
         if: steps.scope.outputs.needed == 'true'
-        run: nix develop --command just ci check "$CI_BASE"
-        env:
-          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
-
-  test:
-    name: Test
-    if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
-    # Leave the variable unset until the local runner is online and verified.
-    runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
-    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
-    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
-    timeout-minutes: 60
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          # Full history so `just ci test` can diff against the PR or merge group base.
-          fetch-depth: 0
-
-      - uses: ./.github/actions/just
-
-      # The dispatcher owns scope, including repository-wide lints. A query
-      # failure fails this job; an empty selection keeps its required name green.
-      - name: Select work
-        id: scope
-        run: just ci-select test "$CI_BASE" >> "$GITHUB_OUTPUT"
-        env:
-          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
-
-      - uses: ./.github/actions/nix
-        if: steps.scope.outputs.needed == 'true' && runner.environment != 'self-hosted'
-
-      # Reads and writes like the `check` job above.
-      - name: Rust cache
-        if: steps.scope.outputs.rust == 'true'
-        uses: ./.github/actions/rust-cache
-        with:
-          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
-          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-
-      - name: Test
-        if: steps.scope.outputs.needed == 'true'
-        run: nix develop --command just ci test "$CI_BASE"
+        run: nix develop --command just ci "$CI_BASE"
         env:
           CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
