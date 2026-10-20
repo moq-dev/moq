@@ -1,4 +1,4 @@
-// The hosted runner still owns timing and action execution. This checks its setup gates.
+// Runner timing and action execution stay in CI. These tests check the setup gates.
 import { expect, test } from "bun:test";
 
 type Step = {
@@ -47,4 +47,13 @@ test("scope queries support both merge groups and release PRs without path filte
 	expect(workflow.on.merge_group).toEqual({ types: ["checks_requested"] });
 	expect(workflow.on.pull_request).toBeDefined();
 	expect(workflow.on.pull_request).not.toHaveProperty("paths");
+});
+
+test("self-hosted runners use the local Rust cache while hosted runners restore GitHub cache", async () => {
+	const action = Bun.YAML.parse(await Bun.file(".github/actions/rust-cache/action.yml").text());
+	const setup = action.runs.steps.find((step: Step) => step.uses?.startsWith("jdx/mr-boxington-action@"));
+	const expression = setup.with.backend.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+	const backend = new Function("runner", `return (${expression});`);
+	expect(backend({ environment: "self-hosted" })).toBe("local");
+	expect(backend({ environment: "github-hosted" })).toBe("github");
 });
