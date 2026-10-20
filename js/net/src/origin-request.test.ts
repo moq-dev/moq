@@ -346,6 +346,22 @@ test("rejecting a prepared answer refuses the request and closes its broadcast",
 	origin.close();
 });
 
+test("a prepared answer that fails to publish refuses the request", async () => {
+	const origin = new Producer();
+	const claim = origin.dynamic(Path.from("room"));
+	const requests = claim.requested();
+	const request = origin.request(Path.from("room/alice"));
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	const prepared = pending.prepare(Epoch.mint());
+	prepared.broadcast.close();
+	expect(() => prepared.publish()).toThrow("broadcast is closed");
+	await settle();
+	expect(request.closed.peek()).toBeInstanceOf(Error);
+	claim.close();
+	origin.close();
+});
+
 test("an answer prepared for an abandoned claim is never announced", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/alice");

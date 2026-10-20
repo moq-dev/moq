@@ -2456,11 +2456,17 @@ export class Prepared {
 		this.#epoch = epoch;
 	}
 
-	/** Announce the filled broadcast and resolve every waiting requester. */
+	/** Announce the filled broadcast and resolve every waiting requester, refusing them if it cannot be announced. */
 	publish(): broadcast.Producer {
 		if (this.#done) throw new Error("prepared answer is closed");
 		this.#done = true;
-		return this.#request.publishPrepared(this.broadcast, this.#epoch);
+		try {
+			return this.#request.publishPrepared(this.broadcast, this.#epoch);
+		} catch (err) {
+			this.broadcast.close();
+			this.#request.rejectPrepared(err instanceof Error ? err : new Error(String(err)));
+			throw err;
+		}
 	}
 
 	/** Abandon the answer unpublished, closing its broadcast and resolving every waiting requester with `err`. */
