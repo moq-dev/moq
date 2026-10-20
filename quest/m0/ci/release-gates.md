@@ -23,9 +23,8 @@ never got activated.
 - Release ruleset 24392632 has no merge queue and requires `Check` and
   `Test`. In the same edit as the cut that carries the one-pass workflow to
   `release`, remove `Test` there too, and add `Platform scope`, `macOS`,
-  `Windows`, and the workflows
-  [cloud CI only in the queue](/quest/m0/ci/queue-only.md) moves off main
-  PRs. Only require a context that every release PR reports: a workflow with
+  `Windows`, and the optional workflows that trigger only on release PRs
+  (`sh/gh/queue.test.ts` lists the policy). Only require a context that every release PR reports: a workflow with
   path filters never reports on an unrelated diff and would block forever,
   so it needs an always-run wrapper job first (the `platform.yml` pattern).
 - Require `Platform scope` too: a failed selector skips its OS dependents,

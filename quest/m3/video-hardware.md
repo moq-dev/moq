@@ -30,7 +30,7 @@ by [VA-API external images](/quest/m2/vaapi-vulkan-import.md).
 
 ### PipeWire DMA-BUF capture on KDE
 
-Tracked in [#2893](https://github.com/moq-dev/moq/issues/2893). On a
+Reported in [#2893](https://github.com/moq-dev/moq/issues/2893). On a
 KDE/Wayland desktop the portal source was selected, but the ignored
 `portal_captures_frames` test never received a frame and timed out at 120
 seconds:
@@ -71,10 +71,6 @@ is not a bug any amount of review finds.
 ## Required
 
 - [Video validation hardware is on hand](/quest/m3/video-hardware-access.md) - the machines to run it on
-
-## Closes
-
-- [#2893](https://github.com/moq-dev/moq/issues/2893) - close this issue when the quest finishes
 
 ## Related
 

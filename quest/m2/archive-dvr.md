@@ -32,7 +32,3 @@ over missing groups, and return to live.
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the `Time(pts)` range a seek sends
 - [Archive consumer](/quest/m1/archive/consumer.md) - serves a stored broadcast and resolves time ranges from its keys
-
-## Closes
-
-- [#2275](https://github.com/moq-dev/moq/issues/2275) - close this issue when the quest finishes
