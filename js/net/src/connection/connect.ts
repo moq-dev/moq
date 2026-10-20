@@ -154,7 +154,9 @@ export interface ConnectProps {
 	/**
 	 * Protocol versions to offer on every transport, most preferred first, spelled like
 	 * `moq-lite-06`. Defaults to every supported version except the work-in-progress
-	 * `moq-lite-07-wip`; list every fallback you still want.
+	 * `moq-lite-07-wip`; list every fallback you still want. A peer that negotiates no
+	 * subprotocol (such as WebTransport in Firefox before 155) is refused unless the list
+	 * includes `moq-lite-02`, `moq-lite-01` or `moq-transport-14`, which negotiate in SETUP.
 	 */
 	versions?: readonly string[];
 
