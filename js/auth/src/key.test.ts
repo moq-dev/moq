@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import * as base64 from "@hexagon/base64";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { base64url, exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, type Claims } from "./claims.ts";
 import { INSECURE_TEST_RS256_OTHER, INSECURE_TEST_RSA_KEYS } from "./insecure-test-keys.ts";
@@ -10,7 +9,7 @@ import { Key, KeyIdSchema } from "./key.ts";
 function encodeJwk(obj: unknown): string {
 	const jsonString = JSON.stringify(obj);
 	const data = new TextEncoder().encode(jsonString);
-	return base64.fromArrayBuffer(data.buffer as ArrayBuffer, true); // true for urlSafe
+	return base64url.encode(data);
 }
 
 const testKey = {
@@ -95,7 +94,7 @@ test("parse - invalid base64url", () => {
 test("parse - invalid JSON after base64url decode", () => {
 	// Base64url encode invalid JSON
 	const data = new TextEncoder().encode("invalid json");
-	const invalidJwk = base64.fromArrayBuffer(data.buffer as ArrayBuffer, true); // true for urlSafe
+	const invalidJwk = base64url.encode(data);
 
 	expect(() => {
 		Key.parse(invalidJwk);
@@ -615,7 +614,7 @@ test("sign - includes kid in header when present", async () => {
 
 	// Decode the header to verify kid is present
 	const [headerB64] = token.split(".");
-	const headerBuffer = base64.toArrayBuffer(headerB64, true); // true for urlSafe
+	const headerBuffer = base64url.decode(headerB64);
 	const header = JSON.parse(new TextDecoder().decode(headerBuffer));
 
 	expect(header.kid).toBe("test-key-1");
@@ -635,7 +634,7 @@ test("sign - no kid in header when not present", async () => {
 
 	// Decode the header to verify kid is not present
 	const [headerB64] = token.split(".");
-	const headerBuffer = base64.toArrayBuffer(headerB64, true); // true for urlSafe
+	const headerBuffer = base64url.decode(headerB64);
 	const header = JSON.parse(new TextDecoder().decode(headerBuffer));
 
 	expect(header.kid).toBe(undefined);
@@ -648,7 +647,7 @@ test("sign - writes iat only when the claims carry one", async () => {
 
 	const decodePayload = (token: string) => {
 		const [, payloadB64] = token.split(".");
-		const payloadBuffer = base64.toArrayBuffer(payloadB64, true); // true for urlSafe
+		const payloadBuffer = base64url.decode(payloadB64);
 		return JSON.parse(new TextDecoder().decode(payloadBuffer));
 	};
 
@@ -688,10 +687,10 @@ test("verify - invalid payload structure", async () => {
 
 	// Create a token with invalid payload structure
 	const headerData = new TextEncoder().encode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-	const header = base64.fromArrayBuffer(headerData.buffer as ArrayBuffer, true); // true for urlSafe
+	const header = base64url.encode(headerData);
 
 	const payloadData = new TextEncoder().encode(JSON.stringify({ invalid: "payload" }));
-	const payload = base64.fromArrayBuffer(payloadData.buffer as ArrayBuffer, true); // true for urlSafe
+	const payload = base64url.encode(payloadData);
 	const signature = "invalid";
 	const invalidToken = `${header}.${payload}.${signature}`;
 
