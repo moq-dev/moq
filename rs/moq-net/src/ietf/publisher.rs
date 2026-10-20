@@ -267,6 +267,8 @@ struct Watched {
 	deferred: bool,
 	/// What the peer's refusal said about coming back, which outranks that timer.
 	refused: Refused,
+	/// How long to stay away the next time the peer ends this advertisement while idle.
+	lapse: Duration,
 }
 
 /// What a refusal said about re-offering the namespace.
@@ -314,7 +316,16 @@ impl Watched {
 			sent: Advert::None,
 			deferred: false,
 			refused: Refused::No,
+			lapse: RETRY_BASE,
 		}
+	}
+
+	/// The peer ended an advertisement it had accepted. The wait doubles each time, so a
+	/// peer that ends every one it accepts sees them on a backoff rather than in a loop.
+	fn lapsed(&mut self, now: crate::time::Instant) -> Refused {
+		let wait = self.lapse;
+		self.lapse = (wait * 2).min(RETRY_MAX);
+		Refused::Until(now + wait)
 	}
 }
 
@@ -3454,7 +3465,8 @@ where
 	/// REQUEST_ERROR closed the stream and withdrew the advertisement (moq-transport Section
 	/// 9.5.1), so the request is dropped and the retry re-offers it fresh. An unanswered
 	/// update is dropped the same way, since a peer that ignored it cannot be assumed to hold
-	/// either version, and so is one the peer cancelled instead of answering.
+	/// either version, and so is one the peer cancelled instead of answering. An idle
+	/// advertisement the peer ends waits out its own growing backoff before coming back.
 	async fn answered(
 		&self,
 		ns: &mut Namespaces<S>,
@@ -3465,7 +3477,7 @@ where
 		let Some(request) = ns.requests.get_mut(&suffix) else {
 			return Ok(());
 		};
-		request.pending = None;
+		let idle = request.pending.take().is_none();
 		let absolute = self.origin.absolute(&request.path).to_owned();
 
 		// A reset stream ends only this request, like a FIN; a malformed answer is the peer's
@@ -3483,6 +3495,15 @@ where
 				// Abrupt: a peer that never answers is not owed the FIN handshake.
 				ns.requests.remove(&suffix);
 				Refused::No
+			}
+			Answer::Ended if idle => {
+				tracing::debug!(broadcast = %absolute, "advertisement ended");
+				self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
+					.await?;
+				let now = self.runtime.now();
+				ns.watched
+					.get_mut(&suffix)
+					.map_or(Refused::No, |watch| watch.lapsed(now))
 			}
 			Answer::Ended => {
 				tracing::debug!(broadcast = %absolute, "update cancelled");
@@ -14622,7 +14643,8 @@ mod tests {
 	}
 
 	/// From draft 18 an idle advertisement keeps reading, so a peer that FINs or resets its
-	/// answer while nothing is pending has the namespace offered again.
+	/// answer while nothing is pending has the namespace offered again, after a wait that
+	/// doubles each time so a peer ending every advertisement does not get a request loop.
 	#[moq_clock::test]
 	async fn an_idle_advertisement_that_ends_is_offered_again() {
 		use crate::transport::memory;
@@ -14654,17 +14676,25 @@ mod tests {
 				let _: ietf::Body = stream.reader.decode().await.unwrap();
 				stream
 			};
-			let mut first = offered().await;
-			let mut ok = bytes::Bytes::from(publish_namespace_ok(VERSION).await);
-			first.writer.write_all(&mut ok).await.unwrap();
-			// Paused time advances once every task is idle: the answer was read, and the
-			// advertisement is parked on its idle reader.
-			moq_clock::sleep(Duration::from_millis(1)).await;
-			match fin {
-				true => first.writer.finish().unwrap(),
-				false => first.writer.abort(&Error::Cancel),
+			let mut stream = offered().await;
+			for wait in [100, 200, 400, 800].map(Duration::from_millis) {
+				let mut ok = bytes::Bytes::from(publish_namespace_ok(VERSION).await);
+				stream.writer.write_all(&mut ok).await.unwrap();
+				// Paused time advances once every task is idle: the answer was read, and the
+				// advertisement is parked on its idle reader.
+				moq_clock::sleep(Duration::from_millis(1)).await;
+				match fin {
+					true => stream.writer.finish().unwrap(),
+					false => stream.writer.abort(&Error::Cancel),
+				}
+				let ended = moq_clock::Instant::now();
+				stream = offered().await;
+				assert!(
+					ended.elapsed() >= wait,
+					"fin={fin}: re-offered after {:?}",
+					ended.elapsed()
+				);
 			}
-			offered().await;
 			assert!(!run.is_finished(), "fin={fin}: the loop ended");
 		}
 	}

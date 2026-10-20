@@ -1500,6 +1500,9 @@ export class Publisher {
 
 			// Keyed by path.
 			const ns: Namespaces = { active: new Map(), refused: new Map(), offered: new Map() };
+			// How long to stay away the next time the peer ends each advertisement while idle,
+			// and the instance that wait is about.
+			const lapses = new Map<Path.Valid, { snap: Advertised; wait: number }>();
 			let retry = 0;
 
 			for (;;) {
@@ -1525,9 +1528,16 @@ export class Publisher {
 					};
 				});
 
-				// The peer no longer holds a namespace whose request ended while idle.
-				for (const key of [...ns.active.keys()]) {
-					if (!requests.has(key)) ns.active.delete(key);
+				// The peer no longer holds a namespace whose request ended while idle. The wait
+				// before offering it again doubles each time, so a peer that ends every one it
+				// accepts sees them on a backoff rather than in a loop.
+				for (const [key, snap] of [...ns.active]) {
+					if (requests.has(key)) continue;
+					ns.active.delete(key);
+					const wait = lapses.get(key)?.wait ?? RETRY_BASE;
+					lapses.set(key, { snap, wait: Math.min(wait * 2, RETRY_MAX) });
+					ns.refused.set(key, Instant.add(now(), Nano.fromMilli(Milli(wait))));
+					ns.offered.set(key, snap);
 				}
 
 				const advertised = this.#advertised.peek();
@@ -1547,6 +1557,11 @@ export class Publisher {
 					)
 						continue;
 					updated.set(covered, candidates[0]);
+				}
+				// Another broadcast at the path starts its backoff fresh, as a refusal does.
+				for (const [key, lapse] of lapses) {
+					const snap = updated.get(key);
+					if (snap === undefined || !sameInstance(lapse.snap, snap)) lapses.delete(key);
 				}
 
 				const outstanding = await this.#reconcile(ns, updated, target);
@@ -1813,7 +1828,8 @@ export class Publisher {
 
 	/**
 	 * Keep reading while an advertisement is idle, so GOAWAY validation never waits for an
-	 * update. A stream that ends while idle drops the request, and the announce loop re-offers it.
+	 * update. A stream that ends while idle drops the request, and the announce loop re-offers it
+	 * after a backoff.
 	 */
 	#readAdvertisement(request: NamespaceRequest, requests: Requests): Promise<number | undefined> {
 		const reply = nextMessage(request.stream.reader, this.#session.version, this.#session.client)
