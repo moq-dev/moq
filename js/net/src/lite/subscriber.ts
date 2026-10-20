@@ -1314,7 +1314,10 @@ export class Subscriber {
 			},
 		};
 
-		let pendingWanted: number | undefined;
+		// The wanted group is subscription state: an update announces each new one past our
+		// largest, and every later update restates it. Joins asking for the same group
+		// coalesce into that one update.
+		let sentWanted: number | undefined;
 		const demand = track.demand();
 		const edge = hooks.producerLargest(track);
 		for (;;) {
@@ -1323,9 +1326,9 @@ export class Subscriber {
 			const refresh =
 				hasRefresh(this.version) &&
 				largest !== undefined &&
-				(pendingWanted === undefined || largest >= pendingWanted) &&
 				wanted !== undefined &&
-				wanted > largest
+				wanted > largest &&
+				wanted !== sentWanted
 					? wanted
 					: undefined;
 			const current = track.subscription.peek();
@@ -1355,7 +1358,7 @@ export class Subscriber {
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxDelay/etc.
 			const update = new SubscribeUpdate({
-				wantedGroup: refresh,
+				wantedGroup: refresh ?? sentWanted,
 				priority: current.priority ?? 0,
 				order: current.order,
 				maxDelay: current.maxDelay,
@@ -1373,7 +1376,7 @@ export class Subscriber {
 			} catch {
 				return;
 			}
-			if (refresh !== undefined) pendingWanted = refresh;
+			if (refresh !== undefined) sentWanted = refresh;
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}

@@ -1496,11 +1496,6 @@ trait Request<S: crate::transport::poll::Session>: Sized {
 	/// Apply an update from the requester.
 	fn update(&mut self, update: Self::Update);
 
-	/// Fold an update into the one still waiting for the reply to start. The newest wins.
-	fn coalesce(pending: &mut Option<Self::Update>, update: Self::Update) {
-		*pending = Some(update);
-	}
-
 	/// Write the reply: `Continue` after each unit of work, so the requester is checked
 	/// between them even while work stays ready, and `Break` once all of it is buffered.
 	fn poll(
@@ -1538,7 +1533,7 @@ struct RequestServe<S: crate::transport::poll::Session, R: Request<S>> {
 	// The request's place under the session's subscription cap.
 	_charged: Option<Charged>,
 	_fetch: Option<crate::session::Slot>,
-	// The updates to arrive before the reply started, folded by [`Request::coalesce`].
+	// The latest update to arrive before the reply started. Each one replaces the last.
 	update: Option<R::Update>,
 	/// Ends the request, even mid-reply, once the session stops allowing its broadcast.
 	gate: Option<crate::auth::Gate>,
@@ -1795,7 +1790,7 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 			};
 			match &mut self.state {
 				RequestState::Serve(request) => request.update(update),
-				_ => R::coalesce(&mut self.update, update),
+				_ => self.update = Some(update),
 			}
 		}
 	}
@@ -2019,18 +2014,9 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		})
 	}
 
-	/// The newest parameters win, but a pending refresh request survives: the requester
-	/// sends each one once, until the group it asks for arrives.
-	fn coalesce(pending: &mut Option<lite::SubscribeUpdate>, mut update: lite::SubscribeUpdate) {
-		if let Some(older) = pending.take() {
-			update.wanted_group = update.wanted_group.max(older.wanted_group);
-		}
-		*pending = Some(update);
-	}
-
 	fn update(&mut self, update: lite::SubscribeUpdate) {
 		match self {
-			Self::Confirm { update: pending, .. } => Self::coalesce(pending, update),
+			Self::Confirm { update: pending, .. } => *pending = Some(update),
 			Self::Run(run) => run.update(update),
 			// The track is over: nothing left to steer.
 			Self::Drain { .. } => {}
@@ -3654,6 +3640,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// subscription. This is what lets relays pause an upstream subscription across
 	/// consumer churn without tearing it down.
 	fn update(&mut self, upd: lite::SubscribeUpdate) {
+		// Every update restates the wanted group. Past our largest it is a join, which
+		// repeats the pending ask; at or below it the group already exists.
 		if upd
 			.wanted_group
 			.is_some_and(|wanted| self.track.peek_largest().is_none_or(|largest| wanted > largest.group))
@@ -6820,8 +6808,9 @@ mod tests {
 	}
 
 	/// SUBSCRIBE_UPDATE is not a close: an update arriving while the subscription
-	/// resolves keeps it waiting, and still applies once it starts. A later update keeps an
-	/// earlier refresh request, which the requester sends only once.
+	/// resolves keeps it waiting, and the latest applies once it starts. Its wanted group
+	/// is state each update restates: past the largest it joins, and once that group
+	/// exists the same value asks for nothing more.
 	#[moq_clock::test]
 	async fn a_subscribe_update_is_not_a_close() {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
@@ -6890,11 +6879,11 @@ mod tests {
 			end_frame: None,
 		};
 		session.push(&update(Some(2), 3).encode_bytes(version).unwrap());
-		session.push(&update(None, 7).encode_bytes(version).unwrap());
+		session.push(&update(Some(2), 7).encode_bytes(version).unwrap());
 		assert!(!drive(&mut serve).await, "an update ended the subscription");
 
-		// Resolve the track with a group over the ratio: the run starts at the updated
-		// priority, and the held refresh request still joins.
+		// Resolve the track with a group over the ratio: the run starts at the latest
+		// priority, and its restated wanted group joins.
 		let request = dynamic
 			.requested_track()
 			.now_or_never()
@@ -6912,6 +6901,21 @@ mod tests {
 		};
 		assert_eq!(run.steer_tx.read().priority, 7, "the update was lost");
 		assert_eq!(track.demand().wanted(), Some(2), "the refresh request was lost");
+
+		// The asked-for group arrives, over the ratio too. A restated wanted group is now
+		// stale, so it is not another join.
+		let mut group = track.create_group(group::Info { sequence: 2 }).unwrap();
+		for frame in [&b"key"[..], b"abc", b"d"] {
+			group.write_frame(crate::Timestamp::ZERO, frame).unwrap();
+		}
+		group.finish().unwrap();
+		session.push(&update(Some(2), 5).encode_bytes(version).unwrap());
+		assert!(!drive(&mut serve).await, "the subscription ended");
+		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
+			panic!("the subscription is not running");
+		};
+		assert_eq!(run.steer_tx.read().priority, 5, "the update was lost");
+		assert_eq!(track.demand().wanted(), Some(2), "a stale wanted group joined");
 	}
 
 	/// A subscription that always has another group ready yields within its budget, so a

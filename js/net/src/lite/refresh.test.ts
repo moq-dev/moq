@@ -62,7 +62,11 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		}
 		expect(producer.demand().wanted.peek()).toBe(alpn === ALPN_07_WIP ? 1 : 0);
 		// Concurrent local joins coalesce into one upstream update.
-		expect(updates.length).toBe(alpn === ALPN_07_WIP ? 1 : 0);
+		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1] : []);
+		// A parameter change restates the wanted group rather than clearing it.
+		joins.push(remote.subscribe({ priority: 9 }));
+		await clock.advanceAsync(Nano(0));
+		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1, 1] : []);
 		for (const join of joins) join.close();
 		received!.close();
 		baseline.close();

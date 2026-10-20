@@ -1228,11 +1228,11 @@ Moving `Frame Start` forward within a group that is already being delivered does
 
 
 **Wanted Group**:
-A live-edge join requesting this group or later, encoded as the sequence plus one; `0` means no request.
-A publisher MUST ignore a request at or below its largest group, and otherwise evaluate it as a new SUBSCRIBE under the Track's Refresh ratio.
-A relay sends a request when local demand wants a group beyond its largest, and MUST NOT send another until its largest reaches the requested group.
-So a later SUBSCRIBE_UPDATE with `0` does not withdraw a request; a publisher that folds updates together before applying them MUST keep the highest Wanted Group.
-The pending request ends with the subscription.
+The newest group the subscriber's live-edge joins want, encoded as the sequence plus one; `0` means none.
+Like the other fields, it is subscription state: every SUBSCRIBE_UPDATE restates it, and the latest one applies.
+A relay sends a SUBSCRIBE_UPDATE when local demand wants a group beyond its largest that differs from the value it last sent, and keeps restating that value in later updates, including after the group arrives.
+A publisher MUST ignore a value at or below its largest group, and otherwise evaluate it as a new SUBSCRIBE under the Track's Refresh ratio.
+Restating a value is harmless: a join while a request is pending asks for the same group.
 A new SUBSCRIBE itself counts as a join and needs no Wanted Group field.
 
 ## TRACK
