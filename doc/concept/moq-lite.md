@@ -245,7 +245,7 @@ resolved from the groups the serving hop holds; upstream it asks for everything
 max delay allows, and an untimed track refuses it. At the live edge, a time end
 may let one group through before its first frame shows it starts past the end:
 the first group that has yet to start is handed out without waiting for that
-frame, and the next one waits on it.
+frame, and the next one waits on it. A datagram is judged by its own timestamp.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
