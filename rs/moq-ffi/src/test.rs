@@ -1094,6 +1094,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 	assert!(matches!(catalog.now(), Err(MoqError::Closed)));
 }
 
+/// `next` yields every state in order with its timestamp; `latest` skips to the newest.
 #[tokio::test]
 async fn json_snapshot_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -1101,7 +1102,13 @@ async fn json_snapshot_roundtrip() {
 		delta_ratio: 8,
 		compression: true,
 	};
-	let track = broadcast.publish_track("meta".into(), None).unwrap();
+	let info = MoqTrackInfo {
+		priority: 127,
+		max_age_us: None,
+		timescale: Some(1_000_000),
+		refresh: None,
+	};
+	let track = broadcast.publish_track("meta".into(), Some(info)).unwrap();
 	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
 	assert!(
 		matches!(track.demand(), Err(MoqError::Closed)),
@@ -1109,34 +1116,54 @@ async fn json_snapshot_roundtrip() {
 	);
 	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await, config).unwrap();
 
-	producer.update(r#"{"a":1}"#.into(), None).unwrap();
+	for n in 1..=4 {
+		producer.update(format!(r#"{{"a":{n}}}"#), Some(n * 1000)).unwrap();
+	}
+
 	let value = tokio::time::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for json snapshot")
 		.unwrap()
 		.expect("expected a value");
 	assert_eq!(
-		serde_json::from_str::<serde_json::Value>(&value).unwrap(),
+		serde_json::from_str::<serde_json::Value>(&value.value).unwrap(),
 		serde_json::json!({ "a": 1 })
 	);
+	assert_eq!(value.timestamp_us, Some(1000));
 
-	// A second update supersedes the first; a late reader collapses to the latest.
-	producer.update(r#"{"a":2}"#.into(), None).unwrap();
 	let value = tokio::time::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for json snapshot delta")
 		.unwrap()
 		.expect("expected a value");
 	assert_eq!(
-		serde_json::from_str::<serde_json::Value>(&value).unwrap(),
+		serde_json::from_str::<serde_json::Value>(&value.value).unwrap(),
 		serde_json::json!({ "a": 2 })
 	);
+	assert_eq!(value.timestamp_us, Some(2000));
+
+	// `latest` skips the buffered third state.
+	let value = tokio::time::timeout(TIMEOUT, consumer.latest())
+		.await
+		.expect("timed out waiting for the latest json snapshot")
+		.unwrap()
+		.expect("expected a value");
+	assert_eq!(
+		serde_json::from_str::<serde_json::Value>(&value.value).unwrap(),
+		serde_json::json!({ "a": 4 })
+	);
+	assert_eq!(value.timestamp_us, Some(4000));
 
 	producer.finish().unwrap();
 	assert!(matches!(
-		producer.update(r#"{"a":3}"#.into(), None),
+		producer.update(r#"{"a":5}"#.into(), Some(5000)),
 		Err(MoqError::Closed)
 	));
+	let end = tokio::time::timeout(TIMEOUT, consumer.next())
+		.await
+		.expect("timed out waiting for the end of the json snapshot")
+		.unwrap();
+	assert_eq!(end, None);
 }
 
 /// JSON producers report subscriber demand through a handle, like the media and raw track producers.
@@ -1245,9 +1272,10 @@ async fn json_stream_roundtrip() {
 			.unwrap()
 			.expect("expected a record");
 		assert_eq!(
-			serde_json::from_str::<serde_json::Value>(&value).unwrap(),
+			serde_json::from_str::<serde_json::Value>(&value.value).unwrap(),
 			serde_json::json!({ "n": n })
 		);
+		assert_eq!(value.timestamp_us, None, "an untimed track yields no timestamp");
 	}
 	producer.finish().unwrap();
 }
@@ -1282,7 +1310,7 @@ async fn json_on_requested_track() {
 		.expect("timed out waiting for json stream record")
 		.unwrap()
 		.expect("expected a record");
-	assert_eq!(value, r#"{"n":1}"#);
+	assert_eq!(value.value, r#"{"n":1}"#);
 }
 
 /// A JSON consumer refuses a track that has already read a group, and closes one it takes over.
@@ -1298,7 +1326,7 @@ async fn json_consumer_takes_an_unread_track() {
 		.subscribe_track("events".into(), None)
 		.await
 		.unwrap();
-	track.append_group().unwrap();
+	track.append_group().unwrap().finish().unwrap();
 	tokio::time::timeout(TIMEOUT, read.recv_group())
 		.await
 		.expect("timed out waiting for a group")
@@ -6051,34 +6079,40 @@ async fn session_protocol_codes_cross_the_ffi() {
 }
 #[tokio::test]
 async fn client_cancel_aborts_a_pending_connect() {
-	let server = MoqServer::new(MoqServerConfig {
-		bind: Some("127.0.0.1:0".into()),
-		tls: localhost_tls(),
-		..Default::default()
-	})
-	.unwrap();
-	let addr = server.listen().await.expect("listen failed");
+	// A bound socket that never answers, so the QUIC handshake can't finish before cancel.
+	// A real server would not do: the dial establishes without the server accepting.
+	let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+	let addr = silent.local_addr().unwrap();
 
 	let client = MoqClient::new(MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
 		once: true,
+		websocket: MoqWebSocketConfig {
+			enabled: Some(false),
+			delay_us: None,
+		},
 		..Default::default()
 	})
 	.unwrap();
 
-	// The server never accepts, so connect parks in established().
-	let connecting = client.clone();
-	let connect = spawn_parked(async move { connecting.connect(format!("https://{addr}")).await }).await;
+	// Poll in place rather than spawning, so cancel lands before the next poll.
+	let mut connect = std::pin::pin!(client.connect(format!("https://{addr}")));
+	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(connect.as_mut().poll(cx))).await;
+	assert!(
+		first.is_pending(),
+		"connect resolved before cancel: {:?}",
+		first.map(|result| result.map(|_| "session")),
+	);
 
 	client.cancel();
 
-	let connect_err = tokio::time::timeout(TIMEOUT, connect)
-		.await
-		.expect("connect task timed out")
-		.expect("connect task panicked");
-	assert!(matches!(connect_err, Err(MoqError::Cancelled)));
-	server.cancel();
+	let connect_err = tokio::time::timeout(TIMEOUT, connect).await.expect("connect timed out");
+	assert!(
+		matches!(connect_err, Err(MoqError::Cancelled)),
+		"connect returned {:?}",
+		connect_err.map(|_| "session"),
+	);
 }
 
 #[tokio::test]

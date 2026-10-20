@@ -483,14 +483,6 @@ pub enum Error {
 	#[error("group too large")]
 	GroupTooLarge,
 
-	/// A whole-frame write was refused because a frame is already open on the group.
-	///
-	/// A [`crate::group::Producer`] streaming a frame with `create_frame` blocks the
-	/// whole-frame writes on every clone of that producer until it finishes, since
-	/// appending around it would reorder the group.
-	#[error("frame already open")]
-	FrameOpen,
-
 	/// A frame's timestamp doesn't fit its track: it's missing on a timed track, present
 	/// on an untimed track, out of range for the track's timescale, or starts a group
 	/// earlier than the group before it.
@@ -664,7 +656,6 @@ impl From<&Error> for SessionError {
 			| Error::Unroutable
 			| Error::FrameTooLarge
 			| Error::GroupTooLarge
-			| Error::FrameOpen
 			| Error::TimestampMismatch
 			| Error::MalformedTrack
 			| Error::UnsupportedExtension => Self::Internal,
@@ -732,7 +723,6 @@ impl From<&Error> for StreamError {
 			| Error::UnsupportedExtension
 			| Error::InvalidRange
 			| Error::InvalidJoiningRequestId
-			| Error::FrameOpen
 			| Error::Encode(_) => Self::Internal,
 			// A producer dropped without an end is a bug here, so it is never given a meaning.
 			Error::Dropped => Self::Internal,

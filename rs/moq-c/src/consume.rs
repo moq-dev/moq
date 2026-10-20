@@ -2,7 +2,6 @@ use std::{
 	collections::BTreeMap,
 	ffi::c_char,
 	future::Future,
-	ops::Bound,
 	pin::Pin,
 	task::{Poll, ready},
 };
@@ -137,90 +136,6 @@ struct RawTaskEntry {
 	update: mpsc::UnboundedSender<Option<moq_net::track::Subscription>>,
 }
 
-/// A raw track's reader, with the track handle its subscription updates resolve against.
-struct RawReader {
-	// A relative range counts from this track's largest: the reader's own reports only
-	// within the bounds the update is replacing. Kept unpolled, so each clone reports the
-	// current largest rather than only a newer one.
-	edge: moq_net::track::Consumer,
-	track: moq_net::track::Ordered,
-	// An update with a relative range, whose bounds wait for the edge to be live.
-	deferred: Option<moq_net::track::Subscription>,
-}
-
-impl RawReader {
-	fn new(edge: moq_net::track::Consumer, track: moq_net::track::Ordered) -> Self {
-		Self {
-			edge,
-			track,
-			deferred: None,
-		}
-	}
-
-	/// Apply a subscription update: its wire preferences at once, and its local bounds once
-	/// any relative range has a live edge to count from.
-	fn apply(&mut self, subscription: Option<moq_net::track::Subscription>, waiter: &kio::Waiter) {
-		let subscription = subscription.unwrap_or_default();
-		// A closed track makes the update meaningless; the reader already sees the close.
-		let _ = self.track.update(subscription.clone());
-		let relative = subscription
-			.ranges
-			.iter()
-			.any(|range| matches!(range.start, moq_net::track::Anchor::Relative(_)));
-		match relative {
-			true => {
-				self.deferred = Some(subscription);
-				self.poll_deferred(waiter);
-			}
-			false => {
-				self.deferred = None;
-				self.set_bounds(&subscription, None);
-			}
-		}
-	}
-
-	/// Apply a deferred update's bounds once the edge is live, or the track ended.
-	fn poll_deferred(&mut self, waiter: &kio::Waiter) {
-		let Some(subscription) = &self.deferred else {
-			return;
-		};
-		if let Poll::Ready(largest) = self.edge.clone().poll_largest(waiter) {
-			let subscription = subscription.clone();
-			self.deferred = None;
-			self.set_bounds(&subscription, largest.map(|position| position.group));
-		}
-	}
-
-	fn set_bounds(&mut self, subscription: &moq_net::track::Subscription, latest: Option<u64>) {
-		// Reads start where the lowest range does. Without a floor of its own (the oldest
-		// range, the default) a raw reader joins at the latest group.
-		let start = subscription
-			.ranges
-			.iter()
-			.map(|range| match range.start {
-				moq_net::track::Anchor::Absolute(start) => Some(start.group),
-				moq_net::track::Anchor::Relative(u64::MAX) => latest,
-				moq_net::track::Anchor::Relative(back) => latest.map(|latest| latest.saturating_sub(back)),
-			})
-			.min()
-			.flatten();
-		// They stop past the last absolute end; an open or relative one follows the live edge.
-		let end = subscription
-			.ranges
-			.iter()
-			.map(|range| match range.end {
-				Some(moq_net::track::Anchor::Absolute(end)) => Some(end),
-				_ => None,
-			})
-			.collect::<Option<Vec<_>>>()
-			.map(|ends| ends.into_iter().max().unwrap_or_default());
-		self.track.set_groups((
-			start.map_or(Bound::Unbounded, Bound::Included),
-			end.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
-		));
-	}
-}
-
 /// Outcome of polling a raw track source alongside its control channels.
 enum RawStep<T> {
 	/// A delivered value: the next group, or the next frame within a group.
@@ -231,12 +146,27 @@ enum RawStep<T> {
 	Stop,
 }
 
-/// A raw frame or datagram timestamp in microseconds, `None` when untimed.
+/// A raw frame, datagram, or JSON value timestamp in microseconds, `None` when untimed.
 fn timestamp_us(timestamp: Option<moq_net::Timestamp>) -> Result<Option<u64>, Error> {
 	timestamp
 		.map(|timestamp| timestamp.as_micros().try_into())
 		.transpose()
 		.map_err(|_| Error::TimestampOverflow(moq_net::TimeOverflow))
+}
+
+/// A JSON value pre-serialized to a string, with its frame timestamp.
+struct JsonValue {
+	json: String,
+	timestamp_us: Option<u64>,
+}
+
+impl JsonValue {
+	fn new(value: moq_net::Timed<serde_json::Value>) -> Result<Self, Error> {
+		Ok(Self {
+			json: serde_json::to_string(&value.value)?,
+			timestamp_us: timestamp_us(value.at)?,
+		})
+	}
 }
 
 #[derive(Default)]
@@ -271,8 +201,8 @@ pub struct Consume {
 	/// JSON consumer tasks (snapshot and stream share this slab).
 	json_task: NonZeroSlab<Task>,
 
-	/// Buffered JSON values ready for consumption, pre-serialized to a string.
-	json_value: NonZeroSlab<String>,
+	/// Buffered JSON values ready for consumption.
+	json_value: NonZeroSlab<JsonValue>,
 }
 
 impl Consume {
@@ -668,12 +598,9 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(async move {
-				let edge = broadcast.track(&name)?;
-				let track = edge.subscribe(subscription.clone()).await?.ordered();
-				let mut reader = RawReader::new(edge, track);
-				// The task's own polls re-poll a deferred update with their waiter.
-				reader.apply(subscription, &kio::Waiter::noop());
-				Self::run_raw(on_frame, reader, close, updates).await
+				let mut track = broadcast.track(&name)?.subscribe(subscription.clone()).await?.ordered();
+				Self::apply_raw_subscription(&mut track, subscription);
+				Self::run_raw(on_frame, track, close, updates).await
 			}))
 			.await;
 
@@ -688,9 +615,22 @@ impl Consume {
 		Ok(id)
 	}
 
+	/// Apply a raw reader's preferences, which join at the latest group unless a range
+	/// names a floor of its own.
+	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
+		let mut subscription = subscription.unwrap_or_default();
+		for range in &mut subscription.ranges {
+			if range.start == moq_net::track::Range::oldest().start {
+				range.start = moq_net::track::Range::live().start;
+			}
+		}
+		// A closed track makes the update meaningless; the reader already sees the close.
+		let _ = track.update(subscription);
+	}
+
 	async fn run_raw(
 		callback: OnStatus,
-		mut reader: RawReader,
+		mut track: moq_net::track::Ordered,
 		mut close: oneshot::Receiver<()>,
 		mut updates: mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
 	) -> Result<(), Error> {
@@ -704,14 +644,10 @@ impl Consume {
 		loop {
 			let mut group =
 				match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::group::Consumer>, Error>> {
-					if Self::poll_raw_control(&mut close, &mut updates, &mut reader, waiter) {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
-					// A group read before deferred bounds apply could sit under the old floor.
-					if reader.deferred.is_some() {
-						return Poll::Pending;
-					}
-					match ready!(reader.track.poll_next_group(waiter))? {
+					match ready!(track.poll_next_group(waiter))? {
 						Some(group) => Poll::Ready(Ok(RawStep::Item(group))),
 						None => Poll::Ready(Ok(RawStep::End)),
 					}
@@ -725,7 +661,7 @@ impl Consume {
 
 			loop {
 				let frame = match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
-					if Self::poll_raw_control(&mut close, &mut updates, &mut reader, waiter) {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
 					match ready!(group.poll_read_frame(waiter))? {
@@ -749,18 +685,17 @@ impl Consume {
 		}
 	}
 
-	/// Poll the close and update channels, applying any subscription updates inline, and a
-	/// deferred update once its edge is live.
+	/// Poll the close and update channels, applying any subscription updates inline.
 	///
 	/// Returns `true` when the task must stop: either the consumer was closed
 	/// (`close` fired) or the update channel was dropped. The caller must then
 	/// unwind rather than poll `close` again, since a completed oneshot panics if
-	/// re-polled. Borrows `reader` only for the duration of the call so the caller
+	/// re-polled. Borrows `track` only for the duration of the call so the caller
 	/// can poll a track/group source afterwards.
 	fn poll_raw_control(
 		close: &mut oneshot::Receiver<()>,
 		updates: &mut mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
-		reader: &mut RawReader,
+		track: &mut moq_net::track::Ordered,
 		waiter: &moq_net::kio::Waiter,
 	) -> bool {
 		let mut cx = waiter.context();
@@ -770,13 +705,11 @@ impl Consume {
 
 		loop {
 			match updates.poll_recv(&mut cx) {
-				Poll::Ready(Some(subscription)) => reader.apply(subscription, waiter),
+				Poll::Ready(Some(subscription)) => Self::apply_raw_subscription(track, subscription),
 				Poll::Ready(None) => return true,
-				Poll::Pending => break,
+				Poll::Pending => return false,
 			}
 		}
-		reader.poll_deferred(waiter);
-		false
 	}
 
 	pub fn raw_track_update(
@@ -905,8 +838,8 @@ impl Consume {
 
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 	///
-	/// `on_value` is called with a value ID for each new latest value; a consumer that falls
-	/// behind collapses the backlog and only sees the newest. Values must be released with
+	/// `on_value` is called with a value ID for each state, in order; a group superseded by a
+	/// newer one before it is read is skipped. Values must be released with
 	/// [`Self::json_value_close`]. Pass the same compression the producer used.
 	pub fn json_snapshot(
 		&mut self,
@@ -956,9 +889,10 @@ impl Consume {
 				},
 			};
 
-			let json = serde_json::to_string(&value)?;
-			// Hold the lock only to buffer the value; release it before the callback.
-			let value_id = State::lock().consume.json_value.insert(json)?;
+			// Serialize before locking, hold the lock only to buffer the value, and release it
+			// before the callback.
+			let value = JsonValue::new(value)?;
+			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
 	}
@@ -1015,8 +949,8 @@ impl Consume {
 				},
 			};
 
-			let json = serde_json::to_string(&value)?;
-			let value_id = State::lock().consume.json_value.insert(json)?;
+			let value = JsonValue::new(value)?;
+			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
 	}
@@ -1030,11 +964,13 @@ impl Consume {
 	/// Fill `dst` with a JSON value delivered via a consumer callback. The pointer is valid
 	/// until the value is released with [`Self::json_value_close`].
 	pub fn json_value(&self, value: Id, dst: &mut moq_json_value) -> Result<(), Error> {
-		let json = self.json_value.get(value).ok_or(Error::FrameNotFound)?;
+		let value = self.json_value.get(value).ok_or(Error::FrameNotFound)?;
 
 		*dst = moq_json_value {
-			json: json.as_str().as_ptr() as *const c_char,
-			json_len: json.len(),
+			json: value.json.as_ptr() as *const c_char,
+			json_len: value.json.len(),
+			timestamp_us: value.timestamp_us.unwrap_or_default(),
+			timestamp_present: value.timestamp_us.is_some(),
 		};
 
 		Ok(())

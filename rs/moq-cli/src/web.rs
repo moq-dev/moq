@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 /// Browser CORS policy for HTTP gateway listeners.
-#[derive(usage::Args, Clone, Default)]
+#[derive(usage_rs::Args, Clone, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Cors {
 	/// Browser origin allowed to call this listener. Repeat to allow multiple.

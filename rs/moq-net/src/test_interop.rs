@@ -168,6 +168,7 @@ fn lite_varint_interop() {
 
 		// An untimed track: zero on lite-07, milliseconds before it.
 		let track_info = lite::TrackInfo {
+			refresh: None,
 			priority: 1,
 			max_age: None,
 			timescale: None,

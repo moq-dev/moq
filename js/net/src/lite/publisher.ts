@@ -46,6 +46,7 @@ import {
 	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
+	hasSynced,
 	hasTrackStream,
 	resolvesStart,
 	Version,
@@ -604,6 +605,94 @@ export class Publisher {
 				return;
 			}
 
+			if (hasSynced(this.version)) {
+				dispose();
+				const pending = new Map<Path.Valid, { end: boolean; next?: Advertised }>();
+				const closed = new Once<null | Error>();
+				void stream.reader.closed.then(
+					() => closed.set(null),
+					(err: unknown) => closed.set(error(err)),
+				);
+				let wake: (() => void) | undefined;
+				let ended = false;
+				const queue = () => {
+					const table = this.#advertised.peek();
+					ended = table === undefined;
+					const latest = table ? visible(table) : new Map<Path.Valid, Advertised>();
+					for (const suffix of pending.keys()) {
+						if (!active.has(suffix) && !latest.has(suffix)) pending.delete(suffix);
+					}
+					for (const suffix of active.keys()) {
+						if (!latest.has(suffix)) pending.set(suffix, { end: true });
+					}
+					for (const [suffix, snap] of latest) {
+						const prev = active.get(suffix);
+						const queued = pending.get(suffix);
+						if (
+							queued?.end ||
+							!prev ||
+							!sameInstance(prev, snap) ||
+							!routesEqual(onWire(prev.route), onWire(snap.route))
+						) {
+							pending.set(suffix, { end: queued?.end ?? false, next: snap });
+						} else {
+							pending.delete(suffix);
+						}
+					}
+					wake?.();
+				};
+				const stopTable = this.#advertised.subscribe(queue);
+				const stopGrant = this.#grant?.subscribe(queue);
+				dispose = () => {
+					stopTable();
+					stopGrant?.();
+				};
+				queue();
+				let remaining: number | undefined = pending.size;
+				await new AnnounceOk(this.hop, 0).encode(stream.writer, this.version);
+				for (;;) {
+					if (remaining !== undefined && (remaining === 0 || pending.size === 0)) {
+						remaining = undefined;
+						await encodeAnnounceBroadcast(stream.writer, { status: "synced" }, this.version);
+					}
+					const departed = closed.peek();
+					if (departed instanceof Error) throw departed;
+					if (this.#withdrawal.closing.peek() || departed === null || (ended && pending.size === 0)) break;
+					const first = pending.entries().next();
+					if (first.done) {
+						const changed = new Promise<"changed">((resolve) => {
+							wake = () => resolve("changed");
+						});
+						if ((await race([changed, stream.reader.closed, this.#withdrawal.closing])) !== "changed")
+							break;
+						continue;
+					}
+					const [suffix, entry] = first.value;
+					if (entry.end) {
+						if (entry.next) pending.set(suffix, { end: false, next: entry.next });
+						else pending.delete(suffix);
+						active.delete(suffix);
+						await retract(suffix);
+					} else if (entry.next) {
+						pending.delete(suffix);
+						const prev = active.get(suffix);
+						active.set(suffix, entry.next);
+						if (!prev) await announce(suffix, entry.next.route);
+						else if (!sameInstance(prev, entry.next)) await restart(suffix, entry.next.route);
+						else await update(suffix, entry.next.route);
+					}
+					if (remaining !== undefined) remaining -= 1;
+				}
+				if (this.#withdrawal.closing.peek()) {
+					if (remaining !== undefined)
+						await encodeAnnounceBroadcast(stream.writer, { status: "synced" }, this.version);
+					for (const suffix of active.keys()) await retract(suffix);
+					stream.close();
+					await stream.writer.closed;
+				}
+				return;
+			}
+
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed
 
@@ -813,6 +902,11 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				apply: (update) => {
+					// Every update restates the wanted group. Past our largest it is a join, which
+					// repeats the pending ask; at or below it the group already exists.
+					const largest = hooks.peekLargest(track).largest?.group;
+					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
+						hooks.joinSubscriber(track);
 					const end = exclusiveGroupEnd(update.endGroup);
 					track.update({
 						priority: update.priority,
@@ -1352,6 +1446,7 @@ export class Publisher {
 				const info = await wireOf(front).resolveTrackInfo(track, release.signal);
 				return new TrackInfoMessage({
 					priority: info.priority,
+					refresh: info.refresh,
 					// Publisher Max Age: the publisher's retention bound, advertised so
 					// relays re-serve with the same window.
 					maxAge: info.maxAge,

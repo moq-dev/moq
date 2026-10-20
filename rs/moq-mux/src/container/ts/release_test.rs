@@ -144,7 +144,7 @@ fn republish_cut(
 }
 
 /// Finish `group`, or abort it as evicted if it is one of the `cut`.
-fn end(sequence: u64, group: moq_net::group::Producer, cut: &[u64]) {
+fn end(sequence: u64, mut group: moq_net::group::Producer, cut: &[u64]) {
 	match cut.contains(&sequence) {
 		true => group.abort(moq_net::Error::Old).unwrap(),
 		false => group.finish().unwrap(),

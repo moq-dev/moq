@@ -4,7 +4,7 @@
 # the user's system GStreamer instead of the nix copy it was linked
 # against. Used by build.sh on the tarball / .deb / .rpm release path;
 # `nix build .#moq-gst` does not run this, so the flake output stays
-# usable inside `nix shell` / cachix.
+# usable inside `nix shell` / the binary cache.
 #
 # Usage:
 #   scrub.sh <path-to-libgstmoq.so|.dylib>

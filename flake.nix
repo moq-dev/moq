@@ -1,19 +1,24 @@
 {
   description = "MoQ - Media over QUIC";
 
-  # Pre-built binaries live in our Cachix cache. Only tagged releases are
-  # pushed (CI fires on moq-relay-v*, moq-cli-v*, etc.), so pin the flake ref
-  # to a recent tag to get a hit. The default branch HEAD is not cached and
-  # builds from source:
+  # Pre-built binaries live in our binary cache at nix.moq.dev. Of the
+  # packages, only tagged releases are pushed (moq-relay-v*, moq-cli-v*, etc.),
+  # so pin the flake ref to a recent tag to get a hit. The default branch HEAD
+  # builds from source, though its dev shell is cached:
   #   nix run github:moq-dev/moq/moq-relay-v0.12.4#moq-relay --accept-flake-config
   #
   # --accept-flake-config opts into the nixConfig below for one command. To
-  # trust the cache permanently instead, run: cachix use kixelated
+  # trust the cache permanently instead, add these settings to nix.conf.
+  #
+  # The dev shell paths expire 30 days after upload, possibly before a path
+  # that depends on them; `fallback` builds whatever is missing instead of
+  # failing the substitution.
   nixConfig = {
-    extra-substituters = [ "https://kixelated.cachix.org" ];
+    extra-substituters = [ "https://nix.moq.dev" ];
     extra-trusted-public-keys = [
-      "kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk="
+      "nix.moq.dev-1:BZ0DtCypDFv1ESX3hxuB42yc0vitSA1YHojSmVwB5bk="
     ];
+    fallback = true;
   };
 
   inputs = {
@@ -53,6 +58,7 @@
     {
       nixosModules = {
         moq-relay = import ./nix/modules/moq-relay.nix;
+        github-runner-vm = import ./nix/modules/github-runner-vm.nix;
       };
 
       overlays.default = import ./nix/overlay.nix { inherit crane; };
@@ -64,6 +70,16 @@
           inherit system;
           overlays = [ (import rust-overlay) ];
         };
+
+        wasm-bindgen-version =
+          (pkgs.lib.findSingle (package: package.name == "wasm-bindgen")
+            (throw "Cargo.lock has no wasm-bindgen package")
+            (throw "Cargo.lock has multiple wasm-bindgen versions")
+            (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package
+          ).version;
+        wasm-bindgen-cli =
+          pkgs.${"wasm-bindgen-cli_${builtins.replaceStrings [ "." ] [ "_" ] wasm-bindgen-version}"}
+            or (throw "nixpkgs does not package wasm-bindgen-cli ${wasm-bindgen-version} locked in Cargo.lock");
 
         # Pinned build toolchain (not latest stable) so `nix develop` and CI
         # compile against a fixed rustc and the relay's MSRV can't creep up
@@ -144,8 +160,8 @@
             # Source-based test coverage (`just rs coverage`).
             cargo-llvm-cov
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
-            # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
-            # crate is pinned to nixpkgs' CLI version); bump both together.
+            # Cargo.lock selects the matching schema version, independently of
+            # nixpkgs' default wasm-bindgen-cli.
             wasm-bindgen-cli
           ]
           ++ gstreamerDeps
@@ -646,7 +662,10 @@
             test -f "${overlayPkgs.moq-boy.src}/rs/moq-video/src/frame/nv12_resize.ptx"
             touch "$out"
           '';
-        };
+        }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") (
+          import ./nix/runner/checks.nix { inherit pkgs; }
+        );
       }
     );
 }

@@ -177,8 +177,11 @@ impl Applied {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
+	/// Encoded width in pixels.
 	pub width: u32,
+	/// Encoded height in pixels.
 	pub height: u32,
+	/// Encoded frame rate.
 	pub framerate: Rate,
 	/// Target bitrate. `None` derives a sane default
 	/// from resolution and framerate (~0.07 bits per pixel per second).
@@ -188,6 +191,7 @@ pub struct Config {
 	pub gop: Gop,
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
+	/// Which encoder implementation to use. Defaults to [`Kind::Auto`].
 	pub kind: Kind,
 	/// How the encoder trades latency for compression. Defaults to
 	/// [`Preset::LowLatency`].
@@ -437,7 +441,9 @@ impl Encoder {
 	/// Rarely needed: the encoder opens groups automatically, so reach for this
 	/// only when something outside the encoder needs a boundary at a specific
 	/// frame. A source group boundary (transcode mirrors the source's groups) is
-	/// the usual reason; a scene change or a source switch is another.
+	/// the usual reason; a scene change, a source switch, or a subscriber joining
+	/// over [`track::Info::refresh`](moq_net::track::Info::refresh) are others.
+	/// Capture cuts for joiners itself.
 	///
 	/// The request waits for the next [`encode`](Self::encode) rather than applying
 	/// at once, so it is safe to call before the frame exists. Calling it repeatedly

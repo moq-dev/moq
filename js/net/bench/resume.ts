@@ -1,6 +1,6 @@
 /**
- * Sweep readers and route swaps for groups read through a logical front, against the same
- * groups read straight from the track.
+ * Sweep readers and route swaps for direct and forked readers through a logical front,
+ * against the same groups read straight from the track.
  *
  * A front reads its serving route's copy directly, so with one route it should cost about what a
  * direct read does, and each swap should leave nothing behind once its groups are read.
@@ -8,6 +8,7 @@
 
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { Producer as GroupProducer } from "../src/group.ts";
+import { hooks } from "../src/internal.ts";
 import { Front } from "../src/resume.ts";
 import type { Subscriber } from "../src/track.ts";
 
@@ -38,7 +39,7 @@ function read(subscribers: Subscriber[]) {
 }
 
 /** Microseconds per group per reader, reading through a front after `swaps` route swaps, or directly. */
-async function measure(readers: number, swaps: number | undefined): Promise<number> {
+async function measure(readers: number, swaps: number | undefined, fork = false): Promise<number> {
 	let sequence = 0;
 	const sources: { broadcast: BroadcastProducer; write: () => void }[] = [];
 	const source = () => {
@@ -68,7 +69,14 @@ async function measure(readers: number, swaps: number | undefined): Promise<numb
 		front = new Front();
 		front.serve(source().consume());
 		const consumer = front.consumer;
-		subscribers = Array.from({ length: readers }, () => consumer.track("seq").subscribe());
+		const track = consumer.track("seq");
+		if (fork) {
+			const parent = track.subscribe();
+			subscribers = Array.from({ length: readers }, () => parent.fork());
+			parent.close();
+		} else {
+			subscribers = Array.from({ length: readers }, () => track.subscribe());
+		}
 		for (let swap = 0; swap < swaps; swap++) {
 			publish();
 			read(subscribers);
@@ -96,30 +104,86 @@ async function measure(readers: number, swaps: number | undefined): Promise<numb
 
 // Warm the JIT so the first row isn't the slowest.
 await measure(4, 1);
+await measure(4, 1, true);
 await measure(4, undefined);
 
-console.log("readers,swaps,direct_us,front_us");
+console.log("readers,swaps,direct_us,front_us,fork_us");
 let baseline: number | undefined;
 for (const swaps of swapCounts) {
 	for (const readers of readerCounts) {
 		const direct: number[] = [];
 		const front: number[] = [];
+		const fork: number[] = [];
 		// Interleaved, so a noisy stretch of the machine lands on both columns alike.
 		for (let rep = 0; rep < reps; rep++) {
 			direct.push(await measure(readers, undefined));
 			front.push(await measure(readers, swaps));
+			fork.push(await measure(readers, swaps, true));
 		}
 		// The fastest run is the one least disturbed by the rest of the machine.
 		const directUs = Math.min(...direct);
 		const frontUs = Math.min(...front);
-		console.log(`${readers},${swaps},${directUs.toFixed(2)},${frontUs.toFixed(2)}`);
+		const forkUs = Math.min(...fork);
+		console.log(`${readers},${swaps},${directUs.toFixed(2)},${frontUs.toFixed(2)},${forkUs.toFixed(2)}`);
 
 		baseline ??= frontUs;
-		if (frontUs > baseline * maxSlope) {
+		if (Math.max(frontUs, forkUs) > baseline * maxSlope) {
 			throw new Error(
-				`${readers} readers after ${swaps} swaps cost ${frontUs.toFixed(2)} us/group, over ${maxSlope}x ${baseline.toFixed(2)}`,
+				`${readers} readers after ${swaps} swaps cost ${Math.max(frontUs, forkUs).toFixed(2)} us/group, over ${maxSlope}x ${baseline.toFixed(2)}`,
 			);
 		}
 	}
 }
 if (checksum === 0) throw new Error("benchmark did no work");
+
+// An adopted copy may repeat a large prefix before it reaches unread content. Time readiness
+// separately from constructing the copies, sweeping both the replay and independent readers.
+async function measureReplay(readers: number, replayed: number): Promise<number> {
+	const producer = new GroupProducer(0);
+	const replacement = new GroupProducer(0);
+	for (let index = 0; index < replayed; index++) {
+		producer.writeFrame({ payload });
+		replacement.writeFrame({ payload });
+	}
+	replacement.writeFrame({ payload });
+	const consumers = Array.from({ length: readers }, () => producer.mirror());
+	for (const consumer of consumers) {
+		for (let index = 0; index < replayed; index++) {
+			if (!consumer.tryReadFrame()) throw new Error("missing original frame");
+		}
+		const copy = replacement.mirror();
+		hooks.recoverGroup(consumer, {
+			changed: producer.closed,
+			wants: (failed) => failed !== undefined,
+			replace: async () => ({
+				group: copy,
+				expiry: { expired: () => false, changed: [] },
+				adopt: () => {},
+				discard: () => {},
+			}),
+		});
+	}
+	producer.close(new Error("route failed"));
+	const start = performance.now();
+	await Promise.all(consumers.map((consumer) => consumer.readable()));
+	const elapsed = performance.now() - start;
+	for (const consumer of consumers) {
+		const frame = consumer.tryReadFrameSequence();
+		if (frame?.sequence !== replayed) throw new Error("readiness did not preserve the unread frame");
+		checksum += frame.payload.byteLength;
+		consumer.close();
+	}
+	replacement.close();
+	await flush();
+	return (elapsed * 1000) / readers;
+}
+
+await measureReplay(4, 64);
+console.log("readers,replayed_frames,readable_us");
+for (const replayed of [0, 1, 64, 1024]) {
+	for (const readers of readerCounts) {
+		const samples: number[] = [];
+		for (let rep = 0; rep < reps; rep++) samples.push(await measureReplay(readers, replayed));
+		console.log(`${readers},${replayed},${Math.min(...samples).toFixed(2)}`);
+	}
+}

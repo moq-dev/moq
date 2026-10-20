@@ -1,13 +1,13 @@
 //! Settings registry for `moq-relay`.
 //!
-//! `usage::Cli` and `usage::Config` reject each other's attributes, so every
-//! merged flag is declared twice. [`usage::config::Registry::drift`] is the test
+//! `usage_rs::Cli` and `usage_rs::Config` reject each other's attributes, so every
+//! merged flag is declared twice. [`usage_rs::config::Registry::drift`] is the test
 //! that the two stay in step.
 
 #![allow(dead_code)]
 
 /// Every setting `moq-relay` merges, flattened tokio groups included.
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 pub struct Settings {
 	#[usage(flatten)]
 	session: Session,
@@ -60,7 +60,7 @@ pub struct Settings {
 	iroh: moq_tokio::settings::Iroh,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "runtime")]
 struct Runtime {
 	#[usage(env = "MOQ_RUNTIME_WORKERS", cli("--runtime-workers"))]
@@ -73,7 +73,7 @@ struct Runtime {
 	io_uring: Option<bool>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "cluster")]
 struct Cluster {
 	#[usage(env = "MOQ_CLUSTER_ID", cli("--cluster-id"))]
@@ -103,7 +103,7 @@ struct Cluster {
 }
 
 #[cfg(feature = "cluster-lan")]
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "cluster.lan")]
 struct ClusterLan {
 	#[usage(env = "MOQ_CLUSTER_LAN", cli("--cluster-lan"))]
@@ -116,7 +116,7 @@ struct ClusterLan {
 	app: Option<String>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "auth")]
 struct Auth {
 	#[usage(env = "MOQ_AUTH_URL", cli("--auth-url"))]
@@ -143,7 +143,7 @@ struct Auth {
 	verifications: Option<usize>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "web")]
 struct Web {
 	#[usage(env = "MOQ_WEB_WS", cli("--web-ws"))]
@@ -156,14 +156,14 @@ struct Web {
 	https: WebHttps,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "web.http")]
 struct WebHttp {
 	#[usage(env = "MOQ_WEB_HTTP_LISTEN", cli("--web-http-listen"))]
 	listen: Option<String>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "web.https")]
 struct WebHttps {
 	#[usage(env = "MOQ_WEB_HTTPS_LISTEN", cli("--web-https-listen"))]
@@ -179,7 +179,7 @@ struct WebHttps {
 	root: Option<Vec<String>>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "acme")]
 struct Acme {
 	#[usage(env = "MOQ_ACME_DOMAINS", cli("--acme-domains"), parse = "list_by_comma")]
@@ -198,7 +198,7 @@ struct Acme {
 	timeout: Option<String>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "stats")]
 struct Stats {
 	#[usage(env = "MOQ_STATS_ENABLED", cli("--stats-enabled"))]
@@ -220,7 +220,7 @@ struct Stats {
 	linger: Option<String>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "cache")]
 struct Cache {
 	#[usage(env = "MOQ_CACHE_CAPACITY", cli("--cache-capacity"))]
@@ -233,14 +233,14 @@ struct Cache {
 	duration: Option<String>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "internal")]
 struct Internal {
 	#[usage(env = "MOQ_INTERNAL_LISTEN", cli("--internal-listen"))]
 	listen: Option<String>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "session")]
 struct Session {
 	#[usage(env = "MOQ_SESSION_ANNOUNCES", cli("--session-announces"))]
@@ -251,7 +251,7 @@ struct Session {
 	fetches: Option<usize>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "peer")]
 struct Peer {
 	#[usage(env = "MOQ_PEER_ANNOUNCES", cli("--peer-announces"))]
@@ -264,7 +264,7 @@ struct Peer {
 	quic: PeerQuic,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "peer.quic")]
 struct PeerQuic {
 	#[usage(env = "MOQ_PEER_QUIC_MAX_STREAMS", cli("--peer-quic-max-streams"))]
@@ -275,7 +275,7 @@ struct PeerQuic {
 	send_window: Option<u64>,
 }
 
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 #[usage(prefix = "stun")]
 struct Stun {
 	#[usage(env = "MOQ_STUN_BIND", cli("--stun-bind"))]
