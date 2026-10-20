@@ -140,11 +140,12 @@ async function measureReplay(readers: number, replayed: number): Promise<number>
 		for (let index = 0; index < replayed; index++) {
 			if (!consumer.tryReadFrame()) throw new Error("missing original frame");
 		}
+		const copy = replacement.mirror();
 		hooks.recoverGroup(consumer, {
 			changed: producer.closed,
 			wants: (failed) => failed !== undefined,
 			replace: async () => ({
-				group: replacement.mirror(),
+				group: copy,
 				expiry: { expired: () => false, changed: [] },
 				adopt: () => {},
 				discard: () => {},
