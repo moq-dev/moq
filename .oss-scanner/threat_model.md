@@ -20,7 +20,7 @@ A design rule of the project: whatever a peer sends, the memory, CPU, and state 
 
 Most important, in this order:
 
-1. `rs/moq-relay` and the crates it serves the network with: `rs/moq-net`, `rs/moq-quic`, `rs/moq-tokio`, `rs/moq-sock`, `rs/moq-auth`, `rs/moq-pattern`.
+1. `rs/moq-relay` and the crates it serves the network with: `rs/moq-net`, `rs/moq-quic`, `rs/moq-tokio`, `rs/moq-uring`, `rs/moq-sock`, `rs/moq-auth`, `rs/moq-pattern`.
 2. Authorization: a session publishing, subscribing, or seeing announcements outside its grant, or reaching another root (tenant) through path tricks, revalidation, mounts, or cluster links.
 3. `rs/moq-mux` and `rs/hang`: container, codec, and catalog parsing of publisher-controlled bytes.
 4. The ingest gateways: `rs/moq-rtmp`, `rs/moq-rtsp`, `rs/moq-srt`, `rs/moq-rtc`, `rs/moq-ice`, `rs/moq-hls`.
@@ -34,8 +34,8 @@ Out of scope: `js/` and the other language bindings (`py/`, `swift/`, `kt/`, `go
 
 The image is offline, with every crate fetched and `CARGO_NET_OFFLINE` set. The debug build of the in-scope crates, their test binaries, and the `moq-relay` and `moq` binaries are already built in `/src/target/debug`. Debug builds keep overflow checks on.
 
-- **Tests**: `cargo nextest run -p path+file:///src/rs/moq-net` (or any in-scope crate; the path spec is needed because the lockfile also has published copies of some crates). Use nextest as CI does: some tests install process-global state and fail under plain `cargo test`. Unit tests use the deterministic clock in `moq-clock` rather than wall time, so they are fast and reproducible.
-- **A relay to attack**: `./target/debug/moq-relay demo/relay/localhost.toml` listens on UDP and TCP `[::]:4443` with a self-signed certificate and anonymous access to every path. For authorization testing, grant a narrow anonymous pattern with `[auth] public_subscribe` / `public_publish`, or run the reference auth server (`moq auth generate`, `moq auth sign`, `moq auth serve`, then `[auth] url`; see `doc/bin/cli.md`) and try to escape a signed token's root and patterns. `doc/bin/relay/` documents the config, auth, cluster, and HTTP endpoints.
+- **Tests**: `cargo nextest run -p path+file:///src/rs/moq-net` (or any in-scope crate; the path spec is needed because the lockfile also has published copies of some crates). Use nextest as CI does: some tests install process-global state and fail under plain `cargo test`. Add `--features moq-relay/io-uring` for the relay and `moq-uring` so the io_uring backend's tests run (they skip on a kernel without io_uring support). Unit tests use the deterministic clock in `moq-clock` rather than wall time, so they are fast and reproducible.
+- **A relay to attack**: `./target/debug/moq-relay demo/relay/localhost.toml` listens on UDP and TCP `[::]:4443` with a self-signed certificate and anonymous access to every path. The binary is built with io_uring support; pass `--runtime-io-uring` to serve QUIC from the io_uring workers in `rs/moq-uring` and `rs/moq-relay/src/uring.rs` instead of tokio. For authorization testing, grant a narrow anonymous pattern with `[auth] public_subscribe` / `public_publish`, or run the reference auth server (`moq auth generate`, `moq auth sign`, `moq auth serve`, then `[auth] url`; see `doc/bin/cli.md`) and try to escape a signed token's root and patterns. `doc/bin/relay/` documents the config, auth, cluster, and HTTP endpoints.
 - **A client**: `./target/debug/moq --help` publishes, subscribes, fetches, and lists announcements against a relay. `curl http://localhost:4443/announced/` and `curl http://localhost:4443/fetch/<broadcast>/<track>` hit the HTTP endpoints.
 - **Fuzz harnesses**: `rs/moq-net/fuzz` and `rs/moq-quic/fuzz` hold cargo-fuzz targets for the wire codecs and the QUIC state machine. cargo-fuzz and a nightly toolchain are not in the image, but the targets show the parser entry points.
 
