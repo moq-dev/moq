@@ -21,11 +21,19 @@ Decided with the maintainer on 2026-10-20:
   `moq_mux::container::fmp4::Import` gains an unwrap mode and makes it the
   default. Passthrough becomes an explicit option, so moq-cli, moq-hls, the
   `ContainerFormat::Fmp4` path in `import/container.rs`, and FFI callers
-  all get `Legacy` unless they opt in. Breaking: add a `moq-mux` `MIGRATE.md`
-  entry.
+  all get `Legacy` unless they opt in. Thread the opt-in through every path
+  that builds an `fmp4::Import`: the importer itself (a builder like its
+  `with_select`), `ContainerFormat` for `import/container.rs` and the FFI,
+  and moq-hls's import args. Settle the exact shape with the maintainer in
+  the PR. Breaking: add a `moq-mux` `MIGRATE.md` entry.
 - Unwrapped output is `Legacy`, not LOC (maintainer choice). Each sample
   becomes one frame. Its timestamp is the tfdt decode time plus its
-  composition offset, in the track's timescale. Keyframes follow the
+  composition offset in the track's timescale, published through the
+  importer's `Timebase` like the passthrough path (`timebase.anchor`), so
+  both modes land on the same catalog clock. Edit lists stay out of scope:
+  both players already ignore `edts` today, and
+  [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) applies them for both
+  modes. Keyframes follow the
   `depends_on` rule moq-mux already applies ([moq-dev/moq#5078](https://github.com/moq-dev/moq/pull/5078)). The codec description
   comes from `stsd`.
 - `moq import hls` takes the same `--passthrough`. HLS export already

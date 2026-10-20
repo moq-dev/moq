@@ -9,7 +9,10 @@ A player that never meets a CMAF rendition never downloads the fMP4 parser.
 
 The decode path is about 12 KB raw and 4.3 KB gzip of watch's first load
 (measured 2026-10-20: 8 KB of cml and 4 KB of `container/cmaf`). Non-goal: replacing
-cml. The parser itself does not change.
+cml. The parser itself does not change, and `@svta/cml-iso-bmff` stays a
+dependency of the published `@moq/hang`. The boundary is the import graph:
+nothing reachable from `@moq/hang`'s other exports or watch's static imports
+pulls in `@moq/hang/cmaf`.
 
 ## Plan
 
