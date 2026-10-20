@@ -3085,6 +3085,86 @@ mod tests {
 		(rendition, watcher)
 	}
 
+	/// Finish the media before End while retaining its track cache for a late recorder.
+	async fn ended_rendition(sibling: bool) -> (Arc<Rendition>, tokio::task::JoinHandle<()>, Box<dyn std::any::Any>) {
+		const KEYFRAME: &[u8] = &[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xf0, 0x00];
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut target = if sibling {
+			let target = origin.create_broadcast("media").unwrap();
+			target.announce(Default::default()).unwrap();
+			target
+		} else {
+			broadcast.clone()
+		};
+		let recorder = catalog.enroll_test("video0").unwrap();
+		let mut media = write_routed_media(&mut target, KEYFRAME, recorder, 0);
+		media.finish().unwrap();
+		settle().await;
+
+		let source = crate::resolved(&origin, "live").await;
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		if sibling {
+			config.broadcast = Some(moq_net::path::Relative::new("media").to_owned());
+		}
+		let (rendition, watcher) = export(&source, &config);
+		rendition.playable().await;
+		assert!(!rendition.snapshot().segments.is_empty());
+		let binding = rendition.poll_media(&kio::Waiter::noop());
+		let bound = binding.broadcast().await.unwrap();
+		target.close();
+		bound.closed().await;
+		assert!(
+			target.consume().track("video0").is_err(),
+			"new lookups are refused after End"
+		);
+		(
+			rendition,
+			watcher,
+			Box::new((origin, catalog, media, broadcast, target)),
+		)
+	}
+
+	// First-time inline init bootstrap must use the bound track, even after End.
+	#[tokio::test]
+	async fn init_bootstraps_after_the_catalog_broadcast_ends() {
+		tokio::time::pause();
+		let (rendition, watcher, _held) = ended_rendition(false).await;
+		let result = rendition.init().await;
+		watcher.abort();
+		let init = result.unwrap().expect("inline init bootstraps after End");
+		assert!(contains(&init, b"ftyp"));
+	}
+
+	#[tokio::test]
+	async fn segments_drain_after_the_catalog_broadcast_ends() {
+		tokio::time::pause();
+		let (rendition, watcher, _held) = ended_rendition(false).await;
+		let result = rendition.listed_segment(0).await;
+		watcher.abort();
+		assert!(result.unwrap().is_some(), "retained segment drains after End");
+	}
+
+	#[tokio::test]
+	async fn init_bootstraps_after_the_sibling_broadcast_ends() {
+		tokio::time::pause();
+		let (rendition, watcher, _held) = ended_rendition(true).await;
+		let result = rendition.init().await;
+		watcher.abort();
+		assert!(result.unwrap().is_some(), "sibling init bootstraps after End");
+	}
+
+	#[tokio::test]
+	async fn segments_drain_after_the_sibling_broadcast_ends() {
+		tokio::time::pause();
+		let (rendition, watcher, _held) = ended_rendition(true).await;
+		let result = rendition.listed_segment(0).await;
+		watcher.abort();
+		assert!(result.unwrap().is_some(), "retained sibling segment drains after End");
+	}
+
 	// A path published again after its broadcast ended is a brand new broadcast. Renditions
 	// derived from the old broadcast's catalog must not serve the replacement's media: its group
 	// numbering restarts, so those bytes would be served under the replaced broadcast's segment
