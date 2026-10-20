@@ -70,7 +70,6 @@ Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so
 
 ## Closes
 
-- [#2277](https://github.com/moq-dev/moq/issues/2277) - close this issue when the quest finishes
 - [#3023](https://github.com/moq-dev/moq/issues/3023) - close this issue when the quest finishes
 
 ## Related

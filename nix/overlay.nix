@@ -66,7 +66,7 @@ let
     src = cleanCargoSource;
     cargoExtraArgs = "-p moq-relay --features jemalloc";
     # Enable frame pointers for profiling support (negligible overhead on x86_64).
-    # This also ensures the CDN build matches what Cachix caches.
+    # This also ensures the CDN build matches what nix.moq.dev caches.
     RUSTFLAGS = "-C force-frame-pointers=yes";
     # jemalloc's configure uses -O0 test builds, which conflict with
     # Nix's _FORTIFY_SOURCE hardening (requires -O).
@@ -220,7 +220,7 @@ let
     '';
 
     # The flake output is meant to load against nix's GStreamer (in a
-    # `nix shell .#moq-gst` / cachix-pulled context). `/nix/store` refs
+    # `nix shell .#moq-gst` / binary-cache-pulled context). `/nix/store` refs
     # are correct there. The only thing we fix is the rustc-emitted
     # self-reference to /nix/var/nix/builds/.../libgstmoq.dylib (the
     # cargo build dir, gone post-build) which would break loading even

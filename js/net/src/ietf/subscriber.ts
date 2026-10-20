@@ -2,6 +2,7 @@ import { Milli } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
+import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
@@ -35,7 +36,7 @@ import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
-import { unwanted } from "../util/demand.ts";
+import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -54,18 +55,17 @@ import {
 } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
-import { type Publish, PublishDone, PublishDoneStatus, PublishError, publishDoneClean } from "./publish.ts";
+import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
 import {
 	type AdvertParams,
 	type PublishNamespace,
 	PublishNamespaceCancel,
 	PublishNamespaceDone,
-	PublishNamespaceError,
 	PublishNamespaceOk,
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { finCancels, refuseReserved } from "./request_stream.ts";
+import { finCancels, nextMessage, refuse, refuseReserved, refuseUpdate } from "./request_stream.ts";
 import { joinFilter, Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
@@ -205,6 +205,7 @@ export class Subscriber {
 	// Our grant (MoQ Auth): a subscription it stops covering is cancelled. Undefined until
 	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
+	#auth?: AuthSession;
 
 	/** Marks this subscriber's deliberate local session close. @internal */
 	close() {
@@ -227,6 +228,7 @@ export class Subscriber {
 		solicit,
 		goaway,
 		grant,
+		auth,
 		limits = LIMITS,
 	}: {
 		/** The session abstraction for bidi streams and request IDs. */
@@ -249,6 +251,7 @@ export class Subscriber {
 		goaway?: GetPromise<Drain>;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we subscribe to. */
 		grant?: Getter<Grant | undefined>;
+		auth?: AuthSession;
 		/** How many live requests the peer may hold. */
 		limits?: Limits;
 	}) {
@@ -263,6 +266,7 @@ export class Subscriber {
 		this.#solicit = solicit;
 		this.#goaway = goaway;
 		this.#grant = grant;
+		this.#auth = auth;
 		// A draining peer usually stops publishing namespaces, so reprice from the signal
 		// itself. Waiting for another message would leave the route primary until close.
 		void goaway?.then(() => this.#drainAnnounced());
@@ -567,7 +571,8 @@ export class Subscriber {
 
 				// Resolves to how many NAMESPACEs make up the initial set (MoQ Active Count).
 				const response = (async () => {
-					const respTypeId = await stream.reader.u53();
+					const respTypeId = await nextMessage(stream.reader, version, this.#session.client);
+					if (respTypeId === undefined) throw new Error("namespace stream ended before its response");
 					if (respTypeId === RequestOk.id) {
 						const ok = await RequestOk.decode(stream.reader, version);
 						// A count the negotiation did not promise, or a missing one it did, is
@@ -600,14 +605,13 @@ export class Subscriber {
 					for (;;) {
 						if (initial === 0) announced.synced();
 
-						const done = await stream.reader.done();
-						if (done) {
+						const msgType = await nextMessage(stream.reader, version, this.#session.client);
+						if (msgType === undefined) {
 							if (initial > 0)
 								throw new ProtocolViolation("namespace stream ended inside the initial set");
 							break;
 						}
 
-						const msgType = await stream.reader.u53();
 						// The counted initial set is NAMESPACEs only, so anything else cuts it short.
 						if (initial > 0 && msgType !== SubscribeNamespaceEntry.id) {
 							throw new ProtocolViolation(`message 0x${msgType.toString(16)} inside the initial set`);
@@ -687,6 +691,7 @@ export class Subscriber {
 				throw err;
 			}
 		} catch (err: unknown) {
+			if (err instanceof ProtocolViolation) this.#violated(err);
 			const e = error(err);
 			console.warn(`subscribe_namespace error: ${reason(e)}`);
 
@@ -755,6 +760,22 @@ export class Subscriber {
 
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request, valid?: AbortSignal, epoch?: Epoch.Valid) {
 		const refused = unauthorized(broadcast);
+		try {
+			for (;;) {
+				const ready = await this.#auth?.ready(broadcast, "subscribe", {
+					signal: valid,
+					until: () => demandAbandoned(request.demand()),
+				});
+				if (ready !== false) break;
+				// Demand returning before we commit is not abandonment, matching the serving loop.
+				if (!isAbandoned(request.demand())) continue;
+				request.reject(new Error("subscribe abandoned before it was authorized"));
+				return;
+			}
+		} catch (err) {
+			request.reject(error(err));
+			return;
+		}
 		if (this.#denied(broadcast)) {
 			request.reject(refused);
 			return;
@@ -795,15 +816,8 @@ export class Subscriber {
 		// Demand returning before we commit is not abandonment, matching the serving loop.
 		const demand = producer.demand();
 		const waitAbandoned = async (): Promise<null> => {
-			// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for
-			// the track info, so only demand that arrived and then left is abandonment.
-			while (demand.wanted.peek() === undefined && demand.closed.peek() === undefined) {
-				await Signal.race(demand.wanted, demand.closed);
-			}
-			for (;;) {
-				await unwanted(demand);
-				if (demand.closed.peek() !== undefined || demand.wanted.peek() === undefined) return null;
-			}
+			await demandAbandoned(demand);
+			return null;
 		};
 
 		let stream: Stream;
@@ -829,6 +843,7 @@ export class Subscriber {
 			}
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
+			if (err instanceof ProtocolViolation) this.#violated(err);
 			// A control request that timed out is not late content, so it carries its own code.
 			// Local abandonment must commit without yielding after the demand check.
 			const e = err === abandoned ? abandoned : await sessionCause(this.#quic, err);
@@ -944,6 +959,7 @@ export class Subscriber {
 			stream.close();
 			console.debug(`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
+			if (err instanceof ProtocolViolation) this.#violated(err);
 			const e = await sessionCause(this.#quic, err);
 			producer.close(this.#localClose ? undefined : e);
 			stream.abort(e);
@@ -978,8 +994,8 @@ export class Subscriber {
 		// further answer is owed.
 		let refused = false;
 		for (;;) {
-			if (await stream.reader.done()) throw new ProtocolViolation("subscribe stream ended without PUBLISH_DONE");
-			const typeId = await stream.reader.u53();
+			const typeId = await nextMessage(stream.reader, version, this.#session.client);
+			if (typeId === undefined) throw new ProtocolViolation("subscribe stream ended without PUBLISH_DONE");
 			if (typeId === PublishDone.id) break;
 			const answer = (typeId === RequestOk.id || typeId === RequestError.id) && !refused && unanswered.peek() > 0;
 			if (!answer) throw new ProtocolViolation(`unexpected message on a subscription: 0x${typeId.toString(16)}`);
@@ -1007,9 +1023,10 @@ export class Subscriber {
 
 	/**
 	 * Follow the aggregate subscriber priority upstream until `done` settles: SUBSCRIBE_UPDATE
-	 * through draft 16, REQUEST_UPDATE after, each under a Request ID of its own. From draft 17
-	 * the answer comes back on this stream, so one update is in flight at a time and changes
-	 * meanwhile coalesce. No draft lets an update change the group order, so it stays as asked.
+	 * through draft 16, REQUEST_UPDATE after, each under a Request ID of its own. From draft 16
+	 * the answer comes back on this stream (routed by the adapter on draft 16), so one update is
+	 * in flight at a time and changes meanwhile coalesce. No draft lets an update change the
+	 * group order, so it stays as asked.
 	 */
 	async #runUpdates(
 		stream: Stream,
@@ -1022,6 +1039,8 @@ export class Subscriber {
 	): Promise<void> {
 		const version = this.#session.version;
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		// Draft 14 answers no update, and draft 15's answer reaches no subscription.
+		const answered = version !== Version.DRAFT_14 && version !== Version.DRAFT_15;
 		const stopped = done.then(
 			() => null,
 			() => null,
@@ -1062,7 +1081,7 @@ export class Subscriber {
 				? new SubscribeUpdate({ requestId, ownRequestId: own, parameters })
 				: new SubscribeUpdate({ requestId: own, parameters });
 			// Counted before writing: the answer can be read before the write's promise resolves.
-			if (!legacy) unanswered.update((count) => count + 1);
+			if (answered) unanswered.update((count) => count + 1);
 			try {
 				await stream.writer.u53(SubscribeUpdate.id);
 				await update.encode(stream.writer, version);
@@ -1155,7 +1174,8 @@ export class Subscriber {
 		if (state.cancelled) throw new Error("subscribe cancelled while it was being sent");
 		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
-		const respTypeId = await state.stream.reader.u53();
+		const respTypeId = await nextMessage(state.stream.reader, version, this.#session.client);
+		if (respTypeId === undefined) throw new Error("subscription ended before its response");
 		if (respTypeId !== SubscribeOk.id) {
 			let reasonPhrase = "unknown error";
 			try {
@@ -1239,13 +1259,11 @@ export class Subscriber {
 		// conforming one never offers it; 0 as the retry interval says not to come back.
 		if (this.#reflected(msg.params.cluster)) {
 			console.debug(`dropping reflected publish_namespace: broadcast=${path}`);
-			await stream.writer.u53(RequestError.id);
-			await new RequestError({
+			await refuse(stream, version, "publish_namespace", {
 				requestId: msg.requestId,
-				errorCode: toRequestCode("uninterested", "publish_namespace", version),
+				condition: "uninterested",
 				reasonPhrase: "route loops back",
-			}).encode(stream.writer, version);
-			stream.close();
+			});
 			return;
 		}
 
@@ -1260,23 +1278,11 @@ export class Subscriber {
 			console.warn("duplicate PublishNamespace");
 			// No draft registers a code for a duplicate, and this refusal is a draft-14/15
 			// implementation limit, which is what INTERNAL_ERROR describes.
-			const errorCode = toRequestCode("internal", "publish_namespace", version);
-			if (version === Version.DRAFT_14) {
-				await stream.writer.u53(PublishNamespaceError.id);
-				await new PublishNamespaceError({
-					requestId: msg.requestId,
-					errorCode,
-					reasonPhrase: "duplicate namespace",
-				}).encode(stream.writer, version);
-			} else {
-				await stream.writer.u53(RequestError.id);
-				await new RequestError({
-					requestId: msg.requestId,
-					errorCode,
-					reasonPhrase: "duplicate namespace",
-				}).encode(stream.writer, version);
-			}
-			stream.close();
+			await refuse(stream, version, "publish_namespace", {
+				requestId: msg.requestId,
+				condition: "internal",
+				reasonPhrase: "duplicate namespace",
+			});
 			return;
 		}
 
@@ -1322,25 +1328,26 @@ export class Subscriber {
 					)
 				: undefined;
 			for (;;) {
-				if (await (stopped !== undefined ? race([stream.reader.done(), stopped]) : stream.reader.done())) {
+				const typeId = await (stopped !== undefined
+					? race([nextMessage(stream.reader, version, this.#session.client), stopped.then(() => undefined)])
+					: nextMessage(stream.reader, version, this.#session.client));
+				if (typeId === undefined) {
 					if (!finCancels(version)) await stopped;
 					stream.reader.stop(new StreamError(StreamCode.Cancel));
 					break;
 				}
 
-				const typeId = await stream.reader.u53();
 				// Drafts 14-15 have no update for an advertisement, so a SUBSCRIBE_UPDATE the
 				// adapter routed here is refused and changes nothing. Draft 14 answers no update;
 				// draft 15 names the update's own Request ID, which the adapter already spent.
 				if (legacy && typeId === SubscribeUpdate.id) {
 					const body = await stream.reader.read(await stream.reader.u16());
 					if (version === Version.DRAFT_15) {
-						await stream.writer.u53(RequestError.id);
-						await new RequestError({
+						await refuseUpdate(stream.writer, version, "publish_namespace", {
 							requestId: await new Reader(undefined, body, version).u62(),
-							errorCode: toRequestCode("not_supported", "publish_namespace", version),
+							condition: "not_supported",
 							reasonPhrase: "update not supported",
-						}).encode(stream.writer, version);
+						});
 					}
 					continue;
 				}
@@ -1368,19 +1375,17 @@ export class Subscriber {
 					if (!keyed && err.requestId !== undefined) this.#session.spendRequest(err.requestId);
 					// Section 8.9 rejects the update, which withdraws the advertisement as any
 					// refused update does.
-					const errorCode = toRequestCode("malformed_auth_token", "publish_namespace", version);
-					await stream.writer.u53(RequestError.id);
-					await new RequestError({
-						requestId: keyed ? err.requestId : undefined,
-						errorCode,
+					await refuseUpdate(stream.writer, version, "publish_namespace", {
+						requestId: err.requestId,
+						condition: "malformed_auth_token",
 						reasonPhrase: err.message,
-					}).encode(stream.writer, version);
+					});
 					// Draft-16's advertisement outlives its stream, so withdraw it explicitly.
 					if (keyed) {
 						await stream.writer.u53(PublishNamespaceCancel.id);
 						await new PublishNamespaceCancel({
 							requestId: msg.requestId,
-							errorCode,
+							errorCode: toRequestCode("malformed_auth_token", "publish_namespace", version),
 							reasonPhrase: err.message,
 						}).encode(stream.writer, version);
 					}
@@ -1445,33 +1450,16 @@ export class Subscriber {
 			await refuseReserved(stream, this.#session.version);
 			return;
 		}
-		const version = this.#session.version;
-
 		// We decline the method itself rather than this particular track, which would be
 		// UNINTERESTED.
 		//
 		// The alias the message carries is deliberately not recorded. Nothing will ever bind
 		// it, and a rejected request has no lifetime of ours to hang the cleanup on.
-		const errorCode = toRequestCode("not_supported", "publish", version);
-
-		if (version === Version.DRAFT_14) {
-			await stream.writer.u53(PublishError.id);
-			const err = new PublishError({
-				requestId: msg.requestId,
-				errorCode,
-				reasonPhrase: "publish not supported",
-			});
-			await err.encode(stream.writer, version);
-		} else {
-			await stream.writer.u53(RequestError.id);
-			const err = new RequestError({
-				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-				errorCode,
-				reasonPhrase: "publish not supported",
-			});
-			await err.encode(stream.writer, version);
-		}
-		stream.close();
+		await refuse(stream, this.#session.version, "publish", {
+			requestId: msg.requestId,
+			condition: "not_supported",
+			reasonPhrase: "publish not supported",
+		});
 	}
 
 	/**
@@ -1489,6 +1477,7 @@ export class Subscriber {
 			// The control message establishing this alias can arrive after the data stream.
 			subscription = await this.#aliases.get(group.trackAlias);
 		} catch (err: unknown) {
+			if (err instanceof ProtocolViolation) this.#violated(err);
 			const e = await sessionCause(this.#quic, err);
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			// Anything else on this alias is the publisher sending data for a track it never
@@ -1586,6 +1575,7 @@ export class Subscriber {
 			// A group with no objects still exists.
 			open().close();
 		} catch (err: unknown) {
+			if (err instanceof ProtocolViolation) this.#violated(err);
 			const e = await sessionCause(this.#quic, err);
 			// The compact form names the subgroup by its first Object ID, so a nonzero one is
 			// subgroup N: stop the stream before any group exists for it.

@@ -20,7 +20,7 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 /// whichever comes first (the latest group of every track is always retained).
 /// With none of the knobs set the pool is unbounded in bytes and only the
 /// default LRU window bounds memory.
-#[derive(usage::Args, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]

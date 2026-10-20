@@ -1,7 +1,8 @@
 name: Dependabot
 
 # Enables auto-merge on Dependabot pull requests, so a bump lands on its own
-# once Check and Test pass. The main ruleset requires both, and dependabot.yml
+# once the merge queue's Check and Test pass. The main ruleset requires both
+# (a main PR reports them skipped, so auto-merge enqueues it), and dependabot.yml
 # holds every new version for 7 days, so nothing merges unreviewed by CI or the
 # moment it is published.
 #
@@ -12,9 +13,8 @@ name: Dependabot
 # calls one `gh` command against the pull request number.
 #
 # The moq-bot token rather than GITHUB_TOKEN: a merge enabled by GITHUB_TOKEN
-# does not trigger further workflow runs, which would silently skip Cache
-# (the Rust cache warm keyed on Cargo.lock, exactly what the cargo group
-# changes), release-rs and release-js on every auto-merged bump.
+# does not trigger further workflow runs, which would silently skip
+# release-rs and release-js on every auto-merged bump.
 
 permissions: {}
 
@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: Generate moq-bot token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}

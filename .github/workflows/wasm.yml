@@ -33,10 +33,14 @@ permissions:
   contents: read
 
 on:
+  workflow_call:
   pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
+    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
+    # retargeted to release. `closed` is here only so merging/closing a PR
+    # cancels its in-flight run via the concurrency group below; the job itself
+    # is skipped on close.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited, closed]
     paths:
       - "rs/moq-wasm/**"
       - "rs/moq-clock/**"
@@ -67,9 +71,11 @@ jobs:
   wasm:
     name: WASM
     if: github.event.action != 'closed'
-    # ARM64 like check.yml, the only architecture cache.yml warms a Rust store
-    # for; the harness builds the relay natively, which that store covers.
+    # ARM64 like check.yml; the harness builds the relay natively, which the
+    # merge queue's Check and Test publish.
     runs-on: ubuntu-24.04-arm
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 60
 
     steps:
@@ -78,19 +84,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter, so the dev shell substitutes
-          # instead of building from source. See check.yml for the full story.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
 
-      # cache.yml warms the default-branch store on `main`. Pull requests restore
-      # it; the action refuses to publish from a pull request.
+      # Nightly's call writes on `main`; release pull requests read.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
       # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
       # runtime libs (`--with-deps` needs the host package manager); run.sh's own

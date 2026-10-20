@@ -428,7 +428,7 @@ mod tests {
 		kio::Waiter,
 		Arc<CountWaker>,
 	) {
-		let mut group = crate::group::Info { sequence: 0 }.produce();
+		let group = crate::group::Info { sequence: 0 }.produce();
 		let mut consumer = group.consume();
 		let frame = group
 			.create_frame_owned(
@@ -640,7 +640,7 @@ mod tests {
 		));
 		assert_eq!(wakes.count(), 1, "a full frame woke before it was committed");
 
-		frame.finish().unwrap();
+		let _group = frame.finish().unwrap();
 		assert_eq!(wakes.count(), 2);
 	}
 

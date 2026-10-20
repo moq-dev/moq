@@ -55,7 +55,8 @@ cases!(
 	a_publish_only_session_grants_no_subscribe,
 	an_out_of_scope_announce_aborts_with_the_path,
 	a_broadcast_published_before_the_grant_is_checked,
-	an_unanswered_token_does_not_suspend_the_check,
+	an_unanswered_token_holds_the_check,
+	a_broadcast_withdrawn_while_its_token_waits_is_not_refused,
 	tokens_union_and_withdrawing_one_shrinks_it,
 	an_update_replaces_one_tokens_grant,
 	a_revoked_grant_withdraws_and_can_be_restored,
@@ -66,6 +67,7 @@ cases!(
 	an_issued_grant_ends_with_its_session,
 	a_reset_auth_stream_reports_unsupported,
 	a_revoked_grant_cancels_its_subscriptions,
+	a_live_subscription_survives_union_renewal,
 	a_grant_update_too_large_for_one_message_is_unsupported,
 	nothing_outside_the_grant_reaches_the_peer,
 );
@@ -153,9 +155,12 @@ async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
 		let (_, first) = tokens.next().await.expect("the announce's token");
 
-		// Ending the grant cancels the announcement, which the client has yet to read when
-		// the swap writes its update.
+		// Ending the grant cancels the announcement. The idle request reads that and the
+		// retry offers it again under the token the route still holds, so the swap renews
+		// the new request.
 		drop(first);
+		let (token, _again) = tokens.next().await.expect("offered again after the cancel");
+		assert_eq!(token, b"first");
 		moq_clock::sleep(Duration::from_secs(1)).await;
 		let second = pair.client.auth().add("second").await.expect("kept for requests");
 		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
@@ -604,9 +609,8 @@ async fn a_broadcast_published_before_the_grant_is_checked(version: &'static str
 	.expect("timed out");
 }
 
-/// Enforcement waits only for the tokens the session presented itself: a peer that
-/// never answers an app-added token cannot suspend it.
-async fn an_unanswered_token_does_not_suspend_the_check(version: &'static str) {
+/// A publication waits on a presented token, then is judged against the settled union.
+async fn an_unanswered_token_holds_the_check(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
 		let mut pair = connect(Options {
@@ -617,22 +621,71 @@ async fn an_unanswered_token_does_not_suspend_the_check(version: &'static str) {
 			..Default::default()
 		})
 		.await;
-		let _issued = serve(pair.requests.take().unwrap(), |token| {
-			token.is_empty().then(|| grant(&["baz"], &[]))
-		});
-
-		let auth = pair.client.auth();
-		let pending = moq_clock::sim::spawn(async move { auth.add("never answered").await.map(|_| ()) });
+		let mut requests = pair.requests.take().unwrap();
+		let _setup = requests.next().await.unwrap().accept(grant(&["baz"], &[]));
 		assert_eq!(granted(&pair.client).await, grant(&["baz"], &[]));
-
-		let bad = publisher.create_broadcast("foo/bar").unwrap();
+		let auth = pair.client.auth();
+		let pending = moq_clock::sim::spawn(async move { auth.add("new").await });
+		let unanswered = requests.next().await.unwrap();
+		let broadcast = publisher.create_broadcast("foo/bar").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		use futures::FutureExt;
+		assert!(
+			pair.server.closed().now_or_never().is_none(),
+			"publication refused before token answered"
+		);
+		let _issued = unanswered.accept(grant(&["foo"], &[]));
+		let _token = pending.await.unwrap().unwrap();
+		assert_eq!(granted(&pair.client).await, grant(&["baz", "foo"], &[]));
+		let bad = publisher.create_broadcast("still-bad").unwrap();
 		bad.announce(Default::default()).unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
 			Error::Session(SessionError::Unauthorized)
 		));
-		// The session's close fails the token still waiting on its answer.
-		assert!(pending.await.unwrap().is_err());
+		let (_, reason) = pair.client_transport.close_reason().expect("closed");
+		assert_eq!(reason, "unauthorized: still-bad");
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A broadcast withdrawn while its token is unanswered is not judged once the token settles.
+async fn a_broadcast_withdrawn_while_its_token_waits_is_not_refused(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(2);
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(publisher.clone()),
+			server_subscribe: Some(produce_origin(1)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut requests = pair.requests.take().unwrap();
+		let _setup = requests.next().await.unwrap().accept(grant(&["baz"], &[]));
+		assert_eq!(granted(&pair.client).await, grant(&["baz"], &[]));
+		let auth = pair.client.auth();
+		let pending = moq_clock::sim::spawn(async move { auth.add("new").await });
+		let unanswered = requests.next().await.unwrap();
+		let withdrawn = publisher.create_broadcast("foo/bar").unwrap();
+		withdrawn.announce(Default::default()).unwrap();
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		withdrawn.unannounce();
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		let _issued = unanswered.accept(grant(&["other"], &[]));
+		let _token = pending.await.unwrap().unwrap();
+		assert_eq!(granted(&pair.client).await, grant(&["baz", "other"], &[]));
+		// Still enforcing: the next uncovered broadcast is the one named.
+		let bad = publisher.create_broadcast("still-bad").unwrap();
+		bad.announce(Default::default()).unwrap();
+		assert!(matches!(
+			pair.server.closed().await,
+			Error::Session(SessionError::Unauthorized)
+		));
+		let (_, reason) = pair.client_transport.close_reason().expect("closed");
+		assert_eq!(reason, "unauthorized: still-bad");
 	})
 	.await
 	.expect("timed out");
@@ -948,6 +1001,61 @@ async fn connect_announced(version: &'static str) -> (Pair, moq_net::broadcast::
 	.await;
 	wait_announced(&server_origin.consume(), "room/x", true).await;
 	(pair, broadcast)
+}
+
+async fn a_live_subscription_survives_union_renewal(version: &'static str) {
+	within(async {
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("room/x").unwrap();
+		let published = broadcast.create_track("video", timed()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let received = produce_origin(2);
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_subscribe: Some(received.clone()),
+			server_publish: Some(publisher),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		pair.server.auth().authorize(&Grant::default());
+		let mut requests = pair.requests.take().unwrap();
+		let _setup = requests.next().await.unwrap().accept(Grant::default());
+		let auth = pair.client.auth();
+		let (first, first_grant) = futures::join!(auth.add("first"), async {
+			requests.next().await.unwrap().accept(grant(&[], &["room"]))
+		});
+		let first = first.unwrap();
+		let remote = received.consume().routed_broadcast("room/x").await.unwrap();
+		let mut group = published.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"first".as_ref())
+			.unwrap();
+		let mut subscription = remote
+			.track("video")
+			.unwrap()
+			.subscribe(moq_net::track::Subscription::default())
+			.await
+			.unwrap();
+		subscription.recv_group().await.unwrap().unwrap();
+		let (renewed, _renewed_grant) = futures::join!(auth.add("renewal"), async {
+			requests.next().await.unwrap().accept(grant(&[], &["room"]))
+		});
+		let _renewed = renewed.unwrap();
+		drop(first);
+		first_grant.closed().await;
+		let mut group = published.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"renewed".as_ref())
+			.unwrap();
+		subscription
+			.recv_group()
+			.await
+			.expect("renewal ended the subscription")
+			.unwrap();
+	})
+	.await
+	.expect("timed out");
 }
 
 /// Losing a grant cancels the subscriptions it covered, in both directions, and

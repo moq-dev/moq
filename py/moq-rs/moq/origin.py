@@ -18,6 +18,7 @@ from moq_ffi import (
     MoqRoute as Route,
 )
 
+from ._stream import _Stream
 from .publish import BroadcastProducer
 from .subscribe import BroadcastConsumer
 
@@ -50,7 +51,7 @@ AnnounceEventRestart = MoqAnnounceEvent.RESTART
 it and request afresh."""
 
 
-class AnnounceConsumer:
+class AnnounceConsumer(_Stream[MoqAnnounceEvent]):
     """Async-iterable stream of :data:`AnnounceEvent` as they arrive.
 
     Usable as an async context manager; iterate with ``async for`` and it keeps
@@ -60,20 +61,8 @@ class AnnounceConsumer:
     def __init__(self, inner: MoqAnnounceConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> MoqAnnounceEvent:
-        result = await self._inner.next()
-        if result is None:
-            raise StopAsyncIteration
-        return result
+    async def _next(self) -> MoqAnnounceEvent | None:
+        return await self._inner.next()
 
     def cancel(self) -> None:
         """Stop iterating and release the underlying announcement stream."""
@@ -135,7 +124,7 @@ class BroadcastRequest:
         self._inner.reject(error_code)
 
 
-class OriginDynamic:
+class OriginDynamic(_Stream[BroadcastRequest]):
     """A served route: advertises a prefix and yields requests beneath it.
 
     Usable as an async context manager that cancels the route on exit.
@@ -144,16 +133,7 @@ class OriginDynamic:
     def __init__(self, inner: MoqOriginDynamic) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> BroadcastRequest:
+    async def _next(self) -> BroadcastRequest:
         return await self.requested_broadcast()
 
     async def requested_broadcast(self) -> BroadcastRequest:

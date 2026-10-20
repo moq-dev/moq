@@ -183,6 +183,8 @@ pub struct SinkSend {
 	/// Writes park until this flips to true; `None` writes immediately. See
 	/// [`SinkSession::gated_bi`].
 	gate: Option<kio::Consumer<bool>>,
+	budget: Option<kio::Consumer<usize>>,
+	writes: usize,
 	/// Bridges the gate's kio wakeups onto the caller's `Context`.
 	park: kio::Park,
 	/// Set by [`finish`](poll::SendStream::finish). A finished stream is what
@@ -236,10 +238,20 @@ impl SinkSend {
 			id: log.streams.fetch_add(1, Ordering::Relaxed),
 			log,
 			gate: None,
+			budget: None,
+			writes: 0,
 			park: kio::Park::default(),
 			finished: false,
 			unacked_fin: false,
 			group: None,
+		}
+	}
+
+	/// A send stream that accepts only the permitted number of writes.
+	pub fn stepped(log: Log, budget: kio::Consumer<usize>) -> Self {
+		Self {
+			budget: Some(budget),
+			..Self::new(log)
 		}
 	}
 
@@ -250,6 +262,8 @@ impl SinkSend {
 			id: log.streams.fetch_add(1, Ordering::Relaxed),
 			log,
 			gate: Some(gate),
+			budget: None,
+			writes: 0,
 			park: kio::Park::default(),
 			finished: false,
 			unacked_fin: false,
@@ -274,6 +288,20 @@ impl poll::SendStream for SinkSend {
 				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
 			}
 		}
+		if let Some(budget) = &self.budget {
+			let waiter = self.park.hold(cx);
+			match budget.poll(waiter, |limit| {
+				if self.writes < **limit {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			}) {
+				Poll::Ready(Ok(_)) => {}
+				_ => return Poll::Pending,
+			}
+		}
+		self.writes += 1;
 		let buf = if self.prefix > 0 {
 			let take = buf.len().min(self.prefix);
 			self.prefix -= take;

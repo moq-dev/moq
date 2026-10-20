@@ -456,6 +456,14 @@ pub struct moq_json_value {
 	/// The JSON document as UTF-8, NOT NULL terminated.
 	pub json: *const c_char,
 	pub json_len: usize,
+
+	/// The timestamp of the frame that carried the value in microseconds, or 0 when
+	/// `timestamp_present` is false. Rounded down to a whole microsecond, so a tick on a track
+	/// like 90 kHz may not survive a read and republish exactly.
+	pub timestamp_us: u64,
+
+	/// Whether the frame carries a timestamp. A value read from an untimed track does not.
+	pub timestamp_present: bool,
 }
 
 /// Information about a frame of media.
@@ -3574,7 +3582,9 @@ pub unsafe extern "C" fn moq_consume_video(
 		let index = index as usize;
 		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.video(catalog, index, max_delay, on_frame)
+		State::lock()
+			.consume
+			.media::<hang::catalog::VideoConfig>(catalog, index, max_delay, on_frame)
 	})
 }
 
@@ -3618,7 +3628,9 @@ pub unsafe extern "C" fn moq_consume_audio(
 		let index = index as usize;
 		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.audio(catalog, index, max_delay, on_frame)
+		State::lock()
+			.consume
+			.media::<hang::catalog::AudioConfig>(catalog, index, max_delay, on_frame)
 	})
 }
 
@@ -3863,8 +3875,8 @@ pub extern "C" fn moq_consume_datagrams_cancel(task: u32) -> i32 {
 
 /// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 ///
-/// `on_value` is called with a positive value ID for each new latest value; a consumer that
-/// falls behind collapses the backlog and only sees the newest. It is called exactly once more
+/// `on_value` is called with a positive value ID for each state, in order; a group superseded by
+/// a newer one before it is read is skipped, so a slow reader stays bounded. It is called exactly once more
 /// with a terminal `0` (track ended / closed) or a negative error, after which `user_data` is
 /// never touched again, so release it there. Read each value with [moq_consume_json_value] and
 /// release it with [moq_consume_json_value_free]. Pass the same compression the producer used.
@@ -3933,7 +3945,7 @@ pub unsafe extern "C" fn moq_consume_json_stream(
 
 /// Read a JSON value delivered via a [moq_consume_json_snapshot] or [moq_consume_json_stream] callback.
 ///
-/// Fills `dst.json` / `dst.json_len`; the pointer is valid until the value is released with
+/// Fills `dst.json` / `dst.json_len` and the frame timestamp; the pointer is valid until the value is released with
 /// [moq_consume_json_value_free].
 ///
 /// Returns a zero on success, or a negative code on failure.

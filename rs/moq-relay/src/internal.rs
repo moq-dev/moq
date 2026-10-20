@@ -55,7 +55,7 @@ type UringWorker = moq_uring::metrics::Metrics;
 type UringWorker = std::convert::Infallible;
 
 /// Configuration for the internal (ops) listener.
-#[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
+#[derive(usage_rs::Args, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]

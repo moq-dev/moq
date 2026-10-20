@@ -64,7 +64,7 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     it).
   - ✅ Make one open frame per group a compile-time guarantee. Drop public
     `Clone` from `group::Producer`; the model and sessions keep a
-    crate-private duplicate. The chunked writer is owned:
+    crate-private non-writing handle. The chunked writer is owned:
     `group::Producer::create_frame(self, info) -> Result<frame::Producer>`
     aborts the group with the error on failure (an oversized frame, a
     timestamp mismatch, or a closed group are bugs or protocol errors),
@@ -72,14 +72,12 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     back, and `frame.group()` gives read access (demand, info, closed)
     while the frame is open. `write_frame(&mut self)` stays for one-shot
     frames. The borrowing `create_frame` and `ProducerOwned` go, with the
-    stale "caller's promise" doc; `FrameOpen` stays only as a backstop for
-    crate-internal duplicates. `track::Producer` keeps `Clone`: several
+    stale "caller's promise" doc. `track::Producer` keeps `Clone`: several
     writers creating groups is legitimate, and `claim_sequence` already
     refuses a duplicate sequence.
-    - Dropping `Clone` and the crate-private non-writing handle moved to
-      [One group writer](/quest/m1/public-model/group-writer.md), which
-      names the handle `group::Handle` and deletes `FrameOpen` (decided
-      2026-10-18, #5892), so the backstop above goes. This item keeps the
+    - #6020 dropped `Clone`, added the crate-private non-writing
+      `group::Handle`, and deleted `FrameOpen` (decided 2026-10-18, #5892),
+      so the backstop above goes. This item keeps the
       public owned chunked writer. Its callers that hold a
       `&mut group::Producer` (hang's `Frame::write_to`, moq-mux's LOC and
       fMP4 encoders) cannot call a consuming `create_frame(self)`; weigh
@@ -206,10 +204,6 @@ JS items (`js/net/src/`): mirror each Rust decision under the same name.
 Tests: each public call gets a mock-time test in its language, and the
 built-in subscribers move onto the public calls, so their existing suites
 cover the behavior.
-
-## Required
-
-- [One group writer](/quest/m1/public-model/group-writer.md) - the non-Clone writer the owned chunked writer builds on
 
 ## Closes
 

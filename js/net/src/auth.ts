@@ -123,12 +123,15 @@ export interface Handle {
 
 /** The {@link Handle} of a session without AUTH: no grant, and no tokens. */
 export class None implements Handle {
+	/** Always undefined: no token is ever granted. */
 	readonly grant: Getter<Grant | undefined> = new Signal<Grant | undefined>(undefined);
 
+	/** Always rejects with {@link Unsupported}. */
 	add(_token: string | Uint8Array): Promise<Auth> {
 		return Promise.reject(new Unsupported());
 	}
 
+	/** A stream that never yields a request. */
 	requests(): Requests {
 		return { next: async () => undefined, close: () => {} };
 	}

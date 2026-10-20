@@ -102,8 +102,8 @@ when a track no longer exists"):
   count anywhere, decided by the maintainer on 2026-10-19 ("We don't need the
   count at all"): a count sent first commits to that many adds, which a track
   removed before a slow reader reaches its add would break. The event itself
-  is the whole wire cost. The announce stream gets the same event in lite-07
-  ([Announce SYNCED](/quest/m1/announce-synced.md)), identical in shape.
+  is the whole wire cost. The announce stream already carries the same
+  event in lite-07, identical in shape.
   Synced means synced with this hop, decided by the maintainer on
   2026-10-19: a relay answers at once with what it currently holds and never
   waits on its upstream, since relays never block on peers. A cold relay may
@@ -207,5 +207,4 @@ answer it. Wire: a new lite-07-wip stream.
 ## Related
 
 - [SUBSCRIBE_TRACKS](/quest/m1/archive/subscribe-tracks.md) - moq-transport answers and learns listings through this hook
-- [SUBSCRIBE_OK names where delivery starts](/quest/m1/subscribe-ok-start.md) - a warm relay answers like a cold one, found while building SUBSCRIBE_ALL
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the subscription shape each per-track SUBSCRIBE uses

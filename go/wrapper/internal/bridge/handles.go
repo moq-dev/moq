@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"fmt"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
@@ -43,8 +44,14 @@ var Frame func(any) (ffi.MoqFrame, error)
 // Subscription converts a *moq.Subscription to the generated record.
 var Subscription func(any) (*ffi.MoqSubscription, error)
 
-// Duration converts a duration into nonnegative microseconds.
-var Duration func(time.Duration, string) (uint64, error)
+// Duration converts d to microseconds, refusing a negative duration rather
+// than letting it wrap when cast to uint64.
+func Duration(d time.Duration, name string) (uint64, error) {
+	if d < 0 {
+		return 0, fmt.Errorf("negative %s: %v", name, d)
+	}
+	return uint64(d.Microseconds()), nil
+}
 
 // OptionalDuration converts a caller's time to microseconds, preserving absence.
 func OptionalDuration(value *time.Duration, name string) (*uint64, error) {

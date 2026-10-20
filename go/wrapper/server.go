@@ -234,21 +234,7 @@ func (s *Server) Accept(ctx context.Context) (*Request, error) {
 // All ranges over incoming requests until the server stops or the loop
 // breaks. Each request must be answered with Accept or Reject.
 func (s *Server) All(ctx context.Context) iter.Seq2[*Request, error] {
-	return func(yield func(*Request, error) bool) {
-		for {
-			req, err := s.Accept(ctx)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if req == nil {
-				return
-			}
-			if !yield(req, nil) {
-				return
-			}
-		}
-	}
+	return bridge.Seq(ctx, s.Accept)
 }
 
 // Serve accepts every session in a loop, holding each one alive in its own
@@ -256,7 +242,7 @@ func (s *Server) All(ctx context.Context) iter.Seq2[*Request, error] {
 // returns when Accept stops (nil) or fails, after the in-flight sessions wind
 // down.
 //
-// To inspect or reject requests, range over Requests instead:
+// To inspect or reject requests, range over All instead:
 //
 //	for req, err := range server.All(ctx) {
 //	    if err != nil {

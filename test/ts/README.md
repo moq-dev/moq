@@ -521,7 +521,7 @@ as well. `--source` also requires the source's SI tables and PAT-declared PMTs, 
 actual grader. Identical streams, different PES interleave, late acquisition with
 bootstrap tables, and PCR wrap must pass. Persistent phase shifts, accumulating
 drift, disappearing/absent/sparse tables, and insufficient shared media must fail.
-Controls run in PR CI; the real pair runs nightly and on manual TS validation.
+Controls run nightly and on release PRs; the real pair runs nightly and on manual TS validation.
 
 ## Open GOP (`open-gop.py`)
 
@@ -568,6 +568,12 @@ to spend more than it does on PES headers, part-filled audio packets, and PCRs
 outside media packets (moq-dev/moq#5362). `--full` exports at 900 ms, above its
 source's lead of about 0.65 s, which absorbs a small excess for a while, so it also
 runs `overhead.py` on the source and capture before the compliance report.
+
+ffmpeg pads its multiplex with nulls, so `drop_nulls.py` removes them before the PCRs
+are restamped at the rate the rest fill. Restamping alone would move each packet by the
+nulls' uneven spread before it, tens of milliseconds, and the DVB AC-3 the export carries
+at its source placement would arrive after it decodes. So every PID but the video keeps
+its time in the padded clip, and the video, sent most of a second ahead, absorbs the rest.
 
 ```bash
 ./overhead.py source.ts capture.ts
@@ -860,8 +866,9 @@ pending acquisition. `rs/moq-net/tests/integration/catalog_acquisition.rs` cover
 outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
 
 [`.github/workflows/ts.yml`](../../.github/workflows/ts.yml) is independent of
-browser interop. PRs touching a workspace crate `run.sh` builds (kept in sync by
-`sh/gh/ts-paths.py`), the harness, or the toolchain run
+browser interop. It runs nightly on `main`, and release PRs touching a workspace
+crate `run.sh` builds (kept in sync by `sh/gh/ts-paths.py`), the harness, or the
+toolchain run it too:
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
 open-GOP, KLV (strict), passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
