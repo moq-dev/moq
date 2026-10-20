@@ -77,19 +77,29 @@ test("main PRs skip both jobs while the queue and release PRs run them", () => {
 test("self-hosted queue jobs use local caches without R2 credentials", async () => {
 	const action = Bun.YAML.parse(await Bun.file(".github/actions/rust-cache/action.yml").text());
 	const setup = action.runs.steps.find((step: Step) => step.uses?.startsWith("jdx/mr-boxington-action@"));
-	const expression = setup.with.backend.replaceAll("inputs.access-key-id", 'inputs["access-key-id"]').replaceAll("inputs.secret-access-key", 'inputs["secret-access-key"]').replace(/^\$\{\{\s*|\s*\}\}$/g, "");
+	const expression = setup.with.backend
+		.replaceAll("inputs.access-key-id", 'inputs["access-key-id"]')
+		.replaceAll("inputs.secret-access-key", 'inputs["secret-access-key"]')
+		.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
 	const backend = new Function("runner", "inputs", `return (${expression});`);
 	const guard = new Function("runner", "github", `return (${action.runs.steps[0].if});`);
 	for (const event_name of ["merge_group", "pull_request", "pull_request_target", "push", "workflow_dispatch"]) {
 		expect(guard({ environment: "self-hosted" }, { event_name })).toBe(event_name !== "merge_group");
 		expect(guard({ environment: "github-hosted" }, { event_name })).toBe(false);
 	}
-	for (const credentials of [{ "access-key-id": "key", "secret-access-key": "secret" }, { "access-key-id": "", "secret-access-key": "" }]) {
+	for (const credentials of [
+		{ "access-key-id": "key", "secret-access-key": "secret" },
+		{ "access-key-id": "", "secret-access-key": "" },
+	]) {
 		expect(backend({ environment: "self-hosted" }, credentials)).toBe("local");
-		expect(backend({ environment: "github-hosted" }, credentials)).toBe(credentials["access-key-id"] ? "remote" : "local");
+		expect(backend({ environment: "github-hosted" }, credentials)).toBe(
+			credentials["access-key-id"] ? "remote" : "local",
+		);
 	}
 	for (const name of ["Cache credentials", "Check the cache"]) {
-		expect(action.runs.steps.find((step: Step) => step.name === name).if).toStartWith("runner.environment != 'self-hosted'");
+		expect(action.runs.steps.find((step: Step) => step.name === name).if).toStartWith(
+			"runner.environment != 'self-hosted'",
+		);
 	}
 	expect(action.runs.steps[0].run).toContain("exit 1");
 });
