@@ -46,9 +46,11 @@ impl AckFrequencyState {
         // Use the peer's max_ack_delay if no custom max_ack_delay was provided in the config. A
         // configured one is capped below the protocol limit, which the peer's own `max_ack_delay`
         // and `min_ack_delay` transport parameters were already validated against.
-        let candidate = config.max_ack_delay.map_or(self.peer_max_ack_delay, |delay| {
-            Ord::min(delay, MAX_ACK_DELAY_LIMIT - Duration::from_micros(1))
-        });
+        let candidate = config
+            .max_ack_delay
+            .map_or(self.peer_max_ack_delay, |delay| {
+                Ord::min(delay, MAX_ACK_DELAY_LIMIT - Duration::from_micros(1))
+            });
 
         // Must be no smaller than the `min_ack_delay` advertised by the peer
         Ord::max(
