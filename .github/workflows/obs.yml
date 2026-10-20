@@ -106,12 +106,14 @@ jobs:
 
       - uses: ./.github/actions/nix
 
-      # cache.yml warms the default-branch store on `main`. Pull requests restore
-      # it; the action refuses to publish from a pull request. It holds
-      # dev-profile artifacts, which is why `just obs ci` builds moq-ffi in debug
-      # rather than the preset's release.
+      # Read only: this runs for `release` alone, and Nightly's `obs ci` row
+      # writes on `main`. The cache holds dev-profile artifacts, which is why
+      # `just obs ci` builds moq-ffi in debug rather than the preset's release.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
       # The same recipe a developer runs on Linux. Warnings are errors here, via
       # the platform's CI preset.

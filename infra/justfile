@@ -3,6 +3,7 @@ set fallback
 mod apt
 mod rpm
 mod moq-sh
+mod mbx
 mod nix
 
 # Deploy all infra workers.

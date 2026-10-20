@@ -43,7 +43,8 @@ pub enum Start {
 	/// Decode every cached group.
 	#[default]
 	Oldest,
-	/// Start at the newest cached group, including earlier groups for decoder warmup.
+	/// Start at the newest group, including earlier groups for decoder warmup. Opening
+	/// waits for the track's live edge, or its end.
 	Latest,
 }
 
@@ -193,10 +194,12 @@ impl Consumer {
 			.await?;
 		// Latest skips cached history unless decoder warmup needs it. Move the
 		// local cursor, not Subscription::ranges: the latter is aggregated
-		// across subscribers and can ask the publisher to rewind for everyone.
+		// across subscribers and can ask the publisher to rewind for everyone. The live edge
+		// is known only once the feed is live, so wait for it rather than read the backlog
+		// of a warm copy still waiting on its source; the wait ends with the track.
 		if options.start == Start::Latest
 			&& warmup.is_zero()
-			&& let std::task::Poll::Ready(Some(live_edge)) = subscriber.poll_largest(&moq_net::kio::Waiter::noop())
+			&& let Some(live_edge) = subscriber.largest().await
 		{
 			subscriber.set_groups(live_edge.group..);
 		}
@@ -757,6 +760,119 @@ mod tests {
 			frames += frame.data.len() / size_of::<f32>();
 		}
 		(stamps, frames)
+	}
+
+	/// An origin at `hop`, its driver spawned.
+	fn origin(hop: u64) -> moq_net::origin::Producer {
+		let config = moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap());
+		let (producer, driver) = moq_net::origin::Producer::new(config);
+		tokio::spawn(moq_net::time::run(driver));
+		producer
+	}
+
+	/// A lite-07 session over memory carrying `from`'s broadcasts into `to`, open while held.
+	async fn link(
+		from: &moq_net::origin::Producer,
+		to: &moq_net::origin::Producer,
+	) -> (moq_net::Session, moq_net::Session) {
+		use moq_net::transport::memory;
+
+		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+		let mut config = memory::Config::default();
+		config.protocol = Some(version.alpn().to_string());
+		let (client_transport, server_transport) = memory::pair(config);
+		let client = moq_net::Client::new()
+			.with_versions(version.into())
+			.with_publisher(from.consume());
+		let server = moq_net::Server::new()
+			.with_versions(version.into())
+			.with_subscriber(to.clone());
+		tokio::join!(
+			async {
+				let (session, driver) = client
+					.connect_lite(moq_net::time::now(), client_transport)
+					.await
+					.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			},
+			async {
+				let (session, driver) = server
+					.accept_lite(moq_net::time::now(), server_transport)
+					.await
+					.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			}
+		)
+	}
+
+	/// A relay copy whose upstream subscription went idle keeps the groups it cached. A
+	/// latest start waits for the copy to go live and joins at its live edge, rather than
+	/// replaying that backlog.
+	#[tokio::test(start_paused = true)]
+	async fn latest_skips_a_warm_copys_backlog() {
+		let publisher = origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let mut demand = track.demand();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let mut write = |packet: u64| {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(packet * 20_000).unwrap(),
+					duration: None,
+					payload: vec![0; 960 * size_of::<f32>()].into(),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		};
+		for packet in 0..4 {
+			write(packet);
+		}
+
+		let relay = origin(2);
+		let _link = link(&publisher, &relay).await;
+		let consumer = relay.consume();
+		consumer.routed("bcast").await.unwrap();
+		let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+
+		// A first reader warms the relay's copy with every group.
+		{
+			let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+			let mut warm = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
+			let mut groups = 0;
+			while groups < 4 {
+				warm.recv_group().await.unwrap().unwrap();
+				groups += 1;
+			}
+		}
+		// The relay cancels the unread upstream subscription; its copy keeps the groups.
+		while demand.wanted_changed().await.unwrap().is_some() {}
+		write(4);
+
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		let mut consumer = Consumer::new(
+			&remote,
+			&catalog,
+			"audio",
+			Options {
+				start: Start::Latest,
+				max_delay: Duration::from_secs(10),
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		let frame = next_frame(&mut consumer).await.unwrap().unwrap();
+		assert_eq!(frame.timestamp.as_micros(), 80_000, "the backlog was replayed");
 	}
 
 	#[tokio::test(start_paused = true)]

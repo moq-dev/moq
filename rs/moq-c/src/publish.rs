@@ -5,21 +5,12 @@ use moq_mux::import;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
+use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, State, moq_demand};
-
-/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
-///
-/// `close` is an `Option` so `*_close` can drop just the sender without
-/// removing the entry. The task delivers one final terminal callback and then
-/// removes itself, so `user_data` stays valid until that callback fires.
-struct TaskEntry {
-	close: Option<oneshot::Sender<()>>,
-	callback: OnStatus,
-}
 
 /// A demand watcher's task, plus a handle to peek the wanted group from its callback.
 struct DemandEntry {
-	task: TaskEntry,
+	task: Task,
 	demand: moq_net::track::Demand,
 }
 
@@ -108,7 +99,7 @@ pub struct Publish {
 
 	/// Track and group request handlers. Close drops the handler, so pending requests
 	/// are rejected; the task delivers a final callback, then removes itself.
-	dynamic: NonZeroSlab<Option<TaskEntry>>,
+	dynamic: NonZeroSlab<Task>,
 
 	/// Track requests delivered to a handler, freed on accept, abort, or free.
 	track_request: NonZeroSlab<TrackRequest>,
@@ -484,17 +475,14 @@ impl Publish {
 	/// closed, negative when the track aborts. Seeding with the current state is what makes a late
 	/// registration safe: a track that went unused before the watcher existed still reports it.
 	pub fn demand(&mut self, demand: moq_net::track::Demand, on_demand: OnStatus) -> Result<Id, Error> {
-		let channel = oneshot::channel();
+		let (task, close) = Task::new(on_demand);
 		let id = self.demand.insert(DemandEntry {
-			task: TaskEntry {
-				close: Some(channel.0),
-				callback: on_demand,
-			},
+			task,
 			demand: demand.clone(),
 		})?;
 
 		tokio::spawn(async move {
-			let res = crate::ffi::run(Self::run_demand(on_demand, demand, channel.1)).await;
+			let res = crate::ffi::run(Self::run_demand(on_demand, demand, close)).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -549,10 +537,7 @@ impl Publish {
 			.get_mut(watcher)
 			.ok_or(Error::NotFound)?
 			.task
-			.close
-			.take()
-			.ok_or(Error::NotFound)?;
-		Ok(())
+			.close(Error::NotFound)
 	}
 
 	/// Serve subscriber requests for tracks the broadcast has not declared, delivering each as
@@ -592,24 +577,11 @@ impl Publish {
 		callback: OnStatus,
 		driver: crate::ffi::Background,
 	) -> Result<Id, Error> {
-		let channel = oneshot::channel();
-		let id = self.dynamic.insert(Some(TaskEntry {
-			close: Some(channel.0),
+		self.dynamic.spawn(
 			callback,
-		}))?;
-
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_dynamic(callback, dynamic, channel.1))).await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().publish.dynamic.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+			|state| &mut state.publish.dynamic,
+			|close| async move { driver.watch(Self::run_dynamic(callback, dynamic, close)).await },
+		)
 	}
 
 	async fn run_dynamic(
@@ -652,14 +624,7 @@ impl Publish {
 	/// Stop a track or group request handler. Pending requests are rejected, and the task
 	/// still delivers its terminal callback.
 	pub fn dynamic_close(&mut self, dynamic: Id) -> Result<(), Error> {
-		self.dynamic
-			.get_mut(dynamic)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::NotFound)?
-			.close
-			.take()
-			.ok_or(Error::NotFound)?;
-		Ok(())
+		self.dynamic.close(dynamic, Error::NotFound)
 	}
 
 	/// The name of a requested track, borrowed from the request's storage.

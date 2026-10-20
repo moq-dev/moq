@@ -71,9 +71,11 @@ jobs:
   wasm:
     name: WASM
     if: github.event.action != 'closed'
-    # ARM64 like check.yml, the only architecture cache.yml warms a Rust store
-    # for; the harness builds the relay natively, which that store covers.
+    # ARM64 like check.yml; the harness builds the relay natively, which the
+    # merge queue's Check and Test publish.
     runs-on: ubuntu-24.04-arm
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 60
 
     steps:
@@ -84,10 +86,12 @@ jobs:
 
       - uses: ./.github/actions/nix
 
-      # cache.yml warms the default-branch store on `main`. Pull requests restore
-      # it; the action refuses to publish from a pull request.
+      # Nightly's call writes on `main`; release pull requests read.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
       # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
       # runtime libs (`--with-deps` needs the host package manager); run.sh's own

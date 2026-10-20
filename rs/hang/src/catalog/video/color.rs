@@ -62,7 +62,9 @@ pub struct Mastering {
 /// A CIE 1931 xy chromaticity coordinate.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct Chromaticity {
+	/// The x coordinate.
 	pub x: f64,
+	/// The y coordinate.
 	pub y: f64,
 }
 
