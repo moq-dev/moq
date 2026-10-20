@@ -999,31 +999,42 @@ impl Consumer {
 	}
 
 	/// Join the demand of the track serving `name`, requesting it from a [`Dynamic`]
-	/// when nothing serves it yet. Errors as [`Self::track`] does.
-	pub(super) fn resolve_track(&self, name: &str) -> Result<kio::Consumer<track::TrackState>, Error> {
-		let mut state = self.state.lock();
+	/// when nothing serves it yet. Registers the subscription before exposing demand.
+	/// Errors as [`Self::track`] does.
+	pub(super) fn resolve_track(
+		&self,
+		name: &str,
+		subscription: Option<&track::Subscription>,
+	) -> Result<(kio::Consumer<track::TrackState>, Option<track::Preferences>), Error> {
+		let mut state = loop {
+			let mut state = self.state.lock();
 
-		if state.closing {
-			return Err(Error::Unroutable);
-		}
-
-		// Reuse a live producer if one is already publishing the track. `get` drops a
-		// closed entry and returns `None`, so we fall through to a fresh request.
-		if let Some(weak) = state.tracks.get(name) {
-			match weak.try_consume() {
-				Some(consumer) => return Ok(consumer),
-				// It closed between the liveness probe and the count bump (an idle
-				// teardown committing under us). Reclaim it and request the track
-				// again, rather than handing back a consumer of a dead track.
-				None => {
-					state.tracks.remove(name);
-				}
+			if state.closing {
+				return Err(Error::Unroutable);
 			}
-		}
+
+			// Reuse a live producer if one is already publishing the track. `get` drops a
+			// closed entry and returns `None`, so we fall through to a fresh request.
+			let Some(weak) = state.tracks.get(name) else {
+				break state;
+			};
+			// Join outside the lock: the subscription and the first consumer wake the
+			// serving session, which may re-enter this broadcast. The track's own lock
+			// still orders the join against its idle teardown.
+			drop(state);
+			if let Some(resolved) = weak.try_consume(subscription) {
+				return Ok(resolved);
+			}
+			// It closed between the liveness probe and the count bump (an idle teardown
+			// committing under us). Look again: `get` reclaims it and the track is
+			// requested again, rather than handing back a consumer of a dead track.
+		};
 
 		if let Some(pending) = state.requests.join(name) {
-			// Coalesce onto a queued request for the same name.
-			return Ok(pending.join());
+			// Coalesce onto a queued request for the same name. Joining under the lock
+			// wakes no subscription observer: only a handler that popped the request
+			// can watch its subscriptions, and popping moves it to `tracks`.
+			return Ok(pending.join(subscription));
 		}
 
 		// Allocate the name once and share the same Arc across the request, the
@@ -1031,7 +1042,7 @@ impl Consumer {
 		// cache pool through its `Arc<Info>`, same as a producer-created track.
 		let name: Arc<str> = name.into();
 		let request = track::Request::new(self.info.clone(), name.clone()).with_sequence(state.sequence(&name));
-		let consumer = request.join();
+		let resolved = request.join(subscription);
 
 		// With no handler alive to serve it, the request is dropped: `NotFound` beats
 		// handing back a consumer that would only resolve `Dropped`.
@@ -1039,7 +1050,7 @@ impl Consumer {
 			return Err(Error::NotFound);
 		}
 
-		Ok(consumer)
+		Ok(resolved)
 	}
 
 	/// Read the track serving `name` now, without joining its demand or requesting it.
@@ -1247,6 +1258,105 @@ mod test {
 	use std::time::Duration;
 
 	#[test]
+	fn a_subscription_is_registered_before_its_request_is_visible() {
+		struct Serve {
+			dynamic: std::sync::Mutex<Dynamic>,
+			request: std::sync::Mutex<Option<track::Request>>,
+			subscription: std::sync::Mutex<Option<Option<track::Subscription>>>,
+		}
+		impl std::task::Wake for Serve {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				let Poll::Ready(Ok(request)) = self.dynamic.lock().unwrap().poll_requested_track(&kio::Waiter::noop())
+				else {
+					return;
+				};
+				*self.subscription.lock().unwrap() = Some(request.subscription());
+				*self.request.lock().unwrap() = Some(request);
+			}
+		}
+
+		let producer = Info::new().produce();
+		let serve = Arc::new(Serve {
+			dynamic: std::sync::Mutex::new(producer.dynamic()),
+			request: Default::default(),
+			subscription: Default::default(),
+		});
+		let consumer = producer.consume().track("catalog").unwrap();
+		let waiter = kio::Waiter::new(std::task::Waker::from(serve.clone()));
+		assert!(serve.dynamic.lock().unwrap().poll_requested_track(&waiter).is_pending());
+		let expected = track::Subscription::default().with_priority(3);
+		let _pending = consumer.subscribe(expected.clone());
+		assert_eq!(*serve.subscription.lock().unwrap(), Some(Some(expected)));
+	}
+
+	#[test]
+	fn a_subscription_is_registered_before_its_demand_is_visible() {
+		struct Inspect {
+			track: track::Producer,
+			seen: std::sync::Mutex<Option<Option<track::Subscription>>>,
+		}
+		impl std::task::Wake for Inspect {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				*self.seen.lock().unwrap() = Some(self.track.subscription());
+			}
+		}
+
+		for lookup in [false, true] {
+			let producer = Info::new().produce();
+			let inspect = Arc::new(Inspect {
+				track: producer.create_track("catalog", None).unwrap(),
+				seen: Default::default(),
+			});
+			let waiter = kio::Waiter::new(std::task::Waker::from(inspect.clone()));
+			assert_eq!(inspect.track.demand().poll_state(&waiter), track::DemandState::Idle);
+			let consumer = if lookup {
+				producer.consume().track("catalog").unwrap()
+			} else {
+				inspect.track.consume()
+			};
+			let expected = track::Subscription::default().with_priority(3);
+			let _pending = consumer.subscribe(expected.clone());
+			assert_eq!(*inspect.seen.lock().unwrap(), Some(Some(expected)), "lookup: {lookup}");
+		}
+	}
+
+	#[test]
+	fn a_subscription_wakes_its_observers_outside_the_broadcast_lock() {
+		struct Reenter {
+			broadcast: Consumer,
+			woken: std::sync::atomic::AtomicBool,
+		}
+		impl std::task::Wake for Reenter {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				// Deadlocks if the subscribe that woke us still holds the broadcast lock.
+				let _ = self.broadcast.track("other");
+				self.woken.store(true, std::sync::atomic::Ordering::Relaxed);
+			}
+		}
+
+		let producer = Info::new().produce();
+		let mut track = producer.create_track("catalog", None).unwrap();
+		let reenter = Arc::new(Reenter {
+			broadcast: producer.consume(),
+			woken: Default::default(),
+		});
+		let waiter = kio::Waiter::new(std::task::Waker::from(reenter.clone()));
+		assert!(track.poll_subscription_changed(&waiter).is_pending());
+		let consumer = producer.consume().track("catalog").unwrap();
+		let _pending = consumer.subscribe(track::Subscription::default().with_priority(3));
+		assert!(reenter.woken.load(std::sync::atomic::Ordering::Relaxed));
+	}
+
+	#[test]
 	fn unique_names_are_never_reused() {
 		let producer = Info::new().produce();
 		let name = producer.unique_name(".opus");
@@ -1278,9 +1388,30 @@ mod test {
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
 		track.append_group().unwrap();
 		let handle = consumer.track("a").unwrap();
-		assert_eq!(handle.latest(), Some(0));
+		assert_eq!(handle.latest_sequence(), Some(0));
 		drop(track);
-		assert_eq!(handle.latest(), None);
+		assert_eq!(handle.latest_sequence(), None);
+	}
+
+	/// A handle's largest reads the instance its open broadcast serves now, without asking
+	/// for it, and ends once nothing is served under the name.
+	#[test]
+	fn a_handle_follows_the_largest_its_broadcast_serves() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.create_track("a", crate::track::Info::default()).unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(None, &b"a"[..]).unwrap();
+		let mut handle = consumer.track("a").unwrap();
+		let waiter = kio::Waiter::noop();
+		assert_eq!(
+			handle.poll_largest(&waiter),
+			std::task::Poll::Ready(Some(crate::track::Position { group: 0, frame: 0 }))
+		);
+		assert!(handle.poll_largest(&waiter).is_pending(), "nothing newer yet");
+		drop(group);
+		drop(track);
+		assert_eq!(handle.poll_largest(&waiter), std::task::Poll::Ready(None));
 	}
 
 	/// Once the broadcast ends, a handle keeps reading the track it saw when it was made.
@@ -1293,7 +1424,7 @@ mod test {
 		let handle = consumer.track("a").unwrap();
 		producer.close();
 		drop(track);
-		assert_eq!(handle.latest(), Some(0));
+		assert_eq!(handle.latest_sequence(), Some(0));
 	}
 
 	#[test]
@@ -1692,24 +1823,18 @@ mod test {
 		let consumer1 = c1_fut.await.unwrap();
 
 		// The producer should NOT be unused yet because there's a consumer.
-		assert!(
-			producer1.demand().unused().now_or_never().is_none(),
-			"track producer should be used"
-		);
+		assert!(producer1.demand().wanted().is_some(), "track producer should be used");
 
 		// A second subscriber reuses the live producer (fast path / dedup).
 		let consumer2 = bc.track("unknown_track").unwrap().subscribe(None).await.unwrap();
 		consumer2.assert_is_clone(&consumer1);
 
 		drop(consumer1);
-		assert!(
-			producer1.demand().unused().now_or_never().is_none(),
-			"track producer should be used"
-		);
+		assert!(producer1.demand().wanted().is_some(), "track producer should be used");
 
 		drop(consumer2);
 		assert!(
-			producer1.demand().unused().now_or_never().is_some(),
+			producer1.demand().wanted().is_none(),
 			"track producer should be unused after all consumers are dropped"
 		);
 
@@ -1730,7 +1855,7 @@ mod test {
 		let consumer4 = c4_fut.await.unwrap();
 		drop(consumer4);
 		assert!(
-			producer2.demand().unused().now_or_never().is_some(),
+			producer2.demand().wanted().is_none(),
 			"new track producer should be unused after its consumer is dropped"
 		);
 	}
@@ -2019,7 +2144,7 @@ mod test {
 		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
 
 		// The unused wake a teardown acts on.
-		assert!(track.demand().poll_unused(&kio::Waiter::noop()).is_ready());
+		assert!(track.demand().wanted().is_none());
 
 		// Demand returns in the gap before it commits.
 		let viewer = consumer.track("video").unwrap().subscribe(None);

@@ -60,7 +60,7 @@ pub async fn import(target: ImportTarget, playlist: String, epoch: moq_net::Epoc
 	let catalog = moq_mux::catalog::Producer::new(&mut producer, config)?;
 	// Announced once the catalog first goes out, which waits for every rendition's init: a
 	// relay queries a broadcast's tracks the moment it is announced, and keeps the refusals of a
-	// standby that cannot serve yet the tracks its epoch's live partner is serving.
+	// publisher that cannot serve its declared tracks yet.
 	let mut listed = catalog.consume()?;
 
 	let playlist = playlist_url(&playlist)?;

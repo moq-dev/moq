@@ -1419,6 +1419,7 @@ mod tests {
 
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let update = ietf::SubscribeUpdate {
+				max_age: None,
 				new_group: None,
 				request_id: update_id,
 				subscription_request_id: Some(target_id),
@@ -1597,7 +1598,7 @@ mod tests {
 		ietf::PublishNamespace {
 			request_id,
 			track_namespace: crate::Path::new(namespace),
-			cluster: None,
+			params: Default::default(),
 			authorization_token: None,
 		}
 	}
@@ -1956,6 +1957,7 @@ mod tests {
 	async fn an_update_past_the_window_closes_the_session() {
 		const VERSION: Version = Version::Draft14;
 		let update = ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(4),
 			subscription_request_id: Some(RequestId(0)),

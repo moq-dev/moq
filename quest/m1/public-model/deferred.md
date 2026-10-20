@@ -30,15 +30,15 @@ the prerequisites will have deleted or renamed most of these.
   caller, bring the shape back to the maintainer rather than publishing
   peeks.
 - JS `Group.Producer.mirror` (lite subscriber fetch coalescing): remove the
-  need through Model ranges and JS track handover, which owns the JS fan-out
-  copy.
+  need through Model ranges. JS track handover landed without a fan-out copy
+  of its own: it reads each route's copy directly.
 - JS track info and fetch answering (`wire.ts` `overrideBroadcastWire`):
   answered through the public `Track.Request` and `Track.Dynamic` range
   requests that Model ranges defines, completing the answering quest's
   `Broadcast.requested` decision.
-- JS `hooks.endTrack` (the JS `finish_at_pending`): public under the
-  received-end shape the ingest quest settles in Rust, once JS pending tail
-  mirrors the hold.
+- JS `hooks.endTrack` and `hooks.startTrack` (the JS `finish_at_pending` and
+  `start_at`): public under the received-end shape the ingest quest settles in
+  Rust.
 
 Tests: as in the other children, mock time in each language, with the
 built-in sessions moved onto the public calls.
@@ -46,9 +46,6 @@ built-in sessions moved onto the public calls.
 ## Required
 
 - [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - replaces per-group fetch requests, the peeks, and `fork`
-- [Live largest location](/quest/m1/largest.md) - the public largest-location stream that replaces `peek_latest` and `is_live` on the IETF Largest Object path
-- [JS track handover](/quest/m1/js-group-handover.md) - owns the JS fan-out copy behind `Group.Producer.mirror`
-- [JS pending tail](/quest/m1/js-pending-tail.md) - the JS received-end hold behind `hooks.endTrack`
 - [Public ingest](/quest/m1/public-model/ingest.md) - settles the received-end shape JS mirrors
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - the JS `Track.Request`/`Track.Dynamic` range requests that answer track info and fetches
 - [Public routes and answering](/quest/m1/public-model/answer.md) - the public `Broadcast.requested` handout this completes

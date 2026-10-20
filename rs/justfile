@@ -89,7 +89,7 @@ tokio-features *args:
 
 # Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
 # skips; platform.yml runs it on a Windows runner, scoped like `check-changed`
-# so the merge queue compiles only the affected crates. Default
+# so a release PR compiles only the affected crates. Default
 # features, since jemalloc doesn't build on MSVC.
 
 # Compile what the branch changed since BASE on a Windows host, or everything with `--all`.
@@ -182,7 +182,7 @@ x11-bench-ci:
 [positional-arguments]
 android *args:
     cargo ndk -t arm64-v8a --platform 26 check --locked -p moq-video --all-targets "$@"
-    cargo ndk -t arm64-v8a --platform 26 -o target/android-jni build --locked -p moq-ffi "$@"
+    cargo ndk -t arm64-v8a --platform 26 -o target/android-jni build --locked -p moq-ffi --features openh264 "$@"
     nm -D --undefined-only target/android-jni/arm64-v8a/libmoq_ffi.so | grep -q __android_log_
 
 # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a wasm32
@@ -231,6 +231,7 @@ c-tests:
 # Compile the workspace at the feature extremes.
 features:
     just rs net-features
+    just rs quic-features
     just rs tokio-features --all
     just rs media-features --all
     cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
@@ -250,6 +251,17 @@ features:
 # Compile and test the explicit-time model without async helpers or sessions.
 net-features:
     bash sh/rs/net-features.sh
+
+# Prove moq-quic leaves moq-clock's dev-only runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
+quic-features:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    graph=$(cargo tree --locked -p moq-quic -e normal --prefix none)
+    if grep -E '^(tokio|web-async) ' <<<"$graph"; then
+        echo "moq-quic must not depend on a native runtime" >&2
+        exit 1
+    fi
+    cargo clippy --locked -p moq-quic --all-targets --no-default-features -- -D warnings
 
 # Compile media boundaries (--all isolates every mode) and prove expensive
 # native/render dependencies are absent when their features are excluded.
@@ -281,7 +293,7 @@ gpu:
 # Test moq-cli's `play` feature, which default features leave out.
 [positional-arguments]
 play *args:
-    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/rs/nextest.sh cargo nextest run --locked -p moq-cli --features play --bins "$@"
+    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/rs/nextest.sh cargo nextest run --locked -p moq-cli --features play,openh264 --bins "$@"
 
 # Compile and run the `/// ```` examples, which nextest skips.
 [positional-arguments]
@@ -316,6 +328,10 @@ quic-sim:
 send-depth:
     bash sh/rs/send-depth.sh
 
+# Exercise small connection and stream receive windows over real QUIC sockets.
+quic-stress:
+    just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
+
 # Needs nightly and cargo-fuzz; CI replays the corpus on stable through each
 # crate's own tests instead. See rs/moq-net/fuzz/README.md and rs/moq-quic/fuzz/README.md.
 
@@ -324,21 +340,12 @@ send-depth:
 fuzz target *args:
     sh/rs/fuzz.sh "$@"
 
-# No threshold: the report is for finding untested paths, not gating. mbx is
-# off because its cache remaps source paths to `${workspace}`, which llvm-cov
-# cannot read back. The LLVM tools come from the toolchain's `llvm-tools`.
-# `--no-report` skips cargo-llvm-cov's own cleanup, so clean first or stale
-# profiles from an earlier run merge into the report.
+# No threshold: the report is for finding untested paths, not gating.
+# The LLVM tools come from the toolchain's `llvm-tools`.
 
-# Report a crate's test coverage: a per-file table, plus lcov and HTML under target/coverage/<crate>.
-[env("MBX_DISABLE", "1")]
-coverage crate:
-    cargo llvm-cov clean --workspace
-    bash sh/rs/nextest.sh cargo llvm-cov nextest --locked -p {{ crate }} --no-report
-    cargo llvm-cov report -p {{ crate }}
-    mkdir -p target/coverage/{{ crate }}
-    cargo llvm-cov report -p {{ crate }} --lcov --output-path target/coverage/{{ crate }}/lcov.info
-    cargo llvm-cov report -p {{ crate }} --html --output-dir target/coverage/{{ crate }}
+# Report native workspace or one crate's coverage under target/coverage/<crate>.
+coverage crate="workspace":
+    bash sh/rs/coverage.sh '{{ crate }}'
 
 # Build the default workspace members.
 build:

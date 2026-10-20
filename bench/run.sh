@@ -47,6 +47,21 @@ usable_cpus() {
     env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc
 }
 case $MODE in
+    --criterion)
+        BASE=
+        CRITERION_CARGO_ARGS=()
+        CRITERION_FILTER_ARGS=()
+        parsing_filters=false
+        for argument in "${@:2}"; do
+            if [[ $argument == -- && $parsing_filters == false ]]; then
+                parsing_filters=true
+            elif [[ $parsing_filters == true ]]; then
+                CRITERION_FILTER_ARGS+=("$argument")
+            else
+                CRITERION_CARGO_ARGS+=("$argument")
+            fi
+        done
+        ;;
     --audio)
         BASE=
         ;;
@@ -193,11 +208,20 @@ criterion_targets() {
                 .packages[] as $package
                 | $package.targets[]
                 | select(any(.kind[]; . == "bench"))
-                | [($package.manifest_path | ltrimstr($root)), .name]
+                | [($package.manifest_path | ltrimstr($root)), .name, (.["required-features"] // [] | join(","))]
                 | @tsv
             ' |
             sort
     )
+}
+
+# The features a bench target requires, comma-separated; cargo refuses to build it without them.
+target_features() {
+    local checkout=$1
+    local manifest=$2
+    local target=$3
+    criterion_targets "$checkout" |
+        awk -F '\t' -v manifest="$manifest" -v target="$target" '$1 == manifest && $2 == target { print $3; exit }'
 }
 
 target_dir() {
@@ -221,7 +245,7 @@ run_criterion() {
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
     fi
-    while IFS=$'\t' read -r manifest target; do
+    while IFS=$'\t' read -r manifest target _; do
         run_criterion_target "$checkout" "$manifest" "$target" "$@"
     done <"$target_list"
 }
@@ -230,18 +254,20 @@ run_criterion_target() {
     local checkout=$1
     local manifest=$2
     local target=$3
+    local features
     shift 3
+    features=$(target_features "$checkout" "$manifest" "$target") || return 1
     (
         cd "$checkout" || exit 1
         CARGO_TARGET_DIR=$(target_dir "$checkout") \
-            cargo bench --locked --manifest-path "$manifest" --bench "$target" -- \
+            cargo bench --locked --manifest-path "$manifest" --bench "$target" ${features:+--features "$features"} -- \
             "${CRITERION_ARGS[@]}" "$@"
     )
 }
 
 criterion_cases() {
     local checkout=$1
-    local manifest target benchmark
+    local manifest target features benchmark
     local listing=$RUN/criterion-listing
     local target_list=$RUN/criterion-targets
 
@@ -252,11 +278,11 @@ criterion_cases() {
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
     fi
-    while IFS=$'\t' read -r manifest target; do
+    while IFS=$'\t' read -r manifest target features; do
         if ! (
             cd "$checkout" || exit 1
             CARGO_TARGET_DIR=$(target_dir "$checkout") \
-                cargo bench --locked --manifest-path "$manifest" --bench "$target" -- --list
+                cargo bench --locked --manifest-path "$manifest" --bench "$target" ${features:+--features "$features"} -- --list
         ) | sed -n 's/: benchmark$//p' >"$listing"; then
             return 1
         fi
@@ -710,7 +736,17 @@ run_profile() {
 
 cd "$ROOT"
 
-if [[ $MODE == --audio ]]; then
+if [[ $MODE == --criterion ]]; then
+    # Each invocation owns fresh results; previous runs cannot become new points.
+    python3 -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))' \
+        "$RUN/criterion-command.json" "${@:2}"
+    if [[ -n ${MOQ_BENCH_RUNS:-} ]]; then
+        printf '%s\n' "$RUN" >>"$MOQ_BENCH_RUNS"
+    fi
+    CARGO_TARGET_DIR=$CURRENT_TARGET cargo bench --locked ${CRITERION_CARGO_ARGS[@]+"${CRITERION_CARGO_ARGS[@]}"} -- \
+        --quick --warm-up-time 0.05 --measurement-time 0.2 --noplot ${CRITERION_FILTER_ARGS[@]+"${CRITERION_FILTER_ARGS[@]}"}
+    exit 0
+elif [[ $MODE == --audio ]]; then
     run_audio_comparison
     exit 0
 elif [[ $MODE == --runtime ]]; then

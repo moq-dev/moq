@@ -5,6 +5,10 @@ name: X11 capture
 on:
   workflow_call:
   pull_request:
+    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
+    # retargeted to release.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "rs/moq-video/**"
       - "rs/justfile"
@@ -46,7 +50,7 @@ jobs:
           MOQ_X11_BENCH_LOG: ${{ runner.temp }}/x11-capture-benchmark.log
       - name: Keep capture measurements
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: x11-capture-benchmark
           path: ${{ runner.temp }}/x11-capture-benchmark.log

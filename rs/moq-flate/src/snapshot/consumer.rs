@@ -1,6 +1,6 @@
 //! Consuming opaque values and their timestamps from a track.
 
-use std::task::Poll;
+use std::{ops::Bound, task::Poll};
 
 use bytes::Bytes;
 
@@ -16,6 +16,8 @@ pub struct Consumer {
 	/// normally one frame, but the window is per group either way.
 	flate: Option<crate::Decoder>,
 	compression: bool,
+	/// The newest group the bounded largest reported, the target of `latest`.
+	largest: Option<u64>,
 }
 
 impl Consumer {
@@ -28,6 +30,7 @@ impl Consumer {
 			group: None,
 			flate: None,
 			compression: config.compression.is_deflate(),
+			largest: None,
 		}
 	}
 
@@ -50,7 +53,8 @@ impl Consumer {
 		kio::wait(|waiter| self.poll_latest(waiter)).await
 	}
 
-	/// Poll for the newest state, discarding superseded groups and intermediate yields.
+	/// Poll for the newest state within the track's group bounds, discarding superseded groups
+	/// and intermediate yields.
 	///
 	/// Frames inside the newest group are still decoded in order. What this skips is gone;
 	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
@@ -59,12 +63,23 @@ impl Consumer {
 	}
 
 	fn poll_read(&mut self, waiter: &kio::Waiter, skip: bool) -> Poll<Result<Option<moq_net::Timed<Bytes>>>> {
-		if skip && let Some(latest) = self.track.latest() {
-			if self.group.as_ref().is_some_and(|group| group.sequence < latest) {
-				self.group = None;
+		if skip {
+			// Bounded by the reader's cap, so a cap set before this consumer took the track holds.
+			if let Poll::Ready(Some(largest)) = self.track.poll_largest(waiter) {
+				self.largest = Some(largest.group);
 			}
-			if self.group.is_none() {
-				self.track.set_groups(latest..);
+			if let Some(largest) = self.largest {
+				if self.group.as_ref().is_some_and(|group| group.sequence < largest) {
+					self.group = None;
+				}
+				// Raise only the floor: an omitted end would drop the cap. Raising it only when
+				// it moves keeps the bounds change from waking the parked largest poll again.
+				if self.group.is_none()
+					&& let (Bound::Included(start), end) = self.track.bounds()
+					&& start < largest
+				{
+					self.track.set_groups((Bound::Included(largest), end));
+				}
 			}
 		}
 
@@ -214,5 +229,34 @@ mod timestamps {
 		assert_eq!(value.value[0] as u64, 3);
 		producer.finish().unwrap();
 		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	#[test]
+	fn latest_keeps_a_cap_set_before_the_consumer() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("data", moq_net::track::Info::default())
+			.unwrap();
+		let mut subscriber = track.subscribe(None);
+		subscriber.set_groups(..5);
+		let config = crate::snapshot::Config::default();
+		let mut producer = crate::snapshot::Producer::new(track, config.clone());
+		let mut consumer = Consumer::new(subscriber, config);
+		let waiter = kio::Waiter::noop();
+		for n in 0..4u8 {
+			producer.update(Bytes::from(vec![n; 32])).unwrap();
+		}
+		let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) else {
+			panic!("missing latest state")
+		};
+		assert_eq!(value.value[0], 3);
+		for n in 4..7u8 {
+			producer.update(Bytes::from(vec![n; 32])).unwrap();
+		}
+		let Poll::Ready(Ok(Some(value))) = consumer.poll_latest(&waiter) else {
+			panic!("missing capped state")
+		};
+		assert_eq!(value.value[0], 4, "latest crossed the cap");
+		assert!(consumer.poll_next(&waiter).is_pending());
 	}
 }

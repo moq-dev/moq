@@ -4,6 +4,67 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `largest()` reports only upstream state, within a reader's `set_groups` bounds
+
+`track::Subscriber::largest()` and `track::Ordered::largest()` (and their `poll_largest`) report the track's largest only while it is within the bounds set with `set_groups`, where they used to ignore the bounds.
+A largest past the cap or below the floor reports nothing; the cache never stands in for it.
+A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
+Every `largest()`, `track::Producer` and `track::Consumer` included, now waits while a relay's copy is idle and reports once its new upstream subscription is live, rather than the largest an ended feed left.
+Cached groups are still served meanwhile.
+To read the track's edge from a capped reader, lift the cap with `set_groups(..)` first.
+
+### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
+
+`lite::SubscribeEnd` now contains only `group`; remove `streams` from struct literals and stop calling `Version::has_stream_count()`.
+The unpublished `moq-lite-07-wip` wire restores `SUBSCRIBE_DROP` and removes Stream Count from `SUBSCRIBE_END`. Update both ends together; published lite versions keep their framing.
+
+### Track demand reports the wanted group (#5930)
+
+`track::Demand::used`, `unused`, `is_used`, `poll_used`, and `poll_unused` are gone.
+`wanted()` returns `None` while nobody consumes the track and `Some(n)` while consumers want group `n` or later; open a group whenever `n` passes your largest.
+`wanted_changed().await` (or `poll_wanted_changed`) returns it at once on the first call, then on each change, and errors once the track closes.
+A clone of a `Demand` watches on its own.
+
+```rust
+// Before
+demand.used().await?;
+demand.unused().await?;
+// After
+while demand.wanted_changed().await?.is_none() {}
+while demand.wanted_changed().await?.is_some() {}
+```
+
+`track::Info::refresh` opts a track in to new groups on join: set it with `Info::with_refresh(ratio)`.
+
+### An expired group fails with `Old` even when drained (#5944)
+
+A reader parked at the end of an unfinished group whose max delay gives up now gets `Error::Old`, even after reading every frame, where it used to end cleanly.
+`group::Consumer::finished` reports the same error.
+Handle it like any other skipped group.
+
+### Track readers follow `largest()` instead of reading `latest()` (#5725)
+
+`latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.
+Await `largest()` and read `.group` where you used the sequence; where you read the edge without waiting, poll `poll_largest` once with `kio::Waiter::noop()`.
+It streams the newest location, the current one at once and then each newer one, and `None` once the track ends.
+A new group or datagram raises it at frame 0 before any frame lands, and it can name a frame the publisher reported before its group arrives.
+
+### Session stats are keyed by label, not auth root (#5731)
+
+`stats::Handle::session`, `stats::Handle::request`, and `stats::Handle::refuse` take the stats label where they took the auth root.
+Pass the empty path for a session without one.
+`Session::set_tier` is now `Session::retag`, which also moves the session to a new label.
+`SessionEntry::root` is renamed `SessionEntry::label`.
+
+```rust
+// Before
+let session = handle.session(&root);
+session.set_tier(tier);
+// After
+let session = handle.session(&label);
+session.retag(tier, &label);
+```
+
 ### Subscriptions carry group ranges (#5732)
 
 `track::Subscription::start` and `end` are replaced by `ranges: Vec<Range>`, and `with_start` and `with_end` are gone.

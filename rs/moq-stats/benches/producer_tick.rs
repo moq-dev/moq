@@ -10,7 +10,7 @@
 //! delta. Time is the Criterion target `stats/tick`. The table is one warm-up
 //! plus a few ticks, allocations included.
 //!
-//! `stats/presence` sweeps the same tick over connected auth roots and the
+//! `stats/presence` sweeps the same tick over connected labels and the
 //! presence tracks held for them.
 //!
 //! `stats/prefix` sweeps it over held paths, path depth, and held prefix
@@ -18,6 +18,9 @@
 //! grows with rows times depth, plus each held track's encode.
 //!
 //! Run `cargo bench -p moq-stats --features bench --bench producer_tick`.
+
+// Custom timings measure the real time the work took, not the ambient clock.
+#![allow(clippy::disallowed_methods)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
@@ -260,13 +263,13 @@ fn bench(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Connected auth roots, one session each.
-const ROOTS: [usize; 2] = [100, 10_000];
+/// Connected labels, one session each.
+const LABELS: [usize; 2] = [100, 10_000];
 
-/// Roots whose presence track a reader holds.
+/// Labels whose presence track a reader holds.
 const HELD: [usize; 3] = [0, 100, 1_000];
 
-/// A relay with sessions under many roots, some of them held.
+/// A relay with sessions under many labels, some of them held.
 struct Presence {
 	driver: Driver,
 	_registry: stats::Registry,
@@ -278,13 +281,13 @@ struct Presence {
 }
 
 impl Presence {
-	fn build(roots: usize, held: usize) -> Self {
+	fn build(labels: usize, held: usize) -> Self {
 		let registry = stats::Registry::new(stats::Config::new());
 		let (origin, origin_driver) = origin::Producer::new(origin::Config::default());
-		let names: Vec<String> = (0..roots).map(|index| format!("room/{index:05}")).collect();
+		let names: Vec<String> = (0..labels).map(|index| format!("room/{index:05}")).collect();
 		let sessions: Vec<_> = names
 			.iter()
-			.map(|root| registry.tier(stats::Tier::default()).session(root.as_str()))
+			.map(|label| registry.tier(stats::Tier::default()).session(label.as_str()))
 			.collect();
 		// One set of wire counters per connection, independently of held presence tracks.
 		let wire = sessions
@@ -293,7 +296,11 @@ impl Presence {
 			.collect();
 		let mut driver = Driver::new(registry.clone(), origin.clone()).expect("stats broadcast");
 		driver.tick();
-		let held = names.iter().take(held).map(|root| driver.hold_presence(root)).collect();
+		let held = names
+			.iter()
+			.take(held)
+			.map(|label| driver.hold_presence(label))
+			.collect();
 		Self {
 			driver,
 			_registry: registry,
@@ -306,24 +313,24 @@ impl Presence {
 	}
 }
 
-/// What holding presence tracks costs a tick, swept over connected roots and
-/// held roots: each session row looks its root up once, and each held track
+/// What holding presence tracks costs a tick, swept over connected labels and
+/// held labels: each session row looks its label up once, and each held track
 /// is summed and encoded once.
 fn presence(c: &mut Criterion) {
-	println!("roots held allocs/tick us/tick");
+	println!("labels held allocs/tick us/tick");
 
 	let mut group = c.benchmark_group("stats/presence");
 	group.sample_size(10);
 	group.warm_up_time(Duration::from_millis(200));
 	group.measurement_time(Duration::from_secs(1));
-	for &roots in &ROOTS {
-		for &held in HELD.iter().filter(|&&held| held <= roots) {
-			let id = BenchmarkId::from_parameter(format!("{roots}r_{held}h"));
-			group.throughput(Throughput::Elements(roots as u64));
+	for &labels in &LABELS {
+		for &held in HELD.iter().filter(|&&held| held <= labels) {
+			let id = BenchmarkId::from_parameter(format!("{labels}l_{held}h"));
+			group.throughput(Throughput::Elements(labels as u64));
 			let mut relay = None;
 			group.bench_function(id, |b| {
 				let relay = relay.get_or_insert_with(|| {
-					let mut relay = Presence::build(roots, held);
+					let mut relay = Presence::build(labels, held);
 					black_box(relay.driver.tick());
 					ALLOCATIONS.store(0, Ordering::Relaxed);
 					COUNTING.store(true, Ordering::Relaxed);
@@ -334,7 +341,7 @@ fn presence(c: &mut Criterion) {
 					let micros = start.elapsed().as_secs_f64() * 1e6 / TABLE_TICKS as f64;
 					COUNTING.store(false, Ordering::Relaxed);
 					let allocs = ALLOCATIONS.load(Ordering::Relaxed) / TABLE_TICKS as usize;
-					println!("{roots:>5} {held:>4} {allocs:>11} {micros:>8.1}");
+					println!("{labels:>5} {held:>4} {allocs:>11} {micros:>8.1}");
 					relay
 				});
 				b.iter_custom(|iters| {

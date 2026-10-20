@@ -17,16 +17,12 @@ use crate::quic::web::{CloseReason, ClosedStream, SessionError, WriteError};
 pub struct SendStream {
 	stream: crate::quic::driver::SendStream,
 	close: Arc<CloseReason>,
-	/// Taken after the WebTransport header this side wrote first, which a reset must still deliver.
-	header: Option<crate::quic::driver::Checkpoint>,
+	/// The end of the WebTransport header this side wrote first, which a reset must still deliver.
+	header: Option<u64>,
 }
 
 impl SendStream {
-	pub(crate) fn new(
-		stream: crate::quic::driver::SendStream,
-		close: Arc<CloseReason>,
-		header: Option<crate::quic::driver::Checkpoint>,
-	) -> Self {
+	pub(crate) fn new(stream: crate::quic::driver::SendStream, close: Arc<CloseReason>, header: Option<u64>) -> Self {
 		Self { stream, close, header }
 	}
 
@@ -53,7 +49,7 @@ impl SendStream {
 	pub fn reset(&mut self, code: u32) -> Result<(), ClosedStream> {
 		let code = self.close.encode_stream_code(code);
 		match self.header.take() {
-			Some(header) => header.reset(code).map_err(Into::into),
+			Some(header) => self.stream.reset_at(header, code).map_err(Into::into),
 			None => self.stream.reset(code).map_err(Into::into),
 		}
 	}

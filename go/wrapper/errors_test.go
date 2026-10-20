@@ -131,3 +131,12 @@ func TestExpiredIsAuthError(t *testing.T) {
 		t.Fatal("an expired request token is not an auth error")
 	}
 }
+
+func TestTrackRevocationIsAuth(t *testing.T) {
+	err := ffi.NewMoqErrorProtocol(ffi.MoqProtocolError{
+		Scope: moq.ErrorScopeStream, Code: 0x3b, Kind: moq.ProtocolKindUnauthorized, Message: "unauthorized",
+	})
+	if !moq.IsAuthError(err) {
+		t.Fatalf("a track revocation is not an auth error: %v", err)
+	}
+}

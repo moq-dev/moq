@@ -10,6 +10,30 @@ How to update your code for each breaking change, newest first.
 A snapshot consumer's callback now fires for each state in order instead of only the newest.
 Timestamps are rounded down to a whole microsecond.
 
+### Demand reports the wanted group (#5930)
+
+`moq_track_info` gains `refresh` and `refresh_present`, which changes its ABI; a zeroed field leaves refresh off.
+A demand watcher's `on_demand` now repeats `MOQ_DEMAND_USED` whenever the wanted group moves, so treat it as "read the wanted group" rather than an edge.
+Read it with `moq_publish_demand_wanted`, and start a new group (a keyframe) once it passes the largest group written.
+Before any group is written, the first subscriber wants group 0, so start one whenever it is present.
+
+```c
+// `written` is false until a group is written; `largest` is the largest group written.
+uint64_t group;
+bool present;
+if (moq_publish_demand_wanted(watcher, &group, &present) == 0 && present && (!written || group > largest)) start_group();
+```
+
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `moq_client_config::quic_keylog` or `moq_server_config::quic_keylog` as well to capture them, each a field appended to its struct; without `SSLKEYLOGFILE` the dial or listen fails.
+
+### OpenH264 is a build feature (#5771)
+
+The release archives and the CMake build still carry the software H.264 fallback.
+A bare `cargo build -p moq-c` leaves it out; add `--features openh264` to keep it.
+
 ### Subscriptions carry group ranges (#5732)
 
 `moq_subscription`'s `group_start`, `group_end`, and their `_present` flags are replaced by `ranges` and `ranges_len`, an array of `moq_range` whose ends are `moq_anchor`s, and `order` (`moq_order`), which changes its ABI.

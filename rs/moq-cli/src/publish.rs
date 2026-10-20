@@ -265,7 +265,7 @@ fn ts_import(
 ) -> anyhow::Result<(ts::Import<ts::Ext>, moq_mux::catalog::Producer<ts::Ext>)> {
 	let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 	let catalog = moq_mux::catalog::Producer::new(broadcast, config)?;
-	let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
+	let mut import = ts::Import::new(broadcast.clone(), catalog.timebase().reserve());
 	if let Some(program) = program {
 		import = import.with_program(program);
 	}
@@ -310,8 +310,7 @@ pub struct Publish {
 ///
 /// The catalog withholds its first snapshot until the input names at least one servable track. A
 /// relay queries a broadcast's tracks the moment it is announced, so a standby
-/// announced any sooner refuses the tracks its epoch's live partner is serving, and the relay
-/// keeps those refusals.
+/// announced any sooner can receive requests for tracks it cannot serve yet.
 struct Pending {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_net::track::Consumer,
@@ -329,8 +328,11 @@ impl Pending {
 	}
 
 	/// Announce the broadcast if its catalog has gone out, returning whether it has.
-	fn announce(&self) -> anyhow::Result<bool> {
-		if self.catalog.latest().is_none() {
+	fn announce(&mut self) -> anyhow::Result<bool> {
+		if !matches!(
+			self.catalog.poll_largest(&moq_net::kio::Waiter::noop()),
+			std::task::Poll::Ready(Some(_))
+		) {
 			return Ok(false);
 		}
 		self.broadcast
@@ -377,21 +379,26 @@ impl Publish {
 				}
 			}
 			PublishFormat::Fmp4 => {
-				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve());
+				let timebase = catalog.timebase();
+				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts { .. } => unreachable!("TS is handled above with the mpegts catalog extension"),
 			// The `m2ts` section is in the base catalog: nothing about the multiplex is described
 			// beyond the track that carries it.
 			PublishFormat::TsPassthrough { pcr_pid } => {
-				let mut passthrough = ts::Passthrough::new(broadcast.clone(), catalog.reserve())?;
+				let timebase = catalog.timebase();
+				let mut passthrough = ts::Passthrough::new(broadcast.clone(), timebase.reserve())?;
 				if let Some(pid) = pcr_pid {
 					passthrough = passthrough.with_pcr_pid(*pid);
 				}
 				PublishDecoder::TsPassthrough(Box::new(passthrough))
 			}
+			// FLV's 32-bit milliseconds wrap after 49 days, which its importer does not follow,
+			// so it takes no era.
 			PublishFormat::Flv => {
-				let flv = flv::Import::new(broadcast.clone(), catalog.reserve());
+				let timebase = catalog.timebase();
+				let flv = flv::Import::new(broadcast.clone(), timebase.reserve());
 				PublishDecoder::Flv(Box::new(flv))
 			}
 		};
@@ -575,7 +582,7 @@ async fn decode(
 				return Ok(()); // EOF
 			}
 			decoder.decode_chunk(&buffer)?;
-			if let Some(announce) = &pending
+			if let Some(announce) = &mut pending
 				&& announce.announce()?
 			{
 				pending = None;
@@ -597,9 +604,13 @@ async fn decode(
 	let outcome = result.and_then(|()| decoder.finish());
 	// The drain can release the first catalog. Without one the input declared no track, and
 	// announcing would only advertise an empty broadcast.
-	let outcome = outcome.and_then(|finished| match &pending {
-		Some(announce) if !announce.announce()? => anyhow::bail!("input ended before it declared a track"),
-		_ => Ok(finished),
+	let outcome = outcome.and_then(|finished| {
+		if let Some(announce) = &mut pending
+			&& !announce.announce()?
+		{
+			anyhow::bail!("input ended before it declared a track");
+		}
+		Ok(finished)
 	});
 	// The drain at end of input can publish a frame nothing vouched for, so the
 	// final snapshot is only complete after `finish`.
@@ -804,13 +815,13 @@ pub(crate) mod tests {
 		0x7f, 0xdf, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xad, 0x25, 0xe8, 0x39,
 	];
 
-	/// Payload of an undecoded PES-framed stream (e.g. teletext/DVB AC-3 private data),
-	/// carried verbatim on its own PID with the original PES stream_id.
-	const PES_PAYLOAD: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02];
+	/// A whole PES of an undecoded stream (private_stream_1, no PTS), carried on its own PID.
+	const PES: &[u8] = &[
+		0x00, 0x00, 0x01, 0xBD, 0x00, 0x09, 0x84, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02,
+	];
 
 	const SECTION_PID: u16 = 0x102;
-	const VERBATIM_PES_PID: u16 = 0x104;
-	const VERBATIM_PES_STREAM_ID: u8 = 0xC0;
+	const PES_PID: u16 = 0x104;
 
 	async fn open_export(
 		source: moq_mux::Source,
@@ -838,7 +849,7 @@ pub(crate) mod tests {
 	}
 
 	/// Manufacture a TS feed carrying real video/audio plus one section-framed
-	/// verbatim stream (SCTE-35) and one PES-framed verbatim stream, by importing
+	/// verbatim stream (SCTE-35) and one whole-PES stream, by importing
 	/// `bbb.ts` into a broadcast that also holds the two ancillary tracks and
 	/// re-exporting with the `mpegts` catalog extension.
 	/// Let the origin's driver run the fronts that requests and announcements
@@ -889,15 +900,12 @@ pub(crate) mod tests {
 		section_producer.cut(None).unwrap();
 		section_producer.finish().unwrap();
 
-		// PES-framed verbatim stream (undecoded private data, stream_type 0x06), with
-		// an explicit PES stream_id to round-trip.
+		// Whole-PES stream (undecoded private data, stream_type 0x06).
 		let pes = broadcast
 			.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.text))
 			.unwrap();
-		let mut verbatim = tscat::Verbatim::new(0x06, tscat::Framing::Pes);
-		verbatim.stream_id = Some(VERBATIM_PES_STREAM_ID);
-		let mut pes_track = tscat::Track::new(VERBATIM_PES_PID);
-		pes_track.verbatim = Some(verbatim);
+		let mut pes_track = tscat::Track::new(PES_PID);
+		pes_track.pes_packet = Some(tscat::PesPacket::new(0x06));
 		catalog
 			.modify()
 			.unwrap()
@@ -910,7 +918,7 @@ pub(crate) mod tests {
 			.write(Frame {
 				timestamp: Timestamp::from_millis(1450).unwrap(),
 				duration: None,
-				payload: bytes::Bytes::from_static(PES_PAYLOAD),
+				payload: bytes::Bytes::from_static(PES),
 				keyframe: true,
 			})
 			.unwrap();
@@ -958,8 +966,7 @@ pub(crate) mod tests {
 
 	/// Full CLI round-trip: a TS feed with undecoded streams goes through `Publish`
 	/// (which selects the `mpegts` catalog) and the subscribe-side catalog stream,
-	/// and the SCTE-35 section and the verbatim PES survive with their PIDs, framing,
-	/// PES stream_id, and byte-exact payloads.
+	/// and the SCTE-35 section and the whole PES survive with their PIDs and every byte.
 	async fn ts_verbatim_round_trip(format: CatalogFormat) {
 		// Paused time auto-advances when the exporter parks, so the `drain` timeouts
 		// fire instantly instead of waiting on the wall clock.
@@ -1020,16 +1027,9 @@ pub(crate) mod tests {
 			.mpegts
 			.tracks
 			.iter()
-			.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x06))
-			.expect("verbatim PES survived the round-trip");
-		assert_eq!(pes.pid, VERBATIM_PES_PID, "verbatim PES PID preserved");
-		let pes_verbatim = pes.verbatim.as_ref().unwrap();
-		assert_eq!(pes_verbatim.framing, tscat::Framing::Pes, "PES framing preserved");
-		assert_eq!(
-			pes_verbatim.stream_id,
-			Some(VERBATIM_PES_STREAM_ID),
-			"PES stream_id preserved"
-		);
+			.find(|(_, t)| t.pes_packet.as_ref().is_some_and(|p| p.stream_type == 0x06))
+			.expect("the PES track survived the round-trip");
+		assert_eq!(pes.pid, PES_PID, "PES PID preserved");
 		let pes_name = pes_name.clone();
 
 		assert_eq!(
@@ -1039,8 +1039,8 @@ pub(crate) mod tests {
 		);
 		assert_eq!(
 			read_frame(&consumer, &pes_name).await,
-			PES_PAYLOAD,
-			"verbatim PES payload round-trips byte-for-byte"
+			PES,
+			"the PES round-trips byte-for-byte"
 		);
 	}
 
@@ -1100,24 +1100,32 @@ pub(crate) mod tests {
 	#[tokio::test]
 	async fn ts_passthrough_crosses_a_relay_through_a_flagged_jump() {
 		const KYRION: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/kyrion_mpeg2av_ac3.ts");
-		// The capture twice, the second copy's clock twenty seconds ahead of the first, its first
-		// PCR flagged as the discontinuity. Inside the track's max age, so the recording keeps
-		// every group.
-		const STEP: u64 = 20 * 90_000;
-		let mut second = KYRION.to_vec();
-		let mut pcrs = second
-			.as_chunks_mut::<188>()
-			.0
-			.iter_mut()
-			.filter(|pkt| pkt[3] & 0x20 != 0 && pkt[4] > 0 && pkt[5] & 0x10 != 0)
-			.peekable();
-		pcrs.peek_mut().expect("a PCR")[5] |= 0x80;
-		for pkt in pcrs {
-			let base = pkt[6..11].iter().fold(0u64, |base, byte| base << 8 | u64::from(*byte)) >> 7;
-			let base = ((base + STEP) & ((1 << 33) - 1)) << 7 | u64::from(pkt[10] & 0x7f);
-			pkt[6..11].copy_from_slice(&base.to_be_bytes()[3..]);
-		}
-		let input = [KYRION, &second].concat();
+		// The capture with its clock `seconds` ahead, its first PCR flagged as a discontinuity
+		// when `flagged`.
+		let shifted = |seconds: u64, flagged: bool| {
+			let mut copy = KYRION.to_vec();
+			let mut pcrs = copy
+				.as_chunks_mut::<188>()
+				.0
+				.iter_mut()
+				.filter(|pkt| pkt[3] & 0x20 != 0 && pkt[4] > 0 && pkt[5] & 0x10 != 0)
+				.peekable();
+			if flagged {
+				pcrs.peek_mut().expect("a PCR")[5] |= 0x80;
+			}
+			for pkt in pcrs {
+				let base = pkt[6..11].iter().fold(0u64, |base, byte| base << 8 | u64::from(*byte)) >> 7;
+				let base = ((base + seconds * 90_000) & ((1 << 33) - 1)) << 7 | u64::from(pkt[10] & 0x7f);
+				pkt[6..11].copy_from_slice(&base.to_be_bytes()[3..]);
+			}
+			copy
+		};
+		// The capture, carried straight on by a copy four seconds ahead so a whole catalog window
+		// follows the first group, then a copy twenty seconds past that one behind a flagged
+		// discontinuity. Inside the track's max age, so the recording keeps every group.
+		let lead = [KYRION, &shifted(4, false)].concat();
+		let second = shifted(24, true);
+		let input = [&lead[..], &second].concat();
 
 		let _env = crate::test_env::EnvGuard::clear(&["MOQ_CONNECT", "MOQ_HOP"]);
 		let _ = moq_tokio::crypto::install_default();
@@ -1175,10 +1183,10 @@ pub(crate) mod tests {
 				.await
 				.unwrap();
 
-			// The catalog names the track once the first group is out, which the first copy holds;
-			// the jump is in the second.
+			// The catalog names the track once a whole window has followed the first group, which
+			// the lead holds; the jump is in the copy after it.
 			const WAIT: Duration = Duration::from_secs(10);
-			decoder.decode_chunk(KYRION).unwrap();
+			decoder.decode_chunk(&lead).unwrap();
 			let consumer = tokio::time::timeout(WAIT, remote.consume().routed_broadcast("pt.hang"))
 				.await
 				.unwrap()

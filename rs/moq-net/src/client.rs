@@ -400,6 +400,7 @@ impl Client {
 			ietf::solicit::into_setup(&mut parameters, ietf_encoding);
 		}
 		ietf::hidden::into_setup(&mut parameters, ietf_encoding);
+		ietf::max_age::into_setup(&mut parameters, ietf_encoding);
 		ietf::active_count::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
@@ -457,6 +458,7 @@ impl Client {
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&parameters, v)?,
 					hidden: ietf::hidden::from_setup(&parameters, v),
+					max_age: ietf::max_age::from_setup(&parameters, v),
 					active_count: ietf::active_count::from_setup(&parameters, v),
 					..Default::default()
 				};

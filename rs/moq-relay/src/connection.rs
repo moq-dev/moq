@@ -1,7 +1,6 @@
-use crate::{auth, cluster, refusals::Refusal};
+use crate::{auth, cluster, incoming::Incoming, refusals::Refusal};
 
 use axum::http;
-use moq_tokio::server::Request;
 use tracing::Instrument;
 
 /// An error carrying the HTTP status to send when closing the request.
@@ -29,8 +28,11 @@ impl From<auth::Error> for StatusError {
 /// Build with [`new`](Self::new), attach the optional knobs, then call
 /// [`run`](Self::run) to admit the request through its lease, wire up
 /// publish/subscribe origins, and serve the session until it closes.
-pub struct Connection {
-	request: Request,
+///
+/// The request is a moq-tokio [`Request`](moq_tokio::server::Request), or an
+/// [`Accepted`](crate::Accepted) session from any moq-net transport.
+pub struct Connection<R: Incoming = moq_tokio::server::Request> {
+	request: R,
 	lifecycle: Lifecycle,
 }
 
@@ -45,12 +47,12 @@ pub(crate) struct Lifecycle {
 	sessions: Option<crate::session::Registry>,
 }
 
-impl Connection {
+impl<R: Incoming> Connection<R> {
 	/// Wrap an accepted request, resolving origins through `cluster` and
 	/// its grant through `auth`.
-	pub fn new(request: Request, cluster: cluster::Cluster, auth: auth::Auth) -> Self {
+	pub fn new(request: R, cluster: cluster::Cluster, auth: auth::Auth) -> Self {
 		Self {
-			lifecycle: Lifecycle::new(cluster, auth, 0, request.remote_addr()),
+			lifecycle: Lifecycle::new(cluster, auth, 0, request.remote()),
 			request,
 		}
 	}
@@ -58,7 +60,7 @@ impl Connection {
 	/// Set the identifier this connection logs under. Defaults to 0.
 	pub fn with_id(mut self, id: u64) -> Self {
 		self.lifecycle.id = id;
-		self.lifecycle.span = span(id, self.request.remote_addr());
+		self.lifecycle.span = span(id, self.request.remote());
 		self
 	}
 
@@ -83,19 +85,14 @@ impl Connection {
 		lifecycle.run(Self::serve(request, &lifecycle)).await;
 	}
 
-	async fn serve(request: Request, lifecycle: &Lifecycle) -> anyhow::Result<()> {
+	async fn serve(request: R, lifecycle: &Lifecycle) -> anyhow::Result<()> {
 		// Abandoned at the drain deadline, so the deadline bounds this task and its
 		// socket like it bounds a session.
-		let admitted = lifecycle.admit(auth::request_for(&lifecycle.auth, &request)).await;
+		let admitted = lifecycle.admit(request.admission(&lifecycle.auth)).await;
 		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {
-				let reject = match err.status {
-					http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
-					http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
-					status => moq_tokio::server::Reject::App(status.as_u16()),
-				};
-				let _ = request.reject(reject).await;
+				request.reject(err.status).await;
 				return Err(err.source);
 			}
 		};
@@ -140,16 +137,15 @@ impl Connection {
 			.until_deadline(request.ok())
 			.await
 			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))?
-			.inspect_err(|err| {
-				let cause = match err {
-					moq_tokio::Error::MoqNet(err) => Some(err),
-					_ => None,
-				};
-				setup_failed(&stats, cause);
-			})?;
+			.inspect_err(|err| setup_failed(&stats, err.downcast_ref()))?;
 
-		let result = lifecycle.supervise(session, lease, registration, transport).await;
-		driver.await??;
+		// Joined rather than awaited in turn, for a driver that runs only when polled. A
+		// spawned driver's panic still surfaces here, so it cannot look like cancellation.
+		let (result, driven) = futures::join!(
+			lifecycle.supervise(session, lease, registration, transport),
+			R::drive(driver),
+		);
+		driven?;
 		result
 	}
 }

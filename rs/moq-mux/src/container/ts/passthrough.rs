@@ -60,7 +60,7 @@ use super::mux_rate::{Meter, PCR_WRAP};
 use super::psi::{self, Pmt};
 
 /// The PCR clock, in Hz.
-const PCR_HZ: u64 = 27_000_000;
+pub(super) const PCR_HZ: u64 = 27_000_000;
 
 /// The longest a group runs without a random access point before a PCR starts the next.
 pub const FALLBACK: std::time::Duration = std::time::Duration::from_secs(1);
@@ -76,7 +76,7 @@ pub const GROUP_OBJECTS_MAX: usize = moq_net::group::MAX_GROUP_FRAMES / 2;
 
 /// The bytes a PCR sits into its packet: four of header, the adaptation field's length and flags,
 /// and the five bytes the 33-bit base ends in.
-const PCR_OFFSET: u64 = 10;
+pub(super) const PCR_OFFSET: u64 = 10;
 
 /// The packet sizes a sync byte can recur at: 188, BDAV's 192, and 204 with Reed-Solomon parity.
 const PACKET_SIZES: [usize; 3] = [TsPacket::SIZE, 192, 204];
@@ -252,12 +252,12 @@ struct Timebase {
 	samples: VecDeque<Sample>,
 }
 
-#[derive(Clone, Copy)]
-struct Sample {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Sample {
 	/// Where the PCR's byte sits in the input.
-	at: u64,
+	pub(super) at: u64,
 	/// The unwrapped PCR, in 27 MHz ticks.
-	ticks: u64,
+	pub(super) ticks: u64,
 }
 
 struct Object {
@@ -792,7 +792,7 @@ fn random_access_indicator(pkt: &[u8; TsPacket::SIZE]) -> bool {
 /// Interpolated between the two PCRs either side of it; extrapolated at the rate of the nearest
 /// interval when it lies before the timebase's first PCR or after its last. With a single PCR
 /// there is no rate, and the byte takes that PCR's time.
-fn locate(at: u64, samples: &VecDeque<Sample>) -> u64 {
+pub(super) fn locate(at: u64, samples: &VecDeque<Sample>) -> u64 {
 	let (first, last) = (samples[0], samples[samples.len() - 1]);
 	let (a, b) = match samples.iter().zip(samples.iter().skip(1)).find(|(_, b)| at < b.at) {
 		Some((a, b)) => (*a, *b),

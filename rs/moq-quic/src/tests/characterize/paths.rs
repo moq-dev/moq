@@ -267,16 +267,41 @@ fn second_retry_is_discarded() {
     assert_connected(pair.client_conn_mut(client_ch));
 }
 
-/// A discarded Retry still counts as an authenticated packet, so the client then discards the
-/// server's genuine Retry of its retransmitted Initial too, and never connects
+/// A discarded Retry does not stop the client from following the server's genuine Retry of its
+/// retransmitted Initial
 #[test]
-#[ignore = "bug: /quest/m0/retry-after-invalid-retry.md"]
 fn retry_after_invalid_retry() {
     let _guard = subscribe();
     for mangle in [bad_tag as Mangle, same_cid] {
         let (mut pair, client_ch, _) = retried(mangle);
         pair.drive();
         assert_connected(pair.client_conn_mut(client_ch));
+    }
+}
+
+/// A discarded Retry does not stop the client from processing a Version Negotiation packet
+#[test]
+fn version_negotiation_after_invalid_retry() {
+    let _guard = subscribe();
+    for mangle in [bad_tag as Mangle, same_cid] {
+        let (mut pair, client_ch, orig_dst_cid) = retried(mangle);
+        let (time, _, retry) = pair.client.inbound.back().unwrap();
+        let time = *time;
+        // Echo the client's CIDs, offering only a reserved version
+        let dst_cid_end = 6 + retry[5] as usize;
+        let mut vn = vec![0x80, 0, 0, 0, 0];
+        vn.extend_from_slice(&retry[5..dst_cid_end]);
+        vn.push(orig_dst_cid.len() as u8);
+        vn.extend_from_slice(&orig_dst_cid);
+        vn.extend_from_slice(&[0x0a, 0x1a, 0x2a, 0x3a]);
+        pair.client
+            .inbound
+            .push_back((time, None, vn.as_slice().into()));
+        pair.drive_client();
+        assert_matches!(
+            lost(pair.client_conn_mut(client_ch)),
+            Some(ConnectionError::VersionMismatch)
+        );
     }
 }
 

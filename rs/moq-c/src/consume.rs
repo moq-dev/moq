@@ -111,6 +111,90 @@ struct RawTaskEntry {
 	callback: OnStatus,
 }
 
+/// A raw track's reader, with the track handle its subscription updates resolve against.
+struct RawReader {
+	// A relative range counts from this track's largest: the reader's own reports only
+	// within the bounds the update is replacing. Kept unpolled, so each clone reports the
+	// current largest rather than only a newer one.
+	edge: moq_net::track::Consumer,
+	track: moq_net::track::Ordered,
+	// An update with a relative range, whose bounds wait for the edge to be live.
+	deferred: Option<moq_net::track::Subscription>,
+}
+
+impl RawReader {
+	fn new(edge: moq_net::track::Consumer, track: moq_net::track::Ordered) -> Self {
+		Self {
+			edge,
+			track,
+			deferred: None,
+		}
+	}
+
+	/// Apply a subscription update: its wire preferences at once, and its local bounds once
+	/// any relative range has a live edge to count from.
+	fn apply(&mut self, subscription: Option<moq_net::track::Subscription>, waiter: &kio::Waiter) {
+		let subscription = subscription.unwrap_or_default();
+		// A closed track makes the update meaningless; the reader already sees the close.
+		let _ = self.track.update(subscription.clone());
+		let relative = subscription
+			.ranges
+			.iter()
+			.any(|range| matches!(range.start, moq_net::track::Anchor::Relative(_)));
+		match relative {
+			true => {
+				self.deferred = Some(subscription);
+				self.poll_deferred(waiter);
+			}
+			false => {
+				self.deferred = None;
+				self.set_bounds(&subscription, None);
+			}
+		}
+	}
+
+	/// Apply a deferred update's bounds once the edge is live, or the track ended.
+	fn poll_deferred(&mut self, waiter: &kio::Waiter) {
+		let Some(subscription) = &self.deferred else {
+			return;
+		};
+		if let Poll::Ready(largest) = self.edge.clone().poll_largest(waiter) {
+			let subscription = subscription.clone();
+			self.deferred = None;
+			self.set_bounds(&subscription, largest.map(|position| position.group));
+		}
+	}
+
+	fn set_bounds(&mut self, subscription: &moq_net::track::Subscription, latest: Option<u64>) {
+		// Reads start where the lowest range does. Without a floor of its own (the oldest
+		// range, the default) a raw reader joins at the latest group.
+		let start = subscription
+			.ranges
+			.iter()
+			.map(|range| match range.start {
+				moq_net::track::Anchor::Absolute(start) => Some(start.group),
+				moq_net::track::Anchor::Relative(u64::MAX) => latest,
+				moq_net::track::Anchor::Relative(back) => latest.map(|latest| latest.saturating_sub(back)),
+			})
+			.min()
+			.flatten();
+		// They stop past the last absolute end; an open or relative one follows the live edge.
+		let end = subscription
+			.ranges
+			.iter()
+			.map(|range| match range.end {
+				Some(moq_net::track::Anchor::Absolute(end)) => Some(end),
+				_ => None,
+			})
+			.collect::<Option<Vec<_>>>()
+			.map(|ends| ends.into_iter().max().unwrap_or_default());
+		self.track.set_groups((
+			start.map_or(Bound::Unbounded, Bound::Included),
+			end.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
+		));
+	}
+}
+
 /// Outcome of polling a raw track source alongside its control channels.
 enum RawStep<T> {
 	/// A delivered value: the next group, or the next frame within a group.
@@ -680,9 +764,12 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(async move {
-				let mut track = broadcast.track(&name)?.subscribe(subscription.clone()).await?.ordered();
-				Self::apply_raw_subscription(&mut track, subscription);
-				Self::run_raw(on_frame, track, channel.1, updates).await
+				let edge = broadcast.track(&name)?;
+				let track = edge.subscribe(subscription.clone()).await?.ordered();
+				let mut reader = RawReader::new(edge, track);
+				// The task's own polls re-poll a deferred update with their waiter.
+				reader.apply(subscription, &kio::Waiter::noop());
+				Self::run_raw(on_frame, reader, channel.1, updates).await
 			}))
 			.await;
 
@@ -697,42 +784,9 @@ impl Consume {
 		Ok(id)
 	}
 
-	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
-		let subscription = subscription.unwrap_or_default();
-		// Reads start where the lowest range does. Without a floor of its own (the oldest
-		// range, the default) a raw reader joins at the latest group.
-		let latest = track.latest();
-		let start = subscription
-			.ranges
-			.iter()
-			.map(|range| match range.start {
-				moq_net::track::Anchor::Absolute(start) => Some(start.group),
-				moq_net::track::Anchor::Relative(u64::MAX) => latest,
-				moq_net::track::Anchor::Relative(back) => latest.map(|latest| latest.saturating_sub(back)),
-			})
-			.min()
-			.flatten();
-		// They stop past the last absolute end; an open or relative one follows the live edge.
-		let end = subscription
-			.ranges
-			.iter()
-			.map(|range| match range.end {
-				Some(moq_net::track::Anchor::Absolute(end)) => Some(end),
-				_ => None,
-			})
-			.collect::<Option<Vec<_>>>()
-			.map(|ends| ends.into_iter().max().unwrap_or_default());
-		track.set_groups((
-			start.map_or(Bound::Unbounded, Bound::Included),
-			end.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
-		));
-		// A closed track makes the update meaningless; the reader already sees the close.
-		let _ = track.update(subscription);
-	}
-
 	async fn run_raw(
 		callback: OnStatus,
-		mut track: moq_net::track::Ordered,
+		mut reader: RawReader,
 		mut close: oneshot::Receiver<()>,
 		mut updates: mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
 	) -> Result<(), Error> {
@@ -746,10 +800,14 @@ impl Consume {
 		loop {
 			let mut group =
 				match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::group::Consumer>, Error>> {
-					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut reader, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
-					match ready!(track.poll_next_group(waiter))? {
+					// A group read before deferred bounds apply could sit under the old floor.
+					if reader.deferred.is_some() {
+						return Poll::Pending;
+					}
+					match ready!(reader.track.poll_next_group(waiter))? {
 						Some(group) => Poll::Ready(Ok(RawStep::Item(group))),
 						None => Poll::Ready(Ok(RawStep::End)),
 					}
@@ -763,7 +821,7 @@ impl Consume {
 
 			loop {
 				let frame = match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
-					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut reader, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
 					match ready!(group.poll_read_frame(waiter))? {
@@ -787,17 +845,18 @@ impl Consume {
 		}
 	}
 
-	/// Poll the close and update channels, applying any subscription updates inline.
+	/// Poll the close and update channels, applying any subscription updates inline, and a
+	/// deferred update once its edge is live.
 	///
 	/// Returns `true` when the task must stop: either the consumer was closed
 	/// (`close` fired) or the update channel was dropped. The caller must then
 	/// unwind rather than poll `close` again, since a completed oneshot panics if
-	/// re-polled. Borrows `track` only for the duration of the call so the caller
+	/// re-polled. Borrows `reader` only for the duration of the call so the caller
 	/// can poll a track/group source afterwards.
 	fn poll_raw_control(
 		close: &mut oneshot::Receiver<()>,
 		updates: &mut mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
-		track: &mut moq_net::track::Ordered,
+		reader: &mut RawReader,
 		waiter: &moq_net::kio::Waiter,
 	) -> bool {
 		let mut cx = waiter.context();
@@ -807,11 +866,13 @@ impl Consume {
 
 		loop {
 			match updates.poll_recv(&mut cx) {
-				Poll::Ready(Some(subscription)) => Self::apply_raw_subscription(track, subscription),
+				Poll::Ready(Some(subscription)) => reader.apply(subscription, waiter),
 				Poll::Ready(None) => return true,
-				Poll::Pending => return false,
+				Poll::Pending => break,
 			}
 		}
+		reader.poll_deferred(waiter);
+		false
 	}
 
 	pub fn raw_track_update(

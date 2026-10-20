@@ -42,6 +42,7 @@ use crate::{
 mod util;
 use util::*;
 
+mod acked;
 mod characterize;
 mod reset_stream_at;
 mod sim;
@@ -222,6 +223,191 @@ fn lifecycle() {
     assert_eq!(pair.server.known_cids(), 0);
 }
 
+/// Which client datagram a `close_before_the_server_has_the_finished` run loses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LostFlight {
+    None,
+    /// The one carrying the Finished, sent before the close.
+    Finished,
+    /// The first close, which the client resends for the server's retransmitted handshake.
+    Close,
+}
+
+/// A client that closes as soon as it is `Connected`, before its Finished has left, still lets
+/// the server complete the handshake and read the application close.
+#[test]
+fn close_before_the_client_finished_leaves() {
+    close_before_the_server_has_the_finished(LostFlight::None);
+}
+
+#[test]
+fn close_after_the_client_finished_is_lost() {
+    close_before_the_server_has_the_finished(LostFlight::Finished);
+}
+
+#[test]
+fn close_before_the_client_finished_leaves_survives_a_lost_flight() {
+    close_before_the_server_has_the_finished(LostFlight::Close);
+}
+
+/// Hands the client the server's flight without letting it transmit, as a pacer would.
+fn connect_before_the_finished_leaves(pair: &mut Pair, config: ClientConfig) -> ConnectionHandle {
+    let client_ch = pair.begin_connect(config);
+    pair.drive_client();
+    pair.drive_server();
+
+    let mut buf = Vec::new();
+    while let Some((recv_time, ecn, packet)) = pair.client.inbound.pop_front() {
+        let server = pair.server.addr;
+        let Some(DatagramEvent::ConnectionEvent(_, event)) = pair
+            .client
+            .endpoint
+            .handle(recv_time, server, None, ecn, packet, &mut buf)
+        else {
+            panic!("expected a connection event");
+        };
+        pair.client_conn_mut(client_ch).handle_event(event);
+    }
+
+    let client = pair.client_conn_mut(client_ch);
+    assert_matches!(client.poll(), Some(Event::HandshakeDataReady));
+    assert_matches!(client.poll(), Some(Event::Connected));
+    client_ch
+}
+
+/// A client certificate flight that fits the close packet but crowds out the coalesced 1-RTT close
+/// falls back to the plain close, instead of resending the flight on every poll of a one-datagram
+/// budget and never reaching the close.
+#[test]
+fn close_before_a_client_certificate_leaves_ends() {
+    let _guard = subscribe();
+    let provider = Arc::new(default_provider());
+    let mut roots = RootCertStore::empty();
+    roots.add(CERTIFIED_KEY.cert.der().clone()).unwrap();
+
+    let (mut carried, mut fell_back) = (0, 0);
+    // Grow the client certificate by names, sweeping its flight past the room in the close packet.
+    for len in (0..1400).step_by(16) {
+        let mut names = vec!["localhost".to_string()];
+        names.extend((0..len / 50).map(|i| format!("{i:03}{}.test", "a".repeat(42))));
+        names.push(format!("{}.test", "b".repeat(len % 50 + 1)));
+        let identity = rcgen::generate_simple_self_signed(names).unwrap();
+
+        let mut store = RootCertStore::empty();
+        store.add(identity.cert.der().clone()).unwrap();
+        let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(
+                WebPkiClientVerifier::builder_with_provider(Arc::new(store), provider.clone())
+                    .build()
+                    .unwrap(),
+            )
+            .with_single_cert(
+                vec![CERTIFIED_KEY.cert.der().clone()],
+                PrivatePkcs8KeyDer::from(CERTIFIED_KEY.signing_key.serialize_der()).into(),
+            )
+            .unwrap();
+        let client = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(roots.clone())
+            .with_client_auth_cert(
+                vec![identity.cert.der().clone()],
+                PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()).into(),
+            )
+            .unwrap();
+        let mut client = ClientConfig::new(Arc::new(
+            crypto::rustls::QuicClientConfig::try_from(client).unwrap(),
+        ));
+        client.transport = Arc::new(cubic_transport());
+
+        let mut pair = Pair::new(
+            Default::default(),
+            ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server).unwrap())),
+        );
+        let client_ch = connect_before_the_finished_leaves(&mut pair, client);
+
+        let now = pair.time;
+        let client = pair.client_conn_mut(client_ch);
+        client.close(now, VarInt(42), Bytes::new());
+        let mut transmits = Vec::new();
+        let mut buf = Vec::new();
+        while transmits.len() <= 2
+            && let Some(transmit) = client.poll_transmit(now, 1, &mut buf)
+        {
+            let datagram = Bytes::copy_from_slice(&buf[..transmit.size]);
+            transmits.push((transmit, datagram));
+            buf.clear();
+        }
+        assert_eq!(transmits.len(), 1, "{len} bytes of names");
+        pair.client.outbound.extend(transmits);
+        pair.drive();
+
+        let server_ch = pair.server.assert_accept();
+        let server = pair.server_conn_mut(server_ch);
+        let mut connected = false;
+        while let Some(event) = server.poll() {
+            match event {
+                Event::Connected => connected = true,
+                Event::ConnectionLost { reason } if connected => {
+                    assert_matches!(
+                        reason,
+                        ConnectionError::ApplicationClosed(ApplicationClose {
+                            error_code: VarInt(42),
+                            ..
+                        })
+                    );
+                }
+                _ => {}
+            }
+        }
+        if connected {
+            carried += 1;
+        } else {
+            fell_back += 1;
+        }
+    }
+    // The sweep covers a flight carried with the close and one too big for it.
+    assert!(
+        carried > 0 && fell_back > 0,
+        "{carried} carried, {fell_back} fell back"
+    );
+}
+
+fn close_before_the_server_has_the_finished(lost: LostFlight) {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let client_ch = connect_before_the_finished_leaves(&mut pair, client_config());
+
+    const REASON: &[u8] = b"whee";
+    let now = pair.time;
+    let server = pair.server.addr;
+    if lost == LostFlight::Finished {
+        pair.client.drive(now, server);
+        assert!(!pair.client.outbound.is_empty());
+        pair.client.outbound.clear();
+    }
+    pair.client_conn_mut(client_ch)
+        .close(now, VarInt(42), REASON.into());
+    if lost == LostFlight::Close {
+        pair.client.drive(now, server);
+        assert!(!pair.client.outbound.is_empty());
+        pair.client.outbound.clear();
+    }
+    pair.drive();
+
+    let server_ch = pair.server.assert_accept();
+    let server = pair.server_conn_mut(server_ch);
+    assert_matches!(server.poll(), Some(Event::HandshakeDataReady));
+    assert_matches!(server.poll(), Some(Event::HandshakeConfirmed));
+    assert_matches!(server.poll(), Some(Event::Connected));
+    assert_matches!(server.poll(),
+                    Some(Event::ConnectionLost { reason: ConnectionError::ApplicationClosed(
+                        ApplicationClose { error_code: VarInt(42), reason }
+                    )}) if reason == REASON);
+}
+
 #[test]
 fn stats_include_congestion_controller_bandwidth_estimate() {
     const WINDOW: u64 = 12_000;
@@ -355,6 +541,8 @@ fn server_stateless_reset() {
     );
 }
 
+/// A reset answering a locally closed connection drains it without the `ConnectionLost` a local
+/// `close()` never reports
 #[test]
 fn client_stateless_reset() {
     let _guard = subscribe();
@@ -380,13 +568,13 @@ fn client_stateless_reset() {
         (&[0xab; 128][..]).into(),
     );
     info!("resetting");
-    pair.drive();
-    assert_matches!(
-        pair.server_conn_mut(server_ch).poll(),
-        Some(Event::ConnectionLost {
-            reason: ConnectionError::Reset
-        })
-    );
+    // Step without advancing time, so the reset rather than the close timer drains the server
+    pair.drive_server();
+    pair.drive_client();
+    pair.drive_server();
+    let conn = pair.server_conn_mut(server_ch);
+    assert!(conn.is_drained());
+    assert_matches!(conn.poll(), None);
 }
 
 /// The client reads CONNECTION_CLOSE after the server forgets the connection.
@@ -6506,31 +6694,23 @@ fn congestion_callbacks_identify_the_initial_a_retry_acks() {
 
 /// A 1 MB/s bottleneck with a 20ms RTT and a one-BDP buffer carries a BBR upload, once marking
 /// CE at half full and once only tail-dropping when full. BBR answers the marks, so the marking
-/// run holds a shorter queue without drops at the dropping run's goodput.
+/// run holds a shorter queue at the dropping run's goodput, and drops at most the one packet its
+/// first bandwidth probe can overshoot before that probe's marks come back.
 #[test]
 fn bbr_marking_versus_dropping() {
     const TOTAL_BYTES: usize = 4_000_000;
     const BPS_LIMIT: u64 = 1_000_000;
-    const SEED: [u8; 16] = [0; 16];
+    // Replays the whole run: packet numbers, keys, and BBR's probe schedule. This seed's first
+    // probe overshoots by one packet.
+    const SEED: u64 = 66;
 
     let _guard = subscribe();
+    // Both runs replay the same inputs, so they differ only in how the bottleneck signals.
     let run = |marks_ce| {
-        let mut transport = TransportConfig::default();
-        // Random packet-number gaps change their encoded width and therefore the exact queue
-        // schedule. This test grades BBR's response to one reproducible bottleneck, not QUIC's
-        // packet-number randomization.
-        transport.deterministic_packet_numbers(true);
-        let mut bbr = congestion::Bbr3Config::default();
-        bbr.probe_rng_seed(SEED);
-        transport.congestion_controller_factory(Arc::new(bbr));
-        let transport = Arc::new(transport);
-        let mut server_cfg = server_config();
-        server_cfg.transport = transport.clone();
-        let mut pair = Pair::new(Default::default(), server_cfg);
+        entropy::reseed(SEED);
+        let mut pair = Pair::new(Default::default(), server_config());
         pair.latency = Duration::from_millis(10);
-        let mut client_cfg = client_config();
-        client_cfg.transport = transport;
-        let (client_ch, server_ch) = pair.connect_with(client_cfg);
+        let (client_ch, server_ch) = pair.connect_with(client_config());
         pair.to_server.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 20_000, marks_ce));
         let time = upload(&mut pair, client_ch, server_ch, TOTAL_BYTES, |_| {});
         let goodput = TOTAL_BYTES as f64 / time.as_secs_f64();
@@ -6552,21 +6732,26 @@ fn bbr_marking_versus_dropping() {
 
     let (marking_goodput, marking) = run(true);
     let (dropping_goodput, dropping) = run(false);
-    // Measured at 4.0-4.7ms mean delay for marking and 7.7ms for dropping, 0.78-0.97s and 1.67s
-    // past the marking threshold, and about 32 drops when dropping. Without a CE response the
-    // marking run drops about 35 packets, at 7.6ms and 1.64s.
-    assert!(marking.marked > 0, "seed {SEED:?}");
-    assert_eq!(marking.dropped, 0, "seed {SEED:?}");
-    assert!(dropping.dropped > 0, "seed {SEED:?}");
+    // Over seeds 0-6999: 3.6-5.3ms mean delay for marking and 6.9-8.4ms for dropping, 0.68-1.13s
+    // and 1.46-1.80s past the marking threshold, and 24-38 drops when dropping. Without a CE
+    // response this seed's marking run drops 35 packets, at 7.4ms and 1.59s.
+    //
+    // The marking run drops one packet on 1% of those seeds, never more. The first probe after
+    // Startup grows inflight exponentially, and its first mark comes back 1.5 RTTs after the
+    // queue crosses half full: a full RTT plus the marked packet's own queueing. BBR answers that
+    // first marked ACK, but the queue can reach the buffer's edge just before it.
+    assert!(marking.marked > 0, "seed {SEED}");
+    assert!(marking.dropped <= 1, "seed {SEED}");
+    assert!(dropping.dropped > 0, "seed {SEED}");
     assert!(
         marking.mean_delay() * 4 < dropping.mean_delay() * 3,
-        "seed {SEED:?}"
+        "seed {SEED}"
     );
     assert!(
         marking.congested * 4 < dropping.congested * 3,
-        "seed {SEED:?}"
+        "seed {SEED}"
     );
-    assert!(marking_goodput > 0.9 * dropping_goodput, "seed {SEED:?}");
+    assert!(marking_goodput > 0.9 * dropping_goodput, "seed {SEED}");
 }
 
 /// A BBR upload learns a 2 MB/s bottleneck at a 50ms RTT, then the connection idles on
@@ -6576,12 +6761,11 @@ fn bbr_marking_versus_dropping() {
 fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
     const BPS_LIMIT: u64 = 2_000_000;
     const BURST: usize = 250_000;
+    const SEED: u64 = 1;
 
     let _guard = subscribe();
+    entropy::reseed(SEED);
     let mut transport = TransportConfig::default();
-    let mut bbr = congestion::Bbr3Config::default();
-    bbr.probe_rng_seed([1; 16]);
-    transport.congestion_controller_factory(Arc::new(bbr));
     // Only the sender pings. A ping from the receiver would reset the sender's keep-alive timer,
     // leaving its controller nothing to sample during the idle.
     transport.keep_alive_interval(Some(Duration::from_secs(10)));
@@ -6615,7 +6799,7 @@ fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
     // burst takes 720ms.
     assert!(
         min_pacing * 10 >= learned * 9,
-        "paced at {min_pacing} B/s after learning {learned} B/s"
+        "paced at {min_pacing} B/s after learning {learned} B/s, seed {SEED}"
     );
 }
 

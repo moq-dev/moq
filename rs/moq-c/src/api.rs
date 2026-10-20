@@ -527,6 +527,12 @@ pub struct moq_track_info {
 	/// Whether `timescale` is set. When false, the default microsecond timescale
 	/// applies, matching the `timestamp_us` units used everywhere else in this ABI.
 	pub timescale_present: bool,
+
+	/// A joining subscriber asks for a new group once the newest group's bytes after its
+	/// first frame exceed `refresh` times that frame. `0` asks once any frame follows the first.
+	pub refresh: u32,
+	/// Whether `refresh` is set. When false, a joining subscriber never asks for a new group.
+	pub refresh_present: bool,
 }
 
 impl TryFrom<&moq_track_info> for moq_net::track::Info {
@@ -544,6 +550,9 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
 		}
+		if info.refresh_present {
+			out = out.with_refresh(info.refresh);
+		}
 		Ok(out)
 	}
 }
@@ -551,12 +560,13 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 /// Whether a published track has subscribers, as reported by a demand watcher.
 ///
 /// The positive values an `on_demand` callback receives; `0` and negative codes are
-/// the terminal statuses every callback shares.
+/// the terminal statuses every callback shares. [moq_publish_demand_wanted] reads which
+/// group the subscribers want.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_demand {
-	/// At least one subscriber is active.
+	/// At least one subscriber is active. Repeats when the wanted group moves.
 	MOQ_DEMAND_USED = 1,
 	/// No subscriber is active.
 	MOQ_DEMAND_UNUSED = 2,
@@ -1140,7 +1150,7 @@ pub struct moq_client_config {
 	pub quic_mtu_discovery: bool,
 	pub has_quic_mtu_discovery: bool,
 
-	/// Congestion control family name, or NULL for the backend's choice.
+	/// Congestion control family name (`loss`, `delay`, or `none`), or NULL for the backend's choice.
 	pub quic_congestion_control: *const c_char,
 	pub quic_congestion_control_len: usize,
 
@@ -1148,6 +1158,10 @@ pub struct moq_client_config {
 	/// compile-time optional; see [moq_qlog_supported].
 	pub quic_qlog: *const c_char,
 	pub quic_qlog_len: usize,
+
+	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
+	/// decrypting a capture. Off when false; on without `SSLKEYLOGFILE` fails the dial.
+	pub quic_keylog: bool,
 }
 
 /// The settings [moq_session_connect] dials with when given NULL.
@@ -1437,6 +1451,10 @@ pub struct moq_server_config {
 	/// fingerprint ([moq_server_fingerprints]) or disable verification.
 	pub tls_generate: *const moq_string,
 	pub tls_generate_len: usize,
+
+	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
+	/// decrypting a capture. Off when false; on without `SSLKEYLOGFILE` fails the listen.
+	pub quic_keylog: bool,
 }
 
 /// Build the listener `config` describes, binding its socket.
@@ -1460,9 +1478,9 @@ unsafe fn parse_server(config: &moq_server_config) -> Result<moq_tokio::Server, 
 		.collect();
 	listen.tls.generate = unsafe { ffi::parse_strings(config.tls_generate, config.tls_generate_len)? };
 
-	listen
-		.init(Default::default())
-		.map_err(|err| Error::InvalidConfig(err.to_string()))
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.keylog = Some(config.quic_keylog);
+	listen.init(quic).map_err(|err| Error::InvalidConfig(err.to_string()))
 }
 
 /// Listen for incoming sessions.
@@ -2221,10 +2239,11 @@ pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 /// Watch whether a media track has subscribers, so an encoder runs only while someone watches.
 ///
 /// `on_demand` fires right away with the current [moq_demand] state, again on every
-/// change, then exactly once more with a terminal code: `0` (the track ended or the
-/// watcher was stopped with [moq_publish_demand_cancel]) or a negative error. After the
-/// terminal (`<= 0`) callback, `user_data` is never touched again. Reporting the current
-/// state first means a track that went unused before the watcher existed still reports it.
+/// change, including a move of the wanted group that [moq_publish_demand_wanted] reads,
+/// then exactly once more with a terminal code: `0` (the track ended or the watcher was
+/// stopped with [moq_publish_demand_cancel]) or a negative error. After the terminal
+/// (`<= 0`) callback, `user_data` is never touched again. Reporting the current state
+/// first means a track that went unused before the watcher existed still reports it.
 ///
 /// A container handle is refused: it publishes several tracks and has no single demand.
 ///
@@ -2259,6 +2278,29 @@ pub extern "C" fn moq_publish_demand_cancel(watcher: u32) -> i32 {
 	ffi::enter(move || {
 		let watcher = ffi::parse_id(watcher)?;
 		State::lock().publish.demand_close(watcher)
+	})
+}
+
+/// Read the group a demand watcher's subscribers want, typically from its `on_demand` callback.
+///
+/// `present` is false while nobody subscribes. Otherwise subscribers want `group` or later:
+/// once `group` passes the largest group written, start a new one (a keyframe). `group`
+/// never goes back, so once a group reaches it nothing is pending until a joiner asks again.
+///
+/// Returns zero on success, or a negative code once the watcher's terminal callback fired.
+///
+/// # Safety
+/// - `group` and `present` must be valid pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_demand_wanted(watcher: u32, group: *mut u64, present: *mut bool) -> i32 {
+	ffi::enter(move || {
+		let watcher = ffi::parse_id(watcher)?;
+		let group = unsafe { group.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let present = unsafe { present.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let wanted = State::lock().publish.demand_wanted(watcher)?;
+		*group = wanted.unwrap_or(0);
+		*present = wanted.is_some();
+		Ok(())
 	})
 }
 

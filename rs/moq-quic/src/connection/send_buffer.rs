@@ -219,6 +219,11 @@ impl SendBuffer {
         self.offset
     }
 
+    /// The end of the contiguous acknowledged prefix
+    pub(super) fn acked(&self) -> u64 {
+        self.offset - self.unacked_len as u64
+    }
+
     /// Whether all sent data has been acknowledged
     pub(super) fn is_fully_acked(&self) -> bool {
         self.unacked_len == 0

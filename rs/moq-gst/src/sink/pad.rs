@@ -1960,14 +1960,17 @@ mod tests {
 
 		let snapshot = catalog.snapshot();
 		let track = snapshot.video.renditions.keys().next().expect("a video rendition");
-		let subscriber = broadcast
+		let mut subscriber = broadcast
 			.consume()
 			.track(track)
 			.expect("the rendition track is published")
 			.subscribe(None)
 			.await
 			.expect("subscribe to the rendition track");
-		assert!(subscriber.latest().is_some(), "the IDR AU emitted a frame to the track");
+		assert!(
+			subscriber.largest().await.is_some(),
+			"the IDR AU emitted a frame to the track"
+		);
 	}
 
 	// A regressing PTS within an Active timeline still emits: frames arrive in decode order and B-frames

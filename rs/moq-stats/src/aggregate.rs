@@ -172,10 +172,10 @@ impl Consumer {
 		}
 	}
 
-	/// A merged reader over auth `root`'s presence track, holding it on every
+	/// A merged reader over `label`'s presence track, holding it on every
 	/// node broadcast in the group; see [`Self::totals`].
-	pub fn presence(&self, root: impl AsPath) -> PresenceConsumer {
-		let name = presence_track(root, self.config.compression);
+	pub fn presence(&self, label: impl AsPath) -> PresenceConsumer {
+		let name = presence_track(label, self.config.compression);
 		PresenceConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
@@ -231,11 +231,11 @@ impl SessionsConsumer {
 	/// The next merged frame, or `None` once the announce stream ends.
 	pub async fn next(&mut self) -> Result<Option<SessionsFrame>> {
 		let frame = kio::wait(|waiter| self.inner.poll_next(waiter)).await?;
-		Ok(frame.map(|frame| frame.into_iter().map(|(root, gauge)| (root, gauge.0)).collect()))
+		Ok(frame.map(|frame| frame.into_iter().map(|(label, gauge)| (label, gauge.0)).collect()))
 	}
 }
 
-/// A merged reader over one root's presence track across every node in the
+/// A merged reader over one label's presence track across every node in the
 /// group; see [`TotalsConsumer`].
 pub struct PresenceConsumer {
 	inner: Merged<Presence>,
@@ -393,14 +393,16 @@ impl Mergeable for Presence {
 			|| self.requests < prev.requests
 			|| self.sessions_started < prev.sessions_started
 			|| self.sessions_ended < prev.sessions_ended
+			|| self.sent_bytes < prev.sent_bytes
+			|| self.received_bytes < prev.received_bytes
 			|| self.announces_peak < prev.announces_peak
 			|| self.subscriptions_peak < prev.subscriptions_peak
 	}
 }
 
-/// One root's sessions on a sessions track, merged as a gauge: a departed
+/// One label's sessions on a sessions track, merged as a gauge: a departed
 /// node's contribution leaves at once rather than staying with its pairs
-/// closed, and a root leaving a node's frame is not a reset.
+/// closed, and a label leaving a node's frame is not a reset.
 #[derive(Debug, Default, Clone, Copy, PartialEq, serde::Deserialize)]
 #[serde(transparent)]
 struct Gauge(Presence);
@@ -1026,10 +1028,10 @@ mod tests {
 	}
 
 	/// Record `bytes` of egress traffic on `path` in `producer`'s registry under
-	/// `tier`/`root`, by driving a throwaway tagged broadcast. The broadcast lives
+	/// `tier`/`label`, by driving a throwaway tagged broadcast. The broadcast lives
 	/// on its own origin so it never lands on the stats origin.
-	async fn feed(producer: &Producer, tier: Tier, root: &str, path: &str, bytes: usize) -> Feed {
-		let ctx = producer.registry().tier(tier).session(root);
+	async fn feed(producer: &Producer, tier: Tier, label: &str, path: &str, bytes: usize) -> Feed {
+		let ctx = producer.registry().tier(tier).session(label);
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
@@ -1751,7 +1753,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn merges_sessions_across_nodes() {
-		// Session presence sums per auth root across nodes.
+		// Session presence sums per stats label across nodes.
 		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
 		let node_b = node_producer(&origin, "b");
@@ -1769,7 +1771,7 @@ mod tests {
 
 		loop {
 			let frame = sessions.next().await.expect("read").expect("frame");
-			// Each feed opens one session ("acme" root) plus the explicit ones,
+			// Each feed opens one session ("acme" label) plus the explicit ones,
 			// summed across both nodes.
 			if frame.get("acme").map(|p| p.active()) >= Some(4) {
 				break;
@@ -1796,7 +1798,7 @@ mod tests {
 
 		loop {
 			let frame = sessions.next().await.expect("read").expect("frame");
-			// Each feed opens one session ("acme" root) plus the explicit ones,
+			// Each feed opens one session ("acme" label) plus the explicit ones,
 			// summed across both nodes.
 			if frame.get("acme").map(|p| p.active()) >= Some(4) {
 				break;
@@ -2070,6 +2072,21 @@ mod tests {
 	}
 
 	#[test]
+	fn byte_only_regression_begins_another_segment() {
+		let (mut merged, key) = hand_merged::<Presence>();
+		let bytes = |sent, received| {
+			let mut presence = Presence::default();
+			presence.sent_bytes = sent;
+			presence.received_bytes = received;
+			presence
+		};
+		let node = merged.nodes.get_mut(&key).unwrap();
+		node.observe(BTreeMap::from([(String::new(), bytes(6, 4))]));
+		node.observe(BTreeMap::from([(String::new(), bytes(2, 1))]));
+		assert_eq!(merged.merged()[""], bytes(8, 5));
+	}
+
+	#[test]
 	fn a_resume_reopens_closed_pairs_without_going_down() {
 		let (mut merged, key) = hand_merged::<Presence>();
 		let presence = |started, ended| {
@@ -2259,7 +2276,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn presence_survives_join_leave_and_restart() {
-		// One root held across nodes: a node joining adds its sessions, one
+		// One label held across nodes: a node joining adds its sessions, one
 		// leaving closes its sessions but keeps its count, and a restarted node
 		// is a new epoch that adds to it. The merged count never goes down.
 		let origin = produce_origin();

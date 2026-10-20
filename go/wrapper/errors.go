@@ -101,7 +101,8 @@ func IsShutdown(err error) bool {
 }
 
 // IsAuthError reports whether err is an authentication/authorization failure
-// (HTTP 401/403, an expired token, or a protocol Unauthorized or Expired session close).
+// (HTTP 401/403, an expired token, a protocol Unauthorized or Expired session
+// close, or a track revocation).
 func IsAuthError(err error) bool {
 	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrExpired) {
 		return true

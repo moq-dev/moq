@@ -67,6 +67,10 @@ fn decode_init(init: &[u8]) -> (mp4_atom::Ftyp, mp4_atom::Moov) {
 }
 
 fn video_config(codec: mp4_atom::Codec) -> hang::catalog::VideoConfig {
+	video_config_result(codec).unwrap()
+}
+
+fn video_config_result(codec: mp4_atom::Codec) -> crate::Result<hang::catalog::VideoConfig> {
 	let (ftyp, mut moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
 	let trak = moov
 		.trak
@@ -80,9 +84,9 @@ fn video_config(codec: mp4_atom::Codec) -> hang::catalog::VideoConfig {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut import = super::Import::new(broadcast, catalog.reserve());
-	import.decode(&init).unwrap();
-	import.finish().unwrap();
-	catalog.snapshot().video.renditions.values().next().unwrap().clone()
+	import.decode(&init)?;
+	import.finish()?;
+	Ok(catalog.snapshot().video.renditions.values().next().unwrap().clone())
 }
 
 #[test]
@@ -186,6 +190,178 @@ fn in_band_entries_without_parameter_sets_keep_visual_dimensions() {
 				|| matches!(&config.codec, hang::catalog::VideoCodec::H265(h265) if h265.in_band)
 		);
 	}
+}
+
+// Exercise every visual sample-entry path, including initializers with no in-band headers yet.
+fn aspect_entries(anamorphic: bool) -> Vec<mp4_atom::Codec> {
+	use crate::codec::{h264, h265};
+	let avcc = mp4_atom::Avcc::new(
+		if anamorphic {
+			h264::fixtures::SPS_ANAMORPHIC
+		} else {
+			h264::fixtures::SPS_IPB
+		},
+		h264::fixtures::PPS,
+	)
+	.unwrap();
+	let mut bytes = h265::build_hvcc(
+		&[bytes::Bytes::from_static(h265::fixtures::VPS)],
+		&[bytes::Bytes::from_static(if anamorphic {
+			h265::fixtures::SPS_ANAMORPHIC
+		} else {
+			h265::fixtures::SPS_NVENC
+		})],
+		&[bytes::Bytes::from_static(h265::fixtures::PPS)],
+	)
+	.unwrap();
+	let hvcc = mp4_atom::Hvcc::decode_body(&mut bytes).unwrap();
+	let visual = mp4_atom::Visual {
+		width: 1440,
+		height: 1080,
+		..Default::default()
+	};
+	let mut codecs = vec![
+		mp4_atom::Codec::Avc1(mp4_atom::Avc1 {
+			avcc: avcc.clone(),
+			visual: visual.clone(),
+			..Default::default()
+		}),
+		mp4_atom::Codec::Hvc1(mp4_atom::Hvc1 {
+			hvcc: hvcc.clone(),
+			visual: visual.clone(),
+			..Default::default()
+		}),
+	];
+	if !anamorphic {
+		let mut avcc = avcc;
+		avcc.sequence_parameter_sets.clear();
+		avcc.picture_parameter_sets.clear();
+		let mut hvcc = hvcc;
+		hvcc.arrays.clear();
+		codecs.extend([
+			mp4_atom::Codec::Avc3(mp4_atom::Avc3 {
+				avcc,
+				visual: visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Hev1(mp4_atom::Hev1 {
+				hvcc,
+				visual: visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Av01(mp4_atom::Av01 {
+				visual: visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Vp08(mp4_atom::Vp08 {
+				visual: visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Vp09(mp4_atom::Vp09 {
+				visual,
+				..Default::default()
+			}),
+		]);
+	}
+	codecs
+}
+
+fn with_pasp(mut codec: mp4_atom::Codec, horizontal: u32, vertical: u32) -> mp4_atom::Codec {
+	let pasp = Some(mp4_atom::Pasp {
+		h_spacing: horizontal,
+		v_spacing: vertical,
+	});
+	match &mut codec {
+		mp4_atom::Codec::Avc1(c) => c.pasp = pasp,
+		mp4_atom::Codec::Avc3(c) => c.pasp = pasp,
+		mp4_atom::Codec::Hvc1(c) => c.pasp = pasp,
+		mp4_atom::Codec::Hev1(c) => c.pasp = pasp,
+		mp4_atom::Codec::Av01(c) => c.pasp = pasp,
+		mp4_atom::Codec::Vp08(c) => c.pasp = pasp,
+		mp4_atom::Codec::Vp09(c) => c.pasp = pasp,
+		_ => unreachable!(),
+	}
+	codec
+}
+
+#[test]
+fn container_aspect_pasp_fills_missing_sps_aspect() {
+	for codec in aspect_entries(false) {
+		for (spacing, expected) in [
+			((4, 3), (Some(16), Some(9))),
+			((1, 1), (None, None)),
+			((3, 4), (Some(1), Some(1))),
+		] {
+			let config = video_config(with_pasp(codec.clone(), spacing.0, spacing.1));
+			assert_eq!(
+				(config.display_aspect_width, config.display_aspect_height),
+				expected,
+				"{} {spacing:?}",
+				config.codec
+			);
+		}
+	}
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn container_aspect_pasp_conflict_keeps_sps() {
+	for codec in aspect_entries(true) {
+		let config = video_config(with_pasp(codec, 1, 1));
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(Some(16), Some(9))
+		);
+	}
+	logs_assert(|lines| {
+		let conflicts = lines
+			.iter()
+			.filter(|line| line.contains("display aspect disagrees") && line.contains("pasp"))
+			.count();
+		if conflicts == 2 {
+			Ok(())
+		} else {
+			Err(format!("expected two SPS conflicts, got {conflicts}"))
+		}
+	});
+}
+
+#[test]
+#[tracing_test::traced_test]
+fn container_aspect_equivalent_pasp_does_not_warn() {
+	for codec in aspect_entries(true) {
+		let config = video_config(with_pasp(codec, 8, 6));
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(Some(16), Some(9))
+		);
+	}
+	assert!(!logs_contain("display aspect disagrees"));
+}
+
+#[test]
+fn container_aspect_pasp_rejects_invalid_ratios() {
+	for (horizontal, vertical) in [(0, 1), (1, 0), (u32::MAX, 1)] {
+		let codec = mp4_atom::Codec::Av01(mp4_atom::Av01 {
+			visual: mp4_atom::Visual {
+				width: 1440,
+				height: 1080,
+				..Default::default()
+			},
+			..Default::default()
+		});
+		assert!(matches!(
+			video_config_result(with_pasp(codec, horizontal, vertical)),
+			Err(crate::Error::Cmaf(super::Error::InvalidAspect(_)))
+		));
+	}
+	// Large intermediate dimensions are valid when the reduced ratio fits the catalog.
+	let codec = aspect_entries(false).remove(0);
+	let config = video_config(with_pasp(codec, u32::MAX - 3, (u32::MAX - 3) / 4 * 3));
+	assert_eq!(
+		(config.display_aspect_width, config.display_aspect_height),
+		(Some(16), Some(9))
+	);
 }
 
 #[test]

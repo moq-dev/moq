@@ -1,14 +1,29 @@
 /**
- * The JSON a relay POSTs to an auth server per session event, and the grant it answers with.
+ * The JSON a relay POSTs to an auth server per session event, and the grant or refusal it answers with.
  *
- * Mirrors `moq_auth::Request` and `moq_auth::Grant` in the Rust crate: a server written
+ * Mirrors `moq_auth::Request`, `moq_auth::Grant`, and `moq_auth::Refusal` in the Rust crate: a server written
  * in TypeScript validates a request and builds a grant with these schemas.
  *
  * @module
  */
 
+import { Pattern } from "@moq/pattern";
 import * as z from "@zod/mini";
 import { AccessSchema } from "./access.ts";
+
+const PathSchema = z.string().check(
+	z.refine(
+		(path) => {
+			try {
+				Pattern.literal(path);
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		{ message: "invalid path" },
+	),
+);
 
 /** How a session reached the relay; `http` is a one-shot request on the relay's web listener. */
 export const TransportSchema = z.pipe(
@@ -153,6 +168,8 @@ export const GrantSchema = z
 		revalidate: z.optional(z.int().check(z.positive())),
 		/** An opaque label handed to stats, so traffic can be bucketed. */
 		tier: z.optional(z.string()),
+		/** The literal path this session's stats record under, independent of its root. Absent records under the empty label. */
+		label: z.optional(PathSchema),
 		/** The session is a cluster peer (another relay): what it announces entered the cluster elsewhere. */
 		peer: z.optional(z.boolean()),
 		/** The peer is upstream: the relay never offers it a route learned from another upstream. Requires `peer`. */
@@ -170,3 +187,15 @@ export const GrantSchema = z
 		}),
 	);
 export type Grant = z.infer<typeof GrantSchema>;
+
+/** The reason and verified attribution an auth server returns with HTTP 403. */
+export const RefusalSchema = z.object({
+	/** Unknown reason strings read as `refused`. */
+	reason: z.pipe(z.string(), z.catch(z.enum(["refused", "forbidden", "expired"]), "refused")),
+	/** A root named by a verified credential, never an unverified request path. */
+	root: z.optional(PathSchema),
+	/** The tier resolved by the decider; absent uses the default tier. */
+	tier: z.optional(z.string()),
+});
+/** A typed refusal returned by an admission decider. */
+export type Refusal = z.infer<typeof RefusalSchema>;
