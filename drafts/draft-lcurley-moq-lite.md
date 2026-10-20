@@ -1194,6 +1194,7 @@ MUST be 0 when `Group End` is 0, since an unbounded subscription has no end grou
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
 A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscription.
 The start and end group can be changed in either direction (growing or shrinking).
+Lowering `Group Start` covers the groups below the old start that the publisher still holds, not only those that arrive later; a group already sent is not sent again.
 
 ~~~
 SUBSCRIBE_UPDATE Message {
@@ -1618,6 +1619,7 @@ The `Message Length` describes the payload size on the wire.
 - SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
 - Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
+- A SUBSCRIBE_UPDATE that lowers `Group Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - A publisher SHOULD order a datagram among the subscription's streams as if it were its Group's stream, ahead of that stream when both exist. It SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.

@@ -2102,46 +2102,15 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::PublishNamespace, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				stream.writer.buffer_varint(ietf::PublishNamespaceError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::PublishNamespaceError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.buffer_varint(ietf::RequestError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				stream.writer.buffer_varint(ietf::RequestError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
-		Ok(())
+		super::request_stream::write_error(
+			&mut stream.writer,
+			request::Kind::PublishNamespace,
+			request_id,
+			err,
+			reason,
+			self.version,
+		)
+		.await
 	}
 
 	/// Refuse a PUBLISH on the bidi stream that carries it.
@@ -2152,46 +2121,15 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::Publish, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				stream.writer.varint(ietf::PublishError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::PublishError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.varint(ietf::RequestError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				stream.writer.varint(ietf::RequestError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
-		Ok(())
+		super::request_stream::write_error(
+			&mut stream.writer,
+			request::Kind::Publish,
+			request_id,
+			err,
+			reason,
+			self.version,
+		)
+		.await
 	}
 
 	/// Attach the route for one newly advertised namespace, returning the id that names
@@ -3117,11 +3055,11 @@ where
 			group: largest.group,
 			object: largest.object.saturating_add(1),
 		});
-		// REQUEST_UPDATEs sent and not yet answered. Drafts 14-16 answer on the control
-		// stream by the update's own Request ID, which reaches no subscription, so only
-		// later drafts count them.
+		// REQUEST_UPDATEs sent and not yet answered. Draft-14 answers none, and draft-15's
+		// answer names only the update's own Request ID, which reaches no subscription, so
+		// only draft-16 on count them; the adapter routes draft-16's back by that ID.
 		let unanswered = AtomicU64::new(0);
-		let answered_here = !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16);
+		let answered_here = !matches!(self.version, Version::Draft14 | Version::Draft15);
 
 		let mut fetch_done = fetching.is_none();
 		// Our grant stopped covering the track, which is aborted rather than kept lingering.

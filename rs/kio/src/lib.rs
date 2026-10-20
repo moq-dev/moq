@@ -16,6 +16,8 @@
 //! [`coop`] bounds the passes a loop makes per poll, so one that always finds
 //! work ready still yields.
 
+#![warn(missing_docs)]
+
 use std::{
 	fmt,
 	ops::{Deref, DerefMut},

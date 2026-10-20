@@ -29,6 +29,7 @@ mod publish;
 mod server;
 mod session;
 mod state;
+mod task;
 mod video;
 
 pub use api::*;
