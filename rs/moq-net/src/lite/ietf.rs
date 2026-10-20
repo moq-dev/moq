@@ -759,7 +759,7 @@ mod tests {
 			let ingress = crate::ietf::Properties::decode(&mut Decoder::new(&list, version.into()), version).unwrap();
 			assert_eq!(ingress.unknown.values.len(), repeats + 1, "{version}");
 			assert!(
-				ingress.unknown.refused(&crate::track::Info::default()).is_none(),
+				ingress.unknown.refused(&crate::track::Info::default(), false).is_none(),
 				"{version}"
 			);
 
@@ -806,7 +806,7 @@ mod tests {
 		assert!(ingress.dynamic_groups);
 		assert!(!fits(&ingress.unknown));
 		assert!(matches!(
-			ingress.unknown.refused(&crate::track::Info::default()),
+			ingress.unknown.refused(&crate::track::Info::default(), false),
 			Some(crate::Error::Unsupported)
 		));
 	}
@@ -1317,6 +1317,27 @@ mod hop_tests {
 				true => assert!(res.is_ok(), "{timescale}: {res:?}"),
 				false => assert!(matches!(res, Err(crate::Error::Unsupported)), "{timescale}: {res:?}"),
 			}
+		}
+	}
+
+	/// A sealed DYNAMIC_GROUPS crosses the hop as it arrived, whatever it says: lite
+	/// TRACK_INFO has no refresh to compare it with until moq-dev/moq#6030.
+	#[moq_clock::test]
+	async fn a_sealed_dynamic_groups_crosses_the_hop() {
+		for value in [0, 1] {
+			let mut sealed = Vec::new();
+			let e = &mut Encoder::new(&mut sealed, crate::ietf::Version::Draft22.into());
+			e.varint(0x30).unwrap();
+			e.varint(value).unwrap();
+			let res = subscribe_across(crate::model::object::TrackProperties {
+				values: vec![Property {
+					id: IMMUTABLE,
+					value: Value::Bytes(sealed.into()),
+				}],
+				encoding: Some(Encoding::Draft19),
+			})
+			.await;
+			assert!(res.is_ok(), "{value}: {res:?}");
 		}
 	}
 

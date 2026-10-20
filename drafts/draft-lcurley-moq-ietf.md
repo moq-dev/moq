@@ -201,6 +201,7 @@ The Immutable Properties may still hold one of those five, which a relay forward
 A relay acts on TRACK_INFO, so a sealed value MUST equal the one it restates: MAX_CACHE_DURATION the Max Age in milliseconds, TIMESCALE the Timescale, DEFAULT_PUBLISHER_PRIORITY the priority, and DYNAMIC_GROUPS whether the track takes a new group request.
 A sealed DEFAULT_PUBLISHER_GROUP_ORDER is advisory: a relay serves its own order and forwards the sealed value unchanged, whatever it says.
 A relay refuses a track whose sealed value differs, from a {{moqt}} publisher or over this extension, as unsupported.
+TRACK_INFO does not yet say whether a track takes a new group request, so a relay receiving a track over this extension forwards a sealed DYNAMIC_GROUPS unchanged rather than comparing it.
 
 A relay neither processes nor forwards a track with a Mandatory Track Property (0x4000 to 0x7FFF), mutable or inside the Immutable Properties, so a publisher never sends one.
 A receiver refuses such a track as {{moqt}} ingress does, with an unsupported extension error.

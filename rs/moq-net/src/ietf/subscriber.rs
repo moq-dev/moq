@@ -482,7 +482,7 @@ fn accepted_info(properties: &ietf::Properties) -> track::Info {
 
 /// Why a track answered with `properties` is neither processed nor forwarded, if it is not.
 fn refused(properties: &ietf::Properties) -> Option<Error> {
-	properties.unknown.refused(&accepted_info(properties))
+	properties.unknown.refused(&accepted_info(properties), false)
 }
 
 /// The Largest Group a subscription knows: its SUBSCRIBE_OK's, or a newer one since.
