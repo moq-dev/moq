@@ -51,7 +51,7 @@ for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-p
 
 			const start = performance.now();
 			for (let index = 0; index < updates; index++) {
-				handles[0].update({ cost: BigInt(index + 1) });
+				handles[0].updateRoute({ cost: BigInt(index + 1) });
 				await new Promise<void>((resolve) => setImmediate(resolve));
 			}
 			const elapsed = performance.now() - start;
