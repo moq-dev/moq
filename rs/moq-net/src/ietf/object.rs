@@ -60,6 +60,16 @@ pub(crate) fn status_defined(status: u64, version: Version) -> bool {
 	}
 }
 
+/// Refuse the properties of an object with a frame on a track in `timescale` if they
+/// leave no room for the Timestamp egress restates.
+pub(crate) fn check_frame(properties: &Properties, timescale: Option<Timescale>) -> Result<(), Error> {
+	// A list at the limit with a small Timestamp cannot take back a larger one on egress.
+	match properties.heap() > max_block(timescale) as u64 {
+		true => Err(Error::Unsupported),
+		false => Ok(()),
+	}
+}
+
 /// Only draft-14 lets a status object, such as END_OF_GROUP, carry properties.
 #[cfg(feature = "async")]
 pub(crate) fn status_has_properties(version: Version) -> bool {
@@ -272,6 +282,9 @@ pub(crate) fn values(block: &crate::model::object::Block) -> Result<Vec<Property
 
 /// Read an object's property list on a track in `timescale`. A timed track's frame holds
 /// the object's time, its mutable Timestamp or else a sealed one, so the block does not.
+///
+/// The caller applies [`check_frame`] once the object has a frame: a draft-14 status
+/// object, whose list arrives before its status, may fill the whole block.
 pub(crate) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>) -> Result<Decoded, Error> {
 	decode(data, version, timescale, true)
 }
@@ -290,8 +303,7 @@ fn decode(data: &Bytes, version: Version, timescale: Option<Timescale>, framed: 
 		sealed_time: timed(parsed.sealed_time, timescale)?,
 		block: block(&parsed.values, encoding(version))?,
 	};
-	// A list at the limit with a small Timestamp cannot take back a larger one on egress.
-	if properties.heap() > max_block(lifted) as u64 {
+	if properties.heap() > MAX_BLOCK as u64 {
 		return Err(Error::Unsupported);
 	}
 	Ok(Decoded {
@@ -591,16 +603,16 @@ mod tests {
 		};
 		let decoded = read(&list(limit), Version::Draft22, milli).unwrap();
 		assert_eq!(decoded.properties.heap(), limit as u64);
+		assert!(check_frame(&decoded.properties, milli).is_ok());
 		let latest = Timestamp::new((1 << 62) - 1, Timescale::MILLI).unwrap();
 		let written = write(&decoded.properties, Some(latest), Version::Draft22, milli).unwrap();
 		assert_eq!(written.len(), MAX_BLOCK);
 
-		assert!(matches!(
-			read(&list(limit + 1), Version::Draft22, milli),
-			Err(Error::Unsupported)
-		));
+		let over = read(&list(limit + 1), Version::Draft22, milli).unwrap();
+		assert!(matches!(check_frame(&over.properties, milli), Err(Error::Unsupported)));
 		// An untimed track has no Timestamp to restate, so its block may fill the limit.
-		assert!(read(&list(MAX_BLOCK - 2), Version::Draft22, None).is_ok());
+		let untimed = read(&list(MAX_BLOCK - 2), Version::Draft22, None).unwrap();
+		assert!(check_frame(&untimed.properties, None).is_ok());
 
 		// The same bound on a block arriving over the lite hop.
 		let encoding = Encoding::Draft19;

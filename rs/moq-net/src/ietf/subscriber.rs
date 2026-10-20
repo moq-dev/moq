@@ -4121,6 +4121,7 @@ where
 			),
 			false => {
 				let decoded = super::object::read(&properties, self.version, track.timescale)?;
+				super::object::check_frame(&decoded.properties, track.timescale)?;
 				(decoded.timestamp, decoded.properties)
 			}
 		};
@@ -4832,6 +4833,7 @@ where
 			std::future::poll_fn(|cx| stream.poll_skip(cx, &mut remaining)).await?;
 			return Ok(Fetched::Frame);
 		}
+		super::object::check_frame(&decoded.properties, timescale)?;
 		let timestamp = object_time(timescale, decoded.timestamp)?;
 		let plain = id == producer.frame_count() as u64 && decoded.properties.is_empty();
 		let fields = (!plain).then(|| {
@@ -5562,6 +5564,7 @@ fn object_time(
 
 impl GroupIngest {
 	fn header(&mut self, group: &group::Producer, info: frame::Info) -> Result<frame::Header, Error> {
+		super::object::check_frame(&self.properties, self.timescale)?;
 		let id = self.prior_object.expect("payload follows object ID");
 		group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
 		let plain = id == group.frame_count() as u64 && self.properties.is_empty();
@@ -12701,6 +12704,84 @@ mod stitch_tests {
 			.unwrap();
 		let end = producer.consume().end_object().expect("the END_OF_GROUP object");
 		assert_eq!(leaves(&end.properties), status, "fetch");
+	}
+
+	/// A draft-14 status object has no frame, so its block may fill the whole limit on a
+	/// timed track, though its list arrives before the status says so. A framed object's
+	/// block leaves room for the Timestamp egress restates.
+	#[moq_clock::test]
+	async fn a_status_object_fills_the_whole_block() {
+		let version = Version::Draft14;
+		let milli = Some(Timescale::MILLI);
+		// A block of `size` held bytes: one opaque property, its key, a four-byte length,
+		// then bytes. A framed object's list adds its Timestamp, which the frame holds.
+		let block = |size: usize, framed: bool| {
+			let mut block = Vec::new();
+			let w = &mut Encoder::new(&mut block, version.into());
+			if framed {
+				w.varint(0x10u64).unwrap();
+				w.varint(5u64).unwrap();
+			}
+			w.varint(0x21u64).unwrap();
+			w.bytes(&vec![7; size - 5]).unwrap();
+			block
+		};
+		let full = block(super::super::object::MAX_BLOCK, false);
+		let limit = super::super::object::max_block(milli);
+
+		for (properties, status, ok) in [
+			(&full, Some(END_OF_GROUP), true),
+			(&block(limit + 1, true), None, false),
+			(&block(limit, true), None, true),
+		] {
+			let script = object_stream(version, true, &[(0, properties, status)]);
+			let mut h = Harness::with_timescale(Fill::Done, vec![script], milli);
+			h.subscriber.version = version;
+			let mut stream = h.stream().await.with_version(version);
+			let result = h.subscriber.clone().recv_group(&mut stream).await;
+			match ok {
+				true => assert!(result.is_ok(), "subgroup {}: {result:?}", properties.len()),
+				false => assert!(matches!(result, Err(Error::Unsupported)), "subgroup: {result:?}"),
+			}
+
+			// The fetch harness's track is untimed, so a framed object it keeps cannot be timed.
+			if ok && status.is_none() {
+				continue;
+			}
+			// A draft-14 FETCH object: Group, Subgroup, Object, priority, then its properties,
+			// and an empty payload with its status or a one-byte payload.
+			let mut objects = Vec::new();
+			let w = &mut Encoder::new(&mut objects, version.into());
+			for value in [SEQUENCE, 0, 0] {
+				w.varint(value).unwrap();
+			}
+			w.u8(128);
+			w.bytes(properties).unwrap();
+			match status {
+				Some(status) => {
+					w.varint(0u64).unwrap();
+					w.varint(status).unwrap();
+				}
+				None => {
+					w.varint(1u64).unwrap();
+					w.u8(99);
+				}
+			}
+			let mut run = GroupFetchRun::new(version, objects).await;
+			let mut producer = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+			let result = run
+				.subscriber
+				.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(1), milli)
+				.await;
+			match ok {
+				true => assert!(result.is_ok(), "fetch {}: {result:?}", properties.len()),
+				false => assert!(matches!(result, Err(Error::Unsupported)), "fetch: {result:?}"),
+			}
+			if status.is_some() {
+				let end = producer.consume().end_object().expect("the END_OF_GROUP object");
+				assert_eq!(end.properties.heap(), full.len() as u64);
+			}
+		}
 	}
 
 	#[moq_clock::test]
