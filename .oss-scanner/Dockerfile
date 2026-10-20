@@ -16,7 +16,8 @@ WORKDIR /src
 # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
 # CI runs tests with nextest, one process per test, and some tests rely on that isolation.
 RUN rustup show active-toolchain || rustup toolchain install \
-    && curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$CARGO_HOME/bin" \
+    && case "$(uname -m)" in aarch64) nextest=linux-arm ;; *) nextest=linux ;; esac \
+    && curl -LsSf "https://get.nexte.st/latest/$nextest" | tar zxf - -C "$CARGO_HOME/bin" \
     && cargo nextest --version
 
 ARG CRATES="kio hang moq-auth moq-clock moq-flate moq-hls moq-ice moq-json moq-loc moq-msf moq-mux moq-net moq-pattern moq-quic moq-relay moq-rtc moq-rtmp moq-rtsp moq-sock moq-srt moq-stats moq-tokio moq-uring moq-cli"
