@@ -101,9 +101,6 @@ interface RunGroup {
 	/** The subscription ID. */
 	sub: bigint;
 
-	/** The subscription's cursor over the track, which learns of a group its stream failed to carry. */
-	track: track.Subscriber;
-
 	/** The group to serve. */
 	group: group.Consumer;
 
@@ -1238,7 +1235,6 @@ export class Publisher {
 
 				const options: RunGroup = {
 					sub,
-					track,
 					group,
 					timescale,
 					priority,
@@ -1505,7 +1501,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
-		const { sub, track, group, timescale, priority, start: startFrame, end: endFrame } = options;
+		const { sub, group, timescale, priority, start: startFrame, end: endFrame } = options;
 		// This model holds whole groups, so frame `startFrame` is always reachable unless
 		// the group ends first. Declaring it up front keeps the stream self-describing.
 		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
@@ -1563,24 +1559,28 @@ export class Publisher {
 			}
 
 			stream.close();
-			group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			// One that never completes is reset past its deadline and reported the same way. Either
-			// way the track learns which group its subscriber did not get.
+			// The group's budget still applies while the FIN is pending, as the Rust GroupServe
+			// does; the live edge, which no budget can expire, falls to a deadline sized to the
+			// group, and a stream that never completes is reset past it.
 			let failed: Error | undefined;
 			try {
-				failed = await timeout(
-					Nano.fromMilli(Milli(GROUP_COMPLETION_TIMEOUT + bytes / GROUP_COMPLETION_RATE)),
-					stream.closed.then(() => undefined, error),
+				failed = await hooks.guardGroup(group, () =>
+					timeout(
+						Nano.fromMilli(Milli(GROUP_COMPLETION_TIMEOUT + bytes / GROUP_COMPLETION_RATE)),
+						stream.closed.then(() => undefined, error),
+					),
 				);
 			} catch (err: unknown) {
-				if (!(err instanceof Elapsed)) throw err;
-				failed = new StreamError(StreamCode.DeliveryTimeout, {
-					message: `group ${group.sequence} stream never completed`,
-				});
+				failed =
+					err instanceof Elapsed
+						? new StreamError(StreamCode.DeliveryTimeout, {
+								message: `group ${group.sequence} stream never completed`,
+							})
+						: error(err);
 				stream.reset(failed);
 			}
-			if (failed) hooks.failGroup(track, group.sequence, failed);
+			group.close();
 			return failed;
 		} catch (err: unknown) {
 			const e = error(err);

@@ -3,7 +3,7 @@ import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import { fromTransport, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
+import { fromTransport, SessionCode, StreamCode, toStreamCode } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks } from "../internal.ts";
@@ -814,8 +814,8 @@ test("lite draft-06: a cut dropped then re-created is not served", async () => {
 });
 
 // A group stream that never completes after its FIN keeps the only copy the subscriber could
-// still receive. Past the deadline its size allows, the publisher resets it, drops the group,
-// and names it on the track; the next group is unaffected.
+// still receive. Past the deadline its size allows, the publisher resets it and drops the
+// group; the next group is unaffected.
 test("lite draft-06: a group stream that never completes is reset past its deadline", async () => {
 	const clock = new Manual();
 	const restore = clock.install();
@@ -831,14 +831,9 @@ test("lite draft-06: a group stream that never completes is reset past its deadl
 		// The frame and the FIN follow the header; the deadline starts once they are written.
 		await flush();
 		await clock.advanceAsync(Nano.fromMilli(Milli(2_999)));
-		expect(sub.track.failed.peek()).toBeUndefined();
+		expect(await Promise.race([reset, flush().then(() => "open")])).toBe("open");
 		await clock.advanceAsync(Nano.fromMilli(Milli(2)));
 		expect(toStreamCode(fromTransport(await reset))).toBe(StreamCode.DeliveryTimeout);
-		const failed = sub.track.failed.peek();
-		if (!failed) throw new Error("expected the track to report the failed group");
-		expect(failed.sequence).toBe(1);
-		expect(failed.error).toBeInstanceOf(StreamError);
-		expect((failed.error as StreamError).code).toBe(StreamCode.DeliveryTimeout);
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
