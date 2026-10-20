@@ -332,6 +332,11 @@ send-depth:
 quic-stress:
     just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
 
+# Run the ignored mDNS tests, which multicast on the host's network interfaces.
+multicast:
+    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::apps_partition_discovery)'
+    just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
+
 # Run moq-audio's ignored output-device tests against a private PulseAudio null sink.
 audio-devices:
     #!/usr/bin/env bash
