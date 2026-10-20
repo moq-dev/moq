@@ -68,7 +68,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 - [A reset group keeps its header](/quest/m1/quic/group-reset.md) - a lite
   publisher resets a group with `RESET_STREAM_AT`, so its subscriber drops the
   tail grace
-- [0-RTT streams adopt a raised stream window](/quest/m1/quic/zero-rtt-window-raise.md) - a server's larger stream window reaches the client's 0-RTT streams, so they no longer stall
 
 ## Related
 

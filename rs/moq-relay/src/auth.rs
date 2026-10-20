@@ -1047,6 +1047,26 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 	out
 }
 
+/// Build an auth request from the path, credential, and role carried in SETUP.
+pub(crate) fn request_for_setup<S: moq_net::transport::poll::Session>(
+	auth: &Auth,
+	setup: &moq_net::server::Handshake<S>,
+	transport: moq_auth::Transport,
+) -> Request {
+	let (path, query) = match setup.path().split_once('?') {
+		Some((path, query)) => (path, Some(query.to_string())),
+		None => (setup.path(), None),
+	};
+	let mut request = auth.request(transport, if path.is_empty() { "/" } else { path });
+	request.query = query;
+	request.token = setup.token().map(|token| moq_auth::Token {
+		kind: token.kind,
+		value: token.value.clone(),
+	});
+	request.role = setup.role().and_then(role);
+	request
+}
+
 /// The auth transport for a session's transport.
 fn transport(transport: moq_tokio::Transport) -> moq_auth::Transport {
 	match transport {

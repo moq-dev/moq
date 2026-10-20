@@ -114,6 +114,9 @@ class Server:
             publish=origin,
             consume=origin,
         )
+
+    ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
+    decrypting a capture; without ``SSLKEYLOGFILE`` entering the server fails.
     """
 
     def __init__(
@@ -125,6 +128,7 @@ class Server:
         tls_generate: Sequence[str] = (),
         versions: Sequence[str] = (),
         max_streams: int | None = None,
+        keylog: bool = False,
         publish: OriginProducer | None = None,
         consume: OriginProducer | None = None,
     ) -> None:
@@ -141,7 +145,7 @@ class Server:
                 key=_strs(tls_key, "tls_key"),
                 generate=_strs(tls_generate, "tls_generate"),
             ),
-            quic=MoqQuicConfig(max_streams=max_streams),
+            quic=MoqQuicConfig(max_streams=max_streams, keylog=keylog),
             publish=None if publish is None else publish._inner,
             consume=None if consume is None else consume._inner,
         )

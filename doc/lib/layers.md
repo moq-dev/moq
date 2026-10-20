@@ -46,8 +46,8 @@ Sessions, origins, broadcasts, tracks, and groups: `Client`, `Server`,
 
 The catalog, encoded-media imports, and container-decoded reads, merging
 Rust's hang and moq-mux: `CatalogProducer`, `CatalogConsumer`, `Timebase`,
-`TrackProducer`, `TrackStreamProducer`, `ContainerProducer`,
-`ContainerStreamProducer`, `TrackConsumer`, and `GroupConsumer`.
+`TrackProducer`, `TrackStreamProducer`, `ContainerProducer`, `TrackConsumer`,
+and `GroupConsumer`.
 
 | Language | Module | Example |
 | --- | --- | --- |

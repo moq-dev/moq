@@ -19,14 +19,10 @@ Decided 2026-10-19 by the maintainer (#5950):
   example against `--help`.
 - The log lives in `handle_pmt` (`rs/moq-mux/src/container/ts/import.rs`),
   once per new elementary stream, beside the existing warn on a dropped
-  stream type. It lands after [whole-PES import](/quest/m1/ts-reliability/pes-import.md),
-  which rewrites the same `ensure_stream` arms.
+  stream type, and reports the outcomes of the `ensure_stream` arms, including
+  the whole-PES (`pesPacket`) carriage of undecoded streams.
 
 Public API: none. Log output only.
-
-## Required
-
-- [Whole-PES import](/quest/m1/ts-reliability/pes-import.md) - rewrites the stream outcomes this log reports
 
 ## Closes
 

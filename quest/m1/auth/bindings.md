@@ -43,7 +43,3 @@ export the experimental Rust request hook through the bindings here.
 
 Additive. Decided in the 2026-09-30 audit: libmoq is frozen, so the C
 surface comes from moq-ffi rather than new `moq_session_auth_*` calls.
-
-## Required
-
-- [FFI shape](/quest/m1/ffi-shape/README.md) - reshapes the moq-ffi session and wrappers this edits, so the wrappers break once

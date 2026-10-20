@@ -51,6 +51,7 @@ use crate::jitter::{self, Arrival, Push};
 
 use super::adts;
 use super::catalog;
+use super::psi;
 use super::schedule::{self, Buffer, Schedule};
 
 /// PID of the single program's PMT.
@@ -278,8 +279,6 @@ struct Track {
 	timing: Timing,
 	/// The receiver's buffers for an audio or verbatim track; video's come from [`Timing`].
 	buffer: Option<Buffer>,
-	/// What the last passed-through Dolby PES left for the next to complete.
-	dolby_carry: Option<DolbyCarry>,
 	/// The audio frames muxed into a PES that has yet to go out.
 	pack: Option<Pack>,
 	/// The last frame's decode time, its jitter buffer key ([`Self::release_key`]) and the PES
@@ -316,7 +315,6 @@ impl Track {
 			keyframe: None,
 			timing: Timing::default(),
 			buffer: None,
-			dolby_carry: None,
 			pack: None,
 			released: None,
 		}
@@ -333,9 +331,6 @@ impl Track {
 			self.release(name, jitter, true)?;
 			self.restart = pending.restart;
 			self.clock = DecodeClock::default();
-		}
-		if let Some(codec) = self.dolby() {
-			return self.queue_dolby(codec, name, pending, jitter);
 		}
 		let Kind::Video(stream_type) = self.kind else {
 			return self.push(name, pending, None, None, jitter);
@@ -419,61 +414,6 @@ impl Track {
 		Ok(())
 	}
 
-	/// Queue each Dolby access unit of a passed-through PES on its own, due at its own decode
-	/// time: a receiver's buffer holds and decodes each on its own, and the whole PES would
-	/// overflow it. A frame the last PES began decodes ahead of this PES, so the jitter buffer
-	/// has to order it on its own time, not the PES's.
-	fn queue_dolby(
-		&mut self,
-		codec: Dolby,
-		name: &str,
-		pending: Pending,
-		jitter: &mut jitter::Buffer<u16, Queued>,
-	) -> anyhow::Result<()> {
-		let Pending {
-			frame,
-			restart,
-			skip,
-			cut,
-			arrived,
-			read,
-		} = pending;
-		let frames = dolby_units(codec, &mut self.dolby_carry, skip, frame.timestamp, &frame.payload)?;
-		for (timestamp, payload) in frames {
-			let frame = Frame {
-				timestamp,
-				duration: None,
-				payload,
-				// Only the first frame that begins in the PES has its PTS.
-				keyframe: frame.keyframe && timestamp == frame.timestamp,
-			};
-			let pending = Pending {
-				frame,
-				restart,
-				skip,
-				cut,
-				arrived,
-				read,
-			};
-			self.push(name, pending, None, None, jitter)?;
-		}
-		Ok(())
-	}
-
-	/// The Dolby audio the track passes through as DVB private data, whose PES may carry
-	/// several sync frames.
-	fn dolby(&self) -> Option<Dolby> {
-		let Kind::Verbatim {
-			stream_type: 0x06,
-			framing: catalog::Framing::Pes,
-			..
-		} = self.kind
-		else {
-			return None;
-		};
-		Dolby::described(&self.descriptors)
-	}
-
 	/// The samples an audio frame of `payload` lasts and their rate, if it may share a PES with
 	/// the frames around it: one whole frame of audio whose receiver removes each frame from
 	/// its buffer at the frame's own decode time.
@@ -483,7 +423,6 @@ impl Track {
 			Kind::Mp2 { .. } => crate::codec::mp2::parse_header,
 			Kind::Ac3 => crate::codec::ac3::parse_header,
 			Kind::Eac3 => crate::codec::eac3::parse_header,
-			_ if self.dolby() == Some(Dolby::Ac3) => crate::codec::ac3::parse_header,
 			_ => return None,
 		};
 		let header = parse(payload).ok()?;
@@ -781,15 +720,9 @@ enum Kind {
 	Ac3,
 	/// E-AC-3 (ATSC stream_type 0x87), carried verbatim.
 	Eac3,
-	/// An undecoded elementary stream carried verbatim (SCTE-35, private PES,
-	/// teletext, ...). Re-announced in the PMT with its recorded `stream_type` and
-	/// repacketized per its `framing`. `stream_id` is the original PES stream_id to
-	/// re-emit (PES framing only; `None` falls back to `private_stream_1`).
-	Verbatim {
-		stream_type: u8,
-		framing: catalog::Framing,
-		stream_id: Option<u8>,
-	},
+	/// An undecoded elementary stream carried as private sections (SCTE-35, ...),
+	/// re-announced in the PMT with its recorded `stream_type`.
+	Verbatim { stream_type: u8 },
 	/// An undecoded elementary stream whose frames are whole PES packets, written unchanged
 	/// and sent at their timestamp, the source's placement ([`catalog::PesPacket`]).
 	PesPacket { stream_type: u8 },
@@ -844,7 +777,7 @@ struct PesUnit {
 	/// (unwrapped) 90 kHz ticks (wrapped to the wire field in `write_pes`). `Some` only when
 	/// it differs from the PTS; the PES then carries both PTS and DTS.
 	dts: Option<u64>,
-	/// Explicit PES stream_id (verbatim PES); `None` derives it from `is_video`.
+	/// Explicit PES stream_id (Opus); `None` derives it from `is_video`.
 	stream_id: Option<u8>,
 }
 
@@ -1148,10 +1081,11 @@ where
 	/// ride is laid, and each slot goes out the delay after its own time on the source's
 	/// clock rather than a delay later still.
 	///
-	/// The clock is acquired before anything goes out: frames are held until a track starts
-	/// a new group, or for the delay at most, and the freshest of them against its release
-	/// time sets the clock, so a joiner runs at the delay from its first output and every
-	/// frame has the whole delay to arrive in. A source that sends its video its send-ahead
+	/// The clock is acquired before anything goes out: frames are held until every expected
+	/// track has delivered (two delays at most) and a track starts a new group, or for a delay
+	/// at most once all have. The track sent latest against its release time sets the clock,
+	/// so a joiner runs at the delay from its first output and every frame has the whole delay
+	/// to arrive in. A source that sends its video its send-ahead
 	/// early, as a TS mux does, is trailed by the delay; one that sends every track at its
 	/// decode time, by the delay and the video's send-ahead. The output then keeps the
 	/// source's pace and muxes every track in `(release time, PID)` order whatever the
@@ -1649,8 +1583,6 @@ where
 			let kind = match (&entry.verbatim, &entry.pes_packet) {
 				(Some(verbatim), _) => Kind::Verbatim {
 					stream_type: verbatim.stream_type,
-					framing: verbatim.framing,
-					stream_id: verbatim.stream_id,
 				},
 				(None, Some(pes)) => Kind::PesPacket {
 					stream_type: pes.stream_type,
@@ -2017,15 +1949,7 @@ where
 		// Section-framed verbatim streams (SCTE-35, ...) are stamped on the video clock
 		// and carry no PTS for the PCR, so they need a video track; audio alone would
 		// leave them pinned to zero.
-		let needs_clock = tracks.iter().any(|t| {
-			matches!(
-				&t.kind,
-				Kind::Verbatim {
-					framing: catalog::Framing::Section,
-					..
-				}
-			)
-		});
+		let needs_clock = tracks.iter().any(|t| matches!(&t.kind, Kind::Verbatim { .. }));
 		let video = tracks.iter().find(|t| matches!(t.kind, Kind::Video(_)));
 		anyhow::ensure!(
 			!needs_clock || video.is_some(),
@@ -2087,16 +2011,9 @@ where
 		let program_info = if !self.program_descriptors.is_empty() {
 			self.program_descriptors.clone()
 		} else if tracks.iter().any(|t| {
-			// Only derive CUEI for section-framed 0x86 (SCTE-35); a PES-framed 0x86
+			// Only derive CUEI for section-framed 0x86 (SCTE-35); a whole-PES 0x86
 			// (e.g. DTS audio) must not advertise SCTE-35 section signaling.
-			matches!(
-				&t.kind,
-				Kind::Verbatim {
-					stream_type: 0x86,
-					framing: catalog::Framing::Section,
-					..
-				}
-			)
+			matches!(&t.kind, Kind::Verbatim { stream_type: 0x86 })
 		}) {
 			vec![registration(b"CUEI")]
 		} else {
@@ -2201,16 +2118,9 @@ where
 			// Each moq Opus frame is one packet; prefix the Opus-in-TS control header.
 			Kind::Opus { .. } => Some(opus_es_payload(&frame.payload)),
 			// Legacy audio frames were ingested whole (framing header included), so
-			// they pass through untouched. PES-framed verbatim payloads likewise.
+			// they pass through untouched.
 			Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => Some(frame.payload.to_vec()),
-			Kind::Verbatim {
-				framing: catalog::Framing::Pes,
-				..
-			} => Some(frame.payload.to_vec()),
-			Kind::Verbatim {
-				framing: catalog::Framing::Section,
-				..
-			} => None,
+			Kind::Verbatim { .. } => None,
 			// The frame is the PES already, written by [`Self::place`] below.
 			Kind::PesPacket { .. } => None,
 		};
@@ -2279,15 +2189,9 @@ where
 			// carry the bytes verbatim.
 			None => self.write_section(&mut out, pid, &frame.payload)?,
 			Some(es_payload) => {
-				// Verbatim PES re-emits its original stream_id (falling back to
-				// private_stream_1 for an undecoded stream with none recorded); media
+				// Opus is private-data PES, carried under private_stream_1 like ffmpeg; media
 				// derives it from is_video.
-				let stream_id = match &kind {
-					Kind::Verbatim { stream_id, .. } => Some(stream_id.unwrap_or(StreamId::PRIVATE_STREAM_1)),
-					// Opus is private-data PES, carried under private_stream_1 like ffmpeg.
-					Kind::Opus { .. } => Some(StreamId::PRIVATE_STREAM_1),
-					_ => None,
-				};
+				let stream_id = matches!(kind, Kind::Opus { .. }).then_some(StreamId::PRIVATE_STREAM_1);
 				let unit = PesUnit {
 					pid,
 					is_video,
@@ -2866,113 +2770,22 @@ impl PesPacket {
 	/// where the `stream_id` has one (ISO 13818-1 2.4.3.6). Only video may leave the
 	/// length zero, unbounded, as 2.4.3.7 permits.
 	fn parse(bytes: &[u8], stream_type: u8) -> anyhow::Result<Self> {
-		anyhow::ensure!(
-			bytes.len() >= PES_PREFIX_LEN && bytes.starts_with(&[0, 0, 1]),
-			"no PES start code"
-		);
-		let stream_id = bytes[3];
-		let length = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
-		if length == 0 {
-			let video = matches!(stream_id, 0xe0..=0xef) || (stream_id == 0xfd && is_video_stream_type(stream_type));
+		// The importer refuses with this same check, so a PES it published never fails here.
+		let pes = psi::PesStart::parse(bytes)?;
+		// The clock fields it refuses ride through unchanged.
+		pes.whole(stream_type)?;
+		if let Some(len) = pes.data_len {
 			anyhow::ensure!(
-				video,
-				"PES_packet_length 0 on stream_id {stream_id:#04x}, which only a video stream may leave unbounded"
-			);
-		} else {
-			anyhow::ensure!(
-				length == bytes.len() - PES_PREFIX_LEN,
-				"PES_packet_length {length} where the frame holds {} bytes after it",
-				bytes.len() - PES_PREFIX_LEN
+				len == pes.data.len(),
+				"PES_packet_length declares {len} payload bytes where the frame holds {}",
+				pes.data.len()
 			);
 		}
-		// program_stream_map, padding, private_stream_2, ECM, EMM, directory, DSM-CC and
-		// H.222.1 type E carry their payload straight after the length.
-		if matches!(stream_id, 0xbc | 0xbe | 0xbf | 0xf0 | 0xf1 | 0xf2 | 0xf8 | 0xff) {
-			return Ok(Self {
-				pts: None,
-				payload: PES_PREFIX_LEN,
-			});
-		}
-		anyhow::ensure!(
-			bytes.len() >= 9 && bytes[6] & 0xc0 == 0x80,
-			"PES optional header missing or without its '10' marker"
-		);
-		let flags = bytes[7];
-		let payload = 9 + usize::from(bytes[8]);
-		let fields = bytes
-			.get(9..payload)
-			.context("PES_header_data_length runs past the packet")?;
-		let pts_dts = flags >> 6;
-		anyhow::ensure!(pts_dts != 0b01, "PTS_DTS_flags '01' is forbidden");
-		// Each flagged field in order (Table 2-21): PTS, DTS, ESCR, ES_rate, DSM trick mode,
-		// additional_copy_info, previous_PES_CRC; stuffing fills the rest.
-		let mut at = [
-			(0x80, 5),
-			(0x40, 5),
-			(0x20, 6),
-			(0x10, 3),
-			(0x08, 1),
-			(0x04, 1),
-			(0x02, 2),
-		]
-		.iter()
-		.filter(|&&(flag, _)| flags & flag != 0)
-		.map(|&(_, len)| len)
-		.sum::<usize>();
-		if flags & 0x01 != 0 {
-			let read = |at: usize| fields.get(at).copied().context("PES extension runs past its header");
-			let extension = read(at)?;
-			at += 1;
-			// PES_private_data, then pack_header_field behind its own length byte.
-			if extension & 0x80 != 0 {
-				at += 16;
-			}
-			if extension & 0x40 != 0 {
-				at += 1 + usize::from(read(at)?);
-			}
-			// program_packet_sequence_counter and P-STD_buffer.
-			at += 2 * usize::from(extension & 0x20 != 0) + 2 * usize::from(extension & 0x10 != 0);
-			if extension & 0x01 != 0 {
-				at += 1 + usize::from(read(at)? & 0x7f);
-			}
-		}
-		anyhow::ensure!(
-			at <= fields.len(),
-			"PES optional fields need {at} bytes where PES_header_data_length gives {}",
-			fields.len()
-		);
-		// Each clock field opens with its 4-bit prefix, PTS '0010' alone or '0011' beside a DTS
-		// '0001', and sets the marker bit after each of its three parts.
-		let clock = |field: &[u8], prefix: u8| {
-			anyhow::ensure!(
-				field[0] >> 4 == prefix && field[0] & field[2] & field[4] & 1 == 1,
-				"PES clock field without its '{prefix:04b}' prefix or marker bits"
-			);
-			Ok(u64::from((field[0] >> 1) & 7) << 30
-				| u64::from(field[1]) << 22
-				| u64::from(field[2] >> 1) << 15
-				| u64::from(field[3]) << 7
-				| u64::from(field[4] >> 1))
-		};
-		let pts = match pts_dts {
-			0b10 => Some(clock(&fields[..5], 0b0010)?),
-			0b11 => {
-				clock(&fields[5..10], 0b0001)?;
-				Some(clock(&fields[..5], 0b0011)?)
-			}
-			_ => None,
-		};
-		Ok(Self { pts, payload })
+		Ok(Self {
+			pts: pes.pts,
+			payload: pes.header.len(),
+		})
 	}
-}
-
-/// Whether a PMT `stream_type` carries video (ISO 13818-1 Table 2-34, and VC-1's 0xEA), whose
-/// PES alone may leave `PES_packet_length` unbounded.
-fn is_video_stream_type(stream_type: u8) -> bool {
-	matches!(
-		stream_type,
-		0x01 | 0x02 | 0x10 | 0x1b | 0x1e..=0x26 | 0x28..=0x2b | 0x31..=0x35 | 0xea
-	)
 }
 
 /// A 33-bit PTS read off a placed PES, on the media timeline in nanoseconds: the value
@@ -3290,17 +3103,11 @@ const EAC3_DESCRIPTOR: u8 = 0x7a;
 /// The DVB teletext descriptor's tag (ETSI EN 300 468 6.2.43).
 const TELETEXT_DESCRIPTOR: u8 = 0x56;
 
-/// A verbatim stream's buffers, for the kinds its descriptors identify: Dolby audio as DVB
+/// A whole-PES stream's buffers, for the kinds its descriptors identify: Dolby audio as DVB
 /// private data (ETSI TS 101 154 4.1.6.11), and teletext, whose 480-byte transport buffer drains at
 /// 6.75 Mb/s (ETSI EN 300 472 5). Any other stream has none the schedule knows.
 fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<Buffer> {
-	let (Kind::Verbatim {
-		stream_type: 0x06,
-		framing: catalog::Framing::Pes,
-		..
-	}
-	| Kind::PesPacket { stream_type: 0x06 }) = kind
-	else {
+	let Kind::PesPacket { stream_type: 0x06 } = kind else {
 		return None;
 	};
 	descriptors.iter().find_map(|descriptor| match descriptor.tag {
@@ -3371,223 +3178,6 @@ impl Dolby {
 /// stream may carry as its independent substream 0 (ETSI TS 102 366 E.1.3.1.2).
 fn ac3_core(data: &[u8]) -> bool {
 	data.get(5).is_some_and(|byte| byte >> 3 <= 10)
-}
-
-/// What a passed-through Dolby PES leaves for the next one.
-struct DolbyCarry {
-	/// The playhead count it was read under ([`Pending::skip`]).
-	skip: u64,
-	/// When an access unit that the next sync frame begins is presented.
-	next: Timestamp,
-	/// The E-AC-3 access unit still open, which a substream at the next PES's start extends.
-	unit: Option<DolbyUnit>,
-	/// The bytes so far of a sync frame left unfinished.
-	bytes: Vec<u8>,
-}
-
-/// An access unit begun: when it is presented, and the blocks and rate its substreams share.
-#[derive(Clone, Copy)]
-struct DolbyUnit {
-	at: Timestamp,
-	samples: u64,
-	rate: u32,
-}
-
-/// The Dolby access units a PES's `payload` completes or holds, each with its presentation
-/// time; none when no sync frame can begin in it. An AC-3 access unit is one sync frame; an
-/// E-AC-3 one is independent substream 0 with every substream after it (ETSI TS 102 366
-/// E.1.3.1.2), which share its presentation interval.
-///
-/// A PES need not begin on a sync frame: a source that leaves `data_alignment_indicator`
-/// clear splits frames, and even their headers, across PES. `carry` holds the frame the last
-/// PES left unfinished, which this payload's first bytes complete, keeping its own time. The
-/// PES's PTS, `start`, times the first access unit that begins in it (ISO 13818-1 2.4.3.7), the
-/// rest count on from there, and a frame left unfinished at the end is carried into the next PES.
-/// A carried frame is dropped when the playhead jumped since (`skip`: a skipped group, a
-/// marker, a resubscription), or when it would not end where the next frame begins, by that
-/// PTS and its sync word: either way it spans a gap in the source. So are bytes ahead of the
-/// first sync frame with nothing carried. No decoder can use them.
-///
-/// An E-AC-3 substream whose access unit went out with the last PES goes out on its own, at
-/// that unit's time, whether its PES is timed by that unit or the next. One whose access unit
-/// began before the join is dropped.
-fn dolby_units(
-	codec: Dolby,
-	carry: &mut Option<DolbyCarry>,
-	skip: u64,
-	start: Timestamp,
-	payload: &Bytes,
-) -> anyhow::Result<Vec<(Timestamp, Bytes)>> {
-	let duration = |samples: u64, rate: u32| Timestamp::from_micros(samples * 1_000_000 / u64::from(rate.max(1)));
-	let joined = carry.as_ref().is_none_or(|head| head.skip != skip);
-	let mut units = Vec::new();
-	let mut open = None;
-	let mut offset = None;
-	// When the next access unit to begin in this PES is presented.
-	let mut base = start;
-	match carry.take() {
-		None => {}
-		Some(head) if head.skip != skip => {
-			if !head.bytes.is_empty() {
-				tracing::debug!("dropped a Dolby sync frame cut by a jump in the playhead");
-			}
-		}
-		Some(head) if head.bytes.is_empty() => {
-			// A unit left open extends into this PES only if this PES's units follow it.
-			if let Some(unit) = head.unit {
-				let length = duration(unit.samples, unit.rate)?;
-				let end = unit.at.checked_add(length)?;
-				let near = |at: Timestamp| at.as_micros().abs_diff(start.as_micros()) <= length.as_micros() / 2;
-				if near(end) {
-					open = Some(unit);
-				} else if near(unit.at) {
-					// Timed by the unit it extends, as a PES of only its substreams is: the
-					// next unit still begins where that one ends.
-					open = Some(unit);
-					base = end;
-				} else {
-					tracing::warn!(?end, ?start, "closed an E-AC-3 access unit at a gap between PES");
-				}
-			}
-		}
-		Some(mut head) => {
-			let min = codec.min_header_len();
-			let probe: Vec<u8> = head.bytes.iter().chain(payload.iter()).take(min).copied().collect();
-			if probe.len() < min {
-				// Even the header runs on past this PES.
-				head.bytes.extend_from_slice(payload);
-				*carry = Some(head);
-				return Ok(units);
-			}
-			match codec.parse(&probe) {
-				Ok(header) => {
-					let need = header.len.saturating_sub(head.bytes.len());
-					let Some((tail, after)) = payload.split_at_checked(need) else {
-						// The frame runs on past this PES as well.
-						head.bytes.extend_from_slice(payload);
-						*carry = Some(head);
-						return Ok(units);
-					};
-					let at = match (codec.begins_unit(&probe), head.unit) {
-						(false, Some(unit)) => unit.at,
-						_ => head.next,
-					};
-					let length = duration(header.samples, header.sample_rate)?;
-					let end = at.checked_add(length)?;
-					// Only a frame that begins here has a PTS to meet.
-					let next = after.is_empty()
-						|| (end.as_micros().abs_diff(start.as_micros()) <= length.as_micros() / 2
-							&& ac3_sync_prefix(after));
-					if next {
-						head.bytes.extend_from_slice(tail);
-						let frame = Bytes::from(head.bytes);
-						// A unit stays open only through a carried frame that completes without a gap.
-						open = head.unit;
-						dolby_place(codec, frame, &header, head.next, &mut open, &mut units)?;
-						offset = Some(need);
-					} else {
-						tracing::warn!(?end, ?start, "dropped a Dolby sync frame cut by a gap between PES");
-					}
-				}
-				Err(_) => tracing::warn!("dropped the start of a Dolby sync frame whose header does not parse"),
-			}
-		}
-	}
-	let mut offset = match offset {
-		Some(offset) => offset,
-		None if payload.is_empty() => 0,
-		None => {
-			let Some(first) = dolby_sync(codec, payload) else {
-				// No decoder can use a PES without a sync frame either, so it goes nowhere.
-				match joined {
-					true => tracing::debug!(bytes = payload.len(), "dropped a PES begun before the join"),
-					false => tracing::warn!(bytes = payload.len(), "dropped a PES with no Dolby sync frame"),
-				}
-				return Ok(units);
-			};
-			if first > 0 {
-				tracing::debug!(
-					bytes = first,
-					"dropped the end of a Dolby sync frame begun before the join"
-				);
-			}
-			first
-		}
-	};
-	let (mut samples, mut rate) = (0u64, 0u32);
-	let mut left = Vec::new();
-	while offset < payload.len() {
-		let rest = &payload[offset..];
-		let next = base.checked_add(duration(samples, rate)?)?;
-		let header = match codec.parse(rest) {
-			Ok(header) => header,
-			// A header cut short at the end, which the next PES completes.
-			Err(_) if rest.len() < codec.min_header_len() && ac3_sync_prefix(rest) => {
-				left = rest.to_vec();
-				break;
-			}
-			Err(_) => {
-				tracing::warn!(bytes = rest.len(), "dropped the rest of a PES that lost Dolby sync");
-				break;
-			}
-		};
-		if rest.len() < header.len {
-			left = rest.to_vec();
-			break;
-		}
-		let frame = payload.slice(offset..offset + header.len);
-		if dolby_place(codec, frame, &header, next, &mut open, &mut units)? {
-			samples += header.samples;
-			rate = header.sample_rate;
-		}
-		offset += header.len;
-	}
-	*carry = Some(DolbyCarry {
-		skip,
-		next: base.checked_add(duration(samples, rate)?)?,
-		unit: open.filter(|_| codec == Dolby::Eac3),
-		bytes: left,
-	});
-	Ok(units)
-}
-
-/// File the whole sync frame `frame` in `units`: as a new access unit presented at `next`, or
-/// as a substream of the `open` one, joining it when it went out from this PES too. Returns
-/// whether it began a unit.
-fn dolby_place(
-	codec: Dolby,
-	frame: Bytes,
-	header: &crate::codec::legacy::Header,
-	next: Timestamp,
-	open: &mut Option<DolbyUnit>,
-	units: &mut Vec<(Timestamp, Bytes)>,
-) -> anyhow::Result<bool> {
-	if codec.begins_unit(&frame) {
-		*open = Some(DolbyUnit {
-			at: next,
-			samples: header.samples,
-			rate: header.sample_rate,
-		});
-		units.push((next, frame));
-		return Ok(true);
-	}
-	let Some(unit) = *open else {
-		tracing::debug!("dropped an E-AC-3 substream whose access unit began before the join");
-		return Ok(false);
-	};
-	anyhow::ensure!(
-		header.samples == unit.samples && header.sample_rate == unit.rate,
-		"E-AC-3 substream of {} samples at {} Hz in an access unit of {} at {} Hz",
-		header.samples,
-		header.sample_rate,
-		unit.samples,
-		unit.rate,
-	);
-	match units.last_mut() {
-		Some((at, bytes)) if *at == unit.at => *bytes = [bytes.as_ref(), frame.as_ref()].concat().into(),
-		_ => units.push((unit.at, frame)),
-	}
-	Ok(false)
 }
 
 /// Where the first Dolby sync frame in `payload` begins: a sync word whose header parses and
@@ -3868,61 +3458,6 @@ mod tests {
 		Timestamp::from_millis(value).unwrap()
 	}
 
-	/// A PES that completes the AC-3 sync frame the last one began holds a frame decoding
-	/// ahead of its own PTS. Each sync frame reaches the jitter buffer at its own decode time,
-	/// so the buffer orders that frame against the other tracks on its own time, not the PES's.
-	#[tokio::test(start_paused = true)]
-	async fn ac3_frames_reach_the_jitter_buffer_at_their_own_decode_time() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let source = crate::source::announced(&broadcast.consume()).await;
-		let source = super::ExportSource::for_stream(&source, "audio", Duration::ZERO).unwrap();
-		let mut track = super::Track::new(
-			source,
-			Kind::Verbatim {
-				stream_type: 0x06,
-				framing: super::catalog::Framing::Pes,
-				stream_id: None,
-			},
-		);
-		track.descriptors = vec![super::catalog::Descriptor {
-			tag: super::AC3_DESCRIPTOR,
-			data: bytes::Bytes::from_static(&[0x00]),
-		}];
-		let mut jitter = super::jitter::Buffer::new(Duration::ZERO);
-
-		// Three 32 ms sync frames, cut mid-frame into frames 0-1 and 1-2, timed by frames 0 and 2.
-		let mut frame = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
-		frame.resize(128, 0x00);
-		let stream = bytes::Bytes::from(frame.repeat(3));
-		// In microseconds, as every hang frame is.
-		let us = |ms: u64| Timestamp::from_micros(ms * 1_000).unwrap();
-		let now = moq_clock::now();
-		for (pts, payload) in [(us(0), stream.slice(..200)), (us(64), stream.slice(200..))] {
-			let frame = super::Frame {
-				timestamp: pts,
-				duration: None,
-				payload,
-				keyframe: true,
-			};
-			let pending = super::Pending {
-				frame,
-				restart: 0,
-				skip: 0,
-				cut: 0,
-				arrived: now,
-				read: now,
-			};
-			track.queue("audio", pending, &mut jitter).unwrap();
-		}
-
-		let waiter = kio::Waiter::noop();
-		let mut decode = Vec::new();
-		while let std::task::Poll::Ready(ready) = jitter.poll_next(&waiter) {
-			decode.push(ready.item.decode);
-		}
-		assert_eq!(decode, [us(0), us(32), us(64)]);
-	}
-
 	/// A six-block E-AC-3 sync frame of 512 bytes: `stream` is byte 2's top bits (strmtyp,
 	/// substreamid) and `rate` byte 4 (fscod, numblkscod, acmod, lfeon).
 	fn eac3(stream: u8, rate: u8) -> Vec<u8> {
@@ -3931,70 +3466,12 @@ mod tests {
 		frame
 	}
 
-	/// Access units count on from the PES's PTS by the samples before them, so a 44.1 kHz
-	/// frame's 34,829.9 us does not round down once per frame.
-	#[test]
-	fn dolby_units_count_samples_not_rounded_periods() {
-		let payload = bytes::Bytes::from(eac3(0x00, 0x7f).repeat(30));
-		let units = super::dolby_units(
-			super::Dolby::Eac3,
-			&mut None,
-			0,
-			Timestamp::from_micros(0).unwrap(),
-			&payload,
-		)
-		.unwrap();
-		assert_eq!(units.len(), 30);
-		for (k, (at, _)) in units.iter().enumerate() {
-			assert_eq!(at.as_micros(), k as u128 * 1_536 * 1_000_000 / 44_100, "unit {k}");
-		}
-	}
-
-	/// An E-AC-3 stream may carry AC-3 as its independent substream 0, which begins each access
-	/// unit that the E-AC-3 substreams after it extend.
-	#[test]
-	fn dolby_units_begin_at_an_ac3_core() {
-		// 32 kb/s 48 kHz AC-3: 128 bytes, 1,536 samples, as six E-AC-3 blocks are.
-		let mut core = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
-		core.resize(128, 0);
-		let unit = [core, eac3(0x40, 0x3f)].concat();
-		let payload = bytes::Bytes::from(unit.repeat(2));
-		let units =
-			super::dolby_units(Dolby::Eac3, &mut None, 0, Timestamp::from_micros(0).unwrap(), &payload).unwrap();
-		let at: Vec<_> = units
-			.iter()
-			.map(|(at, bytes)| (at.as_micros(), bytes.to_vec()))
-			.collect();
-		assert_eq!(at, [(0, unit.clone()), (32_000, unit)]);
-	}
-
-	/// Substreams of one access unit share its blocks and rate (ETSI TS 102 366 E.1.3.1.2), so
-	/// one that differs is malformed rather than timed by a guess.
-	#[test]
-	fn dolby_units_refuse_a_substream_off_its_unit_interval() {
-		// A three-block dependent substream after a six-block independent one.
-		let payload = bytes::Bytes::from([eac3(0x00, 0x3f), eac3(0x40, 0x2f)].concat());
-		let err = super::dolby_units(
-			super::Dolby::Eac3,
-			&mut None,
-			0,
-			Timestamp::from_micros(0).unwrap(),
-			&payload,
-		)
-		.unwrap_err();
-		assert!(err.to_string().contains("E-AC-3 substream"), "{err}");
-	}
-
 	/// Teletext passed through as DVB private data takes its transport buffer's rate from
 	/// EN 300 472, so the schedule spreads it no faster than a receiver passes it on; private
 	/// data nothing identifies has no buffers.
 	#[test]
 	fn teletext_drains_at_its_own_rate() {
-		let kind = Kind::Verbatim {
-			stream_type: 0x06,
-			framing: super::catalog::Framing::Pes,
-			stream_id: None,
-		};
+		let kind = Kind::PesPacket { stream_type: 0x06 };
 		let descriptor = |tag| super::catalog::Descriptor {
 			tag,
 			data: bytes::Bytes::from_static(b"eng\x09\x00"),

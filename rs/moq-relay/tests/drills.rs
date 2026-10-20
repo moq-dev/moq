@@ -804,8 +804,8 @@ const SETTLE: Duration = Duration::from_secs(10);
 /// burst overruns, so its tail waits in the queue or is dropped from it. It is
 /// slower than [`credit`]'s receive window lets a sender go. The first burst
 /// is collected at ingress after setup, so scheduling cannot drain the bucket
-/// between its datagrams; its surviving bytes exceed the burst and 50ms queue
-/// allowance before they are accounted at one instant.
+/// between its datagrams; its bytes exceed the burst and 50ms queue allowance
+/// before they are accounted at one instant.
 fn bursty() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		rate: Some(moq_shaper::Rate {

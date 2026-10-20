@@ -164,6 +164,10 @@ struct Inner {
 	wall_micros: AtomicU64,
 	// Tracks with reads parked on a wall-clock deadline, by their earliest one.
 	wall: kio::Lock<WallDeadlines>,
+	// Hand-offs holding a failed group's head for a successor route, oldest first. The
+	// heads sit outside every track's eviction order, so the pool reclaims them itself:
+	// first under capacity pressure, and once its idle window passes.
+	held: Mutex<Vec<Weak<group::Handoff>>>,
 }
 
 /// The pool-wide index of wall-clock deadlines that [`Pool::gc`] fires.
@@ -218,6 +222,7 @@ impl Pool {
 				wall_epoch: OnceLock::new(),
 				wall_micros: AtomicU64::new(0),
 				wall: kio::Lock::default(),
+				held: Mutex::default(),
 			}),
 		}
 	}
@@ -275,8 +280,56 @@ impl Pool {
 			.map(|window| window / 2)
 	}
 
-	/// Expire idle groups across the registered tracks.
+	/// Have the pool drop `handoff`'s held head under capacity pressure, oldest first, or
+	/// once its idle window passes.
+	pub(super) fn hold_head(&self, handoff: &Arc<group::Handoff>) {
+		let mut held = self.inner.held.lock().unwrap_or_else(PoisonError::into_inner);
+		// Forget the hand-offs done with before growing, so a burst of failed groups whose
+		// heads recovery adopts at once grows the registry no further than the heads held.
+		if held.len() == held.capacity() {
+			self.prune_held(&mut held);
+		}
+		held.push(Arc::downgrade(handoff));
+	}
+
+	/// Drop held heads, oldest first, while the pool is over capacity.
+	pub(super) fn reclaim_held(&self) {
+		if self.used() > self.inner.capacity.load(Ordering::Relaxed) {
+			let mut held = self.inner.held.lock().unwrap_or_else(PoisonError::into_inner);
+			self.prune_held(&mut held);
+		}
+	}
+
+	/// Drop the held heads past the idle window, then the oldest while the pool is over
+	/// capacity, and forget the hand-offs holding none.
+	fn prune_held(&self, held: &mut Vec<Weak<group::Handoff>>) {
+		held.retain(|handoff| {
+			let Some(handoff) = handoff.upgrade() else {
+				return false;
+			};
+			let over = self.used() > self.inner.capacity.load(Ordering::Relaxed);
+			!handoff.expire(over)
+		});
+	}
+
+	#[cfg(test)]
+	pub(super) fn held_capacity(&self) -> usize {
+		self.inner
+			.held
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.capacity()
+	}
+
+	/// Expire idle groups and held heads across the registered tracks.
 	pub(super) fn sweep(&self) {
+		{
+			let mut held = self.inner.held.lock().unwrap_or_else(PoisonError::into_inner);
+			self.prune_held(&mut held);
+			// Give back what a burst of held heads grew it to, which the pool no longer bills.
+			let len = held.len();
+			held.shrink_to(len * 2);
+		}
 		// Upgrade outside each track's lock: dropping its last account unregisters it.
 		let tracks: Vec<_> = self
 			.inner
@@ -801,6 +854,27 @@ impl Track {
 		}
 	}
 
+	/// Bill `bytes` of a failed group's head while a hand-off holds it for a successor route.
+	///
+	/// Readers that stop polling can hold a hand-off indefinitely, so the head is billed
+	/// like cached content and bounded the same way: `None` when it would take the pool past
+	/// its capacity, and [`Pool::hold_head`] has the pool reclaim it like idle content.
+	pub(super) fn hold(self: &Arc<Self>, bytes: u64) -> Option<Bill> {
+		if self
+			.pool
+			.capacity()
+			.is_some_and(|capacity| self.pool.used().saturating_add(bytes) > capacity)
+		{
+			return None;
+		}
+		self.pool.add(bytes);
+		Some(Bill {
+			track: self.clone(),
+			bytes,
+			at: self.pool.now(),
+		})
+	}
+
 	/// Take everything written since the last call, to be turned into eviction debt.
 	pub(super) fn take_written(&self) -> u64 {
 		self.written.swap(0, Ordering::Relaxed)
@@ -908,6 +982,28 @@ impl Drop for Track {
 			let address = std::ptr::from_ref::<Self>(self) as usize;
 			self.pool.inner.wall.lock().due.remove(&(at, address));
 		}
+	}
+}
+
+/// The bytes a held head of a failed group bills to its track's pool, released on drop.
+pub(super) struct Bill {
+	track: Arc<Track>,
+	bytes: u64,
+	// The coarse tick it was billed at.
+	at: u64,
+}
+
+impl Bill {
+	/// Whether the pool's idle window passed since it was billed.
+	pub(super) fn expired(&self) -> bool {
+		let pool = &self.track.pool;
+		pool.now().saturating_sub(self.at) >= pool.expiry_ticks()
+	}
+}
+
+impl Drop for Bill {
+	fn drop(&mut self) {
+		self.track.pool.sub(self.bytes);
 	}
 }
 
@@ -1075,6 +1171,11 @@ impl Charge {
 			track.pool.access_refresh(prev, target);
 		}
 		Some(target >> ACCESS_SHIFT)
+	}
+
+	/// The track account this charge bills, unless it is detached.
+	pub(super) fn account(&self) -> Option<&Arc<Track>> {
+		self.track.as_ref()
 	}
 
 	/// Release everything this charge holds: bytes, overhead, and the access

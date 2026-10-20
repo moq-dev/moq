@@ -33,19 +33,20 @@ Checkpoint, 2026-10-19, against `main` at `2e1ec2ebf`:
   already contain the scheduler, publisher integration, saturation and
   eviction tests, fan-out benchmarks, and draft updates. Broadcast-domain
   exposure remains owned by track-priority-scope.
-- Encoded the already-decided timestamp, E2EE naming-design, and BBR audit
+- Encoded the already-decided timestamp and E2EE naming-design
   prerequisites. Corrected stale paths, epoch discovery, accepted refresh
   recovery behavior, mobile priority, and the landed error, shard, benchmark
-  site, and wire-accounting work. Cut-through and BBR performance judgments
-  now follow the existing bufferbloat policy; historical loss data remains.
+  site, and wire-accounting work. Cut-through now follows the bufferbloat
+  policy.
 - Four closed linked issues still have explicitly planned or in-flight
   work. Their closure alone was not treated as evidence to retire a quest.
   Open implementation PRs were not treated as merged work.
-- Final validation includes `main` at `f37d19b73` (#5920), whose completed
-  auth-refresh quest and updated clock-migration plan were rechecked.
-  `quest check` passes for the remaining 436 documents, as does
-  `git diff --check`. The full `just check` exit was not captured; its
-  attempted capture run was rejected because another suite was running.
+- Rechecked against `main` at `48c8a66dd` (#6017). The random-loss audit
+  (#6000) landed its own BBR, cut-through, and loss-input verdicts, so its
+  versions replace this run's; the 0-RTT window raise (#5937) also finished.
+  Quests added since the baseline (the resume line, egress held state, and
+  the request-behind-its-token race from #5972) were checked only against
+  this run's edits, not audited in full.
 
 This run remains open, with no successor, until the unresolved conflicts are
 settled. The unattended instruction was to skip uncertain choices:
@@ -63,6 +64,3 @@ settled. The unattended instruction was to skip uncertain choices:
   archive priority encoding, while [archive](/quest/m1/archive/README.md)
   replaces the old layout without migration. The ladder also assumes a
   publisher-priority tiebreak that priority scope still asks to decide.
-- Per-request auth planning is separately owned by
-  [#5972](https://github.com/moq-dev/moq/pull/5972), following the rejection
-  of #5927. Preserve that owner's decisions and reconcile after it lands.

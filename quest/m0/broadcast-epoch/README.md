@@ -30,7 +30,7 @@ unchanged paths and End+Start on replacement. The relay retains the explicit
 identity internally; fresh requests cannot join its old cached instance.
 This does not promise cache invalidation in arbitrary older IETF relays or
 clients that retain objects across broadcasts. The negotiated
-[IETF extension](/quest/m1/ietf-epochs.md) follows in m1, independently of
+[IETF extension](/drafts/draft-lcurley-moq-epoch.md) landed in m1, independently of
 this release gate; seamless JS handover stays in m1 too.
 
 Non-goals: pooling, which needs nothing here. A redundant ingest pair runs on

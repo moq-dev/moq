@@ -4557,6 +4557,7 @@ fn a_zeroed_config_is_the_defaults() {
 	assert!(parsed.connect.tls.root.is_empty());
 	assert!(parsed.quic.gso.is_none());
 	assert!(parsed.quic.mtu_discovery.is_none());
+	assert!(!parsed.quic.resolve().keylog);
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,
@@ -4764,6 +4765,7 @@ fn config_quic_and_backoff_knobs_apply() {
 	config.has_quic_gso = true;
 	config.quic_mtu_discovery = true;
 	config.has_quic_mtu_discovery = true;
+	config.quic_keylog = true;
 
 	let dir = "/tmp/qlog";
 	config.quic_qlog = dir.as_ptr() as *const c_char;
@@ -4784,6 +4786,7 @@ fn config_quic_and_backoff_knobs_apply() {
 	assert_eq!(parsed.quic.gso, Some(false));
 	assert_eq!(parsed.quic.mtu_discovery, Some(true));
 	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));
+	assert_eq!(parsed.quic.keylog, Some(true));
 }
 
 /// Whether a qlog directory works at all is a compile-time feature, so the capability
@@ -5244,6 +5247,28 @@ fn server_listen_refuses_bad_config() {
 		unsafe { moq_server_listen(&config, Some(ignore_callback), std::ptr::null_mut()) },
 		MOQ_ERROR_INVALID_CONFIG
 	);
+}
+
+/// `quic_keylog` reaches the listener, which refuses it without `SSLKEYLOGFILE` rather
+/// than binding and logging nothing.
+#[test]
+fn server_keylog_requires_sslkeylogfile() {
+	// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
+	unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+	let bind = "127.0.0.1:0";
+	let generate = [moq_str("localhost")];
+	let mut config: moq_server_config = unsafe { std::mem::zeroed() };
+	config.bind = bind.as_ptr() as *const c_char;
+	config.bind_len = bind.len();
+	config.tls_generate = generate.as_ptr();
+	config.tls_generate_len = generate.len();
+	config.quic_keylog = true;
+	assert_eq!(
+		unsafe { moq_server_listen(&config, Some(ignore_callback), std::ptr::null_mut()) },
+		MOQ_ERROR_INVALID_CONFIG
+	);
+	let msg = unsafe { std::ffi::CStr::from_ptr(moq_error()) }.to_str().unwrap();
+	assert!(msg.contains("SSLKEYLOGFILE"), "{msg}");
 }
 
 /// Subscribe to `name` on `consume` as a raw track and return the payloads of its first `count`
