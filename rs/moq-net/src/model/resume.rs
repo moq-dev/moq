@@ -537,44 +537,54 @@ struct Reader {
 }
 
 impl Reader {
-	/// The reader's ranges resolved, a relative anchor as the first copy to answer for them
-	/// resolved it: a later copy starts where the reader got to, which would raise it.
-	/// Kept once resolved, past that copy being let go. Pending while a relative anchor
-	/// waits on that copy, or when the ranges changed after it was let go.
+	/// The reader's ranges resolved, a relative anchor as the first ready copy to answer for
+	/// them resolved it, whatever its failover cap: that bounds what the copy delivers, not
+	/// where the ranges resolve. Kept once resolved, past that copy being let go. Pending
+	/// while a relative anchor waits on a copy to resolve it.
 	fn window(&mut self) -> &Window {
-		if self.window.is_pending() {
-			let ranges = &self.mirrored.ranges;
-			let resolved = self.copies.iter_mut().find_map(|copy| match &mut copy.sub {
-				Sub::Ready(sub) if copy.floor.is_none() && copy.from == *ranges => Some(sub.resolved_ranges()),
-				_ => None,
-			});
-			if let Some(resolved) = resolved {
-				let ranges: Vec<_> = ranges
-					.iter()
-					.enumerate()
-					.map(|(index, range)| {
-						let Some(resolved) = resolved.get(index).copied().flatten() else {
-							return *range;
-						};
-						track::Range {
-							start: match range.start {
-								// The farthest offset reaches back to the oldest group, which names no floor.
-								Anchor::Relative(back) if back != u64::MAX => {
-									Anchor::Absolute(Position::group(resolved.start))
-								}
-								start => start,
-							},
-							end: match (range.end, resolved.end) {
-								(Some(Anchor::Relative(_)), Some(end)) => Some(Anchor::Absolute(Position::group(end))),
-								(end, _) => end,
-							},
-						}
-					})
-					.collect();
-				self.window = Window::new(&ranges, None);
+		for index in 0..self.copies.len() {
+			if !self.window.is_pending() {
+				break;
 			}
+			let copy = &mut self.copies[index];
+			let resolved = match &mut copy.sub {
+				Sub::Ready(sub) if copy.from == self.mirrored.ranges => sub.resolved_ranges(),
+				_ => continue,
+			};
+			self.resolve(&resolved);
 		}
 		&self.window
+	}
+
+	/// Resolve a pending [`Self::window`] with a copy's resolution of the reader's ranges,
+	/// unless a relative anchor still waits there too.
+	fn resolve(&mut self, resolved: &[Option<Resolved>]) {
+		let ranges: Vec<_> = self
+			.mirrored
+			.ranges
+			.iter()
+			.enumerate()
+			.map(|(index, range)| {
+				let Some(resolved) = resolved.get(index).copied().flatten() else {
+					return *range;
+				};
+				track::Range {
+					start: match range.start {
+						// The farthest offset reaches back to the oldest group, which names no floor.
+						Anchor::Relative(back) if back != u64::MAX => Anchor::Absolute(Position::group(resolved.start)),
+						start => start,
+					},
+					end: match (range.end, resolved.end) {
+						(Some(Anchor::Relative(_)), Some(end)) => Some(Anchor::Absolute(Position::group(end))),
+						(end, _) => end,
+					},
+				}
+			})
+			.collect();
+		let window = Window::new(&ranges, None);
+		if !window.is_pending() {
+			self.window = window;
+		}
 	}
 
 	/// Follow the route: subscribe to a new copy, mark the ones it replaced, and mirror
@@ -590,12 +600,26 @@ impl Reader {
 			Poll::<()>::Pending
 		});
 		if let Some(sub) = changed {
-			if sub.ranges != self.mirrored.ranges {
+			let replaced = sub.ranges != self.mirrored.ranges;
+			if replaced {
 				self.window = Window::new(&sub.ranges, None);
 			}
 			self.mirrored = sub;
 			for copy in &mut self.copies {
 				copy.update(&self.mirrored);
+			}
+			// A ready copy just resolved the replaced ranges against its cache, before its
+			// failover cap raised them, so the reader takes that resolution now.
+			if replaced {
+				for index in (0..self.copies.len()).rev() {
+					if !self.window.is_pending() {
+						break;
+					}
+					if matches!(self.copies[index].sub, Sub::Ready(_)) {
+						let resolved = self.copies[index].resolved.clone();
+						self.resolve(&resolved);
+					}
+				}
 			}
 		}
 
@@ -3400,6 +3424,52 @@ mod test {
 		drop(readers);
 		assert_eq!(sub.floor(), Some(4));
 		assert_eq!(sub.next_in_range(0), Some(4));
+	}
+
+	/// Ranges replaced once a route switch let the first copy go still resolve, from the
+	/// serving copy, whose failover cap bounds what it delivers and not where they resolve.
+	#[test]
+	#[cfg(feature = "async")]
+	fn replaced_ranges_resolve_after_the_first_copy_is_let_go() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+
+		let b = copy();
+		routes.serve(b.consume());
+		for sequence in 1..=5 {
+			write(&b, sequence);
+		}
+		assert!(!drain(&mut sub, false).is_empty());
+		{
+			let readers = routes.readers.lock().unwrap();
+			let reader = readers[0].upgrade().unwrap();
+			let reader = reader.lock().unwrap();
+			assert_eq!(reader.copies.len(), 1, "the first copy was let go");
+			assert!(reader.copies[0].floor.is_some(), "the serving copy has a failover cap");
+		}
+
+		let subscription = Subscription::default()
+			.with_max_delay(Duration::from_secs(10))
+			.with_ranges([
+				track::Range::groups(0..1),
+				track::Range {
+					start: Anchor::Relative(1),
+					end: None,
+				},
+			]);
+		sub.update(subscription).unwrap();
+		drain(&mut sub, false);
+		assert_eq!(
+			sub.next_in_range(1),
+			Some(4),
+			"the relative range resolved on the serving copy"
+		);
+		assert_eq!(sub.floor(), Some(0));
 	}
 
 	/// A resumed reader names the next group its ranges cover, so a reader waiting on each

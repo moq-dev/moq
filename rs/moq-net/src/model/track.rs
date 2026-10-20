@@ -4578,7 +4578,7 @@ struct GroupExpiry {
 	state: kio::ConsumerWeak<TrackState>,
 	subscription: kio::Consumer<Subscription>,
 	/// What the cursor can be served; see [`Cursor::published`].
-	servable: kio::Consumer<Servable>,
+	servable: kio::Consumer<Published>,
 	sequence: u64,
 }
 
@@ -4638,7 +4638,7 @@ impl group::Expiry for GroupExpiry {
 
 		let mut servable = Servable::ALL;
 		let _ = self.servable.poll(waiter, |current| {
-			servable = (**current).clone();
+			servable = current.servable.clone();
 			Poll::<()>::Pending
 		});
 
@@ -4658,6 +4658,33 @@ struct Edge {
 	/// What the edge was resolved within, so per-candidate reach lookups measure
 	/// against the same servable window.
 	servable: Servable,
+}
+
+/// The groups `window` covers from `from`, below the exclusive `cap`.
+fn admitted(window: &Window, from: u64, cap: Option<u64>) -> RangeInclusiveSet<u64> {
+	let mut admitted = RangeInclusiveSet::new();
+	let last = match cap {
+		Some(end) => match end.checked_sub(1) {
+			Some(last) => last,
+			None => return admitted,
+		},
+		None => u64::MAX,
+	};
+	for run in window.runs(from) {
+		if *run.start() > last {
+			break;
+		}
+		admitted.insert(*run.start()..=(*run.end()).min(last));
+	}
+	admitted
+}
+
+/// A cursor's [`Servable`] as the groups it handed out see it, with the cap it was cut to,
+/// so a [`Control`] replacing the ranges can republish it without the cursor.
+#[derive(Clone, PartialEq)]
+struct Published {
+	servable: Servable,
+	cap: Option<u64>,
 }
 
 /// The groups a reader can be served, the only ones its drift is measured against: one it
@@ -4739,8 +4766,9 @@ struct Cursor {
 	/// newest group, and a group in a gap between ranges against nothing.
 	servable: Servable,
 	/// [`Self::servable`], shared with the groups this cursor hands out so their expiry
-	/// measures drift against the same groups after the cap or ranges move.
-	published: kio::Producer<Servable>,
+	/// measures drift against the same groups after the cap or ranges move, and with its
+	/// [`Control`]s, which republish it when they replace the ranges.
+	published: kio::Producer<Published>,
 	/// Groups the drift budget skipped since the count was last drained. Accumulated
 	/// here rather than metered in place because the stats scope lives on the owning
 	/// [`Subscriber`], which drains this after every read.
@@ -4905,7 +4933,10 @@ impl Cursor {
 			next_sequence: Some(0),
 			end_sequence: None,
 			servable: Servable::ALL,
-			published: kio::Producer::new(Servable::ALL),
+			published: kio::Producer::new(Published {
+				servable: Servable::ALL,
+				cap: None,
+			}),
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
 			drops: None,
@@ -4943,14 +4974,18 @@ impl Cursor {
 	/// Resolve [`Self::servable`] again once the window or cap moved, and publish it to the
 	/// groups already handed out. Costs the ranges, never the cache.
 	fn update_servable(&mut self) {
-		let servable = Servable::new(self.admitted(0, self.end_sequence));
-		// Skip a no-op write: every handed-out group's expiry watches this channel.
-		if self.servable == servable {
+		self.servable = Servable::new(self.admitted(0, self.end_sequence));
+		let published = Published {
+			servable: self.servable.clone(),
+			cap: self.end_sequence,
+		};
+		// Compared with the channel, which a `Control` may have republished, and a no-op
+		// write skipped: every handed-out group's expiry watches it.
+		if *self.published.read() == published {
 			return;
 		}
-		self.servable = servable;
 		if let Ok(mut current) = self.published.write() {
-			*current = self.servable.clone();
+			*current = published;
 		}
 	}
 
@@ -4994,21 +5029,7 @@ impl Cursor {
 
 	/// The window from `from`, below the exclusive `cap`.
 	fn admitted(&self, from: u64, cap: Option<u64>) -> RangeInclusiveSet<u64> {
-		let mut admitted = RangeInclusiveSet::new();
-		let last = match cap {
-			Some(end) => match end.checked_sub(1) {
-				Some(last) => last,
-				None => return admitted,
-			},
-			None => u64::MAX,
-		};
-		for run in self.filter.window.runs(from) {
-			if *run.start() > last {
-				break;
-			}
-			admitted.insert(*run.start()..=(*run.end()).min(last));
-		}
-		admitted
+		admitted(&self.filter.window, from, cap)
 	}
 
 	/// [`Filter::owed`] as of now: what was owed and what the walk newly reads since
@@ -5355,6 +5376,35 @@ impl Cursor {
 #[derive(Clone)]
 pub struct Control {
 	subscription: Preferences,
+	/// A plain cursor's servable window, republished when the ranges are replaced, so a
+	/// group it handed out is judged against them before the cursor next reads. `None`
+	/// for a reader that follows a route, whose copies take them on its next read.
+	republish: Option<Republish>,
+}
+
+/// What a [`Control`] needs to republish a plain cursor's [`Published`] window.
+#[derive(Clone)]
+struct Republish {
+	state: kio::ConsumerWeak<TrackState>,
+	published: kio::ProducerWeak<Published>,
+}
+
+impl Republish {
+	/// Resolve `ranges` as the cursor will, under its cap, and publish them.
+	fn publish(&self, ranges: &[Range]) {
+		let Some(published) = self.published.produce() else {
+			return;
+		};
+		let window = Window::new(ranges, self.state.read().newest_produced);
+		let cap = published.read().cap;
+		let servable = Servable::new(admitted(&window, 0, cap));
+		if published.read().servable == servable {
+			return;
+		}
+		if let Ok(mut current) = published.write() {
+			current.servable = servable;
+		}
+	}
 }
 
 impl Control {
@@ -5368,6 +5418,11 @@ impl Control {
 	/// Returns [`Error::Closed`] if the track already ended; the update is
 	/// meaningless at that point and can usually be ignored.
 	pub fn update(&self, subscription: Subscription) -> Result<()> {
+		// Republished first, so the cursor's own resolution, when it next reads, replaces it.
+		let replaced = self.republish.is_some() && self.subscription.read().ranges != subscription.ranges;
+		if let Some(republish) = self.republish.as_ref().filter(|_| replaced) {
+			republish.publish(&subscription.ranges);
+		}
 		self.subscription.update(subscription)
 	}
 }
@@ -5411,10 +5466,17 @@ impl Subscriber {
 
 	/// Create a handle for updating this subscriber's delivery preferences.
 	pub fn control(&self) -> Control {
-		Control {
-			subscription: match &self.inner {
-				Inner::Plain(cursor) => cursor.subscription.clone(),
-				Inner::Resume(resume, _) => resume.subscription().clone(),
+		match &self.inner {
+			Inner::Plain(cursor) => Control {
+				subscription: cursor.subscription.clone(),
+				republish: Some(Republish {
+					state: cursor.state.weak(),
+					published: cursor.published.weak(),
+				}),
+			},
+			Inner::Resume(resume, _) => Control {
+				subscription: resume.subscription().clone(),
+				republish: None,
 			},
 		}
 	}
@@ -9567,6 +9629,34 @@ mod test {
 		let pending = moq_clock::sim::spawn(async move { held.read_frame().await });
 		moq_clock::sim::yield_now().await;
 		assert!(!pending.is_finished(), "group 0 is within the budget of its run");
+	}
+
+	/// Ranges replaced through a [`Control`] republish what a held group is judged against
+	/// at once, before the cursor next reads: group 0 is judged against the run's own
+	/// group 10, not group 1, which the new ranges never read.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_control_update_moves_the_run_a_held_group_is_judged_against() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let budget = Subscription::default().with_max_delay(Duration::from_secs(15));
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(budget.clone());
+		let mut zero = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		zero.write_frame(at(0), bytes::Bytes::from_static(b"x")).unwrap();
+		let mut held = subscriber.recv_group().await.unwrap().expect("group 0");
+		assert!(held.read_frame().await.unwrap().is_some());
+
+		subscriber.control().update(budget.with_groups(10..20)).unwrap();
+		for (sequence, millis) in [(1, 1000), (10, 10_000), (19, 19_000)] {
+			let mut group = producer.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(at(millis), bytes::Bytes::from_static(b"x")).unwrap();
+			group.finish().unwrap();
+		}
+
+		let pending = moq_clock::sim::spawn(async move { held.read_frame().await });
+		moq_clock::sim::yield_now().await;
+		assert!(!pending.is_finished(), "group 0 is within the budget of its run");
+		drop(subscriber);
 	}
 
 	#[test]
