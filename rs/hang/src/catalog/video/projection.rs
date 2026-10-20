@@ -30,9 +30,13 @@ pub enum Projection {
 pub struct UnknownProjection(serde_json::Map<String, serde_json::Value>);
 
 impl UnknownProjection {
-	/// The `kind` as it appeared on the wire, or `None` if it was absent or not a string.
-	pub fn kind(&self) -> Option<&str> {
-		self.0.get("kind").and_then(serde_json::Value::as_str)
+	/// The `kind` as it appeared on the wire.
+	pub fn kind(&self) -> &str {
+		// Deserialize refuses a projection without a string kind, so this is never empty.
+		self.0
+			.get("kind")
+			.and_then(serde_json::Value::as_str)
+			.unwrap_or_default()
 	}
 
 	/// The full JSON object, including `kind`.
@@ -80,10 +84,14 @@ impl<'de> Deserialize<'de> for Projection {
 	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		let object = serde_json::Map::deserialize(deserializer)?;
 
+		let Some(kind) = object.get("kind").and_then(serde_json::Value::as_str) else {
+			return Err(de::Error::custom("projection kind must be a string"));
+		};
+
 		// Only route kinds we know to the derived enum, so a malformed known projection is still
 		// a hard error instead of silently becoming Unknown.
-		let projection = match object.get("kind").and_then(serde_json::Value::as_str) {
-			Some("rectilinear" | "equirectangular") => {
+		let projection = match kind {
+			"rectilinear" | "equirectangular" => {
 				match Known::deserialize(serde_json::Value::Object(object)).map_err(de::Error::custom)? {
 					Known::Rectilinear => Self::Rectilinear,
 					Known::Equirectangular { fov } => Self::Equirectangular { fov },
@@ -126,7 +134,7 @@ mod tests {
 		let Projection::Unknown(unknown) = &parsed else {
 			panic!("expected unknown: {parsed:?}");
 		};
-		assert_eq!(unknown.kind(), Some("cubemap"));
+		assert_eq!(unknown.kind(), "cubemap");
 		assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
 	}
 
@@ -139,6 +147,8 @@ mod tests {
 
 	#[test]
 	fn malformed_known_is_refused() {
+		serde_json::from_str::<Projection>(r#"{"fov":180}"#).unwrap_err();
+		serde_json::from_str::<Projection>(r#"{"kind":5}"#).unwrap_err();
 		serde_json::from_str::<Projection>(r#"{"kind":"equirectangular","fov":"wide"}"#).unwrap_err();
 		for fov in ["0", "-90", "360.5"] {
 			let json = format!(r#"{{"kind":"equirectangular","fov":{fov}}}"#);

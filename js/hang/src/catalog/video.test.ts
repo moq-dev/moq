@@ -221,6 +221,8 @@ test("projection keeps an unknown kind verbatim and ignores unknown fields", () 
 });
 
 test("projection refuses a malformed known kind", () => {
+	expect(() => vr({ projection: { fov: 180 } })).toThrow();
+	expect(() => vr({ projection: { kind: 5 } })).toThrow();
 	for (const fov of ["wide", 0, -90, 360.5, Number.NaN, Number.POSITIVE_INFINITY]) {
 		expect(() => vr({ projection: { kind: "equirectangular", fov } })).toThrow();
 	}
