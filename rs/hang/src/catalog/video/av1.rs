@@ -78,8 +78,9 @@ impl std::fmt::Display for AV1 {
 	}
 }
 
-lazy_static::lazy_static! {
-	static ref AV1_REGEX: regex::Regex = regex::Regex::new(&r"
+static AV1_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+	regex::Regex::new(
+		&r"
 		^av01
 		\.(?<profile>[0-2])
 		\.(?<level>\d{2})(?<tier>\w)
@@ -92,9 +93,11 @@ lazy_static::lazy_static! {
 			\.(?<matrix>\d{2})
 			\.(?<full>[01])
 		)?
-		$".replace(['\n', ' ', '\t'], "")
-	).unwrap();
-}
+		$"
+		.replace(['\n', ' ', '\t'], ""),
+	)
+	.unwrap()
+});
 
 impl std::str::FromStr for AV1 {
 	type Err = Error;
