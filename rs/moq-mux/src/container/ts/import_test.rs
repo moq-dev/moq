@@ -615,7 +615,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	assert_eq!(distinct.len(), 6, "six distinct cue sections");
 	assert!(
 		cues.iter().all(|(_, ts)| *ts != moq_net::Timestamp::ZERO),
-		"cues stamped with the video PTS, not zero"
+		"cues stamped with their PCR placement"
 	);
 }
 

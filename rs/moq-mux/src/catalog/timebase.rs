@@ -86,16 +86,27 @@ impl<E: CatalogExt> Timebase<E> {
 	/// further ahead reads as a period behind, a rewind.
 	pub(crate) fn nearest(&self, raw: u64, wrap: Wrap) -> crate::Result<u64> {
 		let offset = self.anchor(moq_net::Timestamp::from_scale(raw, wrap.hz)?)?;
-		let micros = self.catalog.current_clock().now().as_micros() as i128 - offset.0 as i128;
-		let reading = (micros * wrap.hz as i128).div_euclid(1_000_000);
-		let period = wrap.period as i128;
-		let era = (reading - raw as i128 + period / 2).div_euclid(period);
-		u64::try_from(raw as i128 + era * period).map_err(|_| {
+		u64::try_from(self.era(raw, wrap, offset)).map_err(|_| {
 			crate::Error::UnmappableTimestamp(format!(
 				"{raw} at {} Hz lands before the broadcast clock's zero",
 				wrap.hz
 			))
 		})
+	}
+
+	/// `raw` in the era [`Self::nearest`] gives it, without anchoring: `None` until the timebase
+	/// has an offset. Signed, since a value just behind the wrap the anchor sits past lands in
+	/// the era before zero, as a PCR leading a PTS just past the wrap does.
+	pub(crate) fn unwrap(&self, raw: u64, wrap: Wrap) -> Option<i128> {
+		Some(self.era(raw, wrap, self.offset()?))
+	}
+
+	fn era(&self, raw: u64, wrap: Wrap, offset: Offset) -> i128 {
+		let micros = self.catalog.current_clock().now().as_micros() as i128 - offset.0 as i128;
+		let reading = (micros * wrap.hz as i128).div_euclid(1_000_000);
+		let period = wrap.period as i128;
+		let era = (reading - raw as i128 + period / 2).div_euclid(period);
+		raw as i128 + era * period
 	}
 }
 

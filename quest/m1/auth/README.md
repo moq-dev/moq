@@ -14,9 +14,9 @@ means "nobody wants it yet" instead of "nobody ever will".
 
 This questline adds an AUTH exchange to both wires: one stream per token, a
 grant per token, the union of every accepted token as the session's scope,
-and a loud failure when a publish can never be honored. It ends with the
-credential able to travel in band, while the URL keeps working for every peer
-that predates the stream. Node-bound peer grants for direct sessions belong to
+and a loud failure when a publish can never be honored. It ends with extra
+credentials able to travel in band, while the first rides SETUP, or the URL
+for peers that predate the SETUP token. Node-bound peer grants for direct sessions belong to
 [P2P](/quest/m2/p2p/peer-grant.md), their only consumer.
 
 ## Plan
@@ -27,21 +27,32 @@ Decisions settled while planning, recorded so review does not relitigate them:
   is presented, verified by the acceptor through `requests()`, and earns a
   grant with a lifetime. An AUTH stream's token lives for the session and
   its grant joins the session scope. A moq-transport `AUTHORIZATION TOKEN`
-  on a request is the same kind of auth, named by that request: it admits
-  only that request, never joins the scope, and ends with it. Renewal on
-  SUBSCRIBE_UPDATE or REQUEST_UPDATE names a new auth that replaces the old.
+  on a request is the same kind of auth, scoped to that request: it admits
+  only that request, never joins the scope, and ends with it. A
+  SUBSCRIBE_UPDATE or REQUEST_UPDATE carrying a new token replaces it.
   Per-request tokens are moq-transport's naive form and are not surfaced as
   a separate API.
-- ✅ Decided 2026-10-15 (maintainer, #5148): an unnamed request is admitted
-  by the union of session-lifetime auths only. A named request outside its
-  auth's grant is refused, and ends when that auth ends.
-- ✅ Decided 2026-10-15 (maintainer, #5148): the work lands in steps.
-  Step 1 (#5148) is incoming only: request tokens arrive on `requests()`,
-  named requests are held to their issued grant, renewal is renaming, and
-  no lite wire changes. Step 2 specs `auth=id` in the wip lite version so a
-  lite request names an AUTH stream instead of carrying a token. Step 3
-  adds outgoing request tokens through `add()` with automatic naming, sent
-  as `USE_VALUE` on plain moq-transport.
+- ✅ Decided 2026-10-19 (maintainer, closing
+  [#5927](https://github.com/moq-dev/moq/pull/5927)): **no per-request auth
+  on moq-lite.** Lite AUTH carries no ID and lite requests no `Auth` field,
+  so no request spends a byte on auth. moq-transport's per-request token
+  stays an acceptor-side mapping onto lite's model and never becomes a lite
+  wire feature.
+- ✅ Decided 2026-10-15 (maintainer, #5148), narrowed 2026-10-19 (#5927): a
+  request without its own token is admitted by the union of session-lifetime
+  auths only, which on moq-lite is every request. A moq-transport request
+  carrying a token is held to that token's grant, inside the scope or not,
+  and ends when the token does.
+- ✅ Decided 2026-10-15 (maintainer, #5148), revised 2026-10-19 (#5927): the
+  work lands in steps. Step 1 (#5148) is incoming only: request tokens
+  arrive on `requests()`, a moq-transport request is held to its token's
+  grant, an update's token replaces it, and no lite wire changes. Step 2,
+  lite requests naming an AUTH stream, is dropped; what it would have closed,
+  a request racing the token it relies on, is
+  [A request right behind its token](/quest/m1/auth/request-race.md). Step 3
+  sends outgoing request tokens on moq-transport through `Route::auth` as
+  `USE_VALUE` ([Live requests follow their auth](/quest/m1/auth/request-update.md));
+  lite has nothing to send, since the token already sits in the union.
 - ✅ Decided 2026-10-15 (maintainer, #5148): `auth::Handle::authorize`
   keeps its name and now means the connection credential's grant; the
   session adds every grant it issued to an AUTH token itself.
@@ -58,8 +69,8 @@ Decisions settled while planning, recorded so review does not relitigate them:
 - **One AUTH stream per token, opened by whoever presents it.** Either side of
   a session may open one; the acceptor answers with the grant that token
   earns. A moq-net session opens one on both sides right after SETUP with an
-  empty token, meaning the credential the connection already presented (URL
-  `?jwt=`, mTLS, or nothing), so a publish-only client learns it may subscribe
+  empty token, meaning the credential the connection already presented (the
+  SETUP token, URL `?jwt=`, mTLS, or nothing), so a publish-only client learns it may subscribe
   to nothing and a relay learns which role its peer will ever play. This is
   also the answer to
   [moq-wg #1854](https://github.com/moq-wg/moq-transport/issues/1854): the
@@ -84,21 +95,24 @@ Decisions settled while planning, recorded so review does not relitigate them:
   grant type stays pattern-valued.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
   broadcast outside the union aborts the session with `Unauthorized`, naming
-  the path. The check runs against the grants in hand once the tokens the
-  library itself presented at setup are answered; a token the app adds later
-  is the app's to await before publishing what it unlocks. The origin is
+  the path. The check runs against the grants in hand once every token the
+  session presented is answered, setup, replayed, or app-added alike
+  ([request race](/quest/m1/auth/request-race.md)). The origin is
   untouched, so a broadcast shared across sessions (P2P hops, a cluster) is
   refused only where it is refused. Grant shrinkage cancels previously
   authorized work on this session without aborting it or deleting the shared
   origin; this is distinct from attempting a new unauthorized publication.
   Apps that want to decide themselves read the grant instead.
-- **Older peers keep the URL.** WebTransport negotiates the moq version as a
-  subprotocol of the same CONNECT request that carries the URL, so a client
-  cannot learn whether the peer speaks AUTH before the token has to be sent.
-  The client puts the connection credential in the URL as long as any
-  version it offers has no AUTH stream and omits it once the offered set is
-  AUTH-capable; extra tokens go in band and are simply absent on an old peer.
-  Nothing is refused and nothing is silent.
+- **The first token rides SETUP.** ✅ Decided 2026-10-19 (maintainer,
+  #5972): the connection credential goes in the client's SETUP (a
+  lite-07-wip SETUP parameter, moq-transport's AUTHORIZATION TOKEN option),
+  which the acceptor already reads before serving the session, so it costs
+  no round trip and a session's first requests wait on no AUTH. The URL is
+  fixed before the version is negotiated, so it carries the token as a
+  fallback while any offered version lacks the SETUP token. Extra tokens go
+  in band and are simply absent on an old peer. Nothing is refused and
+  nothing is silent. This replaces the earlier "always in the CONNECT
+  request" decision and its auth-header plan.
 - **Cluster peers keep mTLS.** A relay opens AUTH toward its peer with an empty
   token like any client; AUTH reports the grant actually admitted in each
   direction. The next mTLS scope quest can restrict or refuse it. A v1 endpoint
@@ -132,13 +146,12 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 - [Live requests follow their auth](/quest/m1/auth/request-update.md) - a route swaps its auth and the session sends the update, keeping the request up
 - [Auth outlives its session](/quest/m1/auth/issuer.md) - one `auth::Handle` spans a connection's sessions, so a route's auth survives a reconnect
-- [Requests name their auth](/quest/m1/auth/request-auth-id.md) - lite-07 AUTH carries an ID and each request names the auth that admits it
+- [A request right behind its token](/quest/m1/auth/request-race.md) - a lite request relying on a just-presented token is admitted, with no auth field on any request
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
-- [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
-  the URL: a session starts on what the URL carried and its AUTH streams add
-  the rest, with the URL kept for peers without the AUTH stream
-  subscription even while its joining FETCH waits for request-ID credit
+- [Token in band](/quest/m1/auth/token-in-band.md) - extra credentials ride
+  AUTH streams: a session starts on the token its SETUP or URL carried and its
+  AUTH streams add the rest
 
 ## Related
 

@@ -47,7 +47,7 @@ symbol stripping. Prefix direct calls with
 - Transport parameters that decode re-encode to bytes that decode to the same values.
 - A stream ID keeps the initiator, direction, and index it was built from.
 - ACK ranges walk downward without overlapping.
-- `connection` handshakes a client and server over TLS, then applies opens, accepts,
+- `connection` handshakes a client and server, then applies opens, accepts,
   writes, finishes, resets (plain and at an offset), acknowledgment queries, stops, reads that hold or
   release credit, runtime limit and window changes, datagrams, key updates, and time
   jumps, while dropping, duplicating, reordering, corrupting, and injecting datagrams.
@@ -55,6 +55,13 @@ symbol stripping. Prefix direct calls with
   written, and finishes only at the length the writer finished at. Every datagram
   carries a sequence number and arrives intact, at most once. The network drains at
   the end, so whatever is still in flight is checked too.
+
+  Both sides run `fuzz::Plaintext`, crypto with no TLS and no packet protection, so a
+  run skips the TLS handshake and a corrupted or injected packet decrypts and reaches
+  the frame layer. Since such a packet can carry valid STREAM and DATAGRAM frames, the
+  content checks skip the streams and datagrams it carried; the read order check and
+  "does not panic" still cover them. `Plaintext` is only reachable through the `fuzz`
+  feature, which the benches also enable, so it never ships in a normal build.
 
 A parse that fails is not a finding, and neither is a connection the ops close.
 

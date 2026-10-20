@@ -8,11 +8,12 @@ set working-directory := '.'
 default:
     just check
 
-# Build the package and run the probe and doc samples against its install.
+# Build the package, or check an archive, and run its installed consumers.
+[no-cd]
 [positional-arguments]
 check *args:
-    python3 ../sh/cpp/ffi.test.py
-    ../sh/cpp/check.sh "$@"
+    python3 {{ quote(justfile_directory() / "sh/cpp/ffi.test.py") }}
+    {{ quote(justfile_directory() / "sh/cpp/check.sh") }} "$@"
 
 # Run the in-process binding benchmark with the release library.
 bench:

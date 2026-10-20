@@ -6,6 +6,7 @@ import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
 import * as DatagramStream from "../datagram_stream.ts";
+import type * as Epoch from "../epoch.ts";
 import {
 	closeError,
 	error,
@@ -54,6 +55,7 @@ import { Parameters } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, PublishError, publishDoneClean } from "./publish.ts";
 import {
+	type AdvertParams,
 	type PublishNamespace,
 	PublishNamespaceCancel,
 	PublishNamespaceDone,
@@ -118,6 +120,9 @@ type SubscribeSetupState = {
 	rejected?: boolean;
 };
 
+/** An announced path: each live advertisement referencing it, oldest first, and the route it holds. */
+type Announced = { adverts: { id: number; route: Route }[]; route: Route };
+
 /** A local announce reader's filter: its scope, the prefix it asked for, and its hidden opt-in. */
 type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean };
 
@@ -145,6 +150,9 @@ export class Subscriber {
 	// to us contains.
 	#cluster?: Cluster.Hops;
 
+	// Whether both SETUPs offered MoQ Epoch, so advertisements may name their instance.
+	#epoch: boolean;
+
 	// Publisher-chosen aliases used by incoming group streams.
 	#aliases = new TrackAliases<Subscription>();
 
@@ -161,15 +169,21 @@ export class Subscriber {
 	// got past the duplicate check before either attached would both take one.
 	#legacyRequests = new Set<Path.Valid>();
 
-	// Every announced path, counted by how many live advertisements reference it.
+	// Every announced path, with the live advertisements that reference it.
 	//
 	// A peer may advertise one namespace twice on a session: an unsolicited
 	// PUBLISH_NAMESPACE and an inline NAMESPACE answering our own SUBSCRIBE_NAMESPACE are
 	// two messages about one source, which the MoQ Solicit draft requires us to tolerate.
-	// Counting them is what keeps the second from duplicating the announce and the first
-	// to end from retracting what the other still holds. Each path holds one of the
-	// session's announce slots, however many advertisements reference it.
-	#announced: SlotMap<Path.Valid, { count: number; route: Route }>;
+	// Tracking each is what keeps the second from duplicating the announce and the first
+	// to end from retracting what the other still holds. A publisher replacing its instance
+	// (MoQ Epoch) withdraws one advertisement and makes another, on separate streams that
+	// can arrive in either order, so the newest stands until it goes and an update to an
+	// older one changes nothing. Each path holds one of the session's announce slots,
+	// however many advertisements reference it.
+	#announced: SlotMap<Path.Valid, Announced>;
+
+	// Names each advertisement the peer makes, so a later update or withdrawal finds its own.
+	#nextAdvert = 0;
 
 	// Any consumers that want each new announcement, keyed by their local filter.
 	#announcedConsumers = new Map<announce.Producer, Filter>();
@@ -204,6 +218,7 @@ export class Subscriber {
 		session,
 		quic,
 		cluster,
+		epoch = false,
 		hidden = false,
 		activeCount = false,
 		solicit,
@@ -217,6 +232,8 @@ export class Subscriber {
 		quic?: WebTransport;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
+		/** Whether both SETUPs offered MoQ Epoch. */
+		epoch?: boolean;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
 		/** Whether both SETUPs declared MoQ Active Count. */
@@ -234,6 +251,7 @@ export class Subscriber {
 		this.#quic = quic;
 		this.#announced = new SlotMap(new Slots(limits.announces, { quic, reason: "too many announcements" }));
 		this.#cluster = cluster;
+		this.#epoch = epoch;
 		this.#hidden = hidden;
 		this.#activeCount = activeCount;
 		this.#solicit = solicit;
@@ -261,7 +279,7 @@ export class Subscriber {
 	// Reprice every live advertisement. Idempotent, since the signal stays set.
 	#drainAnnounced(): void {
 		for (const [path, info] of this.#announced) {
-			this.#updateAnnounce(path, info.route);
+			this.#settleAnnounce(path, info);
 		}
 	}
 
@@ -283,10 +301,13 @@ export class Subscriber {
 		return advert !== undefined && this.#cluster !== undefined && Cluster.loops(advert, this.#cluster.self);
 	}
 
-	/** The route an advertisement carries; one without a path is anonymous and free. */
-	#route(advert: Cluster.Advert | undefined): Route {
-		if (advert === undefined) return { hops: [UNKNOWN_HOP], cost: Cost.zero };
-		return { hops: advert.hops, cost: advert.cost };
+	/**
+	 * The route an advertisement carries; one without a path is anonymous and free. Its
+	 * epoch is taken as given, and absent when the advertisement names none.
+	 */
+	#route({ cluster, epoch }: AdvertParams): Route {
+		const route = cluster === undefined ? { hops: [UNKNOWN_HOP], cost: Cost.zero } : { ...cluster };
+		return epoch === undefined ? route : { ...route, epoch };
 	}
 
 	/**
@@ -329,58 +350,82 @@ export class Subscriber {
 	}
 
 	/**
-	 * Record one more advertisement for a path, telling consumers only when it is the
-	 * first. A second one is the same namespace said twice, not news.
+	 * Record one more advertisement for a path, returning the id that names it. Consumers
+	 * hear `start` for the first; a later one stands as the newest (see `#settleAnnounce`).
 	 */
-	#attachAnnounce(path: Path.Valid, route: Route) {
-		route = this.#priced(route);
+	#attachAnnounce(path: Path.Valid, route: Route): number {
+		const id = this.#nextAdvert++;
 		const existing = this.#announced.get(path);
 		if (existing) {
-			existing.count += 1;
-			// A second advertisement after GOAWAY still must not win selection.
-			if (this.#goingAway()) this.#updateAnnounce(path, existing.route);
-			return;
+			existing.adverts.push({ id, route });
+			this.#settleAnnounce(path, existing);
+			return id;
 		}
-		const entry = { count: 1, route };
+		route = this.#priced(route);
+		const entry: Announced = { adverts: [{ id, route }], route };
 		this.#announced.set(path, entry);
 		this.#consumes.announce(path, entry, route);
 
-		console.debug(`announced: broadcast=${path} active=true`);
+		console.debug(`announced: broadcast=${path} active=true epoch=${route.epoch}`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
 			const scope = filter.scope;
 			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "start", route });
 		}
+		return id;
+	}
+
+	/** Replace the route of advertisement `id`, which moves the path only while it is the newest. */
+	#updateAnnounce(path: Path.Valid, id: number, route: Route) {
+		const existing = this.#announced.get(path);
+		const advert = existing?.adverts.find((advert) => advert.id === id);
+		if (existing === undefined || advert === undefined) return;
+		// A repeat under another epoch is a newer advertisement, so it becomes the newest;
+		// one of the same instance stays where it is.
+		if (advert.route.epoch !== route.epoch) {
+			existing.adverts.splice(existing.adverts.indexOf(advert), 1);
+			existing.adverts.push(advert);
+		}
+		advert.route = route;
+		this.#settleAnnounce(path, existing);
 	}
 
 	/**
-	 * Replace the stored route for a path that is already announced. A no-op when the
-	 * hops and cost did not change; otherwise consumers hear `update` so a forwarder
-	 * can reprice without retracting. The path still names the same broadcast, whatever
-	 * the first hop now says, so the shared consume stays.
+	 * Route a path by its newest live advertisement. A no-op when that changed nothing.
+	 * Otherwise consumers hear `update` for new hops or cost, so a forwarder can reprice
+	 * without retracting and the shared consume stays, or `restart` for another publisher
+	 * instance (MoQ Epoch), so the next consume subscribes afresh.
 	 */
-	#updateAnnounce(path: Path.Valid, route: Route) {
-		route = this.#priced(route);
-		const existing = this.#announced.get(path);
-		if (existing === undefined || routesEqual(existing.route, route)) return;
+	#settleAnnounce(path: Path.Valid, existing: Announced) {
+		const newest = existing.adverts.at(-1);
+		if (newest === undefined) return;
+		const route = this.#priced(newest.route);
+		if (routesEqual(existing.route, route)) return;
+		const restart = existing.route.epoch !== route.epoch;
 		existing.route = route;
-		this.#consumes.announce(path, existing, route);
-		console.debug(`announced: broadcast=${path} rerouted`);
+		this.#consumes.announce(path, existing, route, restart);
+		console.debug(`announced: broadcast=${path} ${restart ? `restart=true epoch=${route.epoch}` : "rerouted"}`);
+		const kind = restart ? "restart" : "update";
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
+			// A consumer that closed stays registered until its reader loop notices.
+			if (consumer.closed.peek() !== undefined) continue;
 			const scope = filter.scope;
-			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "update", route });
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind, route });
 		}
 	}
 
 	/**
-	 * Drop one advertisement for a path, retracting it only once the last one goes.
+	 * Drop advertisement `id` for a path, retracting it only once the last one goes.
 	 */
-	#detachAnnounce(path: Path.Valid) {
+	#detachAnnounce(path: Path.Valid, id: number) {
 		const existing = this.#announced.get(path);
-		if (existing === undefined) return;
-		if (existing.count > 1) {
-			existing.count -= 1;
+		const index = existing?.adverts.findIndex((advert) => advert.id === id) ?? -1;
+		if (existing === undefined || index === -1) return;
+		existing.adverts.splice(index, 1);
+		if (existing.adverts.length > 0) {
+			// The newest went while an older one stands: that one is what remains.
+			this.#settleAnnounce(path, existing);
 			return;
 		}
 
@@ -437,9 +482,11 @@ export class Subscriber {
 			return;
 		}
 
-		// Suffixes live on this stream, so a repeat is recognized as an update to the
-		// advertisement rather than a second one, which would leak the count.
-		const live = new Set<Path.Valid>();
+		// Suffixes live on this stream, with the advertisement each holds and the epoch it named,
+		// so a repeat is recognized as an update to it rather than a second one, which would leak.
+		// An advertisement stays live on the wire until its NAMESPACE_DONE, even while its
+		// route is detached (`id` unset) for looping back through us.
+		const live = new Map<Path.Valid, { id?: number; epoch?: Epoch.Valid }>();
 
 		// Set once the teardown below has given back everything this stream held. The read
 		// loop is not awaited when the local consumer closes first, and closing the stream
@@ -560,43 +607,52 @@ export class Subscriber {
 							throw new ProtocolViolation(`message 0x${msgType.toString(16)} inside the initial set`);
 						}
 						if (msgType === SubscribeNamespaceEntry.id) {
-							const entry = await SubscribeNamespaceEntry.decode(
-								stream.reader,
-								version,
-								Cluster.negotiated(this.#cluster),
-							);
+							const entry = await SubscribeNamespaceEntry.decode(stream.reader, version, {
+								cluster: Cluster.negotiated(this.#cluster),
+								epoch: this.#epoch,
+							});
 							// Counted even when discarded below.
 							if (initial > 0) initial -= 1;
 							if (released) break;
 
 							const path = Path.join(prefix, entry.suffix);
+							const params = entry.params ?? {};
+							const held = live.get(path);
+
+							// A repeat under another epoch replaces the instance in place, but one
+							// that gains or loses an epoch skipped the NAMESPACE_DONE it needs.
+							if (held !== undefined && (held.epoch === undefined) !== (params.epoch === undefined)) {
+								throw new ProtocolViolation(`NAMESPACE repeated gaining or losing an epoch: ${path}`);
+							}
 
 							// A repeat updates the advertisement in place, so one that now
 							// loops back through us has taken a route we can't subscribe
 							// over: the path is gone even though the message says active.
-							if (this.#reflected(entry.cluster)) {
+							if (this.#reflected(params.cluster)) {
 								console.debug(`dropping reflected namespace: broadcast=${path}`);
-								if (live.delete(path)) this.#detachAnnounce(path);
+								if (held?.id !== undefined) this.#detachAnnounce(path, held.id);
+								live.set(path, { epoch: params.epoch });
 								continue;
 							}
 
 							// A repeat replaces the advertisement in place: HOP_PATH / ROUTE_COST
-							// can change without a NAMESPACE_DONE. Only the first is a new path.
-							const route = this.#route(entry.cluster);
-							if (live.has(path)) {
-								this.#updateAnnounce(path, route);
+							// can change without a NAMESPACE_DONE, and another epoch restarts the
+							// path without it ever going absent. Only the first is a new path.
+							const route = this.#route(params);
+							if (held?.id !== undefined) {
+								held.epoch = params.epoch;
+								this.#updateAnnounce(path, held.id, route);
 							} else {
-								this.#attachAnnounce(path, route);
-								live.add(path);
+								live.set(path, { id: this.#attachAnnounce(path, route), epoch: params.epoch });
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
 							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
 							if (released) break;
 							const path = Path.join(prefix, entry.suffix);
 
-							if (live.delete(path)) {
-								this.#detachAnnounce(path);
-							}
+							const held = live.get(path);
+							live.delete(path);
+							if (held?.id !== undefined) this.#detachAnnounce(path, held.id);
 						} else if (msgType === PublishBlocked.id && version === Version.DRAFT_17) {
 							const blocked = await PublishBlocked.decode(stream.reader, version);
 							console.debug(`publish_blocked: suffix=${blocked.suffix} track=${blocked.trackName}`);
@@ -645,8 +701,8 @@ export class Subscriber {
 			// each namespace keeps its count and the source never detaches, which would
 			// pin the path for the session even after the other source withdrew.
 			released = true;
-			for (const path of live) {
-				this.#detachAnnounce(path);
+			for (const [path, held] of live) {
+				if (held.id !== undefined) this.#detachAnnounce(path, held.id);
 			}
 			live.clear();
 		}
@@ -671,7 +727,9 @@ export class Subscriber {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
 				if (!request) break;
-				void this.#runSubscribe(path, request, instance.validity?.signal);
+				// Every request names the instance the consume resolved, so the peer refuses
+				// rather than answers from another.
+				void this.#runSubscribe(path, request, instance.validity?.signal, instance.route.epoch);
 			}
 		})();
 		return this.#consumes.insert(path, instance, consumer);
@@ -689,7 +747,7 @@ export class Subscriber {
 		]);
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, request: track.Request, valid?: AbortSignal) {
+	async #runSubscribe(broadcast: Path.Valid, request: track.Request, valid?: AbortSignal, epoch?: Epoch.Valid) {
 		const refused = unauthorized(broadcast);
 		if (this.#denied(broadcast)) {
 			request.reject(refused);
@@ -724,7 +782,7 @@ export class Subscriber {
 		// and any registration if setup eventually finishes.
 		const state: SubscribeSetupState = {};
 		const deadline = new Deadline();
-		const setup = this.#openSubscribe(state, broadcast, request, subscription, requestId, deadline);
+		const setup = this.#openSubscribe(state, broadcast, request, subscription, requestId, deadline, epoch);
 
 		// The publisher can be serving before it answers, so waiting only on the response
 		// would miss the local side going away and leave it serving a track nobody reads.
@@ -1036,6 +1094,7 @@ export class Subscriber {
 		subscription: Subscription,
 		requestId: bigint,
 		deadline: Deadline,
+		epoch: Epoch.Valid | undefined,
 	): Promise<{ stream: Stream; alias: bigint; priority: number }> {
 		const version = this.#session.version;
 
@@ -1070,6 +1129,7 @@ export class Subscriber {
 			// object, and that mid-group stream is dropped, degrading the join to the next
 			// group boundary.
 			filter: joinFilter(version),
+			epoch,
 		});
 		await msg.encode(state.stream.writer, version);
 		state.sent = true;
@@ -1129,7 +1189,7 @@ export class Subscriber {
 		}
 
 		try {
-			this.#aliases.set(ok.trackAlias, subscription, { broadcast, name: request.name });
+			this.#aliases.set(ok.trackAlias, subscription, { broadcast, name: request.name, epoch });
 			const timescale = ok.properties.timescale;
 			if (timescale !== undefined) {
 				this.#timescales.set(ok.trackAlias, timescale);
@@ -1162,7 +1222,7 @@ export class Subscriber {
 		// A path that already ran through us looped back. Refuse it rather than holding an
 		// advertisement we could never subscribe through. The peer knows our Hop ID, so a
 		// conforming one never offers it; 0 as the retry interval says not to come back.
-		if (this.#reflected(msg.cluster)) {
+		if (this.#reflected(msg.params.cluster)) {
 			console.debug(`dropping reflected publish_namespace: broadcast=${path}`);
 			await stream.writer.u53(RequestError.id);
 			await new RequestError({
@@ -1206,11 +1266,13 @@ export class Subscriber {
 		}
 
 		// Everywhere else a path this session already knows is not refused: the same
-		// namespace can reach us twice, and the count is what tells the second apart from
-		// news. This request owns exactly one of those references and gives it back when
-		// the stream ends.
+		// namespace can reach us twice, and each advertisement is tracked apart from news.
+		// This request owns exactly one of those references, named by its id while
+		// attached, and gives it back when the stream ends.
 		if (legacy) this.#legacyRequests.add(path);
-		let attached = false;
+		let attached: number | undefined;
+		// Fixed for the advertisement's life: no REQUEST_UPDATE carries one.
+		const epoch = msg.params.epoch;
 
 		try {
 			// Send OK first. This must complete before notifying consumers,
@@ -1230,14 +1292,13 @@ export class Subscriber {
 
 			// Only now is the advertisement ours to announce, for the reason above: a
 			// consumer reacting with a SUBSCRIBE must not interleave with that OK.
-			this.#attachAnnounce(path, this.#route(msg.cluster));
-			attached = true;
+			attached = this.#attachAnnounce(path, this.#route(msg.params));
 
 			// An advertisement is updated in place with REQUEST_UPDATE on the stream that
 			// already carries it, so read until the stream ends rather than waiting on the
 			// close. Nothing else would deliver a re-parented route. What the peer holds
 			// is kept current, since an update carries only what changed.
-			let held = msg.cluster;
+			let held = msg.params.cluster;
 			const done = version === Version.DRAFT_16 || legacy;
 			const stopped = !done
 				? stream.writer.closed.then(
@@ -1329,17 +1390,16 @@ export class Subscriber {
 				// advertisement's only channel, so a later clean path arrives here or
 				// nowhere.
 				if (this.#reflected(held)) {
-					if (attached) {
-						attached = false;
+					if (attached !== undefined) {
 						console.debug(`publish_namespace now loops back, detaching: broadcast=${path}`);
-						this.#detachAnnounce(path);
+						this.#detachAnnounce(path, attached);
+						attached = undefined;
 					}
-				} else if (!attached) {
+				} else if (attached === undefined) {
 					// Re-attach: a clean path replaced the reflected one we detached from.
-					attached = true;
-					this.#attachAnnounce(path, this.#route(held));
+					attached = this.#attachAnnounce(path, this.#route({ cluster: held, epoch }));
 				} else {
-					this.#updateAnnounce(path, this.#route(held));
+					this.#updateAnnounce(path, attached, this.#route({ cluster: held, epoch }));
 				}
 
 				// Nothing here can fail to apply, so every update is acknowledged. A leaf
@@ -1353,8 +1413,8 @@ export class Subscriber {
 
 			// Give back exactly what was taken: a request that never got its OK out never
 			// referenced the path, and retracting there would drop someone else's count.
-			if (attached) {
-				this.#detachAnnounce(path);
+			if (attached !== undefined) {
+				this.#detachAnnounce(path, attached);
 			}
 		}
 	}

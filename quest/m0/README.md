@@ -31,8 +31,9 @@ Group status. The fixes below LOCATION_FILTER come from them and go ahead
 of Seattle. The cold-relay Largest stays compliant with INVALID_RANGE
 (decided 2026-10-08), and the deviations doc landed in #5022.
 An imquic draft-22 rig (2026-10-08) hit LOCATION_FILTER and a clear
-FIRST_OBJECT at object 0 (#5027); the [release line](/quest/m0/release-22/README.md)
-backports both with moq-noq 1.3.5 so Seattle peers get a fixed 0.17.x.
+FIRST_OBJECT at object 0 (#5027). Both shipped with moq-noq 1.3.5 in
+moq-relay 0.17.3 and `@moq/net` 0.4.3; [release notices](/quest/m0/release-22/README.md)
+remain for the testers and reporters of the later clock and quiet-edge fixes.
 
 Identity: the [broadcast epoch](/quest/m0/broadcast-epoch/README.md) line
 gates the next release (decided 2026-10-03:
@@ -89,7 +90,7 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [Discarded-Retry backport](/quest/m0/retry-backport.md) - one injected or corrupted Retry no longer kills a handshake on the release line, via a moq-noq 1.3.x patch
 
 - [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
-- [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then a patch with draft-20+ FETCH and the unset-clock and quiet-edge fixes
+- [Draft-22 release notices](/quest/m0/release-22/README.md) - tell testers and reporters which published releases contain their fixes
 - [nixpkgs ships the lld fix](/quest/m0/nixpkgs-lld-fix.md) - waiting on NixOS/nixpkgs#568680 to reach `nixpkgs-unstable`, which the release build fix bumps to
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on #412 to publish the patched 0.6.x that main adopts

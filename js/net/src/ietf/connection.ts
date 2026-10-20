@@ -94,6 +94,9 @@ export class Connection implements Established {
 	// The Hop IDs this session declared; see {@link Cluster}.
 	#cluster?: Cluster.Hops;
 
+	// Whether both SETUPs offered MoQ Epoch, so advertisements and requests may carry EPOCH.
+	#epoch: boolean;
+
 	// The peer's GOAWAY: read here on v17+, by the control stream adapter before that.
 	#goaway: Once<Drain>;
 
@@ -126,6 +129,7 @@ export class Connection implements Established {
 		activeCount = false,
 		cluster,
 		auth = false,
+		epoch = false,
 		early = [],
 		requestWindow,
 		extensions,
@@ -155,6 +159,8 @@ export class Connection implements Established {
 		cluster?: Cluster.Hops;
 		/** Whether MoQ Auth is negotiated (draft-17+): offered by both SETUPs. */
 		auth?: boolean;
+		/** Whether MoQ Epoch is negotiated (draft-17+): offered by both SETUPs. */
+		epoch?: boolean;
 		/** Uni streams that arrived before the peer's SETUP, type unread (v17+). */
 		early?: Reader[];
 		/** Requests the peer may hold open on drafts 14 to 16, the window our SETUP advertised (default `REQUEST_WINDOW`). */
@@ -215,6 +221,7 @@ export class Connection implements Established {
 			hidden,
 			activeCount,
 			cluster,
+			epoch,
 			grant: this.#auth.scope,
 			auth: this.#auth,
 			ready: this.#auth.setupAnswered(),
@@ -222,10 +229,12 @@ export class Connection implements Established {
 		this.#solicit = solicit;
 		this.#declaredSolicit = extensions?.solicit ?? true;
 		this.#cluster = cluster;
+		this.#epoch = epoch;
 		this.#subscriber = new Subscriber({
 			session: this.#session,
 			quic,
 			cluster,
+			epoch,
 			hidden,
 			activeCount,
 			solicit,
@@ -441,11 +450,10 @@ export class Connection implements Established {
 
 			// Subscriber handles incoming notifications
 			case BigInt(PublishNamespace.id): {
-				const decoded = PublishNamespace.decode(
-					stream.reader,
-					this.#session.version,
-					Cluster.negotiated(this.#cluster),
-				);
+				const decoded = PublishNamespace.decode(stream.reader, this.#session.version, {
+					cluster: Cluster.negotiated(this.#cluster),
+					epoch: this.#epoch,
+				});
 				const msg = await this.#request(stream, "publish_namespace", decoded);
 				if (!msg) break;
 

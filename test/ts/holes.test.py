@@ -1,9 +1,13 @@
+import contextlib
 import importlib.util
+import io
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from fractions import Fraction
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("holes", pathlib.Path(__file__).with_name("holes.py"))
 holes = importlib.util.module_from_spec(spec)
@@ -108,6 +112,43 @@ class Cuts(unittest.TestCase):
     def test_lost_prefix(self):
         capture = (Fraction(10), *self.SOURCE[1:])
         self.assertEqual(len(holes.cuts(self.SOURCE, capture, self.FRAME)), 1)
+
+
+class LegacyTimestamps(unittest.TestCase):
+    def grade(self, codec, source, capture):
+        def stream(pts):
+            return holes.Stream(
+                {"codec_name": codec, "time_base": "1/90000"}, pts, pts, [True] * len(pts),
+                tuple(Fraction(t, 90_000) for t in (pts[0], pts[-1], pts[-1])),
+            )
+        with patch.object(holes, "probe", side_effect=[{"0x101": stream(capture)}, {"0x101": stream(source)}]), \
+                patch.object(sys, "argv", ["holes.py", "capture.ts", "source.ts", "--shed"]), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as exit:
+            holes.main()
+        return exit.exception.code
+
+    def test_legacy_microseconds_keep_the_source_frames(self):
+        # Legacy audio keeps its cadence, but its microsecond timestamps return
+        # one 90 kHz tick early unless they already land on the microsecond grid.
+        for codec, first, step, shift in [
+            ("mp2", 132298, 2160, 1), ("ac3", 132720, 2880, 1),
+            ("mp2", 132300, 2160, 0), ("ac3", 132723, 2880, 0),
+        ]:
+            with self.subTest(codec=codec, first=first):
+                source = [first + i * step for i in range(5)]
+                self.assertEqual(self.grade(codec, source, [t - shift for t in source]), 0)
+
+    def test_a_shift_beyond_legacy_quantization_fails(self):
+        source = [132298 + i * 2160 for i in range(5)]
+        self.assertEqual(self.grade("mp2", source, [t - 2 for t in source]), 1)
+
+    def test_a_lost_legacy_tail_still_fails(self):
+        source = [132298 + i * 2160 for i in range(5)]
+        self.assertEqual(self.grade("mp2", source, [t - 1 for t in source[:-1]]), 1)
+
+    def test_raw_video_does_not_use_legacy_quantization(self):
+        source = [133200 + i * 3600 for i in range(5)]
+        self.assertEqual(self.grade("h264", source, [t - 1 for t in source]), 1)
 
 
 class Probe(unittest.TestCase):
