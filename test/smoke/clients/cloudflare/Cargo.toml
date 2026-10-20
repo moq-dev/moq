@@ -4,6 +4,10 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+# Its own workspace: moq's root workspace builds from source and locks, while
+# this client floats on cloudflare/moq-rs Git HEAD.
+[workspace]
+
 [dependencies]
 anyhow = "1"
 bytes = "1"

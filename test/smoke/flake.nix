@@ -1,11 +1,11 @@
 {
-  description = "moq smoke - interop test for the public moq packages";
+  description = "moq smoke: interop test for the public moq packages";
 
-  # nixpkgs-unstable, intentionally NOT locked: this repo ships no flake.lock so
-  # every `nix develop` resolves the latest toolchain (and the latest Chromium),
-  # matching the "always test latest" policy. The one version that has to line up
-  # (npm `playwright` <-> this Chromium) is exported below as PLAYWRIGHT_VERSION
-  # and enforced by smoke.sh, so a nixpkgs bump can't silently drift.
+  # Separate from moq's root flake so this toolchain floats on its own schedule.
+  # flake.lock pins only the toolchain, never a moq package under test; bump it
+  # with `nix flake update`. The one version that has to line up (npm
+  # `playwright` <-> this Chromium) is exported below as PLAYWRIGHT_VERSION and
+  # enforced by freshness.sh, so a nixpkgs bump can't silently drift.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";

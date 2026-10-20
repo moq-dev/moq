@@ -20,7 +20,8 @@ json_dep() { grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$PKG" | sed -
 
 echo "== no committed package lock files =="
 # flake.lock is intentionally excluded: it locks the toolchain, not moq packages.
-locks=$(git ls-files 2>/dev/null | grep -E '(^|/)(go\.sum|bun\.lock|bun\.lockb|Cargo\.lock|uv\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Pipfile\.lock|Package\.resolved|gradle\.lockfile)$' || true)
+# Only this directory: the rest of the monorepo builds from source and locks.
+locks=$(git ls-files -- . 2>/dev/null | grep -E '(^|/)(go\.sum|bun\.lock|bun\.lockb|Cargo\.lock|uv\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Pipfile\.lock|Package\.resolved|gradle\.lockfile)$' || true)
 if [[ -n "$locks" ]]; then
     note FAIL "package lock files are checked in (delete them and add to .gitignore):"
     printf '        %s\n' "${locks//$'\n'/$'\n'        }"
@@ -62,7 +63,7 @@ fi
 # The media Docker channel (relay + cli wrappers) must use the unpinned (:latest)
 # images, and CI must pull them fresh.
 if grep -qF 'moqdev/moq-relay}' clients/docker/moq-relay && grep -qF 'moqdev/moq}' clients/docker/moq &&
-    grep -qF 'docker pull moqdev/moq-relay' .github/workflows/smoke.yml; then
+    grep -qF 'docker pull moqdev/moq-relay' ../../.github/workflows/smoke.yml; then
     note ok "moqdev/moq-relay + moqdev/moq -> :latest (pulled each run)"
 else
     note FAIL "the moqdev relay/cli Docker images are no longer unpinned :latest + pulled fresh"

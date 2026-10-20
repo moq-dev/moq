@@ -38,6 +38,18 @@ moxygen:
 relays *args:
     ./relays.sh {{ args }}
 
+# HISTORY_URL is the deployed history.json this run appends to. See report/build.sh.
+
+# Assemble the relay report site from a `relays --json` run.
+report results logs out history_url="":
+    report/build.sh {{ quote(results) }} {{ quote(logs) }} {{ quote(out) }} {{ quote(history_url) }}
+
+# CI only: leaves gh-pages checked out in SITE for the Pages deploy. See report/publish.sh.
+
+# Commit a built relay report to moq's gh-pages under relays/.
+publish report site:
+    report/publish.sh {{ quote(report) }} {{ quote(site) }}
+
 # Token interop: install moq auth in each published flavour and cross-verify.
 # The Rust `moq auth` comes from a channel (PATH); @moq/auth comes from npm,
 # driven under both node and bun. Default: rust only. Pass flags through, e.g.
@@ -85,15 +97,25 @@ negative *args:
 freshness:
     ./freshness.sh
 
-# Lint the harness. shfmt discovers every shell script (incl. the extensionless
-# clients/docker/* wrappers) and reads .editorconfig for style; shellcheck lints
-# the same set. Each tool is guarded so it skips when not on PATH (nix develop
-# provides them all).
+# moq's root `just check` lints these scripts too. shfmt discovers every shell
+# script (incl. the extensionless clients/docker/* wrappers) and reads moq's
+# root .editorconfig for style; shellcheck lints the same set. Each tool is
+# guarded so it skips when not on PATH (nix develop provides them all).
+
+# Lint the harness.
 check:
     @if command -v shfmt >/dev/null 2>&1; then shfmt --diff $(shfmt -f .); else echo "shfmt: skipped"; fi
     @if command -v shellcheck >/dev/null 2>&1 && command -v shfmt >/dev/null 2>&1; then shellcheck $(shfmt -f .); else echo "shellcheck: skipped"; fi
-    @command -v actionlint >/dev/null && actionlint || echo "actionlint: skipped"
+    @command -v actionlint >/dev/null && actionlint ../../.github/workflows/smoke.yml || echo "actionlint: skipped"
     just freshness
+
+# Unit-tests the failure diagnostics first. Linux, needs sudo.
+
+# Install the browser clients and Chromium's system libraries.
+playwright-deps:
+    cd clients/js && bun install
+    cd clients/js && bun test diagnostics.test.ts
+    cd clients/js && bunx playwright install-deps chromium
 
 # Compile-check and unit-test the local integrity client against the current
 # cloudflare/moq-rs Git dependencies. The end-to-end relay check is `just cloudflare`.

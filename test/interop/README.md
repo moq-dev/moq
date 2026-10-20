@@ -3,8 +3,8 @@
 Cross-language interop test that builds every client from **this checkout**
 and runs them against each other.
 
-This is the in-tree companion to [moq-dev/smoke](https://github.com/moq-dev/smoke).
-That repo installs each client from its public package registry (crates.io, PyPI,
+This is the in-tree companion to [`test/smoke`](../smoke).
+That suite installs each client from its public package registry (crates.io, PyPI,
 npm, ...) to catch *packaging* breakage in a release. This one builds each client
 from the workspace source (`cargo`, `bun`, `uv`, `cc`) to catch *interop*
 regressions before anything is published. No apt/brew/npm/PyPI, and no

@@ -1,5 +1,8 @@
 name: Smoke
 
+# Installs each moq package from its PUBLIC registry and checks that the
+# published clients interoperate, catching packaging breakage in a release
+# (test/smoke). The in-tree companion, interop.yml, builds from this checkout.
 on:
   # Manual on-demand runs.
   workflow_dispatch:
@@ -7,16 +10,22 @@ on:
       history_url:
         description: Seed the relay report history from this URL instead of the deployed site
         required: false
-  # On every PR: the harness itself (smoke.sh / token.sh / clients) is what
-  # changes here, so run the matrix against the published packages to catch a
-  # broken cell before it merges. Published-package regressions still surface
-  # nightly; this guards changes to the test.
+  # On PRs that touch the harness itself (smoke.sh / token.sh / clients), run
+  # the matrix against the published packages to catch a broken cell before it
+  # merges. Published-package regressions still surface nightly; this guards
+  # changes to the test. Other PRs don't change what is published.
   pull_request:
-  # Merges: the build caches below (mbx, cargo binaries) only save from the
-  # default branch's push or dispatch runs, never from the nightly schedule, so
-  # this is what keeps them warm for pull requests.
+    paths:
+      - "test/smoke/**"
+      - ".github/workflows/smoke.yml"
+  # Merges of the same: the build caches below (mbx, cargo binaries) only save
+  # from the default branch's push or dispatch runs, never from the nightly
+  # schedule, so this is what keeps them warm for pull requests.
   push:
     branches: [main]
+    paths:
+      - "test/smoke/**"
+      - ".github/workflows/smoke.yml"
   # Nightly: catches breakage from a freshly published wheel / formula / .deb /
   # npm / go module that a developer wouldn't notice until a user hit it.
   schedule:
@@ -25,6 +34,13 @@ on:
 concurrency:
   group: smoke-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: test/smoke
 
 jobs:
   smoke:
@@ -43,7 +59,7 @@ jobs:
     # the limit to 1000 req/hr per token.
     env:
       GITHUB_TOKEN: ${{ github.token }}
-      SMOKE_BROWSER_ARTIFACTS: ${{ github.workspace }}/clients/js/artifacts
+      SMOKE_BROWSER_ARTIFACTS: ${{ github.workspace }}/test/smoke/clients/js/artifacts
 
     strategy:
       fail-fast: false
@@ -75,9 +91,11 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/just
 
       # ── client toolchains ──────────────────────────────────────────────
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -201,7 +219,7 @@ jobs:
             echo "MOQ_BIN=$cli/bin/moq"
           } >> "$GITHUB_ENV"
 
-      # moq-dev/moq's cachix.yml only pushes release tags, so each new HEAD
+      # cachix.yml only pushes release tags, so each new HEAD
       # compiles here for ~20 minutes. Push what we just built, so later runs
       # (and anyone doing `nix run github:moq-dev/moq#moq`) substitute it until
       # moq's main moves. Only the two outputs' runtime closures, never the
@@ -235,16 +253,12 @@ jobs:
       # ── browser deps (Chromium runtime libs on Linux) ──────────────────
       - name: Playwright system deps (Linux)
         if: runner.os == 'Linux'
-        run: |
-          cd clients/js
-          bun install
-          bun test diagnostics.test.ts
-          bunx playwright install-deps chromium
+        run: just playwright-deps
 
       # Fail loudly if we've drifted off "latest": a committed lock file, a moq
       # package that stopped being requested at latest, or a stale playwright pin.
       - name: Freshness
-        run: ./freshness.sh
+        run: just freshness
 
       # ── run the full interop matrix ────────────────────────────────────
       # Publishers: rust, python, go, and the three browser variants publish today;
@@ -263,22 +277,22 @@ jobs:
           # exercise the moq.pc and CMake-package consumer paths, not just -I/-L.
           subs="rust,python,go,kotlin,c,c-pkgconfig,c-cmake,gst,$browser,$native"
           if [ "$RUNNER_OS" = "macOS" ]; then subs="$subs,swift"; fi
-          ./smoke.sh \
+          just smoke \
             --publishers "rust,python,go,$browser" \
             --subscribers "$subs" \
             --timeout 30
 
       - name: Upload browser failure diagnostics
-        if: ${{ !cancelled() && hashFiles('clients/js/artifacts/*') != '' }}
+        if: ${{ !cancelled() && hashFiles('test/smoke/clients/js/artifacts/*') != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: browser-failures-${{ matrix.os }}-${{ matrix.channel }}
-          path: clients/js/artifacts/
+          path: test/smoke/clients/js/artifacts/
           if-no-files-found: error
 
       # Quick proof the harness can actually report failure.
       - name: Negative control
-        run: ./smoke.sh --negative --subscribers rust,python
+        run: just negative --subscribers rust,python
 
       # ── token interop ──────────────────────────────────────────────────
       # Independent of the media matrix: prove the published token tooling
@@ -303,21 +317,25 @@ jobs:
             # it's Linux-only. (Docker is preinstalled on the Linux runners.)
             if [ "$RUNNER_OS" = "Linux" ]; then impls="$impls,rust-docker"; fi
           fi
-          ./token.sh --generators "$impls" --verifiers "$impls"
+          just token --generators "$impls" --verifiers "$impls"
 
   relays:
     name: External relay interop
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      report: ${{ steps.report.outcome }}
     # ~20 public endpoints x 2 publishers, each bounded by --timeout.
     timeout-minutes: 45
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: ./.github/actions/just
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
@@ -338,10 +356,7 @@ jobs:
           sudo apt-get install -y moq-cli
 
       - name: Playwright system deps
-        run: |
-          cd clients/js
-          bun install
-          bunx playwright install-deps chromium
+        run: just playwright-deps
 
       # The relay list comes live from the moq-interop-runner registry. Only
       # moq-dev's own relay gates the job; every other endpoint lands in the job
@@ -350,38 +365,74 @@ jobs:
       # only on WebTransport. The polyfill has no raw-QUIC (moqt://) mode, so
       # neither is listed on native QUIC or on the WebSocket column.
       - name: External relay interop
-        run: ./relays.sh --publishers rust,js-web --subscribers rust,js-web,js-bun --timeout 30 --json results.json --logs logs
+        run: just relays --publishers rust,js-web --subscribers rust,js-web,js-bun --timeout 30 --json results.json --logs logs
 
-      # The HTML report (report/index.html) on GitHub Pages. Built even when a
-      # required relay failed, since that's exactly the run worth looking at.
-      # History carries forward from the currently deployed site. A failed build
-      # uploads nothing, so a broken history never replaces the deployed one.
+      # The HTML report (report/index.html) at /relays/ on moq's GitHub Pages
+      # site. Built even when a required relay failed, since that's exactly the
+      # run worth looking at. History carries forward from the currently
+      # deployed site. A failed build uploads nothing, so a broken history never
+      # replaces the deployed one.
       - name: Build report
         id: report
-        if: ${{ !cancelled() && hashFiles('results.json') != '' }}
+        if: ${{ !cancelled() && hashFiles('test/smoke/results.json') != '' }}
         env:
           HISTORY_URL: ${{ inputs.history_url }}
         run: |
           owner="${GITHUB_REPOSITORY%%/*}"
-          report/build.sh results.json logs _site "${HISTORY_URL:-https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/history.json}"
+          just report results.json logs _site "${HISTORY_URL:-https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/relays/history.json}"
 
       - name: Upload report
         if: ${{ !cancelled() && steps.report.outcome == 'success' }}
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: relay-report
+          path: test/smoke/_site/
+          if-no-files-found: error
 
-  # Publish the relay report from main only (nightly or on demand), never from a PR.
+  # Publish the relay report from main only (nightly or on demand), never from a
+  # PR. moq has one Pages site, so this commits under relays/ on the gh-pages
+  # branch the nightly benchmark charts also write, then deploys that whole
+  # branch. Sharing nightly.yml's concurrency group keeps the two writers from
+  # racing the branch or each other's deploy.
   relays-report:
     name: Publish relay report
     needs: relays
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.relays.outputs.report == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: benchmark-pages
+      cancel-in-progress: false
     permissions:
+      contents: write
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job pushes the shared gh-pages branch.
+          persist-credentials: true
+
+      - uses: ./.github/actions/just
+
+      - name: Download report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: relay-report
+          path: ${{ runner.temp }}/relay-report
+
+      - name: Commit report
+        run: just publish "$RUNNER_TEMP/relay-report" "$RUNNER_TEMP/pages"
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/pages
+
       - name: Deploy to GitHub Pages
         id: deploy
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
@@ -396,12 +447,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       # Both relays build from Git HEAD, so only the tip changes day to day. mbx
-      # (as in moq-dev/moq) caches each compilation; `objects` mode because the
+      # (as in .github/actions/rust-cache) caches each compilation; `objects` mode because the
       # checkouts land in fresh temp dirs. The shim routes the scripts' plain
       # `cargo build` through it; without mise, setup only reports where the
       # shim lives, so put that directory first on PATH (as moq's dev shell
@@ -420,7 +473,7 @@ jobs:
           dirname "$shim" >> "$GITHUB_PATH"
 
       - name: Cloudflare interoperability
-        run: ./cloudflare.sh
+        run: just cloudflare
 
   moxygen:
     name: Moxygen interoperability
@@ -434,12 +487,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       # Both relays build from Git HEAD, so only the tip changes day to day. mbx
-      # (as in moq-dev/moq) caches each compilation; `objects` mode because the
+      # (as in .github/actions/rust-cache) caches each compilation; `objects` mode because the
       # checkouts land in fresh temp dirs. The shim routes the scripts' plain
       # `cargo build` through it; without mise, setup only reports where the
       # shim lives, so put that directory first on PATH (as moq's dev shell
@@ -462,4 +517,4 @@ jobs:
         # announce-subscribe case. Keep the full diagnostic visible without
         # failing the job; remove this once that protocol mismatch is fixed.
         continue-on-error: true
-        run: ./moxygen.sh
+        run: just moxygen

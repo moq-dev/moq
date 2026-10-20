@@ -58,11 +58,17 @@ export class Diagnostics {
 	}
 
 	async write(dir: string, name: string, error?: unknown): Promise<string> {
-		this.#data.error = error instanceof Error ? (error.stack ?? error.message) : error === undefined ? undefined : String(error);
+		this.#data.error =
+			error instanceof Error ? (error.stack ?? error.message) : error === undefined ? undefined : String(error);
 		await Promise.allSettled(this.#pending);
 		for (const exchange of this.#data.requests) {
 			const response = exchange.response;
-			if (exchange.url.startsWith(CDN) && response && response.body === undefined && response.bodyError === undefined) {
+			if (
+				exchange.url.startsWith(CDN) &&
+				response &&
+				response.body === undefined &&
+				response.bodyError === undefined
+			) {
 				response.bodyError = "body incomplete when the cell ended";
 			}
 		}

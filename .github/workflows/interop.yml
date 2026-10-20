@@ -1,7 +1,7 @@
 name: Interop
 
 # Cross-language interop test built from THIS checkout (not the published
-# packages, unlike the moq-dev/smoke repo). Stands up a relay and runs the
+# packages, unlike smoke.yml). Stands up a relay and runs the
 # publish x subscribe matrix across rust / python / go / browser / native-js / c,
 # then browser-to-browser media QA. TS validation has its own workflow.
 on:

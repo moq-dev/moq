@@ -137,7 +137,10 @@ try {
 	// AggregateError from Promise.any has an empty message; the cause is in .errors.
 	const message =
 		err instanceof AggregateError
-			? err.errors.map((e) => (e instanceof Error ? e.message : String(e))).filter(Boolean).join("; ")
+			? err.errors
+					.map((e) => (e instanceof Error ? e.message : String(e)))
+					.filter(Boolean)
+					.join("; ")
 			: err instanceof Error
 				? err.message
 				: String(err);

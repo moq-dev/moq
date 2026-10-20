@@ -85,6 +85,9 @@ th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--lin
 tr:last-child td { border-bottom: 0; }
 th { font-weight: 600; font-size: 12px; color: var(--muted); }
 th.score-col, td.score-col { text-align: center; width: 1%; }
+tr.ok td:first-child { box-shadow: inset 3px 0 0 var(--pass); }
+tr.partial td:first-child { box-shadow: inset 3px 0 0 var(--partial); }
+tr.bad td:first-child { box-shadow: inset 3px 0 0 var(--fail); }
 #latest td:first-child { white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 600px) {
 	th, td { padding: 8px; }
@@ -109,9 +112,6 @@ code { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var
 .PASS { color: var(--pass); }
 .FAIL { color: var(--fail); }
 .SKIP { color: var(--skip); }
-tr.ok td:first-child { box-shadow: inset 3px 0 0 var(--pass); }
-tr.partial td:first-child { box-shadow: inset 3px 0 0 var(--partial); }
-tr.bad td:first-child { box-shadow: inset 3px 0 0 var(--fail); }
 .score {
 	display: inline-block;
 	min-width: 56px;
@@ -214,7 +214,7 @@ summary .reason { margin-left: 22px; }
 		through each public relay in the
 		<a href="https://github.com/englishm/moq-interop-runner">moq-interop-runner</a> registry.
 		A cell passes when media bytes arrive at the subscriber. Only required relays can fail the
-		<a href="https://github.com/moq-dev/smoke">smoke</a> run.
+		<a href="https://github.com/moq-dev/moq/tree/main/test/smoke">smoke</a> run.
 	</p>
 	<p class="meta" id="meta">Loading…</p>
 	<p id="error"></p>
@@ -238,7 +238,7 @@ summary .reason { margin-left: 22px; }
 <dialog id="logs" aria-labelledby="logs-title">
 	<div class="dlg-head">
 		<div id="logs-title"></div>
-		<form method="dialog"><button>Close</button></form>
+		<form method="dialog"><button type="submit">Close</button></form>
 	</div>
 	<div class="dlg-body" id="logs-body"></div>
 </dialog>
@@ -388,6 +388,7 @@ function fetchLog(path) {
 	if (!logCache.has(path)) {
 		logCache.set(path, fetch(`logs/${path}`, { cache: "no-store" })
 			.then((res) => (res.ok ? res.text() : Promise.reject(new Error(`HTTP ${res.status}`))))
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: strips ANSI color escapes from the logs
 			.then((text) => text.replace(/\x1b\[[0-9;]*m/g, "").trimEnd() || "(empty)")
 			.catch((err) => `(log unavailable: ${err.message})`));
 	}

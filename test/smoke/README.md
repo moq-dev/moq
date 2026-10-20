@@ -1,24 +1,24 @@
 # moq smoke
 
-### [Latest smoke results](https://moq-dev.github.io/smoke/)
+### [Latest smoke results](https://moq-dev.github.io/moq/relays/)
 
 Nightly publish/subscribe results for the published clients through public MoQ relays. One row per relay, sorted by name ignoring case, with a passing pair count per transport (WebTransport, QUIC, WebSocket). An empty cell means that relay has no endpoint there. Hover a count for the failure, click it for the logs. The page keeps the last 60 runs and updates from `main`.
 
-This repo installs the public [moq](https://github.com/moq-dev/moq) packages and checks that they exchange media. A missing wheel, a stale Homebrew formula, a broken `.deb`, or an export lost in packaging shows up as a red cell. A cell passes when the subscriber receives a non-empty frame.
+This suite installs the published moq packages and checks that they exchange media. [`test/interop`](../interop) is its in-tree companion: it builds each client from this checkout instead, to catch interop regressions before anything is published. A missing wheel, a stale Homebrew formula, a broken `.deb`, or an export lost in packaging shows up as a red cell. A cell passes when the subscriber receives a non-empty frame.
 
 ## Lanes
 
 | Lane | Run | Coverage |
 | --- | --- | --- |
 | Packages | `just smoke`, `just full` | Published clients through a local `moq-relay`. `smoke` is Rust only. `full` is the cross-language matrix. |
-| Public relays | `just relays` | Rust publisher and subscriber through every relay in the [moq-interop-runner](https://github.com/englishm/moq-interop-runner) registry. CI publishes with Rust and the browser (`js-web`) and subscribes with Rust, `js-web`, and `js-bun`. On those relays `js-web` and `js-bun` run only on WebTransport (`@moq/web-transport` has no raw QUIC mode); a client that does not belong is omitted. WebSocket is its own column for the relays in `WEBSOCKET_KEYS` (`moq-dev-rs`): each of their `http(s)` endpoints also runs as `ws(s)`, and every other relay keeps that fallback off. A relay that refuses anonymous root broadcasts is dialed on the path `publish_path` names (`stitcher-moq` publishes under `/moq-test`). That run is what the [results page](https://moq-dev.github.io/smoke/) shows. Only `--required` relays fail the run; the default is moq-dev's `cdn.moq.dev`, including its WebSocket endpoint. |
+| Public relays | `just relays` | Rust publisher and subscriber through every relay in the [moq-interop-runner](https://github.com/englishm/moq-interop-runner) registry. CI publishes with Rust and the browser (`js-web`) and subscribes with Rust, `js-web`, and `js-bun`. On those relays `js-web` and `js-bun` run only on WebTransport (`@moq/web-transport` has no raw QUIC mode); a client that does not belong is omitted. WebSocket is its own column for the relays in `WEBSOCKET_KEYS` (`moq-dev-rs`): each of their `http(s)` endpoints also runs as `ws(s)`, and every other relay keeps that fallback off. A relay that refuses anonymous root broadcasts is dialed on the path `publish_path` names (`stitcher-moq` publishes under `/moq-test`). That run is what the [results page](https://moq-dev.github.io/moq/relays/) shows. Only `--required` relays fail the run; the default is moq-dev's `cdn.moq.dev`, including its WebSocket endpoint. |
 | Cloudflare | `just cloudflare` | Relays built from the default branches of [cloudflare/moq-rs](https://github.com/cloudflare/moq-rs) and moq-dev/moq, driven by a Cloudflare client over WebTransport and raw QUIC. |
 | moxygen | `just moxygen` | Meta's [`moxygen`](https://github.com/facebookexperimental/moxygen) interop client through the latest moq-dev relay. Needs Linux Docker. |
 | Tokens | `just token`, `just token-full` | `moq auth` and npm [`@moq/auth`](https://www.npmjs.com/package/@moq/auth) mint and verify each other's JWTs, and each verifier rejects a tampered token. |
 
 Hang media, Cloudflare, and moxygen each have their own lane.
 
-CI runs the matrix on pull requests and nightly: [`.github/workflows/smoke.yml`](.github/workflows/smoke.yml).
+CI runs the matrix nightly and on pull requests that touch `test/smoke/`: [`.github/workflows/smoke.yml`](../../.github/workflows/smoke.yml).
 
 ## Clients
 
@@ -38,9 +38,10 @@ CI runs the matrix on pull requests and nightly: [`.github/workflows/smoke.yml`]
 
 ## Run
 
-The Nix flake carries the client toolchains (direnv loads `.envrc`). Put `moq-relay` and `moq` on `PATH` (cargo, Homebrew, or apt) before the lanes below.
+This directory's own Nix flake carries the client toolchains, separate from moq's (direnv loads `.envrc` here). Put `moq-relay` and `moq` on `PATH` (cargo, Homebrew, or apt) before the lanes below.
 
 ```bash
+cd test/smoke
 nix develop
 cargo install moq-relay moq-cli   # or brew / apt
 just full
@@ -57,7 +58,7 @@ just check    # shfmt, shellcheck, actionlint, freshness
 
 ## Versions
 
-Packages resolve to latest on every run: `@moq/*` on the `latest` tag, PyPI `moq-rs`, `moq.dev/moq`, `moqdev/*` images, and GitHub release tarballs. `cloudflare.sh` and `moxygen.sh` build from unpinned Git HEAD. The repo commits no package lock files. `flake.lock` pins the dev toolchain.
+Packages resolve to latest on every run: `@moq/*` on the `latest` tag, PyPI `moq-rs`, `moq.dev/moq`, `moqdev/*` images, and GitHub release tarballs. `cloudflare.sh` and `moxygen.sh` build from unpinned Git HEAD. `test/smoke/` commits no package lock files. `flake.lock` pins the dev toolchain.
 
 npm `playwright` is pinned to the flake's `PLAYWRIGHT_VERSION`. `just freshness` fails when that pin drifts or a lock file is committed. Bump the toolchain with `nix flake update` and the pin together.
 

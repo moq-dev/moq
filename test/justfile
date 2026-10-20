@@ -4,7 +4,7 @@
 # in the root `just check`.
 #
 # Two cross-language interop tests exist:
-#   - https://github.com/moq-dev/smoke installs each client from its PUBLIC
+#   - `just test smoke` (smoke/) installs each client from its PUBLIC
 #     package registry to catch packaging breakage in a release.
 #   - `just test interop` (interop/, below) builds every client from THIS checkout
 #     to catch interop regressions before anything is published.
@@ -50,6 +50,16 @@ interop *args:
 [positional-arguments]
 wire-compat *args:
     ./interop/compat.sh "$@"
+
+# Installs each client from its public registry, inside test/smoke's own Nix
+# shell rather than this repo's toolchain. The first argument picks a smoke
+# recipe and the rest pass through, e.g. `just test smoke full` or `just test
+# smoke relays --only moq-dev-rs`. With none, the Rust-only matrix. See smoke/README.md.
+
+# Published-package interop smoke.
+[positional-arguments]
+smoke *args:
+    nix develop ./smoke --command just --justfile smoke/justfile "$@"
 
 # Paint a short-side transcode rung from a coded portrait through moq-watch.
 portrait:

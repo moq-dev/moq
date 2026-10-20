@@ -36,7 +36,9 @@ const dirByVariant: Record<string, string> = {
 };
 const dir = dirByVariant[variant];
 if ((role !== "publish" && role !== "subscribe") || !url || !broadcast || !dir) {
-	console.error("usage: driver.ts publish|subscribe --variant vite|esbuild|jsdelivr --url U --broadcast B [--timeout S]");
+	console.error(
+		"usage: driver.ts publish|subscribe --variant vite|esbuild|jsdelivr --url U --broadcast B [--timeout S]",
+	);
 	process.exit(2);
 }
 const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
@@ -94,7 +96,8 @@ try {
 	// publisher whose scripts fail to load exits here instead of streaming nothing.
 	const scriptFailed = new Promise<never>((_, reject) => {
 		page.on("requestfailed", (r) => {
-			if (r.resourceType() === "script") reject(new Error(`script failed: ${r.url()}: ${r.failure()?.errorText}`));
+			if (r.resourceType() === "script")
+				reject(new Error(`script failed: ${r.url()}: ${r.failure()?.errorText}`));
 		});
 		page.on("response", (r) => {
 			if (r.request().resourceType() === "script" && r.status() >= 400) {
@@ -141,7 +144,9 @@ try {
 			if (code === 0) await context.tracing.stop();
 			else {
 				// Save both artifacts even if one fails, and keep the run error as the cause.
-				await diagnostics.write(artifactDir, artifactName, error).catch((e) => console.error("diagnostics write failed:", e));
+				await diagnostics
+					.write(artifactDir, artifactName, error)
+					.catch((e) => console.error("diagnostics write failed:", e));
 				await context.tracing
 					.stop({ path: join(artifactDir, `${artifactName}.zip`) })
 					.catch((e) => console.error("trace save failed:", e));
