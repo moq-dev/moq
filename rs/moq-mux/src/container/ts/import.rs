@@ -858,7 +858,11 @@ impl<E: catalog::Catalog> Import<E> {
 				if self.mux_rate_reservation.is_some() {
 					self.hold_media(raw);
 				}
-				let ticks = self.pts.unwrap(raw);
+				// Only a stream still behind a wrap the first PTS crossed reads as negative.
+				let Ok(ticks) = u64::try_from(self.pts.unwrap(raw)) else {
+					*self.unplaced.entry(pid.as_u16()).or_default() += 1;
+					return Ok(());
+				};
 				let offset = self.timebase.anchor(Timestamp::from_scale(ticks, 90_000)?)?;
 				(Some(ticks), offset)
 			}
@@ -3865,34 +3869,35 @@ fn advance_pts(pts: Option<Timestamp>, samples: u64, sample_rate: u32) -> anyhow
 ///
 /// A flagged clock break keeps the history: a forward jump across the wrap lands in the next
 /// one, as the passthrough's PCR count does, while a step back of under half a wrap still reads
-/// as the rewind it is.
+/// as the rewind it is. That holds before the first wrap too: a stream still behind a wrap the
+/// first PTS already crossed (an import started while audio and video straddle it) reads as
+/// negative, before the broadcast clock's zero, rather than a whole wrap ahead.
 #[derive(Default)]
 struct PtsUnwrap {
 	last: Option<u64>,
-	offset: u64,
+	offset: i64,
 }
 
 impl PtsUnwrap {
-	fn unwrap(&mut self, raw: u64) -> u64 {
-		const WRAP: u64 = 1 << 33;
-		const HALF: i64 = (WRAP / 2) as i64;
+	fn unwrap(&mut self, raw: u64) -> i64 {
+		const WRAP: i64 = 1 << 33;
 		if let Some(last) = self.last {
 			let diff = raw as i64 - last as i64;
-			if diff < -HALF {
+			if diff < -WRAP / 2 {
 				self.offset += WRAP;
-			} else if diff > HALF && self.offset >= WRAP {
+			} else if diff > WRAP / 2 {
 				self.offset -= WRAP;
 			}
 		}
 		self.last = Some(raw);
-		self.offset + raw
+		self.offset + raw as i64
 	}
 
 	/// `raw`, a 27 MHz PCR, in the wrap nearest the last PTS, or in the current one before any:
 	/// signed, since a PCR just behind a wrap the PTS already crossed lands in the one before.
 	fn pcr(&self, raw: u64) -> i128 {
 		let period = i128::from(PCR_WRAP);
-		let reference = i128::from(self.offset + self.last.unwrap_or(raw / 300)) * 300;
+		let reference = (i128::from(self.offset) + i128::from(self.last.unwrap_or(raw / 300))) * 300;
 		let raw = i128::from(raw);
 		raw + (reference - raw + period / 2).div_euclid(period) * period
 	}
@@ -7528,6 +7533,27 @@ pub(super) mod test {
 		assert!(
 			(600_143_999..=600_144_001).contains(&step),
 			"the jump adds its step: {step} us"
+		);
+	}
+
+	/// An import started just past a wrap, with the peer still before it, steps the peer back into
+	/// the wrap before rather than a whole wrap ahead, and its PES before the clock's zero are dropped.
+	#[tokio::test(start_paused = true)]
+	async fn a_stream_behind_the_first_wrap_steps_back() {
+		let (consumer, catalog, mut import) = two_stream_import();
+		for i in 0..10 {
+			import.decode(&source_pes(i, 4_000 + i * STEP)).unwrap();
+			tokio::time::advance(Duration::from_millis(144)).await;
+		}
+		import.finish().unwrap();
+		assert_eq!(import.stats().streams[&PEER_PID].unplaced, 1);
+		let all = timeline(&consumer, &catalog).await;
+		assert!(!all.contains_key(&0x80), "the peer's PES before the wrap is dropped");
+		// The peer keeps its place, 8,000 ticks behind the PCR PID.
+		assert_eq!(all[&0x82], (4_000 + STEP - 8_000) as i64 * 1_000_000 / 90_000);
+		assert!(
+			all.values().all(|&us| us < 2_000_000),
+			"the timeline stays at the import's start: {all:?}"
 		);
 	}
 
