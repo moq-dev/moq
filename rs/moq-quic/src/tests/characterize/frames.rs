@@ -135,6 +135,41 @@ fn stop_sending_on_unopened() {
     );
 }
 
+/// RFC 9000 section 4.6: a frame naming a stream past the advertised limit (100 of each type by
+/// default) is a STREAM_LIMIT_ERROR, whichever direction the stream has.
+#[test]
+fn stop_sending_above_stream_limit() {
+    // Within the limit, stopping a peer-initiated bidirectional stream opens it
+    let frames =
+        Frames::default().var(FrameType::STOP_SENDING, &[id(Side::Client, Dir::Bi, 50), 0]);
+    assert_eq!(server_answer(frames), None);
+
+    for dir in [Dir::Bi, Dir::Uni] {
+        let frames =
+            Frames::default().var(FrameType::STOP_SENDING, &[id(Side::Client, dir, 5000), 0]);
+        assert_eq!(
+            server_answer(frames),
+            Some(TransportErrorCode::STREAM_LIMIT_ERROR),
+            "{dir:?}"
+        );
+    }
+}
+
+#[test]
+fn max_stream_data_above_stream_limit() {
+    for dir in [Dir::Bi, Dir::Uni] {
+        let frames = Frames::default().var(
+            FrameType::MAX_STREAM_DATA,
+            &[id(Side::Client, dir, 5000), 1000],
+        );
+        assert_eq!(
+            server_answer(frames),
+            Some(TransportErrorCode::STREAM_LIMIT_ERROR),
+            "{dir:?}"
+        );
+    }
+}
+
 #[test]
 fn streams_blocked_above_limit() {
     for ty in [
