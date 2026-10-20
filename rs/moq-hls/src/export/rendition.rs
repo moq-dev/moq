@@ -98,7 +98,7 @@ struct Run {
 	/// The window [`resets`](segments::Producer::resets) during which a listed segment started
 	/// where a player can, so the master keeps advertising the rendition even once a GOP past
 	/// [`MAX_SEGMENTS`](segments::MAX_SEGMENTS) records evicts that segment. Stale once the window
-	/// is cleared (a new generation, a timeline skip or rewind, an ended sibling).
+	/// is cleared (a new generation or a timeline skip or rewind).
 	startable: Option<u64>,
 }
 
@@ -112,6 +112,7 @@ enum Config {
 /// never rebound onto whatever serves the path next.
 struct Media {
 	handle: Mutex<Handle>,
+	track: String,
 	/// The source and reference a sibling is bound through, to re-issue a bind that failed
 	/// before it ever resolved.
 	sibling: Option<(moq_mux::Source, moq_net::path::RelativeOwned)>,
@@ -119,17 +120,42 @@ struct Media {
 
 struct Handle {
 	binding: Arc<moq_mux::Binding>,
-	/// The bound sibling ended, so the rendition lists nothing more.
+	/// The resolved track and the query keeping it alive without subscribing to its media.
+	track: Option<(moq_net::track::Consumer, moq_net::track::Querying)>,
+	/// The bound sibling ended, so only its retained rows drain.
 	ended: bool,
 }
 
+impl Handle {
+	fn capture(&mut self, broadcast: &moq_net::broadcast::Consumer, name: &str) {
+		if self.track.is_none()
+			&& let Ok(track) = broadcast.track(name)
+		{
+			// Track handles are lazy. Querying installs and holds the concrete instance, so
+			// the second handle captures it before End refuses new broadcast lookups.
+			let query = track.query().into_inner();
+			self.track = broadcast.track(name).ok().map(|track| (track, query));
+		}
+	}
+}
+
 impl Media {
-	fn bind(source: &moq_mux::Source, rel: Option<&moq_net::path::RelativeOwned>) -> moq_mux::Result<Self> {
+	fn bind(
+		source: &moq_mux::Source,
+		rel: Option<&moq_net::path::RelativeOwned>,
+		track: &str,
+	) -> moq_mux::Result<Self> {
+		let mut handle = Handle {
+			binding: Arc::new(source.bind(rel)?),
+			track: None,
+			ended: false,
+		};
+		if let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(&kio::Waiter::noop()) {
+			handle.capture(&broadcast, track);
+		}
 		Ok(Self {
-			handle: Mutex::new(Handle {
-				binding: Arc::new(source.bind(rel)?),
-				ended: false,
-			}),
+			handle: Mutex::new(handle),
+			track: track.to_string(),
 			sibling: sibling(source, rel),
 		})
 	}
@@ -140,37 +166,33 @@ impl Media {
 		!self.handle.lock().expect("media lock poisoned").ended
 	}
 
-	/// End the window when a bound sibling has ended; return the binding listed rows belong to.
+	/// End the window when a bound sibling has ended; retain its rows and media for draining.
 	fn sync(&self, window: &segments::Producer) -> Arc<moq_mux::Binding> {
 		self.poll_sync(&kio::Waiter::noop(), window)
 	}
 
-	/// [`sync`](Self::sync), registering `waiter` to wake when the sibling resolves or ends, so a
-	/// waiter on the window learns of an end that nothing else touches the rendition for.
+	/// Register the bound broadcast's close and retain its track before new lookups are refused.
 	fn poll_sync(&self, waiter: &kio::Waiter, window: &segments::Producer) -> Arc<moq_mux::Binding> {
-		let Some((source, rel)) = &self.sibling else {
-			return self.handle.lock().expect("media lock poisoned").binding.clone();
-		};
 		let mut handle = self.handle.lock().expect("media lock poisoned");
 		let mut reissued = false;
 		loop {
 			match handle.binding.poll_broadcast(waiter) {
-				Poll::Ready(Ok(broadcast)) if !handle.ended && broadcast.poll_closed(waiter).is_ready() => {
-					// A broadcast end carries no cause, so a clean end and a replacement look the
-					// same. Either way its rows can no longer be fetched, and a new instance only
-					// comes with a new catalog instance, so the playlist ends here.
-					tracing::error!(broadcast = %rel, "rendition's sibling broadcast ended; ending its playlist");
-					handle.ended = true;
-					window.clear();
-					window.end();
+				Poll::Ready(Ok(broadcast)) => {
+					handle.capture(&broadcast, &self.track);
+					if self.sibling.is_some() && !handle.ended && broadcast.poll_closed(waiter).is_ready() {
+						// End and Restart both drain only the pinned instance. Looking its path
+						// up again could serve a replacement under the old timeline's rows.
+						handle.ended = true;
+						window.end();
+					}
 				}
-				// Binding never retries a failed request. Re-issue it, once per poll, so a sibling
-				// still being announced binds once it is, and poll the new one. Only a bind that
-				// never resolved fails, and the source pins every one that did, so this never
-				// re-resolves a sibling.
+				// Only a binding that never resolved may be reissued. The source pins every
+				// successful result, so a replacement can never answer these old rows.
 				Poll::Ready(Err(_)) if !reissued => {
 					reissued = true;
-					if let Ok(next) = source.bind(Some(rel)) {
+					if let Some((source, rel)) = &self.sibling
+						&& let Ok(next) = source.bind(Some(rel))
+					{
 						handle.binding = Arc::new(next);
 						continue;
 					}
@@ -179,6 +201,19 @@ impl Media {
 			}
 			return handle.binding.clone();
 		}
+	}
+
+	fn poll_track(
+		&self,
+		binding: &moq_mux::Binding,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)>> {
+		let Ok(broadcast) = std::task::ready!(binding.poll_broadcast(waiter)) else {
+			return Poll::Ready(None);
+		};
+		let mut handle = self.handle.lock().expect("media lock poisoned");
+		handle.capture(&broadcast, &self.track);
+		Poll::Ready(handle.track.as_ref().map(|(track, _)| (broadcast, track.clone())))
 	}
 }
 
@@ -348,6 +383,7 @@ impl Rendition {
 		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
+		let media = Media::bind(source, config.broadcast.as_ref(), config.track(&name))?;
 		Ok(Self {
 			name,
 			kind: Kind::Video,
@@ -365,7 +401,7 @@ impl Rendition {
 			spans: Arc::new(Spans::new()),
 			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
-			media: Media::bind(source, config.broadcast.as_ref())?,
+			media,
 			run: Mutex::default(),
 			building: tokio::sync::Mutex::new(()),
 		})
@@ -380,6 +416,7 @@ impl Rendition {
 		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
+		let media = Media::bind(source, config.broadcast.as_ref(), config.track(&name))?;
 		Ok(Self {
 			name,
 			kind: Kind::Audio,
@@ -397,7 +434,7 @@ impl Rendition {
 			spans: Arc::new(Spans::new()),
 			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
-			media: Media::bind(source, config.broadcast.as_ref())?,
+			media,
 			run: Mutex::default(),
 			building: tokio::sync::Mutex::new(()),
 		})
@@ -918,12 +955,9 @@ impl Rendition {
 		binding: &moq_mux::Binding,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<moq_net::track::Subscribing>> {
-		let Ok(broadcast) = std::task::ready!(binding.poll_broadcast(waiter)) else {
-			return Poll::Ready(None);
-		};
-		let track = broadcast.track(self.track_name()).ok();
+		let track = std::task::ready!(self.media.poll_track(binding, waiter));
 		let subscription = moq_net::track::Subscription::default().with_max_delay(FEED_MAX_DELAY);
-		Poll::Ready(track.map(|track| track.subscribe(subscription).into_inner()))
+		Poll::Ready(track.map(|(_, track)| track.subscribe(subscription).into_inner()))
 	}
 
 	/// The media track handle on `binding`, with that bound broadcast so a fetch can tell a
@@ -937,9 +971,7 @@ impl Rendition {
 		&self,
 		binding: &moq_mux::Binding,
 	) -> Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)> {
-		let broadcast = binding.broadcast().await.ok()?;
-		let track = broadcast.track(self.track_name()).ok()?;
-		Some((broadcast, track))
+		kio::wait(|waiter| self.media.poll_track(binding, waiter)).await
 	}
 
 	/// The media track's name in its broadcast, which can differ from the rendition's ID.
@@ -953,7 +985,8 @@ impl Rendition {
 	/// The rendition's CMAF init segment, built on first request and cached.
 	///
 	/// For inline-parameter-set codecs (no catalog `description`), the parameter sets are
-	/// resolved by fetching the newest keyframe group first.
+	/// resolved by fetching the newest keyframe group first. A bound track's retained media
+	/// remains usable after its broadcast ends or is replaced; replacement media is never read.
 	pub async fn init(&self) -> Result<Option<Bytes>> {
 		Ok(self.load_init().await?.map(|init| init.bytes.clone()))
 	}
@@ -1038,7 +1071,8 @@ impl Rendition {
 	/// Fetches every frame the segment resolves to on this rendition (an audio segment packs many
 	/// short groups) and encodes them as a single CMAF fragment. `None` when the segment isn't in
 	/// the playlist window, is a gap or not yet resolved for this rendition, or its groups already
-	/// left the relay cache.
+	/// left the relay cache. After End or Restart, only the bound instance's retained media
+	/// drains; a replacement's media is never read under these rows.
 	pub async fn segment(&self, tag: &str, segment: u64) -> Result<Option<Bytes>> {
 		self.media.sync(&self.live);
 		let Some(row) = self.live.row(tag, segment) else {
