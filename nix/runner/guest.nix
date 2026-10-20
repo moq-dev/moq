@@ -29,14 +29,15 @@
       "1.1.1.1"
       "8.8.8.8"
     ];
-    enableIPv6 = false;
   };
-
   boot = {
     loader.grub.device = "/dev/vda";
     kernelParams = [ "console=ttyS0" ];
     kernelModules = [ "qemu_fw_cfg" ];
     growPartition = true;
+    # The host forwards only IPv4, so eth0 stays IPv4-only, but tests still
+    # bind the IPv6 loopback.
+    kernel.sysctl."net.ipv6.conf.eth0.disable_ipv6" = true;
   };
   fileSystems."/" = {
     device = "/dev/disk/by-label/nixos";
@@ -103,10 +104,12 @@
     tokenType = "registration";
     replace = true;
     workDir = "/var/cache/github-runner-work";
+    # Tools a hosted runner's base image provides and jobs call directly.
     extraPackages = with pkgs; [
       curl
       just
       openssh
+      procps
       unzip
       which
     ];

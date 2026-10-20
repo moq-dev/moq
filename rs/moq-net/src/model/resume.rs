@@ -1569,23 +1569,72 @@ mod test {
 			.unwrap()
 	}
 
-	#[cfg(feature = "async")]
 	fn recv(sub: &mut track::Subscriber) -> group::Consumer {
-		sub.recv_group()
-			.now_or_never()
-			.expect("a group")
-			.unwrap()
-			.expect("track ended")
+		let Poll::Ready(group) = sub.poll_recv_group(&kio::Waiter::noop()) else {
+			panic!("a group")
+		};
+		group.unwrap().expect("track ended")
 	}
 
-	#[cfg(feature = "async")]
 	fn read(group: &mut group::Consumer) -> Option<Vec<u8>> {
-		let frame = group.read_frame().now_or_never().expect("a frame").unwrap();
-		frame.map(|frame| frame.payload.to_vec())
+		let Poll::Ready(frame) = group.poll_read_frame(&kio::Waiter::noop()) else {
+			panic!("a frame")
+		};
+		frame.unwrap().map(|frame| frame.payload.to_vec())
 	}
 
 	fn ts(ms: u64) -> Timestamp {
 		Timestamp::from_millis(ms).unwrap()
+	}
+
+	/// A later stream header is not a verdict on the group held from a failed route.
+	#[moq_clock::test]
+	async fn a_failed_route_waits_for_a_reordered_group_header() {
+		let waiter = kio::Waiter::noop();
+		for arrives in [true, false] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(1));
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"first".as_ref()).unwrap();
+			let mut held = recv(&mut sub);
+			assert_eq!(read(&mut held), Some(b"first".to_vec()));
+
+			let b = copy();
+			let dynamic = b.dynamic();
+			let mut newer = b.receive_group(group::Info { sequence: 1 }).unwrap();
+			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
+			newer.finish().unwrap();
+			routes.serve(b.consume());
+			open.abort(Error::SessionClosed).unwrap();
+			a.abort(Error::SessionClosed).unwrap();
+			assert!(held.poll_read_frame(&waiter).is_pending());
+			let Poll::Ready(request) = dynamic.poll_requested_group(&waiter) else {
+				panic!("recovery fetch")
+			};
+			request.unwrap().reject(Error::NotFound);
+			assert!(
+				held.poll_read_frame(&waiter).is_pending(),
+				"the gap is still within grace"
+			);
+
+			if arrives {
+				let mut late = b.receive_group(group::Info { sequence: 0 }).unwrap();
+				late.write_frame(ts(0), b"first".as_ref()).unwrap();
+				late.write_frame(ts(1), b"continued".as_ref()).unwrap();
+				late.finish().unwrap();
+				assert_eq!(read(&mut held), Some(b"continued".to_vec()));
+				assert_eq!(read(&mut held), None);
+			} else {
+				moq_clock::sleep(Duration::from_secs(1)).await;
+				assert!(matches!(
+					held.poll_read_frame(&waiter),
+					Poll::Ready(Err(Error::NotFound))
+				));
+			}
+		}
 	}
 
 	#[test]
