@@ -265,7 +265,10 @@ untimed.
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning
 reader or the next fetch finds it. That copy is not live meanwhile: readers get
-nothing from it until the source answers again.
+nothing from it until the source answers again, and its latest group is unknown
+until then too, so a player starting at the latest waits for the answer instead
+of starting from what the ended feed left. A reader's latest group stays within
+the groups it limits itself to, and ends once the track does.
 
 The publisher may declare a retention window per track. Omission sets no limit;
 zero keeps only the live edge. Relays preserve that declaration, and may still
