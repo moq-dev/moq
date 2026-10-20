@@ -10,8 +10,10 @@
 //! - Async code reads the ambient clock: [`now`], [`wall`], [`sleep`],
 //!   [`sleep_until`], [`timeout`], [`interval`], and [`drive`] resolve to the
 //!   current runtime's clock. That is tokio's (paused tokio included) on native,
-//!   `performance.now()` and `setTimeout` in the browser, and the simulator inside
-//!   `sim::run`.
+//!   `performance.now()` and `setTimeout` in the browser, the simulator inside
+//!   `sim::run`, and a [`Deadlines`] queue on a thread that [entered](Deadlines::enter)
+//!   it, which is how a runtime that reads the host clock itself (an io_uring
+//!   worker) becomes a backend.
 //!
 //! The `manual` feature adds `Manual::install`, which makes a [`Manual`] clock
 //! the ambient clock of one tokio runtime. It moves only when told to, never on
@@ -34,7 +36,7 @@ pub mod sim;
 mod timer;
 mod wall;
 
-pub use deadline::{Deadline, Deadlines};
+pub use deadline::{Deadline, Deadlines, Entered};
 #[cfg(feature = "manual")]
 pub use installed::Installed;
 pub use instant::Instant;
@@ -52,6 +54,9 @@ extern crate self as moq_clock;
 
 /// The current instant on the ambient clock.
 pub fn now() -> Instant {
+	if let Some(now) = deadline::now() {
+		return now;
+	}
 	#[cfg(feature = "sim")]
 	if let Some(now) = sim::now() {
 		return now;
@@ -71,6 +76,10 @@ pub fn now() -> Instant {
 ///
 /// When the host's wall clock reads before 1970.
 pub fn wall() -> Wall {
+	#[cfg(feature = "manual")]
+	if let Some(clock) = deadline::installed() {
+		return clock.wall();
+	}
 	#[cfg(feature = "sim")]
 	if let Some(wall) = sim::wall() {
 		return wall;
@@ -86,6 +95,10 @@ pub fn wall() -> Wall {
 ///
 /// Unlike [`wall`], the wall half does not change after a clock correction.
 pub fn anchor() -> (Instant, Wall) {
+	#[cfg(feature = "manual")]
+	if let Some(clock) = deadline::installed() {
+		return clock.anchor();
+	}
 	#[cfg(feature = "sim")]
 	if let Some(anchor) = sim::anchor() {
 		return anchor;

@@ -988,10 +988,10 @@ impl ChurnRoom {
 			let track = self.broadcasts[session].track(&format!("churn{session}")).unwrap();
 			let subscriber = track.subscribe(None).await.unwrap();
 			// The relay saw the request, rather than a cached track answering it locally.
-			self.churn[session].demand().used().await.unwrap();
+			support::wanted(self.churn[session].demand()).await.unwrap();
 			drop(subscriber);
 			drop(track);
-			self.churn[session].demand().unused().await.unwrap();
+			support::unwanted(self.churn[session].demand()).await.unwrap();
 		}
 		start.elapsed()
 	}

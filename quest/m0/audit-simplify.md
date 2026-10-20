@@ -31,3 +31,21 @@ crates, or Rust and JS drifting apart), traits and generics with a single
 implementation, config knobs every caller sets the same way, wrappers that
 only forward, and the largest modules and functions. Prefer reusing what the
 stack already has over a parallel mechanism.
+
+Progress (2026-10-19): the JSON stream consumer reuses the byte stream
+consumer's single-group lifecycle instead of maintaining its own receive,
+roll detection, and teardown state machine. JSON validation, error identity,
+and concurrent-read refusal stay at the JSON boundary. Its record count,
+payload size, and compression sweep runs in the JavaScript nightly lane.
+
+The initial scan covered private Rust traits, media/container dispatch,
+transport adapters, JSON codecs, and duplicated JavaScript utilities.
+Backend and playback traits have multiple implementations or device-free
+test doubles; catalog traits erase application extension types. Keep those
+seams. Transport adapter deduplication and compression removal already have
+dedicated work; avoid a second design in this audit.
+
+This is a checkpoint, not the finished run. Review the remaining large
+publisher/subscriber modules and binding layers before completing it or
+adding the successor. Public wrapper and shared-helper reshaping still need
+maintainer proposals, rather than new exports solely to remove a few lines.

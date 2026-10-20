@@ -95,6 +95,16 @@ jobs:
             artifact: bench-rust
             artifact-path: target/bench/nightly/rust-bench
             benchmark: true
+          - name: Rust supplemental benchmarks
+            recipe: gh nightly rust-extra
+            artifact: bench-rust-extra
+            artifact-path: target/bench/nightly/rust-extra
+            benchmark: true
+          - name: io_uring benchmarks
+            recipe: gh nightly rust-uring
+            artifact: bench-rust-uring
+            artifact-path: target/bench/nightly/rust-uring
+            benchmark: true
           - name: JS benchmarks
             recipe: gh nightly js
             artifact: bench-js
@@ -117,6 +127,9 @@ jobs:
             artifact-path: target/bench/browser
           - name: Audit
             recipe: rs audit
+            uncached: true
+          - name: JS audit
+            recipe: js audit
             uncached: true
           # Uncached: the instrumented build bypasses mbx, so the cache can't serve it.
           - name: moq-quic coverage

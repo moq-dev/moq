@@ -34,6 +34,13 @@ Split the PR by crate group if review needs it; ban direct clock reads in each
 production scope as it finishes. Unrelated legacy test conversions and the
 workspace-wide lint ratchet follow in m2.
 
+The current checkpoint migrates auth clock reads, RTMP session timestamps and
+deadlines, archive retention, and listener stall accounting. The rest of the
+workspace and public `SystemTime` fields still need migration. In particular,
+SRT and WebRTC hand instants to third-party APIs on std's clock, and audio/video
+device threads block outside an async runtime; those boundaries still need
+clock support rather than a second host-clock read at each call site.
+
 Public API: breaking wherever a crate exposes an instant or a time source.
 Wire: none.
 

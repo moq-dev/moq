@@ -5,6 +5,19 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Track demand reports the wanted group (#5930)
+
+`MoqTrackDemand::is_used`, `used`, and `unused` are gone.
+`wanted()` returns null while nobody subscribes, otherwise the group subscribers want next, and `wanted_changed()` waits for it to change (the first call returns at once).
+Loop on `wanted_changed()` until it returns non-null where you awaited `used()`, and null where you awaited `unused()`.
+`MoqTrackInfo` gains `refresh`, the ratio past which a joining subscriber asks for a new group.
+`MoqGroupDemand` is unchanged.
+
+### `MoqCongestionControl` gained `None` (#5926)
+
+`MoqCongestionControl::None` runs no congestion control and no pacing, for tests and controlled links.
+An exhaustive match needs one more arm.
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

@@ -6310,7 +6310,6 @@ mod tests {
 			reader: crate::coding::Reader::new(recv, version),
 		};
 		let mut serve = RequestServe::<_, R>::new(publisher.shared.clone(), stream);
-		let waiter = kio::Waiter::noop();
 		assert!(!drive(&mut serve).await, "{case}: nothing to answer with");
 
 		// The lookup reached the track, which stays wanted while the requester waits.
@@ -6320,10 +6319,7 @@ mod tests {
 				.now_or_never()
 				.expect("track requested")
 				.unwrap();
-			assert!(
-				track.demand().poll_unused(&waiter).is_pending(),
-				"{case}: nobody wants the track"
-			);
+			assert!(track.demand().wanted().is_some(), "{case}: nobody wants the track");
 			track
 		});
 
@@ -6331,9 +6327,10 @@ mod tests {
 		assert!(drive(&mut serve).await, "{case}: still serving");
 		drop(serve);
 		if let Some(track) = track {
+			let mut demand = track.demand();
 			let unused = moq_clock::timeout(
 				Duration::from_millis(1),
-				kio::wait(|waiter| track.demand().poll_unused(waiter)),
+				kio::wait(|waiter| crate::util::poll_unwanted(&mut demand, waiter)),
 			);
 			assert!(unused.await.is_ok(), "{case}: the track is still wanted");
 		}
@@ -6461,7 +6458,7 @@ mod tests {
 						matches!(serve.state, RequestState::Hold { finished, .. } if finished != blocked),
 						"{case}: TRACK_INFO was not answered as expected"
 					);
-					assert!(track.demand().is_used(), "{case}: the track was let go");
+					assert!(track.demand().wanted().is_some(), "{case}: the track was let go");
 					assert_eq!(
 						publisher.shared.owed.load(Ordering::Relaxed),
 						usize::from(blocked),
@@ -6470,10 +6467,13 @@ mod tests {
 
 					session.close(close);
 					assert!(drive(&mut serve).await, "{case}: still holding");
-					moq_clock::timeout(Duration::from_millis(1), track.demand().unused())
-						.await
-						.unwrap_or_else(|_| panic!("{case}: the track is still wanted"))
-						.unwrap();
+					let mut demand = track.demand();
+					moq_clock::timeout(
+						Duration::from_millis(1),
+						kio::wait(|waiter| crate::util::poll_unwanted(&mut demand, waiter)),
+					)
+					.await
+					.unwrap_or_else(|_| panic!("{case}: the track is still wanted"));
 					// The incomplete reply is cancelled; a delivered one is not.
 					assert_eq!(
 						session.log.resets().is_empty(),
