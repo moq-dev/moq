@@ -27,7 +27,10 @@ hardware-only, AV1 decodes through NVDEC and MediaCodec, and VP8 and VP9
 decode in software through the opt-in `vpx` feature.
 
 Capture is pull-driven: `encode::publish_capture` advertises the track up
-front and opens the camera only while someone subscribes. Backends that can
+front and opens the camera only while someone subscribes. A viewer who joins
+once the current group's deltas outweigh twice its keyframe gets a fresh
+keyframe, so the GOP is only the longest a group runs; V4L2 encoders keep to
+their GOP, since a driver may refuse the request. Backends that can
 change bitrate live follow the connection's send estimate. Where the platform
 allows it, frames stay on the GPU between capture, decode, encode, and render.
 
