@@ -3,13 +3,21 @@ use bytes::Bytes;
 
 use crate::Timestamp;
 
-/// How the publisher serialized a list of properties: its key and integer encoding.
+/// The moq-transport drafts a list of properties came from, which share its key and
+/// integer encoding and what each property means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 // private: passthrough
 pub(crate) enum Encoding {
-	Absolute,
-	DeltaQuic,
-	Delta { seven: bool },
+	/// Drafts 14 and 15: absolute keys and QUIC varints.
+	Draft14,
+	/// Draft 16: delta keys and QUIC varints.
+	Draft16,
+	/// Draft 17: delta keys and leading-ones varints without the seven-byte form.
+	Draft17,
+	/// Draft 18: delta keys and leading-ones varints.
+	Draft18,
+	/// Draft 19 and later: as draft 18, with property 0x06 as SUBGROUP_DELIVERY_TIMEOUT.
+	Draft19,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,8 +61,6 @@ pub(crate) struct Block {
 	pub encoding: Encoding,
 	/// `bytes` holds Immutable Properties (0x0b), serialized as `encoding` does.
 	pub immutable: bool,
-	/// Property 0x06 means SUBGROUP_DELIVERY_TIMEOUT on the ingress draft.
-	pub delivery_timeout: bool,
 }
 
 impl Properties {
@@ -76,10 +82,8 @@ pub(crate) struct TrackProperties {
 	/// serialized bytes.
 	pub values: Vec<Property>,
 	/// How the publisher serialized the list and the keys inside Immutable Properties.
-	/// Set beside any values, and never [`Encoding::Absolute`], which predates the list.
+	/// Set beside any values, and never [`Encoding::Draft14`], which predates the list.
 	pub encoding: Option<Encoding>,
-	/// Property 0x06 means SUBGROUP_DELIVERY_TIMEOUT on the ingress draft.
-	pub delivery_timeout: bool,
 }
 
 /// Object numbering is separate from the public frame's ordinal in its group.

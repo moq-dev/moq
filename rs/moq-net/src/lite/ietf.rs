@@ -33,9 +33,6 @@ const PRIORITY: u64 = 0x4;
 const DATAGRAM_END: u64 = 0x8;
 const STATUS: u64 = 0x10;
 
-// Flags of a block and of TRACK_PROPERTIES: property 0x06 means SUBGROUP_DELIVERY_TIMEOUT.
-const DELIVERY_TIMEOUT: u64 = 0x1;
-
 /// Immutable Properties, whose keys TRACK_PROPERTIES derives its sealed list from.
 const IMMUTABLE: u64 = 0x0b;
 
@@ -107,42 +104,27 @@ pub(crate) fn decode_object(prior: Option<u64>, code: u64) -> Result<(u64, bool)
 	Ok((id.ok_or(Error::ProtocolViolation)?, code & 1 != 0))
 }
 
-fn encoding_code(encoding: Option<Encoding>) -> u64 {
+fn encode_encoding(encoding: Option<Encoding>) -> u64 {
 	match encoding {
 		None => 0,
-		Some(Encoding::Absolute) => 1,
-		Some(Encoding::DeltaQuic) => 2,
-		Some(Encoding::Delta { seven: false }) => 3,
-		Some(Encoding::Delta { seven: true }) => 4,
+		Some(Encoding::Draft14) => 1,
+		Some(Encoding::Draft16) => 2,
+		Some(Encoding::Draft17) => 3,
+		Some(Encoding::Draft18) => 4,
+		Some(Encoding::Draft19) => 5,
 	}
-}
-
-fn encode_flags(delivery_timeout: bool, immutable: Option<Encoding>) -> u64 {
-	u64::from(delivery_timeout) | encoding_code(immutable) << 1
 }
 
 fn decode_encoding(code: u64) -> Result<Option<Encoding>, DecodeError> {
 	Ok(match code {
 		0 => None,
-		1 => Some(Encoding::Absolute),
-		2 => Some(Encoding::DeltaQuic),
-		3 => Some(Encoding::Delta { seven: false }),
-		4 => Some(Encoding::Delta { seven: true }),
+		1 => Some(Encoding::Draft14),
+		2 => Some(Encoding::Draft16),
+		3 => Some(Encoding::Draft17),
+		4 => Some(Encoding::Draft18),
+		5 => Some(Encoding::Draft19),
 		_ => return Err(DecodeError::InvalidValue),
 	})
-}
-
-fn decode_flags(flags: u64) -> Result<(bool, Option<Encoding>), DecodeError> {
-	let delivery_timeout = flags & DELIVERY_TIMEOUT != 0;
-	let encoding = decode_encoding(flags >> 1)?;
-	// Only a draft that assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT sets it.
-	if delivery_timeout
-		&& !encoding.is_some_and(|encoding| {
-			crate::ietf::object::drafts(encoding).any(crate::ietf::object::has_delivery_timeout)
-		}) {
-		return Err(DecodeError::InvalidValue);
-	}
-	Ok((delivery_timeout, encoding))
 }
 
 /// Track Properties delta-encoded in the family they arrived in, as moq-transport sent
@@ -213,7 +195,7 @@ pub(crate) fn encode_properties(properties: &Properties, version: Version) -> Re
 		return Ok(out);
 	};
 	let w = &mut Encoder::new(&mut out, version.into());
-	w.varint(encode_flags(block.delivery_timeout, Some(block.encoding)))?;
+	w.varint(encode_encoding(Some(block.encoding)))?;
 	w.slice(&block.bytes);
 	Ok(out)
 }
@@ -242,9 +224,8 @@ pub(crate) fn decode_properties(
 		});
 	}
 	let r = &mut Decoder::new(body, version.into());
-	let (delivery_timeout, encoding) = decode_flags(r.varint()?)?;
 	// An empty body is how nothing at all is sent.
-	let encoding = encoding.ok_or(DecodeError::InvalidValue)?;
+	let encoding = decode_encoding(r.varint()?)?.ok_or(DecodeError::InvalidValue)?;
 	// A small cached block must not pin the reader's larger receive buffer.
 	let bytes = Bytes::copy_from_slice(&body[body.len() - r.remaining()..]);
 	let checked =
@@ -256,7 +237,6 @@ pub(crate) fn decode_properties(
 				bytes,
 				encoding,
 				immutable: checked.immutable,
-				delivery_timeout,
 			}),
 		},
 		gap: checked.gap,
@@ -381,33 +361,31 @@ pub struct TrackProperties(pub Option<Arc<crate::model::object::TrackProperties>
 
 impl Message for TrackProperties {
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
-		// Flags only ever describe values, so none at all is a lone 0.
+		// An encoding only ever describes values, so none at all is a lone 0.
 		let Some(properties) = self.0.as_ref().filter(|properties| !properties.values.is_empty()) else {
 			return w.varint(0);
 		};
-		w.varint(encode_flags(properties.delivery_timeout, properties.encoding))?;
+		w.varint(encode_encoding(properties.encoding))?;
 		w.slice(&encode_list(properties)?);
 		Ok(())
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
-		let flags = r.varint()?;
+		let code = r.varint()?;
 		if r.is_empty() {
 			// Only the canonical form, so what decodes re-encodes to the same bytes.
-			return match flags {
+			return match code {
 				0 => Ok(Self(None)),
 				_ => Err(DecodeError::InvalidValue),
 			};
 		}
-		let (delivery_timeout, encoding) = decode_flags(flags)?;
 		// Track Properties start at draft-16, whose families all delta-encode their keys.
-		let encoding = encoding
-			.filter(|encoding| *encoding != Encoding::Absolute)
+		let encoding = decode_encoding(code)?
+			.filter(|encoding| *encoding != Encoding::Draft14)
 			.ok_or(DecodeError::InvalidValue)?;
 		let properties = crate::model::object::TrackProperties {
 			values: decode_list(r, encoding)?,
 			encoding: Some(encoding),
-			delivery_timeout,
 		};
 		// TRACK_INFO carries these, so a second copy could only contradict it.
 		if properties
@@ -571,7 +549,7 @@ mod tests {
 		];
 		let properties = Properties {
 			sealed_time: Some(crate::Timestamp::new(77, Timescale::MILLI).unwrap()),
-			block: crate::ietf::object::block(&values, Encoding::DeltaQuic, false).unwrap(),
+			block: crate::ietf::object::block(&values, Encoding::Draft16).unwrap(),
 		};
 		let body = encode_properties(&properties, V).unwrap();
 		let decoded = decode_properties(&body, Some(Timescale::MILLI), true, V).unwrap();
@@ -584,7 +562,7 @@ mod tests {
 		assert_eq!(empty.properties, Properties::default());
 
 		// An untimed track's Timestamp has no frame to hold it, so it stays in the block.
-		let untimed = [4 << 1, 0x10, 7];
+		let untimed = [4, 0x10, 7];
 		let decoded = decode_properties(&untimed, None, true, V).unwrap();
 		assert_eq!(encode_properties(&decoded.properties, V).unwrap(), untimed);
 	}
@@ -592,12 +570,11 @@ mod tests {
 	/// Only the canonical form decodes, so whatever decodes re-encodes to the same bytes.
 	#[test]
 	fn properties_refuse_what_is_not_canonical() {
-		let delta = 4 << 1;
+		let delta = 4;
 		for (body, reason) in [
-			(&[0][..], "flags saying nothing"),
-			(&[DELIVERY_TIMEOUT as u8][..], "DELIVERY_TIMEOUT without a block"),
+			(&[0][..], "an encoding saying nothing"),
 			(&[delta][..], "an encoding with an empty block"),
-			(&[5 << 1, 0x20, 1][..], "an unknown encoding"),
+			(&[6, 0x20, 1][..], "an unknown encoding"),
 			(
 				&[delta, 0x10, 5][..],
 				"a timed track's mutable Timestamp, which its frame holds",
@@ -658,8 +635,7 @@ mod tests {
 					value: Value::Bytes(Bytes::from_static(b"opaque")),
 				},
 			],
-			encoding: Some(Encoding::Delta { seven: true }),
-			delivery_timeout: true,
+			encoding: Some(Encoding::Draft19),
 		};
 		let msg = TrackProperties(Some(Arc::new(properties.clone())));
 		let buf = crate::coding::Encode::encode_bytes(&msg, V).unwrap();
@@ -680,11 +656,10 @@ mod tests {
 		let wire = |values: &[Property], code: u64| {
 			let mut buf = Vec::new();
 			let w = &mut Encoder::new(&mut buf, V.into());
-			w.varint(code << 1).unwrap();
+			w.varint(code).unwrap();
 			let list = encode_list(&crate::model::object::TrackProperties {
 				values: values.to_vec(),
-				encoding: Some(Encoding::Delta { seven: true }),
-				..Default::default()
+				encoding: Some(Encoding::Draft18),
 			})
 			.unwrap();
 			w.slice(&list);
@@ -703,7 +678,7 @@ mod tests {
 		// TIMESCALE belongs to TRACK_INFO.
 		assert!(decode(&wire(&[opaque(0x08)], 4)).is_err(), "an understood property");
 		assert!(decode(&wire(&[opaque(0x40)], 0)).is_err(), "a list needs its encoding");
-		assert!(decode(&[1 << 1]).is_err(), "flags without a list");
+		assert!(decode(&[2]).is_err(), "an encoding without a list");
 		assert!(
 			decode(&wire(&[opaque(0x40)], 1)).is_err(),
 			"track properties never use absolute keys"
@@ -735,8 +710,7 @@ mod tests {
 				id: IMMUTABLE,
 				value: Value::Bytes(sealed.into()),
 			}],
-			encoding: Some(Encoding::Delta { seven: true }),
-			delivery_timeout: false,
+			encoding: Some(Encoding::Draft18),
 		})));
 		let buf = crate::coding::Encode::encode_bytes(&msg, V).unwrap();
 		let decoded = <TrackProperties as crate::coding::Decode<Version>>::decode(&mut Decoder::new(&buf, V.into()), V)
@@ -906,7 +880,7 @@ mod tests {
 		for _ in 1..COUNT {
 			block.extend([0, 1]);
 		}
-		let mut body = vec![4 << 1];
+		let mut body = vec![4];
 		body.extend(&block);
 		let mut buf = Vec::new();
 		let w = &mut Encoder::new(&mut buf, V.into());
@@ -921,31 +895,31 @@ mod tests {
 
 	/// A body holding property 0x20 = 1, which every family serializes alike, claiming the
 	/// encoding `code`.
-	fn claiming(code: u8, delivery_timeout: bool) -> [u8; 3] {
-		[code << 1 | u8::from(delivery_timeout), 0x20, 1]
+	fn claiming(code: u8) -> [u8; 3] {
+		[code, 0x20, 1]
 	}
 
-	/// DELIVERY_TIMEOUT names the draft-19 meaning of 0x06, so only a block or list claiming
-	/// the draft-18-and-later encoding may set it.
+	/// Each code names the drafts a block came from, so whether 0x06 means
+	/// SUBGROUP_DELIVERY_TIMEOUT follows from it: only for code 5, drafts 19 and later.
 	#[test]
-	fn delivery_timeout_claims_a_draft_that_assigns_it() {
-		for code in 1..=4 {
-			let ok = code == 4;
-			assert_eq!(
-				decode_properties(&claiming(code, true), None, true, V).is_ok(),
-				ok,
-				"{code}"
-			);
-			assert!(
-				decode_properties(&claiming(code, false), None, true, V).is_ok(),
-				"{code}"
-			);
-			let list = |delivery_timeout| {
-				TrackProperties::decode_msg(&mut Decoder::new(&claiming(code, delivery_timeout), V.into()), V).is_ok()
-			};
-			assert_eq!(list(true), ok, "{code}");
+	fn encoding_codes_name_their_drafts() {
+		for code in 1..=5 {
+			let decoded = decode_properties(&claiming(code), None, true, V).unwrap();
+			let encoding = decoded.properties.block.unwrap().encoding;
+			assert_eq!(encode_encoding(Some(encoding)), u64::from(code));
+			assert_eq!(crate::ietf::object::delivery_timeout(encoding), code == 5, "{code}");
+			let list = TrackProperties::decode_msg(&mut Decoder::new(&claiming(code), V.into()), V);
 			// Track Properties start at draft-16.
-			assert_eq!(list(false), code != 1, "{code}");
+			assert_eq!(list.is_ok(), code != 1, "{code}");
+		}
+		assert!(decode_properties(&claiming(6), None, true, V).is_err());
+
+		// A draft-18 0x06 is dropped on its way to draft-19, where it would mean a timeout.
+		for (code, kept) in [(4, false), (5, true)] {
+			let decoded = decode_properties(&[code, 0x06, 42], None, true, V).unwrap();
+			let written =
+				crate::ietf::object::write(&decoded.properties, None, crate::ietf::Version::Draft19, None).unwrap();
+			assert_eq!(!written.is_empty(), kept, "{code}");
 		}
 	}
 
@@ -954,8 +928,8 @@ mod tests {
 	#[cfg(feature = "async")]
 	#[test]
 	fn an_end_record_block_claims_a_draft_that_carries_one() {
-		for code in 1..=4 {
-			assert_eq!(decode_end(&claiming(code, false), None, V).is_ok(), code == 1, "{code}");
+		for code in 1..=5 {
+			assert_eq!(decode_end(&claiming(code), None, V).is_ok(), code == 1, "{code}");
 		}
 		assert!(decode_end(&[], None, V).is_ok());
 	}
@@ -965,13 +939,13 @@ mod tests {
 	/// 14 and 15 define DOES_NOT_EXIST.
 	#[test]
 	fn a_datagram_block_claims_a_draft_that_sends_its_shape() {
-		for (status, codes) in [(0, &[1, 2, 3, 4][..]), (1, &[1]), (3, &[1, 2]), (4, &[1, 2])] {
-			for code in 1..=4 {
+		for (status, codes) in [(0, &[1, 2, 3, 4, 5][..]), (1, &[1]), (3, &[1, 2]), (4, &[1, 2])] {
+			for code in 1..=5 {
 				let mut buf = Vec::new();
 				let w = &mut Encoder::new(&mut buf, V.into());
 				w.varint(RELAYED | STATUS).unwrap();
 				w.varint(status).unwrap();
-				w.bytes(&claiming(code, false)).unwrap();
+				w.bytes(&claiming(code)).unwrap();
 				let decoded = decode_datagram(&mut Decoder::new(&buf, V.into()), None, V);
 				assert_eq!(decoded.is_ok(), codes.contains(&code), "{status}: {code}");
 			}
@@ -1050,7 +1024,7 @@ mod hop_tests {
 
 	/// The block a draft-22 publisher's `values` arrive as.
 	fn block(values: &[Property]) -> Option<crate::model::object::Block> {
-		crate::ietf::object::block(values, Encoding::Delta { seven: true }, true).unwrap()
+		crate::ietf::object::block(values, Encoding::Draft19).unwrap()
 	}
 
 	/// Write a frame carrying relay `fields`, as moq-transport ingress does.
@@ -1122,8 +1096,7 @@ mod hop_tests {
 			info.priority = 9;
 			let track_properties = crate::model::object::TrackProperties {
 				values: vec![property(0x40, 3)],
-				encoding: Some(Encoding::Delta { seven: true }),
-				..Default::default()
+				encoding: Some(Encoding::Draft19),
 			};
 			info.properties = Some(Arc::new(track_properties.clone()));
 			let track = broadcast.create_track("video", info).unwrap();
@@ -1307,8 +1280,7 @@ mod hop_tests {
 		] {
 			let res = subscribe_across(crate::model::object::TrackProperties {
 				values: values.clone(),
-				encoding: Some(Encoding::Delta { seven: true }),
-				..Default::default()
+				encoding: Some(Encoding::Draft19),
 			})
 			.await;
 			assert!(
@@ -1332,8 +1304,7 @@ mod hop_tests {
 					id: IMMUTABLE,
 					value: Value::Bytes(sealed.into()),
 				}],
-				encoding: Some(Encoding::Delta { seven: true }),
-				..Default::default()
+				encoding: Some(Encoding::Draft19),
 			})
 			.await;
 			match ok {
@@ -1351,8 +1322,7 @@ mod hop_tests {
 		for (count, ok) in [(max, true), (max + 1, false)] {
 			let res = subscribe_across(crate::model::object::TrackProperties {
 				values: (0..count as u64).map(|i| property(0x40 + 2 * i, 1)).collect(),
-				encoding: Some(Encoding::Delta { seven: true }),
-				..Default::default()
+				encoding: Some(Encoding::Draft19),
 			})
 			.await;
 			match ok {

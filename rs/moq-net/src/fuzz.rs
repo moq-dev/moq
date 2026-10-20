@@ -40,8 +40,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 							id: 0x80,
 							value: crate::model::object::Value::Int(96_000),
 						}],
-						crate::model::object::Encoding::Delta { seven: true },
-						true,
+						crate::model::object::Encoding::Draft19,
 					)
 					.unwrap(),
 					..Default::default()

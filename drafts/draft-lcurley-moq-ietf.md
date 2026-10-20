@@ -114,7 +114,7 @@ Object Record {
 **Properties**:
 The object's [properties](#properties), in `Properties Length` bytes.
 An empty one means the object has none.
-A receiver MUST reset the stream if the length exceeds 65,537, the largest Property Block beside a Flags byte.
+A receiver MUST reset the stream if the length exceeds 65,537, the largest Property Block beside an Encoding byte.
 
 In a plain group, every record has a `Skip` of 0 after the first, whose Object ID is the index of its frame, no properties, and `End` of 0.
 A receiver MUST reset the stream with a PROTOCOL_VIOLATION on any other record in a plain group.
@@ -129,19 +129,24 @@ A relay forwards the block to a peer of that encoding unchanged, so the block ne
 
 ~~~
 Properties {
-  Flags (i)
+  Encoding (i)
   Property Block (..)
 }
 ~~~
 
-**Flags**:
+**Encoding**:
+The {{moqt}} drafts the Property Block came from, which serialize it alike and give each property the same meaning:
 
-- `0x1` **DELIVERY_TIMEOUT**: The publisher's {{moqt}} draft assigns property 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
-- `Flags >> 1` names the Property Block's encoding: 1 for drafts 14 and 15 (absolute IDs and QUIC varints), 2 for draft 16 (delta IDs and QUIC varints), 3 for draft 17, and 4 for draft 18 and later.
+| Code | Drafts | IDs | Varints |
+|-----:|:-------|:----|:--------|
+| 1 | 14 and 15 | absolute | QUIC |
+| 2 | 16 | delta | QUIC |
+| 3 | 17 | delta | draft 17 |
+| 4 | 18 | delta | draft 18 |
+| 5 | 19 and later | delta | draft 18 |
 
-A receiver MUST treat any other encoding as malformed, including 0: an empty Properties says the object has none.
-DELIVERY_TIMEOUT lets a relay refuse to forward property 0x06 to a draft that would read it differently.
-Only drafts 19 and later assign it, so a receiver MUST treat DELIVERY_TIMEOUT with any encoding but 4 as malformed.
+A receiver MUST treat any other code as malformed, including 0: an empty Properties says the object has none.
+Codes 4 and 5 serialize alike, but only drafts 19 and later assign property 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a relay knows not to forward 0x06 to a draft that would read it differently.
 
 **Property Block**:
 Every property of the object, serialized as the {{moqt}} drafts of its encoding serialize an object's properties, in ascending ID order.
@@ -150,8 +155,8 @@ It MUST NOT be empty or longer than 65,536 bytes.
 On a timed track an object with a FRAME, or a datagram without a Status, MUST NOT carry one longer than 65,526 bytes, leaving room for the largest Timestamp a relay restates ([Timestamps](#timestamps)): a one-byte key and a value of up to nine bytes.
 A relay MUST refuse a {{moqt}} object whose properties, less its mutable Timestamp, exceed that, so every object it forwards fits.
 A receiver MUST treat a block its encoding's drafts would refuse as malformed.
-The encoding names the drafts the object came from, so a receiver MUST also treat a block as malformed on an object none of them could send with properties.
-Only draft 14 lets a status object carry them, so a block on the END_OF_GROUP record MUST have encoding 1, and a datagram with a block MUST have fields an OBJECT_DATAGRAM Type of those drafts carries ([Datagrams](#datagrams)).
+The Encoding names the drafts the object came from, so a receiver MUST also treat a block as malformed on an object none of them could send with properties.
+Only draft 14 lets a status object carry them, so a block on the END_OF_GROUP record MUST have Encoding 1, and a datagram with a block MUST have fields an OBJECT_DATAGRAM Type of those drafts carries ([Datagrams](#datagrams)).
 Other properties are opaque to this extension.
 
 ## Timestamps {#timestamps}
@@ -170,16 +175,15 @@ When the extension is negotiated, the publisher sends a TRACK_PROPERTIES message
 ~~~
 TRACK_PROPERTIES Message {
   Message Length (i)
-  Flags (i)
+  Encoding (i)
   Property List (..)
 }
 ~~~
 
-**Flags**:
-Bit `0x1` is DELIVERY_TIMEOUT, as in [Properties](#properties).
-`Flags >> 1` names the Property List's encoding, with the codes of [Properties](#properties).
-A message without properties MUST have a Flags of 0 and an empty Property List.
-Track Properties start at draft 16, so any other message with an encoding of 0 or 1 is malformed.
+**Encoding**:
+The drafts the Property List came from, with the codes of [Properties](#properties).
+A message without properties MUST have an Encoding of 0 and an empty Property List.
+Track Properties start at draft 16, so any other message with an Encoding of 0 or 1 is malformed.
 
 **Property List**:
 The {{moqt}} Track Properties a relay forwards without interpreting, serialized as the publisher's draft serializes them: in ascending ID order, with delta-encoded IDs and the varints of that encoding.
@@ -237,7 +241,7 @@ A datagram with a Status MUST have an empty Payload, as {{moqt}} sends no payloa
 A non-zero Status carries no object: it has no Timestamp, even on a timed track.
 A receiver MUST drop a datagram whose Status no {{moqt}} draft defines: only 0 (Normal), 1 (DOES_NOT_EXIST, drafts 14 and 15), 3 (END_OF_GROUP), and 4 (END_OF_TRACK) are relayed.
 It MUST also drop one whose fields no {{moqt}} OBJECT_DATAGRAM Type can carry, such as STATUS with END_OF_GROUP.
-With Properties, only the drafts of their encoding count: from draft 17 on a non-zero Status carries no properties, so one needs encoding 1 or 2, and DOES_NOT_EXIST needs encoding 1.
+With Properties, only the drafts of their Encoding count: from draft 17 on a non-zero Status carries no properties, so one needs Encoding 1 or 2, and DOES_NOT_EXIST needs Encoding 1.
 
 
 # Security Considerations

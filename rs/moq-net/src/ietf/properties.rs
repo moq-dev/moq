@@ -238,7 +238,6 @@ impl Properties {
 		// Recorded only beside a value they describe, so a set with nothing to forward stays empty.
 		let forwarded = !properties.unknown.values.is_empty();
 		properties.unknown.encoding = forwarded.then(|| super::object::encoding(version));
-		properties.unknown.delivery_timeout = forwarded && super::object::has_delivery_timeout(version);
 		Ok(properties)
 	}
 
@@ -299,7 +298,7 @@ pub(crate) const MAX_FORWARDED: usize = MAX_PROPERTIES as usize - UNDERSTOOD.len
 /// family, as [`Properties::decode`] does.
 pub(crate) fn check_immutable(block: &[u8], encoding: crate::model::object::Encoding) -> Result<(), DecodeError> {
 	// Track Properties start at draft-16, whose families all delta-encode their keys.
-	if encoding == crate::model::object::Encoding::Absolute {
+	if encoding == crate::model::object::Encoding::Draft14 {
 		return Err(DecodeError::InvalidValue);
 	}
 	let version = super::object::family(encoding);
@@ -769,9 +768,7 @@ mod tests {
 					value: Value::Int(1),
 				})
 				.collect(),
-			encoding: Some(crate::model::object::Encoding::Delta { seven: true }),
-			// Draft-22 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
-			delivery_timeout: true,
+			encoding: Some(crate::model::object::Encoding::Draft19),
 		};
 		let properties = Properties {
 			max_cache_duration: Some(Duration::from_secs(1)),
@@ -809,7 +806,6 @@ mod tests {
 				value: Value::Bytes(block.into()),
 			}],
 			encoding: Some(super::super::object::encoding(version)),
-			delivery_timeout: true,
 		};
 		let info = crate::track::Info::default()
 			.with_max_age(Duration::from_secs(7))
@@ -867,7 +863,6 @@ mod tests {
 				value: Value::Bytes(sealed.clone().into()),
 			}],
 			encoding: Some(super::super::object::encoding(version)),
-			delivery_timeout: true,
 		};
 		let egress = Properties {
 			unknown: unknown.clone(),

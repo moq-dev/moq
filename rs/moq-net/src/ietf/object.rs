@@ -3,17 +3,29 @@ use bytes::Bytes;
 use super::Version;
 use crate::{
 	Error, Timescale, Timestamp,
-	coding::{Decoder, Encoder},
+	coding::{Decoder, Encoder, Form},
 	model::object::{Encoding, Properties, Property, Value},
 };
 
 pub(crate) fn encoding(version: Version) -> Encoding {
 	match version {
-		Version::Draft14 | Version::Draft15 => Encoding::Absolute,
-		Version::Draft16 => Encoding::DeltaQuic,
-		Version::Draft17 => Encoding::Delta { seven: false },
-		_ => Encoding::Delta { seven: true },
+		Version::Draft14 | Version::Draft15 => Encoding::Draft14,
+		Version::Draft16 => Encoding::Draft16,
+		Version::Draft17 => Encoding::Draft17,
+		Version::Draft18 => Encoding::Draft18,
+		_ => Encoding::Draft19,
 	}
+}
+
+/// Whether lists in encodings `a` and `b` are the same bytes: the same keys and varints.
+pub(crate) fn same_bytes(a: Encoding, b: Encoding) -> bool {
+	let form = |encoding| (encoding == Encoding::Draft14, Form::from(family(encoding)));
+	form(a) == form(b)
+}
+
+/// Whether property 0x06 means SUBGROUP_DELIVERY_TIMEOUT in a list from `encoding`.
+pub(crate) fn delivery_timeout(encoding: Encoding) -> bool {
+	has_delivery_timeout(family(encoding))
 }
 
 /// The drafts that serialize properties in the `family` encoding, one of which sent any
@@ -121,8 +133,8 @@ fn list(data: &Bytes, version: Version, immutable: bool, lift: bool) -> Result<L
 	while !decoder.is_empty() {
 		let key = decoder.varint()?;
 		let id = match keys {
-			Encoding::Absolute => key,
-			Encoding::Delta { .. } | Encoding::DeltaQuic => previous.checked_add(key).ok_or(Error::MalformedTrack)?,
+			Encoding::Draft14 => key,
+			_ => previous.checked_add(key).ok_or(Error::MalformedTrack)?,
 		};
 		previous = id;
 		let value = if id % 2 == 0 {
@@ -175,8 +187,8 @@ fn serialize<'a>(values: impl IntoIterator<Item = &'a Property>, encoding: Encod
 	let mut previous = 0;
 	for property in sorted {
 		encoder.varint(match encoding {
-			Encoding::Absolute => property.id,
-			Encoding::Delta { .. } | Encoding::DeltaQuic => property.id - previous,
+			Encoding::Draft14 => property.id,
+			_ => property.id - previous,
 		})?;
 		previous = property.id;
 		match &property.value {
@@ -192,11 +204,7 @@ fn serialize<'a>(values: impl IntoIterator<Item = &'a Property>, encoding: Encod
 ///
 /// Sorting a delta-encoded list, which arrives ascending, and dropping its Timestamp
 /// never grows it, so the block fits wherever the publisher's list did.
-pub(crate) fn block(
-	values: &[Property],
-	encoding: Encoding,
-	delivery_timeout: bool,
-) -> Result<Option<crate::model::object::Block>, Error> {
+pub(crate) fn block(values: &[Property], encoding: Encoding) -> Result<Option<crate::model::object::Block>, Error> {
 	if values.is_empty() {
 		return Ok(None);
 	}
@@ -204,7 +212,6 @@ pub(crate) fn block(
 		bytes: serialize(values, encoding)?.into(),
 		encoding,
 		immutable: values.iter().any(|property| property.id == 0x0b),
-		delivery_timeout,
 	}))
 }
 
@@ -281,7 +288,7 @@ fn decode(data: &Bytes, version: Version, timescale: Option<Timescale>, framed: 
 	let parsed = list(data, version, false, lifted.is_some())?;
 	let properties = Properties {
 		sealed_time: timed(parsed.sealed_time, timescale)?,
-		block: block(&parsed.values, encoding(version), has_delivery_timeout(version))?,
+		block: block(&parsed.values, encoding(version))?,
 	};
 	// A list at the limit with a small Timestamp cannot take back a larger one on egress.
 	if properties.heap() > max_block(lifted) as u64 {
@@ -330,10 +337,11 @@ pub(crate) fn egress_time(
 /// parses its keys and integers the same way.
 pub(crate) fn family(encoding: Encoding) -> Version {
 	match encoding {
-		Encoding::Absolute => Version::Draft14,
-		Encoding::DeltaQuic => Version::Draft16,
-		Encoding::Delta { seven: false } => Version::Draft17,
-		Encoding::Delta { seven: true } => Version::Draft18,
+		Encoding::Draft14 => Version::Draft14,
+		Encoding::Draft16 => Version::Draft16,
+		Encoding::Draft17 => Version::Draft17,
+		Encoding::Draft18 => Version::Draft18,
+		Encoding::Draft19 => Version::Draft19,
 	}
 }
 
@@ -354,14 +362,14 @@ pub(crate) fn write(
 	let Some(block) = &properties.block else {
 		return serialize(&timestamp, target);
 	};
-	if block.immutable && block.encoding != target {
+	if block.immutable && !same_bytes(block.encoding, target) {
 		return Err(Error::Unsupported);
 	}
 	// Across draft-19, forwarding 0x06 would give it a different meaning.
 	// A mutable one is dropped; a sealed one is refused.
-	let flipped = block.delivery_timeout != has_delivery_timeout(version);
+	let flipped = delivery_timeout(block.encoding) != has_delivery_timeout(version);
 	// The common case: the block is already what this draft would send.
-	if timestamp.is_none() && !flipped && block.encoding == target {
+	if timestamp.is_none() && !flipped && same_bytes(block.encoding, target) {
 		return Ok(block.bytes.to_vec());
 	}
 	let values = values(block)?;
@@ -595,7 +603,7 @@ mod tests {
 		assert!(read(&list(MAX_BLOCK - 2), Version::Draft22, None).is_ok());
 
 		// The same bound on a block arriving over the lite hop.
-		let encoding = Encoding::Delta { seven: true };
+		let encoding = Encoding::Draft19;
 		assert!(check(&block(limit), encoding, milli, true).is_ok());
 		assert!(check(&block(limit + 1), encoding, milli, true).is_err());
 		assert!(check(&block(limit + 1), encoding, None, true).is_ok());
@@ -614,8 +622,8 @@ mod tests {
 
 		// Over the lite hop, only a status block may hold it.
 		let block = status.block.unwrap().bytes;
-		assert!(check(&block, Encoding::Absolute, milli, false).is_ok());
-		assert!(check(&block, Encoding::Absolute, milli, true).is_err());
+		assert!(check(&block, Encoding::Draft14, milli, false).is_ok());
+		assert!(check(&block, Encoding::Draft14, milli, true).is_err());
 	}
 
 	/// Draft-19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so it cannot cross that boundary.

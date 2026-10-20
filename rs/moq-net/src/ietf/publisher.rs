@@ -55,12 +55,19 @@ fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Resul
 	}
 	let mut unknown = info.properties.as_deref().cloned().unwrap_or_default();
 	let block = !matches!(version, Version::Draft14 | Version::Draft15);
-	if block && unknown.immutable().is_some() && unknown.encoding != Some(super::object::encoding(version)) {
+	if block
+		&& unknown.immutable().is_some()
+		&& !unknown
+			.encoding
+			.is_some_and(|encoding| super::object::same_bytes(encoding, super::object::encoding(version)))
+	{
 		return Err(Error::Unsupported);
 	}
 	// Across draft-19, forwarding 0x06 would give it a different meaning, as for object
 	// properties. A mutable one is dropped; a sealed one is refused.
-	if !unknown.values.is_empty() && unknown.delivery_timeout != super::object::has_delivery_timeout(version) {
+	if unknown.encoding.is_some_and(|encoding| {
+		super::object::delivery_timeout(encoding) != super::object::has_delivery_timeout(version)
+	}) {
 		if block && unknown.sealed().any(|id| id == 0x06) {
 			return Err(Error::Unsupported);
 		}

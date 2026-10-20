@@ -12849,7 +12849,8 @@ mod stitch_tests {
 			] {
 				let script = object_stream(ingress, true, &[(0, &properties, None)]);
 				let (bytes, log) = relay_passthrough_stream(script, ingress, egress).await;
-				if super::super::object::encoding(ingress) != super::super::object::encoding(egress) {
+				let encoding = super::super::object::encoding;
+				if !super::super::object::same_bytes(encoding(ingress), encoding(egress)) {
 					assert!(!log.resets().is_empty(), "incompatible immutable bytes must be refused");
 					continue;
 				}

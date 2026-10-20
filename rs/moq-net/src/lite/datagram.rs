@@ -224,8 +224,7 @@ mod test {
 							id,
 							value: crate::model::object::Value::Int(7),
 						}],
-						crate::model::object::Encoding::Delta { seven: true },
-						true,
+						crate::model::object::Encoding::Draft19,
 					)
 					.unwrap(),
 					..Default::default()

@@ -2532,7 +2532,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn ietf_records_need_extensions_for_properties() {
 		// Object 0 with a draft-18 block holding 0x20 = 1, or an untimed Timestamp.
-		for record in [&[3, 4 << 1, 0x20, 1][..], &[3, 4 << 1, 0x10, 7]] {
+		for record in [&[3, 4, 0x20, 1][..], &[3, 4, 0x10, 7]] {
 			for (state, ok) in [(0x1 | 0x4, true), (0x1, false)] {
 				let mut body = vec![state, 0];
 				body.extend(record);
@@ -2552,9 +2552,9 @@ mod tests {
 		// Each record after its Object code: Object 0 unless it says otherwise.
 		for (record, ok, reason) in [
 			(&[0, 0][..], true, "nothing at all"),
-			(&[0, 4, 4 << 1, 0x10, 500], false, "a mutable Timestamp"),
-			(&[0, 3, 4 << 1, 0x20, 1], true, "properties without a Timestamp"),
-			(&[0, 6, 4 << 1, 0x0b, 3, 0x10, 499], true, "a sealed Timestamp"),
+			(&[0, 4, 4, 0x10, 500], false, "a mutable Timestamp"),
+			(&[0, 3, 4, 0x20, 1], true, "properties without a Timestamp"),
+			(&[0, 6, 4, 0x0b, 3, 0x10, 499], true, "a sealed Timestamp"),
 			(&[1 << 1, 0], true, "Object 1 without properties"),
 		] {
 			let mut body = vec![0x1 | 0x4];
@@ -2577,7 +2577,7 @@ mod tests {
 		const COUNT: u64 = 1000;
 		// A relayed group's Object 0, whose draft-18 block holds COUNT two-byte properties
 		// (0x20 = 1, then zero deltas), then an empty frame.
-		let mut body = vec![0x1 | 0x4, 0, 1 + 2 * COUNT, 4 << 1, 0x20, 1];
+		let mut body = vec![0x1 | 0x4, 0, 1 + 2 * COUNT, 4, 0x20, 1];
 		for _ in 1..COUNT {
 			body.extend([0, 1]);
 		}
