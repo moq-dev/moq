@@ -13229,7 +13229,7 @@ mod test {
 			pool: pool.clone(),
 			..Default::default()
 		});
-		let mut producer = Producer::new(broadcast, "test", Info::timed().with_compress(true));
+		let producer = Producer::new(broadcast, "test", Info::timed().with_compress(true));
 		let frame = bytes::Bytes::from(vec![0u8; 256 * 1024]);
 		let groups = 16;
 		for _ in 0..groups {

@@ -4762,6 +4762,7 @@ mod test {
 	/// A compressed group meters `bytes` as stored, whether a frame is written whole, in a
 	/// batch, or in chunks.
 	#[test]
+	#[cfg(feature = "async")]
 	fn compressed_writes_meter_the_stored_bytes() {
 		let registry = stats::Registry::new(stats::Config::new());
 		let metered = || {
