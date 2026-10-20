@@ -47,11 +47,12 @@ impl Encode<Version> for Datagram {
 			if !version.has_ietf() {
 				return Err(EncodeError::Version);
 			}
-			// A status carries no payload and no time.
-			let status = wire
-				.as_ref()
-				.is_some_and(|wire| wire.status.is_some_and(|status| status != 0));
-			if status && (self.timestamp.is_some() || !self.payload.is_empty()) {
+			// Any status object carries no payload, which moq-transport could not send beside
+			// it, and a non-zero one carries no object and so no time either.
+			let status = wire.as_ref().and_then(|wire| wire.status);
+			if status.is_some() && !self.payload.is_empty()
+				|| status.is_some_and(|status| status != 0) && self.timestamp.is_some()
+			{
 				return Err(EncodeError::InvalidState);
 			}
 			super::ietf::encode_datagram(w, wire.as_ref(), version)?;
@@ -89,12 +90,13 @@ impl Datagram {
 		let ietf = ietf
 			.then(|| super::ietf::decode_datagram(&mut r, timescale, version))
 			.transpose()?;
-		// A status carries no payload and no time.
+		// Any status object carries no payload, which moq-transport could not send beside
+		// it, and a non-zero one carries no object and so no time either.
 		let status = ietf
 			.as_ref()
 			.and_then(|wire| wire.as_ref())
-			.is_some_and(|wire| wire.status.is_some_and(|status| status != 0));
-		let timestamp = if timescale.is_some() && !status {
+			.and_then(|wire| wire.status);
+		let timestamp = if timescale.is_some() && status.is_none_or(|status| status == 0) {
 			Some(r.varint()?)
 		} else {
 			None
@@ -102,7 +104,7 @@ impl Datagram {
 
 		// Everything remaining is the payload (the datagram boundary delimits it).
 		let payload = buf.slice(buf.len() - r.remaining()..);
-		if status && !payload.is_empty() {
+		if status.is_some() && !payload.is_empty() {
 			return Err(DecodeError::InvalidValue);
 		}
 
@@ -236,6 +238,46 @@ mod test {
 		};
 		assert!(decode(dg(0x20)).is_ok());
 		assert!(matches!(decode(dg(0x10)), Err(DecodeError::InvalidValue)));
+	}
+
+	/// A Normal status (0) is an empty object, which moq-transport sends as a status with
+	/// no payload, so a STATUS field beside a payload is refused whatever its value.
+	#[test]
+	fn a_status_carries_no_payload() {
+		for status in [0, 3] {
+			let dg = |payload: &'static [u8]| Datagram {
+				subscribe: 1,
+				sequence: 2,
+				timestamp: (status == 0).then_some(500),
+				payload: Bytes::from_static(payload),
+				ietf: Some(Some(crate::model::datagram::Wire {
+					object_id: None,
+					priority: None,
+					end_of_group: false,
+					status: Some(status),
+					properties: Default::default(),
+				})),
+			};
+			assert!(
+				matches!(dg(b"x").encode_bytes(Version::Lite07), Err(EncodeError::InvalidState)),
+				"{status}"
+			);
+			let empty = dg(b"");
+			let mut buf = empty.encode_bytes(Version::Lite07).unwrap().to_vec();
+			let decoded = Datagram::decode(Bytes::from(buf.clone()), Version::Lite07, true, |_| {
+				Some(Timescale::MILLI)
+			})
+			.unwrap();
+			assert_eq!(decoded, empty, "{status}");
+			buf.push(b'x');
+			assert!(
+				matches!(
+					Datagram::decode(Bytes::from(buf), Version::Lite07, true, |_| Some(Timescale::MILLI)),
+					Err(DecodeError::InvalidValue)
+				),
+				"{status}"
+			);
+		}
 	}
 
 	#[test]
