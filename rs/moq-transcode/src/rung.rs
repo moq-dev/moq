@@ -165,6 +165,15 @@ pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Resul
 	result
 }
 
+/// Wait until some subscriber wants the track, or none does, returning at once if
+/// that already holds. A fresh clone reports the current value first, so a
+/// change seen through [`moq_net::track::Demand::wanted`] instead is never missed.
+async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net::Result<()> {
+	let mut demand = demand.clone();
+	while demand.wanted_changed().await?.is_some() != wanted {}
+	Ok(())
+}
+
 /// The live path: wait for demand, attach to the shared decode [`Feed`], and
 /// resize + encode its frames group for group until demand goes away. The
 /// heavy lifting (subscription, decode) is shared with every other active rung
@@ -186,7 +195,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 		}
 
 		tokio::select! {
-			used = demand.used() => if used.is_err() {
+			wanted = until_wanted(&demand, true) => if wanted.is_err() {
 				// The output track closed; nothing more to serve.
 				return Ok(Ended::Closed);
 			},
@@ -225,7 +234,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 		'session: loop {
 			let item = tokio::select! {
 				item = listener.recv() => item,
-				unused = demand.unused(), if !leaving => {
+				unused = until_wanted(&demand, false), if !leaving => {
 					if unused.is_ok() && current.is_some() {
 						leaving = true;
 						continue;
@@ -236,7 +245,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					}
 					break 'session;
 				}
-				used = demand.used(), if leaving => {
+				used = until_wanted(&demand, true), if leaving => {
 					if used.is_ok() {
 						// Back before the group ended: carry on as if never gone.
 						leaving = false;
@@ -263,7 +272,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 			// when the select picked this item instead. A returning viewer keeps
 			// the session rather than missing the next group while a new one
 			// attaches, and a departed one never opens another group.
-			leaving = !demand.is_used();
+			leaving = demand.wanted().is_none();
 
 			match item {
 				Some(Item::Group(sequence)) => {
@@ -292,7 +301,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					encoder.cut().await?;
 					// Demand can also leave while the codec works above. Nothing is
 					// open yet, so there is nothing to finish.
-					if !demand.is_used() {
+					if demand.wanted().is_none() {
 						break 'session;
 					}
 					// Mirror the source sequence so fetches and rendition
@@ -342,7 +351,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 						output.finish()?;
 					}
 					// Or during the flush.
-					leaving = !demand.is_used();
+					leaving = demand.wanted().is_none();
 					if retiring || leaving {
 						break 'session;
 					}

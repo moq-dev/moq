@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Track demand reports the wanted group (#5930)
+
+`TrackDemand.isUsed()`, `used()`, and `unused()` are gone.
+`wanted()` returns null while nobody subscribes, otherwise the group subscribers want next, and `wantedChanged()` waits for it to change (the first call returns at once).
+Loop on `wantedChanged()` until it returns non-null where you called `used()`, and null where you called `unused()`.
+`TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
+
 ### `CongestionControl` gained `NONE` (#5926)
 
 `CongestionControl.NONE` runs no congestion control and no pacing, for tests and controlled links.

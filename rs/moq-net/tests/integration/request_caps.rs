@@ -98,7 +98,7 @@ async fn closed_requests_are_granted_back() {
 
 			// Wait for the server to see it end, so the next round is a fresh request.
 			let published = &setup.tracks[round];
-			moq_clock::timeout(TIMEOUT, published.demand().unused())
+			moq_clock::timeout(TIMEOUT, crate::support::unwanted(published.demand()))
 				.await
 				.unwrap_or_else(|_| panic!("{version}: round {round} never ended"))
 				.unwrap();

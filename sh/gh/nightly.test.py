@@ -2,8 +2,10 @@
 
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 
@@ -56,6 +58,29 @@ class NightlyTest(unittest.TestCase):
         self.assertIn("--bench wire", shared[0])
         self.assertEqual(release[-1], "just gh criterion -p moq-gst --bench catalog")
         self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))
+
+    def test_every_cargo_bench_target_runs_nightly(self):
+        covered = set()
+        workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
+        for group in ("rust-bench", "rust-extra", "rust-uring"):
+            self.assertIn(f"recipe: gh nightly {group}\n", workflow)
+            result, calls = self.run_group(group)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for call in calls:
+                args = shlex.split(call)
+                if args[:3] != ["just", "gh", "criterion"]:
+                    continue
+                packages = [args[i + 1] for i, arg in enumerate(args) if arg == "-p"]
+                targets = [args[i + 1] for i, arg in enumerate(args) if arg == "--bench"]
+                for package in packages:
+                    manifest = ROOT / "rs" / package / "Cargo.toml"
+                    for bench in tomllib.loads(manifest.read_text()).get("bench", []):
+                        if "*" in targets or bench["name"] in targets:
+                            covered.add((package, bench["name"]))
+        declared = {(manifest.parent.name, bench["name"])
+                    for manifest in (ROOT / "rs").glob("*/Cargo.toml")
+                    for bench in tomllib.loads(manifest.read_text()).get("bench", [])}
+        self.assertEqual(declared - covered, set(), "Cargo bench targets missing from Nightly")
 
     def test_benchmark_tests_stay_out_of_cargo_bench(self):
         result, calls = self.run_group("rust-test")

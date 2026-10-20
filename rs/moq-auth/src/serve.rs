@@ -18,7 +18,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use tokio::time::Instant;
+use moq_clock::Instant;
 
 use crate::{Event, Grant, Key, KeyId, KeySet, Permissions, Request, Token};
 
@@ -167,7 +167,11 @@ impl Policy {
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
 		grant.expires = match (expires, self.expires) {
 			(Some(expires), _) => Some(expires),
-			(None, Some(bound)) => Some(SystemTime::now().checked_add(bound).ok_or(Refusal::ExpiresOutOfRange)?),
+			(None, Some(bound)) => Some(
+				SystemTime::from(moq_clock::wall())
+					.checked_add(bound)
+					.ok_or(Refusal::ExpiresOutOfRange)?,
+			),
 			(None, None) => None,
 		};
 		grant.revalidate = self.revalidate;
@@ -362,7 +366,7 @@ impl Server {
 		}
 		if policy
 			.expires
-			.is_some_and(|bound| SystemTime::now().checked_add(bound).is_none())
+			.is_some_and(|bound| SystemTime::from(moq_clock::wall()).checked_add(bound).is_none())
 		{
 			return Err(crate::Error::ExpiresOutOfRange);
 		}
@@ -443,6 +447,7 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use crate::{Algorithm, Bytes, Claims, Client, Error, Peer, Transport, lease::Reason};
@@ -460,6 +465,20 @@ mod tests {
 		let mut request = Request::new("relay-1", Transport::Quic, path);
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request
+	}
+
+	#[moq_clock::test]
+	async fn default_expiry_uses_the_ambient_wall() {
+		let policy = Policy {
+			public: rules(&["**"], &[]),
+			expires: Some(Duration::from_secs(30)),
+			..Default::default()
+		};
+		let grant = policy.decide(&request("/demo")).await.unwrap();
+		assert_eq!(
+			grant.expires,
+			Some((moq_clock::wall() + Duration::from_secs(30)).into())
+		);
 	}
 
 	fn with_token(mut request: Request, jwt: &str) -> Request {

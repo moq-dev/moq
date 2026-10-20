@@ -36,12 +36,12 @@ not counted until its first object arrives; the relay reports what it has
 rather than waiting for the peer.
 
 Test the lite-05 relay case #5000 left out, on mock time beside
-`rs/moq-net/tests/late_lower_group.rs`: a live subscriber already reading
+`rs/moq-net/tests/integration/late_lower_group.rs`: a live subscriber already reading
 group 1, then one from `Absolute(0)`, and a fresh group 0 reaches only the
 second. Today the merged request goes upstream as its covering span, which on
 lite-05 has no floor and joins at the latest group, so group 0 never arrives;
 it needs the explicit group 0 above. The merged-range relay test,
-`rs/moq-net/tests/subscribe_ranges.rs`, extends to lite-07 once it carries the
+`rs/moq-net/tests/integration/subscribe_ranges.rs`, extends to lite-07 once it carries the
 list.
 
 Update `drafts/draft-lcurley-moq-lite.md` in the same PR: the SUBSCRIBE and

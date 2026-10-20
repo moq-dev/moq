@@ -9,6 +9,24 @@ How to update your code for each breaking change, newest first.
 `lite::SubscribeEnd` now contains only `group`; remove `streams` from struct literals and stop calling `Version::has_stream_count()`.
 The unpublished `moq-lite-07-wip` wire restores `SUBSCRIBE_DROP` and removes Stream Count from `SUBSCRIBE_END`. Update both ends together; published lite versions keep their framing.
 
+### Track demand reports the wanted group (#5930)
+
+`track::Demand::used`, `unused`, `is_used`, `poll_used`, and `poll_unused` are gone.
+`wanted()` returns `None` while nobody consumes the track and `Some(n)` while consumers want group `n` or later; open a group whenever `n` passes your largest.
+`wanted_changed().await` (or `poll_wanted_changed`) returns it at once on the first call, then on each change, and errors once the track closes.
+A clone of a `Demand` watches on its own.
+
+```rust
+// Before
+demand.used().await?;
+demand.unused().await?;
+// After
+while demand.wanted_changed().await?.is_none() {}
+while demand.wanted_changed().await?.is_some() {}
+```
+
+`track::Info::refresh` opts a track in to new groups on join: set it with `Info::with_refresh(ratio)`.
+
 ### An expired group fails with `Old` even when drained (#5944)
 
 A reader parked at the end of an unfinished group whose max delay gives up now gets `Error::Old`, even after reading every frame, where it used to end cleanly.

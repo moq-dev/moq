@@ -156,8 +156,12 @@ impl Waiter {
 
 	/// Poll a foreign [`Future`] against this waiter, so it re-wakes the enclosing
 	/// `poll_*` step when it is ready.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_future<F: Future + ?Sized>(&self, future: Pin<&mut F>) -> Poll<F::Output> {
-		future.poll(&mut self.context())
+		match future.poll(&mut self.context()) {
+			Poll::Ready(value) => crate::coop::ready(value),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 }
 

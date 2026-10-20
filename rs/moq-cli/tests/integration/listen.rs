@@ -159,10 +159,12 @@ async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 		.established()
 		.await
 		.unwrap();
-	tokio::time::timeout(TIMEOUT, catalog.demand().used())
-		.await
-		.unwrap()
-		.unwrap();
+	let mut demand = catalog.demand();
+	let wanted = async {
+		while demand.wanted_changed().await?.is_none() {}
+		moq_net::Result::Ok(())
+	};
+	tokio::time::timeout(TIMEOUT, wanted).await.unwrap().unwrap();
 	let mut legacy = moq_tokio::connect::Config::default();
 	legacy.version = vec!["moq-lite-03".parse().unwrap()];
 	let legacy = legacy

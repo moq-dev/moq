@@ -11,7 +11,14 @@ The reusable crypto crate remains independent of Hang and codec-specific publish
 Publishers use `Credential::produce()` and its `generation::Producer`; the
 producing/consuming split landed separately in #5313.
 
-- Provide injectable opaque-name allocation or explicit-name constructors for mux, video, audio, timeline, and catalog publishers that currently derive semantic names.
+- After the dynamic-name design is approved, adapt mux, video, audio,
+  timeline, and catalog publishers to its chosen naming contract.
+  Applications keep semantic track names; the e2ee broadcast wrappers own
+  their translation to physical names, as the epic specifies.
 - Derive the protected catalog name from its well-known logical role, then put media roles, codecs, quality, timelines, and custom-track mappings only inside the encrypted catalog.
 - Encrypt both Hang catalog representations and encrypt or suppress the MSF catalog. Compress protected catalog bodies before encryption and retain ordinary plaintext publication unchanged outside E2EE mode.
 - Cover every current Rust importer and capture path so a convenience API cannot silently recreate `.avc3`, `.opus`, timeline, or other semantic suffixes.
+
+## Required
+
+- [Dynamic names](/quest/m2/e2ee/dynamic-names.md) - the maintainer approves the naming design before implementation starts

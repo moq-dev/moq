@@ -1969,14 +1969,13 @@ mod session_tests {
 		// has: that edge says the session reconciled the removal, which a fixed beat can only
 		// guess at. Answering before it lands is a pump that legitimately goes live, so the
 		// wait is what the assertion below is about.
+		let mut demand = request.demand();
+		let unwanted = async {
+			while demand.wanted_changed().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
 		super::RUNTIME
-			.block_on(async {
-				tokio::time::timeout(
-					Duration::from_secs(10),
-					moq_net::kio::wait(|waiter| request.demand().poll_unused(waiter)),
-				)
-				.await
-			})
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), unwanted).await })
 			.expect("the cancelled pump never dropped its subscription")
 			.expect("the pending request is still open");
 
