@@ -43,6 +43,7 @@ just test ts --headroom         # the same with four audio PIDs, muxed above the
 just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
 just test ts --full             # the same with two audio PIDs, filling its multiplex with no nulls
 just test ts --fragment-pes    # legal headers split across packets, with FFmpeg/TSDuck grading
+just test ts --klv              # KLV and DVB AC-3 carried as whole PES, graded against the source
 just test ts --delay 2s         # pass the exporter's --delay
 just test ts --hrd --rate 7000000 # congest the subscriber's leg below the media rate
 just test ts --loss 1           # drop 1% of the relay's datagrams to the subscriber
@@ -55,6 +56,17 @@ just test ts-passthrough-capture # the same over an in-repo capture the T-STD mo
 null slots after splitting the header. It cycles through header-byte boundaries,
 preserves packet count, PCR positions, payload bytes, and PID continuity, then
 runs the same independent decode/content and transport checks as the default arm.
+
+`--klv` muxes DVB AC-3 beside the AAC, several sync frames a PES, and `klv.py`
+fills null slots with asynchronous KLV (`stream_type` 0x06, `KLVA` registration, no
+PTS) and synchronous KLV (`stream_type` 0x15, `metadata_stream` 0xFC, a PTS per
+picture). The importer decodes none of them, so each PES rides its track whole.
+`klv.py grade` holds each KLV stream in the capture to its source: the same PID,
+`stream_type` and descriptors; every PES from the join to the end, in order and
+byte-equal outside its PTS and DTS, which move by one shift; none out before its
+source placement on the program clock, and none after its PTS; and FFmpeg reading
+each as KLV with the same PES and PTS. `holes.py` and the T-STD model grade the
+AC-3, whose buffer drains each sync frame at its own decode time.
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
 subscriber's stdout goes straight into `pcr-timing.py` instead of a capture file.
@@ -586,7 +598,10 @@ rather than let it grow with the queue. Nothing bounds how much it sheds.
 
 The generated clips go through `holes.py --shed`, which matches the capture's
 frames to the source's by presentation timestamp, since the export derives each
-picture's decode timestamp and a group cut short moves it. Of each source group,
+picture's decode timestamp and a group cut short moves it. Verbatim MP2, AC-3
+and E-AC-3 timestamps are compared after their exact legacy microsecond wire
+conversion back to 90 kHz, rather than allowing an arbitrary timestamp error.
+Of each source group,
 the capture keeps a prefix in decode order (all, part, or none) and never resumes
 mid-group, so it also joins on a sync frame, and a frame reordered, repeated, or
 not in the source fails. The source's last group must arrive whole: a stall, or a latency grown
@@ -611,7 +626,7 @@ retransmit behind a full queue (about twice 300 ms) still lands inside the 1 s
 delay. A loss-based run fails unless the queue overflowed.
 
 ```bash
-MOQ_QUIC_CONGESTION_CONTROL=loss just test ts --hrd --rate 7000000 --queue 250ms
+MOQ_QUIC_CONGESTION_CONTROL=loss just test ts --headroom --rate 7000000 --queue 250ms
 ```
 
 Measured on 2026-10-18 and 2026-10-19 with other test runs sharing the host:
@@ -630,6 +645,9 @@ Measured on 2026-10-18 and 2026-10-19 with other test runs sharing the host:
 | `--hrd --rate 7000000`, CUBIC | 500 ms | 60-120 s, three runs | passes; 541-625 overflowed, 79-229 units missed their deadline |
 | `--hrd --rate 7000000`, CUBIC | 1 s | 120 s | fails: 919 overflowed, 107 s shed and the last group lost |
 | `--hrd --rate 7000000`, CUBIC | 2 s | 60 s | fails: 918 overflowed, then the clock-drift refusal |
+| `--headroom --rate 7000000`, BBRv3 | 2 s | 120 s, saved capture regraded | passes; none overflowed, 62.5 s video and 3 AC-3 frames shed, no MP2 holes |
+| `--headroom --rate 7000000`, CUBIC | 250 ms | 120 s | passes; 427 overflowed, 74 units missed their deadline, 64.5 s video and 3 audio frames shed |
+| `--passthrough --rate 7000000`, CUBIC | 250 ms | 120 s | passes; 428 overflowed, 116 gaps, no missing tail; 458 continuity errors reported |
 
 ```bash
 ./holes.py capture.ts source.ts [--shed]
@@ -651,8 +669,9 @@ on purpose belongs to the [recovery tests](/quest/m1/ts-reliability/recovery.md)
 if the shaper dropped none. Real paths do not lose datagrams independently of
 their load, so this proves correctness only: QUIC retransmits what the path drops,
 so a capture with a hole or a gap fails as on a clean path. It does not judge the
-export's quality or latency, and no CI step runs it; combined with `--rate`, the
-congested path's grading applies.
+export's quality or latency, and no CI step runs it. It cannot be combined with
+`--rate` or `--live`. Use `--rate` without random loss when grading quality or
+release timing on an impaired path.
 
 ## Passthrough (`--passthrough`, `passthrough.py`)
 
@@ -844,13 +863,14 @@ outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
 browser interop. PRs touching a workspace crate `run.sh` builds (kept in sync by
 `sh/gh/ts-paths.py`), the harness, or the toolchain run
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
-open-GOP, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
+open-GOP, KLV (strict), passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
 Nightly and manual runs also invoke `just test ts --pair`,
-`just test ts --live --duration 120`, `just test ts --hrd --rate 7000000 --duration 120`,
+`just test ts --live --duration 120`, `just test ts --headroom --rate 7000000 --duration 120`,
 the same with `--queue 250ms` and `MOQ_QUIC_CONGESTION_CONTROL=loss`,
-and `just test ts --passthrough --rate 7000000 --duration 120`.
+and `just test ts --passthrough --rate 7000000 --queue 250ms --duration 120`
+with `MOQ_QUIC_CONGESTION_CONTROL=loss`.
 The pair exercises late-joining subscribers; the live window distinguishes ongoing
 clock drift from initial buffer filling; the congested paths judge what the export
 does when the path cannot carry the media.

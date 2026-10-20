@@ -31,6 +31,8 @@ pub enum ParameterVarInt {
 	Auth = super::auth::AUTH,
 	/// ACTIVE_COUNT, from the MoQ Active Count extension.
 	ActiveCount = super::active_count::ACTIVE_COUNT,
+	/// EPOCH, from the MoQ Epoch extension.
+	Epoch = super::epoch::EPOCH,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }

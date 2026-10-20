@@ -172,9 +172,8 @@ fn send_window_lowered_and_raised() {
 /// A server whose stream windows grew since the ticket the client resumes with
 ///
 /// The client opens 0-RTT streams with the remembered, smaller windows, and the larger ones
-/// arrive with the handshake. Today `set_params` raises only peer-initiated bidi streams, which
-/// cannot exist yet, so the client's own streams stay at the old window. The server, believing
-/// it granted the new one, never sends MAX_STREAM_DATA, and the stream stalls for good.
+/// arrive with the handshake. The server believes it granted the new window and never sends
+/// MAX_STREAM_DATA for it, so the client's streams must adopt it or stall for good.
 fn zero_rtt_window_raise(dir: Dir) {
     let _guard = subscribe();
     const OLD: u32 = 1000;
@@ -237,13 +236,11 @@ fn zero_rtt_window_raise(dir: Dir) {
 }
 
 #[test]
-#[ignore = "bug: /quest/m1/quic/zero-rtt-window-raise.md"]
 fn zero_rtt_bidi_window_raise() {
     zero_rtt_window_raise(Dir::Bi);
 }
 
 #[test]
-#[ignore = "bug: /quest/m1/quic/zero-rtt-window-raise.md"]
 fn zero_rtt_uni_window_raise() {
     zero_rtt_window_raise(Dir::Uni);
 }

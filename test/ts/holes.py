@@ -17,8 +17,9 @@ Under `--shed` the path was narrower than the media, so losing media is expected
 but only by whole groups: of each group of the source, from a sync frame to the next, the
 capture keeps a prefix in decode order (all of it, part of it, or none) and never resumes
 mid-group, so it also joins on a sync frame. Frames are matched by presentation timestamp, since the export derives each
-picture's decode timestamp from the frames around it and a group cut short moves it, and in
-capture order: a frame reordered, repeated, or not in the source fails. The
+picture's decode timestamp from the frames around it and a group cut short moves it. Legacy
+audio's source timestamps undergo its microsecond wire conversion before comparison. Matching
+keeps capture order: a frame reordered, repeated, or not in the source fails. The
 source's last group still has to arrive whole, so a stream that stalled, or whose latency grew
 past the exporter's delay, fails.
 
@@ -169,7 +170,12 @@ def main() -> None:
         span = (f"from {float(got.span[0]):.3f}s to {float(got.span[1]):.3f}s "
                 f"of {float(src.span[0]):.3f}s to {float(src.span[1]):.3f}s")
         if args.shed:
-            graded = shed(src.pts, src.sync, got.pts)
+            expected = src.pts
+            if src.info["codec_name"] in ("mp2", "ac3", "eac3"):
+                # Verbatim audio uses Hang's legacy microsecond prefix, then TS floors
+                # back to 90 kHz. Match that exact conversion, not a timestamp tolerance.
+                expected = [t * 1_000_000 // 90_000 * 90_000 // 1_000_000 for t in expected]
+            graded = shed(expected, src.sync, got.pts)
             reasons = [f"resumes mid-group at {float(t * base):.3f}s" for t in graded.mid_group[:5]]
             if graded.unmatched:
                 reasons.append(f"{len(graded.unmatched)} frames from {float(graded.unmatched[0] * base):.3f}s "

@@ -137,6 +137,7 @@ ts *args:
     python3 ./ts/open-gop.test.py
     python3 ./ts/holes.test.py
     python3 ./ts/passthrough.test.py
+    python3 ./ts/klv.test.py
     ./ts/run.sh "$@"
 
 # Carry a hardware encoder's capture, which the T-STD model passes, whole through the round-trip.

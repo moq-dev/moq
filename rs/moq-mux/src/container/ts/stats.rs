@@ -86,7 +86,7 @@ pub struct Stream {
 	pub track: String,
 	/// How this PID was classified. See [`Class`].
 	pub class: Class,
-	/// Access units the stream delivered: frames published for decoded media, PES payloads or
+	/// Access units the stream delivered: frames published for decoded media, whole PES or
 	/// sections carried verbatim, and PES read on MPEG-1/2 video. At export, the PES or
 	/// sections written for each frame.
 	pub units: u64,
@@ -110,6 +110,16 @@ pub struct Stream {
 	pub unconfirmed: u64,
 	/// Damaged packets, PES, or access units refused whole on this PID. Export stays zero.
 	pub damaged: u64,
+	/// Whole PES dropped from a private PES track because the program clock could not place
+	/// them: before the first PCR, after the last with no interval to extrapolate from, or
+	/// before the broadcast clock's zero. Export stays zero.
+	pub unplaced: u64,
+	/// Times this PID's stream was refused rather than carried altered: a private PES stream
+	/// with a clock field only the PTS and DTS of are rebased (ESCR, a `pack_header_field`, a
+	/// TREF), PES-level scrambling, an unbounded non-video PES, a header export refuses, or a
+	/// program with no PCR to place it by. Its track ends and leaves the catalog. Export stays
+	/// zero.
+	pub refused: u64,
 	/// This PID's share of [`Snapshot::continuity_count_error`].
 	pub continuity_count_error: u64,
 	/// This PID's share of [`Snapshot::transport_error`].
@@ -145,7 +155,7 @@ impl Stream {
 /// only; a sparse data PID stays counted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Class {
-	/// Undecoded or sparse data (SCTE-35, ID3, private sections, verbatim PES), or a PCR PID
+	/// Undecoded or sparse data (SCTE-35, ID3, private sections, private PES), or a PCR PID
 	/// that carries no elementary stream. A quiet second is not a stall.
 	#[default]
 	Data,
@@ -297,6 +307,16 @@ impl Log {
 					track = stream.track,
 					damaged = stream.damaged,
 					"damaged TS units refused"
+				);
+			}
+			let dropped = |stream: &Stream| (stream.unplaced, stream.refused);
+			if previous.map_or((0, 0), dropped) != dropped(stream) {
+				tracing::info!(
+					pid = *pid,
+					track = stream.track,
+					unplaced = stream.unplaced,
+					refused = stream.refused,
+					"private PES not carried"
 				);
 			}
 			if previous.map_or((0, 0, 0), lost) == lost(stream) {

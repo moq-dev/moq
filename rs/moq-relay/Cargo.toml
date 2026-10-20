@@ -65,6 +65,7 @@ http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "r
 humantime = { workspace = true }
 hyper-util = { workspace = true }
 moq-auth = { workspace = true, features = ["client"] }
+moq-clock = { workspace = true }
 moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true, optional = true }
@@ -101,6 +102,8 @@ sd-notify = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
+# Clocks only the test moves, wall time included, so a grant's life is exact.
+moq-clock = { path = "../moq-clock", features = ["manual", "sim"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rand = { workspace = true }
@@ -110,9 +113,11 @@ time = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Workers built inside a runtime with a manual clock installed run on that clock.
+moq-uring = { workspace = true, features = ["manual"] }
 # Which sockets the process still holds, so the embed tests can prove a stopped
 # relay closed its own without rebinding a port another test could take.
-[target.'cfg(target_os = "linux")'.dev-dependencies]
 socket2 = { workspace = true, features = ["all"] }
 
 # `raise(SIGINT)` at ourselves, so the shutdown test exercises the real signal
