@@ -31,7 +31,9 @@ but the backends `moq-tokio` wraps through `web-transport-trait` (qmux,
 iroh) have no credit query there. Decided 2026-10-20 (maintainer): no new
 work in moq-dev/web-transport, so qmux gets its query when it moves in-tree
 ([qmux on moq-quic](/quest/m1/quic-qmux.md)), and iroh, an accepted
-exception, keeps waiting. Say in the PR which backends fail fast.
+exception, keeps waiting. Whichever of this quest and quic-qmux lands second
+gives the in-tree qmux session the non-waiting open, so this quest does not
+wait on the port. Say in the PR which backends fail fast.
 
 Propose the error variant's name in the PR. Public API: one new `Error`
 variant, and possibly a `transport::poll` session method. Wire: none.
