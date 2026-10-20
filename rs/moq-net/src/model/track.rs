@@ -7734,12 +7734,13 @@ mod test {
 			sequence: d.sequence,
 			timestamp: Some(d.timestamp.unwrap().value()),
 			payload: d.payload.clone(),
+			ietf: None,
 		}
 		.encode_bytes(version)
 		.unwrap();
 
 		// Subscriber decodes the body and writes it downstream, preserving the sequence.
-		let wire = lite::Datagram::decode(body, version, |_| true).unwrap();
+		let wire = lite::Datagram::decode(body, version, false, |_| Some(crate::Timescale::MICRO)).unwrap();
 		let mut downstream = track_producer("test", Info::timed());
 		let mut downstream_dg = downstream.subscribe(None);
 		downstream
