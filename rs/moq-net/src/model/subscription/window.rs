@@ -178,9 +178,12 @@ impl TimeEnd {
 		}
 	}
 
-	/// The lowest sequence not known to be in range.
-	fn unknown(&self, start: u64) -> u64 {
-		self.known.map_or(start, |known| known.saturating_add(1)).max(start)
+	/// The lowest sequence not known to be in range, `None` once the last sequence is.
+	fn unknown(&self, start: u64) -> Option<u64> {
+		match self.known {
+			Some(known) => known.checked_add(1).map(|next| next.max(start)),
+			None => Some(start),
+		}
 	}
 
 	/// Walk the held groups on from where the last call stopped. Returns where the end
@@ -188,7 +191,8 @@ impl TimeEnd {
 	fn advance(&mut self, start: u64, holdings: &impl Holdings) -> Option<u64> {
 		// The starts index passes a group that may still start, so a stalled one never
 		// keeps a later group known to start inside the end from being read.
-		while let Some((sequence, at)) = holdings.next_start(self.unknown(start))
+		while let Some(from) = self.unknown(start)
+			&& let Some((sequence, at)) = holdings.next_start(from)
 			&& self.after.is_none_or(|after| sequence < after)
 		{
 			match later(at, self.pts) {
@@ -198,9 +202,9 @@ impl TimeEnd {
 		}
 
 		// The first held group that may still start is the one read on speculation.
-		self.held = self.held.max(self.unknown(start));
 		self.speculative = None;
-		while let Some((sequence, held)) = holdings.next_held(self.held)
+		while let Some(from) = self.unknown(start)
+			&& let Some((sequence, held)) = holdings.next_held(self.held.max(from))
 			&& self.after.is_none_or(|after| sequence < after)
 		{
 			match held {
@@ -213,7 +217,9 @@ impl TimeEnd {
 					break;
 				}
 			}
-			self.held = sequence.saturating_add(1).max(self.unknown(start));
+			// Nothing sits above the last sequence, so the walk ends on it.
+			let Some(next) = sequence.checked_add(1) else { break };
+			self.held = next;
 		}
 		self.limit = match (self.speculative, self.after) {
 			_ if holdings.complete() => None,
@@ -226,7 +232,8 @@ impl TimeEnd {
 		// Settle once every sequence up to the first group starting past `pts` can no
 		// longer start inside it.
 		let after = self.after?;
-		self.accounted = self.accounted.max(self.unknown(start));
+		// Everything at or below `known` is in range, and `after` lies above it.
+		self.accounted = self.accounted.max(self.unknown(start).unwrap_or(after));
 		while self.accounted < after {
 			let next = holdings.next_held(self.accounted);
 			match next {
@@ -317,12 +324,12 @@ impl Window {
 	}
 
 	/// The lowest sequence whose start could still move an unsettled time end, `None`
-	/// without one.
+	/// without one or once the last sequence is in range.
 	pub fn watch_starts(&self) -> Option<u64> {
 		self.spans
 			.iter()
 			.filter_map(|span| match span.end {
-				End::Time(time) => Some(time.unknown(span.start)),
+				End::Time(time) => time.unknown(span.start),
 				_ => None,
 			})
 			.min()
@@ -911,6 +918,26 @@ mod tests {
 		)
 		.unwrap();
 		assert_eq!(window.resolved(), vec![Some(Resolved { start: 0, end: Some(1) })]);
+	}
+
+	#[test]
+	fn a_time_end_stops_walking_at_the_last_sequence() {
+		let groups = Groups::new([Groups::started(u64::MAX, 3000)]);
+		let window = Window::new(
+			&[range(Anchor::Absolute(Position::group(u64::MAX)), time(5000))],
+			None,
+			&groups,
+		)
+		.unwrap();
+		assert_eq!(
+			window.resolved(),
+			vec![Some(Resolved {
+				start: u64::MAX,
+				end: None
+			})]
+		);
+		assert!(window.contains(u64::MAX));
+		assert_eq!(window.watch_starts(), None, "nothing above the last sequence can start");
 	}
 
 	#[test]
