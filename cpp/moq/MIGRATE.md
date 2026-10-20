@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Regenerate the C++ binding headers and sources from the rebuilt native library,
+then rebuild the application; older generated guards reject the rebuilt library.
+Application calls are unchanged.
+
 ### JSON consumers return `JsonValue` (#5677)
 
 `JsonSnapshotConsumer::next()` and `JsonStreamConsumer::next()` return `JsonValue` (`value`, `timestamp_us`) instead of a string; `timestamp_us` is empty when untimed.

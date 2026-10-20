@@ -5,6 +5,13 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Regenerate bindings after the API documentation update
+
+The new documentation on `MoqAudioProducer::write` and `finish` changes their
+UniFFI metadata checksums, even though their signatures and behavior are unchanged.
+Regenerate each language's bindings from the rebuilt library and update them together.
+Older generated bindings with active checksum guards reject this library during initialization.
+
 ### JSON consumers return `MoqJsonValue` (#5677)
 
 `MoqJsonSnapshotConsumer::next` and `MoqJsonStreamConsumer::next` return `MoqJsonValue { value, timestamp_us }` instead of a string; `timestamp_us` is null when untimed.
