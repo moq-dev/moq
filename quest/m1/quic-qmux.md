@@ -88,6 +88,10 @@ web-transport repo, so the qmux credit and close fixes ship here instead of
 as upstream releases and pin bumps; the bug stays on main until this lands.
 The release line keeps its current qmux and gets no backport.
 
+## Required
+
+- [TS qmux](/quest/m1/ts-qmux.md) - the in-tree TypeScript peer this quest's interop acceptance runs against
+
 ## Related
 
 - [tls:// peer certificates](/quest/m2/tls-listener-mtls.md) - needs a peer-certificate accessor on qmux's TLS session, upstream or in-tree

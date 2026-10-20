@@ -18,14 +18,19 @@ web-transport-proto.
   at the version `js/net` pins (`^0.3.3`), and publish the next version from
   here under the same npm name so external users keep upgrading.
 - `@moq/web-socket-stream`: fold it into `@moq/qmux` unless something
-  outside qmux needs it on its own (maintainer: no strong view).
+  outside qmux needs it on its own (maintainer: no strong view). Folding
+  ends that package for any direct consumer, a breaking change: deprecate
+  it on npm with a pointer to `@moq/qmux` and add a `## Unreleased` entry to
+  `@moq/qmux`'s `MIGRATE.md`. No re-export shim.
 - Keep all four wire versions the Rust qmux negotiates. The Rust
   [qmux on moq-quic](/quest/m1/quic-qmux.md) interop tests then run against
   this in-tree peer instead of a published copy.
 - Wire it into `just check`, CI and the release tooling like the other
   `js/` packages.
 
-Public API: same package name and exports; the source moves. Wire: none.
+Public API: `@moq/qmux` keeps its name and exports; folding
+`@moq/web-socket-stream` in removes that package (breaking, see above).
+Wire: none.
 
 ## Related
 

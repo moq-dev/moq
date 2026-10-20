@@ -56,6 +56,7 @@ lands before the cut.
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
+- [TS qmux in the monorepo](/quest/m1/ts-qmux.md) - `@moq/qmux` moves into `js/` and `js/net` stops depending on moq-dev/web-transport
 - [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - qmux runs in-tree over `moq-quic`'s stream state machine, returning credit for every byte and delivering its close frame
 - [Drop moq-native's noq feature](/quest/m1/native-noq-feature.md) - the empty default `noq` feature is removed
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
@@ -97,7 +98,6 @@ lands before the cut.
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [A stalled subscriber holds bounded state](/quest/m1/egress-held-state.md) - group machines and bytes a credit-withholding downstream makes a publisher hold plateau at what its credit and the latency budget allow, on lite and moq-transport
-- [TS qmux in the monorepo](/quest/m1/ts-qmux.md) - `@moq/qmux` moves into `js/` and `js/net` stops depending on moq-dev/web-transport
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - the in-tree @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
 - [Timed-out requests clean up](/quest/m1/legacy-request-timeout-cleanup.md) - on drafts 14-16, Rust and JS send PUBLISH_NAMESPACE_DONE or UNSUBSCRIBE_NAMESPACE for a timed-out request before its local reset
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
