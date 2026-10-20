@@ -100,7 +100,7 @@ fn back_to_back_groups_arrive_in_order() {
 
 		let publisher = thread::spawn(move || {
 			for _ in 0..2 {
-				let group = track.append_group().expect("append group");
+				let mut group = track.append_group().expect("append group");
 				group.finish().expect("finish group");
 			}
 			track.finish().expect("finish track");
