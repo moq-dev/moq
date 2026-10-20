@@ -78,7 +78,7 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 
 				// Leave mid-group; the publisher cuts the open group once demand is gone.
 				drop(sub);
-				track.demand().unused().await.unwrap();
+				crate::support::unwanted(track.demand()).await.unwrap();
 				open.write_frame(ts(133), b"b1".as_ref()).unwrap();
 				open.finish().unwrap();
 
@@ -162,7 +162,7 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(read_all(&mut group).await.unwrap(), [b"old".to_vec()], "{version}");
 			drop((group, sub));
-			track.demand().unused().await.unwrap();
+			crate::support::unwanted(track.demand()).await.unwrap();
 
 			// The publisher moves on while nobody subscribes.
 			for sequence in 1..=3u64 {
@@ -226,12 +226,12 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"a0".as_ref());
 			drop((group, sub));
-			track.demand().unused().await.unwrap();
+			crate::support::unwanted(track.demand()).await.unwrap();
 
 			let mut rejoined = remote.track("video").unwrap().subscribe(None).await.unwrap();
 			let mut rejoined = rejoined.recv_group().await.unwrap().unwrap();
 			assert_eq!(rejoined.read_frame().await.unwrap().unwrap().payload, b"a0".as_ref());
-			track.demand().used().await.unwrap();
+			crate::support::wanted(track.demand()).await.unwrap();
 
 			let later = relay.consume().request_broadcast("bench", None).await.unwrap();
 			let mut sub = later.track("video").unwrap().subscribe(None).await.unwrap();
@@ -298,7 +298,7 @@ async fn rejoin_goes_live_without_the_join_head() {
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, b"a0".as_ref());
 			drop((group, sub));
-			track.demand().unused().await.unwrap();
+			crate::support::unwanted(track.demand()).await.unwrap();
 
 			// The rejoin's join stream is lost before its header.
 			upstream.server_transport.hold_unis();
@@ -311,7 +311,7 @@ async fn rejoin_goes_live_without_the_join_head() {
 					}
 				}
 			});
-			track.demand().used().await.unwrap();
+			crate::support::wanted(track.demand()).await.unwrap();
 			moq_clock::sleep(Duration::from_millis(100)).await;
 			upstream.server_transport.drop_unis();
 
@@ -367,7 +367,7 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(read_all(&mut group).await.unwrap(), [b"old".to_vec()], "{version}");
 			drop((group, sub));
-			track.demand().unused().await.unwrap();
+			crate::support::unwanted(track.demand()).await.unwrap();
 
 			// The publisher moves on while the relay's cancel is still in flight.
 			for sequence in 1..=3u64 {
@@ -430,7 +430,7 @@ async fn rejoin_waits_for_the_answers_first_frame() {
 			let mut group = sub.recv_group().await.unwrap().unwrap();
 			assert_eq!(read_all(&mut group).await.unwrap(), [b"old".to_vec()], "{version}");
 			drop((group, sub));
-			track.demand().unused().await.unwrap();
+			crate::support::unwanted(track.demand()).await.unwrap();
 
 			let mut group = track.append_group().unwrap();
 			group.write_frame(ts(500), b"new".as_ref()).unwrap();
@@ -571,7 +571,7 @@ async fn rejoin_keeps_source_timestamps() {
 
 			for (sequence, ms) in [(0, 123_456), (1, 654_321)] {
 				let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
-				track.demand().used().await.unwrap();
+				crate::support::wanted(track.demand()).await.unwrap();
 				let mut group = track.append_group().unwrap();
 				group.write_frame(ts(ms), b"frame".as_ref()).unwrap();
 				group.finish().unwrap();
@@ -589,7 +589,7 @@ async fn rejoin_keeps_source_timestamps() {
 					"{version} group {sequence}"
 				);
 				drop((group, sub));
-				track.demand().unused().await.unwrap();
+				crate::support::unwanted(track.demand()).await.unwrap();
 			}
 		})
 		.await
@@ -698,7 +698,7 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			let (mut first, remote, pair) = session(3).await;
 			assert_eq!(first.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
 			drop((first, remote, pair));
-			track.demand().unused().await.unwrap();
+			crate::support::unwanted(track.demand()).await.unwrap();
 			let (mut holder, remote, pair) = session(4).await;
 			assert_eq!(holder.recv_group().await.unwrap().unwrap().sequence, 0, "{version}");
 			(holder, remote, pair)

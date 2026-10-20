@@ -167,4 +167,4 @@ ranked just below deterministic TS legs, which it requires.
 - [RTMP client reports a publish or play error](/quest/m2/rtmp-client-error.md) - a refused publish or play surfaces its reason
 - [Adopt usage-rs 7](/quest/m2/usage-rs-7.md) - the workspace builds on usage-rs 7
 - [Dead routes on IETF name their cause](/quest/m2/js-ietf-dead-route-error.md) - a JS subscription on a dead moq-transport session ends with the session error, not `unauthorized`
-- [Error cleanups](/quest/m2/error-cleanups.md) - delete the unused `Error::SessionClosed`, and Rust and JS both reset a served stream over a raw transport failure with `Unroutable`
+- [Error cleanups](/quest/m2/error-cleanups.md) - delete the unused `Error::SessionClosed`; raw transport failures already map to `Unroutable`

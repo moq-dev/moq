@@ -272,7 +272,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// A watch-only handle to the track's subscriber demand, created eagerly so
 	/// subscription state is observable before any frames arrive. Watch it via
-	/// [`used`](moq_net::track::Demand::used) / [`unused`](moq_net::track::Demand::unused).
+	/// [`wanted`](moq_net::track::Demand::wanted) / [`wanted_changed`](moq_net::track::Demand::wanted_changed).
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.track.track().demand()
 	}
@@ -595,24 +595,32 @@ mod tests {
 			..Options::default()
 		};
 		let mut producer = Producer::new(&mut broadcast, catalog, Input::default(), &options).unwrap();
-		let demand = producer.demand();
+		let mut demand = producer.demand();
 
 		assert_eq!(demand.name(), "audio");
-		assert!(!demand.is_used());
+		assert_eq!(demand.wanted(), None);
 		let subscriber = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
-		tokio::time::timeout(Duration::from_secs(1), demand.used())
+		let wanted = async {
+			while demand.wanted_changed().await?.is_none() {}
+			moq_net::Result::Ok(())
+		};
+		tokio::time::timeout(Duration::from_secs(1), wanted)
 			.await
 			.expect("subscription demand")
 			.unwrap();
-		assert!(demand.is_used());
+		assert_eq!(demand.wanted(), Some(0));
 
 		drop(subscriber);
 		drop(consumer);
-		tokio::time::timeout(Duration::from_secs(1), demand.unused())
+		let unwanted = async {
+			while demand.wanted_changed().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
+		tokio::time::timeout(Duration::from_secs(1), unwanted)
 			.await
 			.expect("subscription released")
 			.unwrap();
-		assert!(!demand.is_used());
+		assert_eq!(demand.wanted(), None);
 
 		producer.finish().unwrap();
 		drop(producer);

@@ -27,7 +27,7 @@ try {
 		const track = broadcast.createTrack("tail");
 		broadcast.announce();
 		const demand = track.demand();
-		while (!demand.used.peek()) await demand.used.changed();
+		while (demand.wanted.peek() === undefined) await demand.wanted.changed();
 		// The end precedes the last group's data; the transport still has to drain it.
 		track.finishAt({ group: GROUPS, frame: 0 });
 		for (let sequence = 0; sequence < GROUPS; sequence++) {

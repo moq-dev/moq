@@ -10,6 +10,14 @@ Move the list to the top-level `versions` of `connect` or `Connection`, spelled 
 It now applies to the WebSocket fallback too, so list every fallback you still want, such as `versions: ["moq-lite-07-wip", "moq-lite-06"]`.
 Passing `webtransport.protocols` throws a `TypeError`.
 
+### Track demand reports the wanted group (#5930)
+
+`Track.Demand.used` and `unused()` are gone.
+`demand.wanted` is a `Getter<number | undefined>`: `undefined` while nobody subscribes, otherwise the group subscribers want next.
+Watch it where you watched `used`, comparing against `undefined`, and wait for it to become `undefined` where you awaited `unused()`.
+`Track.Info.refresh` opts a track in to new groups on join: a live-edge join asks for one only when the newest group's bytes after its first frame exceed `refresh` times that frame, not on every join.
+Broadcast and group demand keep `used` and `unused()`.
+
 ### An expired group fails with `Old` even when drained (#5944)
 
 A reader parked at the end of an unfinished group whose `maxDelay` gives up now rejects with a `StreamError` of code `StreamCode.Old`, even after reading every frame, where `readFrame()` used to resolve `undefined`.

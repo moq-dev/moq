@@ -28,7 +28,7 @@ import * as Path from "../path.ts";
 import { Priority } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
-import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
+import type { Groups, Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { LIMITS, type Limits, Slots } from "../util/limits.ts";
@@ -492,6 +492,9 @@ export class Publisher {
 
 		const priority = fromWire(msg.subscriberPriority);
 		const order = msg.groupOrder;
+		// A range that resolves without the live edge has a fixed start, which is no join:
+		// bound the subscription before subscribing so the refresh ratio never judges it.
+		const fixed = subscribeRange(msg, {}, version);
 		const track = wireOf(broadcast).subscribe(msg.trackName, {
 			priority,
 			order,
@@ -500,6 +503,7 @@ export class Publisher {
 			// Keep the sentinel encodable if this demand crosses a Lite hop before the
 			// producer's retention bound is known.
 			maxDelay: Milli(Varint.MAX_U53),
+			groups: fixed.start ? rangeGroups(fixed) : undefined,
 		});
 
 		let cache: TrackSubscriber | undefined;
@@ -552,10 +556,7 @@ export class Publisher {
 				priority,
 				order,
 				maxDelay: Milli(Varint.MAX_U53),
-				groups: {
-					start: range.start ? { included: Number(range.start.group) } : undefined,
-					end: range.end ? { included: Number(range.end.group) } : undefined,
-				},
+				groups: rangeGroups(range),
 			});
 			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
 			if (startGroup !== undefined) track.setGroups({ start: { included: startGroup } });
@@ -2168,6 +2169,14 @@ interface ServeRange {
 	 * once the range is exhausted; draft-20 removed the notion of a filter ending one.
 	 */
 	end?: EndLocation;
+}
+
+/** The model's group bounds for a {@link ServeRange}: an absent start joins at the latest group. */
+function rangeGroups(range: ServeRange): Groups {
+	return {
+		start: range.start ? { included: Number(range.start.group) } : undefined,
+		end: range.end ? { included: Number(range.end.group) } : undefined,
+	};
 }
 
 /** The slice of one group a subscription's {@link ServeRange} selects. */

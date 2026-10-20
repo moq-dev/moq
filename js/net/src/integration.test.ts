@@ -1404,12 +1404,12 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 	expect(await sub.readString()).toBe("hello");
 
 	// The publisher now has a live downstream reader for the track.
-	await waitUntil(() => video.demand().used.peek());
+	await waitUntil(() => video.demand().wanted.peek() !== undefined);
 
 	// Closing the only subscriber must tear the wire subscription down, so demand drops on the
 	// publisher rather than the relay serving groups to nobody.
 	sub.close();
-	await waitUntil(() => !video.demand().used.peek());
+	await waitUntil(() => video.demand().wanted.peek() === undefined);
 
 	broadcast.close();
 	remote.close();
@@ -1455,11 +1455,11 @@ test("integration: ietf draft-14 subscriber teardown on last unsubscribe", async
 	const remote = wireOf(client).consume(Path.from("test"));
 	const sub = remote.track("video").subscribe().ordered();
 	expect(await sub.readString()).toBe("hello");
-	await waitUntil(() => served?.demand().used.peek() === true);
+	await waitUntil(() => served?.demand().wanted.peek() !== undefined);
 
 	// Closing the subscriber sends Unsubscribe and tears the subscription down, so demand drops.
 	sub.close();
-	await waitUntil(() => served?.demand().used.peek() === false);
+	await waitUntil(() => served?.demand().wanted.peek() === undefined);
 
 	broadcast.close();
 	await serving;
@@ -1528,17 +1528,17 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 	const b = remote.track("video").subscribe().ordered();
 	expect(await a.readString()).toBe("hello");
 	expect(await b.readString()).toBe("hello");
-	await waitUntil(() => video.demand().used.peek());
+	await waitUntil(() => video.demand().wanted.peek() !== undefined);
 
 	// Closing one leaves the shared upstream serving the other.
 	a.close();
 	video.writeFrame(textFrame("more"));
 	expect(await b.readString()).toBe("more");
-	expect(video.demand().used.peek()).toBe(true);
+	expect(video.demand().wanted.peek()).toBeDefined();
 
 	// The last close tears it down.
 	b.close();
-	await waitUntil(() => !video.demand().used.peek());
+	await waitUntil(() => video.demand().wanted.peek() === undefined);
 
 	broadcast.close();
 	remote.close();
@@ -1565,10 +1565,10 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 		video.writeFrame(textFrame(`hello-${i}`));
 		const sub = remote.track("video").subscribe().ordered();
 		expect(await sub.readString()).toBe(`hello-${i}`);
-		await waitUntil(() => video.demand().used.peek());
+		await waitUntil(() => video.demand().wanted.peek() !== undefined);
 
 		sub.close();
-		await waitUntil(() => !video.demand().used.peek());
+		await waitUntil(() => video.demand().wanted.peek() === undefined);
 	}
 
 	broadcast.close();

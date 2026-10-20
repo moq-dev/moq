@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A rendition waits for its own timeline (#6009)
+
+`export::Broadcaster::rendition` and the `renditions()` cursor's `Event::Added` see a rendition only once the catalog advertises its own timeline, not as soon as its init is known.
+An unhinted publisher declares that timeline after the rendition's first record, so feed media until then instead of waiting for `Added` or `Rendition::init` first.
+
 ### Playlists take an optional range (#5705)
 
 `export::Rendition::playlist(query)` is `playlist(range, query)`.

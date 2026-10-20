@@ -69,7 +69,7 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	}
 
 	// The relay cancels the idle upstream subscription.
-	moq_clock::timeout(TIMEOUT, track.demand().unused())
+	moq_clock::timeout(TIMEOUT, crate::support::unwanted(track.demand()))
 		.await
 		.unwrap()
 		.unwrap();
