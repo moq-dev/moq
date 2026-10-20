@@ -12852,6 +12852,103 @@ mod stitch_tests {
 		}
 	}
 
+	/// A status datagram's properties are stripped, not the datagram dropped, where the
+	/// egress draft forbids them beside a non-Normal status.
+	#[moq_clock::test]
+	async fn passthrough_strips_status_datagram_properties_a_draft_forbids() {
+		for ingress in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let egresses = [
+				Version::Draft14,
+				Version::Draft15,
+				Version::Draft16,
+				Version::Draft17,
+				Version::Draft18,
+				Version::Draft19,
+				Version::Draft20,
+				Version::Draft21,
+				Version::Draft22,
+			];
+			let pairs = egresses
+				.into_iter()
+				.flat_map(|egress| [END_OF_GROUP, END_OF_TRACK].map(|status| (egress, status)));
+			for (egress, status) in pairs {
+				let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+				let track = broadcast.create_track("video", None).unwrap();
+				let mut h = Harness::with_timescale(Fill::Done, vec![], None);
+				h.subscriber.version = ingress;
+				h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
+				let mut properties = Vec::new();
+				let mut encoder = Encoder::new(&mut properties, ingress.into());
+				encoder.varint(0x80u64).unwrap();
+				encoder.varint(96_000u64).unwrap();
+				let datagram = ietf::ObjectDatagram {
+					track_alias: ALIAS,
+					group_id: SEQUENCE,
+					object_id: Some(5),
+					publisher_priority: Some(200),
+					end_of_group: false,
+					properties: Some(properties),
+					body: ietf::DatagramBody::Status(status),
+				};
+				h.subscriber
+					.recv_datagram(datagram.encode_bytes(ingress).unwrap())
+					.unwrap();
+				track.finish().unwrap();
+				let mut downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
+				let peer = peer::PeerSetup::default();
+				peer.set(peer::Peer::default());
+				let publisher = crate::ietf::Publisher::new(
+					crate::time::sim(),
+					downstream.clone(),
+					origin.consume(),
+					Control::new(None, false),
+					None,
+					peer,
+					egress,
+				);
+				let subscribe = ietf::Subscribe {
+					max_age: None,
+					new_group: None,
+					request_id: RequestId(3),
+					track_namespace: Path::new("room"),
+					track_name: "video".into(),
+					subscriber_priority: 128,
+					group_order: ietf::GroupOrder::Ascending,
+					filter: Filter::Unfiltered,
+					fill: None,
+					properties_wanted: true,
+					forward: true,
+					rendezvous: false,
+					range_filters: false,
+					authorization_token: None,
+					epoch: None,
+				};
+				let mut body = Vec::new();
+				subscribe
+					.encode_msg(&mut Encoder::new(&mut body, egress.into()), egress)
+					.unwrap();
+				let stream = Stream::open(&mut downstream, egress).await.unwrap();
+				publisher
+					.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, false)
+					.unwrap()
+					.await;
+				let sent = downstream.log.datagrams.lock().unwrap();
+				let context = format!("{ingress} to {egress}, status {status}");
+				let [bytes] = sent.as_slice() else {
+					panic!("{context}: sent {} datagrams", sent.len());
+				};
+				let (actual, _) = ietf::ObjectDatagram::decode_slice(bytes, egress).unwrap();
+				let carried = matches!(egress, Version::Draft14 | Version::Draft15 | Version::Draft16);
+				assert_eq!(
+					(actual.object_id, actual.body, actual.properties.is_some()),
+					(Some(5), ietf::DatagramBody::Status(status), carried),
+					"{context}"
+				);
+			}
+		}
+	}
+
 	#[moq_clock::test]
 	async fn passthrough_translates_mutable_property_encodings() {
 		for ingress in [Version::Draft14, Version::Draft15, Version::Draft17, Version::Draft22] {

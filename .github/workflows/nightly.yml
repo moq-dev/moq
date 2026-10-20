@@ -48,6 +48,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  runner-vm:
+    uses: ./.github/workflows/runner-vm.yml
+
   # The path-filtered gates main PRs skip; release PRs still run them.
   x11:
     uses: ./.github/workflows/x11.yml

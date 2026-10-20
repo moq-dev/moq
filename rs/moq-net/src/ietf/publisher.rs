@@ -4415,7 +4415,17 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						tracing::debug!(sequence, "dropping a datagram status this draft cannot carry");
 						continue;
 					}
-					let properties = match super::object::write(&wire.properties, self.version, self.timescale) {
+					// A status keeps its meaning without the properties this draft forbids
+					// beside it, as a stream's status object does.
+					let stripped = Default::default();
+					let forwarded = match wire
+						.status
+						.is_some_and(|status| !super::datagram::carries_properties(status, self.version))
+					{
+						true => &stripped,
+						false => &wire.properties,
+					};
+					let properties = match super::object::write(forwarded, self.version, self.timescale) {
 						Ok(properties) => properties,
 						Err(err) => {
 							tracing::debug!(%err, sequence, "dropping a datagram whose properties cannot be forwarded");

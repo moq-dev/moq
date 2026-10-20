@@ -1,5 +1,5 @@
 name: Rust cache
-description: Install mbx, put its Cargo shim on PATH, and back it with the R2 build cache that `main` and its merge queue write.
+description: Install mbx and its Cargo shim, using local storage in runner VMs and R2 on hosted runners.
 
 inputs:
   access-key-id:
@@ -12,6 +12,13 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Require merge queue on self-hosted runners
+      if: runner.environment == 'self-hosted' && github.event_name != 'merge_group'
+      shell: bash
+      run: |
+        echo "::error::Persistent self-hosted caches require a merge_group job." >&2
+        exit 1
+
     # Runs on `main` and in its merge queue write; everything else reads. A
     # queued pull request is about to become `main`, so its code is trusted
     # like `main`'s, and publishing from the queue keeps the cache current
@@ -28,6 +35,7 @@ runs:
     # building on would leave every reader cold with nothing to say why. Half
     # a pair is a broken secret on any job, never a fork's empty one.
     - name: Cache credentials
+      if: runner.environment != 'self-hosted'
       shell: bash
       env:
         KEY_ID: ${{ inputs.access-key-id }}
@@ -70,7 +78,7 @@ runs:
     - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
       with:
         version: 1.25.0
-        backend: ${{ inputs.access-key-id != '' && inputs.secret-access-key != '' && 'remote' || 'local' }}
+        backend: ${{ runner.environment != 'self-hosted' && inputs.access-key-id != '' && inputs.secret-access-key != '' && 'remote' || 'local' }}
         remote-url: s3://mbx-moq-dev
         namespace: ${{ runner.os }}-${{ runner.arch }}
 
@@ -80,7 +88,7 @@ runs:
     # come out read-write, or nothing would publish and every reader would
     # drift cold unnoticed.
     - name: Check the cache
-      if: inputs.access-key-id != '' && inputs.secret-access-key != ''
+      if: runner.environment != 'self-hosted' && inputs.access-key-id != '' && inputs.secret-access-key != ''
       shell: bash
       run: |
         report=$(mbx doctor --json || true)
