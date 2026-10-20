@@ -2465,7 +2465,6 @@ impl Producer {
 		}
 		state.advance(sequence, false);
 		state.cache.finish_largest(sequence);
-		meter.datagram(payload.len() as u64);
 		// A datagram is its own group, so it compresses alone.
 		let deflated = state
 			.info
@@ -2473,7 +2472,7 @@ impl Producer {
 			.unwrap()
 			.compress
 			.then(|| super::flate::Encoder::new().frame(&payload));
-		state.push_datagram(super::datagram::Stored {
+		let datagram = super::datagram::Stored {
 			datagram: Datagram {
 				sequence,
 				timestamp,
@@ -2481,7 +2480,9 @@ impl Producer {
 			},
 			wire: None,
 			deflated,
-		});
+		};
+		meter.datagram(datagram.stored_len());
+		state.push_datagram(datagram);
 		let cache = state.cache.clone();
 		drop(state);
 		cache.settle(None);
@@ -2534,7 +2535,7 @@ impl Producer {
 		}
 		state.advance(datagram.sequence, false);
 		state.cache.finish_largest(datagram.sequence);
-		meter.datagram(datagram.payload.len() as u64);
+		meter.datagram(datagram.stored_len());
 		state.push_datagram(datagram);
 		let cache = state.cache.clone();
 		drop(state);
@@ -2563,6 +2564,7 @@ impl Producer {
 			.filter(|size| *size <= super::datagram::MAX_DATAGRAM_PAYLOAD)
 			.ok_or(Error::FrameTooLarge)?;
 		let payload = super::flate::Decoder::new().frame(&deflated, size)?;
+		self.stats.meter().inflated(payload.len() as u64);
 		self.insert_wire_datagram(super::datagram::Stored {
 			datagram: Datagram {
 				sequence,
@@ -5936,12 +5938,23 @@ impl Subscriber {
 	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
 	/// is aborted, or `Poll::Pending` when none is buffered yet.
 	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
-		self.poll_recv_stored_datagram(waiter)
-			.map(|res| res.map(|datagram| datagram.map(|datagram| datagram.datagram)))
+		let datagram = ready!(self.poll_recv_stored_datagram(waiter))?;
+		if let Some(datagram) = &datagram {
+			self.meter_datagram(datagram.payload.len() as u64);
+		}
+		Poll::Ready(Ok(datagram.map(|datagram| datagram.datagram)))
+	}
+
+	/// Count a datagram handed on as `bytes` of payload, the single-frame group it stands in
+	/// for. Unlike a group (metered lazily as its frames are read), a datagram goes whole.
+	// private: passthrough
+	pub(crate) fn meter_datagram(&self, bytes: u64) {
+		self.stats.meter().datagram(bytes);
 	}
 
 	/// [`Self::poll_recv_datagram`], keeping what is stored beside the payload: a compressed
-	/// track's DEFLATE slice.
+	/// track's DEFLATE slice. Unmetered: the caller meters the form it hands on with
+	/// [`Self::meter_datagram`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
 	pub(crate) fn poll_recv_stored_datagram(
@@ -5949,7 +5962,7 @@ impl Subscriber {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<super::datagram::Stored>>> {
 		loop {
-			let Some(datagram) = ready!(self.poll_recv_wire_datagram(waiter))? else {
+			let Some(datagram) = ready!(self.poll_recv_unmetered_datagram(waiter))? else {
 				return Poll::Ready(Ok(None));
 			};
 			if datagram
@@ -5963,22 +5976,25 @@ impl Subscriber {
 		}
 	}
 
+	/// The next datagram with its wire metadata, metered as its plain payload: for a session
+	/// that never carries compression.
 	// private: passthrough
 	pub(crate) fn poll_recv_wire_datagram(
 		&mut self,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<super::datagram::Stored>>> {
-		let meter = self.stats.meter();
-		let res = match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll_recv_datagram(waiter),
-			Inner::Resume(resume, _) => resume.poll_recv_datagram(&self.delivered, waiter),
-		};
-		// Unlike a group (metered lazily as its frames are read), a datagram is
-		// delivered whole here, so count it as the single-frame group it stands in for.
+		let res = self.poll_recv_unmetered_datagram(waiter);
 		if let Poll::Ready(Ok(Some(datagram))) = &res {
-			meter.datagram(datagram.payload.len() as u64);
+			self.meter_datagram(datagram.payload.len() as u64);
 		}
 		res
+	}
+
+	fn poll_recv_unmetered_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<super::datagram::Stored>>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.poll_recv_datagram(waiter),
+			Inner::Resume(resume, _) => resume.poll_recv_datagram(&self.delivered, waiter),
+		}
 	}
 
 	/// Receive the next datagram in arrival order.

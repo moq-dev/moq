@@ -63,6 +63,22 @@ pub(crate) struct Stored {
 	pub deflated: Option<Bytes>,
 }
 
+impl Stored {
+	/// The payload a session sends, with its inflated size when that is the DEFLATE slice:
+	/// only a session that carries `compression` takes a compressed track's stored form.
+	pub fn sent(&self, compression: bool) -> (&Bytes, Option<u64>) {
+		match &self.deflated {
+			Some(deflated) if compression => (deflated, Some(self.datagram.payload.len() as u64)),
+			_ => (&self.datagram.payload, None),
+		}
+	}
+
+	/// The bytes the track stores and meters: the DEFLATE slice when it has one.
+	pub fn stored_len(&self) -> u64 {
+		self.deflated.as_ref().unwrap_or(&self.datagram.payload).len() as u64
+	}
+}
+
 impl From<Datagram> for Stored {
 	fn from(datagram: Datagram) -> Self {
 		Self {

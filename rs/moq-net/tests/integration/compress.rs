@@ -142,3 +142,76 @@ async fn datagrams_serve_every_version() {
 		.unwrap_or_else(|_| panic!("{version}: timed out"));
 	}
 }
+
+/// What the sessions under `registry` metered as `role`.
+fn traffic(registry: &moq_net::stats::Registry, role: moq_net::stats::Role) -> moq_net::stats::Traffic {
+	registry
+		.snapshot()
+		.traffic()
+		.into_iter()
+		.find(|(_, row, _)| *row == role)
+		.map(|(_, _, traffic)| traffic)
+		.unwrap_or_default()
+}
+
+/// A relay meters a compressed track's datagram in the form each wire carries: compressed
+/// on ingress and on moq-lite 07 egress, inflated to an older subscriber. Only `inflated`
+/// counts the bytes the relay inflated.
+#[moq_clock::test]
+async fn datagrams_meter_the_bytes_on_the_wire() {
+	for &version in &["moq-lite-07-wip", "moq-lite-06"] {
+		moq_clock::timeout(TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let broadcast = publisher.create_broadcast("bcast").unwrap();
+			let mut track = broadcast.create_track("data", compressed()).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+
+			// The relay accepts both hops, so its sessions are the ones metered.
+			let relay = produce_origin(2);
+			let ingress = moq_net::stats::Registry::new(Default::default());
+			let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
+			options.client_publish = Some(publisher.consume());
+			options.server_subscribe = Some(relay.clone());
+			options.server_stats = ingress.tier(Default::default()).session("ingress");
+			let upstream = connect_mock(options).await;
+
+			let origin = produce_origin(3);
+			let egress = moq_net::stats::Registry::new(Default::default());
+			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+			options.server_publish = Some(relay.consume());
+			options.client_subscribe = Some(origin.clone());
+			options.server_stats = egress.tier(Default::default()).session("egress");
+			let downstream = connect_mock(options).await;
+
+			let consumer = origin.consume();
+			consumer.routed("bcast").await.unwrap();
+			let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+			let mut subscriber = remote.track("data").unwrap().subscribe(None).await.unwrap();
+			support::harness::subscribed(&track).await;
+
+			track
+				.insert_datagram(0, Timestamp::from_millis(0).unwrap(), payload(0))
+				.unwrap();
+			let datagram = subscriber.recv_datagram().await.unwrap().expect("datagram");
+			assert_eq!(&datagram.payload[..], &payload(0)[..], "{version}");
+
+			let plain = payload(0).len() as u64;
+			let received = traffic(&ingress, moq_net::stats::Role::Subscriber);
+			assert_eq!(received.datagrams, 1, "{version}: ingress");
+			assert!(received.bytes < plain, "{version}: ingress metered {}", received.bytes);
+			assert_eq!(received.inflated, plain, "{version}: the relay inflated it once");
+
+			let sent = traffic(&egress, moq_net::stats::Role::Publisher);
+			assert_eq!(sent.datagrams, 1, "{version}: egress");
+			let expected = match version {
+				"moq-lite-07-wip" => received.bytes,
+				_ => plain,
+			};
+			assert_eq!(sent.bytes, expected, "{version}: egress metered as sent");
+			assert_eq!(sent.inflated, 0, "{version}: egress inflated nothing");
+			drop((upstream, downstream, publisher, relay, origin));
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}

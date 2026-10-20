@@ -3526,18 +3526,13 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		};
 		let sequence = datagram.sequence;
 		// A lite-07 peer takes a compressed track's datagram as stored, others inflated.
-		let (payload, inflated) = match datagram.deflated {
-			Some(deflated) if self.version.has_compression() => {
-				(deflated, Some(datagram.datagram.payload.len() as u64))
-			}
-			_ => (datagram.datagram.payload, None),
-		};
+		let (payload, inflated) = datagram.sent(self.version.has_compression());
 		let body = lite::Datagram {
 			subscribe: self.id,
 			sequence,
 			timestamp,
 			inflated,
-			payload,
+			payload: payload.clone(),
 		};
 		// has_datagrams is checked before this runs, and the timescale is set wherever the
 		// version needs a timestamp, so encoding never hits a version guard.
@@ -3912,6 +3907,9 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// Send a datagram, recording its sequence once it went out.
 	fn serve_datagram(&mut self, datagram: crate::model::datagram::Stored) {
 		let sequence = datagram.sequence;
+		// Metered in the form the wire carries.
+		let (payload, _) = datagram.sent(self.ctx.version.has_compression());
+		self.track.meter_datagram(payload.len() as u64);
 		if self.ctx.serve_datagram(datagram) {
 			self.mark_served(sequence);
 		}
