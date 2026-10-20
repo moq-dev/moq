@@ -144,11 +144,14 @@ if (command === "sign") {
 	// Stopped by the harness with SIGTERM: close, so the relay sees a close rather than timing it out.
 	process.once("SIGTERM", () => void connection.close());
 	console.log("published");
-	// `demand()` replaced the producer's own `used` after @moq/net 0.4.2, and this one
-	// client runs against both packages.
-	type Used = { peek(): boolean; changed(): Promise<unknown> };
-	const used: Used = "demand" in track ? track.demand().used : (track as unknown as { used: Used }).used;
-	while (!used.peek()) await used.changed();
+	// `demand()` replaced the producer's own `used` after @moq/net 0.4.2, then `wanted`
+	// replaced `demand().used`, and this one client runs against each package.
+	type Watch = { peek(): unknown; changed(): Promise<unknown> };
+	const demand = ("demand" in track ? track.demand() : track) as unknown as { used?: Watch; wanted?: Watch };
+	const watch = demand.wanted ?? demand.used;
+	if (!watch) throw new Error("track has no demand");
+	const wanted = () => (demand.wanted ? watch.peek() !== undefined : watch.peek() === true);
+	while (!wanted()) await watch.changed();
 	const group = track.appendGroup();
 	group.writeFrame({
 		payload: new TextEncoder().encode("compat-fetch"),

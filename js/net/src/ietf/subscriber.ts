@@ -35,6 +35,7 @@ import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
+import { unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -791,12 +792,12 @@ export class Subscriber {
 		const waitAbandoned = async (): Promise<null> => {
 			// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for
 			// the track info, so only demand that arrived and then left is abandonment.
-			while (!demand.used.peek() && demand.closed.peek() === undefined) {
-				await Signal.race(demand.used, demand.closed);
+			while (demand.wanted.peek() === undefined && demand.closed.peek() === undefined) {
+				await Signal.race(demand.wanted, demand.closed);
 			}
 			for (;;) {
-				await demand.unused();
-				if (demand.closed.peek() !== undefined || !demand.used.peek()) return null;
+				await unwanted(demand);
+				if (demand.closed.peek() !== undefined || demand.wanted.peek() === undefined) return null;
 			}
 		};
 
@@ -816,7 +817,7 @@ export class Subscriber {
 					priority = result.priority;
 					break;
 				}
-				if (demand.closed.peek() === undefined && demand.used.peek()) continue;
+				if (demand.closed.peek() === undefined && demand.wanted.peek() !== undefined) continue;
 				throw abandoned;
 			}
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
@@ -906,8 +907,9 @@ export class Subscriber {
 			let terminal = localEnded;
 			const demand = producer.demand();
 			for (;;) {
-				const reason = await race([done, demand.unused().then(() => idle)]);
-				if (reason === idle && demand.closed.peek() === undefined && demand.used.peek()) continue;
+				const reason = await race([done, unwanted(demand).then(() => idle)]);
+				if (reason === idle && demand.closed.peek() === undefined && demand.wanted.peek() !== undefined)
+					continue;
 				terminal = reason;
 				break;
 			}

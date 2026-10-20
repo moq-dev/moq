@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### TS sections use PCR placement
+
+A `verbatim` section frame's timestamp is the program clock at its first section byte, derived from the PCR, rather than the latest video PTS.
+Stamp hand-built section frames with their arrival on that clock, as for `pesPacket`; import existing recordings from their source again to recover the placement.
+A PMT naming no PCR PID refuses section streams; a later PMT naming one restores their routing. Sections before the first PCR or past a lone PCR are dropped and counted as `unplaced`, as whole PES are.
+SCTE-35 splice times still absorb the media's offset through `pts_adjustment`; the frame timestamp does not name the splice time.
+
 ### TS private PES rides `pesPacket` tracks; `verbatim` is sections only (#5921)
 
 `ts::Framing::Pes` and `ts::Verbatim::stream_id` are gone, and `Verbatim::framing` no longer defaults: a catalog naming `"framing": "pes"`, or a `verbatim` record without `framing`, fails to parse.

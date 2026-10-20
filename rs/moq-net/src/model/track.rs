@@ -21,7 +21,6 @@ use super::ledger::{self, Ledger};
 use super::{Datagram, Requests};
 
 use super::Cap;
-use super::subscription::NewGroup;
 pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
 use rangemap::RangeSet;
 
@@ -146,19 +145,23 @@ pub struct Info {
 	/// frames inflated, from one inflated copy per group shared by every plain reader.
 	/// Worth it for small, repetitive payloads like JSON; wasted on media.
 	pub compress: bool,
-	/// Whether the original publisher starts a group on a moq-transport NEW_GROUP_REQUEST
-	/// (DYNAMIC_GROUPS), as learned from an upstream moq-transport session.
+	/// The ratio of a group's bytes after its first frame to the first frame past which a
+	/// joining subscriber asks for a new group, or `None` (the default) to never ask.
 	///
-	/// Relay-only: a local publisher has no way to answer the request, and moq-lite does
-	/// not carry the capability, so both leave it unset.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: passthrough
-	pub(crate) dynamic_groups: bool,
+	/// A track opting in starts each group with an independent frame (a snapshot or a
+	/// keyframe) that the deltas after it build on. A joiner reads the newest group from its
+	/// start, so once the deltas outweigh `refresh` times the first frame, a fresh group is
+	/// cheaper: [`Demand::wanted`] moves past the newest group and the publisher opens one.
+	/// Every hop judges a join against its own cache, which holds the same group.
+	/// `Some(0)` asks on any join once a delta follows the first frame.
+	///
+	/// On moq-transport, `Some` is advertised as DYNAMIC_GROUPS, which arrives as `Some(0)`.
+	pub refresh: Option<u32>,
 	/// The moq-transport Track Properties moq-net does not interpret, learned from an
 	/// upstream moq-transport session and forwarded unchanged. `None` when there are none.
 	///
-	/// Relay-only, like [`Self::dynamic_groups`]: moq-lite does not carry them. Shared, since
-	/// every group holds a copy of the info.
+	/// Relay-only: moq-lite does not carry them. Shared, since every group holds a copy
+	/// of the info.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
@@ -171,7 +174,7 @@ impl Default for Info {
 			max_age: None,
 			priority: DEFAULT_PRIORITY,
 			compress: false,
-			dynamic_groups: false,
+			refresh: None,
 			properties: None,
 		}
 	}
@@ -203,6 +206,12 @@ impl Info {
 	/// Set whether frames are DEFLATE compressed per group, returning `self` for chaining.
 	pub fn with_compress(mut self, compress: bool) -> Self {
 		self.compress = compress;
+		self
+	}
+
+	/// Set the [`refresh`](Self::refresh) ratio, returning `self` for chaining.
+	pub fn with_refresh(mut self, refresh: impl Into<Option<u32>>) -> Self {
+		self.refresh = refresh.into();
 		self
 	}
 }
@@ -652,6 +661,36 @@ pub(crate) struct FetchOutcome {
 }
 
 impl TrackState {
+	/// A consumer joined at the live edge: ask for a group past every sequence written when
+	/// the newest group's bytes after its first frame exceed [`Info::refresh`] times that
+	/// frame.
+	///
+	/// Joins while the request is pending ask for the same group, so they coalesce until
+	/// the publisher creates it. A join under the ratio reads the current group and asks
+	/// for nothing, even while a request is pending.
+	///
+	/// Takes the read guard to release it before locking the demand, so the two locks
+	/// never nest.
+	fn join(state: kio::Ref<'_, TrackState>) {
+		let Some(ratio) = state.info.as_ref().and_then(|info| info.refresh) else {
+			return;
+		};
+		let Some(latest) = state.latest_group else {
+			return;
+		};
+		if !state
+			.lookup
+			.get(&latest)
+			.is_some_and(|slot| slot.serving().over_refresh(ratio))
+		{
+			return;
+		}
+		let subscriptions = state.subscriptions.clone();
+		drop(state);
+		let mut wakes = subscriptions.lock().refresh();
+		wakes.wake();
+	}
+
 	/// The starts a first frame of group `sequence` must fall between: the nearest checked
 	/// starts cached on either side, since groups land out of sequence order, and the
 	/// eviction watermark. A group at or below the watermark is late: its floor may be gone,
@@ -1451,10 +1490,15 @@ impl TrackState {
 
 	/// Record a written sequence, here and in the name's shared namespace. It raises the
 	/// largest too, so a later group below it never changes it, even one below a reached end.
-	fn advance(&mut self, sequence: u64) {
+	///
+	/// `answers` when it is a group subscribers receive, which answers a pending refresh.
+	fn advance(&mut self, sequence: u64, answers: bool) {
 		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
+		let next = self.sequence.next();
 		self.sequence.advance(sequence);
 		self.cache.advance_largest(Position::group(sequence));
+		let mut wakes = self.subscriptions.lock().wrote(sequence, next, answers);
+		wakes.wake();
 	}
 
 	/// The sequence the next append takes: one past this track's own writes.
@@ -1527,7 +1571,7 @@ impl TrackState {
 			self.evict.push_back((sequence, stamp));
 		}
 
-		self.advance(sequence);
+		self.advance(sequence, visible);
 		// A publisher may re-create a group it cut; the sequence is no longer given up.
 		if visible
 			&& self.drops.contains(&sequence)
@@ -2342,7 +2386,7 @@ impl Producer {
 		{
 			return Err(Error::Closed);
 		}
-		state.advance(sequence);
+		state.advance(sequence, false);
 		state.cache.finish_largest(sequence);
 		meter.datagram(payload.len() as u64);
 		// A datagram is its own group, so it compresses alone.
@@ -2411,7 +2455,7 @@ impl Producer {
 		if state.final_sequence().is_some_and(|fin| datagram.sequence >= fin) {
 			return Err(Error::Closed);
 		}
-		state.advance(datagram.sequence);
+		state.advance(datagram.sequence, false);
 		state.cache.finish_largest(datagram.sequence);
 		meter.datagram(datagram.payload.len() as u64);
 		state.push_datagram(datagram);
@@ -2718,7 +2762,7 @@ impl Producer {
 	/// Abort an unused track, returning the producer unchanged if consumers remain.
 	///
 	/// Consumer creation and the unused check share a lock, so demand returning
-	/// after [`Demand::poll_unused`] prevents the abort. `Ok(())` means
+	/// after [`Demand::wanted`] went to `None` prevents the abort. `Ok(())` means
 	/// the track is closed, including when it was already closed; existing handles
 	/// may still observe its final state. `Err(producer)` leaves the track unchanged
 	/// so the caller can continue serving and wait for the next unused wake.
@@ -2812,10 +2856,7 @@ impl Producer {
 	/// handle is weak, so holding one neither keeps the track alive nor pins its
 	/// cached groups.
 	pub fn demand(&self) -> Demand {
-		Demand {
-			name: self.name.clone(),
-			state: self.state.weak(),
-		}
+		Demand::new(self.name.clone(), self.state.weak())
 	}
 
 	/// Get a consumer handle for this in-process track.
@@ -2879,44 +2920,10 @@ impl Producer {
 	/// [`Info::max_age`]: no subscriber can wait for a late group longer than the
 	/// publisher keeps it.
 	pub fn subscription(&self) -> Option<Subscription> {
-		public(self.aggregate())
-	}
-
-	/// The aggregate with the relay-only requests the public view leaves out.
-	fn aggregate(&self) -> Option<Subscription> {
 		let state = self.state.read();
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
-	}
-
-	/// The NEW_GROUP_REQUEST the subscribers hold now, if any; see
-	/// [`Subscription::new_group`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: passthrough
-	pub(crate) fn new_group(&self) -> Option<NewGroup> {
-		new_group(self.aggregate())
-	}
-
-	/// Poll for the NEW_GROUP_REQUEST the subscribers hold to differ from `prev`: the
-	/// highest one whenever it changes, `None` once none does. Errors once the track is
-	/// aborted.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: passthrough
-	pub(crate) fn poll_new_group(
-		&self,
-		prev: &mut Option<NewGroup>,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<NewGroup>>> {
-		if self.state.poll_closed(waiter).is_ready() {
-			let abort = self.state.read().abort.clone();
-			return Poll::Ready(Err(abort.unwrap_or(Error::Dropped)));
-		}
-		let state = self.state.read();
-		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
-		drop(state);
-
-		poll_combined_changed(&subs, bound, prev, new_group, waiter).map(Ok)
 	}
 
 	/// Poll for a changed subscription: the
@@ -2935,7 +2942,7 @@ impl Producer {
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
-		poll_combined_changed(&subs, bound, &mut self.prev_subscription, public, waiter).map(Ok)
+		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter).map(Ok)
 	}
 
 	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
@@ -3054,10 +3061,7 @@ impl Dynamic {
 
 	/// Watch subscriber demand without keeping the track alive.
 	pub fn demand(&self) -> Demand {
-		Demand {
-			name: self.name.clone(),
-			state: self.state.weak(),
-		}
+		Demand::new(self.name.clone(), self.state.weak())
 	}
 }
 
@@ -3089,16 +3093,23 @@ impl Drop for Dynamic {
 }
 
 fn set_sequence(state: &kio::Producer<TrackState>, sequence: Sequence) {
-	if let Ok(mut state) = state.write() {
-		debug_assert!(
-			state.max_sequence.is_none(),
-			"a track joins its namespace before writing"
-		);
-		// What earlier producers of the name wrote is gone from this track's cache, so their
-		// highest checked start is its eviction watermark.
-		state.evicted = sequence.bound();
-		state.sequence = sequence;
-	}
+	let Ok(mut state) = state.write() else {
+		return;
+	};
+	debug_assert!(
+		state.max_sequence.is_none(),
+		"a track joins its namespace before writing"
+	);
+	// What earlier producers of the name wrote is gone from this track's cache, so their
+	// highest checked start is its eviction watermark.
+	state.evicted = sequence.bound();
+	// A replacement's consumers want the group past what earlier producers wrote.
+	let next = sequence.next();
+	state.sequence = sequence;
+	let subscriptions = state.subscriptions.clone();
+	drop(state);
+	let mut wakes = subscriptions.lock().want(next);
+	wakes.wake();
 }
 
 /// Ends the track when the last [`Producer`] or [`Dynamic`] drops.
@@ -3191,25 +3202,14 @@ impl Drop for Alive {
 	}
 }
 
-/// Poll the counted aggregate, as `view` sees it, without registering on individual readers.
-fn poll_combined_changed<T: Clone + PartialEq>(
+/// Poll the counted aggregate without registering on individual readers.
+fn poll_combined_changed(
 	subs: &kio::Lock<Subscriptions>,
 	bound: Option<Duration>,
-	prev: &mut T,
-	view: impl Fn(Option<Subscription>) -> T,
+	prev: &mut Option<Subscription>,
 	waiter: &kio::Waiter,
-) -> Poll<T> {
-	subs.lock().poll_changed(bound, prev, view, waiter)
-}
-
-/// The aggregate as the public API reports it: without the relay-only requests.
-fn public(combined: Option<Subscription>) -> Option<Subscription> {
-	combined.map(|sub| Subscription { new_group: None, ..sub })
-}
-
-/// The aggregate's NEW_GROUP_REQUEST, if any subscriber holds one.
-fn new_group(combined: Option<Subscription>) -> Option<NewGroup> {
-	combined.and_then(|sub| sub.new_group)
+) -> Poll<Option<Subscription>> {
+	subs.lock().poll_changed(bound, prev, waiter)
 }
 
 /// Read the counted aggregate without walking the audience.
@@ -3392,34 +3392,89 @@ impl super::WeakEntry for TrackWeak {
 /// A cloneable, watch-only handle to a track's subscriber demand.
 ///
 /// Obtained from [`Producer::demand`], [`Request::demand`], or [`Dynamic::demand`].
-/// A publisher uses it to react to whether anyone is subscribed, querying, or fetching
-/// (on-demand capture / encoding) without being able to publish frames or close the
+/// A publisher uses it to learn which group anyone subscribed, querying, or fetching
+/// wants (on-demand capture / encoding) without being able to publish frames or close the
 /// track. A bare [`Consumer`] is not demand. It's a weak handle, so it neither keeps
 /// the track alive nor pins its cached groups; once the owning [`Producer`]
-/// goes away, [`poll_used`](Self::poll_used) / [`poll_unused`](Self::poll_unused) report the track's
-/// closure.
-#[derive(Clone)]
+/// goes away, [`poll_wanted_changed`](Self::poll_wanted_changed) reports the track's
+/// closure. Each clone watches on its own, so its first
+/// [`poll_wanted_changed`](Self::poll_wanted_changed) reports the current value.
 pub struct Demand {
 	name: Arc<str>,
 	state: kio::ProducerWeak<TrackState>,
+	// The value `poll_wanted_changed` last returned, or `None` before it returned any.
+	prev: Option<Option<u64>>,
+}
+
+impl Clone for Demand {
+	fn clone(&self) -> Self {
+		Self::new(self.name.clone(), self.state.clone())
+	}
 }
 
 impl Demand {
+	fn new(name: Arc<str>, state: kio::ProducerWeak<TrackState>) -> Self {
+		Self {
+			name,
+			state,
+			prev: None,
+		}
+	}
+
 	/// The track name this handle is bound to.
 	pub fn name(&self) -> &str {
 		&self.name
 	}
 
-	/// Block until there is at least one active consumer.
-	#[cfg(feature = "async")]
-	pub async fn used(&self) -> Result<()> {
-		self.state.used().await.map_err(|_| self.abort_reason())
+	/// The group consumers want: `None` while nobody consumes the open track, and
+	/// `Some(n)` while they want group `n` or later.
+	///
+	/// A publisher opens a group whenever `n` passes its largest. The first consumer of a
+	/// track with no group asks for `Some(0)`, and a join judged by [`Info::refresh`]
+	/// asks for the next free sequence until a group lands there, so a datagram taking it
+	/// moves the ask past. `n` never goes back, so once a group reaches it nothing is
+	/// pending until another join asks.
+	pub fn wanted(&self) -> Option<u64> {
+		if !self.is_used() {
+			return None;
+		}
+		let (subscriptions, namespace) = self.subscriptions();
+		let wanted = subscriptions.lock().wanted(&namespace);
+		Some(wanted)
 	}
 
-	/// Block until there are no active consumers.
+	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// immediately on the first call, then on each change. Errors once the track is closed
+	/// or aborted.
+	///
+	/// So `while let Some(n) = demand.wanted_changed().await?` runs while anyone wants the
+	/// track, and `while demand.wanted_changed().await?.is_none()` waits for someone to.
 	#[cfg(feature = "async")]
-	pub async fn unused(&self) -> Result<()> {
-		self.state.unused().await.map_err(|_| self.abort_reason())
+	pub async fn wanted_changed(&mut self) -> Result<Option<u64>> {
+		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
+	}
+
+	/// The demand aggregate, and the name's sequence namespace a pending refresh reads.
+	fn subscriptions(&self) -> (kio::Lock<Subscriptions>, Sequence) {
+		let state = self.state.read();
+		(state.subscriptions.clone(), state.sequence.clone())
+	}
+
+	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
+		let used = match self.poll_state(waiter) {
+			DemandState::Closed => return Poll::Ready(Err(self.abort_reason())),
+			DemandState::Active => true,
+			DemandState::Idle => false,
+		};
+		let (subscriptions, namespace) = self.subscriptions();
+		let wanted = subscriptions.lock().poll_wanted(&namespace, waiter);
+		let next = used.then_some(wanted);
+		if self.prev == Some(next) {
+			return Poll::Pending;
+		}
+		self.prev = Some(next);
+		Poll::Ready(Ok(next))
 	}
 
 	/// Block until the track is closed or aborted, returning the cause.
@@ -3439,22 +3494,9 @@ impl Demand {
 			.map_or(DEFAULT_PRIORITY, |info| info.priority)
 	}
 
-	/// Whether the track is open and anyone is subscribed right now, without waiting.
-	///
-	/// A point-in-time snapshot for gating work on demand. Acting on it to *end* the
-	/// track is the race [`Producer::abort_unused`] exists for.
-	pub fn is_used(&self) -> bool {
+	/// Whether the track is open and anyone consumes it right now, without waiting.
+	pub(super) fn is_used(&self) -> bool {
 		!self.state.is_closed() && self.state.is_used()
-	}
-
-	/// Poll until a consumer is using this resource.
-	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_used(waiter).map_err(|_| self.abort_reason())
-	}
-
-	/// Poll until no consumer is using this resource.
-	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map_err(|_| self.abort_reason())
 	}
 
 	/// Whether the track is gone, without waiting.
@@ -3464,9 +3506,8 @@ impl Demand {
 
 	/// Read the current demand and arm `waiter` for the next transition.
 	///
-	/// Level-triggered, unlike [`poll_used`](Self::poll_used) / [`poll_unused`](Self::poll_unused): it
-	/// answers what the demand is *now* and wakes on whichever way it can move
-	/// next, so a poll-driven caller watching several tracks at once doesn't have
+	/// Level-triggered: it answers what the demand is *now* and wakes on whichever way it
+	/// can move next, so a poll-driven caller watching several tracks at once doesn't have
 	/// to track which edge it's waiting for.
 	pub(super) fn poll_state(&self, waiter: &kio::Waiter) -> DemandState {
 		loop {
@@ -3489,6 +3530,25 @@ impl Demand {
 	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
 	fn abort_reason(&self) -> Error {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+	}
+}
+
+#[cfg(all(test, feature = "async"))]
+impl Demand {
+	/// Wait until [`Self::wanted`] satisfies `f`, returning it. Errors once the track closes.
+	// private: test
+	pub(crate) async fn until(&mut self, f: impl Fn(Option<u64>) -> bool) -> Result<Option<u64>> {
+		kio::wait(|waiter| {
+			loop {
+				match self.poll_wanted_changed(waiter) {
+					Poll::Ready(Ok(wanted)) if f(wanted) => return Poll::Ready(Ok(wanted)),
+					Poll::Ready(Ok(_)) => continue,
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => return Poll::Pending,
+				}
+			}
+		})
+		.await
 	}
 }
 
@@ -3797,6 +3857,19 @@ impl Consumer {
 	fn serving(&self) -> Option<Consumer> {
 		let routes = self.with_state(|state| state?.read().routes.clone())?;
 		routes.serving()
+	}
+
+	/// Join the instance this handle reads at the live edge; see [`Subscriber::join`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	fn join(&self) {
+		if let Some(serving) = self.serving() {
+			return serving.join();
+		}
+		self.with_state(|state| {
+			if let Some(state) = state {
+				TrackState::join(state.read());
+			}
+		});
 	}
 
 	/// Whether the cache is fed live, so the newest object it holds is the track's largest.
@@ -4760,6 +4833,9 @@ impl Cursor {
 		// The ranges floor the cursor, and the budget picks where above it to start, timed
 		// or not: delivery skips the cached groups it already judges stale, on whichever
 		// clock convicts them.
+		if subscription.read().joins_live() {
+			TrackState::join(state.read());
+		}
 		let (floor, datagram_index) = {
 			let preferences = subscription.read();
 			let state = state.read();
@@ -5297,23 +5373,6 @@ impl Subscriber {
 		let mut delivered = std::mem::take(&mut self.delivered);
 		self.forget_past_budget(&mut delivered);
 		self.delivered = delivered;
-		self.answer_new_group(sequence);
-	}
-
-	/// Drop a NEW_GROUP_REQUEST that `sequence` answers, so it never reaches a later
-	/// upstream subscription (a reconnect, or another route) as a request for a group
-	/// that already came.
-	fn answer_new_group(&self, sequence: u64) {
-		// Only a DYNAMIC_GROUPS track forwards a request, so every other track (moq-lite's
-		// included) skips the lock on each group handed out.
-		if !self.info.dynamic_groups {
-			return;
-		}
-		let channel = match &self.inner {
-			Inner::Plain(cursor) => &cursor.subscription,
-			Inner::Resume(resume, _) => resume.subscription(),
-		};
-		channel.answer_new_group(sequence);
 	}
 
 	/// Forget the gaps in `delivered` below each group past this subscriber's budget now:
@@ -5427,7 +5486,6 @@ impl Subscriber {
 		// delivered whole here, so count it as the single-frame group it stands in for.
 		if let Poll::Ready(Ok(Some(datagram))) = &res {
 			meter.datagram(datagram.payload.len() as u64);
-			self.answer_new_group(datagram.sequence);
 		}
 		res
 	}
@@ -5662,6 +5720,22 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().max_sequence,
 			Inner::Resume(resume, _) => resume.latest(),
+		}
+	}
+
+	/// Join again at the live edge, judged by [`Info::refresh`] like a new subscriber: a
+	/// moq-transport NEW_GROUP_REQUEST. A front's reader joins the copy serving it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) fn join(&self) {
+		match &self.inner {
+			Inner::Plain(cursor) => TrackState::join(cursor.state.read()),
+			Inner::Resume(_, state) => {
+				let routes = state.read().routes.clone();
+				if let Some(copy) = routes.and_then(|routes| routes.serving()) {
+					copy.join();
+				}
+			}
 		}
 	}
 }
@@ -5925,10 +5999,7 @@ impl Request {
 
 	/// Watch subscriber demand without keeping the track alive.
 	pub fn demand(&self) -> Demand {
-		Demand {
-			name: self.name.clone(),
-			state: self.state.weak(),
-		}
+		Demand::new(self.name.clone(), self.state.weak())
 	}
 
 	/// Join the eventual track's demand, for a request made through its broadcast.
@@ -5950,7 +6021,7 @@ impl Request {
 	}
 
 	/// Reject only while no consumer needs this pending track. Demand and the check
-	/// share one lock, so demand returning after `Demand::poll_unused` wins the race, and the
+	/// share one lock, so demand returning after `Demand::wanted` went to `None` wins the race, and the
 	/// close under that lock stops a later consumer attaching to a dead request.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// pending: /quest/m1/public-model/answer.md
@@ -6005,23 +6076,10 @@ impl Request {
 	/// The delivery preferences aggregated across everyone waiting on this request,
 	/// or `None` if nobody is waiting. Useful for sizing the track before accepting.
 	pub fn subscription(&self) -> Option<Subscription> {
-		public(self.aggregate())
-	}
-
-	/// The aggregate with the relay-only requests the public view leaves out.
-	fn aggregate(&self) -> Option<Subscription> {
 		let state = self.state.read();
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
-	}
-
-	/// The NEW_GROUP_REQUEST the waiting subscribers hold now, if any; see
-	/// [`Subscription::new_group`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: passthrough
-	pub(crate) fn new_group(&self) -> Option<NewGroup> {
-		new_group(self.aggregate())
 	}
 
 	/// Block until the aggregate [`subscription`](Self::subscription) changes,
@@ -6037,7 +6095,7 @@ impl Request {
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
-		poll_combined_changed(&subs, bound, &mut self.prev_subscription, public, waiter)
+		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter)
 	}
 
 	pub(super) fn weak(&self) -> TrackWeak {
@@ -6385,29 +6443,6 @@ mod test {
 		assert_eq!(got.sequence, seq);
 		assert_eq!(got.timestamp, Some(ts));
 		assert_eq!(&got.payload[..], b"hello");
-	}
-
-	/// A datagram answers a NEW_GROUP_REQUEST the way a group does, so the request never
-	/// outlives its answer.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_datagram_answers_a_new_group_request() {
-		let info = Info {
-			dynamic_groups: true,
-			..Info::timed()
-		};
-		let mut producer = track_producer("test", info);
-		producer.append_datagram(Timestamp::ZERO, &b"a"[..]).unwrap();
-		let mut dg = producer.subscribe(Subscription {
-			new_group: NewGroup::new(0, Some(0)),
-			..Default::default()
-		});
-		assert_eq!(recv_datagram(&mut dg).sequence, 0);
-		assert!(producer.new_group().is_some(), "the datagram it joined on asks still");
-
-		producer.append_datagram(Timestamp::ZERO, &b"b"[..]).unwrap();
-		assert_eq!(recv_datagram(&mut dg).sequence, 1);
-		assert_eq!(producer.new_group(), None);
 	}
 
 	#[test]
@@ -9440,56 +9475,6 @@ mod test {
 			Poll::Ready(Ok(Some(sub))) => assert_eq!(sub.end(), Position::after_group(5)),
 			other => panic!("expected the narrowed aggregate, got {other:?}"),
 		}
-	}
-
-	/// A NEW_GROUP_REQUEST aggregates as the one answered latest, stays out of the public
-	/// subscription, and leaves a subscriber once it is handed a group at or past it.
-	#[test]
-	fn new_group_requests_aggregate_out_of_sight() {
-		let info = Info {
-			dynamic_groups: true,
-			..Info::timed()
-		};
-		let mut producer = track_producer("test", info);
-		let wants = |value, latest| Subscription {
-			new_group: NewGroup::new(value, Some(latest)),
-			..Default::default()
-		};
-		// Answered by group 5 and group 3.
-		let mut a = producer.subscribe(wants(5, 4));
-		let _b = producer.subscribe(wants(0, 2));
-
-		let mut prev = None;
-		let mut poll = |producer: &Producer| {
-			kio::wait(|waiter| producer.poll_new_group(&mut prev, waiter))
-				.now_or_never()
-				.map(|polled| polled.unwrap().map(|new_group| new_group.value))
-		};
-		assert_eq!(poll(&producer), Some(Some(5)));
-		assert_eq!(poll(&producer), None, "unchanged");
-		assert_eq!(producer.subscription().unwrap().new_group, None);
-		let waiter = kio::Waiter::noop();
-		assert!(producer.poll_subscription_changed(&waiter).is_ready());
-
-		producer.create_group(group::Info { sequence: 4 }).unwrap();
-		kio::wait(|waiter| a.poll_recv_group(waiter))
-			.now_or_never()
-			.unwrap()
-			.unwrap()
-			.unwrap();
-		assert_eq!(poll(&producer), None, "group 4 answers neither");
-
-		producer.create_group(group::Info { sequence: 5 }).unwrap();
-		kio::wait(|waiter| a.poll_recv_group(waiter))
-			.now_or_never()
-			.unwrap()
-			.unwrap()
-			.unwrap();
-		assert_eq!(poll(&producer), Some(Some(0)), "the other request remains");
-		assert!(
-			producer.poll_subscription_changed(&waiter).is_pending(),
-			"the public view never saw a request"
-		);
 	}
 
 	/// An [`ArcWake`] that just records that it was woken.
@@ -12790,6 +12775,172 @@ mod test {
 		assert!(pool.used() < used, "its bytes are released");
 	}
 
+	/// Append a group of a 3 byte first frame and a `delta` byte delta.
+	fn refresh_group(producer: &Producer, delta: usize) {
+		let mut group = producer.append_group().unwrap();
+		group.write_frame(None, &b"key"[..]).unwrap();
+		if delta > 0 {
+			group.write_frame(None, vec![0u8; delta]).unwrap();
+		}
+	}
+
+	/// Poll `demand` for a change without waiting.
+	fn wanted_changed(demand: &mut Demand) -> Option<Option<u64>> {
+		match demand.poll_wanted_changed(&kio::Waiter::noop()) {
+			Poll::Ready(res) => Some(res.unwrap()),
+			Poll::Pending => None,
+		}
+	}
+
+	/// The first consumer of a track with no group wants group 0, and nobody wants it once
+	/// the last one leaves.
+	#[test]
+	fn wanted_follows_the_first_consumer() {
+		let producer = track_producer("test", Info::default().with_refresh(1));
+		let mut demand = producer.demand();
+		assert_eq!(demand.wanted(), None);
+		assert_eq!(wanted_changed(&mut demand), Some(None), "the first call reports");
+		assert_eq!(wanted_changed(&mut demand), None, "then only changes");
+
+		let subscriber = producer.subscribe(None);
+		assert_eq!(demand.wanted(), Some(0));
+		assert_eq!(wanted_changed(&mut demand), Some(Some(0)));
+		drop(subscriber);
+		assert_eq!(demand.wanted(), None);
+		assert_eq!(wanted_changed(&mut demand), Some(None));
+	}
+
+	/// A join reads the newest group, unless its bytes after the first frame exceed the
+	/// ratio times the first frame: then it wants the group after the newest.
+	#[test]
+	fn a_join_over_the_ratio_wants_a_new_group() {
+		for (delta, wanted) in [(0, 0), (3, 0), (4, 1)] {
+			let producer = track_producer("test", Info::default().with_refresh(1));
+			refresh_group(&producer, delta);
+			let _subscriber = producer.subscribe(None);
+			assert_eq!(producer.demand().wanted(), Some(wanted), "{delta} byte delta");
+		}
+	}
+
+	/// A datagram past the newest group took the sequence after it, so a join over the
+	/// ratio wants the next free one rather than one already written.
+	#[test]
+	fn a_join_wants_past_a_later_datagram() {
+		let mut producer = track_producer("test", Info::default().with_refresh(1));
+		refresh_group(&producer, 4);
+		assert_eq!(producer.append_datagram(None, &b"dgram"[..]).unwrap(), 1);
+		let _subscriber = producer.subscribe(None);
+		assert_eq!(producer.demand().wanted(), Some(2));
+	}
+
+	/// A datagram taking the sequence a pending refresh asked for moves the ask past it, so
+	/// it still names a group the publisher has to open. The group landing answers it.
+	#[test]
+	fn a_datagram_never_overtakes_a_pending_refresh() {
+		let mut producer = track_producer("test", Info::default().with_refresh(1));
+		let mut demand = producer.demand();
+		refresh_group(&producer, 4);
+		let _subscriber = producer.subscribe(None);
+		assert_eq!(wanted_changed(&mut demand), Some(Some(1)));
+
+		assert_eq!(producer.append_datagram(None, &b"dgram"[..]).unwrap(), 1);
+		assert_eq!(wanted_changed(&mut demand), Some(Some(2)), "the datagram took group 1");
+
+		refresh_group(&producer, 0);
+		assert_eq!(wanted_changed(&mut demand), None, "group 2 answers it");
+		producer.append_datagram(None, &b"dgram"[..]).unwrap();
+		assert_eq!(wanted_changed(&mut demand), None, "nothing is pending");
+		assert_eq!(demand.wanted(), Some(2));
+	}
+
+	/// Joins while a request is pending ask for the same group, so the publisher hears it
+	/// once. The group reaching it leaves nothing pending, and only a join over the ratio of
+	/// that group asks again.
+	#[test]
+	fn joins_coalesce_until_the_group_lands() {
+		let producer = track_producer("test", Info::default().with_refresh(1));
+		let mut demand = producer.demand();
+		refresh_group(&producer, 4);
+		let _a = producer.subscribe(None);
+		assert_eq!(wanted_changed(&mut demand), Some(Some(1)));
+		let _b = producer.subscribe(None);
+		assert_eq!(wanted_changed(&mut demand), None, "coalesced");
+
+		refresh_group(&producer, 0);
+		assert_eq!(wanted_changed(&mut demand), None, "group 1 answers it");
+		let _c = producer.subscribe(None);
+		assert_eq!(wanted_changed(&mut demand), None, "group 1 is under the ratio");
+
+		refresh_group(&producer, 4);
+		let _d = producer.subscribe(None);
+		assert_eq!(wanted_changed(&mut demand), Some(Some(3)));
+	}
+
+	/// A track without a ratio never asks for a group on a join.
+	#[test]
+	fn joins_without_refresh_ask_nothing() {
+		let producer = track_producer("test", Info::default());
+		refresh_group(&producer, 1000);
+		let _subscriber = producer.subscribe(None);
+		assert_eq!(producer.demand().wanted(), Some(0));
+	}
+
+	/// Only a join at the live edge counts: a subscription resuming from a fixed group
+	/// already has the newest group's start.
+	#[test]
+	fn a_fixed_start_is_no_join() {
+		let producer = track_producer("test", Info::default().with_refresh(1));
+		refresh_group(&producer, 4);
+		let _subscriber = producer.subscribe(Subscription::default().with_groups(0..));
+		assert_eq!(producer.demand().wanted(), Some(0));
+	}
+
+	/// A replacement's consumers want the group past what earlier producers of the name
+	/// wrote, where its first group has to start.
+	#[test]
+	fn a_replacement_wants_past_its_predecessor() {
+		let broadcast = broadcast::Info::default().produce();
+		let first = broadcast.create_track("test", Info::default()).unwrap();
+		first.create_group(group::Info { sequence: 7 }).unwrap();
+		first.finish().unwrap();
+		drop(first);
+
+		let second = broadcast.create_track("test", Info::default()).unwrap();
+		let mut demand = second.demand();
+		assert_eq!(wanted_changed(&mut demand), Some(None));
+		let _subscriber = second.subscribe(None);
+		assert_eq!(wanted_changed(&mut demand), Some(Some(8)));
+		second.create_group(group::Info { sequence: 8 }).unwrap();
+		assert_eq!(wanted_changed(&mut demand), None);
+	}
+
+	/// The demand reports the track's closure as its abort reason.
+	#[test]
+	fn wanted_changed_errors_once_closed() {
+		let producer = track_producer("test", Info::default());
+		let mut demand = producer.demand();
+		producer.abort(Error::Cancel).unwrap();
+		assert!(matches!(
+			demand.poll_wanted_changed(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Cancel))
+		));
+		assert_eq!(demand.wanted(), None);
+	}
+
+	/// A NEW_GROUP_REQUEST joins again: under the ratio it asks nothing, over it the group
+	/// past the newest.
+	#[test]
+	fn a_subscriber_joins_again() {
+		let producer = track_producer("test", Info::default().with_refresh(1));
+		let subscriber = producer.subscribe(None);
+		refresh_group(&producer, 3);
+		subscriber.join();
+		assert_eq!(producer.demand().wanted(), Some(0));
+		refresh_group(&producer, 4);
+		subscriber.join();
+		assert_eq!(producer.demand().wanted(), Some(2));
+	}
+
 	#[test]
 	#[cfg(feature = "async")]
 	fn request_and_dynamic_share_weak_track_demand() {
@@ -12807,7 +12958,10 @@ mod test {
 		assert_eq!(producer.demand().name(), demand.name());
 		drop(producer);
 		drop(dynamic);
-		assert!(matches!(demand.used().now_or_never(), Some(Err(Error::Dropped))));
+		assert!(matches!(
+			demand.clone().wanted_changed().now_or_never(),
+			Some(Err(Error::Dropped))
+		));
 	}
 
 	#[test]

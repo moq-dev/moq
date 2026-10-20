@@ -17,6 +17,12 @@ struct TaskEntry {
 	callback: OnStatus,
 }
 
+/// A demand watcher's task, plus a handle to peek the wanted group from its callback.
+struct DemandEntry {
+	task: TaskEntry,
+	demand: moq_net::track::Demand,
+}
+
 /// A subscriber's request for a track the broadcast has not declared, kept with the
 /// broadcast it was made on so media can be published onto it under that broadcast's catalog.
 struct TrackRequest {
@@ -98,7 +104,7 @@ pub struct Publish {
 	binary_stream: NonZeroSlab<Data<moq_mux::binary::Stream<Extra>>>,
 
 	/// Demand watchers. Close signals shutdown; the task delivers a final callback, then removes itself.
-	demand: NonZeroSlab<Option<TaskEntry>>,
+	demand: NonZeroSlab<DemandEntry>,
 
 	/// Track and group request handlers. Close drops the handler, so pending requests
 	/// are rejected; the task delivers a final callback, then removes itself.
@@ -473,25 +479,28 @@ impl Publish {
 
 	/// Watch a track's subscriber demand, reporting the current state and every change.
 	///
-	/// `on_demand` fires with a [`moq_demand`] value immediately and again on each change, then
-	/// once with a terminal code: `0` when the track ends or the watcher is closed, negative when
-	/// the track aborts. Seeding with the current state is what makes a late registration safe: a
-	/// track that went unused before the watcher existed still reports it.
+	/// `on_demand` fires with a [`moq_demand`] value immediately and again on each change of the
+	/// wanted group, then once with a terminal code: `0` when the track ends or the watcher is
+	/// closed, negative when the track aborts. Seeding with the current state is what makes a late
+	/// registration safe: a track that went unused before the watcher existed still reports it.
 	pub fn demand(&mut self, demand: moq_net::track::Demand, on_demand: OnStatus) -> Result<Id, Error> {
 		let channel = oneshot::channel();
-		let id = self.demand.insert(Some(TaskEntry {
-			close: Some(channel.0),
-			callback: on_demand,
-		}))?;
+		let id = self.demand.insert(DemandEntry {
+			task: TaskEntry {
+				close: Some(channel.0),
+				callback: on_demand,
+			},
+			demand: demand.clone(),
+		})?;
 
 		tokio::spawn(async move {
 			let res = crate::ffi::run(Self::run_demand(on_demand, demand, channel.1)).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().publish.demand.remove(id).flatten();
+			let entry = State::lock().publish.demand.remove(id);
 			if let Some(entry) = entry {
-				entry.callback.call(res);
+				entry.task.callback.call(res);
 			}
 		});
 
@@ -500,62 +509,46 @@ impl Publish {
 
 	pub(crate) async fn run_demand(
 		callback: OnStatus,
-		demand: moq_net::track::Demand,
+		mut demand: moq_net::track::Demand,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// Neither handle exposes the current state, only the level-triggered waits, and exactly
-		// one of them is ready at any instant: racing them is the read. Close is ignored until
-		// that seed is delivered, so a watcher closed before its first poll still reports USED
-		// or UNUSED before the terminal. An application dropping its producer ends the watcher; it
-		// does not keep the track alive and reports the close as clean.
-		let mut used = tokio::select! {
-			res = demand.used() => match res {
-				Ok(()) => true,
-				Err(moq_net::Error::Dropped) => return Ok(()),
-				Err(err) => return Err(err.into()),
-			},
-			res = demand.unused() => match res {
-				Ok(()) => false,
-				Err(moq_net::Error::Dropped) => return Ok(()),
-				Err(err) => return Err(err.into()),
-			},
-		};
-
+		// The first change is the current state. Close is ignored until it is delivered, so a
+		// watcher closed before its first poll still reports USED or UNUSED before the terminal.
+		// An application dropping its producer ends the watcher; it does not keep the track
+		// alive and reports the close as clean.
+		let mut first = true;
 		loop {
-			let state = if used {
-				moq_demand::MOQ_DEMAND_USED
+			let next = if first {
+				first = false;
+				demand.wanted_changed().await
 			} else {
-				moq_demand::MOQ_DEMAND_UNUSED
-			};
-			callback.call(state as i32);
-
-			// A flip between the report and this wait resolves it immediately, so no edge is
-			// lost; a double flip collapses into nothing, which is what a level signal means.
-			let flipped = async {
-				if used {
-					demand.unused().await
-				} else {
-					demand.used().await
+				tokio::select! {
+					biased;
+					_ = &mut close => return Ok(()),
+					res = demand.wanted_changed() => res,
 				}
 			};
-			tokio::select! {
-				biased;
-				_ = &mut close => return Ok(()),
-				res = flipped => match res {
-					Ok(()) => used = !used,
-					Err(moq_net::Error::Dropped) => return Ok(()),
-					Err(err) => return Err(err.into()),
-				},
-			}
+			let state = match next {
+				Ok(Some(_)) => moq_demand::MOQ_DEMAND_USED,
+				Ok(None) => moq_demand::MOQ_DEMAND_UNUSED,
+				Err(moq_net::Error::Dropped) => return Ok(()),
+				Err(err) => return Err(err.into()),
+			};
+			callback.call(state as i32);
 		}
+	}
+
+	/// The group a demand watcher's subscribers want right now, until its terminal callback.
+	pub fn demand_wanted(&self, watcher: Id) -> Result<Option<u64>, Error> {
+		Ok(self.demand.get(watcher).ok_or(Error::NotFound)?.demand.wanted())
 	}
 
 	/// Stop a demand watcher. The task still delivers its terminal callback.
 	pub fn demand_close(&mut self, watcher: Id) -> Result<(), Error> {
 		self.demand
 			.get_mut(watcher)
-			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::NotFound)?
+			.task
 			.close
 			.take()
 			.ok_or(Error::NotFound)?;

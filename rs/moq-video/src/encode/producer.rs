@@ -147,7 +147,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// A watch-only handle to the track's subscriber demand, created eagerly so
 	/// subscription state is observable before any frames arrive. Watch it via
-	/// [`used`](moq_net::track::Demand::used) / [`unused`](moq_net::track::Demand::unused).
+	/// [`wanted`](moq_net::track::Demand::wanted) / [`wanted_changed`](moq_net::track::Demand::wanted_changed).
 	pub fn demand(&self) -> moq_net::track::Demand {
 		match &self.codecs {
 			Codecs::H264 { import, .. } => import.demand(),
@@ -623,6 +623,14 @@ fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Erro
 	producer.discontinuity()
 }
 
+/// Wait until some viewer wants the track, or none does.
+#[cfg(feature = "capture")]
+async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> Result<(), moq_net::Error> {
+	let mut demand = demand.clone();
+	while demand.wanted_changed().await?.is_some() != wanted {}
+	Ok(())
+}
+
 // Race source setup or an encode against the last viewer leaving, so an unwatched track
 // stops waiting promptly.
 #[cfg(feature = "capture")]
@@ -632,7 +640,7 @@ async fn wait_capture<T>(
 ) -> Result<Option<T>, Error> {
 	tokio::select! {
 		biased;
-		res = demand.unused() => {
+		res = until_wanted(demand, false) => {
 			if let Err(err) = res {
 				log_track_ended(err);
 			}
@@ -672,7 +680,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		// Idle until a viewer subscribes; the track ending is a clean exit. The
 		// catalog rendition was published when the track was created, so a
 		// subscriber can get here without a frame ever having been encoded.
-		if let Err(err) = demand.used().await {
+		if let Err(err) = until_wanted(demand, true).await {
 			log_track_ended(err);
 			return Ok(());
 		}
@@ -731,7 +739,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 			// unwatched track stops before reading another frame.
 			let frame = tokio::select! {
 				biased;
-				res = demand.unused() => {
+				res = until_wanted(demand, false) => {
 					if let Err(err) = res {
 						log_track_ended(err);
 						return Ok(());

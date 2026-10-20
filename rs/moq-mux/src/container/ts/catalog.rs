@@ -338,7 +338,11 @@ impl Track {
 	}
 }
 
-/// Carriage record for an undecoded elementary stream carried byte-for-byte.
+/// Carriage record for an undecoded elementary stream carried as complete sections.
+///
+/// Each frame includes the section header and CRC, timestamped at its first section byte
+/// on the PCR-derived program clock, as for [`PesPacket`]. SCTE-35 splice times ride inside
+/// the payload, shifted onto the catalog clock through `pts_adjustment`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
