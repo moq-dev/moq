@@ -120,8 +120,15 @@ pkgs.testers.runNixOSTest {
         ];
         ExecStart = lib.mkForce (
           pkgs.writeShellScript "cache-probe" ''
+            set -euo pipefail
             test "$(cat "$HOME/seeded")" = seeded
             mkdir -p "$MBX_CACHE_DIR"
+            # Jobs execute checkout scripts and tools installed in their home.
+            for directory in "$HOME" /var/cache/github-runner-work; do
+              printf '#!${pkgs.runtimeShell}\necho executable\n' > "$directory/exec-probe"
+              chmod +x "$directory/exec-probe"
+              test "$("$directory/exec-probe")" = executable
+            done
             ulimit -l > "$MBX_CACHE_DIR/memlock"
             if test -f "$MBX_CACHE_DIR/marker"; then
               touch "$MBX_CACHE_DIR/reused"

@@ -694,6 +694,12 @@ class Reader implements ResumeSource {
 		}
 	}
 
+	join(): void {
+		this.sync();
+		const serving = this.#serving();
+		if (serving) hooks.joinSubscriber(serving.sub);
+	}
+
 	fork(options?: track.Subscription): track.Subscriber {
 		this.sync();
 		const newest = this.#copies.at(-1);
