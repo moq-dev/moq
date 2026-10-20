@@ -2102,46 +2102,15 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::PublishNamespace, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				stream.writer.buffer_varint(ietf::PublishNamespaceError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::PublishNamespaceError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.buffer_varint(ietf::RequestError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				stream.writer.buffer_varint(ietf::RequestError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
-		Ok(())
+		super::request_stream::write_error(
+			&mut stream.writer,
+			request::Kind::PublishNamespace,
+			request_id,
+			err,
+			reason,
+			self.version,
+		)
+		.await
 	}
 
 	/// Refuse a PUBLISH on the bidi stream that carries it.
@@ -2152,46 +2121,15 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::Publish, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				stream.writer.varint(ietf::PublishError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::PublishError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.varint(ietf::RequestError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				stream.writer.varint(ietf::RequestError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
-		Ok(())
+		super::request_stream::write_error(
+			&mut stream.writer,
+			request::Kind::Publish,
+			request_id,
+			err,
+			reason,
+			self.version,
+		)
+		.await
 	}
 
 	/// Attach the route for one newly advertised namespace, returning the id that names
