@@ -2696,7 +2696,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 		}
 		assert!(
 			ingested.iter().all(|(_, ts)| *ts != Timestamp::ZERO),
-			"{source}: cues stamped with the video PTS, not zero"
+			"{source}: cues stamped with their PCR placement"
 		);
 
 		// Export and re-ingest.
@@ -10101,4 +10101,115 @@ async fn placed_ac3_pes_keeps_its_sync_frames_together() {
 	let out = placed_out(&export_placed(placed).await.unwrap());
 	assert_eq!(out.len(), 1);
 	assert_eq!(out[0].bytes, pes);
+}
+
+/// Section placement is an arrival, so cues beside the tune-in keyframe precede its PTS.
+#[tokio::test(start_paused = true)]
+async fn placed_section_survives_tune_in_beside_the_keyframe() {
+	let mut input = Placed::new(vec![(500, CUE.to_vec()), (1_500, CUE.to_vec()), (2_500, CUE.to_vec())]);
+	input.video = (0..25).map(|k| 2_000 + 40 * k).collect();
+	input.entry.pes_packet = None;
+	input.entry.verbatim = Some(tscat::Verbatim::new(0x86, tscat::Framing::Section));
+	let slices = export_placed(input).await.unwrap();
+	let starts: Vec<_> = slices
+		.iter()
+		.filter(|slice| {
+			slice.payload.as_chunks::<188>().0.iter().any(|packet| {
+				(u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])) == PLACED_PID && packet[1] & 0x40 != 0
+			})
+		})
+		.map(slice_pcr)
+		.collect();
+	assert_eq!(
+		starts,
+		vec![1_500_000_000, 2_500_000_000],
+		"only the cue before the keyframe departs is dropped"
+	);
+}
+
+/// A cue's first section byte keeps its source position when remuxed onto a new constant rate.
+#[tokio::test(start_paused = true)]
+async fn placed_sections_keep_their_source_positions() {
+	const RATE: u64 = 2_000_000;
+	const PID: u16 = 0x21;
+	let data = include_bytes!("test_data/scte35/ffmpeg.ts");
+	let mut clocks = Vec::new();
+	let mut starts = Vec::new();
+	for (k, packet) in data.as_chunks::<188>().0.iter().enumerate() {
+		if let Some(pcr) = super::import::pcr(packet) {
+			clocks.push(((k * 188 + 10) as u64, pcr));
+		}
+		let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+		if pid == PID && packet[1] & 0x40 != 0 {
+			let payload = 4 + if packet[3] & 0x20 != 0 {
+				1 + usize::from(packet[4])
+			} else {
+				0
+			};
+			starts.push((k * 188 + payload + 1 + usize::from(packet[payload])) as u64);
+		}
+	}
+	let source: Vec<_> = starts
+		.iter()
+		.map(|&at| {
+			let before = clocks.iter().rposition(|&(byte, _)| byte <= at).unwrap();
+			let (a, b) = match clocks.get(before + 1) {
+				Some(&after) => (clocks[before], after),
+				None => (clocks[before - 1], clocks[before]),
+			};
+			(a.1 + (at - a.0) * (b.1 - a.1) / (b.0 - a.0)) / 27
+		})
+		.collect();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(data).unwrap();
+	import.finish().unwrap();
+	let name = scte_track(&catalog.snapshot()).unwrap();
+	let cues = read_cues(&consumer, &name).await;
+	assert_eq!(
+		cues.iter().map(|(_, time)| time.as_micros() as u64).collect::<Vec<_>>(),
+		source
+	);
+	let mut exporter = open_ts(
+		crate::source::announced(&consumer).await,
+		crate::catalog::CatalogFormat::Hang,
+	)
+	.await
+	.unwrap()
+	.with_delay(RECORDING_MAX_AGE)
+	.with_replay()
+	.with_mux_rate(RATE);
+	let mut output = Vec::new();
+	while let Ok(Some(slice)) = tokio::time::timeout(DRAIN, exporter.next())
+		.await
+		.map(|next| next.unwrap())
+	{
+		for (k, packet) in slice.payload.as_chunks::<188>().0.iter().enumerate() {
+			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+			if pid == PID && packet[1] & 0x40 != 0 {
+				let payload = 4 + if packet[3] & 0x20 != 0 {
+					1 + usize::from(packet[4])
+				} else {
+					0
+				};
+				let byte = k * 188 + payload + 1 + usize::from(packet[payload]);
+				output.push(slice_pcr(&slice) + byte as u128 * 8 * 1_000_000_000 / u128::from(RATE));
+			}
+		}
+	}
+	assert_eq!(output.len(), source.len());
+	let packet = 188 * 8 * 1_000_000_000 / u128::from(RATE);
+	for (&first, &source) in output.iter().zip(&source) {
+		let place = u128::from(source) * 1_000;
+		assert!(
+			first >= place && first < place + packet,
+			"source first byte at {place} ns, export at {first} ns"
+		);
+	}
 }

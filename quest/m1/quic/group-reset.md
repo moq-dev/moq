@@ -56,8 +56,5 @@ half did not reach.
 
 ## Related
 
-- [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md) - a
-  DROP covers a reset whose header was lost; a reset that keeps its header acts
-  as a one-group drop
 - [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - qmux reuses
   `moq-quic`'s reset state

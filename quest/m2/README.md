@@ -51,6 +51,8 @@ ranked just below deterministic TS legs, which it requires.
 - [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
 - [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) - a released mp4-atom carries the `dOps` channel mapping table, and fMP4 import and export carry it through the OpusHead
 - [GPU CI](/quest/m2/gpu-ci.md) - NVIDIA tests run nightly on real hardware, and `just rs nvidia` runs them locally instead of skipping
+- [Vendor-free CARLA bridge](/quest/m2/carla-bridge.md) - the CARLA demo's GPU bridge lets moq-video pick the encoder, and its stand-in test runs on AMD as well as NVIDIA
+- [V4L2 virtual camera](/quest/m2/v4l2-virtual-camera.md) - V4L2 capture runs nightly against the `vivid` virtual driver instead of only on a developer's camera
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches
 - [A finished PROBE stops reporting](/quest/m2/probe-end-stale.md) - the Rust receive estimate reads unknown once its PROBE stream ends
 - [Wire stats](/quest/m2/wire-stats/README.md) - `Presence` counts each root's transport bytes on the wire, `wire_tx` and `wire_rx`, from QUIC, WebSocket, and embedder gateway sources
@@ -77,7 +79,8 @@ ranked just below deterministic TS legs, which it requires.
 - [Go module proxy](/quest/m2/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
 - [Go per-platform lib modules](/quest/m2/go-ffi-platform-modules.md) - a Go build downloads only the host's staticlib, and `go mod vendor` works
 - [Dart on iOS](/quest/m2/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
-- [Mobile completion](/quest/m2/mobile-completion.md) - verify the Swift and Kotlin bindings over Rust-owned capture before closing #700
+- [Mobile completion](/quest/m2/mobile-completion.md) - verify the Swift and Kotlin bindings over Rust-owned capture
+- [Bindings in the interop matrix](/quest/m2/interop-bindings.md) - Kotlin, Swift, and Dart publish and subscribe against every other interop client
 - [WebGPU HDR](/quest/m2/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
 - [QUIC caps](/quest/m2/rate-quic.md) - paced MAX_DATA credit in and a capped pacer out hold a QUIC session to its token's bitrate
@@ -93,6 +96,7 @@ ranked just below deterministic TS legs, which it requires.
 - [moqsrc A/V sync](/quest/m2/moqsrc-av-sync.md) - a nightly test measures A/V skew from `moqsrc` through clock-synced sinks
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
+- [MKV import refuses out-of-range values](/quest/m2/mkv-dimension-overflow.md) - the Matroska importer errors on a dimension, channel count, or sample rate that would truncate
 - [Linux decoded frames](/quest/m2/obs-decode-linux.md) - present supported native decoded surfaces with visible CPU fallback
 - [Windows decoded frames](/quest/m2/obs-decode-windows.md) - present decoded D3D11 surfaces in OBS without CPU readback
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed the encoder from the OBS compositor without CPU readback
@@ -124,6 +128,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Latency ledger](/quest/m2/latency-ledger.md) - a viewer reports its share of playback delay stage by stage: jitter buffer, decode, render, and device
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
 - [Media Foundation encode](/quest/m2/audio-encode-mediafoundation.md) - Windows encodes AAC-LC
+- [MediaCodec on an emulator](/quest/m2/android-mediacodec-ci.md) - moq-video's MediaCodec tests run nightly on an Android emulator, in a lane the audio MediaCodec quests reuse
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - Android decodes HE-AAC, multichannel AAC, and what else the device offers
 - [MediaCodec encode](/quest/m2/audio-encode-mediacodec.md) - Android encodes AAC-LC
 - [#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the Opus producer follows its bandwidth grant through the settled `moq_mux::rate::Control`
@@ -165,6 +170,8 @@ ranked just below deterministic TS legs, which it requires.
 - [Auth serve bound address](/quest/m2/auth-serve-bound-addr.md) - `moq auth serve` logs the port it actually bound
 - [Relay exposes a verified peer address](/quest/m2/relay-peer-addr.md) - WebRTC and other embedded routes know the client's socket address
 - [RTMP client reports a publish or play error](/quest/m2/rtmp-client-error.md) - a refused publish or play surfaces its reason
-- [Adopt usage-rs 7](/quest/m2/usage-rs-7.md) - the workspace builds on usage-rs 7
+- [H.264 parsing with maintained crates](/quest/m2/h264-reader.md) - moq-mux parses SPS VUI with h264-reader and shares one bit reader across codec config parsers
+- [avcC and hvcC through mp4-atom](/quest/m2/mp4-atom-config.md) - moq-mux stops hand-writing the decoder config records its mp4-atom dependency already parses
+- [Relay metrics through prometheus-client](/quest/m2/relay-prometheus-client.md) - `/metrics` renders through the maintained client with the same series
 - [Dead routes on IETF name their cause](/quest/m2/js-ietf-dead-route-error.md) - a JS subscription on a dead moq-transport session ends with the session error, not `unauthorized`
-- [Error cleanups](/quest/m2/error-cleanups.md) - delete the unused `Error::SessionClosed`, and Rust and JS both reset a served stream over a raw transport failure with `Unroutable`
+- [Error cleanups](/quest/m2/error-cleanups.md) - delete the unused `Error::SessionClosed`; raw transport failures already map to `Unroutable`

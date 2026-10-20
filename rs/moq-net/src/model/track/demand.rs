@@ -1,7 +1,15 @@
 //! Incremental demand, separate from the track's cached content.
-use std::{collections::BTreeMap, sync::Arc, task::Poll, time::Duration};
+use std::{
+	collections::BTreeMap,
+	sync::{
+		Arc,
+		atomic::{self, AtomicU64},
+	},
+	task::Poll,
+	time::Duration,
+};
 
-use super::{NewGroup, Order, Subscription, TrackState, clamp_combined};
+use super::{Order, Sequence, Subscription, TrackState, clamp_combined};
 
 mod ranges;
 use ranges::Ranges;
@@ -13,23 +21,27 @@ pub(super) struct Subscriptions {
 	max_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
 	descending: usize,
-	/// Only the subscribers holding a request.
-	new_group: BTreeMap<NewGroup, usize>,
+	/// The lowest group consumers want while no refresh is pending, never lowered. See
+	/// [`super::Demand::wanted`].
+	wanted: u64,
+	/// A join over the track's refresh ratio asked for a group past every sequence written,
+	/// and no such group has landed yet. Read against the namespace rather than stored as a
+	/// number, so a datagram taking the next sequence can never leave the ask behind.
+	refresh: bool,
 	waiters: kio::WaiterList,
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (u8, Duration, Order, Option<NewGroup>);
+type Scalars = (u8, Duration, Order);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		let (priority, max_delay, order, new_group) = self.scalars()?;
+		let (priority, max_delay, order) = self.scalars()?;
 		Some(Subscription {
 			priority,
 			max_delay,
 			ranges: self.ranges.union(),
 			order,
-			new_group,
 		})
 	}
 
@@ -43,20 +55,17 @@ impl Subscriptions {
 				} else {
 					Order::Descending
 				},
-				self.new_group.last_key_value().map(|(new_group, _)| *new_group),
 			)
 		})
 	}
 
-	/// Poll for the aggregate, as `view` sees it, to differ from `prev`.
-	pub(super) fn poll_changed<T: Clone + PartialEq>(
+	pub(super) fn poll_changed(
 		&mut self,
 		bound: Option<Duration>,
-		prev: &mut T,
-		view: impl Fn(Option<Subscription>) -> T,
+		prev: &mut Option<Subscription>,
 		waiter: &kio::Waiter,
-	) -> Poll<T> {
-		let next = view(clamp_combined(self.combined(), bound));
+	) -> Poll<Option<Subscription>> {
+		let next = clamp_combined(self.combined(), bound);
 		if next != *prev {
 			*prev = next.clone();
 			Poll::Ready(next)
@@ -64,6 +73,56 @@ impl Subscriptions {
 			waiter.register(&mut self.waiters);
 			Poll::Pending
 		}
+	}
+
+	/// The lowest group consumers want, whether or not anyone consumes now: the next free
+	/// sequence of `namespace` while a refresh is pending.
+	///
+	/// Read under this lock, so a write that moves the namespace after it wakes the waiters
+	/// armed here (see [`Self::wrote`]).
+	pub(super) fn wanted(&self, namespace: &Sequence) -> u64 {
+		match self.refresh {
+			true => namespace.next().max(self.wanted),
+			false => self.wanted,
+		}
+	}
+
+	/// [`Self::wanted`], arming `waiter` for its next change.
+	pub(super) fn poll_wanted(&mut self, namespace: &Sequence, waiter: &kio::Waiter) -> u64 {
+		waiter.register(&mut self.waiters);
+		self.wanted(namespace)
+	}
+
+	/// Raise the floor of [`Self::wanted`] to `group`, taking the wakes only when it moved.
+	pub(super) fn want(&mut self, group: u64) -> kio::WaiterList {
+		if group <= self.wanted {
+			return Default::default();
+		}
+		self.wanted = group;
+		self.waiters.take()
+	}
+
+	/// A join over the refresh ratio: ask for a group past every sequence written. Joins
+	/// while one is pending coalesce into it.
+	pub(super) fn refresh(&mut self) -> kio::WaiterList {
+		if std::mem::replace(&mut self.refresh, true) {
+			return Default::default();
+		}
+		self.waiters.take()
+	}
+
+	/// Sequence `sequence` was written at or past `next`, the namespace's next free sequence
+	/// before it. A group subscribers receive answers a pending refresh; anything else, such
+	/// as a datagram, moves the sequence it asks for.
+	pub(super) fn wrote(&mut self, sequence: u64, next: u64, answers: bool) -> kio::WaiterList {
+		if !self.refresh || sequence < next {
+			return Default::default();
+		}
+		if answers {
+			self.refresh = false;
+			self.wanted = self.wanted.max(sequence);
+		}
+		self.waiters.take()
 	}
 
 	/// Mutate counts under one lock, taking wakes only when the aggregate changes.
@@ -81,9 +140,6 @@ impl Subscriptions {
 				}
 			}
 			self.descending += usize::from(new.order == Order::Descending);
-			if let Some(new_group) = new.new_group {
-				add(&mut self.new_group, new_group);
-			}
 			self.count += 1;
 		}
 		if let Some(old) = old {
@@ -95,9 +151,6 @@ impl Subscriptions {
 				}
 			}
 			self.descending -= usize::from(old.order == Order::Descending);
-			if let Some(new_group) = old.new_group {
-				remove(&mut self.new_group, new_group);
-			}
 			self.count -= 1;
 		}
 		if reshaped || self.scalars() != prev {
@@ -138,6 +191,8 @@ pub(in crate::model) struct Preferences(Arc<Preference>);
 struct Preference {
 	value: kio::Producer<Subscription>,
 	subscriptions: Option<kio::Lock<Subscriptions>>,
+	/// Bumped under the write whenever the ranges change.
+	ranges_revision: AtomicU64,
 }
 
 impl Preferences {
@@ -151,33 +206,12 @@ impl Preferences {
 		Self(Arc::new(Preference {
 			value: kio::Producer::new(value),
 			subscriptions,
+			ranges_revision: AtomicU64::new(0),
 		}))
 	}
 
 	pub(super) fn update(&self, next: Subscription) -> crate::Result<()> {
-		self.update_with(|_| next)
-	}
-
-	/// Drop a NEW_GROUP_REQUEST that `sequence` answers.
-	pub(super) fn answer_new_group(&self, sequence: u64) {
-		// Checked before taking the write, which wakes this channel's readers.
-		if !self
-			.read()
-			.new_group
-			.is_some_and(|new_group| sequence >= new_group.first)
-		{
-			return;
-		}
-		let _ = self.update_with(|value| Subscription {
-			new_group: value.new_group.filter(|new_group| sequence < new_group.first),
-			..value.clone()
-		});
-	}
-
-	/// Replace the preference with what `next` makes of it, under one write.
-	fn update_with(&self, next: impl FnOnce(&Subscription) -> Subscription) -> crate::Result<()> {
 		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
-		let next = next(&value);
 		if *value == next {
 			return Ok(());
 		}
@@ -186,6 +220,9 @@ impl Preferences {
 			.subscriptions
 			.as_ref()
 			.map(|subs| subs.lock().replace(Some(&value), Some(&next)));
+		if value.ranges != next.ranges {
+			self.0.ranges_revision.fetch_add(1, atomic::Ordering::Relaxed);
+		}
 		*value = next;
 		drop(value);
 		if let Some(wakes) = &mut wakes {
@@ -201,6 +238,11 @@ impl Preferences {
 	}
 	pub(in crate::model) fn read(&self) -> kio::Ref<'_, Subscription> {
 		self.0.value.read()
+	}
+	/// Counts changes to the ranges, so a reader can tell them apart without comparing every
+	/// range. Read it while holding [`Self::read`] to get the count matching those ranges.
+	pub(in crate::model) fn ranges_revision(&self) -> u64 {
+		self.0.ranges_revision.load(atomic::Ordering::Relaxed)
 	}
 	pub(in crate::model) fn consume(&self) -> kio::Consumer<Subscription> {
 		self.0.value.consume()
@@ -232,6 +274,7 @@ impl From<kio::Producer<Subscription>> for Preferences {
 		Self(Arc::new(Preference {
 			value,
 			subscriptions: None,
+			ranges_revision: AtomicU64::new(0),
 		}))
 	}
 }
@@ -276,10 +319,6 @@ mod tests {
 				} else {
 					Order::Descending
 				},
-				new_group: rng
-					.random_bool(0.5)
-					.then(|| NewGroup::new(rng.random_range(0..8), Some(rng.random_range(0..8))))
-					.flatten(),
 			};
 			match (&mut slots[index], rng.random_range(0..3)) {
 				(slot @ None, _) => *slot = Some((producer.subscribe(next.clone()), next)),
@@ -298,16 +337,7 @@ mod tests {
 				expected.add(value);
 			}
 			let expected = expected.finish();
-			assert_eq!(
-				producer.subscription(),
-				super::super::public(expected.clone()),
-				"operation {step}"
-			);
-			assert_eq!(
-				producer.new_group(),
-				super::super::new_group(expected),
-				"operation {step}"
-			);
+			assert_eq!(producer.subscription(), expected, "operation {step}");
 		}
 		drop(slots);
 		assert_eq!(producer.subscription(), None);

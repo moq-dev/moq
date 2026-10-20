@@ -31,7 +31,7 @@ export the experimental Rust request hook through the bindings here.
   `auth granted publish=[...] subscribe=[...]` line and join `prints_grant` and
   `enforces_grant` in `test/interop/interop.sh`, beside Rust and JS.
 - Wrappers: `py/moq-rs/moq/session.py`, `swift/Sources/Moq`,
-  `kt/.../Flows.kt` (a `Flow` over `grant_changed`), `go/wrapper/moq/session.go`
+  `kt/.../Flows.kt` (a `Flow` over `grant_changed`), `go/wrapper/session.go`
   (context-cancellable like the rest), and `dart/moq/lib/moq.dart`. Kotlin
   typealiases pick up the raw methods for free; the flow is the idiomatic add.
 - Docs: `doc/lib/{py,swift,kt,go,dart}` each gain a short auth section, and

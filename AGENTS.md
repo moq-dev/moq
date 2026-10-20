@@ -106,7 +106,7 @@ The `quest` binary comes from the kixelated/quest flake input and serves the que
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `cpp/moq`, `cpp/obs/src`, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md` |
+| `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `cpp/moq`, `cpp/obs/src`, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
 | `rs/moq-auth` | `js/auth`, `doc/bin/relay/auth.md` |

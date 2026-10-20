@@ -52,13 +52,6 @@ export interface Token {
  */
 export const TOKEN_OUT_OF_BAND = 0x0n;
 
-/**
- * Token Type 1: a Common Access Token (draft-ietf-moq-c4m).
- *
- * @internal
- */
-export const TOKEN_CAT = 0x1n;
-
 /** Draft-17 replaced QUIC's two-bit-length varint with a leading-ones one. */
 function leadingOnes(version: IetfVersion): boolean {
 	return version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16;

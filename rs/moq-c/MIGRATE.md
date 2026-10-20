@@ -4,6 +4,30 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON values carry their timestamp (#5677)
+
+`moq_json_value` gains `timestamp_us` and `timestamp_present`, which changes its ABI.
+A snapshot consumer's callback now fires for each state in order instead of only the newest.
+Timestamps are rounded down to a whole microsecond.
+
+### Ranges filter reads (#5929)
+
+A raw track consumer now reads only the groups its `ranges` cover, rather than every group from the lowest start to the last absolute end.
+
+### Demand reports the wanted group (#5930)
+
+`moq_track_info` gains `refresh` and `refresh_present`, which changes its ABI; a zeroed field leaves refresh off.
+A demand watcher's `on_demand` now repeats `MOQ_DEMAND_USED` whenever the wanted group moves, so treat it as "read the wanted group" rather than an edge.
+Read it with `moq_publish_demand_wanted`, and start a new group (a keyframe) once it passes the largest group written.
+Before any group is written, the first subscriber wants group 0, so start one whenever it is present.
+
+```c
+// `written` is false until a group is written; `largest` is the largest group written.
+uint64_t group;
+bool present;
+if (moq_publish_demand_wanted(watcher, &group, &present) == 0 && present && (!written || group > largest)) start_group();
+```
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

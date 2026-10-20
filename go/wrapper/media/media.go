@@ -454,6 +454,14 @@ func (m *TrackStreamProducer) Finish() error {
 	return m.inner.Finish()
 }
 
+// mediaFrame converts the result of a Next call, keeping (nil, nil) for the end.
+func mediaFrame(frame *ffi.MoqMediaFrame, err error) (*MediaFrame, error) {
+	if frame == nil || err != nil {
+		return nil, err
+	}
+	return &MediaFrame{Payload: frame.Payload, Timestamp: time.Duration(frame.TimestampUs) * time.Microsecond, Keyframe: frame.Keyframe}, nil
+}
+
 // TrackConsumer is a stream of decoded media frames.
 type TrackConsumer struct {
 	inner *ffi.MoqMediaTrackConsumer
@@ -461,11 +469,7 @@ type TrackConsumer struct {
 
 // Next returns the next frame, or (nil, nil) when the track ends.
 func (m *TrackConsumer) Next(ctx context.Context) (*MediaFrame, error) {
-	frame, err := bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
-	if frame == nil || err != nil {
-		return nil, err
-	}
-	return &MediaFrame{Payload: frame.Payload, Timestamp: time.Duration(frame.TimestampUs) * time.Microsecond, Keyframe: frame.Keyframe}, nil
+	return mediaFrame(bridge.Call(ctx, m.inner.Cancel, m.inner.Next))
 }
 
 // All ranges over frames until the track ends or the loop breaks.
@@ -491,11 +495,7 @@ func (m *GroupConsumer) Sequence() uint64 {
 
 // Next returns the next decoded frame, or (nil, nil) when the group ends.
 func (m *GroupConsumer) Next(ctx context.Context) (*MediaFrame, error) {
-	frame, err := bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
-	if frame == nil || err != nil {
-		return nil, err
-	}
-	return &MediaFrame{Payload: frame.Payload, Timestamp: time.Duration(frame.TimestampUs) * time.Microsecond, Keyframe: frame.Keyframe}, nil
+	return mediaFrame(bridge.Call(ctx, m.inner.Cancel, m.inner.Next))
 }
 
 // All ranges over decoded frames until the group ends or the loop breaks.
