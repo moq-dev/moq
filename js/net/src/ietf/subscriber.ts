@@ -191,6 +191,7 @@ export class Subscriber {
 
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
+	#maxAge: boolean;
 
 	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
 	#activeCount: boolean;
@@ -221,6 +222,7 @@ export class Subscriber {
 		cluster,
 		epoch = false,
 		hidden = false,
+		maxAge = false,
 		activeCount = false,
 		solicit,
 		goaway,
@@ -237,6 +239,8 @@ export class Subscriber {
 		epoch?: boolean;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
+		/** Whether the peer accepts subscriber max age. */
+		maxAge?: boolean;
 		/** Whether both SETUPs declared MoQ Active Count. */
 		activeCount?: boolean;
 		/** What the peer's SETUP declared about being solicited (MoQ Solicit). */
@@ -254,6 +258,7 @@ export class Subscriber {
 		this.#cluster = cluster;
 		this.#epoch = epoch;
 		this.#hidden = hidden;
+		this.#maxAge = maxAge;
 		this.#activeCount = activeCount;
 		this.#solicit = solicit;
 		this.#goaway = goaway;
@@ -805,6 +810,7 @@ export class Subscriber {
 		let trackAlias: bigint;
 		// The SUBSCRIBER_PRIORITY the request went out with.
 		let priority: number;
+		let maxAge: number | undefined;
 		const abandoned = new Error("subscribe abandoned before it was accepted");
 		try {
 			// Returning demand keeps the same setup and its original deadline.
@@ -815,6 +821,7 @@ export class Subscriber {
 					stream = result.stream;
 					trackAlias = result.alias;
 					priority = result.priority;
+					maxAge = result.maxAge;
 					break;
 				}
 				if (demand.closed.peek() === undefined && demand.wanted.peek() !== undefined) continue;
@@ -899,7 +906,7 @@ export class Subscriber {
 				producer.closed.then(() => localEnded),
 				revoked,
 			]);
-			const updates = this.#runUpdates(stream, requestId, producer, priority, unanswered, done);
+			const updates = this.#runUpdates(stream, requestId, producer, priority, maxAge, unanswered, done);
 
 			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
 			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
@@ -1009,6 +1016,7 @@ export class Subscriber {
 		requestId: bigint,
 		producer: track.Producer,
 		sent: number,
+		sentMaxAge: number | undefined,
 		unanswered: Signal<number>,
 		done: Promise<unknown>,
 	): Promise<void> {
@@ -1022,8 +1030,10 @@ export class Subscriber {
 		void stopped.then(() => stop.abort());
 
 		for (;;) {
-			const wanted = toWire(producer.subscription.peek()?.priority ?? 0);
-			if (wanted === sent || unanswered.peek() > 0) {
+			const subscription = producer.subscription.peek();
+			const wanted = toWire(subscription?.priority ?? 0);
+			const wantedMaxAge = this.#maxAge ? (subscription?.maxDelay ?? Number.MAX_SAFE_INTEGER) : undefined;
+			if ((wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
 					disposes.push(
@@ -1047,6 +1057,7 @@ export class Subscriber {
 
 			const parameters = new Parameters();
 			parameters.subscriberPriority = wanted;
+			parameters.maxAge = wantedMaxAge;
 			const update = legacy
 				? new SubscribeUpdate({ requestId, ownRequestId: own, parameters })
 				: new SubscribeUpdate({ requestId: own, parameters });
@@ -1060,6 +1071,7 @@ export class Subscriber {
 				return;
 			}
 			sent = wanted;
+			sentMaxAge = wantedMaxAge;
 			console.debug(`subscribe update: id=${requestId} priority=${wanted}`);
 		}
 	}
@@ -1097,7 +1109,7 @@ export class Subscriber {
 		requestId: bigint,
 		deadline: Deadline,
 		epoch: Epoch.Valid | undefined,
-	): Promise<{ stream: Stream; alias: bigint; priority: number }> {
+	): Promise<{ stream: Stream; alias: bigint; priority: number; maxAge?: number }> {
 		const version = this.#session.version;
 
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
@@ -1122,6 +1134,7 @@ export class Subscriber {
 			trackName: request.name,
 			// Read now, since a subscriber can join while the stream opened. Updates follow it.
 			subscriberPriority: toWire(request.priority),
+			maxAge: this.#maxAge ? (request.subscription.maxDelay ?? 0) : undefined,
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
 			groupOrder: request.subscription.order,
 			// No fill is requested: the fill's fetch stream and the live subscription split
@@ -1204,7 +1217,7 @@ export class Subscriber {
 			throw err;
 		}
 		state.registeredAlias = ok.trackAlias;
-		return { stream: state.stream, alias: ok.trackAlias, priority: msg.subscriberPriority };
+		return { stream: state.stream, alias: ok.trackAlias, priority: msg.subscriberPriority, maxAge: msg.maxAge };
 	}
 
 	/**
