@@ -40,7 +40,7 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) 
 
 /// The next announce event, failing on a hang.
 async fn next_event(announced: &mut announce::Consumer) -> announce::Event {
-	moq_net_sim::timeout(Duration::from_secs(10), announced.next())
+	moq_clock::timeout(Duration::from_secs(10), announced.next())
 		.await
 		.expect("announce hung")
 		.expect("announce ended")
@@ -55,7 +55,7 @@ fn write(track: &track::Producer, tag: &str) {
 
 /// The next frame a subscription delivers, as text.
 async fn read(subscription: &mut track::Subscriber) -> String {
-	let mut group = moq_net_sim::timeout(Duration::from_secs(10), subscription.recv_group())
+	let mut group = moq_clock::timeout(Duration::from_secs(10), subscription.recv_group())
 		.await
 		.expect("subscription hung")
 		.unwrap()
@@ -65,7 +65,7 @@ async fn read(subscription: &mut track::Subscriber) -> String {
 }
 
 async fn subscribe(broadcast: &broadcast::Consumer, name: &str) -> Result<track::Subscriber, Error> {
-	moq_net_sim::timeout(Duration::from_secs(10), broadcast.track(name)?.subscribe(None))
+	moq_clock::timeout(Duration::from_secs(10), broadcast.track(name)?.subscribe(None))
 		.await
 		.expect("subscribe hung")
 }
@@ -103,7 +103,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	// The replacement: the same peer re-announces everything over a second session,
 	// while the first one is still open.
 	let _second = link(version, &publisher, &viewer).await;
-	moq_net_sim::sleep(WITHIN_HOLD).await;
+	moq_clock::sleep(WITHIN_HOLD).await;
 
 	// A request through the old handle right after the replacement is still served.
 	let mut late = subscribe(&old, "audio")
@@ -115,7 +115,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	if epoch.is_some() {
 		// The epoch continues across the replacement: nothing to restart, and the old
 		// handle keeps serving.
-		if let Ok(event) = moq_net_sim::timeout(PAST_HOLD, announced.next()).await {
+		if let Ok(event) = moq_clock::timeout(PAST_HOLD, announced.next()).await {
 			panic!("{version}: an epoch route restarted on replacement: {event:?}");
 		}
 		let mut later = subscribe(&old, "meta").await.unwrap();
@@ -126,7 +126,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 
 	// Without an epoch the replacement is a restart: once the hold releases it, the old
 	// handle refuses new requests, and the restart is already there to follow.
-	moq_net_sim::sleep(PAST_HOLD).await;
+	moq_clock::sleep(PAST_HOLD).await;
 	let Err(err) = subscribe(&old, "meta").await else {
 		panic!("{version}: a retired handle served a request");
 	};
@@ -149,24 +149,122 @@ fn epoch() -> Epoch {
 	"01900000-0000-7000-8000-000000000001".parse().unwrap()
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn epochless_lite06() {
-	moq_net_sim::timeout(TEST_TIMEOUT, replace("moq-lite-06", None))
+	moq_clock::timeout(TEST_TIMEOUT, replace("moq-lite-06", None))
 		.await
 		.expect("timed out");
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn epochless_lite07() {
-	moq_net_sim::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", None))
+	moq_clock::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", None))
 		.await
 		.expect("timed out");
 }
 
 /// Only lite-07 carries the epoch.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn epoch_lite07() {
-	moq_net_sim::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", Some(epoch())))
+	moq_clock::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", Some(epoch())))
 		.await
 		.expect("timed out");
+}
+
+/// moq-transport carries the epoch with the MoQ Epoch extension, from draft-17.
+#[moq_clock::test]
+async fn epoch_ietf() {
+	for version in ["moq-transport-17", "moq-transport-22"] {
+		moq_clock::timeout(TEST_TIMEOUT, replace(version, Some(epoch())))
+			.await
+			.expect("timed out");
+	}
+}
+
+/// Without one, a moq-transport replacement restarts as it does over lite.
+#[moq_clock::test]
+async fn epochless_ietf() {
+	for version in ["moq-transport-22"] {
+		moq_clock::timeout(TEST_TIMEOUT, replace(version, None))
+			.await
+			.expect("timed out");
+	}
+}
+
+/// A route change alone is never fatal, but a dead route is: once an epochless replacement
+/// is announced, a subscription on the old instance keeps going while the old publisher
+/// serves it, and its session closing ends that subscription with an error, never cleanly.
+/// The viewer reads either straight from the publisher or through a relay, and the old
+/// session closes after `wait`: inside the update hold, before the `Restart` is delivered,
+/// or past it.
+async fn route_death(version: &str, relayed: bool, wait: Duration) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let relay = produce_origin(2);
+	let viewer = produce_origin(3);
+
+	let cam = publisher.publish("cam", origin::Route::default()).unwrap();
+	let video = cam.create_track("video", timed()).unwrap();
+
+	let upstream = if relayed { &relay } else { &viewer };
+	let old_session = link(version, &publisher, upstream).await;
+	let _downstream = match relayed {
+		true => Some(link(version, &relay, &viewer).await),
+		false => None,
+	};
+	let mut announced = viewer.consume().announced();
+	next_event(&mut announced).await;
+
+	let old = viewer.consume().request_broadcast("cam", None).await.unwrap();
+	let mut sticky = subscribe(&old, "video").await.unwrap();
+	write(&video, "video:0");
+	assert_eq!(read(&mut sticky).await, "video:0", "{version}");
+
+	let _replacement = link(version, &publisher, upstream).await;
+	moq_clock::sleep(wait).await;
+	write(&video, "video:1");
+	assert_eq!(
+		read(&mut sticky).await,
+		"video:1",
+		"{version}: the replacement cut the old instance off while it served"
+	);
+
+	let _ = old_session.server.close().await;
+	let end = moq_clock::timeout(Duration::from_secs(10), async {
+		loop {
+			match sticky.recv_group().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => return None,
+				Err(err) => return Some(err),
+			}
+		}
+	})
+	.await
+	.expect("the dead route's subscription hung");
+	assert!(
+		end.is_some(),
+		"{version} (relayed: {relayed}): the dead route's subscription ended cleanly"
+	);
+}
+
+#[moq_clock::test]
+async fn route_death_within_hold_errors() {
+	for version in ["moq-lite-06", "moq-lite-07-wip"] {
+		for relayed in [false, true] {
+			moq_clock::timeout(TEST_TIMEOUT, route_death(version, relayed, WITHIN_HOLD))
+				.await
+				.expect("timed out");
+		}
+	}
+}
+
+#[moq_clock::test]
+async fn route_death_past_hold_errors() {
+	for version in ["moq-lite-06", "moq-lite-07-wip"] {
+		for relayed in [false, true] {
+			moq_clock::timeout(TEST_TIMEOUT, route_death(version, relayed, PAST_HOLD))
+				.await
+				.expect("timed out");
+		}
+	}
 }

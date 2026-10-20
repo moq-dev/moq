@@ -30,8 +30,10 @@ pub mod web;
 
 mod driver;
 
-pub use driver::{Connection, Credit, RecvStream, SendStream};
+pub use driver::{Connection, Credit, RecvStream, SendGroup, SendOptions, SendStream};
 pub use endpoint::Endpoint;
+/// The flow-control limits a live connection can change; see [`Connection::set_limits`].
+pub use moq_quic::{Limits, LimitsError};
 
 /// The QUIC payload size every full datagram in a GSO train uses, and the
 /// stride GRO coalesces with.
@@ -178,6 +180,8 @@ pub enum Congestion {
 	/// waiting for loss, which keeps queues short and the send rate steady
 	/// enough for an encoder to track.
 	Delay,
+	/// No congestion control and no pacing, for tests and controlled links.
+	None,
 }
 
 /// Why a connection could not be set up or has ended.
@@ -245,6 +249,12 @@ pub enum Error {
 	/// missing or unwritable, or the writer thread could not be started.
 	#[error("qlog error: {0}")]
 	Qlog(String),
+	/// This endpoint closed the connection locally.
+	#[error("locally closed")]
+	Closed,
+	/// The flow-control limits are ones a peer would refuse, so none were applied.
+	#[error("invalid quic limits: {0}")]
+	Limits(#[from] LimitsError),
 }
 
 impl web_transport_trait::Error for Error {

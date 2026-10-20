@@ -117,7 +117,7 @@ async fn vulkan_cuda_convert_resize_encode() {
 	// convert and scale fine, there is just no encoder to hand them to.
 	let size = Size::new(320, 192);
 	let sd = Size::new(160, 96);
-	let color = Color::Bt709Limited;
+	let color = Color::BT709;
 	let mut producer = Producer::new(size).expect("no Vulkan NVIDIA device: this opt-in test needs one");
 	let converter = Converter::new(0, color, NonZeroUsize::new(3).unwrap()).expect("CUDA converter");
 	assert_eq!(converter.color(), color);
@@ -359,7 +359,7 @@ async fn vulkan_cuda_three_view_workload() {
 	const TICKS: u64 = 90;
 	let size = Size::new(1280, 720);
 	let sd = Size::new(640, 360);
-	let color = Color::Bt709Limited;
+	let color = Color::BT709;
 	let tick = Duration::from_nanos(1_000_000_000 / 30);
 
 	// One picture per tick phase, so the encoders see real motion instead of a
@@ -506,8 +506,8 @@ fn auto_external_captures_are_distinguishable() {
 	let size = Size::new(320, 192);
 	for output in [size, Size::new(160, 96)] {
 		for capture in 1..6 {
-			let previous = expected(size, capture_shift(size, capture - 1), Color::Bt709Limited, output);
-			let current = expected(size, capture_shift(size, capture), Color::Bt709Limited, output);
+			let previous = expected(size, capture_shift(size, capture - 1), Color::BT709, output);
+			let current = expected(size, capture_shift(size, capture), Color::BT709, output);
 			for (plane, a, b) in [
 				("y", current.y(), previous.y()),
 				("u", current.u(), previous.u()),
@@ -532,7 +532,7 @@ fn auto_external_captures_are_distinguishable() {
 #[ignore = "requires a Linux NVIDIA GPU with Vulkan/CUDA external memory and NVENC"]
 async fn vulkan_cuda_auto_external_encode() {
 	let size = Size::new(320, 192);
-	let color = Color::Bt709Limited;
+	let color = Color::BT709;
 	let mut producer = Producer::new(size).expect("NVIDIA Vulkan device required by opted-in test");
 	let device = producer.contract(Format::Rgba8).device;
 	let decode = crate::decode::Config {

@@ -79,6 +79,11 @@ Direction to settle in the draft first, then the code:
   presents send order as unrelated.
 - A per-session cap on distinct ranks is a scheduling detail; whatever replaces
   the 255-entry sort must stay O(log n) per group under chat-shaped churn.
+- moq-quic already has the fair tier: send domains sharing bytes by deficit
+  round robin, with groups inside them. They are crate-private (exercised only
+  by its tests) until this quest gives them a consumer. Exposing them also
+  gives moq-net's `poll::Session::send_group(priority)` a domain, so land that
+  in the same trait break and implementers break once.
 
 Signed priority, decided with the maintainer:
 
@@ -118,11 +123,6 @@ Public API impact: `u8` priority fields become `i8` in every language, and
 `Subscribe.priority` on a cluster session changes meaning. Wire impact: none
 in format, but the default byte moves from 127 to 128 on moq-lite and from 128
 to 127 on IETF. Report both with the draft change.
-
-## Required
-
-- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - the fair
-  tier the broadcast domains and subscription send groups ride on
 
 ## Related
 

@@ -1,0 +1,19 @@
+{
+  "transport": {
+    "rtt": 20,
+    "rate": 8000000,
+    "lostBytes": 300,
+    "lostPackets": 2,
+    "age": 5
+  },
+  "renditions": {
+    "hd": {
+      "frames": 900,
+      "bytes": 1048576,
+      "keyframes": 30,
+      "skipped": 4,
+      "bitrate": 6000000
+    },
+    "reset": {}
+  }
+}

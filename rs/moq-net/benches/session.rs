@@ -29,7 +29,7 @@
 //! elements/s across a sweep means the cost per track stays constant.
 //!
 //! `session_idle` times one second of idle viewer sessions, swept over sessions.
-//! Lite viewers hold PROBE open; IETF sessions demand their local transport estimate.
+//! Sweep held consumers per session too: only held consumers request PROBE or transport estimates.
 //! Nothing else happens, so it measures the sessions' own work. Paused time skips waiting.
 //!
 //! `session_churn_*` times one request opened and closed by a session that already
@@ -41,6 +41,9 @@
 //! the protocol and model code, never scheduling across threads.
 //!
 //! Run with `cargo bench -p moq-net --bench session`.
+
+// Custom timings measure the real time the work took, not the ambient clock.
+#![allow(clippy::disallowed_methods)]
 
 #[path = "../tests/integration/support/mod.rs"]
 mod support;
@@ -97,11 +100,15 @@ struct Shape {
 	watch: usize,
 	/// Payload bytes per frame.
 	frame: usize,
+	/// Frames in a complete group.
+	group_frames: usize,
 	/// Write one frame per round, as a live source does, instead of a whole group.
 	paced: bool,
 	/// Whole groups each watched broadcast writes per round, so a serve loop finds a
 	/// backlog ready: the group rate a round stands in for.
 	burst: usize,
+	/// Cached groups per track before a join, whose older groups the live budget skips.
+	history: usize,
 	/// Bytes queued before a mock stream applies backpressure.
 	window: usize,
 	/// Read each group via a fresh FETCH rather than a live subscription.
@@ -118,8 +125,10 @@ impl Shape {
 		viewers: 16,
 		watch: 1,
 		frame: 64,
+		group_frames: FRAMES,
 		paced: false,
 		burst: 1,
+		history: 1,
 		window: 1024 * 1024,
 		fetch: false,
 	};
@@ -136,7 +145,7 @@ impl Shape {
 
 	/// Frames each group gets per round.
 	fn frames(&self) -> usize {
-		if self.paced { 1 } else { FRAMES }
+		if self.paced { 1 } else { self.group_frames }
 	}
 
 	/// Payload bytes every viewer reads in one round.
@@ -146,13 +155,18 @@ impl Shape {
 
 	fn id(&self, version: &str) -> String {
 		format!(
-			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}",
+			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}{}{}",
 			self.relays,
 			self.publishers,
 			self.broadcasts,
 			self.viewers,
 			self.watch,
 			self.frame,
+			if self.group_frames != FRAMES {
+				format!("/frames={}", self.group_frames)
+			} else {
+				String::new()
+			},
 			if self.paced {
 				"/paced".to_string()
 			} else {
@@ -169,6 +183,11 @@ impl Shape {
 				String::new()
 			},
 			if self.fetch { "/fetch" } else { "" },
+			if self.history > 1 {
+				format!("/history={}", self.history)
+			} else {
+				String::new()
+			},
 		)
 	}
 }
@@ -257,12 +276,13 @@ impl MeasurementClock {
 	}
 }
 
-fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) {
+fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) -> u64 {
 	let mut group = track.append_group().unwrap();
 	for _ in 0..frames {
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 	}
 	group.finish().unwrap();
+	group.sequence
 }
 
 /// Read one whole group, returning its payload bytes so skipped work can't look
@@ -506,7 +526,7 @@ impl Room {
 			.map(|viewer| viewer._pair.server_transport.blocked_writes())
 			.sum();
 		// Warm every path so the timed rounds skip first-group setup.
-		for _ in 0..FRAMES / shape.frames() {
+		for _ in 0..shape.group_frames / shape.frames() {
 			room.tick();
 			room.round().await;
 		}
@@ -521,7 +541,7 @@ impl Room {
 			room.tick();
 			room.round().await;
 		}
-		if shape.window < shape.frame * FRAMES {
+		if shape.window < shape.frame * shape.group_frames {
 			let blocked: usize = room
 				.viewers
 				.iter()
@@ -554,7 +574,7 @@ impl Room {
 		if self.shape.paced {
 			return self.paced_round().await;
 		}
-		let constrained = self.shape.window < self.shape.frame * FRAMES;
+		let constrained = self.shape.window < self.shape.frame * self.shape.group_frames;
 		if constrained {
 			for viewer in &mut self.viewers {
 				viewer.blocked = viewer._pair.server_transport.blocked_writes();
@@ -564,9 +584,11 @@ impl Room {
 				}
 			}
 		}
+		let mut newest = vec![0; self.cluster.tracks.len()];
 		for &broadcast in &self.watched {
 			for _ in 0..self.shape.burst {
-				write_group(&self.cluster.tracks[broadcast], &self.payload, FRAMES);
+				newest[broadcast] =
+					write_group(&self.cluster.tracks[broadcast], &self.payload, self.shape.group_frames);
 			}
 		}
 		let mut bytes = 0;
@@ -577,8 +599,7 @@ impl Room {
 				let read = async {
 					let mut bytes = 0;
 					for (broadcast, track) in &viewer.fetches {
-						let sequence = self.cluster.tracks[*broadcast].latest().unwrap();
-						let mut group = track.fetch_group(sequence, None).await.unwrap();
+						let mut group = track.fetch_group(newest[*broadcast], None).await.unwrap();
 						while let Some(frame) = group.read_frame().await.unwrap() {
 							bytes += frame.payload.len();
 						}
@@ -604,9 +625,9 @@ impl Room {
 	}
 
 	/// One frame into every watched group and one frame out to every viewer, so each
-	/// hop serves a group frame by frame across [`FRAMES`] rounds.
+	/// hop serves a group frame by frame across its configured frame count.
 	async fn paced_round(&mut self) {
-		let last = self.written % FRAMES == FRAMES - 1;
+		let last = self.written % self.shape.group_frames == self.shape.group_frames - 1;
 		self.written += 1;
 
 		for (writing, &broadcast) in self.writing.iter_mut().zip(&self.watched) {
@@ -708,6 +729,25 @@ fn group_cost(c: &mut Criterion) {
 	delivery(c, "group_cost", shapes);
 }
 
+/// Cached FETCH write cost across independent publishers, viewers, and group lengths.
+fn fetch_frames(c: &mut Criterion) {
+	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+		return;
+	}
+	let shapes = [1, 4].into_iter().flat_map(|publishers| {
+		[1, 16].into_iter().flat_map(move |viewers| {
+			[4, 256].map(move |group_frames| Shape {
+				publishers,
+				viewers,
+				group_frames,
+				fetch: true,
+				..Shape::BASE
+			})
+		})
+	});
+	delivery(c, "fetch_frames", shapes);
+}
+
 fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {
 	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
@@ -721,7 +761,15 @@ fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) 
 						let cluster = Cluster::new(version, *shape).await;
 						let payload = Bytes::from(vec![0; shape.frame]);
 						for track in &cluster.tracks {
-							write_group(track, &payload, FRAMES);
+							for sequence in 0..shape.history {
+								let mut group = track.append_group().unwrap();
+								for _ in 0..shape.group_frames {
+									group
+										.write_frame(Timestamp::from_millis(sequence as u64).unwrap(), payload.clone())
+										.unwrap();
+								}
+								group.finish().unwrap();
+							}
 						}
 						cluster
 					})
@@ -742,7 +790,7 @@ fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) 
 							viewer.watch(&path(broadcast), &[TRACK], None).await;
 							let bytes = read_group(&mut viewer.subscribers[0]).await;
 							elapsed += start.elapsed();
-							assert_eq!(bytes, FRAMES * shape.frame);
+							assert_eq!(bytes, shape.group_frames * shape.frame);
 							// Teardown is a leaving viewer's cost, not a joining one's.
 							drop(viewer);
 							tokio::task::yield_now().await;
@@ -901,7 +949,7 @@ fn allocations() {
 				rt.block_on(room.measure(ROUNDS as u64));
 				COUNTING.store(false, Ordering::Relaxed);
 
-				let groups = ROUNDS * shape.viewers * shape.watch * shape.frames() / FRAMES;
+				let groups = ROUNDS * shape.viewers * shape.watch * shape.frames() / shape.group_frames;
 				let allocations = ALLOCATIONS.load(Ordering::Relaxed) as f64 / groups as f64;
 				println!("{}: {allocations:.1} allocations per viewer-group", shape.id(version));
 			}
@@ -984,10 +1032,10 @@ impl ChurnRoom {
 			let track = self.broadcasts[session].track(&format!("churn{session}")).unwrap();
 			let subscriber = track.subscribe(None).await.unwrap();
 			// The relay saw the request, rather than a cached track answering it locally.
-			self.churn[session].demand().used().await.unwrap();
+			support::wanted(self.churn[session].demand()).await.unwrap();
 			drop(subscriber);
 			drop(track);
-			self.churn[session].demand().unused().await.unwrap();
+			support::unwanted(self.churn[session].demand()).await.unwrap();
 		}
 		start.elapsed()
 	}
@@ -1012,11 +1060,11 @@ fn churn(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Churn>)
 
 /// Idle sessions to one relay, holding PROBE or their local transport estimate.
 struct IdleRoom {
-	_viewers: Vec<(MockPair, moq_net::bandwidth::Consumer)>,
+	_viewers: Vec<(MockPair, Vec<moq_net::bandwidth::Consumer>)>,
 }
 
 impl IdleRoom {
-	async fn new(version: &str, sessions: usize) -> Self {
+	async fn new(version: &str, sessions: usize, consumers: usize) -> Self {
 		let (relay, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
 		support::harness::spawn(driver);
 		let mut viewers = Vec::new();
@@ -1029,13 +1077,17 @@ impl IdleRoom {
 				rtt: Some(Duration::from_millis(40)),
 			};
 			let pair = connect_mock(options).await;
-			let mut probe = if version.parse::<Version>().unwrap().is_lite() {
-				pair.client.recv_bandwidth().unwrap()
-			} else {
-				pair.server.send_bandwidth().unwrap()
-			};
-			probe.changed().await.unwrap();
-			viewers.push((pair, probe));
+			let mut probes = Vec::new();
+			for _ in 0..consumers {
+				let mut probe = if version.parse::<Version>().unwrap().is_lite() {
+					pair.client.recv_bandwidth().unwrap()
+				} else {
+					pair.server.send_bandwidth().unwrap()
+				};
+				probe.changed().await.unwrap();
+				probes.push(probe);
+			}
+			viewers.push((pair, probes));
 		}
 		Self { _viewers: viewers }
 	}
@@ -1044,7 +1096,7 @@ impl IdleRoom {
 	async fn measure(&self, iters: u64) -> Duration {
 		let start = Instant::now();
 		for _ in 0..iters {
-			tokio::time::sleep(Duration::from_secs(1)).await;
+			moq_clock::sleep(Duration::from_secs(1)).await;
 		}
 		start.elapsed()
 	}
@@ -1054,19 +1106,21 @@ fn idle(c: &mut Criterion) {
 	let mut group = c.benchmark_group("session_idle");
 	for version in ["moq-lite-06", "moq-transport-16", "moq-transport-22"] {
 		for sessions in [1, 64, 1024] {
-			group.throughput(Throughput::Elements(sessions as u64));
-			// Its own runtime, so its paused clock and sessions end with the shape.
-			let rt = runtime();
-			let mut room = None;
-			group.bench_function(format!("{version}/sessions={sessions}"), |b| {
-				let room = room.get_or_insert_with(|| {
-					rt.block_on(async {
-						tokio::time::pause();
-						IdleRoom::new(version, sessions).await
-					})
+			for consumers in [0, 1, 8] {
+				group.throughput(Throughput::Elements(sessions as u64));
+				// Its own runtime, so its paused clock and sessions end with the shape.
+				let rt = runtime();
+				let mut room = None;
+				group.bench_function(format!("{version}/sessions={sessions}/consumers={consumers}"), |b| {
+					let room = room.get_or_insert_with(|| {
+						rt.block_on(async {
+							tokio::time::pause();
+							IdleRoom::new(version, sessions, consumers).await
+						})
+					});
+					b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 				});
-				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
-			});
+			}
 		}
 	}
 	group.finish();
@@ -1101,7 +1155,7 @@ fn withdrawal(c: &mut Criterion) {
 										.unwrap()
 								})
 								.collect();
-							while tokio::time::timeout(Duration::from_secs(1), announced.next())
+							while moq_clock::timeout(Duration::from_secs(1), announced.next())
 								.await
 								.is_ok()
 							{}
@@ -1109,7 +1163,7 @@ fn withdrawal(c: &mut Criterion) {
 							drop(live);
 							let mut retracted = 0;
 							while let Ok(Some(event)) =
-								tokio::time::timeout(Duration::from_secs(1), announced.next()).await
+								moq_clock::timeout(Duration::from_secs(1), announced.next()).await
 							{
 								assert!(matches!(event, moq_net::announce::Event::End(_)), "{event:?}");
 								retracted += 1;
@@ -1217,6 +1271,20 @@ fn session(c: &mut Criterion) {
 			})
 		}),
 	);
+	// A live join skips a cached prefix. Sweep publishers against that prefix so
+	// resolving one start cannot hide a scan of unrelated publishers or group IDs.
+	join(
+		c,
+		"stale",
+		[1, 8, 32].into_iter().flat_map(|publishers| {
+			[1, 64, 1024].map(move |history| Shape {
+				publishers,
+				history,
+				..base
+			})
+		}),
+	);
+
 	join(c, "relays", [1, 2, 8].map(|relays| Shape { relays, ..base }));
 
 	churn(c, "sessions", [1, 16, 128].map(|sessions| Churn { sessions, held: 16 }));
@@ -1270,5 +1338,5 @@ fn session(c: &mut Criterion) {
 	);
 }
 
-criterion_group!(benches, session, group_cost, withdrawal, idle);
+criterion_group!(benches, session, group_cost, fetch_frames, withdrawal, idle);
 criterion_main!(benches);

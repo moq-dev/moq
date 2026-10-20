@@ -10,15 +10,27 @@
 //! - Async code reads the ambient clock: [`now`], [`wall`], [`sleep`],
 //!   [`sleep_until`], [`timeout`], [`interval`], and [`drive`] resolve to the
 //!   current runtime's clock. That is tokio's (paused tokio included) on native,
-//!   `performance.now()` and `setTimeout` in the browser, and the simulator inside
-//!   `sim::run`.
+//!   `performance.now()` and `setTimeout` in the browser, the simulator inside
+//!   `sim::run`, and a [`Deadlines`] queue on a thread that [entered](Deadlines::enter)
+//!   it, which is how a runtime that reads the host clock itself (an io_uring
+//!   worker) becomes a backend.
+//!
+//! The `manual` feature adds `Manual::install`, which makes a [`Manual`] clock
+//! the ambient clock of one tokio runtime. It moves only when told to, never on
+//! idle, so a test harness outside the runtime decides when native time passes.
 //!
 //! The `sim` feature adds the `sim` module, a deterministic executor whose clock
 //! starts at [`Instant::ZERO`], and the `#[moq_clock::test]` attribute that runs an
 //! `async fn` test on it. Enable it for dev-dependencies only.
 
+#![warn(missing_docs)]
+
 mod deadline;
+#[cfg(feature = "manual")]
+mod installed;
 mod instant;
+#[cfg(all(feature = "manual", target_arch = "wasm32", not(target_os = "wasi")))]
+compile_error!("the `manual` feature installs on a tokio runtime, which the browser has none of");
 mod manual;
 mod runtime;
 #[cfg(feature = "sim")]
@@ -26,7 +38,9 @@ pub mod sim;
 mod timer;
 mod wall;
 
-pub use deadline::{Deadline, Deadlines};
+pub use deadline::{Deadline, Deadlines, Entered};
+#[cfg(feature = "manual")]
+pub use installed::Installed;
 pub use instant::Instant;
 pub use manual::Manual;
 pub use timer::{Elapsed, Interval, MissedTickBehavior, Sleep, Timeout, drive, interval, sleep, sleep_until, timeout};
@@ -42,9 +56,16 @@ extern crate self as moq_clock;
 
 /// The current instant on the ambient clock.
 pub fn now() -> Instant {
+	if let Some(now) = deadline::now() {
+		return now;
+	}
 	#[cfg(feature = "sim")]
 	if let Some(now) = sim::now() {
 		return now;
+	}
+	#[cfg(feature = "manual")]
+	if let Some(clock) = installed::current() {
+		return clock.now();
 	}
 	runtime::now()
 }
@@ -57,9 +78,36 @@ pub fn now() -> Instant {
 ///
 /// When the host's wall clock reads before 1970.
 pub fn wall() -> Wall {
+	#[cfg(feature = "manual")]
+	if let Some(clock) = deadline::installed() {
+		return clock.wall();
+	}
 	#[cfg(feature = "sim")]
 	if let Some(wall) = sim::wall() {
 		return wall;
 	}
+	#[cfg(feature = "manual")]
+	if let Some(clock) = installed::current() {
+		return clock.wall();
+	}
 	runtime::wall()
+}
+
+/// The first monotonic and wall readings observed on the ambient clock.
+///
+/// Unlike [`wall`], the wall half does not change after a clock correction.
+pub fn anchor() -> (Instant, Wall) {
+	#[cfg(feature = "manual")]
+	if let Some(clock) = deadline::installed() {
+		return clock.anchor();
+	}
+	#[cfg(feature = "sim")]
+	if let Some(anchor) = sim::anchor() {
+		return anchor;
+	}
+	#[cfg(feature = "manual")]
+	if let Some(clock) = installed::current() {
+		return clock.anchor();
+	}
+	runtime::anchor()
 }

@@ -80,10 +80,9 @@ fn steady_state_sends_do_not_allocate() {
 			// Grow every reusable pool before observing the steady state.
 			for _ in 0..100 {
 				let mut tx = socket.acquire().await.expect("warmup acquire");
-				tx[..4800].fill(0x5a);
+				tx.resize(4800, 0x5a);
 				tx.send(udp::Transmit {
 					to,
-					len: 4800,
 					segment: 1200,
 					ecn: None,
 				})
@@ -101,10 +100,9 @@ fn steady_state_sends_do_not_allocate() {
 				acquires += counted().0;
 
 				count_from_zero();
-				tx[..4800].fill(0x5a);
+				tx.resize(4800, 0x5a);
 				let sent = tx.send(udp::Transmit {
 					to,
-					len: 4800,
 					segment: 1200,
 					ecn: None,
 				});

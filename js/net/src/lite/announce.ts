@@ -13,6 +13,7 @@ import {
 	hasExcludeHop,
 	hasHidden,
 	hasRouteCost,
+	hasSynced,
 	Version,
 } from "./version.ts";
 
@@ -30,8 +31,7 @@ const ANNOUNCE_END = 1;
 const ANNOUNCE_UPDATE = 2;
 // lite-07: another publisher instance replaces the advertisement.
 const ANNOUNCE_RESTART = 3;
-
-export type { Cost };
+const SYNCED = 4;
 
 /**
  * Lite-07: copy `keep` path segments (from the head) or hops (from the tail) of the
@@ -78,7 +78,9 @@ export type AnnounceBroadcast =
 	 * instance. The id stays live. */
 	| { status: "restart"; id: bigint; epoch?: Epoch.Valid; hops: Hop[]; cost?: Cost; hopBase?: Base }
 	/** An unknown lite-06+ announce type, skipped by length. Does not assign an id. */
-	| { status: "skipped" };
+	| { status: "skipped" }
+	/** Lite07+: the initial set has been delivered. */
+	| { status: "synced" };
 
 // Both wire rules on a hop chain, applied to what we send and to what we receive: a
 // chain that revisits a hop looped, so neither forwarding it nor subscribing through it
@@ -236,6 +238,8 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
 			break;
+		case "synced":
+			break;
 		case "ended":
 			// The pre-lite-06 path-form retraction has no place on lite-06.
 			throw new Error("ended-by-path not supported for this version");
@@ -257,6 +261,9 @@ function announce06Type(msg: AnnounceBroadcast, version: Version): number {
 			// Older versions send an end and a start instead.
 			if (!hasAnnounceRestart(version)) throw new Error("announce restart not supported for this version");
 			return ANNOUNCE_RESTART;
+		case "synced":
+			if (!hasSynced(version)) throw new Error("synced not supported for this version");
+			return SYNCED;
 		case "ended":
 			throw new Error("ended-by-path not supported for this version");
 		case "skipped":
@@ -272,6 +279,9 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 			const hops = await decodeHopsBlock(r, version);
 			return { status: "active", ...path, epoch, ...hops, cost: await decodeRouteCost(r, version) };
 		}
+		case SYNCED:
+			if (!hasSynced(version)) break;
+			return { status: "synced" };
 		case ANNOUNCE_END:
 			return { status: "endedId", id: await r.u62() };
 		case ANNOUNCE_UPDATE: {
@@ -308,6 +318,7 @@ async function encodeLegacyBody(w: Writer, msg: AnnounceBroadcast, version: Vers
 			await w.string(Path.encode(msg.suffix));
 			await encodeHops(w, version, []);
 			break;
+		case "synced":
 		case "endedId":
 		case "update":
 		case "restart":
@@ -528,8 +539,8 @@ export class AnnounceInit {
 ///
 /// `origin` is the responder's Hop ID, which the subscriber stamps onto each
 /// announce's hop chain (the publisher no longer stamps itself), or the reserved
-/// {@link UNKNOWN_HOP} when the responder has no identity to give. `active` is
-/// the number of initial Announce messages that follow immediately.
+/// {@link UNKNOWN_HOP} when the responder has no identity to give. Lite05/06
+/// carry `active`, the initial start count; lite07 uses SYNCED instead.
 export class AnnounceOk {
 	hop: Hop;
 	active: number;
@@ -545,27 +556,27 @@ export class AnnounceOk {
 		}
 	}
 
-	async #encode(w: Writer) {
+	async #encode(w: Writer, version: Version) {
 		await w.u62(this.hop);
-		await w.u53(this.active);
+		if (!hasSynced(version)) await w.u53(this.active);
 	}
 
-	static async #decode(r: Reader): Promise<AnnounceOk> {
+	static async #decode(r: Reader, version: Version): Promise<AnnounceOk> {
 		// The draft reserves 0 for "unknown": the responder was never assigned an id, or
 		// withholds it to obscure its routing. It names nobody, so callers must not stamp
 		// it onto a hop chain, but it is a legal message and not grounds to drop the stream.
 		const origin = HopSchema.parse(await r.u62());
-		const active = await r.u53();
+		const active = hasSynced(version) ? 0 : await r.u53();
 		return new AnnounceOk(origin, active);
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		AnnounceOk.#guard(version);
-		return Message.encode(w, this.#encode.bind(this));
+		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 
 	static async decode(r: Reader, version: Version): Promise<AnnounceOk> {
 		AnnounceOk.#guard(version);
-		return Message.decode(r, AnnounceOk.#decode);
+		return Message.decode(r, (r) => AnnounceOk.#decode(r, version));
 	}
 }

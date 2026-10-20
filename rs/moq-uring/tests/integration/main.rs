@@ -5,6 +5,10 @@
 //! `allocations.rs` stays apart because its counting global allocator would
 //! apply to every test in the binary.
 
+// `transport` includes the adapter source, which names `crate::quic`.
+#[cfg(all(target_os = "linux", feature = "quic"))]
+use moq_uring::quic;
+
 mod credit;
 mod echo;
 mod ecn;

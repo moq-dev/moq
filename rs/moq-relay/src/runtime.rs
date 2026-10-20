@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// How the relay lays its QUIC work out over threads.
-#[derive(usage::Args, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -38,7 +38,7 @@ pub struct Config {
 	///
 	/// Each worker owns a `SINGLE_ISSUER` ring, batched UDP (multishot receive
 	/// with `UDP_GRO`, `UDP_SEGMENT` send), userspace timers, and a local task
-	/// set; sessions are moq-lite only (native raw QUIC and browser
+	/// set; sessions get every configured version (native raw QUIC and browser
 	/// WebTransport alike), and everything else (HTTP, WebSocket, cluster
 	/// dials, stats) stays on the shared runtime. Requires `runtime-workers`,
 	/// Linux 6.12+, and refuses to start anywhere it cannot deliver.

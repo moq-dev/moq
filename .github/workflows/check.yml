@@ -4,11 +4,17 @@ permissions:
   id-token: write
   contents: read
 
+# The merge queue is the gate for main: its PRs report both jobs skipped, which
+# satisfies the required names, and contributors run `just ci` locally instead.
+# Release has no queue, so its PRs run both jobs over every package (`just gate`,
+# via CI_BASE=--all): the diff-scoped queue can let a break into main, but none
+# may reach a release.
 on:
   pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
+    # `closed` only cancels an in-flight run. `edited` runs the jobs when a main
+    # PR is retargeted to release. Any edit reruns them, since a skipped rerun
+    # would post a passing context over a failed one; on main PRs that is free.
+    types: [opened, synchronize, reopened, edited, closed]
   merge_group:
     types: [checks_requested]
 
@@ -24,10 +30,13 @@ jobs:
   # runs the other lints, docs, and distinct feature/target builds in parallel.
   check:
     name: Check
-    # Skip the actual work on close/merge: this run exists only to cancel the
-    # superseded in-flight build via the concurrency group above.
-    if: github.event.action != 'closed'
-    runs-on: ubuntu-24.04-arm
+    # A close/merge run exists only to cancel the superseded in-flight build via
+    # the concurrency group above.
+    if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
+    # Leave the variable unset until the local runner is online and verified.
+    runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 60
 
@@ -47,55 +56,43 @@ jobs:
         id: scope
         run: just ci-select check "$CI_BASE" >> "$GITHUB_OUTPUT"
         env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        if: steps.scope.outputs.needed == 'true'
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter. `nixConfig` in flake.nix is
-          # untrusted by default, so nix logs "ignoring untrusted flake
-          # configuration setting 'extra-substituters'" and rebuilds from
-          # source anything missing from the public nixpkgs cache. That was
-          # costing 678s per job for uniffi-bindgen-go alone, in every job that
-          # enters the dev shell.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
+        if: steps.scope.outputs.needed == 'true' && runner.environment != 'self-hosted'
       - uses: DeterminateSystems/flake-checker-action@786422608c7bded2bbc9741ad9f91356842bf520 # main
         if: steps.scope.outputs.needed == 'true'
 
-      # cache.yml warms the default-branch store on `main`. Pull requests restore
-      # it; the action refuses to publish from a pull request, and Actions would
-      # scope such an entry to the PR's own branch anyway, where no later PR
-      # could read it while it ate the repository's 10 GB budget. A selection
-      # of lints alone compiles no Rust, so it skips the restore.
+      # The merge queue writes what it compiles, so the cache follows what lands
+      # on `main` without a second build after it; release pull requests read.
+      # A selection of lints alone compiles no Rust, so it skips the cache.
       - name: Rust cache
         if: steps.scope.outputs.rust == 'true'
         uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
-      # The same recipe a developer runs locally. It diffs against
-      # the merge group base SHA (or origin/$GITHUB_BASE_REF for a PR) and touches
-      # only the changed packages plus their dependents, so a one-crate PR compiles one crate and a
-      # quest-only PR runs only the lints. The pre-setup query and execution use
-      # the same impact map in sh/dispatch.sh; a Test job with no work ends after
-      # the query while Check keeps its selected repository-wide lints.
-      #
-      # MOQ_STRICT turns every "tool missing, skipping" guard into an error.
-      # Locally an absent formatter means less gets checked; here it would mean
-      # a green run that checked nothing, which is the failure mode worth
-      # spending a preflight on.
+      # Half of the `just ci` a contributor runs before pushing, with the same
+      # MOQ_STRICT and nextest profile. In the queue it diffs against the merge
+      # group base SHA and touches only the changed packages plus their
+      # dependents, so a one-crate PR compiles one crate and a quest-only PR
+      # runs only the lints; a release PR runs everything. The pre-setup query and execution
+      # use the same impact map in sh/dispatch.sh; a Test job with no work ends
+      # after the query while Check keeps its selected repository-wide lints.
       - name: Check
         if: steps.scope.outputs.needed == 'true'
         run: nix develop --command just ci check "$CI_BASE"
         env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
-          MOQ_STRICT: 1
+          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
   test:
     name: Test
-    if: github.event.action != 'closed'
-    runs-on: ubuntu-24.04-arm
+    if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
+    # Leave the variable unset until the local runner is online and verified.
+    runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 60
 
     steps:
@@ -114,33 +111,21 @@ jobs:
         id: scope
         run: just ci-select test "$CI_BASE" >> "$GITHUB_OUTPUT"
         env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
+          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        if: steps.scope.outputs.needed == 'true'
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter. `nixConfig` in flake.nix is
-          # untrusted by default, so nix logs "ignoring untrusted flake
-          # configuration setting 'extra-substituters'" and rebuilds from
-          # source anything missing from the public nixpkgs cache. That was
-          # costing 678s per job for uniffi-bindgen-go alone, in every job that
-          # enters the dev shell.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
+        if: steps.scope.outputs.needed == 'true' && runner.environment != 'self-hosted'
 
-      # Restore only, and only for selected Rust, same as the `check` job above.
+      # Reads and writes like the `check` job above.
       - name: Rust cache
         if: steps.scope.outputs.rust == 'true'
         uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
-      # NEXTEST_PROFILE picks up the longer hang timeout in .config/nextest.toml;
-      # without it a runner under load could trip the local one.
       - name: Test
         if: steps.scope.outputs.needed == 'true'
         run: nix develop --command just ci test "$CI_BASE"
         env:
-          CI_BASE: ${{ github.event.merge_group.base_sha }}
-          MOQ_STRICT: 1
-          NEXTEST_PROFILE: ci
+          CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}

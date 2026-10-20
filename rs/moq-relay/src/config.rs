@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::{auth, cache, cluster, internal, stats, web};
@@ -7,7 +8,7 @@ use crate::{auth, cache, cluster, internal, stats, web};
 /// Loadable from CLI arguments, environment variables, or a TOML file.
 /// Precedence is CLI > env > file > defaults.
 ///
-/// `usage::Args` rather than `usage::Cli` on purpose: the program-level parts (a
+/// `usage_rs::Args` rather than `usage_rs::Cli` on purpose: the program-level parts (a
 /// name, a version, the completion command) belong to whichever binary owns the
 /// process, and a `Cli` cannot be `#[usage(flatten)]`ed into another one. Keeping
 /// them off this type is what lets an embedder put the relay's whole flag surface
@@ -15,7 +16,7 @@ use crate::{auth, cache, cluster, internal, stats, web};
 /// re-declaring it and drifting on every flag added here. This binary wraps it in
 /// a private `Cli` that adds those program-level parts; [`spec`] exposes the
 /// resulting command line.
-#[derive(usage::Args, Clone, Debug, Deserialize, Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -80,6 +81,11 @@ pub struct Config {
 	#[serde(default)]
 	pub web: web::Config,
 
+	/// Automatic certificates from an ACME directory. Disabled unless `acme.domains` is set.
+	#[usage(flatten)]
+	#[serde(default)]
+	pub acme: crate::acme::Config,
+
 	/// Optional public STUN Binding listener for application-selected ICE servers.
 	#[usage(flatten)]
 	#[serde(default)]
@@ -123,13 +129,13 @@ pub struct Config {
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
-	#[usage(value_hint = usage::ValueHint::FilePath, extensions("toml"))]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("toml"))]
 	pub file: Option<String>,
 
 	/// Provenance from the last load, skipped in TOML.
 	#[usage(skip)]
 	#[serde(skip)]
-	origins: Option<usage::config::Resolved>,
+	origins: Option<usage_rs::config::Resolved>,
 
 	/// Iroh specific configuration, used for both a client and server.
 	#[usage(flatten)]
@@ -153,6 +159,7 @@ impl Default for Config {
 			cluster: Default::default(),
 			auth: Default::default(),
 			web: Default::default(),
+			acme: Default::default(),
 			stun: Default::default(),
 			stats: Default::default(),
 			cache: Default::default(),
@@ -180,7 +187,7 @@ impl Default for Config {
 // binary: an embedder declares its own and flattens `Config` into it, so nothing
 // outside needs to name this one. What callers do need -- the program's spec,
 // for completions, docs, and the released-flag test -- is `spec`.
-#[derive(usage::Cli, Clone, Debug)]
+#[derive(usage_rs::Cli, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-relay", version = env!("CARGO_PKG_VERSION"))]
 #[usage(completion, settings)]
@@ -196,7 +203,7 @@ struct Cli {
 /// the PROGRAM's, and `Config` is a composable fragment -- an embedder that
 /// flattens it has its own spec, so `Config::spec()` would hand back the wrong
 /// one and read as though it were theirs.
-pub fn spec() -> &'static usage::spec::Spec<'static> {
+pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
 	Cli::spec()
 }
 
@@ -261,7 +268,7 @@ impl Config {
 				anyhow::bail!("{}", answer.message());
 			}
 		};
-		let env = usage::config::EnvLayer::from_process();
+		let env = usage_rs::config::EnvLayer::from_process();
 		let file_path = cli.config.file.clone();
 		let file_body = file_path
 			.as_ref()
@@ -289,8 +296,8 @@ impl Config {
 	/// its `relay` field. Other CLI-only fields remain untouched.
 	pub fn merge_into(
 		&mut self,
-		cli: &usage::config::CliLayer,
-		env: &usage::config::EnvLayer,
+		cli: &usage_rs::config::CliLayer,
+		env: &usage_rs::config::EnvLayer,
 		file: Option<moq_tokio::cli::FileSource<'_>>,
 	) -> anyhow::Result<()> {
 		#[cfg(not(feature = "iroh"))]
@@ -328,7 +335,7 @@ impl Config {
 		self.origins
 			.as_ref()
 			.and_then(|resolved| resolved.origin_key(key))
-			.map(usage::config::Origin::describe)
+			.map(usage_rs::config::Origin::describe)
 	}
 }
 
@@ -361,6 +368,10 @@ impl Config {
 	pub(crate) fn resolve(&mut self) -> anyhow::Result<()> {
 		let deprecated = self.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+		// Here rather than at an endpoint, since io_uring workers and lazily built
+		// dial clients would otherwise check `[quic]` late or never. `[peer.quic]`
+		// is checked by `Cluster::new`, which embedders call directly.
+		self.quic.validate().context("invalid [quic]")?;
 
 		self.quic
 			.max_streams
@@ -441,6 +452,62 @@ mod tests {
 		assert_eq!(config.peer.resolve().fetches, 2000);
 	}
 
+	/// `[peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.
+	#[test]
+	fn peer_quic_table_merges_with_flags() {
+		let _env = EnvGuard::clear(&[
+			"MOQ_QUIC_MAX_STREAMS",
+			"MOQ_PEER_QUIC_MAX_STREAMS",
+			"MOQ_PEER_QUIC_RECEIVE_WINDOW",
+			"MOQ_PEER_QUIC_SEND_WINDOW",
+		]);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("peer-quic.toml");
+		std::fs::write(
+			&path,
+			"[quic]\nmax_streams = 4\n[peer.quic]\nmax_streams = 64\nsend_window = 1000\n",
+		)
+		.unwrap();
+		let config = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-relay"),
+			path.into(),
+			"--peer-quic-receive-window=2000".into(),
+		])
+		.unwrap();
+		assert_eq!(config.quic.max_streams, Some(4));
+		assert_eq!(config.peer.quic.max_streams.get(), 64);
+		assert_eq!(config.peer.quic.receive_window.get(), 2000);
+		assert_eq!(config.peer.quic.send_window.get(), 1000);
+
+		assert!(toml::from_str::<Config>("[peer]\nmax_streams = 64\n").is_err());
+	}
+
+	/// A zero peer stream limit or window would wedge the connection, so it never parses.
+	#[test]
+	fn zero_peer_quic_limits_are_refused() {
+		let _env = EnvGuard::clear(&[
+			"MOQ_PEER_QUIC_MAX_STREAMS",
+			"MOQ_PEER_QUIC_RECEIVE_WINDOW",
+			"MOQ_PEER_QUIC_SEND_WINDOW",
+		]);
+		for key in ["max_streams", "receive_window", "send_window"] {
+			assert!(
+				toml::from_str::<Config>(&format!("[peer.quic]\n{key} = 0\n")).is_err(),
+				"{key}"
+			);
+		}
+		for flag in [
+			"--peer-quic-max-streams=0",
+			"--peer-quic-receive-window=0",
+			"--peer-quic-send-window=0",
+		] {
+			assert!(
+				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), flag.into()]).is_err(),
+				"{flag} must be refused"
+			);
+		}
+	}
+
 	#[cfg(not(feature = "iroh"))]
 	#[test]
 	fn iroh_environment_requires_the_feature() {
@@ -452,8 +519,8 @@ mod tests {
 			"MOQ_IROH_DISABLE_RELAY",
 		] {
 			let mut config = Config::default();
-			let cli = usage::config::CliLayer::new(std::iter::empty::<(String, String)>());
-			let env = usage::config::EnvLayer::new([(name.to_string(), "false".to_string())]);
+			let cli = usage_rs::config::CliLayer::new(std::iter::empty::<(String, String)>());
+			let env = usage_rs::config::EnvLayer::new([(name.to_string(), "false".to_string())]);
 			let error = config.merge_into(&cli, &env, None).unwrap_err();
 			assert!(error.to_string().contains(name), "{error}");
 		}
@@ -1219,7 +1286,7 @@ uid = [1001]
 	fn the_config_can_be_embedded() {
 		/// A stand-in for an embedder's command line: the relay's flags plus one of
 		/// its own.
-		#[derive(usage::Cli, Clone, Debug)]
+		#[derive(usage_rs::Cli, Clone, Debug)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(name = "embedder", version = "0")]
 		#[usage(settings)]
@@ -1308,7 +1375,7 @@ uid = [1001]
 		};
 		let mut config = parsed.config;
 		config
-			.merge_into(&cli, &usage::config::EnvLayer::from_process(), Some(source))
+			.merge_into(&cli, &usage_rs::config::EnvLayer::from_process(), Some(source))
 			.unwrap();
 		assert_eq!(config.cluster.id, Some(9));
 		assert_eq!(config.source("cluster.id"), Some("--cluster-id"));

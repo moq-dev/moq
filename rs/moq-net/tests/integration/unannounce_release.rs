@@ -31,20 +31,20 @@ async fn release(version: Version) {
 	consumer.routed("a/b").await.expect("routed");
 	let remote = consumer.request_broadcast("a/b", None).await.expect("resolves");
 	let sub = remote.track("t").unwrap().subscribe(None).await.expect("subscribes");
-	track.demand().used().await.unwrap();
+	crate::support::wanted(track.demand()).await.unwrap();
 
 	broadcast.unannounce();
-	moq_net_sim::sleep(Duration::from_secs(1)).await;
+	moq_clock::sleep(Duration::from_secs(1)).await;
 
 	drop(sub);
 	drop(remote);
-	moq_net_sim::timeout(Duration::from_secs(600), track.demand().unused())
+	moq_clock::timeout(Duration::from_secs(600), crate::support::unwanted(track.demand()))
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the relay kept its upstream subscription"))
 		.unwrap();
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn unannounced_remote_track_releases_demand() {
 	for name in Version::names() {
 		release(name.parse().unwrap()).await;

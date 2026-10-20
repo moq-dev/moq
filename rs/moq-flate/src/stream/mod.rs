@@ -29,6 +29,8 @@
 //! publisher with more to say opens a new track.
 
 use crate::Compression;
+#[cfg(test)]
+use futures::FutureExt;
 
 pub mod consumer;
 pub mod producer;
@@ -138,7 +140,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(payload))) = consumer.poll_next(&waiter) {
-			out.push(payload);
+			out.push(payload.value);
 		}
 		out
 	}
@@ -149,7 +151,7 @@ mod test {
 
 	#[test]
 	fn every_payload_survives_in_order() {
-		let (mut producer, track) = producer(false);
+		let (mut producer, mut track) = producer(false);
 		let expected = payloads(5);
 		for payload in &expected {
 			producer.append(payload.clone()).unwrap();
@@ -157,7 +159,10 @@ mod test {
 		producer.finish().unwrap();
 
 		// One group holds the whole log, unlike snapshot's group-per-value.
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		assert_eq!(drain(track, false), expected);
 	}
 
@@ -312,7 +317,7 @@ mod test {
 				"compression={compression}"
 			);
 			assert!(refused(producer.append(huge.clone())), "compression={compression}");
-			assert!(producer.demand().is_used(), "a refusal must not end the track");
+			assert!(producer.demand().wanted().is_some(), "a refusal must not end the track");
 
 			producer.append(&b"second"[..]).unwrap();
 			producer.finish().unwrap();
@@ -328,10 +333,13 @@ mod test {
 	/// A refused first payload opens no group, so a subscriber is not handed an empty one to wait on.
 	#[test]
 	fn a_refused_first_payload_publishes_nothing() {
-		let (mut producer, track) = producer(true);
+		let (mut producer, mut track) = producer(true);
 		let huge = Bytes::from(vec![0u8; crate::DEFAULT_MAX_FRAME_SIZE as usize + 1]);
 		assert!(refused(producer.append(huge)));
-		assert_eq!(track.latest(), None);
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			None
+		);
 	}
 
 	/// The budget covers the whole log, so once its frames are spent every append is refused, and
@@ -490,7 +498,7 @@ mod test {
 
 		assert!(matches!(
 			consumer.poll_next(&waiter),
-			Poll::Ready(Ok(Some(payload))) if payload == Bytes::from_static(b"first")
+			Poll::Ready(Ok(Some(payload))) if payload.value == Bytes::from_static(b"first")
 		));
 		assert!(matches!(
 			consumer.poll_next(&waiter),
@@ -516,13 +524,13 @@ mod test {
 			.unwrap();
 		let subscriber = track.subscribe(replaying());
 
-		// Publish sequence 1 before sequence 0, the way reordering delivers them.
+		// Publish sequence 1 before sequence 0, the way reordering delivers them. Each still
+		// starts after the one before it.
 		for sequence in [1u64, 0] {
 			let mut flate = crate::Encoder::new();
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-			group
-				.write_frame(moq_net::Timestamp::now(), flate.frame(&[sequence as u8; 8]))
-				.unwrap();
+			let timestamp = moq_net::Timestamp::from_millis(sequence).unwrap();
+			group.write_frame(timestamp, flate.frame(&[sequence as u8; 8])).unwrap();
 			group.finish().unwrap();
 		}
 		track.finish().unwrap();
@@ -532,7 +540,7 @@ mod test {
 
 		assert!(matches!(
 			consumer.poll_next(&waiter),
-			Poll::Ready(Ok(Some(payload))) if payload == vec![1u8; 8]
+			Poll::Ready(Ok(Some(payload))) if payload.value == vec![1u8; 8]
 		));
 		assert!(matches!(
 			consumer.poll_next(&waiter),

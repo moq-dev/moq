@@ -34,8 +34,8 @@ Decided:
   `moq-c` (`rs/moq-c`), and the generated package takes over that name
   and `moq::c` target, so C users migrate once. Its first release is 0.8.0, a
   minor bump over the hand-written 0.7.x.
-- Docs change inline: the consumer quest rewrites `doc/lib/c`, and retirement
-  adds an upgrade note. No separate guide.
+- Docs change inline: the consumer quest rewrites `doc/lib/c`, and the
+  package's `MIGRATE.md` carries the move. No separate guide.
 
 The line owns the pre-cut check: every `doc/lib/c` sample and the C interop
 client build and run against the built release archive, not only in-tree.
@@ -48,13 +48,9 @@ and fetch quests were abandoned for this line, and hidden is done.
 Decided in the quest audit: [claim epochs](https://github.com/moq-dev/moq/pull/5678)
 is a narrow correctness exception. Its existing claim API migrates with
 Rust and JS so C cannot retain the unsafe accept path while this line waits.
-That change owns its C tests and upgrade notes; other API reshaping stays here.
+That change owns its C tests and `MIGRATE.md` entries; other API reshaping stays here.
 
 ## Required
 
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
-
-## Related
-
-- [FFI shape](/quest/m1/ffi-shape/README.md) - reshapes moq-ffi, which the generated C then follows for free

@@ -283,9 +283,13 @@ impl<T> Inner<T> {
 		}
 
 		// The same test `append_group` applies: a boundary declared ahead of the live edge still
-		// admits the groups below it.
+		// admits the groups below it. The largest counts every group, even an empty one, so the
+		// next group is the one after it.
 		let track = &self.track.inner;
-		let next = track.latest().map_or(0, |latest| latest.saturating_add(1));
+		let next = match track.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
+			std::task::Poll::Ready(Some(largest)) => largest.group.saturating_add(1),
+			_ => 0,
+		};
 		if track.is_closed()
 			|| track
 				.end()
@@ -368,7 +372,7 @@ struct Track {
 impl Track {
 	/// Finish the open group without opening a replacement.
 	fn cut(&mut self) -> Result<()> {
-		if let Some(group) = self.group.take() {
+		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(())
@@ -397,7 +401,7 @@ impl Track {
 	/// Close the open group and write a snapshot as the first frame of a new one.
 	fn write_snapshot(&mut self, timestamp: Option<moq_net::Timestamp>, payload: bytes::Bytes) -> Result<()> {
 		// The previous group is complete; no more frames will be appended to it.
-		if let Some(group) = self.group.take() {
+		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
 
@@ -430,7 +434,7 @@ impl Track {
 	}
 
 	fn finish(&mut self) -> Result<()> {
-		if let Some(group) = self.group.take() {
+		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
 		self.inner.finish()?;

@@ -11,7 +11,7 @@ use crate::support;
 use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use moq_uring::{Config, Error, Worker, quic, udp};
 use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
@@ -95,6 +95,72 @@ fn dial_and_accept_share_one_socket() {
 			for conn in [&a_to_b, &b_to_a] {
 				assert_eq!(conn.server_name(), None, "a dial has no SNI of its own");
 			}
+		})
+		.expect("worker");
+}
+
+/// A session owns the connection independently of the driver and stream handles.
+#[test]
+fn dropping_the_last_raw_session_closes_the_connection() {
+	dropped_raw_session_closes(false);
+}
+
+#[test]
+fn an_explicit_raw_close_survives_the_last_session_drop() {
+	dropped_raw_session_closes(true);
+}
+
+fn dropped_raw_session_closes(explicit: bool) {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let socket = || {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let server = quic::Endpoint::new(
+		socket(),
+		quic::endpoint::Config::default().with_server(server_config(&certs)),
+	)
+	.expect("server endpoint");
+	let client = quic::Endpoint::new(socket(), quic::endpoint::Config::default()).expect("client endpoint");
+	worker
+		.block_on(async move {
+			let conn = client.connect(&dial_config(server.local_addr())).await.expect("dial");
+			let mut peer = server.accept().await.expect("accept");
+			let session = quic::web::Session::raw(conn);
+			let mut remaining = session.clone();
+			drop(session);
+			let mut send = std::future::poll_fn(|cx| remaining.poll_open_uni(cx))
+				.await
+				.expect("surviving clone opens a stream");
+			std::future::poll_fn(|cx| send.poll_write(cx, b"alive"))
+				.await
+				.expect("write");
+			let mut recv = std::future::poll_fn(|cx| peer.poll_accept_uni(cx))
+				.await
+				.expect("accept stream");
+			let mut payload = [0; 5];
+			let read = std::future::poll_fn(|cx| recv.poll_read(cx, &mut payload))
+				.await
+				.expect("read");
+			assert_eq!(read, Some(5));
+			assert_eq!(&payload, b"alive");
+			let code = if explicit {
+				remaining.close(CLOSE_CODE, CLOSE_REASON);
+				u64::from(CLOSE_CODE)
+			} else {
+				0
+			};
+			drop(remaining);
+			// Stream handles intentionally survive the final session handle.
+			let error = std::future::poll_fn(|cx| peer.poll_closed(cx)).await;
+			assert!(
+				matches!(error, quic::Error::App { code: actual, .. } if actual == code),
+				"peer saw {error:?}"
+			);
+			drop((send, recv));
 		})
 		.expect("worker");
 }
@@ -624,9 +690,9 @@ fn connections_share_one_tx_buffer_fairly() {
 				.expect("second client socket");
 			let mut second_config = dial_config(server);
 			second_config.transport.idle_timeout = Duration::from_millis(500);
-			let started = Instant::now();
+			let started = moq_clock::now();
 			let second = quic::client::connect(second_sock, &second_config).await;
-			let elapsed = started.elapsed();
+			let elapsed = moq_clock::now() - started;
 			running.set(false);
 			let second = second.expect("the second connection must not starve");
 			assert!(

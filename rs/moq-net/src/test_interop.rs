@@ -168,6 +168,7 @@ fn lite_varint_interop() {
 
 		// An untimed track: zero on lite-07, milliseconds before it.
 		let track_info = lite::TrackInfo {
+			refresh: None,
 			priority: 1,
 			max_age: None,
 			timescale: None,
@@ -400,6 +401,7 @@ fn ietf_track_status_interop() {
 				track_namespace: crate::Path::new(namespace),
 				track_name: "video".into(),
 				properties_wanted: wanted,
+				epoch: None,
 			}
 			.encode(&mut w, version)
 			.unwrap();
@@ -429,6 +431,8 @@ fn ietf_track_status_interop() {
 				// Only draft-20 can carry the opt-out.
 				_ if !wanted && ietf::Filter::is_draft20(version) => ietf::Properties::default(),
 				_ => ietf::Properties {
+					unknown: Default::default(),
+					dynamic_groups: false,
 					max_cache_duration: Some(std::time::Duration::from_millis(5000)),
 					timescale: Some(crate::Timescale::MILLI),
 					// The JS track's priority 2, lower-first on the wire.

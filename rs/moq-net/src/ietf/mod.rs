@@ -17,6 +17,7 @@ pub mod cluster;
 #[cfg(feature = "async")]
 mod control;
 mod datagram;
+pub(crate) mod epoch;
 pub(crate) mod error;
 mod fetch;
 mod filter;
@@ -24,6 +25,7 @@ mod goaway;
 mod group;
 pub mod hidden;
 mod location;
+pub(crate) mod max_age;
 pub mod message;
 mod namespace;
 mod object;
@@ -70,7 +72,7 @@ pub use request::*;
 #[cfg(feature = "async")]
 pub use session::*;
 pub use subscribe::*;
-pub use subscribe_namespace::*; // includes PublishBlocked
+pub use subscribe_namespace::*;
 #[cfg(feature = "async")]
 use subscriber::*;
 pub use track::*;

@@ -20,6 +20,10 @@ software profiles below; it does not certify a hardware IRD or every TS layout.
 - `open-gop.py` checks the coded access units and leading pictures of open GOPs.
 - `overhead.py` counts the packets a capture spends on clocks and audio framing
   against its source.
+- `holes.py` finds media missing from a generated clip's capture, from its
+  timestamps against the source's.
+- `passthrough.py` places every packet of an `export ts --passthrough` capture
+  at its source position and compares the compliance verdicts.
 
 ## Running
 
@@ -39,13 +43,30 @@ just test ts --headroom         # the same with four audio PIDs, muxed above the
 just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
 just test ts --full             # the same with two audio PIDs, filling its multiplex with no nulls
 just test ts --fragment-pes    # legal headers split across packets, with FFmpeg/TSDuck grading
+just test ts --klv              # KLV and DVB AC-3 carried as whole PES, graded against the source
 just test ts --delay 2s         # pass the exporter's --delay
+just test ts --hrd --rate 7000000 # congest the subscriber's leg below the media rate
+just test ts --loss 1           # drop 1% of the relay's datagrams to the subscriber
+just test ts --passthrough      # carry the multiplex whole, grade it packet by packet
+just test ts --passthrough --mpts # the same with two programs on their own clocks
+just test ts-passthrough-capture # the same over an in-repo capture the T-STD model passes
 ```
 
 `--fragment-pes` shifts generated audio/video PES bursts into their following
 null slots after splitting the header. It cycles through header-byte boundaries,
 preserves packet count, PCR positions, payload bytes, and PID continuity, then
 runs the same independent decode/content and transport checks as the default arm.
+
+`--klv` muxes DVB AC-3 beside the AAC, several sync frames a PES, and `klv.py`
+fills null slots with asynchronous KLV (`stream_type` 0x06, `KLVA` registration, no
+PTS) and synchronous KLV (`stream_type` 0x15, `metadata_stream` 0xFC, a PTS per
+picture). The importer decodes none of them, so each PES rides its track whole.
+`klv.py grade` holds each KLV stream in the capture to its source: the same PID,
+`stream_type` and descriptors; every PES from the join to the end, in order and
+byte-equal outside its PTS and DTS, which move by one shift; none out before its
+source placement on the program clock, and none after its PTS; and FFmpeg reading
+each as KLV with the same PES and PTS. `holes.py` and the T-STD model grade the
+AC-3, whose buffer drains each sync frame at its own decode time.
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
 subscriber's stdout goes straight into `pcr-timing.py` instead of a capture file.
@@ -294,7 +315,16 @@ From a pipe, `pcr-rate` also grades the PCR clock's rate against the arrival
 clock, as the least-squares slope over each time base after the start-up third:
 within 30 ppm (`--rate-ppm`), the tolerance ISO 13818-1 2.4.2.1 gives a system
 clock. `release` cannot see a clock running at a steady wrong rate, which keeps
-its intervals and only adds to the drift.
+its intervals and only adds to the drift. At 30 ppm a 77 s window moves only
+2.3 ms, so the fit excludes two arrival effects that are not the clock. Reads only
+ever land late, so it fits the least-delayed PCR in each second, the floor that
+scheduling and pipe delay sit on; a live control's mean read delay wandered by
+2.4 ms while that floor held within 0.7 ms. And it breaks wherever that floor
+steps by more than the `release` tolerance from one second to the next, pooling
+the runs either side: a stall the sender caught up from leaves a standing lag,
+which a single line reads as a rate (70 ms mid-sample is over 1,000 ppm), though
+it is the bounded lag `release` already grades. A clock off rate moves the floor
+by microseconds a second, so it never steps and stays measured.
 
 ```bash
 # live: every domain, reading the exporter directly
@@ -322,6 +352,7 @@ are laid over the PCRs.
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) (`--live` only) |
 | `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 100, TR 101 290 V1.4.1), within one time base |
 | `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
+| `pcr-rate` | hard | the PCR rate fitted against each second's least-delayed read stays within `--rate-ppm` (default 30), after excluding the first third, separating declared time bases and breaking where that floor steps by more than `--release-ms` (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
 | `pcr-schedule` | shape | share of PCR intervals whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |
 
@@ -331,6 +362,16 @@ since two correct grids offset from one another pool into one that neither keeps
 grades both through TSDuck's `tsanalyze`, which also catches a payload-less
 packet advancing the counter. A pipe cannot go through TSDuck first without
 rebuffering the arrivals `release` stamps.
+
+Live runs write `pcr-timing.json` beside `timing.out`. Failures retain their run;
+set `MOQ_TEST_KEEP=1` to retain passing controls too. The JSON report keeps the
+graded PID's raw `[packet_index, unwrapped_pcr_ticks, arrival_seconds, pid]` samples,
+the indices that begin new time bases, wrap count, and grading parameters. PCR ticks
+are at 27 MHz; arrivals use the reader's `time.monotonic()` clock and are upper
+bounds on when the exporter released those bytes. These preserve the inputs to
+the rate, release and byte-position checks so their verdicts can be replayed.
+Arrival delays alone do not establish whether a source clock, exporter, pipe or
+reader caused the discrepancy.
 
 Accumulated drift has two shapes and only one is a defect, so the check bounds
 the total and reports the rate over the tail of the sample beside it. A sender
@@ -480,7 +521,7 @@ as well. `--source` also requires the source's SI tables and PAT-declared PMTs, 
 actual grader. Identical streams, different PES interleave, late acquisition with
 bootstrap tables, and PCR wrap must pass. Persistent phase shifts, accumulating
 drift, disappearing/absent/sparse tables, and insufficient shared media must fail.
-Controls run in PR CI; the real pair runs nightly and on manual TS validation.
+Controls run nightly and on release PRs; the real pair runs nightly and on manual TS validation.
 
 ## Open GOP (`open-gop.py`)
 
@@ -528,6 +569,12 @@ outside media packets (moq-dev/moq#5362). `--full` exports at 900 ms, above its
 source's lead of about 0.65 s, which absorbs a small excess for a while, so it also
 runs `overhead.py` on the source and capture before the compliance report.
 
+ffmpeg pads its multiplex with nulls, so `drop_nulls.py` removes them before the PCRs
+are restamped at the rate the rest fill. Restamping alone would move each packet by the
+nulls' uneven spread before it, tens of milliseconds, and the DVB AC-3 the export carries
+at its source placement would arrive after it decodes. So every PID but the video keeps
+its time in the padded clip, and the video, sent most of a second ahead, absorbs the rest.
+
 ```bash
 ./overhead.py source.ts capture.ts
 ```
@@ -535,6 +582,146 @@ runs `overhead.py` on the source and capture before the compliance report.
 It counts the packets on each audio PID and the PCR-only packets on each PID,
 scaling the capture's counts by how much of the source's elementary stream on the
 PID it carries, and fails when their total exceeds the source's.
+
+## Impaired path (`--rate`, `--loss`)
+
+`--rate` and `--loss` put [`moq-shaper`](../../rs/moq-shaper/README.md) between
+the relay and the subscriber, with 25 ms each way. Unlike `netem` in two network
+namespaces, as moq-dev/moq#4613 built it, the shaper needs no privileges and
+leaves the host's network alone. The run prints the shaper's counters beside the
+exporter's `dropped` (missed their deadline), `trimmed` (before the output began)
+and `gaps` (skipped upstream).
+
+### Congested path (`--rate`, `--queue`)
+
+`--rate <bits/s>` carries the relay's datagrams to the subscriber at that rate
+behind a queue `--queue` deep (2 s by default), and tail-drops what overflows it:
+bufferbloat, which is how real paths fail. Below the media's rate the path cannot
+carry it all, so the run judges what the export does instead. It must stay T-STD
+conformant and continuous (`compliance.py`, `pcr-timing.py` and PCR accuracy gate
+as on a clean path), shed whole groups rather than stall, and hold its latency
+rather than let it grow with the queue. Nothing bounds how much it sheds.
+
+The generated clips go through `holes.py --shed`, which matches the capture's
+frames to the source's by presentation timestamp, since the export derives each
+picture's decode timestamp and a group cut short moves it. Verbatim MP2, AC-3
+and E-AC-3 timestamps are compared after their exact legacy microsecond wire
+conversion back to 90 kHz, rather than allowing an arbitrary timestamp error.
+Of each source group,
+the capture keeps a prefix in decode order (all, part, or none) and never resumes
+mid-group, so it also joins on a sync frame, and a frame reordered, repeated, or
+not in the source fails. The source's last group must arrive whole: a stall, or a latency grown
+past the exporter's 1 s delay, costs it. The decoded-content comparison owes every
+unit, so it does not run, and `--open-gop`, which owes every leading picture, is
+refused. A passthrough grades its packets in place and reports its gaps
+(`passthrough.py --loss-ok`), but must still end on the source's last packet.
+
+The run fails unless the rate limit held datagrams back and the export shed
+something: a rate above the media's never narrows the path.
+
+The default queue is twice the export's delay, so a sender that kept it full
+would make every unit late. The delay-based default (BBRv3) does not: it keeps
+about a round trip queued, so the backlog lands at the relay, which ages groups out
+(`Old`), and the queue itself overflows only when it is about a round trip deep.
+The loss-based `MOQ_QUIC_CONGESTION_CONTROL=loss` (CUBIC) fills it, latency
+outgrows the delay, and the export refuses the run as a clock drift.
+
+So the queue's own tail drop runs as a lane of its own: CUBIC behind a 250 ms
+queue, five round trips deep, which it overflows on every sawtooth, while a
+retransmit behind a full queue (about twice 300 ms) still lands inside the 1 s
+delay. A loss-based run fails unless the queue overflowed.
+
+```bash
+MOQ_QUIC_CONGESTION_CONTROL=loss just test ts --headroom --rate 7000000 --queue 250ms
+```
+
+Measured on 2026-10-18 and 2026-10-19 with other test runs sharing the host:
+
+| Run | Queue | Duration | Result |
+|---|---:|---:|---|
+| `--hrd --rate 7000000` | 2 s | 120 s | passes; 37.6 s of video shed in whole groups, none overflowed |
+| `--hrd --rate 7000000` | 150 ms - 1 s | 40-120 s | none overflowed |
+| `--hrd --rate 7000000` | 100 ms | 40-120 s, six runs | 0, 0, 0, 3, 5 and 28 overflowed |
+| `--hrd --rate 7000000` | 75 ms | 60 s, two runs | 70 and 103 overflowed |
+| `--hrd --rate 7000000` | 50 ms | 60-120 s, two runs | graders pass; 111 and 269 overflowed |
+| `--hrd --rate 3500000` | 2 s | 60 s | fails: none overflowed, 56 s of video shed and the last group lost |
+| `--hrd --rate 7000000 --live` | 2 s | 60 s | passes; 99.8 % of PCRs released on time, drift -28 ms |
+| `--passthrough --rate 7000000` | 2 s | 120 s | passes; its gaps leave 463 continuity errors (reported) |
+| `--hrd --rate 7000000`, CUBIC | 250 ms | 120 s, four runs | passes; 423-430 overflowed, 18-42 units missed their deadline, 36.5-39.9 s shed |
+| `--hrd --rate 7000000`, CUBIC | 500 ms | 60-120 s, three runs | passes; 541-625 overflowed, 79-229 units missed their deadline |
+| `--hrd --rate 7000000`, CUBIC | 1 s | 120 s | fails: 919 overflowed, 107 s shed and the last group lost |
+| `--hrd --rate 7000000`, CUBIC | 2 s | 60 s | fails: 918 overflowed, then the clock-drift refusal |
+| `--headroom --rate 7000000`, BBRv3 | 2 s | 120 s, saved capture regraded | passes; none overflowed, 62.5 s video and 3 AC-3 frames shed, no MP2 holes |
+| `--headroom --rate 7000000`, CUBIC | 250 ms | 120 s | passes; 427 overflowed, 74 units missed their deadline, 64.5 s video and 3 audio frames shed |
+| `--passthrough --rate 7000000`, CUBIC | 250 ms | 120 s | passes; 428 overflowed, 116 gaps, no missing tail; 458 continuity errors reported |
+
+```bash
+./holes.py capture.ts source.ts [--shed]
+```
+
+Without `--shed`, `holes.py` grades a path that should lose nothing: a capture's
+step past one and a half of its source's is a hole, and every source stream must
+be in the capture and end within half a frame of the source's. Each stream of a
+generated clip keeps one frame step, so it reads the capture's timestamps against
+the source's, independently of what the exporter reports. Either way a stream may
+start up to 3 s late: the subscriber joins at the relay's latest group once the
+catalog is out, which skips the first 1-2 s on a clean path. Omitting MoQ content
+on purpose belongs to the [recovery tests](/quest/m1/ts-reliability/recovery.md).
+
+### Lossy path (`--loss`)
+
+`--loss <percent>` drops that share of the relay's datagrams at random.
+`TSC_SEED` (default 1) fixes which, not when the rest arrive, and the run fails
+if the shaper dropped none. Real paths do not lose datagrams independently of
+their load, so this proves correctness only: QUIC retransmits what the path drops,
+so a capture with a hole or a gap fails as on a clean path. It does not judge the
+export's quality or latency, and no CI step runs it. It cannot be combined with
+`--rate` or `--live`. Use `--rate` without random loss when grading quality or
+release timing on an impaired path.
+
+## Passthrough (`--passthrough`, `passthrough.py`)
+
+`--passthrough` publishes with `import ts --passthrough` and captures with
+`export ts --passthrough`, so the capture should be the source's own packets.
+`passthrough.py` grades it against the source alone:
+
+- The admitted interval is the source from the capture's first packet to the
+  end. What comes before it is the acquisition prefix, which the importer
+  withholds until its first group, plus whatever the export joined after; the
+  grader reports its size and does not count it as loss.
+- Every captured packet must be the source packet at its exact position in that
+  interval, null packets, tables, unknown PIDs and adaptation bytes included.
+  A position is only claimed for a run of 16 matching packets, so a duplicated
+  null or table packet fails rather than passing as an identical later one.
+  Packets the capture skips are gaps, reported by position and PID.
+- On a complete capture, every `compliance.py` check (TSDuck's structure, the
+  T-STD and system buffer models) must give the capture the verdict it gives
+  the admitted interval. The export carries whatever the source is, so a source
+  that fails a check must fail it the same way: the generated clip's AAC
+  overflows its T-STD buffer on its own, and the Kyrion capture CI also runs
+  passes. `decode.py` then compares the generated clip's decoded content.
+
+`--mpts` generates two programs with their own PCR PIDs and keyframes every 25
+and 40 frames, so the importer's groups, which open on program 1's random
+access points, mostly open mid-GOP for program 2. The capture is still the
+source in place: a group boundary promises no immediate decode for every
+program, and passthrough neither inserts tables nor extracts a program.
+
+A gap fails the run, `--loss` included, since QUIC retransmits what the path
+drops. A path that loses content, as `--rate` does, runs the grader with
+`--loss-ok`: gaps are reported and the checks run on the capture alone, since a
+gap can take part of a PES or the next table with it, and the source's packets
+in place keep their continuity counters across it. The capture must still end on
+the source's last packet, which a stall or a growing latency loses.
+
+```bash
+./passthrough.py source.ts capture.ts [--loss-ok]
+```
+
+Release timing is the Rust tests' job
+(`rs/moq-mux/src/container/ts/release_test.rs`, on a paused clock), with the
+packet and schedule oracle in `oracle.rs` and the fixtures it cannot get from a
+capture in `fixture.rs`.
 
 ## EIT fixtures
 
@@ -679,14 +866,21 @@ pending acquisition. `rs/moq-net/tests/integration/catalog_acquisition.rs` cover
 outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
 
 [`.github/workflows/ts.yml`](../../.github/workflows/ts.yml) is independent of
-browser interop. Relevant mux, Hang, CLI, transport, harness and toolchain PRs run
+browser interop. It runs nightly on `main`, and release PRs touching a workspace
+crate `run.sh` builds (kept in sync by `sh/gh/ts-paths.py`), the harness, or the
+toolchain run it too:
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
-open-GOP, EIT, and T-STD controls. Each step runs even after another test fails.
+open-GOP, KLV (strict), passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
-Nightly and manual runs also invoke `just test ts --pair` and
-`just test ts --live --duration 120`. The pair exercises late-joining subscribers;
-the live window distinguishes ongoing clock drift from initial buffer filling.
+Nightly and manual runs also invoke `just test ts --pair`,
+`just test ts --live --duration 120`, `just test ts --headroom --rate 7000000 --duration 120`,
+the same with `--queue 250ms` and `MOQ_QUIC_CONGESTION_CONTROL=loss`,
+and `just test ts --passthrough --rate 7000000 --queue 250ms --duration 120`
+with `MOQ_QUIC_CONGESTION_CONTROL=loss`.
+The pair exercises late-joining subscribers; the live window distinguishes ongoing
+clock drift from initial buffer filling; the congested paths judge what the export
+does when the path cannot carry the media.
 These are actual test invocations, not optional tools installed on a runner.
 
 Failed runs retain source/capture files, process logs and statuses, tool versions,

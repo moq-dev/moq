@@ -16,6 +16,9 @@ import * as Path from "../src/path";
 import { Stream } from "../src/stream";
 import { wireOf } from "../src/wire";
 
+// Keep protocol diagnostics out of the measured CSV on stdout.
+console.debug = console.error;
+
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 console.log("touched,routes,followers,update_us");
 for (const touched of ["watched", "unrelated"])

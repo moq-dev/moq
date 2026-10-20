@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use thiserror::Error;
 
+use super::{ClosedStream, schedule::Slot};
 use crate::{StreamId, VarInt, connection::send_buffer::SendBuffer, frame};
 
 #[derive(Debug)]
@@ -8,7 +9,8 @@ pub(super) struct Send {
     pub(super) max_data: u64,
     pub(super) state: SendState,
     pub(super) pending: SendBuffer,
-    pub(super) priority: i32,
+    pub(super) priority: i64,
+    pub(super) slot: Slot,
     /// Whether a frame containing a FIN bit must be transmitted, even if we don't have any new data
     pub(super) fin_pending: bool,
     /// Whether this stream is in the `connection_blocked` list of `Streams`
@@ -19,6 +21,8 @@ pub(super) struct Send {
     pub(super) data_blocked_limit: Option<u64>,
     /// The reason the peer wants us to stop, if `STOP_SENDING` was received
     pub(super) stop_reason: Option<VarInt>,
+    /// The lowest offset a [`SendStream::acked`](super::SendStream::acked) call is waiting for
+    pub(super) notify: Option<u64>,
 }
 
 impl Send {
@@ -28,10 +32,12 @@ impl Send {
             state: SendState::Ready,
             pending: SendBuffer::new(),
             priority: 0,
+            slot: Slot::default(),
             fin_pending: false,
             connection_blocked: false,
             data_blocked_limit: None,
             stop_reason: None,
+            notify: None,
         })
     }
 
@@ -238,6 +244,41 @@ impl Send {
             SendState::ResetSent { .. } => self.is_reset_acked() && self.pending.is_fully_acked(),
             SendState::Ready => false,
         }
+    }
+
+    /// Whether the peer acknowledged everything before `offset`, noting to report it if not
+    pub(super) fn acked(&mut self, offset: u64) -> Result<bool, ClosedStream> {
+        // A reset cuts the buffer short, so only an unreset stream knows how much was written
+        assert!(
+            self.is_reset() || offset <= self.pending.offset(),
+            "acked past the data written"
+        );
+        // An acknowledgment no longer means the peer reads the data, and a reset dropped the rest
+        if self.stop_reason.is_some() || offset > self.pending.offset() {
+            return Err(ClosedStream::default());
+        }
+        if offset <= self.pending.acked() {
+            return Ok(true);
+        }
+        self.notify = Some(self.notify.map_or(offset, |notify| notify.min(offset)));
+        Ok(false)
+    }
+
+    /// The acknowledged prefix to report once it reaches the offset a waiter is waiting for
+    pub(super) fn take_acked(&mut self) -> Option<u64> {
+        let acked = self.pending.acked();
+        if self.notify.is_none_or(|notify| acked < notify) {
+            return None;
+        }
+        self.notify = None;
+        Some(acked)
+    }
+
+    /// The acknowledged prefix to report to every waiter after a reset or STOP_SENDING, which may
+    /// fail any of them
+    pub(super) fn take_waiting(&mut self) -> Option<u64> {
+        self.notify.take()?;
+        Some(self.pending.acked())
     }
 
     /// Handle increase to stream-level flow control limit

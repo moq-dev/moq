@@ -1117,7 +1117,7 @@ async fn broadcast_route_migration() {
 
 	// Resolve and subscribe: the cheaper route (A) serves the track.
 	let subscription = moq_net::track::Subscription::default()
-		.with_start(moq_net::track::Position::group(1))
+		.with_groups(1..)
 		.with_max_delay(Duration::from_secs(10));
 	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
 		.await
@@ -1265,7 +1265,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 	drop(sub);
 
 	// The front parks the track and cancels upstream, while the publisher moves on.
-	tokio::time::timeout(TIMEOUT, live.demand().unused())
+	tokio::time::timeout(TIMEOUT, crate::unwanted(live.demand()))
 		.await
 		.expect("upstream never canceled")
 		.expect("track open");
@@ -1412,7 +1412,7 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 		drop(reading);
 		drop(sub);
 		// The front parks the track and cancels upstream before the next round rejoins.
-		tokio::time::timeout(TIMEOUT, live.demand().unused())
+		tokio::time::timeout(TIMEOUT, crate::unwanted(live.demand()))
 			.await
 			.unwrap_or_else(|_| panic!("{ctx}: upstream never canceled"))
 			.expect("track open");

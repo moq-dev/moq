@@ -9,7 +9,8 @@ use std::{
 /// The methods mirror [`std::time::Instant`]'s, so swapping one for the other is an
 /// import change. Instants are only comparable within one clock: the simulator
 /// starts at [`Instant::ZERO`], and the runtime backends count from an origin they
-/// pick once, so an instant has no conversion back to the host clock.
+/// pick once, reading far past zero there so earlier moments stay representable.
+/// An instant has no conversion back to the host clock.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Instant(u64);
 
@@ -65,6 +66,16 @@ impl Instant {
 	/// The time from the origin to this instant.
 	pub(crate) fn since_origin(self) -> Duration {
 		Duration::from_nanos(self.0)
+	}
+
+	/// The instant as nanoseconds from the origin, for lock-free storage.
+	pub(crate) const fn to_nanos(self) -> u64 {
+		self.0
+	}
+
+	/// The instant `nanos` past the origin.
+	pub(crate) const fn from_nanos(nanos: u64) -> Self {
+		Self(nanos)
 	}
 }
 

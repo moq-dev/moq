@@ -21,6 +21,9 @@ under the same names.
 - A release workflow and nightly/CI jobs follow the C++ package's, on the same
   generator pin; `v0.11.0-kixelated.4+v0.32.2` already carries the C backend
   (`--lang c`).
+- Ship a `MIGRATE.md` with the package, since it is what C users install.
+  Carry over `rs/moq-c/MIGRATE.md`'s history and add an `## Unreleased`
+  entry mapping the hand-written ABI to the generated one.
 - Ship a hand-written `moq_shutdown` that calls `moq_ffi_shutdown`, then
   `moq_shutdown_dispatcher`.
 - moq-c and moq-cpp each embed the moq-ffi staticlib, so one program can't link
@@ -28,7 +31,3 @@ under the same names.
 - The Cross-Package Sync rows that name the hand-written `rs/moq-c` (as the
   target of `rs/moq-ffi` changes, and its `moq.h` C ABI) point at the
   generated package instead; update `AGENTS.md` in this quest.
-
-## Required
-
-- [FFI shape](/quest/m1/ffi-shape/README.md) - moq-c 0.8.0 ships the reshaped moq-ffi, so C breaks once

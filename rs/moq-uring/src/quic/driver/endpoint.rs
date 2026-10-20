@@ -14,7 +14,6 @@ use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::Instant;
 
 use bytes::BytesMut;
 use moq_quic::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
@@ -170,7 +169,7 @@ impl Endpoint {
 			.inner
 			.endpoint
 			.borrow_mut()
-			.connect(moq_clock::Instant::now(), client, config.peer, &config.server_name)
+			.connect(self.inner.owner.now(), client, config.peer, &config.server_name)
 			.map_err(|err| Error::Quic(err.to_string()))?;
 		let shared = self.inner.launch(key, conn);
 		// Flush the Initial flight; the demux task takes it from here.
@@ -242,7 +241,7 @@ impl Inner {
 				return Poll::Ready(());
 			}
 			match self.socket.poll_recv(waiter) {
-				Poll::Ready(Ok(mut packet)) => self.demux(&mut packet),
+				Poll::Ready(Ok(packet)) => self.demux(&packet),
 				Poll::Ready(Err(err)) => {
 					self.fail(Error::Io(err.to_string()));
 					return Poll::Ready(());
@@ -253,7 +252,7 @@ impl Inner {
 	}
 
 	/// Route every datagram in one receive, then kick the connections fed.
-	fn demux(self: &Rc<Self>, packet: &mut udp::Packet) {
+	fn demux(self: &Rc<Self>, packet: &udp::Packet) {
 		let from = packet.from();
 		let ecn = packet.ecn().map(super::ecn_to_quic);
 		// Where the endpoint writes its own answers (version negotiation,
@@ -264,19 +263,25 @@ impl Inner {
 		// coalesce is a single source, and ids rarely change mid-burst).
 		let mut fed: Vec<ConnectionHandle> = Vec::new();
 
-		for segment in packet.segments() {
+		// moq-quic takes each datagram as an owned `BytesMut`: copy the whole
+		// completion out of the receive pool once and split it per datagram.
+		// The last one is taken whole, since a split makes the allocation
+		// shared, which a lone datagram has no use for.
+		let mut payload = BytesMut::from(packet.payload());
+		let stride = packet.stride();
+		while !payload.is_empty() {
+			let segment = match payload.len() > stride {
+				true => payload.split_to(stride),
+				false => std::mem::take(&mut payload),
+			};
 			buf.clear();
 			// The socket does not report which local address a datagram
 			// arrived on, so the four-tuple stays half known, exactly as it
 			// does on a platform without `IP_PKTINFO`.
-			let event = self.endpoint.borrow_mut().handle(
-				moq_clock::Instant::now(),
-				from,
-				None,
-				ecn,
-				BytesMut::from(&segment[..]),
-				&mut buf,
-			);
+			let event = self
+				.endpoint
+				.borrow_mut()
+				.handle(self.owner.now(), from, None, ecn, segment, &mut buf);
 			match event {
 				Some(DatagramEvent::ConnectionEvent(key, event)) => {
 					let conn = self.conns.borrow().get(&key).cloned();
@@ -284,6 +289,7 @@ impl Inner {
 					// we can feed.
 					if let Some(conn) = conn {
 						conn.conn.borrow_mut().handle_event(event);
+						conn.wire.set_received_bytes(conn.conn.borrow().stats().udp_rx.bytes);
 						if !fed.contains(&key) {
 							fed.push(key);
 						}
@@ -352,11 +358,8 @@ impl Inner {
 		let deadline = self
 			.handshake
 			.timeout
-			.and_then(|timeout| Instant::now().checked_add(timeout));
-		let accepted = self
-			.endpoint
-			.borrow_mut()
-			.accept(incoming, moq_clock::Instant::now(), buf, None);
+			.and_then(|timeout| self.owner.now().checked_add(timeout));
+		let accepted = self.endpoint.borrow_mut().accept(incoming, self.owner.now(), buf, None);
 		let (key, conn) = match accepted {
 			Ok(accepted) => accepted,
 			Err(err) => {
@@ -408,14 +411,13 @@ impl Inner {
 		let Poll::Ready(Ok(mut tx)) = self.socket.poll_acquire(&kio::Waiter::noop()) else {
 			return;
 		};
-		if transmit.size > tx.len() {
+		if transmit.size > tx.capacity() {
 			tracing::debug!(size = transmit.size, "dropping an oversized endpoint response");
 			return;
 		}
-		tx[..transmit.size].copy_from_slice(&buf[..transmit.size]);
+		tx.extend_from_slice(&buf[..transmit.size]);
 		let transmit = udp::Transmit {
 			to: transmit.destination,
-			len: transmit.size,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
 		};
@@ -457,23 +459,23 @@ impl Inner {
 		self.task_waiters.borrow_mut().wake();
 	}
 
-	/// A send to `addr` found no route, so a handshake dialing it can never
-	/// finish: fail it now rather than at the handshake timeout. An established
-	/// connection rides it out as loss, since a route that drops for a moment
-	/// (a client switching networks) comes back.
+	/// A send to `addr` found no route: tell every connection to that peer,
+	/// and moq-quic decides which of them give up.
 	fn unreachable(&self, addr: SocketAddr, err: &std::io::Error) {
+		tracing::debug!(%addr, %err, "no route to the peer");
 		let conns: Vec<connection::Shared> = {
 			let all = self.conns.borrow();
 			self.peers
 				.borrow()
 				.range((addr, ConnectionHandle(0))..=(addr, ConnectionHandle(usize::MAX)))
 				.filter_map(|(_, key)| all.get(key))
-				.filter(|shared| shared.conn.borrow().is_handshaking())
 				.cloned()
 				.collect()
 		};
 		for conn in conns {
-			conn.unreachable(err);
+			conn.conn.borrow_mut().handle_unreachable();
+			// The driver reports a failed handshake and drains it out of the table.
+			conn.kick();
 		}
 	}
 

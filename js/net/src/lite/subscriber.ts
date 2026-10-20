@@ -1,35 +1,29 @@
-import { Milli, Nano } from "@moq/clock";
+import { Milli } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
+import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Drain } from "../connection/goaway.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import type * as Epoch from "../epoch.ts";
-import {
-	controlTimeout,
-	error,
-	ProtocolViolation,
-	reason,
-	StreamCode,
-	StreamError,
-	sessionCause,
-	unauthorized,
-} from "../error.ts";
+import { error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause, unauthorized } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { groupBounds, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { grace } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
-import { type OpenOptions, type Reader, Stream } from "../stream.ts";
-import { TAIL_GRACE_MS, Tail } from "../tail.ts";
+import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
+import { Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
+import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
-import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
 	AnnounceHistory,
@@ -60,38 +54,25 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
+	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
-	hasStreamCount,
+	hasRefresh,
+	hasSynced,
+	hasTrackStream,
 	resolvesStart,
 	updateSupported,
 	Version,
 	waitsForSubscriberFin,
 } from "./version.ts";
 
-// Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
-// drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC streams
-// (Chrome ~100) and we open with waitUntilAvailable, so past the cap the open blocks
-// until the peer frees a slot. The timeout turns a stall into a clear error.
-export const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
+// Request streams refuse exhausted peer credit, with one deadline covering create and answer.
+export const SUBSCRIBE_SETUP_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
 
 // Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
 // Cost::DRAIN: cost is the whole mechanism, not a separate state.
 const DRAIN_COST: Cost = 2n ** 62n - 1n;
-
-// The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
-function supportsTrackStream(version: Version): boolean {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-			return false;
-		default:
-			return true;
-	}
-}
 
 // What a subscription has set up so far, so a revocation (or a timeout) can reach it at
 // any stage.
@@ -135,8 +116,6 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
-	// Group streams opened by the publisher, when SUBSCRIBE_END carries the count.
-	streams?: number;
 	// The TRACK stream that answered (lite-05+), held open as interest in the track until
 	// the SUBSCRIBE has its first response, so the publisher's demand never lapses between
 	// the two.
@@ -189,6 +168,7 @@ export class Subscriber {
 	// Our grant: a subscription it stops covering is cancelled. Undefined until the peer
 	// answers, and forever on a version without AUTH, which allows everything.
 	#grant?: Getter<Grant | undefined>;
+	#auth?: AuthSession;
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -212,6 +192,7 @@ export class Subscriber {
 		goaway?: GetPromise<Drain>,
 		grant?: Getter<Grant | undefined>,
 		limits: Limits = LIMITS,
+		auth?: AuthSession,
 	) {
 		this.#quic = quic;
 		this.#announces = new Slots(limits.announces, { quic, reason: "too many announcements" });
@@ -221,6 +202,7 @@ export class Subscriber {
 		this.#peerSetup = peerSetup;
 		this.#goaway = goaway;
 		this.#grant = grant;
+		this.#auth = auth;
 	}
 
 	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
@@ -278,7 +260,10 @@ export class Subscriber {
 		// to reset the stream, not just close our side of it.
 		let stream: Stream;
 		try {
-			stream = await Stream.open(this.#quic, { version: this.version });
+			const deadline = new Deadline();
+			stream = await deadline.wait(
+				deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions })),
+			);
 		} catch (err: unknown) {
 			announced.close(error(err));
 			return;
@@ -315,6 +300,10 @@ export class Subscriber {
 			// It no longer stamps itself onto each hop chain, so we append it here to
 			// keep the reflected-announce loop check seeing the full chain.
 			let responderOrigin: Hop | undefined;
+			// The ANNOUNCEs still owed of the peer's initial set (lite-05+). Older versions
+			// mark no boundary, so they sync once the request is out, as a best effort.
+			let initial = 0;
+			let waitingSynced = hasSynced(this.version);
 			if (hasAnnounceOk(this.version)) {
 				const ok = await race([AnnounceOk.decode(stream.reader, this.version), announced.closed]);
 				// A consumer that leaves before the peer answers ends the request now, not on the answer.
@@ -326,6 +315,7 @@ export class Subscriber {
 				// anonymous mark and must travel the reconstructed chain. Assigned identities
 				// stay off this hop and are never forwarded.
 				responderOrigin = ok.hop;
+				initial = ok.active;
 			}
 
 			switch (this.version) {
@@ -389,13 +379,32 @@ export class Subscriber {
 
 			// Receive announce updates (for Draft03+, this includes initial state)
 			for (;;) {
+				if (initial === 0 && !waitingSynced) announced.synced();
+
 				const announce = await race([
 					decodeAnnounceBroadcastMaybe(stream.reader, this.version),
 					announced.closed,
 				]);
 				// undefined: the stream ended. null: the consumer closed cleanly.
+				if (announce === undefined && (initial > 0 || waitingSynced)) {
+					throw new ProtocolViolation("announce stream ended inside the initial set");
+				}
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
+				if (announce.status === "synced") {
+					if (!waitingSynced) throw new ProtocolViolation("duplicate SYNCED");
+					waitingSynced = false;
+					continue;
+				}
+
+				// The counted initial set is ANNOUNCEs only, so anything else cuts it short. An
+				// unknown message counts for nothing either way.
+				if (initial > 0 && announce.status !== "skipped") {
+					if (announce.status !== "active") {
+						throw new ProtocolViolation(`${announce.status} inside the initial set`);
+					}
+					initial -= 1;
+				}
 
 				let path: Path.Valid;
 				let active: boolean;
@@ -639,6 +648,22 @@ export class Subscriber {
 			return;
 		}
 		const refused = unauthorized(broadcast);
+		try {
+			for (;;) {
+				const ready = await this.#auth?.ready(broadcast, "subscribe", {
+					signal: consumed.valid,
+					until: () => abandoned(request.demand()),
+				});
+				if (ready !== false) break;
+				// Demand returning before we commit is not abandonment, matching the serving loop.
+				if (!isAbandoned(request.demand())) continue;
+				request.reject(new Error("subscribe abandoned before it was authorized"));
+				return;
+			}
+		} catch (err) {
+			request.reject(error(err));
+			return;
+		}
 		// Armed before the first check and held to the end, so a shrink while the
 		// subscription sets up is never missed: it resets whatever reached the wire.
 		const state: SubscribeSetup = { cancel: new AbortController() };
@@ -701,23 +726,18 @@ export class Subscriber {
 		};
 		valid?.addEventListener("abort", retire);
 		if (valid?.aborted) retire();
-		const setup = this.#openSubscribe(state, msg, request, id, timescale);
+		const deadline = new Deadline();
+		const setup = this.#openSubscribe(state, msg, request, id, timescale, deadline);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
 		try {
-			opened = await withTimeout(
-				untilAborted(setup, valid),
-				Nano.fromMilli(Milli(SUBSCRIBE_SETUP_TIMEOUT_MS)),
-				`subscribe timed out after ${SUBSCRIBE_SETUP_TIMEOUT_MS}ms waiting for the first response (browser stream limit reached?)`,
-			);
+			opened = await deadline.wait(untilAborted(setup, valid));
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			closeViolation(this.#quic, err);
 			// The setup outlived its deadline waiting for the first response: a control
 			// timeout, not content that arrived late. A revocation says so instead.
-			const e =
-				state.revoked ??
-				(err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err));
+			const e = state.revoked ?? (await sessionCause(this.#quic, err));
 			state.cancel.abort(e);
 			valid?.removeEventListener("abort", retire);
 			request.reject(e);
@@ -748,9 +768,7 @@ export class Subscriber {
 			// its FIN; older drafts just close it. Either way group streams can still be in
 			// flight, so the track ends only once the tail is accounted for. A reset rejects
 			// instead, so the track ends with that error rather than a clean tail.
-			const responses = supportsTrackStream(this.version)
-				? this.runResponses(stream, entry)
-				: stream.reader.closed;
+			const responses = hasTrackStream(this.version) ? this.runResponses(stream, entry) : stream.reader.closed;
 			let tailSettled = false;
 			const closed = responses.then(async () => {
 				await this.#settleTail(entry);
@@ -767,8 +785,8 @@ export class Subscriber {
 
 			// Terminal conditions (stream end, track close, a failed subscription update) settle at most
 			// once; race them into one stable promise so the demand loop doesn't re-subscribe each pass.
-			// Updates stop quietly at the FIN, which can land before the responses ahead of it are
-			// decoded, so only their failure is terminal on its own.
+			// Updates stop quietly at the FIN or a failed write, either of which can land before the
+			// responses ahead of it are decoded, so only a refused update is terminal on its own.
 			const terminal: PromiseLike<unknown>[] = [closed, producer.closed];
 			if (subscriptionUpdates !== undefined) terminal.push(subscriptionUpdates.then(() => closed));
 			const done = race(terminal);
@@ -779,8 +797,9 @@ export class Subscriber {
 			const idle = Symbol("idle");
 			const demand = producer.demand();
 			for (;;) {
-				const reason = await race([done, demand.unused().then(() => idle)]);
-				if (reason === idle && demand.closed.peek() === undefined && demand.used.peek()) continue;
+				const reason = await race([done, unwanted(demand).then(() => idle)]);
+				if (reason === idle && demand.closed.peek() === undefined && demand.wanted.peek() !== undefined)
+					continue;
 				break;
 			}
 
@@ -817,14 +836,21 @@ export class Subscriber {
 		request: track.Request,
 		id: bigint,
 		timescale: Signal<number | undefined>,
+		deadline: Deadline,
 	): Promise<{ stream: Stream; entry: SubscribeEntry }> {
 		state.cancel.signal.throwIfAborted();
 		let producer: track.Producer;
 		let drainOk = false;
 
-		if (supportsTrackStream(this.version)) {
+		if (hasTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
-			const { info, stream } = await this.#trackInfo(msg.broadcast, msg.epoch, msg.track, state.cancel.signal);
+			const { info, stream } = await this.#trackInfo(
+				msg.broadcast,
+				msg.epoch,
+				msg.track,
+				state.cancel.signal,
+				deadline,
+			);
 			state.track = stream;
 			// The deadline passed as TRACK_INFO landed: the request is already rejected, so don't
 			// register it again or send its SUBSCRIBE.
@@ -837,6 +863,7 @@ export class Subscriber {
 			timescale.set(0);
 			drainOk = true;
 		}
+		hooks.receiveTrack(producer);
 
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
 		const entry: SubscribeEntry = {
@@ -846,10 +873,7 @@ export class Subscriber {
 			// presentation-time drift), but it is how long the subscriber was willing to wait
 			// for a late group anyway. Already the smaller of the subscriber's and the track's.
 			tail: new Tail({
-				grace: () => {
-					const maxDelay = producer.subscription.peek()?.maxDelay ?? Milli.zero;
-					return maxDelay > 0 ? maxDelay : TAIL_GRACE_MS;
-				},
+				grace: () => grace(producer.subscription.peek()?.maxDelay ?? Milli.zero),
 			}),
 			requested: msg.startGroup,
 			held: state.track,
@@ -857,7 +881,7 @@ export class Subscriber {
 		this.#subscribes.set(id, entry);
 		state.producer = producer;
 
-		state.stream = await Stream.open(this.#quic, { version: this.version });
+		state.stream = await deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions }));
 		// The deadline passed while the open waited: the late-setup handler resets the stream, so
 		// don't send a SUBSCRIBE on it first.
 		state.cancel.signal.throwIfAborted();
@@ -881,7 +905,8 @@ export class Subscriber {
 		broadcast: Path.Valid,
 		epoch: Epoch.Valid | undefined,
 		track: string,
-		signal?: AbortSignal,
+		signal: AbortSignal | undefined,
+		deadline: Deadline,
 	): Promise<{ info: TrackInfo; stream: Stream }> {
 		return this.#exchange(
 			{ version: this.version },
@@ -892,16 +917,22 @@ export class Subscriber {
 				return { info, stream };
 			},
 			signal,
+			deadline,
 		);
 	}
 
 	// Opens a stream and runs a request/response exchange on it, resetting the stream if `run`
 	// fails. Subscriber.close() or `signal` also resets it while `run` is pending, so a peer that
 	// never answers cannot hold it open, and a stream that opens after either is reset at once.
-	async #exchange<T>(options: OpenOptions, run: (stream: Stream) => Promise<T>, signal?: AbortSignal): Promise<T> {
+	async #exchange<T>(
+		options: OpenOptions,
+		run: (stream: Stream) => Promise<T>,
+		signal: AbortSignal | undefined,
+		deadline: Deadline,
+	): Promise<T> {
 		const closed = signal ? AbortSignal.any([this.#closed.signal, signal]) : this.#closed.signal;
 		closed.throwIfAborted();
-		const opening = Stream.open(this.#quic, options);
+		const opening = deadline.open(Stream.open(this.#quic, { ...options, ...requestOptions }));
 		let stream: Stream;
 		try {
 			stream = await untilAborted(opening, closed);
@@ -934,6 +965,7 @@ export class Subscriber {
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
 			priority: info.priority,
+			refresh: info.refresh,
 		};
 	}
 
@@ -948,10 +980,11 @@ export class Subscriber {
 		epoch?: Epoch.Valid,
 		hold?: AbortSignal,
 	): Promise<track.Info> {
-		if (!supportsTrackStream(this.version)) {
+		if (!hasTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
-		const { info, stream } = await this.#trackInfo(broadcast, epoch, track, hold);
+		const deadline = new Deadline();
+		const { info, stream } = await deadline.wait(this.#trackInfo(broadcast, epoch, track, hold, deadline));
 		if (hold && !hold.aborted) hold.addEventListener("abort", () => stream.close(), { once: true });
 		else stream.close();
 		return this.#toModelInfo(info);
@@ -976,7 +1009,10 @@ export class Subscriber {
 		// demand from the start, and a fast FIN cannot discard frames before these callers
 		// receive their handles. An abort closes only this caller's mirror, so the stream is
 		// cancelled once the last one leaves.
-		const key = JSON.stringify([consumed.id, broadcast, epoch, track, sequence]);
+		// Different freshness budgets use independent streams: once a FETCH is on the
+		// wire its limit cannot be widened for a later, more tolerant caller. Equal
+		// budgets still coalesce and each caller keeps an independent mirror.
+		const key = JSON.stringify([consumed.id, broadcast, epoch, track, sequence, options.maxDelay]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
 		if (entry && !entry.group.isClosed) {
@@ -986,7 +1022,15 @@ export class Subscriber {
 			consumer = group.mirror();
 			entry = {
 				group,
-				accepted: this.#runFetch(broadcast, consumed, track, sequence, options.priority ?? 0, group),
+				accepted: this.#runFetch(
+					broadcast,
+					consumed,
+					track,
+					sequence,
+					options.priority ?? 0,
+					group,
+					options.maxDelay,
+				),
 			};
 			this.#fetches.set(key, entry);
 			void group.closed.then(() => {
@@ -1013,24 +1057,39 @@ export class Subscriber {
 		sequence: number,
 		priority: number,
 		group: netGroup.Producer,
+		maxDelay?: Milli,
 	): Promise<void> {
 		const refused = unauthorized(broadcast);
-		// Arm before checking so revocation during setup or response cannot be missed.
-		const disposeGrant = this.#grant?.subscribe(() => {
-			if (this.#denied(broadcast)) group.close(refused);
-		});
-		void group.closed.then(() => disposeGrant?.());
-
 		try {
+			// Every caller leaving ends the wait like it ends the setup below. A caller that
+			// coalesced back onto the group before we commit keeps it waiting.
+			while (
+				(await this.#auth?.ready(broadcast, "subscribe", {
+					signal: consumed.valid,
+					until: () => group.demand().unused(),
+				})) === false
+			) {
+				if (group.closed.peek() === undefined && group.demand().used.peek()) continue;
+				throw new StreamError(StreamCode.Cancel, { message: "cancel" });
+			}
+			// Arm after admission, before checking: another unanswered token may still
+			// widen the union while we wait, which is not a revocation of this fetch.
+			const disposeGrant = this.#grant?.subscribe(() => {
+				if (this.#denied(broadcast)) group.close(refused);
+			});
+			void group.closed.then(() => disposeGrant?.());
 			if (this.#denied(broadcast)) throw refused;
-			if (!supportsTrackStream(this.version)) {
+			if (!hasTrackStream(this.version)) {
 				throw new Error("fetch group requires moq-lite-05 or newer");
 			}
 
 			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
 			// Subscriber.close() closing the group releases every caller at any stage, and resets
 			// the streams the setup opened.
-			const setup = this.#fetchSetup(broadcast, consumed, track, sequence, priority, group);
+			const deadline = new Deadline();
+			const setup = deadline.wait(
+				this.#fetchSetup(broadcast, consumed, track, sequence, priority, group, deadline, maxDelay),
+			);
 			let accepted: { stream: Stream; info: TrackInfo };
 			try {
 				accepted = await untilAbandoned(group, setup);
@@ -1059,12 +1118,14 @@ export class Subscriber {
 		sequence: number,
 		priority: number,
 		group: netGroup.Producer,
+		deadline: Deadline,
+		maxDelay?: Milli,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
 		const { epoch, valid } = consumed;
 		const cancel = new AbortController();
 		void group.closed.then((err) => cancel.abort(err ?? new StreamError(StreamCode.Cancel)));
 		const signal = valid ? AbortSignal.any([valid, cancel.signal]) : cancel.signal;
-		const answered = this.#trackInfo(broadcast, epoch, track, signal);
+		const answered = this.#trackInfo(broadcast, epoch, track, signal, deadline);
 		// Only the properties are needed, so the TRACK stream closes however the wait ends.
 		answered.then(
 			({ stream }) => stream.close(),
@@ -1075,16 +1136,21 @@ export class Subscriber {
 			{ sendOrder: sendOrder({ priority }), version: this.version },
 			async (stream) => {
 				await stream.writer.u53(StreamId.Fetch);
-				await new FetchMessage({ broadcast, epoch, track, priority, group: sequence }).encode(
-					stream.writer,
-					this.version,
-				);
+				await new FetchMessage({
+					broadcast,
+					epoch,
+					track,
+					priority,
+					maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
+					group: sequence,
+				}).encode(stream.writer, this.version);
 				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
 				// done() buffers that byte so the response pump can decode it normally.
 				await untilClosed(group, stream.reader.done());
 				return { stream, info };
 			},
 			signal,
+			deadline,
 		);
 	}
 
@@ -1162,17 +1228,20 @@ export class Subscriber {
 
 			if ("start" in resp) {
 				entry.start = resp.start.group;
+				hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
+				hooks.reportedLargest(entry.track, resp.start.largest);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
 				// demand asks later. One that still arrives is delivered.
 				if (entry.requested !== undefined) entry.tail.account(entry.requested, entry.start);
 			} else if ("end" in resp) {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				entry.end = resp.end.group;
-				if (hasStreamCount(this.version)) entry.streams = resp.end.streams;
 				// A local close can win the race with the response; there is nothing left to end.
 				if (entry.track.closed.peek() !== undefined) continue;
 				try {
-					entry.track.finishAt({ group: entry.end, frame: 0 });
+					// Lower groups may still be on the wire behind a higher one, so readers hold
+					// at a hole below the end until the tail settles.
+					hooks.endTrack(entry.track, { group: entry.end, frame: 0 });
 				} catch (err) {
 					// lite-05 specified an inclusive end, and @moq/net 0.1.3 to 0.1.9 sent one, so
 					// there an end below a received group only costs the early boundary: the FIN
@@ -1184,21 +1253,20 @@ export class Subscriber {
 				}
 			} else if ("drop" in resp) {
 				entry.tail.account(resp.drop.start, resp.drop.end + 1);
+				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1);
 			}
 		}
 	}
 
 	// Wait for the group streams the publisher still owes once it has ended the subscription.
 	//
-	// lite-07 counts streams, so skipped sequences owe nothing. Older drafts account for
-	// the range using received headers and SUBSCRIBE_DROP. A counted stream reset before
-	// its header leaves no trace, so the grace still bounds that wait. Streams whose
+	// Received headers and SUBSCRIBE_DROP account for the range. An unaccounted
+	// sequence, such as a lost datagram, still waits out the grace. Streams whose
 	// headers arrived keep reading until their own FIN or reset.
 	#settleTail(entry: SubscribeEntry): Promise<void> {
 		const { tail, track } = entry;
 
 		const complete = () => {
-			if (entry.streams !== undefined) return tail.streams >= entry.streams;
 			// Without SUBSCRIBE_END (older drafts) nothing says which groups are owed.
 			if (entry.end === undefined) return false;
 			// Without SUBSCRIBE_START the publisher served no group at all.
@@ -1219,7 +1287,7 @@ export class Subscriber {
 	/**
 	 * Send SUBSCRIBE_UPDATE messages whenever the track's aggregate subscription changes.
 	 *
-	 * Resolves cleanly when the stream or track closes, so the caller can include
+	 * Resolves cleanly when the stream or track closes, or a write fails, so the caller can include
 	 * this in a race without leaving a dangling pending write that would
 	 * become an unhandled rejection if the user calls update after close.
 	 *
@@ -1246,11 +1314,32 @@ export class Subscriber {
 			},
 		};
 
+		// The wanted group is subscription state: an update announces each new one past our
+		// largest, and every later update restates it. Joins asking for the same group
+		// coalesce into that one update.
+		let sentWanted: number | undefined;
+		const demand = track.demand();
+		const edge = hooks.producerLargest(track);
 		for (;;) {
+			const largest = edge.peek()?.group;
+			const wanted = demand.wanted.peek();
+			const refresh =
+				hasRefresh(this.version) &&
+				largest !== undefined &&
+				wanted !== undefined &&
+				wanted > largest &&
+				wanted !== sentWanted
+					? wanted
+					: undefined;
 			const current = track.subscription.peek();
-			if (current === undefined || this.#sameSubscription(current, lastSent)) {
+			if (current === undefined || (refresh === undefined && this.#sameSubscription(current, lastSent))) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await race([track.subscription.changed(), stopped]);
+				const next = await race([
+					track.subscription.changed(),
+					demand.wanted.changed(),
+					edge.changed(),
+					stopped,
+				]);
 				if (next === null) return;
 				continue;
 			}
@@ -1269,13 +1358,25 @@ export class Subscriber {
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxDelay/etc.
 			const update = new SubscribeUpdate({
+				wantedGroup: refresh ?? sentWanted,
 				priority: current.priority ?? 0,
 				order: current.order,
 				maxDelay: current.maxDelay,
 				startGroup: current.groups?.start === undefined ? undefined : bounds.start,
 				endGroup: inclusiveGroupEnd(bounds.end),
 			});
-			await update.encode(stream.writer, this.version);
+			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
+			const encoded: Uint8Array[] = [];
+			const buffer = new WritableStream<Uint8Array>({ write: (chunk) => void encoded.push(chunk.slice()) });
+			await update.encode(new Writer(buffer, this.version), this.version);
+			// A failed write means the publisher stopped reading, as it does once it finishes the
+			// track. The responses decide how the track ends, cleanly at the FIN or with a reset's error.
+			try {
+				for (const chunk of encoded) await stream.writer.write(chunk);
+			} catch {
+				return;
+			}
+			if (refresh !== undefined) sentWanted = refresh;
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}

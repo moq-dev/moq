@@ -1,4 +1,3 @@
-import * as base64 from "@hexagon/base64";
 import { wall } from "@moq/clock";
 import * as z from "@zod/mini";
 import * as jose from "jose";
@@ -15,12 +14,14 @@ export const KeyIdSchema = z.string().check(
 		message: "Key ID must contain only alphanumeric characters, hyphens, and underscores",
 	}),
 );
+/** A value parsed by {@link KeyIdSchema}. */
 export type KeyId = z.infer<typeof KeyIdSchema>;
 
 /**
  * Key operations that can be performed
  */
 export const OperationSchema = z.enum(["sign", "verify", "decrypt", "encrypt"]);
+/** A value parsed by {@link OperationSchema}. */
 export type Operation = z.infer<typeof OperationSchema>;
 
 const MIN_HMAC_SECRET_BYTES = 32;
@@ -108,10 +109,15 @@ const OkpKeySchema = z.extend(BaseKeySchema, {
 });
 
 const CanonicalKeySchema = z.discriminatedUnion("kty", [OctKeySchema, RsaKeySchema, EcKeySchema, OkpKeySchema]);
+/** A JSON Web Key of any supported type: oct, RSA, EC, or OKP. */
 export const KeySchema = CanonicalKeySchema;
+/** A value parsed by {@link KeySchema}. */
 export type Key = z.infer<typeof KeySchema>;
+/** An RSA, EC, or OKP key. */
 export type AsymmetricKey = Exclude<Key, { kty: "oct" }>;
+/** An oct (HMAC secret) key. */
 export type SymmetricKey = Extract<Key, { kty: "oct" }>;
+/** An asymmetric key without its private parameters. */
 export type PublicKey = Omit<AsymmetricKey, "d" | "p" | "q" | "dp" | "dq" | "qi">;
 
 /** Derive a verify-only copy of this key, dropping the private material. */
@@ -185,7 +191,7 @@ function parse(jwk: string): Key {
  * `iat` is written only when the claims carry one, so an unset field stays off the
  * wire rather than being stamped with the current time.
  */
-async function sign(key: Key, claims: Claims): Promise<string> {
+async function sign(key: Key, claims: z.input<typeof ClaimsSchema>): Promise<string> {
 	ensureOperationSupported(key, "sign");
 
 	// Scope-check and sign what the schema parsed, never the raw input: an untyped
@@ -280,12 +286,10 @@ async function generateHmacKey(alg: Algorithm, byteLength: number, kid: KeyId): 
 	const bytes = new Uint8Array(byteLength);
 	crypto.getRandomValues(bytes);
 
-	const k = base64.fromArrayBuffer(bytes.buffer, true);
-
 	return {
 		kty: "oct",
 		alg,
-		k,
+		k: jose.base64url.encode(bytes),
 		kid,
 		key_ops: ["sign", "verify"],
 	};
@@ -515,14 +519,9 @@ function decodeBase64Flexible(value: string): Uint8Array | null {
 	}
 
 	try {
-		// First decode as URL
-		return new Uint8Array(base64.toArrayBuffer(trimmed, true));
+		// Accept standard base64 too by mapping it onto the base64url alphabet.
+		return jose.base64url.decode(trimmed.replaceAll("+", "-").replaceAll("/", "_"));
 	} catch {
-		try {
-			// Fallback to standard base64
-			return new Uint8Array(base64.toArrayBuffer(trimmed, false));
-		} catch {
-			return null;
-		}
+		return null;
 	}
 }

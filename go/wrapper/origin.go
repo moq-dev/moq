@@ -161,8 +161,8 @@ func (o *OriginConsumer) Announced(options AnnounceOptions) (*AnnounceConsumer, 
 	return &AnnounceConsumer{inner: inner}, nil
 }
 
-// AnnouncedBroadcast waits for a route covering an exact path, then resolves
-// the broadcast there.
+// AnnouncedBroadcast follows an exact path, resolving each publisher instance
+// that serves it.
 func (o *OriginConsumer) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
 	inner, err := o.inner.AnnouncedBroadcast(path)
 	if err != nil {
@@ -209,12 +209,17 @@ func (a *AnnounceConsumer) Cancel() {
 	a.inner.Cancel()
 }
 
-// AnnouncedBroadcast awaits a specific broadcast becoming available.
+// AnnouncedBroadcast follows a specific broadcast across its publisher instances.
 type AnnouncedBroadcast struct {
 	inner *ffi.MoqAnnouncedBroadcast
 }
 
-// Available blocks until the broadcast is available and returns its consumer.
+// Available blocks until the next publisher instance serves the broadcast and
+// returns its consumer. The first call resolves the instance serving the path once
+// one is announced. Each later call waits for another to take over (a restarted
+// publisher, or a replacement session) or for the broadcast to return after it went
+// offline. Drop what was read from the previous instance then: its tracks end when
+// its session does.
 func (a *AnnouncedBroadcast) Available(ctx context.Context) (*BroadcastConsumer, error) {
 	inner, err := bridge.CallHandle(ctx, a.inner.Cancel, a.inner.Available)
 	if err != nil {

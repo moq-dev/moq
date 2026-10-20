@@ -15,11 +15,13 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Pull the latest origin changes before working.
 - Dig into the root cause and fix it at the source. Never work around a fixable bug with a retry, sleep, or timeout.
 - Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused.
+- Treat anything received over the network as untrusted. Ask how a hostile peer could abuse it, such as memory, CPU, or state it makes the other side hold, and bound that cost by design.
 - Reproduce bugs before fixing them. Land each fix with a regression test that fails without it, when one is easy.
 - Unit tests mock time instead of depending on wall-clock timing or sleeps.
+- Impair a network with bufferbloat (a rate limit below the media bitrate, behind a deep but finite queue), whose overflow drops packets too. Random loss may prove correctness, such as retransmits happening, but never gates acceptance or performance.
 - Keep the PR focused. No unrelated refactors, formatting churn, or drive-by changes; split when in doubt.
 - Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn.
-- Propose a course change, even suggest abandoning a PR, rather than finish a half-solution.
+- Land the ideal implementation now rather than a partial one plus follow-ups; split off only work that is independently landable. If the ideal is out of reach, propose a course change, even abandoning the PR.
 - Be adversarial: attack your own approach, reports, reviews, and other PRs as hard as anyone else's, and argue for the best approach over the first one that works.
 - When a decision is the maintainer's (API shape, naming, scope), ask with 2-3 options and a recommendation.
 - All tests need to be wired into CI, at least a nightly.
@@ -43,7 +45,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Question whether functionality is needed at all before adding it.
 - Deleting code is better than adding code.
 - Suggest follow up sessions and quests when finished, interactively prompting the user.
-- Prefer the simple solution.
+- Prefer the net simpler result: reuse what exists, or narrow the scope, when that makes the implementation or API simpler overall. Say what was dropped.
 - Say it once, in the fewest words that hold up.
 - Prefer a quest over a GitHub issue for work needing durable scope.
 - Use interactive prompts when possible.
@@ -58,10 +60,12 @@ The API is the most important thing to get right.
 A bad shape costs a breaking change in every language, and the surface is huge.
 
 - Report the public API and wire impact of every change, in the PR description and whenever asked.
+- A breaking change adds an entry under `## Unreleased` in each affected package's `MIGRATE.md` saying how to migrate.
 - Keep things private until a consumer needs them. Scrutinize every new exported item.
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` instead.
 - Let the type system make misuse unrepresentable
 - A broadcast, track, or group name always means the same content. MoQ has no ETag-style invalidation, so a publisher that reuses a name for different content (such as restarting group numbers) is a bug; publish a new broadcast instead of working around it.
+- Each publisher produces its own stream. With several publishers, the end subscriber decides how to subscribe to them (switch between, combine, or keep separate); never make independent publishers produce identical output so the relay can stitch them.
 - Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
 - Avoid 4+ args; use a struct or object.
 - Prefer nesting related API, configuration, and structured output fields under their shared role.
@@ -83,6 +87,7 @@ Wire changes should be backwards compatible for any *published* drafts/versions.
 
 Before starting, `git fetch origin` and set the upstream to the base branch.
 Pass PR bodies to `gh` on stdin (`--body-file -`); never write to a directory other agents share.
+Keep scratch files in your worktree's `.scratch/`, not `target/`: build output may live outside the checkout and gets wiped.
 
 Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.
@@ -101,7 +106,7 @@ The `quest` binary comes from the kixelated/quest flake input and serves the que
 
 | Change in | Also update |
 |---|---|
-| `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/moq/*.go` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `cpp/moq`, `cpp/obs/src`, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md` |
+| `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `cpp/moq`, `cpp/obs/src`, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
 | `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
 | `rs/moq-auth` | `js/auth`, `doc/bin/relay/auth.md` |

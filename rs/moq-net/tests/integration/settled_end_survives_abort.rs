@@ -32,7 +32,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	// From the first group with a replay window: a late reader is owed the whole track,
 	// not the live edge.
 	let subscription = moq_net::track::Subscription::default()
-		.with_start(moq_net::track::Position::group(0))
+		.with_groups(0..)
 		.with_max_delay(std::time::Duration::from_secs(30));
 	let mut consumer = track.subscribe(subscription);
 
@@ -77,19 +77,19 @@ fn assert_whole((got, err): (Vec<u64>, Option<Error>), what: &str) {
 }
 
 /// The groups a settled track holds outlive an abort: a late reader gets all of them.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn an_abort_after_the_end_settled_keeps_the_groups_for_a_late_reader() {
 	assert_whole(round(true, false).await, "arrival order, aborted after the end settled");
 }
 
 /// The same in sequence order: the ordered cursor ends clean too, not with the abort.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn an_abort_after_the_end_settled_keeps_the_groups_for_a_late_ordered_reader() {
 	assert_whole(round(true, true).await, "sequence order, aborted after the end settled");
 }
 
 /// Control: with no abort the same late reader gets every group, then the clean end.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_settled_track_delivers_every_group_to_a_late_reader() {
 	assert_whole(round(false, false).await, "arrival order, no abort");
 	assert_whole(round(false, true).await, "sequence order, no abort");

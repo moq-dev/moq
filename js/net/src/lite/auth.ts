@@ -220,6 +220,10 @@ export class LiteAuthWire implements AuthWire {
 		return msg.token;
 	}
 
+	async withdrawn(stream: Stream): Promise<void> {
+		if (!(await stream.reader.done())) throw new ProtocolViolation("additional message on an AUTH stream");
+	}
+
 	async grant(stream: Stream, grant: WireGrant): Promise<void> {
 		await new AuthOk(grant.publish, grant.subscribe, grant.expires).encode(stream.writer, this.#version);
 	}

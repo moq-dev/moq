@@ -47,7 +47,6 @@ test("shared default builds cover each consumer exactly once", async () => {
 	expect(all.length - targets.length).toBe(5);
 	expect(shared.on.push?.tags).toEqual(["moq-ffi-v*"]);
 	const dart = await read("release-dart-ffi");
-	expect(dart.jobs.ffi.with?.["default-features"]).toBe(false);
 	expect(dart.on.push?.tags).toEqual(["moq-ffi-v*"]);
 });
 

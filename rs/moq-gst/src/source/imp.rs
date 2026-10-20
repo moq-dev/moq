@@ -41,6 +41,7 @@ struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
 	tls_disable_verify: bool,
+	quic_keylog: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +49,7 @@ struct ResolvedSettings {
 	url: url::Url,
 	broadcast: String,
 	tls_disable_verify: bool,
+	quic_keylog: bool,
 }
 
 impl TryFrom<Settings> for ResolvedSettings {
@@ -62,6 +64,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.context("broadcast property is required")?
 				.clone(),
 			tls_disable_verify: value.tls_disable_verify,
+			quic_keylog: value.quic_keylog,
 		})
 	}
 }
@@ -214,7 +217,9 @@ fn connect(
 	let _rt = RUNTIME.enter();
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	let client = config.init(Default::default())?.with_subscriber(origin);
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.keylog = Some(settings.quic_keylog);
+	let client = config.init(quic)?.with_subscriber(origin);
 	let connection = client.connect(settings.url.clone());
 	Ok((client, connection, consumer))
 }
@@ -256,6 +261,14 @@ impl ObjectImpl for MoqSrc {
 					.default_value(false)
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecBoolean::builder("quic-keylog")
+					.nick("QUIC TLS key log")
+					.blurb(
+						"Danger: write TLS session secrets to the file SSLKEYLOGFILE names; without it the start fails",
+					)
+					.default_value(false)
+					.mutable_ready()
+					.build(),
 			]
 		});
 		PROPS.as_ref()
@@ -285,6 +298,7 @@ impl ObjectImpl for MoqSrc {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
 			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
+			"quic-keylog" => settings.quic_keylog = value.get().unwrap(),
 			_ => unreachable!(),
 		}
 	}
@@ -295,6 +309,7 @@ impl ObjectImpl for MoqSrc {
 			"url" => settings.url.to_value(),
 			"broadcast" => settings.broadcast.to_value(),
 			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
+			"quic-keylog" => settings.quic_keylog.to_value(),
 			_ => unreachable!(),
 		}
 	}
@@ -425,6 +440,14 @@ impl PumpState {
 
 /// A rendition by kind and moq track name: what a pad is kept by.
 type Rendition = (TrackKind, String);
+
+/// The media a rendition plays: its resolved broadcast and track name, whatever the catalog calls
+/// it or however it spells the reference.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Track {
+	broadcast: Option<moq_net::PathOwned>,
+	name: String,
+}
 
 /// A rendition a run is serving, keyed in the run by moq track name.
 struct ActiveTrack {
@@ -737,6 +760,7 @@ async fn follow_catalog(
 	let playback = Playback {
 		pads: pads.clone(),
 		timeline: Arc::default(),
+		finished: Arc::default(),
 	};
 	let mut active: HashMap<String, ActiveTrack> = HashMap::new();
 	let mut pumps: tokio::task::JoinSet<Option<Rendition>> = tokio::task::JoinSet::new();
@@ -817,7 +841,8 @@ async fn follow_catalog(
 /// Bring the run's pumps in line with `catalog`: spawn pumps for newly announced renditions,
 /// hand the pad of any whose [`Shape`] changed to a new pump, leave ones that vanished to
 /// end with their track, stop disabled ones, and end the kept pads of renditions it no longer
-/// lists. Returns the renditions it lists.
+/// lists. A rendition that already played its track to the end keeps its pad but gets no pump.
+/// Returns the renditions it lists.
 ///
 /// Infallible by design: every way a single rendition can be unusable (unsupported codec,
 /// malformed init, a name the broadcast refuses) skips just that rendition, so one bad entry in
@@ -933,6 +958,14 @@ fn reconcile(
 	// renditions that didn't change. A parse failure (malformed init) skips just this rendition.
 	for name in plan.add {
 		let d = &desired[&name];
+		let track = Track {
+			broadcast: source.resolve_reference(d.shape.broadcast.as_ref()),
+			name: d.shape.track.clone(),
+		};
+		let played = ((d.kind, name.clone()), track.clone());
+		if playback.finished.lock().unwrap().contains(&played) {
+			continue;
+		}
 		let container = match moq_mux::catalog::hang::Container::new(
 			&d.shape.container,
 			match d.kind {
@@ -968,10 +1001,11 @@ fn reconcile(
 					name: name.clone(),
 					caps: d.shape.caps.clone(),
 					binding,
-					track: d.shape.track.clone(),
+					track,
 					container,
 					pads: pads.clone(),
 					timeline: playback.timeline.clone(),
+					finished: playback.finished.clone(),
 					state: state.clone(),
 					cancel: cancel_rx,
 					shutdown: shutdown.clone(),
@@ -1022,11 +1056,19 @@ fn plan_reconcile<S: PartialEq>(desired: &HashMap<String, S>, active: &HashMap<S
 	ReconcilePlan { remove, add }
 }
 
-/// Pads survive a broadcast switch; its timing does not.
+/// Pads survive a broadcast switch; its timing and finished tracks do not.
 struct Playback {
 	pads: Pads,
 	timeline: Arc<Timeline>,
+	finished: Finished,
 }
+
+/// Each pad's rendition with a track it played to the end. A new subscription to a finished
+/// track replays its last group, so a catalog update that still lists the rendition (a
+/// publisher's final snapshot lands after its tracks end) must not start it on that pad again. A
+/// pad that never played the track joins it like any late subscriber. Shared with the pumps,
+/// since a pump that replaces another on its pad learns this only once the other lets go.
+type Finished = Arc<Mutex<HashSet<(Rendition, Track)>>>;
 
 /// The first decoded frame fixes one mapping for every rendition of this broadcast run.
 #[derive(Default)]
@@ -1053,10 +1095,12 @@ struct Pump {
 	name: String,
 	caps: gst::Caps,
 	binding: moq_mux::Binding,
-	track: String,
+	track: Track,
 	container: moq_mux::catalog::hang::Container,
 	pads: Pads,
 	timeline: Arc<Timeline>,
+	/// The run's [`Playback::finished`].
+	finished: Finished,
 	/// Shared with this rendition's [`ActiveTrack::state`].
 	state: Arc<PumpState>,
 	cancel: watch::Receiver<bool>,
@@ -1076,10 +1120,11 @@ impl Pump {
 			name,
 			caps,
 			binding,
-			track,
+			track: media,
 			container,
 			pads,
 			timeline,
+			finished,
 			state,
 			mut cancel,
 			shutdown,
@@ -1093,7 +1138,7 @@ impl Pump {
 			_ = cancel.changed() => return None,
 			subscriber = async {
 				let broadcast = binding.broadcast().await?;
-				let track = broadcast.track(&track)?;
+				let track = broadcast.track(&media.name)?;
 				Ok::<_, moq_mux::Error>(track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1))).await?)
 			} => match subscriber {
 				Ok(subscriber) => subscriber,
@@ -1132,6 +1177,15 @@ impl Pump {
 					_ = cancel.changed() => return None,
 					owned = owner.lock_owned() => owned,
 				};
+				// The pump this one replaces records its track as finished before letting go, so a
+				// replacement started while it was reading the end (a reshape) can't replay it.
+				if finished
+					.lock()
+					.unwrap()
+					.contains(&((kind, name.clone()), media.clone()))
+				{
+					return Some((kind, name));
+				}
 				tokio::task::block_in_place(|| begin(&pad, &name, &caps));
 				(pad, owned)
 			}
@@ -1145,8 +1199,15 @@ impl Pump {
 		let mut sent_segment = false;
 		loop {
 			tokio::select! {
-				// This rendition is being torn down (its run ended, or a catalog update replaced it).
-				_ = cancel.changed() => return None,
+				// This rendition is being torn down (its run ended, or a catalog update replaced it). An
+				// end that arrived alongside still finishes the track, or the replacement waiting for
+				// this pad would replay it.
+				_ = cancel.changed() => {
+					if ended(&mut track) {
+						finished.lock().unwrap().insert(((kind, name.clone()), media));
+					}
+					return None;
+				}
 				frame = track.read() => match frame {
 					Ok(Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. })) => {}
 					Ok(Some(moq_mux::container::Read::Frame { frame, .. })) => {
@@ -1185,13 +1246,33 @@ impl Pump {
 							Err(_) => return Some((kind, name)),
 						}
 					}
-					Ok(None) => return Some((kind, name)),
+					Ok(None) => {
+						// Recorded while this pump still owns the pad, before any replacement can claim it.
+						finished.lock().unwrap().insert(((kind, name.clone()), media));
+						return Some((kind, name));
+					}
 					Err(err) => {
 						gst::warning!(CAT, "track {name} failed: {err:?}");
 						return Some((kind, name));
 					}
 				}
 			}
+		}
+	}
+}
+
+/// Whether the track's end is the next media item, without waiting for it. Markers ready before it
+/// are passed over; a frame or anything not ready yet means it has not ended.
+fn ended(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Container>) -> bool {
+	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+	loop {
+		let mut read = std::pin::pin!(track.read());
+		match read.as_mut().poll(&mut cx) {
+			std::task::Poll::Ready(Ok(None)) => return true,
+			std::task::Poll::Ready(Ok(Some(
+				moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. },
+			))) => continue,
+			_ => return false,
 		}
 	}
 }
@@ -1314,9 +1395,35 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 
 #[cfg(test)]
 mod tests {
-	use super::{PumpState, Timeline, plan_reconcile};
+	use super::{PumpState, Timeline, ended, plan_reconcile};
 	use moq_net::Timestamp;
 	use std::collections::HashMap;
+
+	/// A pump cancelled as its track ends records the end only when no media is left to read,
+	/// passing over the markers a publisher closes with.
+	#[test]
+	fn ended_sees_only_an_end_with_no_media_before_it() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("video", hang::container::track_info(0)).unwrap();
+		let legacy = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut producer = moq_mux::container::Producer::new(track, legacy());
+		let mut consumer = moq_mux::container::Consumer::new(producer.consume(), legacy());
+		assert!(!ended(&mut consumer), "an open track has not ended");
+
+		producer
+			.write(moq_mux::container::Frame {
+				timestamp: Timestamp::ZERO,
+				payload: bytes::Bytes::from_static(&[0]),
+				keyframe: true,
+				duration: None,
+			})
+			.unwrap();
+		assert!(!ended(&mut consumer), "a frame was still unread");
+
+		producer.discontinuity().unwrap();
+		producer.finish().unwrap();
+		assert!(ended(&mut consumer), "the closing marker hid the end");
+	}
 
 	#[test]
 	fn video_caps_preserve_nal_framing() {
@@ -1462,7 +1569,7 @@ mod session_tests {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoCodec, VideoConfig};
 	use tokio::sync::watch;
 
-	use super::{NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, follow_catalog, follow_path};
+	use super::{NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, TrackKind, follow_catalog, follow_path};
 
 	/// The pad-id counters are process-global, so a test reading one has to be the only test
 	/// allocating while it runs. `cargo test` shares a process across tests (nextest doesn't),
@@ -1862,14 +1969,13 @@ mod session_tests {
 		// has: that edge says the session reconciled the removal, which a fixed beat can only
 		// guess at. Answering before it lands is a pump that legitimately goes live, so the
 		// wait is what the assertion below is about.
+		let mut demand = request.demand();
+		let unwanted = async {
+			while demand.wanted_changed().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
 		super::RUNTIME
-			.block_on(async {
-				tokio::time::timeout(
-					Duration::from_secs(10),
-					moq_net::kio::wait(|waiter| request.demand().poll_unused(waiter)),
-				)
-				.await
-			})
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), unwanted).await })
 			.expect("the cancelled pump never dropped its subscription")
 			.expect("the pending request is still open");
 
@@ -2232,6 +2338,118 @@ mod session_tests {
 		drop(shutdown);
 	}
 
+	/// A publisher's last catalog snapshot can land after its tracks end, such as when finishing
+	/// the catalog declares pending timelines. A new subscription to a finished track replays its
+	/// last group, so the update must not start the rendition again, even reshaped. A new
+	/// rendition over the same track still joins it on a pad of its own.
+	#[test]
+	fn a_finished_track_is_not_replayed_after_a_catalog_update() {
+		const FRAMES: u64 = 3;
+
+		let _pad_ids = pad_ids();
+		let element = element();
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let video = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let audio = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		catalog.modify().unwrap().video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+
+		// Count what reaches the first video pad once it is added. A pump adds a new pad from the
+		// signal, before it pushes anything, so every buffer and every later stream is seen.
+		let buffers = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let restarts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let (counted, restarted) = (buffers.clone(), restarts.clone());
+		let probed = std::sync::atomic::AtomicBool::new(false);
+		let (added, mut adds) = tokio::sync::mpsc::unbounded_channel();
+		element.connect_pad_added(move |_, pad| {
+			if pad.name().starts_with("video_") && !probed.swap(true, Ordering::Relaxed) {
+				let (counted, restarted) = (counted.clone(), restarted.clone());
+				pad.add_probe(
+					gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+					move |_, info| match &info.data {
+						Some(gst::PadProbeData::Buffer(_)) => {
+							counted.fetch_add(1, Ordering::Relaxed);
+							gst::PadProbeReturn::Drop
+						}
+						Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::StreamStart => {
+							restarted.fetch_add(1, Ordering::Relaxed);
+							gst::PadProbeReturn::Ok
+						}
+						_ => gst::PadProbeReturn::Ok,
+					},
+				);
+			}
+			added.send(pad.name().to_string()).unwrap();
+		});
+
+		let pads = Pads::default();
+		let (_shutdown, shutdown) = watch::channel(false);
+		let (_cancel, mut cancelled) = watch::channel(false);
+		let session = {
+			let pads = pads.clone();
+			let weak = element.downgrade();
+			let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
+			super::RUNTIME.spawn(async move { follow_catalog(source, &pads, weak, &shutdown, &mut cancelled).await })
+		};
+		let pad = super::RUNTIME.block_on(adds.recv()).unwrap();
+		assert!(pad.starts_with("video_"), "{pad} was added first");
+
+		let mut producer = moq_mux::container::Producer::new(
+			video,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		for i in 0..FRAMES {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: moq_net::Timestamp::from_micros(i * 33_000).unwrap(),
+					payload: bytes::Bytes::from(vec![i as u8; 64]),
+					keyframe: i == 0,
+					duration: None,
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+
+		// The pump owns its pad until it has pushed the whole track and read its end.
+		let owner = pads.0.lock().unwrap()[&(TrackKind::Video, "video".to_string())]
+			.owner
+			.clone();
+		drop(super::RUNTIME.block_on(owner.lock_owned()));
+		assert_eq!(buffers.load(Ordering::Relaxed), FRAMES, "the track never played");
+
+		// The update reshapes the finished rendition over the same track, which hands its pad to a
+		// new pump, and lists a second rendition of that track. Its audio pad proves the session
+		// acted on it.
+		{
+			let mut guard = catalog.modify().unwrap();
+			guard.video.renditions.get_mut("video").unwrap().description = Some(bytes::Bytes::from_static(&[1]));
+			let mut again = video_rendition();
+			again.track = Some("video".into());
+			guard.video.renditions.insert("again".into(), again);
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+		let mut added: Vec<String> =
+			super::RUNTIME.block_on(async { vec![adds.recv().await.unwrap(), adds.recv().await.unwrap()] });
+		added.sort();
+		assert!(
+			added[0].starts_with("audio_") && added[1].starts_with("video_"),
+			"the update added {added:?}"
+		);
+
+		// The run ends only once every pump drains, a replaying one included.
+		audio.finish().unwrap();
+		catalog.finish().unwrap();
+		super::RUNTIME.block_on(session).unwrap().unwrap();
+
+		assert_eq!(restarts.load(Ordering::Relaxed), 0, "the finished track started again");
+		assert_eq!(buffers.load(Ordering::Relaxed), FRAMES, "the finished track replayed");
+	}
+
 	/// Pipelines link `moqsrc`'s pads by name, so the first video rendition that actually
 	/// arrives has to be `video_0`. A rendition announced but never served must not claim that
 	/// name and leave the real one on `video_1`, where `s.video_0 ! ...` never links.
@@ -2281,7 +2499,24 @@ mod session_tests {
 			url: "https://127.0.0.1:1".parse().unwrap(),
 			broadcast: "test".into(),
 			tls_disable_verify: false,
+			quic_keylog: false,
 		}
+	}
+
+	/// `quic-keylog` reaches the client's QUIC config, which refuses it without `SSLKEYLOGFILE`.
+	#[test]
+	fn keylog_reaches_the_client() {
+		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
+		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		let keylog = ResolvedSettings {
+			quic_keylog: true,
+			..unreachable()
+		};
+		let err = super::connect(&keylog)
+			.err()
+			.expect("a keylog without SSLKEYLOGFILE must be refused");
+		assert!(err.to_string().contains("SSLKEYLOGFILE"), "{err}");
+		assert!(super::connect(&unreachable()).is_ok());
 	}
 
 	fn is_closed(connection: &moq_tokio::Connection) -> bool {
@@ -2483,10 +2718,14 @@ mod session_tests {
 			name: "video".into(),
 			caps: gst::Caps::new_empty_simple("video/x-h264"),
 			binding: moq_mux::Binding::new(publisher.broadcast.consume()),
-			track: "video".into(),
+			track: super::Track {
+				broadcast: None,
+				name: "video".into(),
+			},
 			container: moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 			pads: Pads::default(),
 			timeline: std::sync::Arc::default(),
+			finished: std::sync::Arc::default(),
 			state: std::sync::Arc::new(super::PumpState::new()),
 			cancel,
 			shutdown,
@@ -2928,6 +3167,16 @@ mod session_tests {
 		);
 	}
 
+	/// What a [`Relay`] does with each new session.
+	#[derive(Clone, Copy)]
+	enum Admit {
+		Serve,
+		/// Drop the connection unanswered, as a relay that is down would.
+		Down,
+		/// Reject the session as forbidden.
+		Refuse,
+	}
+
 	/// A relay on loopback: an origin served over plain TCP to every session, which may also
 	/// publish into it.
 	struct Relay {
@@ -2935,21 +3184,22 @@ mod session_tests {
 		url: url::Url,
 		task: tokio::task::JoinHandle<()>,
 		close: tokio::sync::mpsc::UnboundedSender<moq_net::Error>,
+		/// Set before a `close` so the redial meets it. The listener stays bound throughout:
+		/// rebinding a freed port races its release and other tests binding port 0.
+		admit: std::sync::Arc<Mutex<Admit>>,
 	}
 
 	impl Relay {
 		fn new() -> Self {
-			Self::bind("127.0.0.1:0".parse().unwrap(), false)
-		}
-
-		fn bind(addr: std::net::SocketAddr, refuse: bool) -> Self {
 			super::RUNTIME.block_on(async {
 				let origin = moq_tokio::origin::spawn();
 				let mut config = moq_tokio::listen::Config::default();
-				config.tcp.bind = Some(addr);
+				config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 				let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 				let port = server.tcp_local_addr().unwrap().port();
 				let serving = origin.clone();
+				let admit = std::sync::Arc::new(Mutex::new(Admit::Serve));
+				let admitting = admit.clone();
 				let (close, mut closing) = tokio::sync::mpsc::unbounded_channel::<moq_net::Error>();
 				let task = tokio::spawn(async move {
 					let mut sessions: Vec<moq_net::Session> = Vec::new();
@@ -2960,10 +3210,15 @@ mod session_tests {
 							}
 							request = server.accept() => {
 								let Some(request) = request else { break };
-								if refuse {
-									request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap();
-								} else if let Ok((session, _driver)) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
-									sessions.push(session);
+								let admit = *admitting.lock().unwrap();
+								match admit {
+									Admit::Serve => {
+										if let Ok((session, _driver)) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
+											sessions.push(session);
+										}
+									}
+									Admit::Down => drop(request),
+									Admit::Refuse => request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap(),
 								}
 							}
 						}
@@ -2974,6 +3229,7 @@ mod session_tests {
 					url: format!("tcp://127.0.0.1:{port}/").parse().unwrap(),
 					task,
 					close,
+					admit,
 				}
 			})
 		}
@@ -3072,7 +3328,6 @@ mod session_tests {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
 		let url = relay.url.clone();
-		let addr = format!("127.0.0.1:{}", url.port().unwrap()).parse().unwrap();
 		let (pipeline, output) = pipeline(&url);
 		let sink = glib::Object::builder::<crate::sink::MoqSink>()
 			.property("url", url.as_str())
@@ -3114,11 +3369,12 @@ mod session_tests {
 		};
 		play();
 		let held = pipeline.by_name("src").unwrap().src_pads();
-		relay.stop();
+		*relay.admit.lock().unwrap() = Admit::Down;
+		relay.close.send(moq_net::Error::GoingAway).unwrap();
 		// Real sockets use the real clock: this exercises the deployed 10s retry budget.
 		std::thread::sleep(Duration::from_secs(11));
 		while pull(Duration::ZERO).is_some() {}
-		let replacement = Relay::bind(addr, false);
+		*relay.admit.lock().unwrap() = Admit::Serve;
 		play();
 		assert_eq!(
 			pipeline.by_name("src").unwrap().src_pads(),
@@ -3127,25 +3383,24 @@ mod session_tests {
 		);
 		sink.set_state(gst::State::Null).unwrap();
 		assert_played_cleanly(pipeline);
-		replacement.stop();
+		relay.stop();
 	}
 
 	#[test]
 	fn a_refused_redial_posts_a_bus_error_after_playback() {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
-		let addr = format!("127.0.0.1:{}", relay.url.port().unwrap()).parse().unwrap();
 		let mut publisher = Publisher::new(&relay.origin, epoch(), video_rendition());
 		let (pipeline, sink) = pipeline(&relay.url);
 		rendered(&sink, &mut publisher, 1);
-		relay.stop();
-		let refusing = Relay::bind(addr, true);
+		*relay.admit.lock().unwrap() = Admit::Refuse;
+		relay.close.send(moq_net::Error::GoingAway).unwrap();
 		let error = pipeline
 			.bus()
 			.unwrap()
 			.timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error]);
 		pipeline.set_state(gst::State::Null).unwrap();
-		refusing.stop();
+		relay.stop();
 		let error = error.expect("refused redial did not fail the pipeline");
 		let gst::MessageView::Error(error) = error.view() else {
 			unreachable!()

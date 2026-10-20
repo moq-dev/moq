@@ -102,12 +102,9 @@ int main() {
     auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
     auto timebase_other = ok(moq::BroadcastProducer::init(), "timebase other");
     auto timebase = ok(moq::MediaTimebase::init(timebase_owner), "timebase");
-    auto foreign_chunks = moq::MediaContainerProducer::init(timebase_other, {moq::ContainerFormat::kFmp4, {}, timebase});
-    CHECK(!foreign_chunks);
-    CHECK(std::holds_alternative<moq::Error::kCodec>(foreign_chunks.error().get_variant()));
-    auto foreign_stream = moq::MediaContainerStreamProducer::init(timebase_other, {moq::ContainerFormat::kFmp4, timebase});
-    CHECK(!foreign_stream);
-    CHECK(std::holds_alternative<moq::Error::kCodec>(foreign_stream.error().get_variant()));
+    auto foreign = moq::MediaContainerProducer::init(timebase_other, {moq::ContainerFormat::kFmp4, {}, timebase});
+    CHECK(!foreign);
+    CHECK(std::holds_alternative<moq::Error::kCodec>(foreign.error().get_variant()));
     ok(timebase_owner->close(), "close timebase owner");
     CHECK(!moq::MediaTimebase::init(timebase_owner));
     ok(timebase_other->close(), "close timebase other");

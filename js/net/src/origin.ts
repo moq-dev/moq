@@ -29,6 +29,7 @@ import {
 	spreadHash,
 } from "./internal.ts";
 import * as Path from "./path.ts";
+import { Front } from "./resume.ts";
 import {
 	type Advertised,
 	type Advertisements,
@@ -241,6 +242,7 @@ class CoveringRoot {
 	}
 }
 
+// pending: /quest/m1/public-model/answer.md
 /**
  * One requested path: the notify node for everything watching it.
  *
@@ -612,6 +614,27 @@ class OriginState {
 	// How many sessions are attached, and how many of those support broadcast discovery.
 	// What backs the public `discovery` getter.
 	sessions = new Signal({ total: 0, discovery: 0 });
+
+	// The prefixes whose initial announcements a session is still delivering, counted. An
+	// announcement stream overlapping one has not synced yet.
+	snapshots = new Signal(new Map<Path.Valid, number>());
+
+	/** Hold an initial set in flight under the absolute `prefix` until the returned dispose. */
+	addSnapshot(prefix: Path.Valid): Dispose {
+		this.snapshots.mutate((counts) => {
+			counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+		});
+		let landed = false;
+		return () => {
+			if (landed) return;
+			landed = true;
+			this.snapshots.mutate((counts) => {
+				const count = (counts.get(prefix) ?? 0) - 1;
+				if (count > 0) counts.set(prefix, count);
+				else counts.delete(prefix);
+			});
+		};
+	}
 
 	// The literal heads readers are watching, counted, as a trie: announcement streams and
 	// announced requests. Sessions ask their peer for announcements under the broadest of
@@ -1082,7 +1105,7 @@ export interface Table {
 	/** Insert a route with protocol metadata. @internal */
 	dynamicRoute(
 		prefix: Path.Valid,
-		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] },
+		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): Dynamic;
 }
 
@@ -1134,6 +1157,7 @@ export class Producer implements Table {
 			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
 			attach: (discovery) => this.#attach(discovery),
 			expect: () => this.#expect(),
+			snapshot: (prefix) => this.#state.addSnapshot(this.#scope.prefix(prefix)),
 			get requests() {
 				if (thisProducer.#scope === Scope.all) return thisProducer.#state.requests;
 				thisProducer.#requests ??= new Derived([thisProducer.#state.requests], (requests) =>
@@ -1280,7 +1304,14 @@ export class Producer implements Table {
 	/** Insert an originated claim with route metadata that answers through `accept`, for tests and benches. @internal */
 	dynamicRoute(
 		prefix: Path.Valid,
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
+		route:
+			| Route
+			| {
+					epoch?: Route["epoch"];
+					hops?: Route["hops"];
+					cost?: Route["cost"];
+					auth?: Route["auth"];
+			  } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), true, false);
 	}
@@ -1293,7 +1324,14 @@ export class Producer implements Table {
 	 */
 	#receive(
 		prefix: Path.Valid,
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
+		route:
+			| Route
+			| {
+					epoch?: Route["epoch"];
+					hops?: Route["hops"];
+					cost?: Route["cost"];
+					auth?: Route["auth"];
+			  } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), false, false);
 	}
@@ -1551,7 +1589,9 @@ export class Requesting {
 	/**
 	 * The current broadcast, or undefined while nothing provides the path.
 	 * Announced requests without an epoch follow publisher restarts. Blind and epoch-pinned
-	 * requests retain their accepted instance. Closing this handle affects only this request.
+	 * requests retain their accepted instance. Another route of the same epoch taking over keeps
+	 * this handle: its tracks resume on that route from the first group each reader lacks.
+	 * Closing this handle affects only this request.
 	 */
 	readonly active: Getter<broadcast.Consumer | undefined>;
 
@@ -1855,20 +1895,33 @@ export class Consumer {
 		// Memoized on the route's identity: the same front resolving again returns the handle
 		// we already made, and only a real swap clones a new one (cloning before closing the
 		// old, so a broadcast that both routes share never briefly loses its last handle).
+		// Under an epoch the handle is a logical front instead: another route of the same epoch
+		// serves the same broadcast, so the front re-sources its tracks and the handle stays.
 		let released = false;
 		let source: Resolution | undefined;
 		let handle: broadcast.Consumer | undefined;
+		let logical: Front | undefined;
 		const own = (resolution: Resolution | undefined): broadcast.Consumer | undefined => {
 			if (released) return undefined;
 			const front = epoch === undefined || resolution?.epoch === epoch ? resolution?.front : undefined;
+			if (logical && source?.epoch !== undefined && resolution?.epoch === source.epoch) {
+				// Between routes of the instance, readers wait for the next one to answer.
+				if (front) logical.serve(front);
+				else logical.park();
+				return handle;
+			}
 			if (front !== source?.front || resolution?.epoch !== source?.epoch) {
 				const previous = handle;
+				const concluded = logical;
 				source = front ? { front, epoch: resolution?.epoch } : undefined;
-				handle = front?.clone();
+				logical = front && resolution?.epoch !== undefined ? new Front() : undefined;
+				logical?.serve(front as broadcast.Consumer);
+				handle = logical ? logical.consumer : front?.clone();
 				if (handle) {
 					hooks.stampPath(handle, relative);
 					hooks.stampEpoch(handle, resolution?.epoch);
 				}
+				concluded?.conclude();
 				previous?.close();
 			}
 			return handle;
@@ -1904,13 +1957,15 @@ export class Consumer {
 			(resolution, answerers, ended) =>
 				ended !== undefined ||
 				(epoch !== undefined && resolution?.epoch !== epoch) ||
-				(!resolution?.front && answerers === 0),
+				(!own(resolution) && answerers === 0),
 		);
 
 		return makeRequesting(relative, active, unroutable, closed, () => {
 			// Releases this request's handle; the route itself belongs to the table.
 			released = true;
 			unsubscribe();
+			logical?.conclude();
+			logical = undefined;
 			handle?.close();
 			handle = undefined;
 			source = undefined;
@@ -2035,7 +2090,26 @@ export class Consumer {
 				}
 				active = next;
 
-				await Signal.race(this.#state.local, this.#state.advertisedLocal, this.#state.routes, producer.closed);
+				// Synced once no session is still delivering an initial set this stream could
+				// list: one under a hidden segment holds only a reader that opts in.
+				let behind = false;
+				for (const prefix of this.#state.snapshots.peek().keys()) {
+					for (const pattern of patterns) {
+						if (!pattern.overlaps(Path.Pattern.subtree(prefix))) continue;
+						if (hidden || !hiddenBelow(scopeHead(pattern), prefix)) behind = true;
+					}
+				}
+				if (behind) producer.behind();
+				else producer.synced();
+
+				await Signal.race(
+					this.#state.local,
+					this.#state.advertisedLocal,
+					this.#state.routes,
+					this.#state.snapshots,
+					producer.closed,
+				);
+
 				if (producer.closed.peek() !== undefined) return;
 			}
 		} catch {
@@ -2216,7 +2290,9 @@ export class Dynamic {
 	 * Route selection still applies: another route still at the old epoch outranks one
 	 * without. To re-price, start from the current route, `update({ ...dynamic.route, cost })`.
 	 */
-	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] }): void {
+	update(
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
+	): void {
 		if (this.#closed) throw new Error("dynamic is closed");
 		const next = Route.normalize(route);
 		const previous = this.#entry.route.peek().epoch;

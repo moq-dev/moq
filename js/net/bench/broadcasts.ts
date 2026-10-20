@@ -6,12 +6,15 @@ import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
 import * as Epoch from "../src/epoch.ts";
 import { HopSchema, Route } from "../src/hop.ts";
+import { AnnounceRequest } from "../src/lite/announce.ts";
+import { Publisher } from "../src/lite/publisher.ts";
 import { Subscriber } from "../src/lite/subscriber.ts";
 import { TrackInfo } from "../src/lite/track.ts";
-import { Version } from "../src/lite/version.ts";
+import { ALPN_07_WIP, Version } from "../src/lite/version.ts";
+import { createMockTransportPair } from "../src/mock.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
-import { Writer } from "../src/stream.ts";
+import { Stream, Writer } from "../src/stream.ts";
 
 const routeCounts = [8, 32, 128];
 const observerCounts = [1, 8, 32];
@@ -367,5 +370,61 @@ for (const routeCount of routeCounts) {
 			source.close();
 		}
 		console.log(`retirement,${routeCount},${consumerCount},${((elapsed * 1000) / 256).toFixed(2)},${refused}`);
+	}
+}
+
+// Exercise each sender's keyed queue while its first wire write is stalled.
+console.log("scope,routes,observers,update_us");
+for (const routeCount of routeCounts) {
+	for (const observerCount of observerCounts) {
+		const origin = new Producer();
+		const routes = Array.from({ length: routeCount }, (_, index) => {
+			const broadcast = origin.createBroadcast(Path.from(`z/${index}`));
+			broadcast.announce();
+			return broadcast;
+		});
+		const senders = Array.from({ length: observerCount }, () => {
+			const pair = createMockTransportPair(ALPN_07_WIP);
+			const publisher = new Publisher(pair.server, Version.DRAFT_07, HopSchema.parse(1n), origin.consume());
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const stream = new Stream({
+				version: Version.DRAFT_07,
+				readable: new ReadableStream<Uint8Array>(),
+				writable: new WritableStream<Uint8Array>({
+					async write() {
+						entered.resolve();
+						await release.promise;
+					},
+				}),
+			});
+			const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
+			return { pair, publisher, entered, release, running };
+		});
+		await Promise.all(senders.map((sender) => sender.entered.promise));
+		const start = performance.now();
+		for (let index = 0; index < updates; index++) {
+			const broadcast = origin.createBroadcast(Path.from(`a/${index}`));
+			broadcast.announce();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			broadcast.close();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+		console.log(
+			`stalled-announce,${routeCount},${observerCount},${(((performance.now() - start) * 1000) / updates).toFixed(1)}`,
+		);
+		await Promise.all(
+			senders.map(async ({ pair, publisher, release, running }) => {
+				const drained = publisher.drain();
+				release.resolve();
+				await drained;
+				await running;
+				publisher.close();
+				pair.client.close();
+				pair.server.close();
+			}),
+		);
+		for (const route of routes) route.close();
+		origin.close();
 	}
 }

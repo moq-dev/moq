@@ -85,6 +85,8 @@ var (
 	ErrInvalidPattern = ffi.ErrMoqErrorInvalidPattern
 	// ErrUnresolvableBroadcast is returned when a referenced sibling broadcast cannot be resolved without an origin.
 	ErrUnresolvableBroadcast = ffi.ErrMoqErrorUnresolvableBroadcast
+	// ErrUnsupportedCatalog is returned when a catalog needs a newer moq-hang draft than this build reads; upgrade to read it.
+	ErrUnsupportedCatalog = ffi.ErrMoqErrorUnsupportedCatalog
 	// ErrLog is returned when installing or configuring the native log subscriber fails.
 	ErrLog = ffi.ErrMoqErrorLog
 	// ErrConfig is returned when Dial or Listen is given a value the native side cannot use.
@@ -99,7 +101,8 @@ func IsShutdown(err error) bool {
 }
 
 // IsAuthError reports whether err is an authentication/authorization failure
-// (HTTP 401/403, an expired token, or a protocol Unauthorized or Expired session close).
+// (HTTP 401/403, an expired token, a protocol Unauthorized or Expired session
+// close, or a track revocation).
 func IsAuthError(err error) bool {
 	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrExpired) {
 		return true

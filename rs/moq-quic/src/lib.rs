@@ -12,7 +12,7 @@
 //! related `Connection`. `Connection` types contain the bulk of the protocol logic related to
 //! managing a single connection and all the related state (such as streams).
 
-#![cfg_attr(not(fuzzing), warn(missing_docs))]
+#![warn(missing_docs)]
 #![cfg_attr(test, allow(dead_code))]
 // Fixes welcome:
 #![warn(unreachable_pub)]
@@ -29,6 +29,15 @@ use std::{
 mod cid_queue;
 pub mod coding;
 mod constant_time;
+mod entropy;
+// Not part of the public API: compiled only for the crate's own tests, the benches, and
+// the `fuzz/` harness. The connection target needs ring or aws-lc-rs for the endpoint's keys.
+#[cfg(all(
+    any(test, feature = "fuzz"),
+    any(feature = "aws-lc-rs", feature = "ring")
+))]
+#[doc(hidden)]
+pub mod fuzz;
 mod range_set;
 #[cfg(all(test, any(feature = "rustls-aws-lc-rs", feature = "rustls-ring")))]
 mod tests;
@@ -44,10 +53,10 @@ pub use bloom_token_log::BloomTokenLog;
 
 mod connection;
 pub use crate::connection::{
-    Checkpoint, Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Credit,
-    CreditStats, Datagrams, Event, FinishError, FrameStats, PathStats, ReadError, ReadableError,
-    RecvStream, RttEstimator, SendDatagramError, SendStream, ShouldTransmit, StreamEvent, Streams,
-    UdpStats, WriteError, Written,
+    Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Credit, CreditStats,
+    Datagrams, Event, FinishError, FrameStats, PathStats, ReadError, ReadableError, RecvStream,
+    RttEstimator, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
+    ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;
@@ -56,12 +65,14 @@ pub use connection::qlog::QlogStream;
 pub use rustls;
 
 mod config;
+mod limits;
 #[cfg(feature = "qlog")]
 pub use config::QlogConfig;
 pub use config::{
     AckFrequencyConfig, ClientConfig, ConfigError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig,
     ServerConfig, StdSystemTime, TimeSource, TransportConfig, ValidationTokenConfig,
 };
+pub use limits::{Limits, LimitsError};
 
 pub mod crypto;
 
@@ -101,9 +112,6 @@ pub use token::{NoneTokenLog, NoneTokenStore, TokenLog, TokenReuseError, TokenSt
 mod token_memory_cache;
 pub use token_memory_cache::TokenMemoryCache;
 
-#[cfg(feature = "arbitrary")]
-use arbitrary::Arbitrary;
-
 // Deal with time
 // MoQ's clock, so a caller-driven clock (a test's or the simulator's) reaches the state machine.
 pub(crate) use moq_clock::Instant;
@@ -111,53 +119,6 @@ pub(crate) use moq_clock::Instant;
 pub(crate) use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 pub(crate) use web_time::{Duration, SystemTime, UNIX_EPOCH};
-
-#[cfg(fuzzing)]
-pub mod fuzzing {
-    pub use crate::connection::{Retransmits, State as ConnectionState, StreamsState};
-    pub use crate::frame::ResetStream;
-    pub use crate::packet::PartialDecode;
-    pub use crate::transport_parameters::TransportParameters;
-    pub use bytes::{BufMut, BytesMut};
-
-    #[cfg(feature = "arbitrary")]
-    use arbitrary::{Arbitrary, Result, Unstructured};
-
-    #[cfg(feature = "arbitrary")]
-    impl<'arbitrary> Arbitrary<'arbitrary> for TransportParameters {
-        fn arbitrary(u: &mut Unstructured<'arbitrary>) -> Result<Self> {
-            Ok(Self {
-                initial_max_streams_bidi: u.arbitrary()?,
-                initial_max_streams_uni: u.arbitrary()?,
-                ack_delay_exponent: u.arbitrary()?,
-                max_udp_payload_size: u.arbitrary()?,
-                ..Self::default()
-            })
-        }
-    }
-
-    #[derive(Debug)]
-    pub struct PacketParams {
-        pub local_cid_len: usize,
-        pub buf: BytesMut,
-        pub grease_quic_bit: bool,
-    }
-
-    #[cfg(feature = "arbitrary")]
-    impl<'arbitrary> Arbitrary<'arbitrary> for PacketParams {
-        fn arbitrary(u: &mut Unstructured<'arbitrary>) -> Result<Self> {
-            let local_cid_len: usize = u.int_in_range(0..=crate::MAX_CID_SIZE)?;
-            let bytes: Vec<u8> = Vec::arbitrary(u)?;
-            let mut buf = BytesMut::new();
-            buf.put_slice(&bytes[..]);
-            Ok(Self {
-                local_cid_len,
-                buf,
-                grease_quic_bit: bool::arbitrary(u)?,
-            })
-        }
-    }
-}
 
 /// The QUIC protocol version implemented.
 pub const DEFAULT_SUPPORTED_VERSIONS: &[u32] = &[
@@ -171,7 +132,6 @@ pub const DEFAULT_SUPPORTED_VERSIONS: &[u32] = &[
 ];
 
 /// Whether an endpoint was the initiator of a connection
-#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Side {
     /// The initiator of a connection
@@ -205,7 +165,6 @@ impl ops::Not for Side {
 }
 
 /// Whether a stream communicates data in both directions or only from the initiator
-#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Dir {
     /// Data flows in both directions
@@ -231,7 +190,6 @@ impl fmt::Display for Dir {
 }
 
 /// Identifier for a stream within a particular connection
-#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct StreamId(u64);
 
