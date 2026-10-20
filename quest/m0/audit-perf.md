@@ -103,6 +103,25 @@ Audit evidence (2026-10-19, second checkpoint, incomplete):
   Single-axis fan-out benches to widen: `session_delivery_paced` (viewers
   only), `track_fanout_*` (subscribers only), `memory` (lite-06 only),
   `bench/workloads/fanout*.toml` (connections only).
+- Third checkpoint (2026-10-20): the Oct 20 Nightly (`f13283b30`) ran the
+  JS leg in 3 minutes, so it fits its hour. It failed on the `requests` bench
+  (stale failover check after `e876c1722`), and the `broadcasts` bench's new
+  stalled-announce sweep leaked `console.debug` into its CSV; both are fixed.
+  The six unscheduled JS benches now run nightly with an inventory test in
+  `sh/gh/nightly.test.py`. The Rust benchmark-tests leg failed on
+  `benchmark_feed_fetch_wakes` tripping the sim spin check from `3899eea20`;
+  fixed by yielding between setup phases.
+- Rust regression (open): Oct 19 to Oct 20 moved 84 series past +25%, while
+  the median moved only +0.4%. `track_subscriber_join` went 300 to 670 ns on CI,
+  and `track_subscriber_churn*` and `track_datagram_subscriber_join` also rose
+  80-110%. `annexb`/`cmaf` export, `catalog_estimate_fanout` and
+  `relay_auth_refresh` rose 27-60% but are not attributed yet. A local bisect of
+  `track_subscriber_join/1000` (one sample per commit at load 30-50) points to
+  `b004c0b07` (#5930, refresh on join): 232 ns at `45f2a548e`, 362 ns at
+  `b004c0b07`. Disabling kio's `sim` feature did not change it. An A/B
+  removing the `Cursor::new` join check (`joins_live` plus `TrackState::join`)
+  gave 562 ns vs 409 ns with it, inconclusive under load. Next: profile
+  subscribe at `45f2a548e` vs `b004c0b07` on a quiet host and fix the source.
 - Still required before completing this run: confirm `gh-pages` history
   accumulates and compare at least five nights of Rust and binding series,
   restore the JS leg and its history, and turn the ranked gaps into
