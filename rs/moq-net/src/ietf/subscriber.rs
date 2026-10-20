@@ -2700,17 +2700,15 @@ where
 		// Retirement and revocation cancel only the wait for an ID. On drafts 14-16 the peer
 		// grants MAX_REQUEST_ID credit back only for requests it receives, so an allocated ID
 		// is always sent; the response wait below cancels it if either landed meanwhile.
-		let request_id = {
-			let mut credit = std::pin::pin!(self.control.next_request_id(&self.runtime));
-			kio::wait(|waiter| {
-				if gate.poll_denied(waiter).is_ready() {
-					return Poll::Ready(Err(Error::Unauthorized));
-				}
-				validity.check(waiter)?;
-				waiter.poll_future(credit.as_mut())
-			})
-			.await
-		};
+		let mut timeout = crate::time::Deadline::after(&self.runtime, Control::REQUEST_ID_TIMEOUT);
+		let request_id = kio::wait(|waiter| {
+			if gate.poll_denied(waiter).is_ready() {
+				return Poll::Ready(Err(Error::Unauthorized));
+			}
+			validity.check(waiter)?;
+			self.control.poll_credit(waiter, &mut timeout)
+		})
+		.await;
 		let request_id = match request_id {
 			Ok(id) => id,
 			Err(err) => {
@@ -2956,15 +2954,16 @@ where
 			}
 			Err(err) => {
 				tracing::debug!(%err, "subscribe response error");
-				if unanswered {
-					self.cancel_subscribe(stream, request_id).await;
-				}
+				// Refuse before waiting on the peer to acknowledge the cancellation.
 				if let Some(pending) = self.take_pending(request_id) {
 					pending.reject(err.clone());
 				}
 				self.remove_subscribe(request_id);
 				if let Some(idle) = resumed {
 					let _ = idle.track.abort(err);
+				}
+				if unanswered {
+					self.cancel_subscribe(stream, request_id).await;
 				}
 				return None;
 			}
@@ -7043,12 +7042,13 @@ mod tests {
 	}
 
 	/// A grant revoked while the SUBSCRIBE waits for its answer refuses the request and
-	/// cancels the subscribe at once, not once the peer answers.
+	/// cancels the subscribe at once, not once the peer answers or acknowledges the cancel.
 	#[moq_clock::test]
 	async fn a_revocation_never_waits_behind_subscribe_ok() {
 		for version in [Version::Draft14, Version::Draft16, Version::Draft18, Version::Draft22] {
-			// A peer that accepts the stream and then says nothing at all.
-			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			// A peer that accepts the stream and then says nothing at all, not even
+			// acknowledging the cancellation's FIN.
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_unacked_fin();
 			let log = session.log.clone();
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let (auth, _cred) = revocable_auth();
@@ -7093,10 +7093,9 @@ mod tests {
 				"{version}: the request outlived its grant: {:?}",
 				result.err()
 			);
-			moq_clock::timeout(Duration::from_secs(1), serving)
-				.await
-				.unwrap_or_else(|_| panic!("{version}: run_subscribe outlived its grant"))
-				.unwrap();
+			// Only the wire cleanup still waits on the peer's acknowledgement.
+			settle().await;
+			drop(serving);
 			// A subscribe revoked before SUBSCRIBE_OK must still be cancelled: by UNSUBSCRIBE
 			// where the draft has one, and by stopping the publisher's direction on every draft.
 			if unsubscribes {
