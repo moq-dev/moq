@@ -43,8 +43,12 @@ impl AckFrequencyState {
         let min_ack_delay =
             Duration::from_micros(peer_params.min_ack_delay.map_or(0, |x| x.into()));
 
-        // Use the peer's max_ack_delay if no custom max_ack_delay was provided in the config
-        let candidate = config.max_ack_delay.unwrap_or(self.peer_max_ack_delay);
+        // Use the peer's max_ack_delay if no custom max_ack_delay was provided in the config. A
+        // configured one is capped below the protocol limit, which the peer's own `max_ack_delay`
+        // and `min_ack_delay` transport parameters were already validated against.
+        let candidate = config.max_ack_delay.map_or(self.peer_max_ack_delay, |delay| {
+            Ord::min(delay, MAX_ACK_DELAY_LIMIT - Duration::from_micros(1))
+        });
 
         // Must be no smaller than the `min_ack_delay` advertised by the peer
         Ord::max(
@@ -143,7 +147,7 @@ impl AckFrequencyState {
         // As for the max_ack_delay transport parameter (RFC 9000 section 18.2), 2^14 ms or more
         // is invalid
         // https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-14.html#section-4
-        if max_ack_delay >= Duration::from_millis(1 << 14) {
+        if max_ack_delay >= MAX_ACK_DELAY_LIMIT {
             return Err(TransportError::PROTOCOL_VIOLATION(
                 "Requested Max Ack Delay in ACK_FREQUENCY frame is 2^14 ms or more",
             ));
@@ -161,6 +165,10 @@ impl AckFrequencyState {
 /// currently desired one before a new request is sent, when the peer supports the ACK frequency
 /// extension and an explicit max ACK delay is not configured.
 const MAX_RTT_ERROR: f32 = 0.2;
+
+/// Exclusive upper bound on a Requested Max Ack Delay, as for the `max_ack_delay` transport
+/// parameter
+const MAX_ACK_DELAY_LIMIT: Duration = Duration::from_millis(1 << 14);
 
 /// Minimum value to request the peer set max ACK delay to when the peer supports the ACK frequency
 /// extension and an explicit max ACK delay is not configured.
@@ -210,5 +218,19 @@ mod tests {
             &params,
         );
         assert_eq!(delay, Duration::from_millis(100));
+    }
+
+    /// A configured delay on a long RTT is requested just below the protocol limit
+    #[test]
+    fn configured_max_ack_delay_stays_below_limit() {
+        let state = AckFrequencyState::new(Duration::from_millis(25));
+        let mut config = AckFrequencyConfig::default();
+        config.max_ack_delay(Some(MAX_ACK_DELAY_LIMIT));
+        let delay = state.candidate_max_ack_delay(
+            MAX_ACK_DELAY_LIMIT * 2,
+            &config,
+            &TransportParameters::default(),
+        );
+        assert_eq!(delay, MAX_ACK_DELAY_LIMIT - Duration::from_micros(1));
     }
 }
