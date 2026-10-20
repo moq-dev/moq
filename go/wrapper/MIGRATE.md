@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Ranges filter reads (#5929)
+
+A subscription now reads only the groups its own `Ranges` cover.
+
 ### Track demand reports the wanted group (#5930)
 
 `TrackDemand.IsUsed`, `Used`, and `Unused` are gone.

@@ -25,7 +25,7 @@ select_packages() {
         return
     fi
 
-    grep -q '^rs/' "$list" || return 0
+    grep -qE '^(rs|demo)/' "$list" || return 0
 
     # `--no-deps` keeps this to workspace members and off the network.
     local metadata
@@ -34,20 +34,27 @@ select_packages() {
     # A seed is the first path segment under `rs/`, so only a crate whose
     # manifest sits directly at `rs/<dir>/Cargo.toml` can be one. That drops
     # the `*-fuzz` crates (at `rs/<crate>/fuzz`), which a diff to their crate would
-    # otherwise select as a dependent and compile libFuzzer for. The separator
-    # is normalized first so Windows paths split too.
-    metadata=$(jq '.packages |= map((.manifest_path |= gsub("\\\\"; "/")) | select(.manifest_path | split("/")[-3] == "rs"))' <<<"$metadata")
+    # otherwise select as a dependent and compile libFuzzer for. A demo's crate
+    # sits at `demo/<demo>/<dir>/Cargo.toml` and is a seed for its directory.
+    # The separator is normalized first so Windows paths split too.
+    metadata=$(jq '.packages |= map((.manifest_path |= gsub("\\\\"; "/")) | select((.manifest_path | split("/")) as $p | $p[-3] == "rs" or $p[-4] == "demo"))' <<<"$metadata")
 
-    # A changed path is a seed only because every crate directory is named
-    # after its crate. Under-selecting checks nothing, so fall back to all.
-    if jq -e '.packages[] | select((.manifest_path | split("/")[-2]) != .name)' <<<"$metadata" >/dev/null; then
+    # A changed path under `rs/` is a seed only because every crate directory
+    # there is named after its crate. Under-selecting checks nothing, so fall
+    # back to all.
+    if jq -e '.packages[] | (.manifest_path | split("/")) as $p | select($p[-3] == "rs" and $p[-2] != .name)' <<<"$metadata" >/dev/null; then
         echo "rs: a crate directory no longer matches its crate name; selecting everything." >&2
         echo ALL
         return
     fi
 
     local seeds edges selected
-    seeds=$(sed -n 's|^rs/\([^/]*\)/.*|\1|p' "$list" | sort -u)
+    seeds=$({
+        sed -n 's|^rs/\([^/]*\)/.*|\1|p' "$list"
+        jq -r --rawfile list "$list" '($list | split("\n")) as $paths | .packages[]
+            | (.manifest_path | split("/")) as $p | select($p[-4] == "demo")
+            | select(any($paths[]; startswith("demo/\($p[-3])/\($p[-2])/"))) | .name' <<<"$metadata"
+    } | sort -u)
     edges=$(jq -r '.packages[] | .name as $name | .dependencies[] | "\($name) \(.name)"' <<<"$metadata")
 
     # A crate is rebuilt when anything it depends on changed, so walk the edges

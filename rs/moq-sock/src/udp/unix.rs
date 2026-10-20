@@ -48,6 +48,7 @@ pub struct UdpSocketState {
 }
 
 impl UdpSocketState {
+    /// Configures `sock` for this platform's offloads and ancillary data and returns its state.
     pub fn new(sock: UdpSockRef<'_>) -> io::Result<Self> {
         let io = sock.0;
         let mut cmsg_platform_space = 0;
@@ -207,6 +208,7 @@ impl UdpSocketState {
         send(self, socket.0, transmit)
     }
 
+    /// Receives datagrams into `bufs`, filling one [`RecvMeta`] per message, and returns how many messages arrived.
     #[cfg(not(any(
         apple,
         target_os = "openbsd",
@@ -225,6 +227,7 @@ impl UdpSocketState {
         recv_via_recvmmsg(socket.0, bufs, meta)
     }
 
+    /// Receives datagrams into `bufs`, filling one [`RecvMeta`] per message, and returns how many messages arrived.
     #[cfg(apple_fast)]
     pub fn recv(
         &self,
@@ -239,6 +242,7 @@ impl UdpSocketState {
         }
     }
 
+    /// Receives datagrams into `bufs`, filling one [`RecvMeta`] per message, and returns how many messages arrived.
     #[cfg(any(
         target_os = "openbsd",
         target_os = "netbsd",

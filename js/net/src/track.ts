@@ -2021,6 +2021,7 @@ export class Subscriber {
 	 * publisher read the cache alongside the cursor it is serving from. Resolving the track
 	 * again through the broadcast would not do: a dynamic serve is one request per peer
 	 * subscription, so that mints a second producer the application has to answer separately.
+	 * A routed track's fork follows the same logical track across route swaps.
 	 *
 	 * @internal Wire layers only.
 	 */

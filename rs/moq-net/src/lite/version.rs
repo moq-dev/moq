@@ -297,6 +297,15 @@ impl Version {
 		}
 	}
 
+	/// Whether discovery streams end their initial set with SYNCED rather than a count.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_synced(self) -> bool {
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements carry the route cost: the marginal cost of pulling
 	/// the broadcast via this route, accumulated per link. Added in lite-06.
 	/// Older versions carry nothing, so a received route stays at zero and ranks
