@@ -47,7 +47,9 @@ impl Encode<Version> for Datagram {
 				return Err(EncodeError::Version);
 			}
 			// A status carries no payload and no time.
-			let status = wire.as_ref().is_some_and(|wire| wire.status.is_some_and(|status| status != 0));
+			let status = wire
+				.as_ref()
+				.is_some_and(|wire| wire.status.is_some_and(|status| status != 0));
 			if status && (self.timestamp.is_some() || !self.payload.is_empty()) {
 				return Err(EncodeError::InvalidState);
 			}
@@ -81,7 +83,9 @@ impl Datagram {
 		let mut r = Decoder::new(&buf, version.into());
 		let subscribe = r.varint()?;
 		let sequence = r.varint()?;
-		let ietf = ietf.then(|| super::ietf::decode_datagram(&mut r, version)).transpose()?;
+		let ietf = ietf
+			.then(|| super::ietf::decode_datagram(&mut r, version))
+			.transpose()?;
 		// A status carries no payload and no time.
 		let status = ietf
 			.as_ref()

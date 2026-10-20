@@ -1214,10 +1214,9 @@ impl FrameIngest {
 							group.mark_gap(id, gap)?;
 							// The frame header already carries the time, so a record may omit it.
 							let plain = id == group.frame_count() as u64
-								&& properties.is_plain()
-								&& properties
-									.timestamp
-									.is_none_or(|time| Some(time) == timestamp.map(|time| time.value()));
+								&& properties.is_plain() && properties
+								.timestamp
+								.is_none_or(|time| Some(time) == timestamp.map(|time| time.value()));
 							if !plain && !records.relayed {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
@@ -2488,7 +2487,10 @@ mod tests {
 		let (res, track) = receive_ietf(&[0, 0, 0, 1, u64::from(b'x')]).await;
 		res.unwrap();
 		let mut group = track.consume().peek_group(0).unwrap();
-		assert_eq!(group.read_frame().now_or_never().unwrap().unwrap().unwrap().payload, b"x"[..]);
+		assert_eq!(
+			group.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
+			b"x"[..]
+		);
 
 		// A relayed group starting at Object 4, then END_OF_GROUP at Object 6.
 		let (res, track) = receive_ietf(&[0x1, 4 << 1, 0, 1, u64::from(b'x'), (1 << 1) | 1, 0]).await;
@@ -5930,10 +5932,17 @@ struct TrackInfoFetch<S: crate::transport::poll::Session> {
 
 enum TrackInfoState<S: crate::transport::poll::Session> {
 	Open,
-	Send { stream: Stream<S, Version> },
-	Read { stream: Stream<S, Version> },
+	Send {
+		stream: Stream<S, Version>,
+	},
+	Read {
+		stream: Stream<S, Version>,
+	},
 	/// Reading the TRACK_PROPERTIES the `ietf` extension sends after TRACK_INFO.
-	Properties { stream: Stream<S, Version>, info: track::Info },
+	Properties {
+		stream: Stream<S, Version>,
+		info: track::Info,
+	},
 }
 
 impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
@@ -6833,7 +6842,12 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						stream,
 						producer,
 						joined,
-						ingest: Box::new(FrameIngest::new(&self.serve.subscriber, self.timescale, ietf, frame_start)),
+						ingest: Box::new(FrameIngest::new(
+							&self.serve.subscriber,
+							self.timescale,
+							ietf,
+							frame_start,
+						)),
 					};
 				}
 				FetchRunState::Ingest {

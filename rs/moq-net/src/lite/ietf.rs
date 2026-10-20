@@ -10,7 +10,7 @@ use bytes::Bytes;
 
 use crate::{
 	Error, Timescale,
-	coding::{DecodeError, Decoder, EncodeError, Encoder, Writer},
+	coding::{DecodeError, Decoder, EncodeError, Encoder},
 	group,
 	model::object::{Encoding, Fields, Properties, Property, Value},
 };
@@ -163,7 +163,7 @@ fn decode_list(r: &mut Decoder<'_>) -> Result<Vec<Property>, DecodeError> {
 }
 
 /// Check the one Immutable Properties block against the encoding the flags declare.
-fn immutable<'a>(values: &'a [Property], encoding: Option<Encoding>) -> Result<Option<&'a Bytes>, DecodeError> {
+fn immutable(values: &[Property], encoding: Option<Encoding>) -> Result<Option<&Bytes>, DecodeError> {
 	let mut sealed = values.iter().filter(|property| property.id == IMMUTABLE);
 	let block = match sealed.next().map(|property| &property.value) {
 		Some(Value::Bytes(bytes)) => Some(bytes),
@@ -267,6 +267,7 @@ pub(crate) fn stamp(properties: &mut Properties, timescale: Option<Timescale>) {
 
 /// A group stream's object records on egress, sent before each frame once the extension
 /// is negotiated.
+#[cfg(feature = "async")]
 pub(crate) struct Records {
 	/// The previous record's Object ID, `None` before the first.
 	prior: Option<u64>,
@@ -275,6 +276,7 @@ pub(crate) struct Records {
 	version: Version,
 }
 
+#[cfg(feature = "async")]
 impl Records {
 	/// Buffer the Group State for a stream serving `group` from its current index, and
 	/// return the records its frames need.
@@ -282,7 +284,7 @@ impl Records {
 	/// `capped` when the stream stops before the group may end. Writes nothing and returns
 	/// `None` unless the session negotiated the extension.
 	pub fn start<W: crate::transport::poll::SendStream>(
-		writer: &mut Writer<W, Version>,
+		writer: &mut crate::coding::Writer<W, Version>,
 		ietf: bool,
 		group: &group::Consumer,
 		capped: bool,
@@ -305,7 +307,7 @@ impl Records {
 	/// Buffer the record for the frame at `index`, ahead of its timestamp and size.
 	pub fn frame<W: crate::transport::poll::SendStream>(
 		&mut self,
-		writer: &mut Writer<W, Version>,
+		writer: &mut crate::coding::Writer<W, Version>,
 		index: u64,
 		fields: Option<&Fields>,
 	) -> Result<(), Error> {
@@ -315,7 +317,7 @@ impl Records {
 	/// Buffer the END_OF_GROUP record once every frame is written, if the group has one.
 	pub fn end<W: crate::transport::poll::SendStream>(
 		&mut self,
-		writer: &mut Writer<W, Version>,
+		writer: &mut crate::coding::Writer<W, Version>,
 		group: &group::Consumer,
 	) -> Result<(), Error> {
 		// A stream capped short of the last frame stops before the end.
@@ -330,7 +332,7 @@ impl Records {
 
 	fn record<W: crate::transport::poll::SendStream>(
 		&mut self,
-		writer: &mut Writer<W, Version>,
+		writer: &mut crate::coding::Writer<W, Version>,
 		id: u64,
 		fields: Option<&Fields>,
 		end: bool,
@@ -423,7 +425,11 @@ pub(crate) fn encode_datagram(
 	if let Some(status) = wire.status {
 		w.varint(status)?;
 	}
-	w.bytes(&encode_properties(&wire.properties, wire.properties.timestamp, version)?)
+	w.bytes(&encode_properties(
+		&wire.properties,
+		wire.properties.timestamp,
+		version,
+	)?)
 }
 
 /// Decode a datagram's relay state. Its properties' units are the track's, which the
@@ -461,7 +467,12 @@ mod tests {
 
 	#[test]
 	fn object_codes_round_trip() {
-		for (prior, id, end) in [(None, 0, false), (None, 7, true), (Some(3), 4, false), (Some(3), 9, true)] {
+		for (prior, id, end) in [
+			(None, 0, false),
+			(None, 7, true),
+			(Some(3), 4, false),
+			(Some(3), 9, true),
+		] {
 			let code = encode_object(prior, id, end).unwrap();
 			assert_eq!(decode_object(prior, code).unwrap(), (id, end));
 		}
@@ -488,7 +499,9 @@ mod tests {
 		assert_eq!(decoded.first_id, 2);
 		assert!(decoded.fetchable && !decoded.sparse);
 
-		let partial = decode_state(encode_state(Some(&wire), false, true), 0).unwrap().unwrap();
+		let partial = decode_state(encode_state(Some(&wire), false, true), 0)
+			.unwrap()
+			.unwrap();
 		assert!(!partial.first_object && !partial.has_end);
 
 		assert_eq!(encode_state(None, true, false), 0);
@@ -572,8 +585,8 @@ mod tests {
 		};
 		let msg = TrackProperties(Some(Arc::new(properties.clone())));
 		let buf = crate::coding::Encode::encode_bytes(&msg, V).unwrap();
-		let decoded = <TrackProperties as crate::coding::Decode<Version>>::decode(&mut Decoder::new(&buf, V.into()), V)
-			.unwrap();
+		let decoded =
+			<TrackProperties as crate::coding::Decode<Version>>::decode(&mut Decoder::new(&buf, V.into()), V).unwrap();
 		assert_eq!(decoded.0.as_deref(), Some(&properties));
 
 		let none = crate::coding::Encode::encode_bytes(&TrackProperties(None), V).unwrap();
@@ -606,7 +619,7 @@ mod tests {
 /// Peer a relay behind `upstream` over moq-lite 07, the way a cluster does. The client
 /// (downstream) and server (upstream) each offer the `ietf` extension per `offer`.
 /// Returns the downstream origin once it learned of `broadcast`, and the sessions to hold.
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 pub(crate) async fn test_hop(
 	upstream: &crate::origin::Producer,
 	broadcast: &str,
@@ -619,10 +632,9 @@ pub(crate) async fn test_hop(
 		protocol: Some(version.alpn().to_string()),
 		..Default::default()
 	});
-	let extensions = |ietf| {
-		let mut extensions = crate::setup::Extensions::default();
-		extensions.ietf = ietf;
-		extensions
+	let extensions = |ietf| crate::setup::Extensions {
+		ietf,
+		..Default::default()
 	};
 	let dial = crate::Client::new()
 		.with_versions(version.into())
@@ -631,7 +643,7 @@ pub(crate) async fn test_hop(
 	let serve = crate::Server::new()
 		.with_versions(version.into())
 		.with_extensions(extensions(offer[1]))
-		.with_publisher(&upstream.consume());
+		.with_publisher(upstream.consume());
 	let (client, server) = futures::join!(
 		async {
 			let (session, driver) = dial.connect(moq_clock::now(), client).await.unwrap();
@@ -652,7 +664,7 @@ pub(crate) async fn test_hop(
 	(downstream, [client, server])
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 mod hop_tests {
 	use super::*;
 	use crate::{Timestamp, frame, model::ProduceTest, track};
@@ -691,7 +703,10 @@ mod hop_tests {
 
 	/// A frame's Object ID and properties, when it keeps any.
 	fn fields(frame: &frame::Object) -> Option<(u64, Properties)> {
-		frame.fields.as_ref().map(|fields| (fields.id, fields.properties.clone()))
+		frame
+			.fields
+			.as_ref()
+			.map(|fields| (fields.id, fields.properties.clone()))
 	}
 
 	async fn next(group: &mut group::Consumer) -> Option<frame::Object> {

@@ -12187,7 +12187,10 @@ mod stitch_tests {
 				if direct_ok.end_of_track && !hopped_ok.end_of_track =>
 			{
 				assert_eq!(hopped_ok.properties, direct_ok.properties, "{ingress} -> {egress}");
-				assert_eq!(hopped_rest, direct_rest, "{ingress} -> {egress}: the hop changed the objects");
+				assert_eq!(
+					hopped_rest, direct_rest,
+					"{ingress} -> {egress}: the hop changed the objects"
+				);
 			}
 			_ => assert_eq!(
 				hopped.0, direct.0,

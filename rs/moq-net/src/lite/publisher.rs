@@ -2171,8 +2171,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					// Matches the timescale TRACK_INFO declared for the track.
 					let timescale = shared.version.wire_timescale(group.timescale());
 					let capped = msg.end_frame.is_some();
-					let records =
-						lite::ietf::Records::start(writer, ietf, &group, capped, timescale, shared.version)?;
+					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale, shared.version)?;
 
 					*self = Self::Serve {
 						group,
@@ -3794,8 +3793,14 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 					.insert(Priority::new(steer.priority, self.ctx.id, sequence).with_order(steer.order)),
 			),
 		};
-		self.children
-			.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, capped, rank, group));
+		self.children.push(GroupServe::new(
+			self.ctx.clone(),
+			sequence,
+			frame_start,
+			capped,
+			rank,
+			group,
+		));
 	}
 }
 
@@ -4095,7 +4100,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										let index = self.group.index() - 1;
 										let buffered = records
 											.as_mut()
-											.map_or(Ok(()), |records| records.frame(writer, index, next.fields.as_deref()))
+											.map_or(Ok(()), |records| {
+												records.frame(writer, index, next.fields.as_deref())
+											})
 											.and_then(|()| {
 												buffer_frame_info(
 													writer,
