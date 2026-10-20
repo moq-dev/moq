@@ -330,8 +330,8 @@ impl Window {
 
 	/// Whether a datagram is in range: a whole group of one frame, so its own `timestamp`
 	/// says exactly whether it falls inside a range's times, even once groups have
-	/// resolved them to sequences. While the ranges wait, which is for good on a track
-	/// that only sends datagrams, the times alone decide.
+	/// resolved them to sequences. While the ranges wait, which is for good on a time
+	/// start over a track that only sends datagrams, the times and absolute groups decide.
 	pub fn admits_datagram(&self, sequence: u64, timestamp: Option<Timestamp>) -> bool {
 		let Some(timestamp) = timestamp else {
 			return self.contains(sequence);
@@ -341,7 +341,12 @@ impl Window {
 				&& !matches!(range.end, Some(Anchor::Time(pts)) if later(timestamp, pts))
 		};
 		if self.pending {
-			return self.ranges.iter().filter(|range| !range.is_empty()).any(timely);
+			return self.ranges.iter().filter(|range| !range.is_empty()).any(|range| {
+				!matches!(range.start, Anchor::Absolute(start) if sequence < start.group)
+					&& !matches!(range.end, Some(Anchor::Absolute(end))
+						if end.final_sequence().is_some_and(|end| sequence >= end))
+					&& timely(range)
+			});
 		}
 		self.spans.iter().any(|span| {
 			span.start <= sequence
@@ -871,6 +876,20 @@ mod tests {
 		assert!(window.admits_datagram(1, Some(at(3000))));
 		assert!(window.admits_datagram(2, Some(at(3500))));
 		assert!(!window.admits_datagram(3, Some(at(3600))));
+	}
+
+	#[test]
+	fn a_waiting_window_judges_a_datagram_against_absolute_groups_too() {
+		let window = Window::new(
+			&[range(time(3000), Some(Anchor::Absolute(Position::group(10))))],
+			None,
+			&Groups::default(),
+		)
+		.unwrap();
+		assert!(window.is_pending(), "no group has started");
+		assert!(window.admits_datagram(9, Some(at(3500))));
+		assert!(!window.admits_datagram(10, Some(at(3500))));
+		assert!(!window.admits_datagram(9, Some(at(2900))));
 	}
 
 	#[test]
