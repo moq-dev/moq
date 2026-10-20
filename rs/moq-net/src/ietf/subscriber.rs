@@ -7073,6 +7073,7 @@ mod tests {
 			let track = consumer.track("video").unwrap();
 			let subscription = track.subscribe(None);
 			let request = dynamic.requested_track().await.expect("no track requested");
+			let unsubscribes = subscriber.unsubscribes();
 
 			let serving = moq_clock::sim::spawn(async move {
 				subscriber
@@ -7098,18 +7099,12 @@ mod tests {
 				.unwrap();
 			// A subscribe revoked before SUBSCRIBE_OK must still be cancelled: by UNSUBSCRIBE
 			// where the draft has one, and by stopping the publisher's direction on every draft.
-			if subscriber_unsubscribes(version) {
+			if unsubscribes {
 				assert!(occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0, "{version}");
 			}
 			assert_eq!(log.stops(), vec![crate::ietf::error::CANCELLED], "{version}");
 			assert!(log.closes().is_empty(), "{version}: the session stays up");
 		}
-	}
-
-	/// Whether `version` cancels a subscription with an UNSUBSCRIBE message; draft-17
-	/// removed it.
-	fn subscriber_unsubscribes(version: Version) -> bool {
-		matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 	}
 
 	/// An unanswered epochless request cannot prove which instance the peer resolved.
