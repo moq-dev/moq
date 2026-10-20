@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `catalog::Timebase::is_on` is removed (#5967)
+
+Nothing needs to check which catalog a timebase came from any more: mint it from the catalog the importer writes, with `Producer::timebase` or `Producer::reserve`, and drop the call.
+
 ### TS sections use PCR placement
 
 A `verbatim` section frame's timestamp is the program clock at its first section byte, derived from the PCR, rather than the latest video PTS.

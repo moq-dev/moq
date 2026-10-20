@@ -4,6 +4,13 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### `--epoch` is removed (#5967)
+
+Remove `--epoch` and `MOQ_EPOCH`: `--epoch` is now an unknown flag, and `MOQ_EPOCH` is ignored.
+Every `moq` run mints its own epoch, so two importers fed one stream publish two instances, and the newest wins new requests.
+To fail over between them, follow restarts: `export ts --stitch` switches programs, and players follow the announced restart.
+Other consumers, such as `export ts --passthrough`, end with the instance they read.
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.
