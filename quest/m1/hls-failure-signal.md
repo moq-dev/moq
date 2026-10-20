@@ -31,7 +31,10 @@ Failures take three paths today, and both end the playlist as finished:
   (`rs/moq-hls/src/export/spans.rs`), and `Rendition::snapshot_as`
   (`rendition.rs`) folds a failed last row into `finished`. Expose that
   rendition-local failure to the playlist route instead of rendering
-  `EXT-X-ENDLIST`.
+  `EXT-X-ENDLIST`. `Rendition::playlist` waits in `playable()` (and then
+  `init()`), which watch only the live window, so the failure must also wake
+  those waits: otherwise a request pending before the first row times out as a
+  404, and a router-free caller waits forever.
 
 The media playlist routes (`rs/moq-hls/src/server/routes.rs`) answer the
 existing no-store error response for any of these failures. The DASH manifest
@@ -41,7 +44,8 @@ keeps its siblings available. Segments already listed may stay fetchable;
 only the listings refuse.
 
 Test a mid-history group that fails to FETCH or decode, a ranged clip over a
-failed timeline (5xx, not 416), a retained reference
+failed timeline (5xx, not 416), a playlist request already pending when the
+timeline fails before its first row, a retained reference
 failing after a handoff, a live timeline error, a single failed rendition
 beside a healthy one (its playlist errors, the sibling's and the DASH
 manifest's do not), and the DASH manifest after a shared failure.
