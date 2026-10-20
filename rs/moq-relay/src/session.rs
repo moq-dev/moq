@@ -175,7 +175,12 @@ pub enum Remote {
 	/// A single address; IPv4-mapped IPv6 folds to IPv4.
 	Ip(IpAddr),
 	/// A network; the session IP is folded the same way, then prefix-matched.
-	Cidr { addr: IpAddr, prefix: u8 },
+	Cidr {
+		/// The network address.
+		addr: IpAddr,
+		/// The prefix length in bits.
+		prefix: u8,
+	},
 }
 
 impl std::str::FromStr for Remote {
@@ -382,7 +387,12 @@ pub enum Error {
 	/// A field the routes do not filter on, including `query`.
 	Unknown(String),
 	/// A known field whose value did not parse.
-	Invalid { field: &'static str, value: String },
+	Invalid {
+		/// The field name.
+		field: &'static str,
+		/// The value that did not parse.
+		value: String,
+	},
 }
 
 impl std::fmt::Display for Error {

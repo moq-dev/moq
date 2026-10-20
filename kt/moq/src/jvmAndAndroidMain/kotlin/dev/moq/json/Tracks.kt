@@ -9,13 +9,9 @@ package dev.moq.json
 //     val reader = SnapshotConsumer(consumer.subscribeTrack("status", null), SnapshotConfig())
 
 import dev.moq.MoqJson
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
+import dev.moq.pull
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onCompletion
 import kotlinx.serialization.serializer
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.microseconds
@@ -71,24 +67,10 @@ inline fun <reified T> StreamProducer.append(value: T, timestampUs: ULong? = nul
  * Groups older than the subscription's `maxDelayUs` are skipped, so a playhead reader sets that
  * budget to its distance behind live. Call [SnapshotConsumer.latest] to skip to the newest state.
  */
-fun SnapshotConsumer.values(): Flow<Value> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun SnapshotConsumer.values(): Flow<Value> = pull({ cancel() }) { next() }
 
 /** Stream of JSON records from a stream track, in order. */
-fun StreamConsumer.values(): Flow<Value> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun StreamConsumer.values(): Flow<Value> = pull({ cancel() }) { next() }
 
 /**
  * Stream of decoded snapshot states, in order.

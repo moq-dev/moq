@@ -10,6 +10,10 @@ How to update your code for each breaking change, newest first.
 Iterating a snapshot consumer now yields every state in order; `await consumer.latest()` returns the newest.
 Timestamps are rounded down to a whole microsecond.
 
+### Ranges filter reads (#5929)
+
+A subscription now reads only the groups its own `ranges` cover.
+
 ### Track demand reports the wanted group (#5930)
 
 `TrackDemand.is_used()`, `used()`, and `unused()` are gone.

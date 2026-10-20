@@ -13,9 +13,12 @@
 //! # Ok::<(), moq_archive::Error>(())
 //! ```
 
+#![warn(missing_docs)]
+
 pub use object_store;
 
 mod error;
+/// The `.info` object holding a track's immutable properties.
 pub mod info;
 #[cfg(test)]
 mod mock;
@@ -25,7 +28,9 @@ mod path;
 mod proof;
 pub mod reader;
 mod recover;
+/// The binary segment object holding a record's groups and frames.
 pub mod segment;
+/// Put, get, list, and delete recording objects on an object store.
 pub mod store;
 pub mod writer;
 

@@ -10,6 +10,10 @@ How to update your code for each breaking change, newest first.
 A snapshot consumer's `Next` now yields every state in order; call `Latest(ctx)` for the newest.
 Timestamps are rounded down to a whole microsecond.
 
+### Ranges filter reads (#5929)
+
+A subscription now reads only the groups its own `Ranges` cover.
+
 ### Track demand reports the wanted group (#5930)
 
 `TrackDemand.IsUsed`, `Used`, and `Unused` are gone.

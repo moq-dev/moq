@@ -440,6 +440,22 @@ class SmokeTest {
         }
     }
 
+    @Test
+    fun `cancelling a flow collection cancels its native handle`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
+            val demand: TrackDemand = producer.demand()
+            producer.update(Status(state = "live"))
+
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
+            while (demand.wantedChanged() == null) {}
+            // `first` cancels the collection, which must release the subscription without an explicit cancel.
+            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first())
+            while (demand.wantedChanged() != null) {}
+        }
+    }
+
     /**
      * A pre-encoded `String` must reach the wire untouched: the member overload
      * wins over the reified extension, which would otherwise double-encode it

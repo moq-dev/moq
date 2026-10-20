@@ -55,18 +55,17 @@ import {
 } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
-import { type Publish, PublishDone, PublishDoneStatus, PublishError, publishDoneClean } from "./publish.ts";
+import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
 import {
 	type AdvertParams,
 	type PublishNamespace,
 	PublishNamespaceCancel,
 	PublishNamespaceDone,
-	PublishNamespaceError,
 	PublishNamespaceOk,
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { finCancels, refuseReserved } from "./request_stream.ts";
+import { finCancels, refuse, refuseReserved, refuseUpdate } from "./request_stream.ts";
 import { joinFilter, Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
@@ -1021,9 +1020,10 @@ export class Subscriber {
 
 	/**
 	 * Follow the aggregate subscriber priority upstream until `done` settles: SUBSCRIBE_UPDATE
-	 * through draft 16, REQUEST_UPDATE after, each under a Request ID of its own. From draft 17
-	 * the answer comes back on this stream, so one update is in flight at a time and changes
-	 * meanwhile coalesce. No draft lets an update change the group order, so it stays as asked.
+	 * through draft 16, REQUEST_UPDATE after, each under a Request ID of its own. From draft 16
+	 * the answer comes back on this stream (routed by the adapter on draft 16), so one update is
+	 * in flight at a time and changes meanwhile coalesce. No draft lets an update change the
+	 * group order, so it stays as asked.
 	 */
 	async #runUpdates(
 		stream: Stream,
@@ -1036,6 +1036,8 @@ export class Subscriber {
 	): Promise<void> {
 		const version = this.#session.version;
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		// Draft 14 answers no update, and draft 15's answer reaches no subscription.
+		const answered = version !== Version.DRAFT_14 && version !== Version.DRAFT_15;
 		const stopped = done.then(
 			() => null,
 			() => null,
@@ -1076,7 +1078,7 @@ export class Subscriber {
 				? new SubscribeUpdate({ requestId, ownRequestId: own, parameters })
 				: new SubscribeUpdate({ requestId: own, parameters });
 			// Counted before writing: the answer can be read before the write's promise resolves.
-			if (!legacy) unanswered.update((count) => count + 1);
+			if (answered) unanswered.update((count) => count + 1);
 			try {
 				await stream.writer.u53(SubscribeUpdate.id);
 				await update.encode(stream.writer, version);
@@ -1253,13 +1255,11 @@ export class Subscriber {
 		// conforming one never offers it; 0 as the retry interval says not to come back.
 		if (this.#reflected(msg.params.cluster)) {
 			console.debug(`dropping reflected publish_namespace: broadcast=${path}`);
-			await stream.writer.u53(RequestError.id);
-			await new RequestError({
+			await refuse(stream, version, "publish_namespace", {
 				requestId: msg.requestId,
-				errorCode: toRequestCode("uninterested", "publish_namespace", version),
+				condition: "uninterested",
 				reasonPhrase: "route loops back",
-			}).encode(stream.writer, version);
-			stream.close();
+			});
 			return;
 		}
 
@@ -1274,23 +1274,11 @@ export class Subscriber {
 			console.warn("duplicate PublishNamespace");
 			// No draft registers a code for a duplicate, and this refusal is a draft-14/15
 			// implementation limit, which is what INTERNAL_ERROR describes.
-			const errorCode = toRequestCode("internal", "publish_namespace", version);
-			if (version === Version.DRAFT_14) {
-				await stream.writer.u53(PublishNamespaceError.id);
-				await new PublishNamespaceError({
-					requestId: msg.requestId,
-					errorCode,
-					reasonPhrase: "duplicate namespace",
-				}).encode(stream.writer, version);
-			} else {
-				await stream.writer.u53(RequestError.id);
-				await new RequestError({
-					requestId: msg.requestId,
-					errorCode,
-					reasonPhrase: "duplicate namespace",
-				}).encode(stream.writer, version);
-			}
-			stream.close();
+			await refuse(stream, version, "publish_namespace", {
+				requestId: msg.requestId,
+				condition: "internal",
+				reasonPhrase: "duplicate namespace",
+			});
 			return;
 		}
 
@@ -1349,12 +1337,11 @@ export class Subscriber {
 				if (legacy && typeId === SubscribeUpdate.id) {
 					const body = await stream.reader.read(await stream.reader.u16());
 					if (version === Version.DRAFT_15) {
-						await stream.writer.u53(RequestError.id);
-						await new RequestError({
+						await refuseUpdate(stream.writer, version, "publish_namespace", {
 							requestId: await new Reader(undefined, body, version).u62(),
-							errorCode: toRequestCode("not_supported", "publish_namespace", version),
+							condition: "not_supported",
 							reasonPhrase: "update not supported",
-						}).encode(stream.writer, version);
+						});
 					}
 					continue;
 				}
@@ -1382,19 +1369,17 @@ export class Subscriber {
 					if (!keyed && err.requestId !== undefined) this.#session.spendRequest(err.requestId);
 					// Section 8.9 rejects the update, which withdraws the advertisement as any
 					// refused update does.
-					const errorCode = toRequestCode("malformed_auth_token", "publish_namespace", version);
-					await stream.writer.u53(RequestError.id);
-					await new RequestError({
-						requestId: keyed ? err.requestId : undefined,
-						errorCode,
+					await refuseUpdate(stream.writer, version, "publish_namespace", {
+						requestId: err.requestId,
+						condition: "malformed_auth_token",
 						reasonPhrase: err.message,
-					}).encode(stream.writer, version);
+					});
 					// Draft-16's advertisement outlives its stream, so withdraw it explicitly.
 					if (keyed) {
 						await stream.writer.u53(PublishNamespaceCancel.id);
 						await new PublishNamespaceCancel({
 							requestId: msg.requestId,
-							errorCode,
+							errorCode: toRequestCode("malformed_auth_token", "publish_namespace", version),
 							reasonPhrase: err.message,
 						}).encode(stream.writer, version);
 					}
@@ -1459,33 +1444,16 @@ export class Subscriber {
 			await refuseReserved(stream, this.#session.version);
 			return;
 		}
-		const version = this.#session.version;
-
 		// We decline the method itself rather than this particular track, which would be
 		// UNINTERESTED.
 		//
 		// The alias the message carries is deliberately not recorded. Nothing will ever bind
 		// it, and a rejected request has no lifetime of ours to hang the cleanup on.
-		const errorCode = toRequestCode("not_supported", "publish", version);
-
-		if (version === Version.DRAFT_14) {
-			await stream.writer.u53(PublishError.id);
-			const err = new PublishError({
-				requestId: msg.requestId,
-				errorCode,
-				reasonPhrase: "publish not supported",
-			});
-			await err.encode(stream.writer, version);
-		} else {
-			await stream.writer.u53(RequestError.id);
-			const err = new RequestError({
-				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-				errorCode,
-				reasonPhrase: "publish not supported",
-			});
-			await err.encode(stream.writer, version);
-		}
-		stream.close();
+		await refuse(stream, this.#session.version, "publish", {
+			requestId: msg.requestId,
+			condition: "not_supported",
+			reasonPhrase: "publish not supported",
+		});
 	}
 
 	/**

@@ -12,6 +12,7 @@ from moq_ffi import (
 )
 
 from ._records import _subscription
+from ._stream import _Stream
 from .types import (
     Datagram,
     FetchGroupOptions,
@@ -25,7 +26,7 @@ def _frame(frame: MoqFrame | None) -> Frame | None:
     return None if frame is None else Frame._from_ffi(frame)
 
 
-class GroupConsumer:
+class GroupConsumer(_Stream[Frame]):
     """Async iterator of raw frames within a single group."""
 
     def __init__(self, inner: MoqGroupConsumer) -> None:
@@ -36,20 +37,8 @@ class GroupConsumer:
         """The sequence number of this group within the track."""
         return self._inner.sequence()
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Frame:
-        frame = await self._inner.read_frame()
-        if frame is None:
-            raise StopAsyncIteration
-        return Frame._from_ffi(frame)
+    async def _next(self) -> Frame | None:
+        return await self.read_frame()
 
     async def read_frame(self) -> Frame | None:
         """Read the next raw frame. Returns `None` when the group ends."""
@@ -60,7 +49,7 @@ class GroupConsumer:
         self._inner.cancel()
 
 
-class TrackConsumer:
+class TrackConsumer(_Stream[GroupConsumer]):
     """Async iterator of groups from a track, in sequence order.
 
     Iterating yields groups via :meth:`next_group`. Use :meth:`recv_group` (or
@@ -74,20 +63,8 @@ class TrackConsumer:
     def __init__(self, inner: MoqTrackConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> GroupConsumer:
-        group = await self.next_group()
-        if group is None:
-            raise StopAsyncIteration
-        return group
+    async def _next(self) -> GroupConsumer | None:
+        return await self.next_group()
 
     async def groups_as_arrived(self) -> AsyncIterator[GroupConsumer]:
         """Iterate groups in arrival order, including out-of-sequence deliveries.
