@@ -36,7 +36,8 @@ test("the publish controls start idle and drive source, mute, and visibility", a
 		expect(await mute.isDisabled()).toBe(true);
 
 		await page.getByRole("button", { name: "Settings", exact: true }).click();
-		const source = (name: string) => page.getByRole("tabpanel", { name: "Source" }).getByRole("button", { name, exact: true });
+		const source = (name: string) =>
+			page.getByRole("tabpanel", { name: "Source" }).getByRole("button", { name, exact: true });
 		await source("Camera").click();
 		expect(await state(page)).toEqual({ source: "camera", muted: false, invisible: false });
 
