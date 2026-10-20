@@ -53,6 +53,7 @@
     {
       nixosModules = {
         moq-relay = import ./nix/modules/moq-relay.nix;
+        github-runner-vm = import ./nix/modules/github-runner-vm.nix;
       };
 
       overlays.default = import ./nix/overlay.nix { inherit crane; };
@@ -646,7 +647,10 @@
             test -f "${overlayPkgs.moq-boy.src}/rs/moq-video/src/frame/nv12_resize.ptx"
             touch "$out"
           '';
-        };
+        }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") (
+          import ./nix/runner/checks.nix { inherit pkgs; }
+        );
       }
     );
 }

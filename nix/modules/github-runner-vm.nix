@@ -1,0 +1,243 @@
+{
+  config,
+  lib,
+  pkgs,
+  utils,
+  ...
+}:
+
+let
+  cfg = config.services.github-runner-vm;
+  tap = "tap-${cfg.name}";
+  user = cfg.name;
+  guest = import (pkgs.path + "/nixos/lib/eval-config.nix") {
+    system = pkgs.stdenv.hostPlatform.system;
+    modules = [
+      (import ../runner/guest.nix { inherit (cfg) runner resources; })
+      cfg.guestConfig
+    ];
+  };
+  device = "${utils.escapeSystemdPath "/sys/subsystem/net/devices/${tap}"}.device";
+  qemu = pkgs.qemu_kvm;
+  stop = pkgs.writeShellScript "github-runner-vm-stop" ''
+    set -euo pipefail
+    ${
+      pkgs.python3.withPackages (p: [ p.qemu-qmp ])
+    }/bin/python3 ${../runner/stop.py} "$RUNTIME_DIRECTORY/qmp"
+    ${pkgs.coreutils}/bin/tail --pid="$MAINPID" -f /dev/null
+  '';
+in
+{
+  options.services.github-runner-vm = {
+    enable = lib.mkEnableOption "a GitHub Actions runner in a persistent KVM guest";
+    name = lib.mkOption {
+      type = lib.types.strMatching "[a-z][a-z0-9-]{0,9}";
+      default = "github-ci";
+      description = "Name of the host service, state directory, and VM user.";
+    };
+    runner = {
+      url = lib.mkOption {
+        type = lib.types.str;
+        description = "GitHub repository URL registered to the runner.";
+      };
+      name = lib.mkOption {
+        type = lib.types.str;
+        default = "${config.networking.hostName}-${cfg.name}";
+        description = "Runner name advertised to GitHub.";
+      };
+      labels = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+        description = "Additional labels advertised to GitHub.";
+      };
+    };
+    network.uplink = lib.mkOption {
+      type = lib.types.strMatching "[a-zA-Z0-9_.:-]{1,15}";
+      description = "Host interface used for public IPv4 egress.";
+    };
+    resources = {
+      cores = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 4;
+        description = "Virtual CPUs and maximum host CPU usage in cores.";
+      };
+      memory = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 8192;
+        description = "Guest memory in MiB, with 2 GiB extra allowed for QEMU.";
+      };
+      disk = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 128;
+        description = "Initial persistent disk capacity in GiB.";
+      };
+    };
+    tokenFile = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/secrets/github-runner-vm.token";
+      description = "Host path to the runtime GitHub registration token.";
+    };
+    guestConfig = lib.mkOption {
+      type = lib.types.deferredModule;
+      default = { };
+      description = "Extra NixOS guest configuration, including SSH keys and binary caches.";
+    };
+    guest = lib.mkOption {
+      type = lib.types.raw;
+      readOnly = true;
+      description = "Evaluated guest system for deployment as a NixOS flake configuration.";
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    services.github-runner-vm.guest = guest;
+    assertions = [
+      {
+        assertion = pkgs.stdenv.hostPlatform.system == "x86_64-linux";
+        message = "services.github-runner-vm supports x86_64-linux KVM hosts.";
+      }
+    ];
+    users.groups.${user} = { };
+    users.users.${user} = {
+      isSystemUser = true;
+      group = user;
+      extraGroups = [ "kvm" ];
+    };
+
+    networking.networkmanager.unmanaged = [ "interface-name:${tap}" ];
+    systemd.network = {
+      enable = true;
+      # When NetworkManager owns the uplink, it also owns online readiness.
+      # The TAP cannot gain carrier until QEMU starts.
+      wait-online.enable = lib.mkIf config.networking.networkmanager.enable false;
+      netdevs."30-github-runner" = {
+        netdevConfig = {
+          Kind = "tap";
+          Name = tap;
+        };
+        tapConfig.User = user;
+      };
+      networks."30-github-runner" = {
+        matchConfig.Name = tap;
+        address = [ "10.231.0.1/30" ];
+        linkConfig.RequiredForOnline = "no";
+        networkConfig = {
+          LinkLocalAddressing = "no";
+          ConfigureWithoutCarrier = true;
+        };
+      };
+    };
+
+    networking.nat = {
+      enable = true;
+      externalInterface = cfg.network.uplink;
+      internalInterfaces = [ tap ];
+    };
+    networking.firewall.filterForward = true;
+    networking.nftables = {
+      enable = true;
+      tables.github-runner-vm = {
+        family = "inet";
+        content = ''
+          chain input {
+            type filter hook input priority -10; policy accept;
+            iifname "${tap}" ct state established,related accept
+            iifname "${tap}" counter drop
+          }
+          chain forward {
+            type filter hook forward priority -10; policy accept;
+            iifname "${tap}" meta nfproto ipv6 counter drop
+            iifname "${tap}" ip saddr != 10.231.0.2 counter drop
+            iifname "${tap}" ip daddr {
+              0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8,
+              169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16,
+              198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4
+            } counter drop
+            iifname "${tap}" oifname != "${cfg.network.uplink}" counter drop
+            oifname "${tap}" ct state established,related accept
+            oifname "${tap}" counter drop
+          }
+        '';
+      };
+    };
+
+    systemd.services.${cfg.name} = {
+      description = "Persistent GitHub Actions runner VM";
+      wantedBy = [ "multi-user.target" ];
+      wants = [ "network-online.target" ];
+      bindsTo = [
+        "nftables.service"
+        device
+      ];
+      after = [
+        "network-online.target"
+        "nftables.service"
+        device
+      ];
+      path = [ qemu ];
+      preStart = ''
+        if ! test -e /dev/kvm; then
+          echo "KVM is unavailable. Enable virtualization in firmware and load the CPU KVM module." >&2
+          exit 1
+        fi
+        if ! test -r /dev/kvm || ! test -w /dev/kvm; then
+          echo "The ${user} user needs read and write access to /dev/kvm through the kvm group." >&2
+          exit 1
+        fi
+        if ! test -e "$STATE_DIRECTORY/root.qcow2"; then
+          cp --reflink=auto ${guest.config.system.build.image}/nixos.qcow2 "$STATE_DIRECTORY/root.qcow2.tmp"
+          chmod 0600 "$STATE_DIRECTORY/root.qcow2.tmp"
+          qemu-img resize "$STATE_DIRECTORY/root.qcow2.tmp" ${toString cfg.resources.disk}G
+          mv "$STATE_DIRECTORY/root.qcow2.tmp" "$STATE_DIRECTORY/root.qcow2"
+        fi
+      '';
+      script = ''
+        exec ${qemu}/bin/qemu-system-x86_64 \
+          -enable-kvm -cpu host -smp ${toString cfg.resources.cores} -m ${toString cfg.resources.memory} \
+          -drive file="$STATE_DIRECTORY/root.qcow2",format=qcow2,if=virtio,cache=none \
+          -netdev tap,id=net,ifname=${tap},script=no,downscript=no \
+          -device virtio-net-pci,netdev=net,mac=02:00:00:00:23:02 \
+          -device virtio-rng-pci \
+          -fw_cfg name=opt/io.systemd.credentials/runner-token,file="$CREDENTIALS_DIRECTORY/runner-token" \
+          -qmp unix:"$RUNTIME_DIRECTORY/qmp",server=on,wait=off \
+          -nographic
+      '';
+      serviceConfig = {
+        User = user;
+        Group = user;
+        StateDirectory = cfg.name;
+        StateDirectoryMode = "0700";
+        RuntimeDirectory = cfg.name;
+        RuntimeDirectoryMode = "0700";
+        LoadCredential = [ "runner-token:${cfg.tokenFile}" ];
+        ExecStop = stop;
+        TimeoutStopSec = 120;
+        ProtectHome = true;
+        ProtectSystem = "strict";
+        PrivateTmp = true;
+        NoNewPrivileges = true;
+        CapabilityBoundingSet = "";
+        DevicePolicy = "closed";
+        DeviceAllow = [
+          "/dev/kvm rw"
+          "/dev/net/tun rw"
+        ];
+        # QEMU queries the TAP's MTU through an IP socket; guest packets use the
+        # TAP descriptor, so denying host IP traffic does not block guest NAT.
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_INET"
+          "AF_INET6"
+          "AF_NETLINK"
+        ];
+        IPAddressDeny = "any";
+        Nice = 10;
+        CPUWeight = 10;
+        IOWeight = 10;
+        CPUQuota = "${toString (cfg.resources.cores * 100)}%";
+        MemoryMax = "${toString (cfg.resources.memory + 2048)}M";
+        TasksMax = 1024;
+      };
+    };
+  };
+}
