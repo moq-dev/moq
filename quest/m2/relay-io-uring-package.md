@@ -34,6 +34,5 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Ring SETUP token](/quest/m1/uring-setup-token.md) - a moq-transport SETUP token reaches the auth decider on the ring too
 - [Ring drain GOAWAY](/quest/m2/uring-ring-drain.md) - closes are delivered on the ring for moq-transport too
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - a one-port config is served on the ring too

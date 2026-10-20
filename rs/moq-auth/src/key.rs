@@ -555,7 +555,7 @@ impl Key {
 	/// [`Claims::authorize`].
 	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
 		let claims = self.verify_claims(token)?;
-		validate_times(&claims, std::time::SystemTime::now())?;
+		validate_times(&claims, moq_clock::wall().into())?;
 		Ok(claims)
 	}
 
@@ -682,6 +682,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 
@@ -1110,6 +1111,18 @@ mod tests {
 
 		let result = key.verify(&token);
 		assert!(result.is_err());
+	}
+
+	#[moq_clock::test]
+	async fn token_validity_uses_the_ambient_wall() {
+		let key = create_test_key();
+		let mut claims = create_test_claims();
+		claims.issued = Some(moq_clock::wall().into());
+		claims.expires = Some((moq_clock::wall() + Duration::from_secs(10)).into());
+		let token = key.sign(&claims).unwrap();
+		key.verify(&token).unwrap();
+		moq_clock::sleep(Duration::from_secs(10)).await;
+		assert!(matches!(key.verify(&token), Err(crate::Error::TokenExpired)));
 	}
 
 	#[test]
