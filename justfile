@@ -96,12 +96,22 @@ install:
 check $BASE="":
     sh/dispatch.sh check "$BASE"
 
-# CI runs `check` as two parallel jobs, since one runner doing both takes about
-# the sum of their times. Same dispatch, with MOQ_STRICT=1.
+# The merge queue runs `ci` as two parallel jobs, since one runner doing both
+# takes about the sum of their times. Run `just ci` before pushing a PR into main.
+# MOQ_STRICT turns a missing tool into an error rather than a skipped check, so a
+# green run cannot have checked nothing; the `ci` nextest profile allows a longer
+# hang timeout for a loaded runner.
 
-# Run half of `check` for CI: JOB `check` lints and compiles, `test` runs the tests.
-ci $JOB $BASE="":
-    sh/dispatch.sh "ci-$JOB" "$BASE"
+# Run the merge queue's Linux gate: both halves, or JOB `check` (lints, compiles) or `test` alone.
+ci $JOB="" $BASE="":
+    MOQ_STRICT=1 NEXTEST_PROFILE=ci sh/dispatch.sh "ci${JOB:+-$JOB}" "$BASE"
+
+# `ci` and the queue select by diff, so a break outside the selection can reach
+# main; nightly and every release PR run `gate` so none reaches a release.
+
+# Run `ci` over every package: both halves, or JOB `check` or `test` alone.
+gate $JOB="":
+    just ci "$JOB" --all
 
 # Report what a CI job (`check`, `test`, `platform`) selects, before installing the dev shell or build caches.
 ci-select $JOB $BASE="":

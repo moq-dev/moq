@@ -725,10 +725,9 @@ mod tests {
 	/// is exactly the case `Surface::color` exists to report.
 	///
 	/// The sibling tests all run at 64x64, below the threshold where the guess
-	/// happens to agree. Ignored: needs a GPU, which CI lacks. Run with
-	/// `--ignored`.
+	/// happens to agree.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn the_declared_color_space_beats_the_size_guess() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(1280, 720);
@@ -775,10 +774,9 @@ mod tests {
 	}
 
 	/// The universal path end to end: a CPU frame uploaded as three planes,
-	/// converted by the shader, read back. Ignored: needs a GPU, which CI lacks.
-	/// Run with `--ignored`.
+	/// converted by the shader, read back.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn cpu_frames_survive_the_round_trip() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(64, 64);
@@ -811,10 +809,9 @@ mod tests {
 	}
 
 	/// The output follows `Config::size` rather than the frame's, so a caller
-	/// can render straight into a fixed target. Ignored: needs a GPU. Run with
-	/// `--ignored`.
+	/// can render straight into a fixed target.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn config_size_overrides_the_frame_size() {
 		let (device, queue) = gpu().await;
 		let config = Config {
@@ -1438,7 +1435,7 @@ mod tests {
 	/// GPU. Run with `--ignored`.
 	#[cfg(apple)]
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Metal GPU; see quest/m3/video-hardware.md"]
 	async fn imports_survive_decoder_pool_recycling() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(256, 256);
@@ -1468,7 +1465,7 @@ mod tests {
 	/// Run with `--ignored`.
 	#[cfg(apple)]
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Metal GPU; see quest/m3/video-hardware.md"]
 	async fn the_metal_import_matches_the_cpu_path() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(64, 64);

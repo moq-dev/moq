@@ -51,6 +51,7 @@ from moq_ffi import (
 
 from . import subscribe as _subscribe
 from ._records import Frame, Subscription, _from_us, _subscription, _to_us
+from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand, TrackRequest
 from .subscribe import BroadcastConsumer
 from .types import FetchGroupOptions
@@ -272,7 +273,7 @@ def _rendition(id: str, rendition: Video | Audio) -> MoqRendition:
     raise TypeError(f"expected a catalog Video or Audio rendition, got {type(rendition).__name__}")
 
 
-class TrackConsumer:
+class TrackConsumer(_Stream[MediaFrame]):
     """Async-iterable stream of decoded :class:`MediaFrame` in decode order.
 
     Construct with :meth:`subscribe`. Iterate with ``async for``;
@@ -295,27 +296,16 @@ class TrackConsumer:
     def __init__(self, inner: MoqMediaTrackConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> MediaFrame:
+    async def _next(self) -> MediaFrame | None:
         frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return MediaFrame._from_ffi(frame)
+        return None if frame is None else MediaFrame._from_ffi(frame)
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering frames."""
         self._inner.cancel()
 
 
-class GroupConsumer:
+class GroupConsumer(_Stream[MediaFrame]):
     """Async iterator of decoded :class:`MediaFrame` within a single group.
 
     Construct with :meth:`fetch`, or decode a raw :class:`~moq.GroupConsumer`,
@@ -360,27 +350,16 @@ class GroupConsumer:
         """The sequence number of this group within the track."""
         return self._inner.sequence()
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> MediaFrame:
+    async def _next(self) -> MediaFrame | None:
         frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return MediaFrame._from_ffi(frame)
+        return None if frame is None else MediaFrame._from_ffi(frame)
 
     def cancel(self) -> None:
         """Cancel reading this group and stop delivering frames."""
         self._inner.cancel()
 
 
-class CatalogConsumer:
+class CatalogConsumer(_Stream[Catalog]):
     """Async-iterable stream of :class:`Catalog` snapshots as the broadcast updates.
 
     Construct with :meth:`subscribe`. Each item is the latest
@@ -395,20 +374,8 @@ class CatalogConsumer:
     def __init__(self, inner: MoqMediaCatalogConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Catalog:
-        catalog = await self._inner.next()
-        if catalog is None:
-            raise StopAsyncIteration
-        return catalog
+    async def _next(self) -> Catalog | None:
+        return await self._inner.next()
 
     def cancel(self) -> None:
         """Cancel the catalog subscription and stop delivering updates."""

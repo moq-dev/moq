@@ -451,6 +451,11 @@ impl State {
 		// than the last output callback, so it leads the echo by however much
 		// the output device buffers, however little that is.
 		if let Some(reference) = reference {
+			// The mixer's writes are discarded until this side is marked read.
+			// Waiting for a whole frame to read first never ends on a resampled
+			// tap: the resampler's delay leaves the priming silence a few samples
+			// short of one, and nothing is ever written to make up the rest.
+			reference.set_output_stream_ready(true);
 			while reference.available_frames() >= REFERENCE_FRAME {
 				reference.read_interleaved(reference_frame, false);
 				deinterleave(reference_frame, render_in, REFERENCE_CHANNELS);
@@ -904,6 +909,26 @@ mod tests {
 		);
 	}
 
+	/// A 44.1 kHz output's tap resamples, which leaves its priming silence short
+	/// of one reference frame; the first pass must still open it to the mixer.
+	#[test]
+	fn a_resampled_tap_starts_flowing() {
+		let canceller = opened(48_000, 1);
+		let (mut prod, cons) = channel(44_100);
+		canceller.inner.state.lock().unwrap().reference = Some(cons);
+		let played = vec![0.5f32; frame(44_100) * REFERENCE_CHANNELS];
+
+		canceller.process(&mut vec![0.0f32; frame(48_000)]);
+		prod.push_interleaved(&played);
+		canceller.process(&mut vec![0.0f32; frame(48_000)]);
+
+		assert_ne!(
+			prod.push_interleaved(&played),
+			fixed_resample::PushStatus::OutputNotReady,
+			"the mixer's reference is still being discarded"
+		);
+	}
+
 	/// A canceller that never sees a reference still has to hand the microphone
 	/// back, since the output device may simply not be open yet.
 	#[test]
@@ -1083,13 +1108,12 @@ mod tests {
 	/// The half of this that only a real device can prove: what a
 	/// [`playback::Engine`] plays reaches the tap.
 	///
-	/// Ignored by default, like the rest of the device round trips: CI has no
-	/// sound card. Run it on a machine with speakers via
-	/// `cargo test -p moq-audio --features aec -- --ignored`. Whether the
+	/// Ignored by default, like the rest of the device round trips, which
+	/// nightly runs against a null sink with `just rs audio-devices`. Whether the
 	/// microphone then stops hearing the speaker is an acoustic question about
 	/// the room, not something a test can assert.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs an output device; run by just rs audio-devices"]
 	async fn taps_a_real_output_device() {
 		let engine = playback::Engine::open(playback::Config::default())
 			.await
@@ -1126,9 +1150,11 @@ mod tests {
 			// Drain the tap the way the microphone callback would, and add up
 			// what the speaker was given.
 			let mut state = canceller.inner.state.lock().unwrap();
-			while let Some(reference) = state.reference.as_mut()
-				&& reference.available_frames() >= REFERENCE_FRAME
-			{
+			let Some(reference) = state.reference.as_mut() else {
+				continue;
+			};
+			reference.set_output_stream_ready(true);
+			while reference.available_frames() >= REFERENCE_FRAME {
 				reference.read_interleaved(&mut buf, false);
 				energy += buf.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
 			}

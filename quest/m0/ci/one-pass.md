@@ -48,7 +48,3 @@ this PR is enqueued, which only loosens the gate, and merge groups built
 earlier still report both. [Release gates](/quest/m0/ci/release-gates.md)
 owns the ruleset edits. Record the queue's wall time per entry before and
 after in the PR.
-
-## Required
-
-- [Cloud CI only in the queue](/quest/m0/ci/queue-only.md) - adds the `just ci` recipe this job calls

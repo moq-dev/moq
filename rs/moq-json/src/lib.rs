@@ -17,6 +17,8 @@
 //! when something else already owns the track, such as a `moq_mux::container::Producer` also
 //! managing a timeline and a catalog estimate.
 
+#![warn(missing_docs)]
+
 mod diff;
 mod merge;
 pub mod snapshot;
