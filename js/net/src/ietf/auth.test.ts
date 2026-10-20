@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Unsupported } from "../auth.ts";
-import { SessionCode, type SessionError } from "../error.ts";
+import { SessionCode, type SessionError, StreamCode, type StreamError } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { AuthError, AuthMessage, AuthOk, fromSetup, intoSetup } from "./auth.ts";
@@ -131,6 +131,9 @@ test("AUTH_ERROR preserves actionable refusal kinds", async () => {
 	expect(expired.code).toBe(SessionCode.Expired);
 	const unauthorized = new AuthError(0x1, "bad").toError() as SessionError;
 	expect(unauthorized.code).toBe(SessionCode.Unauthorized);
+	// Past the acceptor's GOAWAY: the request is refused, not the token.
+	const goingAway = new AuthError(0x6, "going away").toError() as StreamError;
+	expect(goingAway.code).toBe(StreamCode.GoingAway);
 });
 
 test("drafts before 17 carry no AUTH", async () => {

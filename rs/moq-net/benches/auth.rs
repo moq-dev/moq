@@ -5,7 +5,8 @@
 //!
 //! `renewal` times swapping the auth of every announced route on one origin, until
 //! the session that presented both auths has renewed each announcement and its peer
-//! accepted every token. It sweeps the routes and the sessions publishing that origin:
+//! accepted every token. `renewal_one` changes one route while the others remain idle.
+//! Both sweep the routes and the sessions publishing that origin:
 //! the others carry no auth for those routes, so their cost is waking on a change that
 //! sends nothing.
 
@@ -160,58 +161,62 @@ fn renewal(c: &mut Criterion) {
 		.enable_all()
 		.build()
 		.unwrap();
-	let mut group = c.benchmark_group("auth/renewal");
-	group.sample_size(10);
-	group.warm_up_time(Duration::from_millis(100));
-	group.measurement_time(Duration::from_millis(300));
-	for sessions in [1, 16, 64] {
-		for routes in [1, 16, 128] {
-			group.throughput(Throughput::Elements(routes as u64));
-			group.bench_with_input(
-				BenchmarkId::new(sessions.to_string(), routes),
-				&(sessions, routes),
-				|b, &(sessions, routes)| {
-					let _guard = runtime.enter();
-					// No hold, so an iteration times the renewal rather than the origin batching it.
-					let mut config = origin::Config::new(Hop::new(2).unwrap());
-					config.update_hold = Duration::ZERO;
-					let (origin, driver) = origin::Producer::new(config);
-					harness::spawn(driver);
-					let mut publishers = runtime.block_on(join_all((0..sessions).map(|_| publisher(&origin))));
-					let (session, _, requests) = &mut publishers[0];
-					let handle = session.auth();
-					let auths =
-						runtime.block_on(async { [handle.add("a").await.unwrap(), handle.add("b").await.unwrap()] });
-					let broadcasts: Vec<_> = (0..routes)
-						.map(|route| origin.create_broadcast(format!("room/{route}").as_str()).unwrap())
-						.collect();
-					let mut swap = |auth: &auth::Auth| {
-						for broadcast in &broadcasts {
-							broadcast
-								.announce(origin::Route::default().with_auth(auth.clone()))
-								.unwrap();
-						}
-						runtime.block_on(async {
-							let mut issued = Vec::with_capacity(routes);
-							for _ in 0..routes {
-								issued.push(requests.next().await.unwrap().accept(auth::Grant::all()));
+	for (name, single) in [("auth/renewal", false), ("auth/renewal_one", true)] {
+		let mut group = c.benchmark_group(name);
+		group.sample_size(10);
+		group.warm_up_time(Duration::from_millis(100));
+		group.measurement_time(Duration::from_millis(300));
+		for sessions in [1, 16, 64] {
+			for routes in [1, 16, 128] {
+				let touched = if single { 1 } else { routes };
+				group.throughput(Throughput::Elements(touched as u64));
+				group.bench_with_input(
+					BenchmarkId::new(sessions.to_string(), routes),
+					&(sessions, routes),
+					|b, &(sessions, routes)| {
+						let _guard = runtime.enter();
+						// No hold, so an iteration times the renewal rather than the origin batching it.
+						let mut config = origin::Config::new(Hop::new(2).unwrap());
+						config.update_hold = Duration::ZERO;
+						let (origin, driver) = origin::Producer::new(config);
+						harness::spawn(driver);
+						let mut publishers = runtime.block_on(join_all((0..sessions).map(|_| publisher(&origin))));
+						let (session, _, requests) = &mut publishers[0];
+						let handle = session.auth();
+						let auths = runtime
+							.block_on(async { [handle.add("a").await.unwrap(), handle.add("b").await.unwrap()] });
+						let broadcasts: Vec<_> = (0..routes)
+							.map(|route| origin.create_broadcast(format!("room/{route}").as_str()).unwrap())
+							.collect();
+						let mut swap = |auth: &auth::Auth, touched: usize| {
+							for broadcast in broadcasts.iter().take(touched) {
+								broadcast
+									.announce(origin::Route::default().with_auth(auth.clone()))
+									.unwrap();
 							}
-							issued
-						})
-					};
-					// Each round's grants replace the last round's, which drop once their
-					// renewals are accepted.
-					let mut _held = swap(&auths[0]);
-					let mut next = 1;
-					b.iter(|| {
-						_held = swap(&auths[next]);
-						next ^= 1;
-					});
-				},
-			);
+							runtime.block_on(async {
+								let mut issued = Vec::with_capacity(touched);
+								for _ in 0..touched {
+									issued.push(requests.next().await.unwrap().accept(auth::Grant::all()));
+								}
+								issued
+							})
+						};
+						// Each round's grants replace the last round's, which drop once their
+						// renewals are accepted.
+						let mut held = swap(&auths[0], routes);
+						let mut next = 1;
+						b.iter(|| {
+							let replacements = swap(&auths[next], touched);
+							drop(held.splice(..touched, replacements));
+							next ^= 1;
+						});
+					},
+				);
+			}
 		}
+		group.finish();
 	}
-	group.finish();
 }
 
 /// Publications held behind unanswered tokens, sweeping both the token table and paths.

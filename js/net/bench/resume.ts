@@ -1,6 +1,6 @@
 /**
- * Sweep readers and route swaps for groups read through a logical front, against the same
- * groups read straight from the track.
+ * Sweep readers and route swaps for direct and forked readers through a logical front,
+ * against the same groups read straight from the track.
  *
  * A front reads its serving route's copy directly, so with one route it should cost about what a
  * direct read does, and each swap should leave nothing behind once its groups are read.
@@ -39,7 +39,7 @@ function read(subscribers: Subscriber[]) {
 }
 
 /** Microseconds per group per reader, reading through a front after `swaps` route swaps, or directly. */
-async function measure(readers: number, swaps: number | undefined): Promise<number> {
+async function measure(readers: number, swaps: number | undefined, fork = false): Promise<number> {
 	let sequence = 0;
 	const sources: { broadcast: BroadcastProducer; write: () => void }[] = [];
 	const source = () => {
@@ -69,7 +69,14 @@ async function measure(readers: number, swaps: number | undefined): Promise<numb
 		front = new Front();
 		front.serve(source().consume());
 		const consumer = front.consumer;
-		subscribers = Array.from({ length: readers }, () => consumer.track("seq").subscribe());
+		const track = consumer.track("seq");
+		if (fork) {
+			const parent = track.subscribe();
+			subscribers = Array.from({ length: readers }, () => parent.fork());
+			parent.close();
+		} else {
+			subscribers = Array.from({ length: readers }, () => track.subscribe());
+		}
 		for (let swap = 0; swap < swaps; swap++) {
 			publish();
 			read(subscribers);
@@ -97,28 +104,32 @@ async function measure(readers: number, swaps: number | undefined): Promise<numb
 
 // Warm the JIT so the first row isn't the slowest.
 await measure(4, 1);
+await measure(4, 1, true);
 await measure(4, undefined);
 
-console.log("readers,swaps,direct_us,front_us");
+console.log("readers,swaps,direct_us,front_us,fork_us");
 let baseline: number | undefined;
 for (const swaps of swapCounts) {
 	for (const readers of readerCounts) {
 		const direct: number[] = [];
 		const front: number[] = [];
+		const fork: number[] = [];
 		// Interleaved, so a noisy stretch of the machine lands on both columns alike.
 		for (let rep = 0; rep < reps; rep++) {
 			direct.push(await measure(readers, undefined));
 			front.push(await measure(readers, swaps));
+			fork.push(await measure(readers, swaps, true));
 		}
 		// The fastest run is the one least disturbed by the rest of the machine.
 		const directUs = Math.min(...direct);
 		const frontUs = Math.min(...front);
-		console.log(`${readers},${swaps},${directUs.toFixed(2)},${frontUs.toFixed(2)}`);
+		const forkUs = Math.min(...fork);
+		console.log(`${readers},${swaps},${directUs.toFixed(2)},${frontUs.toFixed(2)},${forkUs.toFixed(2)}`);
 
 		baseline ??= frontUs;
-		if (frontUs > baseline * maxSlope) {
+		if (Math.max(frontUs, forkUs) > baseline * maxSlope) {
 			throw new Error(
-				`${readers} readers after ${swaps} swaps cost ${frontUs.toFixed(2)} us/group, over ${maxSlope}x ${baseline.toFixed(2)}`,
+				`${readers} readers after ${swaps} swaps cost ${Math.max(frontUs, forkUs).toFixed(2)} us/group, over ${maxSlope}x ${baseline.toFixed(2)}`,
 			);
 		}
 	}

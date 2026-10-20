@@ -1,0 +1,31 @@
+[Unit]
+Description=CARLA simulator
+Documentation=file://@CARLA_REPO@/demo/carla/README.md
+
+[Service]
+Type=simple
+Environment=CARLA_REPO=@CARLA_REPO@
+# Optional, and the same file the worker reads. CARLA_IMAGE belongs here rather
+# than in a systemd drop-in, so reinstalling the units cannot silently return
+# the simulator to the stock image and its idle game-thread spin.
+EnvironmentFile=-%E/moq/carla.env
+ExecStart=@NIX_BIN@ develop --accept-flake-config ${CARLA_REPO} --command just --justfile ${CARLA_REPO}/justfile carla server
+# The server boots with rendering on and outlives every client, so a simulator
+# waiting for its worker draws frames nobody asked for: 174 W and 100% GPU on
+# an RTX 3070 Ti, against 26 W and 44% parked. `carla park` no-ops when a worker
+# already owns the world. Both lines are `-`: this is an optimization, never a
+# verdict on the simulator, and an unparked one still works. Failing the unit
+# here would restart-loop the container on a slow boot instead.
+ExecStartPost=-@NIX_BIN@ develop --accept-flake-config ${CARLA_REPO} --command just --justfile ${CARLA_REPO}/justfile carla wait-port 127.0.0.1 2000 600
+ExecStartPost=-@NIX_BIN@ develop --accept-flake-config ${CARLA_REPO} --command just --justfile ${CARLA_REPO}/justfile carla park
+# just reports a recipe killed by SIGTERM as exit 143 rather than dying of
+# the signal, which systemd would otherwise log as a failed stop.
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=10s
+RestartSteps=4
+RestartMaxDelaySec=2min
+# The gate above runs inside the start timeout, which defaults to 90s, and also
+# covers the one-time 8.6 GB image pull.
+TimeoutStartSec=6min
+TimeoutStopSec=45s
