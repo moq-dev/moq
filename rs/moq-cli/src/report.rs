@@ -401,7 +401,7 @@ async fn snapshot(
 	track: &mut Option<moq_json::snapshot::Consumer<serde_json::Value>>,
 ) -> moq_json::Result<Option<serde_json::Value>> {
 	match track {
-		Some(track) => track.next().await,
+		Some(track) => Ok(track.latest().await?.map(|timed| timed.value)),
 		None => std::future::pending().await,
 	}
 }
@@ -482,7 +482,7 @@ async fn write_echo(
 	let prefix = moq_net::Path::new(&prefix).to_owned();
 	let mut announced = origin.clone().with_hidden(hidden).announced();
 	let (lines, mut written) = tokio::sync::mpsc::channel::<String>(LINES);
-	let mut readers = HashMap::new();
+	let mut readers = Readers::default();
 	loop {
 		tokio::select! {
 			event = announced.next() => {
@@ -501,25 +501,64 @@ async fn write_echo(
 				}
 				if active {
 					let reader = tokio::spawn(read_echo(origin.clone(), path.clone(), lines.clone()));
-					if let Some(previous) = readers.insert(path, reader) {
-						previous.abort();
-					}
-				} else if let Some(reader) = readers.get(&path) {
-					// Left to drain, not aborted: the final snapshot can still be in flight. It stays
-					// here so a start at the path replaces it, and goes after `DRAIN` even if its
-					// track stays open.
-					let reader = reader.abort_handle();
-					tokio::spawn(async move {
-						tokio::time::sleep(DRAIN).await;
-						reader.abort();
-					});
-					readers.retain(|_, reader| !reader.is_finished());
+					readers.start(path, reader);
+				} else {
+					readers.end(path);
 				}
 			}
 			Some(line) = written.recv() => {
 				stdout.write_all(line.as_bytes()).await?;
 				stdout.flush().await?;
 			}
+			() = readers.reap() => {}
+		}
+	}
+}
+
+/// The `export echo` reader of each feedback broadcast, live or draining after its `End`.
+#[derive(Default)]
+struct Readers {
+	running: HashMap<moq_net::PathOwned, tokio::task::JoinHandle<()>>,
+	/// One timer per `End`, yielding the path and the reader it ended once `DRAIN` passes.
+	drains: tokio::task::JoinSet<(moq_net::PathOwned, tokio::task::Id)>,
+}
+
+impl Readers {
+	/// Read `path` with `reader`, replacing any reader still on it.
+	fn start(&mut self, path: moq_net::PathOwned, reader: tokio::task::JoinHandle<()>) {
+		if let Some(previous) = self.running.insert(path, reader) {
+			previous.abort();
+		}
+	}
+
+	/// Let the reader of `path` drain, not abort it: the final snapshot can still be in flight. It
+	/// stays so a start at the path replaces it, and goes after `DRAIN` even if its track stays open.
+	fn end(&mut self, path: moq_net::PathOwned) {
+		let Some(reader) = self.running.get(&path) else {
+			return;
+		};
+		let id = reader.id();
+		self.drains.spawn(async move {
+			tokio::time::sleep(DRAIN).await;
+			(path, id)
+		});
+	}
+
+	/// Wait for the next drain to pass, then abort and forget its reader unless a start has since
+	/// replaced it. Never returns while none is draining.
+	async fn reap(&mut self) {
+		let (path, id) = loop {
+			match self.drains.join_next().await {
+				Some(Ok(drained)) => break drained,
+				// A timer only sleeps, so it never fails.
+				Some(Err(_)) => continue,
+				None => std::future::pending().await,
+			}
+		};
+		if self.running.get(&path).is_some_and(|reader| reader.id() == id)
+			&& let Some(reader) = self.running.remove(&path)
+		{
+			reader.abort();
 		}
 	}
 }
@@ -534,7 +573,7 @@ async fn read_echo(
 		let broadcast = origin.request_broadcast(&path, None).await?;
 		let subscriber = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
 		let mut track = reader(subscriber);
-		while let Some(feedback) = track.next().await? {
+		while let Some(moq_net::Timed { value: feedback, .. }) = track.latest().await? {
 			let line = EchoLine {
 				broadcast: path.as_str(),
 				feedback,
@@ -596,6 +635,26 @@ mod tests {
 		feedback.update(&serde_json::json!({ "n": 2 })).unwrap();
 		let late = tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await;
 		assert!(late.is_err(), "a drained reader wrote {late:?}");
+	}
+
+	/// A reader is forgotten once its drain passes, unless a start at its path replaced it.
+	#[tokio::test(start_paused = true)]
+	async fn a_drained_reader_is_forgotten() {
+		let mut readers = Readers::default();
+		let path = moq_net::Path::new("viewer.echo").to_owned();
+
+		readers.start(path.clone(), tokio::spawn(std::future::pending()));
+		readers.end(path.clone());
+		readers.reap().await;
+		assert!(readers.running.is_empty());
+
+		readers.start(path.clone(), tokio::spawn(std::future::pending()));
+		readers.end(path.clone());
+		let replacement = tokio::spawn(std::future::pending());
+		let id = replacement.id();
+		readers.start(path.clone(), replacement);
+		readers.reap().await;
+		assert_eq!(readers.running.get(&path).map(|reader| reader.id()), Some(id));
 	}
 
 	/// Feedback under a hidden prefix is found when that prefix is the one asked for.

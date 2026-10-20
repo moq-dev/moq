@@ -5,6 +5,12 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### JSON consumers return `MoqJsonValue` (#5677)
+
+`MoqJsonSnapshotConsumer::next` and `MoqJsonStreamConsumer::next` return `MoqJsonValue { value, timestamp_us }` instead of a string; `timestamp_us` is null when untimed.
+Snapshot `next` now yields every state in order; call the new `MoqJsonSnapshotConsumer::latest` for the old collapse-to-newest read.
+Timestamps are rounded down to a whole microsecond.
+
 ### Ranges filter reads (#5929)
 
 A subscription now reads only the groups its own `ranges` cover, rather than starting at the lowest one and taking whatever arrives.

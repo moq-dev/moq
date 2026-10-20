@@ -1,4 +1,11 @@
-name: Cachix
+name: Release Nix
+
+# Pushes each released package to nix.moq.dev, so `nix run` on a release tag
+# substitutes it instead of building from source.
+#
+# The signing key and the bucket write key live in the `cache-write`
+# Environment, which only `main`, the merge queue, and these tag patterns can
+# deploy from. A tag ruleset limits who can create them; see infra/README.md.
 
 on:
   push:
@@ -13,22 +20,18 @@ jobs:
   # Build and push only the package the tag names. The tag prefix
   # (e.g. moq-relay) is the flake attribute, except moq-cli ships as moq.
   release:
-    name: Release (${{ matrix.os }})
+    name: Release (${{ matrix.runs-on }})
     runs-on: ${{ matrix.runs-on }}
+    environment: cache-write
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # `os` is just the cache pin label; keep the existing values stable so
-          # old pins aren't orphaned.
-          - os: ubuntu-latest # x86_64-linux
-            runs-on: ubuntu-latest
-          - os: macos-latest # aarch64-darwin
-            runs-on: macos-latest
-          - os: aarch64-linux
-            runs-on: ubuntu-24.04-arm
+        runs-on:
+          - ubuntu-latest # x86_64-linux
+          - ubuntu-24.04-arm # aarch64-linux
+          - macos-latest # aarch64-darwin
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,25 +55,17 @@ jobs:
           [[ "$name" == moq-cli ]] && name=moq
           echo "name=${name}" >> "$GITHUB_OUTPUT"
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/just
 
-      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
-        with:
-          name: kixelated
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Build and cache
+      # The release bucket has no lifecycle rule, unlike the CI one, so a flake
+      # pinned to an old tag still substitutes.
+      - name: Build and push
         env:
           PACKAGE: ${{ steps.pkg.outputs.name }}
-          OS: ${{ matrix.os }}
+          NIX_SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.NIX_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_R2_SECRET_ACCESS_KEY }}
         run: |
           nix build ".#$PACKAGE" --print-build-logs
-          cachix push kixelated ./result
-          # Pin so released paths are exempt from GC, otherwise a consumer
-          # pinning a few-weeks-old tag silently falls back to building once
-          # the cache GCs the path. keep-revisions bounds storage for the
-          # free plan; the pin name is per package+OS so each platform keeps
-          # its own last-N releases instead of clobbering the other's.
-          cachix pin kixelated "$PACKAGE-$OS" ./result --keep-revisions 10
+          just infra nix push nix-moq-dev ./result

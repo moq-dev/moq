@@ -103,8 +103,8 @@ impl<T> Default for Registry<T> {
 
 impl<T: Default> Registry<T> {
 	/// The counters for `name`, continuing those of an earlier track under that name. At
-	/// [`MAX_ENTRIES`] names, those no track still counts into make way; with every one live, a new
-	/// name counts into counters no report reads.
+	/// [`MAX_ENTRIES`] names, one that no track still counts into makes way; with every one live, a
+	/// new name counts into counters no report reads.
 	pub(crate) fn track(&self, name: &str) -> Arc<T> {
 		let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
 		if let Some(counters) = entries.get(name) {
@@ -112,17 +112,22 @@ impl<T: Default> Registry<T> {
 		}
 		if entries.len() >= MAX_ENTRIES {
 			// Each track holds its counters for as long as it runs, so the registry's is the last.
-			entries.retain(|_, counters| Arc::strong_count(counters) > 1);
-		}
-		if entries.len() >= MAX_ENTRIES {
-			if !self.full.swap(true, Relaxed) {
-				tracing::warn!(
-					name,
-					limit = MAX_ENTRIES,
-					"every reported rendition is live; not reporting more"
-				);
-			}
-			return Arc::default();
+			// Only one makes way, so the other ended renditions keep their final counts.
+			let ended = entries
+				.iter()
+				.find(|(_, counters)| Arc::strong_count(counters) == 1)
+				.map(|(ended, _)| ended.clone());
+			let Some(ended) = ended else {
+				if !self.full.swap(true, Relaxed) {
+					tracing::warn!(
+						name,
+						limit = MAX_ENTRIES,
+						"every reported rendition is live; not reporting more"
+					);
+				}
+				return Arc::default();
+			};
+			entries.remove(&ended);
 		}
 		entries.entry(name.to_string()).or_default().clone()
 	}
@@ -200,8 +205,37 @@ mod tests {
 		drop(live);
 		registry.track("late").add(1, 1, 0);
 		let report = registry.sent();
-		assert_eq!(report.keys().collect::<Vec<_>>(), ["late"]);
+		assert_eq!(report.len(), MAX_ENTRIES);
 		assert_eq!(report["late"].frames, 1);
+	}
+
+	/// A new name past the cap evicts one ended rendition, so the rest keep their final counts and
+	/// a returning one continues them.
+	#[test]
+	fn a_new_rendition_evicts_only_one_ended() {
+		let registry = Registry::<Sent>::default();
+		let live = registry.track("live");
+		for n in 1..MAX_ENTRIES {
+			registry.track(&format!("r{n}")).add(1, 1, 0);
+		}
+
+		registry.track("late").add(1, 1, 0);
+		let report = registry.sent();
+		assert_eq!(report.len(), MAX_ENTRIES);
+		assert!(report.contains_key("live"));
+		assert!(report.contains_key("late"));
+		let kept = (1..MAX_ENTRIES)
+			.filter(|n| report.contains_key(&format!("r{n}")))
+			.count();
+		assert_eq!(kept, MAX_ENTRIES - 2);
+
+		let returning = (1..MAX_ENTRIES)
+			.map(|n| format!("r{n}"))
+			.find(|name| report.contains_key(name))
+			.unwrap();
+		registry.track(&returning).add(1, 1, 0);
+		assert_eq!(registry.sent()[&returning].frames, 2);
+		drop(live);
 	}
 
 	#[test]

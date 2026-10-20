@@ -19,7 +19,7 @@ pub enum PublishFormat {
 
 /// Command-line adapter for [`moq_video::encode::Codec`].
 #[cfg(feature = "capture")]
-#[derive(usage::ValueEnum, Clone, Copy, Default)]
+#[derive(usage_rs::ValueEnum, Clone, Copy, Default)]
 pub enum VideoCodec {
 	/// H.264 / AVC (the default; widest support).
 	#[default]
@@ -47,7 +47,7 @@ impl From<VideoCodec> for moq_video::encode::Codec {
 /// the default camera and microphone. Run `moq devices` to list the ids each one
 /// takes.
 #[cfg(feature = "capture")]
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(group("video-source"))]
 #[usage(group("audio-source"))]

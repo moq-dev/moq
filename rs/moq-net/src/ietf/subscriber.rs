@@ -182,7 +182,7 @@ impl State {
 				let _ = producer.abort_session(err.clone());
 			}
 			if let Fill::Ready { producer, .. } = &*track.fill.read() {
-				let _ = producer.clone().abort(err.clone());
+				let _ = producer.handle().abort(err.clone());
 			}
 		}
 		for (_, producer) in self.lingering.drain() {
@@ -320,7 +320,7 @@ impl Fill {
 	/// stitched. Finishing rather than aborting, because the head is a valid prefix of the
 	/// group: it starts at the group's first object and has no holes.
 	fn release(&mut self) {
-		if let Fill::Ready { producer, .. } = std::mem::replace(self, Fill::Done) {
+		if let Fill::Ready { mut producer, .. } = std::mem::replace(self, Fill::Done) {
 			let _ = producer.finish();
 		}
 	}
@@ -1128,8 +1128,8 @@ where
 		tracing::debug!(%prefix, "subscribe_namespace sent");
 
 		// Read response
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		let count = match type_id {
@@ -1191,6 +1191,7 @@ where
 				negotiated,
 				&mut live,
 				Initial { initial, snapshot },
+				&mut messages,
 			)
 			.await;
 		for (path, advert) in live {
@@ -1206,6 +1207,7 @@ where
 	/// `live` tracks the suffixes this stream has advertised, so a repeat is recognized
 	/// as an update rather than a second advertisement, and the caller can release
 	/// whatever is still held when the stream ends.
+	#[allow(clippy::too_many_arguments)]
 	async fn run_namespace_entries<T: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<T, Version>,
@@ -1214,19 +1216,19 @@ where
 		negotiated: ietf::Negotiated,
 		live: &mut HashMap<PathOwned, Advertisement>,
 		mut initial: Initial,
+		messages: &mut super::request_stream::Messages<S>,
 	) -> Result<(), Error> {
 		loop {
 			// Every counted NAMESPACE is in the origin by now, dropped ones included.
 			if initial.initial == 0 {
 				initial.snapshot = None;
 			}
-			let type_id = match stream.reader.varint_maybe().await? {
-				Some(id) => id,
+			let super::request_stream::Framed(type_id, body) = match messages.next(&mut stream.reader).await? {
+				Some(message) => message,
 				// A stream ending inside the counted set cut it short.
 				None if initial.initial > 0 => return Err(Error::ProtocolViolation),
 				None => break,
 			};
-			let body: ietf::Body = stream.reader.decode().await?;
 			let mut data = body.decoder(self.version);
 
 			match type_id {
@@ -1695,6 +1697,7 @@ where
 		// does, and the caller's guard ends it when the old grant does. Messages behind a
 		// pending verdict wait in `renewal`, handled in order once it resolves.
 		let mut renewal = request_update::Renewal::<(u64, ietf::Body)>::default();
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		// Draft-19+ only: the peer finished its send direction, which does not withdraw the
 		// advertisement there, so stop reading and keep watching the writer.
 		let mut finished = false;
@@ -1734,10 +1737,7 @@ where
 					// Keep reading while a verdict is pending, so a withdrawal still ends the
 					// announce: a buffered update must not mask a later terminal.
 					if !finished {
-						return match stream
-							.reader
-							.poll_decode_maybe::<super::request_stream::Framed>(&mut cx)
-						{
+						return match messages.poll_next(&mut stream.reader, &mut cx) {
 							Poll::Ready(Ok(Some(super::request_stream::Framed(id, body)))) => {
 								Poll::Ready(Turn::Message(id, body))
 							}
@@ -1758,7 +1758,18 @@ where
 						// Its request ID is spent on arrival, so one dropped with the queue stays spent.
 						if self.version != Version::Draft16 {
 							let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
-							self.spend(update_id)?;
+							if let Err(err) = self.spend(update_id) {
+								if matches!(err, Error::GoingAway) {
+									return Ok(Withdraw::Cancel(
+										update_id,
+										crate::auth::Refusal {
+											error: err,
+											reason: "going away".to_string(),
+										},
+									));
+								}
+								return Err(err);
+							}
 							spent.insert(update_id);
 						}
 						// Decoded on arrival too, so a session-fatal update still closes the session
@@ -1858,8 +1869,20 @@ where
 			// adapter already spent it when it routed the update here, and a queued one was
 			// spent when it arrived.
 			let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
-			if self.version != Version::Draft16 && !spent.remove(&update_id) {
-				self.spend(update_id)?;
+			if self.version != Version::Draft16
+				&& !spent.remove(&update_id)
+				&& let Err(err) = self.spend(update_id)
+			{
+				if matches!(err, Error::GoingAway) {
+					return Ok(Withdraw::Cancel(
+						update_id,
+						crate::auth::Refusal {
+							error: err,
+							reason: "going away".to_string(),
+						},
+					));
+				}
+				return Err(err);
 			}
 			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
 				// A token refusal rejects the update, which withdraws the advertisement as
@@ -2055,6 +2078,9 @@ where
 	/// Spend a peer's request ID, closing the session on one it already used.
 	fn spend(&self, id: RequestId) -> Result<(), Error> {
 		if let Err(err) = self.control.accept(id) {
+			if matches!(err, Error::GoingAway) {
+				return Err(err);
+			}
 			self.session.clone().close(
 				super::error::to_session_code(&crate::SessionError::from(&err)),
 				"invalid request ID",
@@ -2797,9 +2823,10 @@ where
 			Gone,
 		}
 
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let mut retired = false;
 		let setup = {
-			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
+			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream, &mut messages));
 			loop {
 				let setup = kio::wait(|waiter| {
 					let response = waiter.poll_future(response.as_mut());
@@ -3068,7 +3095,12 @@ where
 		// Nobody subscribing at all (only fetches asked) needs no subscription.
 		let mut subscribed = track.subscription().is_some();
 		let idle = {
-			let mut done = std::pin::pin!(Self::read_publish_done(&mut stream.reader, self.version, &unanswered));
+			let mut done = std::pin::pin!(Self::read_publish_done(
+				&mut stream.reader,
+				self.version,
+				&unanswered,
+				&mut messages
+			));
 			loop {
 				let end = kio::wait(|waiter| {
 					if gate.poll_denied(waiter).is_ready() {
@@ -3374,17 +3406,15 @@ where
 		reader: &mut Reader<S::RecvStream, Version>,
 		version: Version,
 		unanswered: &AtomicU64,
+		messages: &mut super::request_stream::Messages<S>,
 	) -> Result<u64, Error> {
 		// A refused update is followed by PUBLISH_DONE, which ends the subscription. Its
 		// count stays, so no further update goes out meanwhile, and no answer is owed.
 		let mut refused = false;
 		loop {
-			let type_id = match reader.varint_maybe().await? {
-				Some(type_id) => type_id,
-				None => return Err(Error::ProtocolViolation),
-			};
+			let super::request_stream::Framed(type_id, body) = messages.message(reader).await?;
 			if type_id == ietf::PublishDone::ID {
-				let msg: ietf::PublishDone = reader.decode().await?;
+				let msg: ietf::PublishDone = body.message(version)?;
 				tracing::debug!(message = ?msg, "received publish done");
 				msg.end(version)?;
 				return Ok(msg.stream_count);
@@ -3394,7 +3424,6 @@ where
 			if !answer {
 				return Err(Error::UnexpectedMessage);
 			}
-			let body: ietf::Body = reader.decode().await?;
 			let mut data = body.decoder(version);
 			match type_id {
 				ietf::RequestOk::ID => {
@@ -3615,8 +3644,9 @@ where
 				})
 				.map(drop)
 		};
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let accepted = {
-			let mut response = std::pin::pin!(self.read_fetch_response(&mut stream));
+			let mut response = std::pin::pin!(self.read_fetch_response(&mut stream, &mut messages));
 			kio::wait(|waiter| {
 				if cancelled(waiter).is_ready() {
 					return Poll::Ready(false);
@@ -3628,8 +3658,31 @@ where
 			.await
 		};
 		if accepted {
-			// The request stays open while the subscription still needs its fill.
-			kio::wait(cancelled).await;
+			// The request stays open while the subscription still needs its fill. From draft 18
+			// it may carry a GOAWAY meanwhile; before that, nothing follows the answer here.
+			let mut finished = matches!(
+				self.version,
+				Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+			);
+			let mut failed = false;
+			kio::wait(|waiter| {
+				if !finished {
+					let mut cx = waiter.context();
+					match messages.poll_end(&mut stream.reader, &mut cx) {
+						Poll::Ready(Ok(())) => finished = true,
+						Poll::Ready(Err(_)) => {
+							failed = true;
+							return Poll::Ready(());
+						}
+						Poll::Pending => {}
+					}
+				}
+				cancelled(waiter)
+			})
+			.await;
+			if failed {
+				settle_join_live(&fill, live);
+			}
 		} else {
 			settle_join_live(&fill, live);
 		}
@@ -3639,9 +3692,12 @@ where
 
 	/// `true` when the publisher answered FETCH_OK. A FETCH_ERROR / REQUEST_ERROR is a
 	/// refusal, not a session error: the live subscription continues.
-	async fn read_fetch_response(&self, stream: &mut Stream<S, Version>) -> Result<bool, Error> {
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+	async fn read_fetch_response(
+		&self,
+		stream: &mut Stream<S, Version>,
+		messages: &mut super::request_stream::Messages<S>,
+	) -> Result<bool, Error> {
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		match type_id {
@@ -3661,10 +3717,13 @@ where
 		}
 	}
 
-	async fn read_subscribe_response(&self, stream: &mut Stream<S, Version>) -> Result<Option<Accepted>, Error> {
+	async fn read_subscribe_response(
+		&self,
+		stream: &mut Stream<S, Version>,
+		messages: &mut super::request_stream::Messages<S>,
+	) -> Result<Option<Accepted>, Error> {
 		// Read type_id + size + body from the stream
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		match type_id {
@@ -3814,8 +3873,8 @@ where
 	/// Read the answer to a TRACK_STATUS: TRACK_STATUS_OK, or the publisher's refusal as an
 	/// error.
 	async fn read_track_status_response(&self, stream: &mut Stream<S, Version>) -> Result<ietf::TrackStatusOk, Error> {
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		let code = match type_id {
@@ -3944,19 +4003,19 @@ where
 
 		// Guarded: this handler can be dropped at any await below, and a group producer
 		// that dies without a terminal leaves its consumer waiting on nothing.
-		let producer = crate::recv::Group::new(producer);
+		let mut producer = crate::recv::Group::new(producer);
+		let observing = producer.handle().clone();
 
+		let mut ingest = GroupIngest::new(self, &group, timescale, resume.map(|_| start));
 		let res = {
-			let mut ingest = GroupIngest::new(self, &group, timescale, resume.map(|_| start));
-			let mut writing = producer.clone();
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
 				}
-				if let Poll::Ready(err) = producer.poll_closed(waiter) {
+				if let Poll::Ready(err) = observing.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
 				}
-				ingest.poll(stream, &mut writing, waiter)
+				ingest.poll(stream, &mut producer, waiter)
 			})
 			.await
 		};
@@ -4713,7 +4772,7 @@ where
 	async fn recv_fetch_payload(
 		&self,
 		stream: &mut Reader<S::RecvStream, Version>,
-		producer: &mut group::Producer,
+		producer: &mut crate::recv::Group,
 		payload: FetchPayload,
 	) -> Result<Fetched, Error> {
 		let FetchPayload {
@@ -4772,7 +4831,7 @@ where
 			let _ = frame.abort(err.clone());
 			return Err(err);
 		}
-		frame.finish()?;
+		producer.restore(frame.finish()?);
 		Ok(Fetched::Frame)
 	}
 
@@ -4860,11 +4919,12 @@ where
 			Ok::<_, Error>(())
 		}
 		.await;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let mut retired = false;
 		let res = match res {
 			Err(err) => Some(Err(err)),
 			Ok(()) => {
-				let mut response = std::pin::pin!(self.read_group_fetch_response(&mut stream));
+				let mut response = std::pin::pin!(self.read_group_fetch_response(&mut stream, &mut messages));
 				kio::wait(|waiter| {
 					let response = waiter.poll_future(response.as_mut());
 					if let Poll::Ready(Err(err)) = response {
@@ -4971,7 +5031,7 @@ where
 			let _ = stream.writer.close().await;
 			return;
 		}
-		let demand = producer.clone();
+		let demand = producer.handle();
 		if let Ok(mut state) = slot.write() {
 			*state = GroupFetch::Ready {
 				producer,
@@ -4995,7 +5055,7 @@ where
 					Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 						super::request_stream::poll_legacy_end(&mut stream, self.version, &mut cx)
 					}
-					_ => stream.reader.poll_closed(&mut cx),
+					_ => messages.poll_end(&mut stream.reader, &mut cx),
 				};
 				match closed {
 					Poll::Ready(Err(err)) => return Poll::Ready(Some(err)),
@@ -5055,9 +5115,12 @@ where
 	}
 
 	/// Read the answer to a group FETCH: FETCH_OK, or the publisher's refusal as an error.
-	async fn read_group_fetch_response(&self, stream: &mut Stream<S, Version>) -> Result<ietf::FetchOk, Error> {
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+	async fn read_group_fetch_response(
+		&self,
+		stream: &mut Stream<S, Version>,
+		messages: &mut super::request_stream::Messages<S>,
+	) -> Result<ietf::FetchOk, Error> {
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		match type_id {
@@ -5118,7 +5181,7 @@ where
 			last: None,
 		})?;
 
-		let closed = producer.clone();
+		let closed = producer.handle();
 		let mut producer = crate::recv::Group::new(producer);
 		let res = {
 			let mut receive = std::pin::pin!(crate::util::sendable(self.recv_group_fetch_objects(
@@ -5162,7 +5225,7 @@ where
 	async fn recv_group_fetch_objects(
 		&self,
 		stream: &mut Reader<S::RecvStream, Version>,
-		producer: &mut group::Producer,
+		producer: &mut crate::recv::Group,
 		start: u64,
 		end: Option<u64>,
 		timescale: Option<Timescale>,
@@ -5505,7 +5568,7 @@ impl GroupIngest {
 	fn poll<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
-		group: &mut group::Producer,
+		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Ended, Error>> {
 		let mut cx = waiter.context();
@@ -5563,7 +5626,7 @@ impl GroupIngest {
 							let timestamp = object_time(self.timescale, *timestamp)?;
 							let header = self.header(group, frame::Info { size: 0, timestamp })?;
 							let frame = group.create_frame_owned(header, &self.budget)?;
-							frame.finish()?;
+							group.restore(frame.finish()?);
 						}
 						self.phase = IngestPhase::Delta;
 						continue;
@@ -5596,7 +5659,7 @@ impl GroupIngest {
 						unreachable!()
 					};
 					match failed {
-						None => frame.finish()?,
+						None => group.restore(frame.finish()?),
 						Some(err) => {
 							// Fail the group with the reason, not the Drop fallback's
 							// generic `Dropped`.
@@ -5642,8 +5705,13 @@ mod tests {
 		let mut session = ScriptedSession::eof(responses);
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		let mut reader = Reader::new(recv, Version::Draft19);
-		let result =
-			Subscriber::<ScriptedSession>::read_publish_done(&mut reader, Version::Draft19, &AtomicU64::new(0)).await;
+		let result = Subscriber::<ScriptedSession>::read_publish_done(
+			&mut reader,
+			Version::Draft19,
+			&AtomicU64::new(0),
+			&mut crate::ietf::request_stream::Messages::new(session.clone(), true),
+		)
+		.await;
 		if clean {
 			assert_eq!(result.unwrap(), 0);
 		} else {
@@ -12421,11 +12489,13 @@ mod stitch_tests {
 			// The next relay reads the same objects into its cache, up to the same end.
 			let end = last + u64::from(Filter::is_draft20(version));
 			let mut run = GroupFetchRun::new(version, decoder.rest().to_vec()).await;
-			let mut producer = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+			let mut producer =
+				crate::recv::Group::new(run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap());
 			run.subscriber
 				.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(end), None)
 				.await
 				.unwrap_or_else(|err| panic!("{version}: {err}"));
+			let mut producer = producer.into_inner();
 			producer.finish().unwrap();
 			let mut reader = producer.consume();
 			for id in [6, 8] {
@@ -12548,11 +12618,13 @@ mod stitch_tests {
 				objects.push(99);
 			}
 			let mut run = GroupFetchRun::new(version, objects.clone()).await;
-			let mut producer = run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
+			let mut producer =
+				crate::recv::Group::new(run.track.create_group(group::Info { sequence: SEQUENCE }).unwrap());
 			run.subscriber
 				.recv_group_fetch_objects(&mut run.stream, &mut producer, 0, Some(9), None)
 				.await
 				.unwrap();
+			let mut producer = producer.into_inner();
 			producer.finish().unwrap();
 			let mut reader = producer.consume();
 			for id in [6, 8] {
@@ -12770,6 +12842,103 @@ mod stitch_tests {
 					let (actual, _) = ietf::ObjectDatagram::decode_slice(bytes, version).unwrap();
 					assert_eq!(actual, expected);
 				}
+			}
+		}
+	}
+
+	/// A status datagram's properties are stripped, not the datagram dropped, where the
+	/// egress draft forbids them beside a non-Normal status.
+	#[moq_clock::test]
+	async fn passthrough_strips_status_datagram_properties_a_draft_forbids() {
+		for ingress in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let egresses = [
+				Version::Draft14,
+				Version::Draft15,
+				Version::Draft16,
+				Version::Draft17,
+				Version::Draft18,
+				Version::Draft19,
+				Version::Draft20,
+				Version::Draft21,
+				Version::Draft22,
+			];
+			let pairs = egresses
+				.into_iter()
+				.flat_map(|egress| [END_OF_GROUP, END_OF_TRACK].map(|status| (egress, status)));
+			for (egress, status) in pairs {
+				let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+				let track = broadcast.create_track("video", None).unwrap();
+				let mut h = Harness::with_timescale(Fill::Done, vec![], None);
+				h.subscriber.version = ingress;
+				h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
+				let mut properties = Vec::new();
+				let mut encoder = Encoder::new(&mut properties, ingress.into());
+				encoder.varint(0x80u64).unwrap();
+				encoder.varint(96_000u64).unwrap();
+				let datagram = ietf::ObjectDatagram {
+					track_alias: ALIAS,
+					group_id: SEQUENCE,
+					object_id: Some(5),
+					publisher_priority: Some(200),
+					end_of_group: false,
+					properties: Some(properties),
+					body: ietf::DatagramBody::Status(status),
+				};
+				h.subscriber
+					.recv_datagram(datagram.encode_bytes(ingress).unwrap())
+					.unwrap();
+				track.finish().unwrap();
+				let mut downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
+				let peer = peer::PeerSetup::default();
+				peer.set(peer::Peer::default());
+				let publisher = crate::ietf::Publisher::new(
+					crate::time::sim(),
+					downstream.clone(),
+					origin.consume(),
+					Control::new(None, false),
+					None,
+					peer,
+					egress,
+				);
+				let subscribe = ietf::Subscribe {
+					max_age: None,
+					new_group: None,
+					request_id: RequestId(3),
+					track_namespace: Path::new("room"),
+					track_name: "video".into(),
+					subscriber_priority: 128,
+					group_order: ietf::GroupOrder::Ascending,
+					filter: Filter::Unfiltered,
+					fill: None,
+					properties_wanted: true,
+					forward: true,
+					rendezvous: false,
+					range_filters: false,
+					authorization_token: None,
+					epoch: None,
+				};
+				let mut body = Vec::new();
+				subscribe
+					.encode_msg(&mut Encoder::new(&mut body, egress.into()), egress)
+					.unwrap();
+				let stream = Stream::open(&mut downstream, egress).await.unwrap();
+				publisher
+					.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, false)
+					.unwrap()
+					.await;
+				let sent = downstream.log.datagrams.lock().unwrap();
+				let context = format!("{ingress} to {egress}, status {status}");
+				let [bytes] = sent.as_slice() else {
+					panic!("{context}: sent {} datagrams", sent.len());
+				};
+				let (actual, _) = ietf::ObjectDatagram::decode_slice(bytes, egress).unwrap();
+				let carried = matches!(egress, Version::Draft14 | Version::Draft15 | Version::Draft16);
+				assert_eq!(
+					(actual.object_id, actual.body, actual.properties.is_some()),
+					(Some(5), ietf::DatagramBody::Status(status), carried),
+					"{context}"
+				);
 			}
 		}
 	}
@@ -14313,9 +14482,18 @@ mod stitch_tests {
 		async fn recv_objects(&mut self, start: u64, end: Option<u64>) -> Result<(), Error> {
 			let mut group = self.track.create_group(group::Info { sequence: SEQUENCE }).unwrap();
 			group.start_at(start).unwrap();
-			self.subscriber
+			let mut group = crate::recv::Group::new(group);
+			match self
+				.subscriber
 				.recv_group_fetch_objects(&mut self.stream, &mut group, start, end, None)
 				.await
+			{
+				Ok(()) => group.finish(),
+				Err(err) => {
+					let _ = group.abort(err.clone());
+					Err(err)
+				}
+			}
 		}
 	}
 }
@@ -14934,7 +15112,7 @@ mod joining_fetch_tests {
 				let GroupFetch::Ready { producer, .. } = &*state else {
 					panic!("accepted slot")
 				};
-				producer.clone()
+				producer.handle()
 			};
 			if stage == FetchStage::Accepted {
 				drop(group);
@@ -15393,6 +15571,8 @@ mod new_group_tests {
 		probe: Subscriber<memory::Session>,
 		peer: memory::Session,
 		serving: moq_clock::sim::JoinHandle<()>,
+		/// Landed groups stay open, as a live publisher's would.
+		landed: Vec<group::Producer>,
 		_broadcast: crate::broadcast::Producer,
 		_tasks: TaskSet,
 	}
@@ -15430,6 +15610,7 @@ mod new_group_tests {
 			probe,
 			peer,
 			serving,
+			landed: Vec::new(),
 			_broadcast: broadcast,
 			_tasks: task_set,
 		};
@@ -15457,7 +15638,7 @@ mod new_group_tests {
 		}
 
 		/// Group `sequence` lands in the copy: a first frame, and a delta when `delta`.
-		fn land(&self, sequence: u64, delta: bool) {
+		fn land(&mut self, sequence: u64, delta: bool) {
 			let state = self.probe.state.lock();
 			let copy = state.subscribes.values().next().unwrap().producer.clone().unwrap();
 			drop(state);
@@ -15466,6 +15647,7 @@ mod new_group_tests {
 			if delta {
 				group.write_frame(None, b"delta".as_slice()).unwrap();
 			}
+			self.landed.push(group);
 		}
 
 		/// A downstream subscriber joins the copy.

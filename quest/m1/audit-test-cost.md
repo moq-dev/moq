@@ -54,8 +54,8 @@ What the m0 run (2026-10-19) learned; check these first:
   [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md), and
   [nightly media players](/quest/m1/media-engines-nightly.md). Owned
   elsewhere: release builds by [release builds link](/quest/m0/release-link.md),
-  Rust advisories by the dependency audit, and the Nix wasm-bindgen pin by
-  [Cargo.lock pins wasm-bindgen](/quest/m0/ci/wasm-bindgen-pin.md).
+  and Rust advisories by the dependency audit. The Nix wasm-bindgen CLI now
+  follows `Cargo.lock` ([#6031](https://github.com/moq-dev/moq/pull/6031)).
 
 Baselines from queue run
 [39371990135](https://github.com/moq-dev/moq/actions/runs/39371990135):

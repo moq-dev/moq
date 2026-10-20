@@ -4,7 +4,7 @@ import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasGroupOrder, hasTrackStream, Version, wireTimescale } from "./version.ts";
+import { hasGroupOrder, hasRefresh, hasTrackStream, Version, wireTimescale } from "./version.ts";
 
 function guardTrack(version: Version) {
 	if (!hasTrackStream(version)) throw new Error("track stream not supported for this version");
@@ -56,6 +56,8 @@ export class Track {
  * FETCH for the track.
  */
 export class TrackInfo {
+	/** Refresh byte ratio on lite-07. */
+	refresh?: number;
 	/** The publisher's tie-break priority for this track. */
 	priority: number;
 	/**
@@ -74,10 +76,12 @@ export class TrackInfo {
 		priority = 0,
 		maxAge,
 		timescale,
+		refresh,
 	}: {
 		priority?: number;
 		maxAge?: number;
 		timescale?: number;
+		refresh?: number;
 	}) {
 		if (!Number.isInteger(priority) || priority < 0 || priority > 255) {
 			throw new RangeError(`priority must be an integer in 0..=255: ${priority}`);
@@ -85,6 +89,9 @@ export class TrackInfo {
 		if (maxAge !== undefined && (!Number.isSafeInteger(maxAge) || maxAge < 0)) {
 			throw new RangeError(`maxAge must be a safe non-negative integer: ${maxAge}`);
 		}
+		if (refresh !== undefined && (!Number.isInteger(refresh) || refresh < 0 || refresh > 0xffff_ffff))
+			throw new RangeError("refresh exceeds u32");
+		this.refresh = refresh;
 		this.priority = priority;
 		this.maxAge = maxAge;
 		this.timescale = timescale === undefined ? undefined : Timescale(timescale);
@@ -98,6 +105,7 @@ export class TrackInfo {
 		const age = this.maxAge === undefined ? undefined : BigInt(this.maxAge);
 		await w.u62(legacy ? (age ?? BigInt(Number.MAX_SAFE_INTEGER)) : age === undefined ? 0n : age + 1n);
 		await w.u53(wireTimescale(version, this.timescale) ?? 0);
+		if (hasRefresh(version)) await w.u53(this.refresh === undefined ? 0 : this.refresh + 1);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<TrackInfo> {
@@ -118,7 +126,8 @@ export class TrackInfo {
 		// Lite-05/06 have no untimed encoding, so zero is malformed there.
 		const scale = await r.u53();
 		const timescale = scale === 0 && !legacy ? undefined : Timescale(scale);
-		return new TrackInfo({ priority, maxAge, timescale });
+		const refresh = hasRefresh(version) ? (await r.u53()) - 1 : undefined;
+		return new TrackInfo({ priority, maxAge, timescale, refresh: refresh === -1 ? undefined : refresh });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -131,6 +140,11 @@ export class TrackInfo {
 		if (this.maxAge !== undefined && (!Number.isSafeInteger(this.maxAge) || this.maxAge < 0)) {
 			throw new RangeError(`maxAge must be a safe non-negative integer: ${this.maxAge}`);
 		}
+		if (
+			this.refresh !== undefined &&
+			(!Number.isInteger(this.refresh) || this.refresh < 0 || this.refresh > 0xffff_ffff)
+		)
+			throw new RangeError("refresh exceeds u32");
 		if (this.timescale !== undefined) Timescale(this.timescale);
 		return Message.encode(w, (w) => this.#encode(w, version));
 	}
