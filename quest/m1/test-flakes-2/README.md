@@ -32,15 +32,15 @@ times on a loaded machine, as the first round did. moq-tokio's
 known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
 
 Added 2026-10-19 (maintainer): three more, the redial pair first since CI
-hit it. The same day's test cost audit added the macOS QUIC connects, and the
-redundant failover drift first: it may hide a TS export bug and failed two of
-three loaded `just check` runs.
+hit it. The same day's test cost audit added the macOS QUIC connects and the
+[redundant failover drift](/quest/m0/redundant-failover-drift.md), which moved
+to m0 on 2026-10-20 (maintainer): it may hide a TS export bug and fails loaded
+`just check` runs.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
 - [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md) - moq-tokio's loopback QUIC tests stop timing out on the macOS Platform job
 
 ## Related

@@ -11,7 +11,9 @@ slowest test in the queue suite (37 s, past nextest's 30 s SLOW mark).
 ## Plan
 
 Found by the 2026-10-19 test cost audit, with the exporter's stderr captured
-on a failing run. After the test kills the newest importer, the exporter
+on a failing run. Moved from the m1
+[load round](/quest/m1/test-flakes-2/README.md) to m0 on 2026-10-20
+(maintainer), since it fails loaded `just check` runs. After the test kills the newest importer, the exporter
 fails instead of switching back to the survivor:
 
 > export failed with the broadcast still up, so not lingering ... the

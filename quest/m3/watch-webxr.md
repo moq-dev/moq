@@ -1,4 +1,4 @@
-# [M] `<moq-watch>` renders spatial video through WebXR layers
+# [M] The watch element renders spatial video through WebXR layers
 
 ## Goal
 

@@ -12,6 +12,11 @@ measured no-go is a valid outcome.
 
 ## Plan
 
+Decided with the maintainer on 2026-10-20: this moved to m1 with the
+[target](/quest/m1/probe-target.md), since the native
+[rung disable](/quest/m1/simulcast-rung-disable.md) requires it to resume a
+stopped rendition.
+
 Decided with the maintainer on 2026-10-17 (see the
 [epic](/quest/m2/probe/README.md)), replacing the old plan's "measure which
 mechanism wins first" step:
@@ -31,10 +36,12 @@ mechanism wins first" step:
   distinct; preserving an old estimate does not discover capacity.
 - Evaluate the IMMEDIATE_ACK extension so ACK delay doesn't obscure a short
   sample.
-- Implement the [target](/quest/m2/probe/target.md) quest's sender hook in
+- Implement the [target](/quest/m1/probe-target.md) quest's sender hook in
   moq-quic's recovery and pacing layer and the moq-tokio and moq-uring
-  adapters. A controller with no ProbeBW_UP phase can't, so its sessions
-  fall back to [padding](/quest/m2/probe/padding.md).
+  adapters. A controller with no ProbeBW_UP phase (such as the
+  [realtime controller](/quest/m2/quic-realtime/README.md)) can't, so its
+  sessions keep `Report`: [padding](/quest/m2/probe/padding.md) is
+  browser-only.
 
 Acceptance, in moq-quic's seeded simulation (`rs/moq-quic/src/tests/`,
 extending `Bottleneck` to step its rate) and wired into CI at least nightly:
@@ -51,14 +58,15 @@ upward adaptation, downward reaction, estimate age, frame deadlines, queue
 delay, unique goodput, and redundant bytes, against a no-probing baseline. A
 successful small burst is not proof of full path capacity.
 
-On a no-go, keep the baseline, record why, and leave padding as moq-quic's
-sender; the [viewer up-switch](/quest/m2/probe/viewer-upswitch.md) then
-requires padding instead of this. Padding can't reach moq-transport drafts 14
-to 17, so sessions on those drafts would keep `Report`.
+On a no-go, keep the baseline, record why, and native sessions keep `Report`.
+Padding is browser-only, so the native
+[rung disable](/quest/m1/simulcast-rung-disable.md) and the
+[viewer up-switch](/quest/m2/probe/viewer-upswitch.md) then go back to the
+maintainer instead of falling back to it.
 
 ## Required
 
-- [Session probe target](/quest/m2/probe/target.md) - the target this probes to and the sender hook it implements
+- [Session probe target](/quest/m1/probe-target.md) - the target this probes to and the sender hook it implements
 
 ## Related
 

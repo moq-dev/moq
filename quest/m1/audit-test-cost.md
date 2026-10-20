@@ -32,7 +32,7 @@ the stats session graph's recursive Send proof (send-depth and fuzz),
 bench/ffi-gen's stale wasm-bindgen lock, moq-uring's fixed 1 ms calibration
 slack, the Nightly JS benchmark stall, the CI selection test's feature count,
 and the stats producer benchmark lint. It planned
-[redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md)
+[redundant failover drift](/quest/m0/redundant-failover-drift.md)
 and [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md).
 
 Baselines from queue run

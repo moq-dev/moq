@@ -1,4 +1,4 @@
-# [XS] Test that `moq --listen` bounds admission
+# [XS] Test that moq --listen bounds admission
 
 ## Goal
 

@@ -75,6 +75,11 @@ the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
 have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 (#5389) and Windows tests (#5339).
 
+Flakes (2026-10-20, maintainer): the redundant failover drift moved here from
+the m1 [load round](/quest/m1/test-flakes-2/README.md). It fails loaded
+`just check` runs, the local gate every merge waits on, and may hide a TS
+export bug.
+
 Hygiene (decided 2026-10-19): the audits sit at the end of this list.
 Each recurs once per major release: its PR adds the next run to the following
 milestone, gated from m2 onward on the [release cut](/quest/m2/release/cut.md).
@@ -87,6 +92,7 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
 
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
+- [Redundant failover drift](/quest/m0/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on #412 to publish the patched 0.6.x that main adopts
 - [qmux credit](/quest/m0/qmux-credit.md) - main adopts qmux 0.6 credit and close fixes; the 0.5 backport is independent
