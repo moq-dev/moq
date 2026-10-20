@@ -6051,24 +6051,24 @@ async fn session_protocol_codes_cross_the_ffi() {
 }
 #[tokio::test]
 async fn client_cancel_aborts_a_pending_connect() {
-	let server = MoqServer::new(MoqServerConfig {
-		bind: Some("127.0.0.1:0".into()),
-		tls: localhost_tls(),
-		..Default::default()
-	})
-	.unwrap();
-	let addr = server.listen().await.expect("listen failed");
+	// A bound socket that never answers, so the QUIC handshake can't finish before cancel.
+	// A real server would not do: the dial establishes without the server accepting.
+	let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+	let addr = silent.local_addr().unwrap();
 
 	let client = MoqClient::new(MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
 		once: true,
+		websocket: MoqWebSocketConfig {
+			enabled: Some(false),
+			delay_us: None,
+		},
 		..Default::default()
 	})
 	.unwrap();
 
-	// The dial can establish without the server accepting, so a spawned connect may finish
-	// while `spawn_parked` waits for the runtime. Poll it in place and cancel before its next poll.
+	// Poll in place rather than spawning, so cancel lands before the next poll.
 	let mut connect = std::pin::pin!(client.connect(format!("https://{addr}")));
 	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(connect.as_mut().poll(cx))).await;
 	assert!(
@@ -6085,7 +6085,6 @@ async fn client_cancel_aborts_a_pending_connect() {
 		"connect returned {:?}",
 		connect_err.map(|_| "session"),
 	);
-	server.cancel();
 }
 
 #[tokio::test]
