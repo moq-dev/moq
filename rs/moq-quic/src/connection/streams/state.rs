@@ -415,14 +415,18 @@ impl StreamsState {
         &mut self,
         id: StreamId,
         error_code: VarInt,
-    ) -> Option<u64> {
+    ) -> Result<Option<u64>, TransportError> {
+        self.validate_send_id(id).inspect_err(|_| {
+            debug!("received illegal STOP_SENDING frame");
+        })?;
+
         self.insert_remote(id);
 
         let max_send_data = self.max_send_data(id);
-        let stream = self
-            .send
-            .get_mut(&id)?
-            .get_or_insert_with(|| Send::new(max_send_data));
+        let Some(stream_opt) = self.send.get_mut(&id) else {
+            return Ok(None);
+        };
+        let stream = stream_opt.get_or_insert_with(|| Send::new(max_send_data));
 
         if stream.try_stop(error_code) {
             self.events
@@ -437,7 +441,7 @@ impl StreamsState {
         if !stream.is_pending() {
             self.pending.remove(&mut stream.slot);
         }
-        reset
+        Ok(reset)
     }
 
     /// Handle acknowledgement of a reset frame sent while the Reliable Size was `reliable_size`
@@ -868,18 +872,9 @@ impl StreamsState {
         id: StreamId,
         offset: u64,
     ) -> Result<(), TransportError> {
-        if id.initiator() != self.side && id.dir() == Dir::Uni {
-            debug!("got MAX_STREAM_DATA on recv-only {}", id);
-            return Err(TransportError::STREAM_STATE_ERROR(
-                "MAX_STREAM_DATA on recv-only stream",
-            ));
-        }
-        if id.dir() == Dir::Bi {
-            // Ensure we don't implicitly open more streams than permitted
-            self.validate_receive_id(id).inspect_err(|_| {
-                debug!("received illegal MAX_STREAM_DATA frame");
-            })?;
-        }
+        self.validate_send_id(id).inspect_err(|_| {
+            debug!("received illegal MAX_STREAM_DATA frame");
+        })?;
 
         self.insert_remote(id);
 
@@ -889,11 +884,6 @@ impl StreamsState {
             if ss.increase_max_data(offset) {
                 self.send_unblocked(id);
             }
-        } else if id.initiator() == self.side && self.is_local_unopened(id) {
-            debug!("got MAX_STREAM_DATA on unopened {}", id);
-            return Err(TransportError::STREAM_STATE_ERROR(
-                "MAX_STREAM_DATA on unopened stream",
-            ));
         }
 
         Ok(())
@@ -994,6 +984,28 @@ impl StreamsState {
         Ok(())
     }
 
+    /// Check for errors entailed by the peer's use of `id` as a receive stream
+    fn validate_send_id(&self, id: StreamId) -> Result<(), TransportError> {
+        if self.side == id.initiator() {
+            if self.is_local_unopened(id) {
+                return Err(TransportError::STREAM_STATE_ERROR(
+                    "operation on unopened stream",
+                ));
+            }
+        } else {
+            let limit = self.max_remote[id.dir() as usize];
+            if id.index() >= limit {
+                return Err(TransportError::STREAM_LIMIT_ERROR(""));
+            }
+            if id.dir() == Dir::Uni {
+                return Err(TransportError::STREAM_STATE_ERROR(
+                    "operation on recv-only stream",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Whether a locally initiated stream has never been open
     pub(crate) fn is_local_unopened(&self, id: StreamId) -> bool {
         id.index() >= self.next[id.dir() as usize]
@@ -1048,8 +1060,6 @@ impl StreamsState {
         let dir_idx = id.dir() as usize;
 
         if id.initiator() == self.side
-            // STREAM/RESET_STREAM/MAX_STREAM_DATA enforce this in `validate_receive_id`, but
-            // STOP_SENDING does not
             || id.index() >= self.max_remote[dir_idx]
             || id.index() < self.next_remote[dir_idx]
         {
@@ -1680,7 +1690,7 @@ mod tests {
         };
 
         let error_code = 0u32.into();
-        stream.state.received_stop_sending(id, error_code);
+        stream.state.received_stop_sending(id, error_code).unwrap();
         assert!(
             stream
                 .state
@@ -1695,7 +1705,7 @@ mod tests {
         assert_eq!(stream.write(&[]), Err(WriteError::ClosedStream));
 
         // A duplicate frame is a no-op
-        stream.state.received_stop_sending(id, error_code);
+        stream.state.received_stop_sending(id, error_code).unwrap();
         assert!(stream.state.events.is_empty());
     }
 
@@ -3015,7 +3025,7 @@ mod tests {
         stream.write(b"hello world").unwrap();
         stream.reset_at(4, 7u32.into()).unwrap();
         assert_eq!(pending.reset_stream, &[(id, 4)]);
-        assert_eq!(server.received_stop_sending(id, 9u32.into()), Some(0));
+        assert_eq!(server.received_stop_sending(id, 9u32.into()), Ok(Some(0)));
 
         server.reset_acked(id, 4);
         assert_eq!(server.send_streams, 1);
@@ -3047,7 +3057,7 @@ mod tests {
         stream.reset_at(4, 7u32.into()).unwrap();
 
         server.reset_acked(id, 4);
-        assert_eq!(server.received_stop_sending(id, 9u32.into()), Some(0));
+        assert_eq!(server.received_stop_sending(id, 9u32.into()), Ok(Some(0)));
         assert_eq!(server.received_ack_of(sent[0].clone()), None);
         assert_eq!(server.send_streams, 1);
         server.reset_acked(id, 0);
@@ -3088,7 +3098,7 @@ mod tests {
             stream.reset_at(4, 7u32.into()).unwrap();
             assert_eq!(pending.reset_stream.is_empty(), !reset_stream_at);
 
-            assert_eq!(server.received_stop_sending(id, 9u32.into()), Some(0));
+            assert_eq!(server.received_stop_sending(id, 9u32.into()), Ok(Some(0)));
             assert_eq!(server.buffered_data, 0);
             assert!(!server.can_send_stream_data());
             let send = server.send[&id].as_ref().unwrap();
@@ -3097,7 +3107,7 @@ mod tests {
             assert_eq!(frame.reliable_size, None);
             assert_eq!(frame.final_offset, VarInt(11));
             // Abandoned once, so a repeated STOP_SENDING sends nothing more
-            assert_eq!(server.received_stop_sending(id, 9u32.into()), None);
+            assert_eq!(server.received_stop_sending(id, 9u32.into()), Ok(None));
         }
     }
 
@@ -3159,7 +3169,7 @@ mod tests {
             conn_state: &state,
         };
         stream.write(b"hello world").unwrap();
-        stream.state.received_stop_sending(id, 9u32.into());
+        stream.state.received_stop_sending(id, 9u32.into()).unwrap();
         stream.reset_at(4, 7u32.into()).unwrap();
 
         let send = server.send[&id].as_ref().unwrap();
@@ -3433,5 +3443,82 @@ mod tests {
                 println!("{streams},{payload},{:.1},{:.1}", ns[0], ns[1]);
             }
         }
+    }
+
+    #[test]
+    fn max_stream_data_over_stream_limit_uni() {
+        let mut server = make(Side::Server);
+        let id = StreamId::new(Side::Client, Dir::Uni, 1 << 40);
+        let result = server.received_max_stream_data(id, 1);
+        assert_eq!(
+            result.map_err(|e| e.code),
+            Err(TransportErrorCode::STREAM_LIMIT_ERROR),
+        );
+    }
+
+    #[test]
+    fn max_stream_data_recv_only() {
+        let mut server = make(Side::Server);
+        let id = StreamId::new(Side::Client, Dir::Uni, 0);
+        let result = server.received_max_stream_data(id, 1);
+        assert_eq!(
+            result.map_err(|e| e.code),
+            Err(TransportErrorCode::STREAM_STATE_ERROR),
+        );
+    }
+
+    #[test]
+    fn max_stream_data_local_unopened() {
+        let mut server = make(Side::Server);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        let result = server.received_max_stream_data(id, 1);
+        assert_eq!(
+            result.map_err(|e| e.code),
+            Err(TransportErrorCode::STREAM_STATE_ERROR),
+        );
+    }
+
+    #[test]
+    fn stop_sending_over_stream_limit_bidi() {
+        let mut server = make(Side::Server);
+        let id = StreamId::new(Side::Client, Dir::Bi, 1 << 40);
+        let result = server.received_stop_sending(id, 0u32.into());
+        assert_eq!(
+            result.map_err(|e| e.code),
+            Err(TransportErrorCode::STREAM_LIMIT_ERROR),
+        );
+    }
+
+    #[test]
+    fn stop_sending_over_stream_limit_uni() {
+        let mut server = make(Side::Server);
+        let id = StreamId::new(Side::Client, Dir::Uni, 1 << 40);
+        let result = server.received_stop_sending(id, 0u32.into());
+        assert_eq!(
+            result.map_err(|e| e.code),
+            Err(TransportErrorCode::STREAM_LIMIT_ERROR),
+        );
+    }
+
+    #[test]
+    fn stop_sending_recv_only() {
+        let mut server = make(Side::Server);
+        let id = StreamId::new(Side::Client, Dir::Uni, 0);
+        let result = server.received_stop_sending(id, 0u32.into());
+        assert_eq!(
+            result.map_err(|e| e.code),
+            Err(TransportErrorCode::STREAM_STATE_ERROR),
+        );
+    }
+
+    #[test]
+    fn stop_sending_local_unopened() {
+        let mut server = make(Side::Server);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        let result = server.received_stop_sending(id, 0u32.into());
+        assert_eq!(
+            result.map_err(|e| e.code),
+            Err(TransportErrorCode::STREAM_STATE_ERROR),
+        );
     }
 }
