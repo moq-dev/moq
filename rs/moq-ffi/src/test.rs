@@ -1293,7 +1293,7 @@ async fn json_consumer_takes_an_unread_track() {
 		.subscribe_track("events".into(), None)
 		.await
 		.unwrap();
-	track.append_group().unwrap();
+	track.append_group().unwrap().finish().unwrap();
 	tokio::time::timeout(TIMEOUT, read.recv_group())
 		.await
 		.expect("timed out waiting for a group")
