@@ -50,4 +50,3 @@ Public API: removals listed above. Wire: the hang catalog loses
 
 - [Core](/quest/m1/compress/core.md) - Rust compresses opted-in tracks
 - [JavaScript](/quest/m1/compress/js.md) - js/publish and js/watch need the JS side before they drop `.z`
-- [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - in review on the same flate and binary consumers this deletes; one owner at a time

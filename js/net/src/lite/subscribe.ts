@@ -5,7 +5,7 @@ import type { Reader, Writer } from "../stream.ts";
 import type { Location, Order } from "../track.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, hasGroupOrder, hasLargest, hasOrder, resolvesStart, Version } from "./version.ts";
+import { hasFrameBounds, hasGroupOrder, hasLargest, hasOrder, hasRefresh, resolvesStart, Version } from "./version.ts";
 
 /**
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
@@ -181,6 +181,8 @@ export function emptyRange({ startGroup, endGroup }: { startGroup?: number; endG
 }
 
 export class SubscribeUpdate {
+	/** A join requesting this group or later, judged against the local refresh ratio. */
+	wantedGroup?: number;
 	priority: number;
 	/** See {@link Subscribe.order}. */
 	order: Order;
@@ -195,6 +197,7 @@ export class SubscribeUpdate {
 
 	constructor(props: {
 		priority: number;
+		wantedGroup?: number;
 		order?: Order;
 		maxDelay?: number;
 		startGroup?: number;
@@ -202,6 +205,9 @@ export class SubscribeUpdate {
 		startFrame?: number;
 		endFrame?: number;
 	}) {
+		if (props.wantedGroup !== undefined && (!Number.isSafeInteger(props.wantedGroup) || props.wantedGroup < 0))
+			throw new RangeError("wanted group must be a safe non-negative integer");
+		this.wantedGroup = props.wantedGroup;
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
 		this.maxDelay = props.maxDelay ?? 0;
@@ -224,6 +230,8 @@ export class SubscribeUpdate {
 				await encodeStartGroup(w, version, this.startGroup);
 				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				await encodeFrameBounds(w, version, this);
+				if (hasRefresh(version))
+					await w.u62(this.wantedGroup === undefined ? 0n : BigInt(this.wantedGroup) + 1n);
 				break;
 		}
 	}
@@ -241,7 +249,11 @@ export class SubscribeUpdate {
 				const endGroup = (await r.u53()) || undefined;
 				const end = endGroup !== undefined ? endGroup - 1 : undefined;
 				const frames = await decodeFrameBounds(r, version, startGroup, end);
+				const wanted = hasRefresh(version) ? await r.u62() : 0n;
+				if (wanted > BigInt(Number.MAX_SAFE_INTEGER) + 1n)
+					throw new RangeError("wanted group exceeds safe integer");
 				return new SubscribeUpdate({
+					wantedGroup: wanted === 0n ? undefined : Number(wanted - 1n),
 					priority,
 					order,
 					maxDelay,
@@ -254,6 +266,8 @@ export class SubscribeUpdate {
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
+		if (this.wantedGroup !== undefined && (!Number.isSafeInteger(this.wantedGroup) || this.wantedGroup < 0))
+			throw new RangeError("wanted group must be a safe non-negative integer");
 		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 

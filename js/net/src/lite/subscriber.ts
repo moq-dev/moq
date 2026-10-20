@@ -57,6 +57,9 @@ import {
 	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
+	hasRefresh,
+	hasSynced,
+	hasTrackStream,
 	resolvesStart,
 	updateSupported,
 	Version,
@@ -70,19 +73,6 @@ export const SUBSCRIBE_SETUP_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
 // Cost::DRAIN: cost is the whole mechanism, not a separate state.
 const DRAIN_COST: Cost = 2n ** 62n - 1n;
-
-// The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
-function supportsTrackStream(version: Version): boolean {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-			return false;
-		default:
-			return true;
-	}
-}
 
 // What a subscription has set up so far, so a revocation (or a timeout) can reach it at
 // any stage.
@@ -313,6 +303,7 @@ export class Subscriber {
 			// The ANNOUNCEs still owed of the peer's initial set (lite-05+). Older versions
 			// mark no boundary, so they sync once the request is out, as a best effort.
 			let initial = 0;
+			let waitingSynced = hasSynced(this.version);
 			if (hasAnnounceOk(this.version)) {
 				const ok = await race([AnnounceOk.decode(stream.reader, this.version), announced.closed]);
 				// A consumer that leaves before the peer answers ends the request now, not on the answer.
@@ -388,18 +379,23 @@ export class Subscriber {
 
 			// Receive announce updates (for Draft03+, this includes initial state)
 			for (;;) {
-				if (initial === 0) announced.synced();
+				if (initial === 0 && !waitingSynced) announced.synced();
 
 				const announce = await race([
 					decodeAnnounceBroadcastMaybe(stream.reader, this.version),
 					announced.closed,
 				]);
 				// undefined: the stream ended. null: the consumer closed cleanly.
-				if (announce === undefined && initial > 0) {
+				if (announce === undefined && (initial > 0 || waitingSynced)) {
 					throw new ProtocolViolation("announce stream ended inside the initial set");
 				}
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
+				if (announce.status === "synced") {
+					if (!waitingSynced) throw new ProtocolViolation("duplicate SYNCED");
+					waitingSynced = false;
+					continue;
+				}
 
 				// The counted initial set is ANNOUNCEs only, so anything else cuts it short. An
 				// unknown message counts for nothing either way.
@@ -772,9 +768,7 @@ export class Subscriber {
 			// its FIN; older drafts just close it. Either way group streams can still be in
 			// flight, so the track ends only once the tail is accounted for. A reset rejects
 			// instead, so the track ends with that error rather than a clean tail.
-			const responses = supportsTrackStream(this.version)
-				? this.runResponses(stream, entry)
-				: stream.reader.closed;
+			const responses = hasTrackStream(this.version) ? this.runResponses(stream, entry) : stream.reader.closed;
 			let tailSettled = false;
 			const closed = responses.then(async () => {
 				await this.#settleTail(entry);
@@ -848,7 +842,7 @@ export class Subscriber {
 		let producer: track.Producer;
 		let drainOk = false;
 
-		if (supportsTrackStream(this.version)) {
+		if (hasTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
 			const { info, stream } = await this.#trackInfo(
 				msg.broadcast,
@@ -971,6 +965,7 @@ export class Subscriber {
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
 			priority: info.priority,
+			refresh: info.refresh,
 		};
 	}
 
@@ -985,7 +980,7 @@ export class Subscriber {
 		epoch?: Epoch.Valid,
 		hold?: AbortSignal,
 	): Promise<track.Info> {
-		if (!supportsTrackStream(this.version)) {
+		if (!hasTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
 		const deadline = new Deadline();
@@ -1084,7 +1079,7 @@ export class Subscriber {
 			});
 			void group.closed.then(() => disposeGrant?.());
 			if (this.#denied(broadcast)) throw refused;
-			if (!supportsTrackStream(this.version)) {
+			if (!hasTrackStream(this.version)) {
 				throw new Error("fetch group requires moq-lite-05 or newer");
 			}
 
@@ -1319,11 +1314,32 @@ export class Subscriber {
 			},
 		};
 
+		// The wanted group is subscription state: an update announces each new one past our
+		// largest, and every later update restates it. Joins asking for the same group
+		// coalesce into that one update.
+		let sentWanted: number | undefined;
+		const demand = track.demand();
+		const edge = hooks.producerLargest(track);
 		for (;;) {
+			const largest = edge.peek()?.group;
+			const wanted = demand.wanted.peek();
+			const refresh =
+				hasRefresh(this.version) &&
+				largest !== undefined &&
+				wanted !== undefined &&
+				wanted > largest &&
+				wanted !== sentWanted
+					? wanted
+					: undefined;
 			const current = track.subscription.peek();
-			if (current === undefined || this.#sameSubscription(current, lastSent)) {
+			if (current === undefined || (refresh === undefined && this.#sameSubscription(current, lastSent))) {
 				// Nothing new to send; wait for a change or termination.
-				const next = await race([track.subscription.changed(), stopped]);
+				const next = await race([
+					track.subscription.changed(),
+					demand.wanted.changed(),
+					edge.changed(),
+					stopped,
+				]);
 				if (next === null) return;
 				continue;
 			}
@@ -1342,6 +1358,7 @@ export class Subscriber {
 			// Round-trip the other Subscribe parameters so the publisher doesn't
 			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxDelay/etc.
 			const update = new SubscribeUpdate({
+				wantedGroup: refresh ?? sentWanted,
 				priority: current.priority ?? 0,
 				order: current.order,
 				maxDelay: current.maxDelay,
@@ -1359,6 +1376,7 @@ export class Subscriber {
 			} catch {
 				return;
 			}
+			if (refresh !== undefined) sentWanted = refresh;
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}

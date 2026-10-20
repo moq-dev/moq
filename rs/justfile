@@ -332,6 +332,31 @@ send-depth:
 quic-stress:
     just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
 
+# Render CPU frames through wgpu on Mesa's software Vulkan driver, so no GPU is needed.
+render-sw:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mesa=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#mesa)
+    loader=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#vulkan-loader)
+    icd=("$mesa"/share/vulkan/icd.d/lvp_icd.*.json)
+    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+        just rs test -p moq-video --features render --lib --run-ignored only \
+        -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size)$/)'
+
+# Run the ignored mDNS tests, which multicast on the host's network interfaces.
+multicast:
+    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::apps_partition_discovery)'
+    just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
+
+# Run moq-audio's ignored output-device tests against a private PulseAudio null sink.
+audio-devices:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir=$(mktemp -d)
+    trap 'rm -rf "$dir"' EXIT
+    python3 test/lib/pulse.py --dir "$dir/run" -- \
+        just rs test -p moq-audio --features aec,pulseaudio --run-ignored only -E 'not test(/benchmark_/)'
+
 # Needs nightly and cargo-fuzz; CI replays the corpus on stable through each
 # crate's own tests instead. See rs/moq-net/fuzz/README.md and rs/moq-quic/fuzz/README.md.
 

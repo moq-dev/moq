@@ -1,10 +1,9 @@
 //! Lossy latest-value opaque publishing over [`moq-net`](moq_net) tracks.
 //!
-//! One opaque value updated over time, for consumers that only care about the current state (a
-//! poster image, a serialized state blob). This mode is **lossy** by design: a consumer yields only
-//! the most recent value. A late joiner (or a consumer that falls behind) jumps straight to the
-//! newest group, and older groups are dropped entirely. For an ordered log where every payload is
-//! preserved, use [`stream`](crate::stream) instead.
+//! One value updated over time. `Consumer::next` yields each state with its frame timestamp,
+//! in order within the subscription's drift budget; `Consumer::latest` skips to the newest
+//! state. Superseded groups may be lost, so use [`stream`](crate::stream) when every record
+//! must survive. A playhead reader sets `max_delay` to its distance behind the live edge.
 //!
 //! On the wire each value is one group holding one frame, so a group is self-contained and a
 //! consumer never needs an older one. With [`Config::compression`] set to
@@ -111,14 +110,40 @@ mod test {
 		Consumer::new(track, cfg(compression))
 	}
 
-	/// Drain every value currently available without blocking.
+	/// Drain newest states currently available without blocking.
 	fn drain(mut consumer: Consumer) -> Vec<Bytes> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
-		while let Poll::Ready(Ok(Some(payload))) = consumer.poll_next(&waiter) {
-			out.push(payload);
+		while let Poll::Ready(Ok(Some(payload))) = consumer.poll_latest(&waiter) {
+			out.push(payload.value);
 		}
 		out
+	}
+
+	#[test]
+	fn next_preserves_intermediate_states() {
+		let (mut producer, mut track) = producer(true);
+		let mut subscription = track.subscription();
+		subscription.max_delay = std::time::Duration::MAX;
+		track.update(subscription).unwrap();
+		for value in [b"one".as_slice(), b"two", b"three"] {
+			producer.update(value).unwrap();
+		}
+		producer.finish().unwrap();
+		let mut consumer = consume(track, true);
+		let mut values = Vec::new();
+		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&kio::Waiter::noop()) {
+			assert_eq!(value.at, None);
+			values.push(value.value);
+		}
+		assert_eq!(
+			values,
+			vec![
+				Bytes::from_static(b"one"),
+				Bytes::from_static(b"two"),
+				Bytes::from_static(b"three")
+			]
+		);
 	}
 
 	/// A snapshot group the transport can no longer serve -- `Old` when the relay reclaims a
@@ -139,13 +164,13 @@ mod test {
 		group
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"one"))
 			.unwrap();
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == "one"));
-		assert!(consumer.poll_next(&waiter).is_pending());
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == "one"));
+		assert!(consumer.poll_latest(&waiter).is_pending());
 
 		// The relay reclaims the group out from under the reader.
 		group.abort(moq_net::Error::Old).unwrap();
 		assert!(
-			consumer.poll_next(&waiter).is_pending(),
+			consumer.poll_latest(&waiter).is_pending(),
 			"a lost group must not end the reader"
 		);
 
@@ -154,7 +179,7 @@ mod test {
 		group
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"two"))
 			.unwrap();
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(v))) if v == "two"));
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == "two"));
 	}
 
 	/// A stamped payload is written at its capture time, and the returned size is the encoded frame
@@ -205,8 +230,8 @@ mod test {
 
 		for n in 0..3u8 {
 			producer.update(vec![n]).unwrap();
-			match consumer.poll_next(&waiter) {
-				Poll::Ready(Ok(Some(payload))) => assert_eq!(&payload[..], &[n]),
+			match consumer.poll_latest(&waiter) {
+				Poll::Ready(Ok(Some(payload))) => assert_eq!(&payload.value[..], &[n]),
 				other => panic!("expected value, got {other:?}"),
 			}
 		}
@@ -285,7 +310,7 @@ mod test {
 
 		let mut consumer = consume(track, false);
 		let waiter = kio::Waiter::noop();
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(Some(_)))));
-		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(None))));
 	}
 }

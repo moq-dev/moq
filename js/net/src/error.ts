@@ -545,14 +545,22 @@ export function closeError(quic: WebTransport): Promise<Error> {
 }
 
 /**
+ * Whether a stream failed because its whole session closed, rather than on its own.
+ *
+ * @internal
+ */
+export function sessionClosed(err: unknown): boolean {
+	return typeof err === "object" && err !== null && (err as { source?: unknown }).source === "session";
+}
+
+/**
  * Report a failure the session's close caused as the session's own error, which carries the
  * peer's close code; any other failure passes through.
  *
  * @internal
  */
 export async function sessionCause(quic: WebTransport | undefined, err: unknown): Promise<Error> {
-	const source = typeof err === "object" && err !== null ? (err as { source?: unknown }).source : undefined;
-	if (quic && source === "session") return closeError(quic);
+	if (quic && sessionClosed(err)) return closeError(quic);
 	return error(err);
 }
 
