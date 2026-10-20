@@ -27,6 +27,14 @@ const COMPRESSED: &str = ".z";
 /// Lines `export echo` queues for stdout before its readers wait for it to catch up.
 const LINES: usize = 64;
 
+/// The most reconstructed state a sink holds for one report. A report is a few KiB, so this
+/// only stops a publisher whose patches keep adding keys.
+const MAX_REPORT: usize = 1024 * 1024;
+
+/// How long `export echo` lets a reader drain after its broadcast ends. The final snapshot can
+/// still be in flight, but the track can also outlive its route.
+const DRAIN: Duration = Duration::from_secs(5);
+
 /// Below every media track, so a report never delays the media it describes.
 const PRIORITY: u8 = 0;
 
@@ -348,6 +356,13 @@ async fn next<S: Stream>(catalog: &mut Option<S>) -> moq_mux::Result<Option<moq_
 	}
 }
 
+/// Read a report track, holding at most [`MAX_REPORT`] of it.
+fn reader(subscriber: moq_net::track::Subscriber) -> moq_json::snapshot::Consumer<serde_json::Value> {
+	let mut config = moq_json::snapshot::consumer::Config::default();
+	config.max_size = Some(MAX_REPORT);
+	moq_json::snapshot::Consumer::new(subscriber, config)
+}
+
 /// The next snapshot of a report track, or never while there is none.
 async fn snapshot(
 	track: &mut Option<moq_json::snapshot::Consumer<serde_json::Value>>,
@@ -391,7 +406,7 @@ pub async fn print_stats(origin: moq_net::origin::Consumer, path: String) -> any
 					track = match &stats {
 						Some(name) => {
 							let subscriber = broadcast.track(name)?.subscribe(None).await?;
-							Some(moq_json::snapshot::Consumer::new(subscriber, Default::default()))
+							Some(reader(subscriber))
 						}
 						None => None,
 					};
@@ -420,7 +435,15 @@ struct EchoLine<'a> {
 /// `export echo`: write the feedback of every `.echo` broadcast under `prefix` to stdout as JSON
 /// lines, following them as they start and end.
 pub async fn print_echo(origin: moq_net::origin::Consumer, prefix: String) -> anyhow::Result<()> {
-	let mut stdout = tokio::io::stdout();
+	write_echo(origin, prefix, tokio::io::stdout()).await
+}
+
+/// [`print_echo`] to any writer.
+async fn write_echo(
+	origin: moq_net::origin::Consumer,
+	prefix: String,
+	mut stdout: impl tokio::io::AsyncWrite + Unpin,
+) -> anyhow::Result<()> {
 	let prefix = moq_net::Path::new(&prefix).to_owned();
 	let mut announced = origin.announced();
 	let (lines, mut written) = tokio::sync::mpsc::channel::<String>(LINES);
@@ -446,10 +469,16 @@ pub async fn print_echo(origin: moq_net::origin::Consumer, prefix: String) -> an
 					if let Some(previous) = readers.insert(path, reader) {
 						previous.abort();
 					}
-				} else {
-					// Detached, not aborted: the final snapshot can still be in flight, and the reader
-					// ends with its track.
-					readers.remove(&path);
+				} else if let Some(reader) = readers.get(&path) {
+					// Left to drain, not aborted: the final snapshot can still be in flight. It stays
+					// here so a start at the path replaces it, and goes after `DRAIN` even if its
+					// track stays open.
+					let reader = reader.abort_handle();
+					tokio::spawn(async move {
+						tokio::time::sleep(DRAIN).await;
+						reader.abort();
+					});
+					readers.retain(|_, reader| !reader.is_finished());
 				}
 			}
 			Some(line) = written.recv() => {
@@ -469,7 +498,7 @@ async fn read_echo(
 	let read = async {
 		let broadcast = origin.request_broadcast(&path, None).await?;
 		let subscriber = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
-		let mut track = moq_json::snapshot::Consumer::<serde_json::Value>::new(subscriber, Default::default());
+		let mut track = reader(subscriber);
 		while let Some(feedback) = track.next().await? {
 			let line = EchoLine {
 				broadcast: path.as_str(),
@@ -487,5 +516,50 @@ async fn read_echo(
 	};
 	if let Err(err) = read.await {
 		tracing::debug!(%err, path = %path.as_str(), "stopped reading feedback");
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use tokio::io::{AsyncBufReadExt, BufReader};
+
+	/// Patches that grow a report past `MAX_REPORT` end the read instead of growing the sink.
+	#[tokio::test]
+	async fn a_report_past_the_cap_ends_the_read() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track(STATS_TRACK, None)
+			.unwrap();
+		let mut read = reader(track.subscribe(None));
+		let mut report = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
+		report
+			.update(&serde_json::json!({ "pad": "x".repeat(MAX_REPORT) }))
+			.unwrap();
+		assert!(matches!(read.next().await, Err(moq_json::Error::TooLarge(MAX_REPORT))));
+	}
+
+	/// A feedback track can outlive its route, so a reader left to drain stops after `DRAIN`.
+	#[tokio::test(start_paused = true)]
+	async fn an_ended_feedback_reader_stops_after_draining() {
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin.create_broadcast("viewer.echo").unwrap();
+		let track = broadcast.create_track(hang::echo::TRACK, None).unwrap();
+		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
+		broadcast.announce(Default::default()).unwrap();
+
+		let (out, read) = tokio::io::duplex(4096);
+		let mut lines = BufReader::new(read).lines();
+		tokio::spawn(write_echo(origin.consume(), String::new(), out));
+
+		feedback.update(&serde_json::json!({ "n": 1 })).unwrap();
+		let line = lines.next_line().await.unwrap().unwrap();
+		assert!(line.contains(r#""n":1"#), "{line}");
+
+		broadcast.unannounce();
+		tokio::time::sleep(DRAIN * 2).await;
+		feedback.update(&serde_json::json!({ "n": 2 })).unwrap();
+		let late = tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await;
+		assert!(late.is_err(), "a drained reader wrote {late:?}");
 	}
 }

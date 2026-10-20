@@ -80,6 +80,10 @@ impl Received {
 	}
 }
 
+/// The most rendition IDs a registry keeps. Entries are never evicted, so a remote catalog that
+/// keeps renaming its renditions would otherwise grow it, and each report, without bound.
+const MAX_ENTRIES: usize = 1024;
+
 /// Counters keyed by rendition ID, shared by the tracks that bump them and the reporter that reads
 /// them.
 pub(crate) struct Registry<T>(Mutex<BTreeMap<String, Arc<T>>>);
@@ -91,9 +95,16 @@ impl<T> Default for Registry<T> {
 }
 
 impl<T: Default> Registry<T> {
-	/// The counters for `name`, continuing those of an earlier track under that name.
+	/// The counters for `name`, continuing those of an earlier track under that name. Past
+	/// [`MAX_ENTRIES`] names, a new one counts into counters no report reads.
 	pub(crate) fn track(&self, name: &str) -> Arc<T> {
 		let mut entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		if let Some(counters) = entries.get(name) {
+			return counters.clone();
+		}
+		if entries.len() >= MAX_ENTRIES {
+			return Arc::default();
+		}
 		entries.entry(name.to_string()).or_default().clone()
 	}
 
@@ -148,6 +159,20 @@ mod tests {
 		registry.track("video").add(1, 10, 0);
 		assert_eq!(registry.sent()["video"].frames, 3);
 		assert_eq!(registry.sent()["video"].bytes, 30);
+	}
+
+	#[test]
+	fn renditions_past_the_cap_are_not_kept() {
+		let registry = Registry::<Sent>::default();
+		for n in 0..=MAX_ENTRIES {
+			registry.track(&format!("r{n}")).add(1, 1, 0);
+		}
+		let report = registry.sent();
+		assert_eq!(report.len(), MAX_ENTRIES);
+		assert!(!report.contains_key(&format!("r{MAX_ENTRIES}")));
+
+		registry.track("r0").add(1, 1, 0);
+		assert_eq!(registry.sent()["r0"].frames, 2);
 	}
 
 	#[test]

@@ -464,7 +464,8 @@ refuses it.
 The `stats` and `echo` sinks print reports as JSON lines. `export stats`
 follows one broadcast's stats track until the broadcast ends; `export echo`
 prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
-`--broadcast` as they come and go.
+`--broadcast` as they come and go, reading one that ends for 5 s more for its
+final report. Either sink stops reading a report that grows past 1 MiB.
 
 ```bash
 moq ... --broadcast event import --stats ts < feed.ts
@@ -475,6 +476,7 @@ moq ... --broadcast viewers export echo
 
 Counters are cumulative for the life of the process: a rendition that ends
 keeps its final counts, and one that returns under the same ID continues them.
+A report keeps the first 1,024 rendition IDs it sees.
 [Stats](/concept/stats#media-reports) has the schema.
 
 ## Debugging
