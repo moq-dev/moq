@@ -140,6 +140,16 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   must be set before any reader sees the track, so it lives on
   `track::Request` (for example a pre-accept `request_start(floor)`), with
   the public `start_at` resolving it.
+  Decided 2026-10-19 by the maintainer (#5862): the same shape must let a
+  lazily served relay track be accepted with content it already holds, so
+  no reader observes it accepted but empty and IETF SUBSCRIBE_OK never omits
+  Largest Location. Accept it idle (the `Feed::Idle` gate `poll_live`
+  already waits on), let the caller write its retained groups, then go
+  live. Not a closure: #5862's `accept_with(info, |producer| …)` is
+  rejected, as callback parameters are. Fix the IETF subscriber's own
+  TRACK_STATUS `accept` → `set_idle` race with it. Regression test: accept,
+  replay a retained group on the same task, and SUBSCRIBE_OK carries
+  Largest Location on a multi-thread runtime over many runs.
 - **Idle copy** (`track::Producer::set_idle`, `set_live`, `is_live`,
   `idle_newest`, `track::IDLE_LINGER`, `poll_past`; lite subscriber,
   `set_idle`, `set_live`, and `poll_past` also IETF). They keep a lingering copy's cache from serving stale groups
@@ -200,6 +210,10 @@ cover the behavior.
 ## Required
 
 - [One group writer](/quest/m1/public-model/group-writer.md) - the non-Clone writer the owned chunked writer builds on
+
+## Closes
+
+- [#5862](https://github.com/moq-dev/moq/issues/5862) - no way to accept a track::Request with content
 
 ## Related
 

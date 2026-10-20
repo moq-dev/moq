@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A newer catalog reports `unsupported`
+
+Handle `"unsupported"` in `Broadcast.out.status` by asking the viewer to update their player.
+This status replaces `"offline"` for a fetched catalog needing a newer reader and `"loading"` for a manual one.
+It is separate from `"error"`, which still reports an origin refusal through `Broadcast.out.error`.
+
 ### `"auto"` delay is measured (#4162)
 
 `"auto"` is sized from how late frames arrive instead of derived from RTT.

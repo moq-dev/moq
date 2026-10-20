@@ -89,7 +89,7 @@ export default class MoqWatchUi extends HTMLElement {
 		// The slotted <moq-watch> (canvas/video) sits at the base of the stack.
 		player.appendChild(DOM.create("slot"));
 
-		// Center affordances: play prompt + buffering spinner + offline / refused / unsupported-codec / hidden notices.
+		// Center affordances: play prompt + buffering spinner + offline / refused / unsupported / hidden notices.
 		const center = DOM.create("div", { className: "center" });
 		center.append(
 			centerPlay(effect, watch),

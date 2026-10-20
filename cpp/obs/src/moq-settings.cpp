@@ -34,6 +34,7 @@ constexpr const char *QUIC_KEEP_ALIVE = "quic_keep_alive_ms";
 constexpr const char *QUIC_GSO = "quic_gso";
 constexpr const char *QUIC_MTU_DISCOVERY = "quic_mtu_discovery";
 constexpr const char *QUIC_QLOG = "quic_qlog";
+constexpr const char *QUIC_KEYLOG = "quic_keylog";
 
 constexpr const char *WEBSOCKET_ENABLED = "websocket_enabled";
 constexpr const char *WEBSOCKET_DELAY = "websocket_delay_ms";
@@ -230,6 +231,10 @@ const std::vector<Field> &Fields()
 					      "Write QUIC connection traces here for diagnosing stalls. Leave "
 					      "empty to disable; the files get large."));
 		}
+		f.push_back(Toggle(QUIC_KEYLOG, "TLS key log", false,
+				   "Write TLS session secrets to the file the SSLKEYLOGFILE environment "
+				   "variable names, to decrypt a packet capture. Anyone holding that file "
+				   "can read the stream. Going live fails if SSLKEYLOGFILE is unset."));
 
 		// WebSocket fallback.
 		f.push_back(Toggle(WEBSOCKET_ENABLED, "WebSocket fallback", d.websocket.enabled.value_or(true),
@@ -360,6 +365,7 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 		else
 			LOG_WARNING("Skipping the qlog directory %s: this build cannot write qlog", qlog);
 	}
+	config.quic.keylog = obs_data_get_bool(settings, QUIC_KEYLOG);
 
 	config.websocket.enabled = obs_data_get_bool(settings, WEBSOCKET_ENABLED);
 	config.websocket.delay_us = Amount(settings, WEBSOCKET_DELAY, error) * 1000;

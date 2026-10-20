@@ -2326,7 +2326,7 @@ pub mod d3d11 {
 		pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self, Error> {
 			let source = Size::new(self.width, self.height);
 			let target = Size::new(width, height);
-			let texture = process(&self.device, &self.texture, Plan::resize(source, target, self.color))?;
+			let texture = process(&self.device, &self.texture, Plan::resize(source, target, self.color)?)?;
 			Ok(Self {
 				device: self.device.clone(),
 				texture,

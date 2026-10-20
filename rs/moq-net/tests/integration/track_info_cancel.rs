@@ -13,7 +13,7 @@ use crate::support;
 use std::time::Duration;
 
 use moq_net::{Hop, Version, origin};
-use support::harness::peer;
+use support::harness::{MockConnectOptions, connect_mock, peer};
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -68,5 +68,74 @@ async fn abandoned_request_reaches_the_publisher_lite05() {
 async fn abandoned_request_reaches_the_publisher_lite06() {
 	for relays in [1, 2] {
 		abandoned_request_reaches_the_publisher("moq-lite-06", relays).await;
+	}
+}
+
+/// Withdrawing a broadcast releases its TRACK interest even while the reader keeps
+/// the local query. An answered query needs no wire resources for its immutable info.
+async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, explicit: bool) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let reader = produce_origin(2);
+	let broadcast = publisher.create_broadcast("room").unwrap();
+	let mut dynamic = broadcast.dynamic();
+	let mut route = origin::Route::default();
+	if explicit {
+		route.epoch = Some("019a1234-5678-7000-8000-000000000001".parse().unwrap());
+	}
+	broadcast.announce(route).unwrap();
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(reader.clone());
+	let pair = connect_mock(options).await;
+	let remote = reader.consume().routed_broadcast("room").await.unwrap();
+	let mut query = remote.track("video").unwrap().query();
+	let request = match futures::future::select(std::pin::pin!(dynamic.requested_track()), &mut query).await {
+		futures::future::Either::Left((request, _)) => request.expect("TRACK reaches the publisher"),
+		futures::future::Either::Right(_) => panic!("nothing answered TRACK"),
+	};
+	let demand = request.demand();
+	let _track = if answered {
+		let track = request.accept(moq_net::track::Info::default());
+		(&mut query).await.expect("TRACK_INFO answers");
+		Some(track)
+	} else {
+		// A dynamic handler may retain its unanswered request after broadcast close.
+		// Its remote TRACK interest must still leave.
+		None
+	};
+	let finished = pair.client_transport.finished_streams();
+	broadcast.close();
+	moq_clock::timeout(Duration::from_secs(5), kio::wait(|waiter| demand.poll_unused(waiter)))
+		.await
+		.unwrap_or_else(|_| panic!("{version}, answered={answered}, explicit={explicit}: TRACK outlived its broadcast"))
+		.expect("the publisher still owns its track");
+	if answered {
+		assert!(
+			pair.client_transport.finished_streams() > finished,
+			"TRACK was not FIN'd"
+		);
+		(&mut query)
+			.await
+			.expect("withdrawal preserves the answered local query");
+	}
+	drop(query);
+}
+
+#[moq_clock::test]
+async fn a_pending_track_info_ends_with_its_broadcast() {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+		for explicit in [false, true] {
+			withdrawn_broadcast_releases_track_info(version, false, explicit).await;
+		}
+	}
+}
+
+#[moq_clock::test]
+async fn an_answered_track_info_ends_with_its_broadcast() {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+		for explicit in [false, true] {
+			withdrawn_broadcast_releases_track_info(version, true, explicit).await;
+		}
 	}
 }
