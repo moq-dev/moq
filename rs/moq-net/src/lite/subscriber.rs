@@ -1745,6 +1745,9 @@ struct TracksRecv<S: crate::transport::poll::Session> {
 	/// makes us hold.
 	listed: HashMap<Arc<str>, crate::session::Slot>,
 	synced: bool,
+	/// Each event fans out to every reader, so a peer streaming add/remove churn must not
+	/// hold the thread for as long as its bytes keep arriving.
+	budget: kio::coop::Budget,
 }
 
 impl<S: crate::transport::poll::Session> TracksRecv<S> {
@@ -1766,6 +1769,7 @@ impl<S: crate::transport::poll::Session> TracksRecv<S> {
 		};
 		ready!(stream.writer.poll_flush(&mut cx))?;
 		loop {
+			ready!(self.budget.poll_yield(waiter));
 			let Some(event) = ready!(stream.reader.poll_decode_maybe::<lite::TracksEvent>(&mut cx))? else {
 				return Poll::Ready(Ok(()));
 			};
@@ -1846,6 +1850,7 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 						stream: None,
 						listed: HashMap::new(),
 						synced: false,
+						budget: kio::coop::Budget::new(32),
 					});
 				}
 				Some(_) if self.lister.poll_unused(waiter).is_ready() => {
