@@ -18,6 +18,11 @@ export async function abandoned(demand: Demand): Promise<void> {
 	}
 	for (;;) {
 		await unwanted(demand);
-		if (demand.closed.peek() !== undefined || demand.wanted.peek() === undefined) return;
+		if (isAbandoned(demand)) return;
 	}
+}
+
+/** Whether no subscriber wants the track now, or it closed. */
+export function isAbandoned(demand: Demand): boolean {
+	return demand.closed.peek() !== undefined || demand.wanted.peek() === undefined;
 }

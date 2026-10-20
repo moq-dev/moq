@@ -641,6 +641,8 @@ async fn an_unanswered_token_holds_the_check(version: &'static str) {
 			pair.server.closed().await,
 			Error::Session(SessionError::Unauthorized)
 		));
+		let (_, reason) = pair.client_transport.close_reason().expect("closed");
+		assert_eq!(reason, "unauthorized: still-bad");
 	})
 	.await
 	.expect("timed out");

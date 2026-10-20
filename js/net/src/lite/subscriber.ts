@@ -22,7 +22,7 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
-import { abandoned, unwanted } from "../util/demand.ts";
+import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
@@ -656,11 +656,14 @@ export class Subscriber {
 		}
 		const refused = unauthorized(broadcast);
 		try {
-			const ready = await this.#auth?.ready(broadcast, "subscribe", {
-				signal: consumed.valid,
-				until: () => abandoned(request.demand()),
-			});
-			if (ready === false) {
+			for (;;) {
+				const ready = await this.#auth?.ready(broadcast, "subscribe", {
+					signal: consumed.valid,
+					until: () => abandoned(request.demand()),
+				});
+				if (ready !== false) break;
+				// Demand returning before we commit is not abandonment, matching the serving loop.
+				if (!isAbandoned(request.demand())) continue;
 				request.reject(new Error("subscribe abandoned before it was authorized"));
 				return;
 			}
@@ -1066,12 +1069,17 @@ export class Subscriber {
 	): Promise<void> {
 		const refused = unauthorized(broadcast);
 		try {
-			// Every caller leaving ends the wait like it ends the setup below.
-			const ready = await this.#auth?.ready(broadcast, "subscribe", {
-				signal: consumed.valid,
-				until: () => group.demand().unused(),
-			});
-			if (ready === false) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
+			// Every caller leaving ends the wait like it ends the setup below. A caller that
+			// coalesced back onto the group before we commit keeps it waiting.
+			while (
+				(await this.#auth?.ready(broadcast, "subscribe", {
+					signal: consumed.valid,
+					until: () => group.demand().unused(),
+				})) === false
+			) {
+				if (group.closed.peek() === undefined && group.demand().used.peek()) continue;
+				throw new StreamError(StreamCode.Cancel, { message: "cancel" });
+			}
 			// Arm after admission, before checking: another unanswered token may still
 			// widen the union while we wait, which is not a revocation of this fetch.
 			const disposeGrant = this.#grant?.subscribe(() => {

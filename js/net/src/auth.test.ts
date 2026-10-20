@@ -416,6 +416,46 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		}
 	});
 
+	// The window between the wait seeing the reader leave and acting on it spans a few
+	// microtasks, so sweep where the new reader lands.
+	test.each(Array.from({ length: 17 }, (_, gap) => gap))(
+		"a subscribe that regains a reader while its token waits keeps waiting (%d)",
+		async (gap) => {
+			const origin = new OriginProducer();
+			const broadcast = origin.createBroadcast(Path.from("room/x"));
+			broadcast.announce();
+			const published = broadcast.createTrack("video");
+			published.appendGroup().writeFrame({ payload: new Uint8Array([7]) });
+			const { client, server } = await connect({ serverPublish: origin, protocol });
+			const requests = server.auth.requests();
+			const setup = await requests.next();
+			if (!setup) throw new Error("missing setup token");
+			const initial = setup.accept(grant([], []));
+			await waitFor(client.auth.grant, (g) => g !== undefined);
+			const adding = client.auth.add("first");
+			try {
+				const unanswered = await requests.next();
+				if (!unanswered) throw new Error("missing token");
+				const track = wireOf(client).consume(Path.from("room/x")).track("video");
+				const first = track.subscribe();
+				await nextTask();
+				first.close();
+				for (let i = 0; i < gap; i++) await Promise.resolve();
+				const second = track.subscribe();
+				const issued = unanswered.accept(grant([], ["room"]));
+				await adding;
+				expect(await second.recvGroup()).toBeDefined();
+				second.close();
+				issued.close();
+			} finally {
+				initial.close();
+				client.abort();
+				server.abort();
+				await adding.catch(() => void 0);
+			}
+		},
+	);
+
 	test("a session's close is not a revocation of its subscriptions", async () => {
 		const origin = new OriginProducer();
 		const broadcast = origin.createBroadcast(Path.from("room/x"));
@@ -582,6 +622,51 @@ test("a fetch abandoned while its token waits never reaches the wire", async () 
 		logged.mockRestore();
 	}
 });
+
+// The window between the wait seeing the caller leave and acting on it spans a few
+// microtasks, so sweep where the new caller lands.
+test.each(Array.from({ length: 17 }, (_, gap) => gap))(
+	"a fetch that regains a caller while its token waits keeps waiting (%d)",
+	async (gap) => {
+		const origin = new OriginProducer();
+		const broadcast = origin.createBroadcast(Path.from("room/x"));
+		broadcast.announce();
+		broadcast
+			.createTrack("video")
+			.appendGroup()
+			.writeFrame({ payload: new Uint8Array([7]) });
+		const { client, server } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		const initial = setup.accept(grant([], []));
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		const adding = client.auth.add("first");
+		try {
+			const unanswered = await requests.next();
+			if (!unanswered) throw new Error("missing token");
+			const track = wireOf(client).consume(Path.from("room/x")).track("video");
+			const abort = new AbortController();
+			const first = track.fetchGroup(0, { signal: abort.signal });
+			await nextTask();
+			// The last caller leaves and another coalesces before the wait observes it.
+			abort.abort(new Error("left"));
+			for (let i = 0; i < gap; i++) await Promise.resolve();
+			const second = track.fetchGroup(0);
+			await expect(first).rejects.toThrow();
+			const issued = unanswered.accept(grant([], ["room"]));
+			await adding;
+			const group = await second;
+			expect((await group.readFrame())?.payload).toEqual(new Uint8Array([7]));
+			issued.close();
+		} finally {
+			initial.close();
+			client.abort();
+			server.abort();
+			await adding.catch(() => void 0);
+		}
+	},
+);
 
 test("lite-07 carries literal and wildcard grants exactly", async () => {
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });

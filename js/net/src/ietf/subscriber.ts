@@ -36,7 +36,7 @@ import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
-import { abandoned as demandAbandoned, unwanted } from "../util/demand.ts";
+import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -756,11 +756,14 @@ export class Subscriber {
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request, valid?: AbortSignal, epoch?: Epoch.Valid) {
 		const refused = unauthorized(broadcast);
 		try {
-			const ready = await this.#auth?.ready(broadcast, "subscribe", {
-				signal: valid,
-				until: () => demandAbandoned(request.demand()),
-			});
-			if (ready === false) {
+			for (;;) {
+				const ready = await this.#auth?.ready(broadcast, "subscribe", {
+					signal: valid,
+					until: () => demandAbandoned(request.demand()),
+				});
+				if (ready !== false) break;
+				// Demand returning before we commit is not abandonment, matching the serving loop.
+				if (!isAbandoned(request.demand())) continue;
 				request.reject(new Error("subscribe abandoned before it was authorized"));
 				return;
 			}
