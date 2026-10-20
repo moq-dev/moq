@@ -4,6 +4,7 @@ mod color;
 mod h264;
 mod h265;
 mod projection;
+mod stereo;
 mod vp9;
 
 pub use av1::*;
@@ -12,6 +13,7 @@ pub use color::*;
 pub use h264::*;
 pub use h265::*;
 pub use projection::*;
+pub use stereo::*;
 pub use vp9::*;
 
 use std::collections::{BTreeMap, btree_map};
@@ -58,10 +60,6 @@ pub struct Video {
 	/// Default: false
 	#[serde(default)]
 	pub flip: Option<bool>,
-
-	/// The type of projection for video
-	#[serde(default)]
-	pub projection: Option<Projection>,
 }
 
 /// Catalog properties shared by every video rendition.
@@ -76,16 +74,11 @@ pub struct VideoProperties {
 
 	/// Flip horizontally after rotation, or clear the explicit value when absent.
 	pub flip: Option<bool>,
-
-	pub projection: Option<Projection>,
 }
 
 impl VideoProperties {
 	fn normalized(mut self) -> crate::Result<Self> {
 		self.rotation = self.rotation.map(normalize_video_rotation).transpose()?;
-		if let Some(projection) = &self.projection {
-			projection.check()?;
-		}
 		Ok(self)
 	}
 }
@@ -153,7 +146,6 @@ impl Video {
 		self.display = properties.display;
 		self.rotation = properties.rotation;
 		self.flip = properties.flip;
-		self.projection = properties.projection;
 		Ok(())
 	}
 }
@@ -253,6 +245,19 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub color: Option<Color>,
 
+	/// How the picture maps onto the viewer's field of view. Absent means rectilinear.
+	///
+	/// Live state, like [`color`](Self::color).
+	#[serde(default)]
+	pub projection: Option<Projection>,
+
+	/// How each eye's view is packed into the frame. Absent means mono.
+	///
+	/// Live state, like [`color`](Self::color).
+	#[serde(default)]
+	#[serde_as(as = "Option<DisplayFromStr>")]
+	pub stereo: Option<Stereo>,
+
 	/// The maximum bitrate of the video track, if known.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
@@ -342,6 +347,8 @@ impl VideoConfig {
 			display_aspect_width: None,
 			display_aspect_height: None,
 			color: None,
+			projection: None,
+			stereo: None,
 			bitrate: None,
 			enabled: true,
 			preference: 0,
@@ -590,7 +597,6 @@ mod test {
 				display: None,
 				rotation: Some(f64::NAN),
 				flip: None,
-				projection: None,
 			}),
 			Err(crate::Error::InvalidVideoRotation)
 		));
@@ -627,7 +633,6 @@ mod test {
 				}),
 				rotation: Some(315.0),
 				flip: None,
-				projection: None,
 			})
 			.unwrap();
 

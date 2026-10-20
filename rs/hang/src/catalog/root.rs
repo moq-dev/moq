@@ -267,8 +267,8 @@ impl Catalog<()> {
 }
 
 impl<E> Catalog<E> {
-	/// Refuse a catalog with more renditions than a consumer can hold, or with an ID naming both
-	/// a video and an audio rendition.
+	/// Refuse a catalog with more renditions than a consumer can hold, with an ID naming both
+	/// a video and an audio rendition, or with a projection or audio layout out of range.
 	pub fn check_renditions(&self) -> Result<()> {
 		let count = self.video.renditions.len() + self.audio.renditions.len() + self.text.renditions.len();
 		if count > MAX_RENDITIONS {
@@ -277,8 +277,23 @@ impl<E> Catalog<E> {
 				max: MAX_RENDITIONS,
 			});
 		}
-		if let Some(projection) = &self.video.projection {
-			projection.check()?;
+		if let Some(id) = self
+			.video
+			.renditions
+			.keys()
+			.find(|id| self.audio.renditions.contains_key(*id))
+		{
+			return Err(crate::Error::DuplicateRendition(id.clone()));
+		}
+		for config in self.video.renditions.values() {
+			if let Some(projection) = &config.projection {
+				projection.check()?;
+			}
+		}
+		for config in self.audio.renditions.values() {
+			if let Some(layout) = &config.layout {
+				layout.check(config.channel_count)?;
+			}
 		}
 		Ok(())
 	}
@@ -491,6 +506,32 @@ mod test {
 	}
 
 	#[test]
+	fn spatial_fields_out_of_range_are_refused() {
+		use crate::catalog::{AudioLayout, Projection, VideoCodec, VideoConfig};
+
+		let mut catalog = Catalog::<()>::from_str(
+			r#"{"audio": {"renditions": {"amb": {"codec": "opus", "sampleRate": 48000, "numberOfChannels": 6, "layout": "ambisonic", "container": {"kind": "legacy"}}}}}"#,
+		)
+		.unwrap();
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::InvalidAmbisonicChannels(6))
+		));
+		catalog.audio.renditions.get_mut("amb").unwrap().channel_count = 4;
+		assert_eq!(catalog.audio.renditions["amb"].layout, Some(AudioLayout::Ambisonic));
+		catalog.check_renditions().unwrap();
+
+		// A publisher building the catalog by hand is caught before it writes the bad value.
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.projection = Some(Projection::Equirectangular { fov: Some(400.0) });
+		catalog.video.insert("vr", config).unwrap();
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::InvalidFieldOfView(_))
+		));
+	}
+
+	#[test]
 	fn simple() {
 		let mut encoded = r#"{
 			"video": {
@@ -605,6 +646,8 @@ mod test {
 				display_aspect_width: None,
 				display_aspect_height: None,
 				color: None,
+				projection: None,
+				stereo: None,
 				bitrate: None,
 				enabled: true,
 				preference: 0,
@@ -627,6 +670,7 @@ mod test {
 				codec: Opus,
 				sample_rate: 48_000,
 				channel_count: 2,
+				layout: None,
 				bitrate: None,
 				enabled: true,
 				description: None,
@@ -648,16 +692,6 @@ mod test {
 		assert_eq!(encoded, output, "encode mismatch");
 	}
 
-	#[test]
-	fn check_rejects_bad_fov() {
-		let catalog =
-			Catalog::<()>::from_str(r#"{"video":{"renditions":{},"projection":{"kind":"equirectangular","fov":400}}}"#)
-				.unwrap();
-		assert!(matches!(
-			catalog.check_renditions(),
-			Err(crate::Error::InvalidFieldOfView(_))
-		));
-	}
 	#[test]
 	fn rendition_with_broadcast_override() {
 		// Decode a catalog where one rendition references a track in a sibling broadcast,

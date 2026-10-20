@@ -167,55 +167,75 @@ test("video warmup round trips as optional integer milliseconds", () => {
 	}
 });
 
-const section = (fields: object) => ({ renditions: {}, ...fields });
+test("color parses the H.273 code points and HDR10 metadata a Rust publisher writes", () => {
+	const color = {
+		primaries: 9,
+		transfer: 16,
+		matrix: 9,
+		range: "limited",
+		mastering: {
+			red: { x: 0.708, y: 0.292 },
+			green: { x: 0.17, y: 0.797 },
+			blue: { x: 0.131, y: 0.046 },
+			white: { x: 0.3127, y: 0.329 },
+			maxLuminance: 1000,
+			minLuminance: 0.005,
+		},
+		contentLight: { maxCll: 1000, maxFall: 400 },
+	};
+	const config = VideoConfigSchema.parse({ codec: "hvc1.2.4.L93.B0", container: { kind: "legacy" }, color });
+	expect(config.color).toEqual(color as typeof config.color);
+	expect(Catalog.ColorSchema.parse(color)).toEqual(config.color as Catalog.Color);
+	expect(VideoConfigSchema.parse({ codec: "vp8", container: { kind: "legacy" } }).color).toBeUndefined();
+});
 
-test("projection parses the known kinds", () => {
-	for (const [json, projection] of [
-		['{"kind":"rectilinear"}', { kind: "rectilinear" }],
-		['{"kind":"equirectangular"}', { kind: "equirectangular" }],
-		['{"kind":"equirectangular","fov":180.0}', { kind: "equirectangular", fov: 180 }],
+test("color refuses out-of-range code points and light levels", () => {
+	const parse = (color: unknown) =>
+		VideoConfigSchema.safeParse({ codec: "vp8", container: { kind: "legacy" }, color }).success;
+	expect(parse({ primaries: 256 })).toBe(false);
+	expect(parse({ contentLight: { maxCll: 65536, maxFall: 0 } })).toBe(false);
+	expect(parse({ matrix: 0 })).toBe(true);
+	expect(parse({ range: "full" })).toBe(true);
+	expect(parse({ range: true })).toBe(false);
+});
+
+const vr = (fields: object) => VideoConfigSchema.parse({ codec: "vp8", container: { kind: "legacy" }, ...fields });
+
+test("projection parses the known kinds and is optional", () => {
+	expect(vr({}).projection).toBeUndefined();
+	for (const projection of [
+		{ kind: "rectilinear" },
+		{ kind: "equirectangular" },
+		{ kind: "equirectangular", fov: 180 },
 	] as const) {
-		expect(VideoSchema.parse(section({ projection: JSON.parse(json) })).projection).toEqual(projection);
+		expect(vr({ projection }).projection).toEqual(projection);
 	}
+	expect(Catalog.ProjectionSchema.parse({ kind: "rectilinear" })).toEqual({ kind: "rectilinear" });
 });
 
-test("projection is optional", () => {
-	expect(VideoSchema.parse(section({})).projection).toBeUndefined();
+test("projection keeps an unknown kind verbatim and ignores unknown fields", () => {
+	const raw = { face: "front", kind: "cubemap" };
+	expect(vr({ projection: raw }).projection).toEqual({ kind: "unknown", raw });
+	// A newer publisher may add a parameter to a known kind; this reader must not refuse it.
+	expect(vr({ projection: { kind: "rectilinear", fov: 90 } }).projection).toEqual({ kind: "rectilinear" });
 });
 
-test("unknown projection is preserved instead of throwing", () => {
-	const raw = JSON.parse('{"face":"front","kind":"cubemap"}');
-	expect(VideoSchema.parse(section({ projection: raw })).projection).toEqual({ kind: "unknown", raw });
-});
-
-test("malformed known projection throws", () => {
-	for (const json of ['{"kind":"equirectangular","fov":"wide"}', '{"kind":"rectilinear","fov":90}']) {
-		expect(() => VideoSchema.parse(section({ projection: JSON.parse(json) }))).toThrow();
-	}
-});
-
-test("projection fov must be in (0, 360]", () => {
-	for (const fov of [0, -90, 360.5, Number.NaN, Number.POSITIVE_INFINITY]) {
-		expect(() => VideoSchema.parse(section({ projection: { kind: "equirectangular", fov } }))).toThrow();
+test("projection refuses a malformed known kind", () => {
+	for (const fov of ["wide", 0, -90, 360.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+		expect(() => vr({ projection: { kind: "equirectangular", fov } })).toThrow();
 	}
 	for (const fov of [0.5, 180, 360]) {
-		expect(VideoSchema.parse(section({ projection: { kind: "equirectangular", fov } })).projection).toEqual({
+		expect(vr({ projection: { kind: "equirectangular", fov } }).projection).toEqual({
 			kind: "equirectangular",
 			fov,
 		});
 	}
 });
 
-test("stereo parses known layouts and keeps unknown ones verbatim", () => {
-	for (const stereo of ["mono", "side-by-side", "top-bottom", "interleaved"]) {
-		expect(VideoSchema.parse(section({ stereo })).stereo).toBe(stereo);
+test("stereo is optional and keeps unknown packings verbatim", () => {
+	expect(vr({}).stereo).toBeUndefined();
+	for (const stereo of ["mono", "left-right", "top-bottom", "multiview"]) {
+		expect(vr({ stereo }).stereo).toBe(stereo);
 	}
-	expect(VideoSchema.parse(section({})).stereo).toBeUndefined();
-	expect(() => VideoSchema.parse(section({ stereo: 2 }))).toThrow();
-});
-
-test("legacy array catalogs have no projection or stereo", () => {
-	const parsed = VideoSchema.parse([{ track: { name: "v" }, config: rendition() }]);
-	expect(parsed.projection).toBeUndefined();
-	expect(parsed.stereo).toBeUndefined();
+	expect(() => vr({ stereo: 2 })).toThrow();
 });

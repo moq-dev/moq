@@ -47,6 +47,42 @@ export const ColorSchema = z.object({
 /** The colour a rendition's pixels carry: H.273 code points plus static HDR metadata. */
 export type Color = z.infer<typeof ColorSchema>;
 
+/** The projection kinds this build knows. */
+const KNOWN_PROJECTIONS = ["rectilinear", "equirectangular"];
+
+/**
+ * Schema for how a rendition's picture maps onto the viewer's field of view. Absent means rectilinear.
+ *
+ * An unrecognized kind parses as `{ kind: "unknown", raw }` instead of throwing, and a consumer treats
+ * it as absent. A recognized kind only parses through its own schema, so a malformed one throws.
+ */
+export const ProjectionSchema = z.union([
+	z.discriminatedUnion("kind", [
+		// A flat picture.
+		z.object({ kind: z.literal("rectilinear") }),
+		// Longitude linear across the width and latitude down the height, the full 180 degrees,
+		// surrounding a viewer at its centre.
+		z.object({
+			kind: z.literal("equirectangular"),
+			// The degrees of longitude the picture spans, centred straight ahead. Absent means 360; VR180 is 180.
+			fov: z.optional(z.number().check(z.positive(), z.lte(360))),
+		}),
+	]),
+	z.pipe(
+		z.looseObject({
+			kind: z.string().check(
+				z.refine((kind) => !KNOWN_PROJECTIONS.includes(kind), {
+					message: "recognized projection kind must match its own schema",
+				}),
+			),
+		}),
+		z.transform((raw) => ({ kind: "unknown" as const, raw })),
+	),
+]);
+
+/** How a rendition's picture maps onto the viewer's field of view. */
+export type Projection = z.infer<typeof ProjectionSchema>;
+
 /** Schema for a single video rendition's decoder config. Mirrors WebCodecs VideoDecoderConfig. */
 export const VideoConfigSchema = z.object({
 	// Optional reference to another broadcast that publishes this track, expressed
@@ -83,6 +119,14 @@ export const VideoConfigSchema = z.object({
 
 	// The colour the decoded pixels carry, so a renderer need not guess or reparse the bitstream.
 	color: z.optional(ColorSchema),
+
+	// How the picture maps onto the viewer's field of view. Absent means rectilinear.
+	projection: z.optional(ProjectionSchema),
+
+	// How each eye's view is packed into the frame: "mono", "left-right" (left eye in the left
+	// half), or "top-bottom" (left eye in the top half). Absent means mono. Typed as a plain string
+	// so an unrecognized packing survives a republish; a consumer treats one as absent.
+	stereo: z.optional(z.string()),
 
 	// The maximum frame rate of the video in frames per second.
 	framerate: z.optional(z.number()),
@@ -138,41 +182,8 @@ export const VideoConfigSchema = z.object({
 	),
 });
 
-// projection kinds this build knows how to render.
-const KNOWN_PROJECTIONS = ["rectilinear", "equirectangular"];
-
-// projection this build does not recognized, not to be rendered
-export const UnknownProjectionSchema = z.pipe(
-	z.looseObject({
-		kind: z.string().check(
-			z.refine((kind) => !KNOWN_PROJECTIONS.includes(kind), {
-				message: "recognized projection kind must match its own schema",
-			}),
-		),
-	}),
-	z.transform((raw) => ({ kind: "unknown" as const, raw })),
-);
-
-// How the coded picture maps onto the viewer's FOV.
-export const ProjectionSchema = z.union([
-	z.discriminatedUnion("kind", [
-		// A flat picture
-		z.strictObject({ kind: z.literal("rectilinear") }),
-		// Longitude across the width and latitude down the height, wrapped onto a sphere.
-		z.strictObject({
-			kind: z.literal("equirectangular"),
-			// Degrees of longitude the picture spans from 0..360.
-			fov: z.optional(z.number().check(z.positive(), z.lte(360))),
-		}),
-	]),
-	UnknownProjectionSchema,
-]);
-
-// How the viewer's pictures share each frame.
-export const StereoSchema = z.union([z.enum(["mono", "side-by-side", "top-bottom"]), z.string()]);
-
 /**
- * Schema for the catalog video section: renditions plus display size, rotation, flip, projection, and stereo.
+ * Schema for the catalog video section: renditions plus display size, rotation, and flip.
  * Renditions mirror WebCodecs VideoDecoderConfig (https://w3c.github.io/webcodecs/#video-decoder-config).
  */
 export const VideoSchema = z.union([
@@ -197,14 +208,6 @@ export const VideoSchema = z.union([
 		// If true, the decoder will flip the video horizontally
 		// Default: false
 		flip: z.optional(z.boolean()),
-
-		// How the picture maps onto the viewer's field of view.
-		// Default: rectilinear
-		projection: z.optional(ProjectionSchema),
-
-		// How the two eyes' pictures share each frame.
-		// Default: mono
-		stereo: z.optional(StereoSchema),
 	}),
 	// Backwards compatibility: transform old array of {track, config} to new object format
 	z.pipe(
@@ -224,8 +227,6 @@ export const VideoSchema = z.union([
 						: undefined,
 				rotation: undefined,
 				flip: undefined,
-				projection: undefined,
-				stereo: undefined,
 			};
 		}),
 	),
@@ -235,10 +236,6 @@ export const VideoSchema = z.union([
 export type Video = z.infer<typeof VideoSchema>;
 /** Decoder config for a single video rendition. */
 export type VideoConfig = z.infer<typeof VideoConfigSchema>;
-/** How the coded picture maps onto the viewer's FOV. */
-export type Projection = z.infer<typeof ProjectionSchema>;
-/** How the two eyes' pictures share each frame. */
-export type Stereo = z.infer<typeof StereoSchema>;
 
 /** Rank video best first: enabled, then highest preference, largest picture, highest bitrate, and name. */
 export function ranked(renditions: Record<string, VideoConfig>): [string, VideoConfig][] {

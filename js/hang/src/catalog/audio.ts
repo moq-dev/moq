@@ -10,89 +10,97 @@ const TrackSchema = z.object({
 	name: z.string(),
 });
 
-const AudioConfigFields = z.object({
-	// Optional reference to another broadcast that publishes this track, expressed
-	// relative to the broadcast that served this catalog (e.g. "./source").
-	// If unset, the track lives in the same broadcast as the catalog.
-	broadcast: z.optional(RelativeBroadcastSchema),
-	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
-	// catalog). Absent means the ID is the track name. Resolve it with `track`.
-	track: z.optional(z.string()),
-
-	// Human-readable rendition name for track pickers.
-	label: z.optional(z.string()),
-
-	// Registered WebCodecs codec string, or Hang's "pcm" extension for
-	// interleaved little-endian IEEE-754 binary32 samples.
-	codec: z.string(),
-
-	// The container format, used to decode the timestamp and more.
-	container: ContainerSchema,
-
-	// The description is used for some codecs.
-	// If provided, we can initialize the decoder based on the catalog alone.
-	// Otherwise, the initialization information is in-band.
-	description: z.optional(hexSchema),
-
-	// The sample rate of the audio in Hz
-	sampleRate: u53Schema,
-
-	// The number of channels in the audio
-	numberOfChannels: u53Schema,
-
-	// The maximum bitrate of the audio in bits per second.
-	// TODO: Support up to Number.MAX_SAFE_INTEGER
-	bitrate: z.optional(u53Schema),
-
-	// Whether this rendition may be selected. When false, no frames are coming and a consumer
-	// must not select it. Default: true, so publishers only write it when false.
-	enabled: z.optional(z.boolean()),
-
-	// The maximum delay between a frame being ready and the publisher flushing it, in whole
-	// milliseconds rounded up. The player's jitter buffer should be larger than this value.
-	// If not provided, the player should assume each frame is flushed immediately.
-	//
-	// This is measured at the publisher (encoder latency, packet packing, reordering),
-	// never on the network a consumer sees. It only ever grows over the life of a stream.
-	//
-	// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
-	// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 24ms
-	jitter: z.optional(
-		z.pipe(
-			u53Schema,
-			z.transform((value) => (value === 0 ? undefined : value)),
-		),
-	),
-
-	// After a non-continuous join, decode from the group start, present at start plus warmup,
-	// and join that many milliseconds earlier.
-	warmup: z.optional(u53Schema),
-
-	// How far this rendition's frames reach the transport behind the broadcast's earliest
-	// rendition, in whole milliseconds rounded up. A player holds `delay + jitter` for it and never
-	// subtracts one rendition's `delay` from another's. Absent on the earliest rendition. It only
-	// ever grows over the life of a stream.
-	delay: z.optional(
-		z.pipe(
-			u53Schema,
-			z.transform((value) => (value === 0 ? undefined : value)),
-		),
-	),
-
-	// "ambisonic" is AmbiX; the order comes from numberOfChannels.
-	layout: z.optional(z.union([z.literal("ambisonic"), z.string()])),
-});
-
 /**
  * Schema for a single audio rendition's decoder config.
  * Mirrors WebCodecs AudioDecoderConfig (https://w3c.github.io/webcodecs/#audio-decoder-config).
  */
-export const AudioConfigSchema = AudioConfigFields.check(
-	z.refine(
-		(c) => c.layout !== "ambisonic" || (c.numberOfChannels >= 4 && Number.isInteger(Math.sqrt(c.numberOfChannels))),
-		{ message: "ambisonic needs a perfect-square channel count >= 4" },
-	),
-);
+export const AudioConfigSchema = z
+	.object({
+		// Optional reference to another broadcast that publishes this track, expressed
+		// relative to the broadcast that served this catalog (e.g. "./source").
+		// If unset, the track lives in the same broadcast as the catalog.
+		broadcast: z.optional(RelativeBroadcastSchema),
+		// The track's name in its broadcast, when it differs from this entry's ID (its key in the
+		// catalog). Absent means the ID is the track name. Resolve it with `track`.
+		track: z.optional(z.string()),
+
+		// Human-readable rendition name for track pickers.
+		label: z.optional(z.string()),
+
+		// Registered WebCodecs codec string, or Hang's "pcm" extension for
+		// interleaved little-endian IEEE-754 binary32 samples.
+		codec: z.string(),
+
+		// The container format, used to decode the timestamp and more.
+		container: ContainerSchema,
+
+		// The description is used for some codecs.
+		// If provided, we can initialize the decoder based on the catalog alone.
+		// Otherwise, the initialization information is in-band.
+		description: z.optional(hexSchema),
+
+		// The sample rate of the audio in Hz
+		sampleRate: u53Schema,
+
+		// The number of channels in the audio
+		numberOfChannels: u53Schema,
+
+		// What the decoded channels carry. Absent means the codec's own channel order. "ambisonic" is
+		// full-sphere AmbiX (ACN order, SN3D normalization) whose order follows from numberOfChannels,
+		// a square of at least 4. Typed as a plain string so an unrecognized layout survives a
+		// republish; a consumer treats one as absent.
+		layout: z.optional(z.string()),
+
+		// The maximum bitrate of the audio in bits per second.
+		// TODO: Support up to Number.MAX_SAFE_INTEGER
+		bitrate: z.optional(u53Schema),
+
+		// Whether this rendition may be selected. When false, no frames are coming and a consumer
+		// must not select it. Default: true, so publishers only write it when false.
+		enabled: z.optional(z.boolean()),
+
+		// The maximum delay between a frame being ready and the publisher flushing it, in whole
+		// milliseconds rounded up. The player's jitter buffer should be larger than this value.
+		// If not provided, the player should assume each frame is flushed immediately.
+		//
+		// This is measured at the publisher (encoder latency, packet packing, reordering),
+		// never on the network a consumer sees. It only ever grows over the life of a stream.
+		//
+		// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
+		// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 24ms
+		jitter: z.optional(
+			z.pipe(
+				u53Schema,
+				z.transform((value) => (value === 0 ? undefined : value)),
+			),
+		),
+
+		// After a non-continuous join, decode from the group start, present at start plus warmup,
+		// and join that many milliseconds earlier.
+		warmup: z.optional(u53Schema),
+
+		// How far this rendition's frames reach the transport behind the broadcast's earliest
+		// rendition, in whole milliseconds rounded up. A player holds `delay + jitter` for it and never
+		// subtracts one rendition's `delay` from another's. Absent on the earliest rendition. It only
+		// ever grows over the life of a stream.
+		delay: z.optional(
+			z.pipe(
+				u53Schema,
+				z.transform((value) => (value === 0 ? undefined : value)),
+			),
+		),
+	})
+	.check(
+		z.refine((c) => c.layout !== "ambisonic" || isAmbisonic(c.numberOfChannels), {
+			message: "ambisonic audio needs a square channel count of at least 4",
+		}),
+	);
+
+// (order + 1)² channels for an order of at least 1.
+function isAmbisonic(channels: number): boolean {
+	const order = Math.round(Math.sqrt(channels));
+	return order >= 2 && order * order === channels;
+}
 
 /** Schema for the catalog audio section: a map of track name to rendition config. */
 export const AudioSchema = z.union([

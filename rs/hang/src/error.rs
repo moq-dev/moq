@@ -86,9 +86,13 @@ pub enum Error {
 	#[error("video rotation must be finite")]
 	InvalidVideoRotation,
 
-	/// The projected video's field of view is outside (0, 360] degrees.
+	/// An equirectangular video's field of view is outside (0, 360] degrees.
 	#[error("video field of view {0} must be in (0, 360] degrees")]
 	InvalidFieldOfView(f64),
+
+	/// An ambisonic audio rendition's channel count is not a square of at least 4.
+	#[error("ambisonic audio needs a square channel count of at least 4, not {0}")]
+	InvalidAmbisonicChannels(u32),
 }
 
 /// A Result type alias for hang operations.

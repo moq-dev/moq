@@ -1,39 +1,51 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
-/// How the coded picture maps onto the viewer's field of view.
+/// How a rendition's decoded picture maps onto the viewer's field of view.
+///
+/// Absent means [`Rectilinear`](Self::Rectilinear). An unrecognized `kind` decodes to
+/// [`Projection::Unknown`] instead of failing, and a consumer treats it as absent.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub enum Projection {
-	/// A flat picture
+	/// A flat picture.
 	#[default]
 	Rectilinear,
 
-	/// Viewer is in the middle of wrapped sphere
+	/// Longitude linear across the width and latitude down the height, the full 180 degrees,
+	/// surrounding a viewer at its centre.
 	Equirectangular {
-		/// Degrees of longitude the picture spans, in range 0..360
+		/// The degrees of longitude the picture spans, centred straight ahead, in (0, 360].
+		/// Absent means 360; VR180 is 180.
 		fov: Option<f64>,
 	},
 
+	/// A projection this build does not recognize, preserved verbatim.
 	Unknown(UnknownProjection),
 }
 
+/// The raw JSON of a projection whose `kind` is not recognized.
+///
+/// Kept intact so a relay or transcoder that reparses and republishes a catalog round-trips it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnknownProjection(serde_json::Map<String, serde_json::Value>);
 
 impl UnknownProjection {
+	/// The `kind` as it appeared on the wire, or `None` if it was absent or not a string.
 	pub fn kind(&self) -> Option<&str> {
 		self.0.get("kind").and_then(serde_json::Value::as_str)
 	}
 
+	/// The full JSON object, including `kind`.
 	pub fn fields(&self) -> &serde_json::Map<String, serde_json::Value> {
 		&self.0
 	}
 }
 
 impl Projection {
-	/// Check that projection is in range 0..360.
+	/// Refuse a field of view outside (0, 360] degrees.
 	pub(crate) fn check(&self) -> crate::Result<()> {
 		if let Self::Equirectangular { fov: Some(fov) } = self
-			&& !(fov.is_finite() && *fov > 0.0 && *fov <= 360.0)
+			&& !(*fov > 0.0 && *fov <= 360.0)
 		{
 			return Err(crate::Error::InvalidFieldOfView(*fov));
 		}
@@ -41,11 +53,12 @@ impl Projection {
 	}
 }
 
+/// The projections this build knows, split out so the tagged representation stays derived.
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 enum Known {
-	Rectilinear {},
+	Rectilinear,
 	Equirectangular {
 		#[serde(default)]
 		fov: Option<f64>,
@@ -55,7 +68,7 @@ enum Known {
 impl Serialize for Projection {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		let known = match self {
-			Self::Rectilinear => Known::Rectilinear {},
+			Self::Rectilinear => Known::Rectilinear,
 			Self::Equirectangular { fov } => Known::Equirectangular { fov: *fov },
 			Self::Unknown(unknown) => return unknown.0.serialize(serializer),
 		};
@@ -67,16 +80,19 @@ impl<'de> Deserialize<'de> for Projection {
 	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
 		let object = serde_json::Map::deserialize(deserializer)?;
 
-		match object.get("kind").and_then(serde_json::Value::as_str) {
+		// Only route kinds we know to the derived enum, so a malformed known projection is still
+		// a hard error instead of silently becoming Unknown.
+		let projection = match object.get("kind").and_then(serde_json::Value::as_str) {
 			Some("rectilinear" | "equirectangular") => {
-				let known = Known::deserialize(serde_json::Value::Object(object)).map_err(de::Error::custom)?;
-				Ok(match known {
-					Known::Rectilinear {} => Self::Rectilinear,
+				match Known::deserialize(serde_json::Value::Object(object)).map_err(de::Error::custom)? {
+					Known::Rectilinear => Self::Rectilinear,
 					Known::Equirectangular { fov } => Self::Equirectangular { fov },
-				})
+				}
 			}
-			_ => Ok(Self::Unknown(UnknownProjection(object))),
-		}
+			_ => Self::Unknown(UnknownProjection(object)),
+		};
+		projection.check().map_err(de::Error::custom)?;
+		Ok(projection)
 	}
 }
 
@@ -115,9 +131,19 @@ mod tests {
 	}
 
 	#[test]
-	fn malformed_known_errors() {
+	fn unknown_fields_are_ignored() {
+		// A newer publisher may add a parameter to a known kind; this reader must not refuse it.
+		let parsed: Projection = serde_json::from_str(r#"{"kind":"rectilinear","fov":90}"#).unwrap();
+		assert_eq!(parsed, Projection::Rectilinear);
+	}
+
+	#[test]
+	fn malformed_known_is_refused() {
 		serde_json::from_str::<Projection>(r#"{"kind":"equirectangular","fov":"wide"}"#).unwrap_err();
-		serde_json::from_str::<Projection>(r#"{"kind":"rectilinear","fov":90}"#).unwrap_err();
+		for fov in ["0", "-90", "360.5"] {
+			let json = format!(r#"{{"kind":"equirectangular","fov":{fov}}}"#);
+			serde_json::from_str::<Projection>(&json).unwrap_err();
+		}
 	}
 
 	#[test]
