@@ -1549,7 +1549,8 @@ export class Publisher {
 
 			stream.close();
 			group.close();
-			await acknowledged(stream);
+			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
+			return await stream.closed.then(() => undefined, error);
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);
@@ -1558,7 +1559,6 @@ export class Publisher {
 		} finally {
 			priority.remove(stream);
 		}
-		return undefined;
 	}
 
 	/**

@@ -1391,6 +1391,54 @@ test("lite draft-07: subscribe end precedes a failed stream open", async () => {
 	}
 });
 
+// A stream that fails after its FIN may have lost its header, so the group is still dropped.
+test("lite draft-07: a group whose close fails is dropped", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const createUni = pair.server.createUnidirectionalStream.bind(pair.server);
+	spyOn(pair.server, "createUnidirectionalStream").mockImplementation(async (options) => {
+		const writer = (await createUni(options)).getWriter();
+		return new WritableStream<Uint8Array>({
+			write: (chunk) => writer.write(chunk),
+			close: () => {
+				writer.abort(new Error("connection lost")).catch(() => void 0);
+				throw new Error("connection lost");
+			},
+		});
+	});
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_07);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+	void publisher.runSubscribe(
+		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+		server,
+	);
+
+	try {
+		const group = new GroupProducer(0);
+		group.writeFrame(textFrame("hello"));
+		group.close();
+		track.writeGroup(group);
+		track.close();
+
+		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
+		expect("start" in start).toBe(true);
+		const end = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
+		if (!("end" in end)) throw new Error("expected SUBSCRIBE_END");
+		const dropped = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
+		if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([dropped.drop.start, dropped.drop.end, dropped.drop.error]).toEqual([0, 0, 0]);
+	} finally {
+		publisher.close();
+		client.close();
+	}
+});
+
 test("blocked DROP responses stop opening later groups", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
