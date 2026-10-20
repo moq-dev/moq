@@ -84,6 +84,9 @@ CA, reconnect pacing, QUIC tuning (congestion control, idle timeout,
 keep-alive, segmentation offload, MTU discovery, and qlog traces when the build
 supports them), and the WebSocket fallback race. A rejected value stops the
 stream with the reason in the log rather than silently using a default.
+To decrypt a packet capture, turn on **TLS key log** here or in a MoQ Source's
+properties and start OBS with `SSLKEYLOGFILE` naming the file; the variable
+alone writes nothing, and the toggle without it fails the connection.
 
 The plugin is C++ over the [generated C++ bindings](/lib/cpp/) and ships with
 every moq-cpp release. Stopping finishes the tracks and drains for up to one

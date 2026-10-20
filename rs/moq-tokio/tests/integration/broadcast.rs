@@ -1265,7 +1265,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 	drop(sub);
 
 	// The front parks the track and cancels upstream, while the publisher moves on.
-	tokio::time::timeout(TIMEOUT, live.demand().unused())
+	tokio::time::timeout(TIMEOUT, crate::unwanted(live.demand()))
 		.await
 		.expect("upstream never canceled")
 		.expect("track open");
@@ -1412,7 +1412,7 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 		drop(reading);
 		drop(sub);
 		// The front parks the track and cancels upstream before the next round rejoins.
-		tokio::time::timeout(TIMEOUT, live.demand().unused())
+		tokio::time::timeout(TIMEOUT, crate::unwanted(live.demand()))
 			.await
 			.unwrap_or_else(|_| panic!("{ctx}: upstream never canceled"))
 			.expect("track open");

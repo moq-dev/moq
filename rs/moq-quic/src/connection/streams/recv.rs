@@ -64,6 +64,12 @@ impl Recv {
             debug!(end, final_offset, "final size error");
             return Err(TransportError::FINAL_SIZE_ERROR(""));
         }
+        // A first FIN can't end the stream below data already received (RFC 9000 section 4.5)
+        if frame.fin && end < self.end {
+            return Err(TransportError::FINAL_SIZE_ERROR(
+                "lower than high water mark",
+            ));
+        }
 
         let new_bytes = self.credit_consumed_by(end, received, max_data)?;
 

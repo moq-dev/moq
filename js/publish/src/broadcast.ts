@@ -10,6 +10,10 @@ import { errors } from "./internal";
 import { Baseline } from "./jitter";
 import { type Kind, Rendition } from "./rendition";
 
+// The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
+// outweigh twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
+const VIDEO_REFRESH = 2;
+
 // Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
 // whose output is wired in, e.g. a Video.Capture's `display`) does the writing.
 export type BroadcastInput = {
@@ -133,7 +137,12 @@ export class Broadcast {
 		this.#signals.run(this.#run.bind(this));
 	}
 
-	/** Register a video rendition under a full track name (e.g. `"video/hd"`). Throws if the name is taken. */
+	/**
+	 * Register a video rendition under a full track name (e.g. `"video/hd"`). Throws if the name is taken.
+	 *
+	 * Its track advertises a refresh ratio, so its producer opens a group with a keyframe whenever
+	 * `track.demand().wanted` passes the largest group, as the video `Encoder` does.
+	 */
 	video(name: string): Rendition<Catalog.VideoConfig> {
 		return this.#register<Catalog.VideoConfig>(name, "video");
 	}
@@ -413,9 +422,10 @@ export class Broadcast {
 					continue;
 				}
 				if (!entry) {
+					const info = Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] });
 					const track = broadcast.createTrack(
 						name,
-						Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] }),
+						rendition.kind === "video" ? { ...info, refresh: VIDEO_REFRESH } : info,
 					);
 					entry = { track, owner: rendition };
 					tracks.set(rendition.name, entry);
@@ -432,7 +442,7 @@ export class Broadcast {
 					});
 				}
 				inner.run((demand) => {
-					demand.set(signal, demand.get(served.demand().used) ? served : undefined);
+					demand.set(signal, demand.get(served.demand().wanted) !== undefined ? served : undefined);
 				});
 			}
 		});

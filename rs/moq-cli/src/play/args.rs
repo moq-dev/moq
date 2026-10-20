@@ -58,7 +58,7 @@ impl fmt::Display for Delay {
 }
 
 /// Play one MoQ broadcast through a native window or an audio-only speaker.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// Catalog format, detected from the broadcast suffix when omitted.
@@ -87,7 +87,7 @@ pub struct Args {
 	/// and how many were quiet, and the gaps and stalls since the line before, in the metric
 	/// schema of `test/audio-quality`, whose analyzer reduces it to underruns, skips, and
 	/// silence. Audio only, so it needs `--no-video`.
-	#[usage(long, requires = "--no-video", value_name = "PATH", value_hint = usage::ValueHint::FilePath, extensions("ndjson"))]
+	#[usage(long, requires = "--no-video", value_name = "PATH", value_hint = usage_rs::ValueHint::FilePath, extensions("ndjson"))]
 	pub metrics: Option<PathBuf>,
 }
 
@@ -154,7 +154,7 @@ impl Args {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	struct Cli {
 		#[usage(flatten)]
 		args: Args,

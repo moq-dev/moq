@@ -35,8 +35,8 @@ async function acceptWith(extensions: Extensions) {
 }
 
 test("every extension is offered by default", () => {
-	expect(offered()).toEqual({ auth: true, solicit: true });
-	expect(offered({ solicit: false })).toEqual({ auth: true, solicit: false });
+	expect(offered()).toEqual({ auth: true, solicit: true, epoch: true });
+	expect(offered({ solicit: false })).toEqual({ auth: true, solicit: false, epoch: true });
 });
 
 test("a declined extension stays out of SETUP", async () => {
@@ -52,6 +52,21 @@ test("a declined extension stays out of SETUP", async () => {
 	// Negotiated only when both offer it, so the declining side does not speak it either.
 	expect(none.dialed.auth).toBe(false);
 	expect(none.dialed.solicit).toBe(true);
+});
+
+test("MoQ Epoch is negotiated only when both sides offer it", async () => {
+	const all = await handshake({}, {});
+	expect(all.dialed.epoch).toBe(true);
+	expect(all.accepted.epoch).toBe(true);
+
+	for (const [client, server] of [
+		[{ epoch: false }, {}],
+		[{}, { epoch: false }],
+	]) {
+		const declined = await handshake(client, server);
+		expect(declined.dialed.epoch).toBe(false);
+		expect(declined.accepted.epoch).toBe(false);
+	}
 });
 
 test("an AUTH to a side that declined it closes the session", async () => {
@@ -82,7 +97,7 @@ test("a side that declined solicit takes an unsolicited announce", async () => {
 		await new PublishNamespace({
 			requestId: 0n,
 			trackNamespace: Path.from("room"),
-			cluster: { hops: [session.peer.cluster.self], cost: 0n },
+			params: { cluster: { hops: [session.peer.cluster.self], cost: 0n } },
 		}).encode(stream.writer, VERSION);
 		return stream;
 	};

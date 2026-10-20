@@ -21,8 +21,8 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
   per-object size extension. Pick values outside the ranges the base draft
   reserves; validate with `just drafts check`.
 - The property is known to moq-net, so it stays out of the unknown property
-  list that [Forward unknown track properties](/quest/m1/ietf-extension/track-properties.md)
-  carries, and egress to a peer without the parameter drops it.
+  list a relay forwards (`track::Info::properties`), and egress to a peer
+  without the parameter drops it.
 - Docs inline in `doc/concept/standard.md`.
 
 Tests: a negotiated IETF publisher -> moq-relay -> negotiated IETF and

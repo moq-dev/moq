@@ -32,6 +32,7 @@ checks that what the fault owned was released.
 | `bursts_cross_a_cluster` | Bursts of one-frame groups cross from an origin relay to a clustered edge relay; the subscriber reads newest-only and FETCHes every group it misses | how many groups missed the live subscription, which live groups were reset, the completed ingress burst and overflow count, and the slowest group's latency | every group arrives, live or by FETCH, within 10s of being written; a lost group fails by name (FETCH failed, FETCH unanswered, live group stalled), and the newest group comes live |
 | `bursts_cross_a_flapping_peer` | The same bursts, with the peer link cut as the second burst is written and restored once the edge withdraws the route | how long the link was down before the withdrawal, and the reads and FETCHes the flap failed | the route comes back and every group still arrives within 10s of being written, or of the route's return when it arrives after it; only a failure the flap caused is retried, on the restored route, so a hang on the dead one past the relays' idle timeout or a withdrawal with the link up still fails |
 | `bursts_cross_a_transport_peer` | The same bursts, with the relays peering over `moq-transport-19`, so the edge recovers gaps with IETF FETCHes | as `bursts_cross_a_cluster` | as `bursts_cross_a_cluster`: a group the origin still holds is served, never refused |
+| `ietf_subscriber_max_age_skips_bufferbloat` | moq-transport-22 media at 5.12Mb/s crosses a 64kb/s link behind a finite 500ms queue, with no random loss | the propagated 100ms budget and forced queue overflow | superseded groups are skipped and the newest catalog snapshot survives its budget |
 | `no_publisher_never_delivers` | none: the negative control | - | with nothing publishing, nothing is announced and no broadcast resolves |
 
 A moq publisher is never blocked by a slow reader: `write_frame` is synchronous
@@ -47,8 +48,10 @@ drill does assert is the half of that behavior worth grading here.
 
 The impaired cluster drills arm a one-shot ingress burst once the origin has subscribed
 to the publisher, since the gate also holds the replies and credit that subscription needs.
-The shaper keeps seeded loss, then collects surviving datagrams on the publisher's
-upstream flow until they exceed the rate bucket's burst and queue allowance. It
+The shaper collects datagrams on the publisher's upstream flow until they exceed
+the rate bucket's burst and queue allowance, exempting them from seeded loss: the
+gate also holds the acknowledgments a sender needs to replace a lost datagram, so
+a gate waiting on survivors could idle the publisher out. It
 accounts that batch at one instant, so scheduling gaps cannot silently drain the
 fault away. Transport credit holds two bucket allowances but remains smaller than
 the application burst. The first burst's newest frame also fills that window, since
@@ -137,6 +140,15 @@ would turn this lane into a second loopback run that passes for free.
 
 There are no retries: a drill that only passes on loopback is a finding.
 
+Random loss is not how real paths fail, so it may prove correctness but never
+judge quality, latency or throughput; those run on a congested path (see
+`test/ts/README.md`). Every drill here proves correctness: that a resource is
+released, a failure surfaces, a route or publisher comes back, or every group is
+recovered. The cluster drills' 10s bound on each group is a stall check, a third
+of the 30s stalls of #4349, not a latency target. So the impaired lane keeps its
+loss, which is what drops the `MAX_STREAMS` and `MAX_DATA` frames the cluster
+drills' senders wait on.
+
 The same shaper is a binary, for putting in front of a relay from another
 process. It applies one profile both ways, prints the seed at start and the
 counters at exit (Ctrl-C or SIGTERM), and exits nonzero if the profile never
@@ -156,7 +168,8 @@ protocol's reaction to loss and delay, not the kernel's rendering of them.
 The Nightly workflow runs all mutations, so patches that stop applying and drills
 that stop detecting their recovery failures fail CI. `just check` also runs
 `--apply-only` whenever Rust or this directory changes, so a patch that no longer
-applies fails the PR that moved its code rather than the next nightly.
+applies fails `just ci` and the merge queue for the PR that moved its code rather
+than the next nightly.
 
 Pull requests do not run the mutations: the drills' sockets still run on the host
 clock, so load can change the outcome.

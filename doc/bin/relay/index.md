@@ -82,6 +82,10 @@ relay.with_web(web).run().await?;
 - To serve MoQ from your own `moq_tokio::server::Config`, set its `activity`
   from `relay.shutdown().activity()` and pass `relay.shutdown().clone()` to
   `Connection::with_shutdown`, so the drain waits for its handshakes too.
+- To serve a session from any other moq-net transport, such as the in-memory
+  one in tests, read its SETUP with `moq_net::Server::accept_request` and pass
+  `Accepted::new(handshake, transport)` to `Connection::new`. The client must
+  send its path in the SETUP.
 - To decide admissions yourself, leave `[auth]` empty and answer
   `relay.admissions()`; see [Authentication](/bin/relay/auth#in-process).
 

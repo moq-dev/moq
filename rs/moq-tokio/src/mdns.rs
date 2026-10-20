@@ -1311,17 +1311,16 @@ mod tests {
 	/// subtype browse leaked, so a short wait is enough to assert isolation
 	/// without treating "the packet never came" as success.
 	///
-	/// Ignored because it multicasts on the host network, which CI runners may
-	/// block even after announce succeeds; run it by hand when touching discovery:
-	/// `just rs test -p moq-tokio --features mdns --run-ignored ignored-only`.
-	/// The skip below is for that manual run when no interface can announce.
+	/// Ignored because it multicasts on the host network; nightly runs it with
+	/// `just rs multicast`. A host where no interface can announce skips, unless
+	/// MOQ_STRICT makes that a failure.
 	#[tokio::test]
-	#[ignore = "needs multicast on the host network; run manually"]
+	#[ignore = "needs multicast on the host network; run by just rs multicast"]
 	async fn apps_partition_discovery() {
 		let shared = unique_app();
 		let mut same_a = match discovery(shared.clone(), Some(KEY_A), "same-a").await {
 			Ok(discovery) => discovery,
-			Err(err) if no_multicast(&err) => {
+			Err(err) if no_multicast(&err) && std::env::var_os("MOQ_STRICT").is_none() => {
 				eprintln!("skipping: {err}");
 				return;
 			}

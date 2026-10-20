@@ -32,13 +32,12 @@
 		"@moq/signals": "workspace:^",
 		"@svta/cml-iso-bmff": "^1.0.6",
 		"@svta/cml-utils": "1.6.1",
-		"@zod/mini": "^4.6.5",
-		"zod": "^4.6.5"
+		"@zod/mini": "^4.6.7",
+		"zod": "^4.6.7"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.2",
+		"@types/bun": "^1.4.3",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.350",
-		"fast-glob": "^3.3.3",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2"
 	}

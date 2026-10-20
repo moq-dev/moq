@@ -120,9 +120,7 @@ Every importer takes a broadcast; single-track imports choose a `Named` or `Requ
    TrackProducer
    TrackStreamProducer
    ContainerProducer
-   ContainerStreamProducer
    ContainerInit
-   ContainerStreamInit
    Timebase
    TrackConsumer
    GroupConsumer
@@ -148,6 +146,7 @@ broadcast, and producers advertise it in the catalog.
    StreamProducer
    SnapshotConsumer
    StreamConsumer
+   Timed
 ```
 
 ## Opaque data

@@ -18,6 +18,7 @@ from moq_ffi import (
 )
 
 from ._records import _subscription, _track_info
+from ._stream import _Stream
 from .types import (
     Frame,
     Route,
@@ -63,7 +64,7 @@ class GroupProducer:
 
 
 class TrackDemand:
-    """A watch-only handle to whether a published track has subscribers.
+    """A watch-only handle to the group a published track's subscribers want next.
 
     Returned by a producer's ``demand()``. Weak: holding it neither keeps the
     track open nor locks the producer, so a wait can park here while the
@@ -79,17 +80,16 @@ class TrackDemand:
         """The name of the track this watches."""
         return self._inner.name()
 
-    def is_used(self) -> bool:
-        """Whether the track has at least one active subscriber right now."""
-        return self._inner.is_used()
+    def wanted(self) -> int | None:
+        """The group subscribers want next, or None while nobody subscribes.
 
-    async def used(self) -> None:
-        """Wait until the track has at least one active subscriber."""
-        await self._inner.used()
+        A value past the newest group asks for a new group now, typically a keyframe.
+        """
+        return self._inner.wanted()
 
-    async def unused(self) -> None:
-        """Wait until the track has no active subscribers."""
-        await self._inner.unused()
+    async def wanted_changed(self) -> int | None:
+        """Wait for ``wanted`` to change and return it. The first call returns at once."""
+        return await self._inner.wanted_changed()
 
 
 class TrackProducer:
@@ -250,7 +250,7 @@ class GroupRequest:
         self._inner.abort(error_code)
 
 
-class TrackDynamic:
+class TrackDynamic(_Stream[GroupRequest]):
     """Async source of uncached group requests for one track.
 
     Usable as an async context manager that cancels on exit.
@@ -259,16 +259,7 @@ class TrackDynamic:
     def __init__(self, inner: MoqTrackDynamic) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> GroupRequest:
+    async def _next(self) -> GroupRequest:
         return await self.requested_group()
 
     async def requested_group(self) -> GroupRequest:
@@ -280,7 +271,7 @@ class TrackDynamic:
         self._inner.cancel()
 
 
-class BroadcastDynamic:
+class BroadcastDynamic(_Stream[TrackRequest]):
     """Async source of tracks requested by subscribers.
 
     Hold this object while subscriptions to unknown tracks should be accepted.
@@ -290,16 +281,7 @@ class BroadcastDynamic:
     def __init__(self, inner: MoqBroadcastDynamic) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> TrackRequest:
+    async def _next(self) -> TrackRequest:
         return await self.requested_track()
 
     async def requested_track(self) -> TrackRequest:

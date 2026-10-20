@@ -62,8 +62,8 @@ reasons, so later sessions don't reopen them:
 - **The simulator folds into `moq-clock`** behind a `sim` feature (a
   dev-dependency only, so production builds never compile it). It is one
   backend of the ambient clock, starts at zero, keeps deadlock detection, and
-  seeds the later runtime trait. `#[moq_clock::test]` replaces
-  `#[moq_clock::test]`.
+  seeds the later runtime trait. `#[moq_clock::test]` runs tests on this
+  backend.
 - **Tests for migrated contracts use the sim wherever possible.** A test with no real I/O
   that cannot run on the sim yet uses paused tokio, whose clock `moq-clock`
   reads. A real-I/O test never uses paused tokio, which auto-advances to the
@@ -81,10 +81,12 @@ reasons, so later sessions don't reopen them:
   `disallowed-types` in a per-crate `clippy.toml`, and a biome
   `noRestrictedGlobals` override, allowing only the backend modules. The
   workspace-wide test and lint sweep follows in m2.
-- **Consolidation.** perf/3122 (one clock read per io_uring turn) merged into
-  [moq-uring on moq-clock](/quest/m1/time/uring.md). The relay seam
-  [bench-relay](/quest/m2/bench-relay.md) needed is
-  [the relay seam](/quest/m1/time/relay-seam.md). Quests that already asked
+- **Consolidation.** perf/3122 (one clock read per io_uring turn) landed with
+  moq-uring on moq-clock in [#5926](https://github.com/moq-dev/moq/pull/5926). The relay seam
+  [bench-relay](/quest/m2/bench-relay.md) needed is `moq_relay::Accepted`:
+  a `moq_relay::Connection` over any moq-net transport, such as the in-memory
+  one. Its tests run on paused tokio until
+  [the runtime trait](/quest/m2/runtime-trait.md) can spawn on the sim. Quests that already asked
   for "mocked time" Require the core quest. moq-quic takes the logical
   instant at its boundary.
 
@@ -96,8 +98,6 @@ cleanup and the global lint ratchet belong to
 ## Required
 
 - [Every crate on moq-clock](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-clock, with controlled tests for the production/public API migrations
-- [moq-uring on moq-clock](/quest/m1/time/uring.md) - one clock read per worker turn and moq-clock's deadline queue replace the private timer heap
-- [The relay seam](/quest/m1/time/relay-seam.md) - one in-memory session and a generic `moq_relay::Connection`, so relay tests run on the sim
 
 ## Related
 

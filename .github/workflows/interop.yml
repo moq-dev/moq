@@ -10,9 +10,12 @@ on:
   # Nightly: catch an interop regression in the current tree before a user does.
   schedule:
     - cron: "0 8 * * *"
-  # On PRs that touch the harness itself, so a change to the interop test is
-  # validated before it merges. Source regressions still surface nightly.
+  # On release PRs that touch the harness itself, so a backported change to the
+  # interop test is validated before it merges. Main PRs skip it; the schedule
+  # above covers main. `edited` catches a main PR retargeted to release.
   pull_request:
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "test/lib/**"
       - "test/p2p/**"
@@ -42,6 +45,8 @@ jobs:
   interop:
     name: Interop
     runs-on: ubuntu-latest
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     # The matrix runs in real time (ffmpeg -re pacing + per-subscriber timeouts);
     # this is a safety net against a hung relay/client plus a cold first build.
     timeout-minutes: 60
@@ -52,27 +57,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter. `nixConfig` in flake.nix is
-          # untrusted by default, so nix logs "ignoring untrusted flake
-          # configuration setting 'extra-substituters'" and rebuilds from
-          # source anything missing from the public nixpkgs cache. That was
-          # costing 678s per job for uniffi-bindgen-go alone, in every job that
-          # enters the dev shell.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
 
-      # Reuse ~/.cargo + ./target across nightly runs so only changed crates
-      # recompile (the relay, cli, moq-ffi, and moq-c all build from source).
+      # The relay, cli, moq-ffi, and moq-c all build from source. The nightly
+      # run publishes them for the pull requests that touch the harness.
       - name: Rust cache
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        uses: ./.github/actions/rust-cache
         with:
-          # A pull request's entry is scoped to its own branch, where no later
-          # run reads it, while it spends the budget the shared store needs.
-          save-if: ${{ github.event_name != 'pull_request' }}
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
       # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
       # runtime libs (`--with-deps` needs the host package manager) so the
@@ -142,6 +135,15 @@ jobs:
       - name: Media output and lifecycle
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test media
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # Run independently so an unrelated cold-start failure cannot hide the
+      # codec replacement and same-track coded-size growth measurements.
+      - name: Media track identity changes
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test media --media-cases rename
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs

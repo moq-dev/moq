@@ -110,6 +110,35 @@ fn bench_announce(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Cancel unseen additions while every cursor stalls on its initial replay.
+fn bench_pending_churn(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/pending_churn");
+	for routes in [10, 1_000] {
+		for readers in [1, 100] {
+			group.bench_function(format!("{routes}routes_{readers}readers"), |b| {
+				let (producer, _driver) = origin::Producer::new(origin::Config::default());
+				let _routes: Vec<_> = (0..routes)
+					.map(|i| producer.publish(format!("z/{i}"), origin::Route::default()).unwrap())
+					.collect();
+				let mut cursors: Vec<_> = (0..readers).map(|_| producer.consume().announced()).collect();
+				let mut sequence = 0u64;
+				b.iter(|| {
+					sequence += 1;
+					drop(
+						producer
+							.publish(format!("a/{sequence}"), origin::Route::default())
+							.unwrap(),
+					);
+				});
+				for cursor in &mut cursors {
+					assert_eq!(std::iter::from_fn(|| cursor.try_next()).count(), routes);
+				}
+			});
+		}
+	}
+	group.finish();
+}
+
 /// A peer carrying `publishers` broadcasts withdraws them all before the
 /// driver's clock moves again, then `subscribers` cursors drain the retractions.
 /// Each retraction quarantines its prefix until a fresh clock reading, so a cost
@@ -1178,7 +1207,7 @@ impl Generation {
 	async fn announce(&self, epoch: &Epoch) {
 		self.route(epoch);
 		for track in &self.tracks {
-			moq_clock::timeout(COPY_WAIT, track.demand().used())
+			moq_clock::timeout(COPY_WAIT, support::wanted(track.demand()))
 				.await
 				.expect("route swap did not splice")
 				.expect("replacement track closed");
@@ -1277,7 +1306,10 @@ fn bench_copy_walk(c: &mut Criterion) {
 
 /// `(readers, retained, routes)` for [`bench_resume_overlap`]: readers of one track,
 /// the groups every route holds, and the routes it swapped through.
-const RESUME_OVERLAP: [(usize, usize, usize); 12] = [
+const RESUME_OVERLAP: [(usize, usize, usize); 15] = [
+	(1, 1, 1),
+	(1, 64, 1),
+	(32, 64, 1),
 	(1, 1, 2),
 	(1, 64, 2),
 	(1, 1024, 2),
@@ -1298,10 +1330,24 @@ const RESUME_OVERLAP: [(usize, usize, usize); 12] = [
 struct ResumeOverlap {
 	_producer: origin::Producer,
 	_generations: Vec<(broadcast::Producer, track::Producer)>,
-	readers: Vec<track::Subscriber>,
+	readers: Vec<ResumeReader>,
 }
 
-async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> ResumeOverlap {
+enum ResumeReader {
+	Arrival(track::Subscriber),
+	Sequence(track::Ordered),
+}
+
+impl ResumeReader {
+	fn poll_group(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Option<moq_net::group::Consumer>>> {
+		match self {
+			Self::Arrival(reader) => reader.poll_recv_group(waiter),
+			Self::Sequence(reader) => reader.poll_next_group(waiter),
+		}
+	}
+}
+
+async fn resume_overlap(readers: usize, retained: usize, routes: usize, ordered: bool) -> ResumeOverlap {
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
 	let epoch = Epoch::mint();
@@ -1344,7 +1390,7 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> Resum
 	for _ in 1..routes {
 		generations.push(generation(&mut (0..retained).rev()));
 		let (_, latest) = generations.last().unwrap();
-		moq_clock::timeout(COPY_WAIT, latest.demand().used())
+		moq_clock::timeout(COPY_WAIT, support::wanted(latest.demand()))
 			.await
 			.expect("route swap did not splice")
 			.expect("replacement track closed");
@@ -1359,10 +1405,17 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> Resum
 	for subscriber in &mut subscribers {
 		subscriber.set_groups(..);
 	}
+	let readers = subscribers
+		.into_iter()
+		.map(|subscriber| match ordered {
+			true => ResumeReader::Sequence(subscriber.ordered()),
+			false => ResumeReader::Arrival(subscriber),
+		})
+		.collect();
 	ResumeOverlap {
 		_producer: producer,
 		_generations: generations,
-		readers: subscribers,
+		readers,
 	}
 }
 
@@ -1372,31 +1425,33 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> Resum
 fn bench_resume_overlap(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/resume_overlap");
 	group.sample_size(10);
-	for (readers, retained, routes) in RESUME_OVERLAP {
-		group.throughput(Throughput::Elements((readers * retained) as u64));
-		group.bench_function(
-			BenchmarkId::from_parameter(format!("{readers}r_{retained}g_{routes}c")),
-			|b| {
-				let runtime = tokio::runtime::Builder::new_current_thread()
-					.enable_all()
-					.build()
-					.unwrap();
-				let waiter = kio::Waiter::noop();
-				b.iter_batched_ref(
-					|| runtime.block_on(resume_overlap(readers, retained, routes)),
-					|rig| {
-						for reader in &mut rig.readers {
-							let mut delivered = 0;
-							while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {
-								delivered += 1;
+	for (order, ordered) in [("arrival", false), ("sequence", true)] {
+		for (readers, retained, routes) in RESUME_OVERLAP {
+			group.throughput(Throughput::Elements((readers * retained) as u64));
+			group.bench_function(
+				BenchmarkId::new(order, format!("{readers}r_{retained}g_{routes}c")),
+				|b| {
+					let runtime = tokio::runtime::Builder::new_current_thread()
+						.enable_all()
+						.build()
+						.unwrap();
+					let waiter = kio::Waiter::noop();
+					b.iter_batched_ref(
+						|| runtime.block_on(resume_overlap(readers, retained, routes, ordered)),
+						|rig| {
+							for reader in &mut rig.readers {
+								let mut delivered = 0;
+								while let Poll::Ready(Ok(Some(_))) = reader.poll_group(&waiter) {
+									delivered += 1;
+								}
+								assert_eq!(delivered, retained, "every group once");
 							}
-							assert_eq!(delivered, retained, "every group once");
-						}
-					},
-					BatchSize::PerIteration,
-				);
-			},
-		);
+						},
+						BatchSize::PerIteration,
+					);
+				},
+			);
+		}
 	}
 	group.finish();
 }
@@ -1404,6 +1459,7 @@ fn bench_resume_overlap(c: &mut Criterion) {
 criterion_group!(
 	benches,
 	bench_announce,
+	bench_pending_churn,
 	bench_withdraw,
 	bench_announce_mounted,
 	bench_announce_fleet,

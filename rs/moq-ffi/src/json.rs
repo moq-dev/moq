@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::consumer::MoqTrackConsumer;
+use crate::consumer::{MoqTrackConsumer, timestamp_us};
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -166,20 +166,32 @@ impl MoqJsonSnapshotProducer {
 	}
 }
 
+/// A JSON value read from a track, with the timestamp of the frame that carried it.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct MoqJsonValue {
+	/// The JSON document.
+	pub value: String,
+	/// The frame's timestamp on the broadcast clock in microseconds, or null when untimed.
+	/// Rounded down to a whole microsecond, so a tick on a track like 90 kHz may not survive a
+	/// read and republish exactly.
+	pub timestamp_us: Option<u64>,
+}
+
+impl MoqJsonValue {
+	fn new(timed: Option<moq_net::Timed<Value>>) -> Result<Option<Self>, MoqError> {
+		let Some(timed) = timed else { return Ok(None) };
+		Ok(Some(Self {
+			value: serde_json::to_string(&timed.value)?,
+			timestamp_us: timed.at.map(timestamp_us).transpose()?,
+		}))
+	}
+}
+
 struct SnapshotConsumer {
 	inner: moq_json::snapshot::Consumer<Value>,
 }
 
-impl SnapshotConsumer {
-	async fn next(&mut self) -> Result<Option<String>, MoqError> {
-		match self.inner.next().await? {
-			Some(value) => Ok(Some(serde_json::to_string(&value)?)),
-			None => Ok(None),
-		}
-	}
-}
-
-/// Consumes a JSON snapshot track, yielding the latest reconstructed value.
+/// Consumes a JSON snapshot track, yielding each reconstructed state or skipping to the newest.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotConsumer {
 	task: Task<SnapshotConsumer>,
@@ -201,14 +213,26 @@ impl MoqJsonSnapshotConsumer {
 		}))
 	}
 
-	/// Get the next value as a JSON string. Returns `None` once the track ends.
+	/// Get the next state in order. Returns `None` once the track ends.
 	///
-	/// A consumer that has fallen behind collapses the backlog and yields only the latest value.
-	pub async fn next(&self) -> Result<Option<String>, MoqError> {
-		self.task.run(|mut state| async move { state.next().await }).await
+	/// Groups older than the subscription's `max_delay_us` are skipped, so a playhead
+	/// reader sets that budget to its distance behind live.
+	pub async fn next(&self) -> Result<Option<MoqJsonValue>, MoqError> {
+		self.task
+			.run(|mut state| async move { MoqJsonValue::new(state.inner.next().await?) })
+			.await
 	}
 
-	/// Cancel all current and future `next()` calls.
+	/// Skip to the newest state, or wait for one. Returns `None` once the track ends.
+	///
+	/// Skipped states are gone; a later `next()` continues after this one.
+	pub async fn latest(&self) -> Result<Option<MoqJsonValue>, MoqError> {
+		self.task
+			.run(|mut state| async move { MoqJsonValue::new(state.inner.latest().await?) })
+			.await
+	}
+
+	/// Cancel all current and future `next()` and `latest()` calls.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
@@ -283,15 +307,6 @@ struct StreamConsumer {
 	inner: moq_json::stream::Consumer<Value>,
 }
 
-impl StreamConsumer {
-	async fn next(&mut self) -> Result<Option<String>, MoqError> {
-		match self.inner.next().await? {
-			Some(value) => Ok(Some(serde_json::to_string(&value)?)),
-			None => Ok(None),
-		}
-	}
-}
-
 /// Consumes an ordered log of JSON records, yielding every record in order.
 #[derive(uniffi::Object)]
 pub struct MoqJsonStreamConsumer {
@@ -314,9 +329,11 @@ impl MoqJsonStreamConsumer {
 		}))
 	}
 
-	/// Get the next record as a JSON string. Returns `None` once the track ends.
-	pub async fn next(&self) -> Result<Option<String>, MoqError> {
-		self.task.run(|mut state| async move { state.next().await }).await
+	/// Get the next record. Returns `None` once the track ends.
+	pub async fn next(&self) -> Result<Option<MoqJsonValue>, MoqError> {
+		self.task
+			.run(|mut state| async move { MoqJsonValue::new(state.inner.next().await?) })
+			.await
 	}
 
 	/// Cancel all current and future `next()` calls.

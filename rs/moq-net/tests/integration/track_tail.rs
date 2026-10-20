@@ -144,6 +144,11 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 	moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
 		.expect("no subscriber appeared");
+	// Let the publisher answer while the track is still empty. Before draft 20, a group
+	// written first sits below SUBSCRIBE_OK's Largest Object, so it would arrive as a
+	// joining FETCH, which the track ending first refuses, not as the subscription's own
+	// late stream. Paused time advances only once every task is idle.
+	moq_clock::sleep(Duration::from_millis(1)).await;
 
 	pair.server_transport.hold_unis();
 	if final_sequence > 0 {
@@ -229,8 +234,7 @@ async fn a_lost_group_ends_the_track_after_the_grace() {
 	}
 }
 
-/// Skipped sequences have no stream, so they must not hold the tail open: lite-07 does not
-/// count them, and lite-05 and lite-06 publishers name them with SUBSCRIBE_DROP.
+/// Skipped sequences have no stream, so lite-05+ publishers name them with SUBSCRIBE_DROP.
 #[moq_clock::test]
 async fn skipped_groups_end_without_the_grace() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
@@ -245,9 +249,9 @@ async fn skipped_groups_end_without_the_grace() {
 	}
 }
 
-/// A zero stream count leaves no tail to wait for.
+/// An empty track leaves no tail to wait for.
 #[moq_clock::test]
-async fn lite07_zero_streams_end_without_the_grace() {
+async fn lite07_empty_track_ends_without_the_grace() {
 	let outcome = round("moq-lite-07-wip", Late::Delivered, 0).await;
 	assert!(outcome.err.is_none());
 	assert!(outcome.frames.is_empty());
@@ -318,13 +322,10 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 	}
 }
 
-/// A lost datagram is not owed, but nothing tells a lite-05 or lite-06 subscriber its
-/// sequence was a datagram rather than a group stream still on its way. Its hole holds
-/// the subscription, and its readers, for the grace, like a stream reset before its
-/// header: ending at once would drop a reordered group. Lite-07 counts the streams, so a
-/// lost datagram never delays its end.
+/// A lost datagram is indistinguishable from a reordered stream header, so its hole
+/// waits out the tail grace on every lite version.
 #[moq_clock::test]
-async fn a_lost_datagram_delays_the_end_only_without_a_stream_count() {
+async fn a_lost_datagram_delays_the_end() {
 	for version in ["moq-lite-05", "moq-lite-07-wip"] {
 		let Pair {
 			pair,
@@ -371,13 +372,10 @@ async fn a_lost_datagram_delays_the_end_only_without_a_stream_count() {
 			.expect("reader panicked");
 		assert_eq!(groups, [0, 2], "{version}");
 		let elapsed = ended - finished;
-		match version {
-			"moq-lite-07-wip" => assert!(elapsed < GRACE / 10, "{version}: ended after {elapsed:?}"),
-			_ => assert!(
-				(GRACE / 2..GRACE * 2).contains(&elapsed),
-				"{version}: ended after {elapsed:?}"
-			),
-		}
+		assert!(
+			(GRACE / 2..GRACE * 2).contains(&elapsed),
+			"{version}: ended after {elapsed:?}"
+		);
 		drop((pair, _keep));
 	}
 }
