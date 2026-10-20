@@ -25,7 +25,11 @@ Decided with the maintainer on 2026-10-20:
   that builds an `fmp4::Import`: the importer itself (a builder like its
   `with_select`), `ContainerFormat` for `import/container.rs` and the FFI,
   and moq-hls's import args. Settle the exact shape with the maintainer in
-  the PR. Breaking: add a `moq-mux` `MIGRATE.md` entry.
+  the PR. The FFI option follows the `rs/moq-ffi` row of the AGENTS.md sync
+  table: `moq-c`, every hand-written wrapper (`py`, `swift`, `kt`, `dart`,
+  `go/wrapper`), `cpp/moq`, and their `doc/lib` pages expose it, so no
+  binding's fMP4 import silently changes without a way back. Breaking: add
+  `MIGRATE.md` entries for `moq-mux` and each affected binding.
 - Unwrapped output is `Legacy`, not LOC (maintainer choice). Each sample
   becomes one frame. Sample `i` is stamped `tfdt + sum(durations of samples
   before i) + composition_offset_i` in the track's timescale. The existing
