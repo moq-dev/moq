@@ -5,19 +5,16 @@
 A publisher's `track::Dynamic` receives range requests for misses instead of
 one request per group, and a track serves a subscription's ranges from one
 cursor, in its order, without duplicating a group, naming every sequence in
-range it won't deliver. A range end may be a `Time(pts)`, resolved by
-whoever holds the track. `requested_group` and `fetch_group` are replaced, not
+range it won't deliver. `requested_group` and `fetch_group` are replaced, not
 kept beside it.
 
 ## Plan
 
 A subscriber already reads only its own ranges, re-resolved when they are
-replaced, and a `Time(pts)` anchor resolves from the cached groups' starts, or
-is refused on an untimed track. What remains is the miss: one below the cache
-becomes a range request on `Dynamic` rather than a group request.
+replaced. What remains is the miss: one below the cache becomes a range request
+on `Dynamic` rather than a group request. Time anchors land separately; see
+[time anchors](/quest/m1/subscribe-ranges/time-anchors.md).
 
-- Pass a time anchor the cache can't resolve to the `track::Dynamic` handler
-  in its range request, and test one passed through.
 - Replace `requested_group` and `fetch_group` rather than keep both. Update
   every caller (relay, moq-archive, hls, the ladder) in the same PR,
   including the archive consumer's time resolution from its key listing if it

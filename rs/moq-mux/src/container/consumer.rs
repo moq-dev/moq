@@ -496,12 +496,19 @@ impl<F: Container> Consumer<F> {
 			// the gap outright, since no new group can arrive. That proof covers only
 			// sequences that never arrived: finishing the track ends new groups, not
 			// the frames still flowing on ones already open, so arrived groups are
-			// settled below by their own FIN, abort, or the budget.
+			// settled below by their own FIN, abort, or the budget. Sequences the
+			// subscriber's own ranges exclude never arrive either, so a gap between two
+			// ranges closes at once.
 			if let Some(front_sequence) = self.pending.front().map(|g| g.sequence)
 				&& front_sequence > self.current
 				&& let Some((_, next_start)) = next_group
-				&& (finished || max_timestamp.saturating_sub(next_start) >= self.max_delay)
-			{
+				&& (finished
+					|| max_timestamp.saturating_sub(next_start) >= self.max_delay
+					|| self.track.as_ref().is_some_and(|track| {
+						track
+							.next_in_range(self.current)
+							.is_none_or(|next| next >= front_sequence)
+					})) {
 				// A data marker has no timestamp to show the missing sequences held nothing.
 				let bare = self.pending.front().is_some_and(|group| group.bare);
 				if bare || !pts_contiguous(current_end.or(self.presented_end), next_start) {
@@ -3247,6 +3254,38 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
 		assert_eq!(micros, vec![0, 100_000], "the open group's late frames are delivered");
+	}
+
+	/// A gap between two ranges is never read, so the reader walks over it at once rather
+	/// than waiting a budget, or forever on an open track, for groups it never gets.
+	#[tokio::test]
+	async fn an_excluded_gap_between_ranges_does_not_stall() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(Duration::from_secs(10))
+			.with_ranges([
+				moq_net::track::Range::groups(0..1),
+				moq_net::track::Range::groups(10..11),
+			]);
+		let mut consumer = Consumer::new(
+			track.subscribe(subscription),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+		for sequence in [0, 5, 10] {
+			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+		}
+
+		let mut micros = Vec::new();
+		for _ in 0..2 {
+			let frame = tokio::time::timeout(Duration::from_millis(200), consumer.read_frame())
+				.await
+				.expect("the open track still delivers the later range")
+				.unwrap()
+				.expect("a frame");
+			micros.push(frame.timestamp.as_micros());
+		}
+		assert_eq!(micros, vec![0, 1_000_000]);
 	}
 
 	/// A relative start names its floor once resolved: delivery starts that many groups

@@ -176,6 +176,7 @@ impl Consumer {
 				generation: None,
 				copies: Vec::new(),
 				newest: None,
+				floor: None,
 				datagram: None,
 				groups: (0, Cap::from(..)),
 				groups_read: false,
@@ -428,12 +429,17 @@ impl Subscriber {
 	}
 
 	/// The floor the first copy answered with; see [`track::Subscriber::floor`]. Later
-	/// copies start where the reader got to, which names no floor of the reader's own.
+	/// copies start where the reader got to, which names no floor of the reader's own, so
+	/// it is kept once answered, past the first copy being let go.
 	pub(super) fn floor(&self) -> Option<u64> {
-		self.reader().copies.iter().find_map(|copy| match &copy.sub {
-			Sub::Ready(sub) if copy.floor.is_none() => Some(sub.floor()),
-			_ => None,
-		})?
+		let mut reader = self.reader();
+		if reader.floor.is_none() {
+			reader.floor = reader.copies.iter().find_map(|copy| match &copy.sub {
+				Sub::Ready(sub) if copy.floor.is_none() => Some(sub.floor()),
+				_ => None,
+			});
+		}
+		reader.floor.flatten()
 	}
 
 	/// Poll for sequences the serving copy gave up; see [`track::Subscriber::poll_drop`].
@@ -522,6 +528,8 @@ struct Reader {
 	copies: Vec<Copy>,
 	/// The newest group handed out: where a new copy is asked to start.
 	newest: Option<u64>,
+	/// The floor the first copy answered for the current ranges, once it answered.
+	floor: Option<Option<u64>>,
 	/// The newest datagram handed out, by Group and Object ID.
 	datagram: Option<(u64, u64)>,
 	/// The local group filter; see [`track::Subscriber::set_groups`].
@@ -544,6 +552,9 @@ impl Reader {
 			Poll::<()>::Pending
 		});
 		if let Some(sub) = changed {
+			if sub.ranges != self.mirrored.ranges {
+				self.floor = None;
+			}
 			self.mirrored = sub;
 			for copy in &mut self.copies {
 				copy.update(&self.mirrored);
@@ -3310,6 +3321,38 @@ mod test {
 				}
 			}
 		}
+	}
+
+	/// The floor the first copy answered stays once a route switch lets that copy go.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_floor_outlives_the_first_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_max_delay(Duration::from_secs(10))
+			.with_groups(5..);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		write(&a, 5);
+		assert_eq!(drain(&mut sub, false), [5]);
+		assert_eq!(sub.floor(), Some(5));
+
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 6);
+		assert_eq!(drain(&mut sub, false), [6]);
+		let readers = routes.readers.lock().unwrap();
+		let reader = readers[0].upgrade().unwrap();
+		assert_eq!(reader.lock().unwrap().copies.len(), 1, "the first copy was let go");
+		drop(readers);
+		assert_eq!(sub.floor(), Some(5));
 	}
 
 	#[test]

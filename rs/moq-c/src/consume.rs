@@ -4,7 +4,7 @@ use std::{
 	pin::Pin,
 	task::{Poll, ready},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::ffi::OnStatus;
 use crate::{
@@ -106,19 +106,11 @@ struct TaskEntry {
 /// A raw track task also accepts subscription updates while it is running.
 struct RawTaskEntry {
 	close: Option<oneshot::Sender<()>>,
-	control: RawControl,
+	update: mpsc::UnboundedSender<Option<moq_net::track::Subscription>>,
 	callback: OnStatus,
 }
 
-/// Where a raw track's subscription updates go.
-enum RawControl {
-	/// Waiting on SUBSCRIBE_OK, holding the latest update to apply once it arrives.
-	Pending(Option<moq_net::track::Subscription>),
-	/// Subscribed: updates apply at once, so a refusal reaches the caller.
-	Live(moq_net::track::Control),
-}
-
-/// Outcome of polling a raw track source alongside its close signal.
+/// Outcome of polling a raw track source alongside its control channels.
 enum RawStep<T> {
 	/// A delivered value: the next group, or the next frame within a group.
 	Item(T),
@@ -661,9 +653,10 @@ impl Consume {
 		let name = name.to_string();
 
 		let channel = oneshot::channel();
+		let (update, updates) = mpsc::unbounded_channel();
 		let entry = RawTaskEntry {
 			close: Some(channel.0),
-			control: RawControl::Pending(None),
+			update,
 			callback: on_frame,
 		};
 		let id = self.raw_task.insert(Some(entry))?;
@@ -671,22 +664,9 @@ impl Consume {
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(async move {
-				let track = broadcast.track(&name)?.subscribe(subscription.clone()).await?.ordered();
-				let control = track.control();
-				Self::update_raw(&control, Self::raw_subscription(subscription))?;
-				// Go live under the lock, so no later update lands before the pending one.
-				if let Some(entry) = State::lock()
-					.consume
-					.raw_task
-					.get_mut(id)
-					.and_then(|entry| entry.as_mut())
-				{
-					let pending = std::mem::replace(&mut entry.control, RawControl::Live(control.clone()));
-					if let RawControl::Pending(Some(subscription)) = pending {
-						Self::update_raw(&control, subscription)?;
-					}
-				}
-				Self::run_raw(on_frame, track, channel.1).await
+				let mut track = broadcast.track(&name)?.subscribe(subscription.clone()).await?.ordered();
+				Self::apply_raw_subscription(&mut track, subscription);
+				Self::run_raw(on_frame, track, channel.1, updates).await
 			}))
 			.await;
 
@@ -701,30 +681,24 @@ impl Consume {
 		Ok(id)
 	}
 
-	/// A raw reader's preferences, which join at the latest group unless a range names
-	/// a floor of its own.
-	fn raw_subscription(subscription: Option<moq_net::track::Subscription>) -> moq_net::track::Subscription {
+	/// Apply a raw reader's preferences, which join at the latest group unless a range
+	/// names a floor of its own.
+	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
 		let mut subscription = subscription.unwrap_or_default();
 		for range in &mut subscription.ranges {
 			if range.start == moq_net::track::Range::oldest().start {
 				range.start = moq_net::track::Range::live().start;
 			}
 		}
-		subscription
-	}
-
-	fn update_raw(control: &moq_net::track::Control, subscription: moq_net::track::Subscription) -> Result<(), Error> {
-		match control.update(subscription) {
-			// A closed track makes the update meaningless; the reader already sees the close.
-			Ok(()) | Err(moq_net::Error::Closed) => Ok(()),
-			Err(err) => Err(err.into()),
-		}
+		// A closed track makes the update meaningless; the reader already sees the close.
+		let _ = track.update(subscription);
 	}
 
 	async fn run_raw(
 		callback: OnStatus,
 		mut track: moq_net::track::Ordered,
 		mut close: oneshot::Receiver<()>,
+		mut updates: mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
 	) -> Result<(), Error> {
 		// Deliver every frame in sequence order, reading all frames within each
 		// group rather than the one-frame-per-group convenience. This is the
@@ -736,7 +710,7 @@ impl Consume {
 		loop {
 			let mut group =
 				match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::group::Consumer>, Error>> {
-					if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
 					match ready!(track.poll_next_group(waiter))? {
@@ -753,7 +727,7 @@ impl Consume {
 
 			loop {
 				let frame = match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
-					if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
+					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
 					match ready!(group.poll_read_frame(waiter))? {
@@ -777,6 +751,33 @@ impl Consume {
 		}
 	}
 
+	/// Poll the close and update channels, applying any subscription updates inline.
+	///
+	/// Returns `true` when the task must stop: either the consumer was closed
+	/// (`close` fired) or the update channel was dropped. The caller must then
+	/// unwind rather than poll `close` again, since a completed oneshot panics if
+	/// re-polled. Borrows `track` only for the duration of the call so the caller
+	/// can poll a track/group source afterwards.
+	fn poll_raw_control(
+		close: &mut oneshot::Receiver<()>,
+		updates: &mut mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
+		track: &mut moq_net::track::Ordered,
+		waiter: &moq_net::kio::Waiter,
+	) -> bool {
+		let mut cx = waiter.context();
+		if Pin::new(close).poll(&mut cx).is_ready() {
+			return true;
+		}
+
+		loop {
+			match updates.poll_recv(&mut cx) {
+				Poll::Ready(Some(subscription)) => Self::apply_raw_subscription(track, subscription),
+				Poll::Ready(None) => return true,
+				Poll::Pending => return false,
+			}
+		}
+	}
+
 	pub fn raw_track_update(
 		&mut self,
 		track: Id,
@@ -787,11 +788,7 @@ impl Consume {
 			.get_mut(track)
 			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::TrackNotFound)?;
-		let subscription = Self::raw_subscription(subscription);
-		match &mut entry.control {
-			RawControl::Pending(pending) => *pending = Some(subscription),
-			RawControl::Live(control) => Self::update_raw(control, subscription)?,
-		}
+		entry.update.send(subscription).map_err(|_| Error::TrackNotFound)?;
 		Ok(())
 	}
 

@@ -4514,8 +4514,7 @@ impl kio::Task for Fetching {
 ///   publisher** and **this subscriber's read filter**. The publisher sees the union across
 ///   every live subscriber, but each subscriber reads only the groups its own ranges cover,
 ///   resolved where it is served: a relative anchor counted back from the latest group (or
-///   the first to arrive, before any exists) and a time anchor from the cached groups'
-///   starts, again whenever the ranges are replaced.
+///   the first to arrive, before any exists), again whenever the ranges are replaced.
 /// - [`Self::set_groups`] narrows **this subscriber's reads** further, without changing the
 ///   publisher's demand.
 ///
@@ -5675,6 +5674,17 @@ impl Subscriber {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.filter.window.start(),
 			Inner::Resume(resume, _) => resume.floor(),
+		}
+	}
+
+	/// The lowest group at or above `from` this subscriber's ranges cover, `None` when
+	/// none does: the groups between are never read, so a reader waiting on each group in
+	/// sequence need not wait for them. `Some(from)` while a relative start waits on the
+	/// first group, and for a reader that follows a route, which can't say.
+	pub fn next_in_range(&self, from: u64) -> Option<u64> {
+		match &self.inner {
+			Inner::Plain(cursor) => cursor.filter.window.runs(from).next().map(|run| *run.start()),
+			Inner::Resume(..) => Some(from),
 		}
 	}
 

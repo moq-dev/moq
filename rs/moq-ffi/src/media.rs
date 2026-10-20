@@ -1330,10 +1330,7 @@ impl MoqMediaTrackConsumer {
 		// subscription if init parsing fails.
 		let media = media_container(container)?;
 		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
-		let subscription = subscription
-			.map(moq_net::track::Subscription::try_from)
-			.transpose()?
-			.unwrap_or_default();
+		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
 		let track = broadcast
 			.driver
 			.watch(async { Ok(resolved.track(&name)?.subscribe(subscription).await?) })

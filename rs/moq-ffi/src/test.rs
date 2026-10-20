@@ -915,17 +915,15 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 		tokio::spawn(async move { consumer.read_frame().await })
 	};
 
-	consumer
-		.update(MoqSubscription {
-			priority: 10,
-			max_delay_us: 25_000,
-			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0, frame: 0 },
-				end: None,
-			}]),
-			order: None,
-		})
-		.unwrap();
+	consumer.update(MoqSubscription {
+		priority: 10,
+		max_delay_us: 25_000,
+		ranges: Some(vec![MoqRange {
+			start: MoqAnchor::Absolute { group: 0, frame: 0 },
+			end: None,
+		}]),
+		order: None,
+	});
 
 	let payload = b"updated subscription".to_vec();
 	track
@@ -3910,17 +3908,15 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 		spawn_parked(async move { consumer.next_group().await }).await
 	};
 
-	consumer
-		.update(MoqSubscription {
-			priority: 10,
-			max_delay_us: 25_000,
-			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0, frame: 0 },
-				end: None,
-			}]),
-			order: None,
-		})
-		.unwrap();
+	consumer.update(MoqSubscription {
+		priority: 10,
+		max_delay_us: 25_000,
+		ranges: Some(vec![MoqRange {
+			start: MoqAnchor::Absolute { group: 0, frame: 0 },
+			end: None,
+		}]),
+		order: None,
+	});
 
 	let sequence = track.append_datagram(datagram_frame(b"after-update")).unwrap();
 	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
@@ -6715,7 +6711,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 		}]),
 		order: Some(MoqOrder::Ascending),
 	};
-	let converted = moq_net::track::Subscription::try_from(subscription.clone()).unwrap();
+	let converted = moq_net::track::Subscription::from(subscription.clone());
 	assert_eq!(converted.order, moq_net::track::Order::Ascending);
 	assert_eq!(
 		converted.ranges,
@@ -6736,62 +6732,4 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 		sequences.push(group.sequence());
 	}
 	assert_eq!(sequences, vec![0, 1, 2]);
-}
-
-/// A time anchor starts at the group containing it, and an untimed track refuses one.
-#[tokio::test]
-async fn time_anchors_start_at_the_containing_group() {
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
-	for timestamp_us in [0, 1_000, 2_000] {
-		let group = track.append_group().unwrap();
-		group
-			.write_frame(MoqFrame {
-				payload: b"x".to_vec(),
-				timestamp_us: Some(timestamp_us),
-			})
-			.unwrap();
-		group.finish().unwrap();
-	}
-
-	let since = |timestamp_us| MoqSubscription {
-		priority: 0,
-		max_delay_us: 10_000_000,
-		ranges: Some(vec![MoqRange {
-			start: MoqAnchor::Time { timestamp_us },
-			end: None,
-		}]),
-		order: Some(MoqOrder::Ascending),
-	};
-	let consumer = track.consume(Some(since(1_500))).unwrap();
-	let mut sequences = Vec::new();
-	for _ in 0..2 {
-		let group = tokio::time::timeout(TIMEOUT, consumer.recv_group())
-			.await
-			.expect("timed out waiting for a cached group")
-			.unwrap()
-			.expect("expected a group");
-		sequences.push(group.sequence());
-	}
-	assert_eq!(sequences, vec![1, 2]);
-
-	let untimed = broadcast
-		.publish_track(
-			"status".into(),
-			Some(MoqTrackInfo {
-				timescale: None,
-				..timed_info()
-			}),
-		)
-		.unwrap();
-	let consumer = untimed.consume(None).unwrap();
-	assert!(matches!(
-		consumer.update(since(0)),
-		Err(MoqError::Protocol {
-			details: MoqProtocolError {
-				kind: MoqProtocolKind::TimestampMismatch,
-				..
-			}
-		})
-	));
 }

@@ -5,11 +5,9 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-### Ranges filter reads, and anchors can name a time (#5929)
+### Ranges filter reads (#5929)
 
 A subscription now reads only the groups its own `ranges` cover, rather than starting at the lowest one and taking whatever arrives.
-`MoqAnchor` gains `Time { timestamp_us }`, the group containing that presentation time, so exhaustive matches need an arm for it.
-`MoqTrackConsumer::update` now returns `Result<(), MoqError>`, failing with `TimestampMismatch` on a time anchor an untimed track can't serve.
 
 ### Track demand reports the wanted group (#5930)
 
