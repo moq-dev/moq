@@ -109,12 +109,15 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 }
 
 // TrackInfo holds publisher-side track properties: priority, how long a
-// non-latest group is cached (nil for no limit), and the timescale in ticks per
-// second (nil means untimed on both publish and receive). A zero Priority is
-// the least urgent; set 127 for the midpoint a nil TrackInfo uses.
+// non-latest group is cached (nil for no limit), how many times its first frame
+// a group's later bytes may grow before a joining subscriber asks for a new group
+// (nil never asks), and the timescale in ticks per second (nil means untimed on
+// both publish and receive). A zero Priority is the least urgent; set 127 for the
+// midpoint a nil TrackInfo uses.
 type TrackInfo struct {
 	Priority  uint8
 	MaxAge    *time.Duration
+	Refresh   *uint32
 	Timescale *uint64
 }
 
@@ -123,11 +126,11 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 		return nil, nil
 	}
 	maxAge, err := optMicros("max age", info.MaxAge)
-	return &ffi.MoqTrackInfo{Priority: info.Priority, MaxAgeUs: maxAge, Timescale: info.Timescale}, err
+	return &ffi.MoqTrackInfo{Priority: info.Priority, MaxAgeUs: maxAge, Refresh: info.Refresh, Timescale: info.Timescale}, err
 }
 
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
-	return TrackInfo{Priority: info.Priority, MaxAge: optFromMicros(info.MaxAgeUs), Timescale: info.Timescale}
+	return TrackInfo{Priority: info.Priority, MaxAge: optFromMicros(info.MaxAgeUs), Refresh: info.Refresh, Timescale: info.Timescale}
 }
 
 // ConnectionStats holds transport metrics for a session (RTT, bandwidth, byte

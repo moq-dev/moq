@@ -4,11 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Typed admission refusals (#5996)
+
+`Error::Refused` now carries a `Refusal`; construct `Error::Refused(Refusal::default())` for an unattributed refusal and match `Error::Refused(refusal)` to read `reason`, `root`, and `tier`.
+HTTP auth servers can return that JSON shape with 403; legacy plain-text 401/403 still refuses without attribution.
+`serve::Refusal::{NoAccess,TokenLimit,RemoteLimit}` now carry an optional verified `root`, and `Expired` carries the verified root.
+
 ### `Grant` reads the ambient clock
 
 `Grant::deadline` returns a `moq_clock::Instant` instead of a `tokio::time::Instant`, and no longer needs the `tokio` feature.
 Wait on it with `moq_clock::sleep_until`, which runs on tokio's clock in production.
 `deadline` and `validate` read wall time from `moq_clock::wall()`, so a test on `moq_clock::sim` or a `moq_clock::Manual` clock decides when a grant expires; stamp `expires` from that clock too.
+
+`Key::verify` and the reference server's default expiry use that wall clock too.
+Session `End` durations and the server's idle-session accounting use its monotonic clock, so advancing controlled time advances those durations without a host-clock wait.
 
 ### Roles carry `Access` (#5697)
 

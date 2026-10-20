@@ -165,16 +165,22 @@ const local: Record<string, () => Promise<string | undefined>> = {
 		const track = broadcast.publishTrack("data", TIMED);
 		const demand = track.demand();
 		const consumer = track.consume(undefined);
-		await within(demand.used(), 1000, "demand.used");
+		const wanted = async () => {
+			while ((await demand.wantedChanged()) === undefined) {}
+		};
+		const unwanted = async () => {
+			while ((await demand.wantedChanged()) !== undefined) {}
+		};
+		await within(wanted(), 1000, "demand wanted");
 		const abort = new AbortController();
 		const read = consumer.recvGroup({ signal: abort.signal }).catch(() => undefined);
 		// The generated `*Like` return types omit uniffiDestroy; only the class declares it.
 		(consumer as MoqTrackConsumer).uniffiDestroy();
 		await sleep(20);
-		const heldByFuture = demand.isUsed();
+		const heldByFuture = demand.wanted() !== undefined;
 		abort.abort();
 		await read;
-		await within(demand.unused(), 1000, "demand.unused after abort");
+		await within(unwanted(), 1000, "demand unwanted after abort");
 		if (!heldByFuture) throw new Error("demand dropped before the pending future was freed");
 		return undefined;
 	},

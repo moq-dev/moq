@@ -121,18 +121,22 @@ class TrackInfo:
     """Publisher-side track properties, mirroring moq-net's ``track::Info``.
 
     ``priority`` defaults to 127, the middle of the range. ``max_age`` is how long the
-    publisher caches a non-latest group, ``None`` for no limit. ``timescale`` is ticks
-    per second: ``None`` means the track is untimed, on both publish and receive.
+    publisher caches a non-latest group, ``None`` for no limit. ``refresh`` is how many
+    times its first frame a group's later bytes may grow before a joining subscriber
+    asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
+    ``None`` means the track is untimed, on both publish and receive.
     """
 
     priority: int = 127
     max_age: timedelta | None = None
+    refresh: int | None = None
     timescale: int | None = None
 
     def _ffi(self) -> MoqTrackInfo:
         return MoqTrackInfo(
             priority=self.priority,
             max_age_us=_opt_us(self.max_age, "max_age"),
+            refresh=self.refresh,
             timescale=self.timescale,
         )
 
@@ -141,6 +145,7 @@ class TrackInfo:
         return TrackInfo(
             priority=info.priority,
             max_age=None if info.max_age_us is None else _from_us(info.max_age_us),
+            refresh=info.refresh,
             timescale=info.timescale,
         )
 

@@ -31,4 +31,4 @@ budget no longer decides which jobs get a cache. Only workflows running on
 
 ## Related
 
-- [Platform in the merge queue](/quest/m0/ci/platform-queue.md) - the macOS and Windows jobs this gives a cache
+- [Release gates](/quest/m0/ci/release-gates.md) - the macOS and Windows jobs this gives a cache

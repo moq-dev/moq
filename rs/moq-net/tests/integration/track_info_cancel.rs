@@ -48,13 +48,10 @@ async fn abandoned_request_reaches_the_publisher(version: &str, relays: u64) {
 
 	// The publisher never answers; the reader gives up.
 	drop(waiting);
-	moq_clock::timeout(
-		Duration::from_secs(5),
-		kio::wait(|waiter| request.demand().poll_unused(waiter)),
-	)
-	.await
-	.unwrap_or_else(|_| panic!("{version:?} over {relays} relays: the publisher's request is still wanted"))
-	.expect("the pending request is still open");
+	moq_clock::timeout(Duration::from_secs(5), crate::support::unwanted(request.demand()))
+		.await
+		.unwrap_or_else(|_| panic!("{version:?} over {relays} relays: the publisher's request is still wanted"))
+		.expect("the pending request is still open");
 }
 
 #[moq_clock::test]
@@ -106,7 +103,7 @@ async fn withdrawn_broadcast_releases_track_info(version: &str, answered: bool, 
 	};
 	let finished = pair.client_transport.finished_streams();
 	broadcast.close();
-	moq_clock::timeout(Duration::from_secs(5), kio::wait(|waiter| demand.poll_unused(waiter)))
+	moq_clock::timeout(Duration::from_secs(5), crate::support::unwanted(demand))
 		.await
 		.unwrap_or_else(|_| panic!("{version}, answered={answered}, explicit={explicit}: TRACK outlived its broadcast"))
 		.expect("the publisher still owns its track");

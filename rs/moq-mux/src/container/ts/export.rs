@@ -43,6 +43,7 @@ use moq_net::Timestamp;
 use super::catalog::Catalog as _;
 use crate::catalog::Stream;
 use crate::catalog::hang::Catalog;
+use crate::codec::annexb::InBandCodec;
 use crate::codec::video::{Hrd, Reorder};
 use crate::codec::{aac, annexb, opus};
 use crate::container::decode::{DecodeClock, MAX_REORDER};
@@ -363,8 +364,8 @@ impl Track {
 			return Ok(());
 		}
 		let is_video = matches!(self.kind, Kind::Video(_));
-		// A placed PES is judged at release, against the keyframe's departure ([`Export::leads_video`]).
-		let aligned = !is_video && !matches!(self.kind, Kind::PesPacket { .. });
+		// A placed frame is judged at release, against the keyframe's departure ([`Export::leads_video`]).
+		let aligned = !is_video && !self.kind.placed();
 		loop {
 			if !input.waiting_for_header && input.jitter.full(&self.pid) {
 				break;
@@ -485,11 +486,11 @@ impl Track {
 	}
 
 	/// How far ahead of its decode time the track's units may go out under `delay`: as far
-	/// as [`schedule::ahead`] lets them, and nothing without a delay or for a placed PES,
+	/// as [`schedule::ahead`] lets them, and nothing without a delay or for a placed frame,
 	/// whose timestamp is when it goes out.
 	fn ahead(&self, delay: Duration) -> Duration {
-		// A placed PES goes out at its placement, never ahead of it.
-		if delay.is_zero() || matches!(self.kind, Kind::PesPacket { .. }) {
+		// A placed frame goes out at its placement, never ahead of it.
+		if delay.is_zero() || self.kind.placed() {
 			return Duration::ZERO;
 		}
 		let slots = schedule::ahead(self.buffer().as_ref(), schedule::slot(delay.as_nanos()));
@@ -729,6 +730,11 @@ enum Kind {
 }
 
 impl Kind {
+	/// Its timestamp is arrival on the program clock, rather than a decode deadline.
+	fn placed(&self) -> bool {
+		matches!(self, Self::PesPacket { .. } | Self::Verbatim { .. })
+	}
+
 	/// The track suffix [`Import`](super::Import) gives a PID carrying this kind, so a stream's
 	/// row is named alike at both edges.
 	fn suffix(&self) -> &'static str {
@@ -844,8 +850,9 @@ enum SiState {
 	Requesting(crate::Binding, String),
 	/// Waiting for the subscription to resolve.
 	Subscribing(kio::Pending<moq_net::track::Subscribing>),
-	/// The resolved subscription, reading snapshot groups.
-	Active(moq_net::track::Ordered),
+	/// The resolved subscription, reading snapshot groups. Boxed: a reader is far larger
+	/// than the other states.
+	Active(Box<moq_net::track::Ordered>),
 	/// The track ended or failed; the last complete snapshot keeps re-emitting,
 	/// mirroring how a real mux repeats its tables between (absent) revisions.
 	Done,
@@ -931,7 +938,7 @@ impl SiTrack {
 				}
 			};
 			self.state = match resolved {
-				Ok(track) => SiState::Active(track.ordered()),
+				Ok(track) => SiState::Active(Box::new(track.ordered())),
 				Err(err) => {
 					tracing::warn!(%err, "SI subscription failed; carrying the last snapshot");
 					SiState::Done
@@ -1191,7 +1198,8 @@ where
 			self.video_start = self.first_video_pts();
 			if let Some(start) = self.video_start {
 				for track in self.tracks.values_mut() {
-					if !matches!(track.kind, Kind::Video(_) | Kind::PesPacket { .. })
+					if !matches!(track.kind, Kind::Video(_))
+						&& !track.kind.placed()
 						&& track.pending.as_ref().is_some_and(|p| p.frame.timestamp < start)
 					{
 						track.pending = None;
@@ -1828,7 +1836,7 @@ where
 	/// out further ahead of its decode time than the other tracks, so what they release before
 	/// it presents ahead of it too.
 	///
-	/// A placed PES has no presentation to compare: it goes out at its placement, so it is
+	/// A placed frame has no presentation to compare: it goes out at its placement, so it is
 	/// dropped only when that comes before the keyframe departs. Both are release times a
 	/// delay before their jitter buffer keys, so it compares keys, and keeps whatever goes
 	/// out beside or after the keyframe even when its PTS is earlier.
@@ -1843,7 +1851,7 @@ where
 			}
 			return false;
 		}
-		let placed = matches!(kind, Kind::PesPacket { .. });
+		let placed = kind.placed();
 		if let Some(departed) = self.video_out {
 			return match placed {
 				true => queued.key < departed,
@@ -1946,9 +1954,7 @@ where
 		let mut tracks: Vec<&Track> = self.tracks.values().collect();
 		tracks.sort_by_key(|t| t.pid);
 
-		// Section-framed verbatim streams (SCTE-35, ...) are stamped on the video clock
-		// and carry no PTS for the PCR, so they need a video track; audio alone would
-		// leave them pinned to zero.
+		// Section-framed streams require a video track in the supported program layout.
 		let needs_clock = tracks.iter().any(|t| matches!(&t.kind, Kind::Verbatim { .. }));
 		let video = tracks.iter().find(|t| matches!(t.kind, Kind::Video(_)));
 		anyhow::ensure!(
@@ -2181,8 +2187,8 @@ where
 			}
 		}
 
-		if let Kind::PesPacket { stream_type } = kind {
-			return self.place(name, stream_type, &frame, out);
+		if kind.placed() {
+			return self.place(name, &frame, out);
 		}
 		match es_payload {
 			// Section-framed verbatim (SCTE-35, ...) rides in private sections, not PES;
@@ -2212,7 +2218,7 @@ where
 		self.push_unit(name, pid, decode, out, keyframe, Vec::new())
 	}
 
-	/// Queue `frame`, one whole PES packet, unchanged on `name`'s PID behind `tables`, its
+	/// Queue a whole PES or section unchanged on `name`'s PID behind `tables`, its
 	/// first byte going out at the frame's timestamp, the source's placement, and no earlier.
 	///
 	/// A PID the T-STD models holds the PES's bytes in its decoder buffer until they decode,
@@ -2220,27 +2226,52 @@ where
 	/// unit that begins in it, so each one after counts on from there and leaves at its own time.
 	/// The bytes ahead of the first end a frame an earlier PES began; they leave with it,
 	/// which only overstates what the buffer holds. A PES without a PTS holds nothing there.
-	fn place(&mut self, name: &str, stream_type: u8, frame: &Frame, tables: Vec<u8>) -> anyhow::Result<()> {
-		let pes = PesPacket::parse(&frame.payload, stream_type)
-			.with_context(|| format!("MPEG-TS track '{name}' carries a malformed PES packet"))?;
+	fn place(&mut self, name: &str, frame: &Frame, tables: Vec<u8>) -> anyhow::Result<()> {
 		let track = self.tracks.get(name).context("missing track")?;
+		let pes = match track.kind {
+			Kind::PesPacket { stream_type } => Some(
+				PesPacket::parse(&frame.payload, stream_type)
+					.with_context(|| format!("MPEG-TS track '{name}' carries a malformed PES packet"))?,
+			),
+			Kind::Verbatim { .. } => None,
+			_ => unreachable!("a placed track"),
+		};
 		let pid = track.pid;
 		let place = frame.timestamp.as_nanos();
-		let decode = pes.pts.map(|pts| unwrap_pts(pts, frame.timestamp));
-		let dolby = Dolby::described(&track.descriptors).filter(|_| stream_type == 0x06);
-		let frames = match (decode, dolby) {
-			(Some(decode), Some(codec)) => dolby_removals(codec, &frame.payload[pes.payload..], decode),
+		let decode = pes
+			.as_ref()
+			.and_then(|pes| pes.pts)
+			.map(|pts| unwrap_pts(pts, frame.timestamp));
+		let dolby = Dolby::described(&track.descriptors)
+			.filter(|_| matches!(track.kind, Kind::PesPacket { stream_type: 0x06 }));
+		let frames = match (&pes, decode, dolby) {
+			(Some(pes), Some(decode), Some(codec)) => dolby_removals(codec, &frame.payload[pes.payload..], decode),
 			_ => Vec::new(),
 		};
 		let buffer = track.buffer();
 		let mut out = std::mem::take(&mut self.tables);
 		out.extend_from_slice(&tables);
-		self.write_pes_packet(&mut out, pid, &frame.payload)?;
+		let prefix = match pes {
+			Some(_) => {
+				self.write_pes_packet(&mut out, pid, &frame.payload)?;
+				0
+			}
+			None => {
+				self.write_section(&mut out, pid, &frame.payload)?;
+				1
+			}
+		};
 		if let Some(buffer) = buffer {
 			self.schedule.set_buffer(pid, buffer);
 		}
-		self.schedule
-			.push_placed(pid, (place, decode.unwrap_or(place)), out, frame.keyframe, frames)
+		self.schedule.push_placed(
+			pid,
+			(place, decode.unwrap_or(place)),
+			prefix,
+			out,
+			frame.keyframe,
+			frames,
+		)
 	}
 
 	/// Mux an audio frame into `name`'s PES, sending the PES on first if the frame cannot join
@@ -3209,25 +3240,33 @@ fn ac3_sync_prefix(bytes: &[u8]) -> bool {
 }
 
 /// Build the Annex-B elementary-stream payload for one video frame: rewrite the
-/// length-prefixed NALs to start-code-delimited NALs, prepending the parameter
-/// sets (SPS/PPS, plus VPS for H.265) from the avcC/hvcC on keyframes so a
-/// receiver can tune in mid-stream.
+/// length-prefixed NALs to start-code-delimited NALs, injecting the parameter
+/// sets (SPS/PPS, plus VPS for H.265) from the avcC/hvcC after a leading AUD on
+/// keyframes so a receiver can tune in mid-stream.
 fn video_es_payload(stream_type: StreamType, description: Option<&Bytes>, frame: &Frame) -> anyhow::Result<Vec<u8>> {
 	let description = description.context("video codec config (avcC/hvcC) not resolved")?;
-	let (length_size, params) = match stream_type {
-		StreamType::H264 => crate::codec::h264::avcc_params(description)?,
-		StreamType::H265 => crate::codec::h265::hvcc_params(description)?,
+	let (codec, (length_size, params)) = match stream_type {
+		StreamType::H264 => (InBandCodec::H264, crate::codec::h264::avcc_params(description)?),
+		StreamType::H265 => (InBandCodec::H265, crate::codec::h265::hvcc_params(description)?),
 		other => anyhow::bail!("unsupported TS video stream type {other:?}"),
 	};
 
 	let mut out = Vec::with_capacity(frame.payload.len() + 64);
+	let mut nals = annexb::length_prefixed_nals(&frame.payload, length_size)?;
 	if frame.keyframe {
+		if let Some(aud) = nals.take_delimiter(codec)? {
+			out.extend_from_slice(&annexb::START_CODE);
+			out.extend_from_slice(aud);
+		}
 		for nal in &params {
 			out.extend_from_slice(&annexb::START_CODE);
 			out.extend_from_slice(nal);
 		}
 	}
-	annexb::length_prefixed_to_annexb(&frame.payload, length_size, &mut out)?;
+	for nal in nals {
+		out.extend_from_slice(&annexb::START_CODE);
+		out.extend_from_slice(nal?);
+	}
 	Ok(out)
 }
 
@@ -3454,8 +3493,168 @@ mod tests {
 		slot, unwrap_pts, verbatim_buffer,
 	};
 
+	/// The same available video/audio backlog must choose the same start in either fill order.
+	#[tokio::test(start_paused = true)]
+	async fn track_fill_observes_every_available_track_before_acquisition() {
+		use crate::catalog::hang::Container;
+		use crate::container::{Kind as MediaKind, Producer};
+
+		for order in [[0, 1], [1, 0]] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let mut publishers = Vec::new();
+			for name in ["video", "audio"] {
+				let track = broadcast.create_track(name, hang::container::track_info(0)).unwrap();
+				publishers.push(Producer::new(track, Container::Legacy(MediaKind::Data)));
+			}
+			let source = crate::source::announced(&broadcast.consume()).await;
+			let mut tracks = Vec::new();
+			for (pid, name, kind) in [
+				(1, "video", Kind::Video(mpeg2ts::es::StreamType::H264)),
+				(2, "audio", Kind::Mp2 { sample_rate: 48_000 }),
+			] {
+				let source = super::ExportSource::for_stream(&source, name, Duration::from_secs(2)).unwrap();
+				let mut track = super::Track::new(source, kind);
+				track.pid = pid;
+				tracks.push(track);
+			}
+			let frame = |at| super::Frame {
+				timestamp: ms(at),
+				duration: None,
+				payload: bytes::Bytes::from_static(b"frame"),
+				keyframe: at % 600 == 0,
+			};
+			let start = moq_clock::now();
+			let mut jitter = super::jitter::Buffer::new(Duration::from_millis(500));
+			jitter.expect([1, 2]);
+			let mut trimmed = 0;
+			for publisher in &mut publishers {
+				publisher.write(frame(0)).unwrap();
+			}
+			// As in Export::poll_next, the first held frame of each track arrives first.
+			kio::wait(|waiter| {
+				for track in &mut tracks {
+					track
+						.fill(
+							"track",
+							waiter,
+							&mut super::Input {
+								waiting_for_header: false,
+								video_start: None,
+								jitter: &mut jitter,
+								trimmed: &mut trimmed,
+							},
+						)
+						.unwrap();
+				}
+				if jitter.len() == 2 {
+					std::task::Poll::Ready(())
+				} else {
+					std::task::Poll::Pending
+				}
+			})
+			.await;
+			for (index, publisher) in publishers.iter_mut().enumerate() {
+				let end = if index == 0 { 1_200 } else { 800 };
+				for at in (40..=end).step_by(40) {
+					publisher.write(frame(at)).unwrap();
+				}
+				publisher.finish().unwrap();
+			}
+			let waiter = kio::Waiter::noop();
+			for index in order {
+				tracks[index]
+					.fill(
+						"track",
+						&waiter,
+						&mut super::Input {
+							waiting_for_header: false,
+							video_start: None,
+							jitter: &mut jitter,
+							trimmed: &mut trimmed,
+						},
+					)
+					.unwrap();
+			}
+			assert!(jitter.poll_next(&waiter).is_pending());
+			// The last available audio frame, including its scheduling lead, anchors both orders.
+			let (decode, key, _) = tracks[1].released.unwrap();
+			assert_eq!(decode.as_micros(), 800_000);
+			assert_eq!(jitter.at(key), Some(start + Duration::from_millis(500)), "{order:?}");
+			tokio::time::advance(Duration::from_millis(500)).await;
+			let video = std::iter::from_fn(|| match jitter.poll_next(&waiter) {
+				std::task::Poll::Ready(ready) => Some(ready),
+				std::task::Poll::Pending => None,
+			})
+			.find(|ready| ready.track == 1)
+			.expect("a video start");
+			assert_eq!(video.item.frame.timestamp.as_micros(), 600_000, "{order:?}");
+		}
+	}
+
 	fn ms(value: u64) -> Timestamp {
 		Timestamp::from_millis(value).unwrap()
+	}
+
+	#[test]
+	fn video_es_payload_keeps_aud_first() {
+		for (stream_type, params, aud, slice) in [
+			(
+				super::StreamType::H264,
+				vec![vec![0x67, 0x42, 0, 0x1f], vec![0x68, 0xce]],
+				vec![0x09, 0x10],
+				vec![0x65, 0x88],
+			),
+			(
+				super::StreamType::H265,
+				vec![vec![0x40, 1], vec![0x42, 1], vec![0x44, 1]],
+				vec![0x46, 1, 0x10],
+				vec![0x26, 1, 0x88],
+			),
+		] {
+			let params: Vec<bytes::Bytes> = params.into_iter().map(bytes::Bytes::from).collect();
+			let description = if stream_type == super::StreamType::H264 {
+				crate::codec::h264::build_avcc(&params[..1], &params[1..]).unwrap()
+			} else {
+				let mut hvcc = vec![0; 23];
+				hvcc[21] = 3;
+				hvcc[22] = 3;
+				for (kind, nal) in (32..=34).zip(&params) {
+					hvcc.extend_from_slice(&[kind, 0, 1]);
+					hvcc.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+					hvcc.extend_from_slice(nal);
+				}
+				hvcc.into()
+			};
+			for keyframe in [false, true] {
+				for leading in [None, Some(aud.as_slice())] {
+					let mut payload = Vec::new();
+					for nal in leading.into_iter().chain([slice.as_slice()]) {
+						payload.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+						payload.extend_from_slice(nal);
+					}
+					let frame = super::Frame {
+						timestamp: ms(0),
+						payload: payload.into(),
+						keyframe,
+						duration: None,
+					};
+					let mut expected = Vec::new();
+					if let Some(aud) = leading {
+						expected.extend_from_slice(&super::annexb::START_CODE);
+						expected.extend_from_slice(aud);
+					}
+					if keyframe {
+						expected.extend_from_slice(&super::annexb::build_prefix(&params));
+					}
+					expected.extend_from_slice(&super::annexb::START_CODE);
+					expected.extend_from_slice(&slice);
+					assert_eq!(
+						super::video_es_payload(stream_type, Some(&description), &frame).unwrap(),
+						expected
+					);
+				}
+			}
+		}
 	}
 
 	/// A six-block E-AC-3 sync frame of 512 bytes: `stream` is byte 2's top bits (strmtyp,

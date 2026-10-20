@@ -651,9 +651,12 @@ class Reader implements ResumeSource {
 			const serving = this.#serving();
 			const view = serving && hooks.peekLargest(serving.sub);
 			const largest = view?.largest;
+			const { start, end } = this.#shell.cursor.peek();
 			// A replacement copy can start below what an earlier one reported.
 			if (
 				largest &&
+				largest.group >= start &&
+				(end === undefined || largest.group < end) &&
 				(!seen || largest.group > seen.group || (largest.group === seen.group && largest.frame > seen.frame))
 			)
 				return largest;
@@ -666,7 +669,7 @@ class Reader implements ResumeSource {
 					for (const dispose of disposes) dispose();
 					resolve();
 				};
-				disposes.push(this.changed(wake), this.#shell.closed.changed(wake));
+				disposes.push(this.changed(wake), this.#shell.closed.changed(wake), this.#shell.cursor.changed(wake));
 				if (serving) disposes.push(hooks.largestChanged(serving.sub, wake));
 			});
 		}

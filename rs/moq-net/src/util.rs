@@ -275,6 +275,17 @@ impl Drop for TaskSet {
 	}
 }
 
+/// Ready once nothing wants the track, or it closed; otherwise arm `waiter` for a change.
+#[cfg(feature = "async")]
+pub(crate) fn poll_unwanted(demand: &mut crate::track::Demand, waiter: &kio::Waiter) -> Poll<()> {
+	// Drain the changes so the waiter stays registered, then read where demand settled.
+	while let Poll::Ready(Ok(Some(_))) = demand.poll_wanted_changed(waiter) {}
+	match demand.wanted() {
+		None => Poll::Ready(()),
+		Some(_) => Poll::Pending,
+	}
+}
+
 #[cfg(all(test, feature = "async"))]
 mod tests {
 	use std::sync::{

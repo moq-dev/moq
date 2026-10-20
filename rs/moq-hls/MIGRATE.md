@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Imports always anchor their own timebase (#5967)
+
+`import::Config::timebase` and `Error::ForeignTimebase` are removed.
+Drop the field from `Config`, and any match arm on `ForeignTimebase`.
+Each import mints its timebase from the catalog it writes, and its first fragment anchors it.
+A placed timebase only made redundant importers share timestamps; each importer now publishes its own epoch instead.
+
+### A rendition waits for its own timeline (#6009)
+
+`export::Broadcaster::rendition` and the `renditions()` cursor's `Event::Added` see a rendition only once the catalog advertises its own timeline, not as soon as its init is known.
+An unhinted publisher declares that timeline after the rendition's first record, so feed media until then instead of waiting for `Added` or `Rendition::init` first.
+
 ### Playlists take an optional range (#5705)
 
 `export::Rendition::playlist(query)` is `playlist(range, query)`.

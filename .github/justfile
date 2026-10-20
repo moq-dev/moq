@@ -10,6 +10,7 @@ check:
 
 # Tests of repository tooling; nightly, not on every pull request.
 test:
+    python3 sh/coverage.test.py
     python3 sh/size/report.test.py
     python3 sh/size/release.test.py
     python3 sh/size/nightly.test.py
@@ -26,7 +27,7 @@ test:
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
     python3 sh/gh/ffi.test.py
-    bun test sh/gh/ffi.test.ts
+    bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts
     python3 sh/rs/package-rename.test.py
     python3 sh/rs/select.test.py
     python3 sh/js/workspace.test.py

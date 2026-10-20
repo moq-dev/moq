@@ -1236,7 +1236,7 @@ async fn an_embedded_decider_admits_and_revokes() {
 	let (refusing, mut refusals) = moq_relay::auth::Auth::embedded("test-relay");
 	tokio::spawn(async move {
 		while let Some(admission) = refusals.next().await {
-			admission.refuse(moq_relay::auth::Error::Refused);
+			admission.refuse(moq_relay::auth::Error::Refused(Default::default()));
 		}
 	});
 	let (refused_port, refusing_relay) = spawn_relay(refusing).await;
