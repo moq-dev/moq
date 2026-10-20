@@ -18,13 +18,18 @@ against their own share instead of the whole downlink.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-17 (see the
-[epic](/quest/m2/probe/README.md)):
+Decided with the maintainer on 2026-10-20: this moved to m1 with
+[native probing](/quest/m1/probe-native.md) and the native
+[rung disable](/quest/m1/simulcast-rung-disable.md), so a native publisher's
+stopped rendition can resume in the next breaking release. The rest of the
+[epic](/quest/m2/probe/README.md) stays in m2.
+
+Decided with the maintainer on 2026-10-17 (see the epic):
 
 - **Publisher side: reuse the reservation.** The local send target is the sum
   of the `max` ceilings of every live `Reservation` on the connection's
   `bandwidth::Allocator`, including a disabled rung's and an undemanded
-  track's, because [rung disable](/quest/m2/probe/simulcast-rung-disable.md)
+  track's, because [rung disable](/quest/m1/simulcast-rung-disable.md)
   needs recovery that doesn't depend on demand: viewers deselect a disabled
   rung, so its demand goes away. Dropping a reservation removes it from the
   sum. No new publisher handle, and publishers need no catalog reader.
@@ -63,9 +68,9 @@ Decided with the maintainer on 2026-10-17 (see the
   override the session's target or disable probing.
 - **The sender seam.** Define the hook a transport implements to probe up to a
   rate, and advertise `Increase` in SETUP only when the session has a sender
-  behind it. [Native](/quest/m2/probe/native.md) implements it in moq-quic,
-  and [padding](/quest/m2/probe/padding.md) is the fallback for transports
-  that don't. This quest only needs a test sender.
+  behind it. [Native](/quest/m1/probe-native.md) implements it in moq-quic,
+  and [padding](/quest/m2/probe/padding.md) in the browser. This quest only
+  needs a test sender.
 
 Notes for the implementer:
 

@@ -1,15 +1,36 @@
-# [M] Server and push sinks handle a broadcast's restarts
+# [L] moq-cli and moq-gst readers follow a broadcast's restarts
 
 ## Goal
 
-Every moq-cli sink that resolves a broadcast and keeps serving it handles an
-epochless `Restart` on purpose: it follows the new publisher instance where
-its output can mark the break. A route change alone is never fatal: a sink
-that cannot follow stays on the old instance while its publisher serves it,
-and fails once that route dies, since its subscriptions then end with an
-error.
+Every moq-cli and moq-gst reader that resolves a broadcast and keeps reading
+it follows publisher instances through moq-net's announced request
+([moq-net follows announced instances](/quest/m1/net-announced-follow.md)),
+the Rust counterpart of moq-ffi's `announced_broadcast`, instead of a
+hand-rolled `origin.follow` loop. Each handles an epochless
+`Restart` on purpose: it follows the new instance where its output can mark
+the break. A route change alone is never fatal: a reader that cannot follow
+stays on the old instance while its publisher serves it, and fails once that
+route dies, since its subscriptions then end with an error.
 
 ## Plan
+
+Decided with the maintainer on 2026-10-20: widened from the server and push
+sinks to every moq-cli and moq-gst reader. Following a catalog's references
+to other broadcasts stays with
+[catalog references](/quest/m0/broadcast-epoch/catalog-references.md).
+
+Readers with their own follow loop today move onto the announced request:
+
+- moqsrc: `follow_path` in `rs/moq-gst/src/source/imp.rs` drains
+  `origin.follow` and re-requests on each start, holding its pads across
+  instances.
+- `moq play`: `play` in `rs/moq-cli/src/play/media.rs` does the same and
+  resets its presentation per instance.
+- The TS stitching follower (`rs/moq-mux/src/container/ts/follower.rs`), if
+  the announced request fits how it marks a break.
+
+Readers that resolve once (`subscribe`, `fetch`) either follow the same way
+or say in the PR why they stay on one instance.
 
 The stdout exports already do this: TS follows with `--stitch`, and the other
 formats ride the old instance until its route dies and its tracks error. Audit
@@ -30,8 +51,8 @@ and fix the rest the same way:
 
 Share one helper (a `moq_mux` `Source::follow`-style API per
 [catalog references](/quest/m0/broadcast-epoch/catalog-references.md))
-rather than one rule per sink. Each fix lands with a test that replaces the
-publisher while the sink runs.
+rather than one rule per reader. Each fix lands with a test that replaces the
+publisher while the reader runs.
 
 Public API: possibly a shared follow helper in `moq-mux`. Wire: none.
 

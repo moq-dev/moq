@@ -87,8 +87,10 @@ group, and sibling paths keep their readers. On the wires without an epoch
 that rests on our relays retiring a copy on End then Start, as
 `tests/integration/restart.rs` shows; arbitrary older caching relays are out of scope, as
 in [MoQ Epoch](/drafts/draft-lcurley-moq-epoch.md), since base IETF object identity
-survives a withdrawal. A same-epoch lagging replica still resumes, checked on
-lite-07 only, the one wire here that carries the epoch. JS mirrors the tests.
+survives a withdrawal. A same-epoch lagging replica still resumes on the wires
+here that carry the epoch, lite-07 and moq-transport 22 (since
+[#5932](https://github.com/moq-dev/moq/pull/5932)), as
+[replica resume](/quest/m1/replica-resume.md) checks. JS mirrors the tests.
 `just test interop --all`.
 
 Public API: breaking. A claim request is answered through `prepare` and
@@ -104,6 +106,7 @@ the broader C API still waits for the generated replacement.
 
 ## Related
 
+- [Replica resume](/quest/m1/replica-resume.md) - a lagging same-epoch replica resumes on lite-07 and moq-transport
 - [Announcement takeover](/quest/m1/announce-takeover.md) - its claim-to-route operation is `Request::prepare` then `publish`; TAKEOVER then removes the cold-start reset
 - [MoQ Epoch](/drafts/draft-lcurley-moq-epoch.md) - carries the answer epoch over moq-transport, so same-epoch resume and replacement can be told apart there
 - [#5057](https://github.com/moq-dev/moq/pull/5057) - the relay-side check this replaces

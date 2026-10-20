@@ -85,6 +85,19 @@ Direction to settle in the draft first, then the code:
   gives moq-net's `poll::Session::send_group(priority)` a domain, so land that
   in the same trait break and implementers break once.
 
+Receive ranks, folded in from
+[#5878](https://github.com/moq-dev/moq/pull/5878)'s follow-ups by the
+maintainer on 2026-10-20. When the receive window is stuck, #5878 evicts the
+lowest subscription priority first across every broadcast on the session,
+then the group its subscription would deliver last, and sets a stream's rank
+once, when its header decodes:
+
+- With fairness on, rank received groups within their broadcast's domain
+  first, as sends are, so one broadcast's priorities never evict another's
+  partial groups.
+- Re-rank a receive stream when its subscription's priority or group order
+  changes, instead of keeping the rank from its header.
+
 Signed priority, decided with the maintainer:
 
 - moq-lite carries `p + 128` (flip the top bit). The mapping is one-to-one
@@ -115,7 +128,9 @@ Signed priority, decided with the maintainer:
 Prove scoping with the existing lite publisher tests extended to two
 broadcasts on one session with fairness on: neither starves, a downstream 255
 does not change the upstream order, and with fairness off the strict order is
-unchanged. The io_uring workers apply the same setting. Move
+unchanged. On the receive side, with fairness on, a high priority in one
+broadcast never makes a stuck window evict another broadcast's partial groups
+first, and a priority or order update moves an already-ranked stream. The io_uring workers apply the same setting. Move
 `doc/concept/moq-lite.md` (the 0..255 knob) and `doc/concept/standard.md`
 (IETF 128 maps to 127) to the new range and mapping.
 
