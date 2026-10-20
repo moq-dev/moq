@@ -8,6 +8,7 @@
 
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { Producer as GroupProducer } from "../src/group.ts";
+import { hooks } from "../src/internal.ts";
 import { Front } from "../src/resume.ts";
 import type { Subscriber } from "../src/track.ts";
 
@@ -123,3 +124,54 @@ for (const swaps of swapCounts) {
 	}
 }
 if (checksum === 0) throw new Error("benchmark did no work");
+
+// An adopted copy may repeat a large prefix before it reaches unread content. Time readiness
+// separately from constructing the copies, sweeping both the replay and independent readers.
+async function measureReplay(readers: number, replayed: number): Promise<number> {
+	const producer = new GroupProducer(0);
+	const replacement = new GroupProducer(0);
+	for (let index = 0; index < replayed; index++) {
+		producer.writeFrame({ payload });
+		replacement.writeFrame({ payload });
+	}
+	replacement.writeFrame({ payload });
+	const consumers = Array.from({ length: readers }, () => producer.mirror());
+	for (const consumer of consumers) {
+		for (let index = 0; index < replayed; index++) {
+			if (!consumer.tryReadFrame()) throw new Error("missing original frame");
+		}
+		hooks.recoverGroup(consumer, {
+			changed: producer.closed,
+			wants: (failed) => failed !== undefined,
+			replace: async () => ({
+				group: replacement.mirror(),
+				expiry: { expired: () => false, changed: [] },
+				adopt: () => {},
+				discard: () => {},
+			}),
+		});
+	}
+	producer.close(new Error("route failed"));
+	const start = performance.now();
+	await Promise.all(consumers.map((consumer) => consumer.readable()));
+	const elapsed = performance.now() - start;
+	for (const consumer of consumers) {
+		const frame = consumer.tryReadFrameSequence();
+		if (frame?.sequence !== replayed) throw new Error("readiness did not preserve the unread frame");
+		checksum += frame.payload.byteLength;
+		consumer.close();
+	}
+	replacement.close();
+	await flush();
+	return (elapsed * 1000) / readers;
+}
+
+await measureReplay(4, 64);
+console.log("readers,replayed_frames,readable_us");
+for (const replayed of [0, 1, 64, 1024]) {
+	for (const readers of readerCounts) {
+		const samples: number[] = [];
+		for (let rep = 0; rep < reps; rep++) samples.push(await measureReplay(readers, replayed));
+		console.log(`${readers},${replayed},${Math.min(...samples).toFixed(2)}`);
+	}
+}

@@ -693,13 +693,18 @@ export class Consumer {
 		this.#closed?.refresh();
 	}
 
-	#readBufferedFrame(pending = false): ReadGroupFrame | undefined {
+	#bufferedFrames(): Frame[] {
 		const frames = this.#state.frames.peek();
 		// A resumed copy repeats the frames an earlier one already delivered.
 		while (this.#state.start < this.#skip && frames.length > 0) {
 			frames.shift();
 			this.#state.start++;
 		}
+		return frames;
+	}
+
+	#readBufferedFrame(pending = false): ReadGroupFrame | undefined {
+		const frames = this.#bufferedFrames();
 		const buffered = frames.shift();
 		if (!buffered) return undefined;
 
@@ -774,7 +779,7 @@ export class Consumer {
 				this.#abandon();
 				return;
 			}
-			if (this.#state.frames.peek().length > 0) return;
+			if (this.#bufferedFrames().length > 0) return;
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error && (await this.#resume(closed))) continue;
 			if (closed !== undefined) {
