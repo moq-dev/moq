@@ -5,7 +5,7 @@
 Two crates linked into one library can each export a type with the same
 name, and a type in one can take the other's: `media.GroupConsumer(group:
 GroupConsumer)` generates and runs in Kotlin, Swift, Python, Go, Dart, C++,
-and C from [moq-dev/uniffi](/quest/m1/uniffi-fork.md).
+and C from [moq-dev/uniffi](/quest/m2/uniffi-fork.md).
 
 ## Plan
 
@@ -22,12 +22,11 @@ in the fork instead of waiting for upstream.
 - Reuse the two-crate spike harness from #5460 as the regression: both
   layers export `GroupConsumer` and `Frame`, and every generator compiles
   and runs the consumer.
-- Re-running the per-layer crate split decision is a follow-up once this
-  lands. [FFI shape](/quest/m1/ffi-shape/README.md) points here as its
-  revisit condition.
+- Re-running the per-layer crate split decision (rejected in #5460) is a
+  follow-up once this lands.
 
 Public API: none in moq until the crate split is re-decided. Wire: none.
 
 ## Required
 
-- [Hard fork](/quest/m1/uniffi-fork.md) - the repository the fix lands in
+- [Hard fork](/quest/m2/uniffi-fork.md) - the repository the fix lands in

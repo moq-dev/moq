@@ -28,6 +28,7 @@ const KINDS: RequestKind[] = [
 const CONDITIONS: RequestCondition[] = [
 	"internal",
 	"unauthorized",
+	"expired",
 	"timeout",
 	"not_supported",
 	"does_not_exist",

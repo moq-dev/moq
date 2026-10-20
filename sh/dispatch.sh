@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Run `just check`, `just fix`, or `just ci check|test` over the branch diff.
+# Run `just check`, `just fix`, or `just ci [check|test]` over the branch diff.
 # `--query` prints the selection instead; `ci-platform` exists only as a query.
 #
-# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query]
+# Usage: sh/dispatch.sh check|fix|ci|ci-check|ci-test [BASE|--all] [--query]
 #        sh/dispatch.sh ci-platform BASE|--all --query
 #
 # The branch diff is resolved once and matched against the impact map below,
 # the one place that says which paths put which module in scope. `check` is
-# `ci-check` plus `ci-test`, which CI runs as parallel jobs with MOQ_STRICT=1,
-# so there is no second definition of "checked".
+# `ci-check` plus `ci-test`, which the merge queue runs as parallel jobs with
+# MOQ_STRICT=1, so there is no second definition of "checked". `ci` runs both
+# halves in turn, as a contributor does before pushing.
 set -euo pipefail
 
-usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query], or ci-platform BASE|--all --query"
+usage="usage: sh/dispatch.sh check|fix|ci|ci-check|ci-test [BASE|--all] [--query], or ci-platform BASE|--all --query"
 action=${1:?$usage}
 base=${2:-}
 query=${3:-}
@@ -21,6 +22,14 @@ if [[ $# -gt 3 || (-n "$query" && "$query" != --query) || ("$action" == ci-platf
 fi
 case "$action" in
     check | fix | ci-check | ci-test | ci-platform) ;;
+    ci)
+        if [[ -n "$query" ]]; then
+            echo "$usage" >&2
+            exit 2
+        fi
+        "$0" ci-check "$base"
+        exec "$0" ci-test "$base"
+        ;;
     *)
         echo "$usage" >&2
         exit 2
@@ -63,7 +72,7 @@ declare -A scope=(
     # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
     # fails a check that reads a cross-tree input this pattern misses.
     # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
-    [js]='^(js/|doc/|drafts/|demo/(boy|pub|web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
@@ -94,6 +103,9 @@ declare -A scope=(
     # nixpkgs, and the last moves on a flake.lock bump alone.
     [obs]='^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)'
     [flake]='(^rs/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'
+    # ts.yml's crate filters against the closure test/ts/run.sh builds, which
+    # moves only with a manifest, the lockfile, or the harness's packages.
+    [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/ts\.yml$|sh/gh/ts-paths\.py$)'
     [markdown]=''
     [shell]=''
     [toml]=''
@@ -149,6 +161,7 @@ declare -A tools=(
     [obs_compile]='cargo cmake pkg-config uniffi-bindgen-cpp'
     [obs]='clang-format cmake gersemi jq'
     [flake]='nix'
+    [ts_paths]='cargo python3'
     [markdown]='bun'
     [shell]='shellcheck shfmt'
     [toml]='taplo'
@@ -171,7 +184,7 @@ declare -A compiles=(
 )
 
 case "$action" in
-    check | ci-check) modules=(js workers moq_sh drafts rs bench quest drill py kt swift go dart cpp obs_compile obs flake markdown shell toml nix justfile gh) ;;
+    check | ci-check) modules=(js workers moq_sh drafts rs bench quest drill py kt swift go dart cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
     fix) modules=(js rs py dart obs markdown shell toml nix justfile) ;;
     ci-test) modules=(js rs py) ;;
 esac
@@ -251,6 +264,7 @@ for module in "${selected[@]}"; do
         check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;
         check:flake) nix flake check ;;
+        check:ts_paths) python3 sh/gh/ts-paths.py ;;
         check:markdown)
             bun install --frozen-lockfile
             sh/markdown.sh check

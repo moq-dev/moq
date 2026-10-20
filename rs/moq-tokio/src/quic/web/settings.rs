@@ -63,7 +63,7 @@ impl Settings {
 
 		tracing::debug!(?settings, "sending SETTINGS frame");
 
-		let mut send = conn.open_uni().await?;
+		let mut send = conn.open_uni(Default::default()).await?;
 		settings.write(&mut send).await?;
 
 		Ok(send)

@@ -49,8 +49,9 @@ source or rendition to clear the failure; the player does not resubscribe to
 broken media automatically. Individual decoder errors are available at
 `el.audio.out.error` and `el.video.out.error`.
 
-`el.broadcast.out.status` is `offline`, `loading`, `live`, or `error`. On
-`error` the origin refused the broadcast, `el.broadcast.out.error` says why,
+`el.broadcast.out.status` is `offline`, `loading`, `live`, `error`, or `unsupported`.
+On `unsupported`, update the player to read the broadcast's newer catalog; the overlay shows this notice.
+On `error` the origin refused the broadcast, `el.broadcast.out.error` says why,
 and the player does not ask again until it is pointed elsewhere or re-enabled.
 
 The broadcast's announcement is its online signal: the player starts when a

@@ -787,7 +787,23 @@ mod tests {
 			let pair = lite_pair_on(version, moq_net::Hop::random()).await;
 			let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 			broadcast.announce(Default::default()).expect("announce");
-			let (_catalog, _registration, track, mut media) = publish_video(&mut broadcast, video_config(), timed());
+			// A hinted timeline is declared before any media, so the rendition is listed early.
+			let hinted = moq_mux::timeline::Config::default().with_duration_hint(Duration::from_secs(2));
+			let catalog = moq_mux::catalog::Producer::new(
+				&mut broadcast,
+				moq_mux::catalog::Config::default().with_timeline(hinted),
+			)
+			.unwrap();
+			let reserved = catalog.reserve();
+			let track = broadcast.create_track("video0", timed()).unwrap();
+			let mut media = reserved
+				.video(
+					track.clone(),
+					moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+					video_config(),
+				)
+				.unwrap();
+			drop(reserved);
 
 			let origin = pair.sub_origin.consume();
 			tokio::time::timeout(TIMEOUT, origin.routed("live"))
@@ -800,7 +816,7 @@ mod tests {
 				.expect("remote broadcast");
 			let source = moq_mux::Source::new(origin, remote);
 			let broadcaster = crate::export::Broadcaster::new(source, crate::export::Config::default());
-			// Recorded as soon as the catalog lists it, before any media, as a recorder does.
+			// Recorded as soon as the catalog lists it with its timeline, as a recorder does.
 			let mut renditions = broadcaster.renditions();
 			let rendition = match tokio::time::timeout(TIMEOUT, renditions.next()).await {
 				Ok(Some(crate::export::renditions::Event::Added(rendition))) => rendition,
@@ -809,11 +825,15 @@ mod tests {
 			let mut cursor = rendition.segments();
 			let mut next = std::pin::pin!(cursor.next());
 			// Waiting for its first segment, the cursor subscribes before any media exists.
-			let demand = track.demand();
+			let mut demand = track.demand();
+			let wanted = async {
+				while demand.wanted_changed().await?.is_none() {}
+				moq_net::Result::Ok(())
+			};
 			tokio::time::timeout(TIMEOUT, async {
 				tokio::select! {
 					_ = next.as_mut() => panic!("{version}: a segment before any media"),
-					used = demand.used() => used.expect("track open"),
+					wanted = wanted => wanted.expect("track open"),
 				}
 			})
 			.await

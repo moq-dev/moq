@@ -40,8 +40,11 @@ and distinguish a MoQ group boundary from a decoder acquisition point. RAI,
 periodic cuts, and an intact object alone do not ensure available PAT/PMT,
 codec configuration, clock context, or references for every MPTS program.
 
-The README owns the guide and the final two-mode integration proof. Reuse the
-children's fixtures and CI recipes, including their known-bad controls. Publish
+The README owns the guide and integration proof for the modes present in
+m1: semantic remux and raw import/carriage. The deferred raw export quest
+extends the guide and proves its output when it lands; it does not block
+this proof. Reuse the children's fixtures and CI recipes, including their
+known-bad controls. Publish
 a coverage table linking each supported profile and loss guarantee to its
 test; unsupported or unmeasured cells stay explicit. Keep CLI instructions
 and the MPEG-TS draft consistent in each feature change.
@@ -97,18 +100,11 @@ remain with their current quests.
 ## Required
 
 - [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
-- [Raw stream types](/quest/m1/ts-reliability/stream-type.md) - unknown stream types survive export instead of failing the PMT
-- [Whole-PES export](/quest/m1/ts-reliability/pes-export.md) - export writes `pesPacket` tracks byte for byte at their placement
-- [Whole-PES import](/quest/m1/ts-reliability/pes-import.md) - private PES travels whole at its source placement, a missing PTS stays missing, and the `pes` framing is deleted
-- [Section placement](/quest/m1/ts-reliability/section-placement.md) - sections share the PCR placement clock instead of the video PTS
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
-- [T-STD TS export](/quest/m1/tstd/README.md) - the semantic mux schedules the content it admits within its supported buffer models
 
 ## Related
 
-- [Epoch anchor](/quest/m1/epoch-anchor.md) - shared identity across importers requires one source coordinate per epoch, derived from the epoch
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - TS identity alone is not ST 2022-7, which also needs matching RTP headers
 - [TS health counters](/quest/m2/ts-health-stats.md) - ingress and egress evidence need distinct monitoring points
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
 
-- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - a new mode that does not gate correctness of existing TS modes

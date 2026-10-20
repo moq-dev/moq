@@ -34,7 +34,7 @@ Found while reworking the in-memory transport (#5530). Facts at 813a92b48:
   and IETF the receiver throws away a tail its transport already holds.
   lite-07 already avoids this at the protocol level: the closer waits for the
   subscriber's Subscribe-stream FIN (`drafts/draft-lcurley-moq-lite.md`).
-- The test mock (`rs/moq-net/tests/support/mock.rs`) hid it: its FIN counts as
+- The test mock (`rs/moq-net/tests/integration/support/mock.rs`) hid it: its FIN counts as
   acked only once the reading application stops or drops the stream.
   `older_lite_close_keeps_ack_drain` never checks what the reader got.
 
@@ -78,6 +78,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Publisher linger](/quest/m1/publisher-linger.md) - keeps a finished broadcast servable so subscribers can drain it, a layer above this
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - groups cut short by a session close
+- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - groups cut short by a session close
 - [QUIC ack hook](/quest/m2/quic-ack-hook.md) - a FIN/ack hook in the QUIC layer

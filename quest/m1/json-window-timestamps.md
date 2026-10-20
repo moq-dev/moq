@@ -20,7 +20,7 @@ stream consumers `Timed<T>`. The window consumer (`window::Consumer::next` in
 - Decided: Rust and JS together, same names and shape. Update moq-ffi and the
   bindings if they expose the window consumer (see the Cross-Package Sync table).
 - Update in-repo readers (`js/hang` timeline, `js/room` chat) and add a line to
-  the Unreleased section of `doc/setup/upgrade.md`. No new doc page.
+  `## Unreleased` of each affected package's `MIGRATE.md`. No new doc page.
 - Land before the next `@moq/json` release, so its break ships together with
   #5099's. Not blocked on the Rust snapshot and stream quest: both Rust breaks
   use the same `moq_net::Timed` and ship in the next moq-json release together.

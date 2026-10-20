@@ -2,17 +2,20 @@
 
 ## Goal
 
-Condition: a maintainer has run the `nix.moq.dev` bootstrap in
-`infra/README.md` (the release tag ruleset, both buckets and the Worker, the
-`cache-write` Environment's tag policies and secrets, and the
-signing key), and the PR that wired it in has merged with the real public key
-in `flake.nix`. Check it with `curl https://nix.moq.dev/nix-cache-info` and
+Condition: the PR that wired `nix.moq.dev` into CI has merged. The maintainer
+ran the bootstrap in `infra/README.md` on 2026-10-19 and 2026-10-20 (the
+release tag ruleset, both buckets and the Worker, the `cache-write`
+Environment's tag policies and secrets, and the signing key). Check it with
+`curl https://nix.moq.dev/nix-cache-info` and
 `gh run list --workflow cache.yml --branch main`.
 
 Then confirm it, and record the numbers in the PR that closes this:
 
-- The first `main` warm pushes the dev shell, and a later pull request job
-  enters `nix develop` without compiling uniffi-bindgen-go.
+- The first `main` warm pushes the dev shell, and a later merge queue or
+  Nightly job enters `nix develop` without compiling uniffi-bindgen-go. The
+  baseline, measured 2026-10-16 in Nightly run 38897397428: every workload
+  spent 12-14 minutes building `uniffi-bindgen-go`, `uniffi-bindgen-cpp` and
+  `quest` before entering the dev shell, because Cachix had no copy.
 - The next `moq-relay-v*` or `moq-cli-v*` tag pushes from all three
   `release-nix.yml` legs, and `nix run github:moq-dev/moq/<tag>#moq-relay
   --accept-flake-config` substitutes on a clean machine.

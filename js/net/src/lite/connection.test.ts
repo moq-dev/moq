@@ -134,6 +134,21 @@ for (const [alpn, version] of [
 			connection.abort();
 		}
 	});
+
+	test(`repeated SETUP parameter closes ${alpn} with PROTOCOL_VIOLATION`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+		try {
+			const writer = await Writer.open(pair.server, { version });
+			await writer.u53(DataType.Setup);
+			// A five-byte body holding two empty parameters with the same id.
+			for (const v of [5, 2, 0, 0, 0, 0]) await writer.u53(v);
+			writer.close();
+			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+		} finally {
+			connection.abort();
+		}
+	});
 }
 
 // Once enabled, hold the FIN acknowledgement of every stream `transport` writes on (unidirectional

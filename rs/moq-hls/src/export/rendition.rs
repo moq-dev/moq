@@ -210,6 +210,7 @@ fn normalize_video(config: &VideoConfig) -> VideoConfig {
 	config.delay = None;
 	config.label = None;
 	config.enabled = true;
+	config.preference = 0;
 	// Publishers estimate it and republish once it settles. The rendition keeps the fMP4
 	// timescale it was built with, and the framerate is refreshed in place like the bitrate.
 	config.framerate = None;
@@ -404,19 +405,12 @@ impl Rendition {
 
 	/// Start following this rendition's own timeline, trimmed to the listed segments. `history`
 	/// reads it from the start, as the reference does in history mode.
-	///
-	/// A rendition the catalog indexes no timeline for resolves nothing but the reference's rows.
 	pub(crate) fn watch(&self, history: bool) {
 		self.history.store(history, Ordering::Relaxed);
-		let track = self.track_name();
-		if !self.section.timelines.contains_key(track) {
-			self.spans.end();
-			return;
-		}
 		let watcher = tokio::spawn(watch_spans(
 			self.catalog.clone(),
 			self.section.clone(),
-			track.to_string(),
+			self.track_name().to_string(),
 			self.spans.clone(),
 			history,
 		));
@@ -644,10 +638,6 @@ impl Rendition {
 		if !super::durable(&self.section) {
 			return Err(crate::Error::RangeNotDurable);
 		}
-		// Without its own timeline every listed segment would be a gap.
-		if !self.section.timelines.contains_key(self.track_name()) {
-			return Err(crate::Error::RangeUnavailable("rendition has no timeline".into()));
-		}
 		if !self.history.load(Ordering::Relaxed) {
 			return Err(crate::Error::RangeUnavailable(
 				"range playlists require Config::history".into(),
@@ -710,8 +700,7 @@ impl Rendition {
 
 	fn snapshot_from_window(&self, window: segments::Window, finished: bool, generation: Option<Arc<str>>) -> Snapshot {
 		// HLS requires EXT-X-TARGETDURATION to be at least every EXTINF, rounded up to whole
-		// seconds. The catalog's `durationMax` is only the ceiling a record is split at, far above a
-		// typical GOP, and a target that large would push every player's live edge back by it.
+		// seconds. The catalog duration is nominal, while actual records can be longer.
 		let target_duration = window
 			.segments
 			.iter()

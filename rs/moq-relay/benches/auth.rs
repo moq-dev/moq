@@ -9,14 +9,14 @@ use std::time::Duration;
 
 fn grant(prefix: &str) -> Grant {
 	Grant::new(
-		[format!("{prefix}/**").parse().unwrap()].into_iter().collect(),
-		Default::default(),
+		format!("{prefix}/**").parse::<moq_auth::Pattern>().unwrap(),
+		moq_auth::Patterns::new(),
 	)
 }
 
 struct Fixture {
 	_connections: Vec<moq_tokio::Connection>,
-	_tokens: Vec<moq_tokio::connection::auth::Token>,
+	_tokens: Vec<moq_tokio::connection::auth::Auth>,
 	producers: Vec<lease::Producer>,
 	selected: usize,
 	watch: moq_tokio::connection::auth::Watch,
@@ -115,7 +115,7 @@ impl Fixture {
 		let expected = grant(if self.alternate { "changed" } else { "restored" });
 		self.producers[self.selected].update(expected.clone());
 		let actual = self.watch.changed().await.unwrap().unwrap();
-		assert_eq!(actual.publish, expected.publish);
+		assert_eq!(actual.publish, expected.publish.path);
 	}
 }
 
@@ -149,7 +149,7 @@ fn refresh(c: &mut Criterion) {
 /// oldest waiting token, and presents one more so the queue keeps its depth.
 struct Queue {
 	_connection: moq_tokio::Connection,
-	auth: moq_tokio::connection::auth::Auth,
+	auth: moq_tokio::connection::auth::Handle,
 	admissions: auth::Admissions,
 	held: std::collections::VecDeque<auth::Admission>,
 	presented: usize,
@@ -223,7 +223,10 @@ impl Queue {
 	}
 
 	async fn round(&mut self) {
-		self.held.pop_front().unwrap().refuse(auth::Error::Refused);
+		self.held
+			.pop_front()
+			.unwrap()
+			.refuse(auth::Error::Refused(Default::default()));
 		self.present();
 		let admission = self.admissions.next().await.unwrap();
 		self.held.push_back(admission);

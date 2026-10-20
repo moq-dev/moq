@@ -17,9 +17,12 @@ use crate::cli::Duration as CliDuration;
 #[cfg(feature = "quic")]
 mod backend;
 #[cfg(feature = "quic")]
-pub use backend::Error;
+pub(crate) use backend::{Client, Closer, Options, Server, accept};
 #[cfg(feature = "quic")]
-pub(crate) use backend::{Client, Options, Server, accept};
+pub use backend::{Connection, Error};
+/// The flow-control limits a live QUIC connection can change; see [`Connection::set_limits`].
+#[cfg(feature = "quic")]
+pub use moq_quic::{Limits, LimitsError};
 
 // The async QUIC layer driving `moq-quic` on tokio, forked from quinn (see its module docs).
 // Public only so the workspace's tests can dial a bare endpoint; not a stable API.
@@ -91,9 +94,11 @@ pub enum CongestionControl {
 	/// for loss, which keeps queues short and the send rate steady enough for an encoder
 	/// to track.
 	Delay,
+	/// No congestion control and no pacing, for tests and controlled links.
+	None,
 }
 
-/// Parses the same spellings the CLI and TOML accept (`loss`, `delay`), case-insensitively.
+/// Parses the same spellings the CLI and TOML accept (`loss`, `delay`, `none`), case-insensitively.
 impl std::str::FromStr for CongestionControl {
 	type Err = String;
 
@@ -110,8 +115,17 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// Bounds how much unread data one peer can make us buffer across all of its streams,
 /// which the backends otherwise leave unlimited. Sized so a relay-to-relay session, which
 /// shares one connection, can still sustain several Gbps at intercontinental RTTs.
-#[cfg(any(feature = "quic", feature = "iroh"))]
-pub(crate) const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
+pub const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
+
+/// Default per-stream receive window, used when [`Config::stream_receive_window`] is unset.
+///
+/// A quarter of [`DEFAULT_RECEIVE_WINDOW`], so one slow group can't take the whole
+/// connection, and enough for a single group stream to reach a few hundred Mbps at a
+/// 100 ms RTT.
+pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 4 << 20;
+
+/// Default cap on unacknowledged outgoing data, used when [`Config::send_window`] is unset.
+pub const DEFAULT_SEND_WINDOW: u64 = 16 << 20;
 
 /// Default idle timeout before an inactive connection is dropped.
 ///
@@ -133,7 +147,8 @@ pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(3);
 #[non_exhaustive]
 pub struct Config {
 	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
-	/// Defaults to 10,000. MoQ opens a stream per group, so busy endpoints want this high.
+	/// Defaults to 10,000; zero is refused. MoQ opens a stream per group, so busy
+	/// endpoints want this high.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-max-streams",
@@ -245,7 +260,7 @@ pub struct Config {
 	)]
 	pub receive_window: Option<u64>,
 
-	/// Per-stream receive window, in bytes. Unset leaves the backend default.
+	/// Per-stream receive window, in bytes. Defaults to 4 MiB.
 	///
 	/// Keep it below [`receive_window`](Self::receive_window) so one slow group
 	/// can't starve the rest of the connection.
@@ -259,7 +274,7 @@ pub struct Config {
 	pub stream_receive_window: Option<u64>,
 
 	/// Cap on unacknowledged outgoing data, in bytes, regardless of what the peer
-	/// allows. Unset leaves the backend default.
+	/// allows. Defaults to 16 MiB.
 	///
 	/// This bounds the transport send buffer.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -280,6 +295,22 @@ pub struct Config {
 	#[usage(name = "quic-qlog", long = "quic-qlog", env = "MOQ_QUIC_QLOG", setting = "quic.qlog")]
 	#[usage(value_hint = usage::ValueHint::DirPath)]
 	pub qlog: Option<PathBuf>,
+
+	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names. Defaults to off.
+	///
+	/// Anyone holding that file can decrypt captured traffic, so keep it to debugging.
+	/// Setting it without `SSLKEYLOGFILE` errors at init.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[usage(
+		name = "quic-keylog",
+		long = "quic-keylog",
+		env = "MOQ_QUIC_KEYLOG",
+		setting = "quic.keylog",
+		default_missing = "true",
+		num_args = 0..=1,
+		require_equals = true,
+	)]
+	pub keylog: Option<bool>,
 
 	/// The old role-prefixed spellings, kept parsing but hidden. Never read as
 	/// settings: [`Config::deprecated`] names what replaced each one so a process
@@ -305,6 +336,7 @@ impl Default for Config {
 			stream_receive_window: None,
 			send_window: None,
 			qlog: None,
+			keylog: None,
 			legacy: Default::default(),
 		}
 	}
@@ -532,16 +564,22 @@ impl Config {
 		self.legacy.deprecated()
 	}
 
-	/// Reject knobs this build can't honor. Called when the endpoint is built.
+	/// Reject knobs this build can't honor, including limits QUIC cannot
+	/// advertise. Called when the endpoint is built.
 	#[cfg(feature = "_transport")]
-	pub(crate) fn validate(&self) -> crate::Result<()> {
+	pub fn validate(&self) -> crate::Result<()> {
 		// Erroring beats silently ignoring the flag: the operator asked for traces and
 		// would otherwise go looking for files that were never going to appear.
 		match self.qlog.as_ref() {
 			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
 			_ => Ok(()),
 		}?;
+		// rustls logs nothing without a path, which would hide the mistake the same way.
+		if self.keylog == Some(true) && std::env::var_os("SSLKEYLOGFILE").is_none_or(|path| path.is_empty()) {
+			return Err(crate::Error::KeylogUnset);
+		}
 		validate_idle_timeout(Some(self.resolve().idle_timeout))?;
+		validate_streams(self.max_streams)?;
 		validate_windows(self)
 	}
 
@@ -572,10 +610,11 @@ impl Config {
 			keep_alive,
 			mtu_discovery: self.mtu_discovery.unwrap_or(false),
 			congestion_control: self.congestion_control,
-			receive_window: self.receive_window,
-			stream_receive_window: self.stream_receive_window,
-			send_window: self.send_window,
+			receive_window: self.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW),
+			stream_receive_window: self.stream_receive_window.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
+			send_window: self.send_window.unwrap_or(DEFAULT_SEND_WINDOW),
 			qlog: self.qlog.clone(),
+			keylog: self.keylog.unwrap_or(false),
 		}
 	}
 }
@@ -601,6 +640,22 @@ fn validate_idle_timeout(idle_timeout: Option<Duration>) -> crate::Result<()> {
 /// limit that goes on the wire as a transport parameter.
 #[cfg(feature = "_transport")]
 const MAX_VARINT: u64 = (1 << 62) - 1;
+
+/// The largest stream limit QUIC can advertise: a stream ID is a varint whose
+/// low two bits are its type, so RFC 9000 caps the count at 2^60.
+#[cfg(feature = "_transport")]
+const MAX_STREAMS: u64 = 1 << 60;
+
+/// Reject a stream limit no connection can honor: zero lets the peer open
+/// nothing, and past 2^60 a peer refuses it with FRAME_ENCODING_ERROR.
+#[cfg(feature = "_transport")]
+fn validate_streams(max_streams: Option<u64>) -> crate::Result<()> {
+	match max_streams {
+		Some(0) => Err(crate::Error::StreamsRange),
+		Some(streams) if streams > MAX_STREAMS => Err(crate::Error::StreamsRange),
+		_ => Ok(()),
+	}
+}
 
 /// Reject a flow-control window no connection can honor.
 ///
@@ -655,14 +710,20 @@ pub struct Resolved {
 	pub mtu_discovery: bool,
 	/// Congestion control override, or `None` for the default.
 	pub congestion_control: Option<CongestionControl>,
-	/// Connection-wide receive window in bytes, or `None` for the 64 MiB default.
-	pub receive_window: Option<u64>,
-	/// Per-stream receive window in bytes, or `None` for the backend default.
-	pub stream_receive_window: Option<u64>,
-	/// Cap on unacknowledged outgoing data in bytes, or `None` for the backend default.
-	pub send_window: Option<u64>,
+	/// Connection-wide receive window in bytes, defaulting to [`DEFAULT_RECEIVE_WINDOW`].
+	///
+	/// The windows are resolved here rather than by each backend, whose own defaults
+	/// differ (moq-quic's and iroh's connection window is unlimited), so every runtime
+	/// honors the same `[quic]` section.
+	pub receive_window: u64,
+	/// Per-stream receive window in bytes, defaulting to [`DEFAULT_STREAM_RECEIVE_WINDOW`].
+	pub stream_receive_window: u64,
+	/// Cap on unacknowledged outgoing data in bytes, defaulting to [`DEFAULT_SEND_WINDOW`].
+	pub send_window: u64,
 	/// Directory to write qlog traces into, or `None` to not capture them.
 	pub qlog: Option<PathBuf>,
+	/// Whether to write TLS session secrets to `SSLKEYLOGFILE`.
+	pub keylog: bool,
 }
 
 impl Resolved {
@@ -724,6 +785,7 @@ mod tests {
 		assert!(!quic.mtu_discovery);
 		assert_eq!(quic.gso, None);
 		assert!(!quic.gso_disabled());
+		assert!(!quic.keylog);
 	}
 
 	#[test]
@@ -765,11 +827,23 @@ mod tests {
 			"delay",
 			"--quic-qlog",
 			"/tmp/qlog",
+			"--quic-keylog",
 		]);
 		assert_eq!(quic.max_streams, Some(5000));
 		assert_eq!(quic.gso, Some(false));
 		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
 		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
+		assert_eq!(quic.keylog, Some(true));
+	}
+
+	/// `none` is spelled the same on the CLI, in TOML, and through `FromStr`.
+	#[test]
+	fn congestion_control_none_parses() {
+		let quic = parse(&["--quic-congestion-control", "none"]);
+		assert_eq!(quic.congestion_control, Some(CongestionControl::None));
+		let quic: Config = toml::from_str(r#"congestion_control = "none""#).expect("parse");
+		assert_eq!(quic.congestion_control, Some(CongestionControl::None));
+		assert_eq!("NONE".parse(), Ok(CongestionControl::None));
 	}
 
 	/// Every old role-prefixed spelling parses into a hidden field and is reported,
@@ -871,6 +945,25 @@ mod tests {
 		}
 	}
 
+	/// Asking for a key log nobody can read back fails instead of logging nothing.
+	#[cfg(feature = "_transport")]
+	#[test]
+	fn keylog_requires_a_path() {
+		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
+		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		assert!(Config::default().validate().is_ok());
+
+		let set = Config {
+			keylog: Some(true),
+			..Default::default()
+		};
+		assert!(matches!(set.validate(), Err(crate::Error::KeylogUnset)));
+
+		// SAFETY: as above.
+		unsafe { std::env::set_var("SSLKEYLOGFILE", "/tmp/keys.log") };
+		assert!(set.validate().is_ok());
+	}
+
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the
 	/// value arrives from a TOML file or a C caller, so validation has to catch it here.
 	#[cfg(feature = "_transport")]
@@ -895,14 +988,13 @@ mod tests {
 		assert!(at_limit.validate().is_ok());
 	}
 
-	/// Each window reaches `Resolved` untouched, and stays `None` when unset so each
-	/// backend applies the default itself (and the io_uring workers can tell it was unset).
+	/// An unset window resolves to our default, so every backend applies the same one.
 	#[test]
 	fn windows_resolve_per_field() {
 		let unset = Config::default().resolve();
-		assert_eq!(unset.receive_window, None);
-		assert_eq!(unset.stream_receive_window, None);
-		assert_eq!(unset.send_window, None);
+		assert_eq!(unset.receive_window, DEFAULT_RECEIVE_WINDOW);
+		assert_eq!(unset.stream_receive_window, DEFAULT_STREAM_RECEIVE_WINDOW);
+		assert_eq!(unset.send_window, DEFAULT_SEND_WINDOW);
 
 		let set = Config {
 			receive_window: Some(64 << 20),
@@ -911,9 +1003,9 @@ mod tests {
 			..Default::default()
 		}
 		.resolve();
-		assert_eq!(set.receive_window, Some(64 << 20));
-		assert_eq!(set.stream_receive_window, Some(8 << 20));
-		assert_eq!(set.send_window, Some(32 << 20));
+		assert_eq!(set.receive_window, 64 << 20);
+		assert_eq!(set.stream_receive_window, 8 << 20);
+		assert_eq!(set.send_window, 32 << 20);
 	}
 
 	/// A zero window credits nothing, so it would wedge the connection rather than
@@ -979,6 +1071,30 @@ mod tests {
 			..Default::default()
 		};
 		assert!(at_limit.validate().is_ok());
+	}
+
+	/// A MAX_STREAMS past 2^60 is a frame encoding error at the peer, and zero lets
+	/// the peer open nothing, so `[quic]` refuses both.
+	#[cfg(feature = "_transport")]
+	#[test]
+	fn stream_limits_must_fit_a_stream_id() {
+		for max_streams in [0, MAX_STREAMS + 1] {
+			let over = Config {
+				max_streams: Some(max_streams),
+				..Default::default()
+			};
+			assert!(
+				matches!(over.validate(), Err(crate::Error::StreamsRange)),
+				"{max_streams}"
+			);
+		}
+		for max_streams in [1, MAX_STREAMS] {
+			let at_limit = Config {
+				max_streams: Some(max_streams),
+				..Default::default()
+			};
+			assert!(at_limit.validate().is_ok(), "{max_streams}");
+		}
 	}
 
 	#[test]

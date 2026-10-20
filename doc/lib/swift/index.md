@@ -23,10 +23,10 @@ Raw tracks with a `nil` timescale are untimed on both publish and receive.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `Media.CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
-Share `Media.Timebase(broadcast:)` through container init records when several imports
-use one source timeline. `ContainerStreamProducer` takes `ContainerStreamInit`;
-omitting its timebase keeps an independent offset. A timebase belongs to its broadcast
-and does not keep it open.
+Share `Media.Timebase(broadcast:)` through `ContainerInit` when several imports use one
+source timeline; omitting it keeps an independent offset. A timebase belongs to its
+broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
+so a raw byte stream needs no other importer.
 For arrival-order reads, decode each group from `TrackConsumer.recvGroup()` with
 `Media.GroupConsumer(group:container:)`; frames carry container media time as they land.
 
@@ -70,7 +70,8 @@ let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.
 try audio.writeFrame(packet, timestampUs: 20_000)
 try audio.cut() // audio has no keyframes, so this is what gives it groups
 
-let video = try broadcast.encodeVideo(
+let video = try Video.Producer(
+    catalog: Media.CatalogProducer(broadcast: broadcast),
     input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
     output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .auto)
 )
@@ -86,13 +87,14 @@ try await session.shutdown()
 ## Things to know
 
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
-one to one; the API reference has the names.
+one to one; the API reference has the names, and [Layers](/lib/layers)
+shows which module holds each.
 
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs:)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
-- **Decoded frames hold decoder buffers.** Release each frame from `decodeVideo` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
+- **Decoded frames hold decoder buffers.** Release each frame from a `Video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `try await session.shutdown()` drains for up to one second and throws on failure. `session.cancel(code:)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
-- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `nil` when the transport does not report it, which is not the same as zero.
+- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `nil` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol, and while a client session reconnects `session.failure()` says why. Hold the owned `Bandwidth.Consumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `peek()` reads the current estimate in bits per second and `changed()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Errors.** Diagnostic cases use the `reason:` argument label; match their associated value to inspect it. Protocol errors carry `details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
@@ -111,9 +113,11 @@ kind `ProtocolKind.tooManyRequests`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
+A session closed because its credential expired reports `ProtocolKind.expired`, and a request refused for an expired token raises `MoqError.Expired`; refresh the token before retrying.
+A catalog that needs a newer moq-hang draft than this build reads raises `MoqError.UnsupportedCatalog`; upgrade the library to read it.
 
 ## Reference
 
-- API reference: [Swift Package Index (DocC)](https://swiftpackageindex.com/moq-dev/moq-swift/documentation/moq)
+- API source: [swift/Sources/Moq](https://github.com/moq-dev/moq/tree/main/swift/Sources/Moq)
 - Source: [`swift/`](https://github.com/moq-dev/moq/tree/main/swift); `just swift check` builds and tests on a Mac
 - Packages SPM resolves: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)

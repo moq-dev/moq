@@ -1,0 +1,432 @@
+/**
+ * The in-page half of the UniFFI comparison: moq-ffi bound by ubrn's wasm2 player.
+ *
+ * `driver.ts` loads this page twice, once normally and once under a strict CSP that
+ * forbids `new Function`, which forces the player's interpreted dispatcher.
+ *
+ * @module
+ */
+import {
+	MoqBroadcastProducer,
+	MoqClient,
+	MoqClientConfig,
+	MoqClientTls,
+	type MoqGroupConsumer,
+	type MoqGroupConsumerLike,
+	MoqRoute,
+	type MoqSessionLike,
+	type MoqTrackConsumer,
+	MoqTrackInfo,
+	uniffiInitAsync,
+} from "./dist/index.ts";
+
+export interface Relay {
+	name: string;
+	url: string;
+	version: string;
+}
+
+export interface CaseResult {
+	name: string;
+	ok: boolean;
+	error?: string;
+	/** What the case observed, when the behavior is reported rather than asserted. */
+	note?: string;
+}
+
+export interface Bench {
+	name: string;
+	iterations: number;
+	us_per_op: number;
+}
+
+export interface Report {
+	/** Whether the page allows `new Function`, which the player's fast dispatchers need. */
+	eval: boolean;
+	init_ms: number;
+	cases: CaseResult[];
+	bench: Bench[];
+}
+
+/** Above 2^53, so a lossy `number` conversion anywhere changes it; the largest QUIC varint. */
+const HIGH = [2n ** 53n + 1n, 2n ** 62n - 1n];
+
+/** Microsecond ticks, so `timestampUs` passes through unscaled. */
+const TIMED = MoqTrackInfo.create({ timescale: 1_000_000n });
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function payload(size: number): ArrayBuffer {
+	const bytes = new Uint8Array(size);
+	for (let i = 0; i < size; i++) bytes[i] = i % 251;
+	return bytes.buffer;
+}
+
+/** Resolve `promise`, or reject once `ms` passes. */
+async function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => reject(new Error(`${what} did not settle in ${ms}ms`)), ms);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** True when `promise` is still pending after the event loop turns over a few times. */
+/** Map how `promise` settles; a timeout still throws rather than reading as a rejection. */
+function settle<T, R>(
+	promise: Promise<T>,
+	ms: number,
+	what: string,
+	resolved: (value: T) => R,
+	rejected: (err: unknown) => R,
+): Promise<R> {
+	return within(promise.then(resolved, rejected), ms, what);
+}
+
+async function pending(promise: Promise<unknown>): Promise<boolean> {
+	let settled = false;
+	promise.then(
+		() => {
+			settled = true;
+		},
+		() => {
+			settled = true;
+		},
+	);
+	await sleep(20);
+	return !settled;
+}
+
+async function connect(relay: Relay): Promise<MoqSessionLike> {
+	const response = await fetch(new URL("/certificate.sha256", relay.url));
+	if (!response.ok) throw new Error(`certificate HTTP ${response.status}`);
+	const url = new URL(relay.url);
+	url.protocol = "https:";
+	const client = new MoqClient(
+		MoqClientConfig.create({
+			// moq-ffi exposes no negotiated version, so offering only the expected one is the check.
+			versions: [relay.version],
+			tls: MoqClientTls.create({ fingerprints: [(await response.text()).trim()] }),
+		}),
+	);
+	return client.connect(url.toString());
+}
+
+/** A standalone group with a consumer, no session. */
+function localGroup(sequence = 0n) {
+	const broadcast = new MoqBroadcastProducer();
+	const track = broadcast.publishTrack("data", TIMED);
+	const group = track.createGroup(sequence);
+	return { broadcast, track, group, consumer: group.consume() };
+}
+
+const local: Record<string, () => Promise<string | undefined>> = {
+	"u64 above 2^53 round-trips locally": async () => {
+		for (const sequence of HIGH) {
+			const { group, consumer } = localGroup(sequence);
+			if (consumer.sequence() !== sequence) throw new Error(`sequence ${consumer.sequence()} != ${sequence}`);
+			group.writeFrame({ payload: payload(1), timestampUs: sequence });
+			const frame = await consumer.readFrame();
+			if (frame?.timestampUs !== sequence) throw new Error(`timestamp ${frame?.timestampUs} != ${sequence}`);
+		}
+		return undefined;
+	},
+
+	"AbortSignal rejects a pending read without stealing the next frame": async () => {
+		const { group, consumer } = localGroup();
+		const abort = new AbortController();
+		const first = consumer.readFrame({ signal: abort.signal });
+		if (!(await pending(first))) throw new Error("read settled with nothing written");
+		abort.abort();
+		const error = await settle(
+			first,
+			1000,
+			"aborted read",
+			() => undefined,
+			(err: unknown) => err,
+		);
+		if (!error) throw new Error("aborted read resolved");
+		group.writeFrame({ payload: payload(3), timestampUs: 0n });
+		const next = await within(consumer.readFrame(), 1000, "read after abort");
+		if (next?.payload.byteLength !== 3) throw new Error("the frame after an abort went missing");
+		return `rejects with ${(error as Error).name}: ${(error as Error).message}`;
+	},
+
+	"aborting a pending call releases its handle": async () => {
+		// The pending future holds a clone of the consumer, so the track stays demanded until
+		// rust_future_free drops it. Destroying the JS handle alone must not be enough.
+		const broadcast = new MoqBroadcastProducer();
+		const track = broadcast.publishTrack("data", TIMED);
+		const demand = track.demand();
+		const consumer = track.consume(undefined);
+		const wanted = async () => {
+			while ((await demand.wantedChanged()) === undefined) {}
+		};
+		const unwanted = async () => {
+			while ((await demand.wantedChanged()) !== undefined) {}
+		};
+		await within(wanted(), 1000, "demand wanted");
+		const abort = new AbortController();
+		const read = consumer.recvGroup({ signal: abort.signal }).catch(() => undefined);
+		// The generated `*Like` return types omit uniffiDestroy; only the class declares it.
+		(consumer as MoqTrackConsumer).uniffiDestroy();
+		await sleep(20);
+		const heldByFuture = demand.wanted() !== undefined;
+		abort.abort();
+		await read;
+		await within(unwanted(), 1000, "demand unwanted after abort");
+		if (!heldByFuture) throw new Error("demand dropped before the pending future was freed");
+		return undefined;
+	},
+
+	"freeing a handle mid-call leaves the call running": async () => {
+		// moq-wasm's free() rejects pending calls. Here every call clones the Arc, so the
+		// call outlives the handle and cancel() is the explicit way to end it.
+		const { group, consumer } = localGroup();
+		const read = consumer.readFrame();
+		(consumer as MoqGroupConsumer).uniffiDestroy();
+		if (!(await pending(read))) throw new Error("free settled the pending read");
+		group.writeFrame({ payload: payload(2), timestampUs: 0n });
+		const frame = await within(read, 1000, "read after free");
+		return `resolves later with ${frame?.payload.byteLength} bytes`;
+	},
+
+	"cancel() rejects a pending call and every later one": async () => {
+		const { consumer } = localGroup();
+		const read = consumer.readFrame();
+		if (!(await pending(read))) throw new Error("read settled with nothing written");
+		consumer.cancel();
+		const first = await settle(
+			read,
+			1000,
+			"cancelled read",
+			() => undefined,
+			(err: unknown) => err as Error,
+		);
+		if (!first) throw new Error("cancelled read resolved");
+		const later = await settle(
+			consumer.readFrame(),
+			1000,
+			"read after cancel",
+			() => undefined,
+			(err: unknown) => err as Error,
+		);
+		if (!later) throw new Error("read after cancel resolved");
+		return `${first.message}; then ${later.message}`;
+	},
+
+	"closing the producer ends a pending read": async () => {
+		const { group, consumer } = localGroup();
+		const read = consumer.readFrame();
+		group.finish();
+		const frame = await within(read, 1000, "read after finish");
+		if (frame !== undefined) throw new Error("finished group yielded a frame");
+		return undefined;
+	},
+};
+
+const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
+	"negotiates the relay's version": async (relay) => {
+		const session = await connect(relay);
+		session.cancel(0);
+		return undefined;
+	},
+
+	"u64 above 2^53 crosses the relay": async (relay) => {
+		const publisher = await connect(relay);
+		const subscriber = await connect(relay);
+		try {
+			const path = `uniffi/u64/${crypto.randomUUID()}`;
+			const broadcast = publisher.publish().createBroadcast(path);
+			const track = broadcast.publishTrack("data", TIMED);
+			broadcast.announce(MoqRoute.create({}));
+			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
+			const sub = await consumer.subscribeTrack("data", undefined);
+			const seen: string[] = [];
+			for (const sequence of [5n, 2n ** 32n, 2n ** 53n - 1n, ...HIGH]) {
+				const group = track.createGroup(sequence);
+				group.writeFrame({ payload: payload(160), timestampUs: sequence });
+				group.finish();
+				const next = within(sub.recvGroup(), 5000, `recvGroup ${sequence} after [${seen}]`);
+				// Known: on moq-lite-06 the largest varint never arrives, while lite-02 and IETF carry it.
+				if (sequence === HIGH[1] && relay.version === "moq-lite-06") {
+					const outcome = await next.then(
+						(group) => `arrived as ${group?.sequence()}`,
+						(err: unknown) => (err as Error).message,
+					);
+					if (outcome === `arrived as ${sequence}`)
+						throw new Error("known lite-06 gap now passes; update the case");
+					return `known gap: 2^62-1 ${outcome}`;
+				}
+				const got = (await next) as MoqGroupConsumerLike | undefined;
+				if (got?.sequence() !== sequence) throw new Error(`sequence ${got?.sequence()} != ${sequence}`);
+				const frame = await got.readFrame();
+				// moq-lite-02 carries no timestamp; every other version must keep it exact.
+				if (relay.version !== "moq-lite-02" && frame?.timestampUs !== sequence)
+					throw new Error(`timestamp ${frame?.timestampUs} != ${sequence}`);
+				seen.push(String(sequence));
+			}
+			return undefined;
+		} finally {
+			publisher.cancel(0);
+			subscriber.cancel(0);
+		}
+	},
+
+	"refuses a track the publisher does not serve": async (relay) => {
+		const publisher = await connect(relay);
+		const subscriber = await connect(relay);
+		try {
+			const path = `uniffi/refuse/${crypto.randomUUID()}`;
+			const broadcast = publisher.publish().createBroadcast(path);
+			broadcast.publishTrack("data", TIMED);
+			broadcast.announce(MoqRoute.create({}));
+			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
+			const outcome = await settle(
+				consumer.subscribeTrack("missing", undefined).then((track) => track.recvGroup()),
+				5000,
+				"refused subscribe",
+				(group) => (group ? "a group" : "no group"),
+				(err: unknown) => `rejected: ${(err as Error).message}`,
+			);
+			if (outcome === "a group") throw new Error("a missing track yielded a group");
+			return outcome;
+		} finally {
+			publisher.cancel(0);
+			subscriber.cancel(0);
+		}
+	},
+
+	"session cancel rejects a pending remote read": async (relay) => {
+		const publisher = await connect(relay);
+		const subscriber = await connect(relay);
+		try {
+			const path = `uniffi/close/${crypto.randomUUID()}`;
+			const broadcast = publisher.publish().createBroadcast(path);
+			const track = broadcast.publishTrack("data", TIMED);
+			broadcast.announce(MoqRoute.create({}));
+			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
+			const sub = await consumer.subscribeTrack("data", undefined);
+			const group = track.appendGroup();
+			group.writeFrame({ payload: payload(4), timestampUs: 0n });
+			const got = await within(sub.recvGroup(), 5000, "recvGroup");
+			if (!got) throw new Error("no group");
+			await got.readFrame();
+			const read = got.readFrame();
+			if (!(await pending(read))) throw new Error("read settled early");
+			subscriber.cancel(1);
+			const outcome = await settle(
+				read,
+				5000,
+				"read after session cancel",
+				(frame) => (frame ? "a frame" : "end of group"),
+				(err: unknown) => `rejected: ${(err as Error).message}`,
+			);
+			if (outcome === "a frame") throw new Error("read yielded a frame after cancel");
+			return outcome;
+		} finally {
+			publisher.cancel(0);
+		}
+	},
+};
+
+/** Per-call costs with no network, so only the binding and moq-net's model are measured. */
+async function bench(): Promise<Bench[]> {
+	const results: Bench[] = [];
+	// Each batch is a fresh group, under moq-net's 8192-frame and 32 MiB group caps.
+	let BATCH = 1000;
+	const measure = async (name: string, batches: number, body: () => Promise<number>) => {
+		await body(); // warm the dispatchers
+		let elapsed = 0;
+		for (let i = 0; i < batches; i++) elapsed += await body();
+		results.push({ name, iterations: batches * BATCH, us_per_op: (elapsed * 1000) / (batches * BATCH) });
+	};
+
+	await measure("sync getter: group.sequence()", 10, async () => {
+		const { consumer } = localGroup();
+		const start = performance.now();
+		for (let i = 0; i < BATCH; i++) consumer.sequence();
+		return performance.now() - start;
+	});
+
+	for (const size of [160, 4096, 131072]) {
+		const bytes = payload(size);
+		BATCH = Math.min(1000, (16 << 20) / size);
+		const batches = size > 4096 ? 8 : 10;
+		await measure(`sync write_frame ${size}B`, batches, async () => {
+			const { group, broadcast } = localGroup();
+			const start = performance.now();
+			for (let i = 0; i < BATCH; i++) group.writeFrame({ payload: bytes, timestampUs: 0n });
+			const elapsed = performance.now() - start;
+			broadcast.close();
+			return elapsed;
+		});
+		await measure(`async read_frame, buffered ${size}B`, batches, async () => {
+			const { group, consumer, broadcast } = localGroup();
+			for (let i = 0; i < BATCH; i++) group.writeFrame({ payload: bytes, timestampUs: 0n });
+			const start = performance.now();
+			for (let i = 0; i < BATCH; i++) await consumer.readFrame();
+			const elapsed = performance.now() - start;
+			broadcast.close();
+			return elapsed;
+		});
+	}
+
+	BATCH = 1000;
+	// Each read parks first, so it pays the continuation: a poll, a JS Promise per wakeup, a re-poll.
+	const bytes = payload(160);
+	await measure("async read_frame, parked then woken 160B", 5, async () => {
+		const { group, consumer, broadcast } = localGroup();
+		const start = performance.now();
+		for (let i = 0; i < BATCH; i++) {
+			const read = consumer.readFrame();
+			group.writeFrame({ payload: bytes, timestampUs: 0n });
+			await read;
+		}
+		const elapsed = performance.now() - start;
+		broadcast.close();
+		return elapsed;
+	});
+	return results;
+}
+
+async function run(relays: Relay[]): Promise<Report> {
+	const start = performance.now();
+	// The page sets the URL; under the strict CSP this also probes `new Function` and falls back.
+	await uniffiInitAsync(new URL("/uniffi/moq_ffi.wasm", location.href));
+	const init_ms = performance.now() - start;
+
+	const cases: CaseResult[] = [];
+	const record = async (name: string, body: () => Promise<string | undefined>) => {
+		try {
+			const note = await within(body(), 15000, name);
+			cases.push({ name, ok: true, note });
+		} catch (err) {
+			cases.push({ name, ok: false, error: err instanceof Error ? err.message : String(err) });
+		}
+	};
+	for (const [name, body] of Object.entries(local)) await record(name, body);
+	for (const relay of relays)
+		for (const [name, body] of Object.entries(remote)) await record(`${relay.name}: ${name}`, () => body(relay));
+
+	let evaluates = true;
+	try {
+		new Function("");
+	} catch {
+		evaluates = false;
+	}
+	return { eval: evaluates, init_ms, cases, bench: await bench() };
+}
+
+declare global {
+	interface Window {
+		uniffiCases: typeof run;
+	}
+}
+window.uniffiCases = run;

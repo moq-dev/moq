@@ -73,19 +73,14 @@ fn apply_transport(transport: &mut driver::TransportConfig, quic: &Resolved) {
 	transport.congestion_controller_factory(congestion_factory(quic.congestion()));
 }
 
-/// Apply the flow-control windows. The connection window defaults to ours, since the
-/// backend's is unlimited; the others stay at the backend default when unset.
+/// Apply the flow-control windows `Config::resolve` settled, replacing moq-quic's own.
 fn apply_windows(transport: &mut driver::TransportConfig, quic: &Resolved) {
 	// Saturating rather than erroring: `Config::validate` already rejects a window
 	// past the varint, so this only bites a `Resolved` built without it.
-	let window = quic.receive_window.unwrap_or(crate::quic::DEFAULT_RECEIVE_WINDOW);
-	transport.receive_window(driver::VarInt::from_u64(window).unwrap_or(driver::VarInt::MAX));
-	if let Some(window) = quic.stream_receive_window {
-		transport.stream_receive_window(driver::VarInt::from_u64(window).unwrap_or(driver::VarInt::MAX));
-	}
-	if let Some(window) = quic.send_window {
-		transport.send_window(window);
-	}
+	transport.receive_window(driver::VarInt::from_u64(quic.receive_window).unwrap_or(driver::VarInt::MAX));
+	transport
+		.stream_receive_window(driver::VarInt::from_u64(quic.stream_receive_window).unwrap_or(driver::VarInt::MAX));
+	transport.send_window(quic.send_window);
 }
 
 /// The controller factory for a congestion control family. moq-quic's BBR is v3.
@@ -93,6 +88,23 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn driver::congestion::
 	match family {
 		CongestionControl::Loss => Arc::new(driver::congestion::CubicConfig::default()),
 		CongestionControl::Delay => Arc::new(driver::congestion::Bbr3Config::default()),
+		CongestionControl::None => Arc::new(driver::congestion::Unlimited),
+	}
+}
+
+/// A live QUIC connection under a session, for tuning it once the peer is known.
+pub struct Connection(driver::Connection);
+
+impl Connection {
+	pub(crate) fn new(conn: driver::Connection) -> Self {
+		Self(conn)
+	}
+
+	/// Change the flow-control limits `limits` sets; a raise reaches the peer on the next packet.
+	///
+	/// Errors, changing nothing, on limits [`Limits::validate`](crate::quic::Limits::validate) refuses.
+	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<()> {
+		Ok(self.0.set_limits(limits)?)
 	}
 }
 
@@ -253,6 +265,10 @@ pub enum Error {
 	/// timeout. A host with a single address reports that error directly instead.
 	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
 	Failover(Vec<crate::failover::Attempt<Error>>),
+
+	/// The flow-control limits are ones a peer would refuse, so none were applied.
+	#[error("invalid quic limits: {0}")]
+	Limits(#[from] moq_quic::LimitsError),
 }
 
 impl crate::failover::Aggregate for Error {
@@ -311,6 +327,8 @@ pub(crate) struct Client {
 	/// whether an IPv4 destination is reachable at all. Captured here because the
 	/// endpoint owns the socket from here on and `local_addr` can't tell us.
 	dual_stack: bool,
+	/// Whether to write session secrets to `SSLKEYLOGFILE` (see [`crate::quic::Config::keylog`]).
+	keylog: bool,
 }
 
 impl Client {
@@ -324,6 +342,7 @@ impl Client {
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "client")?;
 		let transport = Arc::new(transport);
+		let keylog = quic.keylog;
 
 		// There's a bit more boilerplate to make a generic endpoint.
 		// The driver spawns its tasks on the current tokio runtime.
@@ -341,6 +360,7 @@ impl Client {
 			failover_delay: resolved.race,
 			resolution_delay: resolved.resolution_delay,
 			dual_stack,
+			keylog,
 		})
 	}
 
@@ -396,6 +416,11 @@ impl Client {
 
 				tracing::warn!(url = %RedactedUrl::new(&fingerprint), "performing insecure HTTP request for certificate");
 
+				// Even a plaintext fetch builds reqwest's TLS stack, which panics without a
+				// process default when another crate (iroh) builds it as `rustls-no-provider`.
+				// An error only means one is already installed.
+				let _ = crate::crypto::install_default();
+
 				let resp = reqwest::get(fingerprint.as_str())
 					.await
 					.map_err(|err| Error::FetchFingerprint(crate::error::message(err)))?;
@@ -426,7 +451,9 @@ impl Client {
 		};
 
 		config.alpn_protocols = alpns;
-		config.key_log = Arc::new(rustls::KeyLogFile::new());
+		if self.keylog {
+			config.key_log = Arc::new(rustls::KeyLogFile::new());
+		}
 
 		let config: driver::crypto::rustls::QuicClientConfig = config.try_into()?;
 		let mut config = driver::ClientConfig::new(Arc::new(config));
@@ -484,7 +511,8 @@ impl Error {
 			| Self::InvalidDnsName
 			| Self::NoRuntime
 			| Self::NoInitialCipherSuite
-			| Self::ConnectRejected(_) => true,
+			| Self::ConnectRejected(_)
+			| Self::Limits(_) => true,
 			Self::Tls(err) => err.is_terminal(),
 			Self::Failover(failures) => {
 				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())
@@ -582,6 +610,8 @@ struct Socket {
 	/// Wakes every sender blocked on a full send buffer from the socket's single
 	/// write-readiness registration.
 	blocked: Arc<Blocked>,
+	/// When a send error was last logged, shared so a busy server logs one per interval.
+	last_send_error: Arc<Mutex<Option<driver::Instant>>>,
 }
 
 impl Socket {
@@ -594,17 +624,14 @@ impl Socket {
 			state: Arc::new(state),
 			local,
 			blocked: Default::default(),
+			last_send_error: Default::default(),
 		})
 	}
 
-	/// Close the socket, unless a [`crate::server::SocketRetainer`] still holds it.
+	/// Close the socket. A reuseport member stays in its group regardless: the
+	/// group retains a handle of its own.
 	fn release(&self) {
 		self.io.write().unwrap().take();
-	}
-
-	/// A handle keeping the socket open after it is released, or `None` once it is.
-	fn retain(&self) -> Option<Arc<tokio::net::UdpSocket>> {
-		self.io.read().unwrap().clone()
 	}
 }
 
@@ -662,12 +689,15 @@ impl driver::UdpSender for Socket {
 			return Poll::Ready(Ok(()));
 		};
 		loop {
-			// `send` logs and drops a failed datagram rather than failing the connection, as
-			// UDP loss would; only `WouldBlock` comes back.
-			#[allow(deprecated)]
-			match io.try_io(tokio::io::Interest::WRITABLE, || self.state.send(io.into(), transmit)) {
+			match io.try_io(tokio::io::Interest::WRITABLE, || {
+				self.state.try_send(io.into(), transmit)
+			}) {
+				Ok(()) => return Poll::Ready(Ok(())),
 				Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
-				res => return Poll::Ready(res),
+				Err(err) => {
+					let mut last = self.last_send_error.lock().unwrap();
+					return Poll::Ready(driver::send_failed(&mut last, err, transmit));
+				}
 			}
 			// Every connection sends from its own task, but tokio keeps one waker per
 			// direction, so register a fan-out to all of them instead of this task's.
@@ -726,6 +756,7 @@ impl Server {
 		let quic = quic.resolve();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "server")?;
+		let keylog = quic.keylog;
 		let transport = Arc::new(transport);
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
@@ -738,7 +769,9 @@ impl Server {
 		alpns.push(web::ALPN.as_bytes().to_vec());
 
 		let mut tls = (*served.config(alpns)?).clone();
-		tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		if keylog {
+			tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		}
 
 		let tls: driver::crypto::rustls::QuicServerConfig = tls.try_into()?;
 		let mut tls = driver::ServerConfig::with_crypto(Arc::new(tls));
@@ -779,7 +812,11 @@ impl Server {
 				count = shard.count(),
 				"encoding the shard in connection IDs"
 			);
-			endpoint_config.cid_generator(Arc::new(move || Box::new(ShardIdGenerator::new(shard))));
+			endpoint_config.cid_generator(Arc::new(move || {
+				let mut cids = moq_quic::RandomConnectionIdGenerator::default();
+				cids.set_shard(shard.index(), shard.count());
+				Box::new(cids)
+			}));
 		} else if let Some(load_balancer) = load_balancer {
 			let server_id = load_balancer.id;
 			let nonce_len = load_balancer.nonce;
@@ -840,16 +877,27 @@ impl Server {
 	/// Close every connection, wait until each has sent its close to the peer,
 	/// then release the socket.
 	pub async fn shutdown(self) {
-		self.close();
-		// Not `wait_idle`, which also sits out each connection's 3 PTO closing
-		// period: that only repeats the close to a peer that already has it.
-		self.quic.wait_all_draining().await;
+		self.closer().close().await;
 		self.socket.release();
 	}
 
-	/// A handle keeping the socket open after this server is gone.
-	pub fn retain(&self) -> Option<Arc<tokio::net::UdpSocket>> {
-		self.socket.retain()
+	/// A handle that closes this server's connections from wherever its owner
+	/// went, for a worker that has to flush them before its runtime is dropped.
+	pub fn closer(&self) -> Closer {
+		Closer(self.quic.clone())
+	}
+}
+
+/// Closes a [`Server`]'s connections without owning it; see [`Server::closer`].
+pub(crate) struct Closer(driver::Endpoint);
+
+impl Closer {
+	/// Close every connection and wait until each has sent its close to the peer.
+	pub async fn close(self) {
+		self.0.close(driver::VarInt::from_u32(0), b"server shutdown");
+		// Not `wait_idle`, which also sits out each connection's 3 PTO closing
+		// period: that only repeats the close to a peer that already has it.
+		self.0.wait_all_draining().await;
 	}
 }
 
@@ -953,34 +1001,6 @@ pub(crate) async fn accept(
 	}
 }
 
-// ── ShardIdGenerator ────────────────────────────────────────────────
-
-/// Connection IDs whose first byte names the reuseport member that owns them,
-/// so the group's steering filter can route later packets back to it.
-struct ShardIdGenerator {
-	shard: crate::listen::Shard,
-}
-
-impl ShardIdGenerator {
-	fn new(shard: crate::listen::Shard) -> Self {
-		Self { shard }
-	}
-}
-
-impl driver::ConnectionIdGenerator for ShardIdGenerator {
-	fn generate_cid(&mut self) -> driver::ConnectionId {
-		driver::ConnectionId::new(&moq_sock::shard::cid(self.shard))
-	}
-
-	fn cid_len(&self) -> usize {
-		moq_sock::shard::CID_LEN
-	}
-
-	fn cid_lifetime(&self) -> Option<Duration> {
-		None
-	}
-}
-
 // ── ServerIdGenerator ───────────────────────────────────────────────
 
 struct ServerIdGenerator {
@@ -1035,6 +1055,73 @@ mod tests {
 		pinned_connection("[::1]:0", Some("localhost")).await;
 	}
 
+	/// The server's socket hands a send that finds no route back to the connection, as the
+	/// client's does, rather than logging it as loss. Linux refuses a v4-mapped destination on an
+	/// IPv6-only socket with `ENETUNREACH`, an unroutable family without touching the host's routes.
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	async fn server_socket_returns_unreachable_sends() {
+		let socket = socket2::Socket::new(
+			socket2::Domain::IPV6,
+			socket2::Type::DGRAM,
+			Some(socket2::Protocol::UDP),
+		)
+		.unwrap();
+		socket.set_only_v6(true).unwrap();
+		socket.set_nonblocking(true).unwrap();
+		socket
+			.bind(&net::SocketAddr::from((net::Ipv6Addr::LOCALHOST, 0)).into())
+			.unwrap();
+		let socket = Socket::new(socket.into()).unwrap();
+
+		let transmit = moq_sock::udp::Transmit {
+			destination: net::SocketAddr::new(net::Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), 1),
+			ecn: None,
+			contents: b"hello",
+			segment_size: None,
+			src_ip: None,
+		};
+		let mut sender = driver::AsyncUdpSocket::create_sender(&socket);
+		let result = std::future::poll_fn(|cx| sender.as_mut().poll_send(&transmit, cx)).await;
+
+		let err = result.expect_err("an unroutable send must reach the connection");
+		assert_eq!(err.kind(), std::io::ErrorKind::NetworkUnreachable);
+	}
+
+	/// The certificate fetch goes out without a process-default crypto provider installed,
+	/// even when reqwest is built with rustls but no provider (as iroh builds it).
+	#[tokio::test]
+	async fn http_dial_needs_no_installed_provider() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let port = listener.local_addr().unwrap().port();
+		tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut buf = [0; 1024];
+			let _ = socket.read(&mut buf).await;
+			let _ = socket
+				.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+				.await;
+		});
+
+		let config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			..Default::default()
+		};
+		let tls = config.tls.build().expect("tls config");
+		let client = Client::new(&config, &crate::quic::Config::default()).expect("client init");
+		let url: Url = format!("http://127.0.0.1:{port}/").parse().unwrap();
+		let versions = moq_net::Versions::default();
+		let result = tokio::time::timeout(Duration::from_secs(5), client.connect(&tls, url.into(), &versions))
+			.await
+			.expect("dial timed out");
+		assert!(
+			matches!(result, Err(Error::FingerprintStatus(404))),
+			"the fetch should reach the server"
+		);
+	}
+
 	async fn pinned_connection(bind: &str, host_name: Option<&str>) {
 		let quic = crate::quic::Config::default();
 		let config = listen::Config {
@@ -1079,9 +1166,8 @@ mod tests {
 	}
 
 	/// moq-quic exposes no getters for the flow-control windows, but its `Debug` prints
-	/// them, which is enough to prove each one reached the transport config, that an
-	/// unset connection window gets our finite default instead of moq-quic's unlimited one,
-	/// and that the other unset knobs leave moq-quic's own defaults in place.
+	/// them, which is enough to prove each one reached the transport config, and that
+	/// unset windows get our defaults instead of moq-quic's.
 	#[test]
 	fn apply_windows_writes_each_field() {
 		let quic = crate::quic::Config {
@@ -1105,14 +1191,14 @@ mod tests {
 
 		let mut untouched = driver::TransportConfig::default();
 		apply_windows(&mut untouched, &crate::quic::Config::default().resolve());
-		let mut expected = driver::TransportConfig::default();
-		expected.receive_window(driver::VarInt::from_u64(crate::quic::DEFAULT_RECEIVE_WINDOW).unwrap());
-		assert_eq!(format!("{:?}", untouched), format!("{:?}", expected));
-		assert_ne!(
-			format!("{:?}", untouched),
-			format!("{:?}", driver::TransportConfig::default()),
-			"moq-quic's own connection window is unlimited, so ours must replace it"
-		);
+		let applied = format!("{:?}", untouched);
+		for field in [
+			format!("receive_window: {}", crate::quic::DEFAULT_RECEIVE_WINDOW),
+			format!("stream_receive_window: {}", crate::quic::DEFAULT_STREAM_RECEIVE_WINDOW),
+			format!("send_window: {}", crate::quic::DEFAULT_SEND_WINDOW),
+		] {
+			assert!(applied.contains(&field), "{field} missing from {applied}");
+		}
 	}
 
 	/// Build a controller from each family's factory and downcast it to the
@@ -1127,6 +1213,9 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<driver::congestion::Bbr3>().is_ok());
+
+		let none = congestion_factory(CongestionControl::None).build(now, mtu);
+		assert!(none.into_any().downcast::<driver::congestion::Unlimited>().is_ok());
 	}
 
 	/// Loopback regression test: with the knob unset, live QUIC connections must run

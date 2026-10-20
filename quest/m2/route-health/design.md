@@ -67,5 +67,4 @@ fixtures and retained-state/control-work measurements in existing CI lanes.
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - candidate identity, identity-named requests, and transit priority semantics
-- [Live largest location](/quest/m1/largest.md) - shared progress naming with distinct remote/local meaning
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - mode changes must preserve requested positions and demand

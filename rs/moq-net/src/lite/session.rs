@@ -12,7 +12,7 @@ use super::{
 };
 
 pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
-	pub recv_bandwidth: Option<bandwidth::Consumer>,
+	pub recv_bandwidth: Option<bandwidth::Weak>,
 	/// The estimate PROBE reports, published by the session's supervisor.
 	pub estimate: kio::Producer<crate::session::Estimate>,
 	/// The session's protocol machine, named so its `Send`-ness stays inferred
@@ -87,6 +87,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 					| Error::Stream(_)
 					| Error::Remote(_)
 					| Error::Transport(_)
+					| Error::IdleTimeout
 					| Error::Decode(crate::DecodeError::Short),
 				)) => {
 					pending.swap_remove(index);
@@ -142,7 +143,7 @@ pub struct AcceptedSetup<S: crate::transport::poll::Session> {
 /// Everything one moq-lite session needs to start.
 pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
-	pub runtime: crate::time::Clock,
+	pub runtime: crate::time::Deadlines,
 
 	/// Whether we dialed the session. Only the dialing side aborts on a publication
 	/// its grant does not cover: a server's publish origin is everything the peer
@@ -216,7 +217,7 @@ where
 
 	let recv_bw_consumer = match version {
 		Version::Lite01 | Version::Lite02 => None,
-		_ => Some(recv_bw.consume()),
+		_ => Some(recv_bw.weak()),
 	};
 
 	let recv_bw_for_sub = match version {
@@ -395,7 +396,7 @@ where
 			self.subscriber.abort(err);
 		}
 		match &res {
-			Err(Error::Transport(_)) => {
+			Err(Error::Transport(_) | Error::IdleTimeout) => {
 				tracing::info!("session terminated");
 				self.session.close(SessionError::Internal.to_code(), "");
 			}
@@ -468,7 +469,7 @@ impl<S: crate::transport::poll::Session> Drop for Driver<S> {
 
 /// Opens one AUTH stream per token this side presents.
 struct Present<S: crate::transport::poll::Session> {
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	session: S,
 	version: Version,
 	handle: crate::auth::Handle,
@@ -479,7 +480,7 @@ struct Present<S: crate::transport::poll::Session> {
 	/// Whether the first poll decided who answers the peer's tokens.
 	started: bool,
 	/// The connection's own credential, held for the life of the session.
-	_setup: Option<crate::auth::Token>,
+	_setup: Option<crate::auth::Auth>,
 }
 
 impl<S: crate::transport::poll::Session> Present<S> {
@@ -515,7 +516,7 @@ impl<S: crate::transport::poll::Session> Present<S> {
 /// One token's AUTH stream: send the token, then track the grant until either
 /// side ends it.
 struct PresentToken<S: crate::transport::poll::Session> {
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	session: S,
 	version: Version,
 	handle: crate::auth::Handle,
@@ -550,7 +551,7 @@ impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
 			err => crate::auth::protocol_error(err),
 		};
 		match &err {
-			Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::Session(_) => {
+			Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::IdleTimeout | Error::Session(_) => {
 				tracing::debug!(%err, "auth token ended")
 			}
 			err => tracing::warn!(%err, "auth token ended"),
@@ -713,7 +714,8 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 		loop {
 			match &mut self.state {
 				SendSetupState::Open { session, setup } => {
-					let stream = ready!(session.poll_open_uni(cx)).map_err(crate::lite::error::from_transport)?;
+					let stream = ready!(session.poll_open_uni(cx, Default::default()))
+						.map_err(crate::lite::error::from_transport)?;
 					let mut writer = Writer::new(stream, self.version);
 					writer.buffer(&super::DataType::Setup)?;
 					writer.buffer(&**setup)?;
@@ -744,7 +746,7 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 /// session closed on schedule; the peer just never learns why.
 struct SendGoaway<S: crate::transport::poll::Session> {
 	version: Version,
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	goaway: crate::goaway::Protocol,
 	/// A dedicated handle for the trigger-phase close watch, since `session` opens
 	/// the Goaway stream and each pending operation needs its own handle.
@@ -773,7 +775,7 @@ enum SendGoawayState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> SendGoaway<S> {
-	fn new(runtime: crate::time::Clock, session: S, goaway: crate::goaway::Protocol, version: Version) -> Self {
+	fn new(runtime: crate::time::Deadlines, session: S, goaway: crate::goaway::Protocol, version: Version) -> Self {
 		Self {
 			version,
 			runtime,
@@ -890,7 +892,7 @@ mod tests {
 	use crate::coding::Encode;
 	use crate::lite::test_transport::ScriptedSession;
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn malformed_auth_replies_close_the_session() {
 		// Unknown reply, invalid code, truncated error, and trailing body bytes.
 		for script in [
@@ -909,7 +911,7 @@ mod tests {
 		let log = transport.log.clone();
 
 		let start = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			client: true,
 			limits: Default::default(),
 			session: transport,
@@ -925,7 +927,7 @@ mod tests {
 		.unwrap();
 		let mut driver = start.driver;
 
-		let res = moq_net_sim::timeout(
+		let res = moq_clock::timeout(
 			std::time::Duration::from_secs(10),
 			kio::wait(|waiter| driver.poll(waiter)),
 		)
@@ -935,13 +937,13 @@ mod tests {
 		assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn malformed_presenter_auth_closes_the_session() {
 		for script in [vec![7, 1, 2], vec![7, 1, 0, 0]] {
 			let transport = ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
 			let log = transport.log.clone();
 			let start = start(Config {
-				runtime: crate::time::Clock::sim(),
+				runtime: crate::time::sim(),
 				client: false,
 				limits: Default::default(),
 				session: transport,
@@ -964,7 +966,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn malformed_auth_ok_closes_the_session() {
 		for pattern in [
 			b"*/**".as_slice(),
@@ -996,7 +998,7 @@ mod tests {
 
 	/// A reply cut off inside its declared size fails to decode, unlike a peer that
 	/// resets before answering.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn truncated_auth_reply_closes_the_session() {
 		let mut script = Vec::new();
 		let mut w = crate::coding::Encoder::new(&mut script, Version::Lite07.into());
@@ -1006,7 +1008,7 @@ mod tests {
 		assert_session_closes(ScriptedSession::per_stream_eof(vec![script])).await;
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn malformed_auth_error_reasons_close_the_session() {
 		for reason in [vec![0xff], vec![b'a'; 8193]] {
 			let mut script = Vec::new();
@@ -1027,7 +1029,7 @@ mod tests {
 	async fn assert_session_closes(transport: ScriptedSession) {
 		let log = transport.log.clone();
 		let start = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			client: true,
 			limits: Default::default(),
 			session: transport,
@@ -1042,7 +1044,7 @@ mod tests {
 		})
 		.unwrap();
 		let mut driver = start.driver;
-		let res = moq_net_sim::timeout(
+		let res = moq_clock::timeout(
 			std::time::Duration::from_secs(10),
 			kio::wait(|waiter| driver.poll(waiter)),
 		)
@@ -1052,7 +1054,7 @@ mod tests {
 		assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_setup_does_not_wait_on_an_early_stream_header() {
 		let version = Version::Lite05;
 		let mut setup = Vec::new();
@@ -1068,7 +1070,7 @@ mod tests {
 		assert_eq!(accepted.early.len(), 1);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_setup_refuses_two_incomplete_setup_streams() {
 		use futures::FutureExt;
 		let mut session =
@@ -1079,7 +1081,7 @@ mod tests {
 		));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn duplicate_setup_closes_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			for complete in [false, true] {
@@ -1096,7 +1098,7 @@ mod tests {
 					.with_incoming_unis(vec![first.clone(), first]);
 				let log = session.log.clone();
 				let mut started = start(Config {
-					runtime: crate::time::Clock::sim(),
+					runtime: crate::time::sim(),
 					session,
 					setup_stream: None,
 					publish: None,
@@ -1121,10 +1123,10 @@ mod tests {
 		}
 	}
 
-	/// A SETUP that ends before its body decodes leaves nothing to wait on, since the
-	/// Setup Stream is already claimed.
-	#[moq_net_sim::test]
-	async fn truncated_setup_closes_the_session() {
+	/// A SETUP that fails to decode leaves nothing to wait on, since the Setup Stream is
+	/// already claimed.
+	#[moq_clock::test]
+	async fn malformed_setup_closes_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut truncated = Vec::new();
 			DataType::Setup
@@ -1133,31 +1135,45 @@ mod tests {
 					version,
 				)
 				.unwrap();
-			let session =
-				crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(vec![truncated]);
-			let log = session.log.clone();
-			let mut started = start(Config {
-				runtime: crate::time::Clock::sim(),
-				session,
-				setup_stream: None,
-				publish: None,
-				subscribe: None,
-				peer_hop: None,
-				version,
-				our_setup: Setup::default(),
-				peer_setup: None,
-				client: false,
-				auth: crate::auth::Handle::new(version.has_auth()),
-				limits: Default::default(),
-			})
-			.unwrap();
-			let _ = started.driver.poll(&kio::Waiter::noop());
-			assert!(
-				log.closes()
-					.iter()
-					.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
-				"{version:?}: a truncated SETUP must close the session"
-			);
+
+			// Two empty parameters with the same ID.
+			let mut repeated = truncated.clone();
+			let mut w = crate::coding::Encoder::new(&mut repeated, version.into());
+			let prefix = w.prefix_varint();
+			w.varint(2).unwrap();
+			for _ in 0..2 {
+				w.varint(0).unwrap();
+				w.bytes(&[]).unwrap();
+			}
+			w.fill(prefix).unwrap();
+
+			for (case, setup) in [("truncated", truncated), ("repeated parameter", repeated)] {
+				let session =
+					crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(vec![setup]);
+				let log = session.log.clone();
+				let mut started = start(Config {
+					runtime: crate::time::sim(),
+					session,
+					setup_stream: None,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					version,
+					our_setup: Setup::default(),
+					peer_setup: None,
+					client: false,
+					auth: crate::auth::Handle::new(version.has_auth()),
+					limits: Default::default(),
+				})
+				.unwrap();
+				let _ = started.driver.poll(&kio::Waiter::noop());
+				assert!(
+					log.closes()
+						.iter()
+						.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+					"{version:?}, {case}: SETUP must close the session"
+				);
+			}
 		}
 	}
 
@@ -1168,7 +1184,7 @@ mod tests {
 		peer_setup: Option<AcceptedSetup<ScriptedSession>>,
 	) -> SessionStart<ScriptedSession> {
 		start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			client,
 			session: transport,
 			setup_stream: None,
@@ -1184,7 +1200,7 @@ mod tests {
 		.unwrap()
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn server_setup_client_parameters_close_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			for body in [vec![1, 2, 0], vec![1, 3, 1, 0], vec![1, 3, 1, 1], vec![1, 3, 1, 3]] {
@@ -1204,7 +1220,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn unknown_client_role_remains_bidirectional() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1, 4, 1, 3, 1, 3]]);
@@ -1217,7 +1233,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn malformed_probe_reports_close_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let transport = if version.has_auth() {
@@ -1239,7 +1255,7 @@ mod tests {
 				early: Vec::new(),
 			};
 			let mut started = raw_session(transport, version, true, Some(peer_setup));
-			let _bandwidth = started.recv_bandwidth.take().unwrap();
+			let _bandwidth = started.recv_bandwidth.take().unwrap().consume();
 			let _ = started.driver.poll(&kio::Waiter::noop());
 			assert!(
 				log.closes()
@@ -1250,7 +1266,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn malformed_group_headers_remain_per_stream() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![0, 0]]);
@@ -1262,7 +1278,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn clients_never_emit_a_goaway_redirect() {
 		for version in [Version::Lite04, Version::Lite05, Version::Lite06, Version::Lite07] {
 			let client = raw_session(ScriptedSession::new(Vec::new()), version, true, None);

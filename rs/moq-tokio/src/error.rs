@@ -91,6 +91,10 @@ pub enum Error {
 	#[error("qlog capture requires the 'qlog' feature")]
 	QlogUnsupported,
 
+	/// Key logging was configured, but `SSLKEYLOGFILE` names no file to write to.
+	#[error("quic.keylog requires SSLKEYLOGFILE to name a file")]
+	KeylogUnset,
+
 	/// The config was parsed from released spellings that no longer work. The
 	/// payload is the migration to print.
 	#[error("{0}")]
@@ -104,6 +108,10 @@ pub enum Error {
 	/// which one.
 	#[error("quic {0} must be non-zero and fit a QUIC varint")]
 	WindowRange(&'static str),
+
+	/// A QUIC stream limit is zero or past the 2^60 a peer accepts.
+	#[error("quic max_streams must be between 1 and 2^60")]
+	StreamsRange,
 
 	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
@@ -191,11 +199,11 @@ pub enum Error {
 	#[error("{0}")]
 	Reconnect(String),
 
-	/// The connection was stopped locally, by closing it or dropping the last handle.
+	/// The connection or listener was stopped locally, by closing it or dropping the last handle.
 	///
 	/// Not a failure: it is what a caller asked for. Distinct from [`Self::Reconnect`]
 	/// so a status watcher can tell an expected teardown from a connection that gave up.
-	#[error("connection stopped")]
+	#[error("stopped locally")]
 	Stopped,
 
 	/// A task serving this connection panicked. The panic itself is logged.
@@ -230,6 +238,11 @@ pub enum Error {
 	#[cfg(all(feature = "uds", unix))]
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
+
+	/// The WebRTC data channel transport failed.
+	#[cfg(feature = "webrtc")]
+	#[error(transparent)]
+	WebRtc(Arc<crate::webrtc::Error>),
 }
 
 impl Error {
@@ -241,6 +254,7 @@ impl Error {
 			Self::MoqNet(err) => matches!(
 				moq_net::SessionError::from(err),
 				moq_net::SessionError::Unauthorized
+					| moq_net::SessionError::Expired
 					| moq_net::SessionError::ProtocolViolation
 					| moq_net::SessionError::KeyValueFormatting
 					| moq_net::SessionError::InvalidRequestId
@@ -250,7 +264,9 @@ impl Error {
 			| Self::Deprecated(_)
 			| Self::IdleTimeoutRange
 			| Self::WindowRange(_)
+			| Self::StreamsRange
 			| Self::QlogUnsupported
+			| Self::KeylogUnset
 			| Self::Connect(_) => true,
 			#[cfg(feature = "quic")]
 			Self::Quic(err) => err.is_terminal(),
@@ -297,7 +313,9 @@ impl Error {
 
 	/// True if the server rejected us for auth reasons, so retrying won't help without new credentials.
 	pub fn is_auth(&self) -> bool {
-		self.connect_error().is_some_and(|err| err.is_auth())
+		// Expiry has no HTTP status, so it has no `ConnectError` to report.
+		matches!(self, Self::MoqNet(err) if moq_net::SessionError::from(err) == moq_net::SessionError::Expired)
+			|| self.connect_error().is_some_and(|err| err.is_auth())
 	}
 
 	/// The HTTP status a server answered a connection attempt with, if it answered with one at all.
@@ -391,6 +409,13 @@ impl From<crate::unix::Error> for Error {
 	}
 }
 
+#[cfg(feature = "webrtc")]
+impl From<crate::webrtc::Error> for Error {
+	fn from(err: crate::webrtc::Error) -> Self {
+		Self::WebRtc(Arc::new(err))
+	}
+}
+
 /// Convenience alias for results produced by this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -425,6 +450,15 @@ mod tests {
 		// A root file can be briefly absent or empty while it rotates, so rereading it may succeed.
 		assert!(!Error::Tls(Arc::new(crate::tls::Error::EmptyRoots("roots.pem".into()))).is_terminal());
 		assert!(!Error::Tls(Arc::new(crate::tls::Error::Open(std::io::ErrorKind::NotFound.into()))).is_terminal());
+	}
+
+	/// Redialing with the same expired credentials cannot succeed; the caller must refresh them.
+	#[test]
+	fn expired_credentials_are_terminal() {
+		assert!(Error::MoqNet(moq_net::Error::Expired).is_terminal());
+		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_terminal());
+		assert!(Error::MoqNet(moq_net::Error::Expired).is_auth());
+		assert!(Error::MoqNet(moq_net::SessionError::Expired.into()).is_auth());
 	}
 
 	/// Every raced address building the same malformed request is as terminal as one address doing so.

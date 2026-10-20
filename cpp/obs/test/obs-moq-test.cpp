@@ -33,6 +33,7 @@ bool text_lookup_getstr(lookup_t *, const char *, const char **)
 
 } // extern "C"
 
+void register_moq_audio_encoder() {}
 void register_moq_output() {}
 void register_moq_service() {}
 void register_moq_source() {}

@@ -7,8 +7,8 @@ including across a relay cluster, arrives with the publisher's object IDs,
 object properties, END_OF_GROUP status objects, datagram object IDs, and
 unknown track properties intact.
 Tracks advertising DYNAMIC_GROUPS relay NEW_GROUP_REQUEST back to the
-original publisher, including across the cluster, with redundant requests
-coalesced.
+original publisher, with redundant requests coalesced. Across the cluster,
+[refresh](/quest/m1/refresh/README.md) carries them on native lite-07.
 moxygen's moq-test conformance (sections 1-7, except cases that use a
 subgroup other than 0) passes through moq-relay in a nightly CI job.
 
@@ -59,7 +59,7 @@ cannot answer unambiguously is refused.
   Rewriting them would violate immutability; forwarding unchanged
   across those families would change their meaning.
 - **Public model carve-out.** These fields stay crate-private on purpose,
-  an exception to [a public model](/quest/m1/model-public-surface.md). A
+  an exception to [a public model](/quest/m1/public-model/README.md). A
   third-party relay built on the public model drops them, as plain lite
   does.
 - **Verification:** Rust integration tests per feature in each child, plus
@@ -83,12 +83,10 @@ Work owned by this README, after the children land:
 
 ## Required
 
-- [Compact subgroup refusal](/quest/m1/ietf-extension/compact-subgroup.md) - a compact-form subgroup other than 0 is refused, not relabelled as subgroup 0
-- [Dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md) - NEW_GROUP_REQUEST reaches the original publisher, coalesced across downstream subscribers
-- [Track properties](/quest/m1/ietf-extension/track-properties.md) - unknown track properties are forwarded unchanged in SUBSCRIBE_OK, FETCH_OK, and TRACK_STATUS_OK
 - [Relay hops](/quest/m1/ietf-extension/lite.md) - the `ietf` SETUP extension carries every crate-private field across a lite-07 hop between relays
 
 ## Related
 
 - [#4926](https://github.com/moq-dev/moq/issues/4926) - the declined request for an object-level API; this carries the fields for relays only
-- [Plan: a public model](/quest/m1/model-public-surface.md) - these fields are its deliberate exception
+- [A public model](/quest/m1/public-model/README.md) - these fields are its deliberate exception
+- [Refresh](/quest/m1/refresh/README.md) - promotes the dynamic-groups request path to a public byte-ratio API on native lite

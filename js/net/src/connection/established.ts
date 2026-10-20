@@ -34,7 +34,7 @@ export interface Established {
 	 * MoQ Auth, each side presents its connection's credential right after setup.
 	 * Otherwise the grant stays undefined.
 	 */
-	readonly auth: Auth.Auth;
+	readonly auth: Auth.Handle;
 
 	/**
 	 * Subscribe to broadcast announcements matching `scope`, any pattern (`foo/**`

@@ -16,17 +16,21 @@ V4L2 `VIDIOC_EXPBUF` source is dropped with the export itself (see
 Decided 2026-10-08: the VAAPI low-power entrypoint check is dropped. Neither
 Meteor Lake nor the Arrow Lake test host exposes `EncSliceLP`, so no machine
 on hand reaches that fallback. A render node other than the first is checked
-by [VA-API external images](/quest/m1/vaapi-vulkan-import.md).
+by [VA-API external images](/quest/m2/vaapi-vulkan-import.md).
 
 - **Windows Media Foundation capture**: on-demand open and close, so the
   camera LED is off when nobody is watching, and NV12 delivery from MJPEG and
   YUY2 cameras.
 - **A live camera run per platform**: capture needs device permission that a
   headless or agent process cannot grant itself.
+- **OBS follows its grant on a shaped uplink**: stream from a real OBS build
+  through `tc netem` (or `rs/moq-shaper`), narrow and reopen the link, and
+  confirm the Stats tab's video target drops at once, climbs back over a few
+  seconds, and the encoder output follows (`cpp/obs/src/moq-rate.h`).
 
 ### PipeWire DMA-BUF capture on KDE
 
-Tracked in [#2893](https://github.com/moq-dev/moq/issues/2893). On a
+Reported in [#2893](https://github.com/moq-dev/moq/issues/2893). On a
 KDE/Wayland desktop the portal source was selected, but the ignored
 `portal_captures_frames` test never received a frame and timed out at 120
 seconds:
@@ -67,10 +71,6 @@ is not a bug any amount of review finds.
 ## Required
 
 - [Video validation hardware is on hand](/quest/m3/video-hardware-access.md) - the machines to run it on
-
-## Closes
-
-- [#2893](https://github.com/moq-dev/moq/issues/2893) - close this issue when the quest finishes
 
 ## Related
 

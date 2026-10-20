@@ -9,8 +9,10 @@ lite upstream by subscribing to the missing ranges.
 
 ## Plan
 
-Each range end encodes `Absolute(group, frame)`, `Relative(n)`, or open, and
-a SUBSCRIBE with no ranges is refused. Older wires map at the codec only, with
+Each range end encodes `Absolute(group, frame)`, `Relative(n)`, `Time(pts)`,
+or open, and a SUBSCRIBE with no ranges is refused. A `Time` end has no
+older-wire mapping: the answering hop resolves it before going upstream on
+lite-06 or earlier, or refuses it. Older wires map at the codec only, with
 no change to a published version: lite-06 `Group Start` 0 with `Frame Start`
 0, and pre-06 absent, are `Absolute(0)..` capped by max age (the oldest group
 not yet stale); any other lite-06 pair is an absolute start. When merged
@@ -33,6 +35,15 @@ that is the Largest Object's group, so a newest group with no objects yet is
 not counted until its first object arrives; the relay reports what it has
 rather than waiting for the peer.
 
+Test the lite-05 relay case #5000 left out, on mock time beside
+`rs/moq-net/tests/integration/late_lower_group.rs`: a live subscriber already reading
+group 1, then one from `Absolute(0)`, and a fresh group 0 reaches only the
+second. Today the merged request goes upstream as its covering span, which on
+lite-05 has no floor and joins at the latest group, so group 0 never arrives;
+it needs the explicit group 0 above. The merged-range relay test,
+`rs/moq-net/tests/integration/subscribe_ranges.rs`, extends to lite-07 once it carries the
+list.
+
 Update `drafts/draft-lcurley-moq-lite.md` in the same PR: the SUBSCRIBE and
 SUBSCRIBE_UPDATE fields, the Group Order section (the order is now a field),
 the removal of FETCH, and the lite-07 changelog. Fix the stale "offset by 1"
@@ -44,5 +55,4 @@ FETCH, answered through the model's ranges. Run `just drafts check` and
 
 ## Required
 
-- [Model ranges](/quest/m1/subscribe-ranges/model.md) - the model this serves
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07's DROP for holes
+- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the misses a relay fills upstream by range

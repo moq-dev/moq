@@ -37,6 +37,16 @@ how a conference room learns who joined, how a player learns a stream came
 online without polling, and how [relay clusters](/bin/relay/cluster) discover
 each other.
 
+Once that first reply is read, the reader has **synced**: a broadcast not
+announced by then is absent rather than late, so a player can say "offline"
+instead of waiting. A relay replies from what it holds now and never waits on
+its own upstreams. moq-lite 05 and later, and moq-transport with the
+[active-count](/draft/moq-active-count) extension, mark exactly where the first
+reply ends. Older versions sync on the peer's answer, or as soon as the
+request is sent, as a best effort. Reading an origin fed by sessions, a reader
+has synced once every current session's first reply is in, so a reconnect
+takes it back until the new reply lands.
+
 An announcement is a **route**: a claim that broadcasts at a path prefix, and
 every path beneath it, can be served. By convention a publisher announces each
 broadcast's exact path, so subscribers enumerate broadcasts by listing routes.
@@ -85,25 +95,33 @@ authorization and hidden names work exactly as without one.
   fails ends instead of resuming, so request the path again.
 - **Another instance restarts.** A newer epoch, or, without one, another route
   winning the path, is announced as a restart. Subscriptions already open stay
-  on the old instance until dropped or its route goes, while new requests get
-  the new one, so a player follows the restart by requesting the path again.
-  Held handles can still read their old cached content, but cannot open new
-  epochless requests once the restart is delivered. Request the path again for
+  on the old instance until dropped or none of its routes remain, which ends
+  them with an error, while new requests get the new one, so a player follows
+  the restart by requesting the path again.
+  Held handles can still read their old cached content while a subscription
+  on the old instance stays open, but cannot open new epochless requests once
+  the restart is delivered. Request the path again for
   new content.
   That is how a restarted encoder, whose group numbers start over, takes the
   name instead of stalling viewers on the old sequence. A relay drops its copy
   of the old instance, so a new subscriber never sees its cached groups.
 
 The epoch and the restart message travel on moq-lite 07, which is opt-in.
-Older moq-lite versions and moq-transport carry neither, so their routes have
-no epoch and a restart reaches them as an end then a start of the path. Without
-an epoch, any other route winning is a restart, even a reconnect over the same
-path, since nothing says it serves the same bytes.
+moq-transport carries the epoch from draft 17 when both sides offer the [epoch
+extension](/draft/moq-epoch), on by default. A restart onto another epoch is
+advertised before the old one is withdrawn, so the path is never absent, and one
+that gains or loses an epoch is an end then a start. Older moq-lite versions,
+older moq-transport drafts, and a side that declines the extension carry no
+epoch. Without an epoch, any other route winning is a restart, even a reconnect
+over the same path, since nothing says it serves the same bytes. A peer that
+ignores the end and start may keep cached objects of the old run under the same
+names, so an end and a start is not a cache flush.
 
 `moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
-RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
-passing the same [`moq --epoch`](/bin/cli#publisher-runs), which only the importers that derive their tracks from the input accept, except under [encryption](/concept/hang#encryption). See [Clustering](/bin/relay/cluster) for how a
-relay uses this.
+RTMP, SRT, and WHIP ingests mint one per connection. Independent importers use
+distinct epochs, even when fed one stream. Only replicas of one publisher's
+bytes share its epoch, such as one publisher announced through multiple relays. See [Clustering](/bin/relay/cluster) for
+how a relay uses this.
 
 ### Multiple CDNs
 
@@ -115,9 +133,9 @@ compared. A subscription uses the preferred link that has a route and moves to t
 next when that route goes; a publisher pushes the same broadcast to every CDN.
 
 The move resumes without a seam only between routes with the same epoch, which
-needs moq-lite 07 on both links. A CDN speaking moq-transport carries no epoch, so
-moving onto it, or back off it, is a restart and the player requests the path
-again.
+needs moq-lite 07, or moq-transport draft 17 or later with the epoch extension,
+on both links. A CDN link that carries no epoch makes moving onto it, or back
+off it, a restart, and the player requests the path again.
 
 ### Hidden broadcasts
 
@@ -167,7 +185,12 @@ to a prefix. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
-union of every open token's grant. A token the peer has no verifier for, or
+union of every open token's grant. A request outside the known union waits
+while a non-empty token already presented is unanswered, then proceeds or
+fails against the settled union; a covered request does not wait. Each wait
+logs its path and duration. To renew without interrupting live requests the
+new grant still covers, await the new token's acceptance before dropping the
+old one. A token the peer has no verifier for, or
 whose grant is too large to send, fails with `Unsupported` and ends only that
 token; the session and its other grants stay up. A relay with an
 [auth server](/bin/relay/auth#in-band-renewal) verifies these tokens through it,
@@ -177,10 +200,16 @@ expires; under public rules or a client certificate it refuses them as
 
 A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes
-the session with `UNAUTHORIZED`, naming the path. moq-transport carries the same
+the session with `UNAUTHORIZED`, naming the path. A session whose last
+credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
+and reconnect, rather than treating the credential as invalid. moq-transport carries the same
 exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
 to namespace prefixes. Older versions have no grant; the URL token keeps working
-everywhere.
+everywhere. On moq-transport an added token is kept even without the extension,
+so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
+authorization token. The token belongs to the session that added it, so after a
+reconnect the application adds it again and re-announces. moq-lite has no
+per-request token, so there an announcement rides the session's scope.
 
 ## Subscriptions
 
@@ -195,9 +224,19 @@ Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
 | --- | --- |
-| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
+| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
+| **Ranges** | Which groups to ask for: from a group, or a number of groups back from the latest, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
+
+On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
+This lets a finished subscription settle without waiting for missing groups.
+Datagram delivery stays best effort.
+
+Ranges are a request, not a filter. A subscriber reads from where its lowest
+range starts, and may also get groups another subscriber of the same track
+asked for. A relay merges its subscribers' ranges into one upstream request,
+which today's wire versions carry as the single span covering them.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
@@ -233,6 +272,7 @@ zero keeps only the live edge. Relays preserve that declaration, and may still
 evict sooner under their own cache ceiling. Media tracks explicitly use 30
 seconds so a segmented egress can still find its segments. Retention ages a
 group by the same two clocks as max delay and always keeps the newest group.
+A fetch obeys the same window, and may name a tighter max delay of its own.
 IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.
 
 Put together, a conference might use:
@@ -251,6 +291,12 @@ Since moq-lite 05, a publisher can send a tiny single-frame group as a QUIC
 datagram: unreliable, unordered, under about 1200 bytes, and never
 retransmitted. It suits real-time audio and sensor data. There is no stream
 fallback, so a datagram that doesn't fit isn't delivered that way.
+
+A datagram shares its subscription's priority and group order with streams,
+so a low-priority datagram waits behind higher-priority groups instead of
+jumping the queue. From a native Rust publisher over QUIC or WebTransport
+(iroh excepted), a full send buffer drops the lowest-priority subscription's
+oldest datagram.
 
 Nothing caches a datagram. A subscription gets the ones inside its group
 range, and a new one may get the few still in the publisher's short send

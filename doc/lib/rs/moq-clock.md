@@ -25,7 +25,8 @@ and `performance.now()` with `setTimeout` in the browser. Nothing is plumbed
 through. On native, every unpaused runtime and every plain thread share one
 clock, so their instants compare. A paused tokio runtime has its own clock,
 and it pauses the instant but not wall time. The simulator is its own clock
-too.
+too. A runtime that reads the time itself, like a moq-uring worker, enters a
+`Deadlines` queue on its thread, and the ambient clock is that queue.
 
 Instants from different clocks don't compare, and there is no conversion back
 to `std::time::Instant`.
@@ -71,6 +72,16 @@ second timeout takes no real time. A run where every task is parked and no
 timer is armed panics as a deadlock instead of hanging. `sim::advance()` and
 `sim::step_wall()` move time by hand, and `sim::attach(&deadlines)` keeps a
 `Deadlines` queue in step until it drops.
+
+## Driving a tokio runtime by hand
+
+Paused tokio and the simulator both jump to the next timer once everything
+idles. A harness outside the runtime, like a Python test loop driving the
+bindings, needs time that moves only when it says so. The `manual` feature adds
+`Manual::install(&handle)`, which makes a `Manual` clock the ambient clock of
+one tokio runtime. Its timers fire only when the returned handle's `advance()`
+reaches them, and other runtimes and threads keep the host clock. Python's
+`moq.testing.Clock` wraps it in builds made with moq-ffi's `testing` feature.
 
 Tests that do real I/O (sockets, browsers, codecs) can't use the simulator.
 They wait on events and use the host clock only for a watchdog.

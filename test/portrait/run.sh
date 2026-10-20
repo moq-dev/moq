@@ -7,7 +7,7 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 source "$DIR/../lib/harness.sh"
 harness_begin portrait 'just test portrait'
 cd "$WORKSPACE"
-cargo build --locked -p moq-relay -p moq-cli --features moq-cli/transcode
+cargo build --locked -p moq-relay -p moq-cli --features moq-cli/transcode,moq-cli/openh264
 bun install --frozen-lockfile
 (cd test/interop/clients/js && bunx vite build --outDir "$HARNESS_RUN/js-dist" && bunx playwright install chromium)
 harness_port relay

@@ -33,7 +33,7 @@ select_packages() {
 
     # A seed is the first path segment under `rs/`, so only a crate whose
     # manifest sits directly at `rs/<dir>/Cargo.toml` can be one. That drops
-    # `moq-net-fuzz` (at `rs/moq-net/fuzz`), which a moq-net diff would
+    # the `*-fuzz` crates (at `rs/<crate>/fuzz`), which a diff to their crate would
     # otherwise select as a dependent and compile libFuzzer for. The separator
     # is normalized first so Windows paths split too.
     metadata=$(jq '.packages |= map((.manifest_path |= gsub("\\\\"; "/")) | select(.manifest_path | split("/")[-3] == "rs"))' <<<"$metadata")
@@ -124,9 +124,9 @@ case "$packages" in
     *) echo "rs: selecting $names" ;;
 esac
 
-# `moq-net-fuzz` needs a nightly toolchain; only `just rs fuzz` compiles it.
+# The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then
-    flags=(--workspace --exclude moq-net-fuzz)
+    flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz)
 else
     # Space-separated `--package <id>` pairs; ids contain no spaces.
     # shellcheck disable=SC2206

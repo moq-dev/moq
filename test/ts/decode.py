@@ -41,7 +41,11 @@ def run(command, log):
 
 def decode(path, output):
     output.mkdir(parents=True, exist_ok=True)
-    probe = run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(path)], output / "probe.log")
+    # A stream may start past FFmpeg's default 5 MB probe window.
+    probe = run([
+        "ffprobe", "-v", "error", "-probesize", str(path.stat().st_size),
+        "-analyzeduration", str(2**62), "-show_streams", "-of", "json", str(path),
+    ], output / "probe.log")
     (output / "probe.json").write_bytes(probe)
     streams = json.loads(probe)["streams"]
     media = [s for s in streams if s["codec_type"] in ("video", "audio")]

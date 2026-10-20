@@ -15,9 +15,9 @@ answers that the feed went past `seq` as soon as any newer group arrived
 beat N's. Resume (`rs/moq-net/src/model/resume.rs`, the refusal verdict) then
 fails an in-flight group it could have continued.
 
-- Decided: build on [Tail arrivals](/quest/m1/tail-arrivals.md), the per-track
-  record of live arrivals in the model, and make `poll_group`'s "passed" verdict
-  read it. A gap stays open for the subscription's grace, as `tail::Tail` does
+- Decided: build on the per-track record of live arrivals in the model
+  (`TrackState::arrivals`, a `model::ledger::Ledger`), and make
+  `poll_group`'s "passed" verdict read it. A gap stays open for the subscription's grace, as `tail::Tail` does
   in the lite subscriber today.
 - Decided: #5209's held fetches move off their local `Tail` read onto this
   verdict, so one rule remains.
@@ -28,10 +28,6 @@ fails an in-flight group it could have continued.
 
 Public API: behavior only. Wire: none.
 
-## Required
-
-- [Tail arrivals](/quest/m1/tail-arrivals.md) - the per-track arrival record this verdict reads
-
 ## Related
 
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - explicit terminal dispositions end recovery without waiting for a newer group
+- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - explicit terminal dispositions end recovery without waiting for a newer group

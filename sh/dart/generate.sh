@@ -18,8 +18,25 @@ command -v dart >/dev/null 2>&1 || {
     exit 1
 }
 
+# Build with the environment dart/moq_ffi/hook/build.dart gets, so the hook's
+# own Cargo run during `dart test` finds this build fresh. Dart filters a hook's
+# environment, and build scripts such as aws-lc-sys's rerun when a variable they
+# track (CC, PKG_CONFIG, ...) changes, rebuilding everything above them. This
+# mirrors includeHookEnvironmentVariable from the hooks_runner in the pinned Dart
+# SDK (1.5.0 in Dart 3.13); sh/dart/check.sh fails once the two drift apart.
+hook_vars='^(ANDROID_HOME|ANDROID_NDK|ANDROID_NDK_HOME|ANDROID_NDK_LATEST_HOME|ANDROID_NDK_ROOT|APPDATA|GOPATH|HOME|LIBCLANG_PATH|LOCALAPPDATA|PATH|PROGRAMDATA|PROCESSOR_ARCHITECTURE|SYSTEMDRIVE|SYSTEMROOT|TEMP|TMP|TMPDIR|USERPROFILE|WINDIR|HTTP_PROXY|HTTPS_PROXY|NO_PROXY|(CCACHE|DOTNET|NIX|NUGET|CONAN)_.*)$'
+hook_env=()
+shopt -s nocasematch
+while IFS= read -r -d '' entry; do
+    if [[ "${entry%%=*}" =~ $hook_vars ]]; then
+        hook_env+=("$entry")
+    fi
+done < <(env -0)
+shopt -u nocasematch
+
 host=$(rustc -vV | sed -n 's/^host: //p')
-cargo build --locked --release --package moq-ffi --no-default-features \
+# The same features as the hook, too.
+env -i "${hook_env[@]}" cargo build --locked --release --package moq-ffi --features openh264 \
     --target "$host" \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 

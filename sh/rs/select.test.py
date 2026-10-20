@@ -30,7 +30,7 @@ class SelectTest(unittest.TestCase):
     def test_nextest_launcher_selects_workspace(self):
         for action in ("check", "check-test", "lint", "test"):
             with self.subTest(action=action):
-                self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz",
+                self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz",
                               self.selected("sh/rs/nextest.sh", action=action))
         selected = self.selected("sh/rs/nextest.sh")
         for recipe in ("tokio-features --all", "net-features", "wasm", "uring-check", "media-features --all"):
@@ -113,7 +113,7 @@ class FeatureTest(unittest.TestCase):
         boundary = self.trace("tokio")
         exhaustive = self.trace("tokio", "--all")
         self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 2)
-        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 9)
+        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 10)
         self.assertEqual([call for call in boundary if not call.startswith("clippy ")],
                          [call for call in exhaustive if not call.startswith("clippy ")])
 
@@ -126,7 +126,7 @@ class FeatureTest(unittest.TestCase):
                          [call for call in exhaustive if not call.startswith("check ")])
 
 
-CARGO_STUB = r"""#!/bin/bash
+CARGO_STUB = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FEATURE_CALLS"
 if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features quic' ]]; then
  echo 'a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature' >&2

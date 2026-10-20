@@ -89,4 +89,3 @@ Wire: none.
 ## Related
 
 - [Handshake deadline covers admission](/quest/m1/handshake-admission-deadline.md) - bounds pending admissions, which the drain deadline must keep cutting
-- [Session outcomes](/quest/m1/session-outcomes.md) - counts how sessions end, which needs this end recorded

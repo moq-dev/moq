@@ -11,10 +11,12 @@
 
 mod connection;
 mod endpoint;
+mod group;
 mod stream;
 
 pub use connection::Connection;
 pub use endpoint::Endpoint;
+pub use group::{SendGroup, SendOptions};
 pub use stream::{Credit, RecvStream, SendStream};
 
 pub(crate) use connection::{End, Shared};
@@ -27,7 +29,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 #[cfg(feature = "qlog")]
 use super::qlog;
-use super::{Congestion, Error, Identity, SEGMENT, Transport, client, endpoint::CID_LEN, server};
+use super::{Congestion, Error, Identity, SEGMENT, Transport, client, server};
 use crate::udp;
 
 /// Per-stream flow control credit.
@@ -53,15 +55,6 @@ fn ecn_from_quic(ecn: moq_quic::EcnCodepoint) -> udp::Ecn {
 	}
 }
 
-/// Map a moq-quic deadline onto the worker's timers.
-///
-/// moq-quic counts on moq-clock's instants while the worker's timers still take
-/// std's, until the worker becomes a moq-clock backend. A deadline already past
-/// maps to now, which fires at once either way.
-fn to_std(at: moq_clock::Instant) -> std::time::Instant {
-	std::time::Instant::now() + at.saturating_duration_since(moq_clock::Instant::now())
-}
-
 impl From<moq_quic::ConnectionError> for Error {
 	fn from(err: moq_quic::ConnectionError) -> Self {
 		use moq_quic::ConnectionError;
@@ -79,9 +72,9 @@ impl From<moq_quic::ConnectionError> for Error {
 				reason: err.reason.clone(),
 			},
 			ConnectionError::TimedOut => Self::TimedOut,
+			ConnectionError::LocallyClosed => Self::Closed,
 			// The rest (a stateless reset, an unsupported version, exhausted
-			// ids) have no code to report, and a local close is published
-			// where it happens rather than waited for as an event.
+			// ids) have no code to report.
 			err => Self::Quic(err.to_string()),
 		}
 	}
@@ -104,35 +97,20 @@ pub(crate) fn endpoint_config(shard: Option<moq_sock::shard::Shard>) -> Result<A
 	let mut config = moq_quic::EndpointConfig::default();
 	// The steering filter recognizes short headers by their fixed bit.
 	config.grease_quic_bit(shard.is_none());
-	config.cid_generator(Arc::new(move || Box::new(Cids { shard })));
+	// moq-quic asks its generator for every id it issues, dials and rotations
+	// alike, so naming the shard here steers all of them. Random rather than
+	// hashed ids, so neither path gives up nonce bytes to a signature.
+	config.cid_generator(Arc::new(move || {
+		let mut cids = moq_quic::RandomConnectionIdGenerator::default();
+		if let Some(shard) = shard {
+			cids.set_shard(shard.index(), shard.count());
+		}
+		Box::new(cids)
+	}));
 	config
 		.max_udp_payload_size(SEGMENT as u16)
 		.map_err(|err| Error::Quic(err.to_string()))?;
 	Ok(Arc::new(config))
-}
-
-/// Mints the endpoint's connection ids, steering prefix included.
-///
-/// moq-quic asks its generator for every id it issues, dials and rotations
-/// alike, so this is the one place the reuseport group's byte has to be
-/// stamped.
-#[derive(Debug)]
-struct Cids {
-	shard: Option<moq_sock::shard::Shard>,
-}
-
-impl moq_quic::ConnectionIdGenerator for Cids {
-	fn generate_cid(&mut self) -> moq_quic::ConnectionId {
-		moq_quic::ConnectionId::new(&super::endpoint::cid(self.shard))
-	}
-
-	fn cid_len(&self) -> usize {
-		CID_LEN
-	}
-
-	fn cid_lifetime(&self) -> Option<std::time::Duration> {
-		None
-	}
 }
 
 /// Dial as `config` says.
@@ -301,6 +279,7 @@ fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Err
 		Congestion::Loss => Arc::new(moq_quic::congestion::CubicConfig::default())
 			as Arc<dyn moq_quic::congestion::ControllerFactory + Send + Sync>,
 		Congestion::Delay => Arc::new(moq_quic::congestion::Bbr3Config::default()),
+		Congestion::None => Arc::new(moq_quic::congestion::Unlimited),
 	});
 	Ok(transport)
 }

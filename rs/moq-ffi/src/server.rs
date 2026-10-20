@@ -164,8 +164,11 @@ impl ServerState {
 		listen.tls.key = config.tls.key.into_iter().map(PathBuf::from).collect();
 		listen.tls.generate = config.tls.generate;
 
-		let mut quic = moq_tokio::quic::Config::default();
-		quic.max_streams = config.quic.max_streams;
+		// moq-tokio only checks these when `listen` binds, which would report them as `Bind`.
+		let quic: moq_tokio::quic::Config = config.quic.into();
+		quic.validate().map_err(|err| MoqError::Config {
+			reason: err.to_string(),
+		})?;
 
 		Ok(Self {
 			config: listen,

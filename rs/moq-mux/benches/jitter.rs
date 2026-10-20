@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_net::Timestamp;
-use web_async::time::Instant;
 
 #[path = "../src/jitter.rs"]
 #[allow(dead_code)]
@@ -13,13 +12,13 @@ mod jitter;
 /// Every track sends a frame a second as it decodes, for as many two-second steering steps as
 /// fill the rate window with `floors`, each step measuring every track heard.
 async fn steer(tracks: u16, floors: u64) -> u64 {
-	let start = Instant::now();
+	let start = moq_clock::now();
 	let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
 	buffer.expect(1..=tracks);
 	let waiter = kio::Waiter::noop();
 	for second in 0..floors * 2 {
 		let at = start + Duration::from_secs(second);
-		tokio::time::advance(at.saturating_duration_since(Instant::now())).await;
+		tokio::time::advance(at.saturating_duration_since(moq_clock::now())).await;
 		for track in 1..=tracks {
 			let arrival = jitter::Arrival {
 				arrived: at,
@@ -27,6 +26,7 @@ async fn steer(tracks: u16, floors: u64) -> u64 {
 				decode: Timestamp::from_millis(second * 1_000).unwrap(),
 				restart: 0,
 				skip: 0,
+				cut: 0,
 				sync: true,
 				leading: false,
 				item: (),
@@ -58,5 +58,53 @@ fn steering(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, steering);
+/// One fill drains every track's available backlog before polling output.
+fn acquisition(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_time()
+		.start_paused(true)
+		.build()
+		.unwrap();
+	let mut group = c.benchmark_group("jitter_acquisition");
+	group.measurement_time(Duration::from_secs(1));
+	group.warm_up_time(Duration::from_millis(200));
+	group.sample_size(10);
+	for tracks in [1u16, 4, 16, 64] {
+		for frames in [16u64, 64, 256] {
+			group.bench_function(BenchmarkId::new(tracks.to_string(), frames), |b| {
+				b.iter(|| {
+					runtime.block_on(async {
+						let start = moq_clock::now();
+						let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
+						buffer.expect(1..=tracks);
+						for track in 1..=tracks {
+							for frame in 0..frames {
+								buffer
+									.push(
+										track,
+										jitter::Arrival {
+											arrived: start,
+											read: start,
+											decode: Timestamp::from_millis(frame * 20).unwrap(),
+											restart: 0,
+											skip: 0,
+											cut: 0,
+											sync: frame % 15 == 0,
+											leading: false,
+											item: (),
+										},
+									)
+									.unwrap();
+							}
+						}
+						std::hint::black_box(buffer.poll_next(&kio::Waiter::noop()));
+					})
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, steering, acquisition);
 criterion_main!(benches);

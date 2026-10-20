@@ -7,24 +7,40 @@ on:
   schedule:
     - cron: "0 8 * * *"
   pull_request:
+    # Main PRs skip it; the schedule above runs it on main. `edited` catches a
+    # main PR retargeted to release.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "test/ts/**"
       - "test/lib/**"
       - "test/justfile"
-      - "rs/moq-mux/**"
+      # Exactly the workspace crates run.sh builds; sh/gh/ts-paths.py fails Check on drift.
       - "rs/hang/**"
-      - "rs/moq-cli/**"
-      - "rs/moq-net/**"
-      - "rs/moq-tokio/**"
-      - "rs/moq-relay/**"
-      - "rs/moq-loc/**"
-      - "rs/moq-json/**"
-      # Workspace dependencies of moq-net, moq-tokio and moq-mux on the TS path.
       - "rs/kio/**"
+      - "rs/moq-archive/**"
+      - "rs/moq-auth/**"
+      - "rs/moq-cli/**"
+      - "rs/moq-clock/**"
       - "rs/moq-flate/**"
+      - "rs/moq-hls/**"
+      - "rs/moq-ice/**"
+      - "rs/moq-json/**"
+      - "rs/moq-loc/**"
       - "rs/moq-msf/**"
+      - "rs/moq-mux/**"
+      - "rs/moq-net/**"
       - "rs/moq-pattern/**"
+      - "rs/moq-quic/**"
+      - "rs/moq-relay/**"
+      - "rs/moq-rtc/**"
+      - "rs/moq-rtmp/**"
+      - "rs/moq-rtsp/**"
+      - "rs/moq-shaper/**"
       - "rs/moq-sock/**"
+      - "rs/moq-srt/**"
+      - "rs/moq-stats/**"
+      - "rs/moq-tokio/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -79,6 +95,43 @@ jobs:
       - name: TS fragmented PES headers
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --fragment-pes
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # KLV and DVB AC-3 the importer carries as whole PES: each PES comes back byte-equal
+      # outside its PTS and DTS, at its source placement, and the AC-3 passes the T-STD model.
+      - name: TS private PES
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --klv --strict
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # `import/export ts --passthrough`: from its first packet the capture is the source's
+      # packets in place, and every compliance check grades it as it grades that interval of
+      # the source. The generated clip fails the T-STD model on its own; the capture must too.
+      - name: TS passthrough
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same over a hardware encoder's capture the T-STD model passes, with a dirty start
+      # the importer acquires past.
+      - name: TS passthrough of a broadcast capture
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts-passthrough-capture
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same over a whole MPTS: two programs on their own PCR PIDs, whose recovery points
+      # rarely line up.
+      - name: TS passthrough of an MPTS
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --mpts
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
@@ -172,9 +225,37 @@ jobs:
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
+      # The subscriber's leg congested the way real paths are, through moq-shaper: 7 Mb/s under
+      # the 9 Mb/s video and four audio PIDs, behind a 2 s queue, 25 ms each way. The export must
+      # stay T-STD compliant and continuous, shed whole groups, and keep its latency through EOF.
+      - name: TS congested path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --headroom --rate 7000000 --duration 120
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # The same path behind a 250 ms queue, with the relay's loss-based CUBIC: BBRv3 never fills a
+      # queue this deep, CUBIC overflows it every sawtooth. QUIC must recover what the queue drops
+      # inside the export's 1 s delay, and the run fails unless the queue overflowed.
+      - name: TS overflowing path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --headroom --rate 7000000 --queue 250ms --duration 120
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          MOQ_QUIC_CONGESTION_CONTROL: loss
+
+      # Passthrough over the overflowing path, under its 10 Mb/s multiplex: what arrives must be
+      # the source's packets in place, through the source's last packet.
+      - name: TS passthrough overflowing path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --passthrough --rate 7000000 --queue 250ms --duration 120
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          MOQ_QUIC_CONGESTION_CONTROL: loss
+
       - name: Upload failure artifacts
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ts-failure
           path: ${{ runner.temp }}/moq-test-runs
