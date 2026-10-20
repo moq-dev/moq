@@ -1805,9 +1805,9 @@ export class Publisher {
 	 * MAX_REQUEST_UPDATES the peer set without reading it; a change landing meanwhile waits
 	 * for the next turn. The answer decides whether the peer still holds the namespace: a
 	 * REQUEST_ERROR closes the peer's side and withdraws the advertisement, so ours is
-	 * finished too, a draft-16 cancel ends it with nothing more sent, and an unanswered update
-	 * is dropped, since a peer that ignored it cannot be assumed to hold either price. Either
-	 * way the retry re-offers it fresh.
+	 * finished too (with nothing more sent on draft 16, where the peer cancels it), a draft-16
+	 * cancel ends it the same way, and an unanswered update is dropped, since a peer that
+	 * ignored it cannot be assumed to hold either price. Either way the retry re-offers it fresh.
 	 *
 	 * A different original publisher is an update like any other: the receiver drains what
 	 * it already serves from the old one and never splices the two.
@@ -1838,13 +1838,8 @@ export class Publisher {
 					);
 
 					// Draft 16's adapter ends the stream on the peer's PUBLISH_NAMESPACE_CANCEL, which
-					// can beat the answer. The peer already let the namespace go, and draft 16 sends
-					// no PUBLISH_NAMESPACE_DONE after a cancel.
-					if (version === Version.DRAFT_16 && (await reader.done())) {
-						requests.delete(path);
-						request.stream.abort(new Error("cancelled by the peer"));
-						return "dropped";
-					}
+					// can beat the answer.
+					if (version === Version.DRAFT_16 && (await reader.done())) return "dropped";
 
 					const typeId = await reader.u53();
 					if (typeId === RequestError.id) {
@@ -1873,11 +1868,21 @@ export class Publisher {
 			return "dropped";
 		}
 
-		if (answer === "held" && auth) request.auth = auth;
-		// Before draft-17 the peer already closed out a refused request, and its STOP_SENDING
-		// can reject the wait on our FIN. That is the withdrawal finishing, not a reason to end
-		// the loop.
-		if (answer !== "held") await this.#withdraw(path, requests).catch(() => undefined);
+		if (answer === "held") {
+			if (auth) request.auth = auth;
+			return answer;
+		}
+		if (version === Version.DRAFT_16) {
+			// A draft-16 peer lets the namespace go with PUBLISH_NAMESPACE_CANCEL, ahead of its
+			// answer or right after a refusal, and no PUBLISH_NAMESPACE_DONE may follow a cancel.
+			requests.delete(path);
+			request.stream.abort(new Error("released by the peer"));
+		} else {
+			// The peer already closed out a refused request, and its STOP_SENDING can
+			// reject the wait on our FIN. That is the withdrawal finishing, not a reason to end
+			// the loop.
+			await this.#withdraw(path, requests).catch(() => undefined);
+		}
 		return answer;
 	}
 

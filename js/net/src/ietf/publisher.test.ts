@@ -1844,6 +1844,60 @@ test("a draft 16 cancel ahead of the answer offers the namespace again without D
 	}
 });
 
+/**
+ * A draft-16 receiver refuses an update with REQUEST_ERROR and then PUBLISH_NAMESPACE_CANCEL.
+ * Draft 16 sends no PUBLISH_NAMESPACE_DONE after a cancel, so the next message is the
+ * namespace offered again once the refusal's wait is out.
+ */
+test("a refused draft 16 update offers the namespace again without DONE", async () => {
+	jest.useFakeTimers();
+	const version = Version.DRAFT_16;
+	const pair = createMockTransportPair(ALPNS[version]);
+	const control = await Stream.open(pair.server, { version });
+	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, false);
+	void adapter.run().catch(() => undefined);
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+	const tokens = new Tokens();
+	const { pub, origin } = publisher(pair.server, { session: adapter, auth: tokens });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		broadcast.announce({ auth: tokens.issue("first") });
+		void pub.runPublishNamespaces();
+
+		expect(await peer.reader.u53()).toBe(PublishNamespace.id);
+		const advertised = await PublishNamespace.decode(peer.reader, version);
+		await peer.writer.u53(RequestOk.id);
+		await new RequestOk({ requestId: advertised.requestId }).encode(peer.writer, version);
+
+		broadcast.announce({ auth: tokens.issue("second") });
+		expect(await peer.reader.u53()).toBe(PublishNamespaceUpdate.id);
+		const update = await PublishNamespaceUpdate.decode(peer.reader, version);
+		await peer.writer.u53(RequestError.id);
+		await new RequestError({
+			requestId: update.requestId,
+			errorCode: 0x1,
+			reasonPhrase: "no",
+			retryInterval: 1n,
+		}).encode(peer.writer, version);
+		await peer.writer.u53(PublishNamespaceCancel.id);
+		await new PublishNamespaceCancel({ requestId: advertised.requestId, reasonPhrase: "no" }).encode(
+			peer.writer,
+			version,
+		);
+
+		const next = watch(peer.reader.u53());
+		await advanceUntil(() => next.state !== "pending", 30_000);
+		expect(next.value).toBe(PublishNamespace.id);
+	} finally {
+		warn.mockRestore();
+		origin.close();
+		adapter.close();
+		jest.useRealTimers();
+	}
+});
+
 /** A token another session issued is never carried, so swapping between two sends nothing. */
 test("a foreign route token is not carried", async () => {
 	const foreign = new Tokens();

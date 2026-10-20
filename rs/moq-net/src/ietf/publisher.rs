@@ -3480,9 +3480,18 @@ where
 					ietf::RequestError::ID => {
 						let msg: ietf::RequestError = body.message(self.version)?;
 						tracing::warn!(message = ?msg, "publish_namespace update error");
-						// The peer closed its side; closing ours completes the withdrawal.
-						self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
-							.await?;
+						match self.version {
+							// The peer follows its refusal with PUBLISH_NAMESPACE_CANCEL, and draft
+							// 16 sends no PUBLISH_NAMESPACE_DONE after a cancel.
+							Version::Draft16 => {
+								ns.requests.remove(&suffix);
+							}
+							// The peer closed its side; closing ours completes the withdrawal.
+							_ => {
+								self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix.clone())
+									.await?
+							}
+						}
 						self.refusal(msg.retry_interval)
 					}
 					// Draft-16 carries its cancel as a message, which can beat the answer.
@@ -13914,7 +13923,6 @@ mod tests {
 		slot
 	}
 
-	/// The bytes of one REQUEST_UPDATE, framed as the publisher writes it.
 	/// PUBLISH_NAMESPACE_DONE withdrawing the first request, "cam".
 	async fn publish_namespace_done(version: Version) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
@@ -13930,6 +13938,24 @@ mod tests {
 		log.writes.lock().unwrap().clone()
 	}
 
+	/// PUBLISH_NAMESPACE_CANCEL letting go of the first request, "cam".
+	async fn publish_namespace_cancel(version: Version) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		writer.varint(ietf::PublishNamespaceCancel::ID).await.unwrap();
+		writer
+			.encode(&ietf::PublishNamespaceCancel {
+				track_namespace: crate::Path::new("cam"),
+				request_id: RequestId(1),
+				error_code: 0,
+				reason_phrase: "gone".into(),
+			})
+			.await
+			.unwrap();
+		log.writes.lock().unwrap().clone()
+	}
+
+	/// The bytes of one REQUEST_UPDATE, framed as the publisher writes it.
 	async fn request_update(version: Version, msg: &ietf::PublishNamespaceUpdate) -> Vec<u8> {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
@@ -14319,22 +14345,7 @@ mod tests {
 		settle().await;
 
 		let ok = publish_namespace_ok(VERSION).await;
-		let cancel = {
-			let log = crate::lite::test_transport::Log::default();
-			let mut writer =
-				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), VERSION);
-			writer.varint(ietf::PublishNamespaceCancel::ID).await.unwrap();
-			writer
-				.encode(&ietf::PublishNamespaceCancel {
-					track_namespace: crate::Path::new("cam"),
-					request_id: RequestId(1),
-					error_code: 0,
-					reason_phrase: "gone".into(),
-				})
-				.await
-				.unwrap();
-			log.writes.lock().unwrap().clone()
-		};
+		let cancel = publish_namespace_cancel(VERSION).await;
 		let (publisher, log) = auth_publisher(&origin, &auth, vec![[ok.clone(), cancel].concat(), ok], VERSION);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"first-secret", 1).await;
@@ -14348,6 +14359,54 @@ mod tests {
 			occurrences(&log, &publish_namespace_done(VERSION).await),
 			0,
 			"PUBLISH_NAMESPACE_DONE after the peer's cancel"
+		);
+	}
+
+	/// A draft-16 peer refuses an update with REQUEST_ERROR and then PUBLISH_NAMESPACE_CANCEL.
+	/// Draft 16 sends no PUBLISH_NAMESPACE_DONE after a cancel, so the namespace is only
+	/// offered again once the refusal's wait is out.
+	#[moq_clock::test]
+	async fn a_refused_draft_16_update_sends_no_done() {
+		const VERSION: Version = Version::Draft16;
+
+		let origin = unheld_origin();
+		let auth = crate::auth::Handle::ietf(false);
+		let first = auth.present(bytes::Bytes::from_static(b"first-secret"), false).unwrap();
+		let second = auth
+			.present(bytes::Bytes::from_static(b"second-secret"), false)
+			.unwrap();
+		let cam = origin
+			.announce("cam", crate::origin::Route::default().with_auth(first))
+			.unwrap();
+		settle().await;
+
+		let ok = publish_namespace_ok(VERSION).await;
+		let refusal = publish_namespace_error(VERSION, 50).await;
+		let cancel = publish_namespace_cancel(VERSION).await;
+		let (publisher, log) = auth_publisher(
+			&origin,
+			&auth,
+			vec![[ok.clone(), refusal, cancel].concat(), ok],
+			VERSION,
+		);
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		poll_until(&mut run, &log, b"first-secret", 1).await;
+
+		cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"cam") >= 2 {
+				break;
+			}
+			tick().await;
+		}
+
+		assert_eq!(occurrences(&log, b"cam"), 2, "the namespace was not offered again");
+		assert_eq!(log.bi_opens(), 2, "a fresh request after the refusal");
+		assert_eq!(
+			occurrences(&log, &publish_namespace_done(VERSION).await),
+			0,
+			"PUBLISH_NAMESPACE_DONE after the peer's refusal"
 		);
 	}
 
