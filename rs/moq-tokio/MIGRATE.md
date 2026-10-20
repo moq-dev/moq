@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Usage types come from usage-rs 7 (#PR)
+### Usage types come from usage-rs 7 (#6060)
 
 The `Args` and `Config` derives now implement usage-rs 7 traits, and `cli::usage` is renamed `cli::usage_rs`.
 A CLI that flattens these types depends on `usage-rs = "7"` under its own name: the derives emit `::usage_rs` paths and no longer read `Cargo.toml`.

@@ -5,7 +5,7 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
-### Usage types come from usage-rs 7 (#PR)
+### Usage types come from usage-rs 7 (#6060)
 
 The relay's `Args` and `Config` derives now implement usage-rs 7 traits.
 A CLI that flattens them depends on `usage-rs = "7"` under its own name: the derives emit `::usage_rs` paths and no longer read `Cargo.toml`.
