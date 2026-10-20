@@ -275,8 +275,8 @@ fn unapplied(phases: &[(Profile, u64)], stats: &Stats) -> Vec<&'static str> {
 /// `profile` as the run opens and as each of `steps` leaves it, paired with the
 /// datagrams `counts` says that phase treated.
 ///
-/// The datagrams an ingress burst kept from loss pair with a lossless copy of
-/// their phase, since they were no chance for loss to act.
+/// Loss is charged only exposed datagrams, while delay and reorder are charged
+/// only survivors of loss and queue overflow, since neither can act on a drop.
 fn phased(profile: &Profile, steps: &[Step], counts: &BTreeMap<usize, Treated>) -> Vec<(Profile, u64)> {
 	let mut profile = profile.clone();
 	let mut phases = Vec::new();
@@ -285,12 +285,17 @@ fn phased(profile: &Profile, steps: &[Step], counts: &BTreeMap<usize, Treated>) 
 			steps[index - 1].apply(&mut profile);
 		}
 		let treated = counts.get(&index).copied().unwrap_or_default();
-		let lossless = Profile {
+		let loss = Profile {
+			delay: Duration::ZERO,
+			reorder: 0.0,
+			..profile.clone()
+		};
+		let scheduled = Profile {
 			loss: 0.0,
 			..profile.clone()
 		};
-		phases.push((profile.clone(), treated.exposed));
-		phases.push((lossless, treated.exempt));
+		phases.push((loss, treated.exposed));
+		phases.push((scheduled, treated.scheduled));
 	}
 	phases
 }
@@ -664,8 +669,8 @@ struct Tally {
 struct Treated {
 	/// Those loss could drop.
 	exposed: u64,
-	/// Those an ingress burst collected, which loss never drops.
-	exempt: u64,
+	/// Those that survived loss and queue overflow, so delay or reorder could act.
+	scheduled: u64,
 }
 
 impl Tally {
@@ -979,6 +984,8 @@ struct Parcel {
 
 /// The seeded decisions for one datagram.
 struct Draw {
+	/// The phase whose profile made these decisions.
+	phase: usize,
 	lose: bool,
 	skip: bool,
 	spread: f64,
@@ -1054,9 +1061,7 @@ impl Link {
 		// Applying a step is no evidence it acted, so count the datagrams each phase treated.
 		let mut phases = tally.phases.lock().unwrap();
 		let treated = phases.entry(self.stepped).or_default();
-		if exempt {
-			treated.exempt += 1;
-		} else {
+		if !exempt {
 			treated.exposed += 1;
 		}
 	}
@@ -1159,14 +1164,21 @@ impl Link {
 			Jitter::Gaussian => gaussian(&mut self.rng),
 		};
 
-		Draw { lose, skip, spread }
+		Draw {
+			phase: self.stepped,
+			lose,
+			skip,
+			spread,
+		}
 	}
 
 	fn schedule(
 		&mut self,
 		now: Instant,
 		size: usize,
-		Draw { skip, spread, .. }: Draw,
+		Draw {
+			phase, skip, spread, ..
+		}: Draw,
 		tally: &Tally,
 	) -> Option<(Instant, bool)> {
 		let mut depart = now;
@@ -1188,6 +1200,7 @@ impl Link {
 			depart = start;
 		}
 
+		tally.phases.lock().unwrap().entry(phase).or_default().scheduled += 1;
 		let mut delayed = false;
 		if skip {
 			bump(&tally.reordered);
@@ -1752,11 +1765,81 @@ mod tests {
 	}
 
 	#[test]
+	fn dropped_datagrams_are_not_chances_to_reorder() {
+		let profile = Profile {
+			delay: Duration::from_millis(20),
+			loss: 0.05,
+			reorder: 0.02,
+			..Default::default()
+		};
+		let counts = |exposed, scheduled| [(0, Treated { exposed, scheduled })].into();
+		let mut phases = phased(&profile, &[], &counts(258, 209));
+		phases.extend(phased(&profile, &[], &counts(241, 227)));
+		let stats = Stats {
+			up: Counters {
+				packets: 258,
+				lost: 10,
+				overflowed: 39,
+				delayed: 209,
+				..Default::default()
+			},
+			down: Counters {
+				packets: 241,
+				lost: 12,
+				overflowed: 2,
+				delayed: 227,
+				..Default::default()
+			},
+		};
+
+		// Only the 436 survivors can skip delay: 0.98^436 is above 1e-4.
+		assert!(unapplied(&phases, &stats).is_empty());
+	}
+
+	#[test]
+	fn only_survivors_reach_delay_and_reorder_accounting() {
+		for loss in [0.0, 1.0] {
+			let profile = Profile {
+				delay: Duration::from_millis(20),
+				loss,
+				reorder: 0.02,
+				rate: Some(Rate {
+					bits_per_second: 8_000,
+					burst: 1,
+					queue: Duration::ZERO,
+				}),
+				..Default::default()
+			};
+			let now = Instant::now();
+			let (queue, _) = mpsc::unbounded_channel();
+			let mut link = Link::new(&profile, &Options::default(), 7, 0, now, queue);
+			let tally = Tally::default();
+			let survivors = (0..1000).filter(|_| link.treat(now, 1, &tally).is_some()).count();
+			assert_eq!(survivors, usize::from(loss == 0.0));
+			let counts = tally.phases.lock().unwrap();
+			assert_eq!(counts[&0].scheduled, survivors as u64);
+			let stats = Stats {
+				up: tally.snapshot(),
+				down: Counters::default(),
+			};
+			assert!(unapplied(&phased(&profile, &[], &counts), &stats).is_empty());
+		}
+	}
+
+	#[test]
 	fn a_phase_is_charged_only_its_own_traffic() {
 		let ms = Duration::from_millis;
 		let exposed = |counts: [(usize, u64); 2]| {
 			counts
-				.map(|(phase, exposed)| (phase, Treated { exposed, exempt: 0 }))
+				.map(|(phase, exposed)| {
+					(
+						phase,
+						Treated {
+							exposed,
+							scheduled: exposed,
+						},
+					)
+				})
 				.into()
 		};
 		let lossy = Profile {

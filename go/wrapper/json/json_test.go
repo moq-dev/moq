@@ -54,7 +54,12 @@ func TestTracks(t *testing.T) {
 	defer cancel()
 	broadcast, consumer := newBroadcast(t)
 
-	snapshot, err := moqjson.NewSnapshotProducer(broadcast, publishTrack(t, broadcast, "status"), moqjson.SnapshotOptions{Compression: true})
+	scale := uint64(1_000_000)
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Priority: 127, Timescale: &scale})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,20 +68,36 @@ func TestTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer snapshotConsumer.Cancel()
-	if err := snapshot.Update(map[string]any{"viewers": 42}, nil); err != nil {
-		t.Fatal(err)
+	for viewers := 1; viewers <= 4; viewers++ {
+		at := time.Duration(viewers) * time.Millisecond
+		if err := snapshot.Update(map[string]any{"viewers": viewers}, &at); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Next yields every state in order; Latest skips the buffered third.
+	expect := func(value *moqjson.Timed, err error, viewers int) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(value.Value, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded["viewers"] != float64(viewers) {
+			t.Fatalf("snapshot = %s, want viewers %d", value.Value, viewers)
+		}
+		if want := time.Duration(viewers) * time.Millisecond; value.Timestamp == nil || *value.Timestamp != want {
+			t.Fatalf("timestamp = %v, want %v", value.Timestamp, want)
+		}
 	}
 	value, err := snapshotConsumer.Next(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(*value, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded["viewers"] != float64(42) {
-		t.Fatalf("snapshot = %s", *value)
-	}
+	expect(value, err, 1)
+	value, err = snapshotConsumer.Next(ctx)
+	expect(value, err, 2)
+	value, err = snapshotConsumer.Latest(ctx)
+	expect(value, err, 4)
 
 	stream, err := moqjson.NewStreamProducer(broadcast, publishTrack(t, broadcast, "events"), moqjson.StreamOptions{Compression: true})
 	if err != nil {
@@ -94,8 +115,8 @@ func TestTracks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(*record) != `{"n":1}` {
-		t.Fatalf("record = %s", *record)
+	if string(record.Value) != `{"n":1}` || record.Timestamp != nil {
+		t.Fatalf("record = %s at %v, want untimed", record.Value, record.Timestamp)
 	}
 
 	if err := snapshot.Finish(); err != nil {
@@ -144,8 +165,8 @@ func TestDemand(t *testing.T) {
 	if name := snapshotDemand.Name(); name != "status" {
 		t.Fatalf("Name = %q, want status", name)
 	}
-	if snapshotDemand.IsUsed() {
-		t.Fatal("IsUsed before any subscriber")
+	if wanted := snapshotDemand.Wanted(); wanted != nil {
+		t.Fatalf("Wanted = %d before any subscriber", *wanted)
 	}
 
 	snapshotConsumer, err := moqjson.NewSnapshotConsumer(subscribeTrack(ctx, t, consumer, "status"), moqjson.ConsumerOptions{})
@@ -156,26 +177,39 @@ func TestDemand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshotDemand.Used(ctx); err != nil {
+	if err := untilWanted(ctx, snapshotDemand, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := streamDemand.Used(ctx); err != nil {
+	if err := untilWanted(ctx, streamDemand, true); err != nil {
 		t.Fatal(err)
 	}
 
 	snapshotConsumer.Cancel()
 	streamConsumer.Cancel()
-	if err := snapshotDemand.Unused(ctx); err != nil {
+	if err := untilWanted(ctx, snapshotDemand, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := streamDemand.Unused(ctx); err != nil {
+	if err := untilWanted(ctx, streamDemand, false); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := snapshot.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshotDemand.Used(ctx); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("Used after Finish = %v, want ErrClosed", err)
+	if err := untilWanted(ctx, snapshotDemand, true); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("untilWanted after Finish = %v, want ErrClosed", err)
+	}
+}
+
+// untilWanted blocks until some subscriber wants the track, or none does.
+func untilWanted(ctx context.Context, demand *moq.TrackDemand, wanted bool) error {
+	for {
+		next, err := demand.WantedChanged(ctx)
+		if err != nil {
+			return err
+		}
+		if (next != nil) == wanted {
+			return nil
+		}
 	}
 }

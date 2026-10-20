@@ -1,7 +1,7 @@
 /**
- * The JSON a relay POSTs to an auth server per session event, and the grant it answers with.
+ * The JSON a relay POSTs to an auth server per session event, and the grant or refusal it answers with.
  *
- * Mirrors `moq_auth::Request` and `moq_auth::Grant` in the Rust crate: a server written
+ * Mirrors `moq_auth::Request`, `moq_auth::Grant`, and `moq_auth::Refusal` in the Rust crate: a server written
  * in TypeScript validates a request and builds a grant with these schemas.
  *
  * @module
@@ -45,10 +45,12 @@ export const TransportSchema = z.pipe(
 		"unknown",
 	),
 );
+/** A value parsed by {@link TransportSchema}. */
 export type Transport = z.infer<typeof TransportSchema>;
 
 /** The single direction a client declared at SETUP. */
 export const RoleSchema = z.enum(["publisher", "subscriber"]);
+/** A value parsed by {@link RoleSchema}. */
 export type Role = z.infer<typeof RoleSchema>;
 
 /**
@@ -67,6 +69,7 @@ export const PeerSchema = z.object({
 	/** The issuer's distinguished name. */
 	issuer: z.string(),
 });
+/** A value parsed by {@link PeerSchema}. */
 export type Peer = z.infer<typeof PeerSchema>;
 
 /** A credential from a moq-transport SETUP's `AUTHORIZATION TOKEN` option, unparsed. */
@@ -78,6 +81,7 @@ export const TokenSchema = z.object({
 		.string()
 		.check(z.regex(/^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?$/)),
 });
+/** A value parsed by {@link TokenSchema}. */
 export type Token = z.infer<typeof TokenSchema>;
 
 /** Byte totals for a session, both directions from the relay's point of view. */
@@ -87,6 +91,7 @@ export const BytesSchema = z.object({
 	/** Bytes the relay received from the peer. */
 	received: z.int().check(z.nonnegative()),
 });
+/** A value parsed by {@link BytesSchema}. */
 export type Bytes = z.infer<typeof BytesSchema>;
 
 const BaseRequestSchema = z.object({
@@ -143,6 +148,7 @@ export const RequestSchema = z.discriminatedUnion("event", [
 		bytes: BytesSchema,
 	}),
 ]);
+/** A value parsed by {@link RequestSchema}. */
 export type Request = z.infer<typeof RequestSchema>;
 
 /**
@@ -186,4 +192,17 @@ export const GrantSchema = z
 			message: "an upstream grant must be a peer",
 		}),
 	);
+/** A value parsed by {@link GrantSchema}. */
 export type Grant = z.infer<typeof GrantSchema>;
+
+/** The reason and verified attribution an auth server returns with HTTP 403. */
+export const RefusalSchema = z.object({
+	/** Unknown reason strings read as `refused`. */
+	reason: z.pipe(z.string(), z.catch(z.enum(["refused", "forbidden", "expired"]), "refused")),
+	/** A root named by a verified credential, never an unverified request path. */
+	root: z.optional(PathSchema),
+	/** The tier resolved by the decider; absent uses the default tier. */
+	tier: z.optional(z.string()),
+});
+/** A typed refusal returned by an admission decider. */
+export type Refusal = z.infer<typeof RefusalSchema>;

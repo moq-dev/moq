@@ -10,7 +10,7 @@ use crate::{
 use super::{
 	Control, Message, Publisher, Subscriber, Version, active_count,
 	adapter::ControlStreamAdapter,
-	auth, cluster, epoch, hidden, peer, request_update, solicit,
+	auth, cluster, epoch, hidden, max_age, peer, request_update, solicit,
 	subscriber::{is_protocol_violation, subscribe_prefixes},
 };
 
@@ -389,37 +389,25 @@ where
 				res
 			}
 			_ => {
-				// Send SETUP and keep the stream alive: it is also our GOAWAY channel.
-				let setup = {
-					let runtime = runtime.clone();
-					let session = session.clone();
-					let goaway = goaway.clone();
-					let extensions = crate::setup::Extensions {
+				let control = Control::new(None, client).with_history(limits.requests());
+				// Send SETUP and retain its writer for the session's lifetime. Only a failure
+				// ends the session; the other branches report how it closed.
+				let setup = err_only(run_setup(
+					runtime.clone(),
+					session.clone(),
+					version,
+					path,
+					authority,
+					self_origin,
+					cost,
+					crate::setup::Extensions {
 						auth: extensions.auth && auth.supported(),
 						..extensions
-					};
-					async move {
-						if let Err(err) = run_setup(
-							runtime,
-							session,
-							version,
-							client,
-							path,
-							authority,
-							self_origin,
-							cost,
-							extensions,
-							goaway,
-						)
-						.await
-						{
-							tracing::warn!(%err, "setup send error");
-						}
-						std::future::pending::<()>().await;
-					}
-				};
+					},
+					goaway.clone(),
+					control.clone(),
+				));
 
-				let control = Control::new(None, client).with_history(limits.requests());
 				// Only the dialing side fails loud on a publication outside its grant: a
 				// server's publish origin is everything the peer may read, not what it
 				// intends to push.
@@ -579,8 +567,8 @@ where
 					if let Poll::Ready(err) = waiter.poll_future(enforce.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
-					if waiter.poll_future(setup.as_mut()).is_ready() {
-						return Poll::Ready(Ok(()));
+					if let Poll::Ready(err) = waiter.poll_future(setup.as_mut()) {
+						return Poll::Ready(Err(err));
 					}
 					if task_set.poll(waiter).is_ready() {
 						return Poll::Ready(Ok(()));
@@ -766,6 +754,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		cluster: cluster::peer_from_setup(params, version)?,
 		solicit: solicit::from_setup(params, version)?,
 		hidden: hidden::from_setup(params, version),
+		max_age: max_age::from_setup(params, version),
 		auth: auth::from_setup(params, version) == Some(true),
 		active_count: active_count::from_setup(params, version),
 		epoch: epoch::from_setup(params, version),
@@ -784,13 +773,13 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	runtime: crate::time::Deadlines,
 	mut session: S,
 	version: Version,
-	client: bool,
 	path: Option<String>,
 	authority: Option<String>,
 	self_origin: Hop,
 	cost: Option<u64>,
 	extensions: crate::setup::Extensions,
 	goaway: crate::goaway::Protocol,
+	control: Control,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
@@ -813,6 +802,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		solicit::into_setup(&mut parameters, version);
 	}
 	hidden::into_setup(&mut parameters, version);
+	max_age::into_setup(&mut parameters, version);
 	if extensions.auth {
 		auth::into_setup(&mut parameters, version);
 	}
@@ -823,38 +813,62 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	request_update::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
-	writer.encode(&setup::Setup { parameters }).await?;
+	writer
+		.encode(&setup::Setup { parameters })
+		.await
+		.map_err(control_stream_error)?;
 
 	// Hold the writer alive until the session closes, sending a GOAWAY if the
 	// drain trigger fires meanwhile. The trigger resolves `None` when the session
-	// drops without draining; keep holding either way (closing this stream
-	// mid-session is a protocol violation on strict peers).
+	// drops without draining; keep holding either way, since a FIN mid-session is
+	// a protocol violation the peer closes over.
+	let mut untriggered = false;
 	let payload = kio::wait(|waiter| {
 		let mut cx = waiter.context();
 		if session.poll_closed(&mut cx).is_ready() {
-			return std::task::Poll::Ready(None);
+			return std::task::Poll::Ready(Ok(None));
 		}
-		goaway.poll_triggered(waiter)
+		if writer.poll_closed(&mut cx).is_ready() {
+			return std::task::Poll::Ready(Err(Error::ProtocolViolation));
+		}
+		if !untriggered {
+			match goaway.poll_triggered(waiter) {
+				std::task::Poll::Ready(Some(payload)) => return std::task::Poll::Ready(Ok(Some(payload))),
+				std::task::Poll::Ready(None) => untriggered = true,
+				std::task::Poll::Pending => {}
+			}
+		}
+		std::task::Poll::Pending
 	})
-	.await;
+	.await?;
 
 	if let Some(payload) = payload {
 		let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
 		let msg = ietf::GoAway {
 			new_session_uri: std::borrow::Cow::Borrowed(payload.uri.as_ref()),
 			timeout: timeout_ms,
-			// We track no per-request progress, so name the receiver's first Request ID: a
-			// client's are even and a server's odd, so a client sends 1 and a server 0.
-			request_id: Some(ietf::RequestId(u64::from(client))),
+			request_id: (version == Version::Draft18).then(|| control.goaway()).transpose()?,
 		};
 
 		// Frame as [type_id varint][size u16][body], the same shape as the
 		// control-stream messages this channel otherwise carries.
 		let mut writer = writer.with_version(version);
-		writer.encode_message(&msg).await?;
+		writer.encode_message(&msg).await.map_err(control_stream_error)?;
 
-		crate::goaway::enforce(&runtime, &mut session, payload.timeout).await;
-		session.closed().await;
+		let mut draining = std::pin::pin!(async {
+			crate::goaway::enforce(&runtime, &mut session, payload.timeout).await;
+			session.closed().await;
+		});
+		kio::wait(|waiter| {
+			if waiter.poll_future(draining.as_mut()).is_ready() {
+				return std::task::Poll::Ready(Ok(()));
+			}
+			if writer.poll_closed(&mut waiter.context()).is_ready() {
+				return std::task::Poll::Ready(Err(Error::ProtocolViolation));
+			}
+			std::task::Poll::Pending
+		})
+		.await?;
 		writer.finish().ok();
 	} else {
 		writer.finish().ok();
@@ -1007,6 +1021,7 @@ where
 }
 
 /// What serving one incoming uni stream needs from its session.
+#[derive(Clone)]
 struct Uni<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	peer_setup: Option<peer::PeerSetup>,
@@ -1015,19 +1030,6 @@ struct Uni<S: crate::transport::poll::Session> {
 	goaway: crate::goaway::Protocol,
 	client: bool,
 	version: Version,
-}
-
-impl<S: crate::transport::poll::Session> Clone for Uni<S> {
-	fn clone(&self) -> Self {
-		Self {
-			subscriber: self.subscriber.clone(),
-			peer_setup: self.peer_setup.clone(),
-			seen_setup: self.seen_setup.clone(),
-			goaway: self.goaway.clone(),
-			client: self.client,
-			version: self.version,
-		}
-	}
 }
 
 impl<S: crate::transport::poll::Boxable> Uni<S> {
@@ -1262,6 +1264,7 @@ where
 }
 
 /// What serving one incoming bidi request needs from its session.
+#[derive(Clone)]
 struct Bidi<S: crate::transport::poll::Session> {
 	publisher: Publisher<S>,
 	subscriber: Subscriber<S>,
@@ -1271,20 +1274,6 @@ struct Bidi<S: crate::transport::poll::Session> {
 	declared: Option<bool>,
 	serve: Option<auth::Serve>,
 	version: Version,
-}
-
-impl<S: crate::transport::poll::Session> Clone for Bidi<S> {
-	fn clone(&self) -> Self {
-		Self {
-			publisher: self.publisher.clone(),
-			subscriber: self.subscriber.clone(),
-			peer: self.peer,
-			epoch: self.epoch,
-			declared: self.declared,
-			serve: self.serve.clone(),
-			version: self.version,
-		}
-	}
 }
 
 impl<S: crate::transport::poll::Boxable> Bidi<S> {
@@ -1333,7 +1322,12 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 					| auth::Auth::ID
 			) {
 			let request_id = RequestId::decode(&mut data.decoder(version), version)?;
-			publisher.control.accept(request_id)?;
+			match publisher.control.accept(request_id) {
+				Err(Error::GoingAway) => return refuse_going_away(stream, id, version).await,
+				result => {
+					result?;
+				}
+			}
 		}
 		match id {
 			// Draft-16 moved SUBSCRIBE_NAMESPACE to its own stream, past the control stream
@@ -1377,25 +1371,52 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 	}
 }
 
-/// Monitor the peer's SETUP stream for a GOAWAY, surfacing it through
-/// [`crate::Session::goaway`], then hold the stream until it FINs.
-///
-/// Fails only when the peer broke the protocol, which closes the session: an unknown or
-/// malformed message, a second GOAWAY, or a draft-18 Request ID of the wrong parity. The
-/// stream failing on its own, such as a reset, leaves the session up.
+/// Refuse a request past our GOAWAY cutoff with the answer its kind reads: an AUTH
+/// presenter reads only AUTH_OK and AUTH_ERROR.
+async fn refuse_going_away<S: crate::transport::poll::Session>(
+	stream: Stream<S, Version>,
+	id: u64,
+	version: Version,
+) -> Result<(), Error> {
+	if id == auth::Auth::ID {
+		return auth::refuse_going_away(stream).await;
+	}
+	super::request_stream::reject(
+		stream,
+		ietf::RequestError {
+			request_id: None,
+			error_code: super::error::request::to_code(
+				&Error::GoingAway,
+				super::error::request::Kind::Subscribe,
+				version,
+			),
+			reason_phrase: "going away".into(),
+			retry_interval: 0,
+		},
+	)
+	.await
+}
+
+/// Monitor the peer's SETUP stream for GOAWAY until the session closes.
+/// A FIN or reset of this control stream is a protocol violation.
 async fn run_goaway<R: crate::transport::poll::RecvStream>(
 	reader: Reader<R, Version>,
 	version: Version,
 	client: bool,
 	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error> {
-	match read_goaways(reader, version, client, goaway).await {
-		Err(err) if is_protocol_violation(&err) => Err(err),
-		Err(err) => {
-			tracing::debug!(%err, "SETUP stream failed");
-			Ok(())
-		}
-		Ok(()) => Ok(()),
+	read_goaways(reader, version, client, goaway)
+		.await
+		.map_err(control_stream_error)
+}
+
+/// A control stream cannot end independently of its session, so its own failure is the
+/// peer's violation. The session closing or timing out under it passes through.
+pub(super) fn control_stream_error(err: Error) -> Error {
+	if is_protocol_violation(&err) || matches!(err, Error::Session(_) | Error::Encode(_) | Error::IdleTimeout) {
+		err
+	} else {
+		Error::ProtocolViolation
 	}
 }
 
@@ -1449,7 +1470,7 @@ async fn read_goaways<R: crate::transport::poll::RecvStream>(
 			timeout,
 		})?;
 	}
-	Ok(())
+	Err(Error::ProtocolViolation)
 }
 
 /// Closes the auth handle when the session driver ends without finishing, releasing
@@ -2579,6 +2600,7 @@ mod tests {
 		let mut encoder = crate::coding::Encoder::new(&mut subscribe, VERSION.into());
 		encoder.varint(ietf::Subscribe::ID).unwrap();
 		ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("room"),
@@ -3000,6 +3022,7 @@ mod tests {
 	/// `token`, framed as a control message.
 	fn subscribe_with_token(version: Version, token: &[u8]) -> Vec<u8> {
 		let msg = ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(0),
 			track_namespace: crate::Path::new("room"),
@@ -3153,10 +3176,11 @@ mod tests {
 
 	/// The session code a client closes with after reading `stream` as the server's SETUP
 	/// stream, or `None` while the session stays up.
-	async fn client_reads_setup_stream(version: Version, stream: Vec<u8>) -> Option<SessionError> {
+	async fn client_reads_setup_stream(version: Version, stream: Vec<u8>, fin: bool) -> Option<SessionError> {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![stream]);
-		// The peer FINs its stream after the script, so a message it cuts short is malformed.
-		session.close(crate::lite::test_transport::Close::Fin);
+		if fin {
+			session.close(crate::lite::test_transport::Close::Fin);
+		}
 		let (_, result) = drive_unis(version, session, None, None).await;
 		result.map(|result| SessionError::from(&result.expect_err("the loop ended without an error")))
 	}
@@ -3171,7 +3195,7 @@ mod tests {
 			] {
 				let mut params = ietf::Parameters::default();
 				params.set_bytes(param, b"a".to_vec());
-				let closed = client_reads_setup_stream(version, setup_stream(version, params, &[])).await;
+				let closed = client_reads_setup_stream(version, setup_stream(version, params, &[]), false).await;
 				assert_eq!(closed, Some(expected), "{version:?}");
 			}
 		}
@@ -3191,7 +3215,7 @@ mod tests {
 			] {
 				let mut params = ietf::Parameters::default();
 				params.set_bytes(ietf::ParameterBytes::AuthorizationToken, token.to_vec());
-				let closed = client_reads_setup_stream(version, setup_stream(version, params, &[])).await;
+				let closed = client_reads_setup_stream(version, setup_stream(version, params, &[]), false).await;
 				assert_eq!(closed, expected, "{version:?} {token:?}");
 			}
 		}
@@ -3239,9 +3263,36 @@ mod tests {
 				),
 			] {
 				let stream = setup_stream(version, ietf::Parameters::default(), after);
-				let closed = client_reads_setup_stream(version, stream).await;
+				let closed = client_reads_setup_stream(version, stream, why == "a body cut short by FIN").await;
 				assert_eq!(closed, expected, "{version:?}: {why}");
 			}
+		}
+	}
+
+	#[moq_clock::test]
+	async fn a_control_stream_fin_or_reset_is_a_protocol_violation() {
+		use crate::lite::test_transport::{Close, DeadStreamSession, ScriptedSession};
+		use crate::transport::poll::Session as _;
+		for version in [Version::Draft17, Version::Draft18, Version::Draft21, Version::Draft22] {
+			let session = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![setup_stream(
+				version,
+				ietf::Parameters::default(),
+				&[],
+			)]);
+			session.close(Close::Fin);
+			let (_, result) = drive_unis(version, session, None, None).await;
+			assert!(
+				matches!(result, Some(Err(ref err)) if SessionError::from(err) == SessionError::ProtocolViolation),
+				"{version:?}: {result:?}"
+			);
+
+			let mut session = DeadStreamSession::unis(1);
+			let recv = session.accept_uni().await.unwrap();
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
+			let err = run_goaway(Reader::new(recv, version), version, true, protocol)
+				.await
+				.unwrap_err();
+			assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation, "{version:?}");
 		}
 	}
 
@@ -3333,37 +3384,41 @@ mod tests {
 			(None, Some(SessionError::ProtocolViolation)),
 		] {
 			let stream = setup_stream(VERSION, ietf::Parameters::default(), &goaway(VERSION, request_id));
-			let closed = client_reads_setup_stream(VERSION, stream).await;
+			let closed = client_reads_setup_stream(VERSION, stream, false).await;
 			assert_eq!(closed, expected, "Request ID {request_id:?}");
 		}
 	}
 
-	/// We send a draft-18 GOAWAY naming the receiver's first Request ID: odd from a client,
-	/// even from a server, so a strict peer does not close over its parity.
+	/// Draft-18 GOAWAY names the smallest peer ID not processed, here one a reordered stream
+	/// skipped, preserving the peer's parity.
 	#[moq_clock::test]
-	async fn our_draft18_goaway_names_the_receivers_parity() {
+	async fn our_draft18_goaway_names_the_admitted_request_cutoff() {
 		const VERSION: Version = Version::Draft18;
 		for client in [false, true] {
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 			let log = session.log.clone();
+			let control = Control::new(None, client);
+			let first = u64::from(client);
+			control.accept(RequestId(first)).unwrap();
+			control.accept(RequestId(first + 4)).unwrap();
 			let (handle, goaway_protocol) = crate::goaway::Handle::new(!client);
-			let _setup = moq_clock::sim::spawn(run_setup(
+			let mut setup = std::pin::pin!(run_setup(
 				crate::time::sim(),
 				session,
 				VERSION,
-				client,
 				None,
 				None,
 				Hop::new(1).unwrap(),
 				None,
 				Default::default(),
 				goaway_protocol,
+				control.clone(),
 			));
 			handle.producer().send(crate::goaway::Goaway::new()).unwrap();
-			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
-
-			let sent = goaway(VERSION, Some(u64::from(client)));
+			assert!(futures::poll!(setup.as_mut()).is_pending());
+			let sent = goaway(VERSION, Some(first + 2));
 			assert_eq!(occurrences(&log, &sent), 1, "client={client}");
+			assert!(matches!(control.accept(RequestId(first + 2)), Err(Error::GoingAway)));
 		}
 	}
 
@@ -3401,8 +3456,36 @@ mod tests {
 		.unwrap();
 		let _ = moq_clock::timeout(std::time::Duration::from_secs(10), driver).await;
 		let closes = log.closes();
-		assert!(closes.len() <= 1, "closed more than once: {closes:?}");
+		// A request stream closes at the source and its task may close again; the transport
+		// keeps the first, so only a disagreeing code would reach the peer.
+		assert!(
+			closes.iter().all(|(code, _)| *code == closes[0].0),
+			"closed with different codes: {closes:?}"
+		);
 		closes.first().map(|(code, _)| SessionError::from_code(*code))
+	}
+
+	/// A request past our GOAWAY cutoff is refused in the answer its kind reads: an AUTH
+	/// with AUTH_ERROR carrying GOING_AWAY, since its presenter takes anything else as a
+	/// violation, and the rest with REQUEST_ERROR.
+	#[moq_clock::test]
+	async fn a_request_past_our_goaway_is_refused_in_its_own_answer() {
+		const VERSION: Version = Version::Draft18;
+		let reason = b"going away";
+		let body = [&[0x6, reason.len() as u8][..], reason].concat();
+		for (id, answer) in [
+			(auth::Auth::ID, frame(VERSION, auth::AuthError::ID, &body)),
+			(
+				ietf::Subscribe::ID,
+				frame(VERSION, ietf::RequestError::ID, &[&[0x6, 0][..], &body[1..]].concat()),
+			),
+		] {
+			let mut session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			let log = session.log.clone();
+			let stream = Stream::open(&mut session, VERSION).await.unwrap();
+			refuse_going_away(stream, id, VERSION).await.unwrap();
+			assert_eq!(*log.writes.lock().unwrap(), answer, "{id:#x}");
+		}
 	}
 
 	/// A malformed request closes the session with the draft's code: a Request ID of the

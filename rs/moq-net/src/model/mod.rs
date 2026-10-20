@@ -43,9 +43,6 @@ use weak_cache::{WeakCache, WeakEntry};
 pub use bytes::*;
 // pending: /quest/m1/public-model/serve.md
 pub(crate) use subscription::Cap;
-#[cfg_attr(not(feature = "async"), allow(unused_imports))]
-// private: passthrough
-pub(crate) use subscription::NewGroup;
 // Datagram stays flat at the crate root (a small track-adjacent wire type),
 // not under a role module.
 pub use datagram::*;

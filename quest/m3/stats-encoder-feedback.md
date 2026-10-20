@@ -11,7 +11,7 @@ it already follows. Keyframe requests stay out.
 ## Plan
 
 Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no named consumer; the media stats it
-reads land first in m1.
+reads land first in m2.
 
 Decided 2026-10-08: parked, and the transcode leg is out. The
 [ladder controller](/quest/m3/ladder/controller.md) owns every

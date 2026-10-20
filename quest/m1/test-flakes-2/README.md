@@ -1,4 +1,4 @@
-# [S] More tests hold up under load
+# More tests hold up under load
 
 ## Goal
 
@@ -29,9 +29,19 @@ merge batch, ranked by how likely each hides a product bug.
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did. moq-tokio's
 `a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
-known exception, tracked by [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
+known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
+
+Added 2026-10-19 (maintainer): three more, the redial pair first since CI
+hit it. The same day's test cost audit added the macOS QUIC connects, and the
+redundant failover drift first: it may hide a TS export bug and failed two of
+three loaded `just check` runs.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
+- [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md) - moq-tokio's loopback QUIC tests stop timing out on the macOS Platform job
 
 ## Related
 

@@ -1,0 +1,54 @@
+{
+	"version": 1,
+	"map": "Carla/Maps/Town10HD_Opt",
+	"image": "Town10HD_Opt.aerial.webp",
+	"image_sha256": "a131ed672676660a9146a638ea4b40acbbc09f234d4c9d147dc83fbab5b1ec96",
+	"units": "metres",
+	"image_size": {
+		"width": 2560,
+		"height": 1440
+	},
+	"camera": {
+		"location": {
+			"x": -2.306732177734375,
+			"y": 36.241275787353516,
+			"z": 381.4052090099687
+		},
+		"rotation_degrees": {
+			"pitch": -90.0,
+			"yaw": 90.0,
+			"roll": 0.0
+		},
+		"horizontal_fov_degrees": 60.0
+	},
+	"projection": {
+		"type": "nadir_pinhole_ground_plane",
+		"ground_z": 0.0,
+		"world_bounds_at_image_edges": {
+			"min_x": -222.51113226996526,
+			"min_y": -87.62369926452635,
+			"max_x": 217.8976679144965,
+			"max_y": 160.10625083923338
+		},
+		"image_axes": {
+			"left_to_right": "carla_x_increasing",
+			"top_to_bottom": "carla_y_increasing"
+		},
+		"normalized_mapping": {
+			"left": "(x - min_x) / (max_x - min_x)",
+			"top": "(y - min_y) / (max_y - min_y)"
+		}
+	},
+	"capture": {
+		"road_bounds": {
+			"min_x": -114.59522247314453,
+			"min_y": -68.72904205322266,
+			"max_x": 109.98175811767578,
+			"max_y": 141.2115936279297
+		},
+		"padding_fraction": 0.18,
+		"horizontal_flip_applied": true
+	},
+	"name": "Town10HD_Opt",
+	"bbox": [-222.51113226996526, -87.62369926452635, 217.8976679144965, 160.10625083923338]
+}

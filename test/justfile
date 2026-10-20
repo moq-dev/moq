@@ -17,16 +17,16 @@ set working-directory := '.'
 default:
     @just --justfile {{ quote(justfile()) }} --list test
 
-# Port isolation across private temp roots and keyboard activation under a canvas.
+# Port isolation across private temp roots, plus Chromium checks of the watch and publish controls.
 # The browser check is not `*.test.ts`: plain `bun test` runs lack Playwright Chromium,
 # which this recipe installs, as the interop and wasm harnesses do.
 harness:
     ./lib/harness.test.sh
     ./interop/relay-log.test.sh
-    cd .. && bun test test/interop/compat/resolve.test.ts
+    cd .. && bun test test/interop/compat/resolve.test.ts test/interop/compat/claims.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
-    cd interop/clients/js && bun test ./harness.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts
+    cd interop/clients/js && bun test ./harness.browser.ts ./signals-dom.browser.ts ./publish-ui.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
@@ -92,7 +92,7 @@ native-play:
 # audio-quality/budgets.json. The full matrix is 36 rows at 60 s; nightly runs it with
 # --enforce. Narrow it with `--profiles mild --codecs opus --rings plain --duration 20`;
 # `--rings pulse` is the native player alone.
-# `--replays` grades only the recorded traces, in seconds, as PRs touching the player do.
+# `--replays` grades only the recorded traces, in seconds, as nightly and release PRs touching the player do.
 # See audio-quality/README.md.
 
 # Grade browser and native audio playout over an impaired path.
@@ -132,6 +132,7 @@ drill-sensitivity *args:
 [positional-arguments]
 ts *args:
     python3 ./ts/fragment_pes.test.py
+    python3 ./ts/drop_nulls.test.py
     python3 ./ts/compliance.test.py
     python3 ./ts/pcr-timing.test.py
     python3 ./ts/open-gop.test.py
@@ -163,6 +164,7 @@ ts-tstd:
 
 # Prove FFmpeg decode/content and TSDuck structure/PCR assertions reject damaged TS.
 ts-controls:
+    python3 ./ts/decode.test.py
     bash ./ts/controls.sh
 
 # A JS viewer watching a live track through a relay that drains (SIGTERM, after

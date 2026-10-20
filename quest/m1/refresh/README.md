@@ -62,10 +62,7 @@ Work owned by this README, after the children land:
 
 ## Required
 
-- [Core](/quest/m1/refresh/core.md) - `track::Info::refresh` and `Demand::wanted` in Rust, JS, and moq-ffi; each hop evaluates the ratio on a join; IETF dynamic groups map onto it
-- [Lite wire](/quest/m1/refresh/lite.md) - lite-07 TRACK_INFO advertises the ratio and SUBSCRIBE_UPDATE carries the wanted group, so a join at any relay reaches the origin
 - [moq-json](/quest/m1/refresh/json.md) - snapshot and window groups roll on a qualifying join, reading the ratio from the track; `delta_ratio` and `op_ratio` become `deltas` and `ops` switches in every binding
-- [Video](/quest/m1/refresh/video.md) - video publishers advertise refresh and force a keyframe on demand, keeping the encoder's max GOP
 
 ## Related
 
