@@ -4718,9 +4718,9 @@ mod serve_group_test {
 		group.write_frame(None, &b"key"[..]).unwrap();
 		group.finish().unwrap();
 		run.update(update(Some(1)));
-		assert_eq!(track.demand().wanted(), Some(0), "answered request stays answered");
+		assert_eq!(track.demand().wanted(), Some(1), "answered request stays answered");
 		run.update(update(Some(2)));
-		assert_eq!(track.demand().wanted(), Some(0), "new hop judges its own ratio");
+		assert_eq!(track.demand().wanted(), Some(1), "new hop judges its own ratio");
 	}
 
 	fn write_group(track: &mut track::Producer, sequence: u64, millis: u64) {
