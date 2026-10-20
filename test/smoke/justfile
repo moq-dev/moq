@@ -34,7 +34,7 @@ moxygen:
 # registry (Cloudflare, moxygen, imquic, ...). Only moq-dev's relay is required;
 # the rest are reported in a summary table. WebSocket is a separate column for
 # the relays named in relays.sh WEBSOCKET_KEYS. Pass flags through, e.g.
-#   just relays --only moq-rs-draft-18 --publishers rust,js-web --subscribers rust,js-web,js-bun
+# just relays --only moq-rs-draft-18 --publishers rust,js-web --subscribers rust,js-web,js-bun
 relays *args:
     ./relays.sh {{ args }}
 
@@ -53,7 +53,7 @@ publish report site:
 # Token interop: install moq auth in each published flavour and cross-verify.
 # The Rust `moq auth` comes from a channel (PATH); @moq/auth comes from npm,
 # driven under both node and bun. Default: rust only. Pass flags through, e.g.
-#   just token --generators rust,js-node --verifiers rust,js-bun --algorithms HS256
+# just token --generators rust,js-node --verifiers rust,js-bun --algorithms HS256
 token *args:
     ./token.sh {{ args }}
 
