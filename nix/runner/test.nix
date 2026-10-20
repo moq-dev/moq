@@ -53,6 +53,8 @@ pkgs.testers.runNixOSTest {
       # The test driver supplies the three network links instead of QEMU's TAP.
       systemd.network.netdevs = lib.mkForce { };
       networking.networkmanager.enable = false;
+      # The module's isolation must also hold on hosts using asymmetric routing.
+      networking.firewall.checkReversePath = false;
       # The test driver configures the uplink outside networkd.
       systemd.network.wait-online.enable = false;
       networking.useDHCP = false;
@@ -130,6 +132,7 @@ pkgs.testers.runNixOSTest {
       ];
       networking.defaultGateway = "10.231.1.1";
       networking.firewall.allowedTCPPorts = [ 8080 ];
+      networking.firewall.allowedUDPPorts = [ 45679 ];
       environment.systemPackages = [ pkgs.curl ];
       systemd.services.http = {
         wantedBy = [ "multi-user.target" ];
@@ -189,6 +192,20 @@ pkgs.testers.runNixOSTest {
             guest.fail(f"curl --fail --connect-timeout 1 http://{address}:8080/")
         router.succeed("nft list table inet github-runner-queue-ci")
         router.succeed("nft list table inet github-runner-other-ci")
+
+    with subtest("a guest cannot impersonate a sibling's established reply to the host"):
+        other.succeed("systemd-run --unit=udp-peer --service-type=exec ${pkgs.python3}/bin/python3 ${./spoof-test.py} peer")
+        other.wait_for_file("/tmp/udp-peer-ready")
+        router.succeed("systemd-run --unit=udp-receiver --service-type=exec ${pkgs.python3}/bin/python3 ${./spoof-test.py} receiver")
+        router.wait_for_file("/tmp/udp-receiver-ready")
+        guest.succeed("${
+          pkgs.python3.withPackages (p: [ p.scapy ])
+        }/bin/python3 ${./spoof-test.py} attack")
+        # This response traverses the attacker's same transmit queue after its spoof.
+        guest.succeed("curl --fail http://203.0.113.1:8080/")
+        other.succeed("${pkgs.python3}/bin/python3 ${./spoof-test.py} finish")
+        router.wait_for_file("/tmp/udp-result")
+        router.succeed("test $(cat /tmp/udp-result) = finish")
 
     with subtest("the runner inherits the hosted CI locked-memory budget"):
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/memlock")

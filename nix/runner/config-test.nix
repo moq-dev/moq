@@ -1,7 +1,7 @@
 { pkgs }:
 let
   evaluate =
-    ids:
+    ids: nat:
     import (pkgs.path + "/nixos/lib/eval-config.nix") {
       system = pkgs.stdenv.hostPlatform.system;
       modules = [
@@ -9,6 +9,7 @@ let
         {
           boot.isContainer = true;
           networking.useHostResolvConf = false;
+          networking.nat = nat;
           system.stateVersion = "26.05";
           fileSystems."/" = {
             device = "none";
@@ -25,21 +26,28 @@ let
         }
       ];
     };
-  valid = evaluate {
+  ids = {
     first = 0;
     second = 1;
   };
+  valid = evaluate ids { };
+  matchingNat = evaluate ids { externalInterface = "eth0"; };
+  wrongUplink = evaluate ids { externalInterface = "eth1"; };
+  fixedAddress = evaluate ids { externalIP = "203.0.113.1"; };
   duplicate = evaluate {
     first = 0;
     second = 0;
-  };
+  } { };
 in
 assert pkgs.lib.assertMsg (pkgs.lib.all (item: item.assertion) valid.config.assertions) (
   pkgs.lib.concatMapStringsSep "\n" (item: item.message) (
     builtins.filter (item: !item.assertion) valid.config.assertions
   )
 );
+assert pkgs.lib.all (item: item.assertion) matchingNat.config.assertions;
 assert pkgs.lib.any (item: !item.assertion) duplicate.config.assertions;
+assert pkgs.lib.any (item: !item.assertion) wrongUplink.config.assertions;
+assert pkgs.lib.any (item: !item.assertion) fixedAddress.config.assertions;
 pkgs.runCommand "github-runner-vm-config-test" { } ''
   touch "$out"
 ''

@@ -51,6 +51,16 @@ let
           assertion = pkgs.stdenv.hostPlatform.system == "x86_64-linux";
           message = "services.github-runner-vms supports x86_64-linux KVM hosts.";
         }
+        {
+          assertion =
+            config.networking.nat.externalInterface == null
+            || config.networking.nat.externalInterface == cfg.network.uplink;
+          message = "Runner VM ${name} needs networking.nat.externalInterface unset or equal to its network.uplink.";
+        }
+        {
+          assertion = config.networking.nat.externalIP == null;
+          message = "Runner VMs require masquerading; networking.nat.externalIP must be unset.";
+        }
       ];
       users.groups.${user} = { };
       users.users.${user} = {
@@ -95,6 +105,9 @@ let
           content = ''
             chain input {
               type filter hook input priority -10; policy accept;
+              # Conntrack is shared across TAPs, so validate the sender first.
+              iifname "${tap}" meta nfproto ipv6 counter drop
+              iifname "${tap}" ip saddr != ${prefix}.2 counter drop
               iifname "${tap}" ct state established,related accept
               iifname "${tap}" counter drop
             }

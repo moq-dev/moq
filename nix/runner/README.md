@@ -53,6 +53,9 @@ It uses `10.231.ID.0/30`: the host is `.1` and the guest is `.2`. Reserve these
 subnets on the host. Duplicate IDs are rejected during evaluation. NetworkManager owns the host uplink when
 enabled; otherwise configure that uplink in networkd. The TAP receives its address
 before QEMU attaches, so guest startup does not depend on TAP carrier.
+The module uses the host's NixOS NAT service. Leave `networking.nat.externalInterface`
+unset, or set it to the same uplink as every runner. Fixed `networking.nat.externalIP`
+is unsupported. Conflicting settings are rejected during evaluation.
 
 Mint a repository registration token with `gh api -X POST
 repos/OWNER/REPO/actions/runners/registration-token --jq .token`, and install it
@@ -86,4 +89,6 @@ passes; pull requests stay on hosted runners.
 
 `just gh runner-vm` builds a guest image and runs NixOS integration tests for
 startup without carrier, public egress for multiple guests, private-network and
-sibling-guest isolation, the runner's locked-memory budget, and Nix/mbx persistence across runner and guest restarts.
+sibling-guest isolation including spoofed established replies, compatible host NAT
+settings, the runner's locked-memory budget, and Nix/mbx persistence across runner
+and guest restarts.
