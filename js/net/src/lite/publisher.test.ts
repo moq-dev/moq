@@ -835,9 +835,10 @@ test("lite draft-06: a group stream that never completes is reset past its deadl
 		await clock.advanceAsync(Nano.fromMilli(Milli(2)));
 		expect(toStreamCode(fromTransport(await reset))).toBe(StreamCode.DeliveryTimeout);
 		const failed = sub.track.failed.peek();
-		expect(failed?.sequence).toBe(1);
-		expect(failed?.error).toBeInstanceOf(StreamError);
-		expect((failed?.error as StreamError).code).toBe(StreamCode.DeliveryTimeout);
+		if (!failed) throw new Error("expected the track to report the failed group");
+		expect(failed.sequence).toBe(1);
+		expect(failed.error).toBeInstanceOf(StreamError);
+		expect((failed.error as StreamError).code).toBe(StreamCode.DeliveryTimeout);
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);

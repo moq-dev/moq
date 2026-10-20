@@ -1565,22 +1565,23 @@ export class Publisher {
 			stream.close();
 			group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			// One that never completes is reset past its deadline and reported the same way, and
-			// the track learns which group it was.
+			// One that never completes is reset past its deadline and reported the same way. Either
+			// way the track learns which group its subscriber did not get.
+			let failed: Error | undefined;
 			try {
-				return await timeout(
+				failed = await timeout(
 					Nano.fromMilli(Milli(GROUP_COMPLETION_TIMEOUT + bytes / GROUP_COMPLETION_RATE)),
 					stream.closed.then(() => undefined, error),
 				);
 			} catch (err: unknown) {
 				if (!(err instanceof Elapsed)) throw err;
-				const stalled = new StreamError(StreamCode.DeliveryTimeout, {
+				failed = new StreamError(StreamCode.DeliveryTimeout, {
 					message: `group ${group.sequence} stream never completed`,
 				});
-				stream.reset(stalled);
-				hooks.failGroup(track, group.sequence, stalled);
-				return stalled;
+				stream.reset(failed);
 			}
+			if (failed) hooks.failGroup(track, group.sequence, failed);
+			return failed;
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);

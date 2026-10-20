@@ -831,9 +831,10 @@ export class Producer {
 	}
 
 	/**
-	 * The latest group whose stream to a subscriber never completed after it was fully written
-	 * and was reset, with the failure. A publisher that must not lose a group watches this to
-	 * write its content again as a new group; the failed sequence itself is not served again.
+	 * The latest group a subscriber's stream failed to carry after it was fully written, with
+	 * the failure: the peer reset it, or it never completed and was reset here. A publisher that
+	 * must not lose a group watches this to write its content again as a new group; the failed
+	 * sequence itself is not served again.
 	 */
 	get failed(): Getter<{ sequence: number; error: Error } | undefined> {
 		return this.#failed;
