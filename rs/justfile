@@ -339,14 +339,10 @@ quic-stress:
 fuzz target *args:
     sh/rs/fuzz.sh "$@"
 
-# No threshold: the report is for finding untested paths, not gating. mbx is
-# off because its cache remaps source paths to `${workspace}`, which llvm-cov
-# cannot read back. The LLVM tools come from the toolchain's `llvm-tools`.
-# `--no-report` skips cargo-llvm-cov's own cleanup, so clean first or stale
-# profiles from an earlier run merge into the report.
+# No threshold: the report is for finding untested paths, not gating.
+# The LLVM tools come from the toolchain's `llvm-tools`.
 
 # Report native workspace or one crate's coverage under target/coverage/<crate>.
-[env("MBX_DISABLE", "1")]
 coverage crate="workspace":
     bash sh/rs/coverage.sh '{{ crate }}'
 

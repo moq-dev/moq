@@ -27,7 +27,6 @@ that no CI job runs (AGENTS.md wires every test into CI, at least nightly),
 fixes merged since the previous run without a regression test, and gaps in the
 `just test interop --all` matrix.
 
-
 ### Audit checkpoint (2026-10-19)
 
 Base: `origin/main` at `2f1f062c6`. This run is incomplete; keep this quest
@@ -39,7 +38,6 @@ still works. Reports include a JSON summary, LCOV, and HTML. Nightly retains
 those artifacts. The instrumented native workspace ran 8,848 tests successfully
 with 35 ignored tests; the first report attempt exposed incompatible report
 selection flags, which are corrected in the recipe and covered by its tests.
-
 
 Native default-feature Rust baselines from those 8,848 passing tests:
 

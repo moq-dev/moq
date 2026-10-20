@@ -15,8 +15,10 @@ else
 fi
 
 out="target/coverage/$crate"
+# mbx's cache remaps source paths to `${workspace}`, which llvm-cov cannot read back.
 export MBX_DISABLE=1
 rm -rf "$out"
+# `--no-report` skips cargo-llvm-cov's own cleanup, so stale profiles would merge in.
 cargo llvm-cov clean --workspace
 bash sh/rs/nextest.sh cargo llvm-cov nextest --locked "${packages[@]}" --tests --no-report --test-threads "${NEXTEST_TEST_THREADS:-4}"
 mkdir -p "$out"
