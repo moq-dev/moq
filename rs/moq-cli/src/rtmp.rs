@@ -15,7 +15,7 @@ use crate::moq::{ImportTarget, notify_ready};
 /// RTMP endpoint args: exactly one of `--connect` (dial) / `--listen` (bind).
 /// The parent direction fixes whether that dial/bind pushes or pulls. Import uses
 /// this directly; export wraps it in [`ExportArgs`] for the egress-only knobs.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(group("rtmp-mode", required))]
 pub struct Args {
@@ -31,7 +31,7 @@ pub struct Args {
 
 /// RTMP export args: the endpoint plus egress-only tuning. Split from the import
 /// side so the frame-drop knob only shows where it applies.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
 	#[usage(flatten)]

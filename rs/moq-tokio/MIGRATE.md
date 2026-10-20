@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Usage types come from usage-rs 7 (#PR)
+
+The `Args` and `Config` derives now implement usage-rs 7 traits, and `cli::usage` is renamed `cli::usage_rs`.
+A CLI that flattens these types depends on `usage-rs = "7"` under its own name: the derives emit `::usage_rs` paths and no longer read `Cargo.toml`.
+Rename a `usage = { package = "usage-rs" }` alias to `usage-rs`, or add `#[usage(crate = usage)]` to each derive.
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

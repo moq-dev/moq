@@ -58,7 +58,7 @@ fn settles_walk(err: &Error) -> bool {
 /// A GOAWAY naming no new URI is no failure: a restarting peer sends one to each session until
 /// it goes, and each of those
 /// serves, so it restarts the timeout instead.
-#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -189,7 +189,7 @@ pub enum Status {
 ///
 /// The URI is dialed exactly as given, so it must carry whatever credentials the
 /// new endpoint needs. Nothing from the current session is copied onto it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, usage::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, usage_rs::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Redirect {
@@ -328,7 +328,7 @@ fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
 }
 
 /// How a reconnect loop reacts to a peer's GOAWAY.
-#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -1566,7 +1566,7 @@ mod tests {
 	/// Updating with an empty CLI preserves a standing TOML value over typed defaults.
 	#[test]
 	fn cli_does_not_clobber_toml_backoff() {
-		#[derive(usage::Cli)]
+		#[derive(usage_rs::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(settings)]
 		struct Wrapper {
@@ -1604,7 +1604,7 @@ mod tests {
 	/// GOAWAY typed defaults remain overrideable by a standing TOML layer.
 	#[test]
 	fn cli_does_not_clobber_toml_goaway() {
-		#[derive(usage::Cli)]
+		#[derive(usage_rs::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(settings)]
 		struct Wrapper {
