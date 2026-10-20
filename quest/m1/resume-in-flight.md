@@ -104,4 +104,3 @@ Public API: behavior only. Wire: none.
 ## Related
 
 - [Resume reorder](/quest/m1/resume-reorder.md) - the gap rule this reuses
-- [Rust resumed reads](/quest/m1/resume-ordered.md) - another resume follow-up from #5836
