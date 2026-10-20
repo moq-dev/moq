@@ -3399,7 +3399,8 @@ mod tests {
 		}
 	}
 
-	/// Draft-18 GOAWAY carries the admission cutoff, preserving the peer's parity.
+	/// Draft-18 GOAWAY names the smallest peer ID not processed, here one a reordered stream
+	/// skipped, preserving the peer's parity.
 	#[moq_clock::test]
 	async fn our_draft18_goaway_names_the_admitted_request_cutoff() {
 		const VERSION: Version = Version::Draft18;
@@ -3425,9 +3426,9 @@ mod tests {
 			));
 			handle.producer().send(crate::goaway::Goaway::new()).unwrap();
 			assert!(futures::poll!(setup.as_mut()).is_pending());
-			let sent = goaway(VERSION, Some(first + 6));
+			let sent = goaway(VERSION, Some(first + 2));
 			assert_eq!(occurrences(&log, &sent), 1, "client={client}");
-			assert!(matches!(control.accept(RequestId(first + 6)), Err(Error::GoingAway)));
+			assert!(matches!(control.accept(RequestId(first + 2)), Err(Error::GoingAway)));
 		}
 	}
 

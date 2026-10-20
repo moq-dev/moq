@@ -169,15 +169,17 @@ impl Control {
 		self
 	}
 
-	/// Freeze draft-18 admission and name the first peer ID beyond those already admitted.
+	/// Freeze draft-18 admission and name the smallest peer ID not admitted: the first one
+	/// a reordered stream skipped, or else the next.
 	pub fn goaway(&self) -> Result<RequestId, Error> {
 		let mut state = self.state.lock();
-		let next = state.modern.next;
-		if next >= 1 << 62 {
+		let modern = &state.modern;
+		let cutoff = modern.missing.keys().next().copied().unwrap_or(modern.next);
+		if cutoff >= 1 << 62 {
 			return Err(SessionError::Internal.into());
 		}
 		state.going_away = true;
-		Ok(RequestId(next))
+		Ok(RequestId(cutoff))
 	}
 
 	pub fn max_request_id(&self, max: RequestId) {
@@ -330,9 +332,15 @@ mod tests {
 
 			let control = Control::new(None, client);
 			control.accept(RequestId(first)).unwrap();
+			control.accept(RequestId(first + 2)).unwrap();
+			assert_eq!(control.goaway().unwrap(), RequestId(first + 4));
+
+			// A reordered stream skipped first + 2, which is the smallest ID not processed.
+			let control = Control::new(None, client);
+			control.accept(RequestId(first)).unwrap();
 			control.accept(RequestId(first + 4)).unwrap();
-			assert_eq!(control.goaway().unwrap(), RequestId(first + 6));
-			// Cross-stream reordering may deliver an older ID after GOAWAY too.
+			assert_eq!(control.goaway().unwrap(), RequestId(first + 2));
+			// The skipped ID may still arrive after GOAWAY, and is past the cutoff too.
 			for id in [first + 2, first + 6, first + 8] {
 				assert!(matches!(control.accept(RequestId(id)), Err(Error::GoingAway)));
 			}
