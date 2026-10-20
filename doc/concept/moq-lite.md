@@ -207,7 +207,9 @@ exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
 to namespace prefixes. Older versions have no grant; the URL token keeps working
 everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
-authorization token. The token belongs to the session that added it, so after a
+authorization token. Naming a fresh token renews the announcement in place with
+`REQUEST_UPDATE` from draft 16, and re-announces it on drafts 14 and 15, so it
+can outlive the token it started with. The token belongs to the session that added it, so after a
 reconnect the application adds it again and re-announces. moq-lite has no
 per-request token, so there an announcement rides the session's scope.
 

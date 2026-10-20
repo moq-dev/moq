@@ -49,6 +49,24 @@
         "vite-plugin-solid": "^2.11.14",
       },
     },
+    "demo/carla/web": {
+      "name": "@moq/demo-carla",
+      "version": "0.1.0",
+      "dependencies": {
+        "@moq/clock": "workspace:^",
+        "@moq/json": "workspace:^",
+        "@moq/net": "workspace:^",
+        "@moq/watch": "workspace:^",
+        "zod": "^4.6.5",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.4.2",
+        "rolldown": "^1.2.12",
+        "typescript": "7.0.2",
+        "vite": "^8.3.2",
+        "wrangler": "^4.147.0",
+      },
+    },
     "demo/web": {
       "name": "@moq/demo",
       "version": "0.1.1",
@@ -750,6 +768,8 @@
     "@moq/demo": ["@moq/demo@workspace:demo/web"],
 
     "@moq/demo-boy": ["@moq/demo-boy@workspace:demo/boy"],
+
+    "@moq/demo-carla": ["@moq/demo-carla@workspace:demo/carla/web"],
 
     "@moq/drain-test": ["@moq/drain-test@workspace:test/drain"],
 

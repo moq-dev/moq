@@ -8,12 +8,15 @@ infrastructure.
 | `infra/apt` | `apt.moq.dev`   | `apt-moq-dev`   | Debian/Ubuntu package repository        |
 | `infra/rpm` | `rpm.moq.dev`   | `rpm-moq-dev`   | Fedora/RHEL package repository          |
 | `infra/moq-sh` | `moq.sh`     |                 | The `moq` installer script              |
+| `infra/mbx` |                 | `mbx-moq-dev`   | Private Rust build cache for CI         |
 
 Each worker is a standalone bun package with a `wrangler.jsonc` and a
 small TypeScript handler. The apt and rpm workers proxy GETs out of the R2
 bucket with appropriate `Content-Type` and `Cache-Control` headers for the
 file kind. The moq.sh worker serves `install.sh` from its bundle at every path,
 with the newest `moq-cli` release filled in as the default version.
+`infra/mbx` has no Worker: CI reaches its bucket directly through mbx's S3
+client.
 
 ## Deploying a worker
 
@@ -102,6 +105,79 @@ After this, every release that publishes a `.deb` or `.rpm` (one of the
 `moq-relay-v*`, `moq-cli-v*`, `moq-gst-v*` tags)
 triggers `apt-repo.yml` / `rpm-repo.yml`, which downloads the assets,
 regenerates the repository metadata, signs it, and uploads the diff.
+
+## Bootstrapping the Rust build cache
+
+`.github/actions/rust-cache` points mbx at the private `mbx-moq-dev` bucket,
+namespaced per runner OS and architecture. Every job that runs on `main` or in
+its merge queue (`gh-readonly-queue/main/*`) writes what it compiles: a queued
+pull request is about to become `main`, so its code is trusted like `main`'s.
+Release pull request jobs only read (main pull requests run no cloud CI), and
+fork pull requests, which get no secrets, build cold.
+
+The write key is what enforces that: it lives in a GitHub Environment that
+only those refs can deploy to, and each writer job names that Environment only
+when it runs on one of them. mbx on its own trusts only a push to a protected
+branch, which leaves out the queue and Nightly's schedule, so the action sets
+`MBX_REMOTE_TRUST_WRITES` for writers and the Environment is the only boundary.
+
+All of this runs once, by a maintainer. Steps 1, 2, and 4 are done, and step 3
+is done for `main`.
+
+1. **Create the bucket and its lifecycle rule** under your `wrangler login`:
+
+   ```bash
+   just infra mbx create
+   ```
+
+   `lifecycle.json` deletes every object 30 days after upload and aborts
+   multipart uploads left incomplete for a day. mbx writes each compilation
+   once and never refreshes it, so a result still in use expires too; the
+   next writer that misses it compiles and uploads it again. After editing
+   the rules, `just infra mbx lifecycle` applies them.
+
+2. **Create two R2 API tokens** in the dashboard (R2 -> Manage API tokens ->
+   Create Account API token), both scoped to `mbx-moq-dev` only. Wrangler
+   cannot create R2 tokens. Each shows an Access Key ID and a Secret Access
+   Key once.
+
+   - `mbx-read`: **Object Read only**.
+   - `mbx-write`: **Object Read & Write**.
+
+3. **Create the `cache-write` Environment**, deployable from `main` and its
+   merge queue only. A protected-branches policy would admit `release` as
+   well, so name the branches instead:
+
+   ```bash
+   gh api -X PUT repos/moq-dev/moq/environments/cache-write --input - <<'EOF'
+   {"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+   EOF
+   gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
+     -f name=main -f type=branch
+   gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
+     -f name='gh-readonly-queue/main/*' -f type=branch
+   ```
+
+   Without the queue policy, every merge queue job that writes fails before
+   it starts, and the queue merges nothing.
+
+4. **Store the keys under the same two names at both levels.** An Environment
+   secret shadows a repository secret of the same name, so writers get the
+   write key and every other job the read key, all through one pair of names:
+
+   ```bash
+   # mbx-write, readable only by jobs in the cache-write Environment
+   gh secret set MBX_R2_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
+   gh secret set MBX_R2_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
+
+   # mbx-read, for every other job
+   gh secret set MBX_R2_ACCESS_KEY_ID --repo moq-dev/moq
+   gh secret set MBX_R2_SECRET_ACCESS_KEY --repo moq-dev/moq
+   ```
+
+Without the repository secrets, readers warn and build cold. A writer without
+its key fails rather than publish nothing, and so does a key the bucket
+refuses, in any job.
 
 ## Rotating the signing key
 

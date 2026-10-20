@@ -52,4 +52,4 @@ moq-video = { path = "../moq-video", features = ["openh264"] }
 # test-util unlocks tokio::time::pause for the deterministic live-feed tests.
 tokio = { workspace = true, features = ["full", "test-util"] }
 url = { workspace = true }
-usage = { workspace = true }
+usage-rs = { workspace = true }

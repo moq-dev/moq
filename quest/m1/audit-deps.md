@@ -36,7 +36,6 @@ was missing) and that every Dependabot `ignore` still blocks something.
 Majors still open at the end of m0:
 
 - gstreamer 0.25 needs Rust 1.92; moq-gst is on 0.24 under the 1.91 MSRV.
-- usage-rs 7 has [its own quest](/quest/m2/usage-rs-7.md).
 - vt100 0.17 and 0.18 (moq-cli dev-dependency) were inside the cooldown.
 - http-cache-reqwest stays on its 1.0 prerelease until 1.0 ships stable.
 

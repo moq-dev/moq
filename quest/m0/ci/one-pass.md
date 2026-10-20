@@ -23,9 +23,9 @@ its own artifact:
 - docs, wasm clippy, uring-check, the `wasm-release` build, and the py and kt
   binding builds.
 
-cache.yml runs both halves in one job, and its Test step takes as long as a
-standalone Test, so folding them as they are would only add the two times
-together.
+The `cache.yml` warm ran both halves in one job, and its Test step took as
+long as a standalone Test, so folding them as they are would only add the
+two times together.
 
 Decisions (maintainer, 2026-10-19): shrink Check, then fold it.
 

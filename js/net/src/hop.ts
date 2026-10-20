@@ -108,7 +108,7 @@ export interface Route {
 	 * token on its moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE
 	 * answering a solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer
 	 * with a PUBLISH_NAMESPACE, which carries it), and moq-lite advertise the route unnamed.
-	 * Swapping it renews the request with REQUEST_UPDATE from draft 17, or ends and makes it
+	 * Swapping it renews the request with REQUEST_UPDATE from draft 16, or ends and makes it
 	 * again before. Local: a relay never forwards it. Mirrors `Route::auth` in rs/moq-net.
 	 */
 	auth?: Auth;
