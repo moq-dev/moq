@@ -3543,7 +3543,10 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 						// only be reset; the next servable group resolves the start.
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, "skipping group with a missing head");
 						if self.emit_range && self.start.is_none() {
-							self.skipped.insert(group.sequence..group.sequence.saturating_add(1));
+							// At u64::MAX no later group can resolve a start past this one.
+							if let Some(end) = group.sequence.checked_add(1) {
+								self.skipped.insert(group.sequence..end);
+							}
 						} else if self.start.is_some()
 							&& let Some(end) = group.sequence.checked_add(1)
 						{
@@ -5214,6 +5217,126 @@ mod serve_group_test {
 			"only group 0 is served"
 		);
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
+	}
+
+	/// A missing head at the model's largest sequence has no successor to name.
+	#[moq_clock::test]
+	async fn a_missing_head_at_the_maximum_sequence_does_not_panic() {
+		let track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
+		let mut group = track.create_group(group::Info { sequence: u64::MAX }).unwrap();
+		group.start_at(1).unwrap();
+		group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
+		group.finish().unwrap();
+		let (mut run, mut writer, _) = lite_run(Version::Lite07, SinkSession::new(Log::default()), subscriber);
+		assert!(
+			kio::wait(|waiter| run.poll(&mut writer, waiter))
+				.now_or_never()
+				.is_none()
+		);
+	}
+
+	/// A long-budget reader warms the relay without changing a live reader's resolved start.
+	#[moq_clock::test]
+	async fn cold_and_warm_relays_resolve_the_same_start() {
+		fn drive<D: crate::time::Driver + Send + Unpin + 'static>(mut driver: D) {
+			drop(moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
+				crate::time::Driver::poll(&mut driver, now, waiter)
+			})));
+		}
+
+		fn origin(hop: u64) -> origin::Producer {
+			let (origin, driver) = origin::Producer::new(origin::Config::new(crate::Hop::new(hop).unwrap()));
+			drive(driver);
+			origin
+		}
+
+		async fn connect(
+			version: Version,
+			publisher: &origin::Producer,
+			subscriber: &origin::Producer,
+		) -> (crate::Session, crate::Session) {
+			let version = crate::Version::Lite(version);
+			let config = crate::transport::memory::Config {
+				protocol: Some(version.alpn().into()),
+				..Default::default()
+			};
+			let (client_transport, server_transport) = crate::transport::memory::pair(config);
+			let client = crate::Client::new()
+				.with_versions(version.into())
+				.with_subscriber(subscriber.clone());
+			let server = crate::Server::new()
+				.with_versions(version.into())
+				.with_publisher(publisher);
+			futures::join!(
+				async {
+					let (session, driver) = client.connect(moq_clock::now(), client_transport).await.unwrap();
+					drive(driver);
+					session
+				},
+				async {
+					let (session, driver) = server.accept(moq_clock::now(), server_transport).await.unwrap();
+					drive(driver);
+					session
+				}
+			)
+		}
+
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut starts = Vec::new();
+			for warm in [false, true] {
+				let publisher = origin(1);
+				let broadcast = publisher.create_broadcast("room").unwrap();
+				let mut track = broadcast.create_track("test", crate::track::Info::timed()).unwrap();
+				track.start_at(0).unwrap();
+				broadcast.announce(Default::default()).unwrap();
+				let relay = origin(2);
+				let _upstream = connect(version, &publisher, &relay).await;
+				let remote = relay.consume().routed_broadcast("room").await.unwrap();
+				let mut keeper = match warm {
+					true => Some(
+						remote
+							.track("test")
+							.unwrap()
+							.subscribe(
+								track::Subscription::default()
+									.with_groups(0..)
+									.with_max_delay(Duration::from_secs(60)),
+							)
+							.await
+							.unwrap(),
+					),
+					false => None,
+				};
+				for sequence in 0..3 {
+					write_group(&mut track, sequence, sequence * 10);
+					if let Some(keeper) = &mut keeper {
+						assert_eq!(keeper.recv_group().await.unwrap().unwrap().sequence, sequence);
+					}
+				}
+				moq_clock::sim::advance(Duration::from_secs(1)).await;
+				let subscriber = origin(3);
+				let _downstream = connect(version, &relay, &subscriber).await;
+				let remote = subscriber.consume().routed_broadcast("room").await.unwrap();
+				let mut live = remote
+					.track("test")
+					.unwrap()
+					.subscribe(track::Subscription::default().with_groups(0..))
+					.await
+					.unwrap();
+				assert_eq!(live.recv_group().await.unwrap().unwrap().sequence, 2);
+				starts.push(kio::wait(|waiter| live.poll_start(waiter)).await);
+			}
+			assert_eq!(
+				starts,
+				[Some(2), Some(2)],
+				"{version}: cold and warm relay starts differ"
+			);
+		}
 	}
 
 	/// A relay's retained stale groups must not change the start it answers downstream.
