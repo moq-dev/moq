@@ -5,10 +5,10 @@ import { error, ProtocolViolation, SessionCode, SessionError } from "../error.ts
 import { type OpenOptions, Reader, Stream, type Writer } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
-import { toRequestCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW, RequestError } from "./request.ts";
+import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW } from "./request.ts";
+import { refuseUpdate } from "./request_stream.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** The peer used a request ID the draft closes the session for. */
@@ -609,12 +609,11 @@ export class ControlStreamAdapter implements Session {
 		try {
 			await this.#writeMutex.runExclusive(async () => {
 				if (this.#closed) return;
-				await this.#writer.u53(RequestError.id);
-				await new RequestError({
+				await refuseUpdate(this.#writer, this.version, "subscribe", {
 					requestId,
-					errorCode: toRequestCode("not_supported", "subscribe", this.version),
+					condition: "not_supported",
 					reasonPhrase: "update not supported",
-				}).encode(this.#writer, this.version);
+				});
 			});
 		} catch {
 			// The control stream closed under the refusal.

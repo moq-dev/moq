@@ -57,6 +57,7 @@ import {
 	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
+	hasTrackStream,
 	resolvesStart,
 	updateSupported,
 	Version,
@@ -70,19 +71,6 @@ export const SUBSCRIBE_SETUP_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
 // Cost::DRAIN: cost is the whole mechanism, not a separate state.
 const DRAIN_COST: Cost = 2n ** 62n - 1n;
-
-// The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
-function supportsTrackStream(version: Version): boolean {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-			return false;
-		default:
-			return true;
-	}
-}
 
 // What a subscription has set up so far, so a revocation (or a timeout) can reach it at
 // any stage.
@@ -772,9 +760,7 @@ export class Subscriber {
 			// its FIN; older drafts just close it. Either way group streams can still be in
 			// flight, so the track ends only once the tail is accounted for. A reset rejects
 			// instead, so the track ends with that error rather than a clean tail.
-			const responses = supportsTrackStream(this.version)
-				? this.runResponses(stream, entry)
-				: stream.reader.closed;
+			const responses = hasTrackStream(this.version) ? this.runResponses(stream, entry) : stream.reader.closed;
 			let tailSettled = false;
 			const closed = responses.then(async () => {
 				await this.#settleTail(entry);
@@ -848,7 +834,7 @@ export class Subscriber {
 		let producer: track.Producer;
 		let drainOk = false;
 
-		if (supportsTrackStream(this.version)) {
+		if (hasTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
 			const { info, stream } = await this.#trackInfo(
 				msg.broadcast,
@@ -985,7 +971,7 @@ export class Subscriber {
 		epoch?: Epoch.Valid,
 		hold?: AbortSignal,
 	): Promise<track.Info> {
-		if (!supportsTrackStream(this.version)) {
+		if (!hasTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
 		const deadline = new Deadline();
@@ -1084,7 +1070,7 @@ export class Subscriber {
 			});
 			void group.closed.then(() => disposeGrant?.());
 			if (this.#denied(broadcast)) throw refused;
-			if (!supportsTrackStream(this.version)) {
+			if (!hasTrackStream(this.version)) {
 				throw new Error("fetch group requires moq-lite-05 or newer");
 			}
 
