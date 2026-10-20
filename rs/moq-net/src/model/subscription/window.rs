@@ -232,7 +232,12 @@ impl TimeEnd {
 			match next {
 				Some((sequence, held)) if sequence == self.accounted => match held {
 					Held::Pending => return None,
-					Held::Started(at) if later(at, self.pts) => self.after = Some(sequence),
+					// It started past `pts` since the walk above stopped on it: everything
+					// below is accounted for, so the end falls here.
+					Held::Started(at) if later(at, self.pts) => {
+						self.after = Some(sequence);
+						return self.after;
+					}
 					_ => self.accounted += 1,
 				},
 				_ => {
@@ -852,6 +857,60 @@ mod tests {
 		.unwrap();
 		assert!(window.admits_datagram(9, Some(at(3500))));
 		assert!(!window.admits_datagram(9, Some(at(3600))));
+	}
+
+	/// Groups whose `racing` one starts past the end after the first time it is asked
+	/// about, as when its first frame lands between the walks of one settle.
+	struct Racing {
+		groups: Groups,
+		racing: u64,
+		asked: Cell<bool>,
+	}
+
+	impl Holdings for Racing {
+		fn timed(&self) -> bool {
+			true
+		}
+
+		fn containing(&self, pts: Timestamp) -> Containing {
+			self.groups.containing(pts)
+		}
+
+		fn next_start(&self, from: u64) -> Option<(u64, Timestamp)> {
+			self.groups.next_start(from)
+		}
+
+		fn next_held(&self, from: u64) -> Option<(u64, Held)> {
+			let next = self.groups.next_held(from);
+			if next.is_some_and(|(sequence, _)| sequence == self.racing) && self.asked.replace(true) {
+				return Some((self.racing, Held::Started(at(6000))));
+			}
+			next
+		}
+
+		fn gone(&self, sequence: u64) -> Option<u64> {
+			self.groups.gone(sequence)
+		}
+
+		fn complete(&self) -> bool {
+			false
+		}
+	}
+
+	#[test]
+	fn a_time_end_settles_on_a_group_that_starts_between_its_walks() {
+		let racing = Racing {
+			groups: Groups::new([Groups::started(0, 0), (1, Held::Pending), Groups::started(2, 7000)]),
+			racing: 1,
+			asked: Cell::new(false),
+		};
+		let window = Window::new(
+			&[range(Anchor::Absolute(Position::group(0)), time(5000))],
+			None,
+			&racing,
+		)
+		.unwrap();
+		assert_eq!(window.resolved(), vec![Some(Resolved { start: 0, end: Some(1) })]);
 	}
 
 	#[test]

@@ -5522,8 +5522,10 @@ impl Cursor {
 				None => {
 					let floor = self.floor();
 					let polled = self.poll(waiter, |state| state.poll_recv_group(self.index, floor));
+					// A moved window moved the servable edge `drift` was judged against.
 					if polled.is_pending() && self.watch_time(waiter) {
 						self.admit();
+						drift = ready!(self.poll_drift(&self.servable, waiter))?;
 						continue;
 					}
 					let Some((producer, found_index)) = ready!(polled)? else {
@@ -5668,7 +5670,9 @@ impl Cursor {
 		let group = loop {
 			let window = &self.filter.window;
 			let polled = self.poll(waiter, |state| state.poll_next_in_range(floor, end, window));
+			// A moved window moved the servable edge `drift` was judged against.
 			if polled.is_pending() && self.watch_time(waiter) {
+				drift = ready!(self.poll_drift(&self.servable, waiter))?;
 				continue;
 			}
 			let Some(producer) = ready!(polled)? else {
