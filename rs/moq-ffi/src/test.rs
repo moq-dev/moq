@@ -6067,17 +6067,24 @@ async fn client_cancel_aborts_a_pending_connect() {
 	})
 	.unwrap();
 
-	// The server never accepts, so connect parks in established().
-	let connecting = client.clone();
-	let connect = spawn_parked(async move { connecting.connect(format!("https://{addr}")).await }).await;
+	// Keep the foreign call in place: after it parks, cancel before its next poll.
+	// A spawned call can finish while the helper waits for the runtime to catch up.
+	let mut connect = std::pin::pin!(client.connect(format!("https://{addr}")));
+	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(connect.as_mut().poll(cx))).await;
+	assert!(
+		first.is_pending(),
+		"connect resolved before cancel: {:?}",
+		first.map(|result| result.map(|_| "session")),
+	);
 
 	client.cancel();
 
-	let connect_err = tokio::time::timeout(TIMEOUT, connect)
-		.await
-		.expect("connect task timed out")
-		.expect("connect task panicked");
-	assert!(matches!(connect_err, Err(MoqError::Cancelled)));
+	let connect_err = tokio::time::timeout(TIMEOUT, connect).await.expect("connect timed out");
+	assert!(
+		matches!(connect_err, Err(MoqError::Cancelled)),
+		"connect returned {:?}",
+		connect_err.map(|_| "session"),
+	);
 	server.cancel();
 }
 
