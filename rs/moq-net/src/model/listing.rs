@@ -58,9 +58,14 @@ struct Entry {
 /// [`Error::Cancel`], so an owner's listings cost one queue per broadcast however many
 /// paths or requests reach it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+// private: capability gap
+// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 pub(crate) struct Owner(u64);
 
 impl Owner {
+	// private: capability gap
+	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new() -> Self {
 		static NEXT: AtomicU64 = AtomicU64::new(0);
 		Self(NEXT.fetch_add(1, Ordering::Relaxed))
@@ -470,6 +475,9 @@ impl Consumer {
 
 	/// [`Self::tracks`] for `owner`, ending its older listing of this broadcast with
 	/// [`Error::Cancel`].
+	// private: capability gap
+	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn tracks_as(&self, owner: Owner) -> Result<Tracks, Error> {
 		self.list(Some(owner))
 	}

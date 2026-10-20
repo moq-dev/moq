@@ -24,6 +24,9 @@ use super::{Requests, WeakCache};
 
 #[path = "listing.rs"]
 mod listing;
+// private: capability gap
+// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
+#[cfg(feature = "async")]
 pub(crate) use listing::Owner;
 pub(super) use listing::{ListOnAccept, Unlist};
 pub use listing::{Lister, Tracks, TracksEvent};
