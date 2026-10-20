@@ -329,25 +329,26 @@ impl Window {
 	}
 
 	/// Whether a datagram is in range: a whole group of one frame, so its own `timestamp`
-	/// says exactly whether it falls inside a time end. While the ranges wait, which is
-	/// for good on a track that only sends datagrams, it is judged against both times.
+	/// says exactly whether it falls inside a range's times, even once groups have
+	/// resolved them to sequences. While the ranges wait, which is for good on a track
+	/// that only sends datagrams, the times alone decide.
 	pub fn admits_datagram(&self, sequence: u64, timestamp: Option<Timestamp>) -> bool {
 		let Some(timestamp) = timestamp else {
-			return self.pending || self.contains(sequence);
+			return self.contains(sequence);
+		};
+		let timely = |range: &Range| {
+			!matches!(range.start, Anchor::Time(pts) if later(pts, timestamp))
+				&& !matches!(range.end, Some(Anchor::Time(pts)) if later(timestamp, pts))
 		};
 		if self.pending {
-			return self.ranges.iter().filter(|range| !range.is_empty()).any(|range| {
-				!matches!(range.start, Anchor::Time(pts) if later(pts, timestamp))
-					&& !matches!(range.end, Some(Anchor::Time(pts)) if later(timestamp, pts))
-			});
+			return self.ranges.iter().filter(|range| !range.is_empty()).any(timely);
 		}
 		self.spans.iter().any(|span| {
 			span.start <= sequence
 				&& match span.end {
 					End::Before(end) => sequence < end,
-					End::Open => true,
-					End::Time(time) => !later(timestamp, time.pts),
-				}
+					End::Open | End::Time(_) => true,
+				} && timely(&self.ranges[span.index])
 		})
 	}
 
@@ -846,6 +847,20 @@ mod tests {
 		.unwrap();
 		assert!(window.admits_datagram(9, Some(at(3500))));
 		assert!(!window.admits_datagram(9, Some(at(3600))));
+	}
+
+	#[test]
+	fn a_settled_window_still_judges_a_datagram_by_its_times() {
+		// 1 is a datagram the starts index never sees: the end settles before 2 by
+		// sequence, but 1 presents past it.
+		let groups = Groups {
+			gone: vec![1..2],
+			..Groups::new([Groups::started(0, 0), Groups::started(2, 10_000)])
+		};
+		let window = Window::new(&[range(time(0), time(5000))], None, &groups).unwrap();
+		assert_eq!(window.resolved(), vec![Some(Resolved { start: 0, end: Some(2) })]);
+		assert!(window.admits_datagram(1, Some(at(4000))));
+		assert!(!window.admits_datagram(1, Some(at(7000))));
 	}
 
 	#[test]
