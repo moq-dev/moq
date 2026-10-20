@@ -45,6 +45,13 @@ impl Subscriptions {
 		})
 	}
 
+	/// The largest delay budget without materializing the subscription's ranges.
+	pub(super) fn max_delay(&self) -> Duration {
+		self.max_delay
+			.last_key_value()
+			.map_or(Duration::ZERO, |(delay, _)| *delay)
+	}
+
 	fn scalars(&self) -> Option<Scalars> {
 		(self.count != 0).then(|| {
 			(

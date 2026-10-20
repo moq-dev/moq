@@ -125,7 +125,7 @@ impl Ledger {
 	}
 }
 
-// What only a session's tail reads.
+// Gap timing shared by a subscription tail and its track's live arrivals.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 impl Ledger {
 	/// How long a gap is waited for once a later group opened it.
@@ -150,18 +150,18 @@ impl Ledger {
 	/// When the ledger gives up on a missing `group`: once the grace has passed since a later
 	/// group opened the gap below it. `None` while it is accounted for, or while no later
 	/// group has arrived, since nothing says it is late yet.
-	pub fn folds_at(&self, group: u64) -> Option<Instant> {
+	pub fn folds_at(&self, group: u64, grace: Duration) -> Option<Instant> {
 		let above = self
 			.runs
 			.get(self.runs.partition_point(|run| run.groups.end <= group))?;
 		match above.groups.start <= group {
 			true => None,
-			false => above.since.checked_add(self.grace),
+			false => above.since.checked_add(grace),
 		}
 	}
 
 	/// Gaps whose age bounds a held fetch, including the gap before the first arrival.
-	pub fn folds(&self) -> impl Iterator<Item = (Range<u64>, Instant)> + '_ {
+	pub fn folds(&self, grace: Duration) -> impl Iterator<Item = (Range<u64>, Instant)> + '_ {
 		let mut below = 0;
 		self.runs.iter().filter_map(move |run| {
 			let gap = below..run.groups.start;
@@ -169,7 +169,7 @@ impl Ledger {
 			if gap.is_empty() {
 				return None;
 			}
-			Some((gap, run.since.checked_add(self.grace)?))
+			Some((gap, run.since.checked_add(grace)?))
 		})
 	}
 }
@@ -241,12 +241,12 @@ mod tests {
 		let start = Instant::now();
 		let mut ledger = Ledger::new(GRACE);
 		arrive(&mut ledger, 0..1, start);
-		assert_eq!(ledger.folds_at(0), None, "accounted for");
-		assert_eq!(ledger.folds_at(1), None, "nothing later arrived");
+		assert_eq!(ledger.folds_at(0, GRACE), None, "accounted for");
+		assert_eq!(ledger.folds_at(1, GRACE), None, "nothing later arrived");
 
 		arrive(&mut ledger, 2..3, start + GRACE / 2);
-		assert_eq!(ledger.folds_at(1), Some(start + GRACE / 2 + GRACE));
-		assert_eq!(ledger.folds_at(3), None);
+		assert_eq!(ledger.folds_at(1, GRACE), Some(start + GRACE / 2 + GRACE));
+		assert_eq!(ledger.folds_at(3, GRACE), None);
 	}
 
 	/// Splitting a gap leaves both halves with its age.

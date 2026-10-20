@@ -24,6 +24,18 @@ test("certificateHash rejects a PEM string without armor", async () => {
 	await expect(certificateHash("YWJj")).rejects.toThrow(/armor/);
 });
 
+test("certificateHash rejects PEM armor without an END line or a body", async () => {
+	await expect(certificateHash("-----BEGIN CERTIFICATE-----\nYWJj\n")).rejects.toThrow(/armor/);
+	await expect(certificateHash("-----BEGIN CERTIFICATE-----\n\n-----END CERTIFICATE-----")).rejects.toThrow(/armor/);
+});
+
+test("certificateHash rejects repeated BEGIN lines in linear time", async () => {
+	// A lazy regex rescans to the end from every BEGIN, which takes tens of seconds here
+	// and trips the test timeout; a linear scan finishes in well under a millisecond.
+	const pem = "-----BEGIN CERTIFICATE-----a".repeat(40_000);
+	await expect(certificateHash(pem)).rejects.toThrow(/armor/);
+});
+
 test("hex round-trips through fromBytes/toBytes", () => {
 	expect(Hex.fromBytes(Hex.toBytes(ABC_SHA256))).toBe(ABC_SHA256);
 });

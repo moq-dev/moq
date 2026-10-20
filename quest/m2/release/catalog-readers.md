@@ -3,7 +3,7 @@
 ## Goal
 
 The latest published Go and JavaScript clients read live media from the
-current Rust publisher in moq-dev/smoke's Nix channel. Incompatible optional
+current Rust publisher in test/smoke's Nix channel. Incompatible optional
 archive metadata does not make an otherwise playable catalog unreadable.
 
 ## Plan
