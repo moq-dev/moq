@@ -1,4 +1,4 @@
-import { Micro, Milli, Nano, now } from "@moq/clock";
+import { Instant, Micro, Milli, Nano, now } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
 import type { Format } from "./format";
@@ -13,7 +13,9 @@ export interface ConsumerProps {
 	 * How stale a group may get before it is skipped, in milliseconds (default: 0).
 	 *
 	 * Measured as the span from the oldest buffered frame to the newest, so it bounds how long a
-	 * late or missing group is waited for. The local half of the subscription's
+	 * late group is waited for. A missing sequence also expires after this much monotonic
+	 * time blocked on it, even when the next group is a marker on a paused track.
+	 * The local half of the subscription's
 	 * `maxDelay`; both measure the same budget, one on the wire and one as frames are read.
 	 */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
@@ -103,6 +105,7 @@ export class Consumer {
 	#maxDelay: Getter<Milli>;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
+	#hole?: { sequence: number; since: Instant };
 	// Presentation end (max PTS + duration) of the group we most recently advanced past, so next()'s
 	// promotion guard can tell a timeline-continuous next group from one sitting after a gap.
 	// Maintained only via #recordPresented; see its comment for the invariant.
@@ -501,6 +504,9 @@ export class Consumer {
 			if (this.#error) throw this.#error;
 
 			const ended = this.#closed.peek();
+			if (this.#groups[0]?.consumer.sequence === this.#active || this.#groups.length === 0) {
+				this.#hole = undefined;
+			}
 			if (this.#groups.length === 0) {
 				if (ended !== undefined) {
 					if (ended instanceof Error) throw ended;
@@ -520,11 +526,14 @@ export class Consumer {
 			// max delay, so anything still missing in between would arrive too old to play. Proving it
 			// here matters: #checkMaxDelay would instead drop the head, the very group to play next.
 			// After track termination no missing group can arrive, so drain across any remaining gap.
-			// Otherwise wait: #checkMaxDelay skips once the budget is spent, and #tryDurationSkip once
-			// the duration covers it.
+			// A missing sequence also expires on elapsed monotonic time, so timestamp-free markers
+			// behind a hole can end a paused track without more arrivals.
 			if (this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
 				if (head.consumer.sequence > this.#active) {
+					if (this.#hole?.sequence !== this.#active) {
+						this.#hole = { sequence: this.#active, since: now() };
+					}
 					const startup = this.#start === undefined;
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp);
 					const empty = head.empty && head.consumer.done;
@@ -535,9 +544,18 @@ export class Consumer {
 							(this.#presentedEnd !== undefined &&
 								head.latest !== undefined &&
 								head.latest - this.#presentedEnd > maxDelay));
-					if (startup || empty || contiguous || skipHole || ended !== undefined) {
-						if (!contiguous && !empty) this.#lost = true;
+					const elapsed = Instant.durationSince(now(), this.#hole.since) >= Nano.fromMicro(maxDelay);
+					if (startup || empty || contiguous || skipHole || elapsed || ended !== undefined) {
+						if (!contiguous && !empty) {
+							this.#lost = true;
+							if (!startup) {
+								console.warn(
+									`skipping missing groups: track=${this.#track.name} ${this.#active} -> ${head.consumer.sequence}`,
+								);
+							}
+						}
 						this.#active = head.consumer.sequence;
+						this.#hole = undefined;
 					}
 				}
 			}
@@ -621,6 +639,16 @@ export class Consumer {
 
 			const abort = this.#signals.abort;
 			if (abort.aborted) return undefined;
+			let timer: Effect | undefined;
+			if (this.#hole) {
+				timer = new Effect();
+				const since = this.#hole.since;
+				timer.run((effect) => {
+					const budget = Nano.fromMilli(effect.get(this.#maxDelay));
+					const elapsed = Instant.durationSince(now(), since);
+					effect.timer(() => this.#notify?.(), Nano(Math.max(0, budget - elapsed)));
+				});
+			}
 
 			const aborted = await new Promise<boolean>((resolve) => {
 				const onAbort = () => resolve(true);
@@ -630,6 +658,7 @@ export class Consumer {
 					resolve(false);
 				};
 			});
+			timer?.close();
 
 			this.#notify = undefined;
 			if (aborted) return undefined;

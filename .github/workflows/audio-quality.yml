@@ -1,11 +1,17 @@
 name: Audio quality
 
 # Grades the recorded-trace replays of test/audio-quality against their exact
-# budgets on every PR that can move them. They replay the player's container
-# consumer and rings on a simulated clock, so they are deterministic and take
-# seconds, unlike the browser rows, which stay in nightly.yml.
+# budgets, nightly on main and on every release PR that can move them. They
+# replay the player's container consumer and rings on a simulated clock, so
+# they are deterministic and take seconds, unlike the browser rows, which stay
+# in nightly.yml.
 on:
+  workflow_call:
   pull_request:
+    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
+    # retargeted to release.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "js/watch/**"
       # The container consumer decides what a replay delivers, waits for, and skips, on the

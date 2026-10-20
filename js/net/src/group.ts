@@ -204,6 +204,14 @@ export class Producer {
 			group.#admits.push(admit);
 		};
 		hooks.groupStart = (group) => (group.#state.total.peek() > 0 ? group.#state.timestamp : undefined);
+		hooks.overRefresh = (group, ratio) => {
+			const state = group.#state;
+			const first = state.frames.peek()[0];
+			// Without its first frame the cache cannot measure the group, so it asks for nothing.
+			if (state.start !== 0 || first === undefined) return false;
+			const head = first.payload.byteLength;
+			return state.cacheBytes - head > head * ratio;
+		};
 		hooks.limitGroup = (group, frames) => {
 			// A closed group takes no more frames, but one already past the cap still
 			// contradicts the end.

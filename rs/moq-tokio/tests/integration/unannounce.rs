@@ -14,7 +14,7 @@ async fn release(unannounce: bool, settle: bool) {
 	let track = broadcast.create_track("t", None).unwrap();
 	let consumer = origin.consume().request_broadcast("a/b", None).await.unwrap();
 	let sub = consumer.track("t").unwrap().subscribe(None).await.unwrap();
-	track.demand().used().await.unwrap();
+	crate::wanted(track.demand()).await.unwrap();
 
 	if unannounce {
 		broadcast.unannounce();
@@ -25,7 +25,7 @@ async fn release(unannounce: bool, settle: bool) {
 
 	drop(sub);
 	drop(consumer);
-	tokio::time::timeout(Duration::from_secs(600), track.demand().unused())
+	tokio::time::timeout(Duration::from_secs(600), crate::unwanted(track.demand()))
 		.await
 		.expect("demand released")
 		.unwrap();

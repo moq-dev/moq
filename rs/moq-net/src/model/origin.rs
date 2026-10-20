@@ -3133,11 +3133,14 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 						match sources.get(&source).map(|s| s.track(&name)) {
 							Some(Ok(lookup)) => {
-								// `into_inner` sheds the `Pending` future wrapper so only
-								// the pollable (which is `Sync`) is held across the wait.
-								let query = lookup.query().into_inner();
+								// Subscribe before the query exposes upstream demand, and query
+								// that same instance even if the broadcast changes meanwhile.
+								let sub = io.weak.subscription().map(|demand| lookup.subscribe(demand));
+								let query = match &sub {
+									Some(sub) => sub.query(),
+									None => lookup.query().into_inner(),
+								};
 								let copy = query.track();
-								let sub = io.weak.subscription().map(|demand| copy.subscribe(demand));
 								io.query = Some(Asked {
 									source,
 									copy,
@@ -3331,7 +3334,13 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						&& let Some(accepted) = &mut io.accepted
 					{
 						while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
-						if accepted.subscription().is_none() {
+						if let Some(subscription) = accepted.subscription() {
+							// The query's hold must follow demand too, or its initial budget
+							// keeps a later, shorter aggregate from reaching the publisher.
+							if let Some(held) = &mut io.held {
+								let _ = held.update(subscription);
+							}
+						} else {
 							io.held = None;
 						}
 					}
@@ -7974,7 +7983,9 @@ mod tests {
 
 		let mut first = None;
 		let mut front = None;
+		let mut budget = kio::coop::Budget::new(32);
 		for viewer in 0..1000 {
+			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			let session = producer.consume().excluding(Hop::random());
 			let pending = session.request_broadcast("room/alice", None);
 			if viewer == 0 {
@@ -8432,7 +8443,7 @@ mod tests {
 
 		// Parked: the source copy goes, the delivered group stays warm. The source
 		// then tears its idle track down, so a returning reader asks it afresh.
-		moq_clock::timeout(Duration::from_secs(1), source.demand().unused())
+		moq_clock::timeout(Duration::from_secs(1), source.demand().until(|wanted| wanted.is_none()))
 			.await
 			.expect("parked")
 			.expect("source open");
@@ -10714,7 +10725,7 @@ mod tests {
 	}
 
 	/// An origin front drops the source track as soon as its last reader leaves,
-	/// so the publisher's `unused()` resolves far below `track::IDLE_LINGER`.
+	/// so the publisher's demand goes unwanted far below `track::IDLE_LINGER`.
 	/// Cached groups stay on the front for the linger; a returning reader
 	/// replays them and asks the source again for groups past that edge.
 	#[moq_clock::test]
@@ -10741,7 +10752,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		moq_clock::timeout(Duration::from_secs(1), track.demand().unused())
+		moq_clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_none()))
 			.await
 			.expect("source unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -10761,7 +10772,7 @@ mod tests {
 			.expect("track ended early");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
 
-		moq_clock::timeout(Duration::from_secs(1), track.demand().used())
+		moq_clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_some()))
 			.await
 			.expect("returning reader re-splices the source")
 			.expect("source closed");
@@ -10812,7 +10823,7 @@ mod tests {
 		assert_eq!(&tail.payload[..], b"tail");
 		let end = moq_clock::timeout(Duration::from_secs(1), reading.read_frame()).await;
 		assert!(matches!(end, Ok(Ok(None))), "the group should finish: {end:?}");
-		moq_clock::timeout(Duration::from_secs(1), track.demand().unused())
+		moq_clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_none()))
 			.await
 			.expect("the front lets the source go once the held group ends")
 			.expect("source closed");
@@ -10852,7 +10863,7 @@ mod tests {
 	}
 
 	/// A front serving from another front still drops upstream on the unused edge,
-	/// so the publisher's `unused()` resolves far below `track::IDLE_LINGER` through
+	/// so the publisher's demand goes unwanted far below `track::IDLE_LINGER` through
 	/// the whole chain, and a returning reader reaches the publisher's cache afresh.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
@@ -10895,7 +10906,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		moq_clock::timeout(Duration::from_secs(5), track.demand().unused())
+		moq_clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
 			.await
 			.expect("chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -10907,7 +10918,7 @@ mod tests {
 			.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)))
 			.await
 			.expect("resubscribe");
-		moq_clock::timeout(Duration::from_secs(5), track.demand().used())
+		moq_clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_some()))
 			.await
 			.expect("resubscribe should reach the leaf")
 			.expect("source open");
@@ -10922,7 +10933,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		moq_clock::timeout(Duration::from_secs(5), track.demand().unused())
+		moq_clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
 			.await
 			.expect("second chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -10935,7 +10946,7 @@ mod tests {
 		let fetch = edge_resolved.track("video").unwrap().fetch_group(2, None);
 		let mut fetch = std::pin::pin!(fetch);
 		assert!(futures::poll!(fetch.as_mut()).is_pending(), "fetch should re-splice");
-		moq_clock::timeout(Duration::from_secs(5), track.demand().used())
+		moq_clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_some()))
 			.await
 			.expect("fetch should reach the leaf")
 			.expect("source open");
@@ -11041,7 +11052,7 @@ mod tests {
 			.expect("request");
 
 		drop(subscription);
-		moq_clock::timeout(Duration::from_secs(1), old.demand().unused())
+		moq_clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
 			.await
 			.expect("the draining source stays subscribed with nobody reading")
 			.expect("open");
@@ -11072,7 +11083,7 @@ mod tests {
 		drop(group);
 
 		drop(subscription);
-		moq_clock::timeout(Duration::from_secs(1), old.demand().unused())
+		moq_clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
 			.await
 			.expect("parked")
 			.expect("open");
@@ -11425,7 +11436,7 @@ mod tests {
 		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		moq_clock::timeout(Duration::from_secs(1), track.demand().used())
+		moq_clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_some()))
 			.await
 			.expect("the front subscribed the source")
 			.unwrap();
@@ -11436,7 +11447,7 @@ mod tests {
 		drop(broadcast);
 		settle(|| resolved.is_closed()).await;
 
-		moq_clock::timeout(Duration::from_secs(5), track.demand().unused())
+		moq_clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
 			.await
 			.expect("the ended copy must not keep the source subscribed")
 			.unwrap();

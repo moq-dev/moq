@@ -20,6 +20,9 @@ pub(crate) struct Peer {
 	/// SUBSCRIBE_NAMESPACE, so we may send it.
 	pub hidden: bool,
 
+	/// Whether the peer understands subscriber max age (MoQ Timestamp).
+	pub max_age: bool,
+
 	/// MoQ Auth: whether both sides negotiated the Auth request streams.
 	pub auth: bool,
 
@@ -46,6 +49,14 @@ pub(crate) struct PeerSetup {
 }
 
 impl PeerSetup {
+	/// A fixture whose peer already sent its SETUP.
+	#[cfg(test)]
+	pub(crate) fn declared(peer: Peer) -> Self {
+		let setup = Self::default();
+		setup.set(peer);
+		setup
+	}
+
 	/// A slot for a session that offered `offered`.
 	pub fn new(offered: crate::setup::Extensions) -> Self {
 		Self {
@@ -103,6 +114,7 @@ mod tests {
 			},
 			solicit: None,
 			hidden: false,
+			max_age: false,
 			auth: false,
 			active_count: false,
 			epoch: false,
@@ -117,6 +129,7 @@ mod tests {
 			},
 			solicit: Some(true),
 			hidden: true,
+			max_age: false,
 			auth: true,
 			active_count: true,
 			epoch: true,

@@ -50,6 +50,7 @@ mod source_errors;
 mod subscribe_priority;
 mod subscribe_ranges;
 mod subscribe_tracks;
+mod subscriber_max_age;
 mod subscription_end_integrity;
 mod support;
 mod synced;
