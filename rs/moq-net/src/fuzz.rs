@@ -149,7 +149,7 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 	// The body doesn't say whether it carries a timestamp, so try both readings.
 	let mut any = false;
 	for timed in [true, false] {
-		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
+		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, false, |_| timed) else {
 			continue;
 		};
 		any = true;
@@ -158,7 +158,7 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 			continue;
 		};
 
-		let echo = lite::Datagram::decode(first, version, |_| timed).expect("could not decode our own encoding");
+		let echo = lite::Datagram::decode(first, version, false, |_| timed).expect("could not decode our own encoding");
 		assert_eq!(echo, decoded, "datagram did not survive a round trip");
 	}
 	any
@@ -432,6 +432,7 @@ impl LiteSample {
 				sequence: 1_234,
 				timestamp: Some(1_234_567_890),
 				payload: bytes::Bytes::new(),
+				ietf: None,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -463,7 +464,7 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| true)
 				.map(|_| 1)
 				.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),

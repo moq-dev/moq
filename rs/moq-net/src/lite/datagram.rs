@@ -24,6 +24,9 @@ pub struct Datagram {
 	pub timestamp: Option<u64>,
 	/// The frame payload, delimited by the datagram boundary.
 	pub payload: Bytes,
+	/// With the `ietf` extension negotiated, the moq-transport state a relay preserves, or
+	/// `Some(None)` for a plain datagram. `None` without the extension.
+	pub ietf: Option<Option<crate::model::datagram::Wire>>,
 }
 
 impl Encode<Version> for Datagram {
@@ -39,6 +42,17 @@ impl Encode<Version> for Datagram {
 
 		w.varint(self.subscribe)?;
 		w.varint(self.sequence)?;
+		if let Some(wire) = &self.ietf {
+			if !version.has_ietf() {
+				return Err(EncodeError::Version);
+			}
+			// A status carries no payload and no time.
+			let status = wire.as_ref().is_some_and(|wire| wire.status.is_some_and(|status| status != 0));
+			if status && (self.timestamp.is_some() || !self.payload.is_empty()) {
+				return Err(EncodeError::InvalidState);
+			}
+			super::ietf::encode_datagram(w, wire.as_ref(), version)?;
+		}
 		if let Some(timestamp) = self.timestamp {
 			w.varint(timestamp)?;
 		}
@@ -52,26 +66,45 @@ impl Encode<Version> for Datagram {
 impl Datagram {
 	/// Decode a whole datagram body. The payload shares `buf` rather than copying it.
 	///
-	/// `timed` reports whether the track of the given subscribe ID carries a timestamp,
-	/// which the body itself does not say.
-	pub fn decode(buf: Bytes, version: Version, timed: impl FnOnce(u64) -> bool) -> Result<Self, DecodeError> {
-		if !version.has_datagrams() {
+	/// `ietf` says whether the session negotiated the extension, and `timed` whether the
+	/// track of the given subscribe ID carries a timestamp, which the body itself does not say.
+	pub fn decode(
+		buf: Bytes,
+		version: Version,
+		ietf: bool,
+		timed: impl FnOnce(u64) -> bool,
+	) -> Result<Self, DecodeError> {
+		if !version.has_datagrams() || (ietf && !version.has_ietf()) {
 			return Err(DecodeError::Version);
 		}
 
 		let mut r = Decoder::new(&buf, version.into());
 		let subscribe = r.varint()?;
 		let sequence = r.varint()?;
-		let timestamp = if timed(subscribe) { Some(r.varint()?) } else { None };
+		let ietf = ietf.then(|| super::ietf::decode_datagram(&mut r, version)).transpose()?;
+		// A status carries no payload and no time.
+		let status = ietf
+			.as_ref()
+			.and_then(|wire| wire.as_ref())
+			.is_some_and(|wire| wire.status.is_some_and(|status| status != 0));
+		let timestamp = if timed(subscribe) && !status {
+			Some(r.varint()?)
+		} else {
+			None
+		};
 
 		// Everything remaining is the payload (the datagram boundary delimits it).
 		let payload = buf.slice(buf.len() - r.remaining()..);
+		if status && !payload.is_empty() {
+			return Err(DecodeError::InvalidValue);
+		}
 
 		Ok(Self {
 			subscribe,
 			sequence,
 			timestamp,
 			payload,
+			ietf,
 		})
 	}
 }
@@ -87,9 +120,10 @@ mod test {
 			sequence: 42,
 			timestamp: Some(1_000),
 			payload: Bytes::from_static(b"hello"),
+			ietf: None,
 		};
 		let buf = original.encode_bytes(Version::Lite05).unwrap();
-		let decoded = Datagram::decode(buf, Version::Lite05, |_| true).unwrap();
+		let decoded = Datagram::decode(buf, Version::Lite05, false, |_| true).unwrap();
 		assert_eq!(decoded, original, "payload has no trailing length prefix");
 	}
 
@@ -100,9 +134,10 @@ mod test {
 			sequence: 0,
 			timestamp: Some(0),
 			payload: Bytes::new(),
+			ietf: None,
 		};
 		let buf = original.encode_bytes(Version::Lite05).unwrap();
-		let decoded = Datagram::decode(buf, Version::Lite05, |_| true).unwrap();
+		let decoded = Datagram::decode(buf, Version::Lite05, false, |_| true).unwrap();
 		assert_eq!(decoded, original);
 	}
 
@@ -115,6 +150,7 @@ mod test {
 			sequence: 2,
 			timestamp: Some(3),
 			payload: Bytes::from_static(b"world"),
+			ietf: None,
 		};
 		let buf = dg.encode_bytes(Version::Lite05).unwrap();
 		// 1 + 1 + 1 (single-byte varints) + 5 payload = 8 bytes, no length byte.
@@ -129,11 +165,12 @@ mod test {
 			sequence: 2,
 			timestamp: None,
 			payload: Bytes::from_static(b"world"),
+			ietf: None,
 		};
 		let buf = dg.encode_bytes(Version::Lite07).unwrap();
 		assert_eq!(buf.len(), 7);
 		assert_eq!(&buf[2..], b"world");
-		let decoded = Datagram::decode(buf, Version::Lite07, |id| {
+		let decoded = Datagram::decode(buf, Version::Lite07, false, |id| {
 			assert_eq!(id, 1);
 			false
 		})
@@ -148,6 +185,7 @@ mod test {
 			sequence: 2,
 			timestamp: None,
 			payload: Bytes::from_static(b"world"),
+			ietf: None,
 		};
 		for version in [Version::Lite05, Version::Lite06] {
 			assert!(
@@ -164,11 +202,12 @@ mod test {
 			sequence: 2,
 			timestamp: Some(3),
 			payload: Bytes::from_static(b"x"),
+			ietf: None,
 		};
 		assert!(matches!(dg.encode_bytes(Version::Lite04), Err(EncodeError::Version)));
 
 		assert!(matches!(
-			Datagram::decode(Bytes::from_static(b"\x01\x02\x03x"), Version::Lite04, |_| true),
+			Datagram::decode(Bytes::from_static(b"\x01\x02\x03x"), Version::Lite04, false, |_| true),
 			Err(DecodeError::Version)
 		));
 	}

@@ -125,6 +125,57 @@ pub(super) fn read(data: &Bytes, version: Version, timescale: Option<Timescale>)
 	})
 }
 
+/// The mutable Timestamp `properties` carries, in the `timescale` an egress declares.
+///
+/// An untimed ingress forwards its Timestamps as is. A timed one to an egress that
+/// declares no units drops them, as a plain frame there carries none. Rewriting or
+/// dropping an immutable Timestamp would break it, so that is refused.
+pub(crate) fn egress_time(properties: &Properties, timescale: Option<Timescale>) -> Result<Option<u64>, Error> {
+	let unstamped = properties.timescale.is_some() && timescale.is_none();
+	let convert = match (properties.timescale, timescale) {
+		(Some(from), Some(to)) if from != to => Some((from, to)),
+		_ => None,
+	};
+	if properties.sealed_time && (convert.is_some() || unstamped) {
+		return Err(Error::Unsupported);
+	}
+	properties
+		.timestamp
+		.filter(|_| !unstamped)
+		.map(|value| match convert {
+			Some((from, to)) => Timestamp::new(value, from)
+				.and_then(|timestamp| timestamp.convert(to))
+				.map(|timestamp| timestamp.value())
+				.map_err(|_| Error::Unsupported),
+			None => Ok(value),
+		})
+		.transpose()
+}
+
+/// What an Immutable Properties block in the `encoding` family seals.
+pub(crate) struct Sealed {
+	/// It holds a Timestamp.
+	pub time: bool,
+	/// Its Prior Object ID Gap, if any.
+	pub gap: Option<u64>,
+}
+
+/// Parse an Immutable Properties block (0x0b) serialized in the `encoding` family.
+pub(crate) fn sealed(bytes: &Bytes, encoding: Encoding) -> Result<Sealed, Error> {
+	// Any draft in the family parses its keys and integers the same way.
+	let version = match encoding {
+		Encoding::Absolute => Version::Draft14,
+		Encoding::DeltaQuic => Version::Draft16,
+		Encoding::Delta { seven: false } => Version::Draft17,
+		Encoding::Delta { seven: true } => Version::Draft18,
+	};
+	let nested = list(bytes, version, true).map_err(|_| Error::MalformedTrack)?;
+	Ok(Sealed {
+		time: nested.time.is_some(),
+		gap: nested.gap,
+	})
+}
+
 /// Serialize relayed properties for `version`, with Timestamps in the `timescale` the
 /// egress declares, if any.
 pub(super) fn write(properties: &Properties, version: Version, timescale: Option<Timescale>) -> Result<Vec<u8>, Error> {
@@ -134,43 +185,17 @@ pub(super) fn write(properties: &Properties, version: Version, timescale: Option
 	{
 		return Err(Error::Unsupported);
 	}
-	// An untimed ingress forwards its Timestamps as is. A timed one to an egress that
-	// declares no units drops them, as a plain frame there carries none.
-	let unstamped = properties.timescale.is_some() && timescale.is_none();
-	let convert = match (properties.timescale, timescale) {
-		(Some(from), Some(to)) if from != to => Some((from, to)),
-		_ => None,
-	};
-	let time = |value: u64| -> Result<Value, Error> {
-		Ok(Value::Int(match convert {
-			Some((from, to)) => Timestamp::new(value, from)
-				.and_then(|timestamp| timestamp.convert(to))
-				.map_err(|_| Error::Unsupported)?
-				.value(),
-			None => value,
-		}))
-	};
-	// Rewriting or dropping an immutable Timestamp would break it; forwarding it would
-	// change its meaning.
-	if properties.sealed_time && (convert.is_some() || unstamped) {
-		return Err(Error::Unsupported);
-	}
+	let timestamp = egress_time(properties, timescale)?;
 	// Across draft-19, forwarding 0x06 would give it a different meaning.
 	// A mutable one is dropped; a sealed one is refused.
 	let flipped = properties.delivery_timeout != has_delivery_timeout(version);
 	if flipped && sealed_key(properties, version, 0x06)? {
 		return Err(Error::Unsupported);
 	}
-	let timestamp = properties
-		.timestamp
-		.filter(|_| !unstamped)
-		.map(|value| {
-			Ok::<_, Error>(Property {
-				id: 0x10,
-				value: time(value)?,
-			})
-		})
-		.transpose()?;
+	let timestamp = timestamp.map(|value| Property {
+		id: 0x10,
+		value: Value::Int(value),
+	});
 	let mut sorted: Vec<_> = properties
 		.values
 		.iter()
