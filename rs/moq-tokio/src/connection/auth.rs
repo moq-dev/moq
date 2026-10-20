@@ -104,12 +104,8 @@ impl Replay {
 		let mut current = None;
 		for entry in std::mem::take(&mut *queued) {
 			match entry.connects.cmp(&connects) {
-				std::cmp::Ordering::Less => draining.push(
-					entry.session,
-					Held::Unanswered {
-						_opening: entry.opening,
-					},
-				),
+				// Requests on a draining session may still be waiting on this answer.
+				std::cmp::Ordering::Less => draining.push(entry.session, entry.opening),
 				std::cmp::Ordering::Equal => current = Some(entry.opening),
 				// A replacement published since the task's snapshot already holds this token.
 				// Dropping its registration would withdraw the token from a session consumers
@@ -121,28 +117,19 @@ impl Replay {
 	}
 }
 
-/// A token kept on a session that may still be serving its streams.
-enum Held {
-	Answered {
-		_token: auth::Auth,
-	},
-	/// Requests on the session can still be waiting on its answer.
-	Unanswered {
-		_opening: Opening,
-	},
-}
-
-/// Tokens kept on sessions draining after a migration, until each session ends or the
-/// application drops the token.
+/// Tokens kept on sessions draining after a migration. Each is held by a task that
+/// releases it, and its session, once that session ends; dropping this withdraws them all.
 #[derive(Default)]
-struct Draining(Vec<(moq_net::Session, Held)>);
+struct Draining(Vec<AbortOnDrop>);
 
 impl Draining {
-	fn push(&mut self, session: moq_net::Session, held: Held) {
-		self.0.retain(|(session, _)| session.closed().now_or_never().is_none());
-		if session.closed().now_or_never().is_none() {
-			self.0.push((session, held));
-		}
+	/// Keep `held`, a token answered or not, registered on `session` until it ends.
+	fn push(&mut self, session: moq_net::Session, held: impl Send + 'static) {
+		self.0.retain(|task| !task.is_finished());
+		self.0.push(AbortOnDrop::new(tokio::spawn(async move {
+			session.closed().await;
+			drop(held);
+		})));
 	}
 }
 
@@ -341,7 +328,7 @@ async fn present(
 				Err(changed) => {
 					// Requests on a draining session may still be waiting on this answer.
 					if let Some(opening) = opening.take() {
-						draining.push(session, Held::Unanswered { _opening: opening });
+						draining.push(session, opening);
 					}
 					snapshot = changed?;
 					continue 'session;
@@ -397,7 +384,7 @@ async fn present(
 		}
 		// A migrated session may still be serving its streams during GOAWAY drain.
 		// Keep its grant until that session ends or the application drops this token.
-		draining.push(session, Held::Answered { _token: token });
+		draining.push(session, token);
 	}
 }
 
@@ -543,6 +530,23 @@ mod tests {
 		assert!(replay.take(2, &mut draining).is_none());
 		assert!(replay.queued.lock().unwrap().is_empty());
 		assert_eq!(draining.0.len(), 1, "the draining session lost its registration");
+	}
+
+	/// A draining session that closes releases its token and its session handle at once,
+	/// not only when a later migration adds another.
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_draining_session_releases_its_token() {
+		let pair = pair().await;
+		let mut draining = Draining::default();
+		let held = Arc::new(());
+		draining.push(pair.client.clone(), held.clone());
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		assert_eq!(Arc::strong_count(&held), 2, "released while its session lives");
+		pair.client.abort(moq_net::Error::Cancel);
+		pair.client.closed().await;
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		assert_eq!(Arc::strong_count(&held), 1, "a closed draining session kept its token");
+		drop(draining);
 	}
 
 	/// A migration keeps an unanswered replay on the session it leaves, whether or not the

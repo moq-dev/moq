@@ -36,7 +36,7 @@ import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
-import { unwanted } from "../util/demand.ts";
+import { abandoned as demandAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -756,7 +756,10 @@ export class Subscriber {
 	async #runSubscribe(broadcast: Path.Valid, request: track.Request, valid?: AbortSignal, epoch?: Epoch.Valid) {
 		const refused = unauthorized(broadcast);
 		try {
-			const ready = await this.#auth?.ready(broadcast, "subscribe", { signal: valid, demand: request.demand() });
+			const ready = await this.#auth?.ready(broadcast, "subscribe", {
+				signal: valid,
+				until: () => demandAbandoned(request.demand()),
+			});
 			if (ready === false) {
 				request.reject(new Error("subscribe abandoned before it was authorized"));
 				return;
@@ -805,15 +808,8 @@ export class Subscriber {
 		// Demand returning before we commit is not abandonment, matching the serving loop.
 		const demand = producer.demand();
 		const waitAbandoned = async (): Promise<null> => {
-			// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for
-			// the track info, so only demand that arrived and then left is abandonment.
-			while (demand.wanted.peek() === undefined && demand.closed.peek() === undefined) {
-				await Signal.race(demand.wanted, demand.closed);
-			}
-			for (;;) {
-				await unwanted(demand);
-				if (demand.closed.peek() !== undefined || demand.wanted.peek() === undefined) return null;
-			}
+			await demandAbandoned(demand);
+			return null;
 		};
 
 		let stream: Stream;

@@ -22,7 +22,7 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
-import { unwanted } from "../util/demand.ts";
+import { abandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
@@ -658,7 +658,7 @@ export class Subscriber {
 		try {
 			const ready = await this.#auth?.ready(broadcast, "subscribe", {
 				signal: consumed.valid,
-				demand: request.demand(),
+				until: () => abandoned(request.demand()),
 			});
 			if (ready === false) {
 				request.reject(new Error("subscribe abandoned before it was authorized"));
@@ -1066,7 +1066,12 @@ export class Subscriber {
 	): Promise<void> {
 		const refused = unauthorized(broadcast);
 		try {
-			await this.#auth?.ready(broadcast, "subscribe", { signal: consumed.valid });
+			// Every caller leaving ends the wait like it ends the setup below.
+			const ready = await this.#auth?.ready(broadcast, "subscribe", {
+				signal: consumed.valid,
+				until: () => group.demand().unused(),
+			});
+			if (ready === false) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
 			// Arm after admission, before checking: another unanswered token may still
 			// widen the union while we wait, which is not a revocation of this fetch.
 			const disposeGrant = this.#grant?.subscribe(() => {

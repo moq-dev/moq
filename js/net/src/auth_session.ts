@@ -13,7 +13,6 @@ import {
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Stream } from "./stream.ts";
-import type { Demand } from "./track.ts";
 import { nextTask } from "./util/yield.ts";
 
 /** A grant as the wire carries it: the expiry is milliseconds from now. @internal */
@@ -378,34 +377,35 @@ export class AuthSession implements Handle {
 
 	/**
 	 * Wait for presented tokens that might admit this path, without delaying a covered path.
-	 * Resolves false once `demand` loses the subscribers it gained, so an abandoned request
-	 * never waits on a token that may never be answered.
+	 * Resolves false once `until`, the request's own lifetime, settles first, so an abandoned
+	 * request never waits on a token that may never be answered. `until` is called only once
+	 * the request has to wait.
 	 */
 	async ready(
 		path: Path.Valid,
 		direction: "publish" | "subscribe",
-		{ signal, demand }: { signal?: AbortSignal; demand?: Demand } = {},
+		{ signal, until }: { signal?: AbortSignal; until?: () => PromiseLike<unknown> } = {},
 	): Promise<boolean> {
 		let started: Instant | undefined;
-		// An info-only lookup attaches no subscriber, so only demand that arrived and left is abandonment.
-		let wanted = false;
-		const abandoned = () => {
-			if (!demand) return false;
-			if (demand.closed.peek() !== undefined) return true;
-			if (demand.wanted.peek() !== undefined) wanted = true;
-			return wanted && demand.wanted.peek() === undefined;
+		let ended = false;
+		let wake: (() => void) | undefined;
+		const end = () => {
+			ended = true;
+			wake?.();
 		};
 		try {
 			while (this.#pending.peek() > 0 && !this.#union.peek()?.[direction].matches(path)) {
-				if (abandoned()) return false;
-				started ??= now();
+				if (ended) return false;
+				if (started === undefined) {
+					started = now();
+					until?.().then(end, end);
+				}
 				signal?.throwIfAborted();
 				await new Promise<void>((resolve, reject) => {
 					const cleanup = () => {
 						pending();
 						grant();
-						used?.();
-						closed?.();
+						wake = undefined;
 						signal?.removeEventListener("abort", abort);
 					};
 					const done = () => {
@@ -418,8 +418,7 @@ export class AuthSession implements Handle {
 					};
 					const pending = this.#pending.changed(done);
 					const grant = this.#union.changed(done);
-					const used = demand?.wanted.changed(done);
-					const closed = demand?.closed.changed(done);
+					wake = done;
 					signal?.addEventListener("abort", abort, { once: true });
 				});
 			}

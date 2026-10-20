@@ -17,6 +17,7 @@ import { createMockTransportPair, type MockTransport } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { type Stream, Writer } from "./stream.ts";
+import { abandoned } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { nextTask } from "./util/yield.ts";
 import { wireOf } from "./wire.ts";
@@ -45,6 +46,19 @@ async function waitFor<T>(getter: Getter<T>, ready: (value: T) => boolean): Prom
 	let value = getter.peek();
 	while (!ready(value)) value = await getter.changed();
 	return value;
+}
+
+/** Whether a request on `path` logged the end of its authorization wait. */
+function waited(logged: { mock: { calls: unknown[][] } }, path: string): boolean {
+	return logged.mock.calls.some(([line]) =>
+		String(line).startsWith(`request waited for authorization: path=${path} `),
+	);
+}
+
+/** Yield until `done` holds, failing if it never does. */
+async function settles(done: () => boolean): Promise<void> {
+	for (let i = 0; i < 50 && !done(); i++) await nextTask();
+	expect(done()).toBe(true);
 }
 
 interface Pair {
@@ -348,7 +362,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 			const track = new OriginProducer().createBroadcast(Path.from("room/x")).createTrack("video");
 			const reader = track.subscribe();
 			const ready = (client.auth as AuthSession).ready(Path.from("room/x"), "subscribe", {
-				demand: track.demand(),
+				until: () => abandoned(track.demand()),
 			});
 			let settled = false;
 			void ready.then(() => {
@@ -364,6 +378,41 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 			client.abort();
 			server.abort();
 			await adding.catch(() => void 0);
+		}
+	});
+
+	test("a subscribe abandoned while its token waits never reaches the wire", async () => {
+		const logged = spyOn(console, "debug");
+		const origin = new OriginProducer();
+		const broadcast = origin.createBroadcast(Path.from("room/x"));
+		broadcast.announce();
+		broadcast.createTrack("video");
+		const { client, server, transport } = await connect({ serverPublish: origin, protocol });
+		const requests = server.auth.requests();
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		const initial = setup.accept(grant([], []));
+		await waitFor(client.auth.grant, (g) => g !== undefined);
+		const adding = client.auth.add("first");
+		try {
+			const unanswered = await requests.next();
+			if (!unanswered) throw new Error("missing token");
+			const track = wireOf(client).consume(Path.from("room/x")).track("video").subscribe();
+			await nextTask();
+			track.close();
+			await settles(() => waited(logged, "room/x"));
+			const opened = transport.sendStreams.bidi.length;
+			const issued = unanswered.accept(grant([], ["room"]));
+			await adding;
+			for (let i = 0; i < 10; i++) await nextTask();
+			expect(transport.sendStreams.bidi.length).toBe(opened);
+			issued.close();
+		} finally {
+			initial.close();
+			client.abort();
+			server.abort();
+			await adding.catch(() => void 0);
+			logged.mockRestore();
 		}
 	});
 
@@ -491,6 +540,49 @@ describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 });
 
 // moq-lite carries patterns, so every grant arrives exactly as issued.
+test("a fetch abandoned while its token waits never reaches the wire", async () => {
+	const logged = spyOn(console, "debug");
+	const origin = new OriginProducer();
+	const broadcast = origin.createBroadcast(Path.from("room/x"));
+	broadcast.announce();
+	broadcast
+		.createTrack("video")
+		.appendGroup()
+		.writeFrame({ payload: new Uint8Array([1]) });
+	const { client, server, transport } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
+	const requests = server.auth.requests();
+	const setup = await requests.next();
+	if (!setup) throw new Error("missing setup token");
+	const initial = setup.accept(grant([], []));
+	await waitFor(client.auth.grant, (g) => g !== undefined);
+	const adding = client.auth.add("first");
+	try {
+		const unanswered = await requests.next();
+		if (!unanswered) throw new Error("missing token");
+		const abort = new AbortController();
+		const fetched = wireOf(client)
+			.consume(Path.from("room/x"))
+			.track("video")
+			.fetchGroup(0, { signal: abort.signal });
+		await nextTask();
+		abort.abort(new Error("left"));
+		await expect(fetched).rejects.toThrow();
+		await settles(() => waited(logged, "room/x"));
+		const opened = transport.sendStreams.bidi.length;
+		const issued = unanswered.accept(grant([], ["room"]));
+		await adding;
+		for (let i = 0; i < 10; i++) await nextTask();
+		expect(transport.sendStreams.bidi.length).toBe(opened);
+		issued.close();
+	} finally {
+		initial.close();
+		client.abort();
+		server.abort();
+		await adding.catch(() => void 0);
+		logged.mockRestore();
+	}
+});
+
 test("lite-07 carries literal and wildcard grants exactly", async () => {
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });
 	const requests = server.auth.requests();

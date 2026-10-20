@@ -796,6 +796,14 @@ pub struct Auth {
 	presented: std::sync::Arc<Presented>,
 }
 
+#[cfg(all(test, feature = "async"))]
+impl Auth {
+	/// The id the session presents this credential under.
+	pub(crate) fn id(&self) -> u64 {
+		self.presented.id
+	}
+}
+
 /// The slot every clone of one [`Auth`] shares, withdrawn when the last drops.
 struct Presented {
 	state: kio::Shared<State>,
@@ -1745,10 +1753,14 @@ impl Gate {
 		if self.admitted {
 			return Poll::Ready(());
 		}
-		if self
-			.handle
-			.poll_presented(self.direction, self.path.as_str(), waiter)
-			.is_pending()
+		// A withdrawn route ends the wait too: the request is then judged against the union
+		// as it stands, so routing can recover instead of parking on a token.
+		let withdrawn = matches!(&self.part, Part::Announced(live) if live.poll_closed(waiter).is_ready());
+		if !withdrawn
+			&& self
+				.handle
+				.poll_presented(self.direction, self.path.as_str(), waiter)
+				.is_pending()
 		{
 			self.waiting.get_or_insert_with(|| Waiting {
 				path: self.path.clone(),
@@ -1961,6 +1973,28 @@ mod tests {
 		handle.granted(token.presented.id, Grant::all());
 		assert!(gate.poll_ready(&waiter).is_ready());
 		assert!(gate.poll_denied(&waiter).is_pending());
+	}
+
+	/// A route withdrawn while its request waits on a token ends the wait, and the request
+	/// is refused against the union as it stands.
+	#[test]
+	fn a_withdrawn_route_ends_the_wait() {
+		let handle = Handle::new(true);
+		let setup = handle.present(Bytes::new(), true).unwrap();
+		handle.granted(setup.presented.id, Grant::default());
+		let _unanswered = handle.present(Bytes::from_static(b"new"), false).unwrap();
+		let route = kio::Producer::<()>::default();
+		let mut gate = Gate::announced(
+			handle,
+			crate::Path::new("room").to_owned(),
+			Direction::Subscribe,
+			route.consume(),
+		);
+		let waiter = kio::Waiter::noop();
+		assert!(gate.poll_ready(&waiter).is_pending(), "waits while the route stands");
+		drop(route);
+		assert!(gate.poll_ready(&waiter).is_ready(), "a withdrawn route kept the wait");
+		assert!(gate.poll_denied(&waiter).is_ready());
 	}
 
 	#[test]
