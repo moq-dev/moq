@@ -1,4 +1,8 @@
-{ runner, resources }:
+{
+  runner,
+  resources,
+  network,
+}:
 {
   config,
   lib,
@@ -16,11 +20,11 @@
     usePredictableInterfaceNames = false;
     interfaces.eth0.ipv4.addresses = [
       {
-        address = "10.231.0.2";
+        address = network.guestAddress;
         prefixLength = 30;
       }
     ];
-    defaultGateway = "10.231.0.1";
+    defaultGateway = network.hostAddress;
     nameservers = [
       "1.1.1.1"
       "8.8.8.8"

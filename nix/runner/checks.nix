@@ -6,6 +6,10 @@ let
       name = "test-queue";
       labels = [ "queue" ];
     };
+    network = {
+      hostAddress = "10.231.0.1";
+      guestAddress = "10.231.0.2";
+    };
     resources = {
       cores = 2;
       memory = 1024;
@@ -20,4 +24,5 @@ in
 {
   github-runner-vm = import ./test.nix { inherit pkgs guestModule; };
   github-runner-vm-image = guest.config.system.build.image;
+  github-runner-vm-config = import ./config-test.nix { inherit pkgs; };
 }
