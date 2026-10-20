@@ -191,7 +191,7 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 		.subscribe(subscription)
 		.await
 		.expect("subscriber subscribes");
-	moq_clock::timeout(SETTLE, track.demand().used())
+	moq_clock::timeout(SETTLE, crate::support::wanted(track.demand()))
 		.await
 		.expect("the subscribe never reached the announcer")
 		.unwrap();

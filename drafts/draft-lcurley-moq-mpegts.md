@@ -234,7 +234,7 @@ type Verbatim = {
 
 `streamType` is the PMT `stream_type` to re-announce: 0x86 for SCTE-35 {{scte35}}, 0x05 for private sections.
 
-`framing` is required, and `"section"` is its only value: each frame is one complete section, header and CRC included, timestamped with the media time it arrived at.
+`framing` is required, and `"section"` is its only value: each frame is one complete section, header and CRC included, timestamped with its placement: the program clock at its first section byte, on the same timeline as a whole PES below.
 A consumer MUST refuse a catalog whose `verbatim` record names any other `framing` or none, rather than guess; in particular it MUST NOT read the `"pes"` framing of draft -00, or a record without `framing`, as sections.
 
 Each frame MUST be a keyframe in its own group: a verbatim payload is all-or-nothing.
@@ -255,12 +255,13 @@ Each frame MUST be a keyframe in its own group, as for `verbatim`.
 A consumer MUST refuse a frame that is not one well-formed PES packet.
 The record is a member beside `verbatim` rather than a `framing` value, so a consumer that predates it ignores the track instead of refusing the catalog.
 
-A publisher demultiplexing a transport stream places each PES by the PCRs of its program ({{mpeg2}} Section 2.4.2.2): its first byte is interpolated between the reference bytes of the PCRs either side of it, and one past its timebase's last PCR is extrapolated from that timebase's last two.
+A publisher demultiplexing a transport stream places each PES or section by the PCRs of its program ({{mpeg2}} Section 2.4.2.2): its first byte is interpolated between the reference bytes of the PCRs either side of it, and one past its timebase's last PCR is extrapolated from that timebase's last two.
 A timebase ends at a PCR discontinuity, and at a PMT that moves the `PCR_PID`.
-Each PCR takes the 2^33 multiple of its base that lands it nearest the media's PTS, and the placement moves onto the catalog clock by the same shift as the media, so a PES's timestamp depends only on the input and that shift.
-A PES before the first PCR the publisher reads, or past a lone one, has nothing to place it and is dropped.
+Each PCR takes the 2^33 multiple of its base that lands it nearest the media's PTS, and the placement moves onto the catalog clock by the same shift as the media, so its timestamp depends only on the input and that shift.
+A PES or section before the first PCR the publisher reads, or past a lone one, has nothing to place it and is dropped.
 The publisher moves each PTS and DTS by the media's shift modulo 2^33, keeping their prefix and marker bits, and leaves every other byte as received; the PES CRC covers the previous packet's data bytes, not its header, so it stays valid.
-It MUST refuse to carry a stream rather than alter it: one in a program with no PCR, and one whose PES carry a clock the shift does not reach (an ESCR, a `pack_header_field`, or a TREF), PES-level scrambling, a zero `PES_packet_length` on a stream that is not video, or a header whose flagged optional fields overrun its `PES_header_data_length`, which a consumer refuses.
+The publisher MUST refuse a `verbatim` or `pesPacket` stream in a program with no PCR.
+It MUST also refuse a `pesPacket` stream whose PES carry a clock the shift does not reach (an ESCR, a `pack_header_field`, or a TREF), PES-level scrambling, a zero `PES_packet_length` on a stream that is not video, or a header whose flagged optional fields overrun its `PES_header_data_length`, which a consumer refuses.
 
 A verbatim or whole-PES track has no codec, dimensions, or decoder configuration, so a publisher MUST NOT describe it as a media rendition and MUST describe it only by its `tracks` entry, and a consumer MUST refuse a catalog that describes one as both.
 Nothing there declares a container, so its frames use hang's `legacy` container ({{hang}}): a varint microsecond timestamp followed by the payload.
@@ -280,10 +281,10 @@ type M2ts = {
 `track` names the one track carrying the multiplex, in the same broadcast as the catalog.
 A second multiplex is a second broadcast.
 
-`randomAccess` says that every group of the latest window the section describes started at a random access point ({{m2ts-groups}}).
+`randomAccess` says that every group starts at a random access point ({{m2ts-groups}}).
 A publisher MUST write it, and a consumer MUST read an absent `randomAccess` as false.
 
-`muxRate` follows {{field-mux-rate}}, measured over every packet of that window.
+`muxRate` follows {{field-mux-rate}}, measured over every packet of the track.
 
 The section records no program, PID, descriptor, or table: they all reach the consumer inside the packets, as the publisher received them.
 A track named here MUST NOT also be described as a rendition or in an `mpegts` section.
@@ -304,15 +305,11 @@ A group starts at:
 
 - a packet with `random_access_indicator` set on the video PID of the clock's program (the first PID its PMT declares with a video `stream_type`), or on the clock PID when that program has no video;
 - a PCR on the clock PID with `discontinuity_indicator` set that steps forward ({{m2ts-timestamps}}), since a group MUST NOT contain a PCR discontinuity;
-- the first PCR at or past a whole second of the PCR count ({{m2ts-timestamps}}), unless a random access point or a forward jump fell in the second before it, each counted at the PCR before it (its own, if its packet carries one);
+- otherwise, the first PCR at least one second of PCR time after the group's start;
 - the frame that would take a group past a size bound the publisher chooses below what a relay caches of one group; frames are never split to meet it.
 
-Before its first group, a publisher starts one at a second only once it has watched from a PCR before the second before it, with the PMT of the clock's program read, so it never cuts where a publisher running longer saw a random access point or a jump (the first PCR it saw may carry a flag it missed).
-
-The section describes two-second windows of the PCR count, each holding the PCR intervals that start in it.
-As the count passes each window, from the first that starts after the PCR the publisher's first group follows, the section takes that window's values; a window whose values match the last one's leaves the catalog unchanged.
-An input that ends before its first such window takes `randomAccess` from every group it carried and `muxRate` from the window in progress.
-For a window, `randomAccess` is true only if the PAT listed one program, its PMT declared at most one video stream, and the clock PID was that PMT's `PCR_PID` throughout it, and every group it started began at a `random_access_indicator`.
+`randomAccess` is true only while the PAT lists one program, its PMT declares at most one video stream, and the clock PID is that PMT's `PCR_PID`, and only if every group so far has started at a `random_access_indicator`.
+The first group that starts any other way, or that carries packets while that layout does not hold, republishes the section with `randomAccess` false for the rest of the track.
 With more programs or video streams the random access points can stagger, so a group start is not one for all of them.
 
 Both indicators sit in the adaptation field, which TS-level scrambling leaves in the clear, so a scrambled multiplex groups like its clear twin.
@@ -324,11 +321,11 @@ A PCR gives the time of the byte holding the last bit of its `program_clock_refe
 A byte between two PCRs is placed at the rate between them; a byte past the last PCR of a timebase takes the rate of the interval before it, and one before the first PCR of a timebase takes the rate of the interval after it.
 
 PCRs are unwrapped into a 64-bit count of 27 MHz ticks, and timestamps never decrease.
-Each PCR takes the number of 2^33 × 300 tick wraps that lands it nearest the current time on the catalog clock ({{hang}}), so the count runs on across the wrap, which is not a discontinuity, and a PCR more than half a wrap ahead of that time lands a wrap back.
-A PCR with `discontinuity_indicator` set that lands at or past the one before it adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}).
+A step forward of at most half the 2^33 × 300 tick period adds to the count, across the wrap included, so a wrap is not a discontinuity.
+A PCR with `discontinuity_indicator` set whose step is forward by that measure adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}).
 A PCR that steps backwards MUST end the track with an error, flagged or not: a flagged one is a restart, which is new content, so a publisher that carries on publishes it as a new broadcast.
 
-The count therefore depends only on the bytes and the catalog clock, so publishers of one input whose catalog clocks agree publish identical frames, group boundaries, and sections wherever each started, from the later one's first group on.
+The timeline depends only on the bytes since the publisher's first PCR, so two publishers that start at the same packet of one input publish identical frames.
 
 ## Mapping onto MSFTS {#m2ts-msfts}
 Stripping each frame's timestamp leaves an {{msfts}} object of whole source packets, and the groups carry over unchanged.
@@ -447,10 +444,11 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 {:numbered="false"}
 
 - Added the `m2ts` section, a transport stream carried whole, with its mapping onto MSFTS; the comparison uses MSFTS's `mpeg2ts` names.
+- Section-framed `verbatim` timestamps use PCR-derived placement at the first section byte, as whole PES do, rather than a video presentation time.
 - Added the `pesPacket` record: each frame one whole PES packet, timestamped with its placement. A consumer that predates it drops the track rather than refusing the catalog.
 - `verbatim` carries sections only, breaking -00: `framing` is required and `"section"` its only value, and `streamId` is gone. A consumer refuses a -00 catalog with `"pes"` framing or a `verbatim` record without `framing`. A publisher carries an undecoded PES stream as `pesPacket`, and refuses one it cannot carry unaltered.
 - A flagged PCR jump on an `m2ts` track follows hang's discontinuity marker rather than a skipped group sequence.
-- An `m2ts` track's fallback cut falls on whole seconds of a PCR count whose wraps follow the catalog clock, and `randomAccess` and `muxRate` describe the latest two-second window rather than the whole track, so publishers sharing a clock cut and describe the multiplex alike.
+- An `m2ts` track unwraps PCRs from its history, clamps extrapolated object times at a forward discontinuity, and cuts a fallback group after one second. `randomAccess` covers every published group; `muxRate` follows the measured source rate.
 
 ## draft-lcurley-moq-mpegts-00
 {:numbered="false"}

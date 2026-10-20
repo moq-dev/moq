@@ -63,7 +63,7 @@ class GroupProducer:
 
 
 class TrackDemand:
-    """A watch-only handle to whether a published track has subscribers.
+    """A watch-only handle to the group a published track's subscribers want next.
 
     Returned by a producer's ``demand()``. Weak: holding it neither keeps the
     track open nor locks the producer, so a wait can park here while the
@@ -79,17 +79,16 @@ class TrackDemand:
         """The name of the track this watches."""
         return self._inner.name()
 
-    def is_used(self) -> bool:
-        """Whether the track has at least one active subscriber right now."""
-        return self._inner.is_used()
+    def wanted(self) -> int | None:
+        """The group subscribers want next, or None while nobody subscribes.
 
-    async def used(self) -> None:
-        """Wait until the track has at least one active subscriber."""
-        await self._inner.used()
+        A value past the newest group asks for a new group now, typically a keyframe.
+        """
+        return self._inner.wanted()
 
-    async def unused(self) -> None:
-        """Wait until the track has no active subscribers."""
-        await self._inner.unused()
+    async def wanted_changed(self) -> int | None:
+        """Wait for ``wanted`` to change and return it. The first call returns at once."""
+        return await self._inner.wanted_changed()
 
 
 class TrackProducer:

@@ -20,6 +20,17 @@ async function settle() {
 	await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** Whether `promise` is still pending once queued work settles. */
+async function isPending(promise: Promise<unknown>): Promise<boolean> {
+	let settled = false;
+	void promise.then(
+		() => (settled = true),
+		() => (settled = true),
+	);
+	await settle();
+	return !settled;
+}
+
 /** A stand-in session announcing `path` under the epoch at `cost`, serving `source`. */
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
 	const handle = wireOf(origin).receive(path, Route.normalize({ epoch: EPOCH, cost }));
@@ -522,7 +533,7 @@ test("a recovery fetch a later route supersedes is abandoned", async () => {
 	stalled.close(new StreamError(StreamCode.SessionClosed));
 	const read = group.readFrame();
 	await settle();
-	const fetching = tb.producer.demand().used.peek();
+	const fetching = tb.producer.demand().wanted.peek() !== undefined;
 
 	// Another route has it cached: the group continues there, and the fetch from b stops.
 	tc.write(0, 2);
@@ -531,7 +542,7 @@ test("a recovery fetch a later route supersedes is abandoned", async () => {
 	sub.close();
 	await settle();
 	expect(fetching).toBe(true);
-	expect(tb.producer.demand().used.peek()).toBe(false);
+	expect(tb.producer.demand().wanted.peek()).toBeUndefined();
 
 	front.consumer.close();
 	a.close();
@@ -563,13 +574,13 @@ test("a datagram reader lets go of the copies a swap replaced", async () => {
 	copy(b);
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
-	expect(ta.producer.demand().used.peek()).toBe(true);
+	expect(ta.producer.demand().wanted.peek()).toBeDefined();
 	front.serve(b.consume());
 	await settle();
 	// A read with nothing to deliver is the pass that lets go of a's copy.
 	void sub.recvDatagram();
 	await settle();
-	expect(ta.producer.demand().used.peek()).toBe(false);
+	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
 
 	sub.close();
 	front.consumer.close();
@@ -829,7 +840,7 @@ test.each([true, false])(
 			// The serving copy's group bounded the previous route's copy, so the next read lets it go.
 			pending = next();
 			await settle();
-			expect(copies[route - 1].producer.demand().used.peek()).toBe(false);
+			expect(copies[route - 1].producer.demand().wanted.peek()).toBeUndefined();
 		}
 
 		view?.close();
@@ -1149,6 +1160,36 @@ test("a fetch still out on the old route moves to the new one", async () => {
 	front.consumer.close();
 	a.close();
 	b.close();
+});
+
+// A front's reader reports the serving copy's largest only within its bounds: the cap it sets
+// and the floor its subscription names.
+test("the largest honours the reader's bounds on the serving copy", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const capped = front.consumer
+		.track("seq")
+		.subscribe()
+		.withGroups({ end: { excluded: 3 } });
+	const floored = front.consumer.track("seq").subscribe({ groups: { start: { included: 8 } } });
+	for (let sequence = 0; sequence < 5; sequence++) ta.write(sequence);
+
+	const next = capped.largest();
+	expect(await isPending(next)).toBe(true);
+	capped.setGroups({});
+	expect(await next).toEqual({ group: 4, frame: 0 });
+
+	const floor = floored.largest();
+	expect(await isPending(floor)).toBe(true);
+	ta.write(8);
+	expect(await floor).toEqual({ group: 8, frame: 0 });
+
+	capped.close();
+	floored.close();
+	front.consumer.close();
+	a.close();
 });
 
 test("the largest follows the serving copy across a swap without moving back, and ends with the route", async () => {

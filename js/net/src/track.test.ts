@@ -1,11 +1,13 @@
 import { expect, setSystemTime, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
+import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { ProtocolViolation, StreamCode, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { infoDefaults, type Subscription, Producer as TrackProducer } from "./track.ts";
+import { unwanted } from "./util/demand.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -39,25 +41,25 @@ test("priority reads the committed info and is the midpoint before accept", () =
 	expect(producer.priority).toBe(60);
 });
 
-test("used reflects subscriber demand and unused resolves when the last one leaves", async () => {
+test("wanted reflects subscriber demand and clears when the last one leaves", async () => {
 	const producer = new TrackProducer("test");
 
 	// No subscribers: no demand.
-	expect(producer.demand().used.peek()).toBe(false);
+	expect(producer.demand().wanted.peek()).toBeUndefined();
 
 	const a = producer.subscribe();
 	const b = producer.subscribe().ordered();
-	expect(producer.demand().used.peek()).toBe(true);
+	expect(producer.demand().wanted.peek()).toBeDefined();
 
-	// Closing one of two keeps demand, so unused() stays pending.
+	// Closing one of two keeps demand.
 	a.close();
-	expect(producer.demand().used.peek()).toBe(true);
+	expect(producer.demand().wanted.peek()).toBeDefined();
 
-	// Closing the last subscriber drops demand; unused() resolves. The consumer wire awaits this
+	// Closing the last subscriber drops demand. The consumer wire awaits this
 	// to tear an idle upstream down.
 	b.close();
-	await producer.demand().unused();
-	expect(producer.demand().used.peek()).toBe(false);
+	await unwanted(producer.demand());
+	expect(producer.demand().wanted.peek()).toBeUndefined();
 });
 
 test("a producer never self-closes on zero demand: a publisher keeps serving new subscribers", async () => {
@@ -66,9 +68,9 @@ test("a producer never self-closes on zero demand: a publisher keeps serving new
 	// Demand comes and goes...
 	const a = producer.subscribe();
 	a.close();
-	await producer.demand().unused();
+	await unwanted(producer.demand());
 
-	// ...but the producer stays open (only the wire acts on `unused`, not the producer itself),
+	// ...but the producer stays open (only the wire acts on unwanted demand, not the producer),
 	// so a publisher writing to a track nobody is watching is unaffected.
 	expect(producer.closed.peek()).toBeUndefined();
 
@@ -76,17 +78,17 @@ test("a producer never self-closes on zero demand: a publisher keeps serving new
 	producer.writeFrame(textFrame("still here"));
 	const b = producer.subscribe().ordered();
 	expect(await b.readString()).toBe("still here");
-	expect(producer.demand().used.peek()).toBe(true);
+	expect(producer.demand().wanted.peek()).toBeDefined();
 });
 
-test("unused() resolves immediately when there was never any demand", async () => {
+test("unwanted resolves immediately when there was never any demand", async () => {
 	const producer = new TrackProducer("video");
-	// No subscriber was ever attached; unused() must not hang.
-	await producer.demand().unused();
-	expect(producer.demand().used.peek()).toBe(false);
+	// No subscriber was ever attached; the wait must not hang.
+	await unwanted(producer.demand());
+	expect(producer.demand().wanted.peek()).toBeUndefined();
 });
 
-test("used stays true across churn while at least one subscriber remains", async () => {
+test("wanted stays set across churn while at least one subscriber remains", async () => {
 	const producer = new TrackProducer("video");
 
 	const a = producer.subscribe();
@@ -94,12 +96,120 @@ test("used stays true across churn while at least one subscriber remains", async
 	for (let i = 0; i < 20; i++) {
 		const t = producer.subscribe();
 		t.close();
-		expect(producer.demand().used.peek()).toBe(true);
+		expect(producer.demand().wanted.peek()).toBeDefined();
 	}
 
 	a.close();
-	await producer.demand().unused();
-	expect(producer.demand().used.peek()).toBe(false);
+	await unwanted(producer.demand());
+	expect(producer.demand().wanted.peek()).toBeUndefined();
+});
+
+// Append a group of a 3 byte first frame and a `delta` byte delta to an untimed track.
+function refreshGroup(producer: TrackProducer, delta: number): void {
+	const group = producer.appendGroup();
+	group.writeFrame({ payload: enc.encode("key") });
+	if (delta > 0) group.writeFrame({ payload: new Uint8Array(delta) });
+	group.close();
+}
+
+test("the first subscriber of a track with no group wants group 0", () => {
+	const producer = new TrackProducer("test").accept({ refresh: 1 });
+	expect(producer.demand().wanted.peek()).toBeUndefined();
+	const subscriber = producer.subscribe();
+	expect(producer.demand().wanted.peek()).toBe(0);
+	subscriber.close();
+});
+
+test("a join over the refresh ratio wants the group after the newest", () => {
+	for (const [delta, wanted] of [
+		[0, 0],
+		[3, 0],
+		[4, 1],
+	]) {
+		const producer = new TrackProducer("test").accept({ refresh: 1 });
+		refreshGroup(producer, delta);
+		const subscriber = producer.subscribe();
+		expect(producer.demand().wanted.peek()).toBe(wanted);
+		subscriber.close();
+	}
+});
+
+test("a join wants past a datagram after the newest group", () => {
+	const producer = new TrackProducer("test").accept({ refresh: 1 });
+	refreshGroup(producer, 4);
+	expect(producer.appendDatagram(undefined, enc.encode("dgram"))).toBe(1);
+	const subscriber = producer.subscribe();
+	expect(producer.demand().wanted.peek()).toBe(2);
+	subscriber.close();
+});
+
+test("a datagram never overtakes a pending refresh", () => {
+	const producer = new TrackProducer("test").accept({ refresh: 1 });
+	refreshGroup(producer, 4);
+	const subscriber = producer.subscribe();
+	expect(producer.demand().wanted.peek()).toBe(1);
+
+	expect(producer.appendDatagram(undefined, enc.encode("dgram"))).toBe(1);
+	expect(producer.demand().wanted.peek()).toBe(2);
+
+	// Group 2 answers it, and later datagrams ask for nothing.
+	refreshGroup(producer, 0);
+	producer.appendDatagram(undefined, enc.encode("dgram"));
+	expect(producer.demand().wanted.peek()).toBe(2);
+	subscriber.close();
+});
+
+test("joins coalesce until the wanted group lands", () => {
+	const producer = new TrackProducer("test").accept({ refresh: 1 });
+	refreshGroup(producer, 4);
+	const subscribers = [producer.subscribe(), producer.subscribe()];
+	expect(producer.demand().wanted.peek()).toBe(1);
+
+	// Group 1 answers it, and a join under its ratio asks nothing more.
+	refreshGroup(producer, 0);
+	subscribers.push(producer.subscribe());
+	expect(producer.demand().wanted.peek()).toBe(1);
+
+	refreshGroup(producer, 4);
+	subscribers.push(producer.subscribe());
+	expect(producer.demand().wanted.peek()).toBe(3);
+	for (const subscriber of subscribers) subscriber.close();
+});
+
+test("joins without refresh ask for no group", () => {
+	const producer = new TrackProducer("test").accept({});
+	refreshGroup(producer, 1000);
+	const subscriber = producer.subscribe();
+	expect(producer.demand().wanted.peek()).toBe(0);
+	subscriber.close();
+});
+
+test("a fixed start is no join", () => {
+	const producer = new TrackProducer("test").accept({ refresh: 1 });
+	refreshGroup(producer, 4);
+	const subscriber = producer.subscribe({ groups: { start: { included: 0 } } });
+	expect(producer.demand().wanted.peek()).toBe(0);
+	subscriber.close();
+});
+
+test("a replacement wants the group past its predecessor", () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("test");
+	first.writeGroup(new GroupProducer(7));
+	first.close();
+
+	const second = broadcast.createTrack("test");
+	const subscriber = second.subscribe();
+	expect(second.demand().wanted.peek()).toBe(8);
+	subscriber.close();
+	broadcast.close();
+});
+
+test("refresh must be a u32 ratio", () => {
+	expect(() => infoDefaults({ refresh: -1 })).toThrow(RangeError);
+	expect(() => infoDefaults({ refresh: 0.5 })).toThrow(RangeError);
+	expect(() => infoDefaults({ refresh: 2 ** 32 })).toThrow(RangeError);
+	expect(infoDefaults({ refresh: 0 }).refresh).toBe(0);
 });
 
 test("appendDatagram shares the group sequence counter", () => {
@@ -1917,6 +2027,92 @@ test("a datagram raises the largest", async () => {
 	producer.close();
 });
 
+/** Write untimed group `sequence` with `frames` frames, left open. */
+function framedGroup(producer: TrackProducer, sequence: number, frames: number): GroupProducer {
+	const group = new GroupProducer(sequence);
+	producer.writeGroup(group);
+	for (let i = 0; i < frames; i++) group.writeFrame({ payload: enc.encode("x") });
+	return group;
+}
+
+/** Whether `promise` is still pending once queued work settles. */
+async function isPending(promise: Promise<unknown>): Promise<boolean> {
+	let settled = false;
+	void promise.then(
+		() => (settled = true),
+		() => (settled = true),
+	);
+	await settle();
+	return !settled;
+}
+
+// The largest reports only while it is within the bounds: a cap below it or a floor above it
+// reports nothing, rather than a cached group standing in for it.
+test("largest reports only within the bounds", async () => {
+	const producer = new TrackProducer("test").accept({});
+	for (let sequence = 0; sequence < 6; sequence++) framedGroup(producer, sequence, 2);
+
+	const capped = producer.subscribe().withGroups({ end: { excluded: 3 } });
+	expect(await isPending(capped.largest())).toBe(true);
+
+	// An inclusive cap reports the group it names.
+	const ordered = producer
+		.subscribe()
+		.ordered()
+		.withGroups({ end: { included: 5 } });
+	expect(await ordered.largest()).toEqual({ group: 5, frame: 1 });
+
+	const floored = producer.subscribe().withGroups({ start: { included: 8 } });
+	const next = floored.largest();
+	expect(await isPending(next)).toBe(true);
+	framedGroup(producer, 8, 0);
+	expect(await next).toEqual({ group: 8, frame: 0 });
+	producer.close();
+});
+
+// Moving the bounds wakes a pending read, which reports the largest once it is within them;
+// bounds that leave it where it was report nothing new.
+test("largest follows the bounds as they move", async () => {
+	const producer = new TrackProducer("test").accept({});
+	for (let sequence = 0; sequence < 6; sequence++) framedGroup(producer, sequence, 1);
+
+	const reader = producer
+		.subscribe()
+		.ordered()
+		.withGroups({ end: { excluded: 3 } });
+	let next = reader.largest();
+	expect(await isPending(next)).toBe(true);
+	reader.setGroups({});
+	expect(await next).toEqual({ group: 5, frame: 0 });
+
+	next = reader.largest();
+	expect(await isPending(next)).toBe(true);
+	reader.setGroups({ end: { excluded: 2 } });
+	expect(await isPending(next)).toBe(true);
+
+	// Lifting it again leaves the last report standing.
+	reader.setGroups({});
+	expect(await isPending(next)).toBe(true);
+	framedGroup(producer, 6, 0);
+	expect(await next).toEqual({ group: 6, frame: 0 });
+	reader.setGroups({ start: { included: 3 } });
+	expect(await isPending(reader.largest())).toBe(true);
+	producer.close();
+});
+
+// Once the stream ended, widening the bounds over a largest it never reported does not bring
+// it back.
+test("largest stays ended when the bounds widen", async () => {
+	const producer = new TrackProducer("test").accept({});
+	framedGroup(producer, 5, 1).close();
+	producer.close();
+
+	const reader = producer.subscribe().withGroups({ end: { excluded: 3 } });
+	expect(await reader.largest()).toBeUndefined();
+	reader.setGroups({});
+	expect(await reader.largest()).toBeUndefined();
+});
+
 // A reader that starts at the largest group while it is still empty is at the live edge: it
 // gets that group, which ends with nothing, then the next one.
 test("a live-edge reader starts on an empty largest group", async () => {
@@ -2572,8 +2768,10 @@ test("a mid-group end survives eviction and a filtered late reader", async () =>
 		group.close();
 		producer.close();
 		await clock.advance(10_000 + CACHE_WINDOW_MS + 1);
+		expect(await producer.subscribe().largest()).toEqual({ group: 5, frame: 4 });
+		// The cap excludes the only group, so nothing is within it.
 		const reader = producer.subscribe().withGroups({ end: { excluded: 5 } });
-		expect(await reader.largest()).toEqual({ group: 5, frame: 4 });
+		expect(await reader.largest()).toBeUndefined();
 		expect(reader.end()).toEqual({ group: 5, frame: 5 });
 		reader.close();
 	} finally {

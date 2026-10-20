@@ -14,18 +14,19 @@ fails only the Nix Rust publisher against Go and all five JS readers:
 The released Rust, Python, Kotlin, C, and GStreamer readers pass.
 
 Parser tolerance landed on main in #5485 and on the Rust release line in
-#5520. Released `@moq/hang` 0.5.2 and the Go module installed in that run
-still require the old archive shape. The next 0.17 patch publishes
-`@moq/hang` with that parser (decided in #5590, owned by the release-line
-patch). Verify which published artifacts carry the corrected parser and
+#5520. `@moq/hang` 0.5.3 now publishes the tolerant parser (verified
+2026-10-19), while the Go module installed in that run required the old
+archive shape. Verify which published artifacts carry the corrected parser and
 advance any others through the normal release process. This quest does not
 authorize a breaking release cut or version bumps outside that process.
 
 Complete against packages installed from their registries in smoke, keeping
 every MoQ package at latest. Do not pin an older publisher, skip these cells,
 or suppress catalog errors. Direct archive validation and invalid media
-remain strict. Remove the `catalog-archive` compatibility exception only
-after measuring that its released JS reader accepts current catalogs.
+remain strict. The 2026-10-19 wire-compat remeasurement verified that
+released `@moq/hang` 0.5.3 accepts current catalogs and removed the
+`catalog-archive` exception. The registry-installed smoke matrix remains
+this quest's acceptance check.
 
 The maintainer requested fixes or quests for the investigated failures on
 2026-10-15. Publication is tracked separately from the completed parser fix,
@@ -34,4 +35,4 @@ in the existing release-execution act rather than as a prerequisite of m1.
 ## Related
 
 - [Release execution](/quest/m2/release/README.md) - owns publication and installed-artifact verification
-- [Release-line patch](/quest/m0/release-22/README.md) - the current patch publication owner
+- [Draft-22 release notices](/quest/m0/release-22/README.md) - tells testers and reporters about the published fixes

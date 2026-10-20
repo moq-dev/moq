@@ -7,6 +7,7 @@ import { TrackSequences } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
+import { unwanted } from "./util/demand.ts";
 import { wireOf } from "./wire.ts";
 
 // The public API mints consumers internally (Producer.consume, the wire layers); tests act
@@ -282,7 +283,7 @@ test("an info lookup joining a subscription's request stays demand after the sub
 	// Flush every pending notification, so only the lookup is left holding demand.
 	subscriber.close();
 	await new Promise((resolve) => setTimeout(resolve, 0));
-	expect(request.demand().used.peek()).toBe(false);
+	expect(request.demand().wanted.peek()).toBeUndefined();
 	expect(demand.used.peek()).toBe(true);
 
 	request.accept({ timescale: Timescale.MILLI });
@@ -784,12 +785,12 @@ test("broadcast demand watches static and pending tracks rather than broadcast h
 	const request = await pulled;
 	if (!request) throw new Error("expected request");
 	const requested = request.demand();
-	expect(requested.used.peek()).toBe(true);
+	expect(requested.wanted.peek()).toBeDefined();
 	first.close();
 	await Promise.resolve();
 	expect(demand.used.peek()).toBe(true);
 	second.close();
-	await requested.unused();
+	await unwanted(requested);
 	await demand.unused();
 	expect(demand.used.peek()).toBe(false);
 	request.reject();
@@ -824,7 +825,7 @@ test("a pending track info query counts as broadcast demand", async () => {
 	const request = await pending;
 	if (!request) throw new Error("expected request");
 	// Nobody subscribes to the queried track itself.
-	expect(request.demand().used.peek()).toBe(false);
+	expect(request.demand().wanted.peek()).toBeUndefined();
 	request.accept({ timescale: Timescale.MILLI, priority: 2 });
 	expect((await info).priority).toBe(2);
 	await demand.unused();

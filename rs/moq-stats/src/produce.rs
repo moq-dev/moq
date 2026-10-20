@@ -577,7 +577,7 @@ impl<V: Serialize> TrackPair<V> {
 
 	/// Whether any consumer exists on either flavor.
 	fn is_used(&self) -> bool {
-		self.plain.demand().is_used() || self.compressed.demand().is_used()
+		self.plain.demand().wanted().is_some() || self.compressed.demand().wanted().is_some()
 	}
 
 	/// Publish this drain's entries on both flavors (`{}` when there are none)
@@ -673,10 +673,12 @@ impl PendingPair {
 	/// this can read used for a while after the end subscriber left; that only
 	/// delays reclamation, it never strands anyone.
 	fn is_used(&self, waiter: &kio::Waiter) -> bool {
-		self.plain
-			.iter()
-			.chain(self.compressed.iter())
-			.any(|request| request.demand().poll_unused(waiter).is_pending())
+		self.plain.iter().chain(self.compressed.iter()).any(|request| {
+			let mut demand = request.demand();
+			// Drain the changes so the waiter stays registered, then read where demand settled.
+			while let Poll::Ready(Ok(Some(_))) = demand.poll_wanted_changed(waiter) {}
+			demand.wanted().is_some()
+		})
 	}
 }
 

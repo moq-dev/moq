@@ -110,9 +110,12 @@ impl KeySet {
 	///
 	/// A token without a `kid` is accepted only when the set holds exactly one key and that key has no `kid`.
 	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
-		let header = jsonwebtoken::decode_header(token)?;
+		self.key(token)?.verify(token)
+	}
 
-		let key = match header.kid {
+	pub(crate) fn key(&self, token: &str) -> crate::Result<Arc<Key>> {
+		let header = jsonwebtoken::decode_header(token)?;
+		match header.kid {
 			Some(kid) => self
 				.find_key(kid.as_str())
 				.ok_or_else(|| crate::Error::from(KeyError::KeyNotFound(kid))),
@@ -124,13 +127,12 @@ impl KeySet {
 					Err(KeyError::MissingKid.into())
 				}
 			}
-		}?;
-
-		key.verify(token)
+		}
 	}
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

@@ -622,11 +622,6 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(offset)
 	}
 
-	/// Whether `other` is this catalog or a clone of it.
-	pub(super) fn same(&self, other: &Self) -> bool {
-		Arc::ptr_eq(&self.current, &other.current)
-	}
-
 	/// A timestamp base for one source, shared by every importer reading it.
 	///
 	/// Mint each importer's reservation from it with [`Timebase::reserve`](super::Timebase::reserve), so

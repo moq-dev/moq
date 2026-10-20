@@ -304,7 +304,10 @@ export interface ResumeSource {
 	bufferedLargest(): Location | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
 	peekLargest(): { largest?: Location; ended: boolean };
-	/** The serving copy's largest location once newer than `seen`, or undefined once the logical track ends. */
+	/**
+	 * The serving copy's largest location once within the reader's cursor and newer than `seen`,
+	 * or undefined once the logical track ends.
+	 */
 	largest(seen: Location | undefined): Promise<Location | undefined>;
 	/** An independent subscriber to the serving copy. */
 	fork(options?: Subscription): Subscriber;
@@ -449,6 +452,8 @@ export const hooks: {
 	admitGroupStart: (group: GroupProducer, admit: (start: Timestamp) => () => void) => void;
 	/** Return a group producer's first timestamp, if it already holds a frame. */
 	groupStart: (group: GroupProducer) => Timestamp | undefined;
+	/** Whether a group's bytes after its first frame exceed `ratio` times the first frame. */
+	overRefresh: (group: GroupProducer, ratio: number) => boolean;
 	/** Keep a mirror of a group accepted unverified below its track's eviction watermark out of media-time expiry. */
 	unverifyGroup: (group: GroupConsumer) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
@@ -577,6 +582,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupStart: () => {
+		throw new Error("group.ts not loaded");
+	},
+	overRefresh: () => {
 		throw new Error("group.ts not loaded");
 	},
 	unverifyGroup: () => {

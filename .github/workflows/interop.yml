@@ -10,9 +10,12 @@ on:
   # Nightly: catch an interop regression in the current tree before a user does.
   schedule:
     - cron: "0 8 * * *"
-  # On PRs that touch the harness itself, so a change to the interop test is
-  # validated before it merges. Source regressions still surface nightly.
+  # On release PRs that touch the harness itself, so a backported change to the
+  # interop test is validated before it merges. Main PRs skip it; the schedule
+  # above covers main. `edited` catches a main PR retargeted to release.
   pull_request:
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "test/lib/**"
       - "test/p2p/**"
@@ -142,6 +145,15 @@ jobs:
       - name: Media output and lifecycle
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test media
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # Run independently so an unrelated cold-start failure cannot hide the
+      # codec replacement and same-track coded-size growth measurements.
+      - name: Media track identity changes
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test media --media-cases rename
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs

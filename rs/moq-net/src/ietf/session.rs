@@ -10,7 +10,7 @@ use crate::{
 use super::{
 	Control, Message, Publisher, Subscriber, Version, active_count,
 	adapter::ControlStreamAdapter,
-	auth, cluster, epoch, hidden, peer, request_update, solicit,
+	auth, cluster, epoch, hidden, max_age, peer, request_update, solicit,
 	subscriber::{is_protocol_violation, subscribe_prefixes},
 };
 
@@ -766,6 +766,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		cluster: cluster::peer_from_setup(params, version)?,
 		solicit: solicit::from_setup(params, version)?,
 		hidden: hidden::from_setup(params, version),
+		max_age: max_age::from_setup(params, version),
 		auth: auth::from_setup(params, version) == Some(true),
 		active_count: active_count::from_setup(params, version),
 		epoch: epoch::from_setup(params, version),
@@ -813,6 +814,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		solicit::into_setup(&mut parameters, version);
 	}
 	hidden::into_setup(&mut parameters, version);
+	max_age::into_setup(&mut parameters, version);
 	if extensions.auth {
 		auth::into_setup(&mut parameters, version);
 	}
@@ -2579,6 +2581,7 @@ mod tests {
 		let mut encoder = crate::coding::Encoder::new(&mut subscribe, VERSION.into());
 		encoder.varint(ietf::Subscribe::ID).unwrap();
 		ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("room"),
@@ -3000,6 +3003,7 @@ mod tests {
 	/// `token`, framed as a control message.
 	fn subscribe_with_token(version: Version, token: &[u8]) -> Vec<u8> {
 		let msg = ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(0),
 			track_namespace: crate::Path::new("room"),
