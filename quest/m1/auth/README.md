@@ -14,31 +14,63 @@ means "nobody wants it yet" instead of "nobody ever will".
 
 This questline adds an AUTH exchange to both wires: one stream per token, a
 grant per token, the union of every accepted token as the session's scope,
-and a loud failure when a publish can never be honored. It ends with the
-credential able to travel in band, while the URL keeps working for every peer
-that predates the stream. Node-bound peer grants for direct sessions belong to
-[P2P](/quest/m3/p2p/peer-grant.md), their only consumer.
+and a loud failure when a publish can never be honored. It ends with extra
+credentials able to travel in band, while the first rides SETUP, or the URL
+for peers that predate the SETUP token. Node-bound peer grants for direct sessions belong to
+[P2P](/quest/m2/p2p/peer-grant.md), their only consumer.
 
 ## Plan
 
 Decisions settled while planning, recorded so review does not relitigate them:
 
-- **Per-request boundary (2026-10-12).** Request tokens are an experimental
-  Rust interoperability hook with application-owned verification, retaining
-  renewal. They are not a complete authentication scheme or a relay feature.
-  Local session permission may admit an incoming request; grants received
-  from the peer may not. The shared acceptor queue distinguishes session and
-  request events with separate acceptance handles. This is an intentional
-  Rust API change, not an optional scope field on the existing acceptor.
-  Per-request relay integration, JS APIs, CLI, and bindings are deferred;
-  session AUTH work continues. Document the hook only in minimal API comments,
-  with no feature page or guide. The relay request-lease quest is related
-  future work, no longer required to complete this epic.
+- ✅ Decided 2026-10-15 (maintainer, #5148): **one kind of auth.** A token
+  is presented, verified by the acceptor through `requests()`, and earns a
+  grant with a lifetime. An AUTH stream's token lives for the session and
+  its grant joins the session scope. A moq-transport `AUTHORIZATION TOKEN`
+  on a request is the same kind of auth, scoped to that request: it admits
+  only that request, never joins the scope, and ends with it. A
+  SUBSCRIBE_UPDATE or REQUEST_UPDATE carrying a new token replaces it.
+  Per-request tokens are moq-transport's naive form and are not surfaced as
+  a separate API.
+- ✅ Decided 2026-10-19 (maintainer, closing
+  [#5927](https://github.com/moq-dev/moq/pull/5927)): **no per-request auth
+  on moq-lite.** Lite AUTH carries no ID and lite requests no `Auth` field,
+  so no request spends a byte on auth. moq-transport's per-request token
+  stays an acceptor-side mapping onto lite's model and never becomes a lite
+  wire feature.
+- ✅ Decided 2026-10-15 (maintainer, #5148), narrowed 2026-10-19 (#5927): a
+  request without its own token is admitted by the union of session-lifetime
+  auths only, which on moq-lite is every request. A moq-transport request
+  carrying a token is held to that token's grant, inside the scope or not,
+  and ends when the token does.
+- ✅ Decided 2026-10-15 (maintainer, #5148), revised 2026-10-19 (#5927): the
+  work lands in steps. Step 1 (#5148) is incoming only: request tokens
+  arrive on `requests()`, a moq-transport request is held to its token's
+  grant, an update's token replaces it, and no lite wire changes. Step 2,
+  lite requests naming an AUTH stream, is dropped; what it would have closed,
+  a request racing the token it relies on, landed as a presenter-side wait in
+  [#5992](https://github.com/moq-dev/moq/pull/5992). Step 3
+  sends outgoing request tokens on moq-transport through `Route::auth` as
+  `USE_VALUE` ([#5695](https://github.com/moq-dev/moq/pull/5695));
+  lite has nothing to send, since the token already sits in the union.
+- ✅ Decided 2026-10-15 (maintainer, #5148): `auth::Handle::authorize`
+  keeps its name and now means the connection credential's grant; the
+  session adds every grant it issued to an AUTH token itself.
+- ✅ Decided 2026-10-15 (maintainer, #5148): a typed (CAT etc.) or empty
+  request token is refused `NOT_SUPPORTED`. An AUTH token has no type, and
+  an empty one means the connection's own credential.
+- ✅ Decided 2026-10-15 (maintainer, #5148): moq-relay verifies request
+  tokens in band like any token; ending a request token's lease with its
+  request at the auth server stays in
+  [Request leases](/quest/m3/auth-request-lease.md).
+- ✅ Decided 2026-10-15 (maintainer, #5148): no cap on pending tokens. The
+  peer's credit bounds them: each AUTH token holds its stream open, and each
+  request token its request's slot, until answered or withdrawn.
 - **One AUTH stream per token, opened by whoever presents it.** Either side of
   a session may open one; the acceptor answers with the grant that token
   earns. A moq-net session opens one on both sides right after SETUP with an
-  empty token, meaning the credential the connection already presented (URL
-  `?jwt=`, mTLS, or nothing), so a publish-only client learns it may subscribe
+  empty token, meaning the credential the connection already presented (the
+  SETUP token, URL `?jwt=`, mTLS, or nothing), so a publish-only client learns it may subscribe
   to nothing and a relay learns which role its peer will ever play. This is
   also the answer to
   [moq-wg #1854](https://github.com/moq-wg/moq-transport/issues/1854): the
@@ -63,21 +95,24 @@ Decisions settled while planning, recorded so review does not relitigate them:
   grant type stays pattern-valued.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
   broadcast outside the union aborts the session with `Unauthorized`, naming
-  the path. The check runs against the grants in hand once the tokens the
-  library itself presented at setup are answered; a token the app adds later
-  is the app's to await before publishing what it unlocks. The origin is
+  the path. The check runs against the grants in hand once every token the
+  session presented is answered, setup, replayed, or app-added alike
+  ([#5992](https://github.com/moq-dev/moq/pull/5992)). The origin is
   untouched, so a broadcast shared across sessions (P2P hops, a cluster) is
   refused only where it is refused. Grant shrinkage cancels previously
   authorized work on this session without aborting it or deleting the shared
   origin; this is distinct from attempting a new unauthorized publication.
   Apps that want to decide themselves read the grant instead.
-- **Older peers keep the URL.** WebTransport negotiates the moq version as a
-  subprotocol of the same CONNECT request that carries the URL, so a client
-  cannot learn whether the peer speaks AUTH before the token has to be sent.
-  The client puts the connection credential in the URL as long as any
-  version it offers has no AUTH stream and omits it once the offered set is
-  AUTH-capable; extra tokens go in band and are simply absent on an old peer.
-  Nothing is refused and nothing is silent.
+- **The first token rides SETUP.** ✅ Decided 2026-10-19 (maintainer,
+  #5972): the connection credential goes in the client's SETUP (a
+  lite-07-wip SETUP parameter, moq-transport's AUTHORIZATION TOKEN option),
+  which the acceptor already reads before serving the session, so it costs
+  no round trip and a session's first requests wait on no AUTH. The URL is
+  fixed before the version is negotiated, so it carries the token as a
+  fallback while any offered version lacks the SETUP token. Extra tokens go
+  in band and are simply absent on an old peer. Nothing is refused and
+  nothing is silent. This replaces the earlier "always in the CONNECT
+  request" decision and its auth-header plan.
 - **Cluster peers keep mTLS.** A relay opens AUTH toward its peer with an empty
   token like any client; AUTH reports the grant actually admitted in each
   direction. The next mTLS scope quest can restrict or refuse it. A v1 endpoint
@@ -99,8 +134,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   SUBSCRIBE_OK. Rust is `moq_net::auth` with `auth::Grant`, `auth::Handle`,
   `auth::Token`, and `auth::Request`; JS mirrors as `connection.auth`.
 
-`Session::auth()` is additive, while the request-token hook intentionally
-changes the Rust acceptor API as described above. The relay derives the grant
+`Session::auth()` is additive. The relay derives the grant
 from the origin handles it already scopes. Decided 2026-10-05: wire
 work targets the wip lite version until the maintainer cuts it, never a
 published version in place, so AUTH lands in `moq-lite-07-wip` (or whichever
@@ -110,25 +144,22 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Required
 
-- [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
-  sent in band, unions their grants, and cancels only work that loses access
-- [Request tokens](/quest/m1/auth/request-token.md) - an experimental Rust
-  verifier hook confines a token's authority to its request and renews it
-- [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
-  refused up front and held to the grant through a gate its dispatcher owns
-- [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
-  reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
+- [Auth outlives its session](/quest/m1/auth/issuer.md) - one `auth::Handle` spans a connection's sessions, so a route's auth survives a reconnect
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
-- [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
-  the URL: a session starts on what the URL carried and its AUTH streams add
-  the rest, with the URL kept for peers without the AUTH stream
+- [Token in band](/quest/m1/auth/token-in-band.md) - extra credentials ride
+  AUTH streams: a session starts on the token its SETUP or URL carried and its
+  AUTH streams add the rest
 
 ## Related
 
-- [Request leases](/quest/m3/auth-request-lease.md) - deferred relay
-  integration, to revisit when a consumer needs per-request verification
+- [Request leases](/quest/m3/auth-request-lease.md) - deferred auth-server
+  accounting that ends a request token's lease with its request
+- [Request tokens beyond Rust](/quest/m3/request-token-surfaces.md) - JS, moq-ffi,
+  and moq-cli request-token APIs, when a consumer needs one
+- [Token on FETCH](/quest/m3/auth-token-fetch.md) - TRACK_STATUS and FETCH carry
+  and honor a request token. Parked until the maintainer decides whether to
+  reverse the standalone-FETCH decision and bring it into this epic
 - [#5107](https://github.com/moq-dev/moq/pull/5107) - landed request-token
   decoding, including session-fatal REQUEST_UPDATE decode failures
 - [#5106](https://github.com/moq-dev/moq/pull/5106) - landed setup extension
@@ -138,7 +169,7 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
   session with PROTOCOL_VIOLATION in Rust and JS
 - [JS fetch grant watch](https://github.com/moq-dev/moq/pull/5260) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
 
-- [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's node-bound credential,
+- [Peer grants](/quest/m2/p2p/peer-grant.md) - P2P's node-bound credential,
   built on this line's relay tokens
 
 - [#5269](https://github.com/moq-dev/moq/pull/5269) - explicit Lite AUTH NOT_SUPPORTED, including grant updates

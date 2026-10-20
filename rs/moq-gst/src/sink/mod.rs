@@ -6,6 +6,10 @@ mod pad;
 mod request_pad;
 mod session;
 mod timeline;
+mod wall;
+
+#[cfg(test)]
+pub(crate) use pad::h264_keyframe_au;
 
 /// The `moqsink` publish connection lifecycle, exposed as its read-only `status` property.
 pub use session::ConnectionStatus;

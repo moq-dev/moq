@@ -9,7 +9,7 @@
  *
  * @module
  */
-import { Connection } from "@moq/net";
+import { Connection, Error as MoqError } from "@moq/net";
 import type { CloseState } from "./contract";
 
 /** Dial `relay` with a refused token and resolve with how the session closed. */
@@ -33,16 +33,36 @@ export async function refused(relay: string): Promise<CloseState> {
 
 	// @moq/net only drives the handshake far enough for the relay to decide; the close it reports
 	// is not what this checks. It takes a supplied transport as already connected.
-	const admitted = transport.ready.then(() => Connection.connect({ url, transport })).then(
-		(session): CloseState => {
-			session.abort();
-			return { error: "the relay admitted a refused token" };
-		},
-		(err: unknown) => {
-			console.log(`connect failed: ${String(err)}`);
-			return closed;
-		},
-	);
+	const admitted = transport.ready
+		.then(() => Connection.connect({ url, transport }))
+		.then(
+			(session): CloseState => {
+				session.abort();
+				return { error: "the relay admitted a refused token" };
+			},
+			(err: unknown) => {
+				console.log(`connect failed: ${String(err)}`);
+				return closed;
+			},
+		);
 
 	return Promise.race([closed, admitted]);
+}
+
+/** A WebSocket refusal reaches the reconnecting handle as a terminal session error. */
+export async function refusedWebSocket(relay: string): Promise<CloseState> {
+	const url = new URL(relay);
+	url.protocol = "ws:";
+	url.searchParams.set("jwt", "refused");
+	const connection = new Connection({ url, share: false });
+	try {
+		// The default retry window is unlimited. An error is published only once
+		// Reload stops this URL, so observing it proves the rejection is terminal.
+		let error = connection.error.peek();
+		while (!error) error = await connection.error.changed();
+		if (!(error instanceof MoqError.Session)) return { error: String(error) };
+		return { closeCode: error.code, reason: error.message };
+	} finally {
+		connection.close();
+	}
 }

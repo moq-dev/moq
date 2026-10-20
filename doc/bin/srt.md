@@ -44,7 +44,8 @@ moq --connect https://relay.example.com/anon --broadcast event.hang import srt -
 ```
 
 `--latency` (default 500 ms) sets the SRT receive buffer and doubles as the
-export's jitter buffer, like `export ts --delay` in the [CLI](/bin/cli#export):
-a frame arriving later than that is dropped. A `--connect` URL needs a
+export's delay, like `export ts --delay` in the [CLI](/bin/cli#export), but no
+less than that flag's 1 s default: the send-ahead that fills a receiver's
+buffers comes out of the delay. A frame arriving later than that is dropped. A `--connect` URL needs a
 `streamid` query or a path; a listener bridges one `--broadcast` and ignores
 the stream id it is offered. The library is [`moq-srt`](https://docs.rs/moq-srt).

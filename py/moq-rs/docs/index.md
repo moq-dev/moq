@@ -61,8 +61,6 @@ asyncio.run(main())
    GroupProducer
    GroupRequest
    GroupDemand
-   AudioProducer
-   VideoProducer
 ```
 
 ## Subscribing
@@ -77,7 +75,32 @@ asyncio.run(main())
    BroadcastConsumer
    TrackConsumer
    GroupConsumer
-   AudioConsumer
+```
+
+## Native codecs
+
+```{eval-rst}
+.. currentmodule:: moq.audio
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   Producer
+   Encoder
+   Consumer
+```
+
+```{eval-rst}
+.. currentmodule:: moq.video
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   Producer
+   Encoder
+   Consumer
 ```
 
 ## Media
@@ -97,9 +120,10 @@ Every importer takes a broadcast; single-track imports choose a `Named` or `Requ
    TrackProducer
    TrackStreamProducer
    ContainerProducer
-   ContainerStreamProducer
-   ContainerConsumer
-   ContainerGroupConsumer
+   ContainerInit
+   Timebase
+   TrackConsumer
+   GroupConsumer
    Named
    Requested
    MediaFrame
@@ -122,6 +146,20 @@ broadcast, and producers advertise it in the catalog.
    StreamProducer
    SnapshotConsumer
    StreamConsumer
+   Timed
+```
+
+## Opaque data
+
+```{eval-rst}
+.. currentmodule:: moq.flate
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   SnapshotProducer
+   StreamProducer
 ```
 
 ## Origin and announcements
@@ -167,7 +205,6 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    media.Video
    media.VideoHint
    media.VideoProperties
-   VideoFrame
    VideoCodec
    VideoPixelFormat
    VideoEncoderInput
@@ -175,12 +212,9 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    VideoEncoderKind
    media.Dimensions
    media.Audio
-   AudioFrame
    AudioCodec
    media.AudioFormat
-   AudioDecoderOutput
    AudioEncoderInput
-   AudioEncoderOutput
    Subscription
    TrackInfo
    FetchGroupOptions

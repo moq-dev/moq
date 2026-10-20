@@ -23,7 +23,8 @@ export interface Established {
 
 	/**
 	 * Estimates measured by the peer, updated as PROBE messages arrive. Stays empty on
-	 * versions without PROBE. See {@link Stats} for what the local transport counts.
+	 * versions without PROBE. Observe it to request updates; `peek()` alone is passive.
+	 * See {@link Stats} for what the local transport counts.
 	 */
 	readonly probe: Getter<Probe>;
 
@@ -33,20 +34,14 @@ export interface Established {
 	 * MoQ Auth, each side presents its connection's credential right after setup.
 	 * Otherwise the grant stays undefined.
 	 */
-	readonly auth: Auth.Auth;
-
-	/**
-	 * Whether the relay supports broadcast discovery: announcing which broadcasts exist under a
-	 * prefix. When false, {@link announced} never yields, so a consumer must subscribe blind
-	 * rather than wait for an announcement. Set via `discovery` on the connect options.
-	 */
-	readonly discovery: boolean;
+	readonly auth: Auth.Handle;
 
 	/**
 	 * Subscribe to broadcast announcements matching `scope`, any pattern (`foo/**`
 	 * for a subtree, `room/* /chat` for each room's chat, default `**`). Paths are
 	 * relative to the session; captures report what the scope's wildcards stood for.
-	 * Hidden routes are left out unless `options.hidden` opts in.
+	 * Hidden routes are left out unless `options.hidden` opts in. A peer without
+	 * discovery refuses or resets the stream.
 	 */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
 
@@ -58,7 +53,12 @@ export interface Established {
 	 */
 	stats(): Promise<Stats>;
 
-	/** Withdraw announcements and wait up to one second for delivery, then close the session. */
+	/**
+	 * Withdraw announcements and drain for up to one second, then close the session.
+	 *
+	 * Explicit lite-07-wip waits for the subscriber to receive finished tails; older
+	 * Lite versions wait only for transport ACKs. IETF media streams are not drained.
+	 */
 	close(): Promise<void>;
 
 	/** End the session immediately without waiting for delivery. */

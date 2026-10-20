@@ -1,10 +1,12 @@
+import type * as Epoch from "../epoch.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Order } from "../track.ts";
+import { supported as epochSupported } from "./epoch.ts";
 import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { type MessageLocation, Parameters } from "./parameters.ts";
+import { type MessageLocation, MSG_PARAM_FORWARD, MSG_PARAM_SUBSCRIBER_PRIORITY, Parameters } from "./parameters.ts";
 import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -62,6 +64,8 @@ export class Subscribe {
 	trackNamespace: Path.Valid;
 	trackName: string;
 	subscriberPriority: number;
+	/** Subscriber max age in milliseconds (MoQ Timestamp), if negotiated. */
+	maxAge?: number;
 
 	/** The order the publisher is asked to deliver groups in (GROUP_ORDER). Defaults to descending. */
 	groupOrder: Order;
@@ -81,39 +85,57 @@ export class Subscribe {
 	/** Whether the request carried a Range Filter, which we refuse. Never encoded. */
 	rangeFilters: boolean;
 
+	/** Whether RENDEZVOUS_TIMEOUT requested a wait; never encoded. */
+	rendezvous: boolean;
+
+	/**
+	 * The publisher instance the subscriber expects (EPOCH, MoQ Epoch, draft-17+). Only a
+	 * session that negotiated the extension names one; the session refuses one otherwise.
+	 */
+	epoch?: Epoch.Valid;
+
 	constructor({
 		requestId,
 		trackNamespace,
 		trackName,
 		subscriberPriority,
+		maxAge,
 		groupOrder,
 		filter,
 		fill,
 		propertiesWanted,
 		forward,
 		rangeFilters,
+		rendezvous,
+		epoch,
 	}: {
 		requestId: bigint;
 		trackNamespace: Path.Valid;
 		trackName: string;
 		subscriberPriority: number;
+		maxAge?: number;
 		groupOrder?: Order;
 		filter?: Filter.Filter;
 		fill?: Filter.Fill;
 		propertiesWanted?: boolean;
 		forward?: boolean;
 		rangeFilters?: boolean;
+		rendezvous?: boolean;
+		epoch?: Epoch.Valid;
 	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 		this.subscriberPriority = subscriberPriority;
+		this.maxAge = maxAge;
 		this.groupOrder = groupOrder ?? "descending";
 		this.filter = filter ?? { kind: "unfiltered" };
 		this.fill = fill;
 		this.propertiesWanted = propertiesWanted ?? true;
 		this.forward = forward ?? true;
 		this.rangeFilters = rangeFilters ?? false;
+		this.rendezvous = rendezvous ?? false;
+		this.epoch = epoch;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -129,11 +151,14 @@ export class Subscribe {
 			await w.u8(encodeGroupOrder(this.groupOrder));
 			await w.bool(this.forward);
 			await w.write(Filter.encode(this.filter, version));
-			await w.u53(0); // no parameters
+			const params = new Parameters();
+			params.maxAge = this.maxAge;
+			await params.encode(w, version);
 		} else {
 			// v15+: fields moved into parameters
 			const params = new Parameters();
 			params.subscriberPriority = this.subscriberPriority;
+			params.maxAge = this.maxAge;
 			params.groupOrder = encodeGroupOrder(this.groupOrder);
 			params.forward = this.forward;
 			params.subscriptionFilter = this.filter;
@@ -150,6 +175,8 @@ export class Subscribe {
 					params.includeProperties = false;
 				}
 			}
+			// The same for EPOCH, which exists from draft-17.
+			if (epochSupported(version)) params.epoch = this.epoch;
 
 			await params.encode(w, version);
 		}
@@ -168,8 +195,7 @@ export class Subscribe {
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (read and ignore)
 		}
-		const trackNamespace = await Namespace.decode(r);
-		const trackName = await r.string();
+		const { namespace: trackNamespace, name: trackName } = await Namespace.decodeTrack(r);
 
 		if (version === Version.DRAFT_14) {
 			const subscriberPriority = await r.u8();
@@ -179,10 +205,11 @@ export class Subscribe {
 			const forward = await r.bool();
 			const filter = await Filter.decodeInline(r);
 
-			await Parameters.decode(r, version); // ignore parameters
+			const params = await Parameters.decode(r, version, "subscribe");
 
 			return new Subscribe({
 				requestId,
+				maxAge: params.maxAge,
 				trackNamespace,
 				trackName,
 				subscriberPriority,
@@ -217,6 +244,7 @@ export class Subscribe {
 		const fill = rawFill !== undefined ? Filter.decodeFill(rawFill, version) : undefined;
 
 		return new Subscribe({
+			maxAge: params.maxAge,
 			requestId,
 			trackNamespace,
 			trackName,
@@ -228,6 +256,8 @@ export class Subscribe {
 			propertiesWanted: params.includeProperties ?? true,
 			forward: params.forward ?? true,
 			rangeFilters: params.rangeFilters,
+			rendezvous: (params.vars.get(0x04n) ?? 0n) > 0n,
+			epoch: params.epoch,
 		});
 	}
 }
@@ -400,41 +430,49 @@ export class SubscribeUpdate {
 
 	requestId: bigint;
 
-	// This update's own Request ID, the first field on drafts 14 to 16.
-	#ownRequestId?: bigint;
+	/** This update's own Request ID, the first field on drafts 14 to 16, which their answer names. */
+	ownRequestId?: bigint;
 
-	constructor({ requestId, ownRequestId }: { requestId: bigint; ownRequestId?: bigint }) {
+	/** What the update changes. Draft 14's fixed SUBSCRIBER_PRIORITY and FORWARD fields land here too. */
+	parameters: Parameters;
+
+	constructor({
+		requestId,
+		ownRequestId,
+		parameters = new Parameters(),
+	}: { requestId: bigint; ownRequestId?: bigint; parameters?: Parameters }) {
 		this.requestId = requestId;
-		this.#ownRequestId = ownRequestId;
+		this.ownRequestId = ownRequestId;
+		this.parameters = parameters;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		// Drafts 14 to 16 send a new Request ID and then the request being updated.
 		// Later drafts dropped the new id, so the one field left is the target.
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			if (this.#ownRequestId === undefined) throw new Error("ownRequestId required for draft14-16");
-			await w.u62(this.#ownRequestId);
+			if (this.ownRequestId === undefined) throw new Error("ownRequestId required for draft14-16");
+			await w.u62(this.ownRequestId);
 			await w.u62(this.requestId);
 			if (version === Version.DRAFT_14) {
+				// Every field is mandatory and the start must not move. Our subscriptions start at
+				// {0, 0} open ended (`joinFilter`), so zeroes repeat their bounds.
 				await w.u62(0n); // start_group
 				await w.u62(0n); // start_object
 				await w.u62(0n); // end_group
-				await w.u8(128); // subscriber_priority
-				await w.bool(true); // forward
-				await w.u53(0); // no parameters
+				await w.u8(this.parameters.subscriberPriority ?? 128);
+				await w.bool(this.parameters.forward ?? true);
+				await this.parameters.encode(w, version, [MSG_PARAM_SUBSCRIBER_PRIORITY, MSG_PARAM_FORWARD]);
 			} else {
-				const params = new Parameters();
-				await params.encode(w, version);
+				await this.parameters.encode(w, version);
 			}
 		} else {
-			if (this.#ownRequestId !== undefined) throw new Error("ownRequestId is only valid on draft14-16");
+			if (this.ownRequestId !== undefined) throw new Error("ownRequestId is only valid on draft14-16");
 			// v17+: REQUEST_UPDATE
 			await w.u62(this.requestId);
 			if (version === Version.DRAFT_17) {
 				await w.u62(0n); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 			}
-			const params = new Parameters();
-			await params.encode(w, version);
+			await this.parameters.encode(w, version);
 		}
 	}
 
@@ -450,17 +488,22 @@ export class SubscribeUpdate {
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			const ownRequestId = await r.u62();
 			const requestId = await r.u62();
-			if (version === Version.DRAFT_14) {
-				await r.u62(); // start_group
-				await r.u62(); // start_object
-				await r.u62(); // end_group
-				await r.u8(); // subscriber_priority
-				await r.bool(); // forward
-				await Parameters.decode(r, version); // parameters
-			} else {
-				await Parameters.decode(r, version, "subscribe-update");
+			if (version !== Version.DRAFT_14) {
+				const parameters = await Parameters.decode(r, version, "subscribe-update");
+				return new SubscribeUpdate({ requestId, ownRequestId, parameters });
 			}
-			return new SubscribeUpdate({ requestId, ownRequestId });
+			// The range is left as it is: every field is mandatory, so a narrowed range cannot be
+			// told from a repeated one, and draft 14 accepts extra objects as the worst outcome
+			// of an update.
+			await r.u62(); // start_group
+			await r.u62(); // start_object
+			await r.u62(); // end_group
+			const priority = await r.u8();
+			const forward = await r.bool();
+			const parameters = await Parameters.decode(r, version, "subscribe-update");
+			parameters.subscriberPriority = priority;
+			parameters.forward = forward;
+			return new SubscribeUpdate({ requestId, ownRequestId, parameters });
 		}
 
 		// v17+: REQUEST_UPDATE. Request ID is the existing request.
@@ -468,8 +511,8 @@ export class SubscribeUpdate {
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
-		await Parameters.decode(r, version, "subscribe-update");
-		return new SubscribeUpdate({ requestId });
+		const parameters = await Parameters.decode(r, version, "subscribe-update");
+		return new SubscribeUpdate({ requestId, parameters });
 	}
 }
 

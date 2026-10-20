@@ -3,8 +3,9 @@
 use std::fmt;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use moq_net::time::Instant;
 use rand::RngExt;
 
 use moq_mux::catalog::hang::CatalogExt;
@@ -792,21 +793,23 @@ trait Demand {
 
 impl Demand for moq_net::track::Demand {
 	async fn used(&mut self) -> bool {
-		match moq_net::track::Demand::used(self).await {
-			Ok(()) => true,
-			Err(err) => {
-				log_track_ended(err);
-				false
-			}
-		}
+		until_wanted(self, true).await
 	}
 
 	async fn unused(&mut self) -> bool {
-		match moq_net::track::Demand::unused(self).await {
-			Ok(()) => true,
+		until_wanted(self, false).await
+	}
+}
+
+/// Wait until some subscriber wants the track, or none does.
+async fn until_wanted(demand: &mut moq_net::track::Demand, wanted: bool) -> bool {
+	loop {
+		match demand.wanted_changed().await {
+			Ok(next) if next.is_some() == wanted => return true,
+			Ok(_) => {}
 			Err(err) => {
 				log_track_ended(err);
-				false
+				return false;
 			}
 		}
 	}
@@ -1187,9 +1190,8 @@ impl Supervisor {
 	}
 }
 
-/// A dropped or closed track is the normal end of a publish; any other cause is
-/// a real abort (e.g. a transport reset) worth surfacing rather than treating as
-/// a clean exit.
+/// An application dropping or closing its producer ends publishing normally;
+/// a specific abort (such as a transport reset) stays visible in diagnostics.
 fn log_track_ended(err: moq_net::Error) {
 	if matches!(err, moq_net::Error::Dropped | moq_net::Error::Closed) {
 		tracing::debug!("audio track no longer announced; stopping capture");
@@ -2108,7 +2110,7 @@ mod tests {
 	/// the broadcast clock's own correlation, so the published timestamp is exactly that
 	/// instant however late the read happens.
 	mod clock {
-		use std::time::{Duration, Instant, SystemTime};
+		use std::time::{Duration, SystemTime};
 
 		use super::*;
 
@@ -2193,7 +2195,10 @@ mod tests {
 
 			async fn read_new(&self, track: &mut Track, seen: &[u64]) -> u64 {
 				loop {
-					let packet = track.read().await.unwrap().expect("a published packet");
+					let Some(moq_mux::container::Read::Frame { frame: packet, .. }) = track.read().await.unwrap()
+					else {
+						continue;
+					};
 					let timestamp = u64::try_from(packet.timestamp.as_micros()).unwrap();
 					if !seen.contains(&timestamp) {
 						return timestamp;
@@ -2407,17 +2412,16 @@ mod tests {
 			let (samples, input) = stream(None);
 			let mut fixture = Fixture::start(Duration::from_secs(1), wall, [Open::Stream(input)]);
 			let advertised = fixture.catalog.snapshot().clock;
-			assert_eq!(advertised, Some(fixture.clock.wall()));
+			assert_eq!(advertised, fixture.clock.wall());
 
 			let mut track = fixture.subscribe().await;
 			let published = fixture.deliver(&samples, &mut track, &[]).await;
 
-			// The catalog maps to walls at millisecond precision.
 			let mapped = advertised
 				.unwrap()
 				.wall_clock(moq_net::Timestamp::from_micros(published).unwrap())
 				.unwrap();
-			assert_eq!(mapped, wall + Duration::from_millis(published / 1000));
+			assert_eq!(mapped, wall + Duration::from_micros(published));
 			assert_eq!(fixture.catalog.snapshot().clock, advertised);
 			fixture.finish().await;
 		}
@@ -2439,21 +2443,21 @@ mod tests {
 			for samples in [&first, &second] {
 				let mut track = fixture.subscribe().await;
 				live.push(fixture.deliver(samples, &mut track, &live).await);
-				// The rendition, and with it the archive, registers once the input is discovered.
-				if timeline.is_none() {
+				drop(track);
+				wait_for(&mut fixture.publication, Status::Waiting).await;
+				// The second run's first group closes the unhinted timeline's first record.
+				if timeline.is_none() && live.len() > 1 {
 					let section = fixture
 						.catalog
 						.snapshot()
 						.archive
-						.expect("the audio track enrolls an archive");
+						.expect("the audio track declares its archive after the run closes");
 					timeline = Some(
 						moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section, "audio")
 							.await
 							.unwrap(),
 					);
 				}
-				drop(track);
-				wait_for(&mut fixture.publication, Status::Waiting).await;
 				// Idle past the minimum segment, so each run is archived as its own record.
 				tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
 			}

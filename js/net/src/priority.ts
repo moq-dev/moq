@@ -35,6 +35,7 @@ export interface Rank {
 	position?: number;
 }
 
+// private: plumbing
 /**
  * The transport send order for a group, where HIGHER values are transmitted first.
  *
@@ -56,6 +57,7 @@ function clamp(value: number, max: number): number {
 	return Math.min(Math.max(Math.trunc(value), 0), max);
 }
 
+// private: plumbing
 /**
  * Ranks one subscription's group streams against each other, and re-ranks them whenever the
  * set changes or the subscription is updated.
@@ -72,7 +74,7 @@ function clamp(value: number, max: number): number {
  */
 export class Priority {
 	#track: track.Subscriber;
-	#streams = new Map<Writer, number>();
+	#streams = new Map<Writer, { sequence: number; object: number }>();
 	#dispose: Dispose;
 	#closed = false;
 
@@ -82,18 +84,18 @@ export class Priority {
 		this.#dispose = track.subscription.subscribe(() => this.#rerank());
 	}
 
-	/** The send order for a group at `sequence`, whether or not it has a stream yet. */
-	rank(sequence: number): number {
+	/** The send order for a stream starting at this group and object, before it opens. */
+	rank(sequence: number, object: number): number {
 		const subscription = this.#track.subscription.peek();
 		return sendOrder({
 			priority: subscription?.priority ?? 0,
-			position: this.#position(sequence, subscription?.order),
+			position: this.#position(sequence, object, subscription?.order),
 		});
 	}
 
-	/** Rank a group's stream now, and again whenever the ranking changes, until {@link remove}. */
-	add(stream: Writer, sequence: number) {
-		this.#streams.set(stream, sequence);
+	/** Rank a stream by its first object now and after ranking changes, until {@link remove}. */
+	add(stream: Writer, sequence: number, object: number) {
+		this.#streams.set(stream, { sequence, object });
 
 		// Also covers the stream itself: opening one can block on transport capacity, so an
 		// update that landed while it did predates this registration.
@@ -123,13 +125,19 @@ export class Priority {
 		if (this.#streams.size === 0) this.#dispose();
 	}
 
-	// How many of this subscription's groups in flight should be sent before `sequence`.
-	// Sequences are unique within a subscription, so a group already registered never counts
-	// itself.
-	#position(sequence: number, order: track.Order = "descending"): number {
+	// Earlier objects win within one group, so a fill precedes its live rest. Group order
+	// still dominates, and identical starts tie without counting themselves.
+	#position(sequence: number, object: number, order: track.Order = "descending"): number {
 		let ahead = 0;
 		for (const other of this.#streams.values()) {
-			if (order === "ascending" ? other < sequence : other > sequence) ahead++;
+			if (
+				other.sequence === sequence
+					? other.object < object
+					: order === "ascending"
+						? other.sequence < sequence
+						: other.sequence > sequence
+			)
+				ahead++;
 		}
 		return ahead;
 	}
@@ -137,8 +145,10 @@ export class Priority {
 	#rerank() {
 		const subscription = this.#track.subscription.peek();
 		const priority = subscription?.priority ?? 0;
-		for (const [stream, sequence] of this.#streams) {
-			stream.setPriority(sendOrder({ priority, position: this.#position(sequence, subscription?.order) }));
+		for (const [stream, { sequence, object }] of this.#streams) {
+			stream.setPriority(
+				sendOrder({ priority, position: this.#position(sequence, object, subscription?.order) }),
+			);
 		}
 	}
 }

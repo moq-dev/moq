@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { type Micro, Milli } from "@moq/clock";
 import { Derived, Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Video from "@moq/video";
 import type { Decoder } from "./decoder";
@@ -50,7 +50,7 @@ export class Renderer {
 		// The most recently rendered frame, updated after each rAF paint.
 		frame: Getter<VideoFrame | undefined>;
 		// The media timestamp of the most recently rendered frame.
-		timestamp: Getter<Time.Milli | undefined>;
+		timestamp: Getter<Milli | undefined>;
 		// Whether the canvas should currently download per the configured distance and tab focus.
 		visible: Getter<boolean>;
 		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererError}.
@@ -79,9 +79,7 @@ export class Renderer {
 		const frame = this.#video.out.frame;
 		this.out = readonlys({
 			frame,
-			timestamp: new Derived([frame], (frame) =>
-				frame ? Time.Milli.fromMicro(frame.timestamp as Time.Micro) : undefined,
-			),
+			timestamp: new Derived([frame], (frame) => (frame ? Milli.fromMicro(frame.timestamp as Micro) : undefined)),
 			visible: this.#visible,
 			error: this.#video.out.error,
 		});

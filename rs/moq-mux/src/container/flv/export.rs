@@ -34,6 +34,22 @@ use super::{
 use crate::catalog::Stream;
 use crate::container::{ExportSource, Frame};
 
+/// Before the header, unbind every track the catalog no longer lists (removed, or disabled),
+/// so the header declares only what the snapshot offers. A single-track stream also follows the
+/// best rendition, so a snapshot that lacks it doesn't fix the pick. Unbinding unsubscribes the
+/// track; nothing was emitted from it yet.
+fn unbind<C>(tracks: &mut Vec<FlvTrack>, renditions: &[(&String, &C)], multitrack: bool) {
+	if multitrack {
+		tracks.retain(|track| renditions.iter().any(|(name, _)| **name == track.name));
+	} else if tracks.first().map(|track| &track.name) != renditions.first().map(|(name, _)| *name) {
+		tracks.clear();
+	}
+	// Ids follow bind order, so close the gaps an unbind left.
+	for (id, track) in tracks.iter_mut().enumerate() {
+		track.track_id = id as u8;
+	}
+}
+
 /// Which FLV payload shape a bound track is muxed as: a legacy CodecID
 /// (`Avc`/`Aac`) or an enhanced-RTMP FourCC codec.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -131,7 +147,7 @@ struct FlvTrack {
 	source: ExportSource,
 	pending: Option<crate::jitter::Arrival<Frame>>,
 	/// When the source was last empty, bounding the next frame's arrival.
-	empty: web_async::time::Instant,
+	empty: moq_clock::Instant,
 	finished: bool,
 	/// The FLV payload shape (legacy CodecID vs enhanced FourCC) to mux this
 	/// track as, fixed from its catalog codec when it's bound.
@@ -193,7 +209,8 @@ impl<S: Stream> Export<S> {
 
 	/// Release frames a fixed delay after their decode time, dropping late frames.
 	///
-	/// The same delay bounds each source's staleness. Zero (the default) releases each frame as
+	/// A source whose clock runs further off ours than the output's may follow fails the export
+	/// once it has used half the delay. The same delay bounds each source's staleness. Zero (the default) releases each frame as
 	/// soon as it is read and drops none as late, but a stalled group is still skipped once a
 	/// newer one is ready.
 	pub fn with_delay(mut self, delay: std::time::Duration) -> Self {
@@ -286,7 +303,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	#[cfg(test)]
-	pub(super) fn next_deadline(&self) -> Option<web_async::time::Instant> {
+	pub(super) fn next_deadline(&self) -> Option<moq_clock::Instant> {
 		self.jitter.next_deadline()
 	}
 
@@ -332,7 +349,7 @@ impl<S: Stream> Export<S> {
 								break;
 							}
 							Poll::Pending => {
-								track.empty = web_async::time::Instant::now();
+								track.empty = moq_clock::now();
 								break;
 							}
 						};
@@ -341,11 +358,13 @@ impl<S: Stream> Export<S> {
 						}
 						crate::jitter::Arrival {
 							arrived: track.empty,
-							read: web_async::time::Instant::now(),
+							read: moq_clock::now(),
 							decode: frame.timestamp,
 							restart: track.source.markers(),
 							skip: track.source.skips(),
+							cut: track.source.cuts(),
 							sync: kind == 1 || frame.keyframe,
+							leading: false,
 							item: frame,
 						}
 					};
@@ -362,7 +381,9 @@ impl<S: Stream> Export<S> {
 						read,
 						restart,
 						skip,
+						cut,
 						sync,
+						leading,
 						item,
 						..
 					} = arrival;
@@ -374,7 +395,9 @@ impl<S: Stream> Export<S> {
 							decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?,
 							restart,
 							skip,
+							cut,
 							sync,
+							leading,
 							item: (item, timestamp),
 						},
 					)? == crate::jitter::Push::Late
@@ -393,7 +416,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	fn update_catalog(&mut self, mut catalog: Catalog) -> anyhow::Result<()> {
-		self.source.retain_valid_media(&mut catalog);
+		self.source.retain_selectable(&mut catalog);
 
 		// A single-track FLV stream binds one rendition of each kind; multitrack
 		// binds them all.
@@ -433,15 +456,7 @@ impl<S: Stream> Export<S> {
 			ranked
 		};
 
-		// Before the header, a single-track stream follows the best rendition, so a
-		// snapshot that lacks it doesn't fix the pick. Dropping the bound track
-		// unsubscribes it; nothing was emitted from it yet.
-		if !self.multitrack
-			&& let Some((best, _)) = renditions.first()
-			&& self.video.first().is_some_and(|t| &t.name != *best)
-		{
-			self.video.clear();
-		}
+		unbind(&mut self.video, &renditions, self.multitrack);
 
 		for (name, config) in renditions {
 			if !self.multitrack && !self.video.is_empty() {
@@ -467,7 +482,7 @@ impl<S: Stream> Export<S> {
 				track_id,
 				source,
 				pending: None,
-				empty: web_async::time::Instant::now(),
+				empty: moq_clock::now(),
 				finished: false,
 				flavor,
 				fallback_description,
@@ -492,15 +507,7 @@ impl<S: Stream> Export<S> {
 			ranked
 		};
 
-		// Before the header, a single-track stream follows the best rendition, so a
-		// snapshot that lacks it doesn't fix the pick. Dropping the bound track
-		// unsubscribes it; nothing was emitted from it yet.
-		if !self.multitrack
-			&& let Some((best, _)) = renditions.first()
-			&& self.audio.first().is_some_and(|t| &t.name != *best)
-		{
-			self.audio.clear();
-		}
+		unbind(&mut self.audio, &renditions, self.multitrack);
 
 		for (name, config) in renditions {
 			if !self.multitrack && !self.audio.is_empty() {
@@ -521,7 +528,7 @@ impl<S: Stream> Export<S> {
 				track_id,
 				source,
 				pending: None,
-				empty: web_async::time::Instant::now(),
+				empty: moq_clock::now(),
 				finished: false,
 				flavor,
 				fallback_description: None,

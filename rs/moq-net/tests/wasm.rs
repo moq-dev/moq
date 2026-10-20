@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! wasm32 model-layer tests.
 //!
 //! moq-net's model layer (Origin/Broadcast/Track/Group/Frame) is transport-

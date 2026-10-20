@@ -51,6 +51,144 @@ pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
 	}
 }
 
+/// Run a background operation before its terminal callback and resource cleanup.
+pub async fn run<T>(future: impl std::future::Future<Output = Result<T, Error>>) -> Result<T, Error> {
+	moq_tokio::panic::isolate(future).await.unwrap_or(Err(Error::Panic))
+}
+
+/// Completion of an owned background task, shared by the object's host operations.
+#[derive(Clone, Default)]
+pub struct Background {
+	result: Option<kio::Consumer<Option<Result<(), Error>>>>,
+}
+
+impl Background {
+	/// Spawn an owned operation and retain its completion.
+	pub fn new(future: impl std::future::Future<Output = Result<(), Error>> + Send + 'static) -> Self {
+		let result = kio::Producer::new(None);
+		let receiver = result.consume();
+		RUNTIME.spawn(async move {
+			let completed = run(future).await;
+			*result
+				.write()
+				.unwrap_or_else(|_| unreachable!("only the background task closes its completion")) = Some(completed);
+		});
+		Self { result: Some(receiver) }
+	}
+
+	/// Own a model driver until its completion has been reported.
+	pub fn driver(mut driver: impl moq_net::time::Driver + Send + 'static) -> Self {
+		let result = kio::Producer::new(None);
+		let receiver = result.consume();
+		RUNTIME.spawn(async move {
+			// Keep the driver outside the unwind, so its channels close after panic publication.
+			let completed = run(async {
+				match moq_net::time::run(Borrowed(&mut driver)).await {
+					moq_net::Error::Closed => Ok(()),
+					error => Err(error.into()),
+				}
+			})
+			.await;
+			if matches!(&completed, Err(Error::Panic)) {
+				*result
+					.write()
+					.unwrap_or_else(|_| unreachable!("only the task closes its completion")) = Some(completed.clone());
+			}
+			let completed = run(async move {
+				drop(driver);
+				completed
+			})
+			.await;
+			*result
+				.write()
+				.unwrap_or_else(|_| unreachable!("only the background task closes its completion")) = Some(completed);
+		});
+		Self { result: Some(receiver) }
+	}
+
+	/// Return a completed background failure, if any.
+	pub fn check(&self) -> Result<(), Error> {
+		self.result
+			.as_ref()
+			.map(|result| result.read().clone().unwrap_or(Ok(())))
+			.unwrap_or(Ok(()))
+	}
+
+	fn poll_finished(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
+		let Some(result) = &self.result else {
+			return std::task::Poll::Ready(Ok(()));
+		};
+		match std::task::ready!(result.poll(waiter, |state| match &**state {
+			Some(result) => std::task::Poll::Ready(result.clone()),
+			None => std::task::Poll::Pending,
+		})) {
+			Ok(result) => std::task::Poll::Ready(result),
+			Err(_) => std::task::Poll::Ready(Err(Error::Panic)),
+		}
+	}
+
+	/// Wait until the background operation finishes and return its result.
+	pub async fn finished(&self) -> Result<(), Error> {
+		kio::wait(|waiter| self.poll_finished(waiter)).await
+	}
+
+	/// Fail an operation when its owned background task fails.
+	pub async fn watch<T>(&self, future: impl std::future::Future<Output = Result<T, Error>>) -> Result<T, Error> {
+		self.check()?;
+		if self.result.is_none() {
+			return future.await;
+		}
+		tokio::pin!(future);
+		let result = tokio::select! {
+			biased;
+			result = self.finished() => { result?; future.await }
+			result = &mut future => result,
+		};
+		self.check()?;
+		result
+	}
+}
+
+#[cfg(test)]
+pub(crate) fn panicking_origin() -> (moq_net::origin::Producer, Background, kio::Producer<bool>) {
+	struct Driver {
+		inner: moq_net::origin::Driver,
+		failed: kio::Consumer<bool>,
+	}
+	impl moq_net::time::Driver for Driver {
+		fn poll(
+			&mut self,
+			now: moq_net::time::Instant,
+			waiter: &kio::Waiter,
+		) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+			let _ = self.failed.poll(waiter, |state| {
+				assert!(!**state, "injected origin driver panic");
+				std::task::Poll::<()>::Pending
+			});
+			self.inner.poll(now, waiter)
+		}
+	}
+	let (origin, inner) = moq_net::origin::Producer::new(Default::default());
+	let failed = kio::Producer::new(false);
+	let driver = Background::driver(Driver {
+		inner,
+		failed: failed.consume(),
+	});
+	(origin, driver, failed)
+}
+
+struct Borrowed<'a, D>(&'a mut D);
+
+impl<D: moq_net::time::Driver> moq_net::time::Driver for Borrowed<'_, D> {
+	fn poll(
+		&mut self,
+		now: moq_net::time::Instant,
+		waiter: &kio::Waiter,
+	) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+		self.0.poll(now, waiter)
+	}
+}
+
 /// Wrapper for C callback functions with user data.
 ///
 /// Stores a function pointer and user data pointer to call C callbacks
@@ -318,4 +456,90 @@ pub unsafe fn parse_slice<'a>(data: *const u8, size: usize) -> Result<&'a [u8], 
 
 	let data = unsafe { std::slice::from_raw_parts(data, size) };
 	Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+
+	#[tokio::test]
+	async fn a_driver_teardown_panic_reaches_its_owner() {
+		struct Driver;
+		impl moq_net::time::Driver for Driver {
+			fn poll(
+				&mut self,
+				_: moq_net::time::Instant,
+				_: &kio::Waiter,
+			) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+				Err(moq_net::Error::Closed)
+			}
+		}
+		impl Drop for Driver {
+			fn drop(&mut self) {
+				panic!("injected driver teardown panic");
+			}
+		}
+		let driver = crate::ffi::Background::driver(Driver);
+		assert!(matches!(driver.finished().await, Err(Error::Panic)));
+	}
+	use super::*;
+
+	#[tokio::test]
+	async fn an_owned_driver_panic_wins_over_its_dropped_channels() {
+		let driver = Background::new(async { panic!("injected origin driver panic") });
+		assert!(matches!(
+			driver.watch(std::future::pending::<Result<(), Error>>()).await,
+			Err(Error::Panic)
+		));
+		assert!(matches!(
+			driver
+				.watch(async { Err::<(), _>(moq_net::Error::Cancel.into()) })
+				.await,
+			Err(Error::Panic)
+		));
+	}
+
+	struct PanickingDriver {
+		dropped: Option<tokio::sync::oneshot::Sender<()>>,
+		observed: std::sync::mpsc::Receiver<()>,
+	}
+
+	impl moq_net::time::Driver for PanickingDriver {
+		fn poll(
+			&mut self,
+			_: moq_net::time::Instant,
+			_: &kio::Waiter,
+		) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+			panic!("injected driver poll panic");
+		}
+	}
+
+	impl Drop for PanickingDriver {
+		fn drop(&mut self) {
+			let _ = self.dropped.take().unwrap().send(());
+			// Hold teardown until the foreign host has classified the dropped channel.
+			let _ = self.observed.recv();
+		}
+	}
+
+	#[tokio::test]
+	async fn a_driver_panic_is_recorded_before_teardown_wakes_the_host() {
+		let (dropped, closed) = tokio::sync::oneshot::channel();
+		let (observed, ack) = std::sync::mpsc::channel();
+		let driver = Background::driver(PanickingDriver {
+			dropped: Some(dropped),
+			observed: ack,
+		});
+		let result = driver
+			.watch(async {
+				let _ = closed.await;
+				Err::<(), _>(moq_net::Error::Cancel.into())
+			})
+			.await;
+		let _ = observed.send(());
+		assert!(matches!(driver.finished().await, Err(Error::Panic)));
+		assert!(
+			matches!(result, Err(Error::Panic)),
+			"host saw teardown before panic: {result:?}"
+		);
+	}
 }

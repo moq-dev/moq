@@ -15,6 +15,8 @@ const PARAM_ROLE: u64 = 0x3;
 const PARAM_COST: u64 = 0x4;
 /// Setup Parameter id for the endpoint's Hop ID.
 const PARAM_HOP: u64 = 0x5;
+/// Setup Parameter id offering the `ietf` extension (draft-lcurley-moq-ietf): "IETF" in ASCII.
+const PARAM_IETF: u64 = 0x4945_5446;
 
 /// The cost of crossing a link that neither end priced.
 ///
@@ -163,8 +165,8 @@ pub struct Setup {
 	/// qmux over TCP/TLS, unix sockets), with `?` and the URI query appended when
 	/// there is one. Sent only by the client; a server never sends one and a relay
 	/// never forwards it. `None` on URI-carrying bindings, where it would be a
-	/// protocol violation. An empty path means the same thing as `None`; both are
-	/// on the wire so a client need not special-case the root.
+	/// protocol violation. On an in-band binding an empty path selects the root, like `None`;
+	/// a URI binding forbids even an empty Path parameter.
 	pub path: Option<String>,
 	/// The single direction the client intends to use, or `None` for a bidirectional
 	/// session. `None` is sent as the absence of the parameter, which is also how a
@@ -182,44 +184,16 @@ pub struct Setup {
 	/// applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
 	pub hop: Option<crate::Hop>,
+	/// Whether this endpoint offers the `ietf` extension (lite-07+). Negotiated only when
+	/// both endpoints offer it.
+	pub ietf: bool,
 }
 
 impl Message for Setup {
 	const MAX_SIZE: usize = crate::setup::MAX_SETUP_SIZE;
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		if !version.has_setup_stream() {
-			return Err(DecodeError::Version);
-		}
-
-		let params = Parameters::decode(r, version)?;
-		let probe = params
-			.get_varint(PARAM_PROBE, version)?
-			.map(ProbeLevel::from_code)
-			.unwrap_or_default();
-		let path = match params.get_bytes(PARAM_PATH) {
-			Some(bytes) => Some(
-				std::str::from_utf8(bytes)
-					.map_err(|_| DecodeError::InvalidValue)?
-					.to_string(),
-			),
-			None => None,
-		};
-		let role = params.get_varint(PARAM_ROLE, version)?.and_then(Role::from_code);
-		let cost = params.get_varint(PARAM_COST, version)?;
-		// 0 is legal on the wire but carries no identity (it can't be excluded),
-		// so it decodes as "not declared" rather than an error.
-		let hop = params
-			.get_varint(PARAM_HOP, version)?
-			.and_then(|id| crate::Hop::new(id).ok());
-
-		Ok(Self {
-			probe,
-			path,
-			role,
-			cost,
-			hop,
-		})
+		ReceivedSetup::decode_msg(r, version).map(|received| received.setup)
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -246,8 +220,78 @@ impl Message for Setup {
 		if let Some(hop) = self.hop {
 			params.set_varint(PARAM_HOP, hop.id(), version)?;
 		}
+		if self.ietf {
+			// The framing it changes is unpublished, so a published version cannot offer it.
+			if !version.has_ietf() {
+				return Err(EncodeError::Version);
+			}
+			params.set_bytes(PARAM_IETF, Vec::new());
+		}
 
 		params.encode(w, version)
+	}
+}
+
+/// Raw presence is needed even when an unknown Role decodes as bidirectional.
+#[derive(Debug)]
+pub(super) struct ReceivedSetup {
+	pub setup: Setup,
+	role_present: bool,
+}
+
+impl Message for ReceivedSetup {
+	const MAX_SIZE: usize = Setup::MAX_SIZE;
+
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		if !version.has_setup_stream() {
+			return Err(DecodeError::Version);
+		}
+
+		let params = Parameters::decode(r, version)?;
+		let probe = params
+			.get_varint(PARAM_PROBE, version)?
+			.map(ProbeLevel::from_code)
+			.unwrap_or_default();
+		let path = match params.get_bytes(PARAM_PATH) {
+			Some(bytes) => Some(
+				std::str::from_utf8(bytes)
+					.map_err(|_| DecodeError::InvalidValue)?
+					.to_string(),
+			),
+			None => None,
+		};
+		let role_code = params.get_varint(PARAM_ROLE, version)?;
+		let role = role_code.and_then(Role::from_code);
+		let cost = params.get_varint(PARAM_COST, version)?;
+		// 0 is legal on the wire but carries no identity (it can't be excluded),
+		// so it decodes as "not declared" rather than an error.
+		let hop = params
+			.get_varint(PARAM_HOP, version)?
+			.and_then(|id| crate::Hop::new(id).ok());
+		// An older version does not know the parameter, so it ignores it like any other.
+		let ietf = match params.get_bytes(PARAM_IETF) {
+			Some(value) if version.has_ietf() => match value.is_empty() {
+				true => true,
+				false => return Err(DecodeError::InvalidValue),
+			},
+			_ => false,
+		};
+
+		Ok(Self {
+			role_present: role_code.is_some(),
+			setup: Setup {
+				probe,
+				path,
+				role,
+				cost,
+				hop,
+				ietf,
+			},
+		})
+	}
+
+	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		self.setup.encode_msg(w, version)
 	}
 }
 
@@ -256,16 +300,66 @@ impl Message for Setup {
 /// Streams whose encoding depends on a negotiated capability (e.g. the PROBE
 /// stream) wait on this before deciding what to do. Cheap to clone: every handle
 /// shares the same slot.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct PeerSetup(kio::Shared<PeerSetupState>);
 
-#[derive(Default)]
 struct PeerSetupState {
+	client: bool,
+	binding: crate::transport::Binding,
+	/// Whether our own SETUP offers the `ietf` extension.
+	ietf: bool,
 	seen: bool,
 	setup: Option<Setup>,
 }
 
 impl PeerSetup {
+	pub fn new(client: bool, binding: crate::transport::Binding) -> Self {
+		Self(kio::Shared::new(PeerSetupState {
+			client,
+			binding,
+			ietf: false,
+			seen: false,
+			setup: None,
+		}))
+	}
+
+	pub(super) fn receive(&self, received: ReceivedSetup) -> Result<(), crate::Error> {
+		let mut state = self.0.lock();
+		if ((state.client || state.binding == crate::transport::Binding::Uri) && received.setup.path.is_some())
+			|| (state.client && received.role_present)
+		{
+			return Err(crate::Error::ProtocolViolation);
+		}
+		state.seen = true;
+		state.setup = Some(received.setup);
+		Ok(())
+	}
+
+	/// Note whether our own SETUP offers the `ietf` extension, before any stream depends on it.
+	pub fn offer_ietf(self, ietf: bool) -> Self {
+		self.0.lock().ietf = ietf;
+		self
+	}
+
+	/// Poll whether the `ietf` extension is negotiated: both SETUPs offer it.
+	///
+	/// Resolves at once when we did not offer it, and otherwise once the peer's SETUP arrives.
+	pub fn poll_ietf(&self, waiter: &kio::Waiter) -> std::task::Poll<bool> {
+		if !self.0.lock().ietf {
+			return std::task::Poll::Ready(false);
+		}
+		self.poll_get(waiter, |setup| setup.ietf)
+	}
+
+	/// Whether the `ietf` extension is negotiated, or `None` before the peer's SETUP arrives.
+	pub fn ietf(&self) -> Option<bool> {
+		let state = self.0.lock();
+		match state.ietf {
+			false => Some(false),
+			true => state.setup.as_ref().map(|setup| setup.ietf),
+		}
+	}
+
 	/// Record the peer's SETUP.
 	pub fn set(&self, setup: Setup) {
 		let mut state = self.0.lock();
@@ -281,11 +375,6 @@ impl PeerSetup {
 		}
 		state.seen = true;
 		Ok(())
-	}
-
-	/// Poll until the peer's SETUP arrives.
-	pub fn poll_seen(&self, waiter: &kio::Waiter) -> std::task::Poll<()> {
-		self.poll_get(waiter, |_| ())
 	}
 
 	/// Poll for the peer's advertised probe level, waiting until its SETUP arrives.
@@ -346,6 +435,7 @@ mod tests {
 	/// draft makes such a publisher reset any Probe Stream a subscriber opens. It
 	/// must advertise `None` so the subscriber never opens one.
 	#[test]
+	#[cfg(feature = "async")]
 	fn detect_reports_nothing_without_stats() {
 		use crate::lite::test_transport::{SinkSession, SinkStats};
 		let session = SinkSession::new(Default::default()).with_stats(SinkStats::default());
@@ -355,6 +445,7 @@ mod tests {
 	/// Either metric alone is enough to report, since the two PROBE fields are
 	/// independent on the wire.
 	#[test]
+	#[cfg(feature = "async")]
 	fn detect_reports_with_either_metric() {
 		use crate::lite::test_transport::{SinkSession, SinkStats};
 
@@ -411,6 +502,33 @@ mod tests {
 				"{version}"
 			);
 		}
+	}
+
+	/// The `ietf` offer is an empty parameter that only a version with the extension sends,
+	/// and an older one ignores like any unknown parameter.
+	#[test]
+	fn ietf_offer_is_lite07_only() {
+		let msg = Setup {
+			ietf: true,
+			..Default::default()
+		};
+		let buf = msg.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
+		assert!(msg.encode_bytes(Version::Lite06).is_err());
+
+		// Length, one parameter, its 8-byte QUIC varint ID, and an empty value.
+		let older = [0x0a, 0x01, 0xc0, 0, 0, 0, 0x49, 0x45, 0x54, 0x46, 0x00];
+		assert_eq!(
+			Setup::decode_slice(&older, Version::Lite06).unwrap().0,
+			Setup::default()
+		);
+
+		// A value it does not define is refused.
+		let mut valued = buf.to_vec();
+		assert_eq!(valued.pop(), Some(0), "the offer ends in its empty value");
+		valued.extend([1, 7]);
+		valued[0] += 1;
+		assert!(Setup::decode_slice(&valued, Version::Lite07).is_err());
 	}
 
 	/// Never emit a SETUP our own receiver would refuse.

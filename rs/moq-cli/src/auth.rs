@@ -10,7 +10,7 @@ use moq_auth::serve::{Keys, Policy};
 use moq_auth::{Algorithm, Pattern, Permissions};
 
 /// Generate, sign, and verify the JWT tokens a relay authenticates with.
-#[derive(usage::Args, Clone, Debug)]
+#[derive(usage_rs::Args, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	#[usage(subcommand)]
@@ -24,13 +24,15 @@ impl Args {
 		match self.command {
 			// A container runs `moq` as PID 1, where a signal without a handler is
 			// dropped. Only `serve` races one: `sign` and `verify` block on stdin, so a
-			// handler would swallow the signal that used to end them. `biased` installs
-			// the handlers before `serve` logs that it is listening.
-			Command::Serve(serve) => tokio::select! {
-				biased;
-				res = crate::shutdown_signal() => res?,
-				res = serve.run() => res?,
-			},
+			// handler would swallow the signal that used to end them. The handlers are
+			// installed before `serve` logs that it is listening.
+			Command::Serve(serve) => {
+				let mut signals = crate::Signals::new()?;
+				tokio::select! {
+					() = signals.recv() => {}
+					res = serve.run() => res?,
+				}
+			}
 			Command::Generate {
 				algorithm,
 				id,
@@ -122,7 +124,7 @@ impl Args {
 	}
 }
 
-#[derive(usage::Subcommands, Clone, Debug)]
+#[derive(usage_rs::Subcommands, Clone, Debug)]
 enum Command {
 	/// Generate a new signing key.
 	///
@@ -138,19 +140,19 @@ enum Command {
 		id: Option<String>,
 
 		/// Write the key to a file path. Use `-` for stdout.
-		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
+		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 		out: Option<PathBuf>,
 
 		/// Write the key to a directory as {kid}.jwk.
-		#[usage(long, conflicts = "--out", value_hint = usage::ValueHint::DirPath)]
+		#[usage(long, conflicts = "--out", value_hint = usage_rs::ValueHint::DirPath)]
 		out_dir: Option<PathBuf>,
 
 		/// Write the public key to a file path (asymmetric algorithms only). Use `-` for stdout.
-		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
+		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 		public: Option<PathBuf>,
 
 		/// Write the public key to a directory as {kid}.jwk (asymmetric algorithms only).
-		#[usage(long, conflicts = "--public", value_hint = usage::ValueHint::DirPath)]
+		#[usage(long, conflicts = "--public", value_hint = usage_rs::ValueHint::DirPath)]
 		public_dir: Option<PathBuf>,
 
 		/// Root path for the optional key scope. Only applied alongside --publish or --subscribe.
@@ -169,7 +171,7 @@ enum Command {
 	/// Sign a token, writing it to stdout.
 	Sign {
 		/// Path to the signing key file. Use `-` for stdin.
-		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
+		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 		key: PathBuf,
 
 		/// The root path for the token.
@@ -205,17 +207,17 @@ enum Command {
 	/// Verify a token, writing the payload to stdout.
 	Verify {
 		/// Path to the key file. Use `-` for stdin (requires `--in` to be a file).
-		#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
+		#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 		key: PathBuf,
 
 		/// Path to read the token from. Use `-` for stdin.
-		#[usage(long = "in", default = "-", value_hint = usage::ValueHint::FilePath)]
+		#[usage(long = "in", default = "-", value_hint = usage_rs::ValueHint::FilePath)]
 		token: PathBuf,
 	},
 }
 
 /// Filter flags shared by `moq auth sessions` and `moq auth revalidate`.
-#[derive(usage::Args, Clone, Debug)]
+#[derive(usage_rs::Args, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct SessionFilter {
 	/// The relay's internal listener, e.g. `http://127.0.0.1:9101`.
@@ -356,7 +358,7 @@ impl SessionFilter {
 }
 
 /// The reference auth server: the policy a relay used to hold, behind `--auth-url`.
-#[derive(usage::Args, Clone, Debug)]
+#[derive(usage_rs::Args, Clone, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Serve {
 	/// Where to answer: a socket address, or `unix:<path>` for a unix socket.
@@ -368,15 +370,15 @@ pub struct Serve {
 	listen_public: bool,
 
 	/// The key file a `jwt` is verified against.
-	#[usage(long, conflicts = "--key-dir", value_hint = usage::ValueHint::FilePath, extensions("jwk", "json"))]
+	#[usage(long, conflicts = "--key-dir", value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
 	key: Option<PathBuf>,
 
 	/// A directory of `{kid}.jwk` files, selected by the token's `kid`.
-	#[usage(long, conflicts = "--key", value_hint = usage::ValueHint::DirPath)]
+	#[usage(long, conflicts = "--key", value_hint = usage_rs::ValueHint::DirPath)]
 	key_dir: Option<PathBuf>,
 
 	/// A JWK Set file, selecting one verification key by the token's `kid`.
-	#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("json", "jwks"))]
+	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("json", "jwks"))]
 	key_set: Option<PathBuf>,
 
 	/// Patterns an anonymous session may publish, rooted at `/` (repeatable); `foo/**` for a subtree.
@@ -467,9 +469,7 @@ impl Serve {
 				}
 			}
 		}
-		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
-			Permissions::new(publish.iter().cloned().collect(), subscribe.iter().cloned().collect())
-		};
+		let rules = |publish: &[Pattern], subscribe: &[Pattern]| Permissions::new(publish.to_vec(), subscribe.to_vec());
 		if self.key_set.is_some() && (self.key.is_some() || self.key_dir.is_some()) {
 			anyhow::bail!("--key-set conflicts with --key and --key-dir");
 		}

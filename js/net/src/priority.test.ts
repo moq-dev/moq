@@ -80,8 +80,8 @@ test("groups still draining are promoted after the subscription closes", () => {
 
 	const older = open();
 	const newer = open();
-	priority.add(older, 0);
-	priority.add(newer, 1);
+	priority.add(older, 0, 0);
+	priority.add(newer, 1, 0);
 	expect(streams[0].sendOrder).toBe(sendOrder({ priority: 7, position: 1 }));
 
 	// The serving loop is done, but both groups are still on the wire.
@@ -103,7 +103,7 @@ test("the subscription's order picks which group goes first", async () => {
 
 	const writers = [5, 1, 10].map((sequence) => {
 		const writer = open();
-		priority.add(writer, sequence);
+		priority.add(writer, sequence, 0);
 		return writer;
 	});
 	const at = (...positions: number[]) => positions.map((position) => sendOrder({ priority: 7, position }));
@@ -118,5 +118,24 @@ test("the subscription's order picks which group goes first", async () => {
 
 	priority.close();
 	for (const writer of writers) priority.remove(writer);
+	broadcast.close();
+});
+
+// A joining fill starts earlier in the same group, even when the live rest opened first.
+test.each(["ascending", "descending"] as const)("a fill outranks its group's live rest in %s order", (order) => {
+	const { priority, open, streams, broadcast } = ranking({ priority: 7, order });
+	const rest = open();
+	const fill = open();
+	const other = open();
+	priority.add(rest, 5, 2 ** 45);
+	priority.add(fill, 5, 0);
+	priority.add(other, order === "ascending" ? 4 : 6, Number.MAX_SAFE_INTEGER);
+	expect(streams[1].sendOrder).toBeGreaterThan(streams[0].sendOrder!);
+	expect(streams[2].sendOrder).toBeGreaterThan(streams[1].sendOrder!);
+	priority.remove(fill);
+	expect(streams[0].sendOrder).toBe(sendOrder({ priority: 7, position: 1 }));
+	priority.close();
+	priority.remove(rest);
+	priority.remove(other);
 	broadcast.close();
 });

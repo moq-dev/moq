@@ -5,14 +5,14 @@ The `/rs` Cargo workspace. Extends the root `AGENTS.md`.
 One crate per component from the root list, named `moq-<component>` (`hang` is the exception). Keep them modular; a crate does one thing. Beyond that list:
 
 - `kio`: "easy async" primitives everything else polls through.
-- `moq-tokio`: configures the QUIC backends (Quinn/Quiche/Noq/Iroh) and the fallback transports for native binaries, on tokio. `moq-sock` holds the socket plumbing it shares with `moq-uring`, the experimental thread-per-core io\_uring runtime.
+- `moq-tokio`: configures the QUIC backends (`moq-quic`, our quinn fork, and Iroh) and the fallback transports for native binaries, on tokio. `moq-sock` holds the socket plumbing it shares with `moq-uring`, the experimental thread-per-core io\_uring runtime.
 - `moq-cli` builds the `moq` binary and owns the CLI surface for the gateway crates. Binaries never carry a `-cli` suffix.
 
 `moq-net`, `moq-mux`, `moq-relay` (including the config conventions every binary shares), and `moq-ffi` have their own `AGENTS.md`.
 
 # Producer / Consumer
 
-Most crates use a split-handle pattern: a `Producer` writes, any number of `Consumer`s read, state is shared via `kio`. Handles are refcounted: clones share state, the last drop closes cleanly, `abort(err)` closes with an error. A parked clone that keeps something alive is a bug in the holder.
+Most crates use a split-handle pattern: a `Producer` writes, any number of `Consumer`s read, state is shared via `kio`. Handles are refcounted: clones share state, the last drop closes cleanly, `abort(err)` closes with an error. A parked clone that keeps something alive is a bug in the holder. A track, group, or frame consumer seeing `Error::Dropped` is a bug too: its producer went away unfinished without calling `abort` with a specific error, so find that path and abort with the real cause. Lifecycle watchers like `broadcast::Demand` return `Dropped` after `close()` by design.
 
 # Async / poll
 
@@ -50,7 +50,7 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 
 # Testing
 
-- Tests are inline `#[cfg(test)] mod tests`, except full Client/Server session tests over a crate's shared mock harness, which go in its `tests/` directory. Time-dependent async tests call `tokio::time::pause()` first (moq-net uses `#[moq_net_sim::test]` instead), unless they cross real networking that can't be mocked (sockets, smoke tests); those run on the wall clock and assert lower bounds.
+- Tests are inline `#[cfg(test)] mod tests`, except full Client/Server session tests over a crate's shared mock harness, which go in its `tests/integration/` module. Time-dependent async tests call `tokio::time::pause()` first (moq-net uses `#[moq_clock::test]` instead), unless they cross real networking that can't be mocked (sockets, smoke tests); those run on the wall clock and assert lower bounds.
 - Run tests through `just` (nextest), not `cargo test`: nextest kills a wedged test as TIMEOUT, cargo hangs forever. A test flagged SLOW is a bug to fix, not a threshold to raise.
 - `just check` compiles default features only, like CI. `just rs features` (nightly) covers `--all-features` / `--no-default-features`. Keep a feature gate around the dependency, not the logic, so the logic's tests stay in the merge gate.
-- Local checks compile only the host platform; PR CI runs `just rs windows` / `macos` on those hosts, and `just rs wasm` covers `moq-wasm`.
+- Local checks compile only the host platform; Nightly and release PRs run `just rs windows` / `macos` on those hosts, and `just rs wasm` covers `moq-wasm`.

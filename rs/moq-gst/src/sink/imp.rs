@@ -9,8 +9,9 @@
 //! Locks are nested in one direction only: GStreamer's stream lock, then the element control, then a
 //! pad lifecycle, then an object lock. No path takes the element control while holding a pad lifecycle.
 
+use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -20,7 +21,7 @@ use gst::subclass::prelude::*;
 use hang::moq_net;
 
 use super::pad::{CapsOutcome, ProducerOptions, PushOutcome, caps_supported};
-use super::request_pad::{MoqSinkPad, Notifications};
+use super::request_pad::{MoqSinkPad, Notifications, PadLifecycle};
 use super::session::{
 	CAT, Completion, CompletionHandle, ConnectionStatus, RUNTIME, ResolvedSettings, Session, SessionRegistration,
 	notify, sessions_structure,
@@ -33,6 +34,7 @@ struct Settings {
 	tls_disable_verify: bool,
 	quic_idle_timeout: Option<Duration>,
 	quic_keep_alive: Option<Duration>,
+	quic_keylog: bool,
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -53,6 +55,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 			tls_disable_verify: value.tls_disable_verify,
 			quic_idle_timeout: value.quic_idle_timeout,
 			quic_keep_alive: value.quic_keep_alive,
+			quic_keylog: value.quic_keylog,
 		})
 	}
 }
@@ -62,6 +65,7 @@ struct State {
 	session: Session,
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Option<moq_mux::catalog::Producer>,
+	wall: std::sync::Arc<super::wall::Wall>,
 	/// Whether this publication's single EOS message already went out. One per publication, not per
 	/// entry to PLAYING: a finished publication is terminal here, so there is nothing to announce twice.
 	eos_delivered: bool,
@@ -78,7 +82,8 @@ impl State {
 #[derive(Default)]
 struct Control {
 	live: Option<State>,
-	admissions: usize,
+	/// Pads admitted before add_pad and its reentrant notifications finish.
+	admissions: HashSet<MoqSinkPad>,
 	/// Whether the element completed its transition into PLAYING. Tracked here rather than read from
 	/// GStreamer: the current state is not committed until `change_state` returns, so a message earned
 	/// inside that window would read PAUSED and be held with nobody left to release it.
@@ -196,6 +201,14 @@ impl ObjectImpl for MoqSink {
 					.default_value(quic.keep_alive.map(duration_millis).unwrap_or(0))
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecBoolean::builder("quic-keylog")
+					.nick("QUIC TLS key log")
+					.blurb(
+						"Danger: write TLS session secrets to the file SSLKEYLOGFILE names; without it the start fails",
+					)
+					.default_value(false)
+					.mutable_ready()
+					.build(),
 				// Read-only, served from the live session's status. Each notifies on change.
 				glib::ParamSpecEnum::builder::<ConnectionStatus>("status")
 					.nick("Connection status")
@@ -263,6 +276,7 @@ impl ObjectImpl for MoqSink {
 			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
 			"quic-idle-timeout" => settings.quic_idle_timeout = Some(Duration::from_millis(value.get().unwrap())),
 			"quic-keep-alive" => settings.quic_keep_alive = Some(Duration::from_millis(value.get().unwrap())),
+			"quic-keylog" => settings.quic_keylog = value.get().unwrap(),
 			_ => unreachable!(),
 		}
 	}
@@ -307,6 +321,7 @@ impl ObjectImpl for MoqSink {
 						.map(duration_millis)
 						.unwrap_or(0)
 						.to_value(),
+					"quic-keylog" => settings.quic_keylog.to_value(),
 					_ => unreachable!(),
 				}
 			}
@@ -440,7 +455,12 @@ impl ElementImpl for MoqSink {
 				gst::warning!(CAT, "refusing a pad: the publication has ended");
 				return None;
 			}
-			control.admissions += 1;
+			if let Some(state) = control.live.as_ref()
+				&& let Some(catalog) = state.catalog.as_ref()
+			{
+				pad.lifecycle().media.reserve(catalog, state.wall.clone());
+			}
+			control.admissions.insert(pad.clone());
 		}
 
 		if self.obj().add_pad(&pad).is_err() {
@@ -479,6 +499,8 @@ impl ElementImpl for MoqSink {
 		let _ = pad.set_active(false);
 		let changes = {
 			let _rt = RUNTIME.enter();
+			let mut control = self.control.lock().unwrap();
+			control.admissions.remove(sink_pad);
 			let mut lifecycle = sink_pad.lifecycle();
 			if lifecycle.releasing {
 				return;
@@ -549,6 +571,18 @@ impl ElementImpl for MoqSink {
 }
 
 impl MoqSink {
+	/// Membership includes admissions that GStreamer has not made visible yet.
+	fn pads_locked(&self, control: &Control) -> Vec<MoqSinkPad> {
+		let mut seen = HashSet::new();
+		self.obj()
+			.sink_pads()
+			.into_iter()
+			.filter_map(|pad| pad.downcast::<MoqSinkPad>().ok())
+			.chain(control.admissions.iter().cloned())
+			.filter(|pad| seen.insert(pad.clone()))
+			.collect()
+	}
+
 	/// Create the session and producers before any buffer flows.
 	fn start_session(&self) -> Result<SessionRegistration, gst::StateChangeError> {
 		let settings = ResolvedSettings::try_from(self.settings.lock().unwrap().clone()).map_err(|err| {
@@ -561,23 +595,29 @@ impl MoqSink {
 				gst::StateChangeError
 			})?;
 		let completion = session.completion();
+		let wall = super::wall::Wall::new(&catalog);
 		let updates = {
 			let mut control = self.control.lock().unwrap();
 			control.live = Some(State {
 				session,
 				broadcast,
 				catalog: Some(catalog),
+				wall,
 				eos_delivered: false,
 			});
-			self.obj()
-				.sink_pads()
-				.into_iter()
-				.filter_map(|pad| pad.downcast::<MoqSinkPad>().ok())
+			let pads = self.pads_locked(&control);
+			let state = control.live.as_ref().unwrap();
+			let catalog = state.catalog.as_ref().unwrap();
+			let wall = &state.wall;
+			pads.into_iter()
 				.map(|pad| {
 					let changes = {
 						let mut lifecycle = pad.lifecycle();
 						let changes = lifecycle.reset();
 						lifecycle.completion = Some(completion.clone());
+						if !lifecycle.releasing {
+							lifecycle.media.reserve(catalog, wall.clone());
+						}
 						changes
 					};
 					PadUpdate { pad, changes }
@@ -591,22 +631,23 @@ impl MoqSink {
 	/// Finalize the producers (catalog last) and tear down the session. Finalize is best-effort: we are
 	/// tearing down regardless.
 	fn stop_session(&self) {
-		let (mut state, updates, mut failure) = {
+		let (mut state, updates, mut failure, closed) = {
 			let mut control = self.control.lock().unwrap();
 			let Some(state) = control.live.take() else {
 				return;
 			};
 			let _rt = RUNTIME.enter();
 			let mut failure = None;
-			let updates = self
-				.obj()
-				.sink_pads()
+			let mut closed = Vec::new();
+			let pads = self.pads_locked(&control);
+			let updates = pads
 				.into_iter()
-				.filter_map(|pad| pad.downcast::<MoqSinkPad>().ok())
 				.map(|pad| {
 					let changes = {
 						let mut lifecycle = pad.lifecycle();
-						if let Err(err) = lifecycle.media.finalize() {
+						let (track, result) = lifecycle.media.finish();
+						closed.push(track);
+						if let Err(err) = result {
 							gst::warning!(CAT, "finalize {} on stop: {err:?}", pad.name());
 							if failure.is_none() {
 								failure = Some(err);
@@ -617,7 +658,7 @@ impl MoqSink {
 					PadUpdate { pad, changes }
 				})
 				.collect::<Vec<_>>();
-			(state, updates, failure)
+			(state, updates, failure, closed)
 		};
 		notify(
 			&self.obj().downgrade(),
@@ -632,6 +673,7 @@ impl MoqSink {
 			],
 		);
 		let _rt = RUNTIME.enter();
+		state.wall.finish();
 		if let Some(mut catalog) = state.catalog.take()
 			&& let Err(err) = catalog.finish().context("finalize catalog")
 			&& failure.is_none()
@@ -643,6 +685,7 @@ impl MoqSink {
 		}
 		// Close the broadcast before reaping the session task.
 		state.broadcast.close();
+		drop(closed);
 		state.session.stop();
 		self.notify_updates(updates);
 	}
@@ -658,6 +701,16 @@ impl MoqSink {
 		// Only subtitles use this: a cue needs an explicit end, unlike a media frame.
 		let duration = buffer.duration();
 		let current_running_time = self.obj().current_running_time();
+		// Preroll has a frozen running time before the pipeline starts its clock.
+		let reference_running_time = current_running_time.or_else(|| {
+			(self.obj().current_state() != gst::State::Playing)
+				.then(|| self.obj().start_time())
+				.flatten()
+		});
+		let sample = super::wall::Sample {
+			running: reference_running_time,
+			wall: std::time::SystemTime::now(),
+		};
 		let map = buffer.map_readable().map_err(|_| {
 			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
 			gst::FlowError::Error
@@ -684,9 +737,12 @@ impl MoqSink {
 			if lifecycle.media.is_failed() {
 				return Ok(gst::FlowSuccess::Ok);
 			}
-			let outcome = lifecycle
-				.media
-				.push_buffer(data, pts, duration, current_running_time, Instant::now());
+			let outcome = lifecycle.media.place_wall(&buffer, sample).and_then(|()| {
+				lifecycle
+					.media
+					.push_buffer(data, pts, duration, current_running_time, moq_net::time::now())
+					.map_err(anyhow::Error::msg)
+			});
 			let changes = match &outcome {
 				Ok(PushOutcome::Failed(reason)) => Some(lifecycle.fail(reason.clone())),
 				_ => None,
@@ -767,25 +823,11 @@ impl MoqSink {
 					if let Some(state) = control.live.as_ref().filter(|state| state.is_open())
 						&& let Some(catalog) = state.catalog.as_ref()
 					{
-						let completion = state.session.completion();
 						let mut lifecycle = sink_pad.lifecycle();
 						if lifecycle.releasing {
 							return false;
 						}
-						let requested = lifecycle.requested().map(str::to_owned);
-						let mut options = ProducerOptions::new(&caps)
-							.with_container(lifecycle.container().into())
-							.with_encoder(lifecycle.encoder());
-						if let Some(track) = requested.as_deref() {
-							options = options.with_track(track);
-						}
-						let outcome = lifecycle.media.observe_caps(&state.broadcast, catalog, options);
-						lifecycle.completion = Some(completion);
-						Some(match outcome {
-							CapsOutcome::Active(track) => (Some(lifecycle.commit(track)), true),
-							CapsOutcome::Failed(reason) => (Some(lifecycle.fail(reason)), false),
-							CapsOutcome::Unchanged => (None, true),
-						})
+						Some(observe_caps(state, catalog, &mut lifecycle, &caps))
 					} else {
 						None
 					}
@@ -823,10 +865,21 @@ impl MoqSink {
 			gst::EventView::Eos(_) => {
 				let finished = {
 					let mut control = self.control.lock().unwrap();
-					if control.live.as_ref().is_some_and(|state| state.is_open()) {
+					if let Some(state) = control.live.as_ref().filter(|state| state.is_open()) {
+						let _rt = RUNTIME.enter();
 						let mut lifecycle = sink_pad.lifecycle();
 						if !lifecycle.releasing {
 							lifecycle.ended = true;
+							if let Some(catalog) = &state.catalog
+								&& let Err(err) = lifecycle.media.end_unresolved(catalog)
+							{
+								lifecycle.media.invalidate();
+								let changes = lifecycle.fail(format!("{err:#}"));
+								drop(lifecycle);
+								drop(control);
+								sink_pad.notify_changes(changes);
+								return false;
+							}
 						}
 					}
 					self.maybe_finish_locked(&mut control)
@@ -836,44 +889,58 @@ impl MoqSink {
 			}
 			// A pad that starts flushing stops counting towards EOS immediately, not when the flush
 			// finishes. Waiting for FLUSH_STOP lets another pad's EOS complete the element inside the
-			// flush window, and the finalize that follows is not something FLUSH_STOP can undo.
+			// flush window, and the finalize that follows is not something FLUSH_STOP can undo. The
+			// first-catalog slot returns now for the same reason: a sibling resolving inside the window
+			// would otherwise publish a first catalog without this pad.
 			gst::EventView::FlushStart(_) => {
 				let control = self.control.lock().unwrap();
-				if control.live.as_ref().is_some_and(|state| state.is_open()) {
+				if let Some(state) = control.live.as_ref().filter(|state| state.is_open()) {
+					let _rt = RUNTIME.enter();
 					let mut lifecycle = sink_pad.lifecycle();
 					if !lifecycle.releasing {
 						lifecycle.ended = false;
+						if let Some(catalog) = &state.catalog {
+							lifecycle.media.reserve(catalog, state.wall.clone());
+						}
 					}
 				}
 				drop(control);
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
-			gst::EventView::FlushStop(_) => {
-				let control = self.control.lock().unwrap();
-				if control.live.as_ref().is_some_and(|state| state.is_open()) {
-					let mut lifecycle = sink_pad.lifecycle();
-					if !lifecycle.releasing {
-						lifecycle.ended = false;
-						lifecycle.media.flush();
+			// A new stream on this pad is a fresh start like a flush: it no longer counts as ended, and its
+			// timeline is re-anchored. Without that the old stream's segment base stays current, and a new
+			// stream restarting at zero reads as a rewind, which invalidates the pad and silently drops
+			// its buffers. A pad its EOS left unresolved takes back its first-catalog slot, and an
+			// importer that EOS finished is rebuilt from the sticky caps.
+			gst::EventView::FlushStop(_) | gst::EventView::StreamStart(_) => {
+				let changes = {
+					let control = self.control.lock().unwrap();
+					match control.live.as_ref().filter(|state| state.is_open()) {
+						Some(state) => {
+							let _rt = RUNTIME.enter();
+							let mut lifecycle = sink_pad.lifecycle();
+							match lifecycle.releasing {
+								true => None,
+								false => {
+									lifecycle.ended = false;
+									lifecycle.media.flush();
+									let catalog = state.catalog.as_ref();
+									if let Some(catalog) = catalog {
+										lifecycle.media.reserve(catalog, state.wall.clone());
+									}
+									let caps = lifecycle.media.resumable_caps();
+									caps.zip(catalog).and_then(|(caps, catalog)| {
+										observe_caps(state, catalog, &mut lifecycle, &caps).0
+									})
+								}
+							}
+						}
+						None => None,
 					}
+				};
+				if let Some(changes) = changes {
+					sink_pad.notify_changes(changes);
 				}
-				drop(control);
-				gst::Pad::event_default(pad, Some(&*self.obj()), event)
-			}
-			// A new stream on this pad is a fresh start: it no longer counts as ended, and its timeline is
-			// re-anchored like a flush. Without that the old stream's segment base stays current, and a
-			// new stream restarting at zero reads as a rewind, which invalidates the pad and silently
-			// drops its buffers.
-			gst::EventView::StreamStart(_) => {
-				let control = self.control.lock().unwrap();
-				if control.live.as_ref().is_some_and(|state| state.is_open()) {
-					let mut lifecycle = sink_pad.lifecycle();
-					if !lifecycle.releasing {
-						lifecycle.ended = false;
-						lifecycle.media.flush();
-					}
-				}
-				drop(control);
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
 			_ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
@@ -885,7 +952,14 @@ impl MoqSink {
 	}
 
 	fn cancel_admission(&self, pad: &MoqSinkPad) {
-		let finished = self.finish_admission();
+		let finished = {
+			let mut control = self.control.lock().unwrap();
+			let _rt = RUNTIME.enter();
+			if let Err(err) = pad.lifecycle().media.finalize() {
+				gst::warning!(CAT, "finalize cancelled admission {}: {err:?}", pad.name());
+			}
+			self.finish_admission_locked(&mut control, pad)
+		};
 		self.publish_finished(finished);
 		if self.owns_pad(pad) {
 			self.release_pad(pad.upcast_ref());
@@ -894,14 +968,8 @@ impl MoqSink {
 		}
 	}
 
-	fn finish_admission(&self) -> Finished {
-		let mut control = self.control.lock().unwrap();
-		self.finish_admission_locked(&mut control)
-	}
-
-	fn finish_admission_locked(&self, control: &mut Control) -> Finished {
-		debug_assert!(control.admissions > 0);
-		control.admissions = control.admissions.saturating_sub(1);
+	fn finish_admission_locked(&self, control: &mut Control, pad: &MoqSinkPad) -> Finished {
+		control.admissions.remove(pad);
 		self.maybe_finish_locked(control)
 	}
 
@@ -926,12 +994,12 @@ impl MoqSink {
 			}
 		};
 		drop(lifecycle);
-		let finished = self.finish_admission_locked(&mut control);
+		let finished = self.finish_admission_locked(&mut control, pad);
 		(admission, finished)
 	}
 
 	fn maybe_finish_locked(&self, control: &mut Control) -> Finished {
-		if control.admissions > 0 {
+		if !control.admissions.is_empty() {
 			return Finished::default();
 		}
 		let Some(state) = control.live.as_mut() else {
@@ -951,15 +1019,16 @@ impl MoqSink {
 		let _rt = RUNTIME.enter();
 		let mut updates = Vec::new();
 		let mut failure = None;
+		let mut closed = Vec::new();
 		for pad in pads {
 			let mut lifecycle = pad.lifecycle();
 			if lifecycle.releasing || !self.owns_pad(&pad) {
 				continue;
 			}
-			let result = lifecycle.media.finalize();
+			let (track, result) = lifecycle.media.finish();
+			closed.push(track);
 			let changes = match result {
-				Ok(true) => Some(lifecycle.end()),
-				Ok(false) => None,
+				Ok(_) => Some(lifecycle.end()),
 				Err(err) => {
 					gst::warning!(CAT, "finalize {}: {err:?}", pad.name());
 					let reason = format!("{err:#}");
@@ -974,12 +1043,14 @@ impl MoqSink {
 				updates.push(PadUpdate { pad, changes });
 			}
 		}
+		state.wall.finish();
 		if let Some(mut catalog) = state.catalog.take()
 			&& let Err(err) = catalog.finish().context("finalize catalog")
 			&& failure.is_none()
 		{
 			failure = Some(err);
 		}
+		drop(closed);
 		// Claimed after the work, not before: the outcome decides which terminal state this pass takes.
 		// Losing the claim means the session task already ended the publication and posted its own
 		// error, so this pass owes the bus nothing.
@@ -1086,6 +1157,31 @@ impl MoqSink {
 	}
 }
 
+/// Build a pad's producer for `caps` in the open publication, returning its status changes and whether
+/// the caps were accepted.
+fn observe_caps(
+	state: &State,
+	catalog: &moq_mux::catalog::Producer,
+	lifecycle: &mut PadLifecycle,
+	caps: &gst::Caps,
+) -> (Option<Notifications>, bool) {
+	lifecycle.media.reserve(catalog, state.wall.clone());
+	let requested = lifecycle.requested().map(str::to_owned);
+	let mut options = ProducerOptions::new(caps)
+		.with_container(lifecycle.container().into())
+		.with_encoder(lifecycle.encoder());
+	if let Some(track) = requested.as_deref() {
+		options = options.with_track(track);
+	}
+	let outcome = lifecycle.media.observe_caps(&state.broadcast, catalog, options);
+	lifecycle.completion = Some(state.session.completion());
+	match outcome {
+		CapsOutcome::Active(track) => (Some(lifecycle.commit(track)), true),
+		CapsOutcome::Failed(reason) => (Some(lifecycle.fail(reason)), false),
+		CapsOutcome::Unchanged => (None, true),
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::sync::Arc;
@@ -1097,6 +1193,511 @@ mod tests {
 
 	fn sink() -> super::super::MoqSink {
 		glib::Object::builder::<super::super::MoqSink>().build()
+	}
+
+	struct CatalogRun(super::super::MoqSink);
+
+	impl CatalogRun {
+		fn new() -> Self {
+			gst::init().unwrap();
+			let sink = sink();
+			sink.set_property("url", "tcp://127.0.0.1:1");
+			sink.set_property("broadcast", "catalog-test");
+			Self(sink)
+		}
+
+		fn pad(&self, name: &str) -> gst::Pad {
+			let pad = self.0.request_pad_simple("sink_%u").unwrap();
+			pad.set_property("track", name);
+			pad
+		}
+
+		fn start(&self) -> moq_mux::catalog::Consumer {
+			let consumer = self.start_unplaced();
+			let control = self.0.imp().control.lock().unwrap();
+			control
+				.live
+				.as_ref()
+				.unwrap()
+				.wall
+				.place(
+					&gst::Buffer::new(),
+					Duration::ZERO,
+					super::super::wall::Sample {
+						running: Some(gst::ClockTime::ZERO),
+						wall: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
+					},
+				)
+				.unwrap();
+			consumer
+		}
+
+		fn start_unplaced(&self) -> moq_mux::catalog::Consumer {
+			self.0.set_state(gst::State::Paused).unwrap();
+			let broadcast = self
+				.0
+				.imp()
+				.control
+				.lock()
+				.unwrap()
+				.live
+				.as_ref()
+				.unwrap()
+				.broadcast
+				.consume();
+			futures::executor::block_on(moq_mux::catalog::Consumer::new(
+				&broadcast,
+				moq_mux::catalog::CatalogFormat::Hang,
+			))
+			.unwrap()
+		}
+	}
+
+	impl Drop for CatalogRun {
+		fn drop(&mut self) {
+			self.0.set_state(gst::State::Null).unwrap();
+		}
+	}
+
+	fn negotiate(pad: &gst::Pad, caps: &gst::Caps) -> bool {
+		assert!(pad.send_event(gst::event::StreamStart::new(pad.name().as_str())));
+		pad.send_event(gst::event::Caps::new(caps))
+	}
+
+	fn opus_caps() -> gst::Caps {
+		gst::Caps::builder("audio/x-opus")
+			.field("rate", 48_000i32)
+			.field("channels", 2i32)
+			.build()
+	}
+
+	fn h264_caps() -> gst::Caps {
+		gst::Caps::builder("video/x-h264")
+			.field("stream-format", "byte-stream")
+			.field("alignment", "au")
+			.build()
+	}
+
+	fn video_frame(pad: &gst::Pad) {
+		assert!(pad.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
+		let mut buffer = gst::Buffer::from_slice(super::super::pad::h264_keyframe_au());
+		buffer.get_mut().unwrap().set_pts(gst::ClockTime::ZERO);
+		assert_eq!(pad.chain(buffer), Ok(gst::FlowSuccess::Ok));
+	}
+
+	fn next_catalog(
+		catalog: &mut moq_mux::catalog::Consumer,
+	) -> std::task::Poll<moq_mux::Result<Option<moq_mux::catalog::hang::Catalog>>> {
+		use moq_mux::catalog::Stream;
+		catalog.poll_next(&moq_net::kio::Waiter::noop())
+	}
+
+	#[test]
+	fn reference_metadata_places_the_broadcast_wall_clock() {
+		let run = CatalogRun::new();
+		let pad = run.pad("audio");
+		let mut catalog = run.start_unplaced();
+		assert!(negotiate(&pad, &opus_caps()));
+		assert!(
+			next_catalog(&mut catalog).is_pending(),
+			"CAPS must wait for the wall clock"
+		);
+		assert!(pad.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
+		let mut buffer = gst::Buffer::from_slice([0xf8, 0xff, 0xfe]);
+		let buffer_mut = buffer.get_mut().unwrap();
+		buffer_mut.set_pts(gst::ClockTime::from_seconds(3));
+		gst::ReferenceTimestampMeta::add(
+			buffer_mut,
+			&gst::Caps::builder("timestamp/x-unix").build(),
+			gst::ClockTime::from_seconds(1_735_689_603),
+			None,
+		);
+		assert_eq!(pad.chain(buffer), Ok(gst::FlowSuccess::Ok));
+		let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
+			panic!("first catalog")
+		};
+		assert_eq!(
+			first.clock.unwrap().wall.as_micros(),
+			((1_735_689_600 - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128,
+		);
+	}
+
+	#[test]
+	fn pads_keep_one_wall_clock_and_verbatim_running_times_each_run() {
+		let run = CatalogRun::new();
+		let video = run.pad("video");
+		let audio = run.pad("audio");
+		for zero in [1_735_689_600u64, 1_735_689_660] {
+			let _catalog = run.start_unplaced();
+			assert!(negotiate(&video, &h264_caps()));
+			assert!(negotiate(&audio, &opus_caps()));
+			for (pad, origin, pts, payload, reference) in [
+				(&video, 10, 13, super::super::pad::h264_keyframe_au(), zero + 3),
+				(&audio, 100, 105, Bytes::from_static(&[0xf8, 0xff, 0xfe]), zero + 500),
+			] {
+				let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
+				segment.set_start(gst::ClockTime::from_seconds(origin));
+				assert!(pad.send_event(gst::event::Segment::new(&segment)));
+				let mut buffer = gst::Buffer::from_slice(payload);
+				let b = buffer.get_mut().unwrap();
+				b.set_pts(gst::ClockTime::from_seconds(pts));
+				gst::ReferenceTimestampMeta::add(
+					b,
+					&gst::Caps::builder("timestamp/x-unix").build(),
+					gst::ClockTime::from_seconds(reference),
+					None,
+				);
+				assert_eq!(pad.chain(buffer), Ok(gst::FlowSuccess::Ok));
+			}
+			let (broadcast, clock) = {
+				let control = run.0.imp().control.lock().unwrap();
+				let state = control.live.as_ref().unwrap();
+				(
+					state.broadcast.consume(),
+					state.catalog.as_ref().unwrap().snapshot().clock.unwrap(),
+				)
+			};
+			assert_eq!(
+				clock.wall.as_micros(),
+				((zero - hang::catalog::MOQ_EPOCH_UNIX_MILLIS / 1000) * 1_000_000) as u128
+			);
+			for (name, kind, expected) in [
+				("video", moq_mux::container::Kind::Video, 3),
+				("audio", moq_mux::container::Kind::Audio, 5),
+			] {
+				let subscriber = futures::executor::block_on(broadcast.track(name).unwrap().subscribe(None)).unwrap();
+				let mut consumer =
+					moq_mux::container::Consumer::new(subscriber, moq_mux::catalog::hang::Container::Legacy(kind));
+				let std::task::Poll::Ready(Ok(Some(read))) = consumer.poll_read(&moq_net::kio::Waiter::noop()) else {
+					panic!("published media frame")
+				};
+				let moq_mux::container::Read::Frame { frame, .. } = read else {
+					panic!("media frame")
+				};
+				assert_eq!(frame.timestamp.as_micros(), expected * 1_000_000, "{name}");
+			}
+			run.0.set_state(gst::State::Null).unwrap();
+		}
+	}
+
+	#[test]
+	fn first_catalog_waits_for_late_audio_caps_each_run() {
+		let run = CatalogRun::new();
+		let video = run.pad("video");
+		let audio = run.pad("audio");
+		for _ in 0..2 {
+			let mut catalog = run.start();
+			assert!(negotiate(&video, &h264_caps()));
+			video_frame(&video);
+			assert!(
+				next_catalog(&mut catalog).is_pending(),
+				"video alone must not publish the first catalog"
+			);
+			assert!(negotiate(&audio, &opus_caps()));
+			let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
+				panic!("complete first catalog")
+			};
+			assert!(first.video.renditions.contains_key("video"));
+			assert!(first.audio.renditions.contains_key("audio"));
+			run.0.set_state(gst::State::Ready).unwrap();
+		}
+	}
+
+	#[test]
+	fn unresolved_terminal_pad_releases_first_catalog_with_streaming_sibling() {
+		for terminal in [
+			"release",
+			"eos",
+			"opaque",
+			"failed",
+			"duplicate",
+			"unsupported",
+			"h264-eos",
+			"bitstream",
+		] {
+			let run = CatalogRun::new();
+			let audio = run.pad("audio");
+			let pending = run.pad("pending");
+			let mut catalog = run.start();
+			assert!(negotiate(&audio, &opus_caps()));
+			assert!(
+				next_catalog(&mut catalog).is_pending(),
+				"{terminal} pad still owes its config"
+			);
+			match terminal {
+				"release" => run.0.release_request_pad(&pending),
+				"eos" => {
+					assert!(pending.send_event(gst::event::Eos::new()));
+				}
+				"opaque" => {
+					assert!(negotiate(
+						&pending,
+						&gst::Caps::new_empty_simple("application/octet-stream")
+					));
+				}
+				"failed" => {
+					let caps = gst::Caps::builder("audio/mpeg")
+						.field("mpegversion", 4i32)
+						.field("stream-format", "raw")
+						.build();
+					assert!(!negotiate(&pending, &caps));
+				}
+				"duplicate" => {
+					pending.set_property("track", "audio");
+					assert!(!negotiate(&pending, &opus_caps()));
+				}
+				"unsupported" => {
+					assert!(!run.0.imp().handle_event(
+						&pending,
+						gst::event::Caps::new(&gst::Caps::new_empty_simple("video/x-raw"))
+					));
+				}
+				"h264-eos" => {
+					assert!(negotiate(&pending, &h264_caps()));
+					assert!(pending.send_event(gst::event::Eos::new()));
+				}
+				"bitstream" => {
+					assert!(negotiate(&pending, &h264_caps()));
+					assert!(
+						pending.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new()))
+					);
+					let mut buffer = gst::Buffer::from_slice([0, 0, 0, 1, 0x67, 0, 0, 0, 1, 0x65]);
+					buffer.get_mut().unwrap().set_pts(gst::ClockTime::ZERO);
+					assert_eq!(pending.chain(buffer), Ok(gst::FlowSuccess::Ok));
+				}
+				_ => unreachable!(),
+			}
+			let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
+				panic!("{terminal} kept the first catalog gated")
+			};
+			assert!(first.audio.renditions.contains_key("audio"));
+			assert!(first.video.renditions.is_empty());
+			assert!(
+				completion_of(&run.0).is_open(),
+				"sibling keeps streaming after {terminal}"
+			);
+		}
+	}
+
+	#[test]
+	fn admitted_pad_is_reserved_before_it_is_visible_and_only_once() {
+		for visible in [false, true] {
+			let run = CatalogRun::new();
+			let audio = run.pad("audio");
+			let pending = run.pad("video").downcast::<MoqSinkPad>().unwrap();
+			if !visible {
+				run.0.remove_pad(&pending).unwrap();
+			}
+			run.0.imp().control.lock().unwrap().admissions.insert(pending.clone());
+			let mut catalog = run.start();
+			assert!(negotiate(&audio, &opus_caps()));
+			assert!(
+				next_catalog(&mut catalog).is_pending(),
+				"admitted pad was missed (visible={visible})"
+			);
+			if !visible {
+				run.0.add_pad(&pending).unwrap();
+				pending.set_active(true).unwrap();
+			}
+			// CAPS can be reentrant from child_added, before confirm_admission.
+			assert!(negotiate(pending.upcast_ref(), &h264_caps()));
+			video_frame(pending.upcast_ref());
+			let (admission, finished) = run.0.imp().confirm_admission(&pending);
+			run.0.imp().publish_finished(finished);
+			assert!(matches!(admission, Admission::Accepted));
+			let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
+				panic!("a duplicate reservation kept the first catalog gated")
+			};
+			assert!(first.audio.renditions.contains_key("audio"));
+			assert!(first.video.renditions.contains_key("video"));
+			assert!(next_catalog(&mut catalog).is_pending(), "one complete first catalog");
+		}
+	}
+
+	#[test]
+	fn cancelling_an_unconfirmed_pad_releases_its_slot() {
+		let run = CatalogRun::new();
+		let audio = run.pad("audio");
+		let pending = run.pad("pending").downcast::<MoqSinkPad>().unwrap();
+		run.0.remove_pad(&pending).unwrap();
+		run.0.imp().control.lock().unwrap().admissions.insert(pending.clone());
+		let mut catalog = run.start();
+		assert!(negotiate(&audio, &opus_caps()));
+		assert!(next_catalog(&mut catalog).is_pending());
+		run.0.imp().cancel_admission(&pending);
+		assert!(matches!(
+			next_catalog(&mut catalog),
+			std::task::Poll::Ready(Ok(Some(_)))
+		));
+		assert!(run.0.imp().control.lock().unwrap().admissions.is_empty());
+	}
+
+	#[test]
+	fn resolved_eos_waits_with_its_rendition_while_a_sibling_is_unresolved() {
+		let run = CatalogRun::new();
+		let audio = run.pad("audio");
+		let pending = run.pad("pending");
+		let mut catalog = run.start();
+		assert!(negotiate(&audio, &opus_caps()));
+		assert!(audio.send_event(gst::event::Eos::new()));
+		assert!(next_catalog(&mut catalog).is_pending());
+		assert!(negotiate(&pending, &h264_caps()));
+		video_frame(&pending);
+		let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
+			panic!("both resolved renditions")
+		};
+		assert!(
+			first.audio.renditions.contains_key("audio"),
+			"resolved EOS must keep its rendition"
+		);
+		assert!(first.video.renditions.contains_key("pending"));
+		assert!(completion_of(&run.0).is_open());
+	}
+
+	// GStreamer keeps CAPS sticky across a flush, so a resumed pad gets no new CAPS event.
+	#[test]
+	fn an_unresolved_pad_resumed_after_eos_publishes_without_new_caps() {
+		use futures::FutureExt;
+		for resume in ["flush", "stream-start"] {
+			let run = CatalogRun::new();
+			let audio = run.pad("audio");
+			let video = run.pad("video");
+			let mut catalog = run.start();
+			assert!(negotiate(&audio, &opus_caps()));
+			assert!(negotiate(&video, &h264_caps()));
+			assert!(video.send_event(gst::event::Eos::new()));
+			let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
+				panic!("the ended pad must release the first catalog ({resume})")
+			};
+			assert!(first.video.renditions.is_empty());
+
+			match resume {
+				"flush" => {
+					assert!(video.send_event(gst::event::FlushStart::new()));
+					assert!(video.send_event(gst::event::FlushStop::new(true)));
+				}
+				"stream-start" => assert!(video.send_event(gst::event::StreamStart::new("second"))),
+				_ => unreachable!(),
+			}
+			video_frame(&video);
+
+			let std::task::Poll::Ready(Ok(Some(next))) = next_catalog(&mut catalog) else {
+				panic!("the resumed pad must publish its rendition ({resume})")
+			};
+			assert!(next.video.renditions.contains_key("video"), "{resume}");
+			let broadcast = run
+				.0
+				.imp()
+				.control
+				.lock()
+				.unwrap()
+				.live
+				.as_ref()
+				.unwrap()
+				.broadcast
+				.consume();
+			let mut track = broadcast
+				.track("video")
+				.expect("the resumed track is published")
+				.subscribe(None)
+				.now_or_never()
+				.expect("subscribed without waiting")
+				.expect("subscribe to the resumed track")
+				.ordered();
+			let mut group = track
+				.next_group()
+				.now_or_never()
+				.expect("a group is ready")
+				.unwrap()
+				.expect("the resumed keyframe opens a group");
+			let frame = group
+				.read_frame()
+				.now_or_never()
+				.expect("a frame is ready")
+				.unwrap()
+				.expect("the resumed keyframe is published");
+			assert!(!frame.payload.is_empty(), "{resume}");
+		}
+	}
+
+	#[test]
+	fn a_pad_resumed_before_its_caps_gates_the_first_catalog_again() {
+		for resume in ["flush", "stream-start"] {
+			let run = CatalogRun::new();
+			let audio = run.pad("audio");
+			let video = run.pad("video");
+			let mut catalog = run.start();
+			assert!(video.send_event(gst::event::Eos::new()));
+			// The sibling resolves inside the flush window, where the pad already counts as live.
+			match resume {
+				"flush" => {
+					assert!(video.send_event(gst::event::FlushStart::new()));
+					assert!(negotiate(&audio, &opus_caps()));
+					assert!(video.send_event(gst::event::FlushStop::new(true)));
+				}
+				"stream-start" => {
+					assert!(video.send_event(gst::event::StreamStart::new("second")));
+					assert!(negotiate(&audio, &opus_caps()));
+				}
+				_ => unreachable!(),
+			}
+			assert!(
+				next_catalog(&mut catalog).is_pending(),
+				"the resumed pad still owes its rendition ({resume})"
+			);
+			assert!(negotiate(&video, &h264_caps()));
+			video_frame(&video);
+			let std::task::Poll::Ready(Ok(Some(first))) = next_catalog(&mut catalog) else {
+				panic!("the resumed pad must resolve the first catalog ({resume})")
+			};
+			assert!(first.audio.renditions.contains_key("audio"), "{resume}");
+			assert!(first.video.renditions.contains_key("video"), "{resume}");
+		}
+	}
+
+	#[test]
+	fn a_midrun_pending_pad_does_not_gate_later_catalogs() {
+		let run = CatalogRun::new();
+		let audio = run.pad("audio");
+		let mut catalog = run.start();
+		assert!(negotiate(&audio, &opus_caps()));
+		assert!(matches!(
+			next_catalog(&mut catalog),
+			std::task::Poll::Ready(Ok(Some(_)))
+		));
+		let _pending = run.pad("pending");
+		let text = run.pad("text");
+		assert!(negotiate(
+			&text,
+			&gst::Caps::builder("text/x-raw").field("format", "utf8").build()
+		));
+		let std::task::Poll::Ready(Ok(Some(next))) = next_catalog(&mut catalog) else {
+			panic!("later catalogs must not wait")
+		};
+		assert!(next.text.renditions.contains_key("text"));
+	}
+
+	#[test]
+	fn releasing_a_pad_during_a_live_run_still_retires_its_rendition() {
+		let run = CatalogRun::new();
+		let audio = run.pad("audio");
+		let text = run.pad("text");
+		let mut catalog = run.start();
+		assert!(negotiate(&audio, &opus_caps()));
+		assert!(negotiate(
+			&text,
+			&gst::Caps::builder("text/x-raw").field("format", "utf8").build()
+		));
+		assert!(matches!(
+			next_catalog(&mut catalog),
+			std::task::Poll::Ready(Ok(Some(_)))
+		));
+		run.0.release_request_pad(&text);
+		let std::task::Poll::Ready(Ok(Some(next))) = next_catalog(&mut catalog) else {
+			panic!("live release must publish the removal")
+		};
+		assert!(next.text.renditions.is_empty());
+		assert!(next.audio.renditions.contains_key("audio"));
 	}
 
 	#[test]
@@ -1111,8 +1712,11 @@ mod tests {
 			.downcast::<MoqSinkPad>()
 			.unwrap();
 		sink.set_state(gst::State::Paused).unwrap();
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let (broadcast, catalog) = {
+			let control = sink.imp().control.lock().unwrap();
+			let state = control.live.as_ref().unwrap();
+			(state.broadcast.clone(), state.catalog.as_ref().unwrap().clone())
+		};
 		let caps = gst::Caps::builder("audio/x-opus")
 			.field("rate", 48_000i32)
 			.field("channels", 2i32)
@@ -1128,7 +1732,7 @@ mod tests {
 		let segment = gst::FormattedSegment::<gst::ClockTime>::new();
 		pad.lifecycle().media.observe_segment(segment.upcast());
 		sink.set_state(gst::State::Playing).unwrap();
-		let anchor = Instant::now();
+		let anchor = moq_net::time::now();
 		for (pts, arrival) in [(0, 0), (20, 120), (40, 6_000), (60, 6_020)] {
 			if pts == 40 {
 				sink.set_state(gst::State::Paused).unwrap();
@@ -1186,7 +1790,7 @@ mod tests {
 		let pad = pad.downcast::<MoqSinkPad>().expect("MoqSinkPad");
 
 		pad.lifecycle().releasing = true;
-		sink.imp().control.lock().unwrap().admissions += 1;
+		sink.imp().control.lock().unwrap().admissions.insert(pad.clone());
 		let (admission, finished) = sink.imp().confirm_admission(&pad);
 		sink.imp().publish_finished(finished);
 
@@ -1285,12 +1889,19 @@ mod tests {
 			.build();
 		assert!(pad.send_event(gst::event::Caps::new(&caps)));
 
-		sink.imp().control.lock().unwrap().admissions += 1;
+		sink.imp()
+			.control
+			.lock()
+			.unwrap()
+			.admissions
+			.insert(pad.clone().downcast::<MoqSinkPad>().unwrap());
 		assert!(pad.send_event(gst::event::Eos::new()));
 		let pad = pad.downcast::<MoqSinkPad>().expect("MoqSinkPad");
 		assert_eq!(pad.property::<Status>("track-status"), Status::Active);
 
-		let finished = sink.imp().finish_admission();
+		let finished = sink
+			.imp()
+			.finish_admission_locked(&mut sink.imp().control.lock().unwrap(), &pad);
 		sink.imp().publish_finished(finished);
 		assert_eq!(pad.property::<Status>("track-status"), Status::Ended);
 		let _ = element.set_state(gst::State::Null);
@@ -1323,7 +1934,7 @@ mod tests {
 		let stale = CompletionState::new();
 		stale.fail();
 		pad.lifecycle().completion = Some(stale.clone());
-		sink.imp().control.lock().unwrap().admissions += 1;
+		sink.imp().control.lock().unwrap().admissions.insert(pad.clone());
 		let (_, finished) = sink.imp().confirm_admission(&pad);
 		sink.imp().publish_finished(finished);
 
@@ -1333,7 +1944,7 @@ mod tests {
 
 		element.set_state(gst::State::Ready).expect("stop session");
 		pad.lifecycle().completion = Some(stale);
-		sink.imp().control.lock().unwrap().admissions += 1;
+		sink.imp().control.lock().unwrap().admissions.insert(pad.clone());
 		let (_, finished) = sink.imp().confirm_admission(&pad);
 		sink.imp().publish_finished(finished);
 		assert!(pad.lifecycle().completion.is_none());
@@ -1475,15 +2086,14 @@ mod tests {
 		sink.imp().post_session_error(&first, "old session failed".to_string());
 
 		assert!(
-			bus.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Error])
-				.is_none(),
+			bus.pop_filtered(&[gst::MessageType::Error]).is_none(),
 			"the stopped session posted an error into its replacement"
 		);
 
 		sink.imp()
 			.post_session_error(&replacement, "current session failed".to_string());
 		let message = bus
-			.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Error])
+			.pop_filtered(&[gst::MessageType::Error])
 			.expect("the current session posted its error");
 		let gst::MessageView::Error(error) = message.view() else {
 			unreachable!();
@@ -1506,6 +2116,7 @@ mod tests {
 			"tls-disable-verify",
 			"quic-idle-timeout",
 			"quic-keep-alive",
+			"quic-keylog",
 		] {
 			assert!(
 				spec(&sink, name).flags().contains(gst::PARAM_FLAG_MUTABLE_READY),
@@ -1554,13 +2165,17 @@ mod tests {
 		let quic = super::super::session::quic_config(&resolved).resolve();
 		assert_eq!(quic.idle_timeout, Duration::from_secs(15));
 		assert_eq!(quic.keep_alive, Some(Duration::from_secs(3)));
+		assert!(!sink.property::<bool>("quic-keylog"));
+		assert!(!quic.keylog);
 
 		sink.set_property("quic-keep-alive", 0u64);
 		sink.set_property("quic-idle-timeout", 0u64);
+		sink.set_property("quic-keylog", true);
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let quic = super::super::session::quic_config(&resolved).resolve();
 		assert_eq!(quic.idle_timeout, Duration::ZERO);
 		assert_eq!(quic.keep_alive, None);
+		assert!(quic.keylog);
 	}
 
 	#[test]

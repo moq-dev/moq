@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 //! # moq-net: Media over QUIC networking layer
 //!
 //! `moq-net` is the networking layer for Media over QUIC: real-time pub/sub with built-in
@@ -5,9 +7,17 @@
 //! At session setup it negotiates one of two wire protocols: the simplified `moq-lite`
 //! protocol (the default) or the full IETF `moq-transport` protocol.
 //!
+//! ## Features
+//! The default `async` feature enables async helpers, the announcement `Stream` adapter,
+//! `time::run`, and
+//! the Lite/IETF sessions (`Client`, `Server`, `Session`, and the session `Driver`).
+//! With `default-features = false`, use the model's `poll_*` methods and
+//! [`origin::Driver`] with explicit time. Origin serving stays available without
+//! a native runtime; no executor or clock is chosen by the model.
+//!
 //! ## API
 //! The API is built around Producer/Consumer pairs, with the hierarchy:
-//! - [origin::Consumer]: A collection of [broadcast::Consumer]s, produced by one or more [Session]s.
+//! - [origin::Consumer]: A collection of [broadcast::Consumer]s, produced by one or more sessions.
 //! - [broadcast::Consumer]: A collection of [track::Consumer]s, produced by a single publisher.
 //! - [track::Consumer]: A collection of [group::Info]s, delivered out-of-order until expired.
 //! - [group::Info]: A collection of [frame::Info]s, delivered in order until cancelled.
@@ -17,8 +27,8 @@
 //! `announce`) that owns the short `Producer` / `Consumer` / `Info` names.
 //!
 //! Traffic counters for the levels above live in [`stats`]: build a [`stats::Registry`]
-//! and hand each session a [`stats::Session`] via [`Client::with_stats`] /
-//! [`Server::with_stats`]. Publishing the counters as MoQ broadcasts lives in the
+//! and hand each session a [`stats::Session`] via `Client::with_stats` /
+//! `Server::with_stats`. Publishing the counters as MoQ broadcasts lives in the
 //! `moq-stats` crate.
 //!
 //! ## Compatibility
@@ -48,12 +58,12 @@
 //!
 //! ## Driving and time
 //! Session and origin drivers never spawn tasks or read the clock.
-//! Explicitly minting an [`Epoch`] uses the wall clock and secure randomness. [`Client::connect`] and
-//! [`Server::accept`] take an initial [`time::Instant`] and return
-//! `(Session, Driver)`. Poll the [`Driver`] with the current instant and a
+//! Explicitly minting an [`Epoch`] uses the wall clock and secure randomness. `Client::connect` and
+//! `Server::accept` take an initial [`time::Instant`] and return
+//! `(Session, Driver)`. Poll the `Driver` with the current instant and a
 //! [`kio::Waiter`], then wake on external activity or at the deadline it
-//! returns; [`time::run`] does exactly that on tokio or the browser. The last
-//! [`Session`] drop requests closure; dropping the driver cancels it.
+//! returns; `time::run` does exactly that on tokio or the browser. The last
+//! `Session` drop requests closure; dropping the driver cancels it.
 //!
 //! [`origin::Producer::new`] also returns a producer and driver. Its driver runs
 //! route changes, serving, linger, teardown, and the origin's cache expiration.
@@ -66,46 +76,53 @@
 //! instant.
 
 #![warn(missing_docs)]
-// Proving receive futures are Send traverses the shared origin/broadcast/track types.
-#![recursion_limit = "256"]
 // The browser transport is `!Send`, so on wasm the shared state behind these `Arc`s is
 // too and clippy suggests `Rc`. The same code is genuinely cross-thread on native, so
 // `Arc` stays and the lint is unactionable here.
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 pub mod auth;
+#[cfg(feature = "async")]
 mod client;
 mod coding;
+#[cfg(feature = "async")]
 mod driver;
 mod epoch;
 mod error;
 pub mod goaway;
 // Not part of the public API: compiled only for the crate's own tests and for the
 // `fuzz/` harness.
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 #[doc(hidden)]
 pub mod fuzz;
 mod ietf;
 mod lite;
 mod model;
 pub mod path;
+#[cfg(feature = "async")]
 mod priority;
+#[cfg(feature = "async")]
 mod recv;
 pub mod setup;
+#[cfg(feature = "async")]
 mod tail;
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 mod test_interop;
 mod util;
 mod version;
 
+#[cfg(feature = "async")]
 pub mod server;
+#[cfg(feature = "async")]
 pub mod session;
 pub mod stats;
 pub mod time;
 pub mod transport;
 
+#[cfg(feature = "async")]
 pub use client::*;
 pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
+#[cfg(feature = "async")]
 pub use driver::Driver;
 pub use epoch::{Epoch, InvalidEpoch};
 pub use error::*;
@@ -113,7 +130,9 @@ pub use error::*;
 pub use lite::Role;
 pub use model::*;
 pub use path::{AsPath, InvalidPattern, Path, PathOwned, Pattern, Patterns};
+#[cfg(feature = "async")]
 pub use server::Server;
+#[cfg(feature = "async")]
 pub use session::Session;
 pub use version::*;
 

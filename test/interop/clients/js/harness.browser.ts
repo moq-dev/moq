@@ -22,7 +22,7 @@ test("pause activates its button when a canvas intercepts pointer input", async 
 	} finally {
 		await browser.close();
 	}
-});
+}, 30_000);
 
 for (const stall of ["audio", "video"]) {
 	test(`the paused play button stays clickable during ${stall} stalling`, async () => {

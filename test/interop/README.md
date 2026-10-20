@@ -3,8 +3,8 @@
 Cross-language interop test that builds every client from **this checkout**
 and runs them against each other.
 
-This is the in-tree companion to [moq-dev/smoke](https://github.com/moq-dev/smoke).
-That repo installs each client from its public package registry (crates.io, PyPI,
+This is the in-tree companion to [`test/smoke`](../smoke).
+That suite installs each client from its public package registry (crates.io, PyPI,
 npm, ...) to catch *packaging* breakage in a release. This one builds each client
 from the workspace source (`cargo`, `bun`, `uv`, `cc`) to catch *interop*
 regressions before anything is published. No apt/brew/npm/PyPI, and no
@@ -42,7 +42,9 @@ released relays and clients, skip it.
 
 Whenever the browser subscriber is in the run, the matrix ends with a close-code
 case: Chromium dials the relay with a token its public rules refuse, and
-`WebTransport.closed` must carry the relay's code and reason. Chromium treats a
+`WebTransport.closed` must carry the relay's code and reason. A WebSocket-only
+`Connection` must publish the same Unauthorized session error and stop its
+unlimited reconnect loop. Chromium treats a
 server's HTTP/3 control stream ending as fatal, so a server that ends it under
 the close capsule loses both; no Rust peer is that strict.
 
@@ -109,7 +111,7 @@ until moq-ffi exposes one, and the browser's shared connection keeps its session
 private, so their cells check media alone. AUTH is only on the work-in-progress
 moq-lite-07, so the printing clients dial `moq-lite-07-wip` alone and a printing
 client that reports nothing never got its grant. The native JS subscribers dial
-WebTransport alone, since the WebSocket fallback cannot offer it. The rest keep
+WebTransport alone and offer it there. The rest keep
 their defaults, so the matrix also crosses versions through the relay, which
 accepts both.
 
@@ -186,14 +188,22 @@ offers only the cell's version, and JavaScript checks the negotiated version.
 The relay is anonymous here, since released binaries may predate AUTH; the
 default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
-publishers feed current readers, through both relay sources. Rust exports must
-decode to a video frame through ffmpeg. The existing JS subscriber
-reconstructs the catalog and decodes the container.
+publishers feed current readers, through both relay sources. Each reader is its
+own lane, `media-rust` and `media-js-native-node`. Rust exports must
+decode to a video frame through ffmpeg. The JS reader is
+`compat/client.ts`, not the interop subscriber, whose API follows the
+checkout. One copy runs against each package set, using only API both have,
+and it reconstructs the catalog and decodes the container.
+Before cross-version sessions, current and released media controls each run
+with their own relay, publisher, and Rust/JS readers on moq-lite-06. These
+controls always run, including when a planned break skips cross-version lanes,
+so a broken reader cannot make compatibility failures ambiguous.
 
 Each `moq-net` library states whether a draft has FETCH (lite-05 onward
 today). A draft without it in both is logged and its FETCH lanes skipped; one
-the release supports and the checkout dropped fails. Both Rust versions FETCH the group the
-publisher's own JS subscriber observed and compare every frame's exact
+the release supports and the checkout dropped fails, unless a planned break covers
+the `fetch-capability` cell for that version. Both Rust versions FETCH the group the
+publisher's own compat client observed and compare every frame's exact
 payload. JS publishers write one group after that subscriber's demand, and the
 opposite-source Rust CLI FETCHes it by the same observed ID.
 
@@ -202,18 +212,38 @@ skipped, then lists each failing cell before it fails.
 Checkout-only versions are logged and omitted. Removing a released version
 fails before sessions start. A maintainer-approved break belongs in
 `compat/planned-breaks.json` with its reason and the exact affected release
-versions. Keyed by a protocol name it drops that version; with `cells` it
-skips only the named lanes, optionally narrowed to versions, a relay source,
-or a publisher source. Every skipped cell is logged with the break's name.
-Entries become errors once an affected release changes or no longer offers a
-listed version, forcing removal or a fresh review. Future WIP drafts receive
-no automatic exception.
+versions. Keyed by a protocol name it skips every cell of that version, and
+excuses the checkout removing it; with `cells` it skips only the named lanes,
+optionally narrowed to versions, a relay source, or a publisher source. Every
+skipped cell is logged with the break's name. Entries become errors once an
+affected release changes or no longer offers a listed version, forcing a
+re-measure. Future WIP drafts receive no automatic exception.
+
+`just test wire-compat --remeasure` is that re-measure, run after each release
+publishes (see `CONTRIBUTING.md`). It runs the cells planned breaks cover
+without letting them fail the run, then rewrites `compat/planned-breaks.json`:
+a break with a failing cell is re-pinned to the releases just measured, and one
+with none is deleted. It prints each break's failing cells. Review the diff and
+refresh each reason before committing.
 
 ## Media QA
 
 The matrix asks "did bytes arrive and did a pixel light up". That passes on a
 frozen picture, on silence, and on audio a second out of step, so
 `just test media` measures the media itself, browser to browser.
+Use `just test media --media-engines chromium,firefox,webkit` to run each pinned
+Playwright player against a Chromium publisher. The harness installs the requested
+engines and runs the same lifecycle cases, content tolerances, and five negative
+controls per engine. A missing runtime or required API fails that engine by name.
+Firefox and WebKit players explicitly use WebSocket; Chromium keeps normal
+transport selection. This does not measure Firefox's QUIC path.
+
+The capability report names the engine version and separately lists missing
+publisher and player APIs. Firefox 157 in Playwright 1.64 exposes WebTransport and
+WebCodecs but lacks `MediaStreamTrackProcessor`, so it can play this fixture but
+cannot publish it. Capabilities are measured on every run rather than assumed
+from an engine name. Playwright WebKit is not Safari; Safari device/transport
+bugs and real Firefox transport negotiation still require manual evidence.
 
 The publisher is a fixture, not a fake camera: a canvas painting a frame counter
 as black/white blocks, and a tone stepping through a fixed frequency table. Both
@@ -225,7 +255,7 @@ samples, not that a machine played them.
 
 Each run covers, against a real local relay:
 
-- **capabilities** - probes every platform API the player needs, and fails
+- **capabilities** - probes native APIs separately for the publisher and player, and fails
   naming what is missing rather than skipping a case.
 - **cold start** - the publisher reports when it is announced and encoding, then
   a fresh page joins. No reload, unlike the matrix driver: a subscriber that
@@ -233,9 +263,12 @@ Each run covers, against a real local relay:
 - **user gesture** - Chromium is launched with
   `--autoplay-policy=document-user-activation-required`, which applies to
   top-level Web Audio contexts. The fixture and player graphs must be suspended
-  before either page is clicked, then both must carry audio afterwards. Harness
-  state probes use CDP with `userGesture: false`: Playwright's usual page reads
-  themselves grant activation and would invalidate this assertion.
+  before either page is clicked, then both must carry audio afterwards. Firefox
+  is launched with its Web Audio autoplay block enabled. Playwright's usual page
+  reads grant activation and would invalidate this assertion, so the player logs
+  each sample to the console and the harness never evaluates in a player page
+  before its click. The Chromium fixture is read over CDP with
+  `userGesture: false`, and capability probes run in a separate page.
 - **capture permission** - the camera case uses a fake device for deterministic
   input, while Playwright denies and then grants permissions. Both source errors
   must be visible; neither a full nor a microphone-only denial may announce a
@@ -249,6 +282,11 @@ Each run covers, against a real local relay:
   within 1.5s of the fixture's painted frame within 2s, both bounds about twice
   the worst seen in looped runs under CPU load. A rejoin and a reattach cross
   the same demand gap, so they must reach live the same way.
+- **codec identity and coded-size changes** - an AVC-to-VP8 change keeps the
+  broadcast and rendition ID while moving to a fresh track. Playback must keep
+  advancing and in sync through the change. A VP8 resize doubles the presented
+  dimensions on the same track. The pixels carry a source generation, so old
+  pictures cannot reappear after the new generation starts presenting.
 - **resources return to baseline** - the page wraps `WebTransport`, `WebSocket`,
   `AudioContext`, and `Worker` to count live instances, so a detach that leaks a
   session is visible rather than merely invisible.
@@ -262,6 +300,11 @@ boundary and the canvas holding a frame up to one frame old.
 Each window opens once the player's audio buffer has filled and plays. Until
 then the player holds its first decoded frame, silent, for its sync delay, which
 rises past 400ms under load; that is startup, not a gap in playback.
+
+Run a focused lifecycle case with `just test media --media-cases rename`.
+It uses the same real fixture, player and content oracles while leaving cold-start
+grading and the unrelated negative controls to the default full run. A focused
+pass makes no claim about those omitted checks.
 
 The run ends with negative controls. Each injects a defect and names the
 assertion that has to catch it, and passes only by failing there:
@@ -316,7 +359,7 @@ clients/
 ## CI
 
 `.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
-PRs that touch `test/interop/`). A red cell means a real interop break in the
+release PRs that touch `test/interop/`). A red cell means a real interop break in the
 current tree.
 
 ## Subscription termination
@@ -352,3 +395,8 @@ and JS refuses them on lite-06.
 drafts 14 through 22: `ietf-datagram.ts` decodes Rust's datagrams and their
 Timestamps and re-encodes them byte for byte, and Rust decodes the datagram the
 JS publisher sends.
+
+`ietf_track_status_interop` sends Rust's `TRACK_STATUS` to the JS publisher on
+drafts 14 through 22 through `track-status.ts`, and Rust decodes each
+`TRACK_STATUS_OK` and the refusal for a missing broadcast the way its
+subscriber reads them.

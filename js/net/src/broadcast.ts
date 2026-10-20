@@ -80,13 +80,13 @@ function watchDemand(state: BroadcastState, producer: track.Producer, lookups?: 
 		const used =
 			state.closed.peek() === undefined &&
 			demand.closed.peek() === undefined &&
-			((lookups?.pending ?? 0) > 0 || demand.used.peek());
+			((lookups?.pending ?? 0) > 0 || demand.wanted.peek() !== undefined);
 		if (active === used) return;
 		state.active += used ? 1 : -1;
 		active = used;
 		state.used.set(state.active > 0);
 	};
-	const disposeUsed = demand.used.subscribe(update);
+	const disposeUsed = demand.wanted.subscribe(update);
 	if (lookups) lookups.changed = update;
 	const disposeClosed = demand.closed.subscribe(() => {
 		if (demand.closed.peek() === undefined) return;
@@ -221,7 +221,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	let answered = false;
 	let ended = false;
 	const release = () => {
-		if (lookups.opened && lookups.pending === 0 && !producer.demand().used.peek()) producer.close();
+		if (lookups.opened && lookups.pending === 0 && producer.demand().wanted.peek() === undefined) producer.close();
 	};
 	info.then(
 		() => {
@@ -247,6 +247,12 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	return untilAborted(info, hold);
 }
 
+// The newest frame cached for `name`, without subscribing: undefined when nobody serves it yet.
+function largest(state: BroadcastState, name: string): track.Location | undefined {
+	const producer = lookup(state, name);
+	return producer && hooks.cachedLargest(producer);
+}
+
 // Serve a group from the local retained window by subscribing and scanning to the
 // requested sequence. The default for a produced broadcast; the consuming wire layer
 // overrides it to fetch over the network (or to reject when the transport has no FETCH).
@@ -258,7 +264,7 @@ async function fetchGroup(
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
 	const subscriber = subscribe(state, name, { priority: options.priority });
-	hooks.exemptFetch(subscriber);
+	hooks.fetchBudget(subscriber, options.maxDelay);
 	try {
 		for (;;) {
 			const group = await untilAborted(subscriber.recvGroup(), options.signal);
@@ -350,6 +356,7 @@ export class Producer {
 		registerWire(this, {
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
+			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 		});
@@ -452,7 +459,14 @@ export class Producer {
 	 * origin, or if the broadcast is already closed.
 	 */
 	announce(
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
+		route:
+			| Route
+			| {
+					epoch?: Route["epoch"];
+					hops?: Route["hops"];
+					cost?: Route["cost"];
+					auth?: Route["auth"];
+			  } = Route.default,
 	): void {
 		if (this.#state.closed.peek() !== undefined) {
 			throw new Error("broadcast is closed");
@@ -519,6 +533,7 @@ export class Consumer {
 		registerWire(this, {
 			subscribe: (name, options) => subscribe(this.#state, name, options),
 			resolveTrackInfo: (name, hold) => resolveTrackInfo(this.#state, name, hold),
+			largest: (name) => largest(this.#state, name),
 			fetchGroup: (name, sequence, options) => fetchGroup(this.#state, name, sequence, options),
 			requested: () => requested(this.#state),
 		});

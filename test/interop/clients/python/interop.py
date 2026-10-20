@@ -36,7 +36,7 @@ AUDIO_BATCH_US = 20_000
 AUDIO_BATCH_SAMPLES = AUDIO_RATE * AUDIO_BATCH_US // 1_000_000
 
 
-async def _publish_tone(audio: moq.AudioProducer) -> None:
+async def _publish_tone(audio: moq.audio.Producer) -> None:
     """Feed the encoder a real-time tone until the task is cancelled."""
     timestamp_us = 0
     phase = 0
@@ -44,7 +44,11 @@ async def _publish_tone(audio: moq.AudioProducer) -> None:
     started = loop.time()
     while True:
         samples = [math.sin(2 * math.pi * AUDIO_TONE_HZ * (phase + i) / AUDIO_RATE) for i in range(AUDIO_BATCH_SAMPLES)]
-        audio.write(moq.AudioFrame(timestamp_us=timestamp_us, data=struct.pack(f"<{len(samples)}f", *samples)))
+        audio.write(
+            moq.audio.Frame(
+                timestamp=timedelta(microseconds=timestamp_us), data=struct.pack(f"<{len(samples)}f", *samples)
+            )
+        )
         phase += AUDIO_BATCH_SAMPLES
         timestamp_us += AUDIO_BATCH_US
         # Pace against the start, so encoding cost doesn't accumulate as drift.
@@ -55,13 +59,18 @@ async def publish(url: str, broadcast: str) -> None:
     async with moq.Client(url, tls_verify=False) as client:
         # Hold the producer for the lifetime of the publish loop; finish() unpublishes.
         producer = client.create_broadcast(broadcast)
+        catalog = moq.media.CatalogProducer(producer)
         media = moq.media.TrackStreamProducer.video(
             producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b"")
         )
-        audio = producer.encode_audio(
-            AUDIO_TRACK,
-            moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=AUDIO_RATE, channels=1),
-            moq.AudioEncoderOutput(codec=moq.AudioCodec.opus(), frame_duration_us=AUDIO_FRAME_DURATION_US),
+        audio = moq.audio.Producer(
+            catalog,
+            moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=AUDIO_RATE, channels=1),
+            moq.audio.EncoderOutput(
+                codec=moq.audio.Codec.opus(),
+                track=AUDIO_TRACK,
+                frame_duration=timedelta(microseconds=AUDIO_FRAME_DURATION_US),
+            ),
         )
         producer.announce()
         print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {AUDIO_TONE_HZ:.0f} Hz tone) to {url}")
@@ -104,11 +113,10 @@ async def subscribe(url: str, broadcast: str, timeout: float) -> None:
         consumer = await asyncio.wait_for(client.announced_broadcast(broadcast), timeout)
         catalog = await asyncio.wait_for(_catalog_with_video(consumer), timeout)
 
-        track_name = next(iter(catalog.video))
-        video = catalog.video[track_name]
+        id, video = next(iter(catalog.video.items()))
 
-        media = await moq.media.ContainerConsumer.subscribe(
-            consumer, track_name, video.container, subscription=moq.Subscription(max_delay=MAX_DELAY)
+        media = await moq.media.TrackConsumer.subscribe(
+            consumer, id, video, subscription=moq.Subscription(max_delay=MAX_DELAY)
         )
 
         total = 0

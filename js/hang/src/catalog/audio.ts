@@ -1,4 +1,5 @@
 import * as z from "@zod/mini";
+import { compareName, compareNumber } from "./compare";
 import { ContainerSchema } from "./container";
 import { hexSchema } from "./hex";
 import { u53Schema } from "./integers";
@@ -18,6 +19,9 @@ export const AudioConfigSchema = z.object({
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
+	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
+	// catalog). Absent means the ID is the track name. Resolve it with `track`.
+	track: z.optional(z.string()),
 
 	// Human-readable rendition name for track pickers.
 	label: z.optional(z.string()),
@@ -40,7 +44,7 @@ export const AudioConfigSchema = z.object({
 	// The number of channels in the audio
 	numberOfChannels: u53Schema,
 
-	// The bitrate of the audio in bits per second
+	// The maximum bitrate of the audio in bits per second.
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: z.optional(u53Schema),
 
@@ -103,3 +107,15 @@ export const AudioSchema = z.union([
 export type Audio = z.infer<typeof AudioSchema>;
 /** Decoder config for a single audio rendition. */
 export type AudioConfig = z.infer<typeof AudioConfigSchema>;
+
+/** Rank audio best first: enabled, then bitrate, sample rate, channels, and name. */
+export function ranked(renditions: Record<string, AudioConfig>): [string, AudioConfig][] {
+	return Object.entries(renditions).sort(
+		(left, right) =>
+			compareNumber(Number(left[1].enabled !== false), Number(right[1].enabled !== false)) ||
+			compareNumber(left[1].bitrate, right[1].bitrate) ||
+			compareNumber(left[1].sampleRate, right[1].sampleRate) ||
+			compareNumber(left[1].numberOfChannels, right[1].numberOfChannels) ||
+			compareName(left[0], right[0]),
+	);
+}

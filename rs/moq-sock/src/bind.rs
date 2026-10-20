@@ -27,7 +27,7 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// UDP socket buffer size requested in each direction, in bytes.
 ///
 /// A QUIC stack absorbs bursts in the kernel socket buffer: whatever doesn't fit
-/// while the process is off the CPU is dropped before noq ever sees it, and
+/// while the process is off the CPU is dropped before QUIC ever sees it, and
 /// congestion control reads those drops as congestion. The OS defaults are sized
 /// for a chatty TCP-era socket (208 KiB on Linux), which a single relay socket
 /// carrying every connection blows through in milliseconds. 8 MiB is roughly 64ms
@@ -317,7 +317,7 @@ pub fn tcp(addr: SocketAddr) -> io::Result<TcpListener> {
 /// A specific IPv6 address such as `[::1]` can never carry IPv4, so it is set
 /// v6-only instead, which Linux does on bind anyway. Windows keeps the cleared
 /// flag, so the socket claims an IPv4 side it lacks and then rejects the
-/// IPv4-level options noq sets on a dual-stack socket with `WSAEINVAL`, failing
+/// IPv4-level options the QUIC driver sets on a dual-stack socket with `WSAEINVAL`, failing
 /// endpoint setup.
 fn make_dual_stack(socket: &Socket, addr: SocketAddr) {
 	let SocketAddr::V6(addr) = addr else { return };
@@ -364,7 +364,7 @@ mod tests {
 	}
 
 	/// A specific IPv6 address can't carry IPv4, so the socket must not claim to:
-	/// Windows rejects noq's IPv4 socket options on a dual-stack `[::1]` socket.
+	/// Windows rejects the QUIC driver's IPv4 socket options on a dual-stack `[::1]` socket.
 	/// Linux forces v6-only on such a bind itself, so only Windows can regress.
 	#[test]
 	fn udp_ipv6_loopback_is_v6_only() {

@@ -7,12 +7,13 @@ name: Release Swift FFI
 # (release-swift-lib.yml) and versions independently.
 
 on:
-  push:
-    tags:
-      - "moq-ffi-v*"
-  # Dry-run: build everything, publish nothing. Nightly calls every release
-  # workflow this way so a broken build surfaces before the tag is cut.
+  # The tag coordinator supplies shared default-feature artifacts. Manual
+  # calls and Go PR dry-runs still build their own target subset.
   workflow_call:
+    inputs:
+      reuse-native:
+        type: boolean
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -28,6 +29,7 @@ jobs:
     uses: ./.github/workflows/release-ffi.yml
     with:
       language: swift
+      reuse-native: ${{ inputs.reuse-native || false }}
       targets: '["aarch64-apple-ios", "aarch64-apple-ios-sim", "aarch64-apple-darwin"]'
 
   package:
@@ -42,23 +44,27 @@ jobs:
 
       - uses: ./.github/actions/just
 
+      - name: Select native artifacts
+        id: native
+        env:
+          LIB_PREFIX: ${{ inputs.reuse-native && 'default' || 'swift' }}
+          BUILD_TARGETS: ${{ needs.ffi.outputs.targets }}
+        run: just gh ffi pattern
+
       - name: Download per-target libs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: libs-raw
-          pattern: swift-lib-*
+          pattern: ${{ steps.native.outputs.pattern }}
 
       - name: Flatten lib layout
-        run: |
-          mkdir -p libs
-          for dir in libs-raw/swift-lib-*; do
-            target="${dir#libs-raw/swift-lib-}"
-            mv "$dir" "libs/$target"
-          done
-          ls -la libs
+        env:
+          LIB_PREFIX: ${{ inputs.reuse-native && 'default' || 'swift' }}
+          BUILD_TARGETS: ${{ needs.ffi.outputs.targets }}
+        run: just gh ffi stage
 
       - name: Download bindings
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: swift-bindings
           path: bindings
@@ -74,7 +80,7 @@ jobs:
             --output release-out
 
       - name: Upload Swift package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: swift-ffi-package
           path: release-out/*
@@ -106,7 +112,7 @@ jobs:
         run: just gh release prev-tag moq-ffi
 
       - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: swift-ffi-package
           path: artifacts
@@ -136,7 +142,7 @@ jobs:
       - uses: ./.github/actions/just
 
       - name: Download staged package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: swift-ffi-package
           path: artifacts
@@ -160,7 +166,7 @@ jobs:
       - uses: ./.github/actions/just
 
       - name: Generate moq-bot token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
@@ -171,7 +177,7 @@ jobs:
           permission-contents: write
 
       - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: swift-ffi-package
           path: swift-out

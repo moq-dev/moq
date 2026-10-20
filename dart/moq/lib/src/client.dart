@@ -42,17 +42,51 @@ final class ConnectOptions {
   /// Path to a PEM private key to present for mTLS.
   final String? tlsKey;
 
+  /// Server name to verify the certificate against (SNI) instead of the URL's host.
+  final String? tlsHostName;
+
   /// Local socket address to bind, e.g. `0.0.0.0:0`.
   final String? bind;
 
   /// Protocol versions to offer, most preferred first, e.g. `moq-lite-03`.
-  /// Null offers every supported version.
+  /// Null offers every supported version, which [versions] lists.
   final List<String>? versions;
+
+  /// How long one connect may take, dial and handshake together; zero waits forever.
+  final Duration? timeout;
+
+  /// Happy Eyeballs: how long before the next resolved address is also dialed.
+  final Duration? race;
+
+  /// Happy Eyeballs: how long IPv4 waits for the full DNS answer.
+  final Duration? resolutionDelay;
 
   /// Cap on the concurrent QUIC streams the peer may open toward this
   /// connection. MoQ opens one stream per group, so a subscriber to many
   /// tracks may want this raised.
   final int? maxStreams;
+
+  /// How long an idle QUIC connection survives before it is dropped.
+  final Duration? idleTimeout;
+
+  /// QUIC keep-alive ping interval; zero disables it.
+  final Duration? keepAlive;
+
+  /// UDP generic segmentation offload; null leaves the choice to the backend.
+  final bool? gso;
+
+  /// Path MTU discovery; null leaves the choice to the backend.
+  final bool? mtuDiscovery;
+
+  /// The congestion control family; null leaves the choice to the backend.
+  final CongestionControl? congestionControl;
+
+  /// Directory to write qlog traces into; fails unless [qlogSupported].
+  final String? qlog;
+
+  /// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
+  /// decrypting a capture. Off by default; on without `SSLKEYLOGFILE` fails.
+  final bool keylog;
 
   /// Set false to stop the WebSocket fallback racing QUIC, e.g. against a
   /// relay that only serves QUIC. On by default.
@@ -82,9 +116,20 @@ final class ConnectOptions {
     this.tlsFingerprints,
     this.tlsCert,
     this.tlsKey,
+    this.tlsHostName,
     this.bind,
     this.versions,
+    this.timeout,
+    this.race,
+    this.resolutionDelay,
     this.maxStreams,
+    this.idleTimeout,
+    this.keepAlive,
+    this.gso,
+    this.mtuDiscovery,
+    this.congestionControl,
+    this.qlog,
+    this.keylog = false,
     this.websocketEnabled,
     this.websocketDelay,
     this.reconnect = true,
@@ -94,17 +139,19 @@ final class ConnectOptions {
   });
 
   MoqClientConfig get _ffi {
-    final delay = websocketDelay;
-    if (delay != null && delay.isNegative) {
-      throw ArgumentError.value(
-        delay,
-        'websocketDelay',
-        'must not be negative',
-      );
+    int? us(Duration? value, String name) {
+      if (value != null && value.isNegative) {
+        throw ArgumentError.value(value, name, 'must not be negative');
+      }
+      return value?.inMicroseconds;
     }
+
     return MoqClientConfig(
       bind: bind,
       versions: versions ?? const [],
+      timeoutUs: us(timeout, 'timeout'),
+      raceUs: us(race, 'race'),
+      resolutionDelayUs: us(resolutionDelay, 'resolutionDelay'),
       tls: MoqClientTls(
         insecure: !tlsVerify,
         roots: tlsRoots ?? const [],
@@ -112,11 +159,21 @@ final class ConnectOptions {
         fingerprints: tlsFingerprints ?? const [],
         cert: tlsCert,
         key: tlsKey,
+        hostName: tlsHostName,
       ),
-      quic: MoqQuicConfig(maxStreams: maxStreams),
+      quic: MoqQuicConfig(
+        maxStreams: maxStreams,
+        idleTimeoutUs: us(idleTimeout, 'idleTimeout'),
+        keepAliveUs: us(keepAlive, 'keepAlive'),
+        gso: gso,
+        mtuDiscovery: mtuDiscovery,
+        congestionControl: congestionControl,
+        qlog: qlog,
+        keylog: keylog,
+      ),
       websocket: MoqWebSocketConfig(
         enabled: websocketEnabled,
-        delayUs: delay?.inMicroseconds,
+        delayUs: us(websocketDelay, 'websocketDelay'),
       ),
       once: !reconnect,
       backoff: backoff ?? MoqBackoff(),
@@ -125,6 +182,13 @@ final class ConnectOptions {
     );
   }
 }
+
+/// The protocol versions offered by default, most preferred first, spelled the
+/// way [ConnectOptions.versions] takes them.
+List<String> versions() => moqVersions();
+
+/// Whether this build can write qlog traces for [ConnectOptions.qlog].
+bool qlogSupported() => moqQlogSupported();
 
 /// A connected MoQ session with publishing and subscription conveniences.
 final class Moq {
@@ -170,7 +234,8 @@ final class Moq {
     AnnounceOptions options = const AnnounceOptions(),
   }) => session.consume().announced(config: options._ffi);
 
-  /// Wait for a broadcast announced at exactly [path].
+  /// Follow the broadcast at exactly [path]: each `available()` resolves the
+  /// next publisher instance serving it, such as a restarted publisher.
   AnnouncedBroadcast announcedBroadcast(String path) =>
       session.consume().announcedBroadcast(path: path);
 
@@ -189,7 +254,11 @@ final class Moq {
   /// the room back.
   Bandwidth bandwidth() => session.bandwidth();
 
-  /// Gracefully close the session and stop the client.
+  /// Drain within one second, then stop the client.
+  ///
+  /// Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
+  /// Lite versions, including the default lite-06, wait only for transport ACKs.
+  /// IETF also waits for transport ACKs.
   Future<void> close() async {
     try {
       await session.shutdown();

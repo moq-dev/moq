@@ -1,14 +1,8 @@
 name: release-ffi
 
-# Builds rs/moq-ffi for each requested target and generates its UniFFI
-# bindings. The release-{dart,go,kt,swift}-ffi.yml callers package and publish;
-# they keep the moq-ffi-v* tag trigger and the workflow name that alert.yml and
-# the workflow_run chains match on.
-#
-# Uploads, all prefixed by `language` so callers sharing one nightly run never
-# collide:
-#   <language>-lib-<target>  the target's native libraries (the lib/ directory)
-#   <language>-bindings      dist/bindings/<language>/, when `bindings` is set
+# Builds each requested target and generates bindings. The shared coordinator
+# uploads default-lib-<target>; standalone callers retain their language prefix.
+# Binding artifacts retain their language names in either mode.
 
 on:
   workflow_call:
@@ -25,11 +19,18 @@ on:
         description: "Generate and upload the bindings for `language`"
         type: boolean
         default: true
-      default-features:
-        description: "Build moq-ffi with its default features (audio and video)"
+      reuse-native:
+        description: "Consume the coordinator's native libraries and bindings"
         type: boolean
-        default: true
+        default: false
+      binding-languages:
+        description: "JSON array of binding languages; empty means language"
+        type: string
+        default: ""
     outputs:
+      targets:
+        description: "Requested targets, for selecting and staging native artifacts"
+        value: ${{ jobs.parse-version.outputs.targets }}
       version:
         description: "moq-ffi version, from the tag or (off a tag) rs/moq-ffi/Cargo.toml"
         value: ${{ jobs.parse-version.outputs.version }}
@@ -47,6 +48,7 @@ jobs:
     name: Parse version
     runs-on: ubuntu-latest
     outputs:
+      targets: ${{ inputs.targets }}
       version: ${{ steps.parse.outputs.version }}
 
     steps:
@@ -63,6 +65,7 @@ jobs:
   build:
     name: Build moq-ffi (${{ matrix.target }})
     needs: [parse-version]
+    if: ${{ !inputs.reuse-native }}
     runs-on: ${{ contains(matrix.target, '-apple-') && 'macos-latest' || contains(matrix.target, '-windows-') && 'windows-latest' || 'ubuntu-latest' }}
 
     strategy:
@@ -82,8 +85,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # No Rust cache: its entry would evict the store every pull request
-      # restores from the 10 GB budget. See cache.yml.
+      # No Rust cache: shipped binaries compile from source rather than from
+      # whatever the shared R2 cache holds.
 
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -102,28 +105,29 @@ jobs:
         env:
           BUILD_TARGET: ${{ matrix.target }}
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-          DEFAULT_FEATURES: ${{ inputs.default-features }}
           # Set iOS deployment target to avoid ___chkstk_darwin linker errors.
           IPHONEOS_DEPLOYMENT_TARGET: ${{ contains(matrix.target, 'apple-ios') && '16.0' || '' }}
         run: |
-          args=(--target "$BUILD_TARGET" --version "$BUILD_VERSION" --output dist)
-          if [[ "$DEFAULT_FEATURES" == false ]]; then
-            args+=(--no-default-features)
-          fi
-          just rs package-ffi "${args[@]}"
+          just rs package-ffi --target "$BUILD_TARGET" --version "$BUILD_VERSION" --output dist
 
       - name: Upload lib
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ inputs.language }}-lib-${{ matrix.target }}
           # Only the lib/ contents, so a caller's download is <target>/<libname>.
           path: dist/moq-ffi-${{ needs.parse-version.outputs.version }}-${{ matrix.target }}/lib/
 
   bindings:
-    name: Generate bindings
-    needs: [parse-version]
-    if: inputs.bindings
+    name: Generate bindings (${{ matrix.language }})
+    needs: [parse-version, build]
+    # An unrelated target failure must not suppress bindings for successful
+    # consumers. A missing Linux artifact fails its download below.
+    if: ${{ always() && !cancelled() && inputs.bindings && !inputs.reuse-native }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(inputs.binding-languages || format('["{0}"]', inputs.language)) }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -135,12 +139,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      # No Rust cache: its entry would evict the store every pull request
-      # restores from the 10 GB budget. See cache.yml.
+      # No Rust cache: shipped binaries compile from source rather than from
+      # whatever the shared R2 cache holds.
 
       # Go uses a third-party generator; build.sh skips Go when it is absent.
       - name: Install uniffi-bindgen-go
-        if: inputs.language == 'go'
+        if: matrix.language == 'go'
         env:
           # A fork until NordSecurity ships a uniffi 0.32 generator; see flake.nix.
           # The revision is v0.10.0-kixelated.1+v0.32.0.
@@ -151,19 +155,28 @@ jobs:
             --git "$UNIFFI_BINDGEN_GO_REPO" \
             --rev "$UNIFFI_BINDGEN_GO_REV"
 
+      - name: Download binding metadata
+        if: contains(fromJSON(inputs.targets), 'x86_64-unknown-linux-gnu')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ${{ inputs.language }}-lib-x86_64-unknown-linux-gnu
+          path: binding-library
+
       - name: Generate bindings
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          REUSE_LIBRARY: ${{ contains(fromJSON(inputs.targets), 'x86_64-unknown-linux-gnu') }}
         run: |
-          just rs package-ffi \
-            --bindings-only \
-            --version "$BUILD_VERSION" \
-            --output dist
+          args=(--bindings-only --version "$BUILD_VERSION" --output dist)
+          if [[ "$REUSE_LIBRARY" == true ]]; then
+            args+=(--library binding-library/libmoq_ffi.so)
+          fi
+          just rs package-ffi "${args[@]}"
 
       - name: Upload bindings
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: ${{ inputs.language }}-bindings
-          path: dist/bindings/${{ inputs.language }}/
+          name: ${{ matrix.language }}-bindings
+          path: dist/bindings/${{ matrix.language }}/
           # A language build.sh does not generate would otherwise upload nothing.
           if-no-files-found: error

@@ -13,6 +13,9 @@
 //!   16 gates and polls the set once; the woken tasks consume the fire and
 //!   re-park. This is the shape of a driver serving many subscriptions, where
 //!   per-task wakeup granularity is the whole point.
+//!   `kio_tasks_batch` fires the gates from inside the owner's
+//!   [`kio::Waiter::batch`], the driver-advancing-its-clock shape, so the
+//!   difference is what holding and dropping the set's wake of the owner costs.
 //! - `spawn_drain_1000`: cold churn. A fresh set per iteration pushes 1000
 //!   immediately-ready tasks and drains them, measuring per-task setup and
 //!   retirement (allocation included).
@@ -113,6 +116,29 @@ fn wake_sparse(c: &mut Criterion) {
 				next = (next + 1) % N;
 			}
 			let _ = black_box(tasks.poll(&waiter));
+		});
+	});
+
+	// The driver shape: the owner fires its own tasks' gates mid-poll, the way
+	// advancing its clock does, inside the batch that holds the set's wake of it.
+	group.bench_function("kio_tasks_batch", |b| {
+		let gates: Vec<_> = (0..N).map(|_| Gate::new()).collect();
+		let mut tasks = kio::Tasks::new();
+		for gate in &gates {
+			tasks.push(forever(gate.clone()));
+		}
+		let waiter = kio::Waiter::noop();
+		let _ = tasks.poll(&waiter);
+
+		let mut next = 0;
+		b.iter(|| {
+			waiter.batch(|| {
+				for _ in 0..K {
+					gates[next].fire();
+					next = (next + 1) % N;
+				}
+				let _ = black_box(tasks.poll(&waiter));
+			});
 		});
 	});
 

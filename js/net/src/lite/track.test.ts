@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import { Milli, Timescale } from "../time.ts";
+import { Timescale } from "../time.ts";
 import { infoDefaults } from "../track.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
@@ -43,16 +44,34 @@ test("TrackInfo round-trips on draft-05", async () => {
 	const got = await TrackInfo.decode(reader, Version.DRAFT_05);
 	expect(got.priority).toBe(7);
 	expect(got.maxAge).toBe(2000);
-	expect(got.timescale).toBe(90000);
+	expect(got.timescale).toBe(Timescale(90000));
 });
 
 test("TrackInfo for Rust's default Info matches cross-language wire bytes", async () => {
-	// Neither language has a default timescale; an untimed track declares milliseconds on lite-05.
-	const model = infoDefaults({ timescale: Timescale.MILLI });
+	// The default track is untimed, which lite-05 declares as milliseconds.
+	const model = infoDefaults();
 	const info = new TrackInfo({ ...model, timescale: model.timescale ?? undefined });
 	expect(await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05)).toEqual(
 		new Uint8Array([0x0c, 0x7f, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8]),
 	);
+});
+
+test("TrackInfo carries an untimed track as zero on lite-07 and milliseconds before", async () => {
+	const info = new TrackInfo({ priority: 1 });
+	const lite07 = await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07);
+	expect(lite07.at(-1)).toBe(0);
+	const got = await TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07);
+	expect(got.timescale).toBeUndefined();
+
+	for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
+		const encoded = await bytes((w) => info.encode(w, version), version);
+		const legacy = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
+		expect(legacy.timescale).toBe(Timescale.MILLI);
+		// Zero is malformed where no untimed encoding exists. A one-byte timescale makes room for it.
+		const zero = await bytes((w) => new TrackInfo({ priority: 1, timescale: 1 }).encode(w, version), version);
+		zero[zero.length - 1] = 0;
+		await expect(TrackInfo.decode(new Reader(undefined, zero, version), version)).rejects.toThrow(RangeError);
+	}
 });
 
 test("Track request round-trips on draft-05", async () => {
@@ -86,7 +105,7 @@ test("TrackInfo round-trips valid boundary metadata", async () => {
 	const got = await TrackInfo.decode(reader, Version.DRAFT_05);
 	expect(got.priority).toBe(255);
 	expect(got.maxAge).toBe(Number.MAX_SAFE_INTEGER - 1);
-	expect(got.timescale).toBe(Number.MAX_SAFE_INTEGER);
+	expect(got.timescale).toBe(Timescale(Number.MAX_SAFE_INTEGER));
 });
 
 test("TrackInfo refuses invalid fields at construction", () => {
@@ -117,10 +136,10 @@ test("mutated TrackInfo fields emit no bytes on encode", async () => {
 			info.priority = 256;
 		},
 		(info: TrackInfo) => {
-			info.timescale = 0;
+			info.timescale = 0 as Timescale;
 		},
 		(info: TrackInfo) => {
-			info.timescale = Number.MAX_SAFE_INTEGER + 1;
+			info.timescale = (Number.MAX_SAFE_INTEGER + 1) as Timescale;
 		},
 		(info: TrackInfo) => {
 			info.maxAge = Number.MAX_SAFE_INTEGER + 1;
@@ -182,3 +201,14 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 		}
 	});
 }
+
+test("refresh ratio survives lite-07 and disappears on legacy wires", async () => {
+	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+		for (const refresh of [undefined, 0, 3, 0xffff_ffff]) {
+			const info = new TrackInfo({ priority: 7, refresh });
+			const encoded = await bytes((w) => info.encode(w, version), version);
+			const decoded = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
+			expect(decoded.refresh).toBe(version === Version.DRAFT_07 ? refresh : undefined);
+		}
+	}
+});

@@ -405,7 +405,7 @@ impl Track {
 
 	/// Record a locally encoded frame's transport handoff. Call this only for an original
 	/// encoder; file, pipe, and network imports must leave the clock out of the estimate.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> Result<()> {
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> Result<()> {
 		match self.kind {
 			TrackKind::Avc3 { ref mut import, .. } | TrackKind::Avc1 { ref mut import, .. } => {
 				import.flush(timestamp, now)
@@ -1050,7 +1050,7 @@ mod tests {
 			.decode(&payload, Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
 
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read())
+		let frame = tokio::time::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
@@ -1116,7 +1116,7 @@ mod tests {
 		let (mut broadcast, catalog) = new_broadcast();
 		let (import, subscriber) = opus_import(&mut broadcast, &catalog);
 		let mut import: Track = import.into();
-		let anchor = std::time::Instant::now();
+		let anchor = moq_clock::Instant::now();
 		for (pts, arrival) in [(0, 0), (20, 120)] {
 			let timestamp = Timestamp::from_micros(pts * 1_000).unwrap();
 			import.decode(b"a", Some(timestamp)).unwrap();
@@ -1378,7 +1378,7 @@ mod tests {
 			.decode(&au, Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
 
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read())
+		let frame = tokio::time::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()

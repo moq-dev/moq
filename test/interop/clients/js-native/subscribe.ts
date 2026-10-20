@@ -12,8 +12,8 @@
  *
  * @module
  */
-import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
@@ -29,7 +29,7 @@ install();
 // subscribers. A relay drops a superseded group (RESET_STREAM Old) rather than
 // finish sending it, e.g. a cached group a fresh one lands right behind, so a
 // subscriber has to move on to the next group instead of failing.
-const MAX_DELAY = Moq.Time.Milli(1000);
+const MAX_DELAY = Milli(1000);
 
 const { positionals, values } = parseArgs({
 	allowPositionals: true,
@@ -37,8 +37,6 @@ const { positionals, values } = parseArgs({
 		url: { type: "string" },
 		broadcast: { type: "string" },
 		timeout: { type: "string", default: "20" },
-		"track-file": { type: "string" },
-		track: { type: "string" },
 	},
 });
 
@@ -67,19 +65,14 @@ async function video(bc: Moq.Broadcast.Consumer): Promise<[string, Catalog.Video
 
 async function run(): Promise<void> {
 	const origin = new Moq.Origin.Producer();
-	// A released-compat run pins its version through its own transport and runs anonymous.
-	// Otherwise the grant arrives over AUTH, which only the work-in-progress moq-lite-07
-	// carries and no client offers by default. The WebSocket fallback cannot offer it, so it
-	// stays off.
-	const compat = process.env.INTEROP_COMPAT_TRANSPORT;
-	const connection: Moq.Connection.Established = compat
-		? await (await import(compat)).connect({ url: new URL(url as string), consume: origin })
-		: await Moq.Connection.connect({
-				url: new URL(url as string),
-				consume: origin,
-				webtransport: { protocols: ["moq-lite-07-wip"] },
-				websocket: { enabled: false },
-			});
+	// The grant arrives over AUTH, which only the work-in-progress moq-lite-07 carries and no
+	// client offers by default.
+	const connection = await Moq.Connection.connect({
+		url: new URL(url as string),
+		consume: origin,
+		versions: ["moq-lite-07-wip"],
+		websocket: { enabled: false },
+	});
 	// The grant the relay sent, in the Rust client's `auth granted` shape, so the harness can
 	// check it against the token this cell minted.
 	const printGrant = (grant: Moq.Auth.Grant | undefined) => {
@@ -88,11 +81,8 @@ async function run(): Promise<void> {
 		const subscribe = JSON.stringify(grant.subscribe);
 		console.error(`auth granted publish=${publish} subscribe=${subscribe}`);
 	};
-	let unwatch = () => {};
-	if (!compat) {
-		printGrant(connection.auth.grant.peek());
-		unwatch = connection.auth.grant.subscribe(printGrant);
-	}
+	printGrant(connection.auth.grant.peek());
+	const unwatch = connection.auth.grant.subscribe(printGrant);
 	let requested: Moq.Origin.Requesting | undefined;
 	try {
 		const path = Moq.Path.from(broadcast as string);
@@ -101,16 +91,6 @@ async function run(): Promise<void> {
 		while (!bc) {
 			await requested.active.changed();
 			bc = requested.active.peek();
-		}
-
-		if (values["track-file"]) {
-			// Name a group that live demand is filling, so a FETCH of it never races eviction.
-			// The track is `--track`, or the catalog's first video rendition.
-			const name = values.track ?? (await video(bc))[0];
-			const group = await bc.track(name).subscribe({ priority: 0 }).recvGroup();
-			if (!group) throw new Error(`${name} ended before its first group`);
-			writeFileSync(values["track-file"], `${name}\n${group.sequence}\n`);
-			return;
 		}
 
 		const [name, config] = await video(bc);
@@ -129,7 +109,7 @@ async function run(): Promise<void> {
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) break;
-				const bytes = next.frame?.payload.byteLength ?? 0;
+				const bytes = next.kind === "frame" ? next.frame.payload.byteLength : 0;
 				if (bytes > 0) {
 					// The harness judges success by this marker, not the exit code: the
 					// @moq/web-transport NAPI addon can segfault during the runtime's exit

@@ -22,6 +22,7 @@ mod source;
 #[cfg(test)]
 pub(crate) mod test_util;
 mod text;
+mod ttml;
 
 pub mod flv;
 pub mod fmp4;
@@ -46,6 +47,38 @@ pub enum Kind {
 	Data,
 }
 
+/// One item of a [`Consumer`] read, in delivery order.
+#[derive(Clone, Debug)]
+pub enum Read {
+	/// A media frame from `group`.
+	Frame {
+		/// The group's sequence number. Only equality means anything: numbers may skip.
+		group: u64,
+		frame: Frame,
+	},
+	/// Media after an item already read will never reach this reader: a group was skipped,
+	/// evicted, or never arrived. A decoder resumes from here without the references or
+	/// state that media built. Joining mid-track is not a gap: nothing was read before it.
+	///
+	/// The span is an upper bound, in the scale of the item that follows.
+	Gap {
+		/// The furthest presentation point already read. Without a per-frame duration this
+		/// is the last frame's timestamp, one frame early.
+		timestamp: moq_net::Timestamp,
+		/// How long until the next item resumes, so it also covers any declared pause.
+		duration: moq_net::Timestamp,
+	},
+	/// The publisher declared that its media stops at `end`: it paused, switched source, or
+	/// finished. Frames that follow from the same `group` are the stopped encoder's final
+	/// packets (an audio codec's drain), whose output at or past `end` is padding. The next
+	/// group starts fresh.
+	End {
+		/// The group's sequence number. Only equality means anything: numbers may skip.
+		group: u64,
+		end: moq_net::Timestamp,
+	},
+}
+
 /// A decoded media frame: timestamp, payload bytes, keyframe flag.
 ///
 /// `payload` is the raw codec bitstream that gets handed to the decoder.
@@ -66,7 +99,8 @@ pub struct Frame {
 	/// Sample duration in the frame's own scale, when the container reports it.
 	///
 	/// CMAF carries a per-sample duration (trun sample-duration). Legacy and LOC
-	/// can fill it from a duration marker when reading a fetched group. Streaming
+	/// can fill it from a duration marker that has already landed when a
+	/// [`GroupConsumer`] reads the frame, as in a fetched group. Streaming
 	/// muxers receive the later endpoint separately, so media stays immediately available.
 	/// The [`Consumer`] adds it to `timestamp` to learn how far a group has
 	/// presented, so it can advance to a newer group as soon as the gap is
@@ -167,6 +201,10 @@ pub trait Container {
 	/// (e.g. a CMAF fragment with zero samples). That is not end-of-group; poll
 	/// again for the next batch. Callers accumulating frames must not treat an
 	/// empty batch as completion.
+	///
+	/// On a data track an empty batch is the discontinuity marker, so a data
+	/// container returns one only for an object with no bytes, and refuses any
+	/// other object that decodes to no frames.
 	fn poll_read(
 		&self,
 		group: &mut moq_net::group::Consumer,

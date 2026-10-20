@@ -20,9 +20,11 @@ and WebAudio. `@moq/net` also runs in Node, Bun, and Deno.
 | [@moq/publish](/lib/js/publish) | Capture, encode, and publish. `<moq-publish>` plus an optional UI overlay. |
 | [@moq/room](/lib/js/room) | Headless rooms: announce-derived roster, local publish, remote watch, and a chat track. |
 | [@moq/auth](/lib/js/auth) | Validate a relay's request, build its grant, and mint and verify relay JWTs. |
+| [@moq/clock](/lib/js/clock) | Logical monotonic time, wall time, and deterministic timers. |
 | [@moq/signals](/lib/js/signals) | The reactive primitives every package exposes its state through. |
 | [@moq/json](/lib/js/json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [@moq/flate](/lib/js/flate) | Opaque payloads over tracks, optionally compressed with group-scoped DEFLATE: snapshots or append logs. |
+| [@moq/e2ee](https://github.com/moq-dev/moq/tree/main/js/e2ee) | End-to-end encryption of groups, datagrams, and track names, scoped to a publisher epoch. Workspace-only until the browser components use it. |
 | [@moq/loc](https://www.npmjs.com/package/@moq/loc), [@moq/msf](https://www.npmjs.com/package/@moq/msf) | The IETF LOC container and MSF catalog. |
 | [@moq/boy](https://www.npmjs.com/package/@moq/boy) | The [MoQ Boy](/bin/demo) player element. |
 

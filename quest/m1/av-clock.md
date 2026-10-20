@@ -65,5 +65,5 @@ Recommendations for the implementation:
 
 ## Related
 
-- [Time stretch](/quest/m1/watch-audio-time-stretch.md) - stretching needs a clock to converge toward
-- [Watch worker](/quest/m1/watch-worker.md) - moves `Sync` into a worker afterwards; keep the handles free of main-thread assumptions
+- [Time stretch](/quest/m2/watch-audio-time-stretch.md) - stretching needs a clock to converge toward
+- [Watch worker](/quest/m2/watch-worker.md) - moves `Sync` into a worker afterwards; keep the handles free of main-thread assumptions

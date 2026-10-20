@@ -1970,10 +1970,10 @@ async fn an_incompatible_return_fails() {
 	);
 }
 
-/// A resubscription that replays groups already written would write the track's history
-/// twice under one id, so it fails the export.
+/// A returning rendition is resubscribed after the last group read, so the group the
+/// publisher still caches is not written twice, and its new groups follow.
 #[tokio::test(start_paused = true)]
-async fn a_replayed_return_fails() {
+async fn a_return_resumes_after_its_last_group() {
 	let (mut live, mut audio) = live_av();
 	let name = audio.name().to_string();
 	live.track.write(video_frame(0, true)).unwrap();
@@ -1991,10 +1991,15 @@ async fn a_replayed_return_fails() {
 		.audio
 		.renditions
 		.insert(name.clone(), config);
-	let err = error_now(&mut exporter).await;
 	assert!(
-		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackRewound { track, .. }) if *track == name),
-		"{err:?}"
+		drain_now(&mut exporter).await.is_empty(),
+		"the cached group was replayed"
+	);
+
+	write_audio(&mut audio, 220_000, 6);
+	assert!(
+		!drain_now(&mut exporter).await.is_empty(),
+		"the new group was not written"
 	);
 }
 
@@ -2430,4 +2435,90 @@ async fn hevc_main_inits_from_the_catalog() {
 	assert_eq!(hev1.hvcc.bit_depth_chroma_minus8, 0);
 	assert!(hev1.hvcc.arrays.is_empty());
 	assert_eq!((hev1.visual.width, hev1.visual.height), (320, 240));
+}
+
+/// Set whether the catalog enables rendition `name`, video or audio.
+fn set_enabled(live: &mut Live, name: &str, enabled: bool) {
+	let mut catalog = live.catalog.modify().unwrap();
+	if let Some(config) = catalog.video.renditions.get_mut(name) {
+		config.enabled = enabled;
+	} else {
+		catalog.audio.renditions.get_mut(name).expect("rendition").enabled = enabled;
+	}
+}
+
+/// The traks an init segment declares, by handler.
+fn handlers(init: &Bytes) -> Vec<String> {
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut handlers = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			handlers.extend(moov.trak.iter().map(|trak| trak.mdia.hdlr.handler.to_string()));
+		}
+	}
+	handlers
+}
+
+/// A disabled rendition is left out of the init, as if the catalog did not list it.
+#[tokio::test(start_paused = true)]
+async fn a_disabled_rendition_is_left_out_of_the_init() {
+	let (mut live, mut audio) = live_av();
+	let name = audio.name().to_string();
+	set_enabled(&mut live, &name, false);
+	live.track.write(video_frame(0, true)).unwrap();
+	write_audio(&mut audio, 0, 5);
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	assert_eq!(handlers(&init), vec!["vide"]);
+}
+
+/// A rendition disabled after the init keeps its declared track, idle, and the export
+/// carries on with the rest. Re-enabled, it resumes under the same track, even when the
+/// catalog flips back before the publisher's next group.
+#[tokio::test(start_paused = true)]
+async fn a_rendition_disabled_after_the_init_idles_and_resumes() {
+	let (mut live, mut audio) = live_av();
+	let name = live.track.name().to_string();
+	for i in 0..3u64 {
+		live.track.write(video_frame(i * 33_000, i == 0)).unwrap();
+	}
+	write_audio(&mut audio, 0, 5);
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let (video_id, audio_id) = track_ids(&init);
+	let mut fragments = drain_now(&mut exporter).await;
+
+	// The top rung is disabled: no more video, while audio keeps flowing.
+	set_enabled(&mut live, &name, false);
+	fragments.extend(drain_now(&mut exporter).await);
+	write_audio(&mut audio, 100_000, 10);
+	fragments.extend(drain_now(&mut exporter).await);
+
+	// Re-enabled before its next group, then the encoder resumes.
+	set_enabled(&mut live, &name, true);
+	fragments.extend(drain_now(&mut exporter).await);
+	live.track.write(video_frame(1_000_000, true)).unwrap();
+	fragments.extend(drain_now(&mut exporter).await);
+	live.track.write(video_frame(1_033_000, false)).unwrap();
+	live.track.write(video_frame(1_066_000, true)).unwrap();
+	write_audio(&mut audio, 300_000, 5);
+	fragments.extend(drain_now(&mut exporter).await);
+
+	assert_each_track_ascends(&init, &fragments);
+	assert_ascending_sequence_numbers(&fragments);
+	let starts = fragment_starts(&init, &fragments);
+	assert!(
+		starts.iter().all(|(id, _)| [video_id, audio_id].contains(id)),
+		"every fragment belongs to a declared track: {starts:?}"
+	);
+	assert!(
+		starts.contains(&(audio_id, 0.2)),
+		"audio flows while the video is disabled: {starts:?}"
+	);
+	assert!(
+		starts.contains(&(video_id, 1.0)),
+		"the re-enabled video resumes: {starts:?}"
+	);
 }

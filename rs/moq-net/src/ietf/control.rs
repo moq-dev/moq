@@ -72,7 +72,12 @@ pub(crate) fn initial_max_request_id(window: u64, peer_client: bool) -> u64 {
 }
 
 struct ControlState {
+	/// Our own role.
+	client: bool,
 	request_id_next: RequestId,
+	/// Legacy request headers that must finish before a later ID can be allocated.
+	/// A count, since two tasks can allocate before either takes its hold.
+	request_id_sending: usize,
 	/// None means no flow control (draft17 removed MaxRequestId).
 	request_id_max: Option<RequestId>,
 	/// The peer's requests, flow controlled on drafts 14 to 16 only.
@@ -81,6 +86,8 @@ struct ControlState {
 	modern: Spent,
 	/// The most runs `modern` may hold. Forgetting one would make its IDs usable again.
 	history: u64,
+	/// A draft-18 GOAWAY has frozen admission of new peer requests.
+	going_away: bool,
 }
 
 /// The MAX_REQUEST_ID window we grant the peer.
@@ -106,18 +113,35 @@ pub(super) struct Control {
 	state: kio::Shared<ControlState>,
 }
 
+/// The session must keep a committed legacy header alive until this hold ends.
+pub(super) struct RequestSend(Control);
+
+impl Drop for RequestSend {
+	fn drop(&mut self) {
+		self.0.state.lock().request_id_sending -= 1;
+	}
+}
+
 impl Control {
 	pub fn new(request_id_max: Option<RequestId>, client: bool) -> Self {
 		Self {
 			state: kio::Shared::new(ControlState {
+				client,
 				request_id_next: if client { RequestId(0) } else { RequestId(1) },
+				request_id_sending: 0,
 				request_id_max,
 				incoming: None,
 				// The peer takes the other parity: a client's IDs are even, a server's odd.
 				modern: Spent::new(u64::from(client)),
 				history: crate::session::Limits::default().requests(),
+				going_away: false,
 			}),
 		}
+	}
+
+	/// Whether we opened the session.
+	pub fn client(&self) -> bool {
+		self.state.lock().client
 	}
 
 	/// Flow control the peer's requests (drafts 14 to 16), admitting `window` at once.
@@ -145,6 +169,19 @@ impl Control {
 		self
 	}
 
+	/// Freeze draft-18 admission and name the smallest peer ID not admitted: the first one
+	/// a reordered stream skipped, or else the next.
+	pub fn goaway(&self) -> Result<RequestId, Error> {
+		let mut state = self.state.lock();
+		let modern = &state.modern;
+		let cutoff = modern.missing.keys().next().copied().unwrap_or(modern.next);
+		if cutoff >= 1 << 62 {
+			return Err(SessionError::Internal.into());
+		}
+		state.going_away = true;
+		Ok(RequestId(cutoff))
+	}
+
 	pub fn max_request_id(&self, max: RequestId) {
 		// Mutating through the guard wakes any `next_request_id` waiting on the limit.
 		self.state.lock().request_id_max = Some(max);
@@ -170,7 +207,11 @@ impl Control {
 				return Err(SessionError::Internal.into());
 			}
 			modern.spend(id.0);
-			return Ok(None);
+			return if state.going_away {
+				Err(Error::GoingAway)
+			} else {
+				Ok(None)
+			};
 		};
 		if id.0 >= incoming.max {
 			tracing::warn!(id = %id, max = incoming.max, live = incoming.live, "peer exceeded MAX_REQUEST_ID");
@@ -222,24 +263,39 @@ impl Control {
 		Poll::Ready(RequestId(incoming.max))
 	}
 
-	/// Allocate the next request_id, blocking until MAX_REQUEST_ID allows it.
+	/// Hold later allocations until an already allocated legacy header is sent.
+	pub fn sending(&self) -> RequestSend {
+		self.state.lock().request_id_sending += 1;
+		RequestSend(self.clone())
+	}
+
+	/// Allocate the next request_id once credit and the committed header allow it, without
+	/// giving up: for a caller that waits on credit beside its other work.
+	pub fn poll_next_request_id(&self, waiter: &kio::Waiter) -> Poll<RequestId> {
+		let allowed = self.state.poll(waiter, |state| {
+			let allowed = match state.request_id_max {
+				None => true,
+				Some(max) => state.request_id_next < max,
+			};
+			match allowed && state.request_id_sending == 0 {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
+		});
+		let mut state = std::task::ready!(allowed);
+		Poll::Ready(state.request_id_next.increment())
+	}
+
+	/// Allocate the next request_id once credit and the committed header allow it.
 	///
 	/// `runtime` arms the give-up timer, so the wait cannot outlive the caller's
 	/// clock.
-	pub async fn next_request_id(&self, runtime: &crate::time::Clock) -> Result<RequestId, Error> {
+	pub async fn next_request_id(&self, runtime: &crate::time::Deadlines) -> Result<RequestId, Error> {
 		let mut timeout = crate::time::Deadline::after(runtime, std::time::Duration::from_secs(10));
 
 		kio::wait(|waiter| {
-			let allowed = self.state.poll(waiter, |state| {
-				let allowed = match state.request_id_max {
-					None => true,
-					Some(max) => state.request_id_next < max,
-				};
-				if allowed { Poll::Ready(()) } else { Poll::Pending }
-			});
-
-			if let Poll::Ready(mut state) = allowed {
-				return Poll::Ready(Ok(state.request_id_next.increment()));
+			if let Poll::Ready(id) = self.poll_next_request_id(waiter) {
+				return Poll::Ready(Ok(id));
 			}
 
 			if timeout.poll(waiter).is_ready() {
@@ -265,6 +321,35 @@ impl Drop for RequestPermit {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn goaway_freezes_request_admission_at_current_progress() {
+		for client in [false, true] {
+			let control = Control::new(None, client);
+			let first = u64::from(client);
+			assert_eq!(control.goaway().unwrap(), RequestId(first));
+			assert!(matches!(control.accept(RequestId(first)), Err(Error::GoingAway)));
+
+			let control = Control::new(None, client);
+			control.accept(RequestId(first)).unwrap();
+			control.accept(RequestId(first + 2)).unwrap();
+			assert_eq!(control.goaway().unwrap(), RequestId(first + 4));
+
+			// A reordered stream skipped first + 2, which is the smallest ID not processed.
+			let control = Control::new(None, client);
+			control.accept(RequestId(first)).unwrap();
+			control.accept(RequestId(first + 4)).unwrap();
+			assert_eq!(control.goaway().unwrap(), RequestId(first + 2));
+			// The skipped ID may still arrive after GOAWAY, and is past the cutoff too.
+			for id in [first + 2, first + 6, first + 8] {
+				assert!(matches!(control.accept(RequestId(id)), Err(Error::GoingAway)));
+			}
+			assert!(matches!(
+				control.accept(RequestId(first)),
+				Err(Error::Session(SessionError::InvalidRequestId))
+			));
+		}
+	}
 
 	fn granted(control: &Control) -> Option<u64> {
 		match control.poll_grant(&kio::Waiter::noop()) {
@@ -390,7 +475,7 @@ mod tests {
 	/// Skipping to the top of a production-sized window records one run, not every ID.
 	#[test]
 	fn draft16_a_jump_is_one_run_split_only_by_requests_inside_it() {
-		let window = 220_000;
+		let window = crate::session::Limits::default().requests();
 		let control = Control::new(None, false).with_window(window, false, Version::Draft16);
 		let top = 2 * (window - 1);
 		let runs = |control: &Control| {
@@ -490,5 +575,22 @@ mod tests {
 		let control = Control::new(None, true);
 		assert!(control.accept(RequestId(1)).unwrap().is_none());
 		assert_eq!(granted(&control), None);
+	}
+
+	/// Allocation waits until every overlapping legacy header hold has ended.
+	#[moq_clock::test]
+	async fn overlapping_send_holds_block_allocation_until_all_end() {
+		let control = Control::new(None, false);
+		let clock = crate::time::sim();
+		let a = control.sending();
+		let b = control.sending();
+		drop(a);
+		let mut next = std::pin::pin!(control.next_request_id(&clock));
+		assert!(kio::Waiter::noop().poll_future(next.as_mut()).is_pending());
+		drop(b);
+		assert!(matches!(
+			kio::Waiter::noop().poll_future(next.as_mut()),
+			Poll::Ready(Ok(RequestId(1)))
+		));
 	}
 }

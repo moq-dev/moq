@@ -55,7 +55,7 @@ type UringWorker = moq_uring::metrics::Metrics;
 type UringWorker = std::convert::Infallible;
 
 /// Configuration for the internal (ops) listener.
-#[derive(usage::Args, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
+#[derive(usage_rs::Args, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -91,6 +91,7 @@ pub struct Internal {
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 	listener: Option<net::TcpListener>,
 	addr: Option<net::SocketAddr>,
@@ -104,6 +105,7 @@ struct InternalState {
 	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 }
 
@@ -131,10 +133,16 @@ impl Internal {
 			health,
 			listeners,
 			uring: Vec::new(),
+			stun: None,
 			shutdown: None,
 			listener: None,
 			addr: None,
 		}
+	}
+
+	pub(crate) fn with_stun(mut self, counters: Option<crate::stun::Counters>) -> Self {
+		self.stun = counters;
+		self
 	}
 
 	pub(crate) fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
@@ -251,6 +259,7 @@ impl Internal {
 				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
+				stun: self.stun.clone(),
 				shutdown: self.shutdown.clone(),
 			})
 	}
@@ -284,7 +293,11 @@ impl Internal {
 		// capturing a descriptor per health check would spend one for nothing.
 		crate::listener::server(
 			listener,
-			crate::listener::Config { health, timeout },
+			crate::listener::Config {
+				health,
+				timeout,
+				activity: None,
+			},
 			DefaultAcceptor::new(),
 		)?
 		.serve(app.into_make_service())
@@ -310,7 +323,7 @@ async fn serve_health() -> Response {
 }
 
 /// Prometheus text-exposition metrics for this node's own MoQ traffic counters
-/// (bytes/frames/groups, subscriptions, viewers, and connected sessions),
+/// (bytes/frames/groups, announces, subscriptions, viewers, and connected sessions),
 /// summed across broadcasts and split by `tier`/`role`.
 ///
 /// Unauthenticated, which is why it lives on the internal listener rather than
@@ -321,12 +334,16 @@ async fn serve_health() -> Response {
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	let mut body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
+	if let Some(stun) = &state.stun {
+		stun.render(&mut body);
+	}
 	if let Some(shutdown) = &state.shutdown {
 		render_drain(&mut body, shutdown.tally());
 	}
 	if let Some(refusals) = &state.refusals {
 		render_refusals(&mut body, refusals);
 	}
+	render_panics(&mut body, moq_tokio::panic::count());
 	([(http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
@@ -448,6 +465,18 @@ fn render_metrics(
 	);
 	counter(
 		&mut out,
+		"moq_relay_announces_started_total",
+		"Broadcast announces started.",
+		|c| c.announces_started,
+	);
+	counter(
+		&mut out,
+		"moq_relay_announces_ended_total",
+		"Broadcast announces ended; subtract from started for live announces.",
+		|c| c.announces_ended,
+	);
+	counter(
+		&mut out,
 		"moq_relay_subscriptions_opened_total",
 		"Track subscriptions opened.",
 		|c| c.subscriptions_started,
@@ -470,6 +499,20 @@ fn render_metrics(
 		"Distinct (broadcast, session) subscriptions closed; subtract from opened for live viewers.",
 		|c| c.broadcasts_ended,
 	);
+
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_requests_total Admitted request/response exchanges."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_requests_total counter");
+	for (tier, presence) in &snap.sessions() {
+		let _ = writeln!(
+			out,
+			"moq_relay_requests_total{{tier=\"{}\"}} {}",
+			tier.as_str(),
+			presence.requests
+		);
+	}
 
 	// Sessions are per-tier only (no role), so they don't fit the helper above.
 	let _ = writeln!(out, "# HELP moq_relay_sessions_opened_total Connected sessions opened.");
@@ -494,6 +537,23 @@ fn render_metrics(
 			tier.as_str(),
 			sessions.sessions_ended
 		);
+	}
+
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_sessions_failed_total Admitted sessions ending abnormally, by kind."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_sessions_failed_total counter");
+	for (tier, presence) in snap.sessions() {
+		for &kind in moq_net::stats::Failure::ALL {
+			let _ = writeln!(
+				out,
+				"moq_relay_sessions_failed_total{{tier=\"{}\",kind=\"{}\"}} {}",
+				tier.as_str(),
+				kind.as_str(),
+				presence.sessions_failed.count(kind)
+			);
+		}
 	}
 
 	render_accepts(&mut out, listeners);
@@ -529,14 +589,29 @@ fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
 		"# HELP moq_relay_sessions_refused_total Sessions admission refused, by reason."
 	);
 	let _ = writeln!(out, "# TYPE moq_relay_sessions_refused_total counter");
+	let counts = refusals.snapshot();
 	for &refusal in Refusal::ALL {
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_refused_total{{reason=\"{}\"}} {}",
 			refusal.as_str(),
-			refusals.count(refusal)
+			counts.count(refusal)
 		);
 	}
+}
+
+/// Panics contained to one session's task, process-wide. Each one is a bug that
+/// closed a session instead of the process; the error log carries its message and
+/// the session's span.
+fn render_panics(out: &mut String, panics: u64) {
+	use std::fmt::Write as _;
+
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_panics_total Panics that ended a single session instead of the process."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_panics_total counter");
+	let _ = writeln!(out, "moq_relay_panics_total {panics}");
 }
 
 /// The accept-loop health of every listener on the node.
@@ -670,6 +745,16 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 		|snap| snap.enters,
 	);
 	counter(
+		"moq_relay_uring_turns_total",
+		"Worker drive-loop turns, including the final poll that completes the root future.",
+		|snap| snap.turns,
+	);
+	counter(
+		"moq_relay_uring_sq_full_enters_total",
+		"io_uring_enter calls forced by a full submission queue.",
+		|snap| snap.sq_full_enters,
+	);
+	counter(
 		"moq_relay_uring_parks_total",
 		"Times a worker parked in io_uring_enter with nothing left to poll.",
 		|snap| snap.parks,
@@ -700,6 +785,32 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 		"Timers currently in a worker's heap.",
 		|snap| snap.timers_active(),
 	);
+
+	for (suffix, help, field) in [
+		(
+			"sqes_per_enter",
+			"Submission entries accepted by each enter, including zero.",
+			(|snap: &moq_uring::metrics::Snapshot| snap.sqes) as fn(&_) -> _,
+		),
+		(
+			"cqes_per_enter",
+			"Completion entries made visible by each enter, including zero.",
+			|snap: &moq_uring::metrics::Snapshot| snap.cqes,
+		),
+	] {
+		let name = format!("moq_relay_uring_{suffix}");
+		let _ = writeln!(out, "# HELP {name} {help}");
+		let _ = writeln!(out, "# TYPE {name} histogram");
+		for (worker, snap) in snaps.iter().enumerate() {
+			let histogram = field(snap);
+			for (bound, count) in moq_uring::metrics::Histogram::BOUNDS.into_iter().zip(histogram.buckets) {
+				let bound = bound.map_or_else(|| "+Inf".to_string(), |bound| bound.to_string());
+				let _ = writeln!(out, "{name}_bucket{{worker=\"{worker}\",le=\"{bound}\"}} {count}");
+			}
+			let _ = writeln!(out, "{name}_sum{{worker=\"{worker}\"}} {}", histogram.sum);
+			let _ = writeln!(out, "{name}_count{{worker=\"{worker}\"}} {}", histogram.count());
+		}
+	}
 }
 
 /// Off the io_uring path there are no workers to describe, and [`UringWorker`]
@@ -710,6 +821,28 @@ fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn stun_metrics_are_present_only_for_a_configured_listener() {
+		for stun in [None, Some(crate::stun::Counters::default())] {
+			let configured = stun.is_some();
+			let state = InternalState {
+				stats: moq_net::stats::Registry::disabled(),
+				nodes: None,
+				refusals: None,
+				sessions: crate::session::Registry::new(),
+				listeners: Vec::new(),
+				uring: Vec::new(),
+				stun,
+				shutdown: None,
+			};
+			let response = serve_metrics(State(state)).await;
+			let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+			let body = std::str::from_utf8(&body).unwrap();
+			assert_eq!(body.contains("moq_relay_stun_replies_total"), configured);
+			assert_eq!(body.contains("moq_relay_stun_dropped_total"), configured);
+		}
+	}
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
@@ -862,6 +995,8 @@ mod tests {
 			"submissions",
 			"completions",
 			"enters",
+			"turns",
+			"sq_full_enters",
 			"parks",
 			"wakes",
 			"timers_armed",
@@ -877,6 +1012,17 @@ mod tests {
 			for worker in 0..2 {
 				let line = format!("{name}{{worker=\"{worker}\"}} 0");
 				assert!(body.contains(&line), "missing {line} in:\n{body}");
+			}
+		}
+		for name in ["sqes_per_enter", "cqes_per_enter"] {
+			let name = format!("moq_relay_uring_{name}");
+			assert!(body.contains(&format!("# TYPE {name} histogram")));
+			for worker in 0..2 {
+				for bound in ["0", "1", "2", "4", "8", "16", "32", "64", "128", "256", "+Inf"] {
+					assert!(body.contains(&format!("{name}_bucket{{worker=\"{worker}\",le=\"{bound}\"}} 0")));
+				}
+				assert!(body.contains(&format!("{name}_count{{worker=\"{worker}\"}} 0")));
+				assert!(body.contains(&format!("{name}_sum{{worker=\"{worker}\"}} 0")));
 			}
 		}
 		assert!(body.contains("# TYPE moq_relay_uring_timers_active gauge"));
@@ -955,6 +1101,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			stun: None,
 			shutdown: None,
 		};
 
@@ -973,6 +1120,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			stun: None,
 			shutdown: None,
 		};
 
@@ -1003,6 +1151,59 @@ mod tests {
 			);
 			assert!(body.contains(&row), "missing {row}:\n{body}");
 		}
+	}
+
+	#[test]
+	fn request_metrics_never_open_a_session() {
+		let stats = moq_net::stats::Registry::new(Default::default());
+		let request = stats.tier(moq_net::stats::Tier::new("http")).request("root");
+		drop(request);
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(body.contains("# TYPE moq_relay_requests_total counter"), "{body}");
+		assert!(body.contains("moq_relay_requests_total{tier=\"http\"} 1"), "{body}");
+		assert!(
+			body.contains("moq_relay_sessions_opened_total{tier=\"http\"} 0"),
+			"{body}"
+		);
+		assert!(
+			body.contains("moq_relay_sessions_closed_total{tier=\"http\"} 0"),
+			"{body}"
+		);
+	}
+
+	#[tokio::test]
+	async fn announce_metrics_keep_retired_totals() {
+		let stats = moq_net::stats::Registry::new(Default::default());
+		let producer =
+			moq_tokio::origin::spawn().with_stats(stats.tier(moq_net::stats::Tier::new("edge")).session("root"));
+		let broadcast = producer.create_broadcast("demo/retired").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(
+			body.contains("moq_relay_announces_started_total{tier=\"edge\",role=\"subscriber\"} 1"),
+			"live announce start:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_announces_ended_total{tier=\"edge\",role=\"subscriber\"} 0"),
+			"live announce end:\n{body}"
+		);
+
+		broadcast.unannounce();
+		drop(broadcast);
+		drop(producer);
+		let mut report = moq_net::stats::Report::default();
+		stats.report(&mut report);
+
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(
+			body.contains("moq_relay_announces_started_total{tier=\"edge\",role=\"subscriber\"} 1"),
+			"retired announce start:\n{body}"
+		);
+		assert!(
+			body.contains("moq_relay_announces_ended_total{tier=\"edge\",role=\"subscriber\"} 1"),
+			"retired announce end:\n{body}"
+		);
 	}
 
 	/// The `/metrics` renderer emits well-formed Prometheus exposition: a

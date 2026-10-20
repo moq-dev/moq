@@ -52,7 +52,10 @@ impl StatusPublisher {
 
 	/// Publish status, a no-op if unchanged since the last call.
 	pub fn publish(&mut self, status: &Status) {
-		if let Err(err) = self.producer.update(status) {
+		if let Err(err) = self
+			.producer
+			.update(moq_net::Timed::from(status).at(moq_net::Timestamp::now()))
+		{
 			tracing::warn!(%err, "failed to publish status");
 		}
 	}

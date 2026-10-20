@@ -27,17 +27,23 @@ use crate::{
 /// Shareable handle to a single qlog output stream
 #[cfg(feature = "qlog")]
 #[derive(Clone)]
-pub struct QlogStream(pub(crate) Arc<Mutex<QlogStreamer>>);
+pub struct QlogStream {
+    pub(crate) streamer: Arc<Mutex<QlogStreamer>>,
+    /// The epoch event times count from, on MoQ's clock rather than the std one the
+    /// streamer keeps.
+    pub(crate) start: Instant,
+}
 
 #[cfg(feature = "qlog")]
 impl QlogStream {
     fn emit_event(&self, orig_rem_cid: ConnectionId, event: EventData, now: Instant) {
-        // Time will be overwritten by `add_event_with_instant`
-        let mut event = Event::with_time(0.0, event);
+        // Milliseconds since the epoch, at the nanosecond precision the streamer is built with.
+        let time = now.saturating_duration_since(self.start).as_nanos() as f64 / 1e6;
+        let mut event = Event::with_time(time, event);
         event.group_id = Some(Box::new(orig_rem_cid.to_string()));
 
-        let mut qlog_streamer = self.0.lock().unwrap();
-        if let Err(e) = qlog_streamer.add_event_with_instant(event, now) {
+        let mut qlog_streamer = self.streamer.lock().unwrap();
+        if let Err(e) = qlog_streamer.add_event(event) {
             warn!("could not emit qlog event: {e}");
         }
     }

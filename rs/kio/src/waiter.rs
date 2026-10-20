@@ -140,10 +140,28 @@ impl Waiter {
 		true
 	}
 
+	/// Run one poll of this waiter's task, the way a driver's `poll` does.
+	///
+	/// A [`Tasks`](crate::Tasks) set this waiter polls, woken from inside `poll`
+	/// (by time it advances, or a channel an earlier arm writes), holds its wake of
+	/// the task until `poll` returns, and drops it if `poll` polled the set since.
+	/// Otherwise the executor polls the task again for a wake its own poll took.
+	///
+	/// Use it once, around a task's outermost poll. Only the innermost batch holds
+	/// wakes, so one nested inside (around a [`Tasks`](crate::Tasks) child, say)
+	/// lets its siblings' wakes of the owner through, and costs polls.
+	pub fn batch<R>(&self, poll: impl FnOnce() -> R) -> R {
+		crate::task::Polling::run(&self.waker, poll)
+	}
+
 	/// Poll a foreign [`Future`] against this waiter, so it re-wakes the enclosing
 	/// `poll_*` step when it is ready.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_future<F: Future + ?Sized>(&self, future: Pin<&mut F>) -> Poll<F::Output> {
-		future.poll(&mut self.context())
+		match future.poll(&mut self.context()) {
+			Poll::Ready(value) => crate::coop::ready(value),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 }
 

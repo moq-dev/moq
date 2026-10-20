@@ -1,0 +1,5 @@
+{
+	// Tests stay type-checked but are not distributed.
+	"extends": "./tsconfig.json",
+	"exclude": ["src/**/*.test.ts"]
+}

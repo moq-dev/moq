@@ -3,8 +3,7 @@
 ## Goal
 
 C programs use moq through a C API generated from moq-ffi, shipped as the
-`moq-c` package with CMake target `moq::c`, so the hand-written libmoq ABI is
-deleted and C tracks every moq-ffi change the way Go, Swift, Kotlin, Python,
+`moq-c` package with CMake target `moq::c`, so C replaces the hand-written libmoq ABI and tracks every moq-ffi change the way Go, Swift, Kotlin, Python,
 Dart, and C++ already do. The C API shape follows moq-ffi and breaks C users
 once. The C++ package (`cpp/moq`) and the OBS plugin are out of scope; they
 already sit on moq-ffi through the generated C++.
@@ -35,21 +34,23 @@ Decided:
   `moq-c` (`rs/moq-c`), and the generated package takes over that name
   and `moq::c` target, so C users migrate once. Its first release is 0.8.0, a
   minor bump over the hand-written 0.7.x.
-- Docs change inline: the consumer quest rewrites `doc/lib/c`, and retirement
-  adds an upgrade note. No separate guide.
+- Docs change inline: the consumer quest rewrites `doc/lib/c`, and the
+  package's `MIGRATE.md` carries the move. No separate guide.
 
-The line owns the end-to-end check: every `doc/lib/c` sample and the C interop
-client build and run against the released 0.8.0 archive, not only in-tree.
+The line owns the pre-cut check: every `doc/lib/c` sample and the C interop
+client build and run against the built release archive, not only in-tree.
+[Published archive proof](/quest/m2/release/c-publish.md) repeats it after
+publication; [old-crate retirement](/quest/m2/release/c-retire.md) follows
+its final notice release and is not a prerequisite of this preparation.
 
 The hand-written crate gets no more feature work: its shutdown, CMake library,
 and fetch quests were abandoned for this line, and hidden is done.
+Decided in the quest audit: [claim epochs](/quest/m1/claim-answer-epochs.md)
+is a narrow correctness exception. Its existing claim API migrates with
+Rust and JS so C cannot retain the unsafe accept path while this line waits.
+That change owns its C tests and `MIGRATE.md` entries; other API reshaping stays here.
 
 ## Required
 
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
-- [Retire the hand-written moq-c](/quest/m1/c/retire.md) - the hand-written crate is deleted after its final release points at the generated package
-
-## Related
-
-- [FFI shape](/quest/m1/ffi-shape/README.md) - reshapes moq-ffi, which the generated C then follows for free

@@ -1,5 +1,5 @@
 use crate::origin;
-use crate::time::{Clock, Instant};
+use crate::time::{Deadlines, Instant};
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
 	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
@@ -95,7 +95,8 @@ impl Client {
 		self
 	}
 
-	/// Choose which moq-transport extensions to offer in SETUP. Defaults to all of them.
+	/// Choose which extensions to offer in SETUP. Defaults to every moq-transport one, and
+	/// not [`ietf`](setup::Extensions::ietf), which only relays turn on.
 	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
 		self.extensions = extensions;
 		self
@@ -177,7 +178,7 @@ impl Client {
 	/// wire the origins, and return the session and its driver.
 	fn start_lite<S>(
 		&self,
-		runtime: Clock,
+		runtime: Deadlines,
 		session: S,
 		version: lite::Version,
 		peer_hop: crate::Hop,
@@ -200,6 +201,7 @@ impl Client {
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				ietf: self.extensions.ietf && version.has_ietf(),
 			}
 		} else {
 			lite::Setup::default()
@@ -227,9 +229,9 @@ impl Client {
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			crate::session::Handles {
+				stats: self.stats.clone(),
 				goaway: start.goaway,
 				auth: start.auth,
-				setup: start.setup,
 				estimate: Some(start.estimate),
 			},
 		))
@@ -248,7 +250,7 @@ impl Client {
 	where
 		S: crate::transport::poll::Session,
 	{
-		let runtime = Clock::new(now);
+		let runtime = Deadlines::new(now);
 		let version = match session.protocol() {
 			Some(ALPN_LITE_07_WIP) => lite::Version::Lite07,
 			Some(ALPN_LITE_06) => lite::Version::Lite06,
@@ -268,7 +270,7 @@ impl Client {
 	where
 		S: crate::transport::poll::Boxable,
 	{
-		let runtime = Clock::new(now);
+		let runtime = Deadlines::new(now);
 		let peer_hop = self.assigned_hop();
 		let (publish, subscribe) = self.origins(peer_hop);
 
@@ -291,8 +293,8 @@ impl Client {
 				// We advertise the request path in our SETUP for URL-less transports.
 				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
 				// offer it keeps the option out of our SETUP and presents no credential.
-				let auth = crate::auth::Handle::new(self.extensions.auth);
-				let (protocol, goaway, setup) = ietf::start(ietf::Config {
+				let auth = crate::auth::Handle::ietf(self.extensions.auth);
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					limits: self.limits,
 					session: session.clone(),
@@ -321,9 +323,9 @@ impl Client {
 					None,
 					crate::driver::Protocol::Ietf(protocol),
 					crate::session::Handles {
+						stats: self.stats.clone(),
 						goaway,
 						auth,
-						setup,
 						estimate: None,
 					},
 				));
@@ -400,6 +402,7 @@ impl Client {
 			ietf::solicit::into_setup(&mut parameters, ietf_encoding);
 		}
 		ietf::hidden::into_setup(&mut parameters, ietf_encoding);
+		ietf::max_age::into_setup(&mut parameters, ietf_encoding);
 		ietf::active_count::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
@@ -418,7 +421,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (recv_bw, protocol, goaway, auth, setup, estimate) = match version {
+		let (recv_bw, protocol, goaway, auth, estimate) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -444,7 +447,6 @@ impl Client {
 					crate::driver::Protocol::Lite(Box::new(start.driver)),
 					start.goaway,
 					start.auth,
-					start.setup,
 					Some(start.estimate),
 				)
 			}
@@ -458,15 +460,16 @@ impl Client {
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&parameters, v)?,
 					hidden: ietf::hidden::from_setup(&parameters, v),
+					max_age: ietf::max_age::from_setup(&parameters, v),
 					active_count: ietf::active_count::from_setup(&parameters, v),
 					..Default::default()
 				};
 
 				let stream = stream.with_version(v);
 				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
-				let auth = crate::auth::Handle::new(false);
+				let auth = crate::auth::Handle::ietf(false);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				let (protocol, goaway, setup) = ietf::start(ietf::Config {
+				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					limits: self.limits,
 					session: session.clone(),
@@ -486,7 +489,7 @@ impl Client {
 					early_unis: Vec::new(),
 					extensions: self.extensions,
 				})?;
-				(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup, None)
+				(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, None)
 			}
 		};
 
@@ -497,9 +500,9 @@ impl Client {
 			recv_bw,
 			protocol,
 			crate::session::Handles {
+				stats: self.stats.clone(),
 				goaway,
 				auth,
-				setup,
 				estimate,
 			},
 		))
@@ -620,16 +623,29 @@ mod tests {
 		fn poll_open_bi(
 			&mut self,
 			_cx: &mut Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			Poll::Ready(self.state.control_stream.lock().unwrap().take().ok_or(FakeError))
 		}
 
-		fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		fn poll_open_uni(
+			&mut self,
+			_cx: &mut Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
+		) -> Poll<Result<Self::SendStream, Self::Error>> {
 			Poll::Pending
 		}
 
-		fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
+		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+			None
+		}
+
+		fn send_datagram(
+			&mut self,
+			_: Bytes,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
+		) -> Result<(), Self::Error> {
+			Ok(())
 		}
 
 		fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -640,6 +656,9 @@ mod tests {
 			1200
 		}
 
+		fn binding(&self) -> crate::transport::Binding {
+			crate::transport::Binding::InBand
+		}
 		fn protocol(&self) -> Option<&str> {
 			self.state.protocol
 		}
@@ -683,13 +702,18 @@ mod tests {
 
 	impl crate::transport::poll::SendStream for FakeSendStream {
 		type Error = FakeError;
+		type Group = crate::transport::poll::Ungrouped;
 
 		fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			self.writes.lock().unwrap().put_slice(buf);
 			Poll::Ready(Ok(buf.len()))
 		}
 
-		fn set_priority(&mut self, _order: i32) {}
+		fn set_priority(&mut self, _order: i64) {}
+
+		fn set_group(&mut self, group: &Self::Group) {
+			match *group {}
+		}
 
 		fn finish(&mut self) -> Result<(), Self::Error> {
 			Ok(())
@@ -763,8 +787,8 @@ mod tests {
 		);
 
 		// Start the returned driver after the handshake completes.
-		let (_session, driver) = client.connect(moq_net_sim::now(), fake.clone()).await.unwrap();
-		moq_net_sim::spawn(crate::time::run_sim(driver));
+		let (_session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
 
 		// Verify the client setup was encoded using Draft14 framing (ALPN_LITE fallback path).
 		let mut setup_bytes = Bytes::from(fake.control_writes());
@@ -800,7 +824,7 @@ mod tests {
 	/// `connect` for the life of the session, since it waited for the initial announce
 	/// set. Resolving a path you need is `routed`'s job, which waits for
 	/// that path rather than for the peer to finish talking.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn connect_does_not_wait_for_the_peer_to_announce() {
 		// Serves bidi streams, so the announce stream opens, and never answers on them.
 		let gate = kio::Producer::new(true);
@@ -815,9 +839,9 @@ mod tests {
 
 		// Paused time auto-advances while every task is idle, so a `connect` that waits
 		// on the silent peer trips this rather than hanging the suite.
-		let (_session, _driver) = moq_net_sim::timeout(
+		let (_session, _driver) = moq_clock::timeout(
 			std::time::Duration::from_secs(30),
-			client.connect(moq_net_sim::now(), transport),
+			client.connect(moq_clock::now(), transport),
 		)
 		.await
 		.expect("connect waited on a peer that never announced")
@@ -826,7 +850,7 @@ mod tests {
 
 	/// The client SETUP on the bidi control stream (the pre-draft-17 framing) carries the
 	/// AUTHORITY next to the PATH.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn draft14_setup_carries_the_authority() {
 		let fake = FakeSession::new(Some(ALPN_LITE), mock_server_setup(Version::Lite(lite::Version::Lite01)));
 		let client = Client::new()
@@ -840,8 +864,8 @@ mod tests {
 			.with_path("/anon")
 			.with_authority("relay.example.com:4443");
 
-		let (_session, driver) = client.connect(moq_net_sim::now(), fake.clone()).await.unwrap();
-		moq_net_sim::spawn(crate::time::run_sim(driver));
+		let (_session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
 
 		let (setup, _) =
 			setup::Client::decode_slice(&fake.control_writes(), Version::Ietf(ietf::Version::Draft14)).unwrap();
@@ -856,12 +880,12 @@ mod tests {
 		);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn alpn_lite_falls_back_to_draft14_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(Some(ALPN_LITE)).await;
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn no_alpn_falls_back_to_draft14_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(None).await;
 	}
@@ -873,7 +897,7 @@ mod tests {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
-		let runtime = crate::time::Clock::new(crate::time::Instant::now());
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
 		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
 
@@ -896,7 +920,7 @@ mod tests {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
-		let runtime = crate::time::Clock::new(crate::time::Instant::now());
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
 		let clone = session.clone();
 
@@ -930,7 +954,7 @@ mod tests {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
-		let runtime = crate::time::Clock::new(crate::time::Instant::now());
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let (session, driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
 
 		drop(driver);
@@ -989,8 +1013,9 @@ mod tests {
 		fn poll_open_bi(
 			&mut self,
 			cx: &mut Context<'_>,
+			options: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
-			self.inner.poll_open_bi(cx).map_ok(|(send, recv)| {
+			self.inner.poll_open_bi(cx, options).map_ok(|(send, recv)| {
 				(
 					LocalSend {
 						inner: send,
@@ -1004,15 +1029,27 @@ mod tests {
 			})
 		}
 
-		fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-			self.inner.poll_open_uni(cx).map_ok(|stream| LocalSend {
+		fn poll_open_uni(
+			&mut self,
+			cx: &mut Context<'_>,
+			options: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
+		) -> Poll<Result<Self::SendStream, Self::Error>> {
+			self.inner.poll_open_uni(cx, options).map_ok(|stream| LocalSend {
 				inner: stream,
 				_local: self._local.clone(),
 			})
 		}
 
-		fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-			self.inner.poll_send_datagram(cx, payload)
+		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+			None
+		}
+
+		fn send_datagram(
+			&mut self,
+			payload: Bytes,
+			options: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
+		) -> Result<(), Self::Error> {
+			self.inner.send_datagram(payload, options)
 		}
 
 		fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -1023,6 +1060,9 @@ mod tests {
 			self.inner.max_datagram_size()
 		}
 
+		fn binding(&self) -> crate::transport::Binding {
+			crate::transport::Binding::InBand
+		}
 		fn protocol(&self) -> Option<&str> {
 			self.inner.protocol()
 		}
@@ -1042,13 +1082,18 @@ mod tests {
 
 	impl crate::transport::poll::SendStream for LocalSend {
 		type Error = FakeError;
+		type Group = crate::transport::poll::Ungrouped;
 
 		fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			self.inner.poll_write(cx, buf)
 		}
 
-		fn set_priority(&mut self, order: i32) {
+		fn set_priority(&mut self, order: i64) {
 			self.inner.set_priority(order);
+		}
+
+		fn set_group(&mut self, group: &Self::Group) {
+			match *group {}
 		}
 
 		fn finish(&mut self) -> Result<(), Self::Error> {
@@ -1093,7 +1138,7 @@ mod tests {
 		};
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
-		let runtime = crate::time::Clock::new(crate::time::Instant::now());
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let (session, mut driver) = futures::executor::block_on(client.connect_lite(runtime.now(), local)).unwrap();
 		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
 
@@ -1116,7 +1161,7 @@ mod tests {
 		};
 		let server = crate::Server::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 
-		let runtime = crate::time::Clock::new(crate::time::Instant::now());
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let (session, mut driver) = futures::executor::block_on(server.accept_lite(runtime.now(), local)).unwrap();
 		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
 		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
@@ -1137,7 +1182,7 @@ mod tests {
 			_local: std::rc::Rc::new(()),
 		};
 		let client = Client::new();
-		let runtime = crate::time::Clock::new(crate::time::Instant::now());
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let result = futures::executor::block_on(client.connect_lite(runtime.now(), local));
 		assert!(matches!(result, Err(Error::Version)));
 	}
@@ -1145,14 +1190,14 @@ mod tests {
 	// `stats()` reads the machine's latest sample and primes the sampler, so a
 	// periodic poller observes fresh counters without consuming the bandwidth
 	// channel.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn stats_reads_prime_the_sampler() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(Some(1_000_000));
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-		let (session, driver) = client.connect(moq_net_sim::now(), fake.clone()).await.unwrap();
-		moq_net_sim::spawn(crate::time::run_sim(driver));
+		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
 
 		// The construction-time snapshot, before the machine sampled anything.
 		assert_eq!(
@@ -1164,7 +1209,7 @@ mod tests {
 		// so the new rate shows up within an interval (paused time auto-advances).
 		fake.set_send_rate(Some(2_000_000));
 		while session.stats().estimated_send_rate != Some(crate::bandwidth::Rate::from_bps(2_000_000)) {
-			moq_net_sim::sleep(std::time::Duration::from_millis(10)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(10)).await;
 		}
 	}
 
@@ -1174,15 +1219,15 @@ mod tests {
 	// the construction-time snapshot: this backend reports no send rate, so
 	// there is no bandwidth consumer keeping the sampler ticking, and the test
 	// never reads stats while the session is live.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn stats_capture_the_final_counters() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(None);
 		fake.set_bytes_sent(Some(0));
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-		let (session, driver) = client.connect(moq_net_sim::now(), fake.clone()).await.unwrap();
-		moq_net_sim::spawn(crate::time::run_sim(driver));
+		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
 		assert!(
 			session.send_bandwidth().is_none(),
 			"no send-rate estimate, so nothing samples on its own"
@@ -1203,14 +1248,14 @@ mod tests {
 	// The send-bandwidth sampler lives inside the driver: it samples as soon as a
 	// consumer exists and keeps sampling on its interval. Simulated time makes
 	// the interval fire deterministically.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn send_bandwidth_samples_while_the_driver_runs() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(Some(1_000_000));
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-		let (session, driver) = client.connect(moq_net_sim::now(), fake.clone()).await.unwrap();
-		moq_net_sim::spawn(crate::time::run_sim(driver));
+		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
 
 		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
 		assert_eq!(

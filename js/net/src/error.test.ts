@@ -217,6 +217,9 @@ test("the code tables match the spec", () => {
 	expect(Number(SessionCode.AuthTokenCacheOverflow)).toBe(0x13);
 	expect(Number(SessionCode.Version)).toBe(0x15);
 	expect(Number(SessionCode.UnknownAuthTokenAlias)).toBe(0x17);
+	expect(Number(SessionCode.InvalidPath)).toBe(0x8);
+	expect(Number(SessionCode.InvalidAuthority)).toBe(0x19);
+	expect(Number(SessionCode.TooManyRequestUpdates)).toBe(0x1b);
 	expect(Number(StreamCode.Cancel)).toBe(0x1);
 	expect(Number(StreamCode.SessionClosed)).toBe(0x3);
 	expect(Number(StreamCode.TooFarBehind)).toBe(0x5);
@@ -331,10 +334,17 @@ test("toStreamCode: a local condition maps to the code the peer can act on", () 
 	expect(toStreamCode(new StreamError(StreamCode.GoingAway))).toBe(StreamCode.GoingAway);
 	expect(toStreamCode(new StreamError(StreamCode(70)))).toBe(StreamCode(70));
 
-	// Anything else already means 0, and so does a session code: the registries are disjoint, so
-	// forwarding one onto a stream would mistranslate it (session 0x4 is a stream GOING_AWAY).
+	// Anything else already means 0.
 	expect(toStreamCode(new Error("boom"))).toBe(StreamCode.Internal);
-	expect(toStreamCode(new SessionError(SessionCode.GoawayTimeout))).toBe(StreamCode.Internal);
+	// A session's close reaching a stream came from the route it was served through. Its code is
+	// not forwarded: the registries are disjoint (session 0x4 is a stream GOING_AWAY).
+	expect(toStreamCode(new SessionError(SessionCode.GoawayTimeout))).toBe(StreamCode.Unroutable);
+	// An application code means the same in both registries, so the source's own error survives.
+	expect(toStreamCode(new SessionError(SessionCode(70)))).toBe(StreamCode(70));
+	// So is a session that failed at the transport, with no close code: its route is gone.
+	expect(toStreamCode(Object.assign(new Error("connection lost"), { source: "session" }))).toBe(
+		StreamCode.Unroutable,
+	);
 });
 
 // A control request that outlived its deadline is not late content. It carries its own code so a

@@ -96,7 +96,7 @@ async fn public_container_preserves_loc_for_ts() {
 		track,
 		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 	);
-	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read_frame())
 		.await
 		.unwrap()
 		.unwrap()
@@ -262,7 +262,7 @@ async fn import_opus_frames() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut frames = Vec::new();
-	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await {
 		let Some(frame) = res.unwrap() else { break };
 		frames.push(frame.payload);
 	}
@@ -474,7 +474,7 @@ async fn import_export_import_roundtrip() {
 
 	// Re-export to TS. `import` and `catalog` stay alive so the exporter can
 	// subscribe to the finished, retained tracks.
-	let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer).await)
+	let mut exporter = crate::container::ts::export_test::open_export(crate::source::announced(&consumer).await)
 		.await
 		.unwrap()
 		.with_delay(RECORDING_MAX_AGE)
@@ -541,7 +541,9 @@ async fn survives_midstream_join() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut frames = Vec::new();
-	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+	while let Ok(Ok(Some(frame))) =
+		tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
+	{
 		frames.push(frame);
 	}
 	assert_eq!(frames.len(), 1, "expected only the post-join IDR, got {}", frames.len());
@@ -595,7 +597,9 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut cues = Vec::new();
-	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+	while let Ok(Ok(Some(frame))) =
+		tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
+	{
 		cues.push((frame.payload.to_vec(), frame.timestamp));
 	}
 	assert_eq!(cues.len(), 6, "expected the six real splice_inserts");
@@ -611,7 +615,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	assert_eq!(distinct.len(), 6, "six distinct cue sections");
 	assert!(
 		cues.iter().all(|(_, ts)| *ts != moq_net::Timestamp::ZERO),
-		"cues stamped with the video PTS, not zero"
+		"cues stamped with their PCR placement"
 	);
 }
 

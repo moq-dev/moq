@@ -23,7 +23,7 @@
 //! See `test/drill/README.md` for the recipe, the sensitivity proof that each
 //! drill fails when its recovery behavior is removed, and the loom/fuzz cases
 //! covering the primitives underneath.
-#![cfg(all(feature = "noq", feature = "websocket"))]
+#![cfg(all(feature = "quic", feature = "websocket"))]
 
 use std::time::Duration;
 
@@ -54,6 +54,8 @@ const TRACK: &str = "drill";
 /// hostile one, and the drills' own budgets (a 2s idle timeout, 10s waits) hold
 /// under it unchanged. The loss is 5% because a drill only sends a few hundred
 /// datagrams, and at 2% that is a drop or two, which barely exercises recovery.
+/// Random loss only proves correctness, which is all a drill asserts; nothing
+/// here judges quality, latency or throughput.
 fn impairment() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		delay: Duration::from_millis(20),
@@ -187,9 +189,14 @@ fn seed(lane: Lane) -> u64 {
 
 impl Drop for Path {
 	fn drop(&mut self) {
-		// A drill that failed before `verify` still reports what the path did.
+		// A drill that failed before `verify` still reports what the path did,
+		// including a shaper that stopped forwarding, which the drill itself
+		// only sees as a client timing out.
 		if let Some(shaper) = &self.shaper {
-			println!("shaper: {}", shaper.stats());
+			match shaper.verify() {
+				Ok(stats) => println!("shaper: {stats}"),
+				Err(err) => println!("shaper: {err:#}"),
+			}
 		}
 	}
 }
@@ -305,8 +312,8 @@ fn quic() -> moq_tokio::quic::Config {
 	// busy runner has to stall eight times over before a live session is mistaken
 	// for a dead one.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Duration::from_secs(2);
-	quic.keep_alive = Duration::from_millis(250);
+	quic.idle_timeout = Some(Duration::from_secs(2));
+	quic.keep_alive = Some(Duration::from_millis(250));
 	quic
 }
 
@@ -327,8 +334,8 @@ fn dial() -> moq_tokio::connect::Config {
 
 	// Fast enough to keep a relay bounce or a link flap inside the drill's
 	// budget, paced enough that the loop is still a backoff.
-	config.backoff.initial = Duration::from_millis(50);
-	config.backoff.max = Duration::from_millis(200);
+	config.backoff.initial = Some(Duration::from_millis(50));
+	config.backoff.max = Some(Duration::from_millis(200));
 	config.backoff.timeout = Some(Duration::from_secs(5));
 	config
 }
@@ -485,19 +492,20 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	// a moq publisher (`write_frame` is synchronous, and a reader that falls too
 	// far behind is shed rather than waited for), so an unread backlog is what
 	// backpressure looks like from here.
+	let mut behind = None;
 	let backlog = tokio::time::timeout(TIMEOUT, async {
-		loop {
-			match reader.track.latest() {
-				Some(latest) if latest >= first + STALL_GROUPS as u64 => return latest - first,
-				_ => tokio::time::sleep(Duration::from_millis(10)).await,
+		while let Some(largest) = reader.track.largest().await {
+			behind = Some(largest.group - first);
+			if largest.group >= first + STALL_GROUPS as u64 {
+				return largest.group - first;
 			}
 		}
+		panic!("the stalled reader ended before its backlog queued");
 	})
 	.await
 	.unwrap_or_else(|_| {
 		panic!(
-			"the stalled reader is only {:?} groups behind: nothing was queued, so there is no backlog to cancel under",
-			reader.track.latest().map(|latest| latest - first)
+			"the stalled reader is only {behind:?} groups behind: nothing was queued, so there is no backlog to cancel under"
 		)
 	});
 	println!("fault activated: cancelling with {backlog} unread groups queued");
@@ -714,23 +722,20 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let (_, payload) = read_group(&mut reader, "before the interrupt").await;
 	assert_eq!(payload, b"original", "delivery is broken before the drill even starts");
 
-	// The interrupt: the session goes first, so the relay loses the publisher
-	// with no finish and no unannounce, which is what a crashed publisher looks
-	// like. Dropping the broadcast while the session was still up would send a
-	// clean unannounce instead and never reach the crash path. The rest goes
-	// after, including the subscriber's handles, so nothing local keeps the dead
-	// broadcast alive for the assertions below.
+	// Dropping the connection cancels its task asynchronously. Keep the broadcast
+	// alive until the relay withdraws it, so a clean unannounce cannot race the
+	// session loss and satisfy the assertion without testing crash recovery.
 	drop(first_session);
 	drop(reader);
-	drop(track);
-	drop(broadcast);
-	drop(first);
 
 	// Terminal result: the name stops being announced. Nothing told the relay
 	// the broadcast ended, so this is the proof that losing the publisher's
 	// session withdraws what it announced rather than parking subscribers on it.
 	expect_announce(&mut announced, "live", false, "the interrupted publisher").await;
 	println!("fault activated: the interrupted publisher's broadcast was withdrawn");
+	drop(track);
+	drop(broadcast);
+	drop(first);
 
 	// Restore: the same name, a new publisher, different content.
 	let second = moq_tokio::origin::spawn();
@@ -799,8 +804,8 @@ const SETTLE: Duration = Duration::from_secs(10);
 /// burst overruns, so its tail waits in the queue or is dropped from it. It is
 /// slower than [`credit`]'s receive window lets a sender go. The first burst
 /// is collected at ingress after setup, so scheduling cannot drain the bucket
-/// between its datagrams; its surviving bytes exceed the burst and 50ms queue
-/// allowance before they are accounted at one instant.
+/// between its datagrams; its bytes exceed the burst and 50ms queue allowance
+/// before they are accounted at one instant.
 fn bursty() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		rate: Some(moq_shaper::Rate {
@@ -981,7 +986,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// idles out only after `relay_idle`, which the flap's waits allow for.
 	let mut config = relay_config();
 	config.quic = credit(lane, config.quic);
-	let relay_idle = config.quic.idle_timeout;
+	let relay_idle = config.quic.resolve().idle_timeout;
 	let origin = RelayHost::start(config).await;
 	let seed = seed(lane);
 	let peer = match (link, lane) {
@@ -1366,4 +1371,137 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 		| moq_net::announce::Event::Restart(route) => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
+}
+
+/// A finite deep queue, below the media bitrate, must shed superseded groups while
+/// preserving the newest catalog snapshot. Random loss is disabled in this acceptance test.
+#[tokio::test]
+async fn ietf_subscriber_max_age_skips_bufferbloat() {
+	let version: moq_net::Version = "moq-transport-22".parse().unwrap();
+	let mut config = relay_config();
+	config.listen.version = vec![version];
+	let relay = RelayHost::start(config).await;
+	let path = Path::through(
+		&relay,
+		moq_shaper::Profile {
+			rate: Some(moq_shaper::Rate {
+				bits_per_second: 64_000,
+				burst: 1500,
+				queue: Duration::from_millis(500),
+			}),
+			..Default::default()
+		},
+		19,
+	)
+	.await;
+	let publisher = moq_tokio::origin::spawn();
+	let broadcast = publisher.create_broadcast("live").unwrap();
+	let mut track = broadcast.create_track(TRACK, timed()).unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	let mut dial = dial();
+	dial.version = vec![version];
+	let publish_url = relay.url();
+	let publish_session = dial
+		.clone()
+		.init(quic())
+		.unwrap()
+		.with_publisher(&publisher)
+		.with_reconnect(false)
+		.connect(publish_url)
+		.established()
+		.await
+		.unwrap();
+	let subscriber = moq_tokio::origin::spawn();
+	let consumed = subscriber.consume();
+	let subscribe_session = dial
+		.init(quic())
+		.unwrap()
+		.with_subscriber(subscriber)
+		.with_reconnect(false)
+		.connect(path.url.clone())
+		.established()
+		.await
+		.unwrap();
+	write_group(&mut track, b"warmup");
+	let remote = tokio::time::timeout(TIMEOUT, consumed.routed_broadcast("live"))
+		.await
+		.unwrap()
+		.unwrap();
+	let mut groups = remote
+		.track(TRACK)
+		.unwrap()
+		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(100)))
+		.await
+		.unwrap();
+	let mut warmup = groups.recv_group().await.unwrap().unwrap();
+	assert_eq!(
+		warmup.read_frame().await.unwrap().unwrap().payload,
+		b"warmup".as_slice()
+	);
+	tokio::time::timeout(TIMEOUT, async {
+		loop {
+			if track
+				.subscription()
+				.is_some_and(|subscription| subscription.max_delay == Duration::from_millis(100))
+			{
+				break;
+			}
+			track.subscription_changed().await.unwrap();
+		}
+	})
+	.await
+	.expect("subscriber max age did not reach the publisher");
+
+	// The initial congestion window exceeds this queue's 5.5KB allowance, so this
+	// gate proves overflow without depending on how the OS schedules a packet burst.
+	let burst = path
+		.shaper
+		.as_ref()
+		.unwrap()
+		.burst(moq_shaper::ingress::Direction::Down)
+		.unwrap();
+	let payload = vec![42u8; 32_000];
+	write_group(&mut track, &payload);
+	tokio::time::timeout(TIMEOUT, burst.completed())
+		.await
+		.expect("rate-limit queue never filled")
+		.unwrap();
+	assert!(path.overflowed() > 0, "the finite queue did not drop overflow");
+	// 5.12Mb/s of media behind a 64kb/s link, for a second.
+	for sequence in 2..22 {
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(sequence * 50).unwrap(), payload.clone())
+			.unwrap();
+		group.finish().unwrap();
+		tokio::time::sleep(Duration::from_millis(50)).await;
+	}
+	let mut newest = track.append_group().unwrap();
+	newest
+		.write_frame(moq_net::Timestamp::from_millis(1100).unwrap(), b"snapshot")
+		.unwrap();
+	newest.finish().unwrap();
+	// No successor means this snapshot must survive even after its budget elapsed.
+	tokio::time::sleep(Duration::from_millis(500)).await;
+	let sequence = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let mut group = groups.recv_group().await.unwrap().expect("subscription ended");
+			if let Ok(Some(frame)) = group.read_frame().await
+				&& frame.payload == b"snapshot".as_slice()
+			{
+				break group.sequence;
+			}
+		}
+	})
+	.await
+	.expect("subscriber did not skip the backlog to the live edge");
+	assert_eq!(sequence, 22);
+	println!(
+		"max age: newest group {sequence}, {} queue-overflow drops",
+		path.overflowed()
+	);
+	drop(groups);
+	drop(subscribe_session);
+	drop(publish_session);
+	path.verify();
 }

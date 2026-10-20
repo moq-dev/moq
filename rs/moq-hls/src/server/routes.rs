@@ -264,14 +264,57 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 }
 
 async fn media(server: &Server, broadcast: &str, kind: Kind, rendition: &str, query: Option<&str>) -> Response {
+	let (range, child_query) = match playlist_range(query) {
+		Ok(parsed) => parsed,
+		Err(()) => return bad_request(),
+	};
 	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
 	};
-	match tokio::time::timeout(READY_TIMEOUT, rendition.playlist(query)).await {
+	match tokio::time::timeout(READY_TIMEOUT, rendition.playlist(range, child_query.as_deref())).await {
 		Ok(Ok(Some(playlist))) => m3u8(playlist),
 		Ok(Ok(None)) | Err(_) => not_found(),
+		Ok(Err(crate::Error::RangeNotDurable | crate::Error::RangeUnavailable(_))) => range_not_satisfiable(),
 		Ok(Err(err)) => server_error(err),
 	}
+}
+
+/// Parse `start` and `end` as decimal media-time seconds, returning the remaining query for
+/// child resources. Both are required together and may occur only once. Other parameters pass
+/// through byte for byte, so a signed token is never re-encoded.
+fn playlist_range(query: Option<&str>) -> Result<(Option<crate::export::Range>, Option<String>), ()> {
+	let Some(query) = query else {
+		return Ok((None, None));
+	};
+	let mut start = None;
+	let mut end = None;
+	let mut child = Vec::new();
+	for pair in query.split('&') {
+		let Some((key, value)) = url::form_urlencoded::parse(pair.as_bytes()).next() else {
+			continue;
+		};
+		match key.as_ref() {
+			"start" if start.is_none() => start = Some(media_time(&value)?),
+			"end" if end.is_none() => end = Some(media_time(&value)?),
+			"start" | "end" => return Err(()),
+			_ => child.push(pair),
+		}
+	}
+	let range = match (start, end) {
+		(None, None) => None,
+		(Some(start), Some(end)) => Some(crate::export::Range::new(start, end).map_err(|_| ())?),
+		_ => return Err(()),
+	};
+	let child = child.join("&");
+	Ok((range, (!child.is_empty()).then_some(child)))
+}
+
+fn media_time(value: &str) -> Result<Duration, ()> {
+	let seconds = value.parse::<f64>().map_err(|_| ())?;
+	if !seconds.is_finite() || seconds < 0.0 {
+		return Err(());
+	}
+	Duration::try_from_secs_f64(seconds).map_err(|_| ())
 }
 
 async fn init(server: &Server, broadcast: &str, kind: Kind, rendition: &str, hash: &str) -> Response {
@@ -369,6 +412,14 @@ fn not_found() -> Response {
 	(StatusCode::NOT_FOUND, [(header::CACHE_CONTROL, "no-store")]).into_response()
 }
 
+fn bad_request() -> Response {
+	(StatusCode::BAD_REQUEST, [(header::CACHE_CONTROL, "no-store")]).into_response()
+}
+
+fn range_not_satisfiable() -> Response {
+	(StatusCode::RANGE_NOT_SATISFIABLE, [(header::CACHE_CONTROL, "no-store")]).into_response()
+}
+
 fn server_error(err: crate::Error) -> Response {
 	tracing::warn!(%err, "hls request failed");
 	(StatusCode::INTERNAL_SERVER_ERROR, [(header::CACHE_CONTROL, "no-store")]).into_response()
@@ -377,6 +428,31 @@ fn server_error(err: crate::Error) -> Response {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn parses_playlist_ranges_and_preserves_other_query_parameters() {
+		let (range, query) = playlist_range(Some("jwt=a%2Eb&start=1.25&sig=x~y*&end=4")).unwrap();
+		assert_eq!(
+			range,
+			Some(crate::export::Range::new(Duration::from_millis(1250), Duration::from_secs(4)).unwrap())
+		);
+		assert_eq!(query.as_deref(), Some("jwt=a%2Eb&sig=x~y*"));
+		assert_eq!(
+			playlist_range(Some("jwt=x&flag")).unwrap(),
+			(None, Some("jwt=x&flag".into()))
+		);
+
+		for invalid in [
+			"start=1",
+			"end=2",
+			"start=2&end=1",
+			"start=-1&end=2",
+			"start=wat&end=2",
+			"start=1&start=2&end=3",
+		] {
+			assert!(playlist_range(Some(invalid)).is_err(), "accepted {invalid}");
+		}
+	}
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
@@ -567,11 +643,12 @@ mod tests {
 		let pub_for_accept = pub_origin.clone();
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.expect("accept");
-			let session = request
+			let (session, driver) = request
 				.with_publisher(&pub_for_accept)
 				.ok()
 				.await
 				.expect("publisher session");
+			let _ = driver.await;
 			let _ = session.closed().await;
 		});
 
@@ -710,7 +787,23 @@ mod tests {
 			let pair = lite_pair_on(version, moq_net::Hop::random()).await;
 			let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 			broadcast.announce(Default::default()).expect("announce");
-			let (_catalog, _registration, track, mut media) = publish_video(&mut broadcast, video_config(), timed());
+			// A hinted timeline is declared before any media, so the rendition is listed early.
+			let hinted = moq_mux::timeline::Config::default().with_duration_hint(Duration::from_secs(2));
+			let catalog = moq_mux::catalog::Producer::new(
+				&mut broadcast,
+				moq_mux::catalog::Config::default().with_timeline(hinted),
+			)
+			.unwrap();
+			let reserved = catalog.reserve();
+			let track = broadcast.create_track("video0", timed()).unwrap();
+			let mut media = reserved
+				.video(
+					track.clone(),
+					moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+					video_config(),
+				)
+				.unwrap();
+			drop(reserved);
 
 			let origin = pair.sub_origin.consume();
 			tokio::time::timeout(TIMEOUT, origin.routed("live"))
@@ -723,7 +816,7 @@ mod tests {
 				.expect("remote broadcast");
 			let source = moq_mux::Source::new(origin, remote);
 			let broadcaster = crate::export::Broadcaster::new(source, crate::export::Config::default());
-			// Recorded as soon as the catalog lists it, before any media, as a recorder does.
+			// Recorded as soon as the catalog lists it with its timeline, as a recorder does.
 			let mut renditions = broadcaster.renditions();
 			let rendition = match tokio::time::timeout(TIMEOUT, renditions.next()).await {
 				Ok(Some(crate::export::renditions::Event::Added(rendition))) => rendition,
@@ -732,11 +825,15 @@ mod tests {
 			let mut cursor = rendition.segments();
 			let mut next = std::pin::pin!(cursor.next());
 			// Waiting for its first segment, the cursor subscribes before any media exists.
-			let demand = track.demand();
+			let mut demand = track.demand();
+			let wanted = async {
+				while demand.wanted_changed().await?.is_none() {}
+				moq_net::Result::Ok(())
+			};
 			tokio::time::timeout(TIMEOUT, async {
 				tokio::select! {
 					_ = next.as_mut() => panic!("{version}: a segment before any media"),
-					used = demand.used() => used.expect("track open"),
+					wanted = wanted => wanted.expect("track open"),
 				}
 			})
 			.await

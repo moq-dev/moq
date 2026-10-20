@@ -2,63 +2,52 @@
 
 ## Goal
 
-`new Audio.Capture({ source, channelCount: 1 })` publishes continuous audio.
-A subscriber hears no gaps that the same capture without the override does not
-also have, so the documented way to pin a publisher's channel count stops being
-a way to degrade it.
+`new Audio.Capture({ source, channelCount: 1 })` publishes audio a subscriber
+plays as smoothly as the same capture without the override, so pinning a
+publisher's channel count stops being a way to degrade it. The browser media
+fixture can then pin mono again.
 
-Boundaries: `channelCount` keeps its meaning, "force the captured channel
-count", and the published shape does not move. Whether the fix is to stop
-forcing `channelCountMode: "explicit"`, to do the downmix off the realtime
-graph, or to keep the mode and remove whatever it starves, is the quest's to
-decide.
+This is also the home for the media fixture's cold-start audio-tone flake
+without the pin, which shows the same symptom. Fix it at its cause, not by
+lowering the tone floor.
+
+`channelCount` keeps its meaning, "force the captured channel count".
 
 ## Plan
 
-`js/publish/src/audio/capture.ts` sets
-`channelCountMode: requestedChannels !== undefined ? "explicit" : "max"`, so
-supplying `channelCount` is what puts the AudioWorklet behind a forced Web
-Audio downmix. Omitting it does not always take the `"max"` path:
-`requestedChannels` falls back to `requestedChannelCount(source.track)`,
-so an applied `getUserMedia` channelCount constraint forces `"explicit"` too.
-Account for that path when isolating the cause.
+What is known:
 
-What was measured, on macOS headless Chromium through `just test media`,
-publishing a `MediaStreamAudioDestinationNode` track into a graph already
-running at 48 kHz:
+- The real-worklet matrix in
+  `test/interop/clients/js/capture-channel-count.browser.ts` (in
+  `just test harness`) finds nothing override-specific: no timestamp gaps,
+  the requested format, and audible output in every channel, on Linux and
+  macOS. It only asserts each channel is audible at least once. An uncommitted
+  per-quantum trace (#5270) found one short silent run during startup in
+  every case, the no-override baseline included, and none after. Under heavy
+  load the baseline also showed a later run, so a strict per-quantum check
+  flakes on the source. Tightening the matrix needs a baseline-relative
+  measure.
+- The player stalls. In CI (#5270), the pinned fixture failed the `just test media`
+  audio-tone check in 2 of 3 runs, against ~5% of unpinned runs (5 of 108,
+  all cold start). Failures look the same either way: player samples go
+  `stalled` while received audio bytes keep growing, and the jitter delay jumps
+  from ~77 ms to 500-700 ms.
 
-- With `sampleRate: 48000, channelCount: 1`: 11 probe samples across a run read
-  a flat spectrum (peak equal to median, below `AUDIBLE_RMS`), which is
-  silence, not a weak tone. The `audio tone` check fell to 82-88% against its
-  90% floor and took two negative controls down with it.
-- With both overrides removed: zero such samples, and every media check passed.
-- `main`, whose fixture pinned the same format on the encoder rather than the
-  capture, reported `tone 150dB above the floor` and no silent samples at all.
+The working hypothesis is that the explicit downmix (`channelCountMode:
+"explicit"` in `js/publish/src/audio/capture.ts`) changes something the player
+reacts to, such as frame cadence or burstiness, rather than dropping PCM.
+Neither half is proven. Measure the
+publisher's frame arrival timing pinned vs unpinned before picking a fix, and
+check whether the player's re-stall behavior
+([watch jitter target](/quest/m1/audio-jitter-target/watch.md)) is the
+amplifier. A loaded local host fails the media fixture either way, so compare
+on CI or a quiet machine.
 
-What is not established, and should be first:
-
-- The two overrides were removed together, so `channelCount` is implicated by
-  reading the `channelCountMode` choice, not by an isolated run. Re-run with
-  `sampleRate` alone and with `channelCount` alone before believing the
-  attribution.
-- The mechanism. A forced downmix starving or stalling the worklet is the
-  obvious guess and is not evidence.
-- Whether a `getUserMedia` microphone track shows it, or only a
-  destination-node track, whose channel count Web Audio reports as 2 by
-  default. `requestedChannelCount` exists for the macOS
-  mono-mic misreport, so that path has a real caller and cannot simply lose the
-  override.
-
-The regression belongs where the evidence came from: the browser fixture can
-pin a channel count again once this is fixed, and
-`test/interop/clients/js/src/fixture.ts` carries a comment saying why it does
-not. A unit test that counts worklet callbacks under an explicit downmix would
-be cheaper than a full media run, if one can be made to fail reliably.
-
-The `just test media` audio-tone misses under load were not this: the fixture
-takes the `"max"` path, and every miss was the player's own buffering silence
-with audio still arriving.
+Not covered: an applied `getUserMedia` channelCount constraint also takes the
+explicit path, but a destination-node track refuses that constraint, so the
+harness cannot exercise it.
 
 ## Related
 
-- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - the other place browser-side capture and encode costs get measured
+- [Watch jitter target](/quest/m1/audio-jitter-target/watch.md) - a ring that runs dry re-stalls and refills to the target
+- [Test flakes, round 2](/quest/m1/test-flakes-2/README.md) - load flakes fixed at their cause

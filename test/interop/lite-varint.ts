@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { Datagram } from "../../js/net/src/lite/datagram.ts";
 import { frameDecoder, Group } from "../../js/net/src/lite/group.ts";
 import { Setup } from "../../js/net/src/lite/setup.ts";
+import { TrackInfo } from "../../js/net/src/lite/track.ts";
 import { Version } from "../../js/net/src/lite/version.ts";
 import { Reader, Writer } from "../../js/net/src/stream.ts";
 
@@ -12,7 +13,10 @@ const input: {
 	varints: number[];
 	setup: number[];
 	datagram: number[];
+	untimedDatagram: number[];
+	trackInfo: number[];
 	group: number[];
+	untimedGroup: number[];
 } = JSON.parse(process.argv[2]);
 
 const versions: Record<string, Version> = {
@@ -60,8 +64,24 @@ if (version === Version.DRAFT_07) {
 const setup = await Setup.decode(reader(input.setup), version);
 const setupBytes = await write((w) => setup.encode(w, version));
 
-const datagram = await Datagram.decode(Uint8Array.from(input.datagram), version);
+const datagram = await Datagram.decode(Uint8Array.from(input.datagram), version, () => true);
 const datagramBytes = [...datagram.encode(version)];
+
+// Only lite-07 can carry an untimed track; lite-06 stamps it, so it has no untimed bytes.
+const untimed = version === Version.DRAFT_07;
+
+let untimedDatagramBytes: number[] = [];
+if (untimed) {
+	const datagram = await Datagram.decode(Uint8Array.from(input.untimedDatagram), version, () => false);
+	assert.equal(datagram.timestamp, undefined);
+	untimedDatagramBytes = [...datagram.encode(version)];
+} else {
+	assert.throws(() => new Datagram(9n, 1, undefined, new Uint8Array()).encode(version));
+}
+
+const trackInfo = await TrackInfo.decode(reader(input.trackInfo), version);
+assert.equal(trackInfo.timescale, version === Version.DRAFT_07 ? undefined : 1_000);
+const trackInfoBytes = await write((w) => trackInfo.encode(w, version));
 
 // A GROUP header, then frames until the stream ends.
 const g = reader(input.group);
@@ -86,13 +106,37 @@ const groupBytes = await write(async (w) => {
 	}
 });
 
+// The same frames on an untimed track: no timestamp delta.
+let untimedGroupBytes: number[] = [];
+if (untimed) {
+	const u = reader(input.untimedGroup);
+	const untimedGroup = await Group.decode(u, version);
+	const untimedFrames: Uint8Array[] = [];
+	for (;;) {
+		const frame = await u.decodeMaybe(frameDecoder(0));
+		if (!frame) break;
+		assert.equal(frame.timestamp, undefined);
+		untimedFrames.push(frame.payload);
+	}
+	untimedGroupBytes = await write(async (w) => {
+		await untimedGroup.encode(w, version);
+		for (const payload of untimedFrames) {
+			await w.u53(payload.byteLength);
+			await w.write(payload);
+		}
+	});
+}
+
 console.log(
 	JSON.stringify({
 		values: values.map((v) => v.toString()),
 		varints,
 		setup: setupBytes,
 		datagram: datagramBytes,
+		untimedDatagram: untimedDatagramBytes,
+		trackInfo: trackInfoBytes,
 		group: groupBytes,
+		untimedGroup: untimedGroupBytes,
 		beyond,
 	}),
 );

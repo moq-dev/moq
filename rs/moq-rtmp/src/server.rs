@@ -255,7 +255,7 @@ pub struct Server {
 	/// While set, `accept` stops asking the listener until this instant. In-flight handshakes keep
 	/// being polled meanwhile: a connection that already got through must not wait out a backoff
 	/// earned by a different one.
-	accept_retry: Option<tokio::time::Instant>,
+	accept_retry: Option<moq_clock::Instant>,
 }
 
 impl Server {
@@ -355,7 +355,7 @@ impl Server {
 						self.pending.push(Box::pin(async move {
 							// The TLS handshake (if any) and the RTMP handshake share one
 							// budget, so a client that stalls either is dropped.
-							let outcome = tokio::time::timeout(REQUEST_TIMEOUT, async move {
+							let outcome = moq_clock::timeout(REQUEST_TIMEOUT, async move {
 								#[cfg(feature = "tls")]
 								let conn = match tls {
 									Some(acceptor) if starts_tls(&stream).await? => Conn::Tls(Box::new(
@@ -402,7 +402,7 @@ impl Server {
 						tracing::warn!(%err, "failed to accept RTMP connection; continuing");
 						let wait = self.accept_delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
 						self.accept_delay = (self.accept_delay * 2).min(ACCEPT_RETRY_MAX);
-						self.accept_retry = Some(tokio::time::Instant::now() + wait);
+						self.accept_retry = Some(moq_clock::Instant::now() + wait);
 					}
 				},
 			}
@@ -429,9 +429,9 @@ async fn starts_tls(stream: &TcpStream) -> io::Result<bool> {
 ///
 /// The `select!` arm that uses this is guarded on `at` being set; the pending branch keeps the arm
 /// well-formed rather than leaving the macro with a `None` to unwrap.
-async fn sleep_until(at: Option<tokio::time::Instant>) {
+async fn sleep_until(at: Option<moq_clock::Instant>) {
 	match at {
-		Some(at) => tokio::time::sleep_until(at).await,
+		Some(at) => moq_clock::sleep_until(at).await,
 		None => std::future::pending().await,
 	}
 }
@@ -471,7 +471,7 @@ pub fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 ///
 /// Returns `Ok(None)` if the client disconnects before issuing `publish` or
 /// `play`. Unlike [`Server`], this applies no timeout: wrap the call in
-/// [`tokio::time::timeout`] to bound how long a connected-but-idle client can
+/// [`moq_clock::timeout`] to bound how long a connected-but-idle client can
 /// hold the task.
 pub async fn accept_stream<S: Stream>(stream: S, peer: SocketAddr) -> Result<Option<Request<S>>> {
 	Ok(accept_until_request(stream, peer).await?)
@@ -773,7 +773,7 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			resolved = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, origin.routed_broadcast(&path)) => {
+			resolved = moq_clock::timeout(PLAY_RESOLVE_TIMEOUT, origin.routed_broadcast(&path)) => {
 				match resolved {
 					Ok(resolved) => resolved,
 					Err(_) => {
@@ -800,7 +800,7 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			catalog = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, CatalogStream::next(&mut check)) => {
+			catalog = moq_clock::timeout(PLAY_RESOLVE_TIMEOUT, CatalogStream::next(&mut check)) => {
 				match catalog {
 					Ok(Ok(Some(catalog))) => catalog,
 					Ok(Ok(None)) => {
@@ -848,7 +848,7 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			chunk = tokio::time::timeout(PLAY_RESOLVE_TIMEOUT, export.next()) => {
+			chunk = moq_clock::timeout(PLAY_RESOLVE_TIMEOUT, export.next()) => {
 				match chunk {
 					Ok(Ok(Some(chunk))) => chunk,
 					Ok(Ok(None)) => {
@@ -919,15 +919,19 @@ impl<S: Stream> Play<S> {
 
 /// Narrow a play to what the client can decode, or refuse it.
 ///
-/// A multitrack client receives every rendition, so it must play them all. A
-/// single-track client receives the best rendition of each kind it can play.
+/// A multitrack client receives every enabled rendition, so it must play them all. A
+/// single-track client receives the best enabled rendition of each kind it can play.
 fn play_selection(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	capabilities: &ClientCapabilities,
 ) -> std::result::Result<select::Broadcast, String> {
 	let video_playable = |config: &VideoConfig| plays_video(capabilities, config.codec.kind());
 	let video_refused = if capabilities.multitrack {
-		catalog.video.renditions.values().find(|config| !video_playable(config))
+		catalog
+			.video
+			.enabled()
+			.map(|(_, config)| config)
+			.find(|config| !video_playable(config))
 	} else if catalog.video.renditions.values().any(video_playable) {
 		None
 	} else {
@@ -945,7 +949,11 @@ fn play_selection(
 
 	let audio_playable = |config: &hang::catalog::AudioConfig| plays_audio(capabilities, &config.codec);
 	let audio_refused = if capabilities.multitrack {
-		catalog.audio.renditions.values().find(|config| !audio_playable(config))
+		catalog
+			.audio
+			.enabled()
+			.map(|(_, config)| config)
+			.find(|config| !audio_playable(config))
 	} else if catalog.audio.renditions.values().any(audio_playable) {
 		None
 	} else {
@@ -1188,7 +1196,7 @@ async fn pump<S: Stream>(
 	peer: SocketAddr,
 ) -> anyhow::Result<()> {
 	let mut buffer = [0u8; READ_BUFFER];
-	let mut media_deadline = tokio::time::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+	let mut media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 	loop {
 		let mut finished = false;
 		while let Some(result) = work.pop_front() {
@@ -1201,13 +1209,13 @@ async fn pump<S: Stream>(
 					// consumes whole tags atomically, so one bad frame doesn't desync
 					// the stream, and tearing down a live publish over it would be worse.
 					ServerSessionEvent::AudioDataReceived { data, timestamp, .. } => {
-						media_deadline = tokio::time::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 						if let Err(err) = publisher.push(flv::TAG_AUDIO, timestamp.value, &data) {
 							tracing::warn!(%peer, %err, "dropping RTMP audio frame that failed to demux");
 						}
 					}
 					ServerSessionEvent::VideoDataReceived { data, timestamp, .. } => {
-						media_deadline = tokio::time::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 						if let Err(err) = publisher.push(flv::TAG_VIDEO, timestamp.value, &data) {
 							tracing::warn!(%peer, %err, "dropping RTMP video frame that failed to demux");
 						}
@@ -1230,7 +1238,7 @@ async fn pump<S: Stream>(
 
 		let n = tokio::select! {
 			res = stream.read(&mut buffer) => res?,
-			_ = tokio::time::sleep_until(media_deadline) => {
+			_ = moq_clock::sleep_until(media_deadline) => {
 				anyhow::bail!("peer {peer} sent no RTMP media for {:?}", PUBLISH_IDLE_TIMEOUT);
 			}
 		};
@@ -1500,6 +1508,7 @@ impl Publisher {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	#[tokio::test(start_paused = true)]
@@ -2002,26 +2011,43 @@ mod tests {
 		);
 		catalog.video.renditions.insert("c".to_string(), rendition(h264, 720));
 
-		let best = |capabilities: &ClientCapabilities| {
-			let select = play_selection(&catalog, capabilities).unwrap();
+		fn best(catalog: &moq_mux::catalog::hang::Catalog, capabilities: &ClientCapabilities) -> Option<String> {
+			let select = play_selection(catalog, capabilities).unwrap();
 			let mut catalog = catalog.clone();
 			select.retain(&mut catalog);
 			catalog.video.ranked().next().map(|(name, _)| name.clone())
-		};
+		}
 
 		let legacy = ClientCapabilities::default();
-		assert_eq!(best(&legacy).as_deref(), Some("c"));
+		assert_eq!(best(&catalog, &legacy).as_deref(), Some("c"));
 
 		let hevc = FourCcSupport {
 			any: false,
 			fourccs: vec![*b"hvc1"],
 		};
 		let enhanced = ClientCapabilities::new(0, hevc.clone(), FourCcSupport::default());
-		assert_eq!(best(&enhanced).as_deref(), Some("b"));
+		assert_eq!(best(&catalog, &enhanced).as_deref(), Some("b"));
 
 		// Multitrack carries every rendition, so one the client can't decode refuses the play.
-		let multitrack = ClientCapabilities::new(CAPS_EX_MULTITRACK, hevc, FourCcSupport::default());
+		let multitrack = ClientCapabilities::new(CAPS_EX_MULTITRACK, hevc.clone(), FourCcSupport::default());
 		assert!(play_selection(&catalog, &multitrack).is_err());
+
+		// A disabled rendition is never selected, so a single-track client gets the best enabled
+		// one, and a multitrack client that can't decode it still plays the rest.
+		catalog.video.renditions.get_mut("c").unwrap().enabled = false;
+		assert_eq!(best(&catalog, &legacy).as_deref(), Some("a"));
+		let avc = FourCcSupport {
+			any: false,
+			fourccs: vec![*b"avc1"],
+		};
+		let h264_only = ClientCapabilities::new(CAPS_EX_MULTITRACK, avc, FourCcSupport::default());
+		assert!(
+			play_selection(&catalog, &h264_only).is_err(),
+			"b is enabled and is H.265"
+		);
+		catalog.video.renditions.get_mut("b").unwrap().enabled = false;
+		assert!(play_selection(&catalog, &h264_only).is_ok());
+		assert_eq!(best(&catalog, &h264_only).as_deref(), Some("a"));
 	}
 
 	/// A single-track client gets the best audio rendition it can play, not the first by name.

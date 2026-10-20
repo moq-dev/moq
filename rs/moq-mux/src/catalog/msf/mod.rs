@@ -13,10 +13,32 @@ pub use consumer::Consumer;
 #[cfg(test)]
 pub(crate) use consumer::from_msf;
 
+/// Whether an MSF `namespace` names the catalog's own broadcast at `base`.
+///
+/// MSF namespaces are absolute, but each side sees paths under its own connection root. Draft
+/// catalogs repeat the publisher's full namespace on every track, so a namespace that matches
+/// the catalog's path on whole trailing segments is the catalog seen from a different root.
+pub(crate) fn names_catalog(namespace: &moq_net::Path, base: &moq_net::Path) -> bool {
+	if namespace == base {
+		return true;
+	}
+	let namespace: Vec<_> = namespace.parts().collect();
+	let base: Vec<_> = base.parts().collect();
+	!namespace.is_empty() && !base.is_empty() && (namespace.ends_with(&base) || base.ends_with(&namespace))
+}
+
 /// MSF catalog decoding errors.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The namespace cannot be represented by a relative broadcast reference.
+	#[error("MSF track {name:?} namespace {namespace:?} cannot be referenced from the catalog")]
+	UnresolvableNamespace { name: String, namespace: String },
+
+	/// Multiple namespaces use a track name that would overwrite one hang rendition ID.
+	#[error("MSF track name {0:?} is ambiguous as a hang rendition ID")]
+	DuplicateTrackName(String),
+
 	#[error("MSF catalog frame is not valid UTF-8")]
 	InvalidUtf8,
 

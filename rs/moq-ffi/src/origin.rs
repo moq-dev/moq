@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
-use crate::ffi::Task;
+use crate::ffi::{Background, Task};
 use crate::producer::MoqBroadcastProducer;
 
 /// Config used when creating an origin.
@@ -114,12 +114,26 @@ pub fn moq_epoch_time_ms(epoch: String) -> Result<u64, MoqError> {
 
 #[derive(uniffi::Object)]
 pub struct MoqOriginProducer {
-	inner: moq_net::origin::Producer,
+	inner: Origin,
+}
+
+#[derive(Clone)]
+pub(crate) struct Origin {
+	pub inner: moq_net::origin::Producer,
+	pub driver: Background,
+}
+
+impl std::ops::Deref for Origin {
+	type Target = moq_net::origin::Producer;
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
 }
 
 #[derive(uniffi::Object)]
 pub struct MoqOriginConsumer {
 	inner: moq_net::origin::Consumer,
+	pub(crate) driver: Background,
 }
 
 #[derive(uniffi::Object)]
@@ -135,6 +149,7 @@ pub struct MoqAnnounceConsumer {
 /// `MoqOriginProducer` is gone.
 pub struct MoqOriginDynamic {
 	slot: Slot,
+	driver: Background,
 	task: std::sync::Mutex<Option<Arc<Task<OriginDynamic>>>>,
 }
 
@@ -146,6 +161,7 @@ pub struct MoqBroadcastRequest {
 
 struct Announced {
 	inner: moq_net::announce::Consumer,
+	driver: Background,
 }
 
 /// The served route behind one `MoqOriginProducer::dynamic` handle, shared
@@ -155,42 +171,118 @@ type Slot = Arc<std::sync::Mutex<Option<moq_net::origin::Dynamic>>>;
 
 struct OriginDynamic {
 	slot: Slot,
+	driver: Background,
 }
 
 impl OriginDynamic {
 	async fn requested_broadcast(&mut self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
-		let request = kio::wait(|waiter| match self.slot.lock().unwrap().as_ref() {
-			Some(dynamic) => dynamic.poll_requested_broadcast(waiter),
-			None => std::task::Poll::Ready(Err(moq_net::Error::Closed)),
-		})
-		.await
-		.map_err(|err| match err {
-			moq_net::Error::Closed => MoqError::Closed,
-			other => other.into(),
-		})?;
+		let request = self
+			.driver
+			.watch(async {
+				kio::wait(|waiter| match self.slot.lock().unwrap().as_ref() {
+					Some(dynamic) => dynamic.poll_requested_broadcast(waiter),
+					None => std::task::Poll::Ready(Err(moq_net::Error::Closed)),
+				})
+				.await
+				.map_err(|err| match err {
+					moq_net::Error::Closed => MoqError::Closed,
+					other => other.into(),
+				})
+			})
+			.await?;
 		Ok(Arc::new(MoqBroadcastRequest::new(request)))
 	}
 }
 
 impl Announced {
 	async fn next(&mut self) -> Result<Option<MoqAnnounceEvent>, MoqError> {
-		Ok(self.inner.next().await.map(Into::into))
+		self.driver
+			.watch(async { Ok(self.inner.next().await.map(Into::into)) })
+			.await
 	}
 }
 
-/// Waits for a route covering one exact path, then resolves it.
+/// Follows one exact path, resolving each publisher instance that serves it.
 struct AnnouncedBroadcast {
 	origin: moq_net::origin::Consumer,
 	path: moq_net::PathOwned,
+	follow: moq_net::announce::Follow,
+	/// An instance serves the path that was not handed out yet.
+	unseen: bool,
+	/// The handle handed out last, until the caller drops it or the path goes offline. Weak, so
+	/// it never keeps an instance the caller let go of from retiring.
+	last: Weak<MoqBroadcastConsumer>,
+	driver: Background,
 }
 
 impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		// `routed_broadcast` rides out the churn between something covering the path
-		// and the path actually resolving (failover, an advertise-only announce
-		// racing its handler).
-		let broadcast = self.origin.routed_broadcast(&self.path).await?;
-		Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.origin.clone())))
+		let driver = self.driver.clone();
+		driver
+			.watch(async {
+				loop {
+					// Apply every change on hand before resolving, so a burst of them hands out
+					// only the instance serving the path now.
+					self.settle()?;
+					if !self.unseen {
+						let event = self.follow.next().await;
+						self.apply(event)?;
+						continue;
+					}
+
+					// `routed_broadcast` rides out the churn between something covering the path
+					// and the path actually resolving (failover, an advertise-only announce
+					// racing its handler). The instance stays unseen until it resolves: a foreign
+					// cancel only drops this future, and the caller may call again.
+					let broadcast = self.origin.routed_broadcast(&self.path).await?;
+
+					// A change that came through while resolving may predate the answer, such as
+					// an end and a start for the instance it resolved. Resolve afresh once caught up.
+					if self.settle()? {
+						continue;
+					}
+					self.unseen = false;
+
+					// Resolving can run ahead of the follower: a takeover resolves at once while
+					// its restart is held, and that restart then names the instance handed out.
+					if self.last.upgrade().is_some_and(|last| last.inner.is_clone(&broadcast)) {
+						continue;
+					}
+					let broadcast = Arc::new(MoqBroadcastConsumer::routed(
+						broadcast,
+						self.origin.clone(),
+						self.driver.clone(),
+					));
+					self.last = Arc::downgrade(&broadcast);
+					return Ok(broadcast);
+				}
+			})
+			.await
+	}
+
+	/// Apply every change on hand, returning whether any came through.
+	fn settle(&mut self) -> Result<bool, MoqError> {
+		let mut changed = false;
+		while let std::task::Poll::Ready(event) = self.follow.poll_next(&kio::Waiter::noop()) {
+			changed |= self.apply(event)?;
+		}
+		Ok(changed)
+	}
+
+	/// Apply one change to the path, returning whether it is one.
+	fn apply(&mut self, event: Option<moq_net::announce::Event>) -> Result<bool, MoqError> {
+		match event.ok_or(MoqError::Closed)? {
+			moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => self.unseen = true,
+			// An end is a gap that ended every request on the old route, so whatever serves the
+			// path next is handed out, even the same instance coming back.
+			moq_net::announce::Event::End(_) => {
+				self.unseen = false;
+				self.last = Weak::new();
+			}
+			// The same instance over another route, which its subscriptions ride out.
+			moq_net::announce::Event::Update(_) => return Ok(false),
+		}
+		Ok(true)
 	}
 }
 
@@ -255,20 +347,19 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 	}
 }
 
-/// Waits for a specific broadcast to be announced.
+/// Follows a specific broadcast across the publisher instances that serve it.
 #[derive(uniffi::Object)]
 pub struct MoqAnnouncedBroadcast {
 	task: Task<AnnouncedBroadcast>,
 }
 
 impl MoqOriginProducer {
-	pub(crate) fn inner(&self) -> &moq_net::origin::Producer {
+	pub(crate) fn inner(&self) -> &Origin {
 		&self.inner
 	}
 
-	/// Wrap an existing `moq_net::origin::Producer` (e.g. one auto-created
-	/// during `MoqClient::connect`) so it can cross the FFI boundary.
-	pub(crate) fn from_inner(inner: moq_net::origin::Producer) -> Self {
+	/// Wrap an owned origin so it can cross the FFI boundary.
+	pub(crate) fn from_inner(inner: Origin) -> Self {
 		Self { inner }
 	}
 
@@ -285,18 +376,24 @@ impl MoqOriginProducer {
 	}
 }
 
-/// Build an origin producer, spawning its driver on the FFI runtime.
-pub(crate) fn spawn(config: moq_net::origin::Config) -> moq_net::origin::Producer {
-	let (producer, driver) = moq_net::origin::Producer::new(config);
-	crate::ffi::spawn(async move {
+/// Build an origin whose host handles retain its driver's completion.
+pub(crate) fn spawn(config: moq_net::origin::Config) -> Origin {
+	let (inner, driver) = moq_net::origin::Producer::new(config);
+	#[cfg(not(target_arch = "wasm32"))]
+	let driver = Background::driver(driver);
+	#[cfg(target_arch = "wasm32")]
+	let driver = crate::ffi::spawn(async move {
 		moq_net::time::run(driver).await;
 	});
-	producer
+	Origin { inner, driver }
 }
 
 impl MoqOriginConsumer {
-	pub(crate) fn from_inner(inner: moq_net::origin::Consumer) -> Self {
-		Self { inner }
+	pub(crate) fn from_inner(origin: Origin) -> Self {
+		Self {
+			inner: origin.inner.consume(),
+			driver: origin.driver,
+		}
 	}
 }
 
@@ -308,7 +405,7 @@ impl MoqOriginConsumer {
 pub(crate) fn resolve_pair(
 	publish: Option<&Arc<MoqOriginProducer>>,
 	consume: Option<&Arc<MoqOriginProducer>>,
-) -> (moq_net::origin::Producer, moq_net::origin::Producer) {
+) -> (Origin, Origin) {
 	if publish.is_none() && consume.is_none() {
 		// Clones of a Producer share the underlying origin, so this is one origin, not two.
 		let shared = spawn(moq_net::origin::Config::default());
@@ -335,9 +432,7 @@ impl MoqOriginProducer {
 	/// Create a consumer for this origin.
 	pub fn consume(&self) -> Arc<MoqOriginConsumer> {
 		let _guard = crate::ffi::enter();
-		Arc::new(MoqOriginConsumer {
-			inner: self.inner.consume(),
-		})
+		Arc::new(MoqOriginConsumer::from_inner(self.inner.clone()))
 	}
 
 	/// Advertise `prefix` and serve the requests beneath it.
@@ -350,12 +445,19 @@ impl MoqOriginProducer {
 	/// demand, populate, then announce.
 	pub fn dynamic(&self, prefix: String, route: MoqRoute) -> Result<Arc<MoqOriginDynamic>, MoqError> {
 		let _guard = crate::ffi::enter();
+		self.inner.driver.check()?;
 		let route: moq_net::origin::Route = route.try_into()?;
-		let dynamic = self.inner.dynamic(prefix, route)?;
+		let result = self.inner.dynamic(prefix, route);
+		self.inner.driver.check()?;
+		let dynamic = result?;
 		let slot = Arc::new(std::sync::Mutex::new(Some(dynamic)));
 		Ok(Arc::new(MoqOriginDynamic {
 			slot: slot.clone(),
-			task: std::sync::Mutex::new(Some(Arc::new(Task::new(OriginDynamic { slot })))),
+			driver: self.inner.driver.clone(),
+			task: std::sync::Mutex::new(Some(Arc::new(Task::new(OriginDynamic {
+				slot,
+				driver: self.inner.driver.clone(),
+			})))),
 		}))
 	}
 
@@ -371,9 +473,15 @@ impl MoqOriginProducer {
 	/// `dynamic()` included, does the same.
 	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
+		self.inner.driver.check()?;
 		// Surfaces Error::Unauthorized (out of scope) via the MoqError::Protocol conversion.
-		let broadcast = self.inner.create_broadcast(path.as_str())?;
-		Ok(Arc::new(MoqBroadcastProducer::from_inner(broadcast)?))
+		let result = self.inner.create_broadcast(path.as_str());
+		self.inner.driver.check()?;
+		let broadcast = result?;
+		Ok(Arc::new(MoqBroadcastProducer::from_inner(
+			broadcast,
+			self.inner.driver.clone(),
+		)?))
 	}
 }
 
@@ -382,6 +490,7 @@ impl MoqOriginConsumer {
 	/// Subscribe to routes matching a pattern scope; updates stay relative to the origin.
 	pub fn announced(&self, config: MoqAnnounceConfig) -> Result<Arc<MoqAnnounceConsumer>, MoqError> {
 		let _guard = crate::ffi::enter();
+		self.driver.check()?;
 		let filter = match config.filter {
 			Some(filter) => filter.parse::<moq_net::Pattern>()?,
 			None => moq_net::Pattern::all(),
@@ -394,11 +503,12 @@ impl MoqOriginConsumer {
 		Ok(Arc::new(MoqAnnounceConsumer {
 			task: Task::new(Announced {
 				inner: origin.announced(),
+				driver: self.driver.clone(),
 			}),
 		}))
 	}
 
-	/// Resolve the broadcast at `path`, waiting until something can serve it.
+	/// Follow the broadcast at `path`, resolving each publisher instance that serves it.
 	///
 	/// This is how you resolve a path right after connecting: announcements arrive over the
 	/// session after it opens, so `request_broadcast` on its own races them. A
@@ -406,21 +516,25 @@ impl MoqOriginConsumer {
 	/// remote one.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::enter();
+		self.driver.check()?;
 		let path = moq_net::Path::new(&path).to_owned();
 
-		// Probe the permission eagerly so an unreachable path fails here, rather than
-		// surfacing later as a `Closed` the caller can't tell from the origin ending.
-		self.inner
-			.scope(&path, &moq_net::Patterns::from(moq_net::Pattern::all()))?;
+		// Following checks the permission eagerly, so an unreachable path fails here rather
+		// than surfacing later as a `Closed` the caller can't tell from the origin ending.
+		let follow = self.inner.follow(&path)?;
 
 		Ok(Arc::new(MoqAnnouncedBroadcast {
 			task: Task::new(AnnouncedBroadcast {
-				// The wait runs on the *unrooted* cursor. `announced_broadcast` narrows with
-				// `scope`, which leaves the root alone, so the broadcast is handed out named by
-				// its full path. Rooting the cursor at `path` would name it "" instead, making
-				// it its own root, and a catalog's `../sibling` reference would read as escaping.
+				// The wait runs on the *unrooted* cursor, so the broadcast is handed out named
+				// by its full path. Rooting the cursor at `path` would name it "" instead,
+				// making it its own root, and a catalog's `../sibling` reference would read as
+				// escaping.
 				origin: self.inner.clone(),
 				path,
+				follow,
+				unseen: false,
+				last: Weak::new(),
+				driver: self.driver.clone(),
 			}),
 		}))
 	}
@@ -437,8 +551,15 @@ impl MoqOriginConsumer {
 	/// Calling this straight after connecting therefore races the session's announcements
 	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let broadcast = self.inner.request_broadcast(path.as_str(), None).await?;
-		Ok(Arc::new(MoqBroadcastConsumer::routed(broadcast, self.inner.clone())))
+		let broadcast = self
+			.driver
+			.watch(async { Ok(self.inner.request_broadcast(path.as_str(), None).await?) })
+			.await?;
+		Ok(Arc::new(MoqBroadcastConsumer::routed(
+			broadcast,
+			self.inner.clone(),
+			self.driver.clone(),
+		)))
 	}
 }
 
@@ -459,11 +580,14 @@ impl MoqOriginDynamic {
 	/// Replace the route in place: its epoch, hops, and a static cost. The prefix cannot
 	/// change; call `dynamic` again instead.
 	pub fn update(&self, route: MoqRoute) -> Result<(), MoqError> {
+		self.driver.check()?;
 		let _guard = crate::ffi::enter();
 		let route: moq_net::origin::Route = route.try_into()?;
 		let slot = self.slot.lock().unwrap();
 		let dynamic = slot.as_ref().ok_or(MoqError::Closed)?;
-		Ok(dynamic.update(route)?)
+		let result = dynamic.update(route);
+		self.driver.check()?;
+		Ok(result?)
 	}
 
 	/// Stop serving and retract the route. Terminal: this handler is released
@@ -541,9 +665,14 @@ impl MoqAnnounceConsumer {
 
 #[uniffi::export]
 impl MoqAnnouncedBroadcast {
-	/// Wait until the broadcast is announced. Returns `Closed` if cancelled or the origin is closed.
+	/// Wait for the next publisher instance serving the broadcast. Returns `Closed` if cancelled
+	/// or the origin is closed.
 	///
-	/// Its end arrives as a [`MoqAnnounceEvent::End`] on the origin's announcements.
+	/// The first call resolves the instance serving the path, once one is announced. Each later
+	/// call waits for another to take over, as a restarted publisher or a replacement session
+	/// does, or for the broadcast to return after it went offline. Drop everything read from the
+	/// previous instance then and read the new one: the old one's tracks end when its route
+	/// dies, with an error unless this side closed that session.
 	pub async fn available(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		self.task.run(|mut state| async move { state.available().await }).await
 	}
@@ -553,5 +682,171 @@ impl MoqAnnouncedBroadcast {
 	/// Terminal: the announcement watch is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
+	}
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod supervision_tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn a_panicked_origin_task_reaches_the_host_while_another_origin_keeps_working() {
+		let (inner, driver, trigger) = crate::ffi::panicking_origin();
+		let failed = MoqOriginProducer::from_inner(Origin { inner, driver });
+		let failed = failed.consume().announced(Default::default()).unwrap();
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(failed.next().await, Err(MoqError::Task { .. })));
+
+		let healthy = MoqOriginProducer::new(Default::default());
+		let broadcast = healthy.create_broadcast("healthy".into()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		healthy.consume().request_broadcast("healthy".into()).await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn a_broadcast_keeps_the_origin_failure_after_its_origin_handle_is_released() {
+		let (inner, completion, trigger) = crate::ffi::panicking_origin();
+		let origin = MoqOriginProducer::from_inner(Origin {
+			inner,
+			driver: completion.clone(),
+		});
+		let broadcast = origin.create_broadcast("retained".into()).unwrap();
+		let dynamic = broadcast.dynamic().unwrap();
+		drop(origin);
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
+		drop(completion);
+		assert!(matches!(
+			broadcast.announce(Default::default()),
+			Err(MoqError::Task { .. })
+		));
+		assert!(matches!(dynamic.requested_track().await, Err(MoqError::Task { .. })));
+		let healthy = MoqOriginProducer::new(Default::default());
+		healthy
+			.create_broadcast("healthy".into())
+			.unwrap()
+			.announce(Default::default())
+			.unwrap();
+	}
+
+	#[tokio::test]
+	async fn container_importers_keep_the_origin_failure_after_other_owners_are_released() {
+		use crate::media::{MoqContainerFormat, MoqContainerInit, MoqMediaContainerProducer, MoqMediaTimebase};
+		let (inner, completion, trigger) = crate::ffi::panicking_origin();
+		let origin = MoqOriginProducer::from_inner(Origin {
+			inner,
+			driver: completion.clone(),
+		});
+		let broadcast = origin.create_broadcast("retained".into()).unwrap();
+		// One importer shares a timebase and one doesn't, so both reservation paths carry the driver.
+		let timebase = MoqMediaTimebase::new(broadcast.clone()).unwrap();
+		let container = MoqMediaContainerProducer::new(
+			&broadcast,
+			MoqContainerInit {
+				format: MoqContainerFormat::Ts,
+				data: Vec::new(),
+				timebase: Some(timebase.clone()),
+			},
+		)
+		.unwrap();
+		let independent = MoqMediaContainerProducer::new(
+			&broadcast,
+			MoqContainerInit {
+				format: MoqContainerFormat::Ts,
+				data: Vec::new(),
+				timebase: None,
+			},
+		)
+		.unwrap();
+		drop(timebase);
+		drop(broadcast);
+		drop(origin);
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
+		drop(completion);
+		assert!(matches!(container.cut(), Err(MoqError::Task { .. })));
+		assert!(matches!(independent.write(Vec::new()), Err(MoqError::Task { .. })));
+		assert!(matches!(container.finish(), Err(MoqError::Task { .. })));
+		assert!(matches!(independent.finish(), Err(MoqError::Task { .. })));
+	}
+
+	#[tokio::test]
+	async fn readers_derived_from_a_routed_broadcast_report_the_origin_panic() {
+		let (inner, completion, trigger) = crate::ffi::panicking_origin();
+		let origin = MoqOriginProducer::from_inner(Origin {
+			inner,
+			driver: completion.clone(),
+		});
+		let broadcast = origin.create_broadcast("routed".into()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast.publish_track("data".into(), None).unwrap();
+		let open = track.append_group().unwrap();
+		let consumer = origin.consume().request_broadcast("routed".into()).await.unwrap();
+		let subscriber = consumer.subscribe_track("data".into(), None).await.unwrap();
+		let group = subscriber.recv_group().await.unwrap().unwrap();
+		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer)
+			.await
+			.unwrap();
+		drop(consumer);
+		drop(origin);
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
+		drop(completion);
+		// Teardown drops the producers too, which the readers would otherwise report as `dropped`.
+		drop(open);
+		drop(track);
+		drop(broadcast);
+		let result = subscriber.recv_group().await.map(|group| group.is_some());
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
+		let result = group.read_frame().await.map(|frame| frame.is_some());
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
+		let result = catalog.next().await.map(|catalog| catalog.is_some());
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
+	}
+
+	#[tokio::test]
+	async fn a_driver_panic_is_recorded_before_teardown_wakes_the_host() {
+		struct Driver {
+			dropped: Option<tokio::sync::oneshot::Sender<()>>,
+			ack: std::sync::mpsc::Receiver<()>,
+		}
+		impl moq_net::time::Driver for Driver {
+			fn poll(
+				&mut self,
+				_: moq_net::time::Instant,
+				_: &kio::Waiter,
+			) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+				panic!("injected driver panic");
+			}
+		}
+		impl Drop for Driver {
+			fn drop(&mut self) {
+				let _ = self.dropped.take().unwrap().send(());
+				self.ack.recv().unwrap();
+			}
+		}
+		let (dropped, teardown) = tokio::sync::oneshot::channel();
+		let (ack, released) = std::sync::mpsc::channel();
+		let driver = Background::driver(Driver {
+			dropped: Some(dropped),
+			ack: released,
+		});
+		let result: Result<(), MoqError> = driver
+			.watch(async {
+				let _ = teardown.await;
+				Err(MoqError::Cancelled)
+			})
+			.await;
+		ack.send(()).unwrap();
+		assert!(matches!(driver.finished().await, Err(MoqError::Task { .. })));
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
 	}
 }

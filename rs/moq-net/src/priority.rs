@@ -21,7 +21,8 @@ use crate::track::Order;
 // group sequence in that subscription's own direction.
 
 /// A group stream's rank: its subscription's track priority, the subscription it
-/// belongs to, and its group sequence in that subscription's [`Order`].
+/// belongs to, its group sequence in that subscription's [`Order`], and the first object
+/// it carries.
 ///
 /// Higher `track` always wins. `group` breaks ties only *within* one `subscribe`:
 /// newest first by default, so a congested track sheds its backlog rather than its live
@@ -30,12 +31,16 @@ use crate::track::Order;
 /// Scoping the tie-break to a subscription is what keeps group sequence from deciding
 /// between tracks. The draft gives that job to `Priority` alone, so a session carrying
 /// two tracks at equal priority interleaves them rather than draining one first.
+///
+/// `start` only splits two streams of one group: the one starting earlier goes first,
+/// since the rest of a group is undecodable without its start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Priority {
 	track: u8,
 	subscribe: u64,
 	order: Order,
 	group: u64,
+	start: u64,
 }
 
 impl Priority {
@@ -46,12 +51,19 @@ impl Priority {
 			subscribe,
 			order: Order::Descending,
 			group,
+			start: 0,
 		}
 	}
 
 	/// Rank groups of the same subscription in `order` instead.
 	pub fn with_order(mut self, order: Order) -> Self {
 		self.order = order;
+		self
+	}
+
+	/// Rank a stream that starts at object `start` of its group, behind any earlier start.
+	pub fn with_start(mut self, start: u64) -> Self {
+		self.start = start;
 		self
 	}
 }
@@ -75,6 +87,9 @@ impl Ord for Priority {
 				Order::Descending => other.group.cmp(&self.group),
 				Order::Ascending => self.group.cmp(&other.group),
 			})
+			// Two streams of one group, such as a joining prefix beside the live rest: the
+			// earlier objects first, whatever the order.
+			.then(self.start.cmp(&other.start))
 	}
 }
 
@@ -82,6 +97,22 @@ impl PartialOrd for Priority {
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
 		Some(self.cmp(other))
 	}
+}
+
+/// A stream's send order within its subscription's send group, where higher goes first.
+///
+/// The [`Priority`] ranking minus the parts the group itself carries: the group sequence in
+/// the subscription's `order`, then a group's first stream ahead of a later `start` in the
+/// same group. The low bit only splits a stream from the start of its group (`start == 0`)
+/// from the rest, which is the joining prefix beside the live stream; any other two streams
+/// of one group share. Sequences are wire varints below 2^62, so doubling one fits.
+pub fn in_group(group: u64, start: u64, order: Order) -> i64 {
+	let group = i64::try_from(group).unwrap_or(i64::MAX).saturating_mul(2);
+	let group = match order {
+		Order::Descending => group,
+		Order::Ascending => -group,
+	};
+	group.saturating_add(i64::from(start == 0))
 }
 
 #[derive(Debug, Clone)]
@@ -674,6 +705,30 @@ mod tests {
 		assert_eq!(group1.current(), 2);
 	}
 
+	/// Two streams of one group rank by the object each starts at, earliest first in either
+	/// order, and only after the group itself.
+	#[test]
+	fn test_earlier_start_ranks_first_within_a_group() {
+		for order in [Order::Descending, Order::Ascending] {
+			let queue = PriorityQueue::default();
+			let stream = |group, start| Priority::new(100, 0, group).with_order(order).with_start(start);
+			// Queued first, so the slab id alone would rank it ahead.
+			let mut rest = queue.insert(stream(5, 3));
+			let mut head = queue.insert(stream(5, 0));
+			let mut other = queue.insert(stream(4, 0));
+
+			let expected = match order {
+				Order::Descending => (0, 1, 2),
+				Order::Ascending => (1, 2, 0),
+			};
+			assert_eq!(
+				(head.current(), rest.current(), other.current()),
+				expected,
+				"{order:?}: the start of a group goes first, after the group order"
+			);
+		}
+	}
+
 	#[test]
 	fn test_track_priority_overrides_group() {
 		let queue = PriorityQueue::default();
@@ -798,7 +853,7 @@ mod tests {
 		assert_eq!(low_track_high_group.current(), 4); // track=50, group=100
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_watch_notification_on_overflow_promotion() {
 		let queue = PriorityQueue::default();
 
@@ -810,10 +865,10 @@ mod tests {
 		assert_eq!(overflow_item.current(), u8::MAX);
 
 		// Spawn task to wait for promotion from overflow
-		let task = moq_net_sim::spawn(async move { overflow_item.next().await });
+		let task = moq_clock::sim::spawn(async move { overflow_item.next().await });
 
 		// Give the task time to start waiting
-		moq_net_sim::sleep(std::time::Duration::from_millis(10)).await;
+		moq_clock::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Drop highest priority item, which should promote from overflow
 		fillers.remove(0);
@@ -915,7 +970,7 @@ mod tests {
 		assert_eq!(handles[1].current(), 0);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_notification_on_demotion_to_overflow() {
 		let queue = PriorityQueue::default();
 
@@ -927,9 +982,9 @@ mod tests {
 		assert_eq!(at_edge.current(), 254);
 
 		// Spawn task to wait for demotion notification
-		let task = moq_net_sim::spawn(async move { at_edge.next().await });
+		let task = moq_clock::sim::spawn(async move { at_edge.next().await });
 
-		moq_net_sim::sleep(std::time::Duration::from_millis(10)).await;
+		moq_clock::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Insert very high priority item, kicking at_edge to overflow
 		let _high = queue.insert(live(255, 1000));
@@ -982,7 +1037,7 @@ mod tests {
 		assert_eq!(s1_g1.current(), 3);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_steer_track_notifies_other_handles() {
 		let queue = PriorityQueue::default();
 
@@ -993,8 +1048,8 @@ mod tests {
 		assert_eq!(h_low.current(), 1);
 
 		// Wait for a change notification on h_low while another handle's steer runs.
-		let task = moq_net_sim::spawn(async move { h_low.next().await });
-		moq_net_sim::sleep(std::time::Duration::from_millis(10)).await;
+		let task = moq_clock::sim::spawn(async move { h_low.next().await });
+		moq_clock::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Demote h_high below h_low.
 		h_high.steer(10, Order::Descending);
@@ -1092,7 +1147,7 @@ mod tests {
 		assert_eq!(low.current(), 2);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_steer_track_notifies_swapped_overflow_item() {
 		let queue = PriorityQueue::default();
 
@@ -1105,8 +1160,8 @@ mod tests {
 		let mut f1 = fillers.remove(0);
 		assert_eq!(f1.current(), u8::MAX);
 
-		let task = moq_net_sim::spawn(async move { f1.next().await });
-		moq_net_sim::yield_now().await;
+		let task = moq_clock::sim::spawn(async move { f1.next().await });
+		moq_clock::sim::yield_now().await;
 
 		// Demoting top below every filler swaps it with f1 in overflow.
 		top.steer(0, Order::Descending);

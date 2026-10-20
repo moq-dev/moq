@@ -1,8 +1,9 @@
-import { expect, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
+import { Effect } from "@moq/signals";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
-import * as Time from "../time.ts";
 import { type AcceptProps, accept as acceptSession, type ConnectProps, connect as connectSession } from "./index.ts";
 import { Reload } from "./reload.ts";
 import { type TransportStats, transportStats } from "./stats.ts";
@@ -32,7 +33,7 @@ test("transportStats maps the W3C dictionary and normalizes a null send rate", a
 			packetsLost: 6,
 		}),
 	);
-	expect(stats.rtt).toBe(Time.Milli(25));
+	expect(stats.rtt).toBe(Milli(25));
 	expect(stats.estimatedSendRate).toBeUndefined();
 	expect(stats.bytesSent).toBe(1);
 	expect(stats.bytesReceived).toBe(2);
@@ -131,5 +132,79 @@ test("Reload reports stats and probe only while connected", async () => {
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
+	}
+});
+
+function drain(): Promise<void> {
+	return new Promise((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
+}
+
+test("a lite connection probes only while its estimate is observed", async () => {
+	jest.useFakeTimers();
+	const pair = createMockTransportPair(Lite.ALPN_06, { stats: { estimatedSendRate: 1_000_000 } });
+	const open = pair.client.createBidirectionalStream.bind(pair.client);
+	let finished = 0;
+	const opening = spyOn(pair.client, "createBidirectionalStream").mockImplementation(async (options) => {
+		const stream = await open(options);
+		const writer = stream.writable.getWriter();
+		return {
+			readable: stream.readable,
+			writable: new WritableStream<Uint8Array>({
+				write: (chunk) => writer.write(chunk),
+				close: () => {
+					finished++;
+					return writer.close();
+				},
+				abort: (reason) => writer.abort(reason),
+			}),
+		};
+	});
+	const url = new URL("https://example.com/");
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+	let stop = () => {};
+	let effect: Effect | undefined;
+	try {
+		await drain();
+		expect(client.probe.peek()).toEqual({});
+		expect(pair.client.sendStreams.bidi).toHaveLength(0);
+		stop = client.probe.subscribe(() => {});
+		await drain();
+		expect(pair.client.sendStreams.bidi).toHaveLength(1);
+		const values: unknown[] = [];
+		effect = new Effect((effect) => {
+			values.push(effect.get(client.probe));
+		});
+		await drain();
+		jest.advanceTimersByTime(100);
+		await drain();
+		expect(values.at(-1)).toMatchObject({ estimatedRecvRate: 1_000_000 });
+		// A reactive one-shot listener reattaches without dropping demand between updates.
+		expect(pair.client.sendStreams.bidi).toHaveLength(1);
+		stop();
+		await drain();
+		expect(finished).toBe(0);
+		effect.close();
+		await drain();
+		expect(finished).toBe(1);
+		expect(client.probe.peek()).toEqual({});
+		stop = client.probe.subscribe(() => {});
+		await drain();
+		expect(pair.client.sendStreams.bidi).toHaveLength(2);
+	} finally {
+		stop();
+		effect?.close();
+		await drain();
+		client.abort();
+		server.abort();
+		opening.mockRestore();
+		jest.useRealTimers();
 	}
 });

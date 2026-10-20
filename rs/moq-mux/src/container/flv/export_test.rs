@@ -137,7 +137,7 @@ async fn drain_export<S: crate::catalog::Stream>(mut exporter: Export<S>, import
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
 				if let Some(deadline) = exporter.next_deadline() {
-					tokio::time::advance(deadline.saturating_duration_since(web_async::time::Instant::now())).await;
+					tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
 				} else {
 					importer = None; // No scheduled frames remain; close the broadcast.
 				}
@@ -954,6 +954,128 @@ async fn export_rebinds_to_a_better_rendition_before_the_header() {
 	assert!(frame.windows(5).any(|w| w == [0, 0, 0, 1, 0x65]));
 }
 
+/// Before the header, a rendition disabled in the catalog is unbound, so a keyframe it still
+/// carries doesn't put it in the header, and the export waits for one that is enabled.
+#[tokio::test(start_paused = true)]
+async fn export_unbinds_a_rendition_disabled_before_the_header() {
+	use hang::catalog::{Container, H264, VideoConfig};
+	use moq_net::Timestamp;
+
+	use crate::container::Producer;
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let consumer = producer.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+
+	// The small rendition is Annex-B (no description), so it holds the header until its
+	// keyframe arrives.
+	let small = producer.create_track(producer.unique_name(".avc3"), timed()).unwrap();
+	let small_name = small.name().to_string();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	config.container = Container::Legacy;
+	config.coded_width = Some(640);
+	config.coded_height = Some(360);
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert(small_name.clone(), config);
+	let mut small = Producer::new(
+		small,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+
+	// The large rendition starts disabled.
+	let description = avcc_level(0x1e);
+	let large = producer.create_track(producer.unique_name(".avc1"), timed()).unwrap();
+	let large_name = large.name().to_string();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1e,
+		inline: false,
+	});
+	config.container = Container::Legacy;
+	config.description = Some(Bytes::from(description.clone()));
+	config.coded_width = Some(1920);
+	config.coded_height = Some(1080);
+	config.enabled = false;
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert(large_name.clone(), config);
+	let mut large = Producer::new(
+		large,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+
+	let mut exporter = open_export(crate::source::announced(&consumer).await).await;
+	assert!(
+		tokio::time::timeout(Duration::from_millis(100), exporter.next())
+			.await
+			.is_err(),
+		"the header waits on the small rendition's config"
+	);
+
+	// The small rendition is disabled before its keyframe lands, so the keyframe is no reason
+	// to write a header.
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.get_mut(&small_name)
+		.unwrap()
+		.enabled = false;
+	assert!(
+		tokio::time::timeout(Duration::from_millis(100), exporter.next())
+			.await
+			.is_err(),
+		"nothing enabled"
+	);
+	small.write(crate::container::test_util::video_frame(0, true)).unwrap();
+	assert!(
+		tokio::time::timeout(Duration::from_millis(100), exporter.next())
+			.await
+			.is_err(),
+		"the disabled rendition's keyframe writes no header"
+	);
+
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.get_mut(&large_name)
+		.unwrap()
+		.enabled = true;
+	large
+		.write(crate::container::Frame {
+			timestamp: Timestamp::from_millis(100).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(&[0, 0, 0, 1, 0x65]),
+			keyframe: true,
+		})
+		.unwrap();
+	let header = tokio::time::timeout(Duration::from_millis(100), exporter.next())
+		.await
+		.expect("the header follows the enabled rendition")
+		.unwrap()
+		.unwrap();
+	assert!(
+		header.windows(description.len()).any(|w| w == description.as_slice()),
+		"the sequence header carries the enabled rendition's avcC"
+	);
+}
+
 /// A single-track export switches to a better audio rendition that appears before the
 /// header goes out.
 #[tokio::test(start_paused = true)]
@@ -1232,7 +1354,7 @@ async fn drain_until_idle<S: crate::catalog::Stream>(
 			Ok(Err(e)) => return Some(Err(e)),
 			Err(_) => {
 				let deadline = exporter.next_deadline()?;
-				tokio::time::advance(deadline.saturating_duration_since(web_async::time::Instant::now())).await;
+				tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
 			}
 		}
 	}
@@ -1361,7 +1483,7 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 	let delay = std::time::Duration::from_millis(100);
 	let mut export = super::Export::new(live.source().await, live.catalog_stream().await).with_delay(delay);
 	export.next().await.unwrap().unwrap();
-	let start = web_async::time::Instant::now();
+	let start = moq_clock::now();
 	live.track.write(raw_frame(0, b"first", true)).unwrap();
 	let first = export.next().await.unwrap().unwrap();
 	assert!(first.windows(5).any(|part| part == b"first"));

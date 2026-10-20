@@ -3,9 +3,9 @@
 ## Goal
 
 A second round after [#4286](https://github.com/moq-dev/moq/pull/4286):
-tests that pass alone but have failed under a loaded `just check` pass
-reliably, each fixed at its cause, never by raising a timeout or adding a
-retry.
+tests that pass alone but have failed under a loaded `just check`, or
+intermittently in CI or interop, pass reliably, each fixed at its cause,
+never by raising a timeout or adding a retry.
 
 ## Plan
 
@@ -23,18 +23,27 @@ Rules every child keeps:
   timer before a real socket delivers. Where real sockets fight the paused
   clock, make the timers mockable or move the test off real sockets.
 
+Added 2026-10-15 (maintainer): three flakes seen while landing that day's
+merge batch, ranked by how likely each hides a product bug.
+
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did. moq-tokio's
 `a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
-known exception, tracked by [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
+known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
+
+Added 2026-10-19 (maintainer): three more, the redial pair first since CI
+hit it. The same day's test cost audit added the macOS QUIC connects, and the
+redundant failover drift first: it may hide a TS export bug and failed two of
+three loaded `just check` runs.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Interop close code](/quest/m1/test-flakes-2/interop-close-code.md) - the browser close-code test reliably sees `unauthorized` for a refused session
-- [QUIC-wins race](/quest/m1/test-flakes-2/quic-winning-race.md) - moq-tokio's QUIC-wins test sets up QUIC's win instead of racing the WebSocket head start
+- [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
+- [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md) - moq-tokio's loopback QUIC tests stop timing out on the macOS Platform job
 
 ## Related
 
 - [Controlled time](/quest/m1/time/README.md) - the systemic fix these rules ask for: every crate on a controlled clock
+- [Publish channel count](/quest/m1/publish-audio-channel-count.md) - tracks the media fixture's cold-start audio-tone flake, a player stall it shares with the mono pin

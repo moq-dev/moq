@@ -111,7 +111,7 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	ietf::{
 		Filter, GroupOrder, Location, Parameters, Properties, RequestId,
-		namespace::{decode_namespace, encode_namespace},
+		namespace::{decode_track, encode_namespace},
 	},
 };
 
@@ -300,8 +300,8 @@ impl Message for Publish<'_> {
 		if version == Version::Draft17 {
 			let _required_request_id_delta = r.varint()?;
 		}
-		let track_namespace = decode_namespace(r)?;
-		let track_name = Cow::Owned(r.string()?);
+		let (track_namespace, track_name) = decode_track(r)?;
+		let track_name = Cow::Owned(track_name);
 		let track_alias = r.varint()?;
 
 		match version {
@@ -314,7 +314,7 @@ impl Message for Publish<'_> {
 				};
 				let forward = r.bool()?;
 				// parameters
-				super::token::unique(&Parameters::skip_request(r)?)?;
+				super::token::single(Parameters::skip_request(r)?)?;
 
 				Ok(Self {
 					request_id,
@@ -349,9 +349,9 @@ impl Message for Publish<'_> {
 					0x21 => _filter: Option<Filter> where Filter::is_draft20(version),
 					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15 || Filter::is_draft20(version),
 				);
-				super::token::unique(&authorization_token)?;
-
 				let mut properties = Properties::decode(r, version)?;
+				// Last, so a malformed field closes the session before a token refusal.
+				super::token::single(authorization_token)?;
 				properties.group_order = properties.group_order.or(group_order);
 
 				let forward = forward.unwrap_or(true);
@@ -899,6 +899,8 @@ mod tests {
 			largest_location: None,
 			forward: true,
 			properties: Properties {
+				unknown: Default::default(),
+				dynamic_groups: false,
 				max_cache_duration: None,
 				timescale: None,
 				priority: None,
@@ -935,6 +937,8 @@ mod tests {
 			largest_location: None,
 			forward: true,
 			properties: Properties {
+				unknown: Default::default(),
+				dynamic_groups: false,
 				max_cache_duration: None,
 				timescale: None,
 				priority: None,

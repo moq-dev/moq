@@ -1,6 +1,6 @@
 # cargo-deny configuration. See https://embarkstudios.github.io/cargo-deny/
 #
-# Run `cargo deny check` to validate; runs in `just rs check` and `just rs ci`.
+# Run `just rs audit` to validate; runs nightly.
 
 [graph]
 all-features = true
@@ -17,11 +17,9 @@ ignore = [
     # when rustcrypto/RSA publishes a constant-time fix.
     "RUSTSEC-2023-0071",
 
-    # foundations (Cloudflare) pins serde_yaml 0.8 which uses yaml-rust 0.4.
-    "RUSTSEC-2024-0320",
-
-    # gstreamer 0.23 pulls paste (proc-macro). gstreamer 0.25 drops it but
-    # needs Rust 1.92, above the 1.91 workspace MSRV. Build-time only.
+    # paste is unmaintained (proc-macro, build-time only). Pulled by
+    # tikv-jemalloc-ctl (moq-tokio's `jemalloc` feature; 0.7 still uses it) and
+    # by iroh's netwatch via netlink-packet-core 0.8, which 0.9 drops.
     "RUSTSEC-2024-0436",
 
     # ttf-parser is unmaintained, with no upgrade available. Reachable only via
@@ -69,3 +67,5 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# uniffi-bindgen's generator-only UniFFI fork. Unpublished, so it never ships in a crate.
+allow-git = ["https://github.com/kixelated/uniffi-rs"]

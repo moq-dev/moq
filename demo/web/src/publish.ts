@@ -19,6 +19,7 @@ import "./highlight";
 import * as Json from "@moq/json";
 import "@moq/publish/element"; // defines <moq-publish>
 import "@moq/publish/ui"; // defines <moq-publish-ui>
+import { Milli, Nano, now } from "@moq/clock";
 import { type Audio, Net, Signals, Source, type Video } from "@moq/publish";
 import type MoqPublish from "@moq/publish/element";
 import MoqPublishSupport from "@moq/publish/support/element";
@@ -139,7 +140,7 @@ function encoderConfig(effect: Signals.Effect, target: VideoTarget): Video.Confi
 		codec: effect.get(codec),
 		maxPixels: target.width && target.height ? target.width * target.height : undefined,
 		maxBitrate: br != null ? br * 1000 : undefined,
-		keyframeInterval: kf != null ? Net.Time.Milli(kf) : undefined,
+		keyframeInterval: kf != null ? Milli(kf) : undefined,
 		frameRate: target.frameRate,
 	};
 }
@@ -197,7 +198,7 @@ ui.run((effect) => {
 	const config: Audio.OpusConfig = {
 		mime: "opus",
 		...(bitrate != null ? { bitrate: bitrate * 1000 } : {}),
-		...(frameDuration != null ? { frameDuration: Net.Time.Milli(frameDuration) } : {}),
+		...(frameDuration != null ? { frameDuration: Milli(frameDuration) } : {}),
 		...(complexity != null ? { complexity } : {}),
 		...(packetLoss != null ? { packetlossperc: packetLoss } : {}),
 		useinbandfec: effect.get(opusFec),
@@ -361,7 +362,9 @@ ui.run((effect) => {
 // Report the transport negotiated by the live connection.
 ui.run((effect) => {
 	const transport = effect.get(publish.connection.transport);
-	$("network-transport").textContent = transport ? (transport === "websocket" ? "WebSocket" : "WebTransport") : "";
+	$("network-transport").textContent = transport
+		? { websocket: "WebSocket", webtransport: "WebTransport", webrtc: "WebRTC" }[transport]
+		: "";
 });
 
 // Audio: the resolved audio config (codec / sample rate / channels / bitrate).
@@ -403,7 +406,7 @@ meta.run((effect) => {
 	// A day-long cache so a viewer joining long after the last edit still replays the value.
 	const track = net.createTrack(META_TRACK, {
 		timescale: Net.Time.Timescale.MILLI,
-		maxAge: Net.Time.Milli(86_400_000),
+		maxAge: Milli(86_400_000),
 	});
 	effect.cleanup(() => track.close());
 
@@ -451,6 +454,9 @@ const uploadGraph = graph(viz, "Upload estimate", { color: "#34d399", format: fo
 const rttGraph = graph(viz, "Round trip", { color: "#38bdf8", format: (v) => `${Math.round(v)} ms` });
 $("publish-graphs").append(captureGraph.el, uploadGraph.el, rttGraph.el);
 
+// The RTT graph samples with peek(), which requests no estimates, so subscribe to keep them coming.
+viz.cleanup(publish.connection.probe.subscribe(() => {}));
+
 // Count captured frames; the publish API has no encoded-frame counter, so this
 // is the capture rate feeding the encoder (a good proxy for output fps). Read off our own stream:
 // a signal coalesces a burst into one notification, which undercounts the rate.
@@ -477,25 +483,28 @@ viz.run((effect) => {
 });
 
 let prevFrames = 0;
-let prevWhen = performance.now();
-viz.interval(() => {
-	const now = performance.now();
-	const elapsed = now - prevWhen;
-	captureGraph.push(elapsed > 0 ? ((frames - prevFrames) * 1000) / elapsed : undefined);
-	prevFrames = frames;
-	prevWhen = now;
+let prevWhen = Nano.toMilli(Nano(now()));
+viz.interval(
+	() => {
+		const at = Nano.toMilli(Nano(now()));
+		const elapsed = at - prevWhen;
+		captureGraph.push(elapsed > 0 ? ((frames - prevFrames) * 1000) / elapsed : undefined);
+		prevFrames = frames;
+		prevWhen = at;
 
-	const rtt = publish.connection.probe.peek()?.rtt as unknown as number | undefined;
-	rttGraph.push(rtt && rtt > 0 ? rtt : undefined);
+		const rtt = publish.connection.probe.peek()?.rtt as unknown as number | undefined;
+		rttGraph.push(rtt && rtt > 0 ? rtt : undefined);
 
-	void publish.connection.stats().then(
-		(stats) => {
-			const up = stats?.estimatedSendRate;
-			uploadGraph.push(up && up > 0 ? up : undefined);
-		},
-		() => uploadGraph.push(undefined),
-	);
-}, 250);
+		void publish.connection.stats().then(
+			(stats) => {
+				const up = stats?.estimatedSendRate;
+				uploadGraph.push(up && up > 0 ? up : undefined);
+			},
+			() => uploadGraph.push(undefined),
+		);
+	},
+	Nano.fromMilli(Milli(250)),
+);
 
 // Vite re-evaluates this module on hot reload, dropping the references to the
 // module-scoped effects above. Close them on dispose so they don't get garbage

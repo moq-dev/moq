@@ -1,20 +1,23 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, test } from "bun:test";
+import { Manual, Nano } from "@moq/clock";
 import { Broadcast, Time } from "@moq/net";
 import { HISTORY, info, Publisher, Subscriber, TRACK } from "./chat.ts";
 
 test("chat expires ten-second history and late readers only see retained messages", async () => {
-	const clock = spyOn(performance, "now").mockReturnValue(0);
+	const clock = new Manual();
+	const restore = clock.install();
 	const broadcast = new Broadcast.Producer();
 	const publisher = Publisher.create(broadcast);
 	const subscriber = Subscriber.subscribe(broadcast.consume());
 	try {
 		publisher.send("first");
 		expect(await subscriber.recv()).toEqual({ push: { index: 0, value: "first" } });
-		clock.mockReturnValue(HISTORY - 1);
+		await clock.advanceAsync(Nano(HISTORY - 1));
 		publisher.expire();
-		clock.mockReturnValue(HISTORY);
-		publisher.expire();
-		expect(await subscriber.recv()).toEqual({ pop: { start: 0, end: 1 } });
+		// The publisher's own timer retires the message once its history elapses.
+		const popped = subscriber.recv();
+		await clock.advanceAsync(Nano(1));
+		expect(await popped).toEqual({ pop: { start: 0, end: 1 } });
 		publisher.send("second");
 		const late = Subscriber.subscribe(broadcast.consume());
 		expect(await late.recv()).toEqual({ push: { index: 1, value: "second" } });
@@ -25,7 +28,7 @@ test("chat expires ten-second history and late readers only see retained message
 		publisher.finish();
 		subscriber.close();
 		broadcast.close();
-		clock.mockRestore();
+		restore();
 	}
 });
 

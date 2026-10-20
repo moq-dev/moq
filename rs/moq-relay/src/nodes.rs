@@ -6,7 +6,7 @@
 
 use std::{
 	collections::{BTreeMap, HashMap},
-	sync::{Arc, Mutex},
+	sync::{Arc, Mutex, PoisonError},
 };
 
 use serde::Serialize;
@@ -55,7 +55,7 @@ impl Nodes {
 	pub(crate) fn connect_outbound(&self, id: u64, node: impl Into<String>) -> ConnectionGuard {
 		self.connections
 			.lock()
-			.expect("node connection registry poisoned")
+			.unwrap_or_else(PoisonError::into_inner)
 			.insert(id, node.into());
 		ConnectionGuard {
 			nodes: self.clone(),
@@ -65,7 +65,7 @@ impl Nodes {
 
 	pub(crate) fn snapshot(&self) -> Snapshot {
 		let mut nodes = BTreeMap::<String, Vec<Connection>>::new();
-		let connections = self.connections.lock().expect("node connection registry poisoned");
+		let connections = self.connections.lock().unwrap_or_else(PoisonError::into_inner);
 		for (&id, node) in connections.iter() {
 			nodes
 				.entry(crate::cluster::canonicalize_peer_key(node))
@@ -90,7 +90,7 @@ impl Drop for ConnectionGuard {
 		self.nodes
 			.connections
 			.lock()
-			.expect("node connection registry poisoned")
+			.unwrap_or_else(PoisonError::into_inner)
 			.remove(&self.id);
 	}
 }

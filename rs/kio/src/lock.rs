@@ -4,7 +4,7 @@ use std::{
 	// std, not `crate::sync`: [`WeakLock`] needs `Arc::downgrade`, which loom's Arc
 	// doesn't have. Loom still models the `Mutex` inside, which is the part that
 	// orders every handle against every other.
-	sync::{Arc, Weak},
+	sync::{Arc, PoisonError, Weak},
 };
 
 use crate::sync::{Mutex, MutexGuard};
@@ -14,13 +14,33 @@ use crate::sync::{Mutex, MutexGuard};
 /// Every kio channel keeps its state in one of these, with its [`WaiterList`]s inside,
 /// so a state change and the wake it owes are decided under a single lock.
 ///
-/// Poisoning is not part of the contract: a panic while the lock is held poisons it, and
-/// every method here panics in turn rather than handing back a `Result`.
+/// Poisoning is ignored: a panic while the lock is held must not cascade into every other
+/// handle sharing this state, or into a double panic (and an abort) from a `Drop` that locks it.
+///
+/// State that cannot cross threads keeps the lock on its thread too.
+///
+/// ```compile_fail,E0277
+/// fn require_send(_: impl Send) {}
+/// require_send(kio::Lock::new(std::rc::Rc::new(())));
+/// ```
+///
+/// ```compile_fail,E0277
+/// fn require_sync(_: impl Sync) {}
+/// require_sync(kio::Lock::new(std::rc::Rc::new(())));
+/// ```
 ///
 /// [`WaiterList`]: crate::WaiterList
 pub struct Lock<T> {
 	inner: Arc<Mutex<T>>,
 }
+
+// SAFETY: std and loom's Mutex<T> are Send + Sync when T: Send, so this is
+// exactly Arc<Mutex<T>>'s derived bound. Stopping here keeps recursive channel
+// graphs from expanding the same Arc/Mutex proof at every level.
+unsafe impl<T: Send> Send for Lock<T> {}
+
+// SAFETY: Arc<Mutex<T>> has the same T: Send bound for Sync, with either mutex.
+unsafe impl<T: Send> Sync for Lock<T> {}
 
 impl<T> Lock<T> {
 	/// Wrap a value.
@@ -30,10 +50,10 @@ impl<T> Lock<T> {
 		}
 	}
 
-	/// Lock the state, blocking until it is free. Panics if the lock was poisoned.
+	/// Lock the state, blocking until it is free.
 	pub fn lock(&self) -> LockGuard<'_, T> {
 		LockGuard {
-			inner: self.inner.lock().expect("mutex poisoned"),
+			inner: self.inner.lock().unwrap_or_else(PoisonError::into_inner),
 		}
 	}
 
@@ -135,5 +155,29 @@ impl<T> DerefMut for LockGuard<'_, T> {
 impl<T> Default for WeakLock<T> {
 	fn default() -> Self {
 		Self::new()
+	}
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn send_state_does_not_have_to_be_sync() {
+		fn require_send_sync(_: impl Send + Sync) {}
+		require_send_sync(Lock::new(std::cell::Cell::new(1)));
+	}
+
+	#[test]
+	fn a_panic_under_the_lock_leaves_it_usable() {
+		let lock = Lock::new(1);
+		let held = lock.clone();
+		let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let mut guard = held.lock();
+			*guard = 2;
+			panic!("panic while holding the lock");
+		}));
+		assert!(panicked.is_err());
+		assert_eq!(*lock.lock(), 2, "every other handle keeps the state");
 	}
 }

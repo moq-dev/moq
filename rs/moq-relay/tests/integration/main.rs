@@ -1,0 +1,31 @@
+//! Every integration test, linked into one binary.
+//!
+//! Each `tests/*.rs` file is its own crate that links this package and its
+//! dependencies again, so add new integration tests here as a module.
+//! `drills.rs` stays apart so each drill sensitivity mutation rebuilds only
+//! the drills.
+
+mod auth_embedder;
+mod auth_lifetime;
+mod cluster_close;
+mod cluster_idle;
+mod cluster_unknown;
+mod connection;
+mod embed;
+mod goaway_cluster;
+mod hidden_cluster;
+mod lan_mesh;
+mod logs;
+mod memory;
+mod peer_limits;
+mod public_rules;
+mod refusals;
+mod released_cli;
+mod runtime_uring;
+mod runtime_workers;
+mod session_revalidate;
+mod shutdown_signal;
+mod smoke;
+mod stack;
+mod upstream_links;
+mod wire_stats;

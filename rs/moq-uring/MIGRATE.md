@@ -1,0 +1,44 @@
+# Migrating moq-uring
+
+How to update your code for each breaking change, newest first.
+
+## Unreleased
+
+### Timers run on moq-clock
+
+The worker is a moq-clock backend, so its deadlines are `moq_clock::Instant`s instead of `std::time::Instant`s.
+`Timer::set` takes an `Option<moq_clock::Instant>`, and `quic::handshake::Info::deadline` is one.
+Read the worker's time with `moq_clock::now()` inside it.
+
+### Datagrams take `SendOptions` (#5770, #5872)
+
+`quic::Connection::send_datagram` and `quic::web::Session::send_datagram` take a `quic::SendOptions { group, priority }` and never block; pass `SendOptions::default()` for an ungrouped datagram.
+
+### QUIC limits are `moq_quic::Limits` (#5871)
+
+`quic::Limits` is `moq_quic::Limits`, where each `None` field keeps that limit, and an invalid one fails `set_limits` with `Error::Limits` instead of `WindowRange` or `StreamsRange`.
+Start from `quic::Limits::default()` and set only the fields you change.
+
+### The `noq` feature is `quic` (#5664)
+
+The QUIC stack is MoQ's own `moq-quic` instead of `moq-noq-proto`.
+Rename the `noq` cargo feature to `quic`.
+A qlog directory gets one file per endpoint and one per dial instead of one per connection.
+
+### `CID_LEN` is gone (#5688)
+
+`quic::endpoint::CID_LEN` is removed; endpoints still issue 8-byte connection IDs, sharded or not.
+
+### The server config takes a rustls config (#5312)
+
+`quic::server::Config` drops `identity`, `alpn`, and `client_auth` for one `tls: Arc<rustls::ServerConfig>`, and `Config::new` takes it.
+Build it from an identity with `identity.server(&alpns, client_auth)?`, or share a resolver with other listeners.
+
+### Sessions are wrapped for moq-net
+
+moq-net no longer takes a `web_transport_trait` session.
+Wrap a moq-uring session with `transport::Session::new`, naming how the request target travels.
+
+```rust
+let session = moq_uring::transport::Session::new(connection, moq_net::transport::Binding::Uri);
+```

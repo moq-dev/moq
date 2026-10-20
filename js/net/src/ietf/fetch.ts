@@ -1,3 +1,5 @@
+import type * as Epoch from "../epoch.ts";
+import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { hasRangeFilters, isDraft20 } from "./filter.ts";
 import * as Message from "./message.ts";
@@ -39,9 +41,23 @@ export class Fetch {
 	static id = 0x16;
 
 	requestId: bigint;
+	/** Whether the decoded request carried Range Filters. */
+	rangeFilters: boolean;
+	/** The decoded standalone namespace, absent for a joining fetch. */
+	trackNamespace?: Path.Valid;
+	/** The publisher instance the requester expects (EPOCH, MoQ Epoch), never on a joining fetch. */
+	epoch?: Epoch.Valid;
 
-	constructor({ requestId }: { requestId: bigint }) {
+	constructor({
+		requestId,
+		rangeFilters = false,
+		trackNamespace,
+		epoch,
+	}: { requestId: bigint; rangeFilters?: boolean; trackNamespace?: Path.Valid; epoch?: Epoch.Valid }) {
 		this.requestId = requestId;
+		this.rangeFilters = rangeFilters;
+		this.trackNamespace = trackNamespace;
+		this.epoch = epoch;
 	}
 
 	async #encode(_w: Writer): Promise<void> {
@@ -67,16 +83,15 @@ export class Fetch {
 			await r.u8(); // group_order
 		}
 
+		let trackNamespace: Path.Valid | undefined;
 		if (isDraft20(version)) {
 			// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
-			await Namespace.decode(r);
-			await r.string();
+			trackNamespace = (await Namespace.decodeTrack(r)).namespace;
 		} else {
 			const fetchType = await r.u53();
 			switch (fetchType) {
 				case 0x1: // Standalone: namespace, name, start and end Locations
-					await Namespace.decode(r);
-					await r.string();
+					trackNamespace = (await Namespace.decodeTrack(r)).namespace;
 					for (let i = 0; i < 4; i++) await r.u62();
 					break;
 				case 0x2: // Relative Joining: subscription, group offset
@@ -96,34 +111,13 @@ export class Fetch {
 		if (params.trackPropertyFilter) {
 			throw new Error("TRACK_PROPERTY_FILTER is not allowed on FETCH");
 		}
+		// A joining FETCH is served by its subscription's instance, so naming one is malformed.
+		const epoch = params.epoch;
+		if (epoch !== undefined && trackNamespace === undefined) {
+			throw new Error("EPOCH is not allowed on a joining FETCH");
+		}
 
-		return new Fetch({ requestId });
-	}
-}
-
-export class FetchOk {
-	static id = 0x18;
-
-	requestId: bigint | undefined;
-
-	constructor({ requestId }: { requestId?: bigint }) {
-		this.requestId = requestId;
-	}
-
-	async #encode(_w: Writer): Promise<void> {
-		throw new Error("FETCH_OK messages are not supported");
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<FetchOk> {
-		return Message.decode(r, FetchOk.#decode);
-	}
-
-	static async #decode(_r: Reader): Promise<FetchOk> {
-		throw new Error("FETCH_OK messages are not supported");
+		return new Fetch({ requestId, rangeFilters: params.rangeFilters, trackNamespace, epoch });
 	}
 }
 
@@ -158,32 +152,5 @@ export class FetchError {
 
 	static async #decode(_r: Reader): Promise<FetchError> {
 		throw new Error("FETCH_ERROR messages are not supported");
-	}
-}
-
-// Removed in d17
-export class FetchCancel {
-	static id = 0x17;
-
-	requestId: bigint;
-
-	constructor({ requestId }: { requestId: bigint }) {
-		this.requestId = requestId;
-	}
-
-	async #encode(_w: Writer): Promise<void> {
-		throw new Error("FETCH_CANCEL messages are not supported");
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<FetchCancel> {
-		return Message.decode(r, FetchCancel.#decode);
-	}
-
-	static async #decode(_r: Reader): Promise<FetchCancel> {
-		throw new Error("FETCH_CANCEL messages are not supported");
 	}
 }

@@ -21,6 +21,6 @@ The path is resolved relative to the `pubspec.yaml` that declares it. This is
 the only override: build hooks run with a filtered environment, so an
 environment variable cannot reach one.
 
-The first release excludes the optional native audio and video codec features.
-It provides the complete data-plane API, including sessions, announcements,
+The native libraries carry moq-ffi's default features, so the native audio
+and video encoders and decoders ship alongside sessions, announcements,
 broadcasts, tracks, groups, frames, catalogs, and JSON tracks.

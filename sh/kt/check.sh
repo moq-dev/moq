@@ -35,3 +35,7 @@ DOCS_DIR="$KT_DIR/moq/src/jvmAndAndroidTest/kotlin/dev/moq/docs"
 } >"$DOCS_DIR/Samples.kt"
 
 "$GRADLE_CMD" -p "$KT_DIR" -Pmoqffi.version=0.0.0-dev :moq-ffi:jvmTest :moq:jvmTest
+
+# The sibling-project substitution must not leak its dev version into published POMs.
+"$GRADLE_CMD" -p "$KT_DIR" :moq:generatePomFileForKotlinMultiplatformPublication :moq:generatePomFileForJvmPublication
+python3 "$SCRIPT_DIR/check-poms.py" "$KT_DIR/moq/build/publications"

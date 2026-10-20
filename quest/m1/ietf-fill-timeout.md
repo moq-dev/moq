@@ -47,7 +47,6 @@ inline, clearly distinguishing upstream wait time from content age.
 
 ## Required
 
-- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - per-caller age budgets and their public option
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - the JS responder this extends
 
 ## Related

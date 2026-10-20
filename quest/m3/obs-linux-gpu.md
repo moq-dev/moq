@@ -18,7 +18,7 @@ the bottleneck.
 
 ## Required
 
-- [Encoder adapter](/quest/m1/obs-moq-video/adapter.md) - frame ownership, queue policy, packet output, and comparison baseline
+- [Encoder adapter](/quest/m2/obs-moq-video/adapter.md) - frame ownership, queue policy, packet output, and comparison baseline
 
 ## Related
 

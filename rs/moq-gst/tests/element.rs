@@ -1157,8 +1157,7 @@ fn replacing_the_session_from_eos_notify_discards_the_old_eos() {
 	assert!(pad.send_event(gst::event::Eos::new()));
 	assert!(restarted.load(Ordering::SeqCst));
 	assert!(
-		bus.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Eos])
-			.is_none(),
+		bus.pop_filtered(&[gst::MessageType::Eos]).is_none(),
 		"the completed session posted EOS into its replacement"
 	);
 	let _ = sink.set_state(gst::State::Null);

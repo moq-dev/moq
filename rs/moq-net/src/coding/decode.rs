@@ -6,6 +6,7 @@ use super::{BoundsExceeded, Form, varint};
 /// Read the value from a [`Decoder`] using the given version.
 ///
 /// If [DecodeError::Short] is returned, the caller should try again with more data.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub trait Decode<V>: Sized {
 	/// Decode the value from the front of the decoder.
 	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError>;
@@ -103,10 +104,16 @@ pub enum DecodeError {
 	/// another, which rejects the request rather than closing the session.
 	#[error("malformed authorization token")]
 	MalformedAuthToken,
+
+	/// A request carries more than one distinct `AUTHORIZATION TOKEN`, which this
+	/// implementation refuses as unsupported rather than closing the session.
+	#[error("multiple authorization tokens")]
+	MultipleAuthTokens,
 }
 
 impl DecodeError {
 	/// A complete frame cannot be extended by reading more stream bytes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn complete(self) -> Self {
 		match self {
 			Self::Short => Self::InvalidValue,
@@ -126,6 +133,7 @@ impl From<BoundsExceeded> for DecodeError {
 /// A read either consumes exactly what it returns or fails and consumes nothing, so a
 /// [`DecodeError::Short`] can be retried once more bytes arrive.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub struct Decoder<'a> {
 	buf: &'a [u8],
 	form: Form,
@@ -133,26 +141,31 @@ pub struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
 	/// Read `buf`, with varints in the given form.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn new(buf: &'a [u8], form: Form) -> Self {
 		Self { buf, form }
 	}
 
 	/// The varint form this decoder reads.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn form(&self) -> Form {
 		self.form
 	}
 
 	/// The number of unread bytes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn remaining(&self) -> usize {
 		self.buf.len()
 	}
 
 	/// Whether every byte has been read.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn is_empty(&self) -> bool {
 		self.buf.is_empty()
 	}
 
 	/// Read `len` raw bytes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn slice(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
 		let Some((head, rest)) = self.buf.split_at_checked(len) else {
 			return Err(DecodeError::Short);
@@ -162,27 +175,32 @@ impl<'a> Decoder<'a> {
 	}
 
 	/// Read every remaining byte.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn rest(&mut self) -> &'a [u8] {
 		std::mem::take(&mut self.buf)
 	}
 
 	/// Split off the next `len` bytes as their own decoder, e.g. a size-prefixed body.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn sub(&mut self, len: usize) -> Result<Self, DecodeError> {
 		Ok(Self::new(self.slice(len)?, self.form))
 	}
 
 	/// Read a single byte.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn u8(&mut self) -> Result<u8, DecodeError> {
 		Ok(self.slice(1)?[0])
 	}
 
 	/// Read a big-endian `u16`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn u16(&mut self) -> Result<u16, DecodeError> {
 		let b = self.slice(2)?;
 		Ok(u16::from_be_bytes([b[0], b[1]]))
 	}
 
 	/// Read a byte that must be 0 or 1.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn bool(&mut self) -> Result<bool, DecodeError> {
 		match self.u8()? {
 			0 => Ok(false),
@@ -194,6 +212,7 @@ impl<'a> Decoder<'a> {
 	/// Read a varint.
 	#[cfg_attr(target_arch = "wasm32", inline)]
 	#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn varint(&mut self) -> Result<u64, DecodeError> {
 		let (value, rest) = varint::read(self.buf, self.form)?;
 		self.buf = rest;
@@ -201,11 +220,13 @@ impl<'a> Decoder<'a> {
 	}
 
 	/// Read an optional varint: 0 is `None`, and `n + 1` is `Some(n)`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn varint_opt(&mut self) -> Result<Option<u64>, DecodeError> {
 		Ok(self.varint()?.checked_sub(1))
 	}
 
 	/// Read a varint length, then that many raw bytes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn bytes(&mut self) -> Result<&'a [u8], DecodeError> {
 		let start = self.buf;
 		let len = usize::try_from(self.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
@@ -213,6 +234,7 @@ impl<'a> Decoder<'a> {
 	}
 
 	/// Read a varint length, then that many bytes of UTF-8.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn string(&mut self) -> Result<String, DecodeError> {
 		Ok(String::from_utf8(self.bytes()?.to_vec())?)
 	}

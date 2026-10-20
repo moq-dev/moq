@@ -88,13 +88,13 @@ summation, and do not accumulate in a wider type.
 
 ```
 observe(arrival, media):
-    if media <= newest: return          # reordered, excluded entirely
-    newest = media
+    if media > newest:                  # a reordered frame never joins the history
+        newest = media
+        drop history entries with entry.media < media - WINDOW
+        push (arrival, media) onto history
 
-    drop history entries with entry.media < media - WINDOW
-    push (arrival, media) onto history
-
-    ref = entry in history minimising (entry.arrival - entry.media)
+    ref = entry in history with entry.media <= media, minimising (entry.arrival - entry.media)
+    if there is none: return            # older than the whole window, not measured
     delay = max(0, (arrival - ref.arrival) - (media - ref.media))
 
     if first observation:
@@ -137,25 +137,40 @@ special case, and neither does a group the relay dropped.
 fills over ten seconds is measured as the part of it that happened in the last
 two.
 
-### Reordered arrivals are excluded, not measured
+### Reordered arrivals are measured against what came before them
 
 A frame whose media timestamp is not newer than the newest already observed is
-**reordered**, and it is dropped: it updates no state, joins no history, and
-produces no delay.
+**reordered**. It is measured, against the fastest frame **at or before it in
+media time**, and it never joins the history.
 
-This is not a refinement. When a newer group arrives before an older one,
-`arrival - ref.arrival` is positive while `media - ref.media` is negative, so the
-media-time gap between them is *added* to the delay. That is exactly the failure
-this whole design exists to avoid, a media-time distance leaking into a delay
-measurement, and it arrives through the front door: the container consumer takes
-groups off the transport in delivery order and sorts afterwards, so out-of-order
-observation is ordinary input rather than an edge case.
+It is measured because the player waits for it. The container consumer takes
+groups off the transport in delivery order and plays them in media order, and a
+relay sends a track's newest group first. A publisher that flushes several
+one-frame groups at once, over a path that cannot carry them together, has the
+newest frame of each flush arrive first and the oldest, the one played next,
+arrive last. Excluding the reordered frames measures only the punctual head of
+every flush, so the target settles below the wait the playhead actually makes,
+and the receiver runs dry and refills on every flush. That is the re-stall loop
+the nightly harness measured on AAC under bursty delivery, where most frames
+arrived reordered.
 
-Reordering is a real cost, and a receiver that wanted to price it would weigh
-late arrivals against the loss of playing without them. That is WebRTC's
-`ReorderOptimizer` and SpeexDSP's `compute_opt_delay`, which reached the same
-shape independently. It is deliberately out of scope here: ship the underrun
-estimator first.
+It is measured only against earlier frames because of what a subscription's
+start delivers: its live edge first, then the backlog behind it, newest first.
+Measured against the live edge, a backlog frame's whole media-time distance would
+be *added* to its delay, which is exactly the failure this design exists to
+avoid. The backlog is older than every frame in the history, so it has no
+reference and is not measured, the same as a frame the window already pruned.
+An in-order frame gets the same rule for free, since every entry before it is
+older.
+
+It never joins the history because it can never be a reference worth having: it
+arrived after a newer frame, so it is never the fastest. Keeping it out is also
+what leaves the next frame of a backlog without a reference.
+
+Pricing reordering is still out of scope. A receiver that would rather skip a
+late frame than wait for it weighs late arrivals against the loss of playing
+without them, which is WebRTC's `ReorderOptimizer` and SpeexDSP's
+`compute_opt_delay`. This estimator sizes the wait for every frame it measures.
 
 ### One observation per interval, the maximum
 
@@ -322,6 +337,17 @@ reference itself only ever moves earlier, so once the earliest subscribed track
 leaves, the clock stays anchored to it until playback re-anchors; that errs on
 the safe side.
 
+A track that replaces another in the same slot and on the same broadcast path,
+such as the new name a codec change publishes under, continues the outgoing
+track's histogram and startup ramp instead of the prior. The path's arrivals
+did not change with the name; a track on another path starts from the prior.
+Restarting would drop the target to the cold-start 100 ms at the switch, then
+raise it as the lateness is relearned, and the playout follows both moves:
+buffered audio is skipped on the drop and playback parks on each rise. Only the
+reference window restarts, so the new track's frames are measured against its
+own fastest. Its opening backlog would read as seconds late against the old
+track's arrivals.
+
 ## Rise, fall, startup, and the ceiling
 
 There is **no separate rise or fall limiter**. The histogram is the only
@@ -463,7 +489,7 @@ directly, so neither is graded against the other.
 
 `arrival` and `media` are parallel arrays in **delivery order**, the order the
 receiver observes them, so `media` is deliberately out of order in the
-reordering case. `advertised` and `delay` are present only where the case uses
+`reorder` and `backlog` cases. `advertised` and `delay` are present only where the case uses
 them. `target` lists `[frame index, target]` at every frame where the target
 differs from the previous frame's, starting at frame 0, so an implementation
 folds the trace one frame at a time and compares its target at each listed
@@ -475,7 +501,8 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 | `flush` | The measured term follows a flush span, and tracks it when the span doubles |
 | `advertised` | The advertised span floors the target instead of adding to it |
 | `buildup` | A queue filling at 2 ms per frame is measured against the fastest recent arrival |
-| `reorder` | Out-of-order media timestamps never reach the delay measurement |
+| `reorder` | A run delivered after a newer one is measured against the frames before it, so the target covers waiting for it |
+| `backlog` | A backlog delivered newest first behind the live edge is not measured, so its media span never reaches the target |
 | `idle` | A 30 s gap relaxes the histogram toward the prior |
 | `tunein` | A stale frame then the live edge 14.5 s later leaves the target near the frame duration. This is the #3517 regression |
 | `spike` | A recurring stall raises the target, and it decays once the stalls stop |

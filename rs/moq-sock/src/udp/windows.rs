@@ -4,21 +4,16 @@ use std::{
     net::{IpAddr, Ipv4Addr},
     os::windows::io::AsRawSocket,
     ptr,
-    sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Instant,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use libc::{c_int, c_uint};
 use windows_sys::Win32::Networking::WinSock;
 
 use crate::udp::{
-    EcnCodepoint, IO_ERROR_LOG_INTERVAL, RecvMeta, Transmit, UdpSockRef,
+    EcnCodepoint, RecvMeta, Transmit, UdpSockRef,
     cmsg::{self, CMsgHdr},
     log::debug,
-    log_sendmsg_error,
 };
 
 /// QUIC-friendly UDP socket for Windows
@@ -26,7 +21,6 @@ use crate::udp::{
 /// Unlike a standard Windows UDP socket, this allows ECN bits to be read and written.
 #[derive(Debug)]
 pub struct UdpSocketState {
-    last_send_error: Mutex<Instant>,
     max_gso_segments: AtomicUsize,
 
     /// Whether the underlying Winsock provider supports IPv4 ECN socket options/control messages.
@@ -43,6 +37,7 @@ pub struct UdpSocketState {
 }
 
 impl UdpSocketState {
+    /// Configures `socket` for this platform's offloads and ancillary data and returns its state.
     pub fn new(socket: UdpSockRef<'_>) -> io::Result<Self> {
         assert!(
             CMSG_LEN
@@ -152,9 +147,7 @@ impl UdpSocketState {
             }
         }
 
-        let now = Instant::now();
         Ok(Self {
-            last_send_error: Mutex::new(now.checked_sub(2 * IO_ERROR_LOG_INTERVAL).unwrap_or(now)),
             max_gso_segments: AtomicUsize::new(max_gso_segments(&*socket.0)),
             ecn_v4_supported,
             ecn_v6_supported,
@@ -184,35 +177,6 @@ impl UdpSocketState {
         )
     }
 
-    /// Sends a [`Transmit`] on the given socket.
-    ///
-    /// This function will only ever return errors of kind [`io::ErrorKind::WouldBlock`].
-    /// All other errors will be logged and converted to `Ok`.
-    ///
-    /// UDP transmission errors are considered non-fatal because higher-level protocols must
-    /// employ retransmits and timeouts anyway in order to deal with UDP's unreliable nature.
-    /// Thus, logging is most likely the only thing you can do with these errors.
-    ///
-    /// If you would like to handle these errors yourself, use [`UdpSocketState::try_send`]
-    /// instead.
-    #[deprecated(note = "silences I/O errors; use `UdpSocketState::try_send() instead")]
-    pub fn send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
-        match send(
-            socket,
-            transmit,
-            self.ecn_v4_supported,
-            self.ecn_v6_supported,
-        ) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(e),
-            Err(e) => {
-                log_sendmsg_error(&self.last_send_error, e, transmit);
-
-                Ok(())
-            }
-        }
-    }
-
     /// Sends a [`Transmit`] on the given socket without any additional error handling.
     pub fn try_send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
         send(
@@ -223,6 +187,7 @@ impl UdpSocketState {
         )
     }
 
+    /// Receives datagrams into `bufs`, filling one [`RecvMeta`] per message, and returns how many messages arrived.
     pub fn recv(
         &self,
         socket: UdpSockRef<'_>,
@@ -371,6 +336,7 @@ impl UdpSocketState {
         socket.0.recv_buffer_size()
     }
 
+    /// Whether transmitted datagrams might get fragmented by the IP layer
     #[inline]
     pub fn may_fragment(&self) -> bool {
         false

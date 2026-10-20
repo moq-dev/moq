@@ -6,10 +6,8 @@
 
 use crate::connection::Goaway;
 use crate::{Addrs, Backoff, Connection, Error};
-use futures::future::BoxFuture;
-#[cfg(all(feature = "websocket", feature = "noq"))]
+#[cfg(all(feature = "websocket", feature = "quic"))]
 use std::future::Future;
-use std::task::{Poll, ready};
 use url::Url;
 
 /// Everything a [`Client`] is built from.
@@ -48,13 +46,7 @@ pub struct Client {
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
 	/// can't diverge between transports.
-	#[cfg(any(
-		feature = "noq",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(feature = "_transport")]
 	versions: moq_net::Versions,
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
@@ -83,10 +75,10 @@ pub struct Client {
 	#[cfg(feature = "websocket")]
 	tls_host_name: Option<String>,
 	/// Only the TLS-based dials read this; the plaintext qmux transports have none.
-	#[cfg(any(feature = "noq", feature = "websocket"))]
+	#[cfg(any(feature = "quic", feature = "websocket"))]
 	tls: rustls::ClientConfig,
-	#[cfg(feature = "noq")]
-	noq: Option<crate::noq::NoqClient>,
+	#[cfg(feature = "quic")]
+	quic: Option<crate::quic::Client>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<crate::iroh::Endpoint>,
 	#[cfg(feature = "iroh")]
@@ -100,7 +92,7 @@ impl Client {
 	#[cfg(not(feature = "_transport"))]
 	pub fn new(_config: Config) -> crate::Result<Self> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable noq, iroh, websocket, tcp, or uds feature",
+			"no backend compiled; enable quic, iroh, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -123,11 +115,11 @@ impl Client {
 
 		// Only the rustls-backed transports use this. Iroh and the plaintext
 		// qmux transports must not require a rustls crypto provider.
-		#[cfg(any(feature = "noq", feature = "websocket"))]
+		#[cfg(any(feature = "quic", feature = "websocket"))]
 		let tls = config.tls.build()?;
 
-		#[cfg(feature = "noq")]
-		let noq = Some(crate::noq::NoqClient::new(&config, &quic)?);
+		#[cfg(feature = "quic")]
+		let quic = Some(crate::quic::Client::new(&config, &quic)?);
 
 		let versions = config.versions();
 		// Read before the struct literal below moves fields out of `config`.
@@ -146,13 +138,6 @@ impl Client {
 			moq: moq_net::Client::new()
 				.with_versions(versions.clone())
 				.with_extensions(config.extensions),
-			#[cfg(any(
-				feature = "noq",
-				feature = "iroh",
-				feature = "websocket",
-				feature = "tcp",
-				feature = "uds"
-			))]
 			versions,
 			connect: config.url,
 			timeout,
@@ -170,10 +155,10 @@ impl Client {
 			websocket: config.websocket,
 			#[cfg(feature = "websocket")]
 			tls_host_name,
-			#[cfg(any(feature = "noq", feature = "websocket"))]
+			#[cfg(any(feature = "quic", feature = "websocket"))]
 			tls,
-			#[cfg(feature = "noq")]
-			noq,
+			#[cfg(feature = "quic")]
+			quic,
 			#[cfg(feature = "iroh")]
 			iroh: None,
 			#[cfg(feature = "iroh")]
@@ -280,13 +265,13 @@ impl Client {
 	/// This closes at once, discarding stream data the peer has not acknowledged yet.
 	/// Call [`Connection::close`] on each connection first to deliver it.
 	///
-	/// Only the noq endpoint is closed. WebSocket, TCP, and UDS sessions end when their
+	/// Only the QUIC endpoint is closed. WebSocket, TCP, and UDS sessions end when their
 	/// [`Connection`] is dropped (the kernel closes the socket on exit), and an iroh
 	/// endpoint passed to `with_iroh` is closed by its owner.
 	pub async fn close(self) {
-		#[cfg(feature = "noq")]
-		if let Some(noq) = self.noq {
-			noq.close().await;
+		#[cfg(feature = "quic")]
+		if let Some(quic) = self.quic {
+			quic.close().await;
 		}
 	}
 
@@ -313,11 +298,44 @@ impl Client {
 		Some(self.with_subscriber(origin).connect(url))
 	}
 
+	/// Run a MoQ client session over the data channel an [`crate::webrtc::Offerer`] opened.
+	///
+	/// Waits for ICE and the channel to come up, bounded by the connect timeout. A
+	/// peer link cannot be redialed, so there is no reconnect: the session ends with
+	/// the peer connection.
+	#[cfg(feature = "webrtc")]
+	pub async fn connect_webrtc(&self, peer: &crate::webrtc::Offerer) -> crate::Result<moq_net::Session> {
+		let protocol = peer.protocol();
+		if !self.versions.alpns().contains(&protocol) {
+			return Err(crate::webrtc::Error::Protocol(protocol.to_string()).into());
+		}
+
+		let attempt = async {
+			let opened = peer.channel().await?;
+			let config = opened.config;
+			let session = qmux::Session::connect(opened.channel, config)
+				.await
+				.map_err(crate::webrtc::Error::from)?;
+			// A data channel has no request URI, so a path would ride the SETUP; a peer link has none.
+			let transport = crate::transport::Session::new(session, moq_net::transport::Binding::InBand);
+			Ok::<_, Error>(connect_session(&self.moq, transport).await?)
+		};
+
+		let session = match self.timeout.is_zero() {
+			true => attempt.await?,
+			false => tokio::time::timeout(self.timeout, attempt)
+				.await
+				.map_err(|_| Error::ConnectTimeout(self.timeout))??,
+		};
+		tracing::info!(version = %session.version(), transport = %crate::Transport::WebRtc, "connected");
+		Ok(session)
+	}
+
 	/// Dial the given URL and complete the MoQ handshake.
 	///
 	/// Errors if no transport feature is compiled in.
 	#[cfg(not(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -325,19 +343,18 @@ impl Client {
 	)))]
 	pub(crate) async fn dial(&self, _addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable noq, iroh, websocket, tcp, or uds feature",
+			"no backend compiled; enable quic, iroh, websocket, tcp, or uds feature",
 		))
 	}
 
 	/// Dial the given URL and complete the MoQ handshake.
 	///
 	/// The scheme picks the transport, and `https://` races QUIC against the
-	/// WebSocket fallback so a blocked UDP path still connects. When the fallback
-	/// wins, the QUIC dial keeps going as [`Dialed::upgrade`]. The session's
+	/// WebSocket fallback so a blocked UDP path still connects. The session's
 	/// protocol driver is spawned on the current tokio runtime; the session
 	/// closes once the last returned handle drops.
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -353,17 +370,10 @@ impl Client {
 		// arm was still pending.
 		let dialed = match self.timeout.is_zero() {
 			true => attempt.await?,
-			false => {
-				let deadline = tokio::time::Instant::now() + self.timeout;
-				let mut dialed = match tokio::time::timeout_at(deadline, attempt).await {
-					Ok(res) => res?,
-					Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
-				};
-				// The QUIC arm that lost to WebSocket is still part of this attempt, so the
-				// same deadline bounds it.
-				dialed.upgrade = dialed.upgrade.map(|upgrade| upgrade.until(deadline, self.timeout));
-				dialed
-			}
+			false => match tokio::time::timeout(self.timeout, attempt).await {
+				Ok(res) => res?,
+				Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
+			},
 		};
 
 		tracing::info!(version = %dialed.session.version(), transport = %dialed.transport, "connected");
@@ -372,7 +382,7 @@ impl Client {
 
 	/// The moq client builder, advertising `path` in the SETUP when there is one.
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -386,7 +396,7 @@ impl Client {
 	}
 
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -411,7 +421,11 @@ impl Client {
 		if url.scheme() == "tcp" {
 			let session =
 				crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay, self.resolution_delay).await?;
-			let session = connect_session(&moq, crate::transport::Session::new(session)).await?;
+			let session = connect_session(
+				&moq,
+				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
+			)
+			.await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
 
@@ -426,7 +440,11 @@ impl Client {
 				self.resolution_delay,
 			)
 			.await?;
-			let session = connect_session(&moq, crate::transport::Session::new(session)).await?;
+			let session = connect_session(
+				&moq,
+				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
+			)
+			.await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
 
@@ -435,7 +453,11 @@ impl Client {
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
 			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
-			let session = connect_session(&moq, crate::transport::Session::new(session)).await?;
+			let session = connect_session(
+				&moq,
+				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
+			)
+			.await?;
 			return Ok(Dialed::new(session, crate::Transport::Unix));
 		}
 
@@ -462,23 +484,27 @@ impl Client {
 				crate::iroh::Binding::H3 => self.moq.clone(),
 			};
 
-			let session = connect_session(&moq, crate::transport::Session::new(session)).await?;
+			let binding = match binding {
+				crate::iroh::Binding::Raw => moq_net::transport::Binding::InBand,
+				crate::iroh::Binding::H3 => moq_net::transport::Binding::Uri,
+			};
+			let session = connect_session(&moq, crate::transport::Session::new(session, binding)).await?;
 			return Ok(Dialed::new(session, crate::Transport::Iroh));
 		}
 
-		#[cfg(feature = "noq")]
-		if let Some(noq) = self.noq.clone() {
-			// Owned rather than borrowed from `self`: when WebSocket wins the race, this dial
-			// outlives the attempt as the pending upgrade.
-			let tls = self.tls.clone();
-			let versions = self.versions.clone();
+		#[cfg(feature = "quic")]
+		if let Some(quic) = self.quic.as_ref() {
 			let quic_addr = addr.clone();
-			let quic_handle = Box::pin(async move {
-				noq.connect(&tls, quic_addr, &versions)
+			let binding = match quic_transport(&url) {
+				crate::Transport::Quic => moq_net::transport::Binding::InBand,
+				_ => moq_net::transport::Binding::Uri,
+			};
+			let quic_handle = async {
+				quic.connect(&self.tls, quic_addr, &self.versions)
 					.await
-					.map(crate::transport::Session::new)
+					.map(|session| crate::transport::Session::new(session, binding))
 					.map_err(Error::from)
-			});
+			};
 
 			#[cfg(feature = "websocket")]
 			{
@@ -507,15 +533,16 @@ impl Client {
 		let alpns = self.versions.alpns();
 		let session =
 			crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns).await?;
-		let session = connect_session(&self.moq, crate::transport::Session::new(session)).await?;
+		let session = connect_session(
+			&self.moq,
+			crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
+		)
+		.await?;
 		Ok(Dialed::new(session, crate::Transport::WebSocket))
 	}
 
 	/// Race the QUIC dial against the WebSocket fallback, handshaking whichever wins.
-	///
-	/// When WebSocket wins while QUIC is still dialing, the QUIC dial carries on as
-	/// [`Dialed::upgrade`] rather than being dropped, and the attempt falls back to it
-	/// if the MoQ handshake over WebSocket fails.
+	/// The loser is cancelled as soon as the winner's transport is up.
 	///
 	/// `moq` is the QUIC-side builder, which carries the SETUP path for a raw QUIC dial.
 	/// The WebSocket fallback uses the plain builder: qmux over WebSocket carries the
@@ -523,7 +550,7 @@ impl Client {
 	///
 	/// Only compiled when there is a QUIC dial to race: a WebSocket-only build connects
 	/// over the fallback directly.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	async fn race_moq_connect<Q, S>(
 		&self,
 		moq: &moq_net::Client,
@@ -531,7 +558,7 @@ impl Client {
 		quic: Q,
 	) -> crate::Result<Dialed>
 	where
-		Q: Future<Output = crate::Result<S>> + Unpin + Send + 'static,
+		Q: Future<Output = crate::Result<S>>,
 		S: moq_net::transport::poll::Boxable,
 	{
 		let url = addr.url().clone();
@@ -546,45 +573,15 @@ impl Client {
 				.map(|res| res.map_err(Error::from))
 		};
 
-		match race_transport_connect(quic, websocket).await? {
+		match race_transport_connect(&url, quic, websocket).await? {
 			TransportRace::Quic(quic) => Ok(Dialed::new(connect_session(moq, quic).await?, transport)),
-			TransportRace::WebSocket { session, quic } => {
-				let session = match connect_session(&self.moq, crate::transport::Session::new(session)).await {
-					Ok(session) => session,
-					Err(err) => {
-						// The fallback got through but its MoQ handshake did not. A QUIC dial still
-						// pending may yet connect, bounded by the same deadline as the race.
-						let err = Error::from(err);
-						let quic = match quic {
-							Ok(dial) => {
-								tracing::warn!(%err, "WebSocket handshake failed; waiting on QUIC");
-								dial.await
-							}
-							Err(quic) => Err(quic),
-						};
-						let quic = match quic {
-							Ok(quic) => quic,
-							Err(quic) => return Err(race_error(quic, err)),
-						};
-						// UDP gets through after all, so the next dial gives QUIC its head start.
-						crate::websocket::forget(&url);
-						// Both handshakes failing is still a two-arm loss: a mixed auth pair stays retryable.
-						let session = connect_session(moq, quic)
-							.await
-							.map_err(|quic| race_error(quic.into(), err))?;
-						return Ok(Dialed::new(session, transport));
-					}
-				};
-				let mut dialed = Dialed::new(session, crate::Transport::WebSocket);
-				dialed.upgrade = quic.ok().map(|quic| {
-					let moq = moq.clone();
-					let dial = Box::pin(async move {
-						let quic = quic.await?;
-						Ok(Box::pin(async move { Ok(connect_session(&moq, quic).await?) }) as Handshake)
-					});
-					Upgrade::new(dial, transport)
-				});
-				Ok(dialed)
+			TransportRace::WebSocket(session) => {
+				let session = connect_session(
+					&self.moq,
+					crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
+				)
+				.await?;
+				Ok(Dialed::new(session, crate::Transport::WebSocket))
 			}
 		}
 	}
@@ -597,7 +594,7 @@ impl Client {
 /// `None` when the result is empty, which means the same as omitting the parameter: the
 /// server's default path. A peer on published lite-05 rejects an empty value outright.
 #[cfg(any(
-	feature = "noq",
+	feature = "quic",
 	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
@@ -623,7 +620,7 @@ fn request_target(url: &Url) -> Option<String> {
 /// picked by ALPN negotiation rather than by the scheme; that dial reads the negotiated
 /// [`crate::iroh::Binding`] and calls [`request_target`] itself.
 #[cfg(any(
-	feature = "noq",
+	feature = "quic",
 	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
@@ -646,9 +643,9 @@ fn setup_path(url: &Url) -> Option<String> {
 	}
 }
 
-/// What a noq dial to `url` runs on: WebTransport for `https://` (and the `http://`
+/// What a QUIC dial to `url` runs on: WebTransport for `https://` (and the `http://`
 /// bootstrap), raw QUIC for `moqt://` and `moql://`.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 fn quic_transport(url: &Url) -> crate::Transport {
 	match url.scheme() {
 		"moqt" | "moql" => crate::Transport::Quic,
@@ -661,14 +658,12 @@ pub(crate) struct Dialed {
 	pub session: moq_net::Session,
 	/// What `session` runs on.
 	pub transport: crate::Transport,
-	/// The QUIC dial still in flight when the WebSocket fallback won the race.
-	pub upgrade: Option<Upgrade>,
 }
 
 impl Dialed {
 	#[cfg_attr(
 		not(any(
-			feature = "noq",
+			feature = "quic",
 			feature = "iroh",
 			feature = "websocket",
 			feature = "tcp",
@@ -677,112 +672,7 @@ impl Dialed {
 		allow(dead_code)
 	)]
 	fn new(session: moq_net::Session, transport: crate::Transport) -> Self {
-		Self {
-			session,
-			transport,
-			upgrade: None,
-		}
-	}
-}
-
-/// The MoQ handshake starting on an upgrade's QUIC session, up to sending our SETUP.
-pub(crate) type Handshake = BoxFuture<'static, crate::Result<moq_net::Session>>;
-
-/// A QUIC dial that lost the race to the WebSocket fallback but is still going.
-///
-/// Polled by [`Connection`] alongside the WebSocket session, which it replaces
-/// once both stages complete. Dropping it cancels the dial.
-pub(crate) struct Upgrade {
-	stage: Stage,
-	/// What the upgraded session runs on.
-	transport: crate::Transport,
-	/// The connect deadline of the attempt this dial belongs to, and its length for
-	/// the error.
-	deadline: Option<(std::pin::Pin<Box<tokio::time::Sleep>>, std::time::Duration)>,
-}
-
-#[cfg_attr(not(all(feature = "websocket", feature = "noq")), allow(dead_code))]
-enum Stage {
-	/// Waiting on the QUIC transport, and the WebTransport CONNECT for `https://`.
-	Dialing(BoxFuture<'static, crate::Result<Handshake>>),
-	/// The QUIC transport is up and the MoQ handshake is running on it.
-	Handshaking(Handshake),
-	/// Our SETUP is sent, and `setup` waits on the peer's.
-	Setup {
-		session: moq_net::Session,
-		setup: BoxFuture<'static, crate::Result<()>>,
-	},
-}
-
-/// How far an [`Upgrade`] got on one poll.
-pub(crate) enum Step {
-	/// The QUIC transport is up; the MoQ handshake has started on it.
-	Handshaking,
-	/// The MoQ session exists and waits on the peer's SETUP. It is the caller's to close
-	/// if it stops before [`Step::Done`], since the peer already holds it open.
-	Session(moq_net::Session),
-	/// The peer's SETUP arrived over QUIC, which is ready to take over on this transport.
-	Done(moq_net::Session, crate::Transport),
-}
-
-#[cfg_attr(not(all(feature = "websocket", feature = "noq")), allow(dead_code))]
-impl Upgrade {
-	pub(crate) fn new(dial: BoxFuture<'static, crate::Result<Handshake>>, transport: crate::Transport) -> Self {
-		Self {
-			stage: Stage::Dialing(dial),
-			transport,
-			deadline: None,
-		}
-	}
-
-	/// Fail with [`Error::ConnectTimeout`] if still pending at `deadline`.
-	fn until(mut self, deadline: tokio::time::Instant, timeout: std::time::Duration) -> Self {
-		self.deadline = Some((Box::pin(tokio::time::sleep_until(deadline)), timeout));
-		self
-	}
-
-	/// Drive the dial: `Ready(Ok(Step::Handshaking))` once when the QUIC transport
-	/// comes up, `Ready(Ok(Step::Session))` once our SETUP is sent, then
-	/// `Ready(Ok(Step::Done))` once the peer's SETUP arrives. Not polled again after
-	/// `Done` or an error.
-	pub(crate) fn poll(&mut self, waiter: &moq_net::kio::Waiter) -> Poll<crate::Result<Step>> {
-		if let Some((sleep, timeout)) = &mut self.deadline
-			&& waiter.poll_future(sleep.as_mut()).is_ready()
-		{
-			return Poll::Ready(Err(Error::ConnectTimeout(*timeout)));
-		}
-
-		match &mut self.stage {
-			Stage::Dialing(dial) => {
-				let handshake = ready!(waiter.poll_future(dial.as_mut()))?;
-				self.stage = Stage::Handshaking(handshake);
-				Poll::Ready(Ok(Step::Handshaking))
-			}
-			Stage::Handshaking(handshake) => {
-				let session = ready!(waiter.poll_future(handshake.as_mut()))?;
-				let peer = session.clone();
-				let setup = Box::pin(async move {
-					// Wait for the peer's SETUP before draining WebSocket. This crate's servers
-					// send SETUP after admission; other servers may still refuse afterward.
-					// A refusal, or a version with no SETUP to wait on, keeps WebSocket.
-					peer.setup().await?;
-					// A session already told to leave would hand straight back out of QUIC.
-					if peer.draining().peek().is_some() {
-						return Err(Error::ConnectFailed);
-					}
-					Ok(())
-				});
-				self.stage = Stage::Setup {
-					session: session.clone(),
-					setup,
-				};
-				Poll::Ready(Ok(Step::Session(session)))
-			}
-			Stage::Setup { session, setup } => {
-				ready!(waiter.poll_future(setup.as_mut()))?;
-				Poll::Ready(Ok(Step::Done(session.clone(), self.transport)))
-			}
-		}
+		Self { session, transport }
 	}
 }
 
@@ -792,7 +682,7 @@ impl Upgrade {
 /// from the host and port so URL userinfo never goes on the wire. `None` for every other
 /// scheme, and when the URL has no host, since an empty authority is meaningless.
 #[cfg(any(
-	feature = "noq",
+	feature = "quic",
 	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
@@ -810,23 +700,22 @@ fn setup_authority(url: &Url) -> Option<String> {
 	})
 }
 
-#[cfg(all(feature = "websocket", feature = "noq"))]
-enum TransportRace<Q, QT, WT> {
-	Quic(QT),
-	/// The fallback won. `quic` is the QUIC dial if it was still pending, or the error
-	/// it had already failed with.
-	WebSocket {
-		session: WT,
-		quic: crate::Result<Q>,
-	},
+/// The arm that won a [`race_transport_connect`]; the other was dropped, cancelling it.
+#[cfg(all(feature = "websocket", feature = "quic"))]
+enum TransportRace<Q, W> {
+	Quic(Q),
+	WebSocket(W),
 }
 
-#[cfg(all(feature = "websocket", feature = "noq"))]
-async fn race_transport_connect<Q, W, QT, WT>(mut quic: Q, websocket: W) -> crate::Result<TransportRace<Q, QT, WT>>
+/// Race the QUIC dial to `url` against the WebSocket fallback, returning whichever
+/// transport comes up first.
+#[cfg(all(feature = "websocket", feature = "quic"))]
+async fn race_transport_connect<Q, W, QT, WT>(url: &Url, quic: Q, websocket: W) -> crate::Result<TransportRace<QT, WT>>
 where
-	Q: Future<Output = crate::Result<QT>> + Unpin,
+	Q: Future<Output = crate::Result<QT>>,
 	W: Future<Output = Option<crate::Result<WT>>>,
 {
+	tokio::pin!(quic);
 	tokio::pin!(websocket);
 
 	let mut quic_err = None;
@@ -838,7 +727,10 @@ where
 		tokio::select! {
 			res = &mut quic, if !quic_done => {
 				match res {
-					Ok(session) => return Ok(TransportRace::Quic(session)),
+					Ok(session) => {
+						crate::websocket::forget(url);
+						return Ok(TransportRace::Quic(session));
+					}
 					Err(err) => {
 						tracing::warn!(%err, "QUIC connection failed");
 						quic_err = Some(err);
@@ -848,10 +740,7 @@ where
 			}
 			res = &mut websocket, if !websocket_done => {
 				match res {
-					Some(Ok(session)) => {
-						let quic = quic_err.take().map_or(Ok(quic), Err);
-						return Ok(TransportRace::WebSocket { session, quic });
-					}
+					Some(Ok(session)) => return Ok(TransportRace::WebSocket(session)),
 					Some(Err(err)) => {
 						tracing::warn!(%err, "WebSocket connection failed");
 						websocket_err = Some(err);
@@ -882,8 +771,8 @@ where
 /// Auth is terminal only when both arms refused. A WebTransport-only endpoint
 /// answers the fallback with 403 while QUIC is still in flight, and reconnect
 /// treats is_auth() as terminal, so a mixed pair reports the retryable error.
-#[cfg(all(feature = "websocket", feature = "noq"))]
-pub(crate) fn race_error(quic: Error, websocket: Error) -> Error {
+#[cfg(all(feature = "websocket", feature = "quic"))]
+fn race_error(quic: Error, websocket: Error) -> Error {
 	match (quic.is_auth(), websocket.is_auth()) {
 		(false, false) => Error::TransportRace {
 			quic: std::sync::Arc::new(quic),
@@ -894,22 +783,14 @@ pub(crate) fn race_error(quic: Error, websocket: Error) -> Error {
 	}
 }
 
-#[cfg(any(
-	feature = "noq",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp",
-	all(feature = "uds", unix)
-))]
+#[cfg(feature = "_transport")]
 async fn connect_session<S: moq_net::transport::poll::Boxable>(
 	client: &moq_net::Client,
 	transport: S,
 ) -> Result<moq_net::Session, moq_net::Error> {
-	let (session, driver) = client
-		.connect(tokio::time::Instant::now().into_std(), transport)
-		.await?;
+	let (session, driver) = client.connect(moq_net::time::now(), transport).await?;
 	use tracing::Instrument;
-	tokio::spawn(moq_net::time::run(driver).instrument(tracing::Span::current()));
+	tokio::spawn(crate::panic::isolate(moq_net::time::run(driver)).instrument(tracing::Span::current()));
 	Ok(session)
 }
 
@@ -918,49 +799,30 @@ mod tests {
 	use super::*;
 
 	/// A millisecond track: the frames written here carry timestamps.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
-	/// A QUIC session whose peer never sends SETUP gives up at the connect deadline, so the
-	/// WebSocket session keeps serving instead of waiting on the upgrade forever.
-	#[tokio::test(start_paused = true)]
-	async fn a_stalled_upgrade_gives_up_at_the_deadline() {
-		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-		let waiter = moq_net::kio::Waiter::noop();
-		let handshake: Handshake = Box::pin(std::future::pending());
-		let mut upgrade = Upgrade::new(Box::pin(async move { Ok(handshake) }), crate::Transport::WebTransport)
-			.until(tokio::time::Instant::now() + TIMEOUT, TIMEOUT);
-
-		assert!(matches!(upgrade.poll(&waiter), Poll::Ready(Ok(Step::Handshaking))));
-		assert!(upgrade.poll(&waiter).is_pending());
-
-		tokio::time::advance(TIMEOUT).await;
-		assert!(matches!(
-			upgrade.poll(&waiter),
-			Poll::Ready(Err(Error::ConnectTimeout(TIMEOUT)))
-		));
-	}
-
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn fixed_target_preserves_request_and_refuses_redirect() {
 		check_fixed_redirect(false, true).await;
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn one_shot_fixed_target_refuses_redirect() {
 		check_fixed_redirect(true, true).await;
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn unused_fixed_fallback_does_not_restrict_connected_target() {
 		check_fixed_redirect(true, false).await;
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	async fn check_fixed_redirect(once: bool, pinned: bool) {
 		let mut listen = crate::listen::Config {
 			bind: Some("127.0.0.1:0".parse().unwrap()),
@@ -976,7 +838,7 @@ mod tests {
 			let request = server.accept().await.unwrap();
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=secret"));
-			let session = request.with_publisher(&server_origin).ok().await.unwrap();
+			let (session, _driver) = request.with_publisher(&server_origin).ok().await.unwrap();
 			(server, session)
 		});
 		let mut config = crate::connect::Config::default();
@@ -1016,7 +878,7 @@ mod tests {
 	/// A parser wrapping the config, since it derives `Args` (a flattened `Parser`
 	/// registers an implicit group named after the struct, which collides once two
 	/// role configs are flattened together).
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(settings)]
 	struct Cli {
@@ -1037,7 +899,7 @@ mod tests {
 	}
 
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -1088,7 +950,7 @@ mod tests {
 	}
 
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -1127,7 +989,7 @@ mod tests {
 	/// The iroh dial derives its target here rather than through [`setup_path`], since
 	/// only the negotiated binding says whether to send one.
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -1258,7 +1120,7 @@ mod tests {
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.race, crate::connect::DEFAULT_RACE);
+		assert_eq!(config.resolve().race, crate::connect::DEFAULT_RACE);
 		assert!(
 			config.deprecated().to_string().contains("failover_delay -> race"),
 			"{}",
@@ -1279,18 +1141,18 @@ mod tests {
 		"#;
 
 		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.resolution_delay, std::time::Duration::from_millis(10));
+		assert_eq!(config.resolution_delay, Some(std::time::Duration::from_millis(10)));
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --connect-resolution-delay flag).
 		let mut cli = Cli { config };
 		cli.update_from(&[]);
-		assert_eq!(cli.config.resolution_delay, std::time::Duration::from_millis(10));
+		assert_eq!(cli.config.resolution_delay, Some(std::time::Duration::from_millis(10)));
 	}
 
 	#[test]
 	fn test_cli_resolution_delay() {
 		let config = Cli::config_from(["test", "--connect-resolution-delay", "0s"]);
-		assert_eq!(config.resolution_delay, std::time::Duration::ZERO);
+		assert_eq!(config.resolution_delay, None);
 		assert_eq!(config.resolve().resolution_delay, std::time::Duration::ZERO);
 	}
 
@@ -1502,7 +1364,7 @@ mod tests {
 		assert_eq!(config.versions().alpns().len(), moq_net::ALPNS.len());
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_keeps_websocket_after_quic_auth_error() {
 		let quic = async { Err::<usize, _>(crate::ConnectError::Unauthorized.into()) };
@@ -1512,46 +1374,13 @@ mod tests {
 			Some(Ok(1usize))
 		};
 
-		let value = super::race_transport_connect(Box::pin(quic), websocket).await.unwrap();
-		let super::TransportRace::WebSocket {
-			session: 1,
-			quic: Err(err),
-		} = value
-		else {
-			panic!("WebSocket won after QUIC failed, and must carry the QUIC error");
-		};
-		assert!(err.is_auth(), "unexpected error: {err}");
+		let value = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
+		assert!(matches!(value, super::TransportRace::WebSocket(1)));
 	}
 
-	/// A QUIC failure that lands before WebSocket connects stays with the race, so a
-	/// later WebSocket handshake failure combines both arms as `race_error` does.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
-	#[tokio::test]
-	async fn race_transport_connect_keeps_an_earlier_quic_error() {
-		let quic = async { Err::<usize, _>(Error::ConnectFailed) };
-		let websocket = async {
-			tokio::task::yield_now().await;
-			Some(Ok(1usize))
-		};
-
-		let value = super::race_transport_connect(Box::pin(quic), websocket).await.unwrap();
-		let super::TransportRace::WebSocket {
-			session: 1,
-			quic: Err(err),
-		} = value
-		else {
-			panic!("WebSocket won after QUIC failed, and must carry the QUIC error");
-		};
-		assert!(matches!(err, Error::ConnectFailed), "unexpected error: {err}");
-
-		let combined = super::race_error(err, crate::ConnectError::Unauthorized.into());
-		assert!(
-			!combined.is_auth(),
-			"mixed auth/non-auth must stay retryable: {combined}"
-		);
-	}
-
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_keeps_quic_after_websocket_forbidden() {
 		let quic = async {
@@ -1560,7 +1389,9 @@ mod tests {
 		};
 		let websocket = async { Some(Err::<usize, _>(crate::ConnectError::Forbidden.into())) };
 
-		let value = super::race_transport_connect(Box::pin(quic), websocket).await.unwrap();
+		let value = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
 		assert!(matches!(value, super::TransportRace::Quic(3)));
 	}
 
@@ -1571,7 +1402,7 @@ mod tests {
 	/// Inline rather than in `tests/` so each arm dials its own ephemeral port: the
 	/// public connect sends the fallback to the QUIC port, which nothing reserves over
 	/// TCP as well.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn websocket_forbidden_does_not_end_a_quic_connect() {
 		use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1608,21 +1439,21 @@ mod tests {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
 		// No head start, so the fallback dials while QUIC waits on the 403.
-		config.websocket.delay = std::time::Duration::ZERO;
+		config.websocket.delay = Some(std::time::Duration::ZERO);
 		let client = config.init(Default::default()).unwrap();
 
 		// The same race `connect_inner` runs, except the fallback dials its own port,
 		// as plain ws:// so the listener above can answer without TLS.
-		let noq = client.noq.clone().unwrap();
+		let quic = client.quic.clone().unwrap();
 		let (tls, versions) = (client.tls.clone(), client.versions.clone());
 		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
 		let ws_addr: crate::connect::Addr = Url::parse(&format!("http://localhost:{ws_port}")).unwrap().into();
 		// Hold QUIC until the fallback has been refused, so the 403 is always exercised.
 		let quic = Box::pin(async move {
 			forbid.await.unwrap().expect("fallback listener failed");
-			noq.connect(&tls, quic_addr, &versions)
+			quic.connect(&tls, quic_addr, &versions)
 				.await
-				.map(crate::transport::Session::new)
+				.map(|session| crate::transport::Session::new(session, moq_net::transport::Binding::Uri))
 				.map_err(Error::from)
 		});
 
@@ -1642,7 +1473,7 @@ mod tests {
 	/// QUIC wins while the fallback handshake is held until QUIC connects.
 	/// Each transport owns its ephemeral port; this exercises the same race as
 	/// connect_inner without depending on which real handshake runs faster.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tracing_test::traced_test]
 	#[tokio::test]
 	async fn broadcast_race_quic_wins() {
@@ -1685,13 +1516,13 @@ mod tests {
 		let mut client_config = crate::connect::Config::default();
 		client_config.tls.insecure = Some(true);
 		// Dial both arms immediately; the fallback handshake is gated by QUIC.
-		client_config.websocket.delay = std::time::Duration::ZERO;
+		client_config.websocket.delay = Some(std::time::Duration::ZERO);
 
 		let client = client_config.init(Default::default()).expect("failed to init client");
 		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
 		let ws_addr: crate::connect::Addr = Url::parse(&format!("http://localhost:{ws_port}")).unwrap().into();
 
-		// Keep this aligned with the newest default Lite version, as in tests/broadcast.rs.
+		// Keep this aligned with the newest default Lite version, as in tests/integration/broadcast.rs.
 		let expected_version: moq_net::Version = "moq-lite-06".parse().expect("invalid version");
 
 		let server_handle = tokio::spawn(async move {
@@ -1701,7 +1532,7 @@ mod tests {
 				crate::Transport::WebTransport,
 				"expected the QUIC listener",
 			);
-			let session = request.with_publisher(&pub_origin).ok().await?;
+			let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 			assert_eq!(session.version(), expected_version, "server negotiated stale version");
 			let _broadcast = broadcast;
 			let _track = track;
@@ -1712,10 +1543,13 @@ mod tests {
 		let client = client.with_subscriber(sub_origin);
 		let dialer = client.clone();
 		let quic = Box::pin(async move {
-			let noq = dialer.noq.as_ref().expect("QUIC backend");
-			let session = noq.connect(&dialer.tls, quic_addr, &dialer.versions).await?;
+			let quic = dialer.quic.as_ref().expect("QUIC backend");
+			let session = quic.connect(&dialer.tls, quic_addr, &dialer.versions).await?;
 			connected.send(()).expect("fallback listener alive");
-			Ok::<_, crate::Error>(crate::transport::Session::new(session))
+			Ok::<_, crate::Error>(crate::transport::Session::new(
+				session,
+				moq_net::transport::Binding::Uri,
+			))
 		});
 		let cc = client
 			.race_moq_connect(&client.moq, ws_addr, quic)
@@ -1756,19 +1590,19 @@ mod tests {
 			.expect("server task failed");
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_reports_auth_when_both_refuse() {
 		let quic = async { Err::<usize, _>(crate::ConnectError::Unauthorized.into()) };
 		let websocket = async { Some(Err::<usize, _>(crate::ConnectError::Forbidden.into())) };
 
-		let Err(err) = super::race_transport_connect(Box::pin(quic), websocket).await else {
+		let Err(err) = super::race_transport_connect(&race_url(), quic, websocket).await else {
 			panic!("the race must fail");
 		};
 		assert!(err.is_auth(), "unexpected error: {err}");
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_reports_quic_error_when_websocket_forbidden() {
 		let quic = async {
@@ -1777,50 +1611,103 @@ mod tests {
 		};
 		let websocket = async { Some(Err::<usize, _>(crate::ConnectError::Forbidden.into())) };
 
-		let Err(err) = super::race_transport_connect(Box::pin(quic), websocket).await else {
+		let Err(err) = super::race_transport_connect(&race_url(), quic, websocket).await else {
 			panic!("the race must fail");
 		};
 		assert!(matches!(err, Error::ConnectFailed), "unexpected error: {err}");
 		assert!(!err.is_auth(), "mixed auth/non-auth must stay retryable: {err}");
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_keeps_websocket_after_quic_non_auth_error() {
 		let quic = async { Err::<usize, _>(Error::ConnectFailed) };
 		let websocket = async { Some(Ok(7usize)) };
 
-		let value = super::race_transport_connect(Box::pin(quic), websocket).await.unwrap();
-		// `select!` may poll either arm first, so the failed QUIC dial can come back unpolled.
-		assert!(matches!(value, super::TransportRace::WebSocket { session: 7, .. }));
+		let value = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
+		assert!(matches!(value, super::TransportRace::WebSocket(7)));
 	}
 
-	/// WebSocket winning hands back the QUIC dial it beat, still running, so the
-	/// session can move onto QUIC once it lands.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
-	#[tokio::test]
-	async fn race_transport_connect_keeps_a_pending_quic_dial() {
-		let (land, landed) = tokio::sync::oneshot::channel::<()>();
-		let quic = async move {
-			landed.await.unwrap();
-			Ok("quic")
+	/// The URL a race unit test dials. Each test runs in its own process under nextest,
+	/// so the process-wide [`crate::websocket::won`] memo starts empty.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	fn race_url() -> Url {
+		Url::parse("https://race.invalid/").unwrap()
+	}
+
+	/// QUIC winning a race clears WebSocket's earlier win, so the next dial gives QUIC
+	/// its head start again.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	#[tokio::test(start_paused = true)]
+	async fn quic_winning_restores_its_head_start() {
+		crate::websocket::remember(&race_url());
+		let quic = async { Ok("quic") };
+		let (websocket, _dropped) = loser::<Option<crate::Result<&str>>>();
+
+		let won = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
+		assert!(matches!(won, super::TransportRace::Quic("quic")));
+		assert!(
+			!crate::websocket::won(&race_url()),
+			"QUIC won, yet the next dial still skips its head start"
+		);
+	}
+
+	/// A race arm that never finishes, and reports through `dropped` once it is dropped.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	fn loser<T>() -> (
+		impl Future<Output = T>,
+		tokio::sync::oneshot::Receiver<std::convert::Infallible>,
+	) {
+		let (alive, dropped) = tokio::sync::oneshot::channel();
+		let arm = async move {
+			let _alive = alive;
+			std::future::pending().await
 		};
+		(arm, dropped)
+	}
+
+	/// WebSocket winning cancels the QUIC dial before the race returns, so no QUIC
+	/// session can come up behind the one WebSocket serves.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	#[tokio::test(start_paused = true)]
+	async fn websocket_winning_cancels_the_quic_dial() {
+		let (quic, mut dropped) = loser::<crate::Result<&str>>();
 		let websocket = async { Some(Ok("websocket")) };
 
-		let race = super::race_transport_connect(Box::pin(quic), websocket).await;
-		let Ok(super::TransportRace::WebSocket {
-			session: "websocket",
-			quic: Ok(quic),
-		}) = race
-		else {
-			panic!("WebSocket won, and the QUIC dial it beat must come back with it");
-		};
-
-		land.send(()).unwrap();
-		assert_eq!(quic.await.unwrap(), "quic");
+		let won = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
+		assert!(matches!(won, super::TransportRace::WebSocket("websocket")));
+		assert_eq!(
+			dropped.try_recv(),
+			Err(tokio::sync::oneshot::error::TryRecvError::Closed),
+			"the QUIC dial outlived WebSocket's win"
+		);
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	/// QUIC winning cancels the WebSocket dial before the race returns.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
+	#[tokio::test(start_paused = true)]
+	async fn quic_winning_cancels_the_websocket_dial() {
+		let quic = async { Ok("quic") };
+		let (websocket, mut dropped) = loser::<Option<crate::Result<&str>>>();
+
+		let won = super::race_transport_connect(&race_url(), quic, websocket)
+			.await
+			.unwrap();
+		assert!(matches!(won, super::TransportRace::Quic("quic")));
+		assert_eq!(
+			dropped.try_recv(),
+			Err(tokio::sync::oneshot::error::TryRecvError::Closed),
+			"the WebSocket dial outlived QUIC's win"
+		);
+	}
+
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_returns_when_quic_transport_connects() {
 		let quic = async { Ok("quic") };
@@ -1828,7 +1715,7 @@ mod tests {
 
 		let value = tokio::time::timeout(
 			std::time::Duration::from_secs(1),
-			super::race_transport_connect(Box::pin(quic), websocket),
+			super::race_transport_connect(&race_url(), quic, websocket),
 		)
 		.await
 		.expect("race waited for WebSocket after QUIC transport connected")
@@ -1841,13 +1728,13 @@ mod tests {
 	#[test]
 	fn race_defaults_to_the_rfc_8305_stagger() {
 		let config = crate::connect::Config::default();
-		assert_eq!(config.race, std::time::Duration::from_millis(250));
+		assert_eq!(config.race, Some(std::time::Duration::from_millis(250)));
 		assert_eq!(config.resolve().race, std::time::Duration::from_millis(250));
 	}
 
 	/// Iroh carries no rustls state, so constructing its client must not require an
 	/// application-installed crypto provider.
-	#[cfg(all(feature = "iroh", not(any(feature = "noq", feature = "websocket"))))]
+	#[cfg(all(feature = "iroh", not(any(feature = "quic", feature = "websocket"))))]
 	#[test]
 	fn iroh_only_client_does_not_require_a_tls_provider() {
 		crate::connect::Config::default().init().expect("iroh-only client");
@@ -1874,10 +1761,10 @@ mod tests {
 
 		let timeout = crate::connect::DEFAULT_TIMEOUT;
 		let mut config = crate::connect::Config {
-			timeout,
+			timeout: Some(timeout),
 			..Default::default()
 		};
-		config.websocket.delay = std::time::Duration::ZERO;
+		config.websocket.delay = Some(std::time::Duration::ZERO);
 		let client = config.init(Default::default()).unwrap();
 
 		// Nothing is listening on UDP, so the QUIC arm fails and leaves the WebSocket

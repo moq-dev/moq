@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast";
 import * as Epoch from "./epoch";
+import { Route } from "./hop";
 import { Producer } from "./origin";
 import * as Path from "./path";
 import { wireOf } from "./wire";
@@ -265,3 +266,31 @@ test("an announced request keeps a refusal that lands with a re-price", async ()
 	route.close();
 	origin.close();
 });
+
+for (const received of [false, true]) {
+	test(`a plain request watches its path only through a received route (received: ${received})`, async () => {
+		const origin = new Producer();
+		const path = Path.from("room");
+		const events: string[] = [];
+		const stop = wireOf(origin).interests((prefix, wanted) => events.push(`${prefix} ${wanted}`));
+		const source = new BroadcastProducer();
+		const route = received ? wireOf(origin).receive(path, Route.default) : origin.dynamic(path);
+		void (async () => {
+			for await (const request of route.requested()) request.accept(source.consume());
+		})();
+
+		const request = origin.request(path);
+		await settle();
+		expect(request.active.peek()).toBeDefined();
+		// A local route needs no discovery; one a session received stays discovered while held.
+		expect(events).toEqual(received ? ["room true"] : []);
+
+		request.close();
+		await settle();
+		expect(events).toEqual(received ? ["room true", "room false"] : []);
+		stop();
+		route.close();
+		source.close();
+		origin.close();
+	});
+}

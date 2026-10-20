@@ -24,4 +24,4 @@ behind the encode seam on Windows.
 
 ## Related
 
-- [AudioToolbox encode](/quest/m1/audio-encode-audiotoolbox.md) - the macOS and iOS backend, which may already add `flush` to `Encoder::encode`
+- [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - the macOS and iOS backend, which may already add `flush` to `Encoder::encode`

@@ -207,6 +207,15 @@ pub enum Error {
 	#[error("no timeline for track {0}")]
 	TimelineMissing(String),
 
+	/// A timeline frame report is timed differently from the track's earlier ones: a track is all
+	/// timed or all untimed.
+	#[error("timeline report at {0:?} does not match the track's timing")]
+	TimelineTiming(hang::timeline::Position),
+
+	/// A timeline record has no `pts` or `duration` to decode, as on an untimed track.
+	#[error("timeline record {0} is untimed")]
+	TimelineUntimed(u64),
+
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]
@@ -217,8 +226,9 @@ pub enum Error {
 	#[error("invalid timeline timescale: {0}")]
 	InvalidTimescale(u32),
 
-	/// A source's first timestamp cannot anchor the broadcast clock: it is so large that PTS zero
-	/// would land before the moq epoch (2020).
+	/// A timestamp cannot be mapped between the broadcast clock and the wall: PTS zero would land
+	/// before the moq epoch (2020) or after now, the host's wall clock was unset so the clock has no
+	/// mapping, or a catalog root `clock` would change or clear the producer's fixed clock.
 	#[error("timestamp cannot be mapped onto the broadcast clock: {0}")]
 	UnmappableTimestamp(String),
 	/// Tried to set an application catalog section whose name collides with a

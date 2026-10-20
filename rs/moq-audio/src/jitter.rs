@@ -133,28 +133,33 @@ impl Estimator {
 	}
 
 	fn observe(&mut self, arrival: f64, media: f64) {
-		// A reordered arrival is excluded rather than measured: the media-time gap back
-		// to the frame that overtook it would otherwise be added to the delay.
-		if media <= self.newest {
-			return;
-		}
-		self.newest = media;
+		// A reordered arrival is measured but never joins the window: it arrived after a
+		// newer frame, so it is never the fastest, and nothing later is measured against it.
+		if media > self.newest {
+			self.newest = media;
 
-		// Pruning by media time rather than by arrival is what makes a timestamp jump
-		// self-correcting: everything before it leaves the window at once.
-		while self.history.front().is_some_and(|entry| entry.media < media - WINDOW) {
-			self.history.pop_front();
+			// Pruning by media time rather than by arrival is what makes a timestamp jump
+			// self-correcting: everything before it leaves the window at once.
+			while self.history.front().is_some_and(|entry| entry.media < media - WINDOW) {
+				self.history.pop_front();
+			}
+			self.history.push_back(Entry { arrival, media });
 		}
-		self.history.push_back(Entry { arrival, media });
 
-		// The fastest frame still in the window, so delay is measured against the
-		// best-case path instead of against the previous frame.
-		let mut reference = &self.history[0];
-		for entry in &self.history {
-			if entry.arrival - entry.media < reference.arrival - reference.media {
-				reference = entry;
+		// The fastest frame in the window at or before this one, so delay is measured
+		// against the best-case path instead of against the previous frame, and an older
+		// frame held behind newer ones reads as the wait playing it in order costs. A
+		// frame older than the whole window, such as a subscription's backlog behind its
+		// live edge, has nothing to be measured against.
+		let mut reference: Option<&Entry> = None;
+		for entry in self.history.iter().take_while(|entry| entry.media <= media) {
+			if reference.is_none_or(|best| entry.arrival - entry.media < best.arrival - best.media) {
+				reference = Some(entry);
 			}
 		}
+		let Some(reference) = reference else {
+			return;
+		};
 
 		let delay = f64::max(0.0, arrival - reference.arrival - (media - reference.media));
 
@@ -267,8 +272,9 @@ pub(crate) mod tests {
 
 	/// Every case the document lists. Named rather than globbed, so a case that
 	/// goes missing fails here instead of silently shrinking the suite.
-	const CORPUS: [&str; 9] = [
+	const CORPUS: [&str; 10] = [
 		"advertised",
+		"backlog",
 		"buildup",
 		"fixed",
 		"flush",

@@ -4,6 +4,7 @@
  *
  * @module
  */
+import { Interval, MissedTickBehavior, Nano, Second, sleep } from "@moq/clock";
 
 /** Cancels a subscription, effect, or other registration when called. */
 export type Dispose = () => void;
@@ -681,13 +682,14 @@ export class Effect {
 		// so anything that observes cancellation unwinds from here.
 		if (this.#async.size > 0) {
 			// Diagnostic only: a task that ignores cancellation stalls the rerun, so name it.
-			const warn = setTimeout(() => {
-				// A close() racing the timer disarms it, but the callback can already be
+			const warn = new AbortController();
+			sleep(Nano.fromSecond(Second(5)), { signal: warn.signal, ref: false }).then(() => {
+				// A close() racing the timer disarms it, but the wakeup can already be
 				// queued by then. There is nothing to warn about once the effect is gone.
 				if (this.#dispose === undefined) return;
 
 				console.warn("spawn is still running after 5s; the effect cannot rerun until it settles", this.#stack);
-			}, 5000);
+			}, noop);
 
 			try {
 				// A task can spawn another as it unwinds, so drain until nothing new is queued.
@@ -704,7 +706,7 @@ export class Effect {
 				console.error("async effect error", error);
 				if (this.#stack) console.error("stack", this.#stack);
 			} finally {
-				clearTimeout(warn);
+				warn.abort();
 			}
 		}
 
@@ -799,45 +801,40 @@ export class Effect {
 		void promise.then(() => tasks.delete(promise));
 	}
 
-	/** Runs `fn` after `ms` milliseconds, unless the effect reruns or closes first. */
-	timer(fn: () => void, ms: DOMHighResTimeStamp) {
+	/** Runs `fn` after `duration` on the installed clock, unless the effect reruns or closes first. */
+	timer(fn: () => void, duration: Nano) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.timer called when closed, ignoring");
 			return;
 		}
 
-		let timeout: ReturnType<typeof setTimeout> | undefined;
-		timeout = setTimeout(() => {
-			timeout = undefined;
-			fn();
-		}, ms);
-		this.cleanup(() => timeout !== undefined && clearTimeout(timeout));
+		const abort = new AbortController();
+		// The wakeup can already be queued when cleanup aborts, so check again before running.
+		void sleep(duration, { signal: abort.signal }).then(() => {
+			if (!abort.signal.aborted) fn();
+		}, noop);
+		this.cleanup(() => abort.abort());
 	}
 
 	/**
-	 * Runs `fn` as a nested effect, then closes that effect after `ms` milliseconds.
+	 * Runs `fn` as a nested effect, then closes that effect after `duration` on the installed clock.
 	 *
 	 * Shares {@link run}'s handling of a task that outlived its run: the child is closed at the
 	 * next teardown, not immediately.
 	 */
-	timeout(fn: (effect: Effect) => void, ms: DOMHighResTimeStamp) {
+	timeout(fn: (effect: Effect) => void, duration: Nano) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.timeout called when closed, ignoring");
 			return;
 		}
 
 		const effect = new Effect(fn);
-
-		let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
-			effect.close();
-			timeout = undefined;
-		}, ms);
+		const abort = new AbortController();
+		void sleep(duration, { signal: abort.signal }).then(() => effect.close(), noop);
 
 		this.#dispose.push(() => {
-			if (timeout !== undefined) {
-				clearTimeout(timeout);
-				effect.close();
-			}
+			abort.abort();
+			effect.close();
 		});
 	}
 
@@ -857,17 +854,34 @@ export class Effect {
 		});
 	}
 
-	/** Runs `fn` every `ms` milliseconds until the effect reruns or closes. */
-	interval(fn: () => void, ms: DOMHighResTimeStamp) {
+	/** Runs `fn` every `period` on the installed clock until the effect reruns or closes. */
+	interval(fn: () => void, period: Nano) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.interval called when closed, ignoring");
 			return;
 		}
 
-		const interval = setInterval(() => {
-			fn();
-		}, ms);
-		this.cleanup(() => clearInterval(interval));
+		const ticks = new Interval(period);
+		// Like setInterval, a late caller gets one tick rather than a burst of missed ones.
+		ticks.setMissedTickBehavior(MissedTickBehavior.Delay);
+		let closed = false;
+		void (async () => {
+			// The first tick is ready at once; the callback runs a period later.
+			await ticks.tick();
+			for (;;) {
+				await ticks.tick();
+				if (closed) return;
+				try {
+					fn();
+				} catch (error) {
+					console.error("effect interval error", error, this.#stack);
+				}
+			}
+		})().catch(noop);
+		this.cleanup(() => {
+			closed = true;
+			ticks.close();
+		});
 	}
 
 	/**

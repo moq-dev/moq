@@ -4,7 +4,7 @@ import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../
 import { Stream } from "../stream.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
-import { forwardAnnounced } from "./forward.ts";
+import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { exchangeSetup } from "./handshake.ts";
 
 /** Options for {@link accept}. */
@@ -16,12 +16,6 @@ export interface AcceptProps {
 
 	/** Version to select during SETUP negotiation (for non-ALPN paths). */
 	version?: number;
-
-	/**
-	 * Whether this server supports broadcast discovery; see {@link Established.discovery}.
-	 * Defaults to true.
-	 */
-	discovery?: boolean;
 
 	/**
 	 * The origin whose broadcasts the session announces and serves to the peer. Omit to
@@ -41,7 +35,6 @@ export interface AcceptProps {
 
 /** The per-session wiring shared by every negotiated protocol path. */
 type SessionProps = {
-	discovery: boolean;
 	publish?: OriginConsumer;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
@@ -58,6 +51,7 @@ type SessionProps = {
  * @returns A promise that resolves to a Connection instance
  */
 export async function accept({ transport, url, ...props }: AcceptProps): Promise<Established> {
+	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	const connection = await acceptInner(transport, url, props);
 	if (props.consume) forwardAnnounced(connection, props.consume);
 	return connection;
@@ -73,7 +67,6 @@ async function acceptInner(
 	const protocol = (transport as { protocol?: string }).protocol;
 
 	const wiring: SessionProps = {
-		discovery: props.discovery ?? true,
 		publish: props.publish,
 		client: false,
 		extensions: Extensions.offered(props.extensions),
@@ -125,24 +118,15 @@ async function acceptAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, early, solicit, hidden, cluster, auth } = await exchangeSetup(
-		transport,
-		version,
-		"moq-lite-js",
-		wiring.extensions,
-	);
+	// Spread whole, so every negotiated flag reaches the connection.
+	const setup = await exchangeSetup(transport, version, "moq-lite-js", wiring);
 
 	return new Ietf.Connection({
 		...wiring,
 		client: false,
 		url,
 		quic: transport,
-		control,
-		early,
-		solicit,
-		hidden,
-		cluster,
-		auth,
+		...setup,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
 		version,
@@ -178,6 +162,8 @@ async function acceptSetup(
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Extensions.intoSetup(params, wiring.extensions, version);
 	Ietf.hiddenIntoSetup(params);
+	Ietf.maxAgeIntoSetup(params);
+	Ietf.activeCountIntoSetup(params, version);
 
 	const server = new Ietf.ServerSetup({ version, parameters: params });
 	await server.encode(stream.writer, version);
@@ -194,6 +180,8 @@ async function acceptSetup(
 		version,
 		solicit: Ietf.solicitFromSetup(client.parameters),
 		hidden: Ietf.hiddenFromSetup(client.parameters),
+		maxAge: Ietf.maxAgeFromSetup(client.parameters),
+		activeCount: Ietf.activeCountFromSetup(client.parameters, version),
 	});
 }
 
@@ -238,6 +226,8 @@ async function acceptNegotiated(
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
+	Ietf.maxAgeIntoSetup(params);
+	Ietf.activeCountIntoSetup(params, setupVersion);
 
 	const server = new Ietf.ServerSetup({ version: selectedVersion, parameters: params });
 	await server.encode(stream.writer, setupVersion);
@@ -262,6 +252,8 @@ async function acceptNegotiated(
 			version: selectedVersion as Ietf.IetfVersion,
 			solicit: Ietf.solicitFromSetup(client.parameters),
 			hidden: Ietf.hiddenFromSetup(client.parameters),
+			maxAge: Ietf.maxAgeFromSetup(client.parameters),
+			activeCount: Ietf.activeCountFromSetup(client.parameters, selectedVersion as Ietf.IetfVersion),
 		});
 	} else {
 		throw new Error(`unsupported version: ${selectedVersion.toString(16)}`);

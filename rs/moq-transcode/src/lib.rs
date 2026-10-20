@@ -10,7 +10,8 @@
 //! - Subscribing to a rung attaches it to a shared live decode of the source
 //!   (one subscription and one decoder per source, no matter how many rungs
 //!   are active); each rung resizes and encodes its own copy, group for group,
-//!   stopping when the last subscriber leaves.
+//!   stopping at the end of the group in progress once the last subscriber
+//!   leaves.
 //! - Fetching a specific group fetches that same group from the source and
 //!   transcodes just that group, unless every caller leaves before the
 //!   request is accepted, in which case nothing is encoded. Output groups
@@ -18,12 +19,14 @@
 //!   content as source group N.
 //!
 //! The codec work is `moq-video`: hardware where available (NVDEC + NVENC on
-//! Linux, VideoToolbox on macOS, Media Foundation on Windows), with the default
-//! `openh264` feature providing H.264 software fallback. On an NVIDIA GPU the whole pipeline is
+//! Linux, VideoToolbox on macOS, Media Foundation on Windows), with the opt-in
+//! `openh264` feature providing H.264 software fallback, which a GPU-less host needs. On an NVIDIA GPU the whole pipeline is
 //! GPU-resident: NVDEC decodes and scales in hardware and NVENC encodes the
 //! CUDA frame in place, with no CPU copies. macOS and Windows also resize on
 //! the GPU; set [`Config::resize`]'s output to `Output::Cpu` to decode to CPU
 //! pixels and resize there.
+
+#![warn(missing_docs)]
 
 pub mod active;
 pub mod ladder;
@@ -868,6 +871,69 @@ mod tests {
 		transcoder.abort();
 	}
 
+	/// A source rendition keyed apart from its track is read from the track, on
+	/// both the live path and the fetch path.
+	#[tokio::test]
+	async fn a_source_keyed_apart_from_its_track() {
+		let mut source = source_broadcast(2, 5);
+		source
+			.catalog
+			.mutate(|catalog| {
+				let mut video = catalog.video.renditions.remove("video").unwrap();
+				video.track = Some("video".to_string());
+				catalog.video.renditions.insert("main".to_string(), video);
+			})
+			.unwrap();
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		let mut fetched = consumer
+			.track("video/120p")
+			.unwrap()
+			.fetch_group(0, None)
+			.await
+			.unwrap();
+		let mut frames = 0;
+		while fetched.read_frame().await.unwrap().is_some() {
+			frames += 1;
+		}
+		assert_eq!(frames, 5);
+
+		let mut live = consumer
+			.track("video/120p")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap()
+			.ordered();
+		let mut group = live.next_group().await.unwrap().unwrap();
+		assert!(group.read_frame().await.unwrap().is_some());
+
+		transcoder.abort();
+	}
+
 	/// The whole point of [`active`]: a caller metering or pricing the work is
 	/// handed the ladder, sees each rendition start and stop, and can bill the
 	/// seconds in between. Nothing else distinguishes a transcoder publishing a
@@ -1108,9 +1174,8 @@ mod tests {
 	/// has to run to a clean end: the consumer reads it out and then sees the
 	/// track finish, rather than the group going away under it.
 	///
-	/// A rung consumer is demand on its own, so `live` starts the moment the
-	/// track is taken below and produces group 0 from the still-open source
-	/// group. The fetch below then resolves straight from the track cache. What
+	/// The held query is demand, so `live` starts the moment the track is
+	/// queried below and produces group 0 from the still-open source group. The fetch below then resolves straight from the track cache. What
 	/// that pins down is `live` riding out the group it is part way through after
 	/// retirement, plus `serve` joining its two halves rather than letting either
 	/// cancel the other. [`retirement_waits_for_an_unclaimed_fetch`] covers the
@@ -1149,10 +1214,10 @@ mod tests {
 		// wait until the live path has claimed group 0, so the fetch below can only
 		// resolve from the track cache and retirement finds that live group open.
 		let rung = consumer.track("video/120p").unwrap();
-		rung.query().await.unwrap();
-		while rung.latest() != Some(0) {
-			tokio::task::yield_now().await;
-		}
+		let mut query = rung.query();
+		(&mut query).await.unwrap();
+		let mut edge = rung.clone();
+		assert_eq!(edge.largest().await.map(|position| position.group), Some(0));
 		let mut fetched = rung.fetch_group(0, None).await.unwrap();
 
 		// Group 0 is still being written from a source group that is still open, so
@@ -1179,13 +1244,14 @@ mod tests {
 		transcoder.abort();
 	}
 
-	/// A ladder nobody watches holds nothing of its source. A held track handle is
-	/// interest in the track all the way to its publisher, so a transcoder that
-	/// kept one per idle rung would stop an on-demand source from ever idling.
+	/// A ladder nobody watches holds nothing of its source. A held query or
+	/// subscription is interest in the track all the way to its publisher, so a
+	/// transcoder that kept one per idle rung would stop an on-demand source from
+	/// ever idling.
 	#[tokio::test]
 	async fn an_idle_rung_leaves_its_source_unused() {
 		let source = source_catalog(320, 240);
-		let demand = source._track.demand();
+		let mut demand = source._track.demand();
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -1210,20 +1276,29 @@ mod tests {
 			snapshot.video.renditions.contains_key("video/120p")
 		})
 		.await;
-		assert!(!demand.is_used(), "the published ladder holds its source");
+		assert_eq!(demand.wanted(), None, "the published ladder holds its source");
 
-		// A rung consumer is demand on its own, so the rung starts encoding and
-		// subscribes to the source.
+		// A held query is demand, so the rung starts encoding and subscribes to the
+		// source.
 		let rung = consumer.track("video/120p").unwrap();
-		rung.query().await.unwrap();
-		tokio::time::timeout(std::time::Duration::from_secs(5), demand.used())
+		let mut query = rung.query();
+		(&mut query).await.unwrap();
+		let wanted = async {
+			while demand.wanted_changed().await?.is_none() {}
+			moq_net::Result::Ok(())
+		};
+		tokio::time::timeout(std::time::Duration::from_secs(5), wanted)
 			.await
 			.expect("the rung never asked for its source")
 			.unwrap();
 
 		// Its task outlives the viewer, idle until the next one.
-		drop(rung);
-		tokio::time::timeout(std::time::Duration::from_secs(5), demand.unused())
+		drop(query);
+		let unwanted = async {
+			while demand.wanted_changed().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
+		tokio::time::timeout(std::time::Duration::from_secs(5), unwanted)
 			.await
 			.expect("the idle rung kept its source wanted")
 			.unwrap();
@@ -1238,8 +1313,8 @@ mod tests {
 	/// the handler drained its loop to keep.
 	///
 	/// Reaching the fetch handler takes a group the live path cannot produce.
-	/// Holding the consumer needed to fetch is itself the demand that starts the
-	/// live path, and the live path serves the same sequences from the same
+	/// The query held to resolve the track is demand that starts the live path,
+	/// and the live path serves the same sequences from the same
 	/// source, so the source publishes no group at all and serves this one
 	/// through a [`moq_net::track::Dynamic`] instead. That handle also parks the
 	/// fetch at exactly the point in question: past the rung's handler, before
@@ -1278,7 +1353,8 @@ mod tests {
 		// Resolving the info waits for the transcoder to accept the track, so the
 		// fetch below reaches a rung that is already serving.
 		let rung = consumer.track("video/120p").unwrap();
-		rung.query().await.unwrap();
+		let mut query = rung.query();
+		(&mut query).await.unwrap();
 		assert!(
 			source._track.subscription_changed().await.unwrap().is_some(),
 			"the rung never subscribed to the live source",
@@ -1469,6 +1545,193 @@ mod tests {
 		assert!(frames > 0, "the fresh fetch produced no frames");
 
 		transcoder.abort();
+	}
+
+	/// A fetch is demand, so it starts the live path, which claims the group the
+	/// source has open. A reader that picked that group up from the cache is not
+	/// demand, so when the fetch ends the live path is left mid-group with
+	/// nobody asking. It finishes the group before leaving its source: a group
+	/// name always means the same content, so the reader gets the whole group
+	/// rather than one aborted under it.
+	///
+	/// Paused so the runtime settles before the source group ends: the live path
+	/// has seen the demand go away by then, which is the moment that used to
+	/// abort the group.
+	#[tokio::test(start_paused = true)]
+	async fn ended_demand_finishes_the_open_live_group() {
+		let source = source_catalog(320, 240);
+		let mut source_demand = source._track.demand();
+		// Parks the rung's own fetch of the group below, so that fetch is demand
+		// for as long as the caller holds it and nothing else serves it.
+		let _source_fetches = source._track.dynamic();
+
+		// Two frames, so the output's largest moves once both are encoded.
+		let mut group = source._track.create_group(0u64.into()).unwrap();
+		let mut encoder = moq_video::encode::Encoder::new(&{
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+			config.kind = moq_video::encode::Kind::Software;
+			config
+		})
+		.unwrap();
+		encoder.cut().unwrap();
+		let gray = vec![0x80u8; 320 * 240 * 4];
+		for timestamp in [0, 33_333] {
+			for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+				hang::container::Frame {
+					timestamp: encoded.timestamp,
+					payload: encoded.payload,
+				}
+				.write_to(&mut group)
+				.unwrap();
+			}
+		}
+
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let consumer = output.consume();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let catalog = loop {
+			match consumer.track(hang::Catalog::DEFAULT_NAME) {
+				Ok(track) => break track,
+				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+				Err(err) => panic!("catalog track: {err}"),
+			}
+		};
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+		await_catalog(&mut catalogs, |snapshot| {
+			snapshot.video.renditions.contains_key("video/120p")
+		})
+		.await;
+
+		// The only demand on the rung. Sequence 7 is one the live path never
+		// reaches, so it parks in the source handler while the live path claims
+		// output group 0 and encodes both frames of the open source group.
+		let rung = consumer.track("video/120p").unwrap();
+		let fetching = rung.fetch_group(7, None);
+		let mut edge = rung.clone();
+		while edge.largest().await.map(|position| (position.group, position.frame)) != Some((0, 1)) {}
+
+		// Read straight from the cache while the group is still being written.
+		let mut fetched = rung.fetch_group(0, None).await.unwrap();
+
+		// The only demand ends with output group 0 still open.
+		drop(fetching);
+		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+		assert!(
+			source_demand.wanted().is_some(),
+			"the live path left its source mid-group"
+		);
+
+		// Once the source group ends, the live path finishes its copy and leaves.
+		group.finish().unwrap();
+		while source_demand.wanted_changed().await.unwrap().is_some() {}
+
+		let mut frames = 0;
+		while fetched.read_frame().await.expect("group 0 was aborted").is_some() {
+			frames += 1;
+		}
+		assert_eq!(frames, 2, "group 0 lost frames");
+
+		transcoder.abort();
+	}
+
+	/// Demand that ends between groups never opens another one. Here the next
+	/// source group is already queued for the live path when the last fetch
+	/// ends, so the live path sees both at once. It leaves its source rather
+	/// than opening that group and riding it out with nobody asking.
+	///
+	/// The live path picks between the two at random, so without the fix this
+	/// fails about half the rounds, so a run of several fails almost every time.
+	#[tokio::test(start_paused = true)]
+	async fn ended_demand_opens_no_new_live_group() {
+		for _ in 0..8 {
+			let source = source_catalog(320, 240);
+			let mut source_demand = source._track.demand();
+			// Parks the rung's own fetch of the group below, so that fetch is
+			// demand for as long as the caller holds it and nothing else serves it.
+			let _source_fetches = source._track.dynamic();
+
+			let mut encoder = moq_video::encode::Encoder::new(&{
+				let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+				config.kind = moq_video::encode::Kind::Software;
+				config
+			})
+			.unwrap();
+			let gray = vec![0x80u8; 320 * 240 * 4];
+			let mut write = |group: &mut moq_net::group::Producer, timestamps: &[u64]| {
+				encoder.cut().unwrap();
+				for &timestamp in timestamps {
+					for encoded in encoder.encode(&gray_frame(&gray, timestamp)).unwrap() {
+						hang::container::Frame {
+							timestamp: encoded.timestamp,
+							payload: encoded.payload,
+						}
+						.write_to(group)
+						.unwrap();
+					}
+				}
+			};
+			let mut group = source._track.create_group(0u64.into()).unwrap();
+			write(&mut group, &[0, 33_333]);
+
+			let config = Config {
+				ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+				encoder: moq_video::encode::Kind::Software,
+				decoder: moq_video::decode::Kind::Software,
+				source: None,
+				..Default::default()
+			};
+			let output = moq_net::broadcast::Info::default().produce();
+			let consumer = output.consume();
+			let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+			let catalog = loop {
+				match consumer.track(hang::Catalog::DEFAULT_NAME) {
+					Ok(track) => break track,
+					Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+					Err(err) => panic!("catalog track: {err}"),
+				}
+			};
+			let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
+			await_catalog(&mut catalogs, |snapshot| {
+				snapshot.video.renditions.contains_key("video/120p")
+			})
+			.await;
+
+			// The only demand on the rung, parked on a sequence the live path never
+			// reaches. Held until the live path has finished group 0.
+			let rung = consumer.track("video/120p").unwrap();
+			let fetching = rung.fetch_group(7, None);
+			let mut edge = rung.clone();
+			while edge.largest().await.map(|position| (position.group, position.frame)) != Some((0, 1)) {}
+			let mut fetched = rung.fetch_group(0, None).await.unwrap();
+			group.finish().unwrap();
+			while fetched.read_frame().await.expect("group 0 was aborted").is_some() {}
+
+			// Queue the next source group first, so it is waiting for the live
+			// path by the time it sees the demand go.
+			let mut next = source._track.create_group(1u64.into()).unwrap();
+			write(&mut next, &[66_666]);
+			drop(fetching);
+
+			let unwanted = async {
+				while source_demand.wanted_changed().await?.is_some() {}
+				moq_net::Result::Ok(())
+			};
+			tokio::time::timeout(std::time::Duration::from_secs(10), unwanted)
+				.await
+				.expect("the live path opened a group nobody asked for")
+				.unwrap();
+
+			transcoder.abort();
+		}
 	}
 
 	/// Two transcoders fed the same source publish groups that mirror the

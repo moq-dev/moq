@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use futures::FutureExt;
 use moq_net::cache;
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +20,7 @@ const GOVERNOR_INTERVAL: Duration = Duration::from_secs(5);
 /// whichever comes first (the latest group of every track is always retained).
 /// With none of the knobs set the pool is unbounded in bytes and only the
 /// default LRU window bounds memory.
-#[derive(usage::Args, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -73,14 +74,12 @@ pub struct Config {
 /// retention ceiling applied to every track.
 #[non_exhaustive]
 ///
-/// The headroom governor, when configured, is owned by [`Self::pool`] rather than
-/// by this struct: it holds only a [`cache::PoolWeak`] and stops on its next tick
-/// once every [`cache::Pool`] clone has dropped. Handing this to
-/// [`Cluster::new`](crate::cluster::Cluster::new) therefore moves the governor's lifetime
-/// onto the cluster, and dropping this struct afterwards keeps it running.
-/// Conversely, holding a clone of [`Self::pool`] past the relay keeps the governor
-/// running too, deliberately: as long as anything can still cache into the budget,
-/// resizing it is still the right thing to do.
+/// The headroom governor, when configured, starts once this is handed to
+/// [`Cluster::new`](crate::cluster::Cluster::new), which runs it as a critical task, and
+/// is then owned by [`Self::pool`]: it holds only a [`cache::PoolWeak`] and stops on
+/// its next tick once every [`cache::Pool`] clone has dropped. Holding a clone of
+/// [`Self::pool`] past the relay keeps the governor running, deliberately: as long as
+/// anything can still cache into the budget, resizing it is still the right thing to do.
 pub struct Cache {
 	/// The shared pool every session's groups register with: the byte budget plus
 	/// the wall-clock LRU window that reclaims idle groups.
@@ -92,14 +91,17 @@ pub struct Cache {
 	/// every track is always kept). [`Duration::MAX`] imposes no ceiling, leaving
 	/// each track's own window in force.
 	pub duration: Duration,
+
+	/// The headroom governor, not yet running.
+	pub(crate) governor: Option<futures::future::BoxFuture<'static, ()>>,
 }
 
 impl Config {
 	/// Resolve the size knobs into a shared [`cache::Pool`] and age ceiling,
-	/// spawning the headroom governor when configured. Requires a tokio runtime.
+	/// plus the headroom governor when configured.
 	///
-	/// The governor stops with the pool it resizes, so a caller that drops the
-	/// returned [`Cache`] without attaching it (a setup step failing after this
+	/// The governor starts with the cluster the [`Cache`] is attached to, so a
+	/// caller that drops it without attaching it (a setup step failing after this
 	/// point, say) leaves nothing sampling memory behind.
 	pub fn init(&self) -> anyhow::Result<Cache> {
 		let capacity = self.capacity.as_deref().map(parse_limit).transpose()?;
@@ -112,11 +114,12 @@ impl Config {
 			.with_expiry(duration.unwrap_or(cache::DEFAULT_EXPIRY));
 		let pool = cache::Pool::new(config);
 
+		let mut governed = None;
 		if let Some(headroom) = self.headroom.as_deref() {
 			let headroom = parse_limit(headroom)?;
 			anyhow::ensure!(headroom > 0, "cache headroom must be non-zero");
 			tracing::info!(?capacity, headroom, "cache governor enabled");
-			tokio::spawn(governor(pool.downgrade(), capacity, headroom));
+			governed = Some(governor(pool.downgrade(), capacity, headroom).boxed());
 		} else if let Some(capacity) = capacity {
 			tracing::info!(capacity, "cache capacity set");
 		}
@@ -128,6 +131,7 @@ impl Config {
 		Ok(Cache {
 			pool,
 			duration: duration.unwrap_or(Duration::MAX),
+			governor: governed,
 		})
 	}
 }
@@ -275,6 +279,19 @@ mod tests {
 	fn attach(cache: &Config, cluster: crate::cluster::Config) -> anyhow::Result<crate::cluster::Cluster> {
 		let cache = cache.init()?;
 		crate::cluster::Cluster::new(crate::cluster::Options::new(cluster).with_cache(cache))
+	}
+
+	/// The governor runs as a critical task: its panic stops the cluster's
+	/// [`run`](crate::cluster::Started::run) rather than leaving the budget fixed.
+	#[tokio::test(start_paused = true)]
+	async fn governor_panic_stops_the_cluster() {
+		let mut cache = governed().init().unwrap();
+		cache.governor = Some(async { panic!("injected") }.boxed());
+		let cluster = crate::cluster::Cluster::new(crate::cluster::Options::default().with_cache(cache)).unwrap();
+
+		let started = cluster.start().await.unwrap();
+		let err = started.run().await.expect_err("the cluster kept running");
+		assert_eq!(err.to_string(), "cache governor panicked: injected");
 	}
 
 	#[tokio::test(start_paused = true)]

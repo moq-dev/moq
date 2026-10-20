@@ -1,7 +1,8 @@
 import * as z from "@zod/mini";
+import { compareName, compareNumber } from "./compare";
 import { ContainerSchema } from "./container";
 import { hexSchema } from "./hex";
-import { u53Schema } from "./integers";
+import { u8Schema, u53Schema } from "./integers";
 import { RelativeBroadcastSchema } from "./path";
 
 // Backwards compatibility: old track schema
@@ -9,12 +10,52 @@ const TrackSchema = z.object({
 	name: z.string(),
 });
 
+// A CIE 1931 xy chromaticity coordinate.
+const ChromaticitySchema = z.object({ x: z.number(), y: z.number() });
+
+// A CTA-861.3 light level in candelas per square metre; zero means unknown.
+const lightSchema = z.number().check(z.int(), z.nonnegative(), z.lte(0xffff));
+
+/**
+ * Schema for the colour a rendition's pixels carry. The code points are ITU-T H.273's, which every
+ * codec and container shares; an absent field was left unspecified by the source.
+ */
+export const ColorSchema = z.object({
+	// H.273 ColourPrimaries: 1 is BT.709, 9 is BT.2020.
+	primaries: z.optional(u8Schema),
+	// H.273 TransferCharacteristics: 1 is BT.709, 16 is PQ, 18 is HLG.
+	transfer: z.optional(u8Schema),
+	// H.273 MatrixCoefficients: 0 is RGB, 1 is BT.709, 9 is BT.2020 non-constant luminance.
+	matrix: z.optional(u8Schema),
+	// The numeric range of the samples: studio swing, or every code used.
+	range: z.optional(z.enum(["limited", "full"])),
+	// The display the content was mastered on, as SMPTE ST 2086, luminance in cd/m².
+	mastering: z.optional(
+		z.object({
+			red: ChromaticitySchema,
+			green: ChromaticitySchema,
+			blue: ChromaticitySchema,
+			white: ChromaticitySchema,
+			maxLuminance: z.number(),
+			minLuminance: z.number(),
+		}),
+	),
+	// The content's light levels, as CTA-861.3.
+	contentLight: z.optional(z.object({ maxCll: lightSchema, maxFall: lightSchema })),
+});
+
+/** The colour a rendition's pixels carry: H.273 code points plus static HDR metadata. */
+export type Color = z.infer<typeof ColorSchema>;
+
 /** Schema for a single video rendition's decoder config. Mirrors WebCodecs VideoDecoderConfig. */
 export const VideoConfigSchema = z.object({
 	// Optional reference to another broadcast that publishes this track, expressed
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
+	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
+	// catalog). Absent means the ID is the track name. Resolve it with `track`.
+	track: z.optional(z.string()),
 
 	// Human-readable rendition name for track pickers.
 	label: z.optional(z.string()),
@@ -30,27 +71,34 @@ export const VideoConfigSchema = z.object({
 	// Otherwise, the initialization information is (repeated) before each key-frame.
 	description: z.optional(hexSchema),
 
-	// The width and height of the video in pixels.
-	// NOTE: formats that don't use a description can adjust these values in-band.
+	// The largest width and height the track carries in pixels, fixed for its name. The picture
+	// resizes in band at a keyframe below these ceilings, unless the description pins it.
 	codedWidth: z.optional(u53Schema),
 	codedHeight: z.optional(u53Schema),
 
-	// Ratio of display width/height to coded width/height
-	// Allows stretching/squishing individual "pixels" of the video
-	// If not provided, the display ratio is 1:1
+	// The aspect ratio the whole picture is displayed at, as WebCodecs' VideoDecoderConfig
+	// displayAspectWidth/displayAspectHeight. Absent means the decoded picture's own shape.
 	displayAspectWidth: z.optional(u53Schema),
 	displayAspectHeight: z.optional(u53Schema),
 
-	// The frame rate of the video in frames per second
+	// The colour the decoded pixels carry, so a renderer need not guess or reparse the bitstream.
+	color: z.optional(ColorSchema),
+
+	// The maximum frame rate of the video in frames per second.
 	framerate: z.optional(z.number()),
 
-	// The bitrate of the video in bits per second
+	// The maximum bitrate of the video in bits per second.
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: z.optional(u53Schema),
 
 	// Whether this rendition may be selected. When false, no frames are coming and a consumer
 	// must not select it. Default: true, so publishers only write it when false.
 	enabled: z.optional(z.boolean()),
+
+	// Higher is preferred: a player selects among the highest preference it can decode, then by
+	// picture and bitrate within it. A compatibility transcode is -1 so only a player that can't
+	// decode the source pulls it. Default: 0, so publishers only write it when nonzero.
+	preference: z.optional(z.int32()),
 
 	// If true, the decoder will optimize for latency.
 	// Default: true
@@ -145,12 +193,7 @@ export type Video = z.infer<typeof VideoSchema>;
 /** Decoder config for a single video rendition. */
 export type VideoConfig = z.infer<typeof VideoConfigSchema>;
 
-/**
- * Rank video renditions best first: largest picture, then highest bitrate, then name.
- *
- * A missing width, height, or bitrate ranks below a known value. Exact ties keep name order,
- * matching `hang::catalog::Video::ranked`, so the choice does not follow catalog insertion order.
- */
+/** Rank video best first: enabled, then highest preference, largest picture, highest bitrate, and name. */
 export function ranked(renditions: Record<string, VideoConfig>): [string, VideoConfig][] {
 	return Object.entries(renditions).sort(compareRanked);
 }
@@ -161,37 +204,11 @@ function pictureArea(config: VideoConfig): number {
 }
 
 function compareRanked(left: [string, VideoConfig], right: [string, VideoConfig]): number {
-	const leftArea = pictureArea(left[1]);
-	const rightArea = pictureArea(right[1]);
-	if (leftArea !== rightArea) return leftArea > rightArea ? -1 : 1;
-
-	const bitrate = compareBitrate(left[1].bitrate, right[1].bitrate);
-	if (bitrate !== 0) return bitrate;
-
-	return compareName(left[0], right[0]);
-}
-
-// A missing bitrate ranks below every known value, including zero. Higher known bitrates come first.
-function compareBitrate(left: number | undefined, right: number | undefined): number {
-	if (left === right) return 0;
-	if (left === undefined) return 1;
-	if (right === undefined) return -1;
-	return left > right ? -1 : 1;
-}
-
-// Rust `String` order is Unicode code point order. JS `<` is UTF-16 code unit order and disagrees
-// once a name leaves the BMP.
-function compareName(left: string, right: string): number {
-	const l = left[Symbol.iterator]();
-	const r = right[Symbol.iterator]();
-	for (;;) {
-		const a = l.next();
-		const b = r.next();
-		if (a.done && b.done) return 0;
-		if (a.done) return -1;
-		if (b.done) return 1;
-		const ac = a.value.codePointAt(0) ?? 0;
-		const bc = b.value.codePointAt(0) ?? 0;
-		if (ac !== bc) return ac < bc ? -1 : 1;
-	}
+	return (
+		compareNumber(Number(left[1].enabled !== false), Number(right[1].enabled !== false)) ||
+		compareNumber(left[1].preference ?? 0, right[1].preference ?? 0) ||
+		compareNumber(pictureArea(left[1]), pictureArea(right[1])) ||
+		compareNumber(left[1].bitrate, right[1].bitrate) ||
+		compareName(left[0], right[0])
+	);
 }

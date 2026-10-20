@@ -14,7 +14,7 @@
 //
 // Local builds and CI resolve `moq-ffi` from the sibling project via the
 // dependency substitution below, so tests run against freshly-built bindings.
-// The published POM keeps the range (substitution only affects resolution).
+// release-kt-lib.yml publishes only once those bindings match a released tag.
 //
 // Publishing uses com.vanniktech.maven.publish; CI runs
 // `:moq:publishAndReleaseToMavenCentral`. Credentials come from env vars set by
@@ -24,6 +24,7 @@
 import com.android.build.api.dsl.LibraryExtension
 import com.vanniktech.maven.publish.JavadocJar
 import com.vanniktech.maven.publish.KotlinMultiplatform
+import org.gradle.api.publish.maven.tasks.GenerateMavenPom
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 // Plugin versions are pinned in the root build.gradle.kts (Kotlin, publish) and
@@ -174,5 +175,17 @@ mavenPublishing {
             connection.set("scm:git:https://github.com/moq-dev/moq.git")
             developerConnection.set("scm:git:ssh://git@github.com/moq-dev/moq.git")
         }
+    }
+}
+
+// The target POMs (moq-jvm, moq-android) name the substituted project's
+// version, which is never published. Kotlin rewrites those dependencies in its
+// own withXml, whose order against ours varies, so restore the range after the
+// POM is written.
+tasks.withType<GenerateMavenPom>().configureEach {
+    val range = MOQ_FFI_RANGE
+    val ffi = Regex("(<groupId>dev\\.moq</groupId>\\s*<artifactId>moq-ffi[^<]*</artifactId>\\s*<version>)[^<]*(</version>)")
+    doLast {
+        destination.writeText(ffi.replace(destination.readText()) { it.groupValues[1] + range + it.groupValues[2] })
     }
 }

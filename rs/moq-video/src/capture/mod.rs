@@ -374,12 +374,12 @@ impl Stream {
 
 /// A test-driven capture device: fixtures push frames at explicit acquisition
 /// instants or device timestamps, standing in for a camera behind a [`Stream`].
-#[cfg(test)]
+#[cfg(all(test, feature = "openh264"))]
 pub(crate) struct Synthetic {
 	chan: Arc<FrameChannel>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "openh264"))]
 impl Synthetic {
 	/// Open a synthetic device with the given geometry, returning it and the stream reading it.
 	pub(crate) fn open(size: crate::Size, framerate: Rate) -> (Self, Stream) {

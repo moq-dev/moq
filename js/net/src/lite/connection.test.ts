@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
-import { SessionCode } from "../error.ts";
+import { SessionCode, SessionError } from "../error.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -128,6 +128,21 @@ for (const [alpn, version] of [
 		try {
 			const writer = await Writer.open(pair.server, { version });
 			await writer.u53(DataType.Setup);
+			writer.close();
+			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+		} finally {
+			connection.abort();
+		}
+	});
+
+	test(`repeated SETUP parameter closes ${alpn} with PROTOCOL_VIOLATION`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+		try {
+			const writer = await Writer.open(pair.server, { version });
+			await writer.u53(DataType.Setup);
+			// A five-byte body holding two empty parameters with the same id.
+			for (const v of [5, 2, 0, 0, 0, 0]) await writer.u53(v);
 			writer.close();
 			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
 		} finally {
@@ -471,5 +486,86 @@ test("close waits for a request served while withdrawals are in flight", async (
 		broadcast.close();
 		source.close();
 		destination.close();
+	}
+});
+
+for (const peerClosed of [true, false]) {
+	test(`driver distinguishes peer close from an open-transport failure: ${peerClosed}`, async () => {
+		const pair = createMockTransportPair(ALPN_06);
+		let incoming!: ReadableStreamDefaultController<WebTransportBidirectionalStream>;
+		Object.defineProperty(pair.client, "incomingBidirectionalStreams", {
+			value: new ReadableStream<WebTransportBidirectionalStream>({
+				start(controller) {
+					incoming = controller;
+				},
+			}),
+		});
+		let stopped!: () => void;
+		const terminal = new Promise<void>((resolve) => {
+			stopped = resolve;
+		});
+		const original = pair.client.close.bind(pair.client);
+		const close = spyOn(pair.client, "close").mockImplementation((info) => {
+			original(info);
+			stopped();
+		});
+		const logged = spyOn(console, "error").mockImplementation(() => {});
+		const connection = new Connection({
+			url: new URL("https://example.com/"),
+			quic: pair.client,
+			version: Version.DRAFT_06,
+		});
+		const failure = new Error(peerClosed ? "Connection closed: 2 unauthorized" : "local accept failed");
+		try {
+			// QMux fulfills closed before it rejects pending accepts with its raw teardown error.
+			if (peerClosed) pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+			incoming.error(failure);
+			// The driver's final abort is the barrier, so the spy cannot outlive this fixture.
+			await terminal;
+			if (peerClosed) {
+				const reason = await connection.closed;
+				expect(reason).toBeInstanceOf(SessionError);
+				expect((reason as SessionError).code).toBe(SessionCode.Unauthorized);
+				expect(logged).not.toHaveBeenCalled();
+			} else {
+				expect(logged).toHaveBeenCalledWith("fatal error running connection", failure);
+			}
+		} finally {
+			connection.abort();
+			pair.server.close();
+			close.mockRestore();
+			logged.mockRestore();
+		}
+	});
+}
+
+test("a malformed complete GOAWAY closes the session", async () => {
+	for (const [alpn, version] of [
+		[ALPN_04, Version.DRAFT_04],
+		[ALPN_05, Version.DRAFT_05],
+		[ALPN_06, Version.DRAFT_06],
+		[ALPN_07_WIP, Version.DRAFT_07],
+	] as const) {
+		const pair = createMockTransportPair(alpn);
+		const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+		const close = spyOn(pair.client, "close");
+		try {
+			const stream = await Stream.open(pair.server, { version });
+			await stream.writer.u53(StreamId.Goaway);
+			await stream.writer.write(new Uint8Array([2, 0, 0]));
+			await new Promise<void>((resolve) => {
+				const channel = new MessageChannel();
+				channel.port1.onmessage = () => {
+					channel.port1.close();
+					channel.port2.close();
+					resolve();
+				};
+				channel.port2.postMessage(null);
+			});
+			expect(close.mock.calls.some(([info]) => info?.closeCode === SessionCode.ProtocolViolation)).toBe(true);
+		} finally {
+			close.mockRestore();
+			connection.abort();
+		}
 	}
 });

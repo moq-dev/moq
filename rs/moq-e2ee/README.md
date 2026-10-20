@@ -21,20 +21,25 @@ authenticated channel. `credential.produce()` mints a fresh epoch and returns a
 `generation::Producer`, which derives opaque track names and keys for that instance alone.
 It accepts no explicit epoch; its clones share permanent track claims.
 
+The application names tracks by their semantic names. `broadcast::Producer` wraps the
+`moq-net` broadcast and creates each track under its physical name, so only physical names
+reach the relays. A track served on demand is reserved with `reserve_track` and accepted
+once its demand shows a subscriber: physical names cannot be mapped back to semantic ones.
+
 ```rust
 let credential = Credential::new(credential::Config { context, kid, secret })?;
 let generation = credential.produce();
-let path = credential.path("meeting.hang")?;
-let name = generation.name("video")?;
-let producer = generation.produce(broadcast.create_track(name.as_str(), None)?)?;
+let broadcast = origin.create_broadcast(&credential.path("meeting.hang")?)?;
+let protected = broadcast::Producer::new(broadcast.clone(), generation.clone());
+let video = protected.create_track("video", None)?;
 broadcast.announce(Route::default().with_epoch(generation.epoch().clone()))?;
 ```
 
 A subscriber discovers the broadcast at `credential.path(semantic)`, takes the epoch from the
 announced `Route::epoch` (or from the application's channel on a wire older than lite-07),
-and calls `credential.consume(epoch)` to bind a `generation::Consumer`. Its
-`consume(subscriber)` opens a track whose name it derived or read from the decrypted
-catalog. A consuming generation cannot produce. Nothing survives a publisher instance: a restart mints a new epoch.
+binds it with `credential.consume(epoch)`, and wraps the broadcast in a
+`broadcast::Consumer`. Its `subscribe(semantic, subscription)` opens the track a decrypted
+catalog names. A consuming generation cannot produce. Nothing survives a publisher instance: a restart mints a new epoch.
 
 ## Processing
 

@@ -21,7 +21,15 @@
 		//   - SVG assets, which Biome routes to its HTML parser and rejects.
 		//   - The audio jitter corpus, which is generated and byte-compared by its own test,
 		//     so a formatter rewriting it would fight the generator on every `just fix`.
-		"includes": ["**", "!rs/moq-mux/src/container/ts/test_data", "!**/*.svg", "!doc/concept/audio-jitter/*.json"]
+		//   - Recorded audio traces, which record.ts writes one arrival per line so a
+		//     re-recording diffs cleanly; the formatter would undo that.
+		"includes": [
+			"**",
+			"!rs/moq-mux/src/container/ts/test_data",
+			"!**/*.svg",
+			"!doc/concept/audio-jitter/*.json",
+			"!test/audio-quality/traces/*.json"
+		]
 	},
 	"linter": {
 		"rules": {
@@ -53,6 +61,10 @@
 			}
 		}
 	},
+	"html": {
+		// Vue template reads count as uses of script variables.
+		"experimentalFullSupportEnabled": true
+	},
 	"css": {
 		"parser": {
 			"cssModules": false,
@@ -61,6 +73,28 @@
 		}
 	},
 	"overrides": [
+		{
+			// Production code reads time through @moq/clock so a Manual clock drives it in tests.
+			// Tests are not swept yet.
+			"includes": ["js/*/src/**", "demo/web/src/**", "!js/clock/src/host.ts", "!**/*.test.ts", "!**/*.test.tsx"],
+			"linter": {
+				"rules": {
+					"style": {
+						"noRestrictedGlobals": {
+							"level": "error",
+							"options": {
+								"deniedGlobals": {
+									"performance": "Use the installed clock",
+									"Date": "Use wall()",
+									"setTimeout": "Use sleep() or timeout()",
+									"setInterval": "Use interval()"
+								}
+							}
+						}
+					}
+				}
+			}
+		},
 		{
 			// The audio jitter reference is the corpus generator, not a library: an
 			// implementation that calls it proves nothing about the normative document.

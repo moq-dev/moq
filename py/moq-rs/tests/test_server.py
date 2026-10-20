@@ -68,9 +68,7 @@ async def test_server_client_roundtrip():
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
 
-                    media_consumer = await moq.media.ContainerConsumer.subscribe(
-                        broadcast_consumer, track_name, audio.container
-                    )
+                    media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio)
 
                     payload = b"hello over the wire"
                     media.write_frame(payload, timedelta(microseconds=1_000_000))
@@ -128,6 +126,8 @@ async def test_client_reconnects_and_resumes_announcements():
                 session = client.session
                 assert session is not None
                 assert await session.status() == moq.ConnectionStatus.CONNECTED
+                assert session.failure() is None
+                assert session.stats().version is not None
 
                 # Kill the transport under the client, like a relay restart.
                 await asyncio.wait_for(accepted.wait(), timeout=10)
@@ -136,11 +136,15 @@ async def test_client_reconnects_and_resumes_announcements():
                 # Nothing accepts the redial until the gate opens, so DISCONNECTED
                 # is still the current status when we ask for it.
                 assert await asyncio.wait_for(session.status(), timeout=10) == moq.ConnectionStatus.DISCONNECTED
+                # The drop's reason is recorded before the status moves.
+                assert session.failure() is not None
+                assert session.stats().version is None
 
                 # The client redials on its own; the accept loop serves it.
                 regate.set()
                 while await asyncio.wait_for(session.status(), timeout=10) != moq.ConnectionStatus.CONNECTED:
                     pass
+                assert session.failure() is None
 
                 # A broadcast published only after the reconnect still arrives.
                 broadcast = server.create_broadcast("after-reconnect")
@@ -236,6 +240,47 @@ async def test_client_websocket_fallback_options():
         moq.Client("https://localhost", websocket_delay=timedelta(milliseconds=-1))
 
 
+async def test_client_connection_knobs():
+    """Every connection knob reaches the native client, and the dial still connects."""
+    assert moq.versions()
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        sessions: list = []
+
+        async def accept_loop() -> None:
+            async for request in server:
+                sessions.append(await request.accept())
+
+        accept_task = asyncio.create_task(accept_loop())
+        try:
+            async with moq.Client(
+                f"https://{server.local_addr}",
+                tls_fingerprints=server.cert_fingerprints(),
+                tls_host_name="localhost",
+                bind="127.0.0.1:0",
+                versions=moq.versions(),
+                timeout=timedelta(seconds=5),
+                race=timedelta(0),
+                resolution_delay=timedelta(0),
+                idle_timeout=timedelta(seconds=5),
+                keep_alive=timedelta(0),
+                gso=False,
+                mtu_discovery=True,
+                congestion_control=moq.CongestionControl.LOSS,
+                keylog=False,
+                websocket_enabled=False,
+            ) as client:
+                assert client.session is not None
+        finally:
+            accept_task.cancel()
+            try:
+                await accept_task
+            except asyncio.CancelledError:
+                pass
+
+    with pytest.raises(ValueError):
+        moq.Client("https://localhost", idle_timeout=timedelta(milliseconds=-1))
+
+
 async def test_invalid_config_fails_on_enter():
     """A value the native side cannot use fails the connect or listen, not a later call."""
     with pytest.raises(moq.Error.Config):  # type: ignore[attr-defined]
@@ -243,6 +288,16 @@ async def test_invalid_config_fails_on_enter():
             pass
     with pytest.raises(moq.Error.Config):  # type: ignore[attr-defined]
         async with moq.Server("not-an-address", tls_generate=["localhost"]):
+            pass
+
+
+async def test_server_keylog_requires_sslkeylogfile(monkeypatch):
+    """keylog reaches the native server, which refuses it without SSLKEYLOGFILE."""
+    monkeypatch.delenv("SSLKEYLOGFILE", raising=False)
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], keylog=False):
+        pass
+    with pytest.raises(moq.Error.Config, match="SSLKEYLOGFILE"):  # type: ignore[attr-defined]
+        async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], keylog=True):
             pass
 
 
@@ -429,7 +484,9 @@ async def test_client_context_keeps_the_body_error():
                     consumer = await asyncio.wait_for(consume.request_broadcast("live"), timeout=5.0)
                     reader = await asyncio.wait_for(consumer.subscribe_track("data"), timeout=5.0)
                     reading.append(asyncio.create_task(drain(reader)))
-                    await asyncio.wait_for(track.demand().used(), timeout=5.0)
+                    demand = track.demand()
+                    while await asyncio.wait_for(demand.wanted_changed(), timeout=5.0) is None:
+                        pass
                     raise ZeroDivisionError("boom")
             # The error exits the context without draining, but the session is over.
             assert session is not None

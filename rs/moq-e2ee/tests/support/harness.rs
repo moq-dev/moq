@@ -1,20 +1,20 @@
 //! Test harness that produces a connected `(client, server)` pair of
-//! [`moq_net::Session`]s over the in-memory mock transport.
+//! [`moq_net::Session`]s over the in-memory transport.
 //!
 //! The harness runs the full MoQ handshake (Client::connect + Server::accept)
-//! over a [`super::mock::MockSession`] pair and spawns both protocol drivers, giving tests
+//! over a [`moq_net::transport::memory`] pair and spawns both protocol drivers, giving tests
 //! two live sessions ready for pub/sub without any real QUIC or network I/O.
 
 #![allow(dead_code)]
 
 use moq_net::{Client, Server, Session, Version, origin};
 
-use super::mock::create_mock_session_pair;
+use moq_net::transport::memory;
 
 pub use moq_net::time::run;
 
 pub fn now() -> moq_net::time::Instant {
-	tokio::time::Instant::now().into_std()
+	moq_net::time::now()
 }
 
 /// Options for [`connect_mock`].
@@ -51,9 +51,9 @@ pub struct MockPair {
 	pub server: Session,
 }
 
-/// Run the MoQ handshake over the mock transport, returning connected sessions.
+/// Run the MoQ handshake over the in-memory transport, returning connected sessions.
 ///
-/// Both sides negotiate the version via ALPN (the mock reports the protocol
+/// Both sides negotiate the version via ALPN (the transport reports the protocol
 /// string matching the requested version), mirroring a real QUIC transport
 /// where ALPN selects the wire format before the connection starts.
 ///
@@ -61,8 +61,9 @@ pub struct MockPair {
 ///
 /// Panics if the handshake fails on either side (test-only code).
 pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
-	let protocol = opts.version.alpn();
-	let (client_transport, server_transport) = create_mock_session_pair(Some(protocol));
+	let mut config = memory::Config::default();
+	config.protocol = Some(opts.version.alpn().to_string());
+	let (client_transport, server_transport) = memory::pair(config);
 
 	let mut client = Client::new().with_versions(opts.version.into());
 	if let Some(publish) = &opts.client_publish {

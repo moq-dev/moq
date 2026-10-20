@@ -62,20 +62,36 @@ impl Clock {
 	}
 
 	/// The wall-clock time of `pts` under this fixed mapping.
+	///
+	/// Exact down to the nanosecond; an instant finer than that (a 90 kHz tick) is floored.
+	/// Refuses a result past the JSON-safe range or one the system clock cannot represent.
 	pub fn wall_clock(&self, pts: moq_net::Timestamp) -> Result<std::time::SystemTime> {
-		let scale = self.wall.scale();
-		let total = self.wall.value() as u128 + pts.as_scale(scale);
-		if total > MAX_SAFE_INTEGER as u128 {
+		let overflow = || crate::Error::TimestampOverflow(moq_net::TimeOverflow);
+		let wall_scale = self.wall.scale().as_u64() as u128;
+		let pts_scale = pts.scale().as_u64() as u128;
+
+		// Sum as one exact fraction of a second, `num / den`, so neither side is rounded into the
+		// other's units first.
+		let num = (self.wall.value() as u128)
+			.checked_mul(pts_scale)
+			.and_then(|wall| wall.checked_add((pts.value() as u128).checked_mul(wall_scale)?))
+			.ok_or_else(overflow)?;
+		let den = wall_scale.checked_mul(pts_scale).ok_or_else(overflow)?;
+
+		// `num / pts_scale` is the result in the wall's units; any fraction past the limit is past it.
+		if num > MAX_SAFE_INTEGER as u128 * pts_scale {
+			let total = num.div_ceil(pts_scale);
 			return Err(crate::Error::InvalidWall(u64::try_from(total).unwrap_or(u64::MAX)));
 		}
 
-		let unix_millis = MOQ_EPOCH_UNIX_MILLIS as u128 + total * 1000 / scale.as_u64() as u128;
-		let unix_millis =
-			u64::try_from(unix_millis).map_err(|_| crate::Error::TimestampOverflow(moq_net::TimeOverflow))?;
+		let secs = u64::try_from(num / den).map_err(|_| overflow())?;
+		let nanos = (num % den).checked_mul(1_000_000_000).ok_or_else(overflow)? / den;
+		let since_moq_epoch = std::time::Duration::new(secs, nanos as u32);
 		// Windows' `SystemTime` cannot reach the furthest wall a catalog carries.
 		std::time::UNIX_EPOCH
-			.checked_add(std::time::Duration::from_millis(unix_millis))
-			.ok_or(crate::Error::TimestampOverflow(moq_net::TimeOverflow))
+			.checked_add(std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS))
+			.and_then(|moq_epoch| moq_epoch.checked_add(since_moq_epoch))
+			.ok_or_else(overflow)
 	}
 }
 
@@ -144,6 +160,17 @@ mod test {
 		assert!(Clock::new(wall).is_err());
 	}
 
+	/// A fraction of a wall unit past the JSON-safe range is still past it.
+	#[test]
+	fn wall_clock_refuses_a_fraction_past_the_safe_range() {
+		let clock = Clock::new(moq_net::Timestamp::from_micros(MAX_SAFE_INTEGER).unwrap()).unwrap();
+		clock.wall_clock(moq_net::Timestamp::ZERO).unwrap();
+		assert!(matches!(
+			clock.wall_clock(moq_net::Timestamp::from_nanos(1).unwrap()),
+			Err(crate::Error::InvalidWall(_))
+		));
+	}
+
 	/// Regression: the furthest wall a catalog carries overflowed `SystemTime` on
 	/// Windows and panicked. Unix reaches it, so only Windows sees the error.
 	#[test]
@@ -184,5 +211,30 @@ mod test {
 				.unwrap(),
 			second
 		);
+	}
+
+	/// Regression: the result was floored to the millisecond, dropping the sub-millisecond part.
+	#[test]
+	fn wall_clock_keeps_sub_millisecond_precision() {
+		let moq_epoch = std::time::UNIX_EPOCH + std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS);
+		let micros = |v| moq_net::Timestamp::from_micros(v).unwrap();
+		let nanos = std::time::Duration::from_nanos;
+
+		let clock = Clock::new(micros(1_000_999)).unwrap();
+		assert_eq!(
+			clock.wall_clock(moq_net::Timestamp::ZERO).unwrap(),
+			moq_epoch + nanos(1_000_999_000)
+		);
+
+		// One 90 kHz tick on a microsecond wall is 11,111.1 ns, floored at the nanosecond.
+		let tick = moq_net::Timestamp::from_scale(1, 90_000).unwrap();
+		assert_eq!(
+			clock.wall_clock(tick).unwrap(),
+			moq_epoch + nanos(1_000_999_000 + 11_111)
+		);
+
+		// A 1 µs pts on a millisecond wall is not lost converting into the wall's units.
+		let clock = Clock::new(moq_net::Timestamp::from_millis(1_000).unwrap()).unwrap();
+		assert_eq!(clock.wall_clock(micros(1)).unwrap(), moq_epoch + nanos(1_000_001_000));
 	}
 }

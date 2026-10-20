@@ -1,6 +1,6 @@
 use std::io::Write;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -10,8 +10,23 @@ use serde::Serialize;
 /// collecting larger values. Chat delivery should stay far below this ceiling.
 const LATENCY_BUCKETS: usize = 60_001;
 
+/// Fixed sums over every connection's startup roll.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Targets {
+	pub connections: u64,
+	pub broadcasts: u64,
+	pub subscriptions: u64,
+}
+
 /// Shared counters bumped by the connection tasks and drained by the reporter.
 pub struct Stats {
+	targets: Targets,
+	/// Latched once the live established gauges all meet their targets together.
+	ready: AtomicBool,
+	/// Active subscriptions that have read a complete group.
+	pub(crate) subscriptions_established: AtomicU64,
+	/// Active broadcasts that connected or completed their first group.
+	pub(crate) broadcasts_established: AtomicU64,
 	pub connections: AtomicU64,
 	pub broadcasts: AtomicU64,
 	pub subscriptions: AtomicU64,
@@ -24,14 +39,27 @@ pub struct Stats {
 	pub groups_recv: AtomicU64,
 	/// Settled sequence spans plus any failed live-frontier groups.
 	pub groups_expected: AtomicU64,
-	/// Completed deliveries within `groups_expected`. The shortfall is lost groups.
+	/// Completed deliveries within `groups_expected`. The shortfall is the gaps
+	/// still outstanding, which a late arrival shrinks.
 	pub groups_present: AtomicU64,
+	/// Groups skipped past or failed. A late arrival never decrements it.
+	pub groups_lost: AtomicU64,
 	latency: Latency,
 }
 
 impl Default for Stats {
 	fn default() -> Self {
+		Self::new(Targets::default())
+	}
+}
+
+impl Stats {
+	pub(crate) fn new(targets: Targets) -> Self {
 		Self {
+			targets,
+			ready: AtomicBool::new(false),
+			subscriptions_established: AtomicU64::new(0),
+			broadcasts_established: AtomicU64::new(0),
 			connections: AtomicU64::new(0),
 			broadcasts: AtomicU64::new(0),
 			subscriptions: AtomicU64::new(0),
@@ -42,12 +70,23 @@ impl Default for Stats {
 			groups_recv: AtomicU64::new(0),
 			groups_expected: AtomicU64::new(0),
 			groups_present: AtomicU64::new(0),
+			groups_lost: AtomicU64::new(0),
 			latency: Latency::default(),
 		}
 	}
-}
 
-impl Stats {
+	/// Whether the full rolled load has been live at once; a later loss only lowers the gauges.
+	pub(crate) fn ready(&self) -> bool {
+		if !self.ready.load(Ordering::Relaxed)
+			&& self.connections.load(Ordering::Relaxed) >= self.targets.connections
+			&& self.broadcasts_established.load(Ordering::Relaxed) >= self.targets.broadcasts
+			&& self.subscriptions_established.load(Ordering::Relaxed) >= self.targets.subscriptions
+		{
+			self.ready.store(true, Ordering::Relaxed);
+		}
+		self.ready.load(Ordering::Relaxed)
+	}
+
 	pub fn frame_sent(&self, bytes: usize) {
 		self.frames_sent.fetch_add(1, Ordering::Relaxed);
 		self.bytes_sent.fetch_add(bytes as u64, Ordering::Relaxed);
@@ -114,23 +153,22 @@ impl Stats {
 			let recv_fps = now.frames_recv.saturating_sub(prev.frames_recv) as f64 / secs;
 
 			// Group loss is cumulative (a correctness signal), not a per-interval rate.
-			let lost_groups = now.groups_expected.saturating_sub(now.groups_present);
 			let loss = if now.groups_expected > 0 {
-				lost_groups as f64 / now.groups_expected as f64 * 100.0
+				now.groups_lost as f64 / now.groups_expected as f64 * 100.0
 			} else {
 				0.0
 			};
 
 			tracing::info!(
-				connections = now.connections,
-				broadcasts = now.broadcasts,
-				subscriptions = now.subscriptions,
+				connections = now.connections.established,
+				broadcasts = now.broadcasts.active,
+				subscriptions = now.subscriptions.active,
 				send_mbps = format_args!("{send_mbps:.1}"),
 				send_fps = format_args!("{send_fps:.0}"),
 				recv_mbps = format_args!("{recv_mbps:.1}"),
 				recv_fps = format_args!("{recv_fps:.0}"),
 				recv_groups = now.groups_recv,
-				lost_groups,
+				lost_groups = now.groups_lost,
 				loss = format_args!("{loss:.2}%"),
 				latency_samples = now.latency_samples,
 				latency_p50_ms = ?now.latency_p50_ms,
@@ -185,12 +223,26 @@ impl<'a> Record<'a> {
 }
 
 #[derive(Serialize)]
+struct Connections {
+	target: u64,
+	established: u64,
+}
+
+#[derive(Serialize)]
+struct Activity {
+	target: u64,
+	active: u64,
+	established: u64,
+}
+
+#[derive(Serialize)]
 struct Snapshot {
+	ready: bool,
 	#[serde(skip)]
 	captured_at: SystemTime,
-	connections: u64,
-	broadcasts: u64,
-	subscriptions: u64,
+	connections: Connections,
+	broadcasts: Activity,
+	subscriptions: Activity,
 	frames_sent: u64,
 	bytes_sent: u64,
 	frames_recv: u64,
@@ -198,6 +250,7 @@ struct Snapshot {
 	groups_recv: u64,
 	groups_expected: u64,
 	groups_present: u64,
+	groups_lost: u64,
 	latency_samples: u64,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	latency_p50_ms: Option<u64>,
@@ -275,18 +328,35 @@ impl IntervalLatency {
 impl Snapshot {
 	fn take(stats: &Stats) -> Self {
 		let latency = stats.latency.snapshot();
+		// Acquire the counters bounded by `groups_expected` before reading it, pairing
+		// with the release in `GapTracker::record`, so neither exceeds it.
+		let groups_lost = stats.groups_lost.load(Ordering::Acquire);
+		let groups_present = stats.groups_present.load(Ordering::Acquire);
 		Self {
+			ready: stats.ready(),
 			captured_at: latency.captured_at,
-			connections: stats.connections.load(Ordering::Relaxed),
-			broadcasts: stats.broadcasts.load(Ordering::Relaxed),
-			subscriptions: stats.subscriptions.load(Ordering::Relaxed),
+			connections: Connections {
+				target: stats.targets.connections,
+				established: stats.connections.load(Ordering::Relaxed),
+			},
+			broadcasts: Activity {
+				target: stats.targets.broadcasts,
+				active: stats.broadcasts.load(Ordering::Relaxed),
+				established: stats.broadcasts_established.load(Ordering::Relaxed),
+			},
+			subscriptions: Activity {
+				target: stats.targets.subscriptions,
+				active: stats.subscriptions.load(Ordering::Relaxed),
+				established: stats.subscriptions_established.load(Ordering::Relaxed),
+			},
 			frames_sent: stats.frames_sent.load(Ordering::Relaxed),
 			bytes_sent: stats.bytes_sent.load(Ordering::Relaxed),
 			frames_recv: stats.frames_recv.load(Ordering::Relaxed),
 			bytes_recv: stats.bytes_recv.load(Ordering::Relaxed),
 			groups_recv: stats.groups_recv.load(Ordering::Relaxed),
 			groups_expected: stats.groups_expected.load(Ordering::Relaxed),
-			groups_present: stats.groups_present.load(Ordering::Relaxed),
+			groups_present,
+			groups_lost,
 			latency_samples: latency.samples,
 			latency_p50_ms: latency.p50_ms,
 			latency_p90_ms: latency.p90_ms,
@@ -415,6 +485,70 @@ mod tests {
 	use std::sync::Arc;
 
 	use super::*;
+
+	#[test]
+	fn readiness_requires_the_targets_live_at_once() {
+		let stats = Stats::new(Targets {
+			connections: 2,
+			..Default::default()
+		});
+		// One connection ends before the other connects: two established, never together.
+		stats.connections.store(1, Ordering::Relaxed);
+		assert!(!stats.ready());
+		stats.connections.store(0, Ordering::Relaxed);
+		stats.connections.store(1, Ordering::Relaxed);
+		assert!(!stats.ready());
+		stats.connections.store(2, Ordering::Relaxed);
+		assert!(stats.ready());
+	}
+
+	#[test]
+	fn json_readiness_waits_for_each_target_and_survives_later_loss() {
+		let stats = Stats::new(Targets {
+			connections: 1,
+			broadcasts: 1,
+			subscriptions: 2,
+		});
+		let line = |stats: &Stats| {
+			let previous = Snapshot::take(stats);
+			let now = Snapshot::take(stats);
+			let interval = IntervalLatency::from_delta(&previous.latency_buckets, &now.latency_buckets);
+			serde_json::to_value(Record::new(&previous, &now, &interval).unwrap()).unwrap()
+		};
+		assert_eq!(line(&stats)["ready"], false);
+		stats.connections.store(1, Ordering::Relaxed);
+		stats.broadcasts.store(1, Ordering::Relaxed);
+		stats.broadcasts_established.store(1, Ordering::Relaxed);
+		stats.subscriptions.store(2, Ordering::Relaxed);
+		stats.subscriptions_established.store(1, Ordering::Relaxed);
+		assert_eq!(line(&stats)["ready"], false);
+		stats.subscriptions_established.store(2, Ordering::Relaxed);
+		let ready = line(&stats);
+		assert_eq!(ready["ready"], true);
+		assert_eq!(ready["connections"], serde_json::json!({"target": 1, "established": 1}));
+		assert_eq!(
+			ready["broadcasts"],
+			serde_json::json!({"target": 1, "active": 1, "established": 1})
+		);
+		assert_eq!(
+			ready["subscriptions"],
+			serde_json::json!({"target": 2, "active": 2, "established": 2})
+		);
+		for removed in ["targets", "established", "subscriptions_established"] {
+			assert!(ready.get(removed).is_none(), "{removed}");
+		}
+		// Gauges can fall all the way to zero after establishment without resetting readiness.
+		stats.connections.store(0, Ordering::Relaxed);
+		stats.broadcasts.store(0, Ordering::Relaxed);
+		stats.broadcasts_established.store(0, Ordering::Relaxed);
+		stats.subscriptions.store(0, Ordering::Relaxed);
+		stats.subscriptions_established.store(0, Ordering::Relaxed);
+		let lost = line(&stats);
+		assert_eq!(lost["connections"]["established"], 0);
+		assert_eq!(lost["broadcasts"]["established"], 0);
+		assert_eq!(lost["subscriptions"]["established"], 0);
+		assert_eq!(lost["ready"], true);
+	}
 
 	/// A failed stats write must surface as an error so the run dies loudly.
 	/// Silently dropping output leaves a partial JSONL file behind a green exit,

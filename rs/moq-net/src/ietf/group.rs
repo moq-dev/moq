@@ -13,16 +13,9 @@ use crate::ietf::Param;
 const PROP_TIMESCALE: u64 = 0x08;
 const PROP_TIMESTAMP: u64 = 0x10;
 
-/// The Timestamp id from draft-ietf-moq-loc-03, accepted on decode only.
-///
-/// Draft-03's body text and its IANA table disagreed (0x0A vs 0x06); this is the
-/// table's value, which is what we and other implementations shipped. Draft-04
-/// assigns 0x0A to Secure Objects private properties, so it is not accepted here.
-const PROP_TIMESTAMP_DRAFT03: u64 = 0x06;
-
 /// Implementation limit for an object's extension (property) block, independent of the
 /// IETF draft. Checked at the length prefix, before the block is buffered.
-pub(super) const MAX_OBJECT_EXTENSIONS: usize = 64 * 1024;
+pub(crate) const MAX_OBJECT_EXTENSIONS: usize = 64 * 1024;
 
 /// The length prefix of an object's extension block, refused past [`MAX_OBJECT_EXTENSIONS`].
 #[derive(Debug)]
@@ -72,48 +65,20 @@ fn encode_object_property_type(w: &mut Encoder<'_>, kind: u64, prev: u64, versio
 	w.varint(encoded)
 }
 
-/// Decode the Timestamp (0x10) Object Property from an object's extension block,
-/// skipping any other properties. Returns `None` when no Timestamp property is present.
-///
-/// `timescale` is the track's declared units. An object-scope Timescale (0x08), which
-/// draft-ietf-moq-loc-04 permits, is ignored: timedness and units are per track, so the
-/// track's TIMESCALE alone decides them.
+/// Decode the same property list as ingest when checking timestamps in wire tests.
+#[cfg(test)]
 pub fn decode_object_time(
 	r: &mut Decoder<'_>,
 	timescale: Timescale,
 	version: Version,
 ) -> Result<Option<Timestamp>, DecodeError> {
-	let mut timestamp: Option<u64> = None;
-	let mut prev_type: u64 = 0;
-	let mut first = true;
-
-	while !r.is_empty() {
-		let step = r.varint()?;
-		let abs = match version {
-			Version::Draft14 | Version::Draft15 => step,
-			_ if first => step,
-			_ => prev_type.checked_add(step).ok_or(DecodeError::BoundsExceeded)?,
-		};
-		first = false;
-		prev_type = abs;
-
-		if abs % 2 == 0 {
-			// Even type: a single varint value.
-			let value = r.varint()?;
-			match abs {
-				PROP_TIMESTAMP | PROP_TIMESTAMP_DRAFT03 => timestamp = Some(value),
-				_ => {}
-			}
-		} else {
-			// Odd type: length-prefixed bytes we don't care about.
-			let len = usize::try_from(r.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
-			r.slice(len)?;
-		}
-	}
-
-	timestamp
-		.map(|value| Timestamp::new(value, timescale).map_err(|_| DecodeError::InvalidValue))
-		.transpose()
+	let data = bytes::Bytes::copy_from_slice(r.rest());
+	super::object::read(&data, version, Some(timescale))
+		.map(|decoded| decoded.timestamp)
+		.map_err(|error| match error {
+			crate::Error::Decode(error) => error,
+			_ => DecodeError::InvalidValue,
+		})
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
@@ -193,9 +158,8 @@ pub struct GroupFlags {
 	// There's an explicit subgroup on the wire.
 	pub has_subgroup: bool,
 
-	// Use the first object ID as the subgroup ID
-	// Since we don't support subgroups or object ID > 0, this is trivial to support.
-	// Not compatibile with has_subgroup
+	// Use the first object ID as the subgroup ID, so only a first object ID of 0 is
+	// subgroup 0. Not compatible with has_subgroup.
 	pub has_subgroup_object: bool,
 
 	// There's an implicit end marker when the stream is closed.
@@ -207,9 +171,8 @@ pub struct GroupFlags {
 
 	/// Whether this stream carries the subgroup from its first published object.
 	///
-	/// A subgroup that starts partway through has a hole at the front, which moq-lite cannot
-	/// represent. Always true on the drafts that predate the FIRST_OBJECT bit (before
-	/// draft-18), where there is no such signal to read.
+	/// Independent of its first Object ID: a publisher can start a subgroup above 0.
+	/// Always true before draft-18, where there is no such signal to read.
 	pub first_object: bool,
 }
 
@@ -478,16 +441,6 @@ mod tests {
 		assert_eq!(decoded.scale(), Timescale::MILLI);
 	}
 
-	/// A peer on draft-ietf-moq-loc-03 wrote the Timestamp at 0x06; still decode it.
-	#[test]
-	fn test_object_time_decodes_draft03_timestamp() {
-		let buf = from_varints(&[PROP_TIMESTAMP_DRAFT03, 777], Version::Draft18);
-
-		let decoded = decode_time(&buf, Timescale::MICRO, Version::Draft18).unwrap();
-		assert_eq!(decoded.value(), 777);
-		assert_eq!(decoded.scale(), Timescale::MICRO);
-	}
-
 	/// No Timestamp property at all yields None.
 	#[test]
 	fn test_object_time_absent() {
@@ -625,8 +578,7 @@ mod tests {
 	}
 
 	/// Draft-18 introduces the FIRST_OBJECT bit (0x40) per spec §11.4.2.
-	/// moq-lite always sets it on emit and ignores it on decode (we already
-	/// require what the bit asserts).
+	/// Plain groups set it; relayed groups preserve the publisher's claim.
 	#[test]
 	fn test_first_object_bit_draft18() {
 		// Encoding sets bit 0x40 for default flags.

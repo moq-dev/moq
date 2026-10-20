@@ -80,9 +80,9 @@ fn lite_values() -> Vec<u64> {
 	values
 }
 
-/// One GROUP header and its frames, as a publisher writes them: a zigzag timestamp delta,
-/// the payload size, then the payload.
-fn lite_group(version: lite::Version) -> Vec<u8> {
+/// One GROUP header and its frames, as a publisher writes them: a zigzag timestamp delta on
+/// a timed track, the payload size, then the payload.
+fn lite_group(version: lite::Version, frames: impl IntoIterator<Item = (Option<i64>, usize)>) -> Vec<u8> {
 	let mut buf = Vec::new();
 	let w = &mut Encoder::new(&mut buf, version.into());
 	let header = lite::Group {
@@ -91,8 +91,10 @@ fn lite_group(version: lite::Version) -> Vec<u8> {
 		frame_start: 200,
 	};
 	header.encode(w, version).unwrap();
-	for (delta, size) in [(0i64, 10usize), (33_333, 300), (-1_000, 20_000), (1 << 40, 1)] {
-		w.varint(varint::zigzag(delta)).unwrap();
+	for (delta, size) in frames {
+		if let Some(delta) = delta {
+			w.varint(varint::zigzag(delta)).unwrap();
+		}
 		w.varint(size as u64).unwrap();
 		w.slice(&vec![0xAB; size]);
 	}
@@ -100,12 +102,16 @@ fn lite_group(version: lite::Version) -> Vec<u8> {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Echo {
 	values: Vec<String>,
 	varints: Vec<u8>,
 	setup: Vec<u8>,
 	datagram: Vec<u8>,
+	untimed_datagram: Vec<u8>,
+	track_info: Vec<u8>,
 	group: Vec<u8>,
+	untimed_group: Vec<u8>,
 	beyond: Vec<u8>,
 }
 
@@ -135,13 +141,57 @@ fn lite_varint_interop() {
 		let datagram = lite::Datagram {
 			subscribe: (1 << 40) + 1,
 			sequence: 300,
-			timestamp: (1 << 50) + 5,
+			timestamp: Some((1 << 50) + 5),
 			payload: bytes::Bytes::from_static(b"x"),
+			ietf: None,
 		}
 		.encode_bytes(version)
 		.unwrap();
 
-		let group = lite_group(version);
+		// Only lite-07 can carry an untimed track; lite-06 stamps it, so it has no untimed bytes.
+		let untimed = version.wire_timescale(None).is_none();
+
+		// The body doesn't say it is untimed; the subscription's track does.
+		let untimed_datagram = lite::Datagram {
+			subscribe: 9,
+			sequence: 1 << 30,
+			timestamp: None,
+			payload: bytes::Bytes::from_static(b"untimed"),
+			ietf: None,
+		}
+		.encode_bytes(version);
+		let untimed_datagram = match untimed {
+			true => untimed_datagram.unwrap().to_vec(),
+			false => {
+				assert!(untimed_datagram.is_err(), "{version}: encoded an untimed datagram");
+				Vec::new()
+			}
+		};
+
+		// An untimed track: zero on lite-07, milliseconds before it.
+		let track_info = lite::TrackInfo {
+			refresh: None,
+			priority: 1,
+			max_age: None,
+			timescale: None,
+		}
+		.encode_bytes(version)
+		.unwrap();
+
+		let group = lite_group(
+			version,
+			[
+				(Some(0), 10),
+				(Some(33_333), 300),
+				(Some(-1_000), 20_000),
+				(Some(1 << 40), 1),
+			],
+		);
+		// Small, since the whole input rides in one argument.
+		let untimed_group = match untimed {
+			true => lite_group(version, [(None, 10), (None, 300)]),
+			false => Vec::new(),
+		};
 
 		let input = serde_json::json!({
 			"version": crate::Version::from(version).alpn(),
@@ -149,7 +199,10 @@ fn lite_varint_interop() {
 			"varints": varints,
 			"setup": setup.to_vec(),
 			"datagram": datagram.to_vec(),
+			"untimedDatagram": untimed_datagram,
+			"trackInfo": track_info.to_vec(),
 			"group": group,
+			"untimedGroup": untimed_group,
 		});
 		let echo: Echo = serde_json::from_slice(&bun("lite-varint.ts", input)).expect("JS returned its encodings");
 
@@ -158,7 +211,10 @@ fn lite_varint_interop() {
 		assert_eq!(echo.varints, varints, "{version}: JS encoded the values differently");
 		assert_eq!(echo.setup, setup, "{version}: SETUP");
 		assert_eq!(echo.datagram, datagram, "{version}: datagram");
+		assert_eq!(echo.untimed_datagram, untimed_datagram, "{version}: untimed datagram");
+		assert_eq!(echo.track_info, track_info, "{version}: TRACK_INFO");
 		assert_eq!(echo.group, group, "{version}: group");
+		assert_eq!(echo.untimed_group, untimed_group, "{version}: untimed group");
 
 		match version {
 			lite::Version::Lite07 => {
@@ -311,4 +367,108 @@ fn lite_auth_unsupported_interop() {
 		refused
 	);
 	assert!(reader.is_empty());
+}
+
+/// TRACK_STATUS on every draft: the JS publisher decodes what Rust encodes and answers with a
+/// TRACK_STATUS_OK the Rust subscriber reads, carrying what a SUBSCRIBE_OK would as far as the
+/// draft has room, or refuses a missing broadcast DOES_NOT_EXIST.
+#[test]
+#[ignore = "requires Bun; run by just test interop"]
+fn ietf_track_status_interop() {
+	use crate::coding::Decode;
+	use crate::ietf::error::request;
+
+	let all = [
+		ietf::Version::Draft14,
+		ietf::Version::Draft15,
+		ietf::Version::Draft16,
+		ietf::Version::Draft17,
+		ietf::Version::Draft18,
+		ietf::Version::Draft19,
+		ietf::Version::Draft20,
+		ietf::Version::Draft21,
+		ietf::Version::Draft22,
+	];
+	for (draft, version) in (14..).zip(all) {
+		let legacy = matches!(
+			version,
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
+		);
+		let request = |id: u64, namespace: &str, wanted: bool| {
+			let mut buf = Vec::new();
+			let mut w = Encoder::new(&mut buf, version.into());
+			w.varint(<ietf::TrackStatus as ietf::Message>::ID).unwrap();
+			ietf::TrackStatus {
+				request_id: ietf::RequestId(id),
+				track_namespace: crate::Path::new(namespace),
+				track_name: "video".into(),
+				properties_wanted: wanted,
+				epoch: None,
+			}
+			.encode(&mut w, version)
+			.unwrap();
+			buf
+		};
+		let input = serde_json::json!({
+			"draft": draft,
+			"requests": [request(1, "room", true), request(3, "room", false), request(5, "absent", true)],
+		});
+		let responses: Vec<Vec<u8>> =
+			serde_json::from_slice(&bun("track-status.ts", input)).expect("JS returned its responses");
+		assert_eq!(responses.len(), 3, "{version}");
+
+		for (index, wanted) in [true, false].into_iter().enumerate() {
+			let mut r = Decoder::new(&responses[index], version.into());
+			assert_eq!(r.varint().unwrap(), ietf::TrackStatusOk::id(version), "{version}");
+			let ok = ietf::TrackStatusOk::decode(&mut r, version).unwrap();
+			assert!(r.is_empty(), "{version}: trailing bytes");
+
+			let expected = match version {
+				// GROUP_ORDER is a field on draft-14 and a parameter on draft-15.
+				ietf::Version::Draft14 | ietf::Version::Draft15 => ietf::Properties {
+					group_order: Some(ietf::GroupOrder::Descending),
+					..Default::default()
+				},
+				ietf::Version::Draft16 | ietf::Version::Draft17 => ietf::Properties::default(),
+				// Only draft-20 can carry the opt-out.
+				_ if !wanted && ietf::Filter::is_draft20(version) => ietf::Properties::default(),
+				_ => ietf::Properties {
+					unknown: Default::default(),
+					dynamic_groups: false,
+					max_cache_duration: Some(std::time::Duration::from_millis(5000)),
+					timescale: Some(crate::Timescale::MILLI),
+					// The JS track's priority 2, lower-first on the wire.
+					priority: Some(u8::MAX - 2),
+					group_order: Some(ietf::GroupOrder::Descending),
+				},
+			};
+			assert_eq!(
+				ok,
+				ietf::TrackStatusOk {
+					request_id: legacy.then_some(ietf::RequestId(1 + 2 * index as u64)),
+					largest: Some(ietf::Location { group: 4, object: 1 }),
+					properties: expected,
+				},
+				"{version} wanted={wanted}"
+			);
+		}
+
+		let mut r = Decoder::new(&responses[2], version.into());
+		let code = match r.varint().unwrap() {
+			ietf::TRACK_STATUS_ERROR_14 if version == ietf::Version::Draft14 => {
+				ietf::SubscribeError::decode(&mut r, version).unwrap().error_code
+			}
+			id if id == <ietf::RequestError as ietf::Message>::ID && version != ietf::Version::Draft14 => {
+				ietf::RequestError::decode(&mut r, version).unwrap().error_code
+			}
+			id => panic!("{version}: unexpected refusal type {id}"),
+		};
+		assert!(
+			matches!(
+				request::from_code(code, request::Kind::TrackStatus, version),
+				crate::Error::NotFound
+			),
+			"{version}: missing broadcast refused with {code}"
+		);
+	}
 }

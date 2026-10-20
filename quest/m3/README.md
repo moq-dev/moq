@@ -33,16 +33,17 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Stream sessions on the ring](/quest/m3/uring-tcp/README.md) - WebSocket and HTTP on the io_uring workers, gated on the ablation; no fleet asks for ring TCP yet
 - [#3202](/quest/m3/3202-moq-uring-use-fixed-file-slots-for-worker-udp-sockets.md) - moq-uring: fixed-file slots for worker UDP sockets, if its own benchmark measures a win
 - [#3129](/quest/m3/3129-moq-uring-write-the-webtransport-stream-header-at-open.md) - moq-uring writes the WebTransport stream header at open and settles the open contract, once a caller hits it
-- [QUIC receive timestamps](/quest/m3/quic-gcc.md) - a spike measuring receive timestamps in ACKs on native and relay-to-relay egress; delay-based control only if it justifies one
-- [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in the fork, an `ecn` config knob, and a dualpi2 measurement, if the ECN measurement says marks survive
+- [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement, if the ECN measurement says marks survive
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a Rust redial starts at the previous connection's rate
-- [Cut-through](/quest/m3/cut-through/README.md) - a lossy-hop bench decides whether a relay should forward bytes behind a QUIC stream hole; the build is re-planned if it says go
+- [Cut-through](/quest/m3/cut-through/README.md) - a bufferbloat bench decides whether a relay should forward bytes behind a QUIC stream hole; the build is re-planned if it says go
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [vcpkg registry](/quest/m3/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests, once a consumer asks
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
 - [Linux OBS GPU input](/quest/m3/obs-linux-gpu.md) - publish OBS compositor frames without CPU readback on a validated Linux graphics/encoder combination
 - [Routing cost domains](/quest/m3/routing-cost-domains.md) - design operator boundaries and policy without adding incomparable costs
-- [Relay request tokens](/quest/m3/auth-request-lease.md) - verify a request token with its own lease when a consumer needs relay integration
+- [Relay request tokens](/quest/m3/auth-request-lease.md) - the auth server sees a request token's lease end with its request
+- [Request tokens beyond Rust](/quest/m3/request-token-surfaces.md) - a JS, moq-ffi, or moq-cli request-token API, built only for the surface a consumer names
+- [Token on FETCH](/quest/m3/auth-token-fetch.md) - a request token authorizes TRACK_STATUS and FETCH; parked on a maintainer decision, with m1 recommended
 - [moq-transport cluster peers](/quest/m3/ietf-cluster-peers.md) - the cluster draft carries the route layer, so moq-transport relays peer again, once a moq-transport relay operator asks
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment that makes the exemption dead code
 - [Drop the hidden cluster exemption](/quest/m3/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
@@ -54,7 +55,6 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [SITL proof and browser ground station](/quest/m3/teleop-proof.md) - ArduPilot
   SITL and a synthetic camera flown from a browser ground station, reproducible
   in five minutes
-- [P2P](/quest/m3/p2p/README.md) - opted-in clients serve each other over data channels and iroh while the relay stays the rendezvous and the fallback, under application policy
 - [Ladder](/quest/m3/ladder/README.md) - a transcode ladder adapts to the uplink it publishes over, instead of encoding every live rung at its ceiling
 - [fMP4 emsg](/quest/m3/emsg.md) - settles the shared framing and missing-data semantics before this section adopts them
 - [ID3 catalog section](/quest/m3/id3.md) - timed ID3 as a first-class container-neutral catalog section
@@ -63,11 +63,9 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [MSFTS convergence](/quest/m3/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where they differ, once an MSFTS implementer engages
 - [#2279](/quest/m3/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
 - [CEA-608/708](/quest/m3/captions-cea.md) - captions carried inside video SEI become a real text rendition at import
-- [Browser archive](/quest/m3/archive-browser.md) - the same contract for browser-published broadcasts
-- [Paced replay](/quest/m3/archive-paced-replay.md) - a replay pushes its groups to live subscribers on one shared clock, so any live player plays it
+- [Paced replay](/quest/m3/archive-paced-replay.md) - an archive consumer pushes stored groups to live subscribers on one shared clock, so any live player plays it
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   reads its viewers' feedback and adapts its bitrate
-- [Closure counters](/quest/m3/closure-counters.md) - document and pin that a same-epoch rejoin within the grace may regress the closure counters retire advanced
-- [Interop runner withdraws before disconnecting](/quest/m3/interop-runner-approval.md) - condition: the maintainer approves posting and a released moq-tokio and @moq/net carry close() withdrawals
+- [Interop runner withdraws before disconnecting](/quest/m3/interop-runner-approval.md) - condition: a released moq-tokio and @moq/net carry close() withdrawals; then the runner's moq.dev clients switch to close()
 - [Safari ships the WebKit 319818 fix](/quest/m3/webkit-319818.md) - the Safari release the gate admits
 - [Safari WebTransport](/quest/m3/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed

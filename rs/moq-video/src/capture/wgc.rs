@@ -316,8 +316,11 @@ mod tests {
 		let rendition = config.probe().await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(&rendition).unwrap();
 		let mut subscriber = moq_mux::container::Consumer::new(subscriber, container);
-		let mut producer = Producer::with_track(track, catalog.clone(), rendition).unwrap();
-		assert!(producer.demand().is_used());
+		let reserved = catalog
+			.reserve()
+			.with_timeline_hint(config.gop.duration(config.framerate));
+		let mut producer = Producer::with_track(track, reserved, rendition).unwrap();
+		assert!(producer.demand().wanted().is_some());
 
 		// Only one captured picture arrives; more than three intervals of paced
 		// output must still reach a real video subscriber with advancing timestamps.
@@ -327,7 +330,11 @@ mod tests {
 			let (surface, timestamp) = delivery.next(now).unwrap().unwrap();
 			let frame = crate::Frame::new(crate::Surface::I420(surface.clone()), timestamp);
 			producer.publish(&encoder.encode(&frame).unwrap()).unwrap();
-			let received = subscriber.read().await.unwrap().unwrap();
+			let received = loop {
+				if let moq_mux::container::Read::Frame { frame, .. } = subscriber.read().await.unwrap().unwrap() {
+					break frame;
+				}
+			};
 			assert_eq!(received.timestamp.as_micros(), u128::from(step) * 20_000);
 		}
 	}

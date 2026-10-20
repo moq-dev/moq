@@ -34,8 +34,5 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [moq-transport on io_uring](/quest/m2/uring-ietf.md) - a packaged relay
-  must not drop protocols when the ring is on
-- [Dropped session close](/quest/m2/uring-drop-close.md) - closes are delivered when a session is dropped on the ring
-- [Listener deadlines](/quest/m1/listener-deadlines.md) - the io_uring workers apply `listen.timeout` like the default runtime
+- [Ring drain GOAWAY](/quest/m2/uring-ring-drain.md) - closes are delivered on the ring for moq-transport too
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - a one-port config is served on the ring too

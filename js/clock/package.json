@@ -2,31 +2,26 @@
 	"name": "@moq/clock",
 	"type": "module",
 	"version": "0.1.0",
-	"description": "MoQ clock example with publish/subscribe functionality",
+	"description": "Logical time and deterministic timers for JavaScript",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/moq-dev/moq.git",
 		"directory": "js/clock"
 	},
-	"private": true,
-	"files": [
-		"./src",
-		"README.md"
-	],
-	"bin": {
-		"moq-clock": "./src/main.ts"
+	"sideEffects": false,
+	"exports": {
+		".": "./src/index.ts"
 	},
 	"scripts": {
-		"check": "tsc --noEmit"
-	},
-	"dependencies": {
-		"@moq/net": "workspace:*",
-		"@fails-components/webtransport": "^1.6.8",
-		"@fails-components/webtransport-transport-http3-quiche": "^1.6.8"
+		"build": "rimraf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
+		"check": "tsc --noEmit",
+		"test": "bun test --only-failures",
+		"release": "bun ../common/release.ts"
 	},
 	"devDependencies": {
-		"@types/node": "^26.6.4",
+		"@types/bun": "^1.4.3",
+		"rimraf": "^6.1.3",
 		"typescript": "7.0.2"
 	}
 }

@@ -27,7 +27,7 @@ informative:
 This document specifies the transport-level use of the TIMESTAMP and TIMESCALE properties registered by {{loc}}, independent of the LOC container itself.
 A track-level Timescale property establishes the units, and an object-level Timestamp property carries the presentation time of each object.
 Exposing media time to the transport lets relays make consistent age-based decisions (e.g. dropping stale objects) without parsing the media container, and it remains consistent across hops regardless of buffering or jitter.
-No new code points are requested: an endpoint implementing this document is on the wire indistinguishable from a LOC endpoint that carries only these two properties.
+A negotiated subscriber max age bounds delivery of superseded groups without expiring the newest group.
 
 --- note_Note_to_Readers
 
@@ -107,6 +107,9 @@ TIMESTAMP Object Property {
 The absolute presentation timestamp of the object, expressed in the track's Timescale.
 Any value (including 0) is valid.
 
+A receiver MUST read TIMESTAMP only from Type `0x10`, independently of the moq-transport version.
+Type `0x06` MUST NOT be interpreted as a Timestamp.
+
 Each Timestamp is absolute, not delta-encoded against a previous object: {{moqt}} does not guarantee delivery of every object, and a delta would be corrupted by any missing predecessor.
 
 On a track that declares a TIMESCALE, a publisher MUST attach TIMESTAMP to every object with a payload, including an empty one.
@@ -119,15 +122,54 @@ A track is either timed or untimed for its whole lifetime; no track mixes timed 
 A receiver MUST NOT substitute a time for an untimed object, such as its arrival time, and a relay MUST forward an untimed track untimed, declaring no TIMESCALE downstream.
 Arrival time differs at every hop and changes when a route fails over, so a substituted time would not be the same timeline downstream.
 
-Age-based dropping ({{age}}) never drops an untimed object; a relay bounds how long it keeps one with its own cache policy.
-A new subscription to an untimed track that names no start begins at the latest group, since no age says how far back to reach.
+Age-based dropping ({{age}}) does not apply to an untimed object.
+A relay MAY instead drop a group of an untimed track once its immediate successor arrived at it at least the threshold ago, measured on its own clock ({{max-age}}).
 
 ## Age-Based Dropping {#age}
 Given two objects on the same track, both with TIMESTAMP, a relay computes their relative age as the difference of their timestamps divided by the Timescale.
-A relay serving a live subscription MAY drop an object whose age relative to the most recent object on the track exceeds a locally configured or application-supplied threshold, resetting the corresponding stream per {{moqt}}.
-This decision is identical at every hop because it depends only on values embedded in the objects, not on arrival time.
+A relay serving a live subscription MAY drop a group once a newer group supersedes it and either of these bounds reaches the subscriber's max age ({{max-age}}):
+
+- Its reach, bounded by the first timestamp of its immediate successor, trails the live media edge by at least the max age.
+- Its immediate successor arrived at this hop at least the max age ago, measured on the hop's clock.
+
+The newest group has no successor and MUST NOT expire under either bound, including when the max age is zero.
+Media time permits dropping an old backlog immediately; the hop's clock also bounds untimed groups and a stalled media timeline.
 
 A relay MUST NOT use timestamps to reorder delivery beyond what {{moqt}} already permits; this property informs *dropping*, not transmission order.
+
+
+# Subscriber Max Age {#max-age}
+
+An endpoint declares that it understands subscriber max age with this Setup Option ({{moqt}} Section 10.3):
+
+~~~
+MAX_AGE Setup Option {
+  Type (vi64) = 0x915C4
+  Value (vi64) = 1
+}
+~~~
+
+The value is reserved and MUST be ignored on receipt.
+An endpoint MUST NOT send the MAX_AGE parameter to a peer that did not declare this option.
+The Timestamp and Timescale properties themselves still require no negotiation.
+
+~~~
+MAX_AGE Parameter {
+  Type (vi64) = 0x915C6
+  Value (vi64)  ; milliseconds
+}
+~~~
+
+MAX_AGE is a subscriber parameter on SUBSCRIBE and REQUEST_UPDATE (SUBSCRIBE_UPDATE on older drafts).
+Its value MUST be at most `2^53 - 1` milliseconds; a larger value is malformed.
+Zero expires superseded groups immediately, but never the newest group.
+On SUBSCRIBE, absence leaves the publisher's existing delivery policy unchanged.
+On an update, absence leaves the subscription's budget unchanged; presence replaces it.
+A publisher receiving MAX_AGE MUST apply the budget as specified in {{age}} and MUST NOT translate it into OBJECT_DELIVERY_TIMEOUT or SUBGROUP_DELIVERY_TIMEOUT.
+Those timeouts can expire the newest group and do not express this policy.
+
+A relay combining subscribers MUST request at least the most tolerant subscriber's max age upstream, bounded by the publisher's retention policy.
+One subscriber's shorter budget MUST NOT tighten another subscriber's budget.
 
 
 # Security Considerations
@@ -140,7 +182,15 @@ Because age-based dropping only affects which objects a live subscription receiv
 
 # IANA Considerations
 
-This document requests no registrations.
+This document requests these registrations in the "MOQ Setup Options" and "MOQ Message Parameters" registries, respectively:
+
+| Value | Name | Reference |
+|:------|:-----|:----------|
+| 0x915C4 | MAX_AGE | This Document |
+
+| Value | Name | Messages | Reference |
+|:------|:-----|:---------|:----------|
+| 0x915C6 | MAX_AGE | SUBSCRIBE, REQUEST_UPDATE | This Document |
 
 Both properties it uses are already registered by {{loc}} in the "MOQ Properties" registry ({{moqt}} Section 15.8), and this document changes neither their code points nor their value encodings:
 
@@ -162,10 +212,11 @@ An earlier version of this document requested its own code points (`0x915C0` and
 ## moq-timestamp-02
 {:numbered="false"}
 
-- Replaced the wall-clock arrival-time fallback with untimed tracks: a track without TIMESCALE has no media time, its objects are never dropped for age, and a relay forwards it untimed.
+- Add a negotiated subscriber MAX_AGE parameter for SUBSCRIBE and REQUEST_UPDATE, preserving the newest group and aggregating the most tolerant budget.
+- Read TIMESTAMP only from Type `0x10`, independently of the moq-transport version.
+- Replaced the wall-clock arrival-time fallback with untimed tracks: a track without TIMESCALE has no media time, and a relay forwards it untimed. A relay MAY drop one of its groups once a later group arrived longer ago than the threshold.
 - On a track with TIMESCALE, a publisher MUST attach TIMESTAMP to every object with a payload, and a receiver treats one without it as malformed.
 - A receiver ignores an object-scope TIMESCALE, and no longer reads a bare TIMESTAMP on a track without TIMESCALE as microseconds.
-- A new subscription to an untimed track that names no start begins at the latest group.
 
 # Acknowledgments
 {:numbered="false"}

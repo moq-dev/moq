@@ -22,9 +22,10 @@ In m3 until an Unreal consumer asks; the C++ package it links already exists.
   is enough for the verdict, GPU import is not measured here.
 - Record: editor hot-reload behavior with a static Rust library loaded, the
   dispatcher shutdown on module unload, and package size.
-- Verdict promotes a real `cpp/unreal` plugin quest into m1 or abandons this
-  with the reasons.
+- A positive verdict proposes a plugin quest in the then-current feature
+  horizon for maintainer prioritization; it does not automatically gate a
+  release. Otherwise abandon this with the reasons.
 
 ## Required
 
-- [First C++ package release](/quest/m1/cpp-release.md) - the tarball the module links
+- [First C++ package release](/quest/m2/release/cpp-release.md) - the tarball the module links

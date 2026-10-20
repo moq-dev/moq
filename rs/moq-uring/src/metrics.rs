@@ -27,7 +27,69 @@ impl Counter {
 	}
 }
 
-/// The counters themselves, shared by the worker, its sockets, its timer heap,
+/// One fixed distribution, updating one bucket per observation.
+#[derive(Default)]
+struct Distribution {
+	buckets: [Counter; 11],
+	sum: Counter,
+}
+
+impl Distribution {
+	fn record(&self, value: u64) {
+		let bucket = Histogram::BOUNDS
+			.iter()
+			.position(|bound| bound.is_none_or(|bound| value <= bound))
+			.unwrap();
+		self.buckets[bucket].add(1);
+		self.sum.add(value);
+	}
+
+	fn snapshot(&self) -> Histogram {
+		let mut count = 0;
+		Histogram {
+			buckets: std::array::from_fn(|index| {
+				count += self.buckets[index].get();
+				count
+			}),
+			sum: self.sum.get(),
+		}
+	}
+}
+
+/// Cumulative observations of queue entries per ring enter.
+///
+/// Like the counters, bucket and sum reads may be a few operations apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Histogram {
+	/// Cumulative counts at each boundary in [`Self::BOUNDS`].
+	pub buckets: [u64; 11],
+	/// Queue entries across all observations.
+	pub sum: u64,
+}
+
+impl Histogram {
+	/// Inclusive bucket bounds, with `None` representing infinity.
+	pub const BOUNDS: [Option<u64>; 11] = [
+		Some(0),
+		Some(1),
+		Some(2),
+		Some(4),
+		Some(8),
+		Some(16),
+		Some(32),
+		Some(64),
+		Some(128),
+		Some(256),
+		None,
+	];
+
+	/// The number of enters observed, including those with no entries.
+	pub fn count(&self) -> u64 {
+		self.buckets[10]
+	}
+}
+
+/// The counters themselves, shared by the worker, its sockets, its timers,
 /// and its park word.
 #[derive(Default)]
 pub(crate) struct Counters {
@@ -41,11 +103,25 @@ pub(crate) struct Counters {
 	pub submissions: Counter,
 	pub completions: Counter,
 	pub enters: Counter,
+	pub turns: Counter,
+	pub sq_full_enters: Counter,
+	sqes: Distribution,
+	cqes: Distribution,
 	pub parks: Counter,
 	pub wakes: Counter,
 	pub timers_armed: Counter,
 	pub timers_fired: Counter,
 	pub timers_cancelled: Counter,
+}
+
+impl Counters {
+	/// Account for one enter and the entries it accepted or made visible.
+	pub(crate) fn entered(&self, submitted: usize, completed: usize) {
+		self.enters.add(1);
+		self.submissions.add(submitted as u64);
+		self.sqes.record(submitted as u64);
+		self.cqes.record(completed as u64);
+	}
 }
 
 /// A worker's counters, readable from any thread.
@@ -79,6 +155,10 @@ impl Metrics {
 			submissions: self.0.submissions.get(),
 			completions: self.0.completions.get(),
 			enters: self.0.enters.get(),
+			turns: self.0.turns.get(),
+			sq_full_enters: self.0.sq_full_enters.get(),
+			sqes: self.0.sqes.snapshot(),
+			cqes: self.0.cqes.snapshot(),
 			parks: self.0.parks.get(),
 			wakes: self.0.wakes.get(),
 			timers_armed: self.0.timers_armed.get(),
@@ -129,6 +209,14 @@ pub struct Snapshot {
 	/// `io_uring_enter` calls. Datagrams over this is the syscall amortization
 	/// the runtime exists for.
 	pub enters: u64,
+	/// Drive-loop turns, including the final poll that completes the root future.
+	pub turns: u64,
+	/// Enters forced by a full submission queue.
+	pub sq_full_enters: u64,
+	/// Submission entries accepted by each enter, including zero.
+	pub sqes: Histogram,
+	/// Completion entries made visible by each enter, including zero.
+	pub cqes: Histogram,
 	/// Times the worker parked in `io_uring_enter` with nothing left to poll.
 	pub parks: u64,
 	/// `futex` wakes another thread had to issue because the worker was parked.
@@ -147,5 +235,25 @@ impl Snapshot {
 		self.timers_armed
 			.saturating_sub(self.timers_fired)
 			.saturating_sub(self.timers_cancelled)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn enter_distributions_include_empty_and_overflow_buckets() {
+		let metrics = Metrics::default();
+		for count in [0, 1, 2, 3, 4, 255, 256, 257, 2048] {
+			metrics.0.entered(count, 2048 - count);
+		}
+		let snapshot = metrics.snapshot();
+		assert_eq!(snapshot.enters, 9);
+		assert_eq!(snapshot.sqes.buckets, [1, 2, 3, 5, 5, 5, 5, 5, 5, 7, 9]);
+		assert_eq!(snapshot.sqes.count(), snapshot.enters);
+		assert_eq!(snapshot.cqes.count(), snapshot.enters);
+		assert_eq!(snapshot.sqes.sum, snapshot.submissions);
+		assert_eq!(snapshot.cqes.sum + snapshot.sqes.sum, 9 * 2048);
 	}
 }

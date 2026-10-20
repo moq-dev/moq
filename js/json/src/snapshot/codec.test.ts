@@ -81,6 +81,13 @@ test("a null field forces a keyframe", () => {
 	expect(frames.map((f) => f[0])).toEqual([true, true]);
 });
 
+// A null nested in an object written whole would ride the patch as a deletion too, so the decoder
+// would drop the key instead of reconstructing the null.
+test("a null inside a new object forces a keyframe", () => {
+	const values = [{ items: {} }, { items: { a: { parent: null, n: 1 } } }];
+	expect(roundtrip({ deltaRatio: 100 }, values)).toEqual(values);
+});
+
 // A caller that closes the group behind the encoder's back has to say so, or the next value would be
 // a delta against a window and a baseline the new group never carried.
 test("reset forces the next update to be a keyframe", () => {

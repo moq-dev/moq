@@ -1,118 +1,197 @@
 name: Platform
 
-# Compiles the workspace on Windows and macOS, the `#[cfg(...)]` code no Linux
-# job compiles at all: moq-video's Media Foundation and VideoToolbox backends,
-# their capture paths, moq-audio's ScreenCaptureKit capture, and the smaller
-# platform branches elsewhere. Without this, a change that breaks any of them
-# (a moq-net type they consume, say) merges green and compiles for the first
-# time in a tag-triggered release build.
-#
-# A pull request compiles only the crates it changed plus their dependents,
-# the same selection the Linux `check` job makes, because these are the
-# slowest and scarcest runners in CI. Pushes to `main` and `release` compile
-# everything, catching the break two individually green PRs make once both
-# land.
-#
-# Outside Nix, like android.yml: neither runner has it, so each installs the
-# runner-native toolchain. rust-toolchain.toml still pins the compiler, and the
-# recipes are the same ones a developer runs on that OS.
-#
-# No Rust cache. The repository's 10 GB budget is spent on the Linux `target/`
-# that cache.yml warms for every pull request, and a Windows or macOS store
-# would evict it to save these jobs a few minutes.
-
+# The native macOS and Windows gates run nightly on main (nightly.yml calls this)
+# and on every release PR, without path filters, so release can require their names.
 permissions:
   contents: read
 
 on:
   push:
-    branches: [main, release]
+    branches: [release]
     paths:
       - "rs/**"
+      - "cpp/**"
+      - "swift/**"
+      - "infra/moq-sh/**"
+      - "sh/**"
+      - "doc/lib/**"
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "justfile"
-      - "sh/**"
-      - ".github/workflows/platform.yml"
+      - "**/justfile"
+      - ".github/**"
   pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the jobs themselves are skipped on close.
-    types: [opened, synchronize, reopened, closed]
-    paths:
-      - "rs/**"
-      - ".cargo/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "justfile"
-      - "sh/**"
-      - ".github/workflows/platform.yml"
+    branches: [release]
+    # `closed` only cancels an in-flight run. `edited` runs the gates when a main
+    # PR is retargeted to release. Any edit reruns them, since a skipped rerun
+    # would post a passing context over a failed one.
+    types: [opened, synchronize, reopened, edited, closed]
+  workflow_call:
+    inputs:
+      benchmarks:
+        description: Measure Swift against Rust baselines on this runner
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      benchmarks:
+        description: Measure Swift against Rust baselines on this runner
+        type: boolean
+        default: false
 
 concurrency:
-  # Keyed by event, so a merged pull request's `closed` run can't cancel the push
-  # run it triggers. Pull requests key by number rather than ref, since a merged
-  # PR's `closed` run can report the base branch as its ref instead of the PR's
-  # merge ref, and then wouldn't cancel the PR's in-flight run.
   group: platform-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  # Pushes queue instead: `main` merges faster than these jobs finish, so
-  # cancelling meant almost no push run ever reported. Actions keeps only the
-  # newest pending run, so queued merges still coalesce.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  # Cargo and the CMake/Swift builds use one artifact tree on each runner.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  NEXTEST_PROFILE: ci
 
 jobs:
-  windows:
-    name: Windows
+  scope:
+    # Require this check too: a failed selector otherwise skips its dependents,
+    # and GitHub accepts skipped jobs as successful required checks.
+    name: Platform scope
     if: github.event.action != 'closed'
-    runs-on: windows-latest
-    timeout-minutes: 60
-
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    outputs:
+      needed: ${{ steps.scope.outputs.needed }}
+      rs: ${{ steps.scope.outputs.rs }}
+      swift: ${{ steps.scope.outputs.swift }}
+      cpp: ${{ steps.scope.outputs.cpp }}
+      obs: ${{ steps.scope.outputs.obs_compile }}
+      moq_sh: ${{ steps.scope.outputs.moq_sh }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Full history so a pull request can diff against its base.
           fetch-depth: 0
+      - uses: ./.github/actions/just
+      - name: Select platform checks
+        id: scope
+        env:
+          CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
+        run: just ci-select platform "$CI_BASE" >> "$GITHUB_OUTPUT"
 
+  windows:
+    name: Windows
+    needs: scope
+    if: needs.scope.outputs.rs == 'true' || needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
+    # OBS uses the Visual Studio 17 2022 CMake generator.
+    runs-on: windows-2022
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # The suites run serially; the full macOS suite measured 43 min without a Rust cache.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      # aws-lc-rs assembles its x86_64 crypto with NASM on Windows.
       - name: Install NASM
         shell: pwsh
         run: |
           choco install nasm -y --no-progress
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
       - uses: ./.github/actions/just
-
-      - name: Check
+      - name: Install nextest
+        if: needs.scope.outputs.rs == 'true'
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: nextest@0.9.146
+      # Nightly writes these platforms; `release` pull requests read.
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      - name: Install uniffi-bindgen-cpp
+        if: needs.scope.outputs.cpp == 'true' || needs.scope.outputs.obs == 'true'
+        shell: bash
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.5+v0.32.2
+      - name: Rust compile and tests
+        if: needs.scope.outputs.rs == 'true'
         shell: bash
         env:
-          SCOPE: ${{ github.event_name == 'push' && '--all' || '' }}
-        run: just rs windows "$SCOPE"
+          CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
+        run: |
+          just rs windows "$CI_BASE"
+          just rs windows-test
+      - name: C++
+        if: needs.scope.outputs.cpp == 'true'
+        shell: bash
+        run: just cpp check
+      - name: OBS
+        if: needs.scope.outputs.obs == 'true'
+        shell: bash
+        run: just obs package --target x86_64-pc-windows-msvc --output "$RUNNER_TEMP/obs"
 
   macos:
     name: macOS
-    if: github.event.action != 'closed'
+    needs: scope
+    if: needs.scope.outputs.rs == 'true' || needs.scope.outputs.swift == 'true' || needs.scope.outputs.obs == 'true' || needs.scope.outputs.moq_sh == 'true'
     runs-on: macos-latest
-    timeout-minutes: 60
-
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    timeout-minutes: 90
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
       - uses: ./.github/actions/just
-
-      - name: Check
+      - name: Install nextest
+        if: needs.scope.outputs.rs == 'true'
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: nextest@0.9.146
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      - name: Install uniffi-bindgen-cpp
+        if: needs.scope.outputs.obs == 'true'
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.5+v0.32.2
+      - name: Rust compile and tests
+        if: needs.scope.outputs.rs == 'true'
         env:
-          SCOPE: ${{ github.event_name == 'push' && '--all' || '' }}
-        run: just rs macos "$SCOPE"
+          CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
+        run: |
+          just rs macos "$CI_BASE"
+          just rs macos-test
+      - name: Swift simulator check
+        if: needs.scope.outputs.swift == 'true'
+        run: just swift simulator
+      - name: Swift
+        if: needs.scope.outputs.swift == 'true'
+        run: just swift check
+      - name: Swift binding benchmark
+        if: inputs.benchmarks
+        run: just bench-ffi swift
+      - name: Preserve Swift benchmark
+        if: inputs.benchmarks && !cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-ffi-swift
+          path: target/bench/ffi/
+          if-no-files-found: error
+      - name: OBS
+        if: needs.scope.outputs.obs == 'true'
+        run: just obs package --target aarch64-apple-darwin --output "$RUNNER_TEMP/obs"
+      - name: Installer fixtures
+        if: needs.scope.outputs.moq_sh == 'true'
+        run: just infra moq-sh test
+      - name: Installer smoke
+        if: needs.scope.outputs.moq_sh == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: just infra moq-sh smoke

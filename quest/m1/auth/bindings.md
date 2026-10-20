@@ -22,8 +22,7 @@ export the experimental Rust request hook through the bindings here.
   Arc<MoqAuthToken>` whose object carries that token's own `grant()` and
   `closed()` and whose release withdraws it, raising the structured error
   moq-ffi already maps on refusal. `MoqClient` sessions reached through the
-  reconnecting connection use the accessor
-  [Relay tokens](/quest/m1/auth/relay-refresh.md) adds.
+  reconnecting connection use `moq_tokio::Connection::auth()`.
 - No new libmoq API: the hand-written C ABI gets no more feature work. The
   generated C and C++ bindings get this from moq-ffi, and OBS reaches it
   through the generated C++; update `cpp/obs/src`
@@ -32,7 +31,7 @@ export the experimental Rust request hook through the bindings here.
   `auth granted publish=[...] subscribe=[...]` line and join `prints_grant` and
   `enforces_grant` in `test/interop/interop.sh`, beside Rust and JS.
 - Wrappers: `py/moq-rs/moq/session.py`, `swift/Sources/Moq`,
-  `kt/.../Flows.kt` (a `Flow` over `grant_changed`), `go/wrapper/moq/session.go`
+  `kt/.../Flows.kt` (a `Flow` over `grant_changed`), `go/wrapper/session.go`
   (context-cancellable like the rest), and `dart/moq/lib/moq.dart`. Kotlin
   typealiases pick up the raw methods for free; the flow is the idiomatic add.
 - Docs: `doc/lib/{py,swift,kt,go,dart}` each gain a short auth section, and
@@ -44,9 +43,3 @@ export the experimental Rust request hook through the bindings here.
 
 Additive. Decided in the 2026-09-30 audit: libmoq is frozen, so the C
 surface comes from moq-ffi rather than new `moq_session_auth_*` calls.
-
-## Required
-
-- [FFI shape](/quest/m1/ffi-shape/README.md) - reshapes the moq-ffi session and wrappers this edits, so the wrappers break once
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the connection
-  accessor and a relay that answers a real token, which the wrapper tests need

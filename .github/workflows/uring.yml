@@ -1,0 +1,61 @@
+name: io_uring
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    # Main PRs skip it; nightly.yml's `rs uring` runs the whole suite on main.
+    # `edited` catches a main PR retargeted to release.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited, closed]
+    paths:
+      # The shared Rust selector walks reverse dependencies, including feature
+      # dependencies. Broad paths keep newly added shared crates covered.
+      - "rs/**"
+      - "sh/rs/**"
+      - "sh/changed.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "justfile"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/actions/**"
+      - ".github/workflows/uring.yml"
+
+concurrency:
+  group: uring-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  uring:
+    name: io_uring
+    if: github.event.action != 'closed'
+    # This image provides a 6.12+ kernel; MOQ_STRICT fails the tests if that changes.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      MOQ_STRICT: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: ./.github/actions/nix
+
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+
+      - name: io_uring
+        run: nix develop --command just rs uring-changed "$CI_BASE"
+        env:
+          CI_BASE: ${{ github.event.pull_request.base.sha }}
+        shell: bash -leo pipefail {0}

@@ -1,42 +1,42 @@
-# [M] History mode starts at a DVR recording's retained floor
+# [S] History from the retained floor
 
 ## Goal
 
-An HLS export in history mode lists a recording that `moq_archive::Writer`
-retention has pruned, starting at its oldest retained segment, and the
-Reader's timeline index stays within the retained window. Today
-`moq_hls::export::Config::history` refuses it with `Error::HistoryPruned`
-before listing anything, because the exporter cannot tell a pruned start from
-missing history.
+An HLS export in history mode lists an archive consumer broadcast whose
+oldest objects were deleted, starting at its oldest stored segment. Today
+`moq_hls::export::Config::history` refuses a pruned start with
+`Error::HistoryPruned` before listing anything, because the exporter cannot
+tell a pruned start from missing history. A gap after the floor still fails,
+never listing as a complete recording.
 
 ## Plan
 
-Decided 2026-10-11 (#5236): refuse retained recordings now, and quest the
-floor. A gap after the floor must still fail, never list as a complete
-recording.
+Decided 2026-10-11 (#5236): refuse pruned recordings now, and quest the floor.
 
-Prefer a subscribe range: once moq-lite-07 ranges land
-([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)), an `Absolute(0)..`
-range answers from the oldest group that still exists and names the pruned
-ones with SUBSCRIBE_DROP, so history starts at the first delivered group.
-Otherwise the Reader answers a request below its retained floor with an error
-distinct from a missing group.
+Decided 2026-10-17: kept as its own `moq-hls` quest rather than folded into
+the [Archive consumer](/quest/m1/archive/consumer.md). The consumer only
+answers a group below its oldest stored key as dropped; this quest makes
+history mode start there. The old Reader's timeline-map pruning and any
+retention field in the catalog are gone with the reader and the root
+`archive` section. The archive producer's DVR mode is what prunes the start.
 
-The same floor lets `moq_archive::Reader` prune its timeline-group map
-(`Shared::timelines`), which today grows with a long retained recording's
-whole lifetime: its refresh lists only objects after its cursor, so it never
-sees the writer's deletions. Drop mappings below the floor rather than
-bounding the map by age or size, which could discard retained history
-(#5236 review).
+History mode reads the archived `hls` track's groups from group 0. Start
+at the first `hls` group the broadcast delivers, using its checkpoint's
+retained window, and skip records whose first media group is below the floor.
+Once [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) lands, an
+`Absolute(0)..` range answers from the oldest group that exists and names the
+rest with SUBSCRIBE_DROP; before that, the consumer's drop serves the same
+purpose.
 
-Surface retention in the catalog's archive section only if the exporter still
-needs to know up front; that changes the hang format (`js/hang`,
-`drafts/draft-lcurley-moq-hang.md`).
+Test an archive whose oldest objects are deleted: history lists from the first
+stored segment, and a hole after it still fails.
 
-Test a retained recording whose first timeline objects are deleted: history
-lists from the first retained segment, and a hole after it still fails.
+## Required
+
+- [Archive consumer](/quest/m1/archive/consumer.md) - serves the pruned archive and drops groups below its floor
+- [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - the `hls` records history mode reads
 
 ## Related
 
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a range from group 0 answers from the oldest group that still exists
-- [DVR rewind](/quest/m1/archive/dvr.md) - seeks through the same bounded archive
+- [Failed HLS exports error](/quest/m1/hls-failure-signal.md) - the other history-mode gap left by #5236
+- [DVR rewind](/quest/m2/archive-dvr.md) - seeks through the same bounded archive

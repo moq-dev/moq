@@ -11,6 +11,13 @@ import { decodeUtf8 } from "../util/utf8.ts";
 import * as Message from "./message.ts";
 import { hasSetupStream, type Version } from "./version.ts";
 
+const clientParameters = new WeakSet<Setup>();
+
+/** Whether the peer's SETUP carried Path or Role; raw presence matters even when an unknown Role decodes as Both. */
+export function hasClientParameters(setup: Setup): boolean {
+	return clientParameters.has(setup);
+}
+
 /** Setup Parameter id for the Probe capability level. */
 const PARAM_PROBE = 0x1n;
 /** Setup Parameter id for the request Path (client-only, URI-less transports). */
@@ -262,7 +269,9 @@ export class Setup {
 		const hopRaw = await params.getVarint(PARAM_HOP, version);
 		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
 
-		return new Setup({ probe, path, role, hop });
+		const setup = new Setup({ probe, path, role, hop });
+		if (pathBytes !== undefined || roleCode !== undefined) clientParameters.add(setup);
+		return setup;
 	}
 
 	/** Encode the SETUP message with its size prefix. Throws on pre-lite-05 versions. */

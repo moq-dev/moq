@@ -13,7 +13,7 @@ features first.
 
 ## What MoQ offers
 
-- **Publish and subscribe on one session.** Each participant is a broadcast; peers discover each other through announcements on a path prefix. No SDP offer/answer, no renegotiation when someone joins.
+- **Publish and subscribe on one session.** Each source is a broadcast, such as `participant/camera.hang` and `participant/screen.hang`, under the participant's shared announcement prefix. Give siblings a shared [clock](/concept/hang#catalog) so consumers can align them by wall time. No SDP offer/answer, no renegotiation when someone joins.
 - **Latency you choose.** WebRTC decides when to drop. A MoQ subscriber sets its own budget per track, so audio can be near-lossless at 500 ms while video stays at the live edge.
 - **Scale from the same relay.** A relay that serves a two-person call also serves a ten-thousand-viewer webinar. There is no SFU/CDN split.
 - **Full pipeline control in the browser.** WebCodecs frames and `AudioData` samples are yours: render to a texture, run a model, apply effects.

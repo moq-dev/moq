@@ -3,7 +3,7 @@
 use std::task::Poll;
 
 use crate::Error;
-use crate::time::{Clock, Instant};
+use crate::time::{Deadlines, Instant};
 
 /// Drives a session with caller-supplied time.
 ///
@@ -20,7 +20,7 @@ use crate::time::{Clock, Instant};
 #[must_use = "the session makes no progress unless its driver is polled"]
 pub struct Driver<S: crate::transport::poll::Session> {
 	state: State<S>,
-	clock: Clock,
+	clock: Deadlines,
 }
 
 /// The protocol half of a machine, one variant per negotiated wire protocol.
@@ -53,7 +53,7 @@ pub(crate) struct State<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> Driver<S> {
-	pub(crate) fn new(clock: Clock, state: State<S>) -> Self {
+	pub(crate) fn new(clock: Deadlines, state: State<S>) -> Self {
 		Self { state, clock }
 	}
 
@@ -61,13 +61,14 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 	///
 	/// Panics if `now` is earlier than the previous poll or construction time.
 	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
-		self.clock.advance(now);
-		self.clock.register_driver(waiter);
-		match self.state.poll(waiter) {
-			Poll::Ready(Ok(())) => Err(Error::Closed),
-			Poll::Ready(Err(err)) => Err(err),
-			Poll::Pending => Ok(self.clock.timeout()),
-		}
+		waiter.batch(|| {
+			self.clock.advance(now);
+			match self.state.poll(waiter) {
+				Poll::Ready(Ok(())) => Err(Error::Closed),
+				Poll::Ready(Err(err)) => Err(err),
+				Poll::Pending => Ok(self.clock.park(waiter)),
+			}
+		})
 	}
 }
 

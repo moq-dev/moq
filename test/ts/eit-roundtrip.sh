@@ -17,8 +17,12 @@
 set -euo pipefail
 
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+# shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
+source "$DIR/../lib/harness.sh"
+harness_begin ts-eit "$(harness_env TSC_EIT_DURATION)just test ts-eit$(harness_argv "$@")"
+TMP="$HARNESS_RUN"
+ffmpeg -version >"$TMP/ffmpeg-version.txt"
+tsp --version >"$TMP/tsduck-version.txt" 2>&1
 
 DURATION="${TSC_EIT_DURATION:-20}"
 

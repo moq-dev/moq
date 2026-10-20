@@ -27,7 +27,8 @@ use crate::catalog::Estimator;
 /// - Opus
 /// - FLAC
 ///
-/// **Text:** WebVTT (`wvtt`), reconstructed as timed text; unsupported subtitle codecs are skipped.
+/// **Text:** WebVTT (`wvtt`), reconstructed as timed text, and TTML (`stpp`) documents moved onto the
+/// catalog clock; unsupported subtitle codecs, including other XML namespaces, are skipped.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The broadcast being produced
 	broadcast: moq_net::broadcast::Producer,
@@ -320,7 +321,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// Enroll every track in the broadcast's timelines: passthrough writes groups by hand
 			// (no `container::Producer`), so the recorder is fed directly at each fragment. The
 			// reservation holds the archive entry back until the whole track set is declared.
-			let recorder = self.catalog.enroll(track.name())?;
+			let recorder = self.catalog.enroll(track.name(), None)?;
 
 			// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
 			// `estimate` as fragments arrive.
@@ -370,15 +371,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn init_text(&mut self, trak: &Trak, moov: &Moov, reserved: &crate::catalog::Reserved<E>) -> Result<bool> {
-		let [mp4_atom::Codec::Wvtt(codec)] = trak.mdia.minf.stbl.stsd.codecs.as_slice() else {
-			return Ok(false);
+		let (format, mut config) = match trak.mdia.minf.stbl.stsd.codecs.as_slice() {
+			[mp4_atom::Codec::Wvtt(codec)] => {
+				if codec.plaintext.data_reference_index != 1 {
+					return Err(Error::InvalidSubtitle("external subtitle data reference").into());
+				}
+				let header = crate::container::text::header(&codec.config.config).map_err(Error::InvalidSubtitle)?;
+				let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
+				config.role = crate::container::text::role(&header);
+				(super::text::Format::Vtt { header }, config)
+			}
+			[mp4_atom::Codec::Unknown(kind, body)] if kind.as_ref() == b"stpp" && super::text::stpp(body)? => (
+				super::text::Format::Ttml,
+				hang::catalog::TextConfig::new(hang::catalog::TextFormat::Ttml),
+			),
+			_ => return Ok(false),
 		};
-		if codec.plaintext.data_reference_index != 1 {
-			return Err(Error::InvalidSubtitle("external subtitle data reference").into());
-		}
-		let header = crate::container::text::header(&codec.config.config).map_err(Error::InvalidSubtitle)?;
-		let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
-		config.role = crate::container::text::role(&header);
 		config.lang = Some(trak.mdia.mdhd.language.clone());
 		// The picker label is the HandlerBox name; `vlab` is an opaque source identifier.
 		config.label = (!trak.mdia.hdlr.name.is_empty()).then(|| trak.mdia.hdlr.name.clone());
@@ -392,7 +400,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			trak.tkhd.track_id,
 			super::text::Track {
 				producer,
-				header,
+				format,
 				defaults: sample::Defaults::from_moov(moov, trak.tkhd.track_id),
 				timescale: moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?,
 				end_decode_time: None,
@@ -454,23 +462,47 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			_ => return Err(Error::MultipleCodecs.into()),
 		};
 
-		let config = match codec {
-			mp4_atom::Codec::Avc1(avc1) => self.init_h264(false, &avc1.avcc, &avc1.visual, container)?,
-			mp4_atom::Codec::Avc3(avc3) => self.init_h264(true, &avc3.avcc, &avc3.visual, container)?,
-			mp4_atom::Codec::Hev1(hev1) => self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
-			mp4_atom::Codec::Hvc1(hvc1) => self.init_h265(false, &hvc1.hvcc, &hvc1.visual, container)?,
+		let (mut config, colr, pasp) = match codec {
+			mp4_atom::Codec::Avc1(avc1) => (
+				self.init_h264(false, &avc1.avcc, &avc1.visual, container)?,
+				avc1.colr.as_ref(),
+				avc1.pasp.as_ref(),
+			),
+			mp4_atom::Codec::Avc3(avc3) => (
+				self.init_h264(true, &avc3.avcc, &avc3.visual, container)?,
+				avc3.colr.as_ref(),
+				avc3.pasp.as_ref(),
+			),
+			mp4_atom::Codec::Hev1(hev1) => (
+				self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
+				hev1.colr.as_ref(),
+				hev1.pasp.as_ref(),
+			),
+			mp4_atom::Codec::Hvc1(hvc1) => (
+				self.init_h265(false, &hvc1.hvcc, &hvc1.visual, container)?,
+				hvc1.colr.as_ref(),
+				hvc1.pasp.as_ref(),
+			),
 			mp4_atom::Codec::Vp08(vp08) => {
 				let mut config = VideoConfig::new(VideoCodec::VP8);
+				// vpcC carries VP8's colour too; its range is always explicit.
+				let vpcc = &vp08.vpcc;
+				config.color = crate::codec::color::cicp(
+					vpcc.color_primaries,
+					vpcc.transfer_characteristics,
+					vpcc.matrix_coefficients,
+					Some(vpcc.video_full_range_flag),
+				);
 				config.coded_width = Some(vp08.visual.width as _);
 				config.coded_height = Some(vp08.visual.height as _);
 				config.container = container;
-				config
+				(config, vp08.colr.as_ref(), vp08.pasp.as_ref())
 			}
 			mp4_atom::Codec::Vp09(vp09) => {
 				// https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
 				let vpcc = &vp09.vpcc;
 
-				let mut config = VideoConfig::new(VP9 {
+				let vp9 = VP9 {
 					profile: vpcc.profile,
 					level: vpcc.level,
 					bit_depth: vpcc.bit_depth,
@@ -479,22 +511,41 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					transfer_characteristics: vpcc.transfer_characteristics,
 					matrix_coefficients: vpcc.matrix_coefficients,
 					full_range: vpcc.video_full_range_flag,
-				});
+				};
+				let mut config = VideoConfig::new(vp9.clone());
+				config.color = crate::codec::vp9::color(&vp9);
 				config.coded_width = Some(vp09.visual.width as _);
 				config.coded_height = Some(vp09.visual.height as _);
 				config.container = container;
-				config
+				(config, vp09.colr.as_ref(), vp09.pasp.as_ref())
 			}
 			mp4_atom::Codec::Av01(av01) => {
 				let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av01.av1c));
+				config.color = crate::codec::av1::color(&av01.av1c.config_obus);
 				config.coded_width = Some(av01.visual.width as _);
 				config.coded_height = Some(av01.visual.height as _);
 				config.container = container;
-				config
+				(config, av01.colr.as_ref(), av01.pasp.as_ref())
 			}
 			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(*unknown).into()),
 			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
 		};
+		// The codec config outranks the colr box a muxer added, which only fills its gaps.
+		let colr = colr.map(super::colr_color).transpose()?.flatten();
+		crate::codec::color::fill(&mut config.color, colr.as_ref(), "colr");
+		if let Some(pasp) = pasp {
+			let width = config.coded_width.ok_or(Error::InvalidAspect("missing width"))?;
+			let height = config.coded_height.ok_or(Error::InvalidAspect("missing height"))?;
+			let aspect = crate::codec::video::reduce_aspect(
+				u128::from(width) * u128::from(pasp.h_spacing),
+				u128::from(height) * u128::from(pasp.v_spacing),
+			)
+			.ok_or(Error::InvalidAspect("invalid or unrepresentable pasp"))?;
+			// Square samples add no catalog field, but can still contradict an SPS.
+			if pasp.h_spacing != pasp.v_spacing || config.display_aspect_width.is_some() {
+				crate::codec::video::fill_display_aspect(&mut config, aspect, "pasp");
+			}
+		}
 
 		Ok(config)
 	}
@@ -510,6 +561,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	) -> Result<VideoConfig> {
 		let mut description = BytesMut::new();
 		avcc.encode_body(&mut description)?;
+		let metadata = crate::codec::h264::config(&description)?;
 
 		let mut config = VideoConfig::new(H264 {
 			profile: avcc.avc_profile_indication,
@@ -519,6 +571,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		});
 		config.coded_width = Some(visual.width as _);
 		config.coded_height = Some(visual.height as _);
+		config.framerate = metadata.framerate;
+		config.display_aspect_width = metadata.display_aspect_width;
+		config.display_aspect_height = metadata.display_aspect_height;
+		config.color = metadata.color;
 		config.description = Some(description.freeze());
 		config.container = container;
 		Ok(config)
@@ -546,6 +602,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		config.description = Some(description.freeze());
 		config.coded_width = Some(visual.width as _);
 		config.coded_height = Some(visual.height as _);
+		crate::codec::h265::apply_hvcc_sps(hvcc, &mut config)?;
 		config.container = container;
 		Ok(config)
 	}
@@ -598,10 +655,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						.with_pre_skip(dops.pre_skip);
 				head.output_gain = dops.output_gain;
 
-				// The catalog describes the decoder's output: Opus always decodes at 48 kHz, whatever
-				// the sample entry or the informational input rate claims.
-				let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, head.channel_count);
-				config.description = Some(head.encode()?);
+				// The shared conversion sets the decoder's 48 kHz output rate and Opus warmup,
+				// whatever the sample entry or the informational input rate claims.
+				let description = head.encode()?;
+				let mut config: AudioConfig = head.into();
+				config.description = Some(description);
 				config.container = container;
 				config
 			}
@@ -954,7 +1012,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let new_segment = track.segment != Some(self.segment);
 			let start_group = track.group.is_none() || new_segment;
 			let mut g = if start_group {
-				if let Some(prev) = track.group.take() {
+				if let Some(mut prev) = track.group.take() {
 					prev.finish()?;
 					if let Some(recorder) = track.recorder.as_mut() {
 						recorder.finish_group(prev.sequence);
@@ -1027,13 +1085,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
 			track.publish_estimate()?;
-			if let Some(g) = track.group.take() {
+			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 				if let Some(recorder) = track.recorder.as_mut() {
 					recorder.finish_group(g.sequence);
 				}
 			}
 			track.track.finish()?;
+			// Dropping the recorder flushes the open record, so the track is advertised.
+			track.recorder = None;
 		}
 		Ok(())
 	}
@@ -1062,13 +1122,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// is already past `sequence` continues from its own next group instead.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.text.values_mut() {
-			let next = track.producer.track().latest().map_or(0, |latest| latest + 1);
+			let next = track.producer.next_sequence();
 			track.producer.seek(sequence.max(next))?;
 		}
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
 			track.publish_estimate()?;
-			if let Some(g) = track.group.take() {
+			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 				if let Some(recorder) = track.recorder.as_mut() {
 					recorder.finish_group(g.sequence);
@@ -1080,7 +1140,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// The source signalled a new timeline (an HLS `EXT-X-DISCONTINUITY`), so the next
-	/// fragment's decode time is not compared with the last one on each track.
+	/// fragment's decode time is not compared with the last one on each track. A timeline that
+	/// restarts below where it was still fails: a track refuses a group that rewinds.
 	pub fn discontinuity(&mut self) {
 		for track in self.text.values_mut() {
 			track.end_decode_time = None;

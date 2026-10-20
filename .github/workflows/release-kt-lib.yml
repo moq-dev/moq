@@ -16,8 +16,8 @@ name: Release Kotlin lib
 #
 # Those bindings come from this checkout, so a push is deferred while rs/moq-ffi
 # has changes since its release tag: the wrapper could call FFI API that no
-# published moq-ffi has. Release Kotlin FFI re-triggers this workflow once the
-# next moq-ffi release lands, which then publishes from that tag's commit.
+# published moq-ffi has. The FFI coordinator re-triggers this workflow after
+# its Kotlin publisher succeeds, then publishes from that tag's commit.
 
 on:
   push:
@@ -30,7 +30,11 @@ on:
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
       - "sh/gh/release.sh"
+  # Main PRs skip it; nightly.yml calls it as a dry-run on main. `edited`
+  # catches a main PR retargeted to release.
   pull_request:
+    branches: [release]
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "kt/moq/**"
       - "kt/gradle.properties"
@@ -43,8 +47,16 @@ on:
   # depends on land on Maven Central (the guard below skips otherwise). Only a
   # dispatch on `release` publishes.
   workflow_dispatch:
+  # A called run inherits its caller's event, which can be a dispatch on
+  # `release`, so the caller says it is a dry-run rather than the event.
+  workflow_call:
+    inputs:
+      dry-run:
+        description: "Publish to Maven Local and check the POMs, as a PR does"
+        type: boolean
+        default: true
   workflow_run:
-    workflows: ["Release Kotlin FFI"]
+    workflows: ["Release FFI", "Release Kotlin FFI"]
     types:
       - completed
 
@@ -52,17 +64,44 @@ permissions:
   contents: read
 
 jobs:
-  check-version:
-    name: Check version
+  ffi-release:
+    name: Check FFI publisher
     runs-on: ubuntu-latest
-    # workflow_run has the base repository's privileges, so accept only a
-    # successful upstream tag-push run from the expected release workflow.
+    # workflow_run is privileged. Preserve the owner, same-repo, push and tag
+    # gates before reading the trusted upstream checkout or allowing wrapper
+    # publication.
     if: >-
       github.event_name != 'workflow_run' ||
       (github.repository_owner == 'moq-dev' &&
-       github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.name == 'Release FFI' || github.event.workflow_run.conclusion == 'success') &&
        github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
        startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v'))
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      ready: ${{ steps.publisher.outputs.ready }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/just
+      - name: Check independent publisher
+        id: publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_NAME: ${{ github.event.workflow_run.name }}
+          UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+          UPSTREAM_RUN_STARTED_AT: ${{ github.event.workflow_run.run_started_at }}
+        run: just gh ffi completed kotlin
+
+  check-version:
+    name: Check version
+    needs: [ffi-release]
+    if: needs.ffi-release.outputs.ready == 'true'
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
       should_publish: ${{ steps.decide.outputs.should_publish }}
@@ -99,7 +138,7 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # workflow_run is chained after Release Kotlin FFI, so its tag is
+      # workflow_run verifies the Kotlin FFI publisher, so its tag is
       # published. PRs run it too, so the dry-run shows whether merging would
       # publish.
       - name: Check for unreleased FFI changes
@@ -142,10 +181,11 @@ jobs:
 
   publish:
     name: Publish wrapper
-    needs: [check-version]
-    # PRs always run (dry-run). Pushes publish only when the version is new.
+    # Directly on ffi-release: its gate is what makes the head_sha checkout trusted.
+    needs: [ffi-release, check-version]
+    # PRs and nightly always run (dry-run). Pushes publish only when the version is new.
     if: >-
-      github.event_name == 'pull_request' ||
+      github.event_name == 'pull_request' || inputs.dry-run ||
       (needs.check-version.outputs.should_publish == 'true' &&
        (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/release'))
     # Only publishing runs share the serialized group. GitHub keeps a single
@@ -154,8 +194,8 @@ jobs:
     # that skip publishing never enter it. Dry-runs get a per-ref group instead
     # and cancel their superseded builds.
     concurrency:
-      group: release-kt-lib-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+      group: release-kt-lib-${{ (github.event_name == 'pull_request' || inputs.dry-run) && github.ref || 'publish' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' || inputs.dry-run }}
     runs-on: ubuntu-latest
     env:
       # Picked up by com.vanniktech.maven.publish via Gradle project properties.
@@ -177,8 +217,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      # No Rust cache: its entry would evict the store every pull request
-      # restores from the 10 GB budget. See cache.yml.
+      # No Rust cache: shipped binaries compile from source rather than from
+      # whatever the shared R2 cache holds.
 
       # Generate the UniFFI Kotlin so the sibling :moq-ffi project compiles.
       - name: Generate bindings
@@ -208,11 +248,11 @@ jobs:
       # holding it may have published this version since. Check again.
       - name: Recheck wrapper publication
         id: recheck
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && !inputs.dry-run
         run: just gh release maven-exists dev.moq moq "${{ needs.check-version.outputs.version }}"
 
       - name: Publish to Maven Central
-        if: github.event_name != 'pull_request' && steps.recheck.outputs.exists != 'true'
+        if: github.event_name != 'pull_request' && !inputs.dry-run && steps.recheck.outputs.exists != 'true'
         env:
           MOQ_VERSION: ${{ needs.check-version.outputs.version }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
@@ -223,8 +263,8 @@ jobs:
             -Pandroid.enabled=true \
             :moq:publishAndReleaseToMavenCentral --no-configuration-cache
 
-      - name: Publish to Maven Local (PR dry-run)
-        if: github.event_name == 'pull_request'
+      - name: Publish to Maven Local (dry-run)
+        if: github.event_name == 'pull_request' || inputs.dry-run
         env:
           MOQ_VERSION: ${{ needs.check-version.outputs.version }}
         run: |
@@ -232,3 +272,13 @@ jobs:
             -Pmoq.version="$MOQ_VERSION" \
             -Pandroid.enabled=true \
             :moq:publishToMavenLocal --no-configuration-cache
+
+      - name: Check published POM dependencies
+        if: github.event_name == 'pull_request' || inputs.dry-run
+        env:
+          MOQ_VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          just kt check-poms \
+            "$HOME/.m2/repository/dev/moq/moq/$MOQ_VERSION" \
+            "$HOME/.m2/repository/dev/moq/moq-jvm/$MOQ_VERSION" \
+            "$HOME/.m2/repository/dev/moq/moq-android/$MOQ_VERSION"

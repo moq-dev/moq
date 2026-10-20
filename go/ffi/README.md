@@ -53,4 +53,4 @@ Compiled binaries never live in the source tree. `sh/go/check.sh` stages into th
 
 ## Release
 
-The `release-go-ffi.yml` workflow fires on every `moq-ffi-v*` tag, builds per-target static libraries, runs `uniffi-bindgen-go`, calls `just go package-ffi` to assemble the module, and `just go publish-ffi` to push the result to `moq-dev/moq-go-ffi` with a bare-semver tag (e.g. `v0.2.18`) lockstep with the crate. Go's module proxy picks up the new tag automatically.
+The `release-shared-ffi.yml` coordinator fires on every `moq-ffi-v*` tag and builds the default-feature native libraries once for Go, Kotlin, and Swift. It generates bindings from the built Linux library and calls `release-go-ffi.yml`, which calls `just go package-ffi` to assemble the module, and `just go publish-ffi` to push the result to `moq-dev/moq-go-ffi` with a bare-semver tag (e.g. `v0.2.18`) lockstep with the crate. Go's module proxy picks up the new tag automatically.

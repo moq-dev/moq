@@ -102,9 +102,8 @@ impl Drop for Decoder {
 
 impl Nvdec {
 	pub(crate) fn open(codec: Codec, config: &super::Config) -> Result<Box<dyn Backend>, Error> {
-		// cudarc panics (aborting under release `panic = "abort"`) when libcuda
-		// is missing, so probe it and turn a missing driver into a recoverable
-		// error; the cuvid table already loads fallibly.
+		// cudarc panics when libcuda is missing, so probe it and turn a missing
+		// driver into a recoverable error; the cuvid table already loads fallibly.
 		if !driver_libs_present() {
 			return Err(codec_err(
 				"NVIDIA driver libraries not found (libcuda); NVDEC unavailable".into(),

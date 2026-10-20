@@ -1,3 +1,4 @@
+import { now as clockNow, Nano } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 
 const WINDOW = 10_000_000; // 10 seconds in microseconds.
@@ -8,7 +9,7 @@ type Sample = { at: number; lateness: number };
 // does not ratchet forever. The queue is ordered by lateness so its head is the minimum, and each
 // sample enters/leaves once.
 //
-// Every js/publish timestamp is `performance.now()`, so lateness compares across renditions and one
+// Every js/publish timestamp is the installed clock in microseconds, so lateness compares across renditions and one
 // window can be shared by a whole broadcast.
 export class Baseline {
 	#samples: Sample[] = [];
@@ -55,7 +56,7 @@ export class Estimator {
 	// in the catalog shares. Jitter is the spread above this rendition's own recent minimum lateness,
 	// so a constant encoder delay is not jitter; delay is how far that minimum trails the broadcast's.
 	// Returns whether either estimate rose.
-	flush(timestamp: number, broadcast: Baseline, now = performance.now() * 1000): boolean {
+	flush(timestamp: number, broadcast: Baseline, now: number = Nano.toMicro(Nano(clockNow()))): boolean {
 		const lateness = now - timestamp;
 		const earliest = broadcast.observe(lateness, now);
 		const minimum = this.#baseline.observe(lateness, now);

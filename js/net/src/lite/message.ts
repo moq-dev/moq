@@ -1,4 +1,5 @@
 import { Reader, Writer } from "../stream.ts";
+import { decodeError } from "../util/decode_error.ts";
 
 /**
  * The largest message body either side accepts, matching the Rust implementation: the
@@ -61,19 +62,20 @@ export async function encode(
 export async function decode<T>(reader: Reader, f: (r: Reader) => Promise<T>, max = MAX_MESSAGE_SIZE): Promise<T> {
 	const size = await reader.u53();
 	if (size > max) {
-		throw new Error(`message too large: ${size} bytes (max ${max})`);
+		throw decodeError(new Error(`message too large: ${size} bytes (max ${max})`));
 	}
 	const data = await reader.read(size);
 
-	const limit = new Reader(undefined, data, reader.version);
-	const msg = await f(limit);
-
-	// Check that we consumed exactly the right number of bytes
-	if (!(await limit.done())) {
-		throw new Error("Message decoding consumed too few bytes");
+	// Once all declared bytes arrived, running short or leaving bytes unread is
+	// malformed input. A transport FIN/reset while filling above remains distinct.
+	try {
+		const limit = new Reader(undefined, data, reader.version);
+		const msg = await f(limit);
+		if (!(await limit.done())) throw new Error("Message decoding consumed too few bytes");
+		return msg;
+	} catch (err: unknown) {
+		throw decodeError(err);
 	}
-
-	return msg;
 }
 
 export async function decodeMaybe<T>(reader: Reader, f: (r: Reader) => Promise<T>): Promise<T | undefined> {

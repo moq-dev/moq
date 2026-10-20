@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, cast
 
@@ -22,24 +22,23 @@ from moq_ffi import (
     MoqContainerFormat as ContainerFormat,
 )
 from moq_ffi import (
-    MoqContainerInit as ContainerInit,
-)
-from moq_ffi import MoqDimensions as Dimensions
-from moq_ffi import (
+    MoqContainerInit,
     MoqError,
     MoqMediaCatalogConsumer,
     MoqMediaCatalogProducer,
-    MoqMediaContainerConfig,
-    MoqMediaContainerConsumer,
-    MoqMediaContainerGroupConfig,
-    MoqMediaContainerGroupConsumer,
     MoqMediaContainerProducer,
-    MoqMediaContainerStreamProducer,
     MoqMediaFrame,
+    MoqMediaGroupConfig,
+    MoqMediaGroupConsumer,
     MoqMediaTarget,
+    MoqMediaTimebase,
+    MoqMediaTrackConfig,
+    MoqMediaTrackConsumer,
     MoqMediaTrackProducer,
     MoqMediaTrackStreamProducer,
+    MoqRendition,
 )
+from moq_ffi import MoqDimensions as Dimensions
 from moq_ffi import MoqVideo as Video
 from moq_ffi import MoqVideoFormat as VideoFormat
 from moq_ffi import MoqVideoHint as VideoHint
@@ -50,10 +49,33 @@ from moq_ffi import (
     MoqVideoProperties as VideoProperties,
 )
 
+from . import subscribe as _subscribe
 from ._records import Frame, Subscription, _from_us, _subscription, _to_us
+from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand, TrackRequest
 from .subscribe import BroadcastConsumer
 from .types import FetchGroupOptions
+
+
+class Timebase:
+    """Share one source's timestamp offset without keeping its broadcast open."""
+
+    def __init__(self, broadcast: BroadcastProducer) -> None:
+        self._inner = MoqMediaTimebase(broadcast._inner)
+
+
+@dataclass(frozen=True)
+class ContainerInit:
+    """A container format, its leading bytes, and an optional shared source timebase."""
+
+    format: ContainerFormat
+    data: bytes
+    timebase: Timebase | None = field(default=None, kw_only=True)
+
+    def _ffi(self) -> MoqContainerInit:
+        return MoqContainerInit(
+            format=self.format, data=self.data, timebase=self.timebase._inner if self.timebase else None
+        )
 
 
 @dataclass(frozen=True)
@@ -99,6 +121,10 @@ class CatalogProducer:
     def __init__(self, broadcast: BroadcastProducer) -> None:
         self._inner = MoqMediaCatalogProducer(broadcast._inner)
 
+    def now(self) -> timedelta:
+        """Read the broadcast clock, fixing it for subsequent media producers."""
+        return _from_us(self._inner.now())
+
     def set_video_properties(self, properties: VideoProperties) -> None:
         """Replace the video properties shared by every rendition."""
         self._inner.set_video_properties(properties)
@@ -136,7 +162,7 @@ class TrackProducer:
         """A watch-only handle to whether this media track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def write_frame(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> None:
+    def write_frame(self, payload: bytes, timestamp: timedelta) -> None:
         """Write one encoded frame with a presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
@@ -185,10 +211,10 @@ class ContainerProducer:
     """
 
     def __init__(self, broadcast: BroadcastProducer, init: ContainerInit) -> None:
-        self._inner = MoqMediaContainerProducer(broadcast._inner, init)
+        self._inner = MoqMediaContainerProducer(broadcast._inner, init._ffi())
 
     def write(self, payload: bytes) -> None:
-        """Write a whole chunk of container bytes."""
+        """Write container bytes; the container recovers its own framing, so chunks may split anywhere."""
         self._inner.write(payload)
 
     def cut(self) -> None:
@@ -203,21 +229,6 @@ class ContainerProducer:
     def seek(self, sequence: int) -> None:
         """Start a new segment and number its groups ``sequence``."""
         self._inner.seek(sequence)
-
-    def finish(self) -> None:
-        """Finish every track this container publishes."""
-        self._inner.finish()
-
-
-class ContainerStreamProducer:
-    """Publish a container fed by a raw byte stream, which recovers its own framing."""
-
-    def __init__(self, broadcast: BroadcastProducer, format: ContainerFormat) -> None:
-        self._inner = MoqMediaContainerStreamProducer(broadcast._inner, format)
-
-    def write(self, payload: bytes) -> None:
-        """Push raw container bytes; chunk boundaries don't matter."""
-        self._inner.write(payload)
 
     def finish(self) -> None:
         """Finish every track this container publishes."""
@@ -254,7 +265,15 @@ class TrackStreamProducer:
         self._inner.finish()
 
 
-class ContainerConsumer:
+def _rendition(id: str, rendition: Video | Audio) -> MoqRendition:
+    if isinstance(rendition, Video):
+        return cast(MoqRendition, MoqRendition.VIDEO(id=id, config=rendition))
+    if isinstance(rendition, Audio):
+        return cast(MoqRendition, MoqRendition.AUDIO(id=id, config=rendition))
+    raise TypeError(f"expected a catalog Video or Audio rendition, got {type(rendition).__name__}")
+
+
+class TrackConsumer(_Stream[MediaFrame]):
     """Async-iterable stream of decoded :class:`MediaFrame` in decode order.
 
     Construct with :meth:`subscribe`. Iterate with ``async for``;
@@ -263,86 +282,84 @@ class ContainerConsumer:
 
     @classmethod
     async def subscribe(
-        cls, broadcast: BroadcastConsumer, name: str, container: Container, *, subscription: Subscription | None = None
-    ) -> ContainerConsumer:
-        """Subscribe to a media track and decode its container."""
-        config = MoqMediaContainerConfig(name=name, container=container, subscription=_subscription(subscription))
-        return cls(await MoqMediaContainerConsumer.subscribe(broadcast._inner, config))
+        cls,
+        broadcast: BroadcastConsumer,
+        id: str,
+        rendition: Video | Audio,
+        *,
+        subscription: Subscription | None = None,
+    ) -> TrackConsumer:
+        """Subscribe to the catalog rendition ``id`` and decode its container, following its broadcast and track."""
+        config = MoqMediaTrackConfig(rendition=_rendition(id, rendition), subscription=_subscription(subscription))
+        return cls(await MoqMediaTrackConsumer.subscribe(broadcast._inner, config))
 
-    def __init__(self, inner: MoqMediaContainerConsumer) -> None:
+    def __init__(self, inner: MoqMediaTrackConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> MediaFrame:
+    async def _next(self) -> MediaFrame | None:
         frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return MediaFrame._from_ffi(frame)
+        return None if frame is None else MediaFrame._from_ffi(frame)
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering frames."""
         self._inner.cancel()
 
 
-class ContainerGroupConsumer:
-    """Async iterator of decoded :class:`MediaFrame` within a single fetched group.
+class GroupConsumer(_Stream[MediaFrame]):
+    """Async iterator of decoded :class:`MediaFrame` within a single group.
 
-    Construct with :meth:`fetch`. Finite: iteration ends
-    after the group's last frame. Usable as an async context manager that cancels
-    on exit.
+    Construct with :meth:`fetch`, or decode a raw :class:`~moq.GroupConsumer`,
+    such as one from :meth:`~moq.TrackConsumer.recv_group` for arrival-order
+    reads. Finite: iteration ends after the group's last frame. Usable as an
+    async context manager that cancels on exit.
     """
+
+    def __init__(self, group: _subscribe.GroupConsumer, container: Container) -> None:
+        """Decode ``group`` with the track's container, as each frame lands.
+
+        Frame timestamps are container media time, not the transport's. Which
+        groups arrive, and how long a stalled one stays readable, is the
+        subscription's ``max_delay``. Takes over ``group``, whose handle is
+        closed afterward; raises ``Error.AlreadyCommitted`` if it has already
+        read a frame.
+        """
+        self._inner = MoqMediaGroupConsumer(group._inner, container)
+
+    @classmethod
+    def _from_inner(cls, inner: MoqMediaGroupConsumer) -> GroupConsumer:
+        self = cls.__new__(cls)
+        self._inner = inner
+        return self
 
     @classmethod
     async def fetch(
         cls,
         broadcast: BroadcastConsumer,
-        name: str,
+        id: str,
+        rendition: Video | Audio,
         sequence: int,
-        container: Container,
         *,
         options: FetchGroupOptions | None = None,
-    ) -> ContainerGroupConsumer:
-        """Fetch and decode exactly one media group."""
-        config = MoqMediaContainerGroupConfig(name=name, sequence=sequence, container=container, options=options)
-        return cls(await MoqMediaContainerGroupConsumer.fetch(broadcast._inner, config))
-
-    def __init__(self, inner: MoqMediaContainerGroupConsumer) -> None:
-        self._inner = inner
+    ) -> GroupConsumer:
+        """Fetch and decode one group of the catalog rendition ``id``, following its broadcast and track."""
+        config = MoqMediaGroupConfig(rendition=_rendition(id, rendition), sequence=sequence, options=options)
+        return cls._from_inner(await MoqMediaGroupConsumer.fetch(broadcast._inner, config))
 
     @property
     def sequence(self) -> int:
         """The sequence number of this group within the track."""
         return self._inner.sequence()
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> MediaFrame:
+    async def _next(self) -> MediaFrame | None:
         frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return MediaFrame._from_ffi(frame)
+        return None if frame is None else MediaFrame._from_ffi(frame)
 
     def cancel(self) -> None:
         """Cancel reading this group and stop delivering frames."""
         self._inner.cancel()
 
 
-class CatalogConsumer:
+class CatalogConsumer(_Stream[Catalog]):
     """Async-iterable stream of :class:`Catalog` snapshots as the broadcast updates.
 
     Construct with :meth:`subscribe`. Each item is the latest
@@ -357,20 +374,8 @@ class CatalogConsumer:
     def __init__(self, inner: MoqMediaCatalogConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Catalog:
-        catalog = await self._inner.next()
-        if catalog is None:
-            raise StopAsyncIteration
-        return catalog
+    async def _next(self) -> Catalog | None:
+        return await self._inner.next()
 
     def cancel(self) -> None:
         """Cancel the catalog subscription and stop delivering updates."""
@@ -398,9 +403,8 @@ __all__ = [
     "TrackProducer",
     "TrackStreamProducer",
     "ContainerProducer",
-    "ContainerStreamProducer",
-    "ContainerConsumer",
-    "ContainerGroupConsumer",
+    "TrackConsumer",
+    "GroupConsumer",
     "Audio",
     "Video",
     "Catalog",
@@ -414,5 +418,6 @@ __all__ = [
     "AudioInit",
     "VideoInit",
     "ContainerInit",
+    "Timebase",
     "catalog",
 ]

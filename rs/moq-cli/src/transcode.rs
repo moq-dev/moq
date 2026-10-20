@@ -14,7 +14,7 @@ use crate::args::MoqSide;
 use hang::moq_net;
 
 /// Ladder and codec options for the `transcode` verb.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// The derivative broadcast path. Defaults to `<broadcast>/transcode.hang`.
@@ -166,7 +166,7 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 		.create_broadcast(&output_path)
 		.context("failed to create the derivative broadcast")?;
 	output
-		.announce(moq_net::origin::Route::default().with_epoch(moq.epoch.clone().unwrap_or_else(moq_net::Epoch::mint)))
+		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.context("failed to announce the derivative broadcast")?;
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 

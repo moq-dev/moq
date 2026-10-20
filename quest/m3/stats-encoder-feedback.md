@@ -11,7 +11,7 @@ it already follows. Keyframe requests stay out.
 ## Plan
 
 Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no named consumer; the media stats it
-reads land first in m1.
+reads land first in m2.
 
 Decided 2026-10-08: parked, and the transcode leg is out. The
 [ladder controller](/quest/m3/ladder/controller.md) owns every
@@ -68,7 +68,7 @@ covers the encode producers and `moq import --echo`, which need no ladder.
   moq-video README.
 
 Open, to settle before starting (moved from the
-[media stats](/quest/m1/stats/README.md) line):
+[media stats](/quest/m2/stats/README.md) line):
 
 - **Referenced-rendition feedback.** A derivative catalog (a `moq-transcode`
   passthrough) collects feedback for a source rendition it lists, but owns
@@ -86,8 +86,7 @@ Open, to settle before starting (moved from the
 
 ## Required
 
-- [Schema](/quest/m1/stats/schema.md) - the `echo` section and feedback snapshot
-- [Rust reporters](/quest/m1/stats/rust.md) - the viewers that report and
+- [Rust reporters](/quest/m2/stats/rust.md) - the viewers that report and
   the CLI it wires
 
 ## Related

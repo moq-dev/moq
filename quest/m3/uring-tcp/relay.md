@@ -23,7 +23,7 @@ transport is driven, which is what makes that handoff free here too.
 
 Keep the ops and web listeners' behavior identical: the same routes, the same
 CORS scoping, the same landing-page fallback, and the same
-`/certificate.sha256` fingerprint. Extend `rs/moq-relay/tests/runtime_uring.rs`
+`/certificate.sha256` fingerprint. Extend `rs/moq-relay/tests/integration/runtime_uring.rs`
 to prove a WebSocket session and an HTTP route both work when served from a
 worker.
 

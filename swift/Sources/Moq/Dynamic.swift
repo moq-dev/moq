@@ -41,8 +41,8 @@ public final class TrackRequest: Sendable {
 ///
 /// Returned by `GroupRequest.demand()`. Weak: holding it does not keep the request alive. The last
 /// caller to leave withdraws the request, so once unused, demand never returns: drop the request.
-/// Waits throw once the request is answered: `MoqError.Closed` if it was dropped, otherwise the
-/// error the accept or reject left for the waiting fetches.
+/// Waits throw `MoqError.Closed` after the request is accepted or dropped, and keep the rejection
+/// reason after it is rejected.
 public final class GroupDemand: Sendable {
     let ffi: MoqGroupDemand
 

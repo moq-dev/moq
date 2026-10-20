@@ -1,10 +1,26 @@
+import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
-import type { Grant } from "../auth.ts";
+import type { Auth, Grant } from "../auth.ts";
+import { Gate } from "../auth_gate.ts";
+import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import * as DatagramStream from "../datagram_stream.ts";
-import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError } from "../error.ts";
+import type * as Epoch from "../epoch.ts";
+import {
+	controlTimeout,
+	error,
+	NoStreamCredit,
+	NotFound,
+	ProtocolViolation,
+	reason,
+	SessionCode,
+	SessionError,
+	StreamCode,
+	StreamError,
+	unauthorized,
+} from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
@@ -12,9 +28,10 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
-import { Milli, Timescale } from "../time.ts";
-import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
+import { Timescale } from "../time.ts";
+import type { Groups, Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
@@ -22,33 +39,46 @@ import { type Advertised, type Advertisements, sameInstance, wireOf } from "../w
 import type { Session } from "./adapter.ts";
 import * as Cluster from "./cluster.ts";
 import { encodeDatagram } from "./datagram.ts";
-import { type RequestKind, requestReason, toRequestCode } from "./error.ts";
-import { type Fetch, FetchError, FetchHeader } from "./fetch.ts";
+import { requestReason } from "./error.ts";
+import { type Fetch, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
+import { MAX_AGE_PARAMETER } from "./max_age.ts";
 import * as Message from "./message.ts";
+import * as Namespace from "./namespace.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { PublishDone, PublishDoneStatus } from "./publish.ts";
 import {
+	type AdvertParams,
 	PublishNamespace,
 	PublishNamespaceDone,
 	PublishNamespaceOk,
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { cancelled, finCancels } from "./request_stream.ts";
-import { GroupOrder, type Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
+import {
+	cancelled,
+	ended,
+	finCancels,
+	malformed,
+	namespaceUpdate,
+	nextMessage,
+	type Refusal,
+	refuse,
+	refuseReserved,
+	refuseUpdate,
+} from "./request_stream.ts";
+import { GroupOrder, type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
-	SubscribeNamespaceError,
 	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
-import type { TrackStatusRequest } from "./track.ts";
+import { TrackStatusOk, type TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
@@ -91,10 +121,15 @@ function change(
 	return { from, to };
 }
 
-/** A held advertisement's cluster parameters, and the ones the peer should hold instead. */
+/**
+ * What changed for a namespace the peer holds: its cluster parameters (from what it holds
+ * to what it should), its token, or both.
+ */
 interface Reprice {
-	from: Cluster.Advert;
-	to: Cluster.Advert;
+	from?: Cluster.Advert;
+	to?: Cluster.Advert;
+	/** The token the request should carry instead, when it changed. */
+	token?: Auth;
 }
 
 /** Whether two hop paths list the same hops in the same order. */
@@ -103,24 +138,25 @@ function sameHops(a: Hop[], b: Hop[]): boolean {
 }
 
 /**
- * How long one advertisement may take to be answered. Matches the Rust publisher, and the
- * peer accepting the stream is only half the exchange: one it never answers on holds the
+ * How long one advertisement may take to be answered. Accepting the stream is only half
+ * the exchange: one it never answers on holds the
  * loop just as effectively as one it never grants.
  */
-const ADVERTISE_TIMEOUT_MS = 5000;
+const ADVERTISE_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
+const ADVERTISE_TIMEOUT = Nano.fromMilli(Milli(ADVERTISE_TIMEOUT_MS));
 
 /** Sleep `delay`, jittered, so a relay's namespaces don't all retry on the same tick. */
 function retryAfter(delay: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, delay * (0.5 + Math.random() / 2)));
+	return sleep(Nano.fromMilli(Milli(delay * (0.5 + Math.random() / 2))));
 }
 
 /**
- * What a refusal said about re-offering the namespace.
+ * What prevents re-offering the namespace.
  *
  * A peer answers a request it declines with a retry interval, and ignoring it is how a
  * permanent refusal (unauthorized, uninterested) turns into a request every few seconds
- * for the life of the session. `"never"` is an interval of 0; a number is the epoch
- * milliseconds before which we must not come back.
+ * for the life of the session. `"never"` is an interval of 0 or a terminal local failure;
+ * a number is the epoch milliseconds before which we must not come back.
  */
 type Refused = "never" | number;
 
@@ -130,8 +166,18 @@ type Refused = "never" | number;
  */
 type Answer = "held" | "dropped" | Refused;
 
+/** One open PUBLISH_NAMESPACE request. */
+type NamespaceRequest = {
+	path: Path.Valid;
+	requestId: bigint;
+	stream: Stream;
+	auth?: Auth;
+	reply?: Promise<number | undefined>;
+	updating?: boolean;
+};
+
 /** The open PUBLISH_NAMESPACE request per advertised path. */
-type Requests = Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>;
+type Requests = Map<Path.Valid, NamespaceRequest>;
 
 /** What one announce loop knows about the peer, keyed the way that loop names namespaces. */
 interface Namespaces {
@@ -145,16 +191,36 @@ interface Namespaces {
 	offered: Map<Path.Valid, Advertised>;
 }
 
+/** The bytes a request carries for a token this session issued. */
+interface Carrier {
+	carried(token: Auth | undefined): Uint8Array | undefined;
+	/** Bumps whenever one of the session's tokens ends, so a request carrying it drops it. */
+	readonly ended: Getter<number>;
+}
+
 /** Where one announce loop sends its advertisements. */
 interface Target {
 	/** Advertise a namespace the peer does not hold. */
 	advertise(key: Path.Valid, next: Advertised): Promise<Answer>;
+
+	/**
+	 * Replace the instance behind a namespace the peer holds with another (MoQ Epoch): the
+	 * new advertisement goes out before the old is withdrawn, so the peer never sees the
+	 * namespace absent.
+	 */
+	replace(key: Path.Valid, next: Advertised): Promise<Answer>;
 
 	/** Reprice a namespace the peer holds: the same broadcast at a new hop chain or cost. */
 	update(key: Path.Valid, next: Advertised, reprice: Reprice): Promise<Answer>;
 
 	/** Withdraw a namespace the peer holds. */
 	withdraw(key: Path.Valid): Promise<void>;
+
+	/** The token the peer holds a namespace under, or undefined when its advertisement carries none. */
+	held(key: Path.Valid): Auth | undefined;
+
+	/** The token an advertisement naming `auth` carries: only a request can carry one. */
+	carry(auth: Auth | undefined): Auth | undefined;
 }
 
 /** What {@link Publisher.runGroup} needs to serve one group. */
@@ -247,12 +313,15 @@ export class Publisher {
 	#requiresSolicitation: boolean;
 	// Subscriptions the peer holds live on this session.
 	#subscriptions: Slots;
+	#fetches: Slots;
 
 	// The one writer for the outbound datagram stream, shared by every subscription since a
 	// second getWriter would throw. Undefined when the transport carries no datagrams, which
 	// turns them off: there is no stream fallback. Released in close().
 	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 	#hidden: boolean;
+	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
+	#activeCount: boolean;
 
 	// The origin this session serves, borrowed: it outlives the session, and closing the
 	// session leaves its broadcasts alone. Namespaces go out as an unsolicited
@@ -260,6 +329,9 @@ export class Publisher {
 	// told on request. On draft-16 and later {@link runSubscribeNamespace} also carries
 	// every match: a NAMESPACE is discovery, not a second route.
 	#advertised: Getter<Advertisements | undefined>;
+	// Bumped when an idle draft-18+ advertisement ends without an update, so the announce
+	// loop re-offers it instead of holding a request the peer dropped.
+	#lapsed = new Signal(0);
 	#publish?: OriginConsumer;
 
 	// What every advertisement carries on a session that negotiated the MoQ Cluster
@@ -267,14 +339,23 @@ export class Publisher {
 	// back came from us. `undefined` when nothing negotiated it.
 	#advert?: Cluster.Advert;
 
+	// Whether both SETUPs offered MoQ Epoch: every advertisement names its route's epoch, and
+	// a request may name the one it expects.
+	#epoch: boolean;
+
 	// Our grant (MoQ Auth): only what it lets us publish is advertised and served, and a
 	// shrink withdraws what it no longer covers. Undefined until the peer answers, which
 	// allows everything.
 	#grant: Getter<Grant | undefined>;
+	// Holds every incoming request to that grant from dispatch to its end.
+	#gate: Gate;
 
 	// Resolves once the tokens this session presented at setup are answered, so nothing is
 	// advertised before the grant it would be checked against.
 	#ready: Promise<void>;
+
+	// The bytes a request carries for a route's token, for only the tokens this session issued.
+	#auth?: Carrier;
 
 	/**
 	 * Creates a new Publisher instance.
@@ -287,8 +368,11 @@ export class Publisher {
 		publish,
 		requiresSolicitation,
 		hidden = false,
+		activeCount = false,
 		cluster,
+		epoch = false,
 		grant = new Signal<Grant | undefined>(undefined),
+		auth,
 		ready = Promise.resolve(),
 		limits = LIMITS,
 	}: {
@@ -302,10 +386,16 @@ export class Publisher {
 		requiresSolicitation: boolean;
 		/** Whether the peer declared MoQ Hidden. */
 		hidden?: boolean;
+		/** Whether both SETUPs declared MoQ Active Count. */
+		activeCount?: boolean;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
+		/** Whether both SETUPs offered MoQ Epoch. */
+		epoch?: boolean;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we publish. */
 		grant?: Getter<Grant | undefined>;
+		/** This session's tokens, which a route names for its request to carry. */
+		auth?: Carrier;
 		/** Resolves once the setup tokens are answered (MoQ Auth). */
 		ready?: Promise<void>;
 		/** How many live requests the peer may hold. */
@@ -313,7 +403,10 @@ export class Publisher {
 	}) {
 		this.#quic = quic;
 		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
+		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = grant;
+		this.#gate = new Gate(grant);
+		this.#auth = auth;
 		this.#ready = ready;
 		this.#session = session;
 		const origin = publish && wireOf(publish);
@@ -321,7 +414,9 @@ export class Publisher {
 		this.#publish = publish;
 		this.#requiresSolicitation = requiresSolicitation;
 		this.#hidden = hidden;
+		this.#activeCount = activeCount;
 		this.#advert = Cluster.advertise(cluster);
+		this.#epoch = epoch;
 		this.#datagramWriter = DatagramStream.datagramWriter(quic);
 	}
 
@@ -343,9 +438,14 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		this.#pinned(msg.epoch);
+		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
 		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
 		// once. A peer past the cap loses the session.
-		const charged = msg.forward && !msg.rangeFilters && !this.#denied(msg.trackNamespace);
+		const charged = msg.forward && !msg.rangeFilters && this.#gate.allows(msg.trackNamespace);
 		if (charged) this.#subscriptions.acquire();
 		try {
 			await this.#serveSubscribe(msg, stream);
@@ -358,7 +458,7 @@ export class Publisher {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		let broadcast: broadcast.Consumer | undefined;
-		let refusal: { errorCode: number; reasonPhrase: string } | undefined;
+		let refusal: Refusal | undefined;
 
 		// The requester leaving while the broadcast and track resolve ends the request, so a
 		// cancelled subscription gives back its slot instead of holding it until the track
@@ -370,6 +470,10 @@ export class Publisher {
 		// Legal requests we can't honor are refused one at a time. A subscription that
 		// forwards nothing is only useful to a subscriber that later turns forwarding on,
 		// and serving a Range Filter unfiltered would deliver objects it excluded.
+		// An instance never comes back, so a request pinned to a gone one is missing, not
+		// worth waiting for.
+		const rendezvous = msg.rendezvous && msg.epoch === undefined;
+
 		const unsupported = !msg.forward
 			? "FORWARD=0 not supported"
 			: msg.rangeFilters
@@ -377,78 +481,68 @@ export class Publisher {
 				: undefined;
 
 		if (unsupported) {
-			refusal = { errorCode: toRequestCode("not_supported", "subscribe", version), reasonPhrase: unsupported };
-		} else if (this.#denied(name)) {
+			refusal = {
+				condition: msg.rangeFilters && msg.forward ? "invalid_filter" : "not_supported",
+				reasonPhrase: unsupported,
+			};
+		} else if (!this.#gate.allows(name)) {
 			// Serve only what our grant lets us publish. Checked before resolving, so a denied
 			// request never reaches the origin.
-			refusal = { errorCode: toRequestCode("unauthorized", "subscribe", version), reasonPhrase: "not granted" };
+			refusal = { condition: "unauthorized", reasonPhrase: "not granted" };
 		} else {
 			try {
-				broadcast =
-					this.#publish &&
-					(wireOf(this.#publish).local(name) ??
-						(await untilAborted(wireOf(this.#publish).demand(name), left.signal)));
-				if (!broadcast) {
-					refusal = {
-						errorCode: toRequestCode("does_not_exist", "subscribe", version),
-						reasonPhrase: "broadcast not found",
-					};
-				}
+				broadcast = await this.#resolve(name, left.signal, msg.epoch);
 			} catch (err: unknown) {
 				// Nobody is left to refuse.
 				if (left.signal.aborted) {
 					stream.abort(cancel);
 					return;
 				}
-				const e = error(err);
-				const condition =
-					e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
-						? "does_not_exist"
-						: "internal";
-				refusal = { errorCode: toRequestCode(condition, "subscribe", version), reasonPhrase: reason(e) };
+				refusal = this.#failed(err, rendezvous);
 			}
 		}
 
 		if (refusal) {
-			if (version === Version.DRAFT_14) {
-				await stream.writer.u53(SubscribeError.id);
-				const err = new SubscribeError({
-					requestId: msg.requestId,
-					errorCode: refusal.errorCode,
-					reasonPhrase: refusal.reasonPhrase,
-				});
-				await err.encode(stream.writer, version);
-			} else {
-				await stream.writer.u53(RequestError.id);
-				const err = new RequestError({
-					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
-					errorCode: refusal.errorCode,
-					reasonPhrase: refusal.reasonPhrase,
-				});
-				await err.encode(stream.writer, version);
-			}
-			stream.close();
+			await refuse(stream, version, "subscribe", { ...refusal, requestId: msg.requestId });
 			return;
 		}
 		if (!broadcast) return;
 
 		const priority = fromWire(msg.subscriberPriority);
 		const order = msg.groupOrder;
+		// A range that resolves without the live edge has a fixed start, which is no join:
+		// bound the subscription before subscribing so the refresh ratio never judges it.
+		const fixed = subscribeRange(msg, {}, version);
 		const track = wireOf(broadcast).subscribe(msg.trackName, {
 			priority,
 			order,
-			// moq-transport has no subscriber latency parameter. Keep everything the
-			// producer retained and let the receiving subscriber enforce its own budget.
-			// Keep the sentinel encodable if this demand crosses a Lite hop before the
-			// producer's retention bound is known.
-			maxDelay: Milli(Varint.MAX_U53),
+			// An absent budget preserves everything retained by the producer.
+			maxDelay: Milli(msg.maxAge ?? Varint.MAX_U53),
+			groups: fixed.start ? rangeGroups(fixed) : undefined,
 		});
 
 		let cache: TrackSubscriber | undefined;
 		let ranking: Priority | undefined;
 
 		try {
-			const info = await untilAborted(track.info(), left.signal);
+			let info: Awaited<ReturnType<TrackSubscriber["info"]>>;
+			try {
+				info = await untilAborted(track.info(), left.signal);
+			} catch (err) {
+				const failed = error(err);
+				if (
+					!(failed instanceof StreamError) ||
+					(failed.code !== StreamCode.NotFound && failed.code !== StreamCode.Unroutable)
+				)
+					throw err;
+				// The broadcast resolved, so only a vanished route still means a missing publisher;
+				// a missing track is the publisher's answer.
+				await refuse(stream, version, "subscribe", {
+					...this.#failed(err, rendezvous && failed.code === StreamCode.Unroutable),
+					requestId: msg.requestId,
+				});
+				return;
+			}
 			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
 			// Drafts 14-16 never write that property, so their objects stay unstamped.
 			const timescale =
@@ -474,13 +568,10 @@ export class Publisher {
 			track.update({
 				priority,
 				order,
-				maxDelay: Milli(Varint.MAX_U53),
-				groups: {
-					start: range.start ? { included: Number(range.start.group) } : undefined,
-					end: range.end ? { included: Number(range.end.group) } : undefined,
-				},
+				maxDelay: Milli(msg.maxAge ?? Varint.MAX_U53),
+				groups: rangeGroups(range),
 			});
-			const startGroup = range.start ? Number(range.start.group) : track.latest();
+			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
 			if (startGroup !== undefined) track.setGroups({ start: { included: startGroup } });
 
 			// A fill reads the group cache through its own consumer, independent of the
@@ -546,62 +637,74 @@ export class Publisher {
 			const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
 			const updates = (async () => {
 				for (;;) {
-					if (await stream.reader.done()) {
+					const type = await nextMessage(stream.reader, version, this.#session.client).catch(
+						(err: unknown) => {
+							throw malformed(err, "subscription message");
+						},
+					);
+					if (type === undefined) {
 						if (legacy || finCancels(version)) return;
 						return stream.writer.closed;
 					}
-					if ((await stream.reader.u53()) !== 0x02) throw new Error("unexpected message on subscribe stream");
-					// Drafts 15 and 16 name the update's own Request ID; later drafts name none.
-					const refuse = async (
+					if (type !== 0x02)
+						throw new ProtocolViolation(`unexpected message on a subscription: 0x${type.toString(16)}`);
+					// Drafts 15 and 16 name the update's own Request ID.
+					const refused = async (
 						condition: "not_supported" | "malformed_auth_token",
 						reasonPhrase: string,
-						requestId?: bigint,
+						requestId: bigint | undefined,
 					) => {
-						await stream.writer.u53(RequestError.id);
-						await new RequestError({
-							requestId,
-							errorCode: toRequestCode(condition, "subscribe", version),
-							reasonPhrase,
-						}).encode(stream.writer, version);
+						await refuseUpdate(stream.writer, version, "subscribe", { requestId, condition, reasonPhrase });
 						return new UpdateFailed();
 					};
-					if (legacy) {
-						// Not applied yet, but read anyway: an unread update keeps the adapter's
-						// stream from closing, which is how UNSUBSCRIBE arrives.
-						try {
-							await SubscribeUpdate.decode(stream.reader, version);
-						} catch (err) {
-							if (!(err instanceof MalformedAuthToken)) throw err;
-							// Draft 14 answers no update, so the refusal only ends the subscription.
-							if (version === Version.DRAFT_14) throw new UpdateFailed();
-							throw await refuse("malformed_auth_token", err.message, err.requestId);
-						}
-						continue;
-					}
+					let ownRequestId: bigint | undefined;
 					let params: Parameters;
 					try {
-						params = await Message.decode(stream.reader, async (r) => {
-							this.#session.spendRequest(await r.u62());
-							if (version === Version.DRAFT_17) await r.u62();
-							return Parameters.decode(r, version, "request-update");
-						});
+						if (legacy) {
+							// The adapter already spent the update's own Request ID.
+							const update = await SubscribeUpdate.decode(stream.reader, version);
+							ownRequestId = update.ownRequestId;
+							params = update.parameters;
+						} else {
+							params = await Message.decode(stream.reader, async (r) => {
+								this.#session.spendRequest(await r.u62());
+								if (version === Version.DRAFT_17) await r.u62();
+								return Parameters.decode(r, version, "request-update");
+							});
+						}
 					} catch (err) {
 						// Section 8.9 rejects the update, which says more than that we do not support it.
-						if (err instanceof MalformedAuthToken) throw await refuse("malformed_auth_token", err.message);
-						throw err;
+						if (err instanceof MalformedAuthToken)
+							throw await refused("malformed_auth_token", err.message, err.requestId);
+						throw malformed(err, "REQUEST_UPDATE");
 					}
+					if (params.trackPropertyFilter)
+						throw new ProtocolViolation(
+							"TRACK_PROPERTY_FILTER is only allowed on SUBSCRIBE_TRACKS updates",
+						);
 					const unsupported =
 						params.forward === false ||
+						params.subscriptionFilter !== undefined ||
 						params.bytes.size > 0 ||
 						params.rangeFilters ||
-						params.trackPropertyFilter ||
-						[...params.vars.keys()].some((key) => key !== 0x10n && key !== 0x20n);
-					if (unsupported) throw await refuse("not_supported", "REQUEST_UPDATE parameters not supported");
+						[...params.vars.keys()].some(
+							(key) =>
+								key !== MAX_AGE_PARAMETER &&
+								key !== 0x02n &&
+								key !== 0x06n &&
+								key !== 0x10n &&
+								key !== 0x20n,
+						);
+					if (unsupported)
+						throw await refused("not_supported", "REQUEST_UPDATE parameters not supported", ownRequestId);
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
 						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
+					if (params.maxAge !== undefined)
+						track.update({ ...track.subscription.peek(), maxDelay: Milli(params.maxAge) });
+					if (version === Version.DRAFT_14) continue;
 					await stream.writer.u53(RequestOk.id);
-					await new RequestOk({ requestId: undefined }).encode(stream.writer, version);
+					await new RequestOk({ requestId: ownRequestId }).encode(stream.writer, version);
 				}
 			})();
 			const requestEnded = legacy ? updates : race([updates, stream.writer.closed]);
@@ -678,11 +781,9 @@ export class Publisher {
 			const revoked = new Promise<"revoked">((resolve) => {
 				revoke = () => resolve("revoked");
 			});
-			const disposeGrant = this.#grant.subscribe(() => {
-				if (this.#denied(name)) revoke();
-			});
+			const watch = this.#gate.watch(name, revoke);
 			// The grant may have shrunk during setup, before this watcher existed.
-			if (this.#denied(name)) revoke();
+			if (watch.revoked()) revoke();
 
 			let publishError: Error | undefined;
 			let unauthorized = false;
@@ -699,7 +800,7 @@ export class Publisher {
 			} catch (err: unknown) {
 				publishError = error(err);
 			} finally {
-				disposeGrant();
+				watch.dispose();
 			}
 			// An update that broke the protocol, such as one whose AUTHORIZATION TOKEN names an
 			// alias, closes the session: the connection answers a thrown violation with its code.
@@ -728,8 +829,21 @@ export class Publisher {
 				console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(publishError)}`);
 			}
 
+			// A revocation bridged from upstream, such as a moq-lite UNAUTHORIZED reset, is one here too.
+			// PUBLISH_DONE's EXPIRED means the subscription's own lifetime ran out, so an expired
+			// token is reported as no longer granted.
+			if (
+				(publishError instanceof StreamError && publishError.code === StreamCode.Unauthorized) ||
+				(publishError instanceof SessionError &&
+					(publishError.code === SessionCode.Unauthorized || publishError.code === SessionCode.Expired))
+			) {
+				unauthorized = true;
+			}
+
 			// PUBLISH_DONE is required for every supported draft. The peer may have already
 			// closed its side to unsubscribe, in which case there is nowhere to send it.
+			// Draft 14 registers no UPDATE_FAILED, so a failed update ends there as any error does.
+			const updateFailed = publishError instanceof UpdateFailed && version !== Version.DRAFT_14;
 			try {
 				await stream.writer.u53(PublishDone.id);
 				const done = new PublishDone({
@@ -739,7 +853,7 @@ export class Publisher {
 							: undefined,
 					statusCode: unauthorized
 						? PublishDoneStatus.UNAUTHORIZED
-						: publishError instanceof UpdateFailed
+						: updateFailed
 							? PublishDoneStatus.UPDATE_FAILED
 							: publishError
 								? PublishDoneStatus.INTERNAL_ERROR
@@ -747,7 +861,7 @@ export class Publisher {
 					streamCount: BigInt(streams.opened),
 					reasonPhrase: unauthorized
 						? "not granted"
-						: publishError instanceof UpdateFailed
+						: updateFailed
 							? "update failed"
 							: publishError
 								? "internal error"
@@ -791,7 +905,7 @@ export class Publisher {
 			const stream = await Writer.tryOpen(this.#quic, {
 				cancel: unsubscribed,
 				version: this.#session.version,
-				sendOrder: ranking.rank(group.sequence),
+				sendOrder: ranking.rank(group.sequence, slice.skip),
 				waitUntilAvailable: false,
 			});
 			if (!stream) {
@@ -800,7 +914,7 @@ export class Publisher {
 			}
 			streams.opened += 1;
 			// A REQUEST_UPDATE re-ranks the subscription, so a group already on the wire follows it.
-			ranking.add(stream, group.sequence);
+			ranking.add(stream, group.sequence, slice.skip);
 
 			const header = new GroupMessage({
 				trackAlias: requestId,
@@ -996,17 +1110,18 @@ export class Publisher {
 
 			// A fill we cannot serve is reset right after its header, so it needs no rank.
 			const sequence = fill.kind === "group" ? Number(fill.sequence) : undefined;
+			const object = fill.kind === "group" ? Number(fill.skip) : 0;
 			stream = await Writer.tryOpen(this.#quic, {
 				cancel: unsubscribed,
 				version,
-				sendOrder: sequence === undefined ? undefined : ranking.rank(sequence),
+				sendOrder: sequence === undefined ? undefined : ranking.rank(sequence, object),
 			});
 			if (!stream) {
 				console.debug(`fill stream failed to open: fill=${requestId}`);
 				return;
 			}
 			streams.opened += 1;
-			if (sequence !== undefined) ranking.add(stream, sequence);
+			if (sequence !== undefined) ranking.add(stream, sequence, object);
 
 			await stream.u53(FetchHeader.type);
 			await new FetchHeader({ requestId }).encode(stream, version);
@@ -1088,20 +1203,14 @@ export class Publisher {
 		}
 	}
 
-	// Whether our grant excludes publishing this broadcast. No grant yet allows it.
-	#denied(broadcast: Path.Valid): boolean {
-		const grant = this.#grant.peek();
-		return grant !== undefined && !grant.publish.matches(broadcast);
-	}
-
 	/**
 	 * Close the session when our origin publishes a broadcast our grant does not cover;
 	 * see {@link enforceGrant}.
 	 *
 	 * @internal
 	 */
-	async runEnforce(setupAnswered: Promise<void>): Promise<void> {
-		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered });
+	async runEnforce(setupAnswered: Promise<void>, auth?: AuthSession): Promise<void> {
+		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered, auth });
 	}
 
 	/**
@@ -1121,9 +1230,13 @@ export class Publisher {
 	}
 
 	async #runSubscribeNamespace(msg: SubscribeNamespace, stream: Stream) {
+		if (Namespace.reserved(msg.namespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
 		if (this.#withdrawal.closing.peek()) return;
 		const version = this.#session.version;
-		const prefix = msg.namespace;
+		let prefix = msg.namespace;
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
 
 		// Draft-14/15: the open PUBLISH_NAMESPACE request per advertised suffix.
@@ -1136,19 +1249,35 @@ export class Publisher {
 		};
 
 		const ending = cancelled(stream, version);
+		const readUpdate = () =>
+			namespaceUpdate(stream.reader, version, this.#session.client).then(
+				(update) => ({ update }),
+				(err) => ({ error: error(err) }),
+			);
+		// Drafts 14-16 route an update onto the stream too, which stays open behind one left unread.
+		let updating = version !== Version.DRAFT_17 ? readUpdate() : undefined;
 		try {
-			// Send OK response
-			if (version === Version.DRAFT_14) {
-				await stream.writer.u53(SubscribeNamespaceOk.id);
-				const ok = new SubscribeNamespaceOk({ requestId: msg.requestId });
-				await ok.encode(stream.writer, version);
-			} else {
+			const answer = async (activeCount?: number) => {
+				if (version === Version.DRAFT_14) {
+					await stream.writer.u53(SubscribeNamespaceOk.id);
+					const ok = new SubscribeNamespaceOk({ requestId: msg.requestId });
+					await ok.encode(stream.writer, version);
+					return;
+				}
+				const parameters = new Parameters();
+				parameters.activeCount = activeCount;
 				await stream.writer.u53(RequestOk.id);
 				const ok = new RequestOk({
 					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
+					parameters,
 				});
 				await ok.encode(stream.writer, version);
-			}
+			};
+
+			// MoQ Active Count: the OK counts what the first pass below sends, so it waits for
+			// that pass. Otherwise answer now.
+			let answered = !this.#activeCount;
+			if (answered) await answer();
 
 			// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). Draft-16
 			// and later carry every remaining match. Draft-14/15 only add what the
@@ -1157,7 +1286,7 @@ export class Publisher {
 			const carries = (covered: Path.Valid) =>
 				visible(covered) &&
 				(legacy ? this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)) : true) &&
-				!this.#denied(covered);
+				this.#gate.allows(covered);
 
 			// Nothing is advertised before the grant it would be checked against.
 			await this.#ready;
@@ -1168,20 +1297,27 @@ export class Publisher {
 			// be declined.
 			const namespace = async (suffix: Path.Valid, snap: Advertised): Promise<Answer> => {
 				await stream.writer.u53(SubscribeNamespaceEntry.id);
-				const cluster = clusterFor(this.#advert, snap.route);
-				await new SubscribeNamespaceEntry({ suffix, cluster }).encode(stream.writer, version);
+				// Either extension puts the Parameters field on NAMESPACE, even an empty one.
+				const params = this.#advert !== undefined || this.#epoch ? this.#params(snap.route) : undefined;
+				await new SubscribeNamespaceEntry({ suffix, params }).encode(stream.writer, version);
 				return "held";
 			};
 			const target: Target = legacy
 				? {
-						advertise: (suffix, snap) =>
-							this.#advertise(Path.join(prefix, suffix), requests, clusterFor(this.#advert, snap.route)),
+						advertise: (suffix, snap) => this.#advertise(Path.join(prefix, suffix), requests, snap.route),
+						replace: (suffix, snap) => this.#replace(Path.join(prefix, suffix), requests, snap.route),
 						update: (suffix, _snap, reprice) => this.#update(Path.join(prefix, suffix), requests, reprice),
 						withdraw: (suffix) => this.#withdraw(Path.join(prefix, suffix), requests),
+						held: (suffix) => requests.get(Path.join(prefix, suffix))?.auth,
+						carry: (auth) => this.#carry(auth),
 					}
 				: {
 						advertise: namespace,
+						// A repeat under another epoch replaces the instance in place.
+						replace: namespace,
 						update: namespace,
+						held: () => undefined,
+						carry: () => undefined,
 						withdraw: async (suffix) => {
 							await stream.writer.u53(SubscribeNamespaceEntryDone.id);
 							await new SubscribeNamespaceEntryDone({ suffix }).encode(stream.writer, version);
@@ -1203,27 +1339,76 @@ export class Publisher {
 					// A grant change re-diffs the same way, withdrawing what it no longer covers.
 					// The loop top re-reads the table, so an ended origin still stops it there.
 					const grant = this.#grant.changed(() => resolve("changed"));
+					// A token that ended leaves the request carrying it to be made again without.
+					const ended = this.#auth?.ended.changed(() => resolve("changed"));
 					dispose = () => {
 						table();
 						grant();
+						ended?.();
 					};
 				});
 
 				const advertised = this.#advertised.peek();
+				const updated = advertised ? presented(prefix, advertised, carries) : new Map<Path.Valid, Advertised>();
+				// A fresh pass sends a NAMESPACE for every entry, ahead of any change.
+				if (!answered) {
+					answered = true;
+					await answer(updated.size);
+				}
 				if (!advertised) {
 					dispose();
 					break;
 				}
 
-				const outstanding = await this.#reconcile(ns, presented(prefix, advertised, carries), target);
+				const outstanding = await this.#reconcile(ns, updated, target);
+
 				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
 
 				// Wait for the next change, or for the peer to unsubscribe.
 				const next = await (retry
-					? race([changed, this.#withdrawal.closing, ending, retryAfter(retry).then(() => advertised)])
-					: race([changed, this.#withdrawal.closing, ending]));
+					? race([
+							changed,
+							this.#withdrawal.closing,
+							ending,
+							...(updating !== undefined ? [updating] : []),
+							retryAfter(retry).then(() => advertised),
+						])
+					: race([changed, this.#withdrawal.closing, ending, ...(updating !== undefined ? [updating] : [])]));
 				dispose();
 				if (!next || next === true) break;
+				if (typeof next === "object" && "error" in next) throw next.error;
+				if (typeof next === "object" && "update" in next) {
+					const update = next.update;
+					updating = undefined;
+					if (!update) continue;
+					// Drafts 14-16 spend the update's own Request ID in the adapter and name it in
+					// the answer. They define no namespace update, so refusing one leaves the
+					// subscription standing, and draft 14 answers no update at all.
+					const keyed = version <= Version.DRAFT_16;
+					if (!keyed) this.#session.spendRequest(update.requestId);
+					if (update.refused || (update.prefix !== undefined && Namespace.reserved(update.prefix, version))) {
+						await refuseUpdate(stream.writer, version, "subscribe_namespace", {
+							requestId: update.requestId,
+							condition: update.refused ?? "does_not_exist",
+							reasonPhrase: "namespace update refused",
+						});
+						if (!keyed) break;
+						updating = readUpdate();
+						continue;
+					}
+					if (update.prefix !== undefined && update.prefix !== prefix) {
+						for (const suffix of ns.active.keys()) await target.withdraw(suffix);
+						ns.active.clear();
+						ns.offered.clear();
+						ns.refused.clear();
+						prefix = update.prefix;
+						// A new cursor starts its backoff fresh, as in Rust.
+						retry = 0;
+					}
+					await stream.writer.u53(RequestOk.id);
+					await new RequestOk({ requestId: undefined }).encode(stream.writer, version);
+					updating = readUpdate();
+				}
 			}
 
 			// Withdraw before the ask stream FINs, as Rust does: a peer that reads that
@@ -1235,10 +1420,14 @@ export class Publisher {
 			const e = error(err);
 			console.debug(`subscribe_namespace stream error: ${reason(e)}`);
 			stream.abort(e);
-			if (this.#withdrawal.closing.peek()) throw e;
+			if (e instanceof ProtocolViolation || this.#withdrawal.closing.peek()) throw e;
 		} finally {
 			// This subscription's advertisements die with it.
 			await withdrawAll();
+			if (updating !== undefined) {
+				stream.reader.stop(new Error("namespace subscription ended"));
+				await updating;
+			}
 		}
 	}
 
@@ -1269,9 +1458,12 @@ export class Publisher {
 		// The open PUBLISH_NAMESPACE request per advertised path.
 		const requests: Requests = new Map();
 		const target: Target = {
-			advertise: (path, snap) => this.#advertise(path, requests, clusterFor(this.#advert, snap.route)),
+			advertise: (path, snap) => this.#advertise(path, requests, snap.route),
+			replace: (path, snap) => this.#replace(path, requests, snap.route),
 			update: (path, _snap, reprice) => this.#update(path, requests, reprice),
 			withdraw: (path) => this.#withdraw(path, requests),
+			held: (path) => requests.get(path)?.auth,
+			carry: (auth) => this.#carry(auth),
 		};
 
 		// The origin outlives the session and its signal never ends, so this loop needs the
@@ -1291,6 +1483,9 @@ export class Publisher {
 
 			// Keyed by path.
 			const ns: Namespaces = { active: new Map(), refused: new Map(), offered: new Map() };
+			// How long to stay away the next time the peer ends each advertisement while idle,
+			// and the instance that wait is about.
+			const lapses = new Map<Path.Valid, { snap: Advertised; wait: number }>();
 			let retry = 0;
 
 			for (;;) {
@@ -1305,11 +1500,28 @@ export class Publisher {
 					// A grant change re-diffs the same way, withdrawing what it no longer covers.
 					// The loop top re-reads the table, so an ended origin still stops it there.
 					const grant = this.#grant.changed(() => resolve("changed"));
+					// A token that ended leaves the request carrying it to be made again without.
+					const ended = this.#auth?.ended.changed(() => resolve("changed"));
+					const lapsed = this.#lapsed.changed(() => resolve("changed"));
 					dispose = () => {
 						table();
 						grant();
+						ended?.();
+						lapsed();
 					};
 				});
+
+				// The peer no longer holds a namespace whose request ended while idle. The wait
+				// before offering it again doubles each time, so a peer that ends every one it
+				// accepts sees them on a backoff rather than in a loop.
+				for (const [key, snap] of [...ns.active]) {
+					if (requests.has(key)) continue;
+					ns.active.delete(key);
+					const wait = lapses.get(key)?.wait ?? RETRY_BASE;
+					lapses.set(key, { snap, wait: Math.min(wait * 2, RETRY_MAX) });
+					ns.refused.set(key, Instant.add(now(), Nano.fromMilli(Milli(wait))));
+					ns.offered.set(key, snap);
+				}
 
 				const advertised = this.#advertised.peek();
 				if (!advertised) {
@@ -1323,11 +1535,16 @@ export class Publisher {
 					// nothing our grant does not cover reaches the peer at all (MoQ Auth).
 					if (
 						(this.#hidden && hiddenBelow(Path.empty(), covered)) ||
-						this.#denied(covered) ||
+						!this.#gate.allows(covered) ||
 						candidates.length === 0
 					)
 						continue;
 					updated.set(covered, candidates[0]);
+				}
+				// Another broadcast at the path starts its backoff fresh, as a refusal does.
+				for (const [key, lapse] of lapses) {
+					const snap = updated.get(key);
+					if (snap === undefined || !sameInstance(lapse.snap, snap)) lapses.delete(key);
 				}
 
 				const outstanding = await this.#reconcile(ns, updated, target);
@@ -1358,8 +1575,9 @@ export class Publisher {
 	 * Bring the peer's view in line with `updated`, one namespace at a time, and report
 	 * whether anything it should hold is still missing and worth coming back for.
 	 *
-	 * Nothing the peer cannot see is sent, a reprice updates the namespace in place, and
-	 * anything else is withdrawn first so a republish reads as withdraw-then-advertise.
+	 * Nothing the peer cannot see is sent, a reprice updates the namespace in place, another
+	 * epoch replaces it in place (MoQ Epoch), and anything else is withdrawn first so a
+	 * republish reads as withdraw-then-advertise.
 	 * `ns` records what the peer holds rather than what we attempted: a declined
 	 * advertisement or update stays out of it, so the next turn offers it fresh instead
 	 * of believing it is already up.
@@ -1382,19 +1600,23 @@ export class Publisher {
 
 		const held = new Map(ns.active);
 		for (const [key, snap] of ns.active) {
-			if (change(this.#advert, snap, updated.get(key)) !== "restart") continue;
+			const next = updated.get(key);
+			if (this.#change(key, snap, next, target) !== "restart" || this.#replaces(snap, next)) continue;
 			await target.withdraw(key);
 			held.delete(key);
 		}
 
 		for (const [key, snap] of updated) {
 			const prev = held.get(key);
-			const diff = change(this.#advert, prev, snap);
+			const diff = this.#change(key, prev, snap, target);
 			if (diff === "same") continue;
 
 			let answer: Answer;
 			if (prev !== undefined && diff !== "restart") {
 				answer = await target.update(key, snap, diff);
+			} else if (prev !== undefined) {
+				// Still held through a restart: another epoch replacing it.
+				answer = await target.replace(key, snap);
 			} else {
 				// A fresh offer waits for what a refusal asked for, whatever brought us back.
 				if (!this.#offerable(key, ns.refused)) continue;
@@ -1416,12 +1638,52 @@ export class Publisher {
 
 		ns.active = held;
 
-		// Whatever we wanted up and could not get up. Stream credit freeing, a transient
-		// failure clearing, or the peer starting to answer raises no signal of its own, so
-		// the only way back is to ask again on a timer.
+		// Keep the backoff only for a peer refusal that permits another offer. Local
+		// credit failures and unanswered requests are terminal for this broadcast instance.
 		return [...updated].some(
-			([key, snap]) => change(this.#advert, held.get(key), snap) !== "same" && this.#pending(key, ns.refused),
+			([key, snap]) =>
+				this.#change(key, held.get(key), snap, target) !== "same" && this.#pending(key, ns.refused),
 		);
+	}
+
+	/**
+	 * What it takes to move the peer from `held` to `next` at `key`: {@link change}, plus
+	 * the token the request carries.
+	 *
+	 * moq-transport renames a request's token with REQUEST_UPDATE, but cannot name one on a
+	 * request that had none, nor drop one, and before draft-16 cannot update a namespace at
+	 * all: those withdraw the request and make it again.
+	 */
+	#change(
+		key: Path.Valid,
+		held: Advertised | undefined,
+		next: Advertised | undefined,
+		target: Target,
+	): "same" | "restart" | Reprice {
+		const diff = change(this.#advert, held, next);
+		if (diff === "restart" || held === undefined || next === undefined) return diff;
+		const from = target.held(key);
+		const to = target.carry(next.route.auth);
+		if (from === to) return diff;
+		const version = this.#session.version;
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
+		if (from === undefined || to === undefined || legacy) return "restart";
+		return { ...(diff === "same" ? {} : diff), token: to };
+	}
+
+	/**
+	 * Whether `next` replaces the instance the peer holds in `held` with another, both named
+	 * by an epoch on the wire (MoQ Epoch). Gaining or losing one is withdrawn and advertised
+	 * afresh, and so is any instance change on a peer that cannot tell them apart.
+	 */
+	#replaces(held: Advertised, next: Advertised | undefined): boolean {
+		const [from, to] = [held.route.epoch, next?.route.epoch];
+		return this.#epoch && from !== undefined && to !== undefined && from !== to;
+	}
+
+	/** `auth` when a request of this session can carry it. */
+	#carry(auth: Auth | undefined): Auth | undefined {
+		return this.#auth?.carried(auth) === undefined ? undefined : auth;
 	}
 
 	/**
@@ -1433,7 +1695,7 @@ export class Publisher {
 	#offerable(key: Path.Valid, refused: Map<Path.Valid, Refused>): boolean {
 		const entry = refused.get(key);
 		if (entry === undefined) return true;
-		return entry !== "never" && Date.now() >= entry;
+		return entry !== "never" && now() >= entry;
 	}
 
 	/**
@@ -1442,7 +1704,7 @@ export class Publisher {
 	 * Distinct from {@link offerable}, and the difference is what arms the retry: a
 	 * namespace waiting out a minimum is not offerable yet but is still pending, and
 	 * gating the timer on offerable instead would disarm it for exactly the wait it is
-	 * supposed to be counting. Only a refusal that forbids retrying ends it.
+	 * supposed to be counting. A terminal failure or a refusal that forbids retrying ends it.
 	 */
 	#pending(key: Path.Valid, refused: Map<Path.Valid, Refused>): boolean {
 		return refused.get(key) !== "never";
@@ -1458,7 +1720,17 @@ export class Publisher {
 	#refusal(err: RequestError): Answer {
 		const version = this.#session.version;
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) return "dropped";
-		return err.retryInterval === 0n ? "never" : Date.now() + Number(err.retryInterval);
+		return err.retryInterval === 0n
+			? "never"
+			: Instant.add(now(), Nano.fromMilli(Milli(Number(err.retryInterval))));
+	}
+
+	/**
+	 * The extension parameters an advertisement of `route` carries. The epoch is forwarded
+	 * as the route names it, and never invented for one without.
+	 */
+	#params(route: Route): AdvertParams {
+		return { cluster: clusterFor(this.#advert, route), epoch: this.#epoch ? route.epoch : undefined };
 	}
 
 	/**
@@ -1466,35 +1738,31 @@ export class Publisher {
 	 * is logged and skipped: a peer that wants none of this rejects each one and stays
 	 * connected.
 	 */
-	async #advertise(
-		path: Path.Valid,
-		requests: Requests,
-		cluster: Cluster.Advert | undefined = this.#advert,
-	): Promise<Answer> {
+	async #advertise(path: Path.Valid, requests: Requests, route: Route): Promise<Answer> {
+		const params = this.#params(route);
+		const auth = this.#carry(route.auth);
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) return "dropped";
 
 		// Opening is inside the try because it fails like any other advertisement does:
 		// a peer out of stream credit rejects here, and letting that escape would unwind
 		// the announce loop and take discovery down for the whole session, rather than
-		// costing this one namespace a turn.
+		// leaving this one namespace unadvertised.
 		let request: Stream | undefined;
 		try {
-			request = await this.#session.openBi();
-			const stream = request;
-
-			// Bounded, like the subscriber's own request: the loop is single-threaded over
-			// advertisements, so a peer that takes the stream and answers nothing strands
-			// every publish and withdrawal behind it. Timing out costs this namespace a
-			// turn and leaves it outstanding, which the retry above re-offers.
-			const answer = await withTimeout(
+			const deadline = new Deadline();
+			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
+					request = await deadline.open(this.#session.openBi(requestOptions));
+					const stream = request;
 					await stream.writer.u53(PublishNamespace.id);
-					const msg = new PublishNamespace({ requestId, trackNamespace: path, cluster });
+					const token = this.#auth?.carried(auth);
+					const msg = new PublishNamespace({ requestId, trackNamespace: path, params, token });
 					await msg.encode(stream.writer, this.#session.version);
 
 					// Read response (RequestOk and PublishNamespaceOk share 0x07)
-					const respTypeId = await stream.reader.u53();
+					const respTypeId = await nextMessage(stream.reader, this.#session.version, this.#session.client);
+					if (respTypeId === undefined) throw new Error("advertisement ended before its response");
 					if (respTypeId === RequestError.id) {
 						const err = await RequestError.decode(stream.reader, this.#session.version);
 						const why = requestReason(
@@ -1514,22 +1782,84 @@ export class Publisher {
 					if (this.#session.version === Version.DRAFT_14) {
 						await PublishNamespaceOk.decode(stream.reader, this.#session.version);
 					} else {
-						await RequestOk.decode(stream.reader, this.#session.version);
+						this.#answered(await RequestOk.decode(stream.reader, this.#session.version));
 					}
 					return "held";
 				})(),
-				ADVERTISE_TIMEOUT_MS,
-				`advertisement timed out after ${ADVERTISE_TIMEOUT_MS}ms waiting for the peer's answer`,
 			);
 
-			if (answer === "held") requests.set(path, { path, requestId, stream });
+			if (answer === "held" && request) {
+				const held: NamespaceRequest = { path, requestId, stream: request, auth };
+				requests.set(path, held);
+				if (this.#session.version >= Version.DRAFT_18) held.reply = this.#readAdvertisement(held, requests);
+			}
 			return answer;
 		} catch (err: unknown) {
 			// The peer never answered the advertisement: a control timeout, not late content.
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
+			if (e instanceof ProtocolViolation) {
+				this.#quic.close({ closeCode: e.code, reason: e.message });
+				this.#session.close();
+			}
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 			request?.abort(e);
-			return "dropped";
+			return e instanceof NoStreamCredit || (e instanceof StreamError && e.code === StreamCode.ControlTimeout)
+				? "never"
+				: "dropped";
+		}
+	}
+
+	/**
+	 * Keep reading while an advertisement is idle, so GOAWAY validation never waits for an
+	 * update. A stream that ends while idle drops the request, and the announce loop re-offers it
+	 * after a backoff.
+	 */
+	#readAdvertisement(request: NamespaceRequest, requests: Requests): Promise<number | undefined> {
+		const reply = nextMessage(request.stream.reader, this.#session.version, this.#session.client)
+			.then((type) => {
+				if (type !== undefined && !request.updating)
+					throw new ProtocolViolation("unexpected message on an idle advertisement");
+				return type;
+			})
+			.catch((err: unknown) => {
+				if (err instanceof ProtocolViolation) {
+					this.#quic.close({ closeCode: err.code, reason: err.message });
+					this.#session.close();
+				}
+				throw err;
+			});
+		// A later update consumes an answer; an end is acted on as soon as it arrives.
+		void reply.then(
+			(type) => type === undefined && this.#lapse(request, requests),
+			() => this.#lapse(request, requests),
+		);
+		return reply;
+	}
+
+	/** Drop an idle advertisement whose stream ended, unless an update already took it over. */
+	#lapse(request: NamespaceRequest, requests: Requests) {
+		if (request.updating || requests.get(request.path) !== request) return;
+		requests.delete(request.path);
+		request.stream.abort(new StreamError(StreamCode.Cancel, { message: "advertisement ended" }));
+		this.#lapsed.update((n) => n + 1);
+	}
+
+	/**
+	 * Check a REQUEST_OK answering a PUBLISH_NAMESPACE. ACTIVE_COUNT only answers
+	 * SUBSCRIBE_NAMESPACE (MoQ Active Count), and the session closes over it here, with the
+	 * violation's code, since the caller only drops the advertisement.
+	 */
+	#answered(ok: RequestOk) {
+		try {
+			// Reading it throws on a count too large to hold, a violation all the same.
+			if (ok.parameters.activeCount === undefined) return;
+			throw new ProtocolViolation("ACTIVE_COUNT on a PUBLISH_NAMESPACE answer");
+		} catch (err) {
+			if (err instanceof ProtocolViolation) {
+				this.#quic.close({ closeCode: err.code, reason: err.message });
+				this.#session.close();
+			}
+			throw err;
 		}
 	}
 
@@ -1541,20 +1871,22 @@ export class Publisher {
 	 * MAX_REQUEST_UPDATES the peer set without reading it; a change landing meanwhile waits
 	 * for the next turn. The answer decides whether the peer still holds the namespace: a
 	 * REQUEST_ERROR closes the peer's side and withdraws the advertisement, so ours is
-	 * finished too, and an unanswered update is dropped abruptly, since a peer that ignored
-	 * it cannot be assumed to hold either price. Either way the retry re-offers it fresh.
+	 * finished too (with nothing more sent on draft 16, where the peer cancels it), a draft-16
+	 * cancel ends it the same way, and an unanswered update is dropped, since a peer that
+	 * ignored it cannot be assumed to hold either price. Either way the retry re-offers it fresh.
 	 *
 	 * A different original publisher is an update like any other: the receiver drains what
 	 * it already serves from the old one and never splices the two.
 	 */
-	async #update(path: Path.Valid, requests: Requests, { from, to }: Reprice): Promise<Answer> {
+	async #update(path: Path.Valid, requests: Requests, { from, to, token: auth }: Reprice): Promise<Answer> {
 		const request = requests.get(path);
 		if (!request) return "dropped";
 
 		const update: Cluster.Update = {
-			hops: sameHops(from.hops, to.hops) ? undefined : to.hops,
-			cost: from.cost === to.cost ? undefined : to.cost,
+			hops: from && to && !sameHops(from.hops, to.hops) ? to.hops : undefined,
+			cost: from && to && from.cost !== to.cost ? to.cost : undefined,
 		};
+		const token = auth && this.#auth?.carried(auth);
 		const version = this.#session.version;
 		let answer: Answer;
 		try {
@@ -1564,10 +1896,20 @@ export class Publisher {
 			answer = await withTimeout(
 				(async (): Promise<Answer> => {
 					const { writer, reader } = request.stream;
+					request.updating = true;
 					await writer.u53(PublishNamespaceUpdate.id);
-					await new PublishNamespaceUpdate({ requestId, update }).encode(writer, version);
+					const namespaceRequestId = version === Version.DRAFT_16 ? request.requestId : undefined;
+					await new PublishNamespaceUpdate({ requestId, namespaceRequestId, update, token }).encode(
+						writer,
+						version,
+					);
 
-					const typeId = await reader.u53();
+					// Draft 16's adapter ends the stream on the peer's PUBLISH_NAMESPACE_CANCEL, which
+					// can beat the answer.
+					if (version === Version.DRAFT_16 && (await reader.done())) return "dropped";
+
+					const typeId = await (request.reply ?? nextMessage(reader, version, this.#session.client));
+					if (typeId === undefined) throw new Error("advertisement ended before its update response");
 					if (typeId === RequestError.id) {
 						const err = await RequestError.decode(reader, version);
 						const why = requestReason(err.errorCode, err.reasonPhrase, "publish_namespace", version);
@@ -1577,66 +1919,182 @@ export class Publisher {
 					if (typeId !== RequestOk.id) {
 						throw new Error(`unexpected answer to the update: typeId=0x${typeId.toString(16)}`);
 					}
-					await RequestOk.decode(reader, version);
+					this.#answered(await RequestOk.decode(reader, version));
+					request.updating = false;
+					if (version >= Version.DRAFT_18) request.reply = this.#readAdvertisement(request, requests);
 					return "held";
 				})(),
-				ADVERTISE_TIMEOUT_MS,
+				ADVERTISE_TIMEOUT,
 				`update timed out after ${ADVERTISE_TIMEOUT_MS}ms waiting for the peer's answer`,
 			);
 		} catch (err: unknown) {
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
+			if (e instanceof ProtocolViolation) {
+				this.#quic.close({ closeCode: e.code, reason: e.message });
+				this.#session.close();
+			}
 			console.warn(`publish_namespace update failed: broadcast=${path} error=${reason(e)}`);
 			requests.delete(path);
-			request.stream.abort(e);
+			// Aborting a request riding the control stream tells the peer nothing, so it would
+			// hold the namespace beside the one advertised next.
+			if (version === Version.DRAFT_16) await this.#end(request).catch(() => undefined);
+			else request.stream.abort(e);
 			return "dropped";
 		}
 
-		// The peer already closed out a refused request, and its STOP_SENDING can reject the
-		// wait on our FIN. That is the withdrawal finishing, not a reason to end the loop.
-		if (answer !== "held") await this.#withdraw(path, requests).catch(() => undefined);
+		if (answer === "held") {
+			if (auth) request.auth = auth;
+			return answer;
+		}
+		if (version === Version.DRAFT_16) {
+			// A draft-16 peer lets the namespace go with PUBLISH_NAMESPACE_CANCEL, ahead of its
+			// answer or right after a refusal, and no PUBLISH_NAMESPACE_DONE may follow a cancel.
+			requests.delete(path);
+			request.stream.abort(new Error("released by the peer"));
+		} else {
+			// The peer already closed out a refused request, and its STOP_SENDING can
+			// reject the wait on our FIN. That is the withdrawal finishing, not a reason to end
+			// the loop.
+			await this.#withdraw(path, requests).catch(() => undefined);
+		}
 		return answer;
 	}
 
 	/**
-	 * Close out a namespace's PUBLISH_NAMESPACE request with PUBLISH_NAMESPACE_DONE.
+	 * End a namespace's PUBLISH_NAMESPACE request: PUBLISH_NAMESPACE_DONE then FIN before
+	 * draft-17, a cancel in both directions after.
 	 */
+	/**
+	 * Replace the PUBLISH_NAMESPACE request for `path` with one for another instance. The two
+	 * streams are unordered, so the old one is withdrawn only once the peer answered the new
+	 * one, refused or not: it serves another instance either way.
+	 */
+	async #replace(path: Path.Valid, requests: Requests, route: Route): Promise<Answer> {
+		const old = requests.get(path);
+		requests.delete(path);
+		const answer = await this.#advertise(path, requests, route);
+		if (old) await this.#end(old);
+		return answer;
+	}
+
 	async #withdraw(path: Path.Valid, requests: Requests) {
 		const request = requests.get(path);
 		if (!request) return;
 		requests.delete(path);
+		await this.#end(request);
+	}
 
-		// Draft-17+ removed PUBLISH_NAMESPACE_DONE: the close below is the whole
-		// withdrawal. Sending it anyway puts the type on the wire before the body throws,
-		// and a receiver reading 0x09 there has no choice but to treat it as a protocol
-		// violation.
+	/** Withdraw one PUBLISH_NAMESPACE request, already out of its map. */
+	async #end(request: NamespaceRequest) {
+		// Draft-17+ withdraws by cancelling the request in both directions; a FIN is only
+		// allowed to end SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS.
 		const version = this.#session.version;
-		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			try {
-				await request.stream.writer.u53(PublishNamespaceDone.id);
-				const done = new PublishNamespaceDone({ trackNamespace: request.path, requestId: request.requestId });
-				await done.encode(request.stream.writer, version);
-			} catch {
-				// Stream might already be closed
-			}
-			request.stream.close();
-			await request.stream.writer.closed;
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
+			request.stream.abort(new StreamError(StreamCode.Cancel, { message: "withdrawn" }));
 			return;
 		}
+
+		try {
+			await request.stream.writer.u53(PublishNamespaceDone.id);
+			const done = new PublishNamespaceDone({ trackNamespace: request.path, requestId: request.requestId });
+			await done.encode(request.stream.writer, version);
+		} catch {
+			// Stream might already be closed
+		}
 		request.stream.close();
-		// Wait for transport acknowledgment before opening a replacement request.
-		// This assumes the peer processes the withdrawal by then; FIN acknowledgment
-		// does not itself acknowledge application processing across streams.
 		await request.stream.writer.closed;
 	}
 
 	/**
-	 * Handles an incoming TRACK_STATUS_REQUEST on a bidi stream.
+	 * Answers an incoming TRACK_STATUS with what a SUBSCRIBE_OK for the track would carry,
+	 * without subscribing.
+	 *
+	 * The track resolves as it would for a SUBSCRIBE, dynamic handlers included, and the
+	 * answer waits on its info. The Largest Location is whatever the cache holds now.
 	 *
 	 * @internal
 	 */
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
-		// TRACK_STATUS_ERROR is 0x0f on draft-14.
-		await this.#refuseUnsupported(stream, msg.requestId, "track_status", 0x0f, "TRACK_STATUS is not supported");
+		this.#pinned(msg.epoch);
+		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
+		const version = this.#session.version;
+		const name = msg.trackNamespace;
+		const denied: Refusal = { requestId: msg.requestId, condition: "unauthorized", reasonPhrase: "not granted" };
+
+		// Answer only for what our grant lets us publish. Checked before the track resolves,
+		// so a denied request never reaches the origin.
+		if (!this.#gate.allows(name)) {
+			await refuse(stream, version, "track_status", denied);
+			return;
+		}
+
+		// Holds the track wanted until the answer is out. The requester leaving is owed
+		// nothing, and lets go of the broadcast and track lookups.
+		const hold = new AbortController();
+		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
+		void ended(stream, version, this.#session.client).then(
+			() => hold.abort(cancel),
+			(err) => {
+				if (err instanceof ProtocolViolation) {
+					this.#quic.close({ closeCode: err.code, reason: err.message });
+					this.#session.close();
+				}
+				hold.abort(cancel);
+			},
+		);
+
+		// A grant that narrows abandons the lookup, and resets an answer the transport has
+		// not taken yet rather than delivering it.
+		let answering = false;
+		const watch = this.#gate.watch(name, () => {
+			hold.abort();
+			if (answering) stream.abort(unauthorized(name));
+		});
+
+		try {
+			let answer: TrackStatusOk;
+			try {
+				const broadcast = await this.#resolve(name, hold.signal, msg.epoch);
+				const info = await wireOf(broadcast).resolveTrackInfo(msg.trackName, hold.signal);
+				const largest = wireOf(broadcast).largest(msg.trackName);
+				answer = new TrackStatusOk({
+					requestId:
+						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+							? msg.requestId
+							: undefined,
+					largest: largest && { groupId: BigInt(largest.group), objectId: BigInt(largest.frame) },
+					properties: msg.propertiesWanted
+						? {
+								timescale: info.timescale ?? undefined,
+								priority: toWire(info.priority),
+								groupOrder: Properties.DESCENDING,
+								maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
+							}
+						: {},
+				});
+			} catch (err: unknown) {
+				if (hold.signal.reason === cancel) {
+					stream.abort(cancel);
+					return;
+				}
+				const refusal = !this.#gate.allows(name) ? denied : { ...this.#failed(err), requestId: msg.requestId };
+				await refuse(stream, version, "track_status", refusal);
+				return;
+			}
+
+			answering = true;
+			await stream.writer.u53(TrackStatusOk.id(version));
+			await answer.encode(stream.writer, version);
+			// The answer is all this stream carries.
+			stream.close();
+			await stream.writer.closed.catch(() => undefined);
+		} finally {
+			watch.dispose();
+			hold.abort();
+		}
 	}
 
 	/**
@@ -1645,13 +2103,11 @@ export class Publisher {
 	 * @internal
 	 */
 	async refuseSubscribeNamespace(requestId: bigint, stream: Stream) {
-		await this.#refuseUnsupported(
-			stream,
+		await refuse(stream, this.#session.version, "subscribe_namespace", {
 			requestId,
-			"subscribe_namespace",
-			SubscribeNamespaceError.id,
-			"SUBSCRIBE_NAMESPACE for PUBLISH is not supported",
-		);
+			condition: "not_supported",
+			reasonPhrase: "SUBSCRIBE_NAMESPACE for PUBLISH is not supported",
+		});
 	}
 
 	/**
@@ -1660,14 +2116,15 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async runSubscribeTracks(stream: Stream) {
-		const version = this.#session.version;
-		await stream.writer.u53(RequestError.id);
-		await new RequestError({
-			errorCode: toRequestCode("not_supported", "subscribe_namespace", version),
+	async runSubscribeTracks(stream: Stream, namespace?: Path.Valid) {
+		if (namespace !== undefined && Namespace.reserved(namespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
+		await refuse(stream, this.#session.version, "subscribe_namespace", {
+			condition: "not_supported",
 			reasonPhrase: "SUBSCRIBE_TRACKS is not supported",
-		}).encode(stream.writer, version);
-		stream.close();
+		});
 	}
 
 	/**
@@ -1676,34 +2133,53 @@ export class Publisher {
 	 * @internal
 	 */
 	async runFetch(msg: Fetch, stream: Stream) {
-		await this.#refuseUnsupported(stream, msg.requestId, "fetch", FetchError.id, "FETCH is not supported");
+		this.#pinned(msg.epoch);
+		this.#fetches.acquire();
+		try {
+			if (msg.trackNamespace !== undefined && Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+				await refuseReserved(stream, this.#session.version);
+				return;
+			}
+			await refuse(stream, this.#session.version, "fetch", {
+				requestId: msg.requestId,
+				condition: msg.rangeFilters ? "invalid_filter" : "not_supported",
+				reasonPhrase: msg.rangeFilters ? "Range Filters exceed MAX_FILTER_RANGES=0" : "FETCH is not supported",
+			});
+		} finally {
+			this.#fetches.release();
+		}
+	}
+
+	/** What a request that failed to resolve is refused with. */
+	#failed(err: unknown, wait = false): Refusal {
+		const e = error(err);
+		const condition =
+			e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
+				? wait
+					? "timeout"
+					: "does_not_exist"
+				: "internal";
+		return { condition, reasonPhrase: reason(e) };
 	}
 
 	/**
-	 * Refuse a request NOT_SUPPORTED. Draft-14 gives each request its own error message,
-	 * `errorId14`, with the SUBSCRIBE_ERROR body; later drafts use REQUEST_ERROR.
+	 * Resolve the broadcast a request names for serving: a local publish, or else the
+	 * origin's routes and dynamic handlers. Rejects with the abort once `signal` aborts.
+	 *
+	 * A request naming an `epoch` is served only by that instance: one now serving another
+	 * epoch, or none, refuses it as gone rather than answering with other content.
 	 */
-	async #refuseUnsupported(
-		stream: Stream,
-		requestId: bigint,
-		kind: RequestKind,
-		errorId14: number,
-		reasonPhrase: string,
-	) {
-		const version = this.#session.version;
-		const errorCode = toRequestCode("not_supported", kind, version);
-		if (version === Version.DRAFT_14) {
-			await stream.writer.u53(errorId14);
-			await new SubscribeError({ requestId, errorCode, reasonPhrase }).encode(stream.writer, version);
-		} else {
-			await stream.writer.u53(RequestError.id);
-			await new RequestError({
-				requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? requestId : undefined,
-				errorCode,
-				reasonPhrase,
-			}).encode(stream.writer, version);
-		}
-		stream.close();
+	async #resolve(name: Path.Valid, signal: AbortSignal, epoch: Epoch.Valid | undefined): Promise<broadcast.Consumer> {
+		const broadcast =
+			this.#publish &&
+			(wireOf(this.#publish).local(name, epoch) ?? (await wireOf(this.#publish).demand(name, epoch, signal)));
+		if (!broadcast) throw new NotFound(`broadcast ${name}`);
+		return broadcast;
+	}
+
+	/** Break a session whose peer names an epoch it was never told about: MoQ Epoch was not negotiated. */
+	#pinned(epoch: Epoch.Valid | undefined) {
+		if (epoch !== undefined && !this.#epoch) throw new ProtocolViolation("EPOCH without MoQ Epoch");
 	}
 }
 
@@ -1755,6 +2231,14 @@ interface ServeRange {
 	 * once the range is exhausted; draft-20 removed the notion of a filter ending one.
 	 */
 	end?: EndLocation;
+}
+
+/** The model's group bounds for a {@link ServeRange}: an absent start joins at the latest group. */
+function rangeGroups(range: ServeRange): Groups {
+	return {
+		start: range.start ? { included: Number(range.start.group) } : undefined,
+		end: range.end ? { included: Number(range.end.group) } : undefined,
+	};
 }
 
 /** The slice of one group a subscription's {@link ServeRange} selects. */
@@ -1815,10 +2299,10 @@ function saturatingSub(a: bigint, b: bigint): bigint {
 
 /** Snapshot the live edge of a track. */
 function liveEdge(track: TrackSubscriber): LiveEdge {
-	const latest = track.latest();
+	const latest = hooks.latestSequence(track);
 	if (latest === undefined) return {};
 
-	const largest = track.largest();
+	const largest = hooks.bufferedLargest(track);
 	if (!largest) return { latest: BigInt(latest), next: { group: BigInt(latest), object: 0n } };
 
 	const group = BigInt(largest.group);

@@ -468,6 +468,144 @@ mod test {
 	use super::*;
 	use serde_json::json;
 
+	// Mirror the JS generator: bounded JSON trees and edits to a persistent object.
+	fn property_key() -> impl proptest::strategy::Strategy<Value = String> {
+		use proptest::prelude::*;
+		prop_oneof![
+			proptest::sample::select(vec![
+				"a",
+				"b",
+				"c",
+				"",
+				"__proto__",
+				"constructor",
+				"prototype",
+				"\0",
+				"雪"
+			])
+			.prop_map(str::to_owned),
+			"[ -~]{0,8}",
+		]
+	}
+
+	fn property_value() -> proptest::strategy::BoxedStrategy<Value> {
+		use proptest::prelude::*;
+		let leaf = prop_oneof![
+			Just(Value::Null),
+			any::<bool>().prop_map(Value::Bool),
+			(-1_000_000i32..=1_000_000).prop_map(|n| Value::from(f64::from(n) / 4.0)),
+			prop_oneof!["[ -~]{0,16}", Just("雪\0".to_owned())].prop_map(Value::String),
+		];
+		leaf.prop_recursive(4, 64, 4, |inner| {
+			prop_oneof![
+				proptest::collection::vec(inner.clone(), 0..5).prop_map(Value::Array),
+				proptest::collection::btree_map(property_key(), inner, 0..5)
+					.prop_map(|map| Value::Object(map.into_iter().collect())),
+			]
+		})
+		.boxed()
+	}
+
+	#[derive(Clone, Debug)]
+	struct PropertyStep {
+		value: Value,
+		reset: bool,
+	}
+
+	fn property_sequence() -> proptest::strategy::BoxedStrategy<Vec<PropertyStep>> {
+		use proptest::prelude::*;
+		let roots = proptest::collection::vec((property_value(), 0u8..16), 1..33).prop_map(|steps| {
+			steps
+				.into_iter()
+				.map(|(value, reset)| PropertyStep {
+					value,
+					reset: reset == 0,
+				})
+				.collect()
+		});
+		let edits = proptest::collection::vec((property_key(), property_value(), any::<bool>(), 0u8..16), 1..33)
+			.prop_map(|steps| {
+				let mut current = serde_json::Map::new();
+				steps
+					.into_iter()
+					.map(|(key, value, remove, reset)| {
+						if remove {
+							current.remove(&key);
+						} else {
+							current.insert(key, value);
+						}
+						PropertyStep {
+							value: Value::Object(current.clone()),
+							reset: reset == 0,
+						}
+					})
+					.collect()
+			});
+		prop_oneof![roots, edits].boxed()
+	}
+
+	#[test]
+	fn snapshot_codec_property_reconstructs_each_json_value() {
+		use proptest::prelude::*;
+		use proptest::test_runner::{Config as PropertyConfig, RngSeed, TestRunner};
+		let setting = |name: &str, fallback: u32, min: u32| {
+			let value = std::env::var(name).map_or(fallback, |value| {
+				value.parse::<u32>().expect("integer property setting")
+			});
+			assert!(
+				(min..=i32::MAX as u32).contains(&value),
+				"{name} outside supported range"
+			);
+			value
+		};
+		let seed = setting("MOQ_JSON_SEED", 0x6d6f71, 0);
+		let cases = setting("MOQ_JSON_CASES", 256, 1);
+		eprintln!("MOQ_JSON_SEED={seed} MOQ_JSON_CASES={cases}");
+		let mut runner = TestRunner::new(PropertyConfig {
+			cases,
+			rng_seed: RngSeed::Fixed(u64::from(seed)),
+			failure_persistence: None,
+			..Default::default()
+		});
+		let sequence = (
+			proptest::sample::select(vec![0, 1, 2, 8, 100]),
+			any::<bool>(),
+			property_sequence(),
+		);
+		runner
+			.run(&sequence, |(delta_ratio, deflate, steps)| {
+				let compression = if deflate {
+					Compression::Deflate
+				} else {
+					Compression::None
+				};
+				let mut encoder = Encoder::<Value>::new(Config {
+					delta_ratio,
+					compression,
+				});
+				let mut decoder = super::super::Decoder::<Value>::new(super::super::consumer::Config {
+					compression,
+					..Default::default()
+				});
+				for (index, step) in steps.iter().enumerate() {
+					if step.reset {
+						encoder.reset();
+					}
+					if let Some(frame) = encoder.update(&step.value).unwrap() {
+						if frame.keyframe {
+							decoder.snapshot(&frame.payload).unwrap();
+						} else {
+							decoder.delta(&frame.payload).unwrap();
+						}
+						frame.commit();
+					}
+					prop_assert_eq!(decoder.decode().unwrap(), Some(step.value.clone()), "step {}", index);
+				}
+				Ok(())
+			})
+			.unwrap();
+	}
+
 	#[test]
 	fn duplicate_serialized_keys_are_refused() {
 		use serde::ser::SerializeMap;

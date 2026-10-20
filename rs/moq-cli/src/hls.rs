@@ -12,16 +12,16 @@ use url::Url;
 use crate::moq::{ImportTarget, notify_ready};
 
 /// HLS import (pull a remote playlist) args.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
 	/// Playlist URL (http/https) or local file path.
-	#[usage(value_hint = usage::ValueHint::AnyPath, extensions("m3u8", "m3u"))]
+	#[usage(value_hint = usage_rs::ValueHint::AnyPath, extensions("m3u8", "m3u"))]
 	pub playlist: String,
 }
 
 /// HLS export (serve over HTTP) args.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
 	/// HTTP listener for the HLS endpoints.
@@ -54,24 +54,37 @@ pub async fn import(target: ImportTarget, playlist: String, epoch: moq_net::Epoc
 	} = target;
 	let mut producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
 
-	// Create catalog tracks before announcing so a subscriber can consume the
-	// catalog as soon as it observes the announcement.
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(max_age)
 		.with_bandwidth(bandwidth);
 	let catalog = moq_mux::catalog::Producer::new(&mut producer, config)?;
-	producer
-		.announce(moq_net::origin::Route::default().with_epoch(epoch))
-		.context("failed to announce broadcast")?;
+	// Announced once the catalog first goes out, which waits for every rendition's init: a
+	// relay queries a broadcast's tracks the moment it is announced, and keeps the refusals of a
+	// publisher that cannot serve its declared tracks yet.
+	let mut listed = catalog.consume()?;
 
 	let playlist = playlist_url(&playlist)?;
-	let mut importer = moq_hls::import::Import::new(producer, catalog, moq_hls::import::Config::new(playlist))?;
+	let mut importer = moq_hls::import::Import::new(producer.clone(), catalog, moq_hls::import::Config::new(playlist))?;
 
 	tracing::info!(%name, "importing HLS");
 
 	importer.init().await?;
 	notify_ready();
-	Ok(importer.run().await?)
+	let run = importer.run();
+	tokio::pin!(run);
+	tokio::select! {
+		res = &mut run => {
+			res?;
+			anyhow::bail!("the playlist ended before it declared a track");
+		}
+		catalog = listed.next() => {
+			anyhow::ensure!(catalog?.is_some(), "the playlist ended before it declared a track");
+			producer
+				.announce(moq_net::origin::Route::default().with_epoch(epoch))
+				.context("failed to announce broadcast")?;
+		}
+	}
+	Ok(run.await?)
 }
 
 fn playlist_url(playlist: &str) -> anyhow::Result<Url> {

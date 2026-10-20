@@ -14,7 +14,8 @@
 //! usually holds whole groups; a group that outlives the publisher's maximum span is split by
 //! frame, so an append-only group that never closes is still indexed as its frames arrive.
 //! Spans are contiguous in position: a record starts where the previous one ended unless the
-//! track skipped group sequences in between.
+//! track skipped group sequences in between. An untimed track has no content time, so its records
+//! omit `pts` and `duration` and each holds one group.
 //!
 //! The catalog's root [`Archive`](crate::catalog::Archive) entry maps each track to its
 //! timeline track, conventionally the track name plus [`SUFFIX`](crate::timeline::SUFFIX).
@@ -86,23 +87,28 @@ impl Position {
 /// The span holds every frame from [`start`](Self::start) (inclusive) to [`end`](Self::end)
 /// (exclusive). An `end` at frame zero of group `g` means the span holds every frame of group
 /// `g - 1` and nothing of `g`, whether or not `g` exists. `pts`/`duration` are in the timescale
-/// declared by the catalog's [`Archive`](crate::catalog::Archive) entry (default milliseconds).
-/// Extend with a typed [`RecordExt`].
+/// declared by the catalog's [`Archive`](crate::catalog::Archive) entry (default milliseconds),
+/// and both are absent on an untimed track's records. Extend with a typed [`RecordExt`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(
 	rename_all = "camelCase",
+	try_from = "Parsed<E>",
 	bound(serialize = "E: serde::Serialize", deserialize = "E: serde::de::DeserializeOwned")
 )]
 pub struct Record<E: RecordExt = ()> {
 	/// The record's number, consecutive within its track's timeline and equal to its window index.
 	pub sequence: u64,
 
-	/// The span's start, the timestamp of its first frame, in the timeline's timescale.
-	pub pts: u64,
+	/// The span's start, the timestamp of its first frame, in the timeline's timescale. `None` on
+	/// an untimed track, whose frames carry no timestamps.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub pts: Option<u64>,
 
 	/// The span's duration, in the timeline's timescale. The next record's `pts` is
-	/// `pts + duration` unless content time itself jumped (a discontinuity).
-	pub duration: u64,
+	/// `pts + duration` unless content time itself jumped (a discontinuity). `None` exactly when
+	/// `pts` is.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub duration: Option<u64>,
 
 	/// The first frame of the span, inclusive.
 	pub start: Position,
@@ -125,13 +131,61 @@ fn default_keyframe() -> bool {
 	true
 }
 
+/// A [`Record`] as parsed, before checking that it carries both or neither of `pts` and `duration`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", bound(deserialize = "E: serde::de::DeserializeOwned"))]
+struct Parsed<E> {
+	sequence: u64,
+	#[serde(default)]
+	pts: Option<u64>,
+	#[serde(default)]
+	duration: Option<u64>,
+	start: Position,
+	end: Position,
+	#[serde(default = "default_keyframe")]
+	keyframe: bool,
+	#[serde(flatten)]
+	ext: E,
+}
+
+impl<E: RecordExt> TryFrom<Parsed<E>> for Record<E> {
+	type Error = String;
+
+	fn try_from(parsed: Parsed<E>) -> std::result::Result<Self, String> {
+		if parsed.pts.is_some() != parsed.duration.is_some() {
+			return Err(format!(
+				"record {} needs both pts and duration, or neither",
+				parsed.sequence
+			));
+		}
+		Ok(Self {
+			sequence: parsed.sequence,
+			pts: parsed.pts,
+			duration: parsed.duration,
+			start: parsed.start,
+			end: parsed.end,
+			keyframe: parsed.keyframe,
+			ext: parsed.ext,
+		})
+	}
+}
+
 impl<E: RecordExt> Record<E> {
 	/// A keyframe record spanning `start..end` with the default (empty) extension.
 	pub fn new(sequence: u64, pts: u64, duration: u64, start: Position, end: Position) -> Self {
 		Self {
+			pts: Some(pts),
+			duration: Some(duration),
+			..Self::untimed(sequence, start, end)
+		}
+	}
+
+	/// An untimed track's keyframe record spanning `start..end`, with no `pts` or `duration`.
+	pub fn untimed(sequence: u64, start: Position, end: Position) -> Self {
+		Self {
 			sequence,
-			pts,
-			duration,
+			pts: None,
+			duration: None,
 			start,
 			end,
 			keyframe: true,
@@ -192,6 +246,27 @@ mod test {
 			Record::from_slice(br#"{"sequence":0,"pts":0,"duration":1,"start":{"group":1},"end":{"group":2}}"#)
 				.unwrap();
 		assert!(plain.keyframe);
+	}
+
+	#[test]
+	fn an_untimed_record_omits_its_timing() {
+		let record = Record::<()>::untimed(4, Position::group(9), Position::group(10));
+		let json = record.to_vec().unwrap();
+		assert_eq!(
+			std::str::from_utf8(&json).unwrap(),
+			r#"{"sequence":4,"start":{"group":9},"end":{"group":10}}"#
+		);
+		assert_eq!(Record::<()>::from_slice(&json).unwrap(), record);
+	}
+
+	#[test]
+	fn a_record_with_half_its_timing_is_refused() {
+		for json in [
+			r#"{"sequence":0,"pts":0,"start":{"group":0},"end":{"group":1}}"#,
+			r#"{"sequence":0,"duration":1,"start":{"group":0},"end":{"group":1}}"#,
+		] {
+			assert!(Record::<()>::from_slice(json.as_bytes()).is_err(), "{json}");
+		}
 	}
 
 	#[test]

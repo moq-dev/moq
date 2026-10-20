@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
+import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
-import { Time } from "@moq/net";
-import { type Arrival, type Options, QUANTUM, replay } from "./replay";
+import { type Arrival, type Options, QUANTUM, type Quantum, replay } from "./replay";
 
 const RATE = 48000;
 const CONFIG = { codec: "opus", sampleRate: RATE, numberOfChannels: 1 } as Catalog.AudioConfig;
@@ -41,7 +41,7 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		expect(
 			await underruns(
 				paced(10, () => 30),
-				{ ring, rate: RATE, config: CONFIG, delay: Time.Milli(100), duration: observed(10) },
+				{ ring, rate: RATE, config: CONFIG, delay: Milli(100), duration: observed(10) },
 			),
 		).toBe(0);
 	});
@@ -50,14 +50,14 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 		// Five frames held and flushed at once: 80 ms of arrival spread.
 		const trace = paced(10, (i) => 30 + (4 - (i % 5)) * 20);
 		expect(
-			await underruns(trace, { ring, rate: RATE, config: CONFIG, delay: Time.Milli(40), duration: observed(10) }),
+			await underruns(trace, { ring, rate: RATE, config: CONFIG, delay: Milli(40), duration: observed(10) }),
 		).toBeGreaterThan(50);
 		expect(
 			await underruns(trace, {
 				ring,
 				rate: RATE,
 				config: CONFIG,
-				delay: Time.Milli(150),
+				delay: Milli(150),
 				duration: observed(10),
 			}),
 		).toBe(0);
@@ -73,7 +73,7 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 				ring,
 				rate: RATE,
 				config: CONFIG,
-				delay: Time.Milli(100),
+				delay: Milli(100),
 				duration: observed(10),
 			}),
 		).toBeGreaterThan(frame);
@@ -90,7 +90,7 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 				ring,
 				rate: RATE,
 				config: CONFIG,
-				delay: Time.Milli(100),
+				delay: Milli(100),
 				duration: observed(10),
 			}),
 		).toBeGreaterThan(0);
@@ -105,7 +105,7 @@ describe.each(["shared", "post"] as const)("%s ring", (ring) => {
 				ring,
 				rate: RATE,
 				config: CONFIG,
-				delay: Time.Milli(100),
+				delay: Milli(100),
 				duration: 15_000,
 			},
 		)) {
@@ -132,5 +132,35 @@ describe.each(["shared", "post"] as const)("%s ring at auto", (ring) => {
 		expect(await settled(60, () => 30)).toBe(40);
 		// Five frames flushed at once: 80 ms of spread to cover, plus one frame.
 		expect(await settled(60, (i) => 30 + (4 - (i % 5)) * 20)).toBeGreaterThanOrEqual(100);
+	});
+});
+
+describe.each(["shared", "post"] as const)("%s ingress diagnostics", (ring) => {
+	it("keeps recorded arrival and lateness when delivery is held", async () => {
+		const trace = [0, 20, 40].map((timestamp) => ({ timestamp, at: timestamp + 1000, group: 0 }));
+		const run = async (decodeAfter?: number) => {
+			let window: Quantum["arrivals"] = [];
+			for await (const quantum of replay(trace, {
+				ring,
+				rate: RATE,
+				config: CONFIG,
+				delay: Milli(100),
+				duration: 300,
+				decodeAfter,
+			}))
+				window = quantum.arrivals;
+			return window;
+		};
+		const direct = await run();
+		const held = await run(1200);
+		expect(held).toEqual(direct);
+		expect(held).toEqual(
+			trace.map((entry) => ({
+				kind: "frame" as const,
+				timestamp: Milli(entry.timestamp),
+				arrival: Milli(entry.at),
+				late: false,
+			})),
+		);
 	});
 });

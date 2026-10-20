@@ -376,9 +376,6 @@ impl Message for SubscribeStart {
 #[derive(Clone, Debug)]
 pub struct SubscribeEnd {
 	pub group: u64,
-	/// The number of group streams the publisher opened for this subscription.
-	/// Lite07+ only; not on the wire before, where it decodes as 0.
-	pub streams: u64,
 }
 
 impl Message for SubscribeEnd {
@@ -387,11 +384,7 @@ impl Message for SubscribeEnd {
 			return Err(DecodeError::Version);
 		}
 		let group = r.varint()?;
-		let streams = match version.has_stream_count() {
-			true => r.varint()?,
-			false => 0,
-		};
-		Ok(Self { group, streams })
+		Ok(Self { group })
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -399,9 +392,6 @@ impl Message for SubscribeEnd {
 			return Err(EncodeError::Version);
 		}
 		w.varint(self.group)?;
-		if version.has_stream_count() {
-			w.varint(self.streams)?;
-		}
 		Ok(())
 	}
 }
@@ -409,9 +399,10 @@ impl Message for SubscribeEnd {
 /// Sent by the subscriber to update subscription parameters.
 ///
 /// Lite03+ only.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct SubscribeUpdate {
+	/// A join requesting this group or later, judged against the local refresh ratio.
+	pub wanted_group: Option<u64>,
 	pub priority: u8,
 	pub max_delay: std::time::Duration,
 	pub start_group: Option<u64>,
@@ -445,7 +436,13 @@ impl Message for SubscribeUpdate {
 		let (start_frame, end_frame) = decode_frame_bounds(r, version, start_group, end_group)?;
 		let start_group = canonical_start_group(version, start_group, start_frame);
 
+		let wanted_group = match version.has_refresh() {
+			true => r.varint()?.checked_sub(1),
+			false => None,
+		};
+
 		Ok(Self {
+			wanted_group,
 			priority,
 			max_delay,
 			start_group,
@@ -481,6 +478,9 @@ impl Message for SubscribeUpdate {
 			self.end_frame,
 		)?;
 
+		if version.has_refresh() {
+			w.varint_opt(self.wanted_group)?;
+		}
 		Ok(())
 	}
 }
@@ -490,7 +490,7 @@ impl Message for SubscribeUpdate {
 /// The range `[start, end]` is inclusive on both ends. For example,
 /// `start = 5, end = 7` means groups 5, 6, and 7 were dropped.
 ///
-/// Lite03 to Lite06 only: Lite07 counts group streams in [`SubscribeEnd`] instead.
+/// Lite03+; publishers send it on Lite05 and later.
 #[derive(Clone, Debug)]
 pub struct SubscribeDrop {
 	/// The first absolute group sequence in the dropped range.
@@ -510,7 +510,6 @@ impl Message for SubscribeDrop {
 			Version::Lite01 | Version::Lite02 => {
 				return Err(DecodeError::Version);
 			}
-			_ if version.has_stream_count() => return Err(DecodeError::Version),
 			_ => {}
 		}
 
@@ -526,7 +525,6 @@ impl Message for SubscribeDrop {
 			Version::Lite01 | Version::Lite02 => {
 				return Err(EncodeError::Version);
 			}
-			_ if version.has_stream_count() => return Err(EncodeError::Version),
 			_ => {}
 		}
 
@@ -543,9 +541,8 @@ impl Message for SubscribeDrop {
 ///
 /// The discriminator is version-dependent:
 /// - Lite03/04: `0x0` SUBSCRIBE_OK, `0x1` SUBSCRIBE_DROP.
-/// - Lite05/06: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP
+/// - Lite05+: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END, `0x2` SUBSCRIBE_DROP
 ///   (SUBSCRIBE_OK was removed; acceptance is implicit).
-/// - Lite07+: `0x0` SUBSCRIBE_START, `0x1` SUBSCRIBE_END (SUBSCRIBE_DROP was removed).
 #[derive(Clone, Debug)]
 pub enum SubscribeResponse {
 	Ok(SubscribeOk),
@@ -576,8 +573,8 @@ impl Encode<Version> for SubscribeResponse {
 			_ => match self {
 				Self::Start(start) => encode_typed(w, 0, start, version)?,
 				Self::End(end) => encode_typed(w, 1, end, version)?,
-				Self::Drop(drop) if !version.has_stream_count() => encode_typed(w, 2, drop, version)?,
-				Self::Drop(_) | Self::Ok(_) => return Err(EncodeError::Version),
+				Self::Drop(drop) => encode_typed(w, 2, drop, version)?,
+				Self::Ok(_) => return Err(EncodeError::Version),
 			},
 		}
 
@@ -602,7 +599,7 @@ impl Decode<Version> for SubscribeResponse {
 				match typ {
 					0 => Ok(Self::Start(SubscribeStart::decode(buf, version)?)),
 					1 => Ok(Self::End(SubscribeEnd::decode(buf, version)?)),
-					2 if !version.has_stream_count() => Ok(Self::Drop(SubscribeDrop::decode(buf, version)?)),
+					2 => Ok(Self::Drop(SubscribeDrop::decode(buf, version)?)),
 					_ => Err(DecodeError::InvalidMessage(typ)),
 				}
 			}
@@ -662,54 +659,48 @@ mod test {
 
 	#[test]
 	fn subscribe_end_roundtrips_on_lite05() {
-		let resp = SubscribeResponse::End(SubscribeEnd { group: 7, streams: 3 });
+		let resp = SubscribeResponse::End(SubscribeEnd { group: 7 });
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
-		// Type, length, group: no stream count before lite-07.
+		// Type, length, exclusive final group.
 		assert_eq!(buf, [1, 1, 7]);
 		let mut slice = buf.as_slice();
 		match crate::coding::decode_buf(&mut slice, Version::Lite05, SubscribeResponse::decode).unwrap() {
-			SubscribeResponse::End(end) => assert_eq!((end.group, end.streams), (7, 0)),
+			SubscribeResponse::End(end) => assert_eq!(end.group, 7),
 			other => panic!("expected End, got {other:?}"),
 		}
 	}
 
 	#[test]
-	fn subscribe_end_carries_the_stream_count_on_lite07() {
-		let resp = SubscribeResponse::End(SubscribeEnd { group: 7, streams: 3 });
+	fn subscribe_end_has_no_stream_count_on_lite07() {
+		let resp = SubscribeResponse::End(SubscribeEnd { group: 7 });
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
-		assert_eq!(buf, [1, 2, 7, 3]);
+		assert_eq!(buf, [1, 1, 7]);
 		let mut slice = buf.as_slice();
 		match crate::coding::decode_buf(&mut slice, Version::Lite07, SubscribeResponse::decode).unwrap() {
-			SubscribeResponse::End(end) => assert_eq!((end.group, end.streams), (7, 3)),
+			SubscribeResponse::End(end) => assert_eq!(end.group, 7),
 			other => panic!("expected End, got {other:?}"),
 		}
 	}
 
 	#[test]
-	fn subscribe_drop_is_gone_on_lite07() {
+	fn subscribe_drop_is_restored_on_lite07() {
 		let resp = SubscribeResponse::Drop(SubscribeDrop {
 			start: 1,
 			end: 3,
-			error: 0,
+			error: 7,
 		});
 		let mut buf = Vec::new();
-		assert!(matches!(
-			resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07),
-			Err(EncodeError::Version)
-		));
-
-		// A lite-06 DROP is an unknown response type on lite-07.
-		let mut buf = Vec::new();
-		resp.encode(&mut Encoder::new(&mut buf, Version::Lite06.into()), Version::Lite06)
+		resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
 			.unwrap();
-		assert!(matches!(
-			crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite07, SubscribeResponse::decode),
-			Err(DecodeError::InvalidMessage(2))
-		));
+		assert_eq!(buf, [2, 3, 1, 3, 7]);
+		match crate::coding::decode_buf(&mut buf.as_slice(), Version::Lite07, SubscribeResponse::decode).unwrap() {
+			SubscribeResponse::Drop(drop) => assert_eq!((drop.start, drop.end, drop.error), (1, 3, 7)),
+			other => panic!("expected Drop, got {other:?}"),
+		}
 	}
 
 	#[test]
@@ -930,6 +921,28 @@ mod test {
 		);
 	}
 
+	/// Lite-07 carries `Wanted Group` on SUBSCRIBE_UPDATE; older versions drop it.
+	#[test]
+	fn wanted_group_roundtrips_only_on_lite07() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for wanted in [None, Some(0), Some(1), Some(u64::MAX - 1)] {
+				let update = SubscribeUpdate {
+					wanted_group: wanted,
+					priority: 0,
+					max_delay: std::time::Duration::ZERO,
+					start_group: None,
+					end_group: None,
+					start_frame: 0,
+					end_frame: None,
+					order: crate::track::Order::Descending,
+				};
+				let buf = update.encode_bytes(version).unwrap();
+				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, SubscribeUpdate::decode).unwrap();
+				assert_eq!(got.wanted_group, if version.has_refresh() { wanted } else { None });
+			}
+		}
+	}
+
 	/// Lite-07 carries `Group Order` right after the priority, on SUBSCRIBE and
 	/// SUBSCRIBE_UPDATE alike, and refuses a value it does not define.
 	#[test]
@@ -947,6 +960,7 @@ mod test {
 			assert_eq!(got.order, order);
 
 			let update = SubscribeUpdate {
+				wanted_group: None,
 				priority: 3,
 				max_delay: std::time::Duration::from_millis(250),
 				start_group: None,

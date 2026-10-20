@@ -12,7 +12,8 @@ pub use super::Config;
 /// Publishes an opaque value over a track, one value per group.
 ///
 /// Each [`update`](Self::update) rolls a new group holding the whole value, so a consumer only ever
-/// needs the newest group and older ones are dropped. For a log where every payload survives, use
+/// needs the newest group to reconstruct the value. A reader can retain earlier states within its
+/// drift budget. For a log where every payload survives, use
 /// [`stream`](crate::stream) instead.
 ///
 /// Cheaply clonable: clones share one underlying track, like other MoQ producers.
@@ -67,7 +68,7 @@ struct Inner {
 
 impl Inner {
 	fn update(&mut self, payload: Timed<Bytes>) -> Result<usize> {
-		let timestamp = payload.at.unwrap_or_else(moq_net::Timestamp::now);
+		let timestamp = payload.at;
 		let payload = payload.value;
 
 		// One frame per group, so the window spans a single value and starts cold every time.
@@ -89,6 +90,10 @@ impl Inner {
 		// the newest, so the previous value would be lost even though this update reported an error.
 		if payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
 			return Err(moq_net::Error::FrameTooLarge.into());
+		}
+		// The same goes for a timestamp that doesn't match the track.
+		if timestamp.is_some() != self.track.info().timescale.is_some() {
+			return Err(moq_net::Error::TimestampMismatch.into());
 		}
 
 		let size = payload.len();

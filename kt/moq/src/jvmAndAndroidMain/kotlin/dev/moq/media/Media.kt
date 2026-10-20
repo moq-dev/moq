@@ -1,11 +1,7 @@
 package dev.moq.media
 
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
+import dev.moq.pull
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.onCompletion
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.microseconds
 import dev.moq.Frame
@@ -19,12 +15,10 @@ typealias TrackProducer = uniffi.moq.MoqMediaTrackProducer
 typealias TrackStreamProducer = uniffi.moq.MoqMediaTrackStreamProducer
 /** The write side of a container, which publishes each track it describes. */
 typealias ContainerProducer = uniffi.moq.MoqMediaContainerProducer
-/** The write side of a container fed a raw byte stream. */
-typealias ContainerStreamProducer = uniffi.moq.MoqMediaContainerStreamProducer
 /** The read side of a media track: yields frames with codec metadata in decode order. */
-typealias ContainerConsumer = uniffi.moq.MoqMediaContainerConsumer
+typealias TrackConsumer = uniffi.moq.MoqMediaTrackConsumer
 /** A finite fetched media group: yields container-decoded frames until the group ends. */
-typealias ContainerGroupConsumer = uniffi.moq.MoqMediaContainerGroupConsumer
+typealias GroupConsumer = uniffi.moq.MoqMediaGroupConsumer
 /** The read side of a broadcast's catalog: yields updates as the set of tracks changes. */
 typealias CatalogConsumer = uniffi.moq.MoqMediaCatalogConsumer
 /** A broadcast's catalog: its tracks and their properties, plus any application sections. */
@@ -47,7 +41,9 @@ typealias VideoProperties = uniffi.moq.MoqVideoProperties
 typealias AudioInit = uniffi.moq.MoqAudioInit
 /** A video codec, optional init bytes, a label, and catalog hints. */
 typealias VideoInit = uniffi.moq.MoqVideoInit
-/** A container format and its leading bytes. */
+/** A shared source timestamp offset that does not keep its broadcast open. */
+typealias Timebase = uniffi.moq.MoqMediaTimebase
+/** A container format, its leading bytes, and an optional shared source timebase. */
 typealias ContainerInit = uniffi.moq.MoqContainerInit
 /** The catalog description of an audio track: codec, sample rate, channels, whether it is enabled, and container. */
 typealias Audio = uniffi.moq.MoqAudio
@@ -62,28 +58,27 @@ typealias Target = uniffi.moq.MoqMediaTarget
 typealias Named = uniffi.moq.MoqMediaTarget.Named
 /** A subscriber-requested track. */
 typealias Requested = uniffi.moq.MoqMediaTarget.Requested
-/** A track name, container, and live delivery options. */
-typealias ContainerConfig = uniffi.moq.MoqMediaContainerConfig
-/** A fetched group name, sequence, container, and delivery options. */
-typealias ContainerGroupConfig = uniffi.moq.MoqMediaContainerGroupConfig
+/** A catalog rendition: its ID (catalog key) and its video or audio config. */
+typealias Rendition = uniffi.moq.MoqRendition
+/** A catalog video rendition. */
+typealias VideoRendition = uniffi.moq.MoqRendition.Video
+/** A catalog audio rendition. */
+typealias AudioRendition = uniffi.moq.MoqRendition.Audio
+/** A catalog rendition and live delivery options. */
+typealias TrackConfig = uniffi.moq.MoqMediaTrackConfig
+/** A catalog rendition's group sequence and fetch delivery options. */
+typealias GroupConfig = uniffi.moq.MoqMediaGroupConfig
 /** The packaging advertised for a media track. */
 typealias Container = uniffi.moq.MoqContainer
 
 /**
  * Stream of catalog updates. Terminates when the underlying track ends.
  *
- * The Flow's [onCompletion] forwards Kotlin coroutine cancellation to the
+ * The Flow forwards Kotlin coroutine cancellation to the
  * native consumer's `cancel()` so structured concurrency propagates through
  * to the QUIC stream.
  */
-fun CatalogConsumer.updates(): Flow<Catalog> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun CatalogConsumer.updates(): Flow<Catalog> = pull({ cancel() }) { next() }
 
 /**
  * Subscribe to the catalog track and return the first catalog, cancelling the
@@ -100,24 +95,10 @@ suspend fun catalog(broadcast: dev.moq.BroadcastConsumer): Catalog {
 }
 
 /** Stream of decoded media frames in decode order. */
-fun ContainerConsumer.frames(): Flow<MediaFrame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun TrackConsumer.frames(): Flow<MediaFrame> = pull({ cancel() }) { next() }
 
-/** Stream of decoded frames from one finite, fetched media group. */
-fun ContainerGroupConsumer.frames(): Flow<MediaFrame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+/** Stream of decoded frames from one finite media group. */
+fun GroupConsumer.frames(): Flow<MediaFrame> = pull({ cancel() }) { next() }
 
 /** Presentation timestamp of a container-decoded frame. */
 val MediaFrame.timestamp: Duration

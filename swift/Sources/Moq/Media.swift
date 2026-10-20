@@ -48,18 +48,43 @@ public enum Media {
     public typealias AudioInit = MoqAudioInit
     /// A video codec, its initialization bytes, label, and hints.
     public typealias VideoInit = MoqVideoInit
-    /// A container format and its leading bytes.
-    public typealias ContainerInit = MoqContainerInit
-    /// A track name, its container, and live delivery options.
-    public typealias ContainerConfig = MoqMediaContainerConfig
-    /// A fetched group's name, sequence, container, and delivery options.
-    public typealias ContainerGroupConfig = MoqMediaContainerGroupConfig
+    /// Shares one source's timestamp offset without keeping its broadcast open.
+    public final class Timebase: Sendable {
+        let ffi: MoqMediaTimebase
+        /// Create a shared source timebase owned by this broadcast.
+        public init(broadcast: BroadcastProducer) throws { ffi = try MoqMediaTimebase(broadcast: broadcast.ffi) }
+    }
+    /// A container format, its leading bytes, and an optional shared source timebase.
+    public struct ContainerInit: Sendable {
+        /// The container format.
+        public var format: ContainerFormat
+        /// The leading container bytes.
+        public var data: Data
+        /// A shared source timebase, or nil for an independent offset.
+        public var timebase: Timebase?
+        /// Configure a container's leading bytes and source timeline.
+        public init(format: ContainerFormat, data: Data, timebase: Timebase? = nil) {
+            self.format = format
+            self.data = data
+            self.timebase = timebase
+        }
+        var ffi: MoqContainerInit { MoqContainerInit(format: format, data: data, timebase: timebase?.ffi) }
+    }
+    /// A catalog rendition: its ID (catalog key) and its video or audio config.
+    public typealias Rendition = MoqRendition
+    /// A catalog rendition and live delivery options.
+    public typealias TrackConfig = MoqMediaTrackConfig
+    /// A catalog rendition's group sequence and fetch delivery options.
+    public typealias GroupConfig = MoqMediaGroupConfig
 
     /// Updates a catalog without keeping its broadcast open.
     public final class CatalogProducer: Sendable {
         let ffi: MoqMediaCatalogProducer
         /// Construct a weak catalog handle for this broadcast.
         public init(broadcast: BroadcastProducer) throws { ffi = try MoqMediaCatalogProducer(broadcast: broadcast.ffi) }
+
+        /// Read the broadcast clock in microseconds, fixing it for subsequent media producers.
+        public func now() throws -> UInt64 { try ffi.now() }
         /// Replace the video properties shared by every rendition.
         public func setVideoProperties(_ properties: VideoProperties) throws { try ffi.setVideoProperties(properties: properties) }
         /// Set an application catalog section from its serialized JSON value.
@@ -103,17 +128,17 @@ public enum Media {
     }
 
     /// Read side of a media track. Iterating yields decoded frames in decode order.
-    public final class ContainerConsumer: AsyncSequence, Sendable {
+    public final class TrackConsumer: AsyncSequence, Sendable {
         /// The decoded media frame emitted by this sequence.
         public typealias Element = MediaFrame
 
-        let ffi: MoqMediaContainerConsumer
+        let ffi: MoqMediaTrackConsumer
 
-        /// Subscribe to a track and decode its container.
-        public static func subscribe(broadcast: BroadcastConsumer, config: ContainerConfig) async throws -> ContainerConsumer {
-            ContainerConsumer(try await MoqMediaContainerConsumer.subscribe(broadcast: broadcast.ffi, config: config))
+        /// Subscribe to a catalog rendition and decode its container, following its broadcast and track.
+        public static func subscribe(broadcast: BroadcastConsumer, config: TrackConfig) async throws -> TrackConsumer {
+            TrackConsumer(try await MoqMediaTrackConsumer.subscribe(broadcast: broadcast.ffi, config: config))
         }
-        init(_ ffi: MoqMediaContainerConsumer) {
+        init(_ ffi: MoqMediaTrackConsumer) {
             self.ffi = ffi
         }
 
@@ -135,19 +160,30 @@ public enum Media {
         }
     }
 
-    /// A finite, container-decoded media group returned by ``ContainerGroupConsumer/fetch(broadcast:config:)``.
-    public final class ContainerGroupConsumer: AsyncSequence, Sendable {
+    /// A finite, container-decoded media group, from ``GroupConsumer/fetch(broadcast:config:)``
+    /// or decoded from a raw ``Moq/GroupConsumer``.
+    public final class GroupConsumer: AsyncSequence, Sendable {
         /// The decoded media frame emitted by this sequence.
         public typealias Element = MediaFrame
 
-        let ffi: MoqMediaContainerGroupConsumer
+        let ffi: MoqMediaGroupConsumer
 
-        /// Fetch and decode exactly one media group.
-        public static func fetch(broadcast: BroadcastConsumer, config: ContainerGroupConfig) async throws -> ContainerGroupConsumer {
-            ContainerGroupConsumer(try await MoqMediaContainerGroupConsumer.fetch(broadcast: broadcast.ffi, config: config))
+        /// Fetch and decode exactly one group of a catalog rendition, following its broadcast and track.
+        public static func fetch(broadcast: BroadcastConsumer, config: GroupConfig) async throws -> GroupConsumer {
+            GroupConsumer(try await MoqMediaGroupConsumer.fetch(broadcast: broadcast.ffi, config: config))
         }
-        init(_ ffi: MoqMediaContainerGroupConsumer) {
+        init(_ ffi: MoqMediaGroupConsumer) {
             self.ffi = ffi
+        }
+
+        /// Decode `group` with the track's container, as each frame lands.
+        ///
+        /// Pair it with ``Moq/TrackConsumer/recvGroup()`` to read media in arrival order: frame
+        /// timestamps are container media time, not the transport's. Which groups arrive, and how
+        /// long a stalled one stays readable, is the subscription's `maxDelayUs`. Takes over
+        /// `group`, whose handle is closed afterward; throws if it has already read a frame.
+        public convenience init(group: Moq.GroupConsumer, container: Container) throws {
+            self.init(try MoqMediaGroupConsumer(group: group.ffi, container: container))
         }
 
         /// The sequence number of this group within the track.
@@ -198,7 +234,7 @@ public enum Media {
         ///
         /// The importer derives keyframe status from the bitstream, so only the payload and its
         /// timestamp cross the boundary.
-        public func writeFrame(_ payload: Data, timestampUs: UInt64 = 0) throws {
+        public func writeFrame(_ payload: Data, timestampUs: UInt64) throws {
             try ffi.writeFrame(frame: Frame(payload: payload, timestampUs: timestampUs))
         }
 
@@ -241,15 +277,15 @@ public enum Media {
     public final class ContainerProducer: Sendable {
         let ffi: MoqMediaContainerProducer
 
-        /// Import complete container chunks into this broadcast.
+        /// Import a container into this broadcast, from chunks split anywhere.
         public convenience init(broadcast: BroadcastProducer, initData: ContainerInit) throws {
-            self.init(try MoqMediaContainerProducer(broadcast: broadcast.ffi, init: initData))
+            self.init(try MoqMediaContainerProducer(broadcast: broadcast.ffi, init: initData.ffi))
         }
         init(_ ffi: MoqMediaContainerProducer) {
             self.ffi = ffi
         }
 
-        /// Write a whole chunk of container bytes.
+        /// Write container bytes; the container recovers its own framing.
         ///
         /// No timestamp: a container carries its tracks' timing itself, and the importer reads it out
         /// rather than taking the caller's word for it.
@@ -268,29 +304,6 @@ public enum Media {
         /// Start a new segment and number its groups `sequence`.
         public func seek(_ sequence: UInt64) throws {
             try ffi.seek(sequence: sequence)
-        }
-
-        /// Finish every track this container publishes.
-        public func finish() throws {
-            try ffi.finish()
-        }
-    }
-
-    /// Write side of a container fed a raw byte stream, which recovers its own framing.
-    public final class ContainerStreamProducer: Sendable {
-        let ffi: MoqMediaContainerStreamProducer
-
-        /// Import a container byte stream into this broadcast.
-        public convenience init(broadcast: BroadcastProducer, format: ContainerFormat) throws {
-            self.init(try MoqMediaContainerStreamProducer(broadcast: broadcast.ffi, format: format))
-        }
-        init(_ ffi: MoqMediaContainerStreamProducer) {
-            self.ffi = ffi
-        }
-
-        /// Push raw container bytes; chunk boundaries don't matter.
-        public func write(_ payload: Data) throws {
-            try ffi.write(payload: payload)
         }
 
         /// Finish every track this container publishes.

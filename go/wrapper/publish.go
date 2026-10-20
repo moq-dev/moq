@@ -49,43 +49,6 @@ func (b *BroadcastProducer) Unannounce() error {
 	return b.inner.Unannounce()
 }
 
-// EncodeAudio publishes a raw-audio track with an in-process encoder.
-//
-// Select the codec with OpusAudioCodec or AacAudioCodec.
-// Pass bandwidth to reserve this track's bitrate against the session's
-// allocator so a co-resident video encoder sizes itself against what is left.
-func (b *BroadcastProducer) EncodeAudio(name string, input AudioEncoderInput, output AudioEncoderOutput, bandwidth *Bandwidth) (*AudioProducer, error) {
-	var innerBw **ffi.MoqBandwidth
-	if bandwidth != nil {
-		innerBw = &bandwidth.inner
-	}
-	inner, err := b.inner.EncodeAudio(name, input, output, innerBw)
-	if err != nil {
-		return nil, err
-	}
-	return &AudioProducer{inner: inner}, nil
-}
-
-// EncodeVideo publishes a raw-video track with an in-process H.264/H.265
-// encoder.
-//
-// Set output.Track to choose the track name; otherwise one is derived from the
-// codec (.avc3 / .hev1). The catalog rendition is published immediately so
-// subscribers can discover it before the first frame exists.
-//
-// Pass bandwidth to reserve this track's configured bitrate and follow the grant.
-func (b *BroadcastProducer) EncodeVideo(input VideoEncoderInput, output VideoEncoderOutput, bandwidth *Bandwidth) (*VideoProducer, error) {
-	var innerBw **ffi.MoqBandwidth
-	if bandwidth != nil {
-		innerBw = &bandwidth.inner
-	}
-	inner, err := b.inner.EncodeVideo(input, output, innerBw)
-	if err != nil {
-		return nil, err
-	}
-	return &VideoProducer{inner: inner}, nil
-}
-
 // PublishTrack creates a track that carries arbitrary byte payloads with no
 // codec validation. info sets track properties (priority, cache, timescale);
 // pass nil for defaults.
@@ -186,7 +149,7 @@ func (r *TrackRequest) Abort(errorCode uint16) error {
 	return r.inner.Abort(errorCode)
 }
 
-// TrackDemand watches whether a published track has subscribers.
+// TrackDemand watches the group a published track's subscribers want next.
 //
 // It is weak: holding it neither keeps the track open nor locks the producer, so
 // a wait can park here while the producer keeps publishing. Waits return
@@ -200,19 +163,15 @@ func (d *TrackDemand) Name() string {
 	return d.inner.Name()
 }
 
-// IsUsed reports whether the track has at least one active subscriber right now.
-func (d *TrackDemand) IsUsed() bool {
-	return d.inner.IsUsed()
+// Wanted is the group subscribers want next, or nil while nobody subscribes. A
+// value past the newest group asks for a new group now, typically a keyframe.
+func (d *TrackDemand) Wanted() *uint64 {
+	return d.inner.Wanted()
 }
 
-// Used blocks until the track has at least one active subscriber.
-func (d *TrackDemand) Used(ctx context.Context) error {
-	return d.inner.Used(ctx)
-}
-
-// Unused blocks until the track has no active subscribers.
-func (d *TrackDemand) Unused(ctx context.Context) error {
-	return d.inner.Unused(ctx)
+// WantedChanged blocks until Wanted changes and returns it. The first call returns at once.
+func (d *TrackDemand) WantedChanged(ctx context.Context) (*uint64, error) {
+	return d.inner.WantedChanged(ctx)
 }
 
 // TrackProducer writes arbitrary byte payloads with no codec required.
@@ -220,7 +179,7 @@ type TrackProducer struct {
 	inner *ffi.MoqTrackProducer
 }
 
-// Demand returns a watch-only handle to the track's name and whether it has subscribers.
+// Demand returns a watch-only handle to the track's name and the group its subscribers want.
 func (t *TrackProducer) Demand() (*TrackDemand, error) {
 	inner, err := t.inner.Demand()
 	if err != nil {
@@ -409,9 +368,8 @@ func (r *GroupRequest) Abort(errorCode uint16) error {
 //
 // It is weak: holding it does not keep the request alive. The last caller to
 // leave withdraws the request, so once unused, demand never returns: drop the
-// request. Waits fail once the request is answered: ErrClosed if it was
-// dropped, otherwise the error the accept or reject left for the waiting
-// fetches.
+// request. Waits fail with ErrClosed after the request is accepted or dropped,
+// and keep the rejection reason after it is rejected.
 type GroupDemand struct {
 	inner *ffi.MoqGroupDemand
 }
@@ -434,129 +392,4 @@ func (d *GroupDemand) Used(ctx context.Context) error {
 // Unused blocks until the group has no waiting callers.
 func (d *GroupDemand) Unused(ctx context.Context) error {
 	return d.inner.Unused(ctx)
-}
-
-// AudioProducer pushes raw PCM and lets libopus encode it on the way out.
-type AudioProducer struct {
-	inner *ffi.MoqAudioProducer
-}
-
-// Name returns the audio track's name.
-func (a *AudioProducer) Name() (string, error) {
-	return a.inner.Name()
-}
-
-// Demand returns a watch-only handle to whether the audio track has subscribers.
-func (a *AudioProducer) Demand() (*TrackDemand, error) {
-	inner, err := a.inner.Demand()
-	if err != nil {
-		return nil, err
-	}
-	return &TrackDemand{inner: inner}, nil
-}
-
-// Used blocks until the audio track has at least one active subscriber. Prefer Demand.
-func (a *AudioProducer) Used(ctx context.Context) error {
-	return a.inner.Used(ctx)
-}
-
-// Unused blocks until the audio track has no active subscribers. Prefer Demand.
-func (a *AudioProducer) Unused(ctx context.Context) error {
-	return a.inner.Unused(ctx)
-}
-
-// Reanchor re-anchors the timeline to the next frame after an idle gap.
-func (a *AudioProducer) Reanchor() error {
-	return a.inner.Reanchor()
-}
-
-// Write pushes one frame of PCM in the configured input format.
-func (a *AudioProducer) Write(frame AudioFrame) error {
-	return a.inner.Write(frame)
-}
-
-// Reservation returns this encoder's bandwidth reservation, or nil if it was
-// published without an allocator.
-func (a *AudioProducer) Reservation() *Reservation {
-	inner := a.inner.Reservation()
-	if inner == nil || *inner == nil {
-		return nil
-	}
-	return &Reservation{inner: *inner}
-}
-
-// Finish flushes pending samples and finalizes the track.
-func (a *AudioProducer) Finish() error {
-	return a.inner.Finish()
-}
-
-// VideoProducer pushes raw pictures and lets a native encoder compress them on
-// the way out.
-type VideoProducer struct {
-	inner *ffi.MoqVideoProducer
-}
-
-// Name returns the video track's name.
-func (v *VideoProducer) Name() (string, error) {
-	return v.inner.Name()
-}
-
-// Demand returns a watch-only handle to whether the video track has subscribers.
-func (v *VideoProducer) Demand() (*TrackDemand, error) {
-	inner, err := v.inner.Demand()
-	if err != nil {
-		return nil, err
-	}
-	return &TrackDemand{inner: inner}, nil
-}
-
-// Used blocks until the video track has at least one active subscriber. Prefer Demand.
-func (v *VideoProducer) Used(ctx context.Context) error {
-	return v.inner.Used(ctx)
-}
-
-// Unused blocks until the video track has no active subscribers. Prefer Demand.
-func (v *VideoProducer) Unused(ctx context.Context) error {
-	return v.inner.Unused(ctx)
-}
-
-// Write encodes and publishes one frame in the configured input format. A
-// hardware encoder pipelines, so a call that puts nothing on the wire is normal
-// rather than an error.
-func (v *VideoProducer) Write(frame VideoFrame) error {
-	return v.inner.Write(frame)
-}
-
-// Cut starts a new group at the next written frame.
-//
-// Optional: the encoder keyframes every Gop frames on its own, and each of
-// those cuts a group, so a subscriber can always join without this. Reach for it
-// only to place the boundaries yourself, aligning groups with something the
-// encoder can't see such as a scene change. An error means the selected encoder
-// cannot force a keyframe; nothing is queued and groups keep their interval.
-func (v *VideoProducer) Cut() error {
-	return v.inner.Cut()
-}
-
-// SetBitrate retunes the live encoder, in bits per second. Cheap enough to drive
-// from a congestion controller: no keyframe is forced. An error means this
-// backend can't retune while running, which is not fatal; the encoder keeps its
-// current rate.
-func (v *VideoProducer) SetBitrate(bitrate uint64) error {
-	return v.inner.SetBitrate(bitrate)
-}
-
-// Reservation returns this encoder's bandwidth reservation, or nil if it was
-// published without an allocator.
-func (v *VideoProducer) Reservation() *Reservation {
-	inner := v.inner.Reservation()
-	if inner == nil || *inner == nil {
-		return nil
-	}
-	return &Reservation{inner: *inner}
-}
-
-// Finish flushes any frames the codec is holding and finalizes the track.
-func (v *VideoProducer) Finish() error {
-	return v.inner.Finish()
 }

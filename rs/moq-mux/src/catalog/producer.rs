@@ -1,8 +1,9 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use base64::Engine;
+use hang::catalog::Reference;
 
 use super::hang::{Catalog, CatalogExt, Consumer, Extra};
 
@@ -17,15 +18,21 @@ struct State<E: CatalogExt> {
 
 	/// The names live renditions hold, keyed by section (the [`RenditionConfig`](super::RenditionConfig)
 	/// type) and name. The section is part of the key because each writes a disjoint map: `video["v"]`
-	/// and `audio["v"]` are different renditions and neither says anything about the other.
-	owned: BTreeSet<(std::any::TypeId, String)>,
+	/// and `audio["v"]` are different renditions and neither says anything about the other. The
+	/// value is whether the rendition's config is listed, since a lazily-configured one holds its
+	/// name long before it has an entry.
+	owned: BTreeMap<(std::any::TypeId, String), bool>,
+
+	/// Reports whether the extension lists a track of its own, registered by an importer that
+	/// records tracks there (see [`Producer::count_ext_tracks`]).
+	ext_tracks: Option<fn(&mut E) -> bool>,
 
 	/// Gates the initial catalog publish until all reservations resolve (see
 	/// [`reserve`](Producer::reserve)).
 	reservations: Reservations,
 
 	/// Why the catalog tracks are closed, so [`Producer::modify`] refuses further edits with the
-	/// cause: [`Producer::finish`], or a drop-time publish that failed and aborted them.
+	/// cause: [`Producer::finish`], [`Producer::abort`], or a failed drop-time publish.
 	closed: Option<crate::Error>,
 
 	/// The broadcast's shared clock, advertised at the catalog root. Every importer on this
@@ -43,6 +50,34 @@ struct State<E: CatalogExt> {
 	estimates: Throttle,
 }
 
+impl<E: CatalogExt> State<E> {
+	/// Whether the catalog names anything this broadcast can serve, which the initial publish
+	/// waits for.
+	///
+	/// Root metadata and application sections can describe a stream before its media config is
+	/// known, and must not make an empty broadcast discoverable. A disabled video or audio rendition
+	/// promises no frames, so it doesn't count. A listed rendition covers application-defined
+	/// sections the base fields can't see, and an importer that lists tracks in the extension
+	/// reports them through [`ext_tracks`](Self::ext_tracks).
+	fn lists_track(&mut self) -> bool {
+		use std::any::TypeId;
+		// Video and audio carry `enabled`, which only the base check reads.
+		let base = [
+			TypeId::of::<hang::catalog::VideoConfig>(),
+			TypeId::of::<hang::catalog::AudioConfig>(),
+		];
+		let catalog = &mut self.catalog;
+		catalog.video.enabled().next().is_some()
+			|| catalog.audio.enabled().next().is_some()
+			|| !catalog.text.renditions.is_empty()
+			|| !catalog.json.tracks.is_empty()
+			|| !catalog.binary.tracks.is_empty()
+			|| catalog.m2ts.is_some()
+			|| self.ext_tracks.is_some_and(|lists| lists(&mut catalog.ext))
+			|| self.owned.iter().any(|((ty, _), &listed)| listed && !base.contains(ty))
+	}
+}
+
 /// How often a rising `jitter` or `delay` estimate may republish the catalog. Each republish makes
 /// every viewer update every media subscription, and an overloaded publisher's estimate rises a
 /// millisecond at a time.
@@ -55,7 +90,7 @@ const ESTIMATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 #[derive(Default)]
 struct Throttle {
 	/// When the last publish carrying an estimate went out.
-	last: Option<web_async::time::Instant>,
+	last: Option<moq_clock::Instant>,
 	/// An estimate is in the catalog but not yet on the wire.
 	pending: bool,
 }
@@ -64,9 +99,27 @@ impl Throttle {
 	/// A publish is going out: any held estimate rides it and opens a new window.
 	fn fold(&mut self) {
 		if std::mem::take(&mut self.pending) {
-			self.last = Some(web_async::time::Instant::now());
+			self.last = Some(moq_clock::now());
 		}
 	}
+}
+
+/// The producer's `clock` under a root `clock` of `advertised`: re-based on a changed mapping while
+/// nothing has `anchored` the clock, and refused once something has. Clearing it is always refused.
+fn adopt(clock: crate::Clock, anchored: bool, advertised: Option<hang::catalog::Clock>) -> crate::Result<crate::Clock> {
+	if advertised == clock.wall() {
+		return Ok(clock);
+	}
+	let refuse = |why: &str| crate::Error::UnmappableTimestamp(format!("root clock {advertised:?} {why}"));
+	let wall = crate::Clock::exact(advertised.ok_or_else(|| refuse("clears the producer's clock"))?)?;
+	// The same mapping in other units needs no host time, which may be unset or behind PTS zero.
+	if Some(wall) == clock.wall() {
+		return Ok(clock);
+	}
+	if anchored {
+		return Err(refuse("changes the producer's clock after it was fixed"));
+	}
+	crate::Clock::adopted(wall)
 }
 
 /// Take the shared state, ignoring a poisoned lock.
@@ -100,6 +153,10 @@ struct Reservations {
 	pending: bool,
 	/// Whether the initial snapshot has been published (buffering is over).
 	published: bool,
+	/// Whether anything ever reserved, making this an importer's catalog: its initial snapshot also
+	/// waits for a [listed track](State::lists_track), so input that declares none never announces.
+	/// An incremental producer that never reserves publishes as it goes.
+	reserved: bool,
 }
 
 /// The built-in catalog's own timeline, enrolled with the first media track.
@@ -110,17 +167,16 @@ struct CatalogTimeline {
 }
 
 impl CatalogTimeline {
-	/// Report a newly published plaintext catalog group once. Each catalog group is one complete
-	/// snapshot, so it finishes as soon as it is reported.
-	fn record(&mut self, track: &moq_net::track::Producer) {
-		let (Some(recorder), Some(sequence)) = (self.recorder.as_mut(), track.latest()) else {
+	/// Report a newly published plaintext catalog group. Each catalog group is one complete
+	/// snapshot, so it finishes as soon as it is reported. Only this producer writes the track,
+	/// one group per catalog from zero, so the sequence is counted here.
+	fn record(&mut self) {
+		// Counted before enrollment too, so the first recorded group has its real sequence.
+		let sequence = self.last_sequence.map_or(0, |sequence| sequence + 1);
+		self.last_sequence = Some(sequence);
+		let Some(recorder) = self.recorder.as_mut() else {
 			return;
 		};
-		if self.last_sequence == Some(sequence) {
-			return;
-		}
-
-		self.last_sequence = Some(sequence);
 		recorder.frame(
 			hang::timeline::Position::group(sequence),
 			moq_net::Timestamp::now(),
@@ -154,15 +210,24 @@ impl<E: CatalogExt> Clone for Outputs<E> {
 impl<E: CatalogExt> Outputs<E> {
 	/// Emit the catalog to hang, compressed hang, MSF, and the broadcast timeline.
 	fn emit(&mut self, catalog: &Catalog<E>) -> crate::Result<()> {
+		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
+		catalog.check_renditions()?;
 		// One snapshot per group while deltas are disabled; the `.z` track carries the identical catalog.
-		self.hang.update(catalog)?;
-		self.catalog_timeline.lock().unwrap().record(&self.hang_track);
-		self.hangz.update(catalog)?;
+		let written = self
+			.hang
+			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
+		if written.is_some() {
+			self.catalog_timeline.lock().unwrap().record();
+		}
+		self.hangz
+			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
 
 		// The MSF catalog is derived from our own types, so a serialize failure means an extension broke
 		// the shape; report it like any other JSON failure rather than panicking. `abort` below is
 		// what keeps the tracks consistent if this fails after the hang tracks were updated.
-		let msf = to_msf(catalog).to_json().map_err(moq_json::Error::from)?;
+		let msf = to_msf(catalog, &self.msf_track.broadcast().path)
+			.to_json()
+			.map_err(moq_json::Error::from)?;
 		let mut group = self.msf_track.append_group()?;
 		group.write_frame(moq_net::Timestamp::now(), msf)?;
 		group.finish()?;
@@ -273,7 +338,8 @@ impl Default for Config<()> {
 impl<E: CatalogExt> Config<E> {
 	/// Start from an extended catalog rather than the media-only one, e.g. the untyped
 	/// [`Extra`] for the by-name / FFI path. Set application sections through
-	/// [`Producer::modify`](Producer::modify) afterwards.
+	/// [`Producer::modify`](Producer::modify) afterwards. A root `clock` in it is adopted, not
+	/// replaced (see [`Producer::new`]).
 	pub fn with_catalog<F: CatalogExt>(self, catalog: Catalog<F>) -> Config<F> {
 		Config {
 			catalog,
@@ -291,6 +357,9 @@ impl<E: CatalogExt> Config<E> {
 	/// its first frame landing at the clock's reading on arrival. Without this, the catalog starts
 	/// a fresh clock, and the first importer to receive a frame before anything fixes the clock
 	/// places it there instead, keeping its own timestamps verbatim (see [`Timebase`](super::Timebase)).
+	///
+	/// The root `clock` is this clock: a derivative that only learns its input's mapping later
+	/// writes it through [`Producer::modify`] instead, before anything fixes the clock.
 	pub fn with_clock(mut self, clock: crate::Clock) -> Self {
 		self.clock = Some(clock);
 		self
@@ -333,7 +402,24 @@ impl<E: CatalogExt> Config<E> {
 
 impl<E: CatalogExt> Producer<E> {
 	/// Create a new catalog producer from a full [`Config`].
-	pub fn new(broadcast: &mut moq_net::broadcast::Producer, config: Config<E>) -> Result<Self, moq_net::Error> {
+	///
+	/// A root `clock` seeded through [`Config::with_catalog`] is adopted under the same rules as
+	/// [`modify`](Self::modify): the producer runs on it, unless [`Config::with_clock`] fixed a
+	/// different mapping, which is refused.
+	pub fn new(broadcast: &mut moq_net::broadcast::Producer, config: Config<E>) -> crate::Result<Self> {
+		// The broadcast clock is advertised at the catalog root from the first snapshot,
+		// independently of any archive timeline: a live-only publisher exposes its mapping
+		// without creating a segment index. A host with an unset wall clock advertises none.
+		// Resolved before any track exists, so a refused seed leaves the broadcast untouched.
+		let anchored = config.clock.is_some();
+		let mut catalog = config.catalog;
+		let clock = match catalog.clock {
+			// An unseeded catalog runs on the configured clock, or a fresh one.
+			None => config.clock.unwrap_or_default(),
+			seeded => adopt(config.clock.unwrap_or_default(), anchored, seeded)?,
+		};
+		catalog.clock = clock.wall();
+
 		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())?;
 		let hangz_track =
 			broadcast.create_track(hang::Catalog::COMPRESSED_NAME, hang::Catalog::default_track_info())?;
@@ -357,14 +443,6 @@ impl<E: CatalogExt> Producer<E> {
 		#[allow(clippy::arc_with_non_send_sync)]
 		let catalog_timeline = Arc::new(Mutex::new(CatalogTimeline::default()));
 
-		// The broadcast clock is advertised at the catalog root from the first snapshot,
-		// independently of any archive timeline: a live-only publisher exposes its mapping
-		// without creating a segment index.
-		let anchored = config.clock.is_some();
-		let clock = config.clock.unwrap_or_default();
-		let mut catalog = config.catalog;
-		catalog.clock = Some(clock.wall());
-
 		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
 		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
 		// both targets is worth the unused atomics on the single-threaded one.
@@ -379,7 +457,8 @@ impl<E: CatalogExt> Producer<E> {
 			},
 			current: Arc::new(Mutex::new(State {
 				catalog,
-				owned: BTreeSet::new(),
+				owned: BTreeMap::new(),
+				ext_tracks: None,
 				reservations: Reservations::default(),
 				closed: None,
 				clock,
@@ -447,6 +526,14 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// The in-memory catalog is already mutated, so a panic while the guard is held still
 	/// publishes: skipping would leave `snapshot` ahead of the wire with no dirty flag to catch up.
+	///
+	/// The root `clock` is the producer's [`clock`](Self::clock). Writing a different one re-bases
+	/// the clock on it until something fixes the clock ([`Config::with_clock`], taking
+	/// [`clock`](Self::clock), an importer's first frame, or the first publish), so a derivative
+	/// adopts its input's mapping. After that a changed `clock` is refused, as is clearing it at any
+	/// time; writing the same mapping again is no change. Writes through
+	/// [`Reserved::video`](super::Reserved::video) and the codec producers keep their timestamps
+	/// verbatim, so they mean something only under the mapping they were written for.
 	pub fn modify(&mut self) -> crate::Result<Guard<'_, E>> {
 		let state = take(&self.current);
 		if let Some(err) = &state.closed {
@@ -509,7 +596,7 @@ impl<E: CatalogExt> Producer<E> {
 		let offset = if guard.state.anchored {
 			let clock = guard.state.clock;
 			let at = match wall {
-				Some(wall) => clock.reading(wall),
+				Some(wall) => clock.reading(wall)?,
 				None => clock.now().as_micros() as i128,
 			};
 			super::Offset::from_micros(at - pts.as_micros() as i128)?
@@ -521,7 +608,12 @@ impl<E: CatalogExt> Producer<E> {
 			};
 			guard.state.clock = clock;
 			guard.state.anchored = true;
-			guard.clock = Some(clock.wall());
+			match wall {
+				// A placement can precede every track. It stages no publish, so the catalog first
+				// goes out listing them rather than carrying a clock alone.
+				Some(_) => guard.state.catalog.clock = clock.wall(),
+				None => guard.clock = clock.wall(),
+			}
 			super::Offset::default()
 		};
 
@@ -542,9 +634,12 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// Hand it (or clones) to importers, or call its role-specific track constructors. The catalog is
 	/// withheld until every reservation is dropped and every created producer either publishes its
-	/// config or drops. A one-shot muxer therefore publishes the complete track list in its first
-	/// snapshot instead of a half-converged one. Producers created directly on this catalog publish
-	/// incrementally.
+	/// config or drops, and after that until the catalog names a track. A one-shot muxer therefore
+	/// publishes the complete track list in its first snapshot instead of a half-converged one, and
+	/// input that declares no track publishes nothing. An application's extension track counts only
+	/// once a track constructor such as [`track`](Self::track) publishes it; one seeded or written
+	/// through [`modify`](Self::modify) is invisible to this check. Producers created directly on a
+	/// catalog that never reserved publish incrementally.
 	///
 	/// Each call is a fresh [`Timebase`](super::Timebase): an importer handed it shifts its timestamps by
 	/// its own offset. Reserve through one timebase instead for importers sharing a timestamp base.
@@ -618,13 +713,19 @@ impl<E: CatalogExt> Producer<E> {
 		crate::Error: From<C::Error>,
 	{
 		let rendition = self.rendition(track.name())?;
-		self.media(track, container, rendition, config.into())
+		self.media(track, container, rendition, config.into(), None)
+	}
+
+	/// Count the tracks `lists` finds in the extension toward the initial publish's
+	/// [track requirement](State::lists_track), for an importer that records tracks there.
+	pub(crate) fn count_ext_tracks(&self, lists: fn(&mut E) -> bool) {
+		take(&self.current).ext_tracks = Some(lists);
 	}
 
 	/// Whether a live producer or published config already claims `name` in `R`'s section.
 	pub fn is_claimed<R: super::RenditionConfig<E>>(&self, name: &str) -> bool {
 		let mut state = take(&self.current);
-		R::get_mut(&mut state.catalog, name).is_some() || state.owned.contains(&owner_key::<R>(name))
+		R::get_mut(&mut state.catalog, name).is_some() || state.owned.contains_key(&owner_key::<R>(name))
 	}
 
 	/// Take `name` in `C`'s section for a new [`Rendition`](super::Rendition), which owns it until
@@ -637,19 +738,23 @@ impl<E: CatalogExt> Producer<E> {
 	/// [`set`](super::Rendition::set), and then be deleted by the rendition's `Drop`.
 	pub(super) fn acquire<C: super::RenditionConfig<E>>(&self, name: &str) -> crate::Result<()> {
 		let mut state = take(&self.current);
-		if C::get_mut(&mut state.catalog, name).is_some() || !state.owned.insert(owner_key::<C>(name)) {
+		let key = owner_key::<C>(name);
+		if C::get_mut(&mut state.catalog, name).is_some() || state.owned.contains_key(&key) {
 			return Err(hang::Error::Duplicate(name.to_string()).into());
 		}
+		state.owned.insert(key, false);
 		Ok(())
 	}
 
 	/// Register a live [`Reserved`](super::Reserved) handle.
 	pub(super) fn add_reserver(&self) {
-		take(&self.current).reservations.reservers += 1;
+		let mut state = take(&self.current);
+		state.reservations.reservers += 1;
+		state.reservations.reserved = true;
 	}
 
 	/// Drop a [`Reserved`](super::Reserved) handle, flushing the initial snapshot if that was the
-	/// last thing gating it.
+	/// last thing gating it and the catalog names a track.
 	pub(super) fn release_reserver(&mut self) {
 		{
 			let mut state = take(&self.current);
@@ -664,15 +769,14 @@ impl<E: CatalogExt> Producer<E> {
 		// Snapshot under the lock and emit outside it, since emitting writes to the catalog tracks.
 		let catalog = {
 			let mut state = take(&self.current);
-			let r = &mut state.reservations;
-			if r.published || r.reservers != 0 {
-				return;
-			}
+			let r = &state.reservations;
 			// Nothing was staged (e.g. every stream was ignored): stay unpublished so a later change
-			// still triggers the first emit, rather than publishing an empty catalog now.
-			if !r.pending {
+			// still triggers the first emit, rather than publishing an empty catalog now. The track
+			// scan runs last, so releasing each of many reservations stays linear.
+			if r.published || r.reservers != 0 || !r.pending || !state.lists_track() {
 				return;
 			}
+			let r = &mut state.reservations;
 			r.pending = false;
 			r.published = true;
 			// A snapshot on the wire is a mapping a reader may have copied.
@@ -698,6 +802,7 @@ impl<E: CatalogExt> Producer<E> {
 		container: C,
 		rendition: super::Rendition<E, R>,
 		config: Option<R>,
+		timeline_hint: Option<std::time::Duration>,
 	) -> crate::Result<crate::container::Producer<C, R>>
 	where
 		C: crate::container::Container,
@@ -705,7 +810,7 @@ impl<E: CatalogExt> Producer<E> {
 		crate::Error: From<C::Error>,
 	{
 		let mut catalog = self.clone();
-		let recorder = catalog.enroll(track.name())?;
+		let recorder = catalog.enroll(track.name(), timeline_hint)?;
 		let mut producer = crate::container::Producer::with_rendition(track, container, rendition)
 			.with_recorder(recorder)
 			.with_bandwidth(self.bandwidth.clone());
@@ -726,7 +831,7 @@ impl<E: CatalogExt> Producer<E> {
 		crate::Error: From<C::Error>,
 	{
 		let mut catalog = self.clone();
-		let recorder = catalog.enroll(track.name())?;
+		let recorder = catalog.enroll(track.name(), None)?;
 		Ok(crate::container::Producer::new(track, container)
 			.with_recorder(recorder)
 			.with_bandwidth(self.bandwidth.clone()))
@@ -748,13 +853,26 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// The role-specific track constructors call this for you. fMP4 passthrough calls it directly
 	/// because it writes groups by hand instead of using a [`container::Producer`](crate::container::Producer).
-	pub(crate) fn enroll(&mut self, track: &str) -> crate::Result<crate::timeline::Recorder> {
-		let recorder = self.timeline.track(track, self.cutting.clone())?;
+	pub(crate) fn enroll(
+		&mut self,
+		track: &str,
+		duration_hint: Option<std::time::Duration>,
+	) -> crate::Result<crate::timeline::Recorder> {
+		let mut cutting = self.cutting.clone();
+		if duration_hint.is_some() {
+			cutting = cutting.with_duration_hint(duration_hint);
+		}
+		let mut recorder = self.timeline.track(track, cutting)?;
 		{
 			let mut catalog = self.outputs.catalog_timeline.lock().unwrap();
 			if catalog.recorder.is_none() {
-				// Sparse data: a catalog may not change again, so each group is its own record.
-				let cutting = self.cutting.clone().with_duration_min(std::time::Duration::ZERO);
+				// Sparse data: a catalog may not change again, so each group is its own record, and a
+				// media hint says nothing about its cadence.
+				let cutting = self
+					.cutting
+					.clone()
+					.with_duration_min(std::time::Duration::ZERO)
+					.with_duration_hint(None);
 				catalog.recorder = Some(self.timeline.track(hang::Catalog::DEFAULT_NAME, cutting)?);
 			}
 		}
@@ -769,6 +887,45 @@ impl<E: CatalogExt> Producer<E> {
 		match &mut state.catalog.archive {
 			Some(archive) => archive.timelines = section.timelines,
 			None => state.catalog.archive = Some(section),
+		}
+
+		if !state
+			.catalog
+			.archive
+			.as_ref()
+			.is_some_and(|archive| archive.timelines.contains_key(track))
+		{
+			let name = track.to_string();
+			let timeline = hang::timeline::default_name(track);
+			let current = self.current.clone();
+			let mut outputs = self.outputs.clone();
+			recorder.on_declare(move |duration| {
+				let mut state = take(&current);
+				if state.closed.is_some() {
+					return;
+				}
+				state
+					.catalog
+					.archive
+					.get_or_insert_with(hang::catalog::Archive::new)
+					.timelines
+					.insert(name, hang::catalog::Timeline::new(timeline, duration));
+				let reservations = &mut state.reservations;
+				if !reservations.published && reservations.reservers != 0 {
+					reservations.pending = true;
+					return;
+				}
+				reservations.pending = false;
+				reservations.published = true;
+				state.anchored = true;
+				if let Err(err) = outputs.emit(&state.catalog) {
+					tracing::error!(%err, "failed to publish a timeline declaration, aborting catalog tracks");
+					outputs.abort(&err);
+					state.closed = Some(err);
+				} else {
+					state.estimates.fold();
+				}
+			});
 		}
 
 		Ok(recorder)
@@ -865,11 +1022,34 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(Consumer::new(self.outputs.hang.consume()))
 	}
 
+	/// Abort every catalog track with `err`, preventing further edits.
+	pub fn abort(mut self, err: moq_net::Error) {
+		let reason = crate::Error::from(err);
+		{
+			let mut state = take(&self.current);
+			if state.closed.is_some() {
+				return;
+			}
+			state.closed = Some(reason.clone());
+		}
+		self.outputs.abort(&reason);
+		self.timeline.finish();
+	}
+
 	/// Finish publishing to this catalog.
 	///
 	/// An estimate rise still held by the once-a-second limit is not published: media has ended.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		take(&self.current).closed = Some(moq_net::Error::Closed.into());
+		// A track that ends before its first record closes declares its timeline now, while the
+		// catalog can still advertise it.
+		self.timeline.flush();
+		{
+			let mut state = take(&self.current);
+			if let Some(err) = &state.closed {
+				return Err(err.clone());
+			}
+			state.closed = Some(moq_net::Error::Closed.into());
+		}
 		self.outputs.hang.finish()?;
 		self.outputs.hangz.finish()?;
 		self.outputs.msf_track.finish()?;
@@ -912,11 +1092,26 @@ impl<E: CatalogExt> Guard<'_, E> {
 		}
 		self.updated = false;
 
+		// The root `clock` is the producer's clock: never advertise one it disagrees with.
+		match adopt(self.state.clock, self.state.anchored, self.state.catalog.clock) {
+			Ok(clock) => {
+				self.state.clock = clock;
+				self.state.catalog.clock = clock.wall();
+			}
+			Err(err) => {
+				self.state.catalog.clock = self.state.clock.wall();
+				return Err(err);
+			}
+		}
+
 		{
+			// Withhold every emit while still buffering the initial reserved set, or until a reserved
+			// catalog names a track; the mutation stays in `current` and `pending` marks it for the
+			// flush once the gate opens. The track scan runs last, so a published catalog skips it.
+			let r = &self.state.reservations;
+			let withhold = !r.published && (r.reservers != 0 || (r.reserved && !self.state.lists_track()));
 			let r = &mut self.state.reservations;
-			// Withhold every emit while still buffering the initial reserved set; the mutation stays
-			// in `current` and `pending` marks it for the flush once the gate opens.
-			if !r.published && r.reservers != 0 {
+			if withhold {
 				r.pending = true;
 				return Ok(());
 			}
@@ -946,12 +1141,20 @@ impl<E: CatalogExt> Guard<'_, E> {
 		if !estimates.pending {
 			return Ok(());
 		}
-		let now = web_async::time::Instant::now();
+		let now = moq_clock::now();
 		if throttle && estimates.last.is_some_and(|last| now < last + ESTIMATE_WINDOW) {
 			return Ok(());
 		}
 		self.updated = true;
 		self.publish()
+	}
+
+	/// Mark the rendition holding `name` in `C`'s section as listed, so it counts toward the
+	/// initial publish's [track requirement](State::lists_track).
+	pub(super) fn list<C: super::RenditionConfig<E>>(&mut self, name: &str) {
+		if let Some(listed) = self.state.owned.get_mut(&owner_key::<C>(name)) {
+			*listed = true;
+		}
 	}
 
 	/// Release a name taken by [`Producer::acquire`], along with the entry it owns.
@@ -1062,15 +1265,50 @@ fn packaging_of(container: &hang::catalog::Container) -> Option<moq_msf::Packagi
 
 /// Convert a catalog to its MSF equivalent: the media sections become MSF tracks and the
 /// extension rides the MSF root under the same member names it uses in the hang catalog.
-fn to_msf<E: CatalogExt>(catalog: &Catalog<E>) -> moq_msf::Catalog<E> {
-	let mut msf = to_msf_media(&catalog.media());
+fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf::Catalog<E> {
+	let mut msf = to_msf_media(&catalog.media(), base);
 	msf.ext = catalog.ext.clone();
 	msf
 }
 
 /// Convert the base media sections of a hang catalog into MSF tracks.
-fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
+///
+/// MSF names a track by its absolute namespace and wire name. An unresolvable reference, one
+/// a reader would take as the catalog itself ([`names_catalog`](crate::catalog::msf::names_catalog)),
+/// or a duplicate identity is refused instead of advertising the track on the catalog's broadcast.
+fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) -> moq_msf::Catalog<E> {
 	let mut tracks = Vec::new();
+	let mut names = BTreeSet::new();
+	let mut reference = |id: &str, config: &dyn Reference| {
+		let name = config.track(id);
+		let namespace = match config.broadcast().filter(|rel| !rel.is_empty()) {
+			None => None,
+			Some(rel) => {
+				let Some(target) = base.try_resolve(rel) else {
+					tracing::error!(rendition = id, %rel, %base, "MSF broadcast reference escapes the root");
+					return None;
+				};
+				if target == *base {
+					None
+				} else if crate::catalog::msf::names_catalog(&target, base) {
+					tracing::error!(rendition = id, %rel, %base, "MSF readers would take this namespace as the catalog's own");
+					return None;
+				} else {
+					Some(target.to_string())
+				}
+			}
+		};
+		if !names.insert((namespace.clone(), name.to_string())) {
+			tracing::error!(
+				rendition = id,
+				track = name,
+				?namespace,
+				"refusing duplicate MSF track identity"
+			);
+			return None;
+		}
+		Some((name.to_string(), namespace))
+	};
 
 	let has_multiple_video = catalog.video.renditions.len() > 1;
 	for (name, config) in &catalog.video.renditions {
@@ -1087,7 +1325,11 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		};
 
 		let sap_type = video_sap_type(&config.codec);
-		let mut track = moq_msf::Track::new(name.clone(), packaging);
+		let Some((wire, namespace)) = reference(name, config) else {
+			continue;
+		};
+		let mut track = moq_msf::Track::new(wire, packaging);
+		track.namespace = namespace;
 		track.is_live = true;
 		track.role = Some(moq_msf::Role::Video);
 		track.codec = Some(config.codec.to_string());
@@ -1119,7 +1361,11 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 				.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref())),
 		};
 
-		let mut track = moq_msf::Track::new(name.clone(), packaging);
+		let Some((wire, namespace)) = reference(name, config) else {
+			continue;
+		};
+		let mut track = moq_msf::Track::new(wire, packaging);
+		track.namespace = namespace;
 		track.is_live = true;
 		track.role = Some(moq_msf::Role::Audio);
 		track.codec = Some(config.codec.to_string());
@@ -1140,7 +1386,11 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog) -> moq_msf::Catalog<E> {
 		let Some(packaging) = packaging_of(&config.container) else {
 			continue;
 		};
-		let mut track = moq_msf::Track::new(name.clone(), packaging);
+		let Some((wire, namespace)) = reference(name, config) else {
+			continue;
+		};
+		let mut track = moq_msf::Track::new(wire, packaging);
+		track.namespace = namespace;
 		track.is_live = true;
 		track.role = Some(config.role.to_string().parse().unwrap());
 		track.codec = Some(config.format.to_string());
@@ -1167,6 +1417,98 @@ mod test {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoConfig};
 
 	use super::*;
+
+	#[tokio::test(start_paused = true)]
+	async fn msf_publishes_the_referenced_namespace() {
+		for (path, expected) in [(Some("room/catalog"), "room/left"), (Some(""), "left"), (None, "left")] {
+			let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+			let driver = tokio::spawn(moq_net::time::run(driver));
+			let mut broadcast = match path {
+				Some(path) => origin.create_broadcast(path).unwrap(),
+				None => moq_net::broadcast::Info::new().produce(),
+			};
+			let mut producer = Producer::new(&mut broadcast, Config::default()).unwrap();
+			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.container = Container::Loc;
+			config.broadcast = Some("./left".into());
+			producer
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.insert("video".into(), config);
+			let mut track = broadcast
+				.consume()
+				.track(moq_msf::DEFAULT_NAME)
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap()
+				.ordered();
+			let mut group = track.next_group().await.unwrap().unwrap();
+			let frame = group.read_frame().await.unwrap().unwrap();
+			let wire: serde_json::Value = serde_json::from_slice(&frame.payload).unwrap();
+			assert_eq!(wire["tracks"][0]["namespace"], expected);
+			driver.abort();
+		}
+	}
+
+	#[test]
+	fn msf_omits_media_report_discovery() {
+		let catalog =
+			hang::Catalog::<()>::from_str(include_str!("../../../hang/fixtures/catalog-stats-echo.json")).unwrap();
+		let msf = to_msf::<()>(&catalog, &moq_net::Path::empty());
+		let value = serde_json::to_value(msf).unwrap();
+		assert!(value.get("stats").is_none());
+		assert!(value.get("echo").is_none());
+		assert!(!value["tracks"].as_array().unwrap().is_empty());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn abort_preserves_the_cause_on_every_catalog_format_and_clone() {
+		let mut broadcast = moq_net::broadcast::Info::default().produce();
+		let catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
+		let mut copy = catalog.clone();
+		let mut readers = Vec::new();
+		for name in [
+			hang::Catalog::DEFAULT_NAME,
+			hang::Catalog::COMPRESSED_NAME,
+			moq_msf::DEFAULT_NAME,
+		] {
+			readers.push(broadcast.consume().track(name).unwrap().subscribe(None).await.unwrap());
+		}
+		catalog.abort(moq_net::Error::Unauthorized);
+		for reader in &mut readers {
+			assert!(matches!(reader.recv_group().await, Err(moq_net::Error::Unauthorized)));
+		}
+		assert!(copy.finish().is_err());
+		assert!(matches!(
+			copy.modify().err(),
+			Some(crate::Error::Moq(moq_net::Error::Unauthorized))
+		));
+		copy.abort(moq_net::Error::Cancel);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn abort_does_not_replace_a_finished_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::default().produce();
+		let mut catalog = Producer::<()>::new(&mut broadcast, Config::default()).unwrap();
+		let copy = catalog.clone();
+		let mut reader = broadcast
+			.consume()
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		catalog.finish().unwrap();
+		copy.abort(moq_net::Error::Unauthorized);
+		while reader.recv_group().await.unwrap().is_some() {}
+		assert!(matches!(
+			catalog.modify().err(),
+			Some(crate::Error::Moq(moq_net::Error::Closed))
+		));
+	}
 
 	/// The catalog, its MSF twin, and the timeline all rank above media. They're the
 	/// index a player reads before any media is useful, and they're small enough that
@@ -1213,18 +1555,112 @@ mod test {
 			config.container = Container::Loc;
 			let mut catalog = hang::Catalog::<()>::default();
 			catalog.text.insert("text", config.clone()).unwrap();
-			let msf = to_msf_media::<()>(&catalog);
+			let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 			assert_eq!(msf.tracks.len(), 1);
 			let wire = msf.to_json().unwrap();
 			assert!(wire.contains(r#""lang":"es-419""#));
 			assert!(wire.contains(r#""label":"Español""#));
 			let msf = moq_msf::Catalog::<()>::from_str(&wire).unwrap();
-			let decoded = crate::catalog::msf::from_msf(&msf).unwrap();
+			let decoded = crate::catalog::msf::from_msf(&msf, &moq_net::Path::empty()).unwrap();
 			assert_eq!(decoded.text.renditions["text"], config);
 			let mut roundtrip = hang::Catalog::<()>::default();
 			roundtrip.text = decoded.text;
-			assert_eq!(to_msf_media::<()>(&roundtrip).tracks, msf.tracks);
+			assert_eq!(
+				to_msf_media::<()>(&roundtrip, &moq_net::Path::empty()).tracks,
+				msf.tracks
+			);
 		}
+	}
+
+	#[test]
+	fn msf_names_each_track_by_its_wire_name() {
+		let catalog = hang::Catalog::<()>::from_str(
+			r#"{"video": {"renditions": {
+				"hd": {"codec": "avc1.64001f", "container": {"kind": "legacy"}},
+				"left": {"broadcast": "./left", "track": "video", "codec": "avc1.64001f", "container": {"kind": "legacy"}},
+				"right": {"broadcast": "./right", "track": "video", "codec": "avc1.64001f", "container": {"kind": "legacy"}}
+			}}}"#,
+		)
+		.unwrap();
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
+		let names: Vec<_> = msf.tracks.iter().map(|track| track.name.as_str()).collect();
+		assert_eq!(names, ["hd", "video", "video"]);
+		assert_eq!(msf.tracks[1].namespace.as_deref(), Some("left"));
+		assert_eq!(msf.tracks[2].namespace.as_deref(), Some("right"));
+	}
+
+	#[test]
+	fn cross_broadcast_renditions_round_trip_through_msf() {
+		let base = moq_net::Path::new("room/catalog");
+		let catalog = hang::Catalog::<()>::from_str(r#"{
+			"video": {"renditions": {"view": {"broadcast": "./left", "track": "video", "codec": "vp8", "container": {"kind": "loc"}}}},
+			"audio": {"renditions": {"sound": {"broadcast": "./right", "track": "audio", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {"kind": "loc"}}}},
+			"text": {"renditions": {"words": {"broadcast": "../captions", "track": "text", "format": "vtt", "role": "caption", "container": {"kind": "loc"}}}}
+		}"#).unwrap();
+		let msf = to_msf_media::<()>(&catalog, &base);
+		let wire = msf.to_json().unwrap();
+		let msf = moq_msf::Catalog::<()>::from_str(&wire).unwrap();
+		let restored = crate::catalog::msf::from_msf(&msf, &base).unwrap();
+		assert_eq!(
+			base.try_resolve(restored.video.renditions["video"].broadcast.as_ref().unwrap()),
+			Some("room/left".into())
+		);
+		assert_eq!(
+			base.try_resolve(restored.audio.renditions["audio"].broadcast.as_ref().unwrap()),
+			Some("room/right".into())
+		);
+		assert_eq!(
+			base.try_resolve(restored.text.renditions["text"].broadcast.as_ref().unwrap()),
+			Some("captions".into())
+		);
+	}
+
+	#[test]
+	fn msf_refuses_unresolvable_broadcast_references() {
+		let base = moq_net::Path::new("room/catalog");
+		for reference in ["../../left", "../../../left"] {
+			let mut catalog = hang::Catalog::<()>::default();
+			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.broadcast = Some(reference.into());
+			catalog.video.renditions.insert("video".into(), config);
+			assert!(to_msf_media::<()>(&catalog, &base).tracks.is_empty());
+			assert!(to_msf_media::<()>(&catalog, &moq_net::Path::empty()).tracks.is_empty());
+		}
+	}
+
+	/// A reader takes a namespace aligned with the catalog's tail as the catalog itself, so a
+	/// reference to such a broadcast is refused rather than read from the catalog's broadcast.
+	#[test]
+	fn msf_refuses_references_readers_would_take_as_the_catalog() {
+		let base = moq_net::Path::new("room/catalog");
+		for reference in ["../catalog", "./catalog/room/catalog"] {
+			let mut catalog = hang::Catalog::<()>::default();
+			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.container = Container::Loc;
+			config.broadcast = Some(reference.into());
+			catalog.video.renditions.insert("video".into(), config);
+			assert!(to_msf_media::<()>(&catalog, &base).tracks.is_empty(), "{reference}");
+		}
+	}
+
+	#[test]
+	fn msf_names_are_unique_per_namespace_but_ambiguous_hang_ids_are_refused() {
+		let base = moq_net::Path::new("room/catalog");
+		let mut catalog = hang::Catalog::<()>::default();
+		for (id, broadcast) in [("left", "./left"), ("right", "./right")] {
+			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.track = Some("video".into());
+			config.broadcast = Some(broadcast.into());
+			catalog.video.renditions.insert(id.into(), config);
+		}
+		let msf = to_msf_media::<()>(&catalog, &base);
+		assert_eq!(msf.tracks.len(), 2);
+		assert_eq!(msf.tracks[0].namespace.as_deref(), Some("room/left"));
+		assert_eq!(msf.tracks[1].namespace.as_deref(), Some("room/right"));
+		assert!(matches!(
+			crate::catalog::msf::from_msf(&msf, &base),
+			Err(crate::Error::Msf(crate::catalog::msf::Error::DuplicateTrackName(_)))
+		));
 	}
 
 	#[test]
@@ -1320,7 +1756,7 @@ mod test {
 		// A closure that changes nothing publishes nothing: the catalog track runs one snapshot per
 		// group, so a third publish would open a third group.
 		catalog.mutate(|_| {}).unwrap();
-		assert_eq!(catalog.outputs.hang_track.latest(), Some(1));
+		assert_eq!(sent(&catalog), Some(1));
 
 		let expected = catalog.snapshot();
 		let waiter = kio::Waiter::noop();
@@ -1351,7 +1787,7 @@ mod test {
 			Err(crate::Error::Moq(moq_net::Error::Closed))
 		));
 		assert!(matches!(
-			catalog.enroll("audio0"),
+			catalog.enroll("audio0", None),
 			Err(crate::Error::Moq(moq_net::Error::Closed))
 		));
 	}
@@ -1394,7 +1830,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let mut catalog = Producer::<Extra>::new(&mut broadcast, config).unwrap();
-		let track = catalog.outputs.hang.consume();
+		let mut track = catalog.outputs.hang.consume();
 
 		let mut guard = catalog.modify().unwrap();
 		guard
@@ -1408,14 +1844,42 @@ mod test {
 		// The caller got the error, so the tracks stay usable once the catalog fits again.
 		catalog.modify().unwrap().remove_section("big").unwrap();
 		catalog.finish().unwrap();
-		assert_eq!(track.latest(), Some(0));
+		assert!(matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Ready(Some(position)) if position.group == 0));
+	}
+
+	/// Every consumer refuses an ID naming both a video and an audio rendition, so the producer
+	/// refuses to publish one.
+	#[test]
+	fn a_cross_kind_duplicate_id_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut track = catalog.outputs.hang.consume();
+
+		let result = catalog.mutate(|catalog| {
+			catalog.video.renditions.insert(
+				"main".to_string(),
+				hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8),
+			);
+			catalog.audio.renditions.insert(
+				"main".to_string(),
+				hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2),
+			);
+		});
+		assert!(matches!(
+			result,
+			Err(crate::Error::Hang(hang::Error::DuplicateRendition(id))) if id == "main"
+		));
+		assert!(
+			matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Pending),
+			"the refused catalog reached the wire"
+		);
 	}
 
 	#[test]
 	fn commit_publishes_once() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let track = catalog.outputs.hang.consume();
+		let mut track = catalog.outputs.hang.consume();
 
 		let mut guard = catalog.modify().unwrap();
 		guard
@@ -1426,7 +1890,7 @@ mod test {
 
 		// The drop that follows `commit` must not publish a second snapshot.
 		catalog.finish().unwrap();
-		assert_eq!(track.latest(), Some(0));
+		assert!(matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Ready(Some(position)) if position.group == 0));
 	}
 
 	#[test]
@@ -1436,7 +1900,7 @@ mod test {
 
 		// Something else already took the name the timeline track wants.
 		let _taken = broadcast.create_track("video0.timeline.z", None).unwrap();
-		assert!(catalog.enroll("video0").is_err());
+		assert!(catalog.enroll("video0", None).is_err());
 	}
 
 	#[test]
@@ -1446,7 +1910,9 @@ mod test {
 
 		// A broadcast that never segments never advertises an archive.
 		assert_eq!(catalog.snapshot().archive, None);
-		let _recorder = catalog.enroll("video0").unwrap();
+		let _recorder = catalog
+			.enroll("video0", Some(std::time::Duration::from_secs(4)))
+			.unwrap();
 		let archive = catalog
 			.snapshot()
 			.archive
@@ -1460,6 +1926,92 @@ mod test {
 	}
 
 	#[test]
+	fn an_estimated_timeline_is_advertised_after_its_first_record() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut recorder = catalog.enroll("video0", None).unwrap();
+
+		let initial = catalog.snapshot().archive.expect("the catalog timeline is advertised");
+		assert!(!initial.timelines.contains_key("video0"));
+
+		recorder.frame(
+			hang::timeline::Position::group(0),
+			moq_net::Timestamp::from_millis(0).unwrap(),
+			true,
+		);
+		recorder.finish_group(0);
+		recorder.frame(
+			hang::timeline::Position::group(1),
+			moq_net::Timestamp::from_millis(4_000).unwrap(),
+			true,
+		);
+
+		let archive = catalog.snapshot().archive.expect("the estimate publishes the timeline");
+		assert_eq!(archive.timelines["video0"].duration, Some(4_000));
+	}
+
+	#[test]
+	fn a_track_shorter_than_one_record_is_advertised_on_finish() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut recorder = catalog.enroll("audio0", None).unwrap();
+		recorder.frame(
+			hang::timeline::Position::group(0),
+			moq_net::Timestamp::from_millis(0).unwrap(),
+			true,
+		);
+
+		catalog.finish().unwrap();
+		let archive = catalog.snapshot().archive.expect("the catalog timeline is advertised");
+		assert_eq!(archive.timelines["audio0"].duration, Some(4_000));
+	}
+
+	#[test]
+	fn a_track_finished_before_its_catalog_is_advertised() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let net = broadcast
+			.create_track("video0", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut video = catalog
+			.video(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+				VideoConfig::new(hang::catalog::VideoCodec::VP8),
+			)
+			.unwrap();
+		video
+			.write(crate::container::Frame {
+				timestamp: catalog.timestamp(None).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(b"keyframe"),
+				keyframe: true,
+			})
+			.unwrap();
+
+		video.finish().unwrap();
+		let archive = catalog.snapshot().archive.expect("the catalog timeline is advertised");
+		assert_eq!(archive.timelines["video0"].duration, Some(4_000));
+	}
+
+	#[test]
+	fn a_configured_hint_applies_to_media_but_not_the_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = Config::default()
+			.with_timeline(crate::timeline::Config::default().with_duration_hint(std::time::Duration::from_secs(6)));
+		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
+		let _video = catalog.enroll("video0", None).unwrap();
+		let _audio = catalog
+			.enroll("audio0", Some(std::time::Duration::from_secs(5)))
+			.unwrap();
+
+		let archive = catalog.snapshot().archive.expect("the timelines are advertised");
+		assert_eq!(archive.timelines["video0"].duration, Some(6_000));
+		assert_eq!(archive.timelines["audio0"].duration, Some(5_000));
+		assert_eq!(archive.timelines[hang::Catalog::DEFAULT_NAME].duration, Some(0));
+	}
+
+	#[test]
 	fn clock_is_advertised_without_an_archive() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
@@ -1467,7 +2019,57 @@ mod test {
 		// A live-only broadcast exposes its clock without creating a segment index.
 		let snapshot = catalog.snapshot();
 		assert_eq!(snapshot.archive, None);
-		assert_eq!(snapshot.clock, Some(catalog.clock().wall()));
+		assert_eq!(snapshot.clock, catalog.clock().wall());
+	}
+
+	#[test]
+	fn sibling_broadcasts_share_a_clock_and_capture_time() {
+		use std::time::{Duration, SystemTime};
+
+		let captured = moq_clock::now();
+		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
+		let clock = crate::Clock::at(captured, wall).unwrap();
+		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
+		let mut front = origin.create_broadcast("robot/front.hang").unwrap();
+		let mut rear = origin.create_broadcast("robot/rear.hang").unwrap();
+		let catalogs = [
+			Producer::new(&mut front, Config::default().with_clock(clock)).unwrap(),
+			Producer::new(&mut rear, Config::default().with_clock(clock)).unwrap(),
+		];
+		let mut broadcasts = [front, rear];
+		for (catalog, broadcast) in catalogs.iter().zip(&mut broadcasts) {
+			assert_eq!(catalog.snapshot().clock, clock.wall());
+			let timestamp = catalog.clock().capture(captured).unwrap();
+			let track = broadcast
+				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let mut video = catalog
+				.video(
+					track,
+					crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+					VideoConfig::new(hang::catalog::VideoCodec::VP8),
+				)
+				.unwrap();
+			let mut consumer = video.consume();
+			video
+				.write(crate::container::Frame {
+					timestamp,
+					duration: None,
+					payload: Bytes::from_static(b"keyframe"),
+					keyframe: true,
+				})
+				.unwrap();
+			let waiter = kio::Waiter::noop();
+			let Poll::Ready(Ok(Some(mut group))) = consumer.poll_recv_group(&waiter) else {
+				panic!("captured group is published");
+			};
+			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+				panic!("captured frame is published");
+			};
+			let timestamp = frame.timestamp.expect("captured frame is timed");
+			assert_eq!(catalog.clock().wall_clock(timestamp).unwrap(), wall);
+			assert_eq!(catalog.snapshot().clock.unwrap().wall_clock(timestamp).unwrap(), wall);
+		}
 	}
 
 	/// How far `pts` lands from `clock`'s reading now, which is zero for a frame live on arrival.
@@ -1478,13 +2080,14 @@ mod test {
 
 	/// A `with_clock` catalog is fixed from the start: even the first importer shifts onto it,
 	/// landing at the clock's reading on arrival, and the advertised mapping never moves.
-	#[test]
-	fn with_clock_shifts_the_first_importer() {
+	#[moq_clock::test]
+	async fn with_clock_shifts_the_first_importer() {
 		use std::time::{Duration, SystemTime};
 
+		moq_clock::sleep(Duration::from_secs(5)).await;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
-		let start = std::time::Instant::now() - Duration::from_secs(5);
+		let start = moq_clock::now() - Duration::from_secs(5);
 		let config = Config::default().with_clock(crate::Clock::at(start, wall).expect("a representable wall"));
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
 
@@ -1518,7 +2121,7 @@ mod test {
 			"the first timebase stays verbatim"
 		);
 		let clock = catalog.clock();
-		assert_eq!(catalog.snapshot().clock, Some(clock.wall()), "the anchor is advertised");
+		assert_eq!(catalog.snapshot().clock, clock.wall(), "the anchor is advertised");
 		let drift = clock
 			.wall_clock(first)
 			.unwrap()
@@ -1607,7 +2210,7 @@ mod test {
 			"it placed the clock, so it stays verbatim"
 		);
 		let placed = catalog.clock();
-		assert_eq!(placed.reading(wall), pts.as_micros() as i128);
+		assert_eq!(placed.reading(wall).unwrap(), pts.as_micros() as i128);
 
 		// Placed again on the now fixed clock, the same mapping shifts by nothing.
 		let again = catalog.timebase();
@@ -1618,6 +2221,228 @@ mod test {
 		// A timebase that already anchored keeps its offset.
 		assert!(matches!(
 			timebase.place(pts, wall),
+			Err(crate::Error::UnmappableTimestamp(_))
+		));
+	}
+
+	/// A placement lists no track, so alone it publishes nothing: an importer placed before its
+	/// input declares a track has no catalog to announce until it does, and that catalog carries
+	/// the placed clock.
+	#[test]
+	fn a_placement_alone_publishes_nothing() {
+		use std::time::{Duration, SystemTime};
+
+		let wall = SystemTime::now() - Duration::from_secs(2);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		catalog.timebase().place(moq_net::Timestamp::ZERO, wall).unwrap();
+		assert_eq!(sent(&catalog), None, "a clock alone reached the wire");
+
+		catalog
+			.mutate(|catalog| {
+				catalog
+					.audio
+					.renditions
+					.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+			})
+			.unwrap();
+		assert_eq!(sent(&catalog), Some(0));
+		assert_eq!(catalog.clock().reading(wall).unwrap(), 0);
+		assert_eq!(wire(&catalog).clock, catalog.clock().wall());
+	}
+
+	/// Fake this thread's host now a day past the moq epoch, returning a root `clock` an hour
+	/// before it in `scale` units.
+	fn an_hour_ago(scale: moq_net::Timescale) -> hang::catalog::Clock {
+		use std::time::{Duration, SystemTime};
+
+		let now = Duration::from_secs(86_400);
+		crate::clock::fake_host_wall(
+			SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS) + now,
+		);
+		let zero = moq_net::Timestamp::from_secs(now.as_secs() - 3600).unwrap();
+		hang::catalog::Clock::new(zero.convert(scale).unwrap()).unwrap()
+	}
+
+	/// A derivative writes its input's mapping through `modify()` before anything fixes the clock,
+	/// and the producer's clock re-bases on it: what it stamps lands under the input's mapping.
+	#[tokio::test(start_paused = true)]
+	async fn a_root_clock_written_before_the_clock_is_fixed_rebases_it() {
+		let input = an_hour_ago(moq_net::Timescale::MICRO);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+
+		assert_eq!(catalog.snapshot().clock, Some(input), "advertised unchanged");
+		let clock = catalog.clock();
+		assert_eq!(clock.wall(), Some(input));
+		assert_eq!(
+			clock.now(),
+			moq_net::Timestamp::from_secs(3600)
+				.unwrap()
+				.convert(crate::Clock::TIMESCALE)
+				.unwrap()
+		);
+
+		tokio::time::advance(std::time::Duration::from_secs(3)).await;
+		assert_eq!(
+			catalog.timestamp(None).unwrap(),
+			moq_net::Timestamp::from_micros(3_603_000_000).unwrap()
+		);
+
+		// Re-applying the same mapping once fixed changes nothing.
+		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		assert_eq!(catalog.clock(), clock);
+	}
+
+	/// A root `clock` seeded through `with_catalog` is adopted like one written through `modify()`,
+	/// never replaced by a fresh clock; one that disagrees with `with_clock` is refused.
+	#[test]
+	fn a_seeded_root_clock_is_adopted() {
+		use std::time::{Duration, SystemTime};
+
+		let input = an_hour_ago(moq_net::Timescale::MICRO);
+		let mut seed = Catalog::<()>::default();
+		seed.clock = Some(input);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default().with_catalog(seed.clone())).unwrap();
+		assert_eq!(catalog.snapshot().clock, Some(input));
+		assert_eq!(catalog.clock().wall(), Some(input));
+
+		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
+		// clock, which may be unset.
+		let zero = SystemTime::UNIX_EPOCH
+			+ Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)
+			+ Duration::from_micros(input.wall.as_micros() as u64);
+		let fixed = crate::Clock::at(moq_clock::now(), zero).unwrap();
+		seed.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
+		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		let config = Config::default().with_catalog(seed.clone()).with_clock(fixed);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
+		assert_eq!(catalog.clock(), fixed);
+		catalog.mutate(|c| c.clock = seed.clock).unwrap();
+		assert_eq!(catalog.snapshot().clock, Some(input));
+
+		// A different one is refused before any catalog track exists.
+		let other = crate::Clock::at(moq_clock::now(), zero + Duration::from_secs(1)).unwrap();
+		let config = Config::default().with_catalog(seed).with_clock(other);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		assert!(matches!(
+			Producer::new(&mut broadcast, config),
+			Err(crate::Error::UnmappableTimestamp(_))
+		));
+		broadcast
+			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+			.expect("a refused seed leaves the broadcast untouched");
+	}
+
+	/// A millisecond wall is the same mapping in the clock's microseconds, advertised as such.
+	#[test]
+	fn a_millisecond_root_clock_converts() {
+		let input = an_hour_ago(moq_net::Timescale::MILLI);
+		let micro = an_hour_ago(moq_net::Timescale::MICRO);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		assert_eq!(catalog.snapshot().clock, Some(micro));
+		assert_eq!(catalog.clock().wall(), Some(micro));
+
+		// The millisecond spelling of the fixed mapping is no change.
+		catalog.mutate(|c| c.clock = Some(input)).unwrap();
+		assert_eq!(catalog.snapshot().clock, Some(micro));
+	}
+
+	/// A root `clock` the producer cannot run on is refused, and the catalog keeps advertising the
+	/// producer's own.
+	#[test]
+	fn an_unadoptable_root_clock_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let own = catalog.current_clock().wall();
+		let refused = |catalog: &mut Producer, clock: Option<hang::catalog::Clock>| {
+			let err = catalog.mutate(|c| c.clock = clock).unwrap_err();
+			assert!(matches!(err, crate::Error::UnmappableTimestamp(_)), "{err}");
+			assert_eq!(catalog.snapshot().clock, own);
+		};
+
+		// One 90 kHz tick is no whole microsecond.
+		let inexact = an_hour_ago(moq_net::Timescale::MICRO)
+			.wall
+			.convert(moq_net::Timescale::new(90_000).unwrap());
+		let inexact = moq_net::Timestamp::new(inexact.unwrap().value() + 1, moq_net::Timescale::new(90_000).unwrap());
+		refused(&mut catalog, Some(hang::catalog::Clock::new(inexact.unwrap()).unwrap()));
+
+		// PTS zero a minute after this host's now.
+		let future = an_hour_ago(moq_net::Timescale::SECOND).wall.value() + 3660;
+		let future = hang::catalog::Clock::new(moq_net::Timestamp::from_secs(future).unwrap()).unwrap();
+		refused(&mut catalog, Some(future));
+
+		// Clearing it, even before anything fixed it.
+		refused(&mut catalog, None);
+		assert_eq!(catalog.current_clock().wall(), own, "nothing re-based");
+
+		// A change once the clock is handed out.
+		let taken = catalog.clock();
+		refused(&mut catalog, Some(an_hour_ago(moq_net::Timescale::MICRO)));
+		assert_eq!(catalog.clock(), taken);
+	}
+
+	/// A host whose wall clock reads before 2020 (booted before NTP sync) publishes its media on the
+	/// monotonic timeline with no root `clock`, rather than advertise a false one. Placing a source's
+	/// wall time is refused, whether it would place the clock or offset onto it.
+	#[test]
+	fn an_unset_host_clock_publishes_without_a_wall() {
+		use std::time::{Duration, SystemTime};
+
+		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		assert_eq!(catalog.snapshot().clock, None);
+
+		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let pts = moq_net::Timestamp::from_micros(1_000_000).unwrap();
+		assert!(matches!(
+			catalog.timebase().place(pts, wall),
+			Err(crate::Error::UnmappableTimestamp(_))
+		));
+
+		let net = broadcast
+			.create_track("video0", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut video = catalog
+			.video(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+				VideoConfig::new(hang::catalog::VideoCodec::VP8),
+			)
+			.unwrap();
+		let mut subscriber = video.consume();
+		let timestamp = catalog.timestamp(None).unwrap();
+		video
+			.write(crate::container::Frame {
+				timestamp,
+				duration: None,
+				payload: Bytes::from_static(b"keyframe"),
+				keyframe: true,
+			})
+			.unwrap();
+
+		let snapshot = catalog.snapshot();
+		assert!(snapshot.video.renditions.contains_key("video0"));
+		assert_eq!(snapshot.clock, None, "publishing never invents a wall");
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the frame's group is published");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("the frame is published");
+		};
+		assert_eq!(frame.timestamp, Some(timestamp));
+
+		// The catalog clock is fixed now, and has no wall to offset a placement onto.
+		assert!(matches!(
+			catalog.timebase().place(pts, wall),
 			Err(crate::Error::UnmappableTimestamp(_))
 		));
 	}
@@ -1690,6 +2515,181 @@ mod test {
 		};
 		assert!(snapshot.audio.renditions.contains_key("audio0"));
 		assert!(!snapshot.video.renditions.contains_key("video0"));
+	}
+
+	#[test]
+	fn metadata_alone_does_not_publish_the_initial_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = Config::default().with_catalog(Catalog::<Extra>::default());
+		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let waiter = kio::Waiter::noop();
+		let reserved = catalog.reserve();
+
+		catalog
+			.modify()
+			.unwrap()
+			.set_section("mpegts", serde_json::json!({ "programs": [1] }))
+			.unwrap();
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"extension metadata must not publish an empty broadcast"
+		);
+		drop(reserved);
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"releasing the importer must not publish metadata without a track"
+		);
+
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected a catalog naming the track, got {other:?}"),
+		};
+		assert!(snapshot.audio.renditions.contains_key("audio0"));
+		assert!(snapshot.ext.get("mpegts").is_some());
+	}
+
+	/// A passthrough lists its multiplex as `m2ts`, not as a rendition, and that is a track.
+	#[test]
+	fn m2ts_counts_as_a_servable_track() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let waiter = kio::Waiter::noop();
+
+		let reserved = catalog.reserve();
+		catalog
+			.mutate(|catalog| catalog.m2ts = Some(hang::catalog::M2ts::new("input.m2ts")))
+			.unwrap();
+		drop(reserved);
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected the passthrough catalog, got {other:?}"),
+		};
+		assert_eq!(snapshot.m2ts.unwrap().track, "input.m2ts");
+	}
+
+	/// A metadata edit after the last reservation released is still an initial publish, so it waits
+	/// for a track too.
+	#[test]
+	fn metadata_after_release_does_not_publish_the_initial_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = Config::default().with_catalog(Catalog::<Extra>::default());
+		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let waiter = kio::Waiter::noop();
+
+		let reserved = catalog.reserve();
+		catalog
+			.modify()
+			.unwrap()
+			.set_section("mpegts", serde_json::json!({ "programs": [1] }))
+			.unwrap();
+		drop(reserved);
+		catalog
+			.modify()
+			.unwrap()
+			.set_section("mpegts", serde_json::json!({ "programs": [1], "muxRate": 1 }))
+			.unwrap();
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"a later metadata edit must not publish an empty broadcast"
+		);
+
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected a catalog naming the track, got {other:?}"),
+		};
+		assert!(snapshot.audio.renditions.contains_key("audio0"));
+	}
+
+	/// A live rendition holds its name before its config arrives, which lists no track yet.
+	#[test]
+	fn an_unconfigured_rendition_does_not_publish_the_initial_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = Config::default().with_catalog(Catalog::<Extra>::default());
+		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let waiter = kio::Waiter::noop();
+
+		let net = broadcast
+			.create_track("video0", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut video = catalog
+			.video(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+				None,
+			)
+			.unwrap();
+		let reserved = catalog.reserve();
+		catalog
+			.modify()
+			.unwrap()
+			.set_section("mpegts", serde_json::json!({ "programs": [1] }))
+			.unwrap();
+		drop(reserved);
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"an unconfigured rendition is not a listed track"
+		);
+
+		video.set(VideoConfig::new(hang::catalog::VideoCodec::VP8)).unwrap();
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected a catalog naming the track, got {other:?}"),
+		};
+		assert!(snapshot.video.renditions.contains_key("video0"));
+	}
+
+	/// A disabled rendition promises no frames, so it lists no track until it is enabled.
+	#[test]
+	fn a_disabled_rendition_does_not_publish_the_initial_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = Config::default().with_catalog(Catalog::<Extra>::default());
+		let catalog = Producer::new(&mut broadcast, config).unwrap();
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let waiter = kio::Waiter::noop();
+
+		let net = broadcast
+			.create_track("audio0", catalog.track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut audio = catalog
+			.audio(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio),
+				None,
+			)
+			.unwrap();
+		let reserved = catalog.reserve();
+		let mut disabled = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		disabled.enabled = false;
+		audio.set(disabled.clone()).unwrap();
+		drop(reserved);
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"a disabled rendition is not a servable track"
+		);
+
+		disabled.enabled = true;
+		audio.set(disabled).unwrap();
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected a catalog naming the track, got {other:?}"),
+		};
+		assert!(snapshot.audio.renditions["audio0"].enabled);
 	}
 
 	// Dropping a reservation without fulfilling it (a stream that never produced a config) still opens
@@ -1789,7 +2789,7 @@ mod test {
 		catalog.video.renditions = video_renditions;
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 
 		assert_eq!(msf.tracks.len(), 2);
 
@@ -1839,7 +2839,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
 	}
@@ -1855,7 +2855,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(msf.tracks[0].packaging, moq_msf::Packaging::Loc);
 	}
@@ -1876,7 +2876,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		assert_eq!(msf.tracks.len(), 1);
 		assert_eq!(
 			msf.tracks[0].packaging,
@@ -1903,7 +2903,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		let video = &msf.tracks[0];
 		assert_eq!(video.init_data, Some("AQID".to_string()));
 	}
@@ -1911,7 +2911,7 @@ mod test {
 	#[test]
 	fn convert_empty() {
 		let catalog = hang::Catalog::default();
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		assert!(msf.tracks.is_empty());
 	}
 
@@ -1938,7 +2938,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		let video = &msf.tracks[0];
 		assert_eq!(video.packaging, moq_msf::Packaging::Cmaf);
 		assert_eq!(video.init_data, Some("AAAYZ2Z0eXA=".to_string()));
@@ -1974,7 +2974,7 @@ mod test {
 		catalog.video.renditions = video_renditions;
 		catalog.audio.renditions = audio_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 
 		let video = &msf.tracks[0];
 		assert_eq!(video.role, Some(moq_msf::Role::Video));
@@ -2016,7 +3016,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		let video = &msf.tracks[0];
 		// H.265 SAP behavior isn't validated end-to-end yet, so we omit the
 		// SAP fields rather than advertise something we haven't verified.
@@ -2038,7 +3038,7 @@ mod test {
 		let mut catalog = hang::Catalog::default();
 		catalog.video.renditions = video_renditions;
 
-		let msf = to_msf_media::<()>(&catalog);
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
 		let video = &msf.tracks[0];
 		assert_eq!(video.max_grp_sap_starting_type, None);
 		assert_eq!(video.max_obj_sap_starting_type, None);
@@ -2067,7 +3067,11 @@ mod test {
 
 	/// How many catalogs have gone out on the wire.
 	fn sent(catalog: &Producer) -> Option<u64> {
-		catalog.outputs.hang_track.latest()
+		let mut track = catalog.outputs.hang_track.consume();
+		match track.poll_largest(&kio::Waiter::noop()) {
+			Poll::Ready(Some(position)) => Some(position.group),
+			Poll::Ready(None) | Poll::Pending => None,
+		}
 	}
 
 	/// The catalog a viewer joining now receives.

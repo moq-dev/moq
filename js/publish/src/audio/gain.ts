@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Milli } from "@moq/clock";
 import type { AudioFrame } from "./capture";
 
 /**
@@ -13,7 +13,7 @@ export class Gain {
 	#target: number;
 
 	// The ramp toward #target, in ms until the next frame converts it to samples at that frame's rate.
-	#fade: Time.Milli = Time.Milli.zero;
+	#fade: Milli = Milli.zero;
 	#remaining: number | undefined = 0;
 
 	/** Start at `initial`, avoiding a ramp from unity before the first frame. */
@@ -27,7 +27,7 @@ export class Gain {
 	 * starts. Every change takes the whole `fade` whatever its size, so a mute is silent on time.
 	 * A `fade` of 0 steps at once. Repeating the current target leaves a ramp in progress alone.
 	 */
-	set(value: number, fade: Time.Milli): void {
+	set(value: number, fade: Milli): void {
 		if (value === this.#target) return;
 		this.#target = value;
 		this.#fade = fade;
@@ -45,7 +45,7 @@ export class Gain {
 		// Unity already, and staying there: every sample would be multiplied by 1.
 		if (this.#current === 1 && this.#target === 1) return frame;
 
-		this.#remaining ??= Math.round(Time.Milli.toSecond(this.#fade) * sampleRate);
+		this.#remaining ??= Math.round(Milli.toSecond(this.#fade) * sampleRate);
 
 		const samples = frame.channels[0]?.length ?? 0;
 		const channels = frame.channels.map((channel) => new Float32Array(channel));

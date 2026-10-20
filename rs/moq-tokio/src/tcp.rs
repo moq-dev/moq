@@ -25,7 +25,7 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 /// [`tls`](Self::tls) the listener serves the listen TLS certificate instead.
 // The derived arg group is named after the struct, so it needs an explicit id to
 // stay unique across the flattened sections.
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -66,7 +66,7 @@ pub struct Config {
 ///
 /// A separate arg rather than a Usage alias, since an alias renames the flag but
 /// leaves its env var behind.
-#[derive(usage::Args, Clone, Debug, Default)]
+#[derive(usage_rs::Args, Clone, Debug, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(
@@ -192,7 +192,8 @@ pub(crate) async fn connect_tls(
 	crate::tls::server_name(&name)?;
 	let client = qmux::tls::Client::new(std::sync::Arc::new(tls.build()?))
 		.with_protocols(protocols.iter().map(|&alpn| (alpn, &[WIRE_VERSION][..])))
-		.require_protocol();
+		.require_protocol()
+		.with_session_config(crate::qmux_config());
 
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via TLS over TCP");
 	let candidates = crate::resolve::Candidates::resolve(host, port, resolution_delay);
@@ -221,6 +222,7 @@ async fn connect_addrs(
 		async move {
 			qmux::tcp::Config::new(WIRE_VERSION)
 				.protocols(protocols.iter().map(String::as_str))
+				.session_config(crate::qmux_config())
 				.connect(addr)
 				.await
 				.map_err(|err| Error::Connect(crate::error::message(err)))
@@ -253,7 +255,7 @@ impl Listener {
 	/// Serve TLS with `config`, whose ALPN list already names each
 	/// `qmux-01.<protocol>` pair to accept.
 	pub(crate) fn with_tls(mut self, config: std::sync::Arc<rustls::ServerConfig>) -> Self {
-		self.tls = Some(qmux::tls::Server::new(config));
+		self.tls = Some(qmux::tls::Server::new(config).with_session_config(crate::qmux_config()));
 		self
 	}
 
@@ -310,7 +312,9 @@ impl Listener {
 	) -> impl Future<Output = Result<(qmux::Session, net::SocketAddr)>> + use<> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted TCP connection");
-		let config = qmux::tcp::Config::new(WIRE_VERSION).protocols(self.protocols.iter().map(String::as_str));
+		let config = qmux::tcp::Config::new(WIRE_VERSION)
+			.protocols(self.protocols.iter().map(String::as_str))
+			.session_config(crate::qmux_config());
 		let tls = self.tls.clone();
 		async move {
 			let session = match tls {
@@ -372,7 +376,7 @@ mod tests {
 			listen.tcp.tls = Some(true);
 			listen.tls.generate = vec!["localhost".into()];
 			// Client-certificate policy is refused without a QUIC listener to read it.
-			if !cfg!(feature = "noq") {
+			if !cfg!(feature = "quic") {
 				continue;
 			}
 			listen.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -401,7 +405,7 @@ mod tests {
 			assert_eq!(request.transport(), crate::Transport::Tcp);
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=credential"));
-			let session = request.ok().await.unwrap();
+			let (session, _driver) = request.ok().await.unwrap();
 			(server, session)
 		});
 
@@ -459,6 +463,39 @@ mod tests {
 		accept.await.expect("accept task panicked");
 	}
 
+	/// moq-lite holds a stream open per subscription, so each end of a session must
+	/// let its peer hold far more than qmux's default of 100 open at once.
+	#[tokio::test]
+	async fn sessions_grant_a_thousand_open_streams() {
+		use futures::FutureExt as _;
+
+		let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
+			.await
+			.expect("bind listener")
+			.with_protocols(["moq-test"]);
+		let addr = listener.local_addr().expect("local addr");
+		let accept = tokio::spawn(async move { listener.accept().await.expect("listener gone").expect("accept") });
+		let candidates = crate::resolve::Candidates::fixed([addr]);
+		let client = connect_addrs(candidates, &["moq-test"], Duration::ZERO)
+			.await
+			.expect("connect failed");
+		let server = accept.await.expect("accept task panicked");
+
+		// Both handshakes are done, so each end knows its peer's grant, and an open
+		// with credit left completes without waiting.
+		for (end, session) in [("client", &client), ("server", &server)] {
+			let mut held = Vec::new();
+			for opened in 0..1_000 {
+				let bi = session.open_bi().now_or_never();
+				let uni = session.open_uni().now_or_never();
+				let (Some(bi), Some(uni)) = (bi, uni) else {
+					panic!("{end} stalled on stream credit after opening {opened} stream pairs");
+				};
+				held.push((bi.expect("open bi"), uni.expect("open uni")));
+			}
+		}
+	}
+
 	#[tokio::test]
 	async fn connect_addrs_rejects_empty() {
 		let candidates = crate::resolve::Candidates::fixed([]);
@@ -470,7 +507,7 @@ mod tests {
 #[cfg(test)]
 mod legacy_tests {
 	use super::*;
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(settings)]
 	struct Cli {

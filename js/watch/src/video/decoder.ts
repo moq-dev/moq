@@ -1,8 +1,8 @@
+import { type Micro, Milli, Nano } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import {
 	type Computed,
 	Effect,
@@ -14,9 +14,9 @@ import {
 	Signal,
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
+import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
-
 import type { Sync } from "../sync";
 import {
 	type DecoderConfig,
@@ -26,10 +26,11 @@ import {
 	supportCacheKey,
 } from "./config";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
+import { Recovery } from "./recovery";
 import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.
-const BUFFERING = Time.Milli(500);
+const BUFFERING = Milli(500);
 
 export type DecoderInput = {
 	/** Whether to download the video track. Defaults to true; the parent may wire it from the renderer's output. */
@@ -60,7 +61,7 @@ type DecoderOutput = {
 	frame: Signal<VideoFrame | undefined>;
 
 	// The timestamp of the current frame.
-	timestamp: Signal<Time.Milli | undefined>;
+	timestamp: Signal<Milli | undefined>;
 
 	// The display size of the video in pixels, ideally sourced from the catalog.
 	display: Signal<{ width: number; height: number } | undefined>;
@@ -69,7 +70,7 @@ type DecoderOutput = {
 	stats: Signal<Stats | undefined>;
 
 	// The rendition delay Sync must cover while switching tracks.
-	jitter: Signal<Time.Milli | undefined>;
+	jitter: Signal<Milli | undefined>;
 
 	// Combined buffered ranges (network jitter + decode buffer)
 	buffered: Signal<Container.BufferedRanges>;
@@ -84,11 +85,11 @@ export class Decoder {
 	readonly #out: DecoderOutput = {
 		error: new Signal<Error | undefined>(undefined),
 		frame: new Signal<VideoFrame | undefined>(undefined),
-		timestamp: new Signal<Time.Milli | undefined>(undefined),
+		timestamp: new Signal<Milli | undefined>(undefined),
 		display: new Signal<{ width: number; height: number } | undefined>(undefined),
 		stalled: new Signal<boolean>(false),
 		stats: new Signal<Stats | undefined>(undefined),
-		jitter: new Signal<Time.Milli | undefined>(undefined),
+		jitter: new Signal<Milli | undefined>(undefined),
 		buffered: new Signal<Container.BufferedRanges>([]),
 	};
 	readonly out = readonlys(this.#out);
@@ -100,11 +101,14 @@ export class Decoder {
 	// the name alone would compare equal, and the jitter effect would keep the previous catalog.
 	#pending = new Signal<{ track: string; catalog: Getter<Catalog.Root | undefined> } | undefined>(undefined);
 	// The active track's arrival estimate from its container consumer.
-	#spread = new Signal<Time.Milli | undefined>(undefined);
+	#spread = new Signal<Milli | undefined>(undefined);
 	// The path of the media the last rendition read, and its instance. Every handle to one instance
 	// shares `closed`, so it identifies the instance where the handle itself does not.
 	#instance?: { path: Moq.Path.Valid; closed: unknown };
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
+
+	// Fans received frames out to open `arrivals()` handles; retains nothing without one.
+	#arrivals = new ArrivalProducer();
 
 	#signals = new Effect();
 	#selected?: DecoderTrack;
@@ -135,7 +139,7 @@ export class Decoder {
 			if (spread === undefined) return jitter;
 			const active = effect.get(this.#active);
 			const delay = active && effect.get(active.catalog)?.video?.renditions?.[active.track]?.delay;
-			return Time.Milli.max(Time.Milli.add(spread, Time.Milli(delay ?? 0)), jitter ?? Time.Milli.zero);
+			return Milli(Math.max(spread + (delay ?? 0), jitter ?? Milli.zero));
 		});
 		this.#signals.cleanup(this.sync.register(target));
 		this.#identity = this.#signals.computed((effect) => {
@@ -224,15 +228,22 @@ export class Decoder {
 		this.#instance = { path: active.path, closed: active.closed };
 		if (republished) this.sync.reset();
 
+		// Only a rendition read from the same path continues the outgoing arrival estimate: another
+		// path's arrivals have nothing to do with what this one learned.
+		const outgoing = this.#active.peek();
+		const predecessor = outgoing?.broadcast.path === active.path ? outgoing.consumer : undefined;
+
 		// Start a new pending effect.
 		let pending: DecoderTrack | undefined = new DecoderTrack({
 			sync: this.sync,
 			broadcast: active,
 			track,
+			name: Catalog.track(track, identity),
 			config: identity.decoder,
 			identity: key,
 			stats: this.#out.stats,
 			catalog: broadcast.out.catalog,
+			predecessor,
 		});
 		this.#selected = pending;
 		effect.run((inner) => {
@@ -269,6 +280,8 @@ export class Decoder {
 
 			// Upgrade the pending track to active.
 			// #runActive will be in charge of it now.
+			if (current) current.arrivals = undefined;
+			pending.arrivals = this.#arrivals;
 			this.#active.set(pending);
 			this.#pending.set(undefined);
 			pending = undefined;
@@ -307,7 +320,7 @@ export class Decoder {
 				this.#failed = undefined;
 				this.#out.error.set(undefined);
 			}
-			this.#out.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
+			this.#out.timestamp.set(Milli.fromMicro(frame.timestamp as Micro));
 			this.#out.frame.update((prev) => {
 				prev?.close();
 				return frame.clone();
@@ -362,11 +375,17 @@ export class Decoder {
 
 		effect.timer(() => {
 			this.#out.stalled.set(true);
-		}, BUFFERING);
+		}, Nano.fromMilli(BUFFERING));
+	}
+
+	/** Observe every frame and gap the displayed rendition receives until the handle or this decoder closes. */
+	arrivals(): Arrivals {
+		return this.#arrivals.consume();
 	}
 
 	close() {
 		this.#clearCurrentFrame();
+		this.#arrivals.close();
 
 		this.#signals.close();
 	}
@@ -378,12 +397,17 @@ export class Decoder {
 interface DecoderTrackProps {
 	sync: Sync;
 	broadcast: Moq.Broadcast.Consumer;
+	// The rendition ID; `name` is its track's name in `broadcast`.
 	track: string;
+	name: string;
 	config: DecoderConfig;
 	identity: string;
 	// The broadcast catalog this subscription started from. Updates on that broadcast still apply;
 	// a later source does not.
 	catalog: Getter<Catalog.Root | undefined>;
+	// The consumer of the rendition on screen when this one was selected from the same path, whose
+	// arrival estimate it continues.
+	predecessor?: Container.Consumer;
 
 	stats: Signal<Stats | undefined>;
 }
@@ -393,25 +417,25 @@ class DecoderTrack {
 	sync: Sync;
 	broadcast: Moq.Broadcast.Consumer;
 	track: string;
+	name: string;
 	config: DecoderConfig;
 	identity: string;
 	catalog: Getter<Catalog.Root | undefined>;
 	stats: Signal<Stats | undefined>;
+	// Set once promoted, so only the rendition feeding the picture reports arrivals.
+	arrivals?: ArrivalProducer;
 
-	timestamp = new Signal<Time.Milli | undefined>(undefined);
+	timestamp = new Signal<Milli | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
 	// Network jitter + decode buffer.
 	buffered = new Signal<Container.BufferedRanges>([]);
 
 	// How late frames arrive relative to the earliest one, from the container consumer.
-	spread = new Signal<Time.Milli | undefined>(undefined);
+	spread = new Signal<Milli | undefined>(undefined);
 
 	// Decoded frames waiting to be rendered.
 	#buffered = new Signal<Container.BufferedRanges>([]);
-
-	// The last discontinuity count seen from the container consumer.
-	#discontinuity = 0;
 
 	// Codec description from the last configure, reused after a playhead reset.
 	#description?: Uint8Array;
@@ -419,24 +443,45 @@ class DecoderTrack {
 	// The playhead moved and the next decoded frame decides whether the decoder resets.
 	#resetPending = false;
 
+	// The newest consumer reading this track, whose estimate a replacement continues. The predecessor
+	// is only held until the first one opens.
+	consumer?: Container.Consumer;
+	#predecessor?: Container.Consumer;
+
 	#signals = new Effect();
 
 	constructor(props: DecoderTrackProps) {
 		this.sync = props.sync;
 		this.broadcast = props.broadcast;
 		this.track = props.track;
+		this.name = props.name;
 		this.config = props.config;
 		this.identity = props.identity;
 		this.catalog = props.catalog;
 		this.stats = props.stats;
+		this.#predecessor = props.predecessor;
 
 		this.#signals.run(this.#run.bind(this));
+	}
+
+	// Reorders groups and frames up to the shared max delay. A rendition switch is not a cold start:
+	// the path's arrivals are what they were, so the estimate continues from whatever read before.
+	#consume(effect: Effect, sub: Moq.Track.Subscriber, format: Container.Format): Container.Consumer {
+		const consumer = new Container.Consumer(sub, {
+			format,
+			maxDelay: this.sync.out.maxDelay,
+			predecessor: this.consumer ?? this.#predecessor,
+		});
+		effect.cleanup(() => consumer.close());
+		this.consumer = consumer;
+		this.#predecessor = undefined;
+		return consumer;
 	}
 
 	#run(effect: Effect): void {
 		const sub = subscribeMedia(effect, {
 			broadcast: this.broadcast,
-			track: this.track,
+			track: this.name,
 			priority: Catalog.PRIORITY.video,
 			maxDelay: this.sync.out.maxDelay,
 		});
@@ -450,7 +495,7 @@ class DecoderTrack {
 					// boundary) means the frame belongs to the previous timeline and must be dropped.
 					const epoch = this.sync.epoch;
 
-					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
+					const timestamp = Milli.fromMicro(frame.timestamp as Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
 						return;
@@ -461,6 +506,8 @@ class DecoderTrack {
 					// received(), so it predates the current timeline. Drop it: painting it would
 					// set `timestamp` from the old timeline and late-reject what follows.
 					if (this.sync.out.reference.peek() === undefined) return;
+					// WebCodecs can hold a picture until after another track skipped the playhead past it.
+					if (this.sync.skipped(timestamp)) return;
 
 					if (this.frame.peek() === undefined) {
 						// Render something while we wait for the sync to catch up.
@@ -472,7 +519,7 @@ class DecoderTrack {
 					const signal = effect.abort;
 					await this.sync.wait(timestamp, signal);
 					if (signal.aborted) return;
-					if (epoch !== this.sync.epoch) return;
+					if (epoch !== this.sync.epoch || this.sync.skipped(timestamp)) return;
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -515,12 +562,7 @@ class DecoderTrack {
 			this.config.container.kind === "loc"
 				? new Container.Loc.Format("video")
 				: new Container.Legacy.Format(this.config);
-		// Create consumer that reorders groups/frames up to the provided latency.
-		const consumer = new Container.Consumer(sub, {
-			format,
-			maxDelay: this.sync.out.maxDelay,
-		});
-		effect.cleanup(() => consumer.close());
+		const consumer = this.#consume(effect, sub, format);
 
 		// Combine network jitter buffer with decode buffer
 		effect.run((inner) => {
@@ -535,33 +577,43 @@ class DecoderTrack {
 		this.#description = this.config.description ? Util.Hex.toBytes(this.config.description) : undefined;
 		this.#configure(decoder);
 
-		let previous: Time.Micro | undefined;
+		let previous: Micro | undefined;
 		let latest: number | undefined;
+		const recovery = new Recovery();
 
 		effect.spawn(async () => {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 
-				// Playhead moved: re-anchor before decoding further.
-				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
-
+				// A gap or a declared end breaks the timeline: re-anchor before decoding further, and
+				// never bridge the buffer across it.
+				if (next.kind !== "frame") {
+					if (next.kind === "gap") {
+						recovery.gap();
+						this.arrivals?.write(gap(next));
+					}
+					if (latest !== undefined) this.#onBreak();
+					previous = undefined;
+					continue;
+				}
 				const { frame } = next;
-				if (!frame) continue; // The group is done
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so a discontinuity (which a stale marker
-				// can raise) never resets this guard. Rejected payloads still count as received bytes.
+				// sequences only grow within a subscription, so a break (which a stale marker can
+				// raise) never resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
+				const accepted = !stale && recovery.accept(frame);
 				this.stats.update((current) => ({
-					frameCount: (current?.frameCount ?? 0) + (stale ? 0 : 1),
+					frameCount: (current?.frameCount ?? 0) + (accepted ? 1 : 0),
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
-				if (stale) continue;
+				if (!accepted) continue;
 
-				// Mark that we received this frame right now.
-				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
-				this.sync.received(timestamp, "video");
+				// Classify ingress before decoder backpressure changes the delivery clock.
+				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
+				const late = this.sync.received(timestamp, "video", frame.arrival);
+				this.arrivals?.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -570,12 +622,12 @@ class DecoderTrack {
 				});
 
 				// Track decode buffer: frames sent to decoder but not yet rendered. Only bridge from
-				// the previous frame when the consumer says nothing is missing in between. Group ids
-				// can't answer that: they aren't required to be sequential (some encoders derive them
-				// from DTS), so adjacency neither proves continuity nor rules out a gap the consumer
-				// skipped, and reporting a skipped span as decoded overstates the buffer.
-				if (previous !== undefined && next.continuous) {
-					this.#addBuffered(Time.Milli.fromMicro(previous), Time.Milli.fromMicro(frame.timestamp));
+				// the previous frame when no gap or end came between them. Group ids can't answer that:
+				// they aren't required to be sequential (some encoders derive them from DTS), so
+				// adjacency neither proves continuity nor rules out a gap the consumer skipped, and
+				// reporting a skipped span as decoded overstates the buffer.
+				if (previous !== undefined) {
+					this.#addBuffered(Milli.fromMicro(previous), Milli.fromMicro(frame.timestamp));
 				}
 
 				previous = frame.timestamp;
@@ -595,11 +647,7 @@ class DecoderTrack {
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : init.description;
 
-		const consumer = new Container.Consumer(sub, {
-			format: new Container.Cmaf.Format(init),
-			maxDelay: this.sync.out.maxDelay,
-		});
-		effect.cleanup(() => consumer.close());
+		const consumer = this.#consume(effect, sub, new Container.Cmaf.Format(init));
 
 		// Combine network jitter buffer with decode buffer
 		effect.run((inner) => {
@@ -615,38 +663,47 @@ class DecoderTrack {
 		this.#description = description;
 		this.#configure(decoder);
 
-		let previous: Time.Micro | undefined;
+		let previous: Micro | undefined;
 		let latest: number | undefined;
+		const recovery = new Recovery();
 
 		effect.spawn(async () => {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 
-				// Playhead moved: re-anchor before decoding further.
-				if (this.#onDiscontinuity(next.discontinuity)) previous = undefined;
-
+				// A gap or a declared end breaks the timeline (see #runLegacy).
+				if (next.kind !== "frame") {
+					if (next.kind === "gap") {
+						recovery.gap();
+						this.arrivals?.write(gap(next));
+					}
+					if (latest !== undefined) this.#onBreak();
+					previous = undefined;
+					continue;
+				}
 				const { frame } = next;
-				if (!frame) continue;
 
 				// An older keyframe would replace the codec references needed by live deltas. Group
-				// sequences only grow within a subscription, so a discontinuity (which a stale marker
-				// can raise) never resets this guard. Rejected payloads still count as received bytes.
+				// sequences only grow within a subscription, so a break (which a stale marker can
+				// raise) never resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
+				const accepted = !stale && recovery.accept(frame);
 				this.stats.update((current) => ({
-					frameCount: (current?.frameCount ?? 0) + (stale ? 0 : 1),
+					frameCount: (current?.frameCount ?? 0) + (accepted ? 1 : 0),
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
-				if (stale) continue;
+				if (!accepted) continue;
 
-				// Mark that we received this frame right now.
-				const timestamp = Time.Milli.fromMicro(frame.timestamp);
-				this.sync.received(timestamp, "video");
+				// Classify ingress before decoder backpressure changes the delivery clock.
+				const timestamp = Milli.fromMicro(frame.timestamp);
+				const late = this.sync.received(timestamp, "video", frame.arrival);
+				this.arrivals?.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
-				// Track decode buffer (see #runLegacy: bridge on the consumer's continuity signal,
+				// Track decode buffer (see #runLegacy: bridge only when no gap or end came between,
 				// never on group adjacency, which proves nothing about the timeline).
-				if (previous !== undefined && next.continuous) {
-					this.#addBuffered(Time.Milli.fromMicro(previous), Time.Milli.fromMicro(frame.timestamp));
+				if (previous !== undefined) {
+					this.#addBuffered(Milli.fromMicro(previous), Milli.fromMicro(frame.timestamp));
 				}
 
 				previous = frame.timestamp;
@@ -665,25 +722,21 @@ class DecoderTrack {
 		});
 	}
 
-	// The container bumped its playhead (a marker, a hole, or a latency skip). Re-anchor and
-	// let the next decoded frame decide the decoder reset (see #resetAtKeyframe). Clearing
-	// `timestamp` keeps a stale high value from late-rejecting the following frames, which may
-	// overlap the previous group's tail. The held picture stays until the new keyframe renders.
-	// Returns true when a new generation was handled.
-	#onDiscontinuity(count: number): boolean {
-		if (count === this.#discontinuity) return false;
-		this.#discontinuity = count;
+	// The container read a gap or a declared end after media. Re-anchor and let the next decoded
+	// frame decide the decoder reset (see #resetAtKeyframe). Clearing `timestamp` keeps a stale
+	// high value from late-rejecting the following frames, which may overlap the previous group's
+	// tail. The held picture stays until the new keyframe renders.
+	#onBreak(): void {
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
 		this.sync.reset();
 		this.#resetPending = true;
-		return true;
 	}
 
-	// Call before each decode. After a playhead bump, a keyframe starts a new timeline, so drop
-	// the pictures still queued in the decoder: one from later in a group that restarts would
+	// Call before each decode. After a break, a keyframe starts a new timeline, so drop the
+	// pictures still queued in the decoder: one from later in a group that restarts would
 	// otherwise come out above the new keyframe and late-reject it. A delta continues a group the
-	// bump interrupted (a stale marker or a max-delay hole), so it keeps the decoder's references;
+	// break interrupted (a stale marker or a max-delay hole), so it keeps the decoder's references;
 	// a reset would make WebCodecs require a key chunk and throw. `reset()` cannot cancel an
 	// output callback that already holds a frame; the clock epoch it captured rejects that one.
 	#resetAtKeyframe(decoder: VideoDecoder, keyframe: boolean): void {
@@ -708,15 +761,15 @@ class DecoderTrack {
 	}
 
 	// Add a range to the decode buffer (decoded, waiting to render)
-	#addBuffered(start: Time.Milli, end: Time.Milli): void {
+	#addBuffered(start: Milli, end: Milli): void {
 		if (start > end) return;
 
 		this.#buffered.mutate((current) => {
 			for (const range of current) {
 				// Check if there's any overlap, then merge
 				if (range.start <= end && range.end >= start) {
-					range.start = Time.Milli.min(range.start, start);
-					range.end = Time.Milli.max(range.end, end);
+					range.start = Milli(Math.min(range.start, start));
+					range.end = Milli(Math.max(range.end, end));
 					return;
 				}
 			}
@@ -727,11 +780,11 @@ class DecoderTrack {
 	}
 
 	// Trim the decode buffer up to the rendered timestamp
-	#trimBuffered(timestamp: Time.Milli): void {
+	#trimBuffered(timestamp: Milli): void {
 		this.#buffered.mutate((current) => {
 			while (current.length > 0) {
 				if (current[0].end >= timestamp) {
-					current[0].start = Time.Milli.max(current[0].start, timestamp);
+					current[0].start = Milli(Math.max(current[0].start, timestamp));
 					break;
 				}
 				current.shift();

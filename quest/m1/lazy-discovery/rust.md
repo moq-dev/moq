@@ -4,7 +4,7 @@
 
 The Rust client session requests announcements only for prefixes its
 `consume` origin is watching, matching the
-[JS behavior](/quest/m1/lazy-discovery/js.md) and the
+[JS behavior](/doc/lib/js/net.md) and the
 [line's shared rules](/quest/m1/lazy-discovery/README.md). Rust's `follow`
 folds into its request path as in the
 [JS read API](/doc/lib/js/net.md). Relays keep watching the
@@ -24,8 +24,28 @@ Facts (2026-10-10, `origin/main` e5446b036):
   equivalent.
 - `OriginConsumer::follow` exists (`rs/moq-net/src/model/origin.rs:4473`);
   Rust has no announced-gated request like JS's, so the fold's shape is open.
+- Added 2026-10-17: [moq-net follows announced instances](/quest/m1/net-announced-follow.md)
+  lands first and gives Rust its announced request. This quest then makes
+  that request register discovery interest for its path, since the session
+  stops asking for its whole scope.
 - moq-relay reads `origin.consume().announced()` for the root in its web,
   internal, and cluster paths, so a relay's watch set is the root.
+
+The JS shape to mirror (`js/net/src/connection/forward.ts`): the origin
+counts watched literal heads in a trie and hands each session only the
+covering-set changes a watch causes, so a change costs the prefixes it covers
+or uncovers and stays flat over unrelated held watches
+(`js/net/bench/forward.ts`); an announce request stays open while anything at
+or beneath its prefix is watched, so a narrower watch rides it and never takes
+its routes over (nothing tells when a fresh request has synced); a narrower
+request already open when a broader watch arrives stays open until the broader
+request goes; a route reported by overlapping requests is inserted once,
+driven by the first reporter, and if it changes hands anyway (a request
+failing) it restarts unless one epoch proves both saw one instance; closing an announce request ends its stream; a plain request
+resolved through a discovered route watches its path until closed; a request
+closes 2s after nothing beneath it is watched (a fixed constant, since one-shot
+connections have no `linger`); a refused or reset request downgrades the
+whole session to blind answers.
 
 Open for the plan round: the Rust equivalent of an announced request, how the
 watch set crosses the poll-based session driver, and moq-ffi and binding
@@ -37,4 +57,4 @@ lazy discovery never narrows what a relay discovers.
 
 ## Required
 
-- [JS lazy discovery](/quest/m1/lazy-discovery/js.md) - Rust mirrors the settled JS shape
+- [moq-net follows announced instances](/quest/m1/net-announced-follow.md) - the Rust announced request this quest registers discovery interest for

@@ -32,7 +32,7 @@ Full documentation lives at **[doc.moq.dev](https://doc.moq.dev)**.
 - **[Linux packages](https://doc.moq.dev/setup/install)** - install the relay and GStreamer plugin from `apt.moq.dev` / `rpm.moq.dev`.
 - **[Production setup](https://doc.moq.dev/setup/prod)** - deploy a relay with a real domain and TLS.
 
-The quickest way to see it in action (requires [Nix](https://nixos.org/download.html) with [flakes](https://nixos.wiki/wiki/Flakes)):
+The quickest way to see it in action (requires [Nix](https://nixos.org/download.html) with [flakes](https://wiki.nixos.org/wiki/Flakes)):
 
 ```sh
 # Runs a relay, demo media, and the web server
@@ -111,6 +111,12 @@ Read the specifications:
 - [hang](https://moq-dev.github.io/drafts/draft-lcurley-moq-hang.html)
 - [use-cases](https://moq-dev.github.io/drafts/draft-lcurley-moq-use-cases.html)
 
+## Stability
+
+The `release` branch is stable and is what gets published; `main` is the trunk where breaking API changes land between releases.
+Every package follows [semver](https://semver.org): a breaking API change bumps the first nonzero version number (`1.2.0` to `2.0.0`, `0.3.1` to `0.4.0`, `0.0.5` to `0.0.6`).
+Breaking wire changes are extremely rare.
+
 ## Development
 
 Contributions are welcome, including AI-assisted issues, pull requests, reviews, and comments. See [CONTRIBUTING.md](CONTRIBUTING.md#ai-contributions) for the attribution policy and guidance on when to open an issue before writing code.
@@ -133,7 +139,7 @@ just check --all
 just fix --all
 ```
 
-CI runs `check` as two parallel jobs, `just ci check` and `just ci test`, so it covers the same ground as your local run. It sets two things you don't: `MOQ_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
+PRs into `main` get no cloud CI until the merge queue, so run `just ci` before pushing. It runs what the queue runs, the same ground as `just check`, plus two settings: `MOQ_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
 
 See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.
 

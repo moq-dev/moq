@@ -31,19 +31,20 @@ span from the newest acknowledged frame to the newest written one, which is
 the exact media the viewer lost.
 
 Add a second byte-weighted cumulative histogram of delivery delay:
-`acked.received - written_at` per frame, where `received` is the
-ACK-delay-corrected instant the hook returns. Its low edge approaches the
-path RTT and its spread is the jitter. Document that the value still includes
-the return one-way delay and that a backend without the hook leaves the
+`acked_at - written_at` per frame, where `acked_at` is when the serve task is
+woken by `poll_acked`. Its low edge approaches the path RTT and its spread is
+the jitter. Document that the value still includes the return one-way delay
+and the peer's delayed-ACK timer, since the hook reports no corrected instant
+(decided 2026-10-17 on #5817), and that a backend without the hook leaves the
 histogram absent, never zero.
 
 Backends that return unsupported from `poll_acked` keep the group-granularity
 sampling from the parent quest, so the histogram never disappears over qmux or
 a browser transport; document which resolution a node offers.
 
-Decided in the 2026-09-30 audit: moved to m2. The group-granularity sampler
-from the parent quest answers the m1 question, and this waits on the m2 ACK
-hook.
+Deferred to m2 with the parent QoS sampler. Group-granularity lag lands
+first after the next release; frame-granularity sampling then adds the ACK
+hook without making either resolution a release gate.
 
 Decided 2026-10-08: the group-granularity sampler is the egress lag histogram
 from the QoS line, which so far exists only on its line branch, so that quest
@@ -52,13 +53,13 @@ is Required.
 Tests: the frontier tracking frame ends under a peer that acknowledges in
 bursts, with interval samples landing one bucket lower than group-granularity
 tracking of the same run; a reset mid-group attributing only the
-unacknowledged span to `dropped_duration`; delivery delay under an injected ACK delay staying inside one bucket of the
-true RTT; and fallback to group-granularity frontier tracking when the hook is
+unacknowledged span to `dropped_duration`; delivery delay staying inside one bucket of the true RTT plus the peer's
+`max_ack_delay`; and fallback to group-granularity frontier tracking when the hook is
 unsupported.
 
 ## Required
 
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
   hook this samples through
-- [Egress lag histogram](/quest/m1/qos/lag-histogram.md) - the
+- [Egress lag histogram](/quest/m2/qos/lag-histogram.md) - the
   group-granularity sampler and starvation histogram this refines

@@ -1,14 +1,17 @@
 /**
- * A reconnecting, shareable connection: one origin and one reconnect loop per relay URL.
+ * A reconnecting, shareable connection: one origin and reconnect loop per URL and version list.
  *
  * @module
  */
+
+import { Milli, Nano } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
-import * as Time from "../time.ts";
+import { Follow } from "../util/observed.ts";
+import { after } from "../util/timer.ts";
 import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import {
@@ -16,18 +19,20 @@ import {
 	type ConnectProps as ConnectPropsType,
 	certificateHash,
 	connect,
+	normalizeVersions,
 	type WebSocketProps as WebSocketPropsType,
 	type WebTransportProps as WebTransportPropsType,
 } from "./connect.ts";
 import type { Established as EstablishedType } from "./established.ts";
 import type { Extensions as ExtensionsType } from "./extensions.ts";
+import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { GoawayProps, Redirect as RedirectType } from "./goaway.ts";
-import { Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
+import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
 
 /** How long an unreferenced shared connection lingers before it actually closes. */
-const LINGER_MS = Time.Milli(2000);
+const LINGER_MS = Milli(2000);
 
 /** Options for {@link Connection}. */
 export interface ConnectionProps {
@@ -44,23 +49,23 @@ export interface ConnectionProps {
 	 * everything it discovered are still warm when the new owner asks for them. The longest
 	 * linger requested by any handle sharing the connection wins.
 	 */
-	linger?: Time.Milli;
+	linger?: Milli;
 
 	/**
-	 * Share a pooled transport keyed on the URL. By default, options specific to this
-	 * handle use a private reconnect loop; otherwise connections share by URL.
+	 * Share a pooled transport keyed on the URL and ordered versions. By default, options specific to this
+	 * handle use a private reconnect loop; otherwise connections share by URL and versions.
 	 * Explicit `true` refuses options a pool cannot honor.
 	 */
 	share?: boolean;
+
+	/** Protocol versions to offer, most preferred first, spelled like `moq-lite-06`; connections pool by URL and this list. */
+	versions?: readonly string[];
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportPropsType;
 
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
 	websocket?: WebSocketPropsType;
-
-	/** Whether the relay supports broadcast discovery. */
-	discovery?: boolean;
 
 	/** The origin whose broadcasts are served, spanning reconnects. Implies a private loop. */
 	publish?: Origin.Consumer;
@@ -87,7 +92,7 @@ export interface ConnectionProps {
 
 /**
  * A cloneable handle on a MoQ connection: `new Connection({ url })` reconnects and, by
- * default, shares one origin and one reconnect loop with every other handle on that URL.
+ * default, shares one origin and reconnect loop with handles using the same URL and versions.
  *
  * The shared {@link origin} is wired to both directions. Everything the relay announces
  * lands in it, a publish into it is announced to the relay, and a page that publishes and
@@ -106,7 +111,7 @@ export interface ConnectionProps {
  * session finishes its groups, and the handle and its origin carry across. A redirect the
  * {@link ConnectionProps.goaway} policy refuses stops the loop like an auth rejection does.
  *
- * Options the pool cannot honor (transport options, discovery, delay, goaway, a pinned
+ * Options the pool cannot honor (transport options, delay, goaway, a pinned
  * certificate, caller-owned origins) use a private loop. An explicit `share: true`
  * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
@@ -151,7 +156,7 @@ export class Connection {
 	 */
 	readonly transport: Getter<TransportType | undefined>;
 
-	/** The current connection's PROBE estimates, or undefined while disconnected. */
+	/** Receive estimates while observed, or undefined while disconnected; peek does not request them. */
 	readonly probe: Getter<ProbeType | undefined>;
 
 	/**
@@ -186,7 +191,7 @@ export class Connection {
 	#closed = new Once<Error | null>();
 	readonly #status = new Signal<ReloadStatus>("disconnected");
 	readonly #established = new Signal<EstablishedType | undefined>(undefined);
-	readonly #probe = new Signal<ProbeType | undefined>(undefined);
+	readonly #probe = new Signal<Getter<ProbeType | undefined> | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	readonly #bandwidth = new Signal<Handle | undefined>(undefined);
 	readonly #error = new Signal<Error | undefined>(undefined);
@@ -201,6 +206,7 @@ export class Connection {
 	 * (plus the linger window) wants them.
 	 */
 	constructor(props?: ConnectionProps) {
+		const versions = normalizeVersions(props);
 		refuse(props);
 		this.#signals = new Effect();
 
@@ -208,7 +214,7 @@ export class Connection {
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.status = this.#status;
 		this.error = this.#error;
-		this.probe = this.#probe;
+		this.probe = new Follow(this.#probe);
 		this.origin = this.#origin;
 		this.bandwidth = this.#bandwidth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
@@ -220,7 +226,7 @@ export class Connection {
 		const href = this.#signals.computed((effect) => effect.get(this.url)?.href);
 
 		if (props && (props.share === false || requiresPrivate(props))) {
-			this.#runPrivate(props, href);
+			this.#runPrivate({ ...props, versions }, href);
 			return;
 		}
 
@@ -229,7 +235,7 @@ export class Connection {
 			const key = effect.get(href);
 			if (!key) return;
 
-			const lease = acquire(key, linger);
+			const lease = acquire(key, versions, linger);
 			effect.cleanup(lease.release);
 
 			effect.set(this.#origin, lease.origin, undefined);
@@ -238,7 +244,7 @@ export class Connection {
 			// Proxy the shared loop's outputs, so this handle reads like its own connection.
 			effect.run((nested) => nested.set(this.#status, nested.get(lease.connection.status), "disconnected"));
 			effect.run((nested) => nested.set(this.#established, nested.get(lease.connection.established), undefined));
-			effect.run((nested) => nested.set(this.#probe, nested.get(lease.connection.probe), undefined));
+			effect.run((nested) => nested.set(this.#probe, lease.connection.probe, undefined));
 			effect.run((nested) => nested.set(this.#error, nested.get(lease.connection.error), undefined));
 		});
 	}
@@ -253,9 +259,9 @@ export class Connection {
 			enabled: this.enabled,
 			publish: props.publish ?? (owned ? origin.consume() : undefined),
 			consume: origin,
+			versions: props.versions,
 			webtransport: props.webtransport,
 			websocket: props.websocket,
-			discovery: props.discovery,
 			delay: props.delay,
 			goaway: props.goaway,
 		});
@@ -268,7 +274,7 @@ export class Connection {
 		});
 		this.#signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
 		this.#signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
-		this.#signals.run((effect) => effect.set(this.#probe, effect.get(loop.probe), undefined));
+		this.#signals.run((effect) => effect.set(this.#probe, loop.probe, undefined));
 		this.#signals.run((effect) => effect.set(this.#error, effect.get(loop.error), undefined));
 	}
 
@@ -281,44 +287,20 @@ export class Connection {
 		const producer = new Announce.Producer();
 		const consumer = producer.consume();
 
-		// Closing the consumer closes the shared state, so stop appending after that.
-		let closed = false;
-		void consumer.closed.then(() => {
-			closed = true;
-		});
-
 		// A child of this handle's scope rather than a standalone Effect it merely cleans up
 		// after: the disposer run() hands back also drops itself from the parent, so opening
 		// and closing announcement streams repeatedly does not pile up dead pumps that live
 		// until the whole handle closes.
 		const stop = this.#signals.run((effect) => {
 			const origin = effect.get(this.#origin);
-			if (!origin) return;
-
-			const upstream = origin.announced(scope, options);
-			effect.cleanup(() => upstream.close());
-
-			// Track what this origin announced so a URL switch retracts it; the last
-			// event rides along for the retraction.
-			const active = new Map<Path.Valid, Announce.Announce>();
-
-			effect.spawn(async () => {
-				try {
-					for (;;) {
-						const entry = await effect.race(upstream.next());
-						if (!entry) break;
-						if (entry.kind === "end") active.delete(entry.prefix);
-						else active.set(entry.prefix, entry);
-						producer.append(entry);
-					}
-				} finally {
-					if (!closed) {
-						for (const entry of active.values()) {
-							producer.append({ ...entry, kind: "end" });
-						}
-					}
-				}
-			});
+			if (!origin) {
+				// Like a reconnecting loop's origin: behind while enabled with nothing to deliver.
+				if (effect.get(this.enabled)) producer.behind();
+				else producer.synced();
+				return;
+			}
+			// A URL switch retracts what the old origin announced.
+			pumpAnnounced(effect, origin.announced(scope, options), producer);
 		});
 
 		void consumer.closed.then(stop);
@@ -380,6 +362,7 @@ function refuse(props?: ConnectionProps): void {
 	if (!props) return;
 
 	const extra = props as ConnectionProps & { transport?: unknown; signal?: unknown };
+	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	if (extra.transport) {
 		throw new Error("a supplied transport cannot reconnect; call Connection.connect() instead");
 	}
@@ -401,9 +384,6 @@ function refuse(props?: ConnectionProps): void {
 	if (props.websocket !== undefined) {
 		throw new Error("websocket options cannot be shared; pass share: false");
 	}
-	if (props.discovery !== undefined) {
-		throw new Error("discovery cannot be shared; pass share: false");
-	}
 	if (props.delay !== undefined) {
 		throw new Error("delay cannot be shared; pass share: false");
 	}
@@ -417,7 +397,6 @@ function requiresPrivate(props: ConnectionProps): boolean {
 	return (
 		props.webtransport !== undefined ||
 		props.websocket !== undefined ||
-		props.discovery !== undefined ||
 		props.delay !== undefined ||
 		props.goaway !== undefined ||
 		props.publish !== undefined ||
@@ -427,25 +406,32 @@ function requiresPrivate(props: ConnectionProps): boolean {
 
 /** One shared connection and the handles keeping it alive. */
 interface Entry {
-	/** The pool key: the dialed URL, which a GOAWAY redirect moves. */
+	/** The pool key: the dialed URL and versions, moved together on GOAWAY. */
 	key: string;
 	origin: Origin.Producer;
 	connection: Reload;
 	refs: number;
-	linger: Time.Milli;
-	timer?: ReturnType<typeof setTimeout>;
+	linger: Milli;
+	timer?: () => void;
 }
 
 /** The process-wide pool backing {@link Connection}. */
 const pool = new Map<string, Entry>();
 
-/** Take a reference on the shared entry for `key`, creating it on first use. */
-function acquire(key: string, linger?: Time.Milli): Entry & { release: () => void } {
+// Preserve the ordered versions when a redirect moves the URL.
+function poolKey(url: string, versions?: readonly string[]): string {
+	return JSON.stringify([url, versions]);
+}
+
+/** Take a reference on the shared entry, creating it on first use. */
+function acquire(url: string, versions?: readonly string[], linger?: Milli): Entry & { release: () => void } {
+	const key = poolKey(url, versions);
 	let entry = pool.get(key);
 	if (!entry) {
 		const origin = new Origin.Producer();
 		const connection = new Reload({
-			url: new URL(key),
+			url: new URL(url),
+			versions,
 			enabled: true,
 			publish: origin.consume(),
 			consume: origin,
@@ -466,9 +452,11 @@ function acquire(key: string, linger?: Time.Milli): Entry & { release: () => voi
 		// A live entry already at the target wins: this one leaves the pool and serves only
 		// the handles it has until they release it.
 		connection.redirect.subscribe((redirect) => {
-			if (!redirect || redirect.href === created.key) return;
+			if (!redirect) return;
+			const key = poolKey(redirect.href, versions);
+			if (key === created.key) return;
 			if (pool.get(created.key) === created) pool.delete(created.key);
-			created.key = redirect.href;
+			created.key = key;
 			if (!pool.has(created.key)) pool.set(created.key, created);
 		});
 
@@ -477,10 +465,10 @@ function acquire(key: string, linger?: Time.Milli): Entry & { release: () => voi
 	}
 
 	const taken = entry;
-	taken.linger = Time.Milli(Math.max(taken.linger, linger ?? LINGER_MS));
+	taken.linger = Milli(Math.max(taken.linger, linger ?? LINGER_MS));
 	taken.refs += 1;
 	if (taken.timer !== undefined) {
-		clearTimeout(taken.timer);
+		taken.timer();
 		taken.timer = undefined;
 	}
 
@@ -494,14 +482,16 @@ function acquire(key: string, linger?: Time.Milli): Entry & { release: () => voi
 			taken.refs -= 1;
 			if (taken.refs > 0) return;
 
-			taken.timer = setTimeout(() => {
-				if (pool.get(taken.key) === taken) pool.delete(taken.key);
-				taken.connection.close();
-				taken.origin.close();
-			}, taken.linger);
-
 			// Don't hold a Node process open for a connection nobody is using.
-			(taken.timer as { unref?: () => void }).unref?.();
+			taken.timer = after(
+				Nano.fromMilli(taken.linger),
+				() => {
+					if (pool.get(taken.key) === taken) pool.delete(taken.key);
+					taken.connection.close();
+					taken.origin.close();
+				},
+				{ ref: false },
+			);
 		},
 	};
 }
@@ -517,7 +507,7 @@ export function resetShared(): void {
 	const entries = [...pool.values()];
 	pool.clear();
 	for (const entry of entries) {
-		if (entry.timer !== undefined) clearTimeout(entry.timer);
+		entry.timer?.();
 		entry.connection.close();
 		entry.origin.close();
 	}

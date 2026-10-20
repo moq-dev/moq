@@ -1,48 +1,30 @@
-# [M] moq-relay honors a request token with its own lease
+# [M] moq-relay ends a request token's lease with its request
 
 ## Goal
 
-moq-relay verifies a moq-transport request token through `moq_auth::Client`,
-each request getting a lease of its own that is never counted as a session
-grant and ends when the request ends. Until this lands the relay explicitly
-refuses request-token verification as `Unsupported`, even if it consumes
-session-token events and once [Request tokens](/quest/m1/auth/request-token.md)
-merges. Requests independently covered by locally verified session permission
-do not require request-token verification.
+The auth server sees a moq-transport request token's lease end when its
+request ends. Since #5148, a request token reaches the relay on `requests()`
+like any in-band token and is verified through the same attach path; moq-net
+confines its grant to the request. The auth server still counts it as one
+more attached grant on the session that never reports `end`, against its own
+`--limit-token` cap until the connection ends.
 
 ## Plan
 
-Deferred on 2026-10-12 until a consumer needs relay request verification.
-This is not required for the experimental Rust hook or the session AUTH epic.
-Revisit the design against moq-transport's authentication model at that point;
-the lease integration below is future work, not a capability of the hook.
+✅ Decided 2026-10-15 (maintainer, #5148): a request token is one kind of
+auth, named by its request, so the relay keeps a single verification path and
+needs no request-specific variant on `requests()`.
 
-An application acceptor built on moq-net answers request tokens through
-the explicit request variant of `requests()` itself and does not need this;
-it is the relay's half of
-[Request tokens](/quest/m1/auth/request-token.md).
+Deferred until a consumer needs per-request accounting at the auth server.
 
-- A per-request call on `moq_auth::Client`, not the `Client::attach` that
-  [Relay tokens](/quest/m1/auth/relay-refresh.md) builds. `attach` connects
-  with the connection's id, and the auth server treats that as one more grant
-  on the session that never POSTs `end`, so a request token would widen the
-  whole connection for its life. The per-request call carries the token in
-  `moq_auth::Request.token` with its kind and the request's path, is never
-  counted as a session grant, and ends when the request ends. Two requests
-  carrying the same bytes get two leases. Name the call while implementing.
-- The request is resolved against the origin with the path checked against
-  that lease's grant, not through the session's scoped origin handle.
-- Docs: `doc/bin/relay/auth.md` states the order (session grant, then the
-  request's token, then `UNAUTHORIZED`) and that a request token covers only
+- The relay drops a request token's credential when its issued grant closes.
+  The missing piece is telling the auth server: either a per-request call on
+  `moq_auth::Client` that ends the lease, or an `end` for an attachment that
+  closes before its connection. Name the call while implementing.
+- Two requests carrying the same bytes get two leases.
+- Docs: `doc/bin/relay/auth.md` states that a request token's lease ends with
   its request.
-- Tests: through the relay, the auth server never counts a request token as a
-  session grant and sees its lease end with the request.
+- Tests: through the relay, the auth server sees a request token's lease end
+  with the request, while the connection's own lease continues.
 
 Public API: additive on `moq_auth::Client`. Wire: none.
-
-## Required
-
-- [Request tokens](/quest/m1/auth/request-token.md) - the per-request grant
-  this lease backs
-- [Relay tokens](/quest/m1/auth/relay-refresh.md) - supplies the lease
-  revalidation this reuses

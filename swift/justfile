@@ -8,12 +8,16 @@ set working-directory := '.'
 default:
     just check
 
-# Skips cleanly on non-macOS hosts, which is why swift.yml runs it on a Mac.
+# Skips cleanly on non-macOS hosts, which is why platform.yml runs it on a Mac.
 # This runs the tests too, so there is no separate `just swift test`.
 
 # Build moq-ffi for the host, regenerate uniffi bindings, run swift test.
 check:
     bash ../sh/swift/check.sh
+
+# Run the binding benchmark with optimized Rust and Swift builds on macOS.
+bench:
+    bash ../sh/swift/bench.sh
 
 # Release recipes run in the caller's directory, so a relative `--output` or
 # `--tarball` means what it would to the script itself.
@@ -53,3 +57,7 @@ publish *args:
 [positional-arguments]
 publish-ffi *args:
     {{ quote(justfile_directory() / "sh/swift/publish-ffi.sh") }} "$@"
+
+# Check the FFI with the Apple simulator backends enabled.
+simulator:
+    bash ../sh/swift/simulator.sh

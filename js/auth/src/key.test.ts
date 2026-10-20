@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import * as base64 from "@hexagon/base64";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { base64url, exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, type Claims } from "./claims.ts";
 import { INSECURE_TEST_RS256_OTHER, INSECURE_TEST_RSA_KEYS } from "./insecure-test-keys.ts";
@@ -10,7 +9,7 @@ import { Key, KeyIdSchema } from "./key.ts";
 function encodeJwk(obj: unknown): string {
 	const jsonString = JSON.stringify(obj);
 	const data = new TextEncoder().encode(jsonString);
-	return base64.fromArrayBuffer(data.buffer as ArrayBuffer, true); // true for urlSafe
+	return base64url.encode(data);
 }
 
 const testKey = {
@@ -21,7 +20,7 @@ const testKey = {
 	kid: "test-key-1",
 } as const;
 
-const testClaims: Claims = {
+const testClaims = {
 	root: "test-path",
 	publish: ["test-pub/**"],
 	subscribe: ["test-sub/**"],
@@ -95,7 +94,7 @@ test("parse - invalid base64url", () => {
 test("parse - invalid JSON after base64url decode", () => {
 	// Base64url encode invalid JSON
 	const data = new TextEncoder().encode("invalid json");
-	const invalidJwk = base64.fromArrayBuffer(data.buffer as ArrayBuffer, true); // true for urlSafe
+	const invalidJwk = base64url.encode(data);
 
 	expect(() => {
 		Key.parse(invalidJwk);
@@ -124,6 +123,44 @@ test("parse - secret too short", () => {
 	expect(() => {
 		Key.parse(jwk);
 	}).toThrow();
+});
+
+test("parse - a field with non-base64 characters is refused, whatever its length", () => {
+	// Long enough to pass the 32-byte check if the bad characters were silently zeroed.
+	const invalidKey = { ...testKey, k: `${testKey.k.slice(0, -2)}!!` };
+
+	expect(() => Key.parse(encodeJwk(invalidKey))).toThrow();
+});
+
+test("parse - accepts a JWK in standard padded base64", () => {
+	// The note survives as "+" and "/" in standard base64, and the kid length forces padding.
+	const json = JSON.stringify({ ...testKey, kid: "key-1", note: "~~~???" });
+	const encoded = Buffer.from(json).toString("base64");
+	expect(encoded).toMatch(/\+/);
+	expect(encoded).toMatch(/\//);
+	expect(encoded).toMatch(/=$/);
+
+	const key = Key.parse(encoded);
+	expect(key.kid).toBe("key-1");
+	expect((key as { k?: string }).k).toBe(testKey.k);
+});
+
+test("generate - an HMAC secret is unpadded base64url that round-trips", async () => {
+	for (const [alg, bytes] of [
+		["HS256", 32],
+		["HS384", 48],
+		["HS512", 64],
+	] as const) {
+		const key = await Key.generate(alg, "generated");
+		const k = (key as { k: string }).k;
+		expect(k).toMatch(/^[A-Za-z0-9_-]+$/);
+		expect(base64url.decode(k).byteLength).toBe(bytes);
+
+		const parsed = Key.parse(encodeJwk(key));
+		expect(parsed).toEqual(key);
+		const claims = await Key.verify(parsed, await Key.sign(key, testClaims));
+		expect(claims.root).toBe(testClaims.root);
+	}
 });
 
 test("parse - missing required fields", () => {
@@ -198,8 +235,8 @@ test("verify - successful verification", async () => {
 	const claims = await Key.verify(key, token);
 
 	expect(claims.root).toBe(testClaims.root);
-	expect(claims.publish).toEqual(testClaims.publish);
-	expect(claims.subscribe).toEqual(testClaims.subscribe);
+	expect(claims.publish?.toJSON()).toEqual(testClaims.publish);
+	expect(claims.subscribe?.toJSON()).toEqual(testClaims.subscribe);
 });
 
 test("verify - key doesn't support verification", async () => {
@@ -227,7 +264,7 @@ test("verify - invalid token format", async () => {
 });
 
 test("verify - expired token", async () => {
-	const expiredClaims: Claims = {
+	const expiredClaims = {
 		...testClaims,
 		exp: Math.floor((Date.now() - 60 * 1000) / 1000), // 1 minute ago in seconds
 	};
@@ -243,7 +280,7 @@ test("verify - expired token", async () => {
 });
 
 test("verify - token without exp field", async () => {
-	const claimsWithoutExp: Claims = {
+	const claimsWithoutExp = {
 		root: "test-path",
 		publish: ["test-pub/**"],
 	};
@@ -253,7 +290,7 @@ test("verify - token without exp field", async () => {
 	const claims = await Key.verify(key, token);
 
 	expect(claims.root).toBe("test-path");
-	expect(claims.publish).toEqual(["test-pub/**"]);
+	expect(claims.publish?.toJSON()).toEqual(["test-pub/**"]);
 	expect(claims.exp).toBe(undefined);
 });
 
@@ -274,7 +311,7 @@ test("claims validation - must have pub or sub", async () => {
 
 test("round-trip - sign and verify", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const originalClaims: Claims = {
+	const originalClaims = {
 		root: "test-path",
 		publish: ["test-pub/**"],
 		subscribe: ["test-sub/**"],
@@ -286,8 +323,8 @@ test("round-trip - sign and verify", async () => {
 	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(originalClaims.root);
-	expect(verifiedClaims.publish).toEqual(originalClaims.publish);
-	expect(verifiedClaims.subscribe).toEqual(originalClaims.subscribe);
+	expect(verifiedClaims.publish?.toJSON()).toEqual(originalClaims.publish);
+	expect(verifiedClaims.subscribe?.toJSON()).toEqual(originalClaims.subscribe);
 	expect(verifiedClaims.exp).toBe(originalClaims.exp);
 	expect(verifiedClaims.iat).toBe(originalClaims.iat);
 });
@@ -319,7 +356,7 @@ test("sign - invalid claims without pub or sub", async () => {
 
 test("sign - claims validation path not prefix absolute sub", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const validClaims: Claims = {
+	const validClaims = {
 		root: "test-path",
 		subscribe: ["absolute-sub/**"],
 	};
@@ -331,7 +368,7 @@ test("sign - claims validation path not prefix absolute sub", async () => {
 
 test("sign - claims validation path is prefix with relative paths", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const validClaims: Claims = {
+	const validClaims = {
 		root: "test-path",
 		publish: ["relative-pub/**"],
 		subscribe: ["relative-sub/**"],
@@ -344,7 +381,7 @@ test("sign - claims validation path is prefix with relative paths", async () => 
 
 test("sign - claims validation empty root", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const validClaims: Claims = {
+	const validClaims = {
 		root: "",
 		publish: ["test-pub/**"],
 	};
@@ -368,7 +405,7 @@ test("different algorithms - HS384", async () => {
 	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(testClaims.root);
-	expect(verifiedClaims.publish).toEqual(testClaims.publish);
+	expect(verifiedClaims.publish?.toJSON()).toEqual(testClaims.publish);
 });
 
 test("different algorithms - HS512", async () => {
@@ -385,7 +422,7 @@ test("different algorithms - HS512", async () => {
 	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(testClaims.root);
-	expect(verifiedClaims.publish).toEqual(testClaims.publish);
+	expect(verifiedClaims.publish?.toJSON()).toEqual(testClaims.publish);
 });
 
 test("verify - private to public key", async () => {
@@ -615,7 +652,7 @@ test("sign - includes kid in header when present", async () => {
 
 	// Decode the header to verify kid is present
 	const [headerB64] = token.split(".");
-	const headerBuffer = base64.toArrayBuffer(headerB64, true); // true for urlSafe
+	const headerBuffer = base64url.decode(headerB64);
 	const header = JSON.parse(new TextDecoder().decode(headerBuffer));
 
 	expect(header.kid).toBe("test-key-1");
@@ -635,7 +672,7 @@ test("sign - no kid in header when not present", async () => {
 
 	// Decode the header to verify kid is not present
 	const [headerB64] = token.split(".");
-	const headerBuffer = base64.toArrayBuffer(headerB64, true); // true for urlSafe
+	const headerBuffer = base64url.decode(headerB64);
 	const header = JSON.parse(new TextDecoder().decode(headerBuffer));
 
 	expect(header.kid).toBe(undefined);
@@ -648,7 +685,7 @@ test("sign - writes iat only when the claims carry one", async () => {
 
 	const decodePayload = (token: string) => {
 		const [, payloadB64] = token.split(".");
-		const payloadBuffer = base64.toArrayBuffer(payloadB64, true); // true for urlSafe
+		const payloadBuffer = base64url.decode(payloadB64);
 		return JSON.parse(new TextDecoder().decode(payloadBuffer));
 	};
 
@@ -688,10 +725,10 @@ test("verify - invalid payload structure", async () => {
 
 	// Create a token with invalid payload structure
 	const headerData = new TextEncoder().encode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-	const header = base64.fromArrayBuffer(headerData.buffer as ArrayBuffer, true); // true for urlSafe
+	const header = base64url.encode(headerData);
 
 	const payloadData = new TextEncoder().encode(JSON.stringify({ invalid: "payload" }));
-	const payload = base64.fromArrayBuffer(payloadData.buffer as ArrayBuffer, true); // true for urlSafe
+	const payload = base64url.encode(payloadData);
 	const signature = "invalid";
 	const invalidToken = `${header}.${payload}.${signature}`;
 
@@ -727,8 +764,8 @@ test("verify - a legacy put/get prefix token reads as subtrees", async () => {
 		.setProtectedHeader({ alg: "HS256", kid: testKey.kid })
 		.sign(secret);
 	const claims = await Key.verify(key, legacy);
-	expect(claims.publish).toEqual(["alice/**"]);
-	expect(claims.subscribe).toEqual(["**"]);
+	expect(claims.publish?.toJSON()).toEqual(["alice/**"]);
+	expect(claims.subscribe?.toJSON()).toEqual(["**"]);
 });
 
 test("sign - subtree grants are written as legacy put/get", async () => {
@@ -753,8 +790,8 @@ test("key scope is enforced when signing and verifying", async () => {
 		...unrestricted,
 		scope: { root: "project", publish: ["live/**"] },
 	};
-	const allowed: Claims = { root: "project", publish: ["live/room/**"] };
-	const denied: Claims = { root: "project", publish: ["other/**"] };
+	const allowed = { root: "project", publish: ["live/room/**"] };
+	const denied = { root: "project", publish: ["other/**"] };
 
 	await expect(Key.sign(scoped, allowed)).resolves.toBeString();
 	await expect(Key.sign(scoped, denied)).rejects.toThrow("exceed the key scope");

@@ -1,4 +1,4 @@
-import type { Time } from "@moq/net";
+import type { Milli } from "@moq/clock";
 
 // Implements the estimator in doc/concept/audio-jitter.md, which is normative. The design and
 // every constant come from WebRTC NetEq's underrun optimizer; this is written from the document,
@@ -34,9 +34,10 @@ const PRIOR = Float64Array.from({ length: BUCKETS }, (_, i) => 0.5 ** (i + 1));
 /**
  * How much buffer late arrivals need, measured from arrival timing alone.
  *
- * Each frame's delay is measured against the fastest frame in the last `WINDOW` of media time, the
- * largest delay per `RESAMPLE` interval lands in a decaying histogram, and the estimate is its 95th
- * percentile. Excludes the codec frame and any advertised floor, which the caller composes on top.
+ * Each frame's delay is measured against the fastest frame at or before it in the last `WINDOW` of
+ * media time, the largest delay per `RESAMPLE` interval lands in a decaying histogram, and the
+ * estimate is its 95th percentile. Excludes the codec frame and any advertised floor, which the
+ * caller composes on top.
  */
 export class Jitter {
 	/** Arrivals still inside the reference window, in media order. */
@@ -56,25 +57,31 @@ export class Jitter {
 	#count = 0;
 
 	/** Fold one frame in: `arrival` on the receiver's monotonic clock, `media` its timestamp. */
-	observe(arrival: Time.Milli, media: Time.Milli): void {
-		// A reordered frame is excluded rather than measured: the media-time gap back to the frame
-		// that overtook it would otherwise be added to the delay.
-		if (media <= this.#newest) return;
-		this.#newest = media;
+	observe(arrival: Milli, media: Milli): void {
+		// A reordered frame is measured but never joins the window: it arrived after a newer frame,
+		// so it can never be the fastest, and a later frame must not be measured against it.
+		if (media > this.#newest) {
+			this.#newest = media;
 
-		// Pruning by media time is what makes a timestamp jump self-correcting: everything before it
-		// leaves the window at once and the new frame becomes its own reference.
-		let stale = 0;
-		while (stale < this.#history.length && this.#history[stale].media < media - WINDOW) stale++;
-		if (stale > 0) this.#history.splice(0, stale);
-		this.#history.push({ arrival, media });
-
-		// Delay against the fastest frame in the window, not the previous one, so a queue that
-		// fills a little per frame reads as the build-up it is.
-		let reference = this.#history[0];
-		for (const entry of this.#history) {
-			if (entry.arrival - entry.media < reference.arrival - reference.media) reference = entry;
+			// Pruning by media time is what makes a timestamp jump self-correcting: everything before
+			// it leaves the window at once and the new frame becomes its own reference.
+			let stale = 0;
+			while (stale < this.#history.length && this.#history[stale].media < media - WINDOW) stale++;
+			if (stale > 0) this.#history.splice(0, stale);
+			this.#history.push({ arrival, media });
 		}
+
+		// Delay against the fastest frame in the window at or before this one, not the previous one,
+		// so a queue that fills a little per frame reads as the build-up it is, and an older frame
+		// held behind newer ones reads as the wait playing it in order costs. A frame older than the
+		// whole window, such as the backlog a subscription delivers after its live edge, has no
+		// reference and is not measured.
+		let reference: { arrival: number; media: number } | undefined;
+		for (const entry of this.#history) {
+			if (entry.media > media) break;
+			if (!reference || entry.arrival - entry.media < reference.arrival - reference.media) reference = entry;
+		}
+		if (!reference) return;
 		const delay = Math.max(0, arrival - reference.arrival - (media - reference.media));
 
 		if (this.#origin === undefined) {
@@ -99,14 +106,26 @@ export class Jitter {
 		this.#peak = delay;
 	}
 
+	/**
+	 * A new estimator that keeps what this one learned but measures arrivals afresh, for a track that
+	 * replaces this one on the same path. Its frames are measured against their own fastest, never
+	 * against this track's.
+	 */
+	fork(): Jitter {
+		const fork = new Jitter();
+		fork.#histogram = Float64Array.from(this.#histogram);
+		fork.#count = this.#count;
+		return fork;
+	}
+
 	/** The measured term: the upper edge of the bucket holding the 95th percentile. */
-	get measured(): Time.Milli {
+	get measured(): Milli {
 		let cumulative = 0;
 		for (let i = 0; i < BUCKETS; i++) {
 			cumulative += this.#histogram[i];
-			if (cumulative > QUANTILE) return ((i + 1) * BUCKET) as Time.Milli;
+			if (cumulative > QUANTILE) return ((i + 1) * BUCKET) as Milli;
 		}
-		return (BUCKETS * BUCKET) as Time.Milli;
+		return (BUCKETS * BUCKET) as Milli;
 	}
 
 	// `h = f*h + (1-f)*x`, where x is all weight on the observed bucket, or the prior when the

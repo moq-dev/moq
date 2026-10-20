@@ -276,7 +276,7 @@ mod tests {
 		let admission = admissions.next().await.unwrap();
 		trigger.start();
 		let waited = shutdown.drained().now_or_never().is_none();
-		admission.refuse(crate::auth::Error::Refused);
+		admission.refuse(crate::auth::Error::Refused(Default::default()));
 		drop(connecting.await.unwrap());
 		running.await.unwrap().unwrap();
 		assert!(waited, "drain completed while auth admission is pending");
@@ -285,12 +285,12 @@ mod tests {
 	/// A WebSocket peer that upgrades and never sends SETUP ends at the drain
 	/// deadline even with the SETUP timeout disabled, so its task does not
 	/// outlive the relay.
-	#[cfg(all(feature = "noq", feature = "websocket"))]
+	#[cfg(all(feature = "quic", feature = "websocket"))]
 	#[tokio::test]
 	async fn withheld_websocket_setup_ends_at_the_deadline() {
 		let window = Duration::from_secs(1);
 		let mut config = crate::Config::default();
-		config.listen.timeout = Duration::ZERO;
+		config.listen.timeout = Some(Duration::ZERO);
 		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.listen.tls.generate = vec!["localhost".into()];
 		config.web.ws = true;
@@ -413,7 +413,7 @@ mod tests {
 		});
 		let admission = admissions.next().await.unwrap();
 		trigger.start();
-		let all = || [moq_auth::Pattern::all()].into_iter().collect();
+		let all = moq_auth::Pattern::all;
 		let (_lease, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 		admission.grant(consumer);
 		let connection = connecting.await.unwrap().unwrap();

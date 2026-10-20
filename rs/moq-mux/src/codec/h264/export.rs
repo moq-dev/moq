@@ -25,6 +25,10 @@ pub struct Export<S: Stream> {
 	catalog: Option<S>,
 	max_delay: std::time::Duration,
 	track: Option<H264Track>,
+	/// The latest presentation time written. A switch to another rendition resumes at its first
+	/// keyframe past it: a new subscription starts at the rendition's latest group, which for
+	/// one re-enabled is the stale group it stopped on.
+	playhead: Option<std::time::Duration>,
 }
 
 struct H264Track {
@@ -38,6 +42,8 @@ struct H264Track {
 	/// A decoder description supplies length-prefix size and any out-of-band parameter sets.
 	/// Without one, the payload is already Annex-B.
 	convert: Option<Convert>,
+	/// Frames are dropped until a keyframe past the playhead.
+	joining: bool,
 }
 
 struct Convert {
@@ -58,6 +64,7 @@ impl<S: Stream> Export<S> {
 			catalog: Some(catalog),
 			max_delay: std::time::Duration::ZERO,
 			track: None,
+			playhead: None,
 		}
 	}
 
@@ -97,6 +104,14 @@ impl<S: Stream> Export<S> {
 
 			match ready!(track.source.poll_read(waiter))? {
 				Some(frame) => {
+					let timestamp = std::time::Duration::from(frame.timestamp);
+					if track.joining {
+						if !frame.keyframe || self.playhead.is_some_and(|playhead| timestamp <= playhead) {
+							continue;
+						}
+						track.joining = false;
+					}
+					self.playhead = self.playhead.max(Some(timestamp));
 					let bytes = match &track.convert {
 						None => frame.payload,
 						Some(convert) => {
@@ -119,7 +134,7 @@ impl<S: Stream> Export<S> {
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> crate::Result<()> {
 		let mut catalog = catalog.clone();
-		self.source.retain_valid_media(&mut catalog);
+		self.source.retain_selectable(&mut catalog);
 
 		let picked = catalog
 			.video
@@ -179,6 +194,7 @@ impl<S: Stream> Export<S> {
 			config: config.clone(),
 			source,
 			convert,
+			joining: true,
 		});
 
 		Ok(())
@@ -322,6 +338,60 @@ mod tests {
 			"frame 1 P-slice must follow the prefix in Annex-B form"
 		);
 	}
+	/// The next chunk, required to be ready without another frame arriving.
+	async fn next<S: Stream>(export: &mut Export<S>) -> Bytes {
+		tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+			.await
+			.expect("a frame is ready")
+			.unwrap()
+			.expect("the export continues")
+	}
+
+	/// A disabled rendition hands the stream to its enabled sibling. Re-enabled, it takes the
+	/// stream back at its first keyframe past what was written, skipping the stale group a new
+	/// subscription starts on.
+	#[tokio::test(start_paused = true)]
+	async fn follows_the_catalog_across_a_disable() {
+		use crate::container::test_util::{Live, raw_frame};
+
+		let mut live = Live::avc3();
+		let primary = live.track.name().to_string();
+		let config = live.catalog.snapshot().video.renditions[&primary].clone();
+		let mut sibling = live.add_track(".sibling", |catalog, name| {
+			catalog.modify().unwrap().video.renditions.insert(name, config);
+		});
+		assert!(primary.as_str() < sibling.name(), "the primary is first by name");
+		let set_enabled = |live: &mut Live, enabled: bool| {
+			live.catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.get_mut(&primary)
+				.unwrap()
+				.enabled = enabled;
+		};
+		let mut export = Export::new(live.source().await, live.catalog_stream().await);
+
+		live.track.write(raw_frame(0, b"primary-0", true)).unwrap();
+		sibling.write(raw_frame(0, b"sibling-0", true)).unwrap();
+		assert_eq!(next(&mut export).await.as_ref(), b"primary-0");
+
+		set_enabled(&mut live, false);
+		sibling.write(raw_frame(100_000, b"sibling-1", true)).unwrap();
+		assert_eq!(next(&mut export).await.as_ref(), b"sibling-1");
+
+		set_enabled(&mut live, true);
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+				.await
+				.is_err(),
+			"the stale group the primary stopped on is not replayed"
+		);
+		live.track.write(raw_frame(200_000, b"primary-2", true)).unwrap();
+		assert_eq!(next(&mut export).await.as_ref(), b"primary-2");
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn in_band_export_accepts_empty_parameter_sets() {
 		for in_band in [false, true] {

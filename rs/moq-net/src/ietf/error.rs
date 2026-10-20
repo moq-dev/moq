@@ -1,7 +1,8 @@
 //! The moq-transport error code registries, per negotiated draft.
 //!
-//! This module holds the stream reset registry; [`request`] holds the one for rejecting a
-//! request. The two are disjoint, so the same integer means different things in each.
+//! This module holds the stream reset registry and the session close encoder; [`request`]
+//! holds the one for rejecting a request. The reset and request registries are disjoint, so
+//! the same integer means different things in each.
 //!
 //! # Stream reset codes
 //!
@@ -101,7 +102,7 @@ pub fn to_stream_code(err: &StreamError, version: Version) -> u32 {
 /// A code the draft does not assign stays [`StreamError::Unknown`], which surfaces as
 /// [`Error::Stream`](crate::Error::Stream): an error, but never one given a meaning it did
 /// not carry. That includes the codes this crate has no local counterpart for
-/// (UNKNOWN_OBJECT_STATUS, EXPIRED_AUTH_TOKEN, EXCESSIVE_LOAD) and every value a later
+/// (UNKNOWN_OBJECT_STATUS, EXCESSIVE_LOAD) and every value a later
 /// draft may add.
 pub fn from_stream_code(code: u32, version: Version) -> StreamError {
 	match code {
@@ -114,6 +115,17 @@ pub fn from_stream_code(code: u32, version: Version) -> StreamError {
 		TOO_FAR_BEHIND if has_too_far_behind(version) => StreamError::TooFarBehind,
 		MALFORMED_TRACK if has_malformed_track(version) => StreamError::MalformedTrack,
 		code => StreamError::Unknown(code),
+	}
+}
+
+/// The code to close the session with.
+///
+/// The shared session registry, except moq-lite's own 0x30-0x3f range: a bridge must not
+/// carry those codes onto this wire, so an unknown one closes as unspecified instead.
+pub(crate) fn to_session_code(error: &SessionError) -> u32 {
+	match error {
+		SessionError::Unknown(0x30..=0x3f) => SessionError::Internal.to_code(),
+		error => error.to_code(),
 	}
 }
 
@@ -134,7 +146,9 @@ pub fn from_stream_code(code: u32, version: Version) -> StreamError {
 /// | DOES_NOT_EXIST | 0x4 | 0x4 | - | - | - | 0x10 |
 /// | UNINTERESTED | - | - | 0x4 | 0x4 | - | 0x20 |
 /// | MALFORMED_TRACK | - | 0x9 | - | - | - | 0x12 |
+/// | EXPIRED_AUTH_TOKEN | 0x12 | 0x12 | - | 0x12 | 0x12 | 0x5 |
 /// | GOING_AWAY | - | - | - | - | - | 0x6 (17+) |
+/// | UNSUPPORTED_EXTENSION | - | - | - | - | - | 0x33 (18+) |
 ///
 /// The renumbering is the trap: draft-14 SUBSCRIBE_ERROR gives 0x4 to TRACK_DOES_NOT_EXIST
 /// and 0x10 to MALFORMED_AUTH_TOKEN, and draft-15 swaps the two. Sending either number
@@ -188,6 +202,13 @@ pub(crate) mod request {
 	const INVALID_RANGE_14: u64 = 0x5;
 	const INVALID_RANGE: u64 = 0x11;
 
+	/// The track holds a Mandatory Track Property the endpoint does not understand. Draft-18
+	/// and later; draft-15 gave 0x33 another meaning.
+	const UNSUPPORTED_EXTENSION: u64 = 0x33;
+
+	/// A Range Filter exceeds MAX_FILTER_RANGES (draft-19 and later).
+	pub(crate) const INVALID_FILTER: u64 = 0x36;
+
 	/// A joining FETCH named no active subscription. Removed from the registry in draft-20.
 	const INVALID_JOINING_REQUEST_ID_14: u64 = 0x7;
 	const INVALID_JOINING_REQUEST_ID: u64 = 0x32;
@@ -212,6 +233,12 @@ pub(crate) mod request {
 
 	/// The same condition from draft-15 on, where 0x10 became DOES_NOT_EXIST.
 	const MALFORMED_AUTH_TOKEN: u64 = 0x4;
+
+	/// An expired AUTHORIZATION TOKEN, as draft-14 numbers it.
+	const EXPIRED_AUTH_TOKEN_14: u64 = 0x12;
+
+	/// The same condition from draft-15 on, where 0x12 became MALFORMED_TRACK.
+	const EXPIRED_AUTH_TOKEN: u64 = 0x5;
 
 	/// The value for "the thing you asked for is not here", or `None` where the draft and
 	/// request assign none.
@@ -283,6 +310,25 @@ pub(crate) mod request {
 		}
 	}
 
+	/// The value for an expired token, or `None` where the draft and request assign none.
+	/// Draft-14 registers none on PUBLISH_ERROR.
+	fn expired_auth_token(kind: Kind, version: Version) -> Option<u64> {
+		match (version, kind) {
+			(Version::Draft14, Kind::Publish) => None,
+			(Version::Draft14, _) => Some(EXPIRED_AUTH_TOKEN_14),
+			_ => Some(EXPIRED_AUTH_TOKEN),
+		}
+	}
+
+	/// The value for a track needing a property we do not understand, or `None` before
+	/// draft-18 registered one.
+	fn unsupported_extension(version: Version) -> Option<u64> {
+		match version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => None,
+			_ => Some(UNSUPPORTED_EXTENSION),
+		}
+	}
+
 	/// The value for a draining session, or `None` before draft-17 registered one.
 	fn going_away(version: Version) -> Option<u64> {
 		match version {
@@ -303,10 +349,14 @@ pub(crate) mod request {
 			Error::Unauthorized
 			| Error::Session(SessionError::Unauthorized)
 			| Error::Stream(StreamError::Unauthorized) => return UNAUTHORIZED,
+			Error::Expired | Error::Session(SessionError::Expired) => expired_auth_token(kind, version),
 			Error::Timeout | Error::Stream(StreamError::DeliveryTimeout) | Error::Session(SessionError::Timeout) => {
 				return TIMEOUT;
 			}
-			Error::Unsupported | Error::Version | Error::Session(SessionError::Version | SessionError::Unsupported) => {
+			Error::Unsupported
+			| Error::Version
+			| Error::Decode(DecodeError::MultipleAuthTokens)
+			| Error::Session(SessionError::Version | SessionError::Unsupported) => {
 				return NOT_SUPPORTED;
 			}
 			// moq-transport has no code for a FETCH that reached a datagram, which is never
@@ -332,6 +382,8 @@ pub(crate) mod request {
 			| Error::MalformedTrack
 			| Error::Stream(StreamError::MalformedTrack) => malformed_track(kind, version),
 			Error::GoingAway | Error::Stream(StreamError::GoingAway) => going_away(version),
+			// Before its code, the closest is that we do not implement what the track needs.
+			Error::UnsupportedExtension => unsupported_extension(version).or(Some(NOT_SUPPORTED)),
 			// Everything else, a duplicate included: no draft assigns it a value, and
 			// INTERNAL_ERROR is how a peer reads an unregistered code anyway.
 			_ => return INTERNAL_ERROR,
@@ -349,12 +401,14 @@ pub(crate) mod request {
 			UNAUTHORIZED => Error::Unauthorized,
 			TIMEOUT => Error::Timeout,
 			NOT_SUPPORTED => Error::Unsupported,
+			code if Some(code) == expired_auth_token(kind, version) => Error::Expired,
 			code if Some(code) == does_not_exist(kind, version) => Error::NotFound,
 			code if Some(code) == invalid_range(kind, version) => Error::InvalidRange,
 			code if Some(code) == invalid_joining_request_id(kind, version) => Error::InvalidJoiningRequestId,
 			code if Some(code) == uninterested(kind, version) => Error::Unroutable,
 			code if Some(code) == malformed_track(kind, version) => Error::MalformedTrack,
 			code if Some(code) == going_away(version) => Error::GoingAway,
+			code if Some(code) == unsupported_extension(version) => Error::UnsupportedExtension,
 			code => Error::Remote(u32::try_from(code).unwrap_or(u32::MAX)),
 		}
 	}
@@ -387,9 +441,10 @@ pub(crate) mod request {
 		/// Every error a rejection distinguishes, plus one it does not, so the checks below cover
 		/// the whole registry rather than the variants someone remembered. A new arm in
 		/// [`to_code`] belongs here.
-		const EVERY_ERROR: [Error; 13] = [
+		const EVERY_ERROR: [Error; 15] = [
 			Error::Duplicate,
 			Error::Unauthorized,
+			Error::Expired,
 			Error::Timeout,
 			Error::Unsupported,
 			Error::Session(SessionError::Unsupported),
@@ -400,6 +455,7 @@ pub(crate) mod request {
 			Error::Unroutable,
 			Error::MalformedTrack,
 			Error::GoingAway,
+			Error::UnsupportedExtension,
 			Error::Remote(0x30),
 		];
 
@@ -483,6 +539,24 @@ pub(crate) mod request {
 			}
 		}
 
+		/// Draft-15 moved EXPIRED_AUTH_TOKEN from 0x12 to 0x5, and draft-14 gives PUBLISH_ERROR
+		/// no value for it.
+		#[test]
+		fn an_expired_token_uses_the_draft_s_own_number() {
+			for kind in KINDS {
+				if kind == Kind::Publish {
+					assert_eq!(to_code(&Error::Expired, kind, Version::Draft14), INTERNAL_ERROR);
+				} else {
+					assert_eq!(to_code(&Error::Expired, kind, Version::Draft14), 0x12);
+					assert!(matches!(from_code(0x12, kind, Version::Draft14), Error::Expired));
+				}
+				for version in ALL.into_iter().skip(1) {
+					assert_eq!(to_code(&Error::Expired, kind, version), 0x5);
+					assert!(matches!(from_code(0x5, kind, version), Error::Expired));
+				}
+			}
+		}
+
 		/// GOING_AWAY arrived in draft-17. Sent to an earlier peer, 0x6 is unassigned there,
 		/// so say INTERNAL_ERROR outright rather than a number that means nothing.
 		#[test]
@@ -503,6 +577,27 @@ pub(crate) mod request {
 				] {
 					assert_eq!(to_code(&Error::GoingAway, kind, version), GOING_AWAY);
 					assert!(matches!(from_code(GOING_AWAY, kind, version), Error::GoingAway));
+				}
+			}
+		}
+
+		/// UNSUPPORTED_EXTENSION arrived in draft-18. Draft-15 gave its 0x33 to
+		/// UNKNOWN_STATUS_IN_RANGE, so earlier drafts say NOT_SUPPORTED instead.
+		#[test]
+		fn unsupported_extension_only_exists_from_draft_18() {
+			for kind in KINDS {
+				for version in ALL {
+					let code = to_code(&Error::UnsupportedExtension, kind, version);
+					match version {
+						Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+							assert_eq!(code, NOT_SUPPORTED, "{version}");
+							assert!(!matches!(from_code(0x33, kind, version), Error::UnsupportedExtension));
+						}
+						_ => {
+							assert_eq!(code, 0x33, "{version}");
+							assert!(matches!(from_code(code, kind, version), Error::UnsupportedExtension));
+						}
+					}
 				}
 			}
 		}
@@ -654,6 +749,26 @@ mod tests {
 			"the two spaces disagree about 0"
 		);
 		assert_eq!(SessionError::Cancel.to_code(), INTERNAL_ERROR);
+	}
+
+	/// moq-lite's own session range never reaches this wire, while the shared registry and
+	/// its reserved range pass through as on moq-lite.
+	#[test]
+	fn the_lite_session_range_is_not_sent() {
+		for code in 0x30..=0x3f {
+			assert_eq!(to_session_code(&SessionError::Unknown(code)), 0x1);
+			assert_eq!(
+				SessionError::Unknown(code).to_code(),
+				code,
+				"the shared encoder is unchanged"
+			);
+		}
+		assert_eq!(to_session_code(&SessionError::Unknown(0x20)), 0x20);
+		assert_eq!(
+			to_session_code(&SessionError::Unauthorized),
+			SessionError::Unauthorized.to_code()
+		);
+		assert_eq!(to_session_code(&SessionError::App(7)), 64 + 7);
 	}
 
 	/// Every code we send must decode back to what we meant on the same draft, or two

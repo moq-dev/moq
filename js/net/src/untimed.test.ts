@@ -1,5 +1,5 @@
 // A track keeps its timedness end to end: no receive path fills in arrival time, and a
-// wire that can't declare a timeline delivers frames untimed. Mirrors rs/moq-net/tests/untimed.rs.
+// wire that can't declare a timeline delivers frames untimed. Mirrors rs/moq-net/tests/integration/untimed.rs.
 import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
@@ -30,7 +30,7 @@ const WIRES: Wire[] = [
 	{ name: "lite-04", protocol: Lite.ALPN_04, declares: false, stamps: false },
 	{ name: "lite-05", protocol: Lite.ALPN_05, declares: true, stamps: true },
 	{ name: "lite-06", protocol: Lite.ALPN_06, declares: true, stamps: true },
-	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true, stamps: true },
+	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true, stamps: false },
 	{ name: "ietf-14", protocol: "", version: Ietf.Version.DRAFT_14, declares: false, stamps: false },
 	{ name: "ietf-16", protocol: Ietf.ALPN.DRAFT_16, declares: false, stamps: false },
 	{ name: "ietf-17", protocol: Ietf.ALPN.DRAFT_17, declares: true, stamps: false },
@@ -185,5 +185,39 @@ for (const wire of WIRES) {
 			expect(info.timescale).toBeUndefined();
 			for (const frame of frames) expect(frame.timestamp).toBeUndefined();
 		}
+	});
+}
+
+for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name === "lite-07-wip")) {
+	test(`${wire.name}: an untimed datagram arrives untimed, or with a send time where the wire must stamp`, async () => {
+		const pair = createMockTransportPair(wire.protocol);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect({ url, transport: pair.client }),
+			accept({ transport: pair.server, url, publish: origin.consume() }),
+		]);
+
+		const broadcast = origin.createBroadcast(Path.from("test"));
+		broadcast.announce();
+		const producer = broadcast.createTrack("video", {});
+		const subscriber = wireOf(client).consume(Path.from("test")).track("video").subscribe();
+
+		// Datagrams aren't cached, so a group read back first proves the subscription is live.
+		const group = producer.appendGroup();
+		group.writeFrame({ payload: new Uint8Array([0]) });
+		group.close();
+		expect(await subscriber.recvGroup()).toBeDefined();
+
+		producer.appendDatagram(undefined, new Uint8Array([7]));
+		const datagram = await subscriber.recvDatagram();
+
+		expect(datagram?.payload).toEqual(new Uint8Array([7]));
+		if (wire.stamps) expect(datagram?.timestamp).toBeDefined();
+		else expect(datagram?.timestamp).toBeUndefined();
+
+		broadcast.close();
+		subscriber.close();
+		client.abort();
+		server.abort();
 	});
 }

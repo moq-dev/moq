@@ -3,6 +3,7 @@
 	"private": true,
 	"type": "module",
 	"dependencies": {
+		"@moq/clock": "workspace:*",
 		"@moq/net": "workspace:*"
 	}
 }

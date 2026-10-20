@@ -50,6 +50,9 @@ pub use encoder::{Config, Encoder, Pending};
 pub use producer::Producer;
 
 #[cfg(test)]
+use futures::FutureExt;
+
+#[cfg(test)]
 mod test {
 	use std::task::Poll;
 
@@ -58,15 +61,61 @@ mod test {
 	use super::*;
 	use crate::Compression;
 
+	/// Refused before the log's group opens, so the log carries on rather than ending.
+	#[test]
+	fn a_timed_track_refuses_a_bare_publish() {
+		let (mut producer, track) = producer_on(Config::default(), timed());
+		assert!(matches!(
+			producer.append(&json!({ "n": 0 })),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+		let at = moq_net::Timestamp::from_millis(100).unwrap();
+		producer
+			.append(moq_net::Timed::from(&json!({ "n": 1 })).at(at))
+			.unwrap();
+		assert!(matches!(
+			producer.append(&json!({ "n": 2 })),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+		producer
+			.append(moq_net::Timed::from(&json!({ "n": 3 })).at(at))
+			.unwrap();
+		producer.finish().unwrap();
+		assert_eq!(drain(consume(track, false)), vec![json!({ "n": 1 }), json!({ "n": 3 })]);
+	}
+
+	#[test]
+	fn a_bare_publish_stays_untimed() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("untimed", moq_net::track::Info::default())
+			.unwrap();
+		let mut groups = track.subscribe(None);
+		let mut producer = Producer::new(track, Config::default());
+		producer.append(&json!({ "n": 1 })).unwrap();
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(Some(mut group))) = groups.poll_recv_group(&waiter) else {
+			panic!("expected an untimed group");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected an untimed frame");
+		};
+		assert_eq!(frame.timestamp, None);
+	}
+
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
 	fn producer(config: Config) -> (Producer<Value>, moq_net::track::Subscriber) {
+		producer_on(config, moq_net::track::Info::default())
+	}
+
+	fn producer_on(config: Config, info: moq_net::track::Info) -> (Producer<Value>, moq_net::track::Subscriber) {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
-			.create_track("test", timed())
+			.create_track("test", info)
 			.unwrap();
 		let consumer = track.subscribe(None);
 		(Producer::new(track, config), consumer)
@@ -77,16 +126,13 @@ mod test {
 	fn demand_follows_subscribers() {
 		let (producer, consumer) = producer(Config::default());
 		let demand = producer.demand();
-		let waiter = kio::Waiter::noop();
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
+		assert_eq!(demand.wanted(), Some(0));
 
 		drop(consumer);
-		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Ok(()))));
-		assert!(demand.poll_used(&waiter).is_pending());
+		assert_eq!(demand.wanted(), None);
 
 		let _consumer = producer.consume();
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
-		assert!(demand.poll_unused(&waiter).is_pending());
+		assert_eq!(demand.wanted(), Some(0));
 	}
 
 	fn compressed() -> Config {
@@ -113,7 +159,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			out.push(value);
+			out.push(value.value);
 		}
 		out
 	}
@@ -133,7 +179,7 @@ mod test {
 	/// Each record keeps its own capture time, and the returned size is the encoded frame.
 	#[test]
 	fn a_stamped_append_writes_its_capture_time() {
-		let (mut producer, _track) = producer(compressed());
+		let (mut producer, _track) = producer_on(compressed(), timed());
 		let mut groups = producer.consume();
 		let captured = moq_net::Timestamp::from_millis(1_234).unwrap();
 		let record = json!({ "n": 1 });
@@ -165,14 +211,17 @@ mod test {
 
 	#[test]
 	fn all_records_ride_one_group() {
-		let (mut producer, track) = producer(compressed());
+		let (mut producer, mut track) = producer(compressed());
 		for n in 0..50 {
 			producer.append(&json!({ "n": n })).unwrap();
 		}
 		producer.finish().unwrap();
 
 		// Never rolled: a single group holds the whole log.
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		assert_eq!(drain(consume(track, true)).len(), 50);
 	}
 
@@ -185,7 +234,7 @@ mod test {
 		for n in 0..3 {
 			producer.append(&json!({ "n": n })).unwrap();
 			match consumer.poll_next(&waiter) {
-				Poll::Ready(Ok(Some(value))) => assert_eq!(value, json!({ "n": n })),
+				Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "n": n })),
 				other => panic!("expected record, got {other:?}"),
 			}
 		}
@@ -234,9 +283,21 @@ mod test {
 
 		let mut bad = std::collections::BTreeMap::new();
 		bad.insert((1, 2), 3);
-		assert!(producer.append(&bad).is_err());
+		assert!(
+			producer
+				.append(moq_net::Timed::from(&bad).at(moq_net::Timestamp::from_millis(0).unwrap()))
+				.is_err()
+		);
 
-		assert_eq!(subscriber.latest(), None, "a rejected record opened a group");
+		assert_eq!(
+			subscriber
+				.largest()
+				.now_or_never()
+				.flatten()
+				.map(|position| position.group),
+			None,
+			"a rejected record opened a group"
+		);
 
 		let waiter = kio::Waiter::noop();
 		assert!(
@@ -259,6 +320,12 @@ mod test {
 			.unwrap()
 	}
 
+	/// `value` at a time [`rejecting_track`] can't hold: it matches the timed track, so the
+	/// append gets as far as the group before the conversion fails.
+	fn late(value: &Value) -> moq_net::Timed<&Value> {
+		moq_net::Timed::from(value).at(moq_net::Timestamp::from_millis(10_000).unwrap())
+	}
+
 	/// A failed write must reach the consumer, not just the caller. A clean close drains a reader to
 	/// `None`, which is exactly what a completed log looks like, so a truncated log would be
 	/// indistinguishable from a whole one.
@@ -268,7 +335,10 @@ mod test {
 		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::<Value>::new(track, Config::default());
 
-		assert!(matches!(producer.append(&json!({ "n": 1 })), Err(crate::Error::Net(_))));
+		assert!(matches!(
+			producer.append(late(&json!({ "n": 1 }))),
+			Err(crate::Error::Net(_))
+		));
 
 		let waiter = kio::Waiter::noop();
 		assert!(
@@ -285,12 +355,15 @@ mod test {
 		let track = rejecting_track();
 		let mut producer = Producer::<Value>::new(track, compressed());
 
-		assert!(matches!(producer.append(&json!({ "n": 1 })), Err(crate::Error::Net(_))));
+		assert!(matches!(
+			producer.append(late(&json!({ "n": 1 }))),
+			Err(crate::Error::Net(_))
+		));
 
 		// The retry reports the abort rather than the `Error::Desync` the dropped record left on the
 		// encoder, which says nothing about why the log stopped.
 		assert!(
-			matches!(producer.append(&json!({ "n": 2 })), Err(crate::Error::Net(_))),
+			matches!(producer.append(late(&json!({ "n": 2 }))), Err(crate::Error::Net(_))),
 			"a second append must fail on the ended track rather than open another group"
 		);
 
@@ -346,7 +419,7 @@ mod test {
 
 		assert!(matches!(
 			consumer.poll_next(&waiter),
-			Poll::Ready(Ok(Some(value))) if value == json!({ "n": 0 })
+			Poll::Ready(Ok(Some(value))) if value.value == json!({ "n": 0 })
 		));
 		assert!(matches!(
 			consumer.poll_next(&waiter),

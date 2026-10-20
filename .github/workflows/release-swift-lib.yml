@@ -9,8 +9,8 @@ name: Release Swift Lib
 # it isn't already tagged on the mirror. That tag check is the release gate (the
 # same model release-plz uses for crates), so there's no separate tag to
 # remember. When wrapper and FFI changes land together, publication waits for
-# Release Swift FFI and resumes from its successful workflow run so the required
-# generated API already exists on the mirror.
+# the Swift FFI publisher in Release FFI and resumes once it succeeds, so the
+# required generated API already exists on the mirror.
 
 on:
   push:
@@ -27,6 +27,9 @@ on:
       - ".github/workflows/release-swift-lib.yml"
       - "sh/gh/release.sh"
   pull_request:
+    branches: [release]
+    # `edited` catches a main PR retargeted to release.
+    types: [opened, synchronize, reopened, edited]
     paths:
       - "swift/VERSION"
       - "swift/Package.swift.template"
@@ -37,8 +40,10 @@ on:
       - "sh/swift/verify.sh"
       - ".github/workflows/release-swift-lib.yml"
       - "sh/gh/release.sh"
+  workflow_call:
+  workflow_dispatch:
   workflow_run:
-    workflows: ["Release Swift FFI"]
+    workflows: ["Release FFI", "Release Swift FFI"]
     types:
       - completed
 
@@ -48,27 +53,54 @@ permissions:
 # Separate PR builds from publishes so a PR run can't queue ahead of (and
 # delay) a release.
 concurrency:
-  group: release-swift-lib-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'publish' }}
+  group: release-swift-lib-${{ (github.event_name == 'push' || github.event_name == 'workflow_run') && 'publish' || github.ref }}
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build wrapper package
-    runs-on: macos-latest
-    # workflow_run has the base repository's privileges, so accept only a
-    # successful upstream tag-push run from the expected release workflow.
+  ffi-release:
+    name: Check FFI publisher
+    runs-on: ubuntu-latest
+    # workflow_run is privileged. Preserve the owner, same-repo, push and tag
+    # gates before reading the trusted upstream checkout or allowing wrapper
+    # publication.
     if: >-
       github.repository_owner == 'moq-dev' &&
       (github.event_name != 'workflow_run' ||
-       (github.event.workflow_run.conclusion == 'success' &&
+       ((github.event.workflow_run.name == 'Release FFI' || github.event.workflow_run.conclusion == 'success') &&
         github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
         startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v')))
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      ready: ${{ steps.publisher.outputs.ready }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/just
+      - name: Check independent publisher
+        id: publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_NAME: ${{ github.event.workflow_run.name }}
+          UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+          UPSTREAM_RUN_STARTED_AT: ${{ github.event.workflow_run.run_started_at }}
+        run: just gh ffi completed swift
+
+  build:
+    name: Build wrapper package
+    needs: [ffi-release]
+    if: needs.ffi-release.outputs.ready == 'true'
+    runs-on: macos-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
       ffi_version: ${{ steps.version.outputs.ffi_version }}
       ffi_unreleased: ${{ steps.ffi-diff.outputs.unreleased }}
-      # On PRs we only build (dry-run). On `release` we publish when the version
-      # isn't already tagged on the mirror.
+      # Release PRs and nightly only build. On `release` we publish when the
+      # version is not already tagged on the mirror.
       publish: ${{ (github.event_name == 'push' || github.event_name == 'workflow_run') && steps.ffi-diff.outputs.unreleased != 'true' && steps.ffi-gate.outputs.exists == 'true' && steps.gate.outputs.exists == 'false' }}
 
     steps:
@@ -95,8 +127,8 @@ jobs:
           echo "ffi_version=$FFI_VERSION" >> "$GITHUB_OUTPUT"
           echo "wrapper $VERSION, moq-ffi pin $FFI_VERSION"
 
-      # workflow_run is chained after Release Swift FFI, so its tag is published.
-      # PRs run it too, so the dry-run shows whether merging would publish.
+      # workflow_run verifies the Swift FFI publisher, so its tag is published.
+      # Dry-runs show whether merging would publish.
       - name: Check for unreleased FFI changes
         id: ffi-diff
         if: github.event_name != 'workflow_run'
@@ -111,13 +143,13 @@ jobs:
         run: just gh release git-tag-exists moq-dev/moq-swift-ffi "$FFI_VERSION"
 
       - name: Unpublished FFI notice
-        if: steps.ffi-diff.outputs.unreleased != 'true' && steps.ffi-gate.outputs.exists != 'true' && github.event_name != 'pull_request'
+        if: steps.ffi-diff.outputs.unreleased != 'true' && steps.ffi-gate.outputs.exists != 'true' && (github.event_name == 'push' || github.event_name == 'workflow_run')
         env:
           FFI_VERSION: ${{ steps.version.outputs.ffi_version }}
-        run: echo "::warning::moq-swift-ffi ${FFI_VERSION} is not published; deferring to the Release Swift FFI chain."
+        run: echo "::warning::moq-swift-ffi ${FFI_VERSION} is not published; deferring to the FFI release chain."
 
       # The release gate: skip publishing a version already tagged on the mirror.
-      # Runs on PRs too, as an informational dry-run.
+      # Runs on dry-runs too, as an informational dry-run.
       - name: Check mirror tag
         id: gate
         env:
@@ -130,7 +162,7 @@ jobs:
         run: just swift package --version "$BUILD_VERSION" --output release-out
 
       - name: Upload Swift package
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: swift-wrapper-package
           path: release-out/*
@@ -142,7 +174,8 @@ jobs:
     # failed) when the pinned moq-ffi version isn't mirrored yet, so the first
     # bootstrap doesn't deadlock on a not-yet-published FFI package.
     name: Verify staged package resolves
-    needs: [build]
+    # Directly on ffi-release: its gate is what makes the head_sha checkout trusted.
+    needs: [ffi-release, build]
     runs-on: macos-latest
 
     steps:
@@ -155,7 +188,7 @@ jobs:
 
       - name: Check FFI mirror tag
         id: ffi
-        if: needs.build.outputs.publish == 'true' || (github.event_name == 'pull_request' && needs.build.outputs.ffi_unreleased != 'true')
+        if: needs.build.outputs.publish == 'true' || (github.event_name != 'push' && github.event_name != 'workflow_run' && needs.build.outputs.ffi_unreleased != 'true')
         env:
           FFI_VERSION: ${{ needs.build.outputs.ffi_version }}
         # Treat a missing mirror repo / unreachable remote as "not published"
@@ -166,7 +199,7 @@ jobs:
 
       - name: Download staged package
         if: steps.ffi.outputs.exists == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: swift-wrapper-package
           path: artifacts
@@ -182,14 +215,15 @@ jobs:
         run: echo "::notice::moq-ffi has unreleased changes; skipping the published-package cross-resolve and deferring wrapper publication to the FFI release chain."
 
       - name: Unpublished FFI notice
-        if: (needs.build.outputs.publish == 'true' || github.event_name == 'pull_request') && needs.build.outputs.ffi_unreleased != 'true' && steps.ffi.outputs.exists != 'true'
+        if: (needs.build.outputs.publish == 'true' || (github.event_name != 'push' && github.event_name != 'workflow_run')) && needs.build.outputs.ffi_unreleased != 'true' && steps.ffi.outputs.exists != 'true'
         env:
           FFI_VERSION: ${{ needs.build.outputs.ffi_version }}
         run: echo "::notice::moq-swift-ffi ${FFI_VERSION} not published yet; skipping cross-package resolve."
 
   publish:
     name: Publish to Swift Package mirror
-    needs: [build, verify]
+    # Directly on ffi-release: its gate is what makes the head_sha checkout trusted.
+    needs: [ffi-release, build, verify]
     runs-on: ubuntu-latest
     if: ${{ needs.build.outputs.publish == 'true' }}
 
@@ -202,7 +236,7 @@ jobs:
       - uses: ./.github/actions/just
 
       - name: Generate moq-bot token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
         id: token
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
@@ -213,7 +247,7 @@ jobs:
           permission-contents: write
 
       - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: swift-wrapper-package
           path: swift-out
@@ -231,7 +265,7 @@ jobs:
     name: Publish dry-run
     needs: [build]
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name != 'push' && github.event_name != 'workflow_run'
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -241,7 +275,7 @@ jobs:
       - uses: ./.github/actions/just
 
       - name: Download package
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: swift-wrapper-package
           path: swift-out

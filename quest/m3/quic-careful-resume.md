@@ -11,8 +11,6 @@ to slow start without hurting the path.
 ## Plan
 
 Decided in the 2026-10-10 audit: scope this to remembered QUIC connections.
-Transferring TCP estimates into a WebSocket-to-QUIC upgrade is out of scope;
-that upgrade starts without a seed.
 
 Follow the shape of draft-ietf-ccwg-careful-resume: the sender keeps a
 per-destination record of the last validated bandwidth estimate and minimum
@@ -20,7 +18,7 @@ RTT with its age, jumps the congestion window toward that estimate once the
 new path's RTT matches the recorded one, and drops back to ordinary slow
 start on the first loss or a mismatched RTT.
 
-- Implement in the fork as a `Controller` wrapper: any controller can be
+- Implement in `moq-quic` as a `Controller` wrapper: any controller can be
   resumed. BBR3 seeds its bandwidth model and pacing rate directly; Cubic
   seeds `ssthresh`.
 - The store is a bounded, in-process map keyed by remote address plus SNI,
@@ -29,18 +27,15 @@ start on the first loss or a mismatched RTT.
   `rs/moq-tokio/src/connection.rs`, dialing through the race in
   `failover.rs`) seeds a redial from the session it replaces, and
   the relay's cluster peers seed from the previous session to the same peer.
-  The transport-upgrade quest's QUIC dial seeds from nothing, since the
-  previous session ran over TCP.
 
-Measure time to the encoder's target rate after a reconnect on the impaired
-path profile, plus loss and latency during the jump. Ship it on by default
+Measure time to the encoder's target rate after a reconnect on bufferbloat:
+a rate below the media bitrate behind a deep but finite queue, with actual
+overflow drops, plus loss and latency during the jump. Include competing
+loss-based traffic when BBR alone does not fill the queue. Random loss may
+prove fallback correctness, but never grades the jump's performance.
+Ship it on by default
 only when the jump never makes the first second worse than slow start.
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 
 ## Related
 
-- [Transport upgrade](/quest/m1/transport-upgrade/README.md) - its first QUIC connection has no seed from TCP; later QUIC reconnects may reuse a remembered estimate
 - [noq#815](https://github.com/n0-computer/noq/issues/815) - the careful-resume proposal to n0

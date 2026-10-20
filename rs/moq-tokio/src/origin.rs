@@ -8,16 +8,30 @@
 /// remaining lifecycle work drains. Keep the pair explicit instead when you
 /// want to poll the driver yourself or tear the origin down by dropping it.
 ///
-/// Panics if called outside a tokio runtime.
-///
+/// Panics if called outside a tokio runtime. A panic in the driver aborts the
+/// process: every session on the origin depends on it, so serving on without it
+/// would look healthy while delivering nothing.
 pub fn spawn() -> moq_net::origin::Producer {
 	spawn_config(moq_net::origin::Config::default())
 }
 
 /// Build and spawn an origin producer with an explicit configuration.
 pub fn spawn_config(config: moq_net::origin::Config) -> moq_net::origin::Producer {
+	use futures::FutureExt;
+
 	let (producer, driver) = moq_net::origin::Producer::new(config);
-	tokio::spawn(moq_net::time::run(driver));
+	tokio::spawn(async move {
+		if let Err(payload) = std::panic::AssertUnwindSafe(moq_net::time::run(driver))
+			.catch_unwind()
+			.await
+		{
+			tracing::error!(
+				panic = crate::panic::message(payload.as_ref()),
+				"origin driver panicked"
+			);
+			std::process::abort();
+		}
+	});
 	producer
 }
 

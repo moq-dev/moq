@@ -1,6 +1,8 @@
 import type * as Catalog from "@moq/hang/catalog";
 import { u53 } from "@moq/hang/catalog";
+import * as Util from "@moq/hang/util";
 import type * as Msf from "@moq/msf";
+import { Path } from "@moq/net";
 import { base64ToBytes } from "./base64";
 
 const DEFAULT_SAMPLE_RATE = 48000;
@@ -91,25 +93,58 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 		sampleRate: u53(track.samplerate ?? DEFAULT_SAMPLE_RATE),
 		numberOfChannels: u53(channels),
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
+		// MSF cannot advertise decoder warmup, so derive Opus's seek pre-roll.
+		warmup: track.codec === "opus" ? u53(Util.Opus.WARMUP) : undefined,
 		jitter: track.jitter != null ? u53(track.jitter) : undefined,
 		delay: track.delay != null ? delayMillis(track.delay) : undefined,
 	};
 }
 
+// MSF namespaces are absolute, but each side sees paths under its own connection root. Draft
+// catalogs repeat the publisher's full namespace on every track, so a namespace matching the
+// catalog's path on whole trailing segments is the catalog seen from a different root.
+function namesCatalog(namespace: Path.Valid, base: Path.Valid): boolean {
+	if (namespace === base) return true;
+	const a = Path.parts(namespace);
+	const b = Path.parts(base);
+	if (a.length === 0 || b.length === 0) return false;
+	const endsWith = (long: string[], short: string[]) =>
+		short.length <= long.length && short.every((part, i) => part === long[long.length - short.length + i]);
+	return endsWith(a, b) || endsWith(b, a);
+}
+
 /** Convert an MSF catalog to a hang catalog Root. */
-export function toHang(msf: Msf.Catalog): Catalog.Root {
+export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 	// Track names are untrusted keys; a null prototype keeps `__proto__` an ordinary rendition.
 	const videoRenditions: Record<string, Catalog.VideoConfig> = Object.create(null);
 	const audioRenditions: Record<string, Catalog.AudioConfig> = Object.create(null);
 	const textRenditions: Record<string, Catalog.TextConfig> = Object.create(null);
 
+	const names = new Set<string>();
 	for (const track of msf.tracks) {
+		if (names.has(track.name)) throw new Error(`MSF track name ${track.name} is ambiguous as a hang rendition ID`);
+		names.add(track.name);
+		let broadcast: Path.Relative | undefined;
+		if (track.namespace !== undefined) {
+			if (base === undefined)
+				throw new Error(`MSF track ${track.name} namespace requires the catalog broadcast path`);
+			const target = Path.from(track.namespace);
+			// Normalizing an MSF namespace must not select different content.
+			if (target !== track.namespace)
+				throw new Error(`MSF track ${track.name} namespace cannot be referenced from the catalog`);
+			if (!namesCatalog(target, base)) {
+				const relative = Path.relative(target, base);
+				if (relative === undefined)
+					throw new Error(`MSF track ${track.name} namespace cannot be referenced from the catalog`);
+				broadcast = relative;
+			}
+		}
 		if (track.role === "video") {
 			const config = toVideoConfig(track);
-			if (config) videoRenditions[track.name] = config;
+			if (config) videoRenditions[track.name] = { ...config, broadcast };
 		} else if (track.role === "audio") {
 			const config = toAudioConfig(track);
-			if (config) audioRenditions[track.name] = config;
+			if (config) audioRenditions[track.name] = { ...config, broadcast };
 		} else if (
 			track.role === "caption" ||
 			track.role === "subtitle" ||
@@ -123,6 +158,7 @@ export function toHang(msf: Msf.Catalog): Catalog.Root {
 			if (!info) continue;
 			if (!track.codec) throw new Error(`MSF text track ${track.name} missing codec`);
 			textRenditions[track.name] = {
+				broadcast,
 				format: track.codec,
 				role: track.role,
 				lang: track.lang,

@@ -4,8 +4,9 @@
 
 A path and the epoch on its route are the only content identity, and no
 first-party publisher reuses a pair for different content. Only routes with
-the same epoch resume a subscription from the first frame it lacks; a route
-without one keeps its subscriptions until it goes. So epochs are what make
+the same epoch resume a subscription from the first frame it lacks, within
+the subscriber's max age; a route without one keeps its subscriptions until
+it goes. So epochs are what make
 failover seamless. Routes without an epoch never splice (maintainer,
 2026-10-08): a `Restart` (or an end and start on older versions) tells every
 downstream subscriber to stop using its copy of the old source and
@@ -30,11 +31,12 @@ unchanged paths and End+Start on replacement. The relay retains the explicit
 identity internally; fresh requests cannot join its old cached instance.
 This does not promise cache invalidation in arbitrary older IETF relays or
 clients that retain objects across broadcasts. The negotiated
-[IETF extension](/quest/m1/ietf-epochs.md) follows in m1, independently of
+[IETF extension](/drafts/draft-lcurley-moq-epoch.md) landed in m1, independently of
 this release gate; seamless JS handover stays in m1 too.
 
-Non-goals: pooling, which needs nothing here; a redundant pair shares an
-explicit epoch through `moq --epoch`.
+Non-goals: pooling, which needs nothing here. A redundant ingest pair runs on
+distinct epochs (decided 2026-10-19), so only replicas of one publisher's
+bytes share one.
 Also out of scope: trusting the publisher's clock (a far-future epoch wins
 until its route goes away).
 
@@ -65,21 +67,18 @@ Decided:
   the lite-07 cut, not this release. It replaces the response-only claim-epoch
   proposal: an independent route explicitly continues the same served
   instance, rather than inferring continuity from an epochless claim.
-- Decided in the 2026-10-10 resume audit: a catalog reference pins its first
-  resolved sibling for the catalog instance's lifetime in players and
-  exporters. Optional reference epochs constrain the first resolution on
-  epoch-aware transports; on epochless transports they remain best effort.
-  This supersedes following the newest sibling by name. The
+- Decided 2026-10-14: announcement-following readers handle a referenced
+  sibling's replacement as Restart; other readers pin their first resolution
+  for the catalog instance's lifetime. Optional reference epochs constrain
+  resolution on epoch-aware transports and remain best effort on epochless
+  transports. Following never turns a replacement into seamless resume. The
   [catalog references quest](/quest/m0/broadcast-epoch/catalog-references.md)
   owns the schemas, readers, and compatibility documentation.
 - Every first-party publisher that can restart mints its own: the apps,
-  moq-boy, the ingest gateways, moqsink, and the bindings. Players
+  moq-boy, the ingest gateways, moqsink, OBS, and the bindings. Players
   (`moq play`, `@moq/watch`, demo/web) follow the announce `Restart`. moq-stats mints one per
   [group announcement](/doc/concept/stats.md#broadcasts), which also gated
   the release (decided 2026-10-04).
-- The m1 quests gating this line moved under it in the 2026-10-05 audit, and
-  the OBS half moved to m1 as [OBS publishes under epochs](/quest/m1/obs-epoch.md).
-
 - Until lite-07 is offered by default, default sessions (lite-06) carry no
   epoch, so a cluster GOAWAY redial or a standby takeover ends subscriptions
   instead of resuming them (accepted 2026-10-06 over negotiating the field on
@@ -111,21 +110,22 @@ maintainer's pre-release merge of `release` into `main` keeps `main`'s
 The 2026-10-10 resume audit adds release gates for newly issued requests
 through retired handles and for late duplicate delivery after same-epoch
 handover. Keep existing reads sticky; stopping new unpinned wire work is a
-separate boundary. The catalog-reference work applies the same pinning
-policy to players and exporters. Wall-clock expiry, live DROP dispositions,
+separate boundary. Catalog references apply the same identity policy to
+players and exporters, distinguishing announcement followers from readers
+that retain lifetime pins. Wall-clock expiry, live DROP dispositions,
 FETCH budgets, seamless JS handover, and the IETF extension remain m1.
 
 Extend the line's relay/media tests to hold catalog and media from A while B
 replaces it, exercise later metadata/subscription/FETCH operations, and prove
-that following the replacement starts a fresh catalog with fresh pins. Check
+that replacing the catalog starts fresh pins. A followed sibling replacement
+restarts that sibling while preserving the catalog's explicit epoch
+constraints; it never mixes instances through an old handle. Check
 exact and covering routes, matching/different/absent epochs, and legacy
 End+Start. The child quests own their focused regressions.
 
 ## Required
 
-- [Resume duplicates](/quest/m0/broadcast-epoch/resume-duplicates.md) - a delayed group is delivered once even beyond the old 1024-entry history
-- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - players and exporters pin siblings consistently, with optional reference epochs and documented legacy best effort
-- [Stats prefix tracks](/quest/m0/broadcast-epoch/prefix-tracks.md) - the same release adds on-demand prefix tracks beside the per-path stats maps, which stay for existing readers (decided 2026-10-05, maps kept 2026-10-12)
+- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - announcement followers restart replaced siblings; other readers retain pins, with optional epochs and legacy best effort
 
 ## Related
 

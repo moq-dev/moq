@@ -98,7 +98,7 @@ impl Import {
 	}
 
 	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> crate::Result<()> {
 		self.track.flush(timestamp, now)
 	}
 
@@ -206,7 +206,7 @@ mod tests {
 			subscriber,
 			crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 		);
-		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()

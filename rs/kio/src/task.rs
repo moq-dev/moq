@@ -34,18 +34,22 @@
 //! pinned futures, a slot's identity is stable and its [`Waker`] is minted once
 //! and reused across occupants: the per-task allocation `FuturesUnordered`
 //! pays per future (and futures-buffered removes with an unsafe arena) is a
-//! per-slot cost here, amortized to zero in a long-lived set. Safe Rust
+//! per-slot cost here, amortized to zero in a long-lived set. An owner that
+//! wakes its own tasks mid-poll (a driver advancing its clock) runs that poll in
+//! [`Waiter::batch`], so the set's wake of the owner is not a second poll. Safe Rust
 //! throughout.
 
 use std::{
-	sync::{
-		Arc, Mutex,
-		atomic::{AtomicBool, AtomicU64, Ordering},
-	},
-	task::{Context, Poll, Wake, Waker},
+	cell::{Cell, RefCell},
+	// std's `Arc`: `Waker::from` needs it. The atomics are loom's under `--cfg loom`.
+	sync::{Arc, atomic::Ordering},
+	task::{Context, Poll, RawWakerVTable, Wake, Waker},
 };
 
-use crate::waiter::{Park, Waiter};
+use crate::{
+	sync::{AtomicBool, AtomicU64, Mutex},
+	waiter::{Park, Waiter},
+};
 
 /// Wake-bits per chunk word and words per chunk: one chunk covers 1024 slots.
 const WORD_BITS: usize = 64;
@@ -106,14 +110,107 @@ struct Shared {
 }
 
 impl Shared {
-	fn wake_parent(&self) {
+	fn wake_parent(self: &Arc<Self>) {
 		if self.pending.swap(true, Ordering::AcqRel) {
+			return;
+		}
+		let parent = self.parent.lock().unwrap().clone();
+		if let Some(waker) = parent
+			&& !Polling::hold(&waker, self)
+		{
+			waker.wake();
+		}
+	}
+
+	/// Deliver a wake [`Polling::hold`] kept back, unless the set was polled since.
+	fn release(&self) {
+		if !self.pending.load(Ordering::Acquire) {
 			return;
 		}
 		let parent = self.parent.lock().unwrap().clone();
 		if let Some(waker) = parent {
 			waker.wake();
 		}
+	}
+}
+
+// Loom runs its threads on one OS thread, so the scope must be loom's to stay per thread.
+#[cfg(not(loom))]
+std::thread_local! {
+	static POLLING: Polling = const { Polling { current: Cell::new(None), held: RefCell::new(Vec::new()) } };
+}
+#[cfg(loom)]
+loom::thread_local! {
+	static POLLING: Polling = Polling { current: Cell::new(None), held: RefCell::new(Vec::new()) };
+}
+
+/// A waker's identity: what [`Waker::will_wake`] compares.
+type Identity = (*const (), *const RawWakerVTable);
+
+/// The [`Waiter::batch`] running on this thread, and the wakes held for it.
+///
+/// A set woken from inside its owner's poll (by time that poll advanced, say)
+/// would wake a task that is already running, and the executor would poll it
+/// again for nothing once the set's own poll, later in the same pass, took the
+/// wake. So the wake is held until the batch returns, then delivered only if the
+/// set is still pending. A wake from another thread is never held: it cannot
+/// know where the owner's poll is.
+pub(crate) struct Polling {
+	/// The innermost batch's waker; the outer ones wait on their stack frames.
+	current: Cell<Option<Identity>>,
+	/// Held wakes. Each batch owns the ones past the length it found on entry.
+	held: RefCell<Vec<Arc<Shared>>>,
+}
+
+impl Polling {
+	/// Run `poll` as the task `waker` wakes, delivering the wakes it held when it returns.
+	pub(crate) fn run<R>(waker: &Waker, poll: impl FnOnce() -> R) -> R {
+		struct Scope {
+			outer: Option<Identity>,
+			start: usize,
+		}
+		impl Drop for Scope {
+			fn drop(&mut self) {
+				let held: Vec<_> = POLLING.with(|polling| {
+					polling.current.set(self.outer);
+					let mut held = polling.held.borrow_mut();
+					match held.len() > self.start {
+						true => held.drain(self.start..).collect(),
+						false => Vec::new(),
+					}
+				});
+				// Outside the borrow: a waker may poll inline and open a batch of its own.
+				for shared in held {
+					shared.release();
+				}
+			}
+		}
+
+		// Delivered on unwind too, so a panicking poll loses no wakeup. Polled from a
+		// thread-local's destructor after the scope is gone, nothing is held at all.
+		let _scope = POLLING
+			.try_with(|polling| Scope {
+				outer: polling.current.replace(Some((waker.data(), waker.vtable()))),
+				start: polling.held.borrow().len(),
+			})
+			.ok();
+		poll()
+	}
+
+	/// Keep back a wake of `parent` when it is the innermost batch on this thread.
+	///
+	/// A wake from a thread-local's destructor may run after the scope is gone; it
+	/// is delivered.
+	fn hold(parent: &Waker, shared: &Arc<Shared>) -> bool {
+		POLLING
+			.try_with(|polling| {
+				if polling.current.get() != Some((parent.data(), parent.vtable())) {
+					return false;
+				}
+				polling.held.borrow_mut().push(shared.clone());
+				true
+			})
+			.unwrap_or(false)
 	}
 }
 
@@ -245,6 +342,7 @@ impl<T: Task<Output = ()>> Tasks<T> {
 	/// such an arm with [`is_empty`](Self::is_empty).
 	/// `waiter` is registered for the next task wake or push; the tasks
 	/// themselves park on their own wakers.
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
 		{
 			let mut parent = self.shared.parent.lock().unwrap();
@@ -305,6 +403,10 @@ impl<T: Task<Output = ()>> Tasks<T> {
 					}
 					let cx = Context::from_waker(&self.wakers[index]);
 					let child_waiter = occupant.park.hold(&cx);
+					// Each child is its own task, so a large sweep of finite children is not
+					// one spinning poll.
+					#[cfg(feature = "sim")]
+					let _scope = crate::coop::child();
 					if occupant.task.poll(child_waiter).is_ready() {
 						self.children[index] = None;
 						self.free.push(index);
@@ -316,7 +418,7 @@ impl<T: Task<Output = ()>> Tasks<T> {
 		self.scratch = scratch;
 
 		match self.len {
-			0 => Poll::Ready(()),
+			0 => crate::coop::ready(()),
 			_ => Poll::Pending,
 		}
 	}
@@ -544,6 +646,115 @@ mod tests {
 
 		assert!(tasks.poll(&waiter).is_pending());
 		assert_eq!(b_polls.load(Ordering::SeqCst), 1, "one poll, not two");
+	}
+
+	/// Counts the owner's wakes.
+	struct Wakes(AtomicUsize);
+
+	impl Wake for Wakes {
+		fn wake(self: Arc<Self>) {
+			self.0.fetch_add(1, Ordering::SeqCst);
+		}
+	}
+
+	/// A task woken by a thread-local's destructor, after the batch scope's own
+	/// thread-local is gone, still wakes the owner rather than panicking there.
+	#[test]
+	fn a_wake_during_thread_teardown_reaches_the_owner() {
+		type Set = Tasks<Box<dyn FnMut(&Waiter) -> Poll<()>>>;
+		struct Teardown {
+			gate: crate::Producer<bool>,
+			_tasks: Set,
+		}
+		impl Drop for Teardown {
+			fn drop(&mut self) {
+				open(&self.gate);
+			}
+		}
+		std::thread_local! {
+			static TEARDOWN: RefCell<Option<Teardown>> = const { RefCell::new(None) };
+		}
+
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let waker = Waker::from(wakes.clone());
+		std::thread::spawn(move || {
+			// Touched before the batch scope, so destroyed after it: destructors run LIFO.
+			TEARDOWN.with(|_| {});
+			let gate = crate::Producer::new(false);
+			let mut tasks: Set = Tasks::new();
+			tasks.push(Box::new(gated(gate.consume(), Arc::new(AtomicUsize::new(0)))));
+			let waiter = Waiter::new(waker);
+			assert!(waiter.batch(|| tasks.poll(&waiter)).is_pending());
+			TEARDOWN.with(|teardown| *teardown.borrow_mut() = Some(Teardown { gate, _tasks: tasks }));
+		})
+		.join()
+		.unwrap();
+		assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "the teardown wake was lost");
+	}
+
+	/// An owner whose poll wakes a task in its own set, then polls the set, took that
+	/// wake in the same pass: the executor must not be asked to poll it again.
+	#[test]
+	fn a_wake_from_the_owners_own_poll_is_not_redelivered() {
+		let mut tasks = Tasks::new();
+		let gate = crate::Producer::new(false);
+		let polls = Arc::new(AtomicUsize::new(0));
+		tasks.push(gated(gate.consume(), polls.clone()));
+		let _parked = crate::Producer::new(false);
+		tasks.push(gated(_parked.consume(), Arc::new(AtomicUsize::new(0))));
+
+		let opening = std::cell::Cell::new(false);
+		let mut owner = std::pin::pin!(crate::wait(|waiter: &Waiter| {
+			waiter.batch(|| {
+				if opening.take() {
+					open(&gate);
+				}
+				tasks.poll(waiter)
+			})
+		}));
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let waker = Waker::from(wakes.clone());
+		let mut cx = Context::from_waker(&waker);
+
+		assert!(owner.as_mut().poll(&mut cx).is_pending());
+		opening.set(true);
+		assert!(owner.as_mut().poll(&mut cx).is_pending());
+		assert_eq!(polls.load(Ordering::SeqCst), 2, "the woken task ran in that pass");
+		assert_eq!(
+			wakes.0.load(Ordering::SeqCst),
+			0,
+			"the owner was woken for a wake it took"
+		);
+	}
+
+	/// The same wake, when the owner's poll returns without polling the set again,
+	/// still reaches the owner as it returns.
+	#[test]
+	fn a_held_wake_lands_when_the_set_is_not_polled() {
+		let mut tasks = Tasks::new();
+		let gate = crate::Producer::new(false);
+		let polls = Arc::new(AtomicUsize::new(0));
+		tasks.push(gated(gate.consume(), polls.clone()));
+
+		let mut first = true;
+		let mut owner = std::pin::pin!(crate::wait(|waiter: &Waiter| {
+			waiter.batch(|| {
+				if std::mem::take(&mut first) {
+					let _ = tasks.poll(waiter);
+					open(&gate);
+					return Poll::Pending;
+				}
+				tasks.poll(waiter)
+			})
+		}));
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let waker = Waker::from(wakes.clone());
+		let mut cx = Context::from_waker(&waker);
+
+		assert!(owner.as_mut().poll(&mut cx).is_pending());
+		assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "the held wake was lost");
+		assert!(owner.as_mut().poll(&mut cx).is_ready());
+		assert_eq!(polls.load(Ordering::SeqCst), 2);
 	}
 
 	/// A task is allowed to self-wake before returning Pending. Such a task must

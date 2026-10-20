@@ -19,6 +19,7 @@ mod play;
 mod publish;
 mod rtc;
 mod rtmp;
+mod rtsp;
 mod srt;
 mod subscribe;
 #[cfg(test)]
@@ -60,9 +61,14 @@ impl Net {
 		Ok(client)
 	}
 
-	fn server(&self, config: moq_tokio::listen::Config) -> anyhow::Result<moq_tokio::Server> {
+	fn server(
+		&self,
+		config: moq_tokio::listen::Config,
+		activity: moq_net::server::Activity,
+	) -> anyhow::Result<moq_tokio::Server> {
 		let mut server = moq_tokio::server::Config::default();
 		server.listen = config;
+		server.activity = activity;
 		server.quic = self.quic.clone();
 		#[cfg(feature = "iroh")]
 		{
@@ -81,12 +87,18 @@ async fn spawn_server(
 	cluster: &moq_relay::cluster::Cluster,
 	net: &Net,
 	directions: Directions,
-) -> anyhow::Result<moq_relay::cluster::Started> {
+) -> anyhow::Result<(moq_relay::cluster::Started, Option<Shutdown>)> {
 	if !moq.serves() {
-		return cluster.clone().start().await.context("cluster failed to start");
+		let started = cluster.clone().start().await.context("cluster failed to start")?;
+		return Ok((started, None));
 	}
 
-	let server = net.server(moq.server_config())?;
+	let window = moq
+		.drain_timeout
+		.map(crate::duration::Duration::into_std)
+		.unwrap_or(moq_relay::DEFAULT_DRAIN_TIMEOUT);
+	let (trigger, shutdown) = moq_relay::shutdown::Observer::new(window);
+	let server = net.server(moq.server_config(), shutdown.activity().clone())?;
 	let certificates = server.certificates();
 	let cluster = attach_lan(cluster.clone(), moq, &server)?;
 	// The auth server or public grant a `--listen` endpoint admits through. A
@@ -101,27 +113,22 @@ async fn spawn_server(
 	// live credential rather than refused as "LAN discovery is not enabled".
 	let started = cluster.clone().start().await.context("cluster failed to start")?;
 
-	// No server-wide origins: every session is scoped from its own grant, and an
-	// unset side stays a no-op origin rather than falling back to everything.
-	let origin = &cluster.origin;
-
 	// Stream sockets bind asynchronously in `listen`, so this must finish before
 	// `spawn_moq` reports readiness. The serve task only owns an already-bound
 	// listener and cannot discover a late bind failure.
 	let listener = server.listen().await.context("failed to bind listeners")?;
-	if moq.lan() {
-		spawn_cluster_serve(
-			tasks,
-			listener,
-			cluster.clone(),
+	spawn_serve(
+		tasks,
+		listener,
+		Serving {
+			cluster,
 			auth,
-			origin.clone(),
 			directions,
-			moq.server.bind.is_some(),
-		);
-	} else {
-		spawn_serve(tasks, listener, auth, origin.clone(), directions);
-	}
+			shutdown: shutdown.clone(),
+			lan: moq.lan(),
+			public_quic: moq.server.bind.is_some(),
+		},
+	);
 
 	// The certificate endpoint is for clients dialing a URL, so it follows the
 	// explicit listener rather than the mesh's ephemeral one.
@@ -129,7 +136,13 @@ async fn spawn_server(
 		tasks.spawn(async move { web::run_web(web_bind, certificates).await });
 	}
 
-	Ok(started)
+	Ok((
+		started,
+		Some(Shutdown {
+			trigger,
+			observer: shutdown,
+		}),
+	))
 }
 
 /// Advertise the bound listener on the LAN when `--cluster-lan` is on.
@@ -154,51 +167,15 @@ fn attach_lan(
 	Ok(cluster.with_advertise(advertise))
 }
 
-/// Accept inbound sessions, splitting LAN mesh peers off from ordinary clients.
-///
-/// Both share one listener; only the request path tells them apart. A listener
-/// `--cluster-lan` invented is for the mesh, not for viewers.
-fn spawn_cluster_serve(
-	tasks: &mut JoinSet<anyhow::Result<()>>,
-	mut listener: moq_tokio::Listener,
+/// The admission, accounting and shutdown context shared by one listener.
+#[derive(Clone)]
+struct Serving {
 	cluster: moq_relay::cluster::Cluster,
 	auth: moq_relay::auth::Auth,
-	origin: moq_net::origin::Producer,
 	directions: Directions,
+	shutdown: moq_relay::shutdown::Observer,
+	lan: bool,
 	public_quic: bool,
-) {
-	if let Ok(addr) = listener.local_addr() {
-		tracing::info!(%addr, "listening");
-	}
-	tasks.spawn(async move {
-		let mut sessions = tokio::task::JoinSet::new();
-		while let Some(request) = listener.accept().await {
-			while sessions.try_join_next().is_some() {}
-			if moq_relay::cluster::Cluster::is_lan_path(request.path()) {
-				let conn = moq_relay::Connection::new(request, cluster.clone(), auth.clone())
-					.with_id(cluster.next_connection_id());
-				sessions.spawn(async move {
-					if let Err(err) = conn.run().await {
-						tracing::warn!(%err, "LAN peer session ended");
-					}
-				});
-				continue;
-			}
-			if !is_public_transport(request.transport(), public_quic) {
-				tracing::debug!(path = %request.path(), "refusing a non-peer request on the LAN mesh listener");
-				request.reject(moq_tokio::server::Reject::App(404)).await.ok();
-				continue;
-			}
-			let auth = auth.clone();
-			let origin = origin.clone();
-			sessions.spawn(async move {
-				if let Err(err) = serve_client(request, &auth, &origin, directions).await {
-					tracing::warn!(%err, "session ended with error");
-				}
-			});
-		}
-		anyhow::bail!("the MoQ listener stopped accepting")
-	});
 }
 
 /// Admit one ordinary client through its lease and serve it until it closes.
@@ -206,51 +183,54 @@ fn spawn_cluster_serve(
 /// The grant scopes the process's origin to what the session may see, then the
 /// stage's directions prune the side it does not use, so a subscribe-only export
 /// never announces what a viewer could not have had anyway.
-async fn serve_client(
-	request: moq_tokio::server::Request,
-	auth: &moq_relay::auth::Auth,
-	origin: &moq_net::origin::Producer,
-	directions: Directions,
-) -> anyhow::Result<()> {
-	let auth_request = moq_relay::auth::request_for(auth, &request);
-	let lease = match auth.admit(auth_request).await {
-		Ok(lease) => lease,
-		Err(err) => {
-			let status = axum::http::StatusCode::from(&err);
-			let reject = match status {
-				axum::http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
-				axum::http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
-				status => moq_tokio::server::Reject::App(status.as_u16()),
-			};
-			request.reject(reject).await.ok();
-			return Err(anyhow::Error::new(err).context("session refused"));
+impl Serving {
+	async fn serve_client(&self, request: moq_tokio::server::Request) -> anyhow::Result<()> {
+		let origin = &self.cluster.origin;
+		let directions = self.directions;
+		let auth_request = moq_relay::auth::request_for(&self.auth, &request);
+		let lease = match self.auth.admit(auth_request).await {
+			Ok(lease) => lease,
+			Err(err) => {
+				let status = axum::http::StatusCode::from(&err);
+				let reject = match status {
+					axum::http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
+					axum::http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
+					status => moq_tokio::server::Reject::App(status.as_u16()),
+				};
+				request.reject(reject).await.ok();
+				return Err(anyhow::Error::new(err).context("session refused"));
+			}
+		};
+
+		// What the grant allows, as origin handles rooted where the session dialed.
+		let token = lease.token();
+		let publish = directions
+			.publish
+			.then(|| origin.scope(&token.root, &token.subscribe.path).ok())
+			.flatten();
+		let subscribe = directions
+			.consume
+			.then(|| origin.scope(&token.root, &token.publish.path).ok())
+			.flatten();
+		if publish.is_none() && subscribe.is_none() {
+			request.reject(moq_tokio::server::Reject::Forbidden).await.ok();
+			anyhow::bail!("grant allows nothing this endpoint serves at {}", token.root);
 		}
-	};
 
-	// What the grant allows, as origin handles rooted where the session dialed.
-	let token = lease.token();
-	let publish = directions
-		.publish
-		.then(|| origin.scope(&token.root, &token.subscribe).ok())
-		.flatten();
-	let subscribe = directions
-		.consume
-		.then(|| origin.scope(&token.root, &token.publish).ok())
-		.flatten();
-	if publish.is_none() && subscribe.is_none() {
-		request.reject(moq_tokio::server::Reject::Forbidden).await.ok();
-		anyhow::bail!("grant allows nothing this endpoint serves at {}", token.root);
+		let stats = self.cluster.stats.tier(token.tier.clone()).session(&token.label);
+		let lease = lease.with_stats(stats.clone());
+		let mut request = request.with_stats(stats);
+		if let Some(publish) = publish {
+			request = request.with_publisher(publish.consume());
+		}
+		if let Some(subscribe) = subscribe {
+			request = request.with_subscriber(subscribe);
+		}
+		let (session, driver) = request.ok().await?;
+		let result = moq_relay::supervise(session, lease, self.shutdown.clone(), None).await;
+		driver.await??;
+		result
 	}
-
-	let mut request = request;
-	if let Some(publish) = publish {
-		request = request.with_publisher(publish.consume());
-	}
-	if let Some(subscribe) = subscribe {
-		request = request.with_subscriber(subscribe);
-	}
-	let session = request.ok().await?;
-	moq_relay::supervise(session, lease, moq_relay::shutdown::Observer::disabled(), None).await
 }
 
 /// Whether ordinary clients may use this transport on the shared LAN server.
@@ -262,32 +242,71 @@ fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bo
 }
 
 /// Serve ordinary clients from an already-bound listener, each through its lease.
-fn spawn_serve(
-	tasks: &mut JoinSet<anyhow::Result<()>>,
-	mut listener: moq_tokio::Listener,
-	auth: moq_relay::auth::Auth,
-	origin: moq_net::origin::Producer,
-	directions: Directions,
-) {
+fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio::Listener, serving: Serving) {
 	if let Ok(addr) = listener.local_addr() {
 		tracing::info!(%addr, "listening");
 	}
 	tasks.spawn(async move {
+		let mut sessions = JoinSet::new();
 		while let Some(request) = listener.accept().await {
-			let auth = auth.clone();
-			let origin = origin.clone();
-			tokio::spawn(async move {
-				if let Err(err) = serve_client(request, &auth, &origin, directions).await {
+			while sessions.try_join_next().is_some() {}
+			let serving = serving.clone();
+			sessions.spawn(async move {
+				let result = if serving.lan && moq_relay::cluster::Cluster::is_lan_path(request.path()) {
+					// Logs its own close.
+					moq_relay::Connection::new(request, serving.cluster.clone(), serving.auth.clone())
+						.with_id(serving.cluster.next_connection_id())
+						.with_shutdown(serving.shutdown.clone())
+						.run()
+						.await;
+					return;
+				} else if serving.lan && !is_public_transport(request.transport(), serving.public_quic) {
+					tracing::debug!(path = %request.path(), "refusing a non-peer request on the LAN mesh listener");
+					request.reject(moq_tokio::server::Reject::App(404)).await.ok();
+					return;
+				} else {
+					match moq_tokio::panic::isolate(serving.serve_client(request)).await {
+						Some(result) => result,
+						None => return,
+					}
+				};
+				if let Err(err) = result {
 					tracing::warn!(%err, "session ended with error");
 				}
 			});
 		}
-		Ok(())
+		anyhow::bail!("the MoQ listener stopped accepting")
 	});
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// The listener's shared drain window, owned by the process driver.
+struct Shutdown {
+	trigger: moq_relay::shutdown::Trigger,
+	observer: moq_relay::shutdown::Observer,
+}
+
+/// Keep all stages and listener tasks alive while admitted sessions drain.
+async fn drain(shutdown: Shutdown, signals: &mut Signals) {
+	let deadline = tokio::time::Instant::now() + shutdown.observer.drain_timeout;
+	shutdown.trigger.start();
+	tracing::info!(window = ?shutdown.observer.drain_timeout, "shutdown requested; draining sessions (signal again to exit immediately)");
+	tokio::select! {
+		() = signals.recv() => {},
+		() = shutdown.observer.activity().close() => {},
+		() = tokio::time::sleep_until(deadline) => {},
+	}
+}
+
+fn main() -> anyhow::Result<()> {
+	let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+	let result = runtime.block_on(run());
+	// Tokio's stdin read cannot be cancelled. Async cleanup has finished, so
+	// runtime teardown must not wait for a pipe its producer still holds open.
+	runtime.shutdown_background();
+	result
+}
+
+async fn run() -> anyhow::Result<()> {
 	moq_tokio::crypto::install_default().expect("failed to install default crypto provider");
 
 	let mut cli = Invocation::parse().await;
@@ -410,32 +429,50 @@ impl Directions {
 async fn spawn_moq(
 	moq: &MoqSide,
 	net: &Net,
-	client: moq_tokio::Client,
 	cluster: moq_relay::cluster::Cluster,
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Attached> {
-	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
-	let mut connection = None;
 	let cluster = cluster
-		.with_client(client.clone())
 		.with_client_tls(moq.client.tls.build()?)
 		.with_connect(moq.client.clone(), moq.quic.clone());
+	#[cfg(feature = "iroh")]
+	let cluster = match net.iroh.clone() {
+		Some(iroh) => cluster.with_iroh(iroh),
+		None => cluster,
+	};
 	let origin = cluster.origin.clone();
 
-	if let Some(url) = moq.client.url.clone() {
-		let mut client = client;
+	// Built only to dial `--connect`: the cluster binds its own client from the
+	// same `[connect]` config, so a second one would contend for a fixed bind port.
+	// Built before the listener so a bad config fails before readiness, but dialed
+	// only after it: a later startup failure would drop a live dial unclosed.
+	let dialer = match moq.client.url.clone() {
+		Some(url) => Some((url, net.client(moq.client.clone())?)),
+		None => None,
+	};
+
+	let (started, shutdown) =
+		notify_when_initialized(spawn_server(tasks, moq, &cluster, net, directions), moq::notify_ready).await?;
+	// Even standalone: it is what reports a panic in the origin driver.
+	tasks.spawn(async move { started.run().await });
+
+	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
+	let mut connection = None;
+	let mut client = None;
+	if let Some((url, mut dialer)) = dialer {
+		client = Some(dialer.clone());
 		if directions.publish {
-			client = client.with_publisher(origin.consume());
+			dialer = dialer.with_publisher(origin.consume());
 		}
 		if directions.consume {
-			client = client.with_subscriber(origin.clone());
+			dialer = dialer.with_subscriber(origin.clone());
 		}
 
 		// Both directions ride one connection, so this dials directly rather than
 		// through `Client::publish` / `Client::consume`, which each attach a single
 		// direction and dial the same URL.
-		let reconnect = client.connect(url);
+		let reconnect = dialer.connect(url);
 		// Read before the handle moves into the task. This consumer is persistent: it
 		// survives reconnects, reading `None` while down, so it can be wired up before
 		// anything connects.
@@ -445,16 +482,12 @@ async fn spawn_moq(
 		connection = Some(reconnect);
 	}
 
-	let started =
-		notify_when_initialized(spawn_server(tasks, moq, &cluster, net, directions), moq::notify_ready).await?;
-	if !started.standalone() {
-		tasks.spawn(async move { started.run().await });
-	}
-
 	Ok(Attached {
 		bandwidth,
 		origin,
+		client,
 		connection,
+		shutdown,
 	})
 }
 
@@ -462,8 +495,11 @@ async fn spawn_moq(
 struct Attached {
 	bandwidth: moq_net::bandwidth::Allocator,
 	origin: moq_net::origin::Producer,
+	/// The client that dialed `--connect`, to close its endpoint on exit.
+	client: Option<moq_tokio::Client>,
 	/// The relay connection, when `--connect` dialed one.
 	connection: Option<moq_tokio::Connection>,
+	shutdown: Option<Shutdown>,
 }
 
 /// Report readiness only after every configured MoQ attachment initializes.
@@ -480,7 +516,7 @@ async fn notify_when_initialized<T>(
 ///
 /// The playback event loop runs on this task's thread rather than a spawned one:
 /// winit can only build an event loop on the process main thread, which is where
-/// `#[tokio::main]` polls this future.
+/// the runtime polls this future.
 #[cfg(feature = "play")]
 async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()> {
 	// Before anything dials: a codec we can't decode is a blank window otherwise.
@@ -494,16 +530,23 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 		consume: true,
 		..Default::default()
 	};
-	let client = net.client(moq.client.clone())?;
-	let Attached { origin, .. } = spawn_moq(&moq, &net, client, cluster, directions, &mut tasks).await?;
+	let Attached {
+		origin,
+		client,
+		connection,
+		..
+	} = spawn_moq(&moq, &net, cluster.clone(), directions, &mut tasks).await?;
 
-	play::run(origin.consume(), name, args, tasks).await
+	let result = play::run(origin.consume(), name, args, tasks).await;
+	detach(connection, client, &cluster).await;
+	result
 }
 
 /// Run every stage over one Origin and one MoQ attachment.
 ///
 /// Stages are independent: each names its own broadcast and owns its own endpoint,
-/// and the first to finish (stdin EOF, SIGINT, SIGTERM, or an error) ends the process.
+/// and the first endpoint to finish ends the process. A shutdown signal keeps
+/// accepted sessions serving through the configured drain window.
 async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Result<()> {
 	let cluster = moq.cluster()?;
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
@@ -511,24 +554,31 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	// platform capture stream is not Send, so their futures cannot be spawned.
 	let mut locals: Vec<Publish> = Vec::new();
 
+	// Before anything listens: a client can count its session established as soon
+	// as the listener is up, and a signal then must drain it, not kill the process.
+	let signals = Signals::new()?;
+
 	// The stage combinations were refused up front by `Invocation::validate`, before
 	// anything bound a port or dialed out.
-	let client = net.client(moq.client.clone())?;
+	let mut client = None;
 	let mut connection = None;
 	let result = async {
 		let Attached {
 			bandwidth,
 			origin,
+			client: dialer,
 			connection: attached,
-		} = spawn_moq(&moq, &net, client.clone(), cluster, Directions::of(&stages), &mut tasks).await?;
+			shutdown,
+		} = spawn_moq(&moq, &net, cluster.clone(), Directions::of(&stages), &mut tasks).await?;
+		client = dialer;
 		connection = attached;
 
 		// stdin and stdout are one resource each, so two stages can't share them.
 		let mut stdin = None;
 		let mut stdout = None;
 
-		// One publisher instance per run, unless redundant publishers named a shared one.
-		let epoch = moq.epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+		// Each run publishes its own content and therefore mints its own instance.
+		let epoch = moq_net::Epoch::mint();
 		tracing::info!(%epoch, "publisher instance");
 
 		for stage in stages {
@@ -555,25 +605,38 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		}
 
 		if locals.is_empty() {
-			drive(tasks).await
+			drive(tasks, signals, shutdown).await
 		} else {
 			let local = tokio::task::LocalSet::new();
 			supervise(&local, locals.into_iter().map(Publish::run), &mut tasks);
-			local.run_until(drive(tasks)).await
+			local.run_until(drive(tasks, signals, shutdown)).await
 		}
 	}
 	.await;
 
-	// The process exits next, even on a setup error, so the relay only hears we left
-	// if the close goes out now. The connection first delivers what it queued, such
-	// as the finished tracks at stdin EOF, since the client's close discards it.
+	// Even on a setup error.
+	detach(connection, client, &cluster).await;
+	result
+}
+
+/// Close everything [`spawn_moq`] attached. The process exits next, so the relay
+/// and cluster peers only hear we left if the closes go out now. The connection
+/// first delivers what it queued, such as the finished tracks at stdin EOF, since
+/// the client's close discards it.
+async fn detach(
+	connection: Option<moq_tokio::Connection>,
+	client: Option<moq_tokio::Client>,
+	cluster: &moq_relay::cluster::Cluster,
+) {
 	if let Some(connection) = connection
 		&& let Err(err) = connection.close().await
 	{
 		tracing::warn!(%err, "closed before delivering everything");
 	}
-	client.close().await;
-	result
+	if let Some(client) = client {
+		client.close().await;
+	}
+	cluster.close().await;
 }
 
 /// Run the non-Send pipelines on `local`, reporting each into `tasks`.
@@ -651,7 +714,7 @@ fn spawn_import(
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(max_age)
 			.with_bandwidth(bandwidth.clone());
-		let publish = if let ImportSource::Ts(TsImport {
+		let mut publish = if let ImportSource::Ts(TsImport {
 			program: Some(TsProgram::All),
 			..
 		}) = &import.source
@@ -662,8 +725,6 @@ fn spawn_import(
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::new(broadcast, &format, config)?
 		};
-		// Media stays servable at EOF until it goes stale, the same max-age relays retain it for.
-		let publish = publish.linger(max_age.unwrap_or(hang::container::MAX_AGE));
 		publish.announce(epoch)?;
 		local = Some(publish);
 	} else {
@@ -690,6 +751,9 @@ fn spawn_import(
 					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std(), program));
 				}
 			}
+			ImportSource::Rtsp(rtsp) => {
+				tasks.spawn(rtsp::connect_import(target(name), rtsp.connect));
+			}
 			ImportSource::Rtc(rtc) => {
 				if let Some(addr) = rtc.listen {
 					let name = require_broadcast(name, "import rtc --listen")?;
@@ -715,7 +779,7 @@ fn spawn_import(
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
 				let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-				let publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age)?;
+				let mut publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age)?;
 				publish.announce(epoch)?;
 				local = Some(publish);
 			}
@@ -823,38 +887,71 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 	Subscribe::new(consumer, &name, catalog, args).await?.run().await
 }
 
-/// Run every endpoint until the first finishes (stdin EOF, SIGINT, SIGTERM, or an
-/// error), then drop the rest.
-async fn drive(mut tasks: JoinSet<anyhow::Result<()>>) -> anyhow::Result<()> {
-	tasks.spawn(shutdown_signal());
-
-	while let Some(res) = tasks.join_next().await {
-		match res {
-			Ok(Ok(())) => return Ok(()),
-			Ok(Err(err)) => return Err(err),
-			Err(err) if err.is_cancelled() => continue,
-			Err(err) => return Err(err.into()),
+/// Run until an endpoint ends, keeping all tasks alive while a signalled listener drains.
+async fn drive(
+	mut tasks: JoinSet<anyhow::Result<()>>,
+	mut signals: Signals,
+	shutdown: Option<Shutdown>,
+) -> anyhow::Result<()> {
+	let result = loop {
+		tokio::select! {
+			biased;
+			() = signals.recv() => {
+				if let Some(shutdown) = shutdown {
+					drain(shutdown, &mut signals).await;
+				}
+				break Ok(());
+			}
+			result = tasks.join_next() => match result {
+				Some(Ok(result)) => break result,
+				Some(Err(err)) if err.is_cancelled() => continue,
+				Some(Err(err)) => break Err(err.into()),
+				None => break Ok(()),
+			}
 		}
-	}
-
-	Ok(())
+	};
+	tasks.shutdown().await;
+	result
 }
 
-/// Resolve on SIGINT or, on unix, SIGTERM (what process supervisors send on stop).
-async fn shutdown_signal() -> anyhow::Result<()> {
+/// SIGINT or, on unix, SIGTERM (what process supervisors send on stop), caught from
+/// construction on. Until a handler is installed the default action kills the
+/// process, so build this before anything can accept a session.
+struct Signals {
 	#[cfg(unix)]
-	{
-		let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-			.context("failed to listen for SIGTERM")?;
-		tokio::select! {
-			res = tokio::signal::ctrl_c() => res.context("failed to listen for SIGINT")?,
-			_ = term.recv() => {}
-		}
-		Ok(())
-	}
+	interrupt: tokio::signal::unix::Signal,
+	#[cfg(unix)]
+	terminate: tokio::signal::unix::Signal,
 	#[cfg(not(unix))]
-	{
-		tokio::signal::ctrl_c().await.context("failed to listen for SIGINT")
+	ctrl_c: tokio::signal::windows::CtrlC,
+}
+
+impl Signals {
+	fn new() -> anyhow::Result<Self> {
+		#[cfg(unix)]
+		{
+			use tokio::signal::unix::{SignalKind, signal};
+			Ok(Self {
+				interrupt: signal(SignalKind::interrupt()).context("failed to listen for SIGINT")?,
+				terminate: signal(SignalKind::terminate()).context("failed to listen for SIGTERM")?,
+			})
+		}
+		#[cfg(not(unix))]
+		{
+			let ctrl_c = tokio::signal::windows::ctrl_c().context("failed to listen for Ctrl-C")?;
+			Ok(Self { ctrl_c })
+		}
+	}
+
+	/// Resolve on the next signal, including one caught before this was polled.
+	async fn recv(&mut self) {
+		#[cfg(unix)]
+		tokio::select! {
+			_ = self.interrupt.recv() => {}
+			_ = self.terminate.recv() => {}
+		}
+		#[cfg(not(unix))]
+		self.ctrl_c.recv().await;
 	}
 }
 
@@ -895,12 +992,78 @@ mod tests {
 
 	type Pipeline = Pin<Box<dyn Future<Output = anyhow::Result<()>>>>;
 
+	/// Held by every test that builds [`Signals`]: a raised signal reaches each
+	/// listener in the process, and `cargo test` runs tests as threads of one.
+	static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+	#[tokio::test(start_paused = true)]
+	async fn drain_ends_when_the_last_admission_leaves() {
+		let _signals = SIGNALS.lock().await;
+		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(std::time::Duration::from_secs(10));
+		let active = observer.activity().enter().unwrap();
+		let mut signals = Signals::new().unwrap();
+		let shutdown = Shutdown {
+			trigger,
+			observer: observer.clone(),
+		};
+		let draining = tokio::spawn(async move { drain(shutdown, &mut signals).await });
+		observer.started().await;
+		assert!(!draining.is_finished());
+		drop(active);
+		draining.await.unwrap();
+	}
+
+	/// A signal sent before the driver first polls, such as right after a client
+	/// counted its session established, still drains that session. The default
+	/// action would otherwise kill the process with no GOAWAY.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn a_signal_before_the_driver_polls_drains() {
+		let _signals = SIGNALS.lock().await;
+		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(std::time::Duration::from_secs(10));
+		let session = observer.activity().enter().unwrap();
+		let signals = Signals::new().unwrap();
+		// SAFETY: raise has no memory-safety preconditions.
+		assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+		let mut tasks = JoinSet::new();
+		tasks.spawn(std::future::pending());
+		let shutdown = Shutdown {
+			trigger,
+			observer: observer.clone(),
+		};
+		let driving = tokio::spawn(drive(tasks, signals, Some(shutdown)));
+		observer.started().await;
+		assert!(!driving.is_finished(), "drain ended under an established session");
+		drop(session);
+		driving.await.unwrap().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn drain_bounds_a_pending_admission() {
+		let _signals = SIGNALS.lock().await;
+		let window = std::time::Duration::from_secs(10);
+		let (trigger, mut observer) = moq_relay::shutdown::Observer::new(window);
+		let _active = observer.activity().enter().unwrap();
+		let mut signals = Signals::new().unwrap();
+		let shutdown = Shutdown {
+			trigger,
+			observer: observer.clone(),
+		};
+		let draining = tokio::spawn(async move { drain(shutdown, &mut signals).await });
+		observer.started().await;
+		tokio::time::advance(window / 2).await;
+		assert!(!draining.is_finished());
+		tokio::time::advance(window / 2).await;
+		draining.await.unwrap();
+	}
+
 	/// A local pipeline that dies takes the process with it, even while another one is
 	/// still running. Reporting completion from inside the task instead would miss
 	/// this: a panic skips the report, leaving the survivor to keep the process alive
 	/// with one broadcast silently gone.
 	#[tokio::test]
 	async fn a_panicking_pipeline_ends_the_process() {
+		let _signals = SIGNALS.lock().await;
 		let local = tokio::task::LocalSet::new();
 		let mut tasks = JoinSet::new();
 
@@ -910,20 +1073,27 @@ mod tests {
 		];
 		supervise(&local, pipelines, &mut tasks);
 
-		let err = local.run_until(drive(tasks)).await.unwrap_err();
+		let err = local
+			.run_until(drive(tasks, Signals::new().unwrap(), None))
+			.await
+			.unwrap_err();
 		assert!(err.to_string().contains("pipeline panicked"), "{err}");
 	}
 
 	/// The first to finish ends the process, which is how stdin EOF stops a run.
 	#[tokio::test]
 	async fn a_finished_pipeline_ends_the_process() {
+		let _signals = SIGNALS.lock().await;
 		let local = tokio::task::LocalSet::new();
 		let mut tasks = JoinSet::new();
 
 		let pipelines: Vec<Pipeline> = vec![Box::pin(async { Ok(()) }), Box::pin(std::future::pending())];
 		supervise(&local, pipelines, &mut tasks);
 
-		local.run_until(drive(tasks)).await.unwrap();
+		local
+			.run_until(drive(tasks, Signals::new().unwrap(), None))
+			.await
+			.unwrap();
 	}
 
 	/// A stream bind failure is part of initialization, so systemd must never see
@@ -966,6 +1136,43 @@ mod tests {
 		assert!(err.to_string().contains("failed to bind listeners"), "{err:#}");
 		assert!(!ready.get(), "readiness must be withheld after a bind failure");
 		assert!(tasks.is_empty(), "nothing should be spawned after a bind failure");
+	}
+
+	/// `--connect` dials only once the listener is up, so a bind failure leaves no
+	/// live dial to drop without its close.
+	#[tokio::test]
+	async fn a_stream_bind_failure_starts_no_dial() {
+		let _ = moq_tokio::crypto::install_default();
+		let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
+		let addr = occupied.local_addr().expect("occupied address").to_string();
+		let invocation = Invocation::try_parse_from([
+			"moq",
+			"--connect",
+			"http://127.0.0.1:9/",
+			"--listen-tcp-bind",
+			&addr,
+			"--auth-public",
+			"**",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		let cluster = invocation.moq.cluster().expect("create cluster");
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let mut tasks = JoinSet::new();
+		let directions = Directions {
+			publish: true,
+			consume: false,
+		};
+		let Err(err) = spawn_moq(&invocation.moq, &net, cluster, directions, &mut tasks).await else {
+			panic!("the occupied port must fail startup");
+		};
+		assert!(err.to_string().contains("failed to bind listeners"), "{err:#}");
+		assert!(tasks.is_empty(), "no dial starts before the listener is up");
 	}
 
 	/// An explicit listener with no auth source stops startup instead of refusing
@@ -1060,17 +1267,10 @@ mod tests {
 		])
 		.expect("parse");
 		assert!(invocation.moq.validate().is_ok());
-		let net = Net {
-			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
-		};
-		let client = net.client(invocation.moq.client.clone()).expect("client");
 		let cluster = invocation
 			.moq
 			.cluster()
 			.expect("cluster")
-			.with_client(client)
 			.with_connect(invocation.moq.client.clone(), invocation.moq.quic.clone());
 		let err = cluster
 			.clone()
@@ -1085,6 +1285,51 @@ mod tests {
 			.start()
 			.await
 			.expect("http API with TLS");
+	}
+
+	/// Without `--connect`, only the cluster binds `--connect-bind`, so a fixed
+	/// port with a WAN cluster peer starts instead of colliding with itself.
+	#[tokio::test]
+	async fn a_fixed_connect_bind_with_a_cluster_peer_starts() {
+		let _ = moq_tokio::crypto::install_default();
+		// Borrow a free port from the OS, then hand it to `--connect-bind`.
+		let bind = std::net::UdpSocket::bind("127.0.0.1:0")
+			.expect("probe socket")
+			.local_addr()
+			.expect("probe addr")
+			.to_string();
+		let invocation = Invocation::try_parse_from([
+			"moq",
+			"--connect-bind",
+			&bind,
+			"--cluster-connect",
+			"moql://127.0.0.1:9/",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		invocation.moq.validate().expect("validate");
+		let cluster = invocation.moq.cluster().expect("cluster");
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let mut tasks = JoinSet::new();
+		let attached = spawn_moq(
+			&invocation.moq,
+			&net,
+			cluster,
+			Directions {
+				publish: true,
+				consume: false,
+			},
+			&mut tasks,
+		)
+		.await
+		.expect("a fixed bind with a cluster peer starts");
+		assert!(attached.client.is_none(), "no --connect, so no client of its own");
+		tasks.abort_all();
 	}
 
 	#[test]

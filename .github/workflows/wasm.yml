@@ -1,21 +1,23 @@
 name: WASM
 
 # Runs the @moq/wasm bindings in a real browser, which nothing in `just check`
-# can do. rs/moq-wasm is `#![cfg(target_arch = "wasm32")]`, so a host-target
-# `cargo check --workspace` compiles it to nothing, and `just rs wasm` is a
-# compile gate: it catches a moq-net change that stops the bindings building,
-# never one that stops them working. See test/wasm/README.md.
+# can do, and moq-clock's browser timers and wall clock through
+# wasm-bindgen-test on the same Chromium. rs/moq-wasm is
+# `#![cfg(target_arch = "wasm32")]`, so a host-target `cargo check --workspace`
+# compiles it to nothing, and `just rs wasm` is a compile gate: it catches a
+# moq-net change that stops the bindings building, never one that stops them
+# working. See test/wasm/README.md.
 #
-# Narrow trigger, like obs.yml and swift.yml. The filter covers what the bindings
+# Narrow trigger, like obs.yml. The filter covers what the bindings
 # are built out of: moq-net, because that is the break this exists to catch in
 # review (they are a thin wrapper over it, and every other gate compiles them to
 # nothing), and kio underneath it, because a lost wakeup or a timer regression
 # reaches the browser through moq-net without touching a file named here
-# otherwise. Those two are the whole in-repo dependency graph of the crate.
+# otherwise. moq-clock supplies the browser clock below those layers.
 #
 # The rest of the filter is the machinery that turns the crate into the package
 # under test, which is just as able to break it: the root `justfile` owns the
-# `wasm` recipe, and `.cargo/config.toml` carries the wasm32 rustflags
+# `wasm` recipe, `rs/justfile` the `wasm-test` recipe, and `.cargo/config.toml` carries the wasm32 rustflags
 # (`getrandom_backend`, `web_sys_unstable_apis`) without which it does not
 # compile at all.
 #
@@ -31,12 +33,17 @@ permissions:
   contents: read
 
 on:
+  workflow_call:
   pull_request:
-    # `closed` is here only so merging/closing a PR cancels its in-flight run
-    # via the concurrency group below; the job itself is skipped on close.
-    types: [opened, synchronize, reopened, closed]
+    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
+    # retargeted to release. `closed` is here only so merging/closing a PR
+    # cancels its in-flight run via the concurrency group below; the job itself
+    # is skipped on close.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited, closed]
     paths:
       - "rs/moq-wasm/**"
+      - "rs/moq-clock/**"
       - "rs/moq-net/**"
       - "rs/kio/**"
       - "js/wasm/**"
@@ -44,6 +51,7 @@ on:
       - "test/lib/**"
       - "justfile"
       - "js/justfile"
+      - "rs/justfile"
       - "test/justfile"
       - ".cargo/config.toml"
       - "package.json"
@@ -63,41 +71,37 @@ jobs:
   wasm:
     name: WASM
     if: github.event.action != 'closed'
-    # ARM64 like check.yml, the only architecture cache.yml warms a Rust store
-    # for; the harness builds the relay natively, which that store covers.
+    # ARM64 like check.yml; the harness builds the relay natively, which the
+    # merge queue's Check and Test publish.
     runs-on: ubuntu-24.04-arm
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 60
 
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter, so the dev shell substitutes
-          # instead of building from source. See check.yml for the full story.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
 
-      # cache.yml warms the default-branch store on `main`. Pull requests restore
-      # it; the action refuses to publish from a pull request.
+      # Nightly's call writes on `main`; release pull requests read.
       - name: Rust cache
         uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
       # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
       # runtime libs (`--with-deps` needs the host package manager); run.sh's own
       # `playwright install` then no-ops.
       - name: Playwright Chromium
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
+        shell: bash -leo pipefail {0}
+
+      - name: Browser clock
+        run: nix develop --command just rs wasm-test
         shell: bash -leo pipefail {0}
 
       - name: WASM
@@ -113,7 +117,7 @@ jobs:
       # short while so a red run is diagnosable; a passing run deletes its own.
       - name: Upload failure artifacts
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: wasm-failure
           path: ${{ runner.temp }}/moq-test-runs

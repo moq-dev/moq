@@ -9,7 +9,7 @@ use crate::Range;
 ///
 /// Each `[min, max]` range is rolled once per connection, so a single config can
 /// describe a heterogeneous swarm (e.g. some connections at 24fps, others at 60).
-#[derive(usage::Cli, Clone, Debug, Deserialize, Serialize)]
+#[derive(usage_rs::Cli, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[usage(name = "moq-bench", version = env!("CARGO_PKG_VERSION"))]
@@ -108,7 +108,7 @@ pub struct Config {
 	/// Provenance from the last [`Self::parse_and_merge`].
 	#[usage(skip)]
 	#[serde(skip)]
-	origins: Option<usage::config::Resolved>,
+	origins: Option<usage_rs::config::Resolved>,
 }
 
 impl Default for Config {
@@ -191,7 +191,7 @@ impl Config {
 				anyhow::bail!("{}", answer.message());
 			}
 		};
-		let env = usage::config::EnvLayer::from_process();
+		let env = usage_rs::config::EnvLayer::from_process();
 		let file_path = config.file.clone();
 		let file_body = file_path
 			.as_ref()
@@ -238,6 +238,22 @@ impl Config {
 				"--fanout owns the publish/subscribe shape; omit --broadcasts and --subscribe"
 			);
 		}
+		if config.publishes() && config.expects_delivery() {
+			anyhow::ensure!(
+				config.fps.min.min(config.fps.max) > 0,
+				"subscribing to generated media requires --fps greater than 0"
+			);
+			if config.fanout.is_none() {
+				let connections = config.connections.min.min(config.connections.max).max(1);
+				let broadcasts = config.broadcasts();
+				let available = (connections - 1).saturating_mul(broadcasts.min.min(broadcasts.max));
+				let subscribe = config.subscribe();
+				anyhow::ensure!(
+					subscribe.min.max(subscribe.max) <= available,
+					"--subscribe exceeds the {available} peer broadcasts guaranteed by --connections and --broadcasts"
+				);
+			}
+		}
 		Ok(config)
 	}
 
@@ -247,7 +263,7 @@ impl Config {
 		self.origins
 			.as_ref()
 			.and_then(|resolved| resolved.origin_key(key))
-			.map(usage::config::Origin::describe)
+			.map(usage_rs::config::Origin::describe)
 	}
 
 	pub fn name(&self) -> &str {
@@ -307,7 +323,7 @@ impl Config {
 }
 
 #[allow(dead_code)]
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 struct Settings {
 	#[usage(env = "MOQ_BENCH_NAME", cli("--name"))]
 	name: Option<String>,
@@ -361,6 +377,40 @@ struct Settings {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn readiness_refuses_unreachable_or_idle_generated_media() {
+		for args in [
+			vec!["--connections", "2:4", "--broadcasts", "1:3", "--subscribe", "2"],
+			vec!["--connections", "4:2", "--broadcasts", "3:1", "--subscribe", "2"],
+			vec!["--connections", "2", "--subscribe", "1", "--fps", "0:30"],
+			vec!["--connections", "2", "--fanout", "test", "--fps", "30:0"],
+		] {
+			let result = Config::parse_and_merge(std::iter::once("moq-bench").chain(args.clone()));
+			let error = result.unwrap_err().to_string();
+			assert!(
+				error.contains(if args.contains(&"--fps") {
+					"--fps"
+				} else {
+					"--subscribe"
+				}),
+				"{args:?}: {error}"
+			);
+		}
+		let config = Config::parse_and_merge([
+			"moq-bench",
+			"--connections",
+			"1",
+			"--broadcasts",
+			"0",
+			"--subscribe",
+			"9",
+			"--fps",
+			"0",
+		])
+		.unwrap();
+		assert_eq!(config.subscribe(), Range::new(9, 9));
+	}
 
 	#[test]
 	fn cli_overrides_toml() {

@@ -1,6 +1,7 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
+import { Micro, Milli } from "@moq/clock";
 import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
-import { Consumer } from "./consumer.ts";
+import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 
 // Drain the in-memory readers and their continuations without advancing mocked time.
@@ -9,11 +10,11 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 function setup(maxDelay = 100) {
 	jest.useFakeTimers();
 	const track = new Track.Producer("video");
-	const consumer = new Consumer(track.subscribe({ maxDelay: Time.Milli(30_000) }), {
+	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("video"),
-		maxDelay: Time.Milli(maxDelay),
+		maxDelay: Milli(maxDelay),
 	});
-	const results: NonNullable<Awaited<ReturnType<Consumer["next"]>>>[] = [];
+	const results: Read[] = [];
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const reading = (async () => {
 		for (;;) {
@@ -35,9 +36,22 @@ function setup(maxDelay = 100) {
 	return { track, consumer, results, warn };
 }
 
+// Each item as "gap <µs>+<µs>", "<group>@<µs>" for a frame, or "end <group>@<µs>".
+function items(results: Read[]): string[] {
+	return results.map((read) => {
+		if (read.kind === "gap") return `gap ${read.timestamp}+${read.duration}`;
+		if (read.kind === "end") return `end ${read.group}@${read.end}`;
+		return `${read.group}@${read.frame.timestamp}`;
+	});
+}
+
+function frames(results: Read[]) {
+	return results.flatMap((read) => (read.kind === "frame" ? [read] : []));
+}
+
 function write(group: Group.Producer, timestamp: number, marker = false) {
 	group.writeFrame({
-		payload: encodeFrame(marker ? new Uint8Array() : new Uint8Array([1]), Time.Micro(timestamp)),
+		payload: encodeFrame(marker ? new Uint8Array() : new Uint8Array([1]), Micro(timestamp)),
 		timestamp: Time.Timestamp.now(),
 	});
 }
@@ -46,7 +60,7 @@ for (const emptySuccessor of [false, true]) {
 	test.each([0, 100])(
 		`Consumer starts across a hole after an empty reset (empty successor: ${emptySuccessor}, maxDelay: %s)`,
 		async (maxDelay) => {
-			const { track, consumer, results, warn } = setup(maxDelay);
+			const { track, results, warn } = setup(maxDelay);
 			const stale = new Group.Producer(16);
 			track.writeGroup(stale);
 			await flush();
@@ -58,8 +72,7 @@ for (const emptySuccessor of [false, true]) {
 			}
 			stale.close(new NetError.Stream(StreamCode.Old));
 			await flush();
-			expect(results.some((result) => result.group === 16 && !result.frame)).toBe(true);
-			if (emptySuccessor) expect(results.some((result) => result.group === 17 && !result.frame)).toBe(true);
+			expect(results).toEqual([]);
 
 			const sequence = emptySuccessor ? 19 : 18;
 			const live = new Group.Producer(sequence);
@@ -67,36 +80,35 @@ for (const emptySuccessor of [false, true]) {
 			for (let i = 0; i < 5; i++) write(live, 1_000_000 + i * 33_333);
 			await flush();
 
-			const frames = results.filter((result) => result.frame);
-			expect(frames.map((result) => result.group)).toEqual(Array(5).fill(sequence));
-			expect(frames.map((result) => result.frame?.timestamp)).toEqual(
-				[1_000_000, 1_033_333, 1_066_666, 1_099_999, 1_133_332].map((timestamp) => Time.Micro(timestamp)),
-			);
-			expect(frames.map((result) => result.frame?.keyframe)).toEqual([true, false, false, false, false]);
-			expect(frames.map((result) => result.continuous)).toEqual([false, true, true, true, true]);
-			expect(consumer.discontinuity).toBe(0);
+			// Nothing was read before the live group, so the stale one leaves no gap.
+			expect(items(results)).toEqual([
+				...[1_000_000, 1_033_333, 1_066_666, 1_099_999, 1_133_332].map(
+					(timestamp) => `${sequence}@${timestamp}`,
+				),
+			]);
+			expect(frames(results).map((read) => read.frame.keyframe)).toEqual([true, false, false, false, false]);
 			expect(warn).not.toHaveBeenCalled();
 		},
 	);
 }
 
 test("Consumer preserves a declared marker before its first media across a hole", async () => {
-	const { track, consumer, results, warn } = setup();
+	const { track, results, warn } = setup();
 	const marker = new Group.Producer(16);
 	track.writeGroup(marker);
 	write(marker, 0, true);
 	marker.close();
 	await flush();
-	expect(consumer.discontinuity).toBe(1);
+	expect(items(results)).toEqual(["end 16@0"]);
 
 	const live = new Group.Producer(18);
 	track.writeGroup(live);
 	write(live, 50_000);
 	await flush();
-	const frames = results.filter((result) => result.frame);
-	expect(frames).toHaveLength(1);
-	expect(frames[0]).toMatchObject({ group: 18, discontinuity: 1, continuous: false });
-	expect(frames[0].frame?.keyframe).toBe(true);
+	// Group 17 never arrived, so the media after the marker is past a gap. It spans the declared
+	// pause too: the reader can't tell where group 17 would have started.
+	expect(items(results)).toEqual(["end 16@0", "gap 0+50000", "18@50000"]);
+	expect(frames(results)[0].frame.keyframe).toBe(true);
 	expect(warn).not.toHaveBeenCalled();
 });
 
@@ -107,7 +119,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	write(first, 0);
 	first.close();
 	await flush();
-	expect(results.filter((result) => result.frame)).toHaveLength(1);
+	expect(items(results)).toEqual(["16@0"]);
 
 	if (reset) {
 		const marker = new Group.Producer(17);
@@ -115,7 +127,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 		write(marker, 0, true);
 		marker.close();
 		await flush();
-		expect(consumer.discontinuity).toBe(1);
+		expect(items(results)).toEqual(["16@0", "end 17@0"]);
 	}
 	const sequence = reset ? 20 : 19;
 	const later = new Group.Producer(sequence);
@@ -123,7 +135,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	write(later, 50_000);
 	await flush();
 	expect(consumer.buffered.peek().length).toBeGreaterThan(0);
-	expect(results.filter((result) => result.frame)).toHaveLength(1);
+	expect(frames(results)).toHaveLength(1);
 
 	// Supply the missing, timestamp-contiguous bridge and prove the queued frame survives.
 	const bridge = new Group.Producer(sequence - 1);
@@ -131,11 +143,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	write(bridge, 0);
 	bridge.close();
 	await flush();
-	expect(results.filter((result) => result.frame).map((result) => result.group)).toEqual([
-		16,
-		sequence - 1,
-		sequence,
-	]);
-	expect(consumer.discontinuity).toBe(reset ? 1 : 0);
+	// The bridge closes the hole, so nothing reads as a gap.
+	expect(items(results)).toEqual(["16@0", ...(reset ? ["end 17@0"] : []), `${sequence - 1}@0`, `${sequence}@50000`]);
 	expect(warn).not.toHaveBeenCalled();
 });

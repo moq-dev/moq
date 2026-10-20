@@ -21,7 +21,7 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 /// Flattened onto [`crate::listen::Config::unix`].
 // The derived arg group is named after the struct, so it needs an explicit id to
 // stay unique across the flattened sections.
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -33,7 +33,7 @@ pub struct Config {
 		env = "MOQ_LISTEN_UNIX_BIND",
 		setting = "listen.unix.bind"
 	)]
-	#[usage(value_hint = usage::ValueHint::AnyPath)]
+	#[usage(value_hint = usage_rs::ValueHint::AnyPath)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub bind: Option<PathBuf>,
 
@@ -54,7 +54,7 @@ pub struct Config {
 ///
 /// Separate args rather than Usage aliases, since an alias renames the flag but
 /// leaves its env var behind.
-#[derive(usage::Args, Clone, Debug, Default)]
+#[derive(usage_rs::Args, Clone, Debug, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(
@@ -139,7 +139,7 @@ impl Config {
 /// The kernel reports the connecting process's credentials. Each populated list
 /// constrains the corresponding credential (AND across the three, OR within
 /// each); all empty means no check.
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -247,6 +247,7 @@ pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Sessio
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via Unix socket");
 	qmux::uds::Config::new(WIRE_VERSION)
 		.protocols(protocols.iter().copied())
+		.session_config(crate::qmux_config())
 		.connect(path)
 		.await
 		.map_err(|err| Error::Connect(crate::error::message(err)))
@@ -354,7 +355,9 @@ impl Listener {
 	/// Accept a socket and return its independently driven qmux handshake.
 	pub(crate) async fn accept_pending(&self) -> impl Future<Output = Result<(qmux::Session, PeerCred)>> + use<> {
 		let stream = self.accept_socket().await;
-		let config = qmux::uds::Config::new(WIRE_VERSION).protocols(self.protocols.iter().map(String::as_str));
+		let config = qmux::uds::Config::new(WIRE_VERSION)
+			.protocols(self.protocols.iter().map(String::as_str))
+			.session_config(crate::qmux_config());
 		async move {
 			let cred = stream.peer_cred()?;
 			let cred = PeerCred {
@@ -398,7 +401,7 @@ impl Drop for Listener {
 #[cfg(test)]
 mod legacy_tests {
 	use super::*;
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(settings)]
 	struct Cli {

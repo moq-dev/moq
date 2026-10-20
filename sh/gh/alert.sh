@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Discord alerting for workflow failures outside of pull requests.
+# Discord alerting for cron, release, and deployment failures.
 # Usage:
 #   alert.sh discord          Post the current workflow_run failure to Discord.
-#   alert.sh check-coverage   Verify alert.yml watches every non-PR workflow.
+#   alert.sh check-coverage   Verify alert.yml watches every alertable workflow.
 #
 # Environment (discord):
 #   DISCORD_WEBHOOK   Required. The #alerts channel webhook URL.
@@ -59,36 +59,34 @@ discord() {
         "$DISCORD_WEBHOOK"
 }
 
-# Every workflow that can run outside a pull request must be watched by
-# alert.yml, and pull-request-only workflows must not be (each entry costs a
-# skipped Alert run per trigger, and `Check` alone fires on every push to every
-# PR).
+# Watch cron and publishing workflows. Ordinary CI stays on GitHub, avoiding
+# both Discord noise and a skipped Alert run on every CI completion.
 #
 # This is the guard against the list going stale: adding a workflow, or adding
 # a push/schedule trigger to a PR-only one, fails here until alert.yml matches.
 check_coverage() {
     local expected actual
-    # Not `non_pr_workflow_names | sort -u`: a failure inside a pipeline would
+    # Not `alertable_workflow_names | sort -u`: a failure inside a pipeline would
     # be swallowed and read as "no workflows need watching", which is the
     # silent pass this whole guard exists to prevent. Capture, propagate, then
     # sort.
-    expected=$(non_pr_workflow_names) || return 2
+    expected=$(alertable_workflow_names) || return 2
     expected=$(sort -u <<<"$expected")
     actual=$(watched_workflow_names) || return 2
     actual=$(sort -u <<<"$actual")
 
     if [[ "$expected" == "$actual" ]]; then
-        echo "alert.yml watches all $(wc -l <<<"$expected" | tr -d ' ') non-PR workflows"
+        echo "alert.yml watches all $(wc -l <<<"$expected" | tr -d ' ') alertable workflows"
         return 0
     fi
 
     echo "alert.yml's workflow list is out of sync with .github/workflows/" >&2
     comm -23 <(echo "$expected") <(echo "$actual") | sed 's/^/  missing (add to alert.yml):  /' >&2
-    comm -13 <(echo "$expected") <(echo "$actual") | sed 's/^/  stale (remove, PR-only):    /' >&2
+    comm -13 <(echo "$expected") <(echo "$actual") | sed 's/^/  stale (remove, CI-only):    /' >&2
     return 1
 }
 
-# Names of workflows with a trigger that starts a run outside a pull request.
+# Names of cron and publishing workflows.
 #
 # The YAML is parsed rather than pattern-matched. GitHub accepts `on:` as a
 # block map, block sequence, flow sequence or bare scalar, any of which may wrap
@@ -102,7 +100,7 @@ check_coverage() {
 # A workflow with no `name:` is an error, not a skip: GitHub falls back to the
 # file path, which alert.yml cannot reference, and skipping it would put the
 # workflow past this check unwatched.
-non_pr_workflow_names() {
+alertable_workflow_names() {
     local f files=()
     shopt -s nullglob
     for f in "$WORKFLOWS_DIR"/*.yml "$WORKFLOWS_DIR"/*.yaml; do
@@ -113,10 +111,12 @@ non_pr_workflow_names() {
 
     printf "%s\n" "${files[@]}" | bun -e '
 const files = (await Bun.stdin.text()).split("\n").filter(Boolean);
-// The PR events report their failure as a check on the PR itself, and
+// PR and merge group events report their failure as a check on the PR itself, and
 // workflow_call runs inside the run that called it, so a workflow triggered
 // only by these needs no entry.
-const UNWATCHED = new Set(["pull_request", "pull_request_target", "workflow_call"]);
+const UNWATCHED = new Set(["pull_request", "pull_request_target", "merge_group", "workflow_call"]);
+// These push workflows validate branches or warm caches; none publishes.
+const CI_ONLY = new Set(["Cache", "OBS", "Platform", "Quest"]);
 const names = [];
 for (const file of files) {
     const doc = Bun.YAML.parse(await Bun.file(file).text());
@@ -140,6 +140,7 @@ for (const file of files) {
         console.error("alert.sh: " + file + " has no top-level name:, so alert.yml cannot reference it");
         process.exit(2);
     }
+    if (CI_ONLY.has(name.trim()) && !triggers.includes("schedule")) continue;
     names.push(name.trim());
 }
 if (names.length) console.log(names.join("\n"));

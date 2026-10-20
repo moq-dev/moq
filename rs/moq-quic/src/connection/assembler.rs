@@ -232,6 +232,40 @@ impl Assembler {
         self.bytes_read
     }
 
+    /// Number of bytes before `end` the application has yet to read, received or not
+    pub(super) fn unread_before(&self, end: u64) -> u64 {
+        let State::Unordered { recvd } = &self.state else {
+            return end.saturating_sub(self.bytes_read);
+        };
+        // Unordered reads leave holes, so count what was received and not yet handed out
+        let clip = |range: std::ops::Range<u64>| range.end.min(end).saturating_sub(range.start);
+        let received: u64 = recvd.iter().map(clip).sum();
+        let buffered: u64 = self
+            .data
+            .iter()
+            .map(|buffer| clip(buffer.offset..buffer.end()))
+            .sum();
+        end - received + buffered
+    }
+
+    /// Discard buffered data at or past `end`
+    pub(super) fn truncate(&mut self, end: u64) {
+        let (mut buffered, mut allocated) = (self.buffered, self.allocated);
+        self.data.retain_mut(|buffer| {
+            if buffer.offset >= end {
+                buffered -= buffer.bytes.len();
+                allocated -= buffer.allocation_size;
+                return false;
+            }
+            let excess = buffer.end().saturating_sub(end) as usize;
+            buffer.bytes.truncate(buffer.bytes.len() - excess);
+            buffered -= excess;
+            true
+        });
+        self.buffered = buffered;
+        self.allocated = allocated;
+    }
+
     /// Discard all buffered data
     pub(super) fn clear(&mut self) {
         self.data.clear();
@@ -935,6 +969,44 @@ mod test {
             got.extend_from_slice(&chunk.bytes);
         }
         assert_eq!(&got[..], b"abcdefghij");
+    }
+
+    #[test]
+    fn truncate_ordered() {
+        let mut x = Assembler::new();
+        x.insert(0, Bytes::from_static(b"abc"), 3).unwrap();
+        x.insert(2, Bytes::from_static(b"cdefg"), 5).unwrap();
+        x.insert(6, Bytes::from_static(b"gh"), 2).unwrap();
+        assert_eq!(next(&mut x, 2), Some(Bytes::from_static(b"ab")));
+        assert_eq!(x.unread_before(5), 3);
+        x.truncate(5);
+        assert_sorted(&x);
+        assert_eq!(x.buffered, 4);
+        assert_eq!(next(&mut x, usize::MAX), Some(Bytes::from_static(b"cde")));
+        assert_eq!(next(&mut x, usize::MAX), None);
+        assert_eq!(x.unread_before(5), 0);
+        assert_eq!(x.unread_before(9), 4);
+    }
+
+    #[test]
+    fn truncate_unordered() {
+        let mut x = Assembler::new();
+        x.ensure_ordering(false).unwrap();
+        x.insert(4, Bytes::from_static(b"efgh"), 4).unwrap();
+        x.insert(0, Bytes::from_static(b"a"), 1).unwrap();
+        assert_eq!(
+            next_unordered(&mut x),
+            Chunk::new(0, Bytes::from_static(b"a"))
+        );
+        // 1..4 was never received, and 4..6 is buffered
+        assert_eq!(x.unread_before(6), 5);
+        x.truncate(6);
+        assert_eq!(
+            next_unordered(&mut x),
+            Chunk::new(4, Bytes::from_static(b"ef"))
+        );
+        assert_eq!(x.unread_before(6), 3);
+        assert_eq!(x.read(usize::MAX, false), None);
     }
 
     fn next_unordered(x: &mut Assembler) -> Chunk {

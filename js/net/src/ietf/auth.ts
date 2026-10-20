@@ -1,12 +1,13 @@
 import { Unsupported } from "../auth.ts";
 import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
-import { SessionCode, SessionError } from "../error.ts";
+import { ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "../error.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream, Writer } from "../stream.ts";
 import type { Session } from "./adapter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { SetupOption, type SetupOptions } from "./parameters.ts";
+import { nextMessage } from "./request_stream.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
@@ -45,6 +46,9 @@ export function intoSetup(params: SetupOptions, version: IetfVersion) {
 /** The REQUEST_ERROR codes AUTH_ERROR carries. */
 const UNAUTHORIZED = 0x1;
 const NOT_SUPPORTED = 0x3;
+const EXPIRED_AUTH_TOKEN = 0x5;
+/** Draft-17 assigned it, the first draft this extension negotiates on. */
+const GOING_AWAY = 0x6;
 
 /** Longest AUTH_ERROR reason, in bytes, matching the Rust decoder. */
 const MAX_REASON = 8192;
@@ -205,9 +209,11 @@ export class AuthError {
 		});
 	}
 
-	/** What the refusal means to the presenter: NOT_SUPPORTED is a grant it could not tell. */
+	/** What the refusal means to the presenter, preserving an actionable expiry. */
 	toError(): Error {
 		if (this.code === NOT_SUPPORTED) return new Unsupported(this.reason);
+		if (this.code === EXPIRED_AUTH_TOKEN) return new SessionError(SessionCode.Expired, { reason: this.reason });
+		if (this.code === GOING_AWAY) return new StreamError(StreamCode.GoingAway, { reason: this.reason });
 		return new SessionError(SessionCode.Unauthorized, { reason: this.reason });
 	}
 }
@@ -231,8 +237,8 @@ export class IetfAuthWire implements AuthWire {
 	}
 
 	async read(stream: Stream): Promise<WireReply | undefined> {
-		if (await stream.reader.done()) return undefined;
-		const id = await stream.reader.u53();
+		const id = await nextMessage(stream.reader, this.#version, this.#session.client);
+		if (id === undefined) return undefined;
 		switch (id) {
 			case AuthOk.id: {
 				const ok = await AuthOk.decode(stream.reader, this.#version);
@@ -254,13 +260,23 @@ export class IetfAuthWire implements AuthWire {
 		return msg.token;
 	}
 
+	async withdrawn(stream: Stream): Promise<void> {
+		if ((await nextMessage(stream.reader, this.#version, this.#session.client)) !== undefined)
+			throw new ProtocolViolation("additional message on an AUTH stream");
+	}
+
 	async grant(stream: Stream, grant: WireGrant): Promise<void> {
 		await new AuthOk(grant.publish, grant.subscribe, grant.expires).encode(stream.writer, this.#version);
 	}
 
 	async refuse(stream: Stream, code: SessionCode, reason: string): Promise<void> {
-		// The public API speaks session codes; this registry distinguishes only unsupported from unauthorized.
-		const wire = code === SessionCode.Version || code === SessionCode.Unsupported ? NOT_SUPPORTED : UNAUTHORIZED;
+		// The public API speaks session codes; translate the actionable request-error kinds.
+		const wire =
+			code === SessionCode.Version || code === SessionCode.Unsupported
+				? NOT_SUPPORTED
+				: code === SessionCode.Expired
+					? EXPIRED_AUTH_TOKEN
+					: UNAUTHORIZED;
 		await new AuthError(wire, reason).encode(stream.writer, this.#version);
 	}
 

@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 mod bbr3;
 mod cubic;
-mod new_reno;
+mod unlimited;
 
 pub use bbr3::{Bbr3, Bbr3Config};
 pub use cubic::{Cubic, CubicConfig};
-pub use new_reno::{NewReno, NewRenoConfig};
+pub use unlimited::Unlimited;
 
 /// Common interface for different congestion controllers
 pub trait Controller: Send + Sync {
@@ -33,11 +33,12 @@ pub trait Controller: Send + Sync {
     /// the congestion window at this point in the current round trip.
     fn on_cwnd_limited(&mut self) {}
 
-    /// A transmit poll found nothing to send, and neither the congestion window nor the pacer
-    /// held a send back
+    /// A transmit poll drained the source without reaching a sender limit.
     ///
-    /// Reports the spec's `CheckIfApplicationLimited` event: the application ran dry with
-    /// `in_flight` bytes outstanding.
+    /// Reports the spec's `CheckIfApplicationLimited` event with `in_flight` bytes outstanding,
+    /// including after a partial send. Congestion, pacing, and the local send window are sender
+    /// limits. Receiver credit counts as application-limited: for MoQ, peer flow control is a
+    /// configuration limit rather than a measure of path capacity.
     #[allow(unused_variables)]
     fn on_app_limited(&mut self, in_flight: u64) {}
 

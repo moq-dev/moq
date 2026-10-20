@@ -4,7 +4,7 @@
 // state each role mirrors onto the DOM.
 import type MoqPublish from "@moq/publish/element";
 import type MoqWatch from "@moq/watch/element";
-import { refused } from "./close";
+import { refused, refusedWebSocket } from "./close";
 import { type CaptureState, FAULTS, type Fault, publish, SAMPLE_MS } from "./contract";
 import { Fixture } from "./fixture";
 import { attach, watchResources } from "./probe";
@@ -69,6 +69,8 @@ if (role === "publish") {
 		},
 		disableVideo: () => fixture?.setVideo(false),
 		enableVideo: () => fixture?.setVideo(true),
+		changeVideoCodec: () => fixture?.changeVideoCodec(),
+		resizeVideo: () => fixture?.resizeVideo(),
 	});
 } else if (role === "subscribe") {
 	await customElements.whenDefined("moq-watch");
@@ -131,7 +133,9 @@ if (role === "publish") {
 	});
 } else if (role === "close") {
 	// The relay refuses this session; mirror how it closed for close.ts to check.
-	document.body.dataset.interopClose = JSON.stringify(await refused(url));
+	document.body.dataset.interopClose = JSON.stringify(
+		await (params.get("transport") === "websocket" ? refusedWebSocket(url) : refused(url)),
+	);
 } else {
 	throw new Error("missing ?role=publish|fixture|subscribe|close");
 }

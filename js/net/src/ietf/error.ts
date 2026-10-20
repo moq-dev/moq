@@ -87,12 +87,15 @@ export type RequestCondition =
 	| "internal"
 	/** The peer's credentials do not cover the request. */
 	| "unauthorized"
+	/** The token expired and can be refreshed. */
+	| "expired"
 	/** The request outlived an implementation-specific deadline. */
 	| "timeout"
 	/** This endpoint does not implement the request at all. */
 	| "not_supported"
 	/** The broadcast or track the peer asked for is not here. */
 	| "invalid_range"
+	| "invalid_filter"
 	| "invalid_joining_request_id"
 	| "does_not_exist"
 	/** The content the peer offered is not wanted here, so it should stop offering it. */
@@ -170,6 +173,16 @@ function malformedAuthToken(kind: RequestKind, version: IetfVersion): number | u
 	return kind === "publish" ? undefined : MALFORMED_AUTH_TOKEN_14;
 }
 
+/** Draft-15 moved EXPIRED_AUTH_TOKEN off 0x12, which became MALFORMED_TRACK. */
+const EXPIRED_AUTH_TOKEN_14 = 0x12;
+const EXPIRED_AUTH_TOKEN = 0x5;
+
+/** The value for an expired token, or undefined where none is assigned: draft-14 PUBLISH_ERROR. */
+function expiredAuthToken(kind: RequestKind, version: IetfVersion): number | undefined {
+	if (version !== Version.DRAFT_14) return EXPIRED_AUTH_TOKEN;
+	return kind === "publish" ? undefined : EXPIRED_AUTH_TOKEN_14;
+}
+
 /** The value for a draining session, or undefined before draft-17 registered one. */
 function goingAway(version: IetfVersion): number | undefined {
 	return version >= Version.DRAFT_17 ? GOING_AWAY : undefined;
@@ -188,10 +201,14 @@ function goingAway(version: IetfVersion): number | undefined {
  */
 export function toRequestCode(condition: RequestCondition, kind: RequestKind, version: IetfVersion): number {
 	switch (condition) {
+		case "invalid_filter":
+			return version >= Version.DRAFT_19 ? 0x36 : INTERNAL_ERROR;
 		case "internal":
 			return INTERNAL_ERROR;
 		case "unauthorized":
 			return UNAUTHORIZED;
+		case "expired":
+			return expiredAuthToken(kind, version) ?? INTERNAL_ERROR;
 		case "timeout":
 			return TIMEOUT;
 		case "not_supported":
@@ -236,9 +253,11 @@ export function fromRequestCode(code: number, kind: RequestKind, version: IetfVe
 			return "not_supported";
 	}
 
+	if (code === 0x36 && version >= Version.DRAFT_19) return "invalid_filter";
 	if (code === doesNotExist(kind, version)) return "does_not_exist";
 	if (code === invalidRange(kind, version)) return "invalid_range";
 	if (code === invalidJoiningRequestId(kind, version)) return "invalid_joining_request_id";
+	if (code === expiredAuthToken(kind, version)) return "expired";
 	if (code === uninterested(kind, version)) return "uninterested";
 	if (code === malformedTrack(kind, version)) return "malformed_track";
 	if (code === goingAway(version)) return "going_away";

@@ -14,7 +14,7 @@ pub enum Bind {
 }
 
 impl Bind {
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	pub(crate) fn resolve(&self) -> std::io::Result<std::net::SocketAddr> {
 		match self {
 			Self::Addr(addr) => Ok(*addr),
@@ -79,9 +79,9 @@ pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 
 /// The accept side of an endpoint: what to listen on and how to be trusted.
 ///
-/// Derives [`usage::Args`], so flatten it into a binary's own parser with
+/// Derives [`usage_rs::Args`], so flatten it into a binary's own parser with
 /// `#[usage(flatten)]`. The dial side is [`crate::connect::Config`].
-#[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -146,7 +146,7 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The moq-transport extensions to offer in SETUP, all by default.
+	/// The extensions to offer in SETUP, every moq-transport one by default.
 	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,
@@ -159,16 +159,20 @@ pub struct Config {
 	/// connection open indefinitely, since keep-alives count as activity. The
 	/// connection is closed with a timeout code once this passes. See
 	/// [`resolved_timeout`](Self::resolved_timeout) for the value in effect.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub timeout: std::time::Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub timeout: Option<std::time::Duration>,
 
+	/// Maximum time for an accepted connection to finish its handshake. Defaults to 10s; 0s waits forever.
 	#[usage(
 		name = "listen-timeout",
 		long = "listen-timeout",
 		env = "MOQ_LISTEN_TIMEOUT",
-		default_value_t = crate::cli::Duration::fallback(DEFAULT_TIMEOUT),
-		default = "10s",
 		setting = "listen.timeout"
 	)]
 	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
@@ -182,11 +186,11 @@ pub struct Config {
 
 	/// IPv4 address advertised as the QUIC preferred_address.
 	///
-	/// Supporting clients (Chrome M131+, native noq) migrate to this address
+	/// Supporting clients (Chrome M131+, this crate) migrate to this address
 	/// shortly after the handshake completes. Typical use: handshake on an
 	/// anycast IP, steady-state on this host's unicast IP.
 	///
-	/// Honored by noq. Accept-only, which is why it lives
+	/// Honored by the QUIC backend. Accept-only, which is why it lives
 	/// here rather than in the shared [`crate::quic::Config`].
 	#[usage(
 		name = "listen-preferred-v4",
@@ -274,7 +278,7 @@ impl Default for Config {
 			unix: Default::default(),
 			version: Vec::new(),
 			extensions: Default::default(),
-			timeout: DEFAULT_TIMEOUT,
+			timeout: Some(DEFAULT_TIMEOUT),
 			timeout_arg: None,
 			tls: Default::default(),
 			preferred_v4: None,
@@ -288,8 +292,6 @@ impl Default for Config {
 	}
 }
 
-#[cfg(feature = "noq")]
-pub(crate) use moq_sock::shard::Shard;
 /// One server's socket in a complete `SO_REUSEPORT` group.
 ///
 /// Crate-private on purpose: [`crate::worker::Workers`] is the only thing that
@@ -302,7 +304,7 @@ pub(crate) use moq_sock::shard::Socket;
 /// They carry their original env vars, which is why these are separate args rather
 /// than Usage aliases: an alias renames the flag but not the variable, and a relay
 /// deployed through the environment is the common case.
-#[derive(Clone, Debug, Default, usage::Args)]
+#[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(name = "server-bind", long = "server-bind", env = "MOQ_SERVER_BIND", hide = true)]
@@ -515,11 +517,15 @@ impl Config {
 	/// How long an accepted connection has to finish its handshake, or `None` to wait
 	/// forever: for zero, and for a timeout too long for the clock to reach.
 	pub fn resolved_timeout(&self) -> Option<std::time::Duration> {
-		let timeout = crate::cli::Duration::resolve(self.timeout_arg, self.timeout);
+		let timeout = self
+			.timeout_arg
+			.map(Into::into)
+			.or(self.timeout)
+			.unwrap_or(DEFAULT_TIMEOUT);
 		(!timeout.is_zero() && std::time::Instant::now().checked_add(timeout).is_some()).then_some(timeout)
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	/// Return the effective QUIC-LB connection-ID encoding.
 	pub fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
 		self.lb_id
@@ -552,7 +558,7 @@ mod tests {
 	}
 	/// A parser wrapping the config, since it derives `Args` (see the note in
 	/// [`crate::connect`]).
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(settings)]
 	struct Cli {
@@ -658,7 +664,7 @@ mod tests {
 		assert!("relay.example.com:443:8443".parse::<Bind>().is_err());
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[test]
 	fn cli_load_balancer_survives_the_merge_round_trip() {
 		let config = config_from(["test", "--listen-quic-lb-id", "ab", "--listen-quic-lb-nonce", "9"]);
@@ -718,7 +724,7 @@ load_balancer = { id = "cd", nonce = 4 }
 	}
 
 	/// Programmatic configuration keeps the QUIC-LB id and nonce paired.
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[test]
 	fn load_balancer_is_a_single_typed_value() {
 		assert_eq!(Config::default().load_balancer(), None);
@@ -846,7 +852,7 @@ load_balancer = { id = "ab", nonce = 8 }
 
 		// Past the clock's range is forever, not a panic on the first accept.
 		let config = Config {
-			timeout: std::time::Duration::MAX,
+			timeout: Some(std::time::Duration::MAX),
 			..Default::default()
 		};
 		assert_eq!(config.resolved_timeout(), None);
@@ -862,4 +868,17 @@ load_balancer = { id = "ab", nonce = 8 }
 		);
 		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
 	}
+}
+
+#[cfg(test)]
+mod duration_tests {
+	use super::*;
+	crate::cli::duration::test_config_duration!(
+		timeout_set_in_code_beats_parser_default,
+		Config,
+		timeout,
+		"--listen-timeout",
+		|c: &Config| c.resolved_timeout(),
+		|d: std::time::Duration| (!d.is_zero()).then_some(d)
+	);
 }

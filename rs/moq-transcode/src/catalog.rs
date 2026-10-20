@@ -341,10 +341,12 @@ pub(crate) async fn rung_entry(
 }
 
 /// Rungs are enabled exactly when the rendition the pipeline decodes is: a disabled source sends
-/// no frames, so neither can its rungs.
-pub(crate) fn inherit_enabled(rungs: &mut [Published], source: &VideoConfig) {
+/// no frames, so neither can its rungs. They share its preference too, so a viewer that prefers
+/// the source can still step down the ladder within the same tier.
+pub(crate) fn inherit(rungs: &mut [Published], source: &VideoConfig) {
 	for published in rungs {
 		published.entry.enabled = source.enabled;
+		published.entry.preference = source.preference;
 	}
 }
 
@@ -446,7 +448,7 @@ mod tests {
 			entry: source(640, 360, Some(600_000)),
 		}];
 
-		inherit_enabled(&mut published, &source_catalog.video.renditions["video"]);
+		inherit(&mut published, &source_catalog.video.renditions["video"]);
 		let mut out = moq_mux::catalog::hang::Catalog::default();
 		populate(&mut out, &source_catalog, &published, None).unwrap();
 		assert!(!out.video.renditions["video/360p"].enabled);
@@ -454,9 +456,39 @@ mod tests {
 		// Following an enabled input re-enables the rungs.
 		let healthy = source(1920, 1080, Some(5_000_000));
 		source_catalog.video.insert("healthy", healthy.clone()).unwrap();
-		inherit_enabled(&mut published, &healthy);
+		inherit(&mut published, &healthy);
 		populate(&mut out, &source_catalog, &published, None).unwrap();
 		assert!(out.video.renditions["video/360p"].enabled);
+	}
+
+	#[test]
+	fn rungs_inherit_the_source_preference() {
+		let mut source_catalog = moq_mux::catalog::hang::Catalog::default();
+		let mut src = source(1280, 720, Some(2_500_000));
+		src.preference = 1;
+		source_catalog.video.insert("video", src).unwrap();
+
+		let mut published = [Published {
+			rung: Resolved {
+				name: "video/360p".into(),
+				short_side: 360,
+				size: moq_video::Size::new(640, 360),
+				bitrate: moq_net::bandwidth::Rate::from_bps(600_000),
+				framerate: Some(moq_video::Rate::new(30, 1).unwrap()),
+			},
+			entry: source(640, 360, Some(600_000)),
+		}];
+
+		inherit(&mut published, &source_catalog.video.renditions["video"]);
+		let mut out = moq_mux::catalog::hang::Catalog::default();
+		populate(&mut out, &source_catalog, &published, None).unwrap();
+		assert_eq!(out.video.renditions["video/360p"].preference, 1);
+
+		// A source catalog edit that only re-ranks the source carries over to the rungs.
+		source_catalog.video.renditions.get_mut("video").unwrap().preference = -1;
+		inherit(&mut published, &source_catalog.video.renditions["video"]);
+		populate(&mut out, &source_catalog, &published, None).unwrap();
+		assert_eq!(out.video.renditions["video/360p"].preference, -1);
 	}
 
 	#[test]
@@ -941,9 +973,10 @@ mod tests {
 			.insert("video", source(1920, 1080, Some(6_000_000)))
 			.unwrap();
 		let mut archive = hang::catalog::Archive::new();
-		archive
-			.timelines
-			.insert("video".to_string(), "video.timeline.z".to_string());
+		archive.timelines.insert(
+			"video".to_string(),
+			hang::catalog::Timeline::new("video.timeline.z", 4_000),
+		);
 		archive.replay = Some(RelativeOwned::from("./recordings/clip".to_string()));
 		archive.version = Some(hang::catalog::Archive::VERSION);
 		child.archive = Some(archive.clone());
@@ -954,5 +987,49 @@ mod tests {
 		populate(&mut out, &child, &[], None).unwrap();
 		assert_eq!(out.archive, Some(archive), "a derivative keeps the child's archive");
 		assert_eq!(out.clock, Some(clock), "a derivative keeps the child's clock");
+	}
+
+	/// A derivative runs on its source's mapping: `populate` writes the source's root clock through
+	/// `modify()`, so the derivative's clock carries that mapping and its data is stamped on it.
+	#[tokio::test(start_paused = true)]
+	async fn a_derivative_stamps_on_its_source_clock() {
+		use std::time::{Duration, SystemTime};
+
+		// A minute in, the source's mapping is far from the one a fresh clock would advertise.
+		let ago = Duration::from_secs(60);
+		let _ = moq_net::time::now();
+		tokio::time::advance(ago).await;
+		let clock = moq_mux::Clock::at(moq_net::time::now() - ago, SystemTime::now() - ago).unwrap();
+		let mut input = moq_net::broadcast::Info::default().produce();
+		let source =
+			moq_mux::catalog::Producer::new(&mut input, moq_mux::catalog::Config::default().with_clock(clock)).unwrap();
+
+		let mut output = moq_net::broadcast::Info::default().produce();
+		let mut derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default()).unwrap();
+		let mut guard = derived.modify().unwrap();
+		populate(&mut guard, &source.snapshot(), &[], None).unwrap();
+		guard.commit().unwrap();
+		let adopted = derived.clock();
+		assert_eq!(adopted.wall(), clock.wall());
+
+		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let mut status = derived
+			.json_snapshot::<u32>(
+				output.create_track("status", info).unwrap(),
+				moq_mux::json::Config::default(),
+			)
+			.unwrap();
+		let mut subscriber = status.consume();
+		tokio::time::advance(Duration::from_secs(3)).await;
+		status.update(moq_net::Timed::from(&1).at(adopted.now())).unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let std::task::Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the update is published");
+		};
+		let std::task::Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("the update is published");
+		};
+		assert_eq!(frame.timestamp.unwrap().as_millis(), adopted.now().as_millis());
 	}
 }

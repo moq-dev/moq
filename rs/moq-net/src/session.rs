@@ -35,31 +35,6 @@ struct StatsState {
 	demanded: bool,
 }
 
-/// How [`Session::setup`] learns that the peer's SETUP arrived.
-#[derive(Clone)]
-pub(crate) enum Setup {
-	/// The handshake read it before the session started.
-	Read,
-	/// The lite driver records it from the peer's Setup Stream.
-	Lite(crate::lite::PeerSetup),
-	/// The moq-transport driver records it from the peer's SETUP stream.
-	Ietf(crate::ietf::peer::PeerSetup),
-	/// The version carries no SETUP from the peer.
-	Never,
-}
-
-impl Setup {
-	/// `Ready(true)` once the SETUP arrived, `Ready(false)` if it never will.
-	fn poll(&self, waiter: &kio::Waiter) -> Poll<bool> {
-		match self {
-			Self::Read => Poll::Ready(true),
-			Self::Lite(setup) => setup.poll_seen(waiter).map(|()| true),
-			Self::Ietf(setup) => setup.poll_seen(waiter).map(|()| true),
-			Self::Never => Poll::Ready(false),
-		}
-	}
-}
-
 /// A snapshot of connection statistics for a [`Session`].
 ///
 /// Every field is optional: availability depends on the transport backend (native QUIC
@@ -74,11 +49,6 @@ pub struct Stats {
 
 	/// Estimated send bandwidth from the congestion controller.
 	pub estimated_send_rate: Option<bandwidth::Rate>,
-
-	/// Estimated receive bandwidth from MoQ PROBE.
-	///
-	/// `None` unless the negotiated version supports PROBE (moq-lite-03+).
-	pub estimated_recv_rate: Option<bandwidth::Rate>,
 
 	/// Total bytes sent over the connection, including retransmissions and overhead.
 	pub bytes_sent: Option<u64>,
@@ -150,10 +120,9 @@ pub struct Session {
 	version: Version,
 	// Weak, so the sampler runs only while a caller holds a consumer.
 	send_bandwidth: Option<bandwidth::Weak>,
-	recv_bandwidth: Option<bandwidth::Consumer>,
+	recv_bandwidth: Option<bandwidth::Weak>,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
-	setup: Setup,
 }
 
 impl Session {
@@ -171,9 +140,10 @@ impl Session {
 
 	/// Returns a consumer for the estimated receive bitrate (from PROBE).
 	///
+	/// Holding the consumer requests PROBE; dropping the last one stops it.
 	/// Returns `None` if the MoQ version doesn't support PROBE (requires moq-lite-03+).
 	pub fn recv_bandwidth(&self) -> Option<bandwidth::Consumer> {
-		self.recv_bandwidth.clone()
+		self.recv_bandwidth.as_ref().map(bandwidth::Weak::consume)
 	}
 
 	/// Returns a snapshot of the current connection statistics.
@@ -183,17 +153,13 @@ impl Session {
 	/// fresh counters (100ms cadence). See [`Stats`] for which
 	/// metrics each backend reports.
 	pub fn stats(&self) -> Stats {
-		let mut stats = {
-			let mut state = self.stats.lock();
-			// A read is demand: wake the sampler, but only mutate (and so wake)
-			// when the flag actually flips.
-			if !state.demanded {
-				state.demanded = true;
-			}
-			state.sample
-		};
-		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(bandwidth::Consumer::peek);
-		stats
+		let mut state = self.stats.lock();
+		// A read is demand: wake the sampler, but only mutate (and so wake)
+		// when the flag actually flips.
+		if !state.demanded {
+			state.demanded = true;
+		}
+		state.sample
 	}
 
 	/// Close the transport with an explicit error, instead of waiting for the last
@@ -213,11 +179,13 @@ impl Session {
 		}
 	}
 
-	/// Close the session once the data it queued has been delivered.
+	/// Close the session after draining its queued data.
 	///
 	/// Waits until every stream still serving the peer (a subscription whose track
 	/// finished, a fetch, a track info reply) has written its data and FIN and the
-	/// peer acknowledged them, then closes the transport. Returns
+	/// transport acknowledged them, then closes the transport. Explicit lite-07-wip
+	/// also waits for the subscriber to receive a subscription's tail. Older Lite
+	/// versions, including the default lite-06, and IETF wait only for transport ACKs. Returns
 	/// [`Error::Timeout`] if that takes longer than one second, closing anyway, or
 	/// the session's terminal error if it ended some other way first. A track that
 	/// is still live never finishes, so finish or abort tracks before closing.
@@ -250,10 +218,11 @@ impl Session {
 	///
 	/// A close code the peer sent is decoded through the session registry (so an auth
 	/// rejection arrives as `Error::Session(SessionError::Unauthorized)`); every peer code is
-	/// preserved as [`Error::Session`], and a close carrying no application code surfaces as
-	/// [`Error::Transport`]. See [`Error::from_transport`]. If the runtime drops
-	/// the driver instead of running it to completion, this resolves with
-	/// [`Error::Cancel`].
+	/// preserved as [`Error::Session`]. A close carrying no application code surfaces as
+	/// [`Error::IdleTimeout`] for an idle timeout, `Error::Session(SessionError::Cancel)`
+	/// for a local close, and [`Error::Transport`] otherwise. See [`Error::from_transport`].
+	/// If the runtime drops the driver instead of running it to completion, this resolves
+	/// with [`Error::Cancel`].
 	pub async fn closed(&self) -> Error {
 		match self
 			.closed
@@ -267,35 +236,6 @@ impl Session {
 			// The driver was dropped before it could observe the close.
 			Err(kio::Closed) => Error::Cancel,
 		}
-	}
-
-	/// Wait for the peer's SETUP, or return the session's close reason.
-	///
-	/// Resolves when the peer's SETUP arrives. This crate's servers send it only once
-	/// they admit the client, but neither protocol requires that ordering, so another
-	/// server may send SETUP and still refuse the session afterward.
-	/// [`crate::Client::connect`] returns before the SETUP on moq-lite-05+ and
-	/// moq-transport draft 17+. Older versions read it during the handshake and resolve
-	/// at once, except moq-lite-03 and -04, which carry none and return
-	/// [`Error::Unsupported`]. A session that already closed returns its close reason.
-	pub async fn setup(&self) -> Result<(), Error> {
-		kio::wait(|waiter| {
-			match self.closed.poll(waiter, |state| match &**state {
-				Some(ended) => Poll::Ready(ended.err.clone()),
-				None => Poll::Pending,
-			}) {
-				Poll::Ready(Ok(err)) => return Poll::Ready(Err(err)),
-				// The driver was dropped before it could observe the close.
-				Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::Cancel)),
-				Poll::Pending => {}
-			}
-			match self.setup.poll(waiter) {
-				Poll::Ready(true) => Poll::Ready(Ok(())),
-				Poll::Ready(false) => Poll::Ready(Err(Error::Unsupported)),
-				Poll::Pending => Poll::Pending,
-			}
-		})
-		.await
 	}
 
 	/// Drain the peer gracefully: the handle for sending this session's single
@@ -341,9 +281,9 @@ impl Session {
 
 /// The handles a protocol driver shares with its [`Session`].
 pub(super) struct Handles {
+	pub stats: crate::stats::Session,
 	pub goaway: goaway::Handle,
 	pub auth: auth::Handle,
-	pub setup: Setup,
 	/// Where the driver publishes [`Estimate`] changes, for a protocol that reports
 	/// them to the peer (moq-lite PROBE). Sampled only while a consumer exists.
 	pub estimate: Option<kio::Producer<Estimate>>,
@@ -351,10 +291,10 @@ pub(super) struct Handles {
 
 impl Session {
 	pub(super) fn new<S>(
-		runtime: crate::time::Clock,
+		runtime: crate::time::Deadlines,
 		session: S,
 		version: Version,
-		recv_bandwidth: Option<bandwidth::Consumer>,
+		recv_bandwidth: Option<bandwidth::Weak>,
 		protocol: crate::driver::Protocol<S>,
 		handles: Handles,
 	) -> (Self, crate::Driver<S>)
@@ -364,9 +304,10 @@ impl Session {
 		let Handles {
 			goaway,
 			auth,
-			setup,
 			estimate,
+			stats: context,
 		} = handles;
+		let wire = session.wire().map(|counters| context.wire(counters));
 		let sample = snapshot(&session);
 		if let Some(estimate) = &estimate
 			&& let Ok(mut current) = estimate.write()
@@ -399,6 +340,7 @@ impl Session {
 			close: Some(close.consume()),
 			closed,
 			stats: stats.clone(),
+			wire,
 			send_bandwidth: send_producer,
 			estimate,
 			sampled: None,
@@ -415,7 +357,6 @@ impl Session {
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
 			auth,
-			setup,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -439,7 +380,7 @@ impl Session {
 pub(crate) struct Supervisor<S> {
 	version: Version,
 	local_close: Arc<std::sync::atomic::AtomicBool>,
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	session: S,
 	// A dedicated clone for the close watch, since each pending poll operation
 	// needs its own handle.
@@ -460,6 +401,8 @@ pub(crate) struct Supervisor<S> {
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
 	drain: Drain,
+	/// The transport's wire counters, registered under the session's root; dropping records the last reading.
+	wire: Option<crate::stats::Wire>,
 }
 
 /// A [`Session::close`] waiting for the protocol to deliver what it queued.
@@ -476,7 +419,11 @@ enum SamplerMode {
 	/// Nobody wants stats; sampling is paused.
 	Idle,
 	/// Someone does; sample when the deadline elapses.
-	Polling { deadline: crate::time::Deadline },
+	// Keep the deadline under a task bit: advancing this driver's clock then
+	// queues the sample without waking the already-running driver again.
+	Polling {
+		deadline: Box<kio::Tasks<crate::time::Deadline>>,
+	},
 }
 
 impl<S: crate::transport::poll::Session> Supervisor<S> {
@@ -491,6 +438,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			// this cell, so leave it holding the session's final counters
 			// rather than whichever sample the last demand happened to catch.
 			self.stats.lock().sample = snapshot(&self.session);
+			self.wire.take();
 			let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
 				Drain::Done(res) => Some(res),
 				_ => None,
@@ -606,9 +554,17 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		stats.sample = sample;
 		stats.demanded = false;
 		drop(stats);
-		self.mode = SamplerMode::Polling {
-			deadline: crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
-		};
+		let next = crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL);
+		match &mut self.mode {
+			SamplerMode::Polling { deadline } => deadline.push(next),
+			SamplerMode::Idle => {
+				let mut deadline = kio::Tasks::new();
+				deadline.push(next);
+				self.mode = SamplerMode::Polling {
+					deadline: Box::new(deadline),
+				};
+			}
+		}
 	}
 
 	fn poll_sampler(&mut self, waiter: &kio::Waiter) {
@@ -682,9 +638,6 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 }
 
 /// A [`Stats`] snapshot of the transport's counters.
-///
-/// `estimated_recv_rate` is filled in at the [`Session`] level (it comes from
-/// MoQ PROBE, not the transport), so it stays `None` here.
 fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 	let stats = session.stats();
 	Stats {
@@ -753,8 +706,7 @@ impl Drop for Withdrawing {
 /// Caps on what one peer can make a session hold at once.
 ///
 /// A peer that goes past a cap loses the session, closed with `TOO_MANY_REQUESTS`. The
-/// stats sessions rows report each root's peaks, so an operator sees how close sessions
-/// come before one is closed.
+/// stats sessions rows report announcement and subscription peaks.
 ///
 /// On moq-transport drafts 14 to 16 the caps also size the request window, which counts
 /// every request (FETCH, TRACK_STATUS and SUBSCRIBE_UPDATE included), so very low caps
@@ -769,6 +721,8 @@ pub struct Limits {
 	/// Subscriptions the peer may hold on our broadcasts. On moq-lite 05 and later an open
 	/// TRACK stream holds one too, sharing it with a SUBSCRIBE for the same track.
 	pub subscriptions: usize,
+	/// FETCH requests the peer may hold before group coalescing, defaulting to 10,000.
+	pub fetches: usize,
 }
 
 impl Default for Limits {
@@ -777,6 +731,7 @@ impl Default for Limits {
 		Self {
 			announces: 100_000,
 			subscriptions: 10_000,
+			fetches: 10_000,
 		}
 	}
 }
@@ -787,7 +742,10 @@ impl Limits {
 	/// Twice what the caps admit, so a peer within them is never blocked by request IDs
 	/// still waiting to be granted back.
 	pub(crate) fn requests(&self) -> u64 {
-		let caps = self.announces.saturating_add(self.subscriptions) as u64;
+		let caps = self
+			.announces
+			.saturating_add(self.subscriptions)
+			.saturating_add(self.fetches) as u64;
 		caps.saturating_mul(2)
 	}
 }

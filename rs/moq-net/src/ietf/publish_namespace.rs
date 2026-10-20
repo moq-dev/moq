@@ -2,13 +2,43 @@
 
 use std::borrow::Cow;
 
-use crate::{Path, coding::*, ietf::RequestId};
+use crate::{Epoch, Path, coding::*, ietf::RequestId};
 
 use super::Message;
-use super::cluster;
 use super::namespace::{decode_namespace, encode_namespace};
+use super::token::RequestToken;
+use super::{cluster, epoch};
 
 use super::Version;
+
+/// Which advertisement extensions a session negotiated: what its PUBLISH_NAMESPACE and
+/// NAMESPACE messages carry.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Negotiated {
+	/// MoQ Cluster: every advertisement carries HOP_PATH, and may carry ROUTE_COST.
+	pub cluster: bool,
+	/// MoQ Epoch: an advertisement may carry EPOCH.
+	pub epoch: bool,
+}
+
+impl Negotiated {
+	/// Whether NAMESPACE takes the extended form, with a Parameters field.
+	pub fn extended(&self) -> bool {
+		self.cluster || self.epoch
+	}
+}
+
+/// The extension parameters one advertisement carries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdvertParams {
+	/// The MoQ Cluster parameters (see [`cluster`]). `Some` exactly on a session that
+	/// negotiated the extension.
+	pub cluster: Option<cluster::Advert>,
+
+	/// The MoQ Epoch parameter: the publisher instance the route serves, if it names one.
+	/// Only on a session that negotiated the extension.
+	pub epoch: Option<Epoch>,
+}
 
 /// PublishNamespace message (0x06)
 /// Sent by the publisher to announce the availability of a namespace.
@@ -17,49 +47,47 @@ pub struct PublishNamespace<'a> {
 	pub request_id: RequestId,
 	pub track_namespace: Path<'a>,
 
-	/// The MoQ Cluster parameters (see [`cluster`]). `Some` on a session that
-	/// negotiated the extension and `None` on one that did not, which is what decides
-	/// whether they appear on the wire at all.
-	pub cluster: Option<cluster::Advert>,
+	/// The extension parameters, which a session that negotiated none leaves empty.
+	pub params: AdvertParams,
+
+	/// The `AUTHORIZATION TOKEN` (0x03) this request presents. At most one is
+	/// accepted: decoding refuses a repeated or second token.
+	pub authorization_token: Option<RequestToken>,
 }
 
 impl PublishNamespace<'_> {
-	/// Decode the message body, expecting the cluster parameters when the session
-	/// negotiated the extension.
+	/// Decode the message body, expecting the parameters of the extensions the session
+	/// negotiated.
 	///
 	/// The negotiation is session state rather than anything in the message, so the
-	/// caller supplies it. A negotiated session that omits HOP_PATH is a protocol
-	/// violation, which surfaces here as [`DecodeError::InvalidValue`].
-	pub fn decode_body(r: &mut Decoder<'_>, version: Version, negotiated: bool) -> Result<Self, DecodeError> {
+	/// caller supplies it. A negotiated cluster session that omits HOP_PATH, or a
+	/// parameter of an extension the session did not negotiate, is a protocol violation,
+	/// which surfaces here as [`DecodeError::InvalidValue`].
+	pub fn decode_body(r: &mut Decoder<'_>, version: Version, negotiated: Negotiated) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		if version == Version::Draft17 {
 			let _required_request_id_delta = r.varint()?;
 		}
 		let track_namespace = decode_namespace(r)?;
 
-		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		decode_params!(r, version,
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
+			epoch::EPOCH_PARAM => epoch: Option<Epoch> where negotiated.epoch,
 		);
-		super::token::unique(&authorization_token)?;
-
-		let cluster = match negotiated {
-			true => Some(cluster::Advert {
-				hops: hops.ok_or(DecodeError::InvalidValue)?,
-				cost: cost.unwrap_or(0),
-			}),
-			// An endpoint must not append these on a session that did not negotiate the
-			// extension, so either is a violation.
-			false if hops.is_some() || cost.is_some() => return Err(DecodeError::InvalidValue),
-			false => None,
+		let params = AdvertParams {
+			cluster: cluster_params(negotiated.cluster, hops, cost)?,
+			epoch,
 		};
+		// Last, so a malformed field closes the session before a token refusal.
+		let authorization_token = super::token::single(authorization_token)?;
 
 		Ok(Self {
 			request_id,
 			track_namespace,
-			cluster,
+			params,
+			authorization_token,
 		})
 	}
 }
@@ -73,28 +101,66 @@ impl Message for PublishNamespace<'_> {
 			w.varint(0)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
 		}
 		encode_namespace(w, &self.track_namespace)?;
-		encode_cluster_params(w, version, self.cluster.as_ref())
+		// ROUTE_COST is optional and absent means 0, so a free path sends nothing.
+		let hops = self.params.cluster.as_ref().map(|advert| advert.hops.clone());
+		let cost = self
+			.params
+			.cluster
+			.as_ref()
+			.and_then(|advert| (advert.cost != 0).then_some(advert.cost));
+		encode_params!(w, version,
+			0x03 => self.authorization_token.clone(),
+			cluster::HOP_PATH => hops,
+			cluster::ROUTE_COST => cost,
+			epoch::EPOCH_PARAM => self.params.epoch.clone(),
+		);
+		Ok(())
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		Self::decode_body(r, version, false)
+		Self::decode_body(r, version, Negotiated::default())
 	}
 }
 
-/// REQUEST_UPDATE (0x02) on a PUBLISH_NAMESPACE stream: the cluster parameters that
-/// changed (draft-lcurley-moq-cluster, Updating an Advertisement).
+/// The MoQ Cluster parameters of an advertisement, given what arrived.
+///
+/// A negotiated session requires HOP_PATH, and ROUTE_COST absent means 0. An endpoint
+/// must not send either on a session that did not negotiate, so either is a violation.
+fn cluster_params(
+	negotiated: bool,
+	hops: Option<cluster::HopPath>,
+	cost: Option<u64>,
+) -> Result<Option<cluster::Advert>, DecodeError> {
+	match negotiated {
+		true => Ok(Some(cluster::Advert {
+			hops: hops.ok_or(DecodeError::InvalidValue)?,
+			cost: cost.unwrap_or(0),
+		})),
+		false if hops.is_some() || cost.is_some() => Err(DecodeError::InvalidValue),
+		false => Ok(None),
+	}
+}
+
+/// REQUEST_UPDATE (0x02) on a PUBLISH_NAMESPACE: the cluster parameters that changed
+/// (draft-lcurley-moq-cluster, Updating an Advertisement), or a renewed request token.
 ///
 /// An omitted parameter keeps its value (moq-transport Section 9.5), so a cost that
 /// dropped to 0 is sent as an explicit 0, unlike the advertisement itself where absent
-/// means 0. Draft-17+ only: the extension negotiates on nothing earlier.
+/// means 0. Draft-16+: the cluster extension negotiates on draft-17+ only, so draft-16
+/// carries only the token.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishNamespaceUpdate {
 	/// The update's own Request ID; every REQUEST_UPDATE consumes one.
 	pub request_id: RequestId,
+	/// Draft-16 only: the PUBLISH_NAMESPACE this updates, which later drafts name by stream.
+	pub namespace_request_id: Option<RequestId>,
 	/// HOP_PATH, when the route changed.
 	pub hops: Option<cluster::HopPath>,
 	/// ROUTE_COST, when the cost changed.
 	pub cost: Option<u64>,
+	/// The `AUTHORIZATION TOKEN` (0x03) renewing the advertisement's credential, if any. At
+	/// most one is accepted: decoding refuses a repeated or second token.
+	pub authorization_token: Option<RequestToken>,
 }
 
 impl PublishNamespaceUpdate {
@@ -102,8 +168,10 @@ impl PublishNamespaceUpdate {
 	pub fn between(request_id: RequestId, held: &cluster::Advert, next: &cluster::Advert) -> Self {
 		Self {
 			request_id,
+			namespace_request_id: None,
 			hops: (held.hops != next.hops).then(|| next.hops.clone()),
 			cost: (held.cost != next.cost).then_some(next.cost),
+			authorization_token: None,
 		}
 	}
 
@@ -121,7 +189,13 @@ impl Message for PublishNamespaceUpdate {
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(EncodeError::Version),
+			Version::Draft14 | Version::Draft15 => return Err(EncodeError::Version),
+			Version::Draft16 => {
+				self.request_id.encode(w, version)?;
+				self.namespace_request_id
+					.ok_or(EncodeError::Version)?
+					.encode(w, version)?;
+			}
 			Version::Draft17 => {
 				self.request_id.encode(w, version)?;
 				w.varint(0)?; // required_request_id_delta = 0 (draft-17 only, removed in draft-18 per #1615)
@@ -129,6 +203,7 @@ impl Message for PublishNamespaceUpdate {
 			_ => self.request_id.encode(w, version)?,
 		}
 		encode_params!(w, version,
+			0x03 => self.authorization_token.clone(),
 			cluster::HOP_PATH => self.hops,
 			cluster::ROUTE_COST => self.cost,
 		);
@@ -136,59 +211,68 @@ impl Message for PublishNamespaceUpdate {
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(DecodeError::Version),
+		let (request_id, namespace_request_id) = match version {
+			Version::Draft14 | Version::Draft15 => return Err(DecodeError::Version),
+			Version::Draft16 => (RequestId::decode(r, version)?, Some(RequestId::decode(r, version)?)),
 			Version::Draft17 => {
 				let request_id = RequestId::decode(r, version)?;
 				let _required_request_id_delta = r.varint()?;
-				request_id
+				(request_id, None)
 			}
-			_ => RequestId::decode(r, version)?,
+			_ => (RequestId::decode(r, version)?, None),
 		};
-		// The token decodes but grants nothing: the session's grant is what authorizes the request.
 		decode_params!(r, version,
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
 		);
-		super::token::unique(&authorization_token)?;
-		Ok(Self { request_id, hops, cost })
+		let authorization_token = super::token::single(authorization_token)?;
+		Ok(Self {
+			request_id,
+			namespace_request_id,
+			hops,
+			cost,
+			authorization_token,
+		})
 	}
 }
 
-/// Write the Parameters field of an advertisement.
+/// Write the Parameters field of an extended NAMESPACE.
 ///
-/// On a session that negotiated the MoQ Cluster extension every advertisement carries
-/// HOP_PATH; ROUTE_COST is optional and absent means 0, so a free path sends nothing.
-pub(super) fn encode_cluster_params(
+/// ROUTE_COST is optional and absent means 0, so a free path sends nothing.
+pub(super) fn encode_advert_params(
 	w: &mut Encoder<'_>,
 	version: Version,
-	advert: Option<&cluster::Advert>,
+	params: &AdvertParams,
 ) -> Result<(), EncodeError> {
-	match advert {
-		Some(advert) => {
-			let cost = (advert.cost != 0).then_some(advert.cost);
-			encode_params!(w, version,
-				cluster::HOP_PATH => advert.hops,
-				cluster::ROUTE_COST => cost,
-			);
-		}
-		None => encode_params!(w, version,),
-	}
+	let hops = params.cluster.as_ref().map(|advert| advert.hops.clone());
+	let cost = params
+		.cluster
+		.as_ref()
+		.and_then(|advert| (advert.cost != 0).then_some(advert.cost));
+	encode_params!(w, version,
+		cluster::HOP_PATH => hops,
+		cluster::ROUTE_COST => cost,
+		epoch::EPOCH_PARAM => params.epoch.clone(),
+	);
 	Ok(())
 }
 
-/// Read the Parameters field of a NAMESPACE on a session that negotiated the extension.
-/// See [`encode_cluster_params`].
-pub(super) fn decode_cluster_params(r: &mut Decoder<'_>, version: Version) -> Result<cluster::Advert, DecodeError> {
+/// Read the Parameters field of an extended NAMESPACE. See [`encode_advert_params`].
+pub(super) fn decode_advert_params(
+	r: &mut Decoder<'_>,
+	version: Version,
+	negotiated: Negotiated,
+) -> Result<AdvertParams, DecodeError> {
 	decode_params!(r, version,
 		cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 		cluster::ROUTE_COST => cost: Option<u64>,
+		epoch::EPOCH_PARAM => epoch: Option<Epoch> where negotiated.epoch,
 	);
 
-	Ok(cluster::Advert {
-		hops: hops.ok_or(DecodeError::InvalidValue)?,
-		cost: cost.unwrap_or(0),
+	Ok(AdvertParams {
+		cluster: cluster_params(negotiated.cluster, hops, cost)?,
+		epoch,
 	})
 }
 
@@ -368,7 +452,8 @@ mod tests {
 		let msg = PublishNamespace {
 			request_id: RequestId(1),
 			track_namespace: Path::new("test/broadcast"),
-			cluster: None,
+			params: Default::default(),
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -457,7 +542,8 @@ mod tests {
 		let msg = PublishNamespace {
 			request_id: RequestId(5),
 			track_namespace: Path::new("v17/broadcast"),
-			cluster: None,
+			params: Default::default(),
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -472,7 +558,8 @@ mod tests {
 		let msg = PublishNamespace {
 			request_id: RequestId(5),
 			track_namespace: Path::new("v18/broadcast"),
-			cluster: None,
+			params: Default::default(),
+			authorization_token: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -567,20 +654,34 @@ mod tests {
 		assert_eq!(decoded.apply(&held), rerouted);
 	}
 
-	/// The extension negotiates on draft-17+ only, so the update has no legacy shape.
+	/// Drafts 14-15 have no update for an advertisement, and draft-16's names the one it
+	/// updates.
 	#[test]
-	fn update_has_no_legacy_encoding() {
-		let msg = PublishNamespaceUpdate {
+	fn update_names_the_advertisement_on_draft_16() {
+		let mut msg = PublishNamespaceUpdate {
 			request_id: RequestId(2),
+			namespace_request_id: None,
 			hops: None,
-			cost: Some(0),
+			cost: None,
+			authorization_token: Some(super::super::token::RequestToken(crate::setup::Token {
+				kind: 0,
+				value: b"jwt".to_vec(),
+			})),
 		};
-		let mut buf = Vec::new();
-		assert!(
-			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft16.into()), Version::Draft16)
-				.is_err()
-		);
-		assert!(decode_message::<PublishNamespaceUpdate>(&[0x02, 0x00], Version::Draft16).is_err());
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let mut buf = Vec::new();
+			assert!(
+				msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
+					.is_err(),
+				"{version:?}"
+			);
+		}
+		assert!(decode_message::<PublishNamespaceUpdate>(&[0x02, 0x00], Version::Draft15).is_err());
+
+		msg.namespace_request_id = Some(RequestId(1));
+		let decoded: PublishNamespaceUpdate =
+			decode_message(&encode_message(&msg, Version::Draft16), Version::Draft16).unwrap();
+		assert_eq!(decoded, msg);
 	}
 
 	#[test]

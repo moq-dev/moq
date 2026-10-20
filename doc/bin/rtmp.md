@@ -7,8 +7,8 @@ description: RTMP and enhanced RTMP ingest and playback
 
 `moq import rtmp` accepts pushes from OBS, FFmpeg, and hardware encoders;
 `moq export rtmp` serves plays to VLC, ffplay, and mpv, or pushes to a remote
-RTMP server such as Twitch. Both legacy RTMP (H.264 + AAC) and enhanced RTMP
-(HEVC, AV1, VP9, Opus, AC-3, multitrack) work in each direction.
+RTMP server such as Twitch. Both legacy RTMP (H.264, AAC, MP3) and enhanced
+RTMP (HEVC, AV1, VP9, Opus, AC-3, E-AC-3, multitrack) work in each direction.
 
 ```bash
 # Accept an OBS push and publish it to a relay.
@@ -43,7 +43,8 @@ the stalled-group budget. Frames go out in decode order; a late video frame
 is dropped and video resumes at the next keyframe. Zero releases available
 frames immediately without deadline drops.
 
-A player that advertises enhanced-RTMP multitrack receives every rendition.
+Disabled renditions (catalog `enabled: false`) are skipped. A player that
+advertises enhanced-RTMP multitrack receives every enabled rendition.
 Any other player receives one video rendition, the largest picture (then
 highest bitrate) in a codec it advertised, and one audio rendition, the highest
 bitrate (then sample rate, then channels) in a codec it advertised. A push
@@ -52,5 +53,5 @@ carries the best of each.
 Implemented in pure Rust (no librtmp). The CLI speaks plaintext `rtmp://`
 only, so stream keys cross the network unencrypted. The library adds RTMPS on
 the same port when the embedder supplies a TLS config, and can refuse plaintext
-there. FLAC and MP3 enhanced-audio payloads are dropped because hang has no
-catalog codec for them.
+there. FLAC enhanced-audio payloads are dropped because hang has no catalog
+codec for them. MP3 works in both legacy and enhanced audio tags.

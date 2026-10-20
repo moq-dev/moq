@@ -9,4 +9,9 @@ export * as Net from "@moq/net";
 export * as Signals from "@moq/signals";
 export * as Catalog from "./catalog";
 export * as Container from "./container";
+/** Solicited viewer feedback schemas and broadcast names. */
+export * as Echo from "./echo";
+
+/** Publisher media and transport snapshot schemas. */
+export * as Stats from "./stats";
 export * as Timeline from "./timeline";

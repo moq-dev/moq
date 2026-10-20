@@ -725,10 +725,9 @@ mod tests {
 	/// is exactly the case `Surface::color` exists to report.
 	///
 	/// The sibling tests all run at 64x64, below the threshold where the guess
-	/// happens to agree. Ignored: needs a GPU, which CI lacks. Run with
-	/// `--ignored`.
+	/// happens to agree.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn the_declared_color_space_beats_the_size_guess() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(1280, 720);
@@ -757,13 +756,13 @@ mod tests {
 			// threshold. The samples stay BT.601 while the size now implies
 			// BT.709, so rendering by size alone skews this back.
 			let sd = solid(Size::new(640, 480), rgba);
-			assert_eq!(sd.surface.color(), Some(crate::Color::Bt601Limited));
+			assert_eq!(sd.surface.color(), Some(crate::Color::BT601));
 			let scaled = sd
 				.resize(size, &crate::resize::Config::default())
 				.expect("scale past 576 lines");
 			assert_eq!(
 				scaled.surface.color(),
-				Some(crate::Color::Bt601Limited),
+				Some(crate::Color::BT601),
 				"resize carries the space across rather than re-guessing"
 			);
 			assert_ne!(scaled.surface.color(), Some(crate::Color::infer(size)));
@@ -775,10 +774,9 @@ mod tests {
 	}
 
 	/// The universal path end to end: a CPU frame uploaded as three planes,
-	/// converted by the shader, read back. Ignored: needs a GPU, which CI lacks.
-	/// Run with `--ignored`.
+	/// converted by the shader, read back.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn cpu_frames_survive_the_round_trip() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(64, 64);
@@ -811,10 +809,9 @@ mod tests {
 	}
 
 	/// The output follows `Config::size` rather than the frame's, so a caller
-	/// can render straight into a fixed target. Ignored: needs a GPU. Run with
-	/// `--ignored`.
+	/// can render straight into a fixed target.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn config_size_overrides_the_frame_size() {
 		let (device, queue) = gpu().await;
 		let config = Config {
@@ -874,9 +871,10 @@ mod tests {
 	/// they assert the space is limited before building a pattern.
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	fn to_yuv(color: Color, rgb: [u8; 3]) -> [u8; 3] {
-		let (kr, kb) = match color {
-			Color::Bt601Limited | Color::Bt601Full => (0.299f32, 0.114f32),
-			Color::Bt709Limited | Color::Bt709Full => (0.2126, 0.0722),
+		let (kr, kb) = match color.matrix {
+			crate::color::Matrix::Bt601 => (0.299f32, 0.114f32),
+			crate::color::Matrix::Bt709 => (0.2126, 0.0722),
+			crate::color::Matrix::Bt2020 => (0.2627, 0.0593),
 		};
 		let kg = 1.0 - kr - kb;
 		let [r, g, b] = rgb.map(|c| c as f32 / 255.0);
@@ -992,7 +990,7 @@ mod tests {
 		// Below the 576 lines the crate infers BT.709 above, so both paths land
 		// on BT.601 limited and the pattern is built for that.
 		let color = Color::infer(size);
-		assert_eq!(color, Color::Bt601Limited);
+		assert_eq!(color, Color::BT601);
 
 		let Some(buffer) = crate::render::dmabuf::fixture::surface(format, size, &pattern(format, size, color)) else {
 			return false;
@@ -1437,7 +1435,7 @@ mod tests {
 	/// GPU. Run with `--ignored`.
 	#[cfg(apple)]
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Metal GPU; see quest/m3/video-hardware.md"]
 	async fn imports_survive_decoder_pool_recycling() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(256, 256);
@@ -1467,7 +1465,7 @@ mod tests {
 	/// Run with `--ignored`.
 	#[cfg(apple)]
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Metal GPU; see quest/m3/video-hardware.md"]
 	async fn the_metal_import_matches_the_cpu_path() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(64, 64);

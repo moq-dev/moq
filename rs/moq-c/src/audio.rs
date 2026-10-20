@@ -19,6 +19,7 @@ use bytes::Bytes;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
+use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 
 // ---- C-visible types ----
@@ -143,18 +144,8 @@ type AudioProducer = Shared<AudioEncoder>;
 #[derive(Default)]
 pub struct Audio {
 	producers: NonZeroSlab<AudioProducer>,
-	consumer_tasks: NonZeroSlab<Option<AudioTaskEntry>>,
+	consumer_tasks: NonZeroSlab<Task>,
 	frames: NonZeroSlab<moq_audio::Frame>,
-}
-
-/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
-///
-/// `close` is an `Option` so `consume_close` can drop just the sender without
-/// removing the entry. The task delivers one final terminal callback and then
-/// removes itself, so `user_data` stays valid until that callback fires.
-struct AudioTaskEntry {
-	close: Option<oneshot::Sender<()>>,
-	callback: OnStatus,
 }
 
 impl Audio {
@@ -210,41 +201,31 @@ impl Audio {
 
 	pub fn consume(
 		&mut self,
-		broadcast: &moq_net::broadcast::Consumer,
-		catalog: &hang::catalog::AudioConfig,
-		name: &str,
+		rendition: crate::consume::Rendition<hang::catalog::AudioConfig>,
 		config: moq_audio::decode::Options,
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let broadcast = broadcast.clone();
-		let catalog = catalog.clone();
-		let name = name.to_string();
-
-		let channel = oneshot::channel();
-		let entry = AudioTaskEntry {
-			close: Some(channel.0),
-			callback: on_frame,
-		};
-		let id = self.consumer_tasks.insert(Some(entry))?;
+		let crate::consume::Rendition {
+			broadcast,
+			config: catalog,
+			name,
+			driver,
+		} = rendition;
 
 		// `decode::Consumer::new` subscribes (blocking on SUBSCRIBE_OK), so run it
 		// inside the task to keep this entrypoint non-blocking.
-		tokio::spawn(async move {
-			let res = async move {
-				let consumer = moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config).await?;
-				Self::run(on_frame, consumer, channel.1).await
-			}
-			.await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().audio.consumer_tasks.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.consumer_tasks.spawn(
+			on_frame,
+			|state| &mut state.audio.consumer_tasks,
+			|close| async move {
+				driver
+					.watch(async move {
+						let consumer = moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config).await?;
+						Self::run(on_frame, consumer, close).await
+					})
+					.await
+			},
+		)
 	}
 
 	async fn run(
@@ -258,7 +239,8 @@ impl Audio {
 				biased;
 				_ = &mut close => return Ok(()),
 				frame = consumer.read() => match frame {
-					Ok(Some(frame)) => frame,
+					Ok(Some(moq_audio::decode::Read::Frame { frame, .. })) => frame,
+					Ok(Some(moq_audio::decode::Read::End { .. })) => continue,
 					Ok(None) => return Ok(()),
 					// One packet the codec rejected is that packet's problem: the
 					// decoder stays usable, so drop it and keep the subscription rather
@@ -278,15 +260,7 @@ impl Audio {
 	}
 
 	pub fn consume_close(&mut self, id: Id) -> Result<(), Error> {
-		// Signal shutdown; the task delivers a final callback and removes itself.
-		self.consumer_tasks
-			.get_mut(id)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::TrackNotFound)?
-			.close
-			.take()
-			.ok_or(Error::TrackNotFound)?;
-		Ok(())
+		self.consumer_tasks.close(id, Error::TrackNotFound)
 	}
 
 	pub fn frame_info(&self, id: Id, dst: &mut moq_audio_frame) -> Result<(), Error> {
@@ -520,10 +494,10 @@ pub unsafe extern "C" fn moq_decode_audio(
 		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };
 
 		let mut state = State::lock();
-		let (broadcast, audio_cfg, name) = state.consume.audio_rendition(catalog, index as usize)?;
+		let rendition = state.consume.rendition(catalog, index as usize)?;
 
 		let State { audio, .. } = &mut *state;
-		audio.consume(&broadcast, &audio_cfg, &name, config, on_frame)
+		audio.consume(rendition, config, on_frame)
 	})
 }
 

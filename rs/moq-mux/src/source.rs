@@ -144,20 +144,26 @@ impl Source {
 	/// the origin root.
 	///
 	/// The exporters use it to drop a single bad rendition rather than fail the whole export.
-	/// [`Self::retain_valid`] already removes those renditions, so this is the second half of
+	/// [`Self::retain_selectable`] already removes those renditions, so this is the second half of
 	/// the same policy rather than a different one.
 	pub(crate) fn try_request(&self, rel: Option<&moq_net::path::Relative<'_>>) -> Option<Binding> {
 		Some(self.request_path(&self.resolve_reference(rel)?))
 	}
 
-	/// Remove renditions whose broadcast reference escapes above the origin root.
+	/// Remove the renditions an export must not select: a disabled one (catalog
+	/// `enabled: false`), or one whose broadcast reference escapes above the origin root.
 	///
-	/// Every section carrying renditions must be listed here; one left out silently exempts
-	/// its renditions from the containment check, exactly as on the consumer side.
-	pub(crate) fn retain_valid<E: crate::catalog::hang::CatalogExt>(
+	/// Every export runs this on each catalog snapshot, so a disabled rendition reads as
+	/// absent: one that is disabled later leaves the snapshot, and one that re-enables
+	/// returns to it. Every section carrying renditions must be listed here; one left out
+	/// silently exempts its renditions from the containment check, exactly as on the
+	/// consumer side.
+	pub(crate) fn retain_selectable<E: crate::catalog::hang::CatalogExt>(
 		&self,
 		catalog: &mut crate::catalog::hang::Catalog<E>,
 	) {
+		catalog.video.renditions.retain(|_, config| config.enabled);
+		catalog.audio.renditions.retain(|_, config| config.enabled);
 		self.retain_valid_references("video", &mut catalog.video.renditions);
 		self.retain_valid_references("audio", &mut catalog.audio.renditions);
 		self.retain_valid_references("text", &mut catalog.text.renditions);
@@ -165,14 +171,7 @@ impl Source {
 		self.retain_valid_references("binary", &mut catalog.binary.tracks);
 	}
 
-	/// Remove media renditions whose broadcast reference escapes above the origin root.
-	pub(crate) fn retain_valid_media(&self, catalog: &mut hang::Catalog) {
-		self.retain_valid_references("video", &mut catalog.video.renditions);
-		self.retain_valid_references("audio", &mut catalog.audio.renditions);
-		self.retain_valid_references("text", &mut catalog.text.renditions);
-	}
-
-	fn retain_valid_references<C: BroadcastConfig>(
+	fn retain_valid_references<C: hang::catalog::Reference>(
 		&self,
 		kind: &'static str,
 		renditions: &mut std::collections::BTreeMap<String, C>,
@@ -291,40 +290,6 @@ impl Binding {
 	/// Concurrent reads and cancelled waits retain the same request and result.
 	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
 		kio::wait(|waiter| self.poll_broadcast(waiter)).await
-	}
-}
-
-trait BroadcastConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned>;
-}
-
-impl BroadcastConfig for hang::catalog::VideoConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
-		self.broadcast.as_ref()
-	}
-}
-
-impl BroadcastConfig for hang::catalog::AudioConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
-		self.broadcast.as_ref()
-	}
-}
-
-impl BroadcastConfig for hang::catalog::TextConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
-		self.broadcast.as_ref()
-	}
-}
-
-impl BroadcastConfig for hang::catalog::JsonConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
-		self.broadcast.as_ref()
-	}
-}
-
-impl BroadcastConfig for hang::catalog::BinaryConfig {
-	fn broadcast(&self) -> Option<&moq_net::path::RelativeOwned> {
-		self.broadcast.as_ref()
 	}
 }
 
@@ -623,13 +588,39 @@ mod tests {
 		let mut sibling = escaped.clone();
 		sibling.broadcast = Some(Relative::new("./source").to_owned());
 
-		let mut catalog = hang::Catalog::default();
+		let mut catalog = hang::Catalog::<()>::default();
 		catalog.video.renditions.insert("escaped".to_string(), escaped);
 		catalog.video.renditions.insert("sibling".to_string(), sibling);
-		source.retain_valid_media(&mut catalog);
+		source.retain_selectable(&mut catalog);
 
 		assert!(!catalog.video.renditions.contains_key("escaped"));
 		assert!(catalog.video.renditions.contains_key("sibling"));
+	}
+
+	/// A disabled rendition is never selected, while its enabled sibling is.
+	#[test]
+	fn disabled_rendition_is_removed_while_enabled_sibling_remains() {
+		let origin = produce_origin();
+		let source = created(&origin);
+		let enabled = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0,
+			level: 0x1e,
+			inline: false,
+		});
+		let mut disabled = enabled.clone();
+		disabled.enabled = false;
+		let mut muted = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		muted.enabled = false;
+
+		let mut catalog = hang::Catalog::<()>::default();
+		catalog.video.renditions.insert("disabled".to_string(), disabled);
+		catalog.video.renditions.insert("enabled".to_string(), enabled);
+		catalog.audio.renditions.insert("muted".to_string(), muted);
+		source.retain_selectable(&mut catalog);
+
+		assert_eq!(catalog.video.renditions.keys().collect::<Vec<_>>(), vec!["enabled"]);
+		assert!(catalog.audio.renditions.is_empty());
 	}
 
 	/// The filter covers every section carrying renditions, not just the media ones. Text
@@ -645,10 +636,10 @@ mod tests {
 		let mut sibling = escaped.clone();
 		sibling.broadcast = Some(Relative::new("./source").to_owned());
 
-		let mut catalog = hang::Catalog::default();
+		let mut catalog = hang::Catalog::<()>::default();
 		catalog.text.renditions.insert("escaped".to_string(), escaped);
 		catalog.text.renditions.insert("sibling".to_string(), sibling);
-		source.retain_valid_media(&mut catalog);
+		source.retain_selectable(&mut catalog);
 
 		assert!(!catalog.text.renditions.contains_key("escaped"));
 		assert!(catalog.text.renditions.contains_key("sibling"));

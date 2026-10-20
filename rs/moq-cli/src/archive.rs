@@ -18,7 +18,7 @@ use crate::moq::notify_ready;
 const GRACE: Duration = Duration::from_secs(30);
 
 /// `export archive` args.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
 	/// Where to record: `file:///dir`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://container/prefix`.
@@ -35,7 +35,7 @@ pub struct ExportArgs {
 }
 
 /// `import archive` args.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
 	/// The recording to replay, as `export archive` wrote it.
@@ -225,27 +225,20 @@ impl Tracks {
 	/// Refuses a track served from another broadcast, since an archive holds exactly one, and a
 	/// track that returns after the catalog dropped it, since the writer cannot resume one.
 	fn update(&mut self, catalog: &hang::Catalog) -> anyhow::Result<Vec<Change>> {
-		let video = catalog
-			.video
-			.renditions
-			.iter()
-			.map(|(name, c)| (name, &c.broadcast, true));
-		let audio = catalog
-			.audio
-			.renditions
-			.iter()
-			.map(|(name, c)| (name, &c.broadcast, true));
-		let text = catalog
-			.text
-			.renditions
-			.iter()
-			.map(|(name, c)| (name, &c.broadcast, false));
-		let json = catalog.json.tracks.iter().map(|(name, c)| (name, &c.broadcast, false));
-		let binary = catalog
-			.binary
-			.tracks
-			.iter()
-			.map(|(name, c)| (name, &c.broadcast, false));
+		use hang::catalog::Reference;
+
+		// Recorded by track name, which is what the archive's timelines are keyed by.
+		fn entry<'a, C: Reference>(
+			(id, config): (&'a String, &'a C),
+			media: bool,
+		) -> (&'a str, Option<&'a moq_net::path::RelativeOwned>, bool) {
+			(config.track(id), config.broadcast(), media)
+		}
+		let video = catalog.video.renditions.iter().map(|e| entry(e, true));
+		let audio = catalog.audio.renditions.iter().map(|e| entry(e, true));
+		let text = catalog.text.renditions.iter().map(|e| entry(e, false));
+		let json = catalog.json.tracks.iter().map(|e| entry(e, false));
+		let binary = catalog.binary.tracks.iter().map(|e| entry(e, false));
 
 		let mut listed = HashSet::new();
 		let mut changes = Vec::new();
@@ -255,16 +248,16 @@ impl Tracks {
 					"track `{name}` is served from broadcast `{broadcast}`; an archive records one broadcast"
 				);
 			}
-			if !listed.insert(name.clone()) || self.listed.contains(name) {
+			if !listed.insert(name.to_string()) || self.listed.contains(name) {
 				continue;
 			}
 			anyhow::ensure!(
-				self.enrolled.insert(name.clone()),
+				self.enrolled.insert(name.to_string()),
 				"track `{name}` returned to the catalog after it was dropped; the recording cannot resume it"
 			);
 			changes.push(match media {
-				true => Change::Media(name.clone()),
-				false => Change::Sparse(name.clone()),
+				true => Change::Media(name.to_string()),
+				false => Change::Sparse(name.to_string()),
 			});
 		}
 
@@ -306,6 +299,20 @@ mod tests {
 		catalog.audio.renditions.insert("audio2".into(), audio());
 		assert_eq!(tracks.update(&catalog).unwrap(), [Change::Media("audio2".into())]);
 		assert_eq!(tracks.update(&catalog).unwrap(), []);
+	}
+
+	/// A rendition keyed apart from its track records the track.
+	#[test]
+	fn renditions_record_their_track() {
+		let mut rendition = audio();
+		rendition.track = Some("audio".into());
+		let mut catalog = hang::Catalog::default();
+		catalog.audio.renditions.insert("main".into(), rendition);
+
+		assert_eq!(
+			Tracks::default().update(&catalog).unwrap(),
+			[Change::Media("audio".into())]
+		);
 	}
 
 	/// A dropped rendition stops recording, and coming back is refused rather than silently lost.
@@ -354,6 +361,17 @@ mod tests {
 	/// export ends cleanly with its broadcast.
 	#[tokio::test]
 	async fn a_recording_replays_its_groups() {
+		replays_its_groups(Some(Timescale::MILLI)).await;
+	}
+
+	/// An untimed track, as every track is over moq-transport without TIMESCALE, records and
+	/// replays untimed.
+	#[tokio::test]
+	async fn an_untimed_recording_replays_untimed() {
+		replays_its_groups(None).await;
+	}
+
+	async fn replays_its_groups(timescale: Option<Timescale>) {
 		// `open` reads the credential variables.
 		let _env = crate::test_env::EnvGuard::clear(&[]);
 		let dir = tempfile::tempdir().unwrap();
@@ -363,7 +381,7 @@ mod tests {
 		let mut broadcast = origin.create_broadcast("live.hang").unwrap();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let info = track::Info::default()
-			.with_timescale(Timescale::MILLI)
+			.with_timescale(timescale)
 			.with_max_age(Duration::from_secs(3600));
 		let mut track = broadcast.create_track("audio", info).unwrap();
 		catalog
@@ -383,7 +401,7 @@ mod tests {
 		for sequence in 0..3 {
 			let mut group = track.create_group(group::Info { sequence }).unwrap();
 			for offset in [0, 500] {
-				let timestamp = Timestamp::from_millis(sequence * 1000 + offset).unwrap();
+				let timestamp = timescale.map(|_| Timestamp::from_millis(sequence * 1000 + offset).unwrap());
 				group.write_frame(timestamp, format!("{sequence}+{offset}")).unwrap();
 			}
 			group.finish().unwrap();
@@ -419,8 +437,8 @@ mod tests {
 			for offset in [0, 500] {
 				let frame = group.read_frame().await.unwrap().expect("a frame");
 				assert_eq!(
-					frame.timestamp.unwrap().as_millis(),
-					u128::from(sequence * 1000 + offset)
+					frame.timestamp.map(|timestamp| timestamp.as_millis()),
+					timescale.map(|_| u128::from(sequence * 1000 + offset))
 				);
 				assert_eq!(frame.payload, format!("{sequence}+{offset}"));
 			}
@@ -490,7 +508,7 @@ mod tests {
 		let store = super::open(&url).unwrap();
 		for track in ["audio", "audio2"] {
 			let object = store
-				.get_segments(&hang::timeline::default_name(track), 0)
+				.get_segments(&hang::timeline::default_name(track), 0, true)
 				.await
 				.expect("record 0");
 			let config = moq_json::window::ConsumerConfig::default().with_compression(true);

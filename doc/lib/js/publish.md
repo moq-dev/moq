@@ -49,17 +49,23 @@ for a permission, device, or settings change instead of prompting again.
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
 Codec, resolution, framerate, and bitrate are tunable through
-`el.video.config`, and `el.video.cut()` asks for an extra keyframe. For
+`el.video.config`, and `el.video.cut()` asks for an extra keyframe. A viewer
+who joins once a group's deltas outweigh twice its keyframe gets a fresh one,
+so `keyframeInterval` is only the longest a group runs. Through a moq-lite
+relay, only the join that opens the relay's upstream subscription counts. Size,
+bitrate, and framerate change in place, while a codec or audio format change
+keeps the rendition's catalog ID under a fresh `track` name that viewers
+follow through the catalog. For
 simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 
 Audio groups carry at least 20 ms by default, packing shorter codec frames
-together. `el.audio.groupDuration` changes that minimum; `Time.Milli(0)` puts
+together. `el.audio.groupDuration` changes that minimum; `Milli(0)` puts
 every frame in its own group. A longer minimum lets a relay keep fewer
 streams, at the cost of coarser loss: a viewer that falls behind skips a whole
 group. Frames still forward as they are encoded.
 
-Timestamps are `performance.now()` in microseconds, so every source shares one
+Timestamps are `@moq/clock`'s `now()` in microseconds, so every source shares one
 timeline. The catalog's `clock` maps it to wall time. Stamp your own tracks
 (e.g. text cues) on the same timeline to stay in sync.
 
@@ -67,12 +73,14 @@ timeline. The catalog's `clock` maps it to wall time. Stamp your own tracks
 
 `broadcast.net` is the underlying `Moq.Broadcast.Producer`, so an application
 can serve its own tracks alongside the media. It is recreated when the origin, name,
-`enabled`, or `maxAge` changes, or when a failed rendition track must be
-replaced, so acquire it from an effect and create each
-track once per `net`. A track name always means the same content, so a track
-re-created on the same `net` throws on an append that would reuse its sequences:
+`enabled`, or `maxAge` changes, so acquire it from an effect and create each
+track once per `net`. Names under a rendition's ID, such as `video/1`, are
+reserved for that rendition's replacement tracks. A track name always means
+the same content, so a track re-created on the same `net` throws on an append
+that would reuse its sequences:
 
 ```ts
+import { Milli } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 
@@ -84,7 +92,7 @@ signals.run((effect) => {
     // value is stamped with when it was written, so the track declares a timescale.
     const track = net.createTrack("meta.json", {
         timescale: Moq.Time.Timescale.MILLI,
-        maxAge: Moq.Time.Milli(86_400_000),
+        maxAge: Milli(86_400_000),
     });
     effect.cleanup(() => track.close());
 
@@ -112,16 +120,19 @@ import * as Publish from "@moq/publish";
 // the broadcasts, so they survive a reconnect.
 const connection = new Moq.Connection({ url: new URL("https://relay.example.com/anon") });
 
+const camera = new Publish.Source.Camera({ enabled: true });
+const microphone = new Publish.Source.Microphone({ enabled: true });
+const video = new Publish.Signals.Computed((effect) => effect.get(camera.out.source)?.video);
+// The orientation turns a phone's landscape frames upright while it is held in portrait.
+const capture = new Publish.Video.Capture({ source: video, orientation: camera.out.orientation });
+
 const broadcast = new Publish.Broadcast({
     origin: connection.origin,
     enabled: true,
     name: Publish.Net.Path.from("alice.hang"),
+    display: capture.out.display,
+    rotation: capture.out.rotation,
 });
-
-const camera = new Publish.Source.Camera({ enabled: true });
-const microphone = new Publish.Source.Microphone({ enabled: true });
-const video = new Publish.Signals.Computed((effect) => effect.get(camera.out.source)?.video);
-const capture = new Publish.Video.Capture({ source: video });
 
 // Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
 // encodes only while someone is subscribed.
@@ -137,7 +148,13 @@ signal). An enabled camera or microphone prompts for permission on
 construction, and a screen source must be built inside the user gesture that
 authorizes it. Audio waits for the page's first click or keypress, since
 browsers suspend Web Audio until then. Every input and output is a signal from
-[`@moq/signals`](/lib/js/signals).
+[`@moq/signals`](/lib/js/signals). A failed encoder exposes the cause through
+`out.error` and disables only its rendition; siblings and the broadcast keep
+running. It does not retry on demand or bandwidth changes, and enable cycles
+that keep the same capture do not retry. A new capture source (such as the
+track a camera or microphone reopens on unmute), changed encoder settings, or
+a replacement encoder recovers it. Recovery keeps the catalog ID and uses a
+fresh `track` name.
 
 ## Strict CSP
 

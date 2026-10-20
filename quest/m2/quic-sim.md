@@ -2,24 +2,24 @@
 
 ## Goal
 
-The `moq-time` sim drives two `moq-quic` endpoints over in-memory datagrams
+The `moq-clock` sim drives two `moq-quic` endpoints over in-memory datagrams
 with configurable latency, loss, reordering, and bandwidth, so QUIC behavior
-(BBR, reliable reset, stream deadlines, the transport upgrade) and MoQ over
+(BBR, reliable reset, stream deadlines, the transport race) and MoQ over
 real QUIC are tested deterministically with no sockets.
 
 ## Plan
 
-Decided 2026-10-10: the in-memory session comes first
-([the relay seam](/quest/m1/time/relay-seam.md)); simulated UDP follows.
-`moq-quic` already takes `moq_time::Instant` after the
-[switch](/quest/m1/quic/fork/switch.md), so this is a datagram link plus a
+The in-memory session and the relay connection over it
+(`moq_relay::Accepted`) landed first; simulated UDP follows.
+`moq-quic` already takes `moq_clock::Instant`, so this is a datagram link plus a
 driver. Start from moq-shaper's in-memory `UdpSocket` (`rs/moq-shaper/src/mem.rs`).
 BBR's controller-level `Sim` in `bbr3/mod.rs` stays separate unless this
 replaces it cleanly.
 
-## Required
-
-- [The relay seam](/quest/m1/time/relay-seam.md) - the sim already drives relay tests in memory
+Keep random loss for recovery correctness. Any acceptance or performance
+consumer uses a rate below its media bitrate behind a deep but finite queue,
+and checks that the queue overflowed. A stalled sender that never filled the
+queue is not evidence about congestion loss.
 
 ## Related
 

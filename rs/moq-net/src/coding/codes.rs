@@ -13,6 +13,7 @@ use crate::{Error, StreamError, ietf, lite};
 ///
 /// Encoding and decoding live on one trait so a peer cannot be told a code from one table
 /// and read against another: implement both halves or neither.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub trait StreamCodes {
 	/// The code to reset a stream, or send STOP_SENDING, with.
 	fn encode_stream_code(&self, err: &StreamError) -> u32;
@@ -38,7 +39,7 @@ pub trait StreamCodes {
 			return self.decode_stream_code(code).into();
 		}
 
-		Error::Transport(err.to_string())
+		Error::from_transport(err)
 	}
 }
 
@@ -171,6 +172,18 @@ mod tests {
 				"{version:?} cancels with a different code than the Writer's Drop sends"
 			);
 		}
+	}
+
+	/// `Closed` also describes virtual streams, so it cannot claim that the transport's
+	/// connection closed. Native transport adapters supply that metadata themselves.
+	#[test]
+	fn a_virtual_stream_close_does_not_claim_the_connection_closed() {
+		let version = ietf::Version::Draft16;
+		assert!(matches!(version.transport_error(Error::Closed), Error::Transport(_)));
+		assert!(matches!(
+			version.transport_error(Error::IdleTimeout),
+			Error::IdleTimeout
+		));
 	}
 
 	/// A session close is not stream-scoped, so it keeps the session registry whichever

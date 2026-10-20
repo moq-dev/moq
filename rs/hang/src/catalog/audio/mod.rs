@@ -101,23 +101,33 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub broadcast: Option<moq_net::path::RelativeOwned>,
 
+	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
+	/// catalog. Absent means the ID is the track name, as in every catalog before this field.
+	///
+	/// Set it only when the ID can't be the name, such as two renditions of same-named tracks
+	/// from different broadcasts. Readers resolve the name with
+	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
+	/// field subscribes to the ID instead.
+	#[serde(default)]
+	pub track: Option<String>,
+
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
 	pub label: Option<String>,
 
-	// The codec, see the registry for details:
-	// https://w3c.github.io/webcodecs/codec_registry.html
+	/// The codec, see the registry for details:
+	/// <https://w3c.github.io/webcodecs/codec_registry.html>
 	#[serde_as(as = "DisplayFromStr")]
 	pub codec: AudioCodec,
 
-	// The sample rate of the audio in Hz
+	/// The sample rate of the audio in Hz.
 	pub sample_rate: u32,
 
-	// The number of channels in the audio
+	/// The number of channels in the audio.
 	#[serde(rename = "numberOfChannels")]
 	pub channel_count: u32,
 
-	// The bitrate of the audio track in bits per second
+	/// The maximum bitrate of the audio track in bits per second.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 
@@ -129,8 +139,8 @@ pub struct AudioConfig {
 	)]
 	pub enabled: bool,
 
-	// Some codecs include a description so the decoder can be initialized without extra data.
-	// If not provided, there may be in-band metadata (marginally higher overhead).
+	/// Some codecs include a description so the decoder can be initialized without extra data.
+	/// If not provided, there may be in-band metadata (marginally higher overhead).
 	#[serde(default)]
 	#[serde_as(as = "Option<Hex>")]
 	pub description: Option<Bytes>,
@@ -184,6 +194,7 @@ impl AudioConfig {
 	pub fn new(codec: impl Into<AudioCodec>, sample_rate: u32, channel_count: u32) -> Self {
 		Self {
 			broadcast: None,
+			track: None,
 			label: None,
 			codec: codec.into(),
 			sample_rate,

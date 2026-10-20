@@ -12,14 +12,11 @@ typedef TrackStreamProducer = MoqMediaTrackStreamProducer;
 /// The write side of a container, which publishes each track it describes.
 typedef ContainerProducer = MoqMediaContainerProducer;
 
-/// The write side of a container fed a raw byte stream.
-typedef ContainerStreamProducer = MoqMediaContainerStreamProducer;
-
 /// The read side of a media track: yields frames with codec metadata in decode order.
-typedef ContainerConsumer = MoqMediaContainerConsumer;
+typedef TrackConsumer = MoqMediaTrackConsumer;
 
 /// A finite fetched media group: yields container-decoded frames until the group ends.
-typedef ContainerGroupConsumer = MoqMediaContainerGroupConsumer;
+typedef GroupConsumer = MoqMediaGroupConsumer;
 
 /// The read side of a broadcast's catalog: yields updates as the set of tracks changes.
 typedef CatalogConsumer = MoqMediaCatalogConsumer;
@@ -57,7 +54,10 @@ typedef AudioFormat = MoqAudioFormat;
 /// A container that publishes its own tracks.
 typedef ContainerFormat = MoqContainerFormat;
 
-/// A container format and its leading bytes.
+/// A shared source timestamp offset that does not keep its broadcast open.
+typedef Timebase = MoqMediaTimebase;
+
+/// A container format, its leading bytes, and an optional shared source timebase.
 typedef ContainerInit = MoqContainerInit;
 
 /// A width and height pair, in pixels.
@@ -75,11 +75,20 @@ typedef Named = NamedMoqMediaTarget;
 /// A subscriber-requested track.
 typedef Requested = RequestedMoqMediaTarget;
 
-/// A track name, container, and live delivery options.
-typedef ContainerConfig = MoqMediaContainerConfig;
+/// A catalog rendition: its ID (catalog key) and its video or audio config.
+typedef Rendition = MoqRendition;
 
-/// A fetched group name, sequence, container, and delivery options.
-typedef ContainerGroupConfig = MoqMediaContainerGroupConfig;
+/// A catalog video rendition.
+typedef VideoRendition = VideoMoqRendition;
+
+/// A catalog audio rendition.
+typedef AudioRendition = AudioMoqRendition;
+
+/// A catalog rendition and live delivery options.
+typedef TrackConfig = MoqMediaTrackConfig;
+
+/// A catalog rendition's group sequence and fetch delivery options.
+typedef GroupConfig = MoqMediaGroupConfig;
 
 /// The packaging advertised for a media track.
 typedef Container = MoqContainer;

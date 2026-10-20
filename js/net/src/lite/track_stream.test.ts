@@ -1,12 +1,13 @@
 // An open Track Stream is interest in the track: the subscriber keeps it open until its
 // SUBSCRIBE is answered, and the publisher keeps the track wanted until the subscriber closes it.
 import { describe, expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { randomHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import { Milli, Timescale } from "../time.ts";
+import { Timescale } from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { Fetch } from "./fetch.ts";
 import { Publisher } from "./publisher.ts";

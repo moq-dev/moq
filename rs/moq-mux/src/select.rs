@@ -4,8 +4,10 @@
 //! additive: a default [`Broadcast`] selects *nothing*, and you opt a role in with
 //! [`video`](Broadcast::video) / [`audio`](Broadcast::audio). Within an opted-in
 //! role, an empty field matches everything; listing values keeps renditions matching
-//! any one of them (a union within a field, intersected across fields). A rendition whose
-//! container `kind` this build does not recognize is never selected, per the hang spec.
+//! any one of them (a union within a field, intersected across fields). Per the hang spec, a
+//! disabled rendition (catalog `enabled: false`) and one whose container `kind` this build does
+//! not recognize are never selected. Selection runs on every snapshot, so a rendition that
+//! re-enables is selected again.
 //!
 //! The same [`Broadcast`] drives selection at either end of the pipeline: narrowing
 //! a published catalog on the consume side (see [`catalog::Select`](crate::catalog::Select)),
@@ -88,7 +90,8 @@ impl Video {
 	}
 
 	fn matches(&self, name: &str, config: &VideoConfig) -> bool {
-		supported(name, &config.container)
+		config.enabled
+			&& supported(name, &config.container)
 			&& (self.name.is_empty() || self.name.iter().any(|n| n == name))
 			&& (self.codec.is_empty() || self.codec.contains(&config.codec.kind()))
 	}
@@ -115,7 +118,8 @@ impl Audio {
 	}
 
 	fn matches(&self, name: &str, config: &AudioConfig) -> bool {
-		supported(name, &config.container)
+		config.enabled
+			&& supported(name, &config.container)
 			&& (self.name.is_empty() || self.name.iter().any(|n| n == name))
 			&& (self.codec.is_empty() || self.codec.contains(&config.codec.kind()))
 	}
@@ -245,6 +249,20 @@ mod tests {
 		let mut catalog = catalog(vec![h264("known"), (name, future)], vec![]);
 		Broadcast::default().video(Video::default()).retain(&mut catalog);
 		assert_eq!(video_names(&catalog), vec!["known"]);
+	}
+
+	#[test]
+	fn disabled_never_selected() {
+		let (name, mut disabled) = h264("hi");
+		disabled.enabled = false;
+		let (audio, mut muted) = opus("a");
+		muted.enabled = false;
+
+		let mut catalog = catalog(vec![h264("lo"), (name, disabled)], vec![(audio, muted)]);
+		let selection = Broadcast::default().video(Video::default()).audio(Audio::default());
+		selection.retain(&mut catalog);
+		assert_eq!(video_names(&catalog), vec!["lo"]);
+		assert!(catalog.audio.renditions.is_empty());
 	}
 
 	#[test]

@@ -1,0 +1,149 @@
+name: Release FFI
+
+# Default-feature libraries are identical across Go, Kotlin and Swift: build
+# each target once, then preserve each package's own artifacts and publishers.
+on:
+  push:
+    tags:
+      - "moq-ffi-v*"
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-shared-ffi-${{ github.ref_type == 'tag' && 'publish' || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  native:
+    name: Shared moq-ffi
+    uses: ./.github/workflows/release-ffi.yml
+    with:
+      language: default
+      binding-languages: '["go", "kotlin", "swift"]'
+      targets: >-
+        [
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "aarch64-apple-darwin",
+          "x86_64-pc-windows-msvc",
+          "aarch64-linux-android",
+          "armv7-linux-androideabi",
+          "x86_64-linux-android",
+          "aarch64-apple-ios",
+          "aarch64-apple-ios-sim"
+        ]
+
+  # A failed target must affect only packages that consume it. Each packager
+  # selects its own targets and fails if one of its libraries is missing.
+  go:
+    name: Release Go FFI
+    needs: [native]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/release-go-ffi.yml
+    with:
+      reuse-native: true
+    secrets: inherit
+
+  kotlin:
+    name: Release Kotlin FFI
+    needs: [native]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/release-kt-ffi.yml
+    with:
+      reuse-native: true
+    secrets: inherit
+
+  swift:
+    name: Release Swift FFI
+    needs: [native]
+    if: ${{ always() && !cancelled() }}
+    uses: ./.github/workflows/release-swift-ffi.yml
+    with:
+      reuse-native: true
+    permissions:
+      contents: write
+    secrets: inherit
+
+  cpp-native:
+    name: C++ native input (${{ matrix.target }})
+    needs: [native]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/just
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install uniffi-bindgen-cpp
+        run: cargo install uniffi-bindgen-cpp --locked --git https://github.com/kixelated/uniffi-bindgen-cpp --tag v0.11.0-kixelated.5+v0.32.2
+      - name: Download default-feature input
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: default-lib-${{ matrix.target }}
+          path: native-library
+      - name: Parse FFI version
+        id: parse
+        run: just gh release parse-version moq-ffi
+      - name: Stage native input
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: just cpp ffi stage --version "$VERSION" --target "$TARGET" --library native-library --output native-input
+      - name: Check installed consumers
+        shell: bash
+        run: just cpp check --ffi-dir "$GITHUB_WORKSPACE/native-input"
+      - name: Archive validated input
+        run: just cpp ffi archive --directory native-input --output native-dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: cpp-native-${{ matrix.target }}
+          path: native-dist/*
+          if-no-files-found: error
+
+  cpp-native-release:
+    name: Publish C++ native inputs
+    needs: [cpp-native]
+    if: ${{ always() && !cancelled() && github.ref_type == 'tag' && startsWith(github.ref_name, 'moq-ffi-v') && needs.cpp-native.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/just
+      - name: Find previous tag
+        id: prev_tag
+        run: just gh release prev-tag moq-ffi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: cpp-native-*
+          path: native-dist
+          merge-multiple: true
+      - name: Parse FFI version
+        id: parse
+        run: just gh release parse-version moq-ffi
+      - name: Publish without replacing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.parse.outputs.version }}
+          PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: just cpp ffi publish --version "$VERSION" --directory native-dist --prev-tag "$PREV_TAG"

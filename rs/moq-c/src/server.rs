@@ -41,7 +41,7 @@ impl Server {
 		}))?;
 
 		tokio::spawn(async move {
-			let res = Self::run(server, callback, closed).await;
+			let res = crate::ffi::run(Self::run(server, callback, closed)).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.

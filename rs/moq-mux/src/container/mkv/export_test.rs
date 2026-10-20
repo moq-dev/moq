@@ -438,7 +438,7 @@ async fn export_emits_blocks_for_each_frame() {
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
 				if let Some(deadline) = exporter.next_deadline() {
-					tokio::time::advance(deadline.saturating_duration_since(web_async::time::Instant::now())).await;
+					tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
 				} else {
 					importer = None;
 				}
@@ -681,7 +681,7 @@ async fn export_fragment_duration_batches_blocks() {
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
 				if let Some(deadline) = exporter.next_deadline() {
-					tokio::time::advance(deadline.saturating_duration_since(web_async::time::Instant::now())).await;
+					tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
 				} else {
 					importer = None;
 				}
@@ -925,7 +925,7 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 		.with_delay(delay)
 		.with_fragment_duration(std::time::Duration::ZERO);
 	export.next().await.unwrap().unwrap();
-	let start = web_async::time::Instant::now();
+	let start = moq_clock::now();
 	live.track.write(raw_frame(0, b"first", true)).unwrap();
 	let first = export.next().await.unwrap().unwrap();
 	assert!(first.windows(5).any(|part| part == b"first"));
@@ -1083,4 +1083,52 @@ async fn a_retained_group_trims_to_the_delay() {
 	export.next().await.unwrap().unwrap();
 	// What is left spans no more than the delay: five 20 ms frames.
 	assert!(export.buffered() <= 5, "{} frames buffered", export.buffered());
+}
+
+/// A disabled rendition stays out of the header. One disabled after the header keeps its
+/// track, idle, without ending the export, and resumes when it re-enables.
+#[tokio::test(start_paused = true)]
+async fn disabled_renditions_stay_out_of_the_header_and_idle_after_it() {
+	use hang::catalog::{AAC, AudioConfig, Container};
+
+	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
+	config.description = Some(Bytes::from_static(&[0x12, 0x10]));
+	config.container = Container::Legacy;
+	let mut live = Live::audio(config.clone());
+	let main = live.track.name().to_string();
+	let mut other = live.add_track("other", |catalog, name| {
+		catalog.modify().unwrap().audio.renditions.insert(name, config.clone());
+	});
+	let _disabled = live.add_track("disabled", |catalog, name| {
+		let mut config = config.clone();
+		config.enabled = false;
+		catalog.modify().unwrap().audio.renditions.insert(name, config);
+	});
+	let set_enabled = |live: &mut Live, enabled: bool| {
+		live.catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.get_mut(&main)
+			.unwrap()
+			.enabled = enabled;
+	};
+
+	let mut export = super::Export::new(live.source().await, live.catalog_stream().await)
+		.with_fragment_duration(std::time::Duration::ZERO);
+	let header = chunk_now(&mut export).await;
+	let mut cursor = Cursor::new(header.as_ref());
+	let entries = WebmIterator::new(&mut cursor, &[])
+		.filter(|tag| matches!(tag, Ok(MatroskaSpec::TrackEntry(Master::Start))))
+		.count();
+	assert_eq!(entries, 2, "the disabled rendition is left out");
+
+	set_enabled(&mut live, false);
+	other.write(raw_frame(0, b"other-0", true)).unwrap();
+	assert!(chunk_now(&mut export).await.windows(7).any(|part| part == b"other-0"));
+
+	set_enabled(&mut live, true);
+	live.track.write(raw_frame(20_000, b"main-1", true)).unwrap();
+	assert!(chunk_now(&mut export).await.windows(6).any(|part| part == b"main-1"));
 }

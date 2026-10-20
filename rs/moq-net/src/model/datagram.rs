@@ -26,7 +26,7 @@ use crate::Timestamp;
 /// encoded body exceeds the transport's current datagram size (roughly the path MTU minus QUIC
 /// and MoQ header overhead), so callers should keep payloads well below the minimum path MTU
 /// of 1200 bytes (e.g. a single audio frame).
-pub(crate) const MAX_DATAGRAM_PAYLOAD: usize = u16::MAX as usize;
+pub(super) const MAX_DATAGRAM_PAYLOAD: usize = u16::MAX as usize;
 
 /// A single unreliable payload on a track: a sequence number, an optional presentation timestamp, and the bytes.
 ///
@@ -40,4 +40,34 @@ pub struct Datagram {
 	pub timestamp: Option<Timestamp>,
 	/// The datagram payload.
 	pub payload: Bytes,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+// private: passthrough
+pub(crate) struct Wire {
+	pub object_id: Option<u64>,
+	pub priority: Option<u8>,
+	pub end_of_group: bool,
+	pub status: Option<u64>,
+	pub properties: super::object::Properties,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+// private: passthrough
+pub(crate) struct Stored {
+	pub datagram: Datagram,
+	pub wire: Option<std::sync::Arc<Wire>>,
+}
+
+impl From<Datagram> for Stored {
+	fn from(datagram: Datagram) -> Self {
+		Self { datagram, wire: None }
+	}
+}
+
+impl std::ops::Deref for Stored {
+	type Target = Datagram;
+	fn deref(&self) -> &Datagram {
+		&self.datagram
+	}
 }

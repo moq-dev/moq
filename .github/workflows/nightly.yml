@@ -18,14 +18,19 @@ name: Nightly
 # the wheel builds in a manylinux container, the Kotlin/Swift/Go/Dart packages
 # link the FFI on every platform) and nothing notices until the tag is pushed.
 #
-# `audio-quality` is here because of what it measures. It plays twenty-four rows of
+# `audio-quality` is here because of what it measures. It plays thirty-six rows of
 # audio in real time, a minute each, which no merge gate should carry, and every
 # number it grades is a timing one that moves with whatever else the runner is
 # doing. A per-PR arm would fail on unrelated load often enough to be ignored;
 # nightly it competes with nothing, and a regression surfaces a day late against
 # a budget that still means something. The recorded-trace replays are the
 # exception: deterministic and seconds long, so audio-quality.yml also gates
-# PRs on them.
+# release PRs on them.
+#
+# Main PRs run no cloud CI beyond the merge queue's Check and Test, so every
+# path-filtered gate (Android, C++, WASM, X11, the audio replays, the OSS
+# Scanner image, platform.yml and the release dry-runs) runs here on main too,
+# and on release PRs.
 #
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in check.yml.
@@ -43,348 +48,375 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  runner-vm:
+    uses: ./.github/workflows/runner-vm.yml
+
+  # The path-filtered gates main PRs skip; release PRs still run them.
   x11:
     uses: ./.github/workflows/x11.yml
+    secrets: inherit
 
+  android:
+    uses: ./.github/workflows/android.yml
+
+  cpp:
+    uses: ./.github/workflows/cpp.yml
+
+  wasm:
+    uses: ./.github/workflows/wasm.yml
+    secrets: inherit
+
+  audio-replay:
+    uses: ./.github/workflows/audio-quality.yml
+
+  oss-scanner:
+    uses: ./.github/workflows/oss-scanner.yml
+
+  # Each independent workload gets its own hour. Each benchmark group keeps one
+  # build environment, so a benchmark reuses the dependencies its group already
+  # compiled. The Rust benchmarks outgrew one hour, so they split by harness:
+  # nextest's ignored benchmark tests and cargo's bench targets share few builds.
   nightly:
-    name: Nightly
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
-
-    steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter, as check.yml does, so the dev
-          # shell is substituted rather than built from source.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
-
-      # Restore only, like `tests` below. Saving its own store cost 3.6 GB of the
-      # repository's 10 GB budget and evicted the one every pull request restores.
-      - name: Rust cache
-        uses: ./.github/actions/rust-cache
-
-      # Runs even if the audit fails: a fresh advisory shouldn't hide a
-      # compile break in the feature permutations.
-      - name: Features
-        run: nix develop --command just rs features
-        env:
-          NEXTEST_PROFILE: ci
-
-      - name: Go publisher runtime benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just go bench -benchtime=1x
-
-      - name: Audio grouping relay benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just bench-audio
-
-      # perf samples worker switch-outs in kernel context into a large buffer; bench-lock refuses without it.
-      - name: Allow perf kernel sampling
-        if: ${{ !cancelled() }}
-        run: sudo sysctl -w kernel.perf_event_paranoid=-1
-
-      # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
-      - name: Relay lock-wait profile
-        if: ${{ !cancelled() }}
-        run: nix develop --command just bench-lock fanout-heavy 4
-
-      - name: Latency observation benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-latency
-
-      - name: Audio mixer benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-playback
-
-      # A single route re-price should expose any slope over the route table or
-      # over independent observers of the new live broadcast map.
-      - name: JS origin broadcast map benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench broadcasts
-
-      - name: JS request ID admission benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench request-ids
-
-      # A restart should cost the same whether one or many requests follow the path,
-      # and an unrelated route should wake none of them.
-      - name: JS origin request restart benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench requests
-
-      # A route above several interest heads lands once per head, so its re-price
-      # should expose any slope over heads times received routes.
-      - name: JS origin announce forwarding benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench forward
-
-      # Fails if reading a fragmented frame costs more per byte as the frame grows.
-      - name: JS stream reader benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench reader
-
-      # Fails if a chunk carrying many small frames costs as much per frame as one
-      # carrying a single frame, on either the lite or moq-transport group stream,
-      # which means decoding went back to a wakeup per frame.
-      - name: JS group frame benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench frames
-
-      # Times one varint encode and decode per wire format. No threshold: it only
-      # has to keep running, and its numbers are the baseline for the generated codec.
-      - name: JS varint benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench varint
-
-      # Bytes and time for lite-06 against lite-07 frames, groups, and requests. No
-      # threshold: it only has to keep running.
-      - name: JS lite varint benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench lite-varint
-
-      # Fails if publishing a group costs more as the track retains more groups,
-      # which means the latency guard or the cache went back to scanning them all.
-      - name: JS track retention benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench track
-
-      # Fails if charging a subscription costs more as the session holds more
-      # broadcasts and tracks, which means the cap accounting went back to scanning.
-      - name: JS session interest accounting benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js bench interests
-
-      - name: JS catalog estimate fanout benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js catalog-bench
-
-      # Times Effect create and close beside a bare `new Error()`. No threshold: it only
-      # has to keep running, and its numbers track the creation stack's cost.
-      - name: JS signals effect benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just js signals-bench
-
-      # Runs each moq-net Criterion routine once, so a bench that panics (an
-      # unparsable version, a shape that deadlocks) fails here instead of on the
-      # next manual run. Timing is not compared; nextest never runs a
-      # `harness = false` target. `fuzz` enables the benches that require it,
-      # which the `'*'` glob otherwise refuses.
-      - name: moq-net benchmark smoke
-        if: ${{ !cancelled() }}
-        run: nix develop --command cargo bench --locked -p moq-net --features fuzz --bench '*' -- --test
-
-      - name: HTTP idle accounting benchmark smoke
-        if: ${{ !cancelled() }}
-        run: nix develop --command cargo bench --locked -p moq-relay --bench http_idle -- --test
-
-      # One relay's stats tick (drain plus plain and compressed encode), swept
-      # over held paths, tiers, and how many of those paths changed, plus the
-      # decode table. `--test` runs each tick routine once (decode ignores it
-      # and runs its whole table), so a panic (a plain
-      # frame past the cache cap, a drain that drops a held path) fails here
-      # instead of on the next manual run. Timing is not compared. `bench`
-      # exposes the hidden producer hook; without it the tick target is skipped.
-      - name: moq-stats producer tick and decode benchmarks
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-stats --test
-
-      # The catalog bench asserts the estimate rate limit's publish counts, so one pass is
-      # the regression check.
-      - name: moq-mux catalog estimate fanout benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command cargo bench --locked -p moq-mux --bench catalog -- --test
-
-      - name: Archive timeline FETCH fanout benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs test -p moq-archive benchmark_timeline_fetch_fanout --run-ignored only --success-output immediate
-
-      - name: TS damage PID benchmark
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs test -p moq-mux benchmark_damage_pid_fanout --run-ignored only --success-output immediate
-
-      - name: Container export benchmark smoke
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-export --test
-
-      - name: RTMP chunk-stream benchmark smoke
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs bench-rtmp --test
-
-      - name: Stream import throughput
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
-
-      - name: BBB rendition alignment
-        if: ${{ !cancelled() }}
-        run: nix develop --command just pub check-bbb
-
-      - name: Audit
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs audit
-
-      # The OBS plugin (over moq-ffi) and moq-c's C fixtures link a Rust
-      # staticlib from outside cargo, so a stale `rs/moq-c/native-libs/*.txt`
-      # breaks them and no cargo build. obs.yml lists the inputs that can do that,
-      # but a list of paths can't be complete: a build script emitting
-      # `cargo::rustc-link-lib` needs no manifest change, and widening that
-      # filter to `rs/**` would run a link on nearly every PR. Being
-      # diff-independent, this run covers whatever the filter misses, at the
-      # cost of surfacing a day late rather than in review.
-      - name: OBS
-        if: ${{ !cancelled() }}
-        run: nix develop .#obs --command just obs ci
-
-      - name: moq-c C fixtures
-        if: ${{ !cancelled() }}
-        run: nix develop --command just rs c-tests
-
-      - name: TS table alignment
-        if: ${{ !cancelled() }}
-        run: nix develop --command just test ts --pair
-        env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
-
-      # The TS exporter's PCR release timing. Everything else about the stream
-      # can be graded from a capture, but *when* the bytes were handed over
-      # cannot: the grader has to sit on the exporter's stdout for the length of
-      # the run, stamping each packet. That is a real-time window no per-PR gate
-      # should pay for, so it lives here (see test/ts/README.md).
-      #
-      # 120 s rather than the 20 s default, because the drift term needs it. The
-      # exporter builds its mux buffer once and holds it, and a window that ends
-      # while it is still filling cannot tell that from a pipe running slow: the
-      # lag reaches ~480 ms over the first ~48 s and is flat after. Nightly is the
-      # one arm with the wall-clock time to see the flat part.
-      - name: TS timing
-        if: ${{ !cancelled() }}
-        run: nix develop --command just test ts --live --duration 120
-
-      - name: Upload TS pair failure artifacts
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: nightly-ts-pair
-          path: ${{ runner.temp }}/moq-test-runs
-          if-no-files-found: ignore
-          retention-days: 7
-
-  tests:
-    name: Tests (${{ matrix.recipe }})
-    runs-on: ubuntu-24.04-arm
+    name: Nightly (${{ matrix.name }})
+    runs-on: ${{ matrix.runner || 'ubuntu-24.04-arm' }}
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        # `rs uring` is a separate feature compile (off the default set) and
-        # kernel-gated below 6.12. The embedding tests for io_uring live there.
-        # `test drain` stands up two relays and drains one under a live JS
-        # viewer: diff-independent, since a break can arrive through the relay,
-        # js/net, or the wire between them.
-        # `gh test` exercises workflow and release tooling, which no pull request runs.
-        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test"]
+        # Unset keys default to the ARM runner, the plain dev shell, the Rust
+        # cache, no perf sampling, no Chromium, and nextest's default profile.
+        include:
+          - name: Features
+            recipe: rs features
+            profile: ci
+          - name: Binding benchmark
+            recipe: bench-ffi
+            artifact: bench-ffi
+            artifact-path: target/bench/ffi
+            benchmark: true
+          # Keeps the BoltFFI and UniFFI slice building and running for the
+          # browser generator comparison, which reuses it. It skips the size
+          # step, whose moq-ffi and moq-wasm builds double the time and are
+          # already built elsewhere.
+          - name: Generator comparison
+            recipe: bench-ffi-gen build bench
+            artifact: bench-ffi-gen
+            artifact-path: target/ffi-gen/results
+          - name: Audio grouping relay benchmark
+            recipe: bench-audio
+          - name: Relay shard sweep
+            recipe: bench-shard
+          # Smoke-tests each capture path: exact off-CPU waits, CPU stacks, and
+          # heap snapshots, each refused without resolved relay stacks.
+          # x86: on the SVE-capable ARM runner, perf's DWARF unwinding asks for the SVE VG
+          # register, which the kernel refuses for the software context-switches event.
+          - name: Relay profiles
+            recipe: bench-profile "lock cpu heap" fanout-heavy 4
+            perf: true
+            runner: ubuntu-24.04
+          - name: Rust benchmark tests
+            recipe: gh nightly rust-test
+          - name: Rust bench targets
+            recipe: gh nightly rust-bench
+            artifact: bench-rust
+            artifact-path: target/bench/nightly/rust-bench
+            benchmark: true
+          - name: Rust supplemental benchmarks
+            recipe: gh nightly rust-extra
+            artifact: bench-rust-extra
+            artifact-path: target/bench/nightly/rust-extra
+            benchmark: true
+          - name: io_uring benchmarks
+            recipe: gh nightly rust-uring
+            artifact: bench-rust-uring
+            artifact-path: target/bench/nightly/rust-uring
+            benchmark: true
+          - name: JS benchmarks
+            recipe: gh nightly js
+            artifact: bench-js
+            artifact-path: target/bench/nightly/js
+            benchmark: true
+            uncached: true
+          - name: BBB rendition alignment
+            recipe: pub check-bbb
+            uncached: true
+          - name: Browser backend baseline
+            recipe: test wasm-baseline --uniffi
+            chromium: true
+            artifact: wasm-backend-baseline
+            artifact-path: target/test
+          # Bounded: fails on crashes, missing output, or invalid samples, never on timing.
+          - name: Browser benchmark smoke
+            recipe: bench-browser --smoke
+            chromium: true
+            artifact: bench-browser
+            artifact-path: target/bench/browser
+          - name: Audit
+            recipe: rs audit
+            uncached: true
+          - name: JS audit
+            recipe: js audit
+            uncached: true
+          # Uncached: the instrumented build bypasses mbx, so the cache can't serve it.
+          - name: Rust coverage
+            recipe: rs coverage
+            uncached: true
+            artifact: rust-coverage
+            artifact-path: target/coverage/workspace
+          - name: JS coverage
+            recipe: js coverage
+            uncached: true
+            artifact: js-coverage
+            artifact-path: target/coverage/js
+          # OBS (over moq-ffi) and moq-c's C fixtures link a Rust staticlib from
+          # outside cargo, so a stale `rs/moq-c/native-libs/*.txt` breaks them and
+          # no cargo build. obs.yml's path filter can't list every such input;
+          # this diff-independent run catches what it misses, a day late.
+          - name: OBS
+            recipe: obs ci
+            shell: .#obs
+          - name: moq-c C fixtures
+            recipe: rs c-tests
+
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+
+      - uses: ./.github/actions/nix
+
+      # Writes from `main`, like every Rust cache user there.
+      - name: Rust cache
+        if: ${{ !matrix.uncached }}
+        uses: ./.github/actions/rust-cache
         with:
-          determinate: false
-          # Trust the flake's cachix substituter, as check.yml does, so the dev
-          # shell is substituted rather than built from source.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+
+      # perf samples the relay in kernel context into large buffers; bench-profile refuses without it.
+      - name: Allow perf kernel sampling
+        if: matrix.perf
+        run: sudo sysctl -w kernel.perf_event_paranoid=-1
+
+      # Playwright's Chromium isn't in the nix devShell; `--with-deps` installs
+      # its apt runtime libs, and the recipe's own install then no-ops.
+      - name: Playwright Chromium
+        if: matrix.chromium
+        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
+
+      - name: Run workload
+        id: workload
+        run: nix develop ${{ matrix.shell }} --command just ${{ matrix.recipe }}
+        env:
+          NEXTEST_PROFILE: ${{ matrix.profile || 'default' }}
+
+      - name: Record benchmark outcome
+        if: ${{ matrix.benchmark && !cancelled() }}
+        run: nix develop --command just gh benchmark-report status "${{ steps.workload.outcome }}" "${{ matrix.artifact-path }}"
+
+      - name: Preserve results
+        if: ${{ matrix.artifact && !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact-path }}
+          retention-days: 45
+
+  # gh-pages is the one Pages site, including future Criterion regression
+  # history. smoke.yml also commits its relay report there under relays/; each
+  # writer touches only its own directory, deploys the whole branch, and holds
+  # the benchmark-pages group so they never race.
+  # Explicit Pages deployment works with GITHUB_TOKEN; a branch push alone does not.
+  benchmark-site:
+    name: Benchmark site
+    needs: nightly
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    concurrency:
+      group: benchmark-pages
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Only main-branch publishers push the shared history branch.
+          persist-credentials: true
+      - uses: ./.github/actions/nix
+      # No dev shell: these recipes need only just, the runner's python3 and git.
+      # Building the shell's uncached tools outlasted this job's timeout.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: bench-*
+          path: benchmark-inputs
+      - name: Validate completed reports
+        id: reports
+        run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-report prepare benchmark-inputs benchmark-reports
+      - name: Prepare history
+        run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-publish init
+      - name: Store time, CPU and ratio history
+        if: steps.reports.outputs.costs == 'true'
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+        with:
+          name: MoQ nightly costs
+          tool: customSmallerIsBetter
+          output-file-path: benchmark-reports/costs.json
+          benchmark-data-dir-path: bench/costs
+          skip-fetch-gh-pages: true
+          github-token: ${{ github.token }}
+          ref: ${{ github.sha }}
+          auto-push: false
+          comment-on-alert: false
+          fail-on-alert: false
+      - name: Store throughput history
+        if: steps.reports.outputs.rates == 'true'
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+        with:
+          name: MoQ nightly throughput
+          tool: customBiggerIsBetter
+          output-file-path: benchmark-reports/rates.json
+          benchmark-data-dir-path: bench/rates
+          skip-fetch-gh-pages: true
+          github-token: ${{ github.token }}
+          ref: ${{ github.sha }}
+          auto-push: false
+          comment-on-alert: false
+          fail-on-alert: false
+      - name: Publish shared history
+        run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-publish finish benchmark-site
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: benchmark-site
+      - name: Deploy charts
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  tests:
+    name: Tests (${{ matrix.recipe }})
+    runs-on: ubuntu-24.04-arm
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # `rs uring` is a separate feature compile (off the default set), and
+        # MOQ_STRICT fails it below the 6.12 kernel floor. The embedding tests for
+        # io_uring live there; uring.yml also runs it on affected release PRs.
+        # `test drain` stands up two relays and drains one under a live JS
+        # viewer: diff-independent, since a break can arrive through the relay,
+        # js/net, or the wire between them.
+        # `gh test` exercises workflow and release tooling, which no pull request runs.
+        # `rs quic-sim` sweeps moq-quic's simulated workloads from a fresh seed; PRs run a fixed 64.
+        # `gate` runs the queue's Check and Test over every package, catching
+        # what a diff-scoped queue run let into main.
+        # `rs audio-devices` plays moq-audio's device tests into a private null sink.
+        # `rs multicast` runs the mDNS tests, which loop multicast back on the runner.
+        # `rs render-sw` renders through wgpu on Mesa's software Vulkan driver.
+        recipe: ["gate check", "gate test", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test", "test json-properties", "rs quic-sim", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw"]
+        include:
+          - recipe: rs send-depth
+            nightly: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
       - name: Rust cache
         uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      - name: Install nightly Rust
+        if: matrix.nightly
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: nightly
       - name: Test
         run: nix develop --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: ci
           MOQ_STRICT: 1
 
-  # Instant/SystemTime ranges and native transport behavior differ by OS.
-  # The PR platform gate only compiles them; this job runs their tests nightly.
-  # Outside Nix like platform.yml, with no cache that would evict Linux's store.
-  platform-tests:
-    name: Tests (${{ matrix.recipe }})
-    runs-on: ${{ matrix.os }}
+  # Media QA with non-Chromium players against a Chromium fixture. The Chromium
+  # player already runs in interop.yml, nightly and on release PRs.
+  media-engines:
+    name: Media (${{ matrix.engine }} player)
+    runs-on: ubuntu-24.04-arm
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            recipe: rs windows-test
-          - os: macos-latest
-            recipe: rs macos-test
+        engine: [firefox, webkit]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      # aws-lc-rs assembles its x86_64 crypto with NASM on Windows.
-      - name: Install NASM
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install nasm -y --no-progress
-          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - uses: ./.github/actions/just
-      - name: Install nextest
-        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+      - uses: ./.github/actions/nix
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
         with:
-          tool: nextest@0.9.146
-      - name: Test
-        shell: bash
-        run: just ${{ matrix.recipe }}
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      - name: Install publisher and player engines
+        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium ${{ matrix.engine }}"
+      - name: Media and negative controls
+        run: nix develop --command just test media --media-engines ${{ matrix.engine }}
         env:
-          NEXTEST_PROFILE: ci
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          # Playwright checks a browser's libraries with the `ldd` on PATH, which in the
+          # dev shell is Nix glibc's and can't see the ones `--with-deps` installed, so
+          # it refuses a Firefox or WebKit that launches fine.
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: 1
+      - name: Preserve measurements and traces
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: media-${{ matrix.engine }}
+          path: ${{ runner.temp }}/moq-test-runs
+          if-no-files-found: error
 
-  # Plays the matrix in headless Chromium through moq-shaper and grades what the
-  # listener heard against test/audio-quality/budgets.json. ARM64 like wasm.yml,
-  # the only architecture cache.yml warms a Rust store for.
+  # The only macOS and Windows coverage main gets; release PRs run it too.
+  platform:
+    uses: ./.github/workflows/platform.yml
+    secrets: inherit
+    with:
+      benchmarks: true
+
+  # Plays the matrix in headless Chromium and the native player through moq-shaper
+  # and grades what the listener heard against test/audio-quality/budgets.json.
+  # ARM64 like wasm.yml.
   audio-quality:
     name: Audio quality
     runs-on: ubuntu-24.04-arm
-    # Twenty-four rows at a minute each, plus the relay, CLI, and shaper built from source.
-    timeout-minutes: 60
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
+    # Thirty-six rows at a minute each, plus the relay, CLI, and shaper built from source.
+    timeout-minutes: 90
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
       - name: Rust cache
         uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       # Playwright's Chromium isn't in the nix devShell; `--with-deps` installs
       # its apt runtime libs, and run.sh's own install then no-ops.
       - name: Playwright Chromium
@@ -404,30 +436,63 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
       - name: Audio quality
         if: ${{ !cancelled() }}
-        run: nix develop --command just test audio-quality --enforce --capture
+        run: nix develop --command just test audio-quality --rings isolated,plain --enforce --capture
         shell: bash -leo pipefail {0}
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          # A passing run is kept too: budgets.json is measured from these nights.
+          MOQ_TEST_KEEP: 1
+      # The native player's rows, graded but not enforced: an intermittent device
+      # stall voids about one AAC row in seven, which would fail most nights until
+      # it is fixed. Kept beside the browser run so its ceilings can be re-measured.
+      - name: Native audio quality
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test audio-quality --rings pulse
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          MOQ_TEST_KEEP: 1
       # The run directory is the diagnosis: each process's log, the shaper's
-      # counters, the raw samples, and every row's summary. The harness keeps it
-      # on a failure without being asked.
-      - name: Keep the failing run
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      # counters, the raw samples, and every row's summary.
+      - name: Keep the run
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: audio-quality-run
           path: ${{ runner.temp }}/moq-test-runs/
           retention-days: 7
           if-no-files-found: ignore
 
-  # Every tag-driven release workflow, run against main with publishing skipped:
-  # the workflows gate their publish jobs on `github.ref_type == 'tag'`, and no
-  # secrets are passed, so a dry-run cannot publish even by accident.
+  # Every release workflow, run against main with publishing skipped: the
+  # workflows gate their publish jobs on `github.ref_type == 'tag'`, a push, or
+  # (Kotlin) a dry-run input, and no secrets are passed, so a dry-run cannot
+  # publish even by accident.
   #
   # A caller has to grant every permission a nested job declares, skipped or
   # not, so these carry the release-time grants. Nothing that runs here uses
   # them.
+  release-dart:
+    name: Release Dart
+    uses: ./.github/workflows/release-dart.yml
+    permissions:
+      contents: read
+      id-token: write
+
+  release-js:
+    name: Release JS
+    uses: ./.github/workflows/release-js.yml
+    permissions:
+      contents: read
+      id-token: write
+
+  release-kt-lib:
+    name: Release Kotlin lib
+    uses: ./.github/workflows/release-kt-lib.yml
+    permissions:
+      contents: read
+      actions: read
+
   release-py-ffi:
     name: Release Py FFI
     uses: ./.github/workflows/release-py-ffi.yml
@@ -435,23 +500,20 @@ jobs:
       contents: read
       id-token: write
 
-  release-kt-ffi:
-    name: Release Kotlin FFI
-    uses: ./.github/workflows/release-kt-ffi.yml
+  release-swift-lib:
+    name: Release Swift Lib
+    uses: ./.github/workflows/release-swift-lib.yml
+    # Its publisher check reads upstream run jobs; a called workflow can't
+    # exceed the permissions granted here.
     permissions:
       contents: read
+      actions: read
 
-  release-swift-ffi:
-    name: Release Swift FFI
-    uses: ./.github/workflows/release-swift-ffi.yml
+  release-shared-ffi:
+    name: Release FFI
+    uses: ./.github/workflows/release-shared-ffi.yml
     permissions:
       contents: write
-
-  release-go-ffi:
-    name: Release Go FFI
-    uses: ./.github/workflows/release-go-ffi.yml
-    permissions:
-      contents: read
 
   release-dart-ffi:
     name: Release Dart FFI
@@ -468,7 +530,11 @@ jobs:
 
   release-cpp:
     name: Release Cpp
+    needs: [release-shared-ffi]
+    if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-cpp.yml
+    with:
+      reuse-native: true
     permissions:
       contents: write
 
@@ -505,8 +571,10 @@ jobs:
   sizes:
     name: Shipping sizes
     # Measures what these release jobs upload rather than rebuilding it.
-    needs: [release-py-ffi, release-kt-ffi, release-swift-ffi, release-go-ffi, release-moq-c, release-moq-relay, release-moq-cli]
+    needs: [release-py-ffi, release-shared-ffi, release-moq-c, release-moq-relay, release-moq-cli]
     runs-on: ubuntu-24.04-arm
+    # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
+    environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 120
     permissions:
       contents: read
@@ -515,20 +583,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
       - uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Collect and compare sizes
         run: nix develop --command just gh size-nightly size-report "$GITHUB_RUN_ID"
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Preserve sizes and attribution
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: nightly-size-history
           path: |
@@ -548,24 +614,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern]
+        target: [lite, announce, ietf, varint, path, pattern, packet, params, streamid, streams, frame, connection]
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
-          # Trust the flake's cachix substituter, as check.yml does, so the dev
-          # shell is substituted rather than built from source.
-          extra-conf: |
-            extra-substituters = https://kixelated.cachix.org
-            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - uses: ./.github/actions/nix
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -576,8 +631,8 @@ jobs:
         run: nix develop --command just rs fuzz ${{ matrix.target }} -- -max_total_time=300
       - name: Preserve failure inputs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: fuzz-${{ matrix.target }}
-          path: rs/moq-net/fuzz/artifacts/
+          path: rs/*/fuzz/artifacts/
           if-no-files-found: ignore

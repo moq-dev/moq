@@ -11,6 +11,12 @@
 //! `Arc<Counts>` that carries the producer/consumer counts is loom's.
 
 #[cfg(loom)]
-pub(crate) use loom::sync::{Arc, Mutex, MutexGuard, atomic::AtomicUsize};
+pub(crate) use loom::sync::{
+	Arc, Mutex, MutexGuard,
+	atomic::{AtomicBool, AtomicU64, AtomicUsize},
+};
 #[cfg(not(loom))]
-pub(crate) use std::sync::{Arc, Mutex, MutexGuard, atomic::AtomicUsize};
+pub(crate) use std::sync::{
+	Arc, Mutex, MutexGuard,
+	atomic::{AtomicBool, AtomicU64, AtomicUsize},
+};

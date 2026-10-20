@@ -55,13 +55,14 @@ enum Importer {
 		// (prompt unannounce) even though the importer owns it.
 		broadcast: moq_net::broadcast::Producer,
 	},
-	/// Each program's broadcast is created and announced once the first PAT names it.
+	/// Each program's broadcast is created once the first PAT names it, and announced once its PMT
+	/// declares its tracks.
 	All(Box<ts::Programs>),
 }
 
 impl Publisher {
 	/// Wire up the TS importer and catalog for `path` on `origin`, announcing the broadcast
-	/// now, or each program's once the PAT lists it for [`Program::All`].
+	/// now, or each program's once its PMT declares its tracks for [`Program::All`].
 	///
 	/// `config` is the catalog the importer publishes into: retention
 	/// (`with_max_age`) and the connection allocator passthrough tracks claim on
@@ -138,7 +139,8 @@ impl Publisher {
 				import.finish().map_err(moq_mux::Error::from)?;
 				broadcast.close();
 			}
-			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
+			// Dropping the handles closes every program now, as `close` does for one.
+			Importer::All(programs) => drop(programs.finish().map_err(moq_mux::Error::from)?),
 		}
 		// The drain at end of input can publish a frame nothing vouched for.
 		self.span.in_scope(|| self.log.finish(&self.stats()));
@@ -160,10 +162,14 @@ impl Publisher {
 	}
 }
 
+/// The least delay an egress muxes at, `moq export ts`'s default: the send-ahead that fills a
+/// receiver's buffers comes out of the delay, and a broadcast-sized CPB needs a second of it.
+const MIN_DELAY: Duration = Duration::from_secs(1);
+
 /// How an egress treats its broadcast ending or being replaced.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Options {
-	/// The muxer's jitter-buffer delay ([`Subscriber::new`]).
+	/// The muxer's delay, at least [`MIN_DELAY`] ([`Subscriber::new`]).
 	pub latency: Duration,
 	/// How long a return or stitched replacement has to supply its first catalog.
 	pub linger: Duration,
@@ -188,8 +194,8 @@ pub struct Subscriber {
 impl Subscriber {
 	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
 	///
-	/// `options.latency` is the muxer's jitter-buffer delay: each frame is muxed that long after
-	/// its decode time, a frame arriving later is dropped, and a stalled group is
+	/// `options.latency` is the muxer's delay, but no less than [`MIN_DELAY`]: the output runs
+	/// that far behind the source, a frame arriving later is dropped, and a stalled group is
 	/// skipped after half of it. We reuse the locally configured SRT receive latency for
 	/// it, the same budget an SRT hop gives a packet. It's the configured value,
 	/// not the handshake result (srt-tokio doesn't expose the negotiated latency),
@@ -208,9 +214,8 @@ impl Subscriber {
 		// broadcast (the catalog `broadcast` field) through the same origin.
 		let broadcast = origin.request_broadcast(path, None).await?;
 		let source = moq_mux::Source::new(origin.clone(), broadcast);
-		let export = ts::Export::with_ts(source, moq_mux::catalog::CatalogFormat::Hang)
-			.await?
-			.with_delay(options.latency);
+		let catalog = source.catalog::<ts::Ext>(moq_mux::catalog::CatalogFormat::Hang).await?;
+		let export = ts::Export::new(source, catalog).with_delay(options.latency.max(MIN_DELAY));
 		let follower = ts::Follower::new(export)?
 			.with_linger(options.linger)
 			.with_stitch(options.stitch);
@@ -647,15 +652,20 @@ mod tests {
 
 		let track = broadcast.track(name.as_str()).unwrap().subscribe(None).await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let cue = timeout(Duration::from_secs(5), reader.read())
+		let cue = timeout(Duration::from_secs(5), next_frame(&mut reader))
 			.await
 			.expect("cue read timed out")
-			.unwrap()
 			.expect("a published cue section");
 		let expected_cue = cue.payload;
 		assert_eq!(expected_cue[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
 
-		let mut subscriber = Subscriber::new(&origin.consume(), "ingest", Options::default())
+		// The egress joins the clip's last group, read at once and two seconds long. Under the
+		// default delay its keyframe is stale, and the egress waits on the next one.
+		let options = Options {
+			latency: Duration::from_secs(3),
+			..Default::default()
+		};
+		let mut subscriber = Subscriber::new(&origin.consume(), "ingest", options)
 			.await
 			.unwrap()
 			.expect("the ingest broadcast is available for SRT egress");
@@ -696,15 +706,24 @@ mod tests {
 			.expect("SRT egress preserves the SCTE-35 track");
 		let track = roundtrip_consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let cue = timeout(Duration::from_secs(5), reader.read())
+		let cue = timeout(Duration::from_secs(5), next_frame(&mut reader))
 			.await
 			.expect("round-trip cue read timed out")
-			.unwrap()
 			.expect("SRT egress preserves a cue section");
 		assert_eq!(cue.payload[0], 0xFC, "the round-trip cue is a splice_info_section");
 		assert_eq!(
 			cue.payload, expected_cue,
 			"SRT egress preserves the complete cue section"
 		);
+	}
+
+	/// The next frame, passing over gaps and ends.
+	async fn next_frame(reader: &mut moq_mux::container::Consumer<Container>) -> Option<moq_mux::container::Frame> {
+		loop {
+			match reader.read().await.unwrap()? {
+				moq_mux::container::Read::Frame { frame, .. } => return Some(frame),
+				moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. } => continue,
+			}
+		}
 	}
 }

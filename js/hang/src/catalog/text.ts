@@ -6,7 +6,8 @@ import { RelativeBroadcastSchema } from "./path";
 /**
  * The cue serialization format of a text track, mirroring the Rust `TextFormat`.
  *
- * Known values are `"vtt"` (WebVTT), `"ttml"` (TTML/IMSC1), and `"utf8"` (raw text). Any other
+ * Known values are `"vtt"` (WebVTT), `"ttml"` (one complete TTML/IMSC1 document per frame, clipped
+ * to the frame, whose `body` begins at the frame timestamp), and `"utf8"` (raw text). Any other
  * string is an unrecognized format the consumer should ignore. The frame timestamp always carries
  * the cue's start time, so a relay never parses the payload.
  */
@@ -34,6 +35,9 @@ export const TextConfigSchema = z.object({
 	// broadcast that served this catalog (e.g. "../source"). If unset, the track lives in the same
 	// broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
+	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
+	// catalog). Absent means the ID is the track name. Resolve it with `track`.
+	track: z.optional(z.string()),
 
 	// The cue serialization format: "vtt" | "ttml" | "utf8" | (unknown).
 	format: TextFormatSchema,

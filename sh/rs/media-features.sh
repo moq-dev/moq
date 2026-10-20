@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+all=0
+if [[ $# == 1 && $1 == --all ]]; then
+    all=1
+elif [[ $# != 0 ]]; then
+    echo 'usage: just rs media-features [--all]' >&2
+    exit 2
+fi
+
 check() {
     echo "media features: cargo check $*"
     cargo check --locked --all-targets "$@"
@@ -29,9 +37,10 @@ forbid_crate() {
     fi
 }
 
-# Each shape is compiled independently so workspace feature unification cannot
-# hide a missing gate. The normal dependency graph then proves the expensive
-# stacks are absent rather than merely unused by this target.
+# Minimal shapes and the off-default VPX backend always compile and test. The
+# other positive paths already compile in default, capture, and play checks;
+# isolate them when their feature owner changes, and exhaustively in Nightly.
+# Dependency absence contracts stay on every affected PR, including transitive edits.
 check -p moq-video --no-default-features
 minimal=$(tree -p moq-video --no-default-features)
 for crate in openh264 openh264-sys2 wgpu cpal; do
@@ -39,13 +48,13 @@ for crate in openh264 openh264-sys2 wgpu cpal; do
 done
 cargo nextest run --locked -p moq-video --no-default-features
 
-check -p moq-video --no-default-features --features openh264
+if ((all)); then check -p moq-video --no-default-features --features openh264; fi
 software=$(tree -p moq-video --no-default-features --features openh264)
 require_crate "$software" openh264 "moq-video software-only"
 require_crate "$software" openh264-sys2 "moq-video software-only"
 forbid_crate "$software" wgpu "moq-video software-only"
 
-check -p moq-video --no-default-features --features nvidia
+if ((all)); then check -p moq-video --no-default-features --features nvidia; fi
 native=$(tree -p moq-video --no-default-features --features nvidia)
 require_crate "$native" moq-nvenc "moq-video native-only"
 for crate in openh264 openh264-sys2 wgpu; do
@@ -63,7 +72,7 @@ for crate in openh264 openh264-sys2 wgpu; do
 done
 cargo nextest run --locked -p moq-video --no-default-features --features vpx -E 'test(/::vpx::/)'
 
-check -p moq-video --no-default-features --features render
+if ((all)); then check -p moq-video --no-default-features --features render; fi
 render=$(tree -p moq-video --no-default-features --features render)
 require_crate "$render" wgpu "moq-video rendering"
 for crate in openh264 openh264-sys2; do
@@ -76,12 +85,12 @@ for crate in openh264 openh264-sys2 wgpu moq-nvenc; do
     forbid_crate "$transcode_minimal" "$crate" "moq-transcode minimal"
 done
 
-check -p moq-transcode --no-default-features --features openh264
+if ((all)); then check -p moq-transcode --no-default-features --features openh264; fi
 transcode_software=$(tree -p moq-transcode --no-default-features --features openh264)
 require_crate "$transcode_software" openh264 "moq-transcode software-only"
 forbid_crate "$transcode_software" wgpu "moq-transcode software-only"
 
-check -p moq-transcode --no-default-features --features nvidia
+if ((all)); then check -p moq-transcode --no-default-features --features nvidia; fi
 transcode_native=$(tree -p moq-transcode --no-default-features --features nvidia)
 require_crate "$transcode_native" moq-nvenc "moq-transcode native-only"
 for crate in openh264 openh264-sys2 wgpu; do
@@ -92,7 +101,7 @@ check -p moq-audio --no-default-features --features pipewire
 audio_host=$(tree -p moq-audio --no-default-features --features pipewire)
 forbid_crate "$audio_host" cpal "moq-audio host-only"
 
-check -p moq-audio --no-default-features --features capture,pipewire
+if ((all)); then check -p moq-audio --no-default-features --features capture,pipewire; fi
 audio_capture=$(tree -p moq-audio --no-default-features --features capture,pipewire)
 require_crate "$audio_capture" cpal "moq-audio PipeWire capture"
 

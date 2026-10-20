@@ -43,6 +43,14 @@ pub enum Error {
 	#[error("history needs timeline {0} from its first group; retained recordings are not supported")]
 	HistoryPruned(String),
 
+	/// A range playlist was requested from a timeline whose media is not durable.
+	#[error("range playlists require a durable timeline")]
+	RangeNotDurable,
+
+	/// A requested range is invalid or no longer fully retained.
+	#[error("requested range is unavailable: {0}")]
+	RangeUnavailable(String),
+
 	/// A `file://` URL could not be turned back into a filesystem path.
 	#[error("invalid file URL")]
 	InvalidFileUrl,

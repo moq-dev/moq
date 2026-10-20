@@ -1,0 +1,203 @@
+# Migrating the Python moq-rs package
+
+How to update your code for each breaking change, newest first.
+
+## Unreleased
+
+### JSON consumers yield `json.Timed` (#5677)
+
+`json.SnapshotConsumer` and `json.StreamConsumer` yield `Timed(value, timestamp)` instead of the bare value; `timestamp` is a `timedelta`, or `None` when untimed.
+Iterating a snapshot consumer now yields every state in order; `await consumer.latest()` returns the newest.
+Timestamps are rounded down to a whole microsecond.
+
+### Ranges filter reads (#5929)
+
+A subscription now reads only the groups its own `ranges` cover.
+
+### Track demand reports the wanted group (#5930)
+
+`TrackDemand.is_used()`, `used()`, and `unused()` are gone.
+`wanted()` returns `None` while nobody subscribes, otherwise the group subscribers want next, and `await wanted_changed()` waits for it to change (the first call returns at once).
+Loop on `wanted_changed()` until it returns non-`None` where you awaited `used()`, and `None` where you awaited `unused()`.
+`TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
+
+### `CongestionControl` gained `NONE` (#5926)
+
+`CongestionControl.NONE` runs no congestion control and no pacing, for tests and controlled links.
+Code that handles every value needs one more case.
+
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Pass `keylog=True` to `Client`, `connect`, or `Server` as well to capture them; without `SSLKEYLOGFILE` the client refuses to build and the server refuses to listen.
+
+### Subscriptions carry group ranges (#5732)
+
+`Subscription.group_start` and `group_end` are replaced by `ranges`, a list of `Range` whose ends are an `Anchor` (an absolute group and frame, or a count of groups before the latest), and an optional `order`.
+To start at group `n`, pass one range starting at the absolute anchor for group `n`, frame 0.
+
+### Receive estimates come from `Session.recv_bandwidth` (#5777)
+
+The connection stats no longer carry a receive estimate.
+Hold the consumer `Session.recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and drop it to stop.
+
+```python
+bandwidth = session.recv_bandwidth()
+rate = bandwidth.peek() if bandwidth else None
+```
+
+### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)
+
+The first call returns the broadcast serving the path, as before.
+Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
+
+### A timed track refuses a group that rewinds (#5803)
+
+Writing a frame fails with `TimestampMismatch` when a group's first frame starts before a lower-sequence group's, or after a higher one's.
+A publisher whose timeline restarts publishes a new broadcast instead.
+
+### Bandwidth reserves a track's demand (#5845)
+
+`Bandwidth.reserve` takes the track's `demand()` instead of the producer.
+
+### Media subscribe and fetch take a catalog rendition (#5834)
+
+`media.TrackConsumer.subscribe` and `media.GroupConsumer.fetch` take the catalog ID and its `Video` or `Audio` config instead of a track name and container, and follow the rendition's broadcast and track; `fetch` takes them before `sequence`.
+The decode consumers' `name` argument is `id`.
+
+### Native codecs have `audio` and `video` modules (#5694)
+
+`BroadcastProducer.encode_audio` / `encode_video` are `moq.audio.Producer` / `moq.video.Producer`, built from a `moq.media.CatalogProducer`.
+The audio track name moves into `EncoderOutput(track=...)`, and durations and timestamps are `timedelta` (`frame_duration`, `Frame.timestamp`) instead of `_us` integers; a zero `frame_duration` takes the codec's own frame.
+`BroadcastConsumer.decode_audio` / `decode_video` are `await moq.audio.Consumer.subscribe(broadcast, ...)` / `await moq.video.Consumer.subscribe(broadcast, ...)`.
+Producers expose subscriber state only through `demand()`, and a video `gop` is `moq.video.Gop.KEYFRAME(interval=...)`.
+`moq.audio.Encoder` / `moq.video.Encoder` encode without publishing.
+
+```python
+audio = moq.audio.Producer(
+    moq.media.CatalogProducer(broadcast),
+    moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=48000, channels=1),
+    moq.audio.EncoderOutput(codec=moq.audio.Codec.opus(), track="audio", frame_duration=timedelta(milliseconds=20)),
+)
+audio.write(moq.audio.Frame(timestamp=timedelta(0), data=pcm))
+```
+
+### Background panics are reported (#5562)
+
+A panic in a background task raises `moq.Error.Task` with the panic message as `reason`, and other objects keep running.
+
+### Announcements are events with a restart
+
+`AnnounceConsumer` yields an `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` as `announce`.
+`AnnounceUpdate` is gone.
+A restart means another publisher instance now serves the prefix: request the path again.
+Where you checked `update.active`, act on `AnnounceEventStart` and `AnnounceEventRestart` and read `event.announce.prefix`.
+
+### "Epoch" means only the publisher epoch (#5146)
+
+`Session.epoch()` is `connects()`, and `AudioProducer.reset_epoch()` is `reanchor()`.
+
+### The consume origin is `consume`
+
+`Client(..., subscribe=origin)` is `Client(..., consume=origin)`.
+A server request takes its origins in `accept(publish=..., consume=...)`, where `None` inherits the server's origin.
+A value the native side cannot use raises `moq.Error.Config` at construction, including a bad bind address.
+
+### JSON data tracks wrap a track
+
+`BroadcastProducer.publish_json_snapshot` / `publish_json_stream` and the matching consumers are gone.
+Create the track, then wrap it with `moq.json` (or `moq.flate` for opaque bytes).
+
+```python
+track = broadcast.publish_track("state")
+state = moq.json.SnapshotProducer(broadcast, track)
+```
+
+### Media lives in `moq.media`
+
+`BroadcastProducer.publish_audio`, `publish_video`, `publish_container`, their `_on_track` and `_stream` variants, `set_video_properties`, and `set_catalog_section`, and the consumer's catalog and media subscriptions, are gone.
+Use `moq.media.TrackProducer.audio` / `video`, `ContainerProducer`, `CatalogProducer`, `CatalogConsumer`, `TrackConsumer`, and `GroupConsumer`.
+Producers drop `name`, `used`, and `unused`; read them through `demand()`.
+
+```python
+audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head))
+```
+
+### Container byte streams use `moq.media.ContainerProducer` (#5919)
+
+`BroadcastProducer.publish_container_stream` has no separate importer: a container recovers its own framing, so `moq.media.ContainerProducer` takes chunks split anywhere.
+Pass empty `data` and write the stream through it.
+`ContainerInit`'s optional `timebase` shares one source's offset across container imports.
+
+```python
+stream = moq.media.ContainerProducer(broadcast, moq.media.ContainerInit(moq.media.ContainerFormat.FMP4, b""))
+```
+
+### Durations are `timedelta`
+
+`Frame`, `Datagram`, `Subscription`, `TrackInfo`, and `ConnectionStats` carry `timedelta` instead of microsecond integers: `timestamp_us` is `timestamp`, and `rtt_us` is `rtt`.
+A string passed where a list of strings belongs (`tls_roots="ca.pem"`) raises `TypeError` instead of splitting into characters.
+
+### Timestamps are optional
+
+A frame read from an untimed track has `timestamp` set to `None`.
+Raw writes no longer default to zero, so a write to a timed track without a timestamp raises `TimestampMismatch`; whole-frame media writes require one.
+Pass `timestamp=` on every write to a timed track.
+`moq.media.CatalogProducer.now()` samples the broadcast clock for local-event stamps.
+
+### Subscriber staleness is `max_delay`
+
+`Subscription.max_age_us` is `max_delay`, a `timedelta`, and the decoder outputs take `max_delay`, also a `timedelta`.
+`TrackInfo` keeps its `max_age`: it is the publisher's retention.
+
+### Error payloads are named `reason`
+
+Errors that carried a positional string (`Transport`, `Internal`, `Connect`, ...) name it `reason`: read `err.reason` instead of `err[0]`.
+
+### `Transport` gains `WEB_TRANSPORT`
+
+A WebTransport session reports `moq.Transport.WEB_TRANSPORT`; `QUIC` now means raw QUIC only, so a server that admits only `QUIC` refuses every browser.
+Check for both where you meant any QUIC session.
+
+### `stalled` is `enabled` (#4915)
+
+`moq.media.Video.stalled` is `enabled`, defaulting to `True` with the meaning inverted, and `moq.media.Audio` gains `enabled`.
+
+### Routes have one cost (#4661)
+
+`Route.cold` is removed: drop the argument and keep `cost`.
+
+### Decoded video frames are objects
+
+A `VideoDecodedFrame`'s fields are methods: `timestamp_us()`, `width()`, `height()`, and `pixels(format)` replacing `data` and `format`.
+`VideoDecoderOutput.format` is gone; set `surface=True` to keep the decoder's native surface.
+Read `frame.pixels(moq.VideoPixelFormat.RGBA)` instead of `frame.data`.
+
+### `BroadcastProducer.finish()` is removed (#4152)
+
+Call `broadcast.close()` instead.
+
+## 0.4 -> 0.5
+
+### Publish split by kind
+
+`publish_media*` is `publish_audio`, `publish_video`, or `publish_container`, each taking its own init.
+For example, `publish_media("opus", opus_head)` is `publish_audio(moq.AudioFormat.OPUS, opus_head)`.
+The raw encoder paths that used to be `publish_audio` / `publish_video` are `encode_audio` / `encode_video`.
+
+### Renames
+
+| Before | After |
+| --- | --- |
+| millisecond durations | microseconds (`max_age_us`, `Backoff.initial_us`) |
+| `estimated_send_bitrate` / `estimated_recv_bitrate` | `estimated_send_rate` / `estimated_recv_rate` |
+| `tls_disable_verify=True` | `tls_verify=False` |
+| `Announced` / `Announcement` | `AnnounceConsumer` / `AnnounceUpdate` |
+| `BroadcastRequest.abort` | `reject` |
+| `OriginOptions` | `OriginConfig` |
+
+### Errors are structured
+
+`Error.Protocol` carries a `ProtocolError` (scope, wire code, kind) instead of a flattened message: read `e.details.kind` instead of parsing `str(e)`.
+Setters raise (`Busy` during connect or listen) instead of dropping the value.
+Track and group `finish()` keep the handle open, so a later `abort()` can still run.

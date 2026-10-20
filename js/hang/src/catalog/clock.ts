@@ -33,9 +33,11 @@ export type Clock = z.infer<typeof ClockSchema>;
  * The wall-clock time of `pts`, given in `ptsTimescale` units per second, under the broadcast's
  * fixed clock mapping (`wall + pts` after conversion into the clock's timescale).
  *
+ * Floored to the millisecond, the precision of a `Date`, and only once: the sum is exact until then.
  * Throws on a zero timescale, a non-integer or unsafe value, or a result outside the JSON-safe
- * integer range, rather than truncating.
+ * integer range.
  */
+// biome-ignore lint/style/noRestrictedGlobals: converts a timestamp, not a clock read.
 export function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): Date {
 	if (!Number.isSafeInteger(clock.wall)) throw new RangeError(`invalid wall clock: ${clock.wall}`);
 	if (!Number.isSafeInteger(clock.timescale) || clock.timescale <= 0 || clock.timescale > 4_294_967_295)
@@ -44,10 +46,16 @@ export function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): 
 	if (!Number.isSafeInteger(ptsTimescale) || ptsTimescale <= 0)
 		throw new RangeError(`invalid timescale: ${ptsTimescale}`);
 
-	const units = Math.floor((pts * clock.timescale) / ptsTimescale);
-	const total = clock.wall + units;
-	if (!Number.isSafeInteger(total)) throw new RangeError(`invalid wall clock: ${total}`);
+	// Sum as one exact fraction of a second, `num / den`, so neither side is rounded into the
+	// other's units first.
+	const wallScale = BigInt(clock.timescale);
+	const ptsScale = BigInt(ptsTimescale);
+	const num = BigInt(clock.wall) * ptsScale + BigInt(pts) * wallScale;
+	const den = wallScale * ptsScale;
+	// `num / ptsScale` is the result in the wall's units; any fraction past the limit is past it.
+	if (num > BigInt(Number.MAX_SAFE_INTEGER) * ptsScale)
+		throw new RangeError(`invalid wall clock: ${num / ptsScale} past ${Number.MAX_SAFE_INTEGER}`);
 
-	const unixMillis = MOQ_EPOCH_UNIX_MILLIS + Math.floor((total * 1000) / clock.timescale);
-	return new Date(unixMillis);
+	// biome-ignore lint/style/noRestrictedGlobals: converts a timestamp, not a clock read.
+	return new Date(MOQ_EPOCH_UNIX_MILLIS + Number((num * 1000n) / den));
 }

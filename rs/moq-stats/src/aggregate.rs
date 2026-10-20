@@ -11,15 +11,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::task::Poll;
 use std::time::Duration;
 
+use moq_clock::Instant;
 use moq_net::kio::{self, Pending, Waiter};
 use moq_net::stats::{Presence, Role, Tier, Traffic};
 use moq_net::track::Subscribing;
 use moq_net::{AsPath, Epoch, PathOwned, origin};
-use web_async::time::Instant;
 
 use crate::{
-	PresenceFrame, Result, SessionsFrame, Totals, TotalsFrame, TrafficFrame, parse_node_path, presence_track,
-	sessions_track, totals_track, traffic_track,
+	Prefix, PrefixFrame, PresenceFrame, Result, SessionsFrame, Totals, TotalsFrame, TrafficFrame, Usage,
+	parse_node_path, prefix_track, presence_track, sessions_track, totals_track, traffic_track,
 };
 
 /// Configuration for an [`Consumer`]. Construct with [`Config::new`] and chain
@@ -99,7 +99,7 @@ impl Default for Config {
 ///
 /// Scope an [`origin::Consumer`] to a single group (e.g. `.stats/<pid>`) and
 /// hand it here; each [`Self::totals`] / [`Self::traffic`] / [`Self::presence`]
-/// call opens its own announce cursor and subscribes to that track on every
+/// / [`Self::prefix`] call opens its own announce cursor and subscribes to that track on every
 /// node broadcast in the group, summing the cumulative counters per key, so
 /// the merged track has the same format as one node's.
 ///
@@ -121,14 +121,18 @@ impl Default for Config {
 /// A sessions track is the exception: it is a gauge, so a departed node stops
 /// counting its sessions immediately.
 ///
-/// The totals and presence tracks never regress: a node's counter going down
-/// is that node resetting (a restart on a route without an epoch, or a
-/// presence track held again from zero), so its previous readout is kept as a
-/// baseline the new one adds to. A node that resumes after its departure
+/// The totals, presence, and prefix tracks never regress: a node's counter
+/// going down is that node resetting (a restart on a route without an epoch,
+/// or a presence or prefix track held again from zero), so its previous
+/// readout is kept as a baseline the new one adds to. A prefix's children are
+/// the exception: they sum the live nodes' current children, so a child leaves
+/// the merged map with the last node carrying it while its tail stays in the
+/// rollup. A node that resumes after its departure
 /// closed its open pairs reopens them as new starts rather than lowering their
-/// ends. A per-path traffic track keeps the reset
-/// contract of a single node: a route without an epoch that returns within the
-/// grace with a lower counter regresses the merged counter.
+/// ends. Per-path traffic also reopens pairs when a node resumes without
+/// regressing, but keeps the reset contract of a single node: a route without
+/// an epoch that returns within the grace with a lower counter regresses the
+/// merged counter.
 pub struct Consumer {
 	origin: origin::Consumer,
 	config: Config,
@@ -168,11 +172,20 @@ impl Consumer {
 		}
 	}
 
-	/// A merged reader over auth `root`'s presence track, holding it on every
+	/// A merged reader over `label`'s presence track, holding it on every
 	/// node broadcast in the group; see [`Self::totals`].
-	pub fn presence(&self, root: impl AsPath) -> PresenceConsumer {
-		let name = presence_track(root, self.config.compression);
+	pub fn presence(&self, label: impl AsPath) -> PresenceConsumer {
+		let name = presence_track(label, self.config.compression);
 		PresenceConsumer {
+			inner: Merged::new(self.origin.clone(), &self.config, name),
+		}
+	}
+
+	/// A merged reader over broadcast prefix `path`'s track, holding it on
+	/// every node broadcast in the group; see [`Self::totals`].
+	pub fn prefix(&self, path: impl AsPath) -> PrefixConsumer {
+		let name = prefix_track(path, self.config.compression);
+		PrefixConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
 	}
@@ -218,11 +231,11 @@ impl SessionsConsumer {
 	/// The next merged frame, or `None` once the announce stream ends.
 	pub async fn next(&mut self) -> Result<Option<SessionsFrame>> {
 		let frame = kio::wait(|waiter| self.inner.poll_next(waiter)).await?;
-		Ok(frame.map(|frame| frame.into_iter().map(|(root, gauge)| (root, gauge.0)).collect()))
+		Ok(frame.map(|frame| frame.into_iter().map(|(label, gauge)| (label, gauge.0)).collect()))
 	}
 }
 
-/// A merged reader over one root's presence track across every node in the
+/// A merged reader over one label's presence track across every node in the
 /// group; see [`TotalsConsumer`].
 pub struct PresenceConsumer {
 	inner: Merged<Presence>,
@@ -235,8 +248,21 @@ impl PresenceConsumer {
 	}
 }
 
+/// A merged reader over one broadcast prefix's track across every node in the
+/// group; see [`TotalsConsumer`].
+pub struct PrefixConsumer {
+	inner: Merged<Prefix>,
+}
+
+impl PrefixConsumer {
+	/// The next merged frame, or `None` once the announce stream ends.
+	pub async fn next(&mut self) -> Result<Option<PrefixFrame>> {
+		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	}
+}
+
 /// A per-key cumulative counter that folds across nodes.
-trait Mergeable: serde::de::DeserializeOwned + Default + Copy + PartialEq + 'static {
+trait Mergeable: serde::de::DeserializeOwned + Default + Clone + PartialEq + 'static {
 	/// Whether a node's last contribution survives its departure, with its
 	/// open pairs closed. Only the sessions gauge drops it instead.
 	const STICKY: bool = true;
@@ -253,10 +279,11 @@ trait Mergeable: serde::de::DeserializeOwned + Default + Copy + PartialEq + 'sta
 	/// state while its cumulative counters stay.
 	fn retire(self) -> Self;
 
-	/// The pairs [`Self::retire`] closes, as that many starts and ends and
-	/// nothing else. Added to a node that resumes after a departure, so the
-	/// pairs reopen as new starts instead of their ends going back down.
-	fn reopen(self) -> Self;
+	/// The pairs [`Self::retire`] closes that `next` has not since ended, as
+	/// that many starts and ends and nothing else. Added to a node that resumes
+	/// with `next` after a departure, so those pairs reopen as new starts
+	/// instead of their ends going back down.
+	fn reopen(self, next: &Self) -> Self;
 
 	/// Whether any counter in `self` is below `prev`.
 	fn regressed(&self, prev: &Self) -> bool;
@@ -267,9 +294,10 @@ fn close(started: u64, ended: &mut u64) {
 	*ended = (*ended).max(started);
 }
 
-/// Set a pair to as many starts and ends as `started`/`ended` leaves open.
-fn reopen(started: u64, ended: u64, into_started: &mut u64, into_ended: &mut u64) {
-	let open = started.saturating_sub(ended);
+/// Set a pair to as many starts and ends as `next_ended` falls short of the
+/// closed pair's `started`.
+fn reopen(started: u64, next_ended: u64, into_started: &mut u64, into_ended: &mut u64) {
+	let open = started.saturating_sub(next_ended);
 	*into_started = open;
 	*into_ended = open;
 }
@@ -290,23 +318,23 @@ impl Mergeable for Traffic {
 		self
 	}
 
-	fn reopen(self) -> Self {
+	fn reopen(self, next: &Self) -> Self {
 		let mut open = Self::default();
 		reopen(
 			self.announces_started,
-			self.announces_ended,
+			next.announces_ended,
 			&mut open.announces_started,
 			&mut open.announces_ended,
 		);
 		reopen(
 			self.broadcasts_started,
-			self.broadcasts_ended,
+			next.broadcasts_ended,
 			&mut open.broadcasts_started,
 			&mut open.broadcasts_ended,
 		);
 		reopen(
 			self.subscriptions_started,
-			self.subscriptions_ended,
+			next.subscriptions_ended,
 			&mut open.subscriptions_started,
 			&mut open.subscriptions_ended,
 		);
@@ -346,11 +374,11 @@ impl Mergeable for Presence {
 		self
 	}
 
-	fn reopen(self) -> Self {
+	fn reopen(self, next: &Self) -> Self {
 		let mut open = Self::default();
 		reopen(
 			self.sessions_started,
-			self.sessions_ended,
+			next.sessions_ended,
 			&mut open.sessions_started,
 			&mut open.sessions_ended,
 		);
@@ -358,16 +386,23 @@ impl Mergeable for Presence {
 	}
 
 	fn regressed(&self, prev: &Self) -> bool {
-		self.sessions_started < prev.sessions_started
+		self.wire_tx < prev.wire_tx
+			|| self.wire_rx < prev.wire_rx
+			|| self.sessions_refused.regressed(&prev.sessions_refused)
+			|| self.sessions_failed.regressed(&prev.sessions_failed)
+			|| self.requests < prev.requests
+			|| self.sessions_started < prev.sessions_started
 			|| self.sessions_ended < prev.sessions_ended
+			|| self.sent_bytes < prev.sent_bytes
+			|| self.received_bytes < prev.received_bytes
 			|| self.announces_peak < prev.announces_peak
 			|| self.subscriptions_peak < prev.subscriptions_peak
 	}
 }
 
-/// One root's sessions on a sessions track, merged as a gauge: a departed
+/// One label's sessions on a sessions track, merged as a gauge: a departed
 /// node's contribution leaves at once rather than staying with its pairs
-/// closed, and a root leaving a node's frame is not a reset.
+/// closed, and a label leaving a node's frame is not a reset.
 #[derive(Debug, Default, Clone, Copy, PartialEq, serde::Deserialize)]
 #[serde(transparent)]
 struct Gauge(Presence);
@@ -384,8 +419,8 @@ impl Mergeable for Gauge {
 		Self(self.0.retire())
 	}
 
-	fn reopen(self) -> Self {
-		Self(self.0.reopen())
+	fn reopen(self, next: &Self) -> Self {
+		Self(self.0.reopen(&next.0))
 	}
 
 	fn regressed(&self, prev: &Self) -> bool {
@@ -407,11 +442,11 @@ impl Mergeable for Totals {
 		self
 	}
 
-	fn reopen(self) -> Self {
+	fn reopen(self, next: &Self) -> Self {
 		Self {
-			publisher: self.publisher.reopen(),
-			subscriber: self.subscriber.reopen(),
-			sessions: self.sessions.reopen(),
+			publisher: self.publisher.reopen(&next.publisher),
+			subscriber: self.subscriber.reopen(&next.subscriber),
+			sessions: self.sessions.reopen(&next.sessions),
 		}
 	}
 
@@ -419,6 +454,71 @@ impl Mergeable for Totals {
 		self.publisher.regressed(&prev.publisher)
 			|| self.subscriber.regressed(&prev.subscriber)
 			|| self.sessions.regressed(&prev.sessions)
+	}
+}
+
+impl Mergeable for Usage {
+	const RESETS: bool = true;
+
+	fn merge(acc: &mut Self, other: Self) {
+		acc.add(other);
+	}
+
+	fn retire(self) -> Self {
+		Self {
+			publisher: self.publisher.retire(),
+			subscriber: self.subscriber.retire(),
+		}
+	}
+
+	fn reopen(self, next: &Self) -> Self {
+		Self {
+			publisher: self.publisher.reopen(&next.publisher),
+			subscriber: self.subscriber.reopen(&next.subscriber),
+		}
+	}
+
+	fn regressed(&self, prev: &Self) -> bool {
+		self.publisher.regressed(&prev.publisher) || self.subscriber.regressed(&prev.subscriber)
+	}
+}
+
+impl Mergeable for Prefix {
+	const RESETS: bool = true;
+
+	fn merge(acc: &mut Self, other: Self) {
+		acc.publisher.add(other.publisher);
+		acc.subscriber.add(other.subscriber);
+		acc.own.add(other.own);
+		for (segment, child) in other.children {
+			acc.children.entry(segment).or_default().add(child);
+		}
+	}
+
+	/// A departed node's children leave the map; their tails stay in the rollup.
+	fn retire(self) -> Self {
+		Self {
+			publisher: self.publisher.retire(),
+			subscriber: self.subscriber.retire(),
+			own: self.own.retire(),
+			children: BTreeMap::new(),
+		}
+	}
+
+	fn reopen(self, next: &Self) -> Self {
+		Self {
+			publisher: self.publisher.reopen(&next.publisher),
+			subscriber: self.subscriber.reopen(&next.subscriber),
+			own: self.own.reopen(&next.own),
+			children: BTreeMap::new(),
+		}
+	}
+
+	/// Children are left out: one leaving or returning lower is not a reset.
+	fn regressed(&self, prev: &Self) -> bool {
+		self.publisher.regressed(&prev.publisher)
+			|| self.subscriber.regressed(&prev.subscriber)
+			|| self.own.regressed(&prev.own)
 	}
 }
 
@@ -454,7 +554,8 @@ struct Node<V: Mergeable> {
 	epoch: Option<Epoch>,
 	/// The last known publisher identity, retained while route metadata vanishes.
 	identity: Option<Epoch>,
-	/// The node's readouts from before each reset, with their pairs closed.
+	/// Previous reset readouts with closed pairs, plus starts and ends added
+	/// when stale pairs reopen. Traffic discards its additions on a reset.
 	base: BTreeMap<String, V>,
 	/// The last frame the node produced, as read.
 	last: Option<BTreeMap<String, V>>,
@@ -482,26 +583,35 @@ impl<V: Mergeable> Node<V> {
 			return false;
 		}
 		self.stale = true;
-		self.last.iter().flatten().any(|(_, value)| value.retire() != *value)
+		self.last
+			.iter()
+			.flatten()
+			.any(|(_, value)| value.clone().retire() != *value)
 	}
 
-	/// Take a fresh frame. Where the node reset, the previous readout becomes
-	/// part of its baseline. Where it resumed after a departure closed its open
-	/// pairs, those pairs reopen as new starts. Either way the merged counters
-	/// never go down.
+	/// Take a fresh frame. A resume reopens the closed pairs still open as new
+	/// starts. On a reset, totals and presence keep the closed readout as a
+	/// baseline, while traffic discards its additions to preserve per-path
+	/// resets.
 	fn observe(&mut self, frame: BTreeMap<String, V>) {
-		if V::RESETS
+		if (V::RESETS || self.stale || !self.base.is_empty())
 			&& let Some(last) = self.last.take()
 		{
 			for (key, prev) in last {
 				let base = match frame.get(&key) {
 					Some(next) if !next.regressed(&prev) => match self.stale {
-						true => prev.reopen(),
+						true => prev.reopen(next),
 						false => continue,
 					},
-					_ => prev.retire(),
+					_ if V::RESETS => prev.retire(),
+					_ => {
+						self.base.remove(&key);
+						continue;
+					}
 				};
-				V::merge(self.base.entry(key).or_default(), base);
+				if V::RESETS || base != V::default() {
+					V::merge(self.base.entry(key).or_default(), base);
+				}
 			}
 		}
 		self.last = Some(frame);
@@ -511,10 +621,13 @@ impl<V: Mergeable> Node<V> {
 	/// Add this node's contribution to `acc`.
 	fn contribute(&self, acc: &mut BTreeMap<String, V>) {
 		for (key, value) in &self.base {
-			V::merge(acc.entry(key.clone()).or_default(), *value);
+			V::merge(acc.entry(key.clone()).or_default(), value.clone());
 		}
 		for (key, value) in self.last.iter().flatten() {
-			let value = if self.stale { value.retire() } else { *value };
+			let value = match self.stale {
+				true => value.clone().retire(),
+				false => value.clone(),
+			};
 			V::merge(acc.entry(key.clone()).or_default(), value);
 		}
 	}
@@ -613,7 +726,7 @@ impl<V: Mergeable> Merged<V> {
 		// then fold every departed node whose grace elapsed. A fold leaves the
 		// merged view unchanged, and only an announce adds a node, which polls
 		// here, so no timer is needed to keep the map bounded.
-		let now = Instant::now();
+		let now = moq_clock::now();
 		let config = &self.config;
 		let name = self.name.as_str();
 		let origin = &self.origin;
@@ -697,7 +810,7 @@ impl<V: Mergeable> Merged<V> {
 					let node = entry.get_mut();
 					// A return after the grace starts over, even when this announce
 					// is the first poll since the grace elapsed.
-					node.fold_expired(&mut self.retired, self.grace, Instant::now());
+					node.fold_expired(&mut self.retired, self.grace, moq_clock::now());
 					node.departed = None;
 					if matches!(node.reader, Reader::Ended) {
 						node.reader = resolve(&self.origin, &node.path, node.epoch.clone());
@@ -725,7 +838,7 @@ impl<V: Mergeable> Merged<V> {
 			// grace re-arms it.
 			match self.nodes.get_mut(&key) {
 				Some(node) => {
-					node.departed = Some(Instant::now());
+					node.departed = Some(moq_clock::now());
 					node.depart()
 				}
 				None => false,
@@ -812,9 +925,9 @@ fn advance<V: Mergeable>(
 				}
 				Poll::Pending => return changed,
 			},
-			Reader::Active(reader) => match reader.poll_next(waiter) {
+			Reader::Active(reader) => match reader.poll_latest(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
-					node.observe(frame);
+					node.observe(frame.value);
 					changed = true;
 				}
 				// The subscription ended: the serving session died (a failover to
@@ -915,10 +1028,10 @@ mod tests {
 	}
 
 	/// Record `bytes` of egress traffic on `path` in `producer`'s registry under
-	/// `tier`/`root`, by driving a throwaway tagged broadcast. The broadcast lives
+	/// `tier`/`label`, by driving a throwaway tagged broadcast. The broadcast lives
 	/// on its own origin so it never lands on the stats origin.
-	async fn feed(producer: &Producer, tier: Tier, root: &str, path: &str, bytes: usize) -> Feed {
-		let ctx = producer.registry().tier(tier).session(root);
+	async fn feed(producer: &Producer, tier: Tier, label: &str, path: &str, bytes: usize) -> Feed {
+		let ctx = producer.registry().tier(tier).session(label);
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
@@ -1014,7 +1127,9 @@ mod tests {
 		fn publish(&mut self, path: &str, bytes: u64) {
 			let entry = self.frame.entry(path.to_string()).or_default();
 			entry.bytes += bytes;
-			self.traffic.update(&self.frame).expect("publish");
+			self.traffic
+				.update(moq_net::Timed::from(&self.frame).at(moq_net::Timestamp::now()))
+				.expect("publish");
 		}
 
 		/// Fail the node's reader: append a frame the snapshot decoder can't
@@ -1022,7 +1137,7 @@ mod tests {
 		fn fail_traffic(&mut self) {
 			let mut group = self.track.append_group().expect("append group");
 			group
-				.write_frame(Timestamp::ZERO, b"not json".to_vec())
+				.write_frame(Timestamp::now(), b"not json".to_vec())
 				.expect("write frame");
 			group.finish().expect("finish group");
 		}
@@ -1156,6 +1271,29 @@ mod tests {
 	}
 
 	#[test]
+	fn a_wire_only_drop_starts_a_new_presence_segment() {
+		for received in [false, true] {
+			let (mut merged, key) = hand_merged::<Presence>();
+			let value = |wire| {
+				let mut presence = Presence::default();
+				presence.sessions_started = 1;
+				if received {
+					presence.wire_rx = wire;
+				} else {
+					presence.wire_tx = wire;
+				}
+				presence
+			};
+			let node = merged.nodes.get_mut(&key).unwrap();
+			node.observe(BTreeMap::from([(String::new(), value(10))]));
+			node.observe(BTreeMap::from([(String::new(), value(3))]));
+			let combined = &merged.merged()[""];
+			assert_eq!(if received { combined.wire_rx } else { combined.wire_tx }, 13);
+			assert_eq!(combined.active(), 1, "retiring closes the earlier segment");
+		}
+	}
+
+	#[test]
 	fn outgoing_epoch_metadata_migrates_without_choosing_a_grace_entry() {
 		let origin = produce_origin();
 		let path = PathOwned::from(".stats/acme/node/a");
@@ -1258,7 +1396,7 @@ mod tests {
 	fn replacement_while_reader_retries(drop_epoch: bool) {
 		use std::sync::Barrier;
 
-		let now = std::time::Instant::now();
+		let now = moq_clock::now();
 		// The clock never advances here, so nothing may wait out the update hold.
 		let mut config = origin::Config::default();
 		config.update_hold = std::time::Duration::ZERO;
@@ -1319,11 +1457,11 @@ mod tests {
 				let mut warm = moq_json::snapshot::Consumer::<TrafficFrame>::new(subscriber, Default::default());
 				let frame = futures::executor::block_on(kio::wait(|waiter| {
 					driver.poll(now, waiter).unwrap();
-					warm.poll_next(waiter)
+					warm.poll_latest(waiter)
 				}))
 				.unwrap()
 				.unwrap();
-				assert_eq!(frame["acme/room"].bytes, 30);
+				assert_eq!(frame.value["acme/room"].bytes, 30);
 				ready.wait();
 				release.wait();
 				(new, front, warm, driver)
@@ -1588,7 +1726,10 @@ mod tests {
 		published.subscriptions_ended = 1;
 		published.bytes = 100;
 		node_a.frame.insert("acme/room".to_string(), published);
-		node_a.traffic.update(&node_a.frame).expect("publish");
+		node_a
+			.traffic
+			.update(moq_net::Timed::from(&node_a.frame).at(moq_net::Timestamp::now()))
+			.expect("publish");
 
 		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
 		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
@@ -1612,7 +1753,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn merges_sessions_across_nodes() {
-		// Session presence sums per auth root across nodes.
+		// Session presence sums per stats label across nodes.
 		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
 		let node_b = node_producer(&origin, "b");
@@ -1630,7 +1771,7 @@ mod tests {
 
 		loop {
 			let frame = sessions.next().await.expect("read").expect("frame");
-			// Each feed opens one session ("acme" root) plus the explicit ones,
+			// Each feed opens one session ("acme" label) plus the explicit ones,
 			// summed across both nodes.
 			if frame.get("acme").map(|p| p.active()) >= Some(4) {
 				break;
@@ -1657,7 +1798,7 @@ mod tests {
 
 		loop {
 			let frame = sessions.next().await.expect("read").expect("frame");
-			// Each feed opens one session ("acme" root) plus the explicit ones,
+			// Each feed opens one session ("acme" label) plus the explicit ones,
 			// summed across both nodes.
 			if frame.get("acme").map(|p| p.active()) >= Some(4) {
 				break;
@@ -1691,7 +1832,7 @@ mod tests {
 				.expect("frame");
 			if let Some(prev) = &prev {
 				for (key, before) in prev {
-					let after = frame.get(key).copied().unwrap_or_default();
+					let after = frame.get(key).cloned().unwrap_or_default();
 					assert!(monotonic(before, &after), "{key} regressed: {before:?} -> {after:?}");
 				}
 			}
@@ -1760,7 +1901,9 @@ mod tests {
 			let mut totals = Totals::default();
 			totals.publisher.bytes = bytes;
 			self.totals
-				.update(&TotalsFrame::from([(String::new(), totals)]))
+				.update(
+					moq_net::Timed::from(&TotalsFrame::from([(String::new(), totals)])).at(moq_net::Timestamp::now()),
+				)
 				.expect("publish");
 		}
 	}
@@ -1808,6 +1951,65 @@ mod tests {
 	}
 
 	#[test]
+	fn outcomes_survive_node_departure_resume_and_counter_only_reset() {
+		let (mut merged, key) = hand_merged::<Presence>();
+		let sample = |refused, failed| {
+			let mut value = Presence::default();
+			value.sessions_refused.forbidden = refused;
+			value.sessions_failed.transport = failed;
+			value
+		};
+		let path = PathOwned::from(".stats/acme/node/b");
+		merged.apply_announce(
+			moq_net::announce::Announce {
+				prefix: path.clone(),
+				captures: None,
+				route: origin::Route::default(),
+			},
+			true,
+		);
+		let second = (path, None);
+		merged
+			.nodes
+			.get_mut(&second)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), sample(2, 1))]));
+
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), sample(5, 3))]));
+		merged.nodes.get_mut(&key).unwrap().depart();
+		assert_eq!(merged.merged()[""], sample(7, 4));
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), sample(5, 3))]));
+		assert_eq!(
+			merged.merged()[""],
+			sample(7, 4),
+			"same epoch does not count old errors again"
+		);
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), sample(6, 4))]));
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), sample(2, 1))]));
+		assert_eq!(
+			merged.merged()[""],
+			sample(10, 6),
+			"outcome-only reset starts a fresh segment"
+		);
+	}
+
+	#[test]
 	fn a_reset_closes_the_old_open_pairs() {
 		let (mut merged, key) = hand_merged::<Presence>();
 		let presence = |started, ended| {
@@ -1825,6 +2027,63 @@ mod tests {
 		let node = merged.nodes.values_mut().next().expect("node");
 		node.observe(BTreeMap::from([(String::new(), presence(1, 0))]));
 		assert_eq!(merged.merged()[""], presence(7, 6));
+	}
+
+	#[test]
+	fn request_totals_survive_departure_resume_and_request_only_reset() {
+		let (mut merged, key) = hand_merged::<Presence>();
+		let request = |requests| {
+			let mut presence = Presence::default();
+			presence.requests = requests;
+			presence
+		};
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(5))]));
+		merged.nodes.get_mut(&key).unwrap().depart();
+		assert_eq!(merged.merged()[""], request(5));
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(5))]));
+		assert_eq!(
+			merged.merged()[""],
+			request(5),
+			"resuming does not admit requests again"
+		);
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(6))]));
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(2))]));
+		assert_eq!(
+			merged.merged()[""],
+			request(8),
+			"request-only regression begins another segment"
+		);
+	}
+
+	#[test]
+	fn byte_only_regression_begins_another_segment() {
+		let (mut merged, key) = hand_merged::<Presence>();
+		let bytes = |sent, received| {
+			let mut presence = Presence::default();
+			presence.sent_bytes = sent;
+			presence.received_bytes = received;
+			presence
+		};
+		let node = merged.nodes.get_mut(&key).unwrap();
+		node.observe(BTreeMap::from([(String::new(), bytes(6, 4))]));
+		node.observe(BTreeMap::from([(String::new(), bytes(2, 1))]));
+		assert_eq!(merged.merged()[""], bytes(8, 5));
 	}
 
 	#[test]
@@ -1863,6 +2122,137 @@ mod tests {
 		assert_eq!(merged.merged()[""], presence(9, 8));
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn traffic_resume_reopens_closed_pairs_without_going_down() {
+		let origin = produce_origin();
+		let mut node = NodeBroadcast::new(&origin, "acme", "a");
+		let mut route = origin::Route::default();
+		route.epoch = Some("01900000-0000-7000-8000-000000000001".parse().unwrap());
+		node.source.announce(route.clone()).expect("announce epoch");
+		let mut raw = Traffic::default();
+		raw.announces_started = 5;
+		raw.announces_ended = 3;
+		raw.broadcasts_started = 4;
+		raw.broadcasts_ended = 1;
+		raw.subscriptions_started = 6;
+		raw.subscriptions_ended = 2;
+		raw.bytes = 100;
+		node.frame.insert("acme/room".into(), raw);
+		node.publish("acme/room", 0);
+
+		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
+		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
+		let grew = |before: &Traffic, after: &Traffic| !after.regressed(before);
+		read_until(&mut traffic.inner, grew, |frame| frame.get("acme/room") == Some(&raw)).await;
+		node.source.unannounce();
+		let departed = raw.retire();
+		read_until(&mut traffic.inner, grew, |frame| {
+			assert!(!frame["acme/room"].regressed(&raw));
+			frame["acme/room"] == departed
+		})
+		.await;
+
+		// The same publisher epoch returns with all three pairs still open.
+		node.source.announce(route).expect("reannounce epoch");
+		let mut expected = raw;
+		expected.announces_started = 7;
+		expected.announces_ended = 5;
+		expected.broadcasts_started = 7;
+		expected.broadcasts_ended = 4;
+		expected.subscriptions_started = 10;
+		expected.subscriptions_ended = 6;
+		let resumed = read_until(&mut traffic.inner, grew, |frame| {
+			assert!(!frame["acme/room"].regressed(&departed), "{departed:?} -> {frame:?}");
+			frame["acme/room"] == expected
+		})
+		.await;
+		let resumed = resumed["acme/room"];
+		assert_eq!(resumed.announces_started - resumed.announces_ended, 2);
+		assert_eq!(resumed.active_broadcasts(), raw.active_broadcasts());
+		assert_eq!(resumed.active_subscriptions(), raw.active_subscriptions());
+		assert_eq!(resumed.bytes, raw.bytes, "flow counters are not reopened");
+
+		node.publish("acme/room", 20);
+		expected.bytes = 120;
+		read_until(&mut traffic.inner, grew, |frame| {
+			assert!(!frame["acme/room"].regressed(&resumed));
+			frame["acme/room"] == expected
+		})
+		.await;
+	}
+
+	#[test]
+	fn a_resume_reopens_only_the_pairs_still_open() {
+		let (mut merged, key) = hand_merged::<Traffic>();
+		let traffic = |started, ended| {
+			let mut traffic = Traffic::default();
+			traffic.subscriptions_started = started;
+			traffic.subscriptions_ended = ended;
+			traffic
+		};
+		let frame = |started, ended| BTreeMap::from([("room".into(), traffic(started, ended))]);
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(frame(5, 3));
+		node.depart();
+		assert_eq!(merged.merged()["room"], traffic(5, 5));
+
+		// One of the two open subscriptions ended while the node was away.
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(frame(5, 4));
+		assert_eq!(merged.merged()["room"], traffic(6, 5));
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.depart();
+		assert_eq!(merged.merged()["room"], traffic(6, 6));
+
+		// Every subscription ended while away: nothing reopens.
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(frame(5, 5));
+		assert_eq!(merged.merged()["room"], traffic(6, 6));
+	}
+
+	#[test]
+	fn traffic_reset_discards_reopened_pairs() {
+		let (mut merged, key) = hand_merged::<Traffic>();
+		let mut raw = Traffic::default();
+		raw.subscriptions_started = 4;
+		raw.subscriptions_ended = 1;
+		raw.bytes = 100;
+		let frame = || BTreeMap::from([("room".into(), raw)]);
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(frame());
+		node.depart();
+		node.observe(frame());
+		let mut expected = raw;
+		expected.subscriptions_started = 7;
+		expected.subscriptions_ended = 4;
+		assert_eq!(merged.merged()["room"], expected);
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.depart();
+		node.observe(frame());
+		expected.subscriptions_started = 10;
+		expected.subscriptions_ended = 7;
+		assert_eq!(merged.merged()["room"], expected);
+
+		// A route without an epoch still resets, including after a resume.
+		let mut reset = Traffic::default();
+		reset.subscriptions_started = 1;
+		reset.bytes = 10;
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.depart();
+		node.observe(BTreeMap::from([("room".into(), reset)]));
+		assert_eq!(merged.merged()["room"], reset);
+
+		// Removing a path also resets its counters when it returns.
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.depart();
+		node.observe(BTreeMap::from([("room".into(), reset)]));
+		node.observe(BTreeMap::new());
+		assert!(merged.merged().is_empty());
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([("room".into(), reset)]));
+		assert_eq!(merged.merged()["room"], reset);
+	}
+
 	#[test]
 	fn a_resume_reopens_the_pairs_inside_totals() {
 		let (mut merged, key) = hand_merged::<Totals>();
@@ -1886,7 +2276,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn presence_survives_join_leave_and_restart() {
-		// One root held across nodes: a node joining adds its sessions, one
+		// One label held across nodes: a node joining adds its sessions, one
 		// leaving closes its sessions but keeps its count, and a restarted node
 		// is a new epoch that adds to it. The merged count never goes down.
 		let origin = produce_origin();
@@ -1918,5 +2308,97 @@ mod tests {
 		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 8).await;
 		let frame = read_until(&mut presence.inner, grew, |frame| frame[""].active() == 2).await;
 		assert_eq!(frame[""].sessions_started, 3);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn prefix_survives_join_leave_and_restart() {
+		// One prefix held across nodes: a node joining adds its traffic and its
+		// children, one leaving closes its subscriptions and drops its children
+		// but keeps its rollup, and a restarted node is a new epoch that adds to
+		// it. The merged rollup never goes down.
+		let origin = produce_origin();
+		let node_a = node_producer(&origin, "a");
+		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 8).await;
+		drive_tick().await;
+
+		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
+		let mut prefix = agg.prefix("acme");
+		let grew = |before: &Prefix, after: &Prefix| !after.regressed(before);
+		let live = |count| {
+			move |frame: &PrefixFrame| {
+				frame
+					.get("")
+					.is_some_and(|p| p.publisher.active_subscriptions() == count)
+			}
+		};
+		let frame = read_until(&mut prefix.inner, grew, live(1)).await;
+		assert_eq!(frame[""].children["room"].publisher.bytes, 8);
+
+		// Join.
+		let node_b = node_producer(&origin, "b");
+		let fb = feed(&node_b, Tier::default(), "acme", "acme/other", 5).await;
+		let frame = read_until(&mut prefix.inner, grew, live(2)).await;
+		assert_eq!(frame[""].publisher.bytes, 13);
+		assert_eq!(frame[""].children.len(), 2);
+
+		// Leave: node b's child leaves the map, its tail stays in the rollup.
+		drop(fb);
+		drop(node_b);
+		let frame = read_until(&mut prefix.inner, grew, live(1)).await;
+		assert_eq!(frame[""].publisher.bytes, 13);
+		assert_eq!(frame[""].publisher.subscriptions_started, 2);
+		assert!(!frame[""].children.contains_key("other"), "{frame:?}");
+
+		// Restart: a new epoch at node b's path.
+		let node_b = node_producer(&origin, "b");
+		let _fb = feed(&node_b, Tier::default(), "acme", "acme/other", 3).await;
+		let frame = read_until(&mut prefix.inner, grew, |frame| {
+			live(2)(frame) && frame[""].publisher.bytes == 16
+		})
+		.await;
+		assert_eq!(frame[""].publisher.subscriptions_started, 3);
+		assert_eq!(frame[""].children["other"].publisher.bytes, 3, "the new epoch's child");
+	}
+
+	#[test]
+	fn a_prefix_reset_keeps_the_rollup_and_drops_the_children() {
+		let (mut merged, key) = hand_merged::<Prefix>();
+		let prefix = |bytes, child: Option<u64>| {
+			let mut prefix = Prefix::default();
+			prefix.publisher.bytes = bytes;
+			prefix.own.publisher.bytes = bytes;
+			if let Some(child) = child {
+				let mut usage = Usage::default();
+				usage.publisher.bytes = child;
+				prefix.children.insert("cam".into(), usage);
+			}
+			prefix
+		};
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), prefix(10, Some(4)))]));
+		assert_eq!(merged.merged()[""], prefix(10, Some(4)));
+
+		// A child leaving the map is not a reset.
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), prefix(10, None))]));
+		assert_eq!(merged.merged()[""], prefix(10, None));
+
+		// Held again from zero: the old rollup is a baseline, the children are
+		// only the live ones.
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), prefix(3, Some(1)))]));
+		assert_eq!(merged.merged()[""], {
+			let mut expected = prefix(13, Some(1));
+			expected.own.publisher.bytes = 13;
+			expected
+		});
+
+		// A departed node keeps its rollup and drops its children.
+		merged.nodes.get_mut(&key).expect("node").depart();
+		assert_eq!(merged.merged()[""], {
+			let mut expected = prefix(13, None);
+			expected.own.publisher.bytes = 13;
+			expected
+		});
 	}
 }

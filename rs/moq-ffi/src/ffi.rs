@@ -14,6 +14,9 @@ static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Runtime {
 	handle: tokio::runtime::Handle,
+	/// The clock a test drives, when the runtime started with one.
+	#[cfg(feature = "testing")]
+	clock: Option<moq_clock::Installed>,
 	/// Taken by [`shutdown`], so the thread is stopped and joined once.
 	thread: std::sync::Mutex<Option<Thread>>,
 	/// Set by [`shutdown`] to wake the [`Task::run`] calls parked in place, so they observe
@@ -53,18 +56,40 @@ impl std::ops::Deref for Runtime {
 /// The runtime, started on first use.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn runtime() -> &'static Runtime {
-	RUNTIME.get_or_init(Runtime::new)
+	RUNTIME.get_or_init(|| Runtime::new(false))
+}
+
+/// Start the runtime on a [`moq_clock::Manual`] clock that only a test moves.
+///
+/// False when the runtime already started, since its timers are armed on the host clock.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+pub(crate) fn start_test_clock() -> bool {
+	let mut started = false;
+	RUNTIME.get_or_init(|| {
+		started = true;
+		Runtime::new(true)
+	});
+	started
+}
+
+/// The clock [`start_test_clock`] installed, if it did.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+pub(crate) fn test_clock() -> Option<&'static moq_clock::Installed> {
+	RUNTIME.get()?.clock.as_ref()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Runtime {
-	fn new() -> Self {
+	fn new(#[cfg_attr(not(feature = "testing"), allow(unused_variables))] test_clock: bool) -> Self {
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.thread_name("moq-ffi-worker")
 			.enable_all()
 			.build()
 			.unwrap();
 		let handle = runtime.handle().clone();
+		// Before any task runs, so every read and timer lands on it.
+		#[cfg(feature = "testing")]
+		let clock = test_clock.then(|| moq_clock::Manual::new().install(&handle));
 		let (stop, stopped) = tokio::sync::oneshot::channel();
 
 		let join = std::thread::Builder::new()
@@ -80,6 +105,8 @@ impl Runtime {
 
 		Runtime {
 			handle,
+			#[cfg(feature = "testing")]
+			clock,
 			thread: std::sync::Mutex::new(Some(Thread { stop, join })),
 			stopped: tokio::sync::watch::Sender::new(false),
 			polls: Default::default(),
@@ -101,14 +128,19 @@ pub(crate) fn shutdown() {
 impl Runtime {
 	fn shutdown(&self) {
 		let runtime = self;
-		let mut owner = runtime.thread.lock().unwrap();
+		let mut owner = runtime.thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		let Some(thread) = owner.take() else {
 			return;
 		};
 		// Before the thread stops, so no call awaited in place polls the runtime after it is gone.
-		let mut polls = runtime.polls.lock().unwrap();
+		let mut polls = runtime.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		polls.stopped = true;
-		drop(runtime.idle.wait_while(polls, |polls| polls.active > 0).unwrap());
+		drop(
+			runtime
+				.idle
+				.wait_while(polls, |polls| polls.active > 0)
+				.unwrap_or_else(std::sync::PoisonError::into_inner),
+		);
 		// Outside the lock: a waker may poll inline, which takes it.
 		runtime.stopped.send_replace(true);
 		let _ = thread.stop.send(());
@@ -140,7 +172,10 @@ struct Polling;
 impl Polling {
 	/// `None` once [`shutdown`] has begun.
 	fn start() -> Option<Self> {
-		let mut polls = runtime().polls.lock().unwrap();
+		let mut polls = runtime()
+			.polls
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
 		if polls.stopped {
 			return None;
 		}
@@ -153,7 +188,7 @@ impl Polling {
 impl Drop for Polling {
 	fn drop(&mut self) {
 		let runtime = runtime();
-		let mut polls = runtime.polls.lock().unwrap();
+		let mut polls = runtime.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 		polls.active -= 1;
 		if polls.active == 0 {
 			runtime.idle.notify_all();
@@ -189,19 +224,167 @@ pub(crate) fn enter() -> EnterGuard {
 	EnterGuard
 }
 
-/// Spawn a background future, detached from the caller.
-///
-/// Uses the runtime handle directly (rather than `tokio::spawn`) because a
-/// constructor is called from a foreign thread with no runtime entered.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) {
-	runtime().spawn(future);
+/// Completion of an owned operation, retained by the object's host calls.
+#[derive(Clone, Default)]
+pub(crate) struct Background {
+	#[cfg(not(target_arch = "wasm32"))]
+	result: Option<kio::Consumer<Option<moq_tokio::Result<()>>>>,
 }
 
-/// Spawn onto the JS event loop: wasm32 has no other thread to hand it to.
+#[cfg(not(target_arch = "wasm32"))]
+impl Background {
+	pub fn new(future: impl Future<Output = moq_tokio::Result<()>> + Send + 'static) -> Self {
+		let result = kio::Producer::new(None);
+		let receiver = result.consume();
+		runtime().spawn(async move {
+			let completed = moq_tokio::panic::isolate(future)
+				.await
+				.unwrap_or(Err(moq_tokio::Error::Panic));
+			*result
+				.write()
+				.unwrap_or_else(|_| unreachable!("only the task closes its completion")) = Some(completed);
+		});
+		Self { result: Some(receiver) }
+	}
+
+	pub fn driver(mut driver: impl moq_net::time::Driver + Send + 'static) -> Self {
+		let result = kio::Producer::new(None);
+		let receiver = result.consume();
+		runtime().spawn(async move {
+			// Keep channel teardown outside the unwind and after panic publication.
+			let completed = moq_tokio::panic::isolate(async {
+				match moq_net::time::run(Borrowed(&mut driver)).await {
+					moq_net::Error::Closed => Ok(()),
+					error => Err(error.into()),
+				}
+			})
+			.await
+			.unwrap_or(Err(moq_tokio::Error::Panic));
+			if matches!(&completed, Err(moq_tokio::Error::Panic)) {
+				*result
+					.write()
+					.unwrap_or_else(|_| unreachable!("only the task closes its completion")) = Some(completed.clone());
+			}
+			let completed = moq_tokio::panic::isolate(async move {
+				drop(driver);
+				completed
+			})
+			.await
+			.unwrap_or(Err(moq_tokio::Error::Panic));
+			*result
+				.write()
+				.unwrap_or_else(|_| unreachable!("only the task closes its completion")) = Some(completed);
+		});
+		Self { result: Some(receiver) }
+	}
+
+	pub async fn finished(&self) -> Result<(), MoqError> {
+		let Some(result) = &self.result else { return Ok(()) };
+		let completed = kio::wait(|waiter| {
+			match std::task::ready!(result.poll(waiter, |state| {
+				match &**state {
+					Some(completed) => std::task::Poll::Ready(completed.clone()),
+					None => std::task::Poll::Pending,
+				}
+			})) {
+				Ok(completed) => std::task::Poll::Ready(completed),
+				Err(_) => std::task::Poll::Ready(Err(moq_net::Error::Cancel.into())),
+			}
+		})
+		.await;
+		completed.map_err(crate::session::map_closed_error)
+	}
+}
+
+impl Background {
+	pub fn check(&self) -> Result<(), MoqError> {
+		#[cfg(not(target_arch = "wasm32"))]
+		if let Some(result) = &self.result {
+			return result
+				.read()
+				.clone()
+				.unwrap_or(Ok(()))
+				.map_err(crate::session::map_closed_error);
+		}
+		Ok(())
+	}
+
+	pub async fn watch<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
+		self.check()?;
+		#[cfg(not(target_arch = "wasm32"))]
+		let result = if self.result.is_some() {
+			tokio::pin!(future);
+			tokio::select! {
+				biased;
+				result = self.finished() => { result?; future.await }
+				result = &mut future => result,
+			}
+		} else {
+			future.await
+		};
+		#[cfg(target_arch = "wasm32")]
+		let result = future.await;
+		self.check()?;
+		result
+	}
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn panicking_origin() -> (moq_net::origin::Producer, Background, kio::Producer<bool>) {
+	struct Driver {
+		inner: moq_net::origin::Driver,
+		failed: kio::Consumer<bool>,
+	}
+	impl moq_net::time::Driver for Driver {
+		fn poll(
+			&mut self,
+			now: moq_net::time::Instant,
+			waiter: &kio::Waiter,
+		) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+			let _ = self.failed.poll(waiter, |state| {
+				assert!(!**state, "injected origin driver panic");
+				std::task::Poll::<()>::Pending
+			});
+			self.inner.poll(now, waiter)
+		}
+	}
+	let (origin, inner) = moq_net::origin::Producer::new(Default::default());
+	let failed = kio::Producer::new(false);
+	let driver = Background::driver(Driver {
+		inner,
+		failed: failed.consume(),
+	});
+	(origin, driver, failed)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct Borrowed<'a, D>(&'a mut D);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<D: moq_net::time::Driver> moq_net::time::Driver for Borrowed<'_, D> {
+	fn poll(
+		&mut self,
+		now: moq_net::time::Instant,
+		waiter: &kio::Waiter,
+	) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+		self.0.poll(now, waiter)
+	}
+}
+
+/// Spawn an owned background future on the native runtime.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) -> Background {
+	Background::new(async move {
+		future.await;
+		Ok(())
+	})
+}
+
+/// Spawn onto the JS event loop, whose current toolchain aborts on panic.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn spawn<F: Future<Output = ()> + 'static>(future: F) {
+pub(crate) fn spawn<F: Future<Output = ()> + 'static>(future: F) -> Background {
 	web_async::spawn(future);
+	Background::default()
 }
 
 /// Aborts a spawned task when the future awaiting it is dropped.
@@ -226,10 +409,14 @@ where
 	T: Send + 'static,
 	E: Into<MoqError> + Send + 'static,
 {
-	let task = runtime().spawn(future);
+	let task = runtime().spawn(async move {
+		moq_tokio::panic::isolate(async move { future.await.map_err(Into::into) })
+			.await
+			.unwrap_or_else(|| Err(crate::session::map_closed_error(moq_tokio::Error::Panic)))
+	});
 	let _abort = AbortOnDrop(task.abort_handle());
 	match task.await {
-		Ok(result) => result.map_err(Into::into),
+		Ok(result) => result,
 		Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
 		Err(e) => Err(e.into()),
 	}
@@ -256,6 +443,8 @@ pub(crate) struct Task<T: kio::MaybeSend + 'static> {
 	/// unrepresentable rather than merely documented.
 	state: Arc<tokio::sync::Mutex<Option<T>>>,
 	cancel: tokio::sync::watch::Sender<bool>,
+	cleanup: std::sync::Mutex<Option<Background>>,
+	driver: Background,
 }
 
 /// Exclusive access to a [Task]'s state, held for as long as the guard lives.
@@ -266,7 +455,14 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		Self {
 			state: Arc::new(tokio::sync::Mutex::new(Some(inner))),
 			cancel: tokio::sync::watch::Sender::new(false),
+			cleanup: Default::default(),
+			driver: Background::default(),
 		}
+	}
+
+	pub fn supervised(mut self, driver: Background) -> Self {
+		self.driver = driver;
+		self
 	}
 
 	/// Try to lock the state synchronously. Returns `None` if a task is running or it was cancelled.
@@ -301,6 +497,10 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	/// [`Self::cancel`].
 	#[cfg(not(target_arch = "wasm32"))]
 	pub fn configure(&self) -> Result<Guard<T>, MoqError> {
+		self.driver.check()?;
+		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
+			cleanup.check()?;
+		}
 		match self.lock() {
 			Some(guard) => Ok(guard),
 			None if self.is_cancelled() => Err(MoqError::Cancelled),
@@ -322,22 +522,37 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		F: FnOnce(Guard<T>) -> Fut,
 		Fut: Future<Output = Result<R, MoqError>>,
 	{
-		let drive = Self::drive(self.cancel.subscribe(), self.state.clone(), f);
-		let mut run = std::pin::pin!(async {
-			tokio::select! {
-				biased;
-				_ = stopped() => Err(MoqError::Cancelled),
-				result = drive => result,
-			}
-		});
-		std::future::poll_fn(|cx| {
-			let Some(_polling) = Polling::start() else {
-				return std::task::Poll::Ready(Err(MoqError::Cancelled));
-			};
-			let _runtime = enter();
-			run.as_mut().poll(cx)
-		})
-		.await
+		self.driver.check()?;
+		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
+			cleanup.check()?;
+		}
+		let result = {
+			let drive = self
+				.driver
+				.watch(Self::drive(self.cancel.subscribe(), self.state.clone(), f));
+			let mut run = std::pin::pin!(async {
+				tokio::select! {
+					biased;
+					_ = stopped() => Err(MoqError::Cancelled),
+					result = drive => result,
+				}
+			});
+			std::future::poll_fn(|cx| {
+				let Some(_polling) = Polling::start() else {
+					return std::task::Poll::Ready(Err(MoqError::Cancelled));
+				};
+				let _runtime = enter();
+				run.as_mut().poll(cx)
+			})
+			.await
+		};
+		// A foreign future may stop polling while holding the state, so cancellation cannot
+		// wait for cleanup. Its next call still reports a completed cleanup panic.
+		self.driver.check()?;
+		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
+			cleanup.check()?;
+		}
+		result
 	}
 
 	/// Wait for the lock, then run `f`, with [Self::cancel] able to interrupt either.
@@ -366,8 +581,34 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		}
 	}
 
-	/// Cancel all current and future [Self::run] calls, causing them to return [MoqError::Cancelled],
-	/// and drop the state.
+	/// Move the state to a new owner, ending this handle as [Self::cancel] would.
+	///
+	/// `check` sees the state first, and an error there leaves this handle untouched.
+	/// [`MoqError::Busy`] while a [Self::run] owns the state, [`MoqError::Cancelled`] after
+	/// [Self::cancel].
+	pub fn take(&self, check: impl FnOnce(&T) -> Result<(), MoqError>) -> Result<T, MoqError> {
+		self.driver.check()?;
+		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
+			cleanup.check()?;
+		}
+		if *self.cancel.borrow() {
+			return Err(MoqError::Cancelled);
+		}
+		let mut state = self.state.clone().try_lock_owned().map_err(|_| MoqError::Busy)?;
+		// Re-read under the lock, as `lock` does: a cancel we don't see here has not taken the state.
+		if *self.cancel.borrow() {
+			return Err(MoqError::Cancelled);
+		}
+		check(state.as_ref().ok_or(MoqError::Cancelled)?)?;
+		let inner = state.take().ok_or(MoqError::Cancelled)?;
+		// The state is already gone, so this only fails later runs; nothing is left to drop.
+		self.cancel.send_replace(true);
+		Ok(inner)
+	}
+
+	/// Cancel all current and future [Self::run] calls and drop the state.
+	///
+	/// Calls return [MoqError::Cancelled]; later calls report a completed cleanup panic.
 	///
 	/// Terminal: there is no way back from here, and the state is gone rather than idle.
 	/// The drop is not synchronous with this call, because an in-flight [Self::run] holds the
@@ -377,15 +618,16 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 		// send_replace, not send: `send` refuses to store the value while no
 		// receiver exists, so a cancel BEFORE the first `run` would silently
 		// no-op and the run would proceed.
+		let mut cleanup = self.cleanup.lock().unwrap();
 		if self.cancel.send_replace(true) {
 			// Already cancelled, so the first call is the one dropping the state.
 			return;
 		}
 
 		let state = self.state.clone();
-		spawn(async move {
+		*cleanup = Some(spawn(async move {
 			state.lock().await.take();
-		});
+		}));
 	}
 }
 
@@ -397,6 +639,45 @@ impl<T: kio::MaybeSend + 'static> Drop for Task<T> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+
+	#[tokio::test]
+	async fn a_driver_teardown_panic_reaches_its_owner() {
+		struct Driver;
+		impl moq_net::time::Driver for Driver {
+			fn poll(
+				&mut self,
+				_: moq_net::time::Instant,
+				_: &kio::Waiter,
+			) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+				Err(moq_net::Error::Closed)
+			}
+		}
+		impl Drop for Driver {
+			fn drop(&mut self) {
+				panic!("injected driver teardown panic");
+			}
+		}
+		let driver = super::Background::driver(Driver);
+		assert!(matches!(driver.finished().await, Err(super::MoqError::Task { .. })));
+	}
+	#[tokio::test]
+	async fn a_cleanup_panic_reaches_the_host_while_another_task_keeps_working() {
+		struct Panics;
+		impl Drop for Panics {
+			fn drop(&mut self) {
+				panic!("injected cleanup panic");
+			}
+		}
+		let failed = super::Task::new(Panics);
+		failed.cancel();
+		let cleanup = failed.cleanup.lock().unwrap().clone().unwrap();
+		assert!(matches!(cleanup.finished().await, Err(super::MoqError::Task { .. })));
+		let result = failed.run(|_| async { Ok(()) }).await;
+		assert!(matches!(result, Err(super::MoqError::Task { .. })), "{result:?}");
+		let healthy = super::Task::new(7);
+		assert_eq!(healthy.run(|state| async move { Ok(*state) }).await.unwrap(), 7);
+	}
+
 	use std::sync::Arc;
 	use std::sync::atomic::{AtomicBool, Ordering};
 	use std::time::Duration;
@@ -405,14 +686,14 @@ mod tests {
 
 	#[test]
 	fn runtime_uses_parallel_workers() {
-		let runtime = Runtime::new();
+		let runtime = Runtime::new(false);
 		assert_eq!(runtime.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread);
 		runtime.shutdown();
 	}
 
 	#[test]
 	fn shutdown_joins_a_worker_callback() {
-		let runtime = Arc::new(Runtime::new());
+		let runtime = Arc::new(Runtime::new(false));
 		let (entered, entering) = std::sync::mpsc::channel();
 		let (release, released) = std::sync::mpsc::channel();
 		let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -519,6 +800,30 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn a_queued_cancel_does_not_wait_for_an_unpolled_owner() {
+		let task = Task::new(());
+		let first = task.run(|state| async move {
+			let _state = state;
+			std::future::pending::<Result<(), MoqError>>().await
+		});
+		tokio::pin!(first);
+		assert!(
+			std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx)))
+				.await
+				.is_pending()
+		);
+		task.cancel();
+		let queued = task.run(|_| async { panic!("cancelled calls never touch the state") });
+		tokio::pin!(queued);
+		let result: std::task::Poll<Result<(), MoqError>> =
+			std::future::poll_fn(|cx| std::task::Poll::Ready(queued.as_mut().poll(cx))).await;
+		assert!(
+			matches!(result, std::task::Poll::Ready(Err(MoqError::Cancelled))),
+			"{result:?}"
+		);
+	}
+
+	#[tokio::test]
 	async fn run_after_cancel_is_cancelled_without_touching_the_state() {
 		let (task, dropped) = tracked();
 
@@ -587,6 +892,51 @@ mod tests {
 
 		let err = soon(&mut run).await.expect_err("the in-flight run should be cancelled");
 		assert!(matches!(err, MoqError::Cancelled));
+	}
+
+	#[tokio::test]
+	async fn take_is_busy_while_a_run_holds_the_lock() {
+		let task = Task::new(7);
+		let (started, running) = tokio::sync::oneshot::channel();
+		let run = task.run(move |state| async move {
+			let _state = state;
+			started.send(()).expect("test should still be waiting");
+			std::future::pending::<Result<(), MoqError>>().await
+		});
+		tokio::pin!(run);
+
+		soon(async {
+			tokio::select! {
+				_ = &mut run => panic!("a pending run should not resolve"),
+				started = running => started.expect("the run should start"),
+			}
+		})
+		.await;
+		assert!(matches!(task.take(|_| Ok(())), Err(MoqError::Busy)));
+	}
+
+	#[tokio::test]
+	async fn take_moves_the_state_unless_refused() {
+		let task = Task::new(7);
+		assert!(matches!(
+			task.take(|_| Err(MoqError::AlreadyCommitted)),
+			Err(MoqError::AlreadyCommitted)
+		));
+		assert_eq!(
+			task.take(|state| {
+				assert_eq!(*state, 7);
+				Ok(())
+			})
+			.unwrap(),
+			7
+		);
+
+		let err = task
+			.run(|_| async { Ok(()) })
+			.await
+			.expect_err("taken state cannot run");
+		assert!(matches!(err, MoqError::Cancelled));
+		assert!(matches!(task.take(|_| Ok(())), Err(MoqError::Cancelled)));
 	}
 
 	#[test]

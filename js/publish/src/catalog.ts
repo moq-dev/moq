@@ -1,8 +1,12 @@
+import { Instant, Milli, Nano, now, origin } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Effect } from "@moq/signals";
+
+// Estimate-only edits publish at most this often.
+const ESTIMATE_INTERVAL = Nano.fromMilli(Milli(1000));
 
 /**
  * A stable catalog producer that fans out to one or more network tracks.
@@ -13,29 +17,36 @@ import { Effect } from "@moq/signals";
  * application's own sections, e.g. `scte35`) each edit only their own keys, so their sections
  * compose instead of clobbering one another.
  *
- * The root `clock` is advertised from the first snapshot: every js/publish timestamp is
- * `performance.now()` in microseconds, so PTS zero is `performance.timeOrigin`. The mapping is fixed
- * for the page, so a system-clock adjustment never retimes the broadcast.
+ * The root `clock` is advertised from the first snapshot: every js/publish timestamp is the
+ * installed clock's instant in microseconds, so PTS zero is the wall time of instant zero. The
+ * mapping is fixed when the producer is created, so a later system-clock adjustment never retimes
+ * the broadcast. A page whose wall clock reads before 2020 has not set it yet (a device booted
+ * before it synced), so it omits `clock` rather than advertise a false one.
  */
 export class CatalogProducer {
-	#value: Catalog.Root = { clock: pageClock() };
+	#value: Catalog.Root = pageRoot();
 	#outputs = new Set<Json.Snapshot.Producer<Catalog.Root>>();
-	#lastEstimate: number | undefined;
+	#lastEstimate: Instant | undefined;
 	#pending: Effect | undefined;
 
 	/** Edit the catalog; estimate-only changes publish at most once a second with a trailing update. */
 	mutate(fn: (catalog: Catalog.Root) => void): void {
 		const value = structuredClone(this.#value);
 		fn(value);
+		// Every consumer refuses a catalog that fails this, so refuse the edit before it reaches one.
+		Catalog.checkRenditions(value);
+		// Computed, never carried, so an edit can't claim less than the catalog uses.
+		const version = Catalog.minVersion(value);
+		if (version === undefined) delete value.version;
+		else value.version = version;
+		// Estimates only rise for a track; a renamed rendition starts its new track over.
 		for (const field of ["jitter", "delay"] as const) {
-			const previous = advertised(this.#value, field);
-			for (const [section, next] of Object.entries(advertised(value, field))) {
-				for (const [name, estimate] of Object.entries(next)) {
-					if (estimate === 0) throw new Error(`omit ${field} rather than advertising 0`);
-					const before = previous[section]?.[name];
-					if (before !== undefined && (estimate === undefined || estimate < before)) {
-						throw new Error(`${field} cannot decrease for an existing track`);
-					}
+			const previous = new Map(advertised(this.#value, field));
+			for (const [track, estimate] of advertised(value, field)) {
+				if (estimate === 0) throw new Error(`omit ${field} rather than advertising 0`);
+				const before = previous.get(track);
+				if (before !== undefined && (estimate === undefined || estimate < before)) {
+					throw new Error(`${field} cannot decrease for an existing track`);
 				}
 			}
 		}
@@ -44,19 +55,20 @@ export class CatalogProducer {
 		this.#value = value;
 		if (!changed || this.#outputs.size === 0) return;
 
-		const now = performance.now();
-		if (!estimateOnly || this.#lastEstimate === undefined || now >= this.#lastEstimate + 1000) {
+		const at = now();
+		const next = this.#lastEstimate === undefined ? undefined : Instant.add(this.#lastEstimate, ESTIMATE_INTERVAL);
+		if (!estimateOnly || next === undefined || at >= next) {
 			this.#publish(estimateOnly || this.#pending !== undefined);
 		} else if (!this.#pending) {
 			this.#pending = new Effect();
-			this.#pending.timer(() => this.#publish(true), this.#lastEstimate + 1000 - now);
+			this.#pending.timer(() => this.#publish(true), Instant.durationSince(next, at));
 		}
 	}
 
 	#publish(estimate: boolean): void {
 		this.#pending?.close();
 		this.#pending = undefined;
-		if (estimate) this.#lastEstimate = performance.now();
+		if (estimate) this.#lastEstimate = now();
 		const at = Time.Timestamp.now();
 		for (const output of this.#outputs) output.update({ value: this.#value, at });
 	}
@@ -107,24 +119,31 @@ function structure(catalog: Catalog.Root): Catalog.Root {
 	return value;
 }
 
-/** Every track's advertised `field`, by section and then track name. */
-function advertised(
-	catalog: Catalog.Root,
-	field: "jitter" | "delay",
-): Record<string, Record<string, number | undefined>> {
-	const pick = (tracks: Record<string, { jitter?: number; delay?: number }> | undefined) =>
-		Object.fromEntries(Object.entries(tracks ?? {}).map(([name, config]) => [name, config[field]]));
-	return {
-		audio: pick(catalog.audio?.renditions),
-		video: pick(catalog.video?.renditions),
-		text: pick(catalog.text?.renditions),
-		json: pick(catalog.json?.tracks),
-		binary: pick(catalog.binary?.tracks),
+type Advertised = { broadcast?: string; track?: string; jitter?: number; delay?: number };
+
+/** Every entry's advertised `field`, keyed by its section, ID, broadcast, and track name. */
+function advertised(catalog: Catalog.Root, field: "jitter" | "delay"): [string, number | undefined][] {
+	const sections = {
+		audio: catalog.audio?.renditions,
+		video: catalog.video?.renditions,
+		text: catalog.text?.renditions,
+		json: catalog.json?.tracks,
+		binary: catalog.binary?.tracks,
 	};
+	return Object.entries(sections).flatMap(([section, tracks]) =>
+		Object.entries((tracks ?? {}) as Record<string, Advertised>).map(
+			([id, config]): [string, number | undefined] => [
+				JSON.stringify([section, id, config.broadcast, Catalog.track(id, config)]),
+				config[field],
+			],
+		),
+	);
 }
 
-// The wall time of `performance.now() === 0`, the zero every js/publish timestamp counts from.
-function pageClock(): Catalog.Clock {
-	const wall = Math.round((performance.timeOrigin - Catalog.MOQ_EPOCH_UNIX_MILLIS) * 1000);
-	return { wall: Catalog.u53(wall), timescale: 1_000_000 };
+// An empty root advertising the wall time of instant zero, the zero every js/publish timestamp
+// counts from, when the wall clock is set.
+function pageRoot(): Catalog.Root {
+	const at = Math.round((origin() - Catalog.MOQ_EPOCH_UNIX_MILLIS) * 1000);
+	if (at < 0) return {};
+	return { clock: { wall: Catalog.u53(at), timescale: 1_000_000 } };
 }

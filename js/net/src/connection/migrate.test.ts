@@ -1,11 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { RefusedRedirect } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import * as Time from "../time.ts";
 import { accept } from "./accept.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { Reload } from "./reload.ts";
@@ -73,7 +73,7 @@ async function goaway(server: WebTransport, uri: string): Promise<void> {
 const url = new URL("https://relay.example/room");
 
 // Short enough to watch, long enough that a handover visibly overlaps the replacement.
-const handover = Time.Milli(200);
+const handover = Milli(200);
 
 test("an empty GOAWAY migrates the announced request to the replacement session", async () => {
 	const { dials, origin } = fleet();
@@ -87,7 +87,7 @@ test("an empty GOAWAY migrates the announced request to the replacement session"
 		consume,
 		goaway: { handover },
 		// A session younger than this counts as redirected immediately and backs off first.
-		delay: { initial: Time.Milli(1) },
+		delay: { initial: Milli(1) },
 	});
 	const watched = consume.request(Path.from("cam"), { announced: true });
 
@@ -129,7 +129,7 @@ test("a GOAWAY without a timeout hands over at the configured cap", async () => 
 		url,
 		websocket: { enabled: false },
 		goaway: { handover },
-		delay: { initial: Time.Milli(1) },
+		delay: { initial: Milli(1) },
 	});
 
 	try {
@@ -153,7 +153,7 @@ test("a refused redirect ends the connection instead of reconnecting", async () 
 	const refused = ["https://other.example/", "not a url", "http://relay.example/", "https://127.0.0.1/"];
 	for (const uri of refused) {
 		const { dials } = fleet();
-		const reload = new Reload({ url, websocket: { enabled: false }, delay: { initial: Time.Milli(1) } });
+		const reload = new Reload({ url, websocket: { enabled: false }, delay: { initial: Milli(1) } });
 
 		try {
 			await waitUntil(() => reload.status.peek() === "connected");
@@ -182,7 +182,7 @@ test("a certificate pin refuses a redirect to another host even under follow", a
 		websocket: { enabled: false },
 		webtransport: { serverCertificateHashes: [{ value: "00".repeat(32) }] },
 		goaway: { redirect: "follow" },
-		delay: { initial: Time.Milli(1) },
+		delay: { initial: Milli(1) },
 	});
 
 	try {

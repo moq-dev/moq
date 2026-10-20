@@ -44,18 +44,24 @@ tracing-log = ["tracing/log"]
 rustls-log = ["rustls?/logging"]
 # Enable qlog support
 qlog = ["dep:qlog"]
-
 # Internal (PRIVATE!) features used to aid testing.
 # Don't rely on these whatsoever. They may disappear at any time.
 
 __rustls-post-quantum-test = []
 
+# Exposes the `fuzz/` harness's target bodies, and the plaintext crypto the connection
+# target and the benches run on, through the hidden `fuzz` module. ring keys the endpoint's
+# reset and token secrets. Off by default and hidden from the docs.
+fuzz = ["dep:arbitrary", "ring"]
+
 [dependencies]
-arbitrary = { version = "1.0.1", features = ["derive"], optional = true }
+arbitrary = { version = "1.5", features = ["derive"], optional = true }
 aws-lc-rs = { version = "1.9", default-features = false, optional = true }
 bytes = { workspace = true }
 fastbloom = { version = "0.17", default-features = false, optional = true }
 lru-slab = "0.1.2"
+# Without the runtime, which is meant for dev-dependencies; a driver brings its own.
+moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
 rand_pcg = "0.10"
@@ -78,17 +84,52 @@ rustls-pki-types = { version = "1.7", features = ["web"] }
 web-time = "1"
 
 [dev-dependencies]
+arbitrary = { version = "1.5", features = ["derive"] }
 assert_matches = "1.1"
+criterion = { workspace = true }
 hex-literal = "1"
-rcgen = "0.14"
+# The tests and benches read time through the runtime, as the drivers do.
+moq-clock = { path = "../moq-clock" }
+proptest = { workspace = true }
+rcgen = { workspace = true, features = ["pem", "ring"] }
+stats_alloc = "0.1.10"
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
 wasm-bindgen-test = "0.3.45"
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+cpu-time = "1.0.0"
+
+# Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
+# `--all-targets` build skips it rather than failing to find the module.
+[[example]]
+name = "fuzz-seeds"
+path = "examples/fuzz-seeds.rs"
+required-features = ["fuzz"]
+
+# The benches run on the hidden `fuzz` module's plaintext crypto.
+[[bench]]
+name = "streams"
+harness = false
+required-features = ["fuzz"]
+
+[[bench]]
+name = "receive"
+harness = false
+required-features = ["fuzz"]
+
+[[bench]]
+name = "endpoint"
+harness = false
+required-features = ["fuzz"]
+
+[[bench]]
+name = "wire"
+harness = false
+required-features = ["fuzz"]
 
 # quinn's workspace lints, kept so upstream code stays clean against them.
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
-# https://rust-fuzz.github.io/book/cargo-fuzz/guide.html#cfgfuzzing
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 unnameable_types = "warn"
 unreachable_pub = "warn"
 unused_qualifications = "warn"

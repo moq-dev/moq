@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { Effect, Once, Signal } from "@moq/signals";
 import { nextMedia, subscribeMedia } from "./media";
 
@@ -23,7 +23,7 @@ test("media max delay is present on the initial subscription and later updates",
 			},
 		}),
 	} as unknown as Moq.Broadcast.Consumer;
-	const maxDelay = new Signal(Time.Milli(250));
+	const maxDelay = new Signal(Milli(250));
 	const effect = new Effect();
 
 	subscribeMedia(effect, {
@@ -32,11 +32,11 @@ test("media max delay is present on the initial subscription and later updates",
 		priority: 7,
 		maxDelay,
 	});
-	expect(initial).toEqual({ priority: 7, maxDelay: Time.Milli(250) });
+	expect(initial).toEqual({ priority: 7, maxDelay: Milli(250) });
 
-	maxDelay.set(Time.Milli(500));
+	maxDelay.set(Milli(500));
 	await flush();
-	expect(updates.at(-1)).toEqual({ priority: 7, maxDelay: Time.Milli(500) });
+	expect(updates.at(-1)).toEqual({ priority: 7, maxDelay: Milli(500) });
 
 	effect.close();
 });
@@ -73,7 +73,7 @@ test("media does not subscribe through a closed broadcast handle", () => {
 				broadcast: handle,
 				track: "video",
 				priority: 0,
-				maxDelay: new Signal(Time.Milli(0)),
+				maxDelay: new Signal(Milli(0)),
 			}),
 		).toBeUndefined();
 	} finally {
