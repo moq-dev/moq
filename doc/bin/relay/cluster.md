@@ -48,9 +48,8 @@ worker.
 
 Failover routes must carry copies of one publisher's broadcast. Independent
 importers use distinct epochs and switch as a restart, even when fed one stream.
-A source whose track
-differs in timescale, retention, publisher priority, or group order is refused
-for that track.
+A source whose track differs in timescale, retention, publisher priority, or
+group order is refused for that track.
 
 A route whose original publisher (its first hop) changes under the same epoch is
 updated in place on both wire protocols, so the broadcast never briefly vanishes

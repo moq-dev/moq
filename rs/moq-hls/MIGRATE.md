@@ -4,12 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### HLS imports anchor their own timebase
-
-Remove `import::Config::timebase` and handling for `Error::ForeignTimebase`.
-An import anchors the playlist's timebase when its first fragment arrives.
-Independent imports publish distinct epochs, so they do not share a clock override.
-
 ### Playlists take an optional range (#5705)
 
 `export::Rendition::playlist(query)` is `playlist(range, query)`.

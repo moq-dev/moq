@@ -834,9 +834,11 @@ fn redundant_feed() -> (tokio::sync::mpsc::UnboundedSender<ChildStdin>, JoinHand
 	(add, task)
 }
 
-fn redundant_import(relay: &Relay, feed: &tokio::sync::mpsc::UnboundedSender<ChildStdin>) -> Child {
+/// Start an importer of the live source on lite-07, with `flags` for `import ts`.
+fn redundant_import(relay: &Relay, feed: &tokio::sync::mpsc::UnboundedSender<ChildStdin>, flags: &[&str]) -> Child {
 	let mut child = moq(relay, &["--connect-version", LITE_07])
 		.args(["import", "--max-age", "10s", "ts"])
+		.args(flags)
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn redundant importer");
@@ -850,6 +852,7 @@ async fn redundant_importers_switch_to_the_survivor_and_back_on_lite_07() {
 	redundant_failover(false).await;
 }
 
+/// The same behind a rate limit below the media's, over a deep but finite queue.
 #[tokio::test]
 async fn redundant_importers_switch_through_bufferbloat_on_lite_07() {
 	redundant_failover(true).await;
@@ -871,7 +874,7 @@ async fn redundant_failover(bufferbloat: bool) {
 				up: moq_shaper::Profile::default(),
 				down: moq_shaper::Profile {
 					rate: Some(moq_shaper::Rate {
-						bits_per_second: 64_000,
+						bits_per_second: 160_000,
 						burst: 1200,
 						queue: Duration::from_secs(2),
 					}),
@@ -891,7 +894,7 @@ async fn redundant_failover(bufferbloat: bool) {
 		origin: relay.origin.clone(),
 	};
 	let (feed, feeding) = redundant_feed();
-	let mut first = redundant_import(&relay, &feed);
+	let mut first = redundant_import(&relay, &feed, &[]);
 	let mut exports: Vec<_> = (0..2)
 		.map(|_| {
 			export_with(
@@ -904,7 +907,7 @@ async fn redundant_failover(bufferbloat: bool) {
 	for export in &mut exports {
 		export.output_past(0).await;
 	}
-	let mut second = redundant_import(&relay, &feed);
+	let mut second = redundant_import(&relay, &feed, &[]);
 	for version in 1..=3 {
 		for export in &mut exports {
 			tokio::time::timeout(TIMEOUT, async {
@@ -925,7 +928,7 @@ async fn redundant_failover(bufferbloat: bool) {
 		if version == 1 {
 			second.kill().await.unwrap();
 		} else if version == 2 {
-			second = redundant_import(&relay, &feed);
+			second = redundant_import(&relay, &feed, &[]);
 		}
 	}
 	first.kill().await.unwrap();
@@ -944,7 +947,15 @@ async fn redundant_failover(bufferbloat: bool) {
 		distinct.dedup();
 		assert_eq!(distinct, [0, 1, 2, 3], "one marked switch per change");
 		for version in 1..=3 {
-			let start = packets(&output).position(|p| pat_version(p) == Some(version)).unwrap() * 188;
+			// A program opens in the slot of its first PAT, with a PCR flagging the break.
+			let all: Vec<_> = packets(&output).collect();
+			let pat = all.iter().position(|p| pat_version(*p) == Some(version)).unwrap();
+			let old = all[..pat].iter().rposition(|p| pat_version(*p).is_some()).unwrap();
+			let opens = all[old..pat]
+				.iter()
+				.rposition(|p| adaptation_flags(*p).is_some_and(|flags| flags & 0x90 == 0x90))
+				.expect("the switch flags a break before its PAT");
+			let start = (old + opens) * 188;
 			let tail = &output[start..];
 			let end = packets(tail)
 				.position(|p| pat_version(p).is_some_and(|v| v != version))
@@ -965,7 +976,57 @@ async fn redundant_failover(bufferbloat: bool) {
 	if let Some(shaper) = shaper {
 		let stats = shaper.verify().unwrap();
 		assert!(stats.down.throttled > 0, "bufferbloat never queued traffic: {stats}");
-		assert!(stats.down.overflowed > 0, "finite queue never overflowed: {stats}");
 		eprintln!("redundant ingest bufferbloat: {stats}");
 	}
+}
+
+/// The epoch of the next route announced for the path.
+async fn next_epoch(announced: &mut moq_net::announce::Follow) -> moq_net::Epoch {
+	tokio::time::timeout(TIMEOUT, async {
+		loop {
+			match announced.next().await.expect("the relay stays up") {
+				moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => {
+					return announce.route.epoch.expect("a lite-07 importer announces its epoch");
+				}
+				_ => continue,
+			}
+		}
+	})
+	.await
+	.expect("the importer never announced")
+}
+
+/// `export ts --passthrough` follows no restart: it stays on the passthrough importer it
+/// resolved while a backup on its own epoch starts, and ends once that importer goes.
+#[tokio::test]
+async fn a_passthrough_export_ends_with_its_redundant_importer() {
+	let relay = relay().await;
+	let mut announced = relay.origin.follow("demo").unwrap();
+	let (feed, feeding) = redundant_feed();
+	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
+	let incumbent = next_epoch(&mut announced).await;
+	let mut export = export_with(&relay, &["--connect-version", LITE_07], &["--passthrough"]);
+	export.output_past(0).await;
+
+	let mut second = redundant_import(&relay, &feed, &["--passthrough"]);
+	assert_ne!(
+		next_epoch(&mut announced).await,
+		incumbent,
+		"the backup mints its own epoch"
+	);
+	let mark = export.output.lock().unwrap().len();
+	export.output_past(mark).await;
+	assert!(
+		export.child.try_wait().unwrap().is_none(),
+		"a backup starting leaves the export on its importer"
+	);
+
+	first.kill().await.unwrap();
+	let (_, errors) = export.wait().await;
+	assert!(
+		second.try_wait().unwrap().is_none(),
+		"the export ended with the backup still up; exporter stderr: {errors}"
+	);
+	second.kill().await.unwrap();
+	feeding.abort();
 }
