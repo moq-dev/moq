@@ -60,18 +60,26 @@ with no wire change.
   nothing already served goes out twice; a group already delivered and since
   evicted downstream is a cache miss, which the relay fills upstream by range
   per [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) (a miss below
-  the cache becomes a range request), not a re-offer. The same re-offer fires
-  at the same max age when a stale verdict loses its edge: the newer group
-  that made an older one stale is aborted or evicted, and `TrackState::is_stale`
-  revalidates the edge, so a cold cursor would serve the older group.
+  the cache becomes a range request), not a re-offer.
+- **Only a widening reverses a stale verdict,** a bigger budget or a wider
+  range, decided by the maintainer on 2026-10-19 ("Narrow, then merge").
+  Nothing at the same terms re-offers a group the cursor gave up, so no
+  cursor tracks what convicted it.
+- **Open question: warm/cold equivalence after an edge loss is not
+  promised.** When the newer group that made G stale is aborted or evicted,
+  a cold cursor may serve G while a warm one stays past it. Deferred
+  because watching for it needs more than this plan carries: a verdict
+  depends on two groups (`drifted` uses G's successor for `reach` and a
+  possibly later presentation edge in `live_above`, and losing either can
+  free G), a range may end mid-group so an edge needs a frame position, and
+  a run skipped at the max age bound would no longer be final.
 - **Each cursor keeps a disposition record,** as the maintainer first framed
   it ("keep what was dropped within each cursor and within the track
   state"). It is what makes a re-offer safe: the cursor must tell a group it
   gave up as stale (re-offer it) from one it delivered (never resend it).
   The record is one run-length map per cursor, each run marked delivered,
-  skipped as stale (with the budget it was judged under and the newer group
-  here that convicted it, which the edge-loss trigger watches), or reported
-  in SUBSCRIBE_DROP (final for now, below). It replaces today's `Delivered`
+  skipped as stale (with the budget and range it was judged under), or
+  reported in SUBSCRIBE_DROP (final for now, below). It replaces today's `Delivered`
   (`rs/moq-net/src/model/delivered.rs`), whose floor (`forget_below`) folds
   stale gaps in with delivered groups, and absorbs `TrackRun::served` in
   `rs/moq-net/src/lite/publisher.rs` and the JS wire cursor's `#reported` in
@@ -84,9 +92,9 @@ with no wire change.
   (the same bound in `js/net`) and is settled a run at a time, so a cursor's
   state and CPU track its runs, never their span. The floor only rises over
   a final prefix: the runs from the floor up to the lowest run that is not
-  final. Final means delivered, reported, or skipped as stale past the
-  track's max age bound, which no widening can reach since every budget is
-  clamped to it. A skipped stale run within reach is not final, and neither
+  final. Final means delivered, reported, or skipped as stale at the
+  track's max age bound: only a widening reverses a verdict, and no
+  widening reaches past the bound since every budget is clamped to it. A skipped stale run within reach is not final, and neither
   is an unknown hole: a descending or arrival-order cursor can deliver H
   while a lower G is still unknown, and folding H would silently treat G as
   handled. When the pool evicts one of a cursor's runs:
@@ -132,13 +140,12 @@ answer; a late group below the copy's start still reaches the no-floor
 reader; a reader joining with the same max age sends no SUBSCRIBE_UPDATE; and
 a re-offered group is never delivered twice to one subscriber; and a widen,
 shrink, evict, widen sequence at the relay gets the evicted groups back
-through the range miss fill, not a re-offer; and at the same max age, aborting
-or evicting the group that made an older one stale re-offers the older one,
-as a cold relay would serve it; and a stale group already reported in
+through the range miss fill, not a re-offer; and a stale group already reported in
 SUBSCRIBE_DROP stays dropped after a widening, never served after its drop;
 and a cursor that delivered F, skipped its neighbour G as stale while G
 stayed cached, and delivered H, gets only G after a widening that covers
-all three, or after G's convicting edge is lost, never F or H again; and a
+all three, through a bigger budget or a wider range, never F or H again;
+and a run skipped at the max age bound folds into the floor; and a
 cursor whose final prefix is evicted under pool pressure folds it and
 resends nothing; and a descending cursor that delivered H while a lower G
 is still unknown or skipped within reach, under pool pressure that evicts
@@ -147,7 +154,7 @@ warm-relay case in `js/net` too.
 
 Public API: none. Wire: no encoding change. A publisher now re-offers
 cached groups it never reported dropped when a SUBSCRIBE_UPDATE widens the
-max age or a stale verdict loses its edge.
+max age or the range.
 
 ## Required
 

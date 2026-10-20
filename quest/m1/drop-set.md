@@ -28,15 +28,19 @@ which keeps drops final for now.
   in O(1):
   - A run whose reason does not depend on the budget (a cut, a group never
     produced) is dropped for every reader as one range, as today.
-  - A stale run is dropped promptly as one range for a reader whose budget
-    is no wider than the one it was judged under and whose range reaches
-    the edge that convicted it, and for any reader under whose own budget
-    and range `TrackState::drifted` convicts it. A verdict depends on the
-    range as well as the budget, since `drifted` caps the edge to the
-    reader's range (`Edge::cap`): a reader whose range ends before the edge
-    would not call the group stale. `drifted` judges a
-    missing sequence by its successor here, and every sequence in a missing
-    run shares one successor, so one call settles the run.
+  - A received stale run is dropped promptly as one range for a reader
+    whose budget is no wider than the one it was judged under and whose
+    range covers this relay's aggregate range for the track, which the
+    upstream judged under. A verdict depends on the range as well as the
+    budget, since `drifted` caps the edge to the reader's range
+    (`Edge::cap`), so a narrower reader treats the run as unknown and fills
+    it by range, where the upstream judges it under that narrower range.
+    The cost is an extra range request, only for narrower readers, when a
+    stale drop arrives.
+  - A missing run this relay judges itself is dropped for a reader under
+    whose own budget and range `TrackState::drifted` convicts it. `drifted`
+    judges a missing sequence by its successor here, and every sequence in
+    a missing run shares one successor, so one call settles the run.
   - A wider reader skips the run and waits for a group, a re-offer, or its
     own verdict, each of which splits the run at most once.
   - An unknown span (a gap between runs, or an evicted run) is judged the
@@ -57,29 +61,16 @@ which keeps drops final for now.
   set, so only the cursor's record remembers that it reported cached G
   stale. A reported run now carries its reason and, for a stale one, the
   budget it was judged under. On lite-07 a reported stale run is no longer
-  final: like a skipped one, it is re-offered when a widening or edge loss
-  covers it.
+  final: like a skipped one, it is re-offered when a widening covers it.
 - **A widening re-offers the dropped runs now inside its budget,** through
   the re-offer path the resolved-demand quest adds, in the subscription's
   order. Upstream, the relay's own widening asks for them again.
-- **A local stale run that loses its edge is invalidated** as one span, the
-  same as a widening invalidates it, matching resolved-demand's stale-edge
-  trigger. A run this cursor judged stale records, in resolved-demand's
-  disposition record, the newer group here that convicted it. When that
-  group is
-  aborted or evicted, the run's sequences
-  become unknown: a cached group is re-offered, and a missing one is judged
-  again against the current edge (`TrackState::drifted`) or waited for.
-- **A received stale run is never invalidated locally.** Its groups are not held here,
-  so a cold cursor at this relay would fill them from upstream by range, and
-  the upstream, still holding its edge, would drop them again. A local abort
-  or eviction therefore never makes a received verdict obsolete; only the
-  upstream changing its mind does, and it says so: on lite-07 it re-offers
-  the group when its own edge is lost, and a widening re-asks. A received
-  run is invalidated only by an upstream re-offer or a widening. The edge
-  sequence it carries (below) only checks a reader's range; no local event
-  watches it. Cuts and never-produced runs carry no edge and are
-  unaffected.
+- **Only a widening reverses a stale verdict,** as resolved-demand
+  decides, local or received alike: no run tracks the group that convicted
+  it, and an abort or eviction of that group leaves the run standing (the
+  open question in resolved-demand). A received run is also reversed by
+  the upstream re-offering its group after a widening, since a later group
+  wins over its drop. Cuts and never-produced runs are unaffected.
 - **A stale drop names its budget.** A SUBSCRIBE_UPDATE has no
   acknowledgement, so after a widening from B1 to B2, an in-flight B1 drop
   and the B2 re-drop look identical, and no guess settles a B2 reader. On
@@ -95,18 +86,6 @@ which keeps drops final for now.
   and agreement on every update counted, while the budget itself is
   self-describing, order-free, and unaffected by updates that change
   nothing.
-- **A stale drop names its edge.** Upstream convicts G with an edge E in
-  the aggregate range, which a narrower reader may not reach. Next to
-  `Max Age`, lite-07's stale SUBSCRIBE_DROP carries `Edge`, the sequence of
-  the group that convicted it (plus one, `0` when `Max Age` is `0`). A
-  cursor accepts the drop only when its own range cap reaches that
-  sequence, an O(1) check per run; otherwise the run is unknown to it and
-  it fills G by range, where the upstream judges G under that narrower
-  range. A relay forwards the field unchanged, since sequences are the
-  track's own. Rejected: each cursor confirming the drop with its own
-  capped `drifted`, which needs a successor of G held here, and a relay
-  that never cached G often holds none, so it would fall back to the range
-  fill anyway with more state to reason about.
 - **lite-07 only for re-offering reported groups.** Released lite-05 and
   lite-06 peers treat a flushed SUBSCRIBE_DROP as final, so a drop received
   over those versions is final for every reader, and a lite-07 hop never
@@ -121,8 +100,8 @@ which keeps drops final for now.
   when it was sent, that a widening re-offers held groups and re-drops the
   rest, and that a later group wins over its drop. Whichever of this and
   [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md)
-  lands second writes it, including the `Max Age` and `Edge` fields above,
-  which are free to add because lite-07 is unpublished.
+  lands second writes it, including the `Max Age` field above, which is
+  free to add because lite-07 is unpublished.
 
 Code it replaces, in Rust and `js/net` alike:
 
@@ -152,7 +131,8 @@ the floor never rises over it, and if the pool must evict it or a run above
 it, the cursor fails with `TooFarBehind`. Folding it would forgo the
 re-offer this plan promises after a widening.
 
-A cursor judges an unknown missing sequence as it would a
+A cursor judges an unknown missing sequence (never a stale run its record
+still holds as reported, which only a widening settles) as it would a
 group never received: locally against its own budget (`TrackState::drifted`),
 and otherwise as a cache miss, which the relay fills upstream by range
 ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)), so no reader
@@ -165,40 +145,34 @@ record, or a run's span.
 Test on mock time through a relay:
 - On a live track, a reader no wider than the upstream budget gets a prompt
   drop for an upstream OLD naming a group the relay never cached.
-- On lite-07, a widened reader gets that group re-offered and never the
-  drop, whether the drop was flushed before or after the widening
-  SUBSCRIBE_UPDATE. Check what each reader receives, not only tail
-  accounting.
+- On lite-07, a widened reader gets that group re-offered. A drop already
+  flushed before the widening SUBSCRIBE_UPDATE was received, so the reader
+  then gets the re-offer and no further final drop; a drop still in flight
+  does not settle the widened reader. Check what each reader receives, not
+  only tail accounting.
 - On lite-07, after a widening from B1 to B2 for a group the upstream no
   longer holds, an in-flight drop tagged B1 settles only the B1 reader, and
   the re-drop tagged B2 settles the B2 reader.
 - A group arriving after its drop is served, and a drop arriving after its
   group leaves it served.
-- At the same budget B, for a group G judged stale because of a newer
-  edge E: when the relay judged G itself and E is aborted or evicted there,
-  a B reader gets G re-offered from the cache. When G was reported stale by
-  the upstream and E is lost upstream, the upstream re-offers G, which wins
-  over the stored drop. When E is evicted only at the relay, the received
-  drop stands, as a cold relay filling G from upstream would also be told.
 - Through a lite-06 hop, a reported group stays dropped for every reader,
   with no session error.
 - A shrink sends no drops.
-- A reader whose range ends below the edge E that convicted G upstream is
-  not settled by the drop: it fills G by range and gets G or a drop judged
-  under its own range, while a reader whose range reaches E is settled at
-  once.
+- A reader whose range is narrower than the relay's aggregate range is not
+  settled by a received stale drop: it fills G by range and gets G or a
+  drop judged under its own range, while a reader covering the aggregate
+  range is settled at once.
 - On lite-07, a cursor that delivered F, reported its neighbour G stale
   while G stayed cached, and delivered H, gets only G after a widening that
-  covers all three: G is re-offered and F and H are never resent. The same
-  holds when G's convicting edge is lost instead of a widening.
+  covers all three: G is re-offered and F and H are never resent.
 - Under pool pressure, a cursor's delivered runs and budget-independent
   drops fold into the floor, while evicting a lite-07 stale-reported run
   within reach, or a run above it, ends the cursor with `TooFarBehind`
   instead of losing the re-offer. Through a lite-06 hop the reported run
   folds.
 - A flood of fragmented runs stays within the pool, evicting the oldest
-  runs first, and a sequence whose run was evicted is judged locally or
-  filled by range, never waited on indefinitely.
+  shared runs first, and a sequence whose shared run was evicted is judged
+  locally or filled by range, never waited on indefinitely.
 - A single run spanning billions of sequences is settled by each cursor in
   one step, whether dropped, skipped by a wider reader, or evicted and
   judged again.
@@ -206,7 +180,7 @@ Test on mock time through a relay:
 Mirror each case in `js/net`.
 
 Public API: none. Wire: lite-07 SUBSCRIBE_DROP (unpublished) gains `Max Age`
-and `Edge`, and the widening and ordering rules above; published versions are
+and the widening and ordering rules above; published versions are
 unchanged.
 
 ## Required
