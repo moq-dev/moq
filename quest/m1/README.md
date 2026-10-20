@@ -81,7 +81,6 @@ lands before the cut.
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
 - [IETF takeover](/quest/m1/ietf-takeover.md) - carry the shared takeover contract through the negotiated IETF epoch extension
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explain pinned catalogs, lazy jobs, takeover, restart and version compatibility
-- [Redundant ingest guide](/quest/m1/redundant-ingest-guide.md) - a setup page on redundant ingest over multiple routes, for any publisher
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [moq-ffi reports why a first dial fails](/quest/m1/ffi-first-dial-failure.md) - OBS names the reason while the first dial retries, as moq-c already can
 - [Scope track priority](/quest/m1/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants
