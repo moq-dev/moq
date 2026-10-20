@@ -16,7 +16,7 @@ use anyhow::Context;
 use chrono::prelude::*;
 use moq_net::*;
 
-#[derive(usage::Cli, Clone)]
+#[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "clock")]
 #[usage(settings)]
@@ -42,7 +42,7 @@ struct Config {
 	role: Command,
 }
 
-#[derive(usage::Subcommands, Clone)]
+#[derive(usage_rs::Subcommands, Clone)]
 enum Command {
 	Publish,
 	Subscribe,

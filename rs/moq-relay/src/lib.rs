@@ -70,6 +70,6 @@ pub use relay::*;
 pub use test_support::*;
 
 /// The relay settings registry for composing a binary's CLI and TOML merge.
-pub fn settings() -> usage::config::Registry {
+pub fn settings() -> usage_rs::config::Registry {
 	settings::Settings::SETTINGS_REGISTRY
 }

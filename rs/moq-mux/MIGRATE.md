@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON and binary consumers return `Timed<T>` (#5677)
+
+The `json` and `binary` consumers' `next` / `poll_next` return `moq_net::Timed<T>`; read `.value` and the optional `.at`.
+On a snapshot track `next` yields every state; call `latest` / `poll_latest` for the newest. `latest` on a stream track fails with `UnsupportedMode`.
+
 ### `ts::Passthrough` describes the whole track in its `m2ts` section (#5967)
 
 The section's `randomAccess` turns false at the first group that does not start at a random access point and stays false, instead of recovering with the next two-second window; its `muxRate` follows the source's measured rate.

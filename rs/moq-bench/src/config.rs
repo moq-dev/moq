@@ -9,7 +9,7 @@ use crate::Range;
 ///
 /// Each `[min, max]` range is rolled once per connection, so a single config can
 /// describe a heterogeneous swarm (e.g. some connections at 24fps, others at 60).
-#[derive(usage::Cli, Clone, Debug, Deserialize, Serialize)]
+#[derive(usage_rs::Cli, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[usage(name = "moq-bench", version = env!("CARGO_PKG_VERSION"))]
@@ -108,7 +108,7 @@ pub struct Config {
 	/// Provenance from the last [`Self::parse_and_merge`].
 	#[usage(skip)]
 	#[serde(skip)]
-	origins: Option<usage::config::Resolved>,
+	origins: Option<usage_rs::config::Resolved>,
 }
 
 impl Default for Config {
@@ -191,7 +191,7 @@ impl Config {
 				anyhow::bail!("{}", answer.message());
 			}
 		};
-		let env = usage::config::EnvLayer::from_process();
+		let env = usage_rs::config::EnvLayer::from_process();
 		let file_path = config.file.clone();
 		let file_body = file_path
 			.as_ref()
@@ -263,7 +263,7 @@ impl Config {
 		self.origins
 			.as_ref()
 			.and_then(|resolved| resolved.origin_key(key))
-			.map(usage::config::Origin::describe)
+			.map(usage_rs::config::Origin::describe)
 	}
 
 	pub fn name(&self) -> &str {
@@ -323,7 +323,7 @@ impl Config {
 }
 
 #[allow(dead_code)]
-#[derive(usage::Config)]
+#[derive(usage_rs::Config)]
 struct Settings {
 	#[usage(env = "MOQ_BENCH_NAME", cli("--name"))]
 	name: Option<String>,

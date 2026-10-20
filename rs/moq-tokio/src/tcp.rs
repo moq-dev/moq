@@ -25,7 +25,7 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 /// [`tls`](Self::tls) the listener serves the listen TLS certificate instead.
 // The derived arg group is named after the struct, so it needs an explicit id to
 // stay unique across the flattened sections.
-#[derive(usage::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -66,7 +66,7 @@ pub struct Config {
 ///
 /// A separate arg rather than a Usage alias, since an alias renames the flag but
 /// leaves its env var behind.
-#[derive(usage::Args, Clone, Debug, Default)]
+#[derive(usage_rs::Args, Clone, Debug, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(
@@ -507,7 +507,7 @@ mod tests {
 #[cfg(test)]
 mod legacy_tests {
 	use super::*;
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(settings)]
 	struct Cli {

@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON consumers return `JsonValue` (#5677)
+
+`JsonSnapshotConsumer::next()` and `JsonStreamConsumer::next()` return `JsonValue` (`value`, `timestamp_us`) instead of a string; `timestamp_us` is empty when untimed.
+A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+Timestamps are rounded down to a whole microsecond.
+
 ### Ranges filter reads (#5929)
 
 A subscription now reads only the groups its own `ranges` cover.

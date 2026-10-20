@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// per-path traffic, per-root sessions, and per-root presence on request) plus compressed
 /// `.json.z` siblings; see `moq_stats` for the wire format and per-field
 /// semantics.
-#[derive(usage::Args, Clone, Debug, Deserialize, Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]

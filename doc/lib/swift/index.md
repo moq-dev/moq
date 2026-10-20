@@ -19,6 +19,8 @@ updates catalog properties and sections without keeping the broadcast open.
 Its writes fail after closing or releasing the broadcast.
 `Flate.SnapshotProducer` / `StreamProducer` publish opaque bytes with an optional `timestampUs`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
+`Json` consumers yield `Json.Timed` (`value`, `timestampUs`); a snapshot consumer yields each state in order,
+and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
 `MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
