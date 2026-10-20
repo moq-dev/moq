@@ -15937,7 +15937,7 @@ mod track_property_tests {
 				.clone()
 				.expect("the properties were dropped");
 			assert_eq!(properties.values, unknown, "{version}");
-			assert_eq!(properties.immutable, None, "{version}");
+			assert!(properties.immutable().is_none(), "{version}");
 		}
 	}
 

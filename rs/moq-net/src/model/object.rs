@@ -3,7 +3,7 @@ use bytes::Bytes;
 
 use crate::Timestamp;
 
-/// How the publisher serialized the keys inside immutable properties.
+/// How the publisher serialized a list of properties: its key and integer encoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 // private: passthrough
 pub(crate) enum Encoding {
@@ -72,10 +72,12 @@ impl Properties {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 // private: passthrough
 pub(crate) struct TrackProperties {
-	/// In arrival order, with Immutable Properties (0x0b) as its serialized bytes.
+	/// In arrival order, which is ascending, with Immutable Properties (0x0b) as its
+	/// serialized bytes.
 	pub values: Vec<Property>,
-	/// How the publisher serialized the keys inside Immutable Properties, when present.
-	pub immutable: Option<Encoding>,
+	/// How the publisher serialized the list and the keys inside Immutable Properties.
+	/// Set beside any values, and never [`Encoding::Absolute`], which predates the list.
+	pub encoding: Option<Encoding>,
 	/// Property 0x06 means SUBGROUP_DELIVERY_TIMEOUT on the ingress draft.
 	pub delivery_timeout: bool,
 }

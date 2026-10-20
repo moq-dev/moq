@@ -56,11 +56,7 @@ fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Resul
 	}
 	let mut unknown = info.properties.as_deref().cloned().unwrap_or_default();
 	let block = !matches!(version, Version::Draft14 | Version::Draft15);
-	if block
-		&& unknown
-			.immutable
-			.is_some_and(|ingress| ingress != super::object::encoding(version))
-	{
+	if block && unknown.immutable().is_some() && unknown.encoding != Some(super::object::encoding(version)) {
 		return Err(Error::Unsupported);
 	}
 	// Across draft-19, forwarding 0x06 would give it a different meaning, as for object

@@ -207,12 +207,7 @@ impl Properties {
 				let value = r.slice(len)?;
 				if abs == IMMUTABLE {
 					// A second block would leave the sealed list ambiguous.
-					if properties
-						.unknown
-						.immutable
-						.replace(super::object::encoding(version))
-						.is_some()
-					{
+					if properties.unknown.immutable().is_some() {
 						return Err(DecodeError::InvalidValue);
 					}
 					sealed(&mut Decoder::new(value, version.into()), &mut properties, &mut seen)?;
@@ -225,9 +220,10 @@ impl Properties {
 			}
 		}
 
-		// Recorded only beside a value it describes, so a set with nothing to forward stays empty.
-		properties.unknown.delivery_timeout =
-			!properties.unknown.values.is_empty() && super::object::has_delivery_timeout(version);
+		// Recorded only beside a value they describe, so a set with nothing to forward stays empty.
+		let forwarded = !properties.unknown.values.is_empty();
+		properties.unknown.encoding = forwarded.then(|| super::object::encoding(version));
+		properties.unknown.delivery_timeout = forwarded && super::object::has_delivery_timeout(version);
 		Ok(properties)
 	}
 
@@ -300,20 +296,24 @@ pub(crate) fn check_immutable(block: &[u8], encoding: crate::model::object::Enco
 }
 
 impl TrackProperties {
+	/// The Immutable Properties block, serialized as [`Self::encoding`] says.
+	pub(crate) fn immutable(&self) -> Option<&Bytes> {
+		self.values
+			.iter()
+			.find_map(|property| match (property.id, &property.value) {
+				(IMMUTABLE, Value::Bytes(block)) => Some(block),
+				_ => None,
+			})
+	}
+
 	/// The keys inside Immutable Properties, which egress must not restate as mutable.
 	///
 	/// Read from the block each time rather than held as a list, which could be many times
 	/// its size. Ingress checked the block, so a malformed key cannot occur and ends it.
 	pub(crate) fn sealed(&self) -> impl Iterator<Item = u64> + '_ {
-		let block = self
-			.values
-			.iter()
-			.find_map(|property| match (property.id, &property.value) {
-				(IMMUTABLE, Value::Bytes(block)) => Some(block),
-				_ => None,
-			});
-		let mut r = block
-			.zip(self.immutable)
+		let mut r = self
+			.immutable()
+			.zip(self.encoding)
 			.map(|(block, encoding)| Decoder::new(block, super::object::family(encoding).into()));
 		let mut id: u64 = 0;
 		std::iter::from_fn(move || {
@@ -335,6 +335,10 @@ impl TrackProperties {
 		}
 		// Egress could not restate the track's info beside them without overflowing.
 		if self.values.len() > MAX_FORWARDED {
+			return Some(crate::Error::Unsupported);
+		}
+		// Nor could a relay hop carry them in one message.
+		if !crate::lite::ietf::fits(self) {
 			return Some(crate::Error::Unsupported);
 		}
 		None
@@ -650,7 +654,7 @@ mod tests {
 			assert_eq!(properties.unknown.values.len(), 3, "{version}");
 			assert!(properties.unknown.sealed().eq([0x02]), "{version}");
 			assert_eq!(
-				properties.unknown.immutable,
+				properties.unknown.encoding,
 				Some(super::super::object::encoding(version)),
 				"{version}"
 			);
@@ -722,7 +726,7 @@ mod tests {
 					value: Value::Int(1),
 				})
 				.collect(),
-			immutable: None,
+			encoding: Some(crate::model::object::Encoding::Delta { seven: true }),
 			// Draft-22 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
 			delivery_timeout: true,
 		};

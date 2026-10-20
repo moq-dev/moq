@@ -286,7 +286,7 @@ pub(crate) fn egress_time(
 
 /// A draft that serializes properties in the `encoding` family. Any draft in the family
 /// parses its keys and integers the same way.
-pub(super) fn family(encoding: Encoding) -> Version {
+pub(crate) fn family(encoding: Encoding) -> Version {
 	match encoding {
 		Encoding::Absolute => Version::Draft14,
 		Encoding::DeltaQuic => Version::Draft16,

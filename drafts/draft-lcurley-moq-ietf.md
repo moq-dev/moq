@@ -166,40 +166,33 @@ When the extension is negotiated, the publisher sends a TRACK_PROPERTIES message
 TRACK_PROPERTIES Message {
   Message Length (i)
   Flags (i)
-  Property (..) ...
+  Property List (..)
 }
 ~~~
 
 **Flags**:
 Bit `0x1` is DELIVERY_TIMEOUT, as in [Properties](#properties).
-`Flags >> 1` names how the publisher serialized its Immutable Properties (0x0b), with the codes of [Properties](#properties), or 0 for none.
-A message without properties MUST have a Flags of 0.
+`Flags >> 1` names the Property List's encoding, with the codes of [Properties](#properties).
+A message without properties MUST have a Flags of 0 and an empty Property List.
+Track Properties start at draft 16, so any other message with an encoding of 0 or 1 is malformed.
 
-**Property**:
-The {{moqt}} Track Properties a relay forwards without interpreting, in arrival order, each with its absolute ID.
-An even ID has an integer Value, and an odd ID a length-prefixed one.
-Immutable Properties are forwarded as the publisher's bytes, and there MUST be exactly one when `Flags >> 1` is not 0, and none otherwise.
-
-~~~
-Property {
-  ID (i)
-  [Value (i)]
-  [Length (i), Value (..)]
-}
-~~~
+**Property List**:
+The {{moqt}} Track Properties a relay forwards without interpreting, serialized as the publisher's draft serializes them: in ascending ID order, with delta-encoded IDs and the varints of that encoding.
+A relay keeps the publisher's encoding, so a repeated ID still costs a one-byte delta and the list never grows on a hop.
+Immutable Properties (0x0b), at most one, are forwarded as the publisher's bytes, in the same encoding.
 
 A message MUST NOT carry more than 64 properties, nor any a relay interprets rather than forwards: MAX_CACHE_DURATION (0x04), TIMESCALE (0x08), DEFAULT_PUBLISHER_PRIORITY (0x0e), DEFAULT_PUBLISHER_GROUP_ORDER (0x22), and DYNAMIC_GROUPS (0x30).
 TRACK_INFO carries what a relay keeps of them, so a second copy could only contradict it.
 A message that breaks either rule is malformed.
 
 A relay restates up to five of those from TRACK_INFO, so it forwards at most 59 properties, and it refuses a track with more, from a {{moqt}} publisher or over this extension, as unsupported.
+Dropping those five can widen the delta that spans them, so a relay also refuses a {{moqt}} track whose remaining list would not fit a TRACK_PROPERTIES message, as unsupported.
 
 A relay neither processes nor forwards a track with a Mandatory Track Property (0x4000 to 0x7FFF), mutable or inside the Immutable Properties, so a publisher never sends one.
 A receiver refuses such a track as {{moqt}} ingress does, with an unsupported extension error.
 
 The receiver parses the keys inside the Immutable Properties from its value, which a relay MUST NOT restate as mutable.
 It SHOULD read them from the value when needed rather than hold them beside it, as a list of IDs can cost several times the value.
-Track Properties never use the Immutable Properties family of drafts 14 and 15, so a `Flags >> 1` of 1 is malformed here.
 
 
 # Datagrams {#datagrams}

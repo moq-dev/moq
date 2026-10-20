@@ -136,29 +136,54 @@ fn decode_flags(flags: u64) -> Result<(bool, Option<Encoding>), DecodeError> {
 	Ok((flags & DELIVERY_TIMEOUT != 0, decode_encoding(flags >> 1)?))
 }
 
-/// Encode each property, with absolute IDs: an even ID has an integer value, an odd one bytes.
-fn encode_list<'a>(w: &mut Encoder<'_>, values: impl IntoIterator<Item = &'a Property>) -> Result<(), EncodeError> {
-	for property in values {
-		w.varint(property.id)?;
+/// Track Properties delta-encoded in the family they arrived in, as moq-transport sent
+/// them less the properties TRACK_INFO carries, so the list is never wider than it arrived.
+///
+/// An even ID has an integer value, an odd one bytes.
+fn encode_list(properties: &crate::model::object::TrackProperties) -> Result<Vec<u8>, EncodeError> {
+	let mut out = Vec::new();
+	let Some(encoding) = properties.encoding else {
+		return match properties.values.is_empty() {
+			true => Ok(out),
+			false => Err(EncodeError::InvalidState),
+		};
+	};
+	let w = &mut Encoder::new(&mut out, crate::ietf::object::family(encoding).into());
+	let mut prior = 0;
+	for property in &properties.values {
+		w.varint(property.id.checked_sub(prior).ok_or(EncodeError::InvalidState)?)?;
+		prior = property.id;
 		match (&property.value, property.id % 2) {
 			(Value::Int(value), 0) => w.varint(*value)?,
 			(Value::Bytes(value), 1) => w.bytes(value)?,
 			_ => return Err(EncodeError::InvalidState),
 		}
 	}
-	Ok(())
+	Ok(out)
 }
 
-/// Decode Track Properties to the end of `r`, in the order they arrived.
+/// Whether TRACK_PROPERTIES can carry `properties` across a hop.
+///
+/// Dropping the understood properties can widen the delta that spans them, so a list that
+/// fit its moq-transport message may still not fit, though only by a byte or two.
+pub(crate) fn fits(properties: &crate::model::object::TrackProperties) -> bool {
+	// The Flags beside it are one byte.
+	encode_list(properties).is_ok_and(|list| list.len() < super::message::MAX_MESSAGE_SIZE)
+}
+
+/// Decode Track Properties to the end of `r`, delta-encoded in the `encoding` family.
 ///
 /// No more than moq-transport ingress keeps, which is all a relay forwards.
-fn decode_list(r: &mut Decoder<'_>) -> Result<Vec<Property>, DecodeError> {
-	let mut values = Vec::new();
+fn decode_list(r: &mut Decoder<'_>, encoding: Encoding) -> Result<Vec<Property>, DecodeError> {
+	let r = &mut Decoder::new(r.rest(), crate::ietf::object::family(encoding).into());
+	let mut values: Vec<Property> = Vec::new();
+	let mut prior = 0u64;
 	while !r.is_empty() {
 		if values.len() as u64 >= crate::ietf::properties::MAX_PROPERTIES {
 			return Err(DecodeError::TooMany);
 		}
-		let id = r.varint()?;
+		let id = prior.checked_add(r.varint()?).ok_or(DecodeError::BoundsExceeded)?;
+		prior = id;
 		let value = match id % 2 {
 			0 => Value::Int(r.varint()?),
 			// A small cached property must not pin the reader's larger receive buffer.
@@ -167,20 +192,6 @@ fn decode_list(r: &mut Decoder<'_>) -> Result<Vec<Property>, DecodeError> {
 		values.push(Property { id, value });
 	}
 	Ok(values)
-}
-
-/// Check the one Immutable Properties block against the encoding the flags declare.
-fn immutable(values: &[Property], encoding: Option<Encoding>) -> Result<Option<&Bytes>, DecodeError> {
-	let mut sealed = values.iter().filter(|property| property.id == IMMUTABLE);
-	let block = match sealed.next().map(|property| &property.value) {
-		Some(Value::Bytes(bytes)) => Some(bytes),
-		Some(Value::Int(_)) => unreachable!("odd IDs decode as bytes"),
-		None => None,
-	};
-	if sealed.next().is_some() || block.is_some() != encoding.is_some() {
-		return Err(DecodeError::InvalidValue);
-	}
-	Ok(block)
 }
 
 /// Encode an object's properties as a record body, empty when it has none.
@@ -345,37 +356,51 @@ impl Message for TrackProperties {
 		let Some(properties) = self.0.as_ref().filter(|properties| !properties.values.is_empty()) else {
 			return w.varint(0);
 		};
-		w.varint(encode_flags(properties.delivery_timeout, properties.immutable))?;
-		encode_list(w, &properties.values)
+		w.varint(encode_flags(properties.delivery_timeout, properties.encoding))?;
+		w.slice(&encode_list(properties)?);
+		Ok(())
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
 		let flags = r.varint()?;
-		let (delivery_timeout, encoding) = decode_flags(flags)?;
-		let values = decode_list(r)?;
-		// TRACK_INFO carries these, so a second copy could only contradict it.
-		if values
-			.iter()
-			.any(|property| crate::ietf::properties::understood(property.id))
-		{
-			return Err(DecodeError::InvalidValue);
-		}
-		// Egress reads the sealed keys from the block, so it must be one ingress would keep.
-		if let (Some(block), Some(encoding)) = (immutable(&values, encoding)?, encoding) {
-			crate::ietf::properties::check_immutable(block, encoding)?;
-		}
-		if values.is_empty() {
+		if r.is_empty() {
 			// Only the canonical form, so what decodes re-encodes to the same bytes.
 			return match flags {
 				0 => Ok(Self(None)),
 				_ => Err(DecodeError::InvalidValue),
 			};
 		}
-		Ok(Self(Some(Arc::new(crate::model::object::TrackProperties {
-			values,
-			immutable: encoding,
+		let (delivery_timeout, encoding) = decode_flags(flags)?;
+		// Track Properties start at draft-16, whose families all delta-encode their keys.
+		let encoding = encoding
+			.filter(|encoding| *encoding != Encoding::Absolute)
+			.ok_or(DecodeError::InvalidValue)?;
+		let properties = crate::model::object::TrackProperties {
+			values: decode_list(r, encoding)?,
+			encoding: Some(encoding),
 			delivery_timeout,
-		}))))
+		};
+		// TRACK_INFO carries these, so a second copy could only contradict it.
+		if properties
+			.values
+			.iter()
+			.any(|property| crate::ietf::properties::understood(property.id))
+		{
+			return Err(DecodeError::InvalidValue);
+		}
+		// Egress reads the sealed keys from the block, so it must be the one ingress would keep.
+		if properties
+			.values
+			.iter()
+			.filter(|property| property.id == IMMUTABLE)
+			.count() > 1
+		{
+			return Err(DecodeError::InvalidValue);
+		}
+		if let Some(block) = properties.immutable() {
+			crate::ietf::properties::check_immutable(block, encoding)?;
+		}
+		Ok(Self(Some(Arc::new(properties))))
 	}
 }
 
@@ -589,15 +614,15 @@ mod tests {
 		let properties = crate::model::object::TrackProperties {
 			values: vec![
 				Property {
-					id: 0x41,
-					value: Value::Bytes(Bytes::from_static(b"opaque")),
-				},
-				Property {
 					id: IMMUTABLE,
 					value: Value::Bytes(Bytes::from_static(&[0x02, 0x01])),
 				},
+				Property {
+					id: 0x41,
+					value: Value::Bytes(Bytes::from_static(b"opaque")),
+				},
 			],
-			immutable: Some(Encoding::Delta { seven: true }),
+			encoding: Some(Encoding::Delta { seven: true }),
 			delivery_timeout: true,
 		};
 		let msg = TrackProperties(Some(Arc::new(properties.clone())));
@@ -616,42 +641,48 @@ mod tests {
 	/// restate what TRACK_INFO carries, or claim sealed keys its block does not hold.
 	#[test]
 	fn track_properties_refuse_what_ingress_would_not_keep() {
-		let decode = |values: Vec<Property>, immutable: Option<Encoding>| {
-			let msg = TrackProperties(Some(Arc::new(crate::model::object::TrackProperties {
-				values,
-				immutable,
+		let wire = |values: &[Property], code: u64| {
+			let mut buf = Vec::new();
+			let w = &mut Encoder::new(&mut buf, V.into());
+			w.varint(code << 1).unwrap();
+			let list = encode_list(&crate::model::object::TrackProperties {
+				values: values.to_vec(),
+				encoding: Some(Encoding::Delta { seven: true }),
 				..Default::default()
-			})));
-			let buf = crate::coding::Encode::encode_bytes(&msg, V).unwrap();
-			<TrackProperties as crate::coding::Decode<Version>>::decode(&mut Decoder::new(&buf, V.into()), V)
+			})
+			.unwrap();
+			w.slice(&list);
+			buf
 		};
+		let decode = |buf: &[u8]| TrackProperties::decode_msg(&mut Decoder::new(buf, V.into()), V);
 		let opaque = |id| Property {
 			id,
 			value: Value::Int(1),
 		};
 
 		let max = crate::ietf::properties::MAX_PROPERTIES;
-		assert!(decode((0..max).map(|i| opaque(0x40 + 2 * i)).collect(), None).is_ok());
-		assert!(
-			decode((0..=max).map(|i| opaque(0x40 + 2 * i)).collect(), None).is_err(),
-			"more than ingress keeps"
-		);
+		let list: Vec<_> = (0..=max).map(|i| opaque(0x40 + 2 * i)).collect();
+		assert!(decode(&wire(&list[..max as usize], 4)).is_ok());
+		assert!(decode(&wire(&list, 4)).is_err(), "more than ingress keeps");
 		// TIMESCALE belongs to TRACK_INFO.
-		assert!(decode(vec![opaque(0x08)], None).is_err(), "an understood property");
+		assert!(decode(&wire(&[opaque(0x08)], 4)).is_err(), "an understood property");
+		assert!(decode(&wire(&[opaque(0x40)], 0)).is_err(), "a list needs its encoding");
+		assert!(decode(&[1 << 1]).is_err(), "flags without a list");
+		assert!(
+			decode(&wire(&[opaque(0x40)], 1)).is_err(),
+			"track properties never use absolute keys"
+		);
 
 		// The sealed keys come from the block, never the sender.
 		let sealed = Property {
 			id: IMMUTABLE,
 			value: Value::Bytes(Bytes::from_static(&[0x20, 0x01, 0x04, 0x05])),
 		};
-		let decoded = decode(vec![sealed.clone()], Some(Encoding::Delta { seven: true }))
-			.unwrap()
-			.0
-			.unwrap();
+		let decoded = decode(&wire(std::slice::from_ref(&sealed), 4)).unwrap().0.unwrap();
 		assert!(decoded.sealed().eq([0x20, 0x24]));
 		assert!(
-			decode(vec![sealed], Some(Encoding::Absolute)).is_err(),
-			"track properties never use absolute keys"
+			decode(&wire(&[sealed.clone(), sealed], 4)).is_err(),
+			"a second block leaves the sealed keys ambiguous"
 		);
 	}
 
@@ -668,7 +699,7 @@ mod tests {
 				id: IMMUTABLE,
 				value: Value::Bytes(sealed.into()),
 			}],
-			immutable: Some(Encoding::Delta { seven: true }),
+			encoding: Some(Encoding::Delta { seven: true }),
 			delivery_timeout: false,
 		})));
 		let buf = crate::coding::Encode::encode_bytes(&msg, V).unwrap();
@@ -679,6 +710,89 @@ mod tests {
 		assert_eq!(decoded.values.len(), 1);
 		assert_eq!(decoded.sealed().count(), count);
 		assert!(decoded.sealed().all(|id| id == 0x20));
+	}
+
+	/// Track Properties cross in the delta encoding moq-transport sent, where a repeated ID
+	/// is a one-byte zero. Written with absolute IDs, a list that filled its moq-transport
+	/// message would no longer fit a lite one.
+	#[test]
+	fn track_properties_cross_at_their_wire_size() {
+		for version in [
+			crate::ietf::Version::Draft16,
+			crate::ietf::Version::Draft17,
+			crate::ietf::Version::Draft22,
+		] {
+			// As many repeats of an ID from 2^60 as moq-transport forwards, then one value
+			// that fills the rest of a lite message beside its Flags.
+			let id = (1 << 60) + 1;
+			let repeats = crate::ietf::properties::MAX_FORWARDED - 1;
+			let mut list = Vec::new();
+			let e = &mut Encoder::new(&mut list, version.into());
+			e.varint(id).unwrap();
+			e.bytes(&[]).unwrap();
+			for _ in 1..repeats {
+				e.varint(0).unwrap();
+				e.bytes(&[]).unwrap();
+			}
+			let rest = super::super::message::MAX_MESSAGE_SIZE - 1 - list.len() - 1;
+			let fill = (1..=8)
+				.map(|prefix| rest - prefix)
+				.find(|fill| {
+					crate::coding::varint::size(*fill as u64, version.into()).is_ok_and(|size| size == rest - fill)
+				})
+				.unwrap();
+			let e = &mut Encoder::new(&mut list, version.into());
+			e.varint(0).unwrap();
+			e.bytes(&vec![0; fill]).unwrap();
+			assert_eq!(list.len(), super::super::message::MAX_MESSAGE_SIZE - 1, "{version}");
+
+			let ingress = crate::ietf::Properties::decode(&mut Decoder::new(&list, version.into()), version).unwrap();
+			assert_eq!(ingress.unknown.values.len(), repeats + 1, "{version}");
+			assert!(ingress.unknown.refused().is_none(), "{version}");
+
+			let msg = TrackProperties(Some(Arc::new(ingress.unknown.clone())));
+			let buf = crate::coding::Encode::encode_bytes(&msg, V).unwrap();
+			let decoded =
+				<TrackProperties as crate::coding::Decode<Version>>::decode(&mut Decoder::new(&buf, V.into()), V)
+					.unwrap();
+			assert_eq!(decoded.0.as_deref(), Some(&ingress.unknown), "{version}");
+
+			let mut written = Vec::new();
+			let egress = crate::ietf::Properties {
+				unknown: decoded.0.unwrap().as_ref().clone(),
+				..Default::default()
+			};
+			egress
+				.encode(&mut Encoder::new(&mut written, version.into()), version)
+				.unwrap();
+			assert_eq!(written, list, "{version}: the hop changed the list");
+		}
+	}
+
+	/// Dropping an understood property can widen the delta that spans it, so a list that
+	/// could not cross is refused where it arrives rather than where it would be sent.
+	#[test]
+	fn track_properties_that_cannot_cross_are_refused_at_ingress() {
+		let version = crate::ietf::Version::Draft16;
+		// The most a draft-16 answer holds beside a Request ID and an empty parameter count.
+		let size = super::super::message::MAX_MESSAGE_SIZE - 2;
+		// DYNAMIC_GROUPS, then the last ID whose delta from it fits four bytes.
+		let id = 0x30 + (1 << 30) - 1;
+		let mut list = Vec::new();
+		let e = &mut Encoder::new(&mut list, version.into());
+		for value in [0x30, 1, id - 0x30] {
+			e.varint(value).unwrap();
+		}
+		let fill = size - list.len() - 4;
+		let e = &mut Encoder::new(&mut list, version.into());
+		e.bytes(&vec![0; fill]).unwrap();
+		assert_eq!(list.len(), size);
+
+		// The delta from zero takes eight bytes once DYNAMIC_GROUPS leaves the list.
+		let ingress = crate::ietf::Properties::decode(&mut Decoder::new(&list, version.into()), version).unwrap();
+		assert!(ingress.dynamic_groups);
+		assert!(!fits(&ingress.unknown));
+		assert!(matches!(ingress.unknown.refused(), Some(crate::Error::Unsupported)));
 	}
 
 	#[test]
@@ -870,6 +984,7 @@ mod hop_tests {
 			info.priority = 9;
 			let track_properties = crate::model::object::TrackProperties {
 				values: vec![property(0x40, 3)],
+				encoding: Some(Encoding::Delta { seven: true }),
 				..Default::default()
 			};
 			info.properties = Some(Arc::new(track_properties.clone()));
@@ -990,25 +1105,22 @@ mod hop_tests {
 		let e = &mut Encoder::new(&mut sealed, crate::ietf::Version::Draft22.into());
 		e.varint(0x4000).unwrap();
 		e.varint(1).unwrap();
-		for (values, immutable) in [
-			(vec![property(0x4000, 1)], None),
-			(
-				vec![Property {
-					id: IMMUTABLE,
-					value: Value::Bytes(sealed.into()),
-				}],
-				Some(Encoding::Delta { seven: true }),
-			),
+		for values in [
+			vec![property(0x4000, 1)],
+			vec![Property {
+				id: IMMUTABLE,
+				value: Value::Bytes(sealed.into()),
+			}],
 		] {
 			let res = subscribe_across(crate::model::object::TrackProperties {
-				values,
-				immutable,
+				values: values.clone(),
+				encoding: Some(Encoding::Delta { seven: true }),
 				..Default::default()
 			})
 			.await;
 			assert!(
 				matches!(res, Err(crate::Error::UnsupportedExtension)),
-				"{immutable:?}: {res:?}"
+				"{values:?}: {res:?}"
 			);
 		}
 	}
@@ -1021,6 +1133,7 @@ mod hop_tests {
 		for (count, ok) in [(max, true), (max + 1, false)] {
 			let res = subscribe_across(crate::model::object::TrackProperties {
 				values: (0..count as u64).map(|i| property(0x40 + 2 * i, 1)).collect(),
+				encoding: Some(Encoding::Delta { seven: true }),
 				..Default::default()
 			})
 			.await;
