@@ -15,6 +15,21 @@ pub enum Version {
 	Draft22,
 }
 
+impl Version {
+	/// Every implemented draft, oldest first.
+	pub(crate) const ALL: [Self; 9] = [
+		Self::Draft14,
+		Self::Draft15,
+		Self::Draft16,
+		Self::Draft17,
+		Self::Draft18,
+		Self::Draft19,
+		Self::Draft20,
+		Self::Draft21,
+		Self::Draft22,
+	];
+}
+
 impl fmt::Display for Version {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
@@ -89,6 +104,7 @@ mod tests {
 		};
 
 		let subscribe = Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("broadcast"),
@@ -168,6 +184,7 @@ mod tests {
 	#[test]
 	fn draft22_changes_only_the_location_filter() {
 		let subscribe = Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("broadcast"),

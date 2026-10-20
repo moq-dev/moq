@@ -89,7 +89,7 @@ tokio-features *args:
 
 # Runs the `#[cfg(windows)]` code past the compiler, which the Linux gate
 # skips; platform.yml runs it on a Windows runner, scoped like `check-changed`
-# so the merge queue compiles only the affected crates. Default
+# so a release PR compiles only the affected crates. Default
 # features, since jemalloc doesn't build on MSVC.
 
 # Compile what the branch changed since BASE on a Windows host, or everything with `--all`.
@@ -252,7 +252,7 @@ features:
 net-features:
     bash sh/rs/net-features.sh
 
-# Prove moq-quic leaves moq-clock's dev-only runtime to its consumers; a workspace build unifies it back in.
+# Prove moq-quic leaves moq-clock's dev-only runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 quic-features:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -261,6 +261,7 @@ quic-features:
         echo "moq-quic must not depend on a native runtime" >&2
         exit 1
     fi
+    cargo clippy --locked -p moq-quic --all-targets --no-default-features -- -D warnings
 
 # Compile media boundaries (--all isolates every mode) and prove expensive
 # native/render dependencies are absent when their features are excluded.
@@ -327,6 +328,35 @@ quic-sim:
 send-depth:
     bash sh/rs/send-depth.sh
 
+# Exercise small connection and stream receive windows over real QUIC sockets.
+quic-stress:
+    just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
+
+# Render CPU frames through wgpu on Mesa's software Vulkan driver, so no GPU is needed.
+render-sw:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mesa=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#mesa)
+    loader=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#vulkan-loader)
+    icd=("$mesa"/share/vulkan/icd.d/lvp_icd.*.json)
+    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+        just rs test -p moq-video --features render --lib --run-ignored only \
+        -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size)$/)'
+
+# Run the ignored mDNS tests, which multicast on the host's network interfaces.
+multicast:
+    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::apps_partition_discovery)'
+    just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
+
+# Run moq-audio's ignored output-device tests against a private PulseAudio null sink.
+audio-devices:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir=$(mktemp -d)
+    trap 'rm -rf "$dir"' EXIT
+    python3 test/lib/pulse.py --dir "$dir/run" -- \
+        just rs test -p moq-audio --features aec,pulseaudio --run-ignored only -E 'not test(/benchmark_/)'
+
 # Needs nightly and cargo-fuzz; CI replays the corpus on stable through each
 # crate's own tests instead. See rs/moq-net/fuzz/README.md and rs/moq-quic/fuzz/README.md.
 
@@ -335,21 +365,12 @@ send-depth:
 fuzz target *args:
     sh/rs/fuzz.sh "$@"
 
-# No threshold: the report is for finding untested paths, not gating. mbx is
-# off because its cache remaps source paths to `${workspace}`, which llvm-cov
-# cannot read back. The LLVM tools come from the toolchain's `llvm-tools`.
-# `--no-report` skips cargo-llvm-cov's own cleanup, so clean first or stale
-# profiles from an earlier run merge into the report.
+# No threshold: the report is for finding untested paths, not gating.
+# The LLVM tools come from the toolchain's `llvm-tools`.
 
-# Report a crate's test coverage: a per-file table, plus lcov and HTML under target/coverage/<crate>.
-[env("MBX_DISABLE", "1")]
-coverage crate:
-    cargo llvm-cov clean --workspace
-    bash sh/rs/nextest.sh cargo llvm-cov nextest --locked -p {{ crate }} --no-report
-    cargo llvm-cov report -p {{ crate }}
-    mkdir -p target/coverage/{{ crate }}
-    cargo llvm-cov report -p {{ crate }} --lcov --output-path target/coverage/{{ crate }}/lcov.info
-    cargo llvm-cov report -p {{ crate }} --html --output-dir target/coverage/{{ crate }}
+# Report native workspace or one crate's coverage under target/coverage/<crate>.
+coverage crate="workspace":
+    bash sh/rs/coverage.sh '{{ crate }}'
 
 # Build the default workspace members.
 build:

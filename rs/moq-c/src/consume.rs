@@ -1,13 +1,14 @@
 use std::{
+	collections::BTreeMap,
 	ffi::c_char,
 	future::Future,
-	ops::Bound,
 	pin::Pin,
 	task::{Poll, ready},
 };
 use tokio::sync::{mpsc, oneshot};
 
 use crate::ffi::OnStatus;
+use crate::task::Task;
 use crate::{
 	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_json_value, moq_section, moq_string,
 	moq_video_config, moq_video_properties,
@@ -46,6 +47,42 @@ impl ConsumeCatalog {
 				.map(|origin| origin.driver.clone())
 				.unwrap_or_default(),
 		}
+	}
+}
+
+/// A catalog media section whose renditions are consumed by index.
+pub(crate) trait Media: hang::catalog::Reference + Clone {
+	/// The delivery priority its tracks subscribe with.
+	const PRIORITY: u8;
+
+	/// Its renditions, keyed by ID.
+	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self>;
+
+	/// Whether the publisher is serving this rendition.
+	fn enabled(&self) -> bool;
+}
+
+impl Media for hang::catalog::VideoConfig {
+	const PRIORITY: u8 = hang::catalog::PRIORITY.video;
+
+	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
+		&catalog.video.renditions
+	}
+
+	fn enabled(&self) -> bool {
+		self.enabled
+	}
+}
+
+impl Media for hang::catalog::AudioConfig {
+	const PRIORITY: u8 = hang::catalog::PRIORITY.audio;
+
+	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
+		&catalog.audio.renditions
+	}
+
+	fn enabled(&self) -> bool {
+		self.enabled
 	}
 }
 
@@ -93,22 +130,10 @@ async fn resolve(
 		.await
 }
 
-/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
-///
-/// `close` is an `Option` so `*_close` can drop just the sender (signalling
-/// shutdown) without removing the entry or revoking the callback. The task
-/// removes its own entry only after delivering one final terminal callback,
-/// so `user_data` stays valid until that callback fires.
-struct TaskEntry {
-	close: Option<oneshot::Sender<()>>,
-	callback: OnStatus,
-}
-
 /// A raw track task also accepts subscription updates while it is running.
 struct RawTaskEntry {
-	close: Option<oneshot::Sender<()>>,
+	task: Task,
 	update: mpsc::UnboundedSender<Option<moq_net::track::Subscription>>,
-	callback: OnStatus,
 }
 
 /// Outcome of polling a raw track source alongside its control channels.
@@ -121,12 +146,27 @@ enum RawStep<T> {
 	Stop,
 }
 
-/// A raw frame or datagram timestamp in microseconds, `None` when untimed.
+/// A raw frame, datagram, or JSON value timestamp in microseconds, `None` when untimed.
 fn timestamp_us(timestamp: Option<moq_net::Timestamp>) -> Result<Option<u64>, Error> {
 	timestamp
 		.map(|timestamp| timestamp.as_micros().try_into())
 		.transpose()
 		.map_err(|_| Error::TimestampOverflow(moq_net::TimeOverflow))
+}
+
+/// A JSON value pre-serialized to a string, with its frame timestamp.
+struct JsonValue {
+	json: String,
+	timestamp_us: Option<u64>,
+}
+
+impl JsonValue {
+	fn new(value: moq_net::Timed<serde_json::Value>) -> Result<Self, Error> {
+		Ok(Self {
+			json: serde_json::to_string(&value.value)?,
+			timestamp_us: timestamp_us(value.at)?,
+		})
+	}
 }
 
 #[derive(Default)]
@@ -138,10 +178,10 @@ pub struct Consume {
 	catalog: NonZeroSlab<ConsumeCatalog>,
 
 	/// Catalog consumer tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
-	catalog_task: NonZeroSlab<Option<TaskEntry>>,
+	catalog_task: NonZeroSlab<Task>,
 
 	/// Track consumer tasks (video and audio).
-	track_task: NonZeroSlab<Option<TaskEntry>>,
+	track_task: NonZeroSlab<Task>,
 
 	/// Buffered frames ready for consumption.
 	frame: NonZeroSlab<moq_mux::container::Frame>,
@@ -153,16 +193,16 @@ pub struct Consume {
 	raw_frame: NonZeroSlab<moq_net::frame::Frame>,
 
 	/// Raw track datagram consumer tasks (best-effort, parallel to `raw_task`).
-	datagram_task: NonZeroSlab<Option<TaskEntry>>,
+	datagram_task: NonZeroSlab<Task>,
 
 	/// Buffered datagrams ready for consumption.
 	datagram: NonZeroSlab<moq_net::Datagram>,
 
 	/// JSON consumer tasks (snapshot and stream share this slab).
-	json_task: NonZeroSlab<Option<TaskEntry>>,
+	json_task: NonZeroSlab<Task>,
 
-	/// Buffered JSON values ready for consumption, pre-serialized to a string.
-	json_value: NonZeroSlab<String>,
+	/// Buffered JSON values ready for consumption.
+	json_value: NonZeroSlab<JsonValue>,
 }
 
 impl Consume {
@@ -188,34 +228,24 @@ impl Consume {
 			self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
 
 		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
-		let channel = oneshot::channel();
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_catalog,
-		};
-		let id = self.catalog_task.insert(Some(entry))?;
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task
 		// to keep this entrypoint non-blocking.
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(async move {
-				let catalog = broadcast
-					.track(hang::catalog::Catalog::DEFAULT_NAME)?
-					.subscribe(hang::catalog::Catalog::default_subscription())
-					.await?;
-				Self::run_catalog(on_catalog, broadcast.clone(), origin, catalog.into(), channel.1).await
-			}))
-			.await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().consume.catalog_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.catalog_task.spawn(
+			on_catalog,
+			|state| &mut state.consume.catalog_task,
+			|close| async move {
+				driver
+					.watch(async move {
+						let catalog = broadcast
+							.track(hang::catalog::Catalog::DEFAULT_NAME)?
+							.subscribe(hang::catalog::Catalog::default_subscription())
+							.await?;
+						Self::run_catalog(on_catalog, broadcast.clone(), origin, catalog.into(), close).await
+					})
+					.await
+			},
+		)
 	}
 
 	async fn run_catalog(
@@ -423,17 +453,7 @@ impl Consume {
 	}
 
 	pub fn catalog_close(&mut self, catalog: Id) -> Result<(), Error> {
-		// Signal shutdown by dropping the sender. The task still delivers one
-		// final callback and then removes itself, so this neither revokes the
-		// callback nor frees user_data. Errors if already closed.
-		self.catalog_task
-			.get_mut(catalog)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::CatalogNotFound)?
-			.close
-			.take()
-			.ok_or(Error::CatalogNotFound)?;
-		Ok(())
+		self.catalog_task.close(catalog, Error::CatalogNotFound)
 	}
 
 	pub fn catalog_free(&mut self, catalog: Id) -> Result<(), Error> {
@@ -441,22 +461,19 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn video(
+	/// Subscribe to the video or audio rendition at catalog `index`, delivering its frames.
+	pub fn media<C: Media>(
 		&mut self,
 		catalog: Id,
 		index: usize,
 		max_delay: std::time::Duration,
 		on_frame: OnStatus,
-	) -> Result<Id, Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let (name, config) = consume
-			.catalog
-			.video
-			.renditions
-			.iter()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
-		if !config.enabled {
+	) -> Result<Id, Error>
+	where
+		for<'a> moq_mux::catalog::hang::Container: TryFrom<&'a C, Error = moq_mux::Error>,
+	{
+		let (consume, name, config) = self.select::<C>(catalog, index)?;
+		if !config.enabled() {
 			return Err(moq_net::Error::NotFound.into());
 		}
 		let name = hang::catalog::Reference::track(config, name).to_string();
@@ -466,104 +483,33 @@ impl Consume {
 		let container = moq_mux::catalog::hang::Container::try_from(config)?;
 		// The rendition may live in a sibling broadcast, so resolve its reference rather than
 		// assuming the catalog's own broadcast serves the track.
-		let reference = config.broadcast.clone();
+		let reference = config.broadcast().cloned();
 		let broadcast = consume.broadcast.clone();
 		let origin = consume.origin.clone();
 		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
 
-		let channel = oneshot::channel();
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_frame,
-		};
-		let id = self.track_task.insert(Some(entry))?;
-
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(async move {
-				let broadcast = resolve(broadcast, origin, reference).await?;
-				let track = broadcast
-					.track(&name)?
-					.subscribe(
-						moq_net::track::Subscription::default()
-							.with_priority(hang::catalog::PRIORITY.video)
-							.with_max_delay(max_delay),
-					)
-					.await?;
-				let track = moq_mux::container::Consumer::new(track, container);
-				Self::run_track(on_frame, track, channel.1).await
-			}))
-			.await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().consume.track_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
-	}
-
-	pub fn audio(
-		&mut self,
-		catalog: Id,
-		index: usize,
-		max_delay: std::time::Duration,
-		on_frame: OnStatus,
-	) -> Result<Id, Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let (name, config) = consume
-			.catalog
-			.audio
-			.renditions
-			.iter()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
-		if !config.enabled {
-			return Err(moq_net::Error::NotFound.into());
-		}
-		let name = hang::catalog::Reference::track(config, name).to_string();
-		let container = moq_mux::catalog::hang::Container::try_from(config)?;
-		let reference = config.broadcast.clone();
-		let broadcast = consume.broadcast.clone();
-		let origin = consume.origin.clone();
-		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
-
-		let channel = oneshot::channel();
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_frame,
-		};
-		let id = self.track_task.insert(Some(entry))?;
-
-		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(async move {
-				let broadcast = resolve(broadcast, origin, reference).await?;
-				let track = broadcast
-					.track(&name)?
-					.subscribe(
-						moq_net::track::Subscription::default()
-							.with_priority(hang::catalog::PRIORITY.audio)
-							.with_max_delay(max_delay),
-					)
-					.await?;
-				let track = moq_mux::container::Consumer::new(track, container);
-				Self::run_track(on_frame, track, channel.1).await
-			}))
-			.await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().consume.track_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.track_task.spawn(
+			on_frame,
+			|state| &mut state.consume.track_task,
+			|close| async move {
+				driver
+					.watch(async move {
+						let broadcast = resolve(broadcast, origin, reference).await?;
+						let track = broadcast
+							.track(&name)?
+							.subscribe(
+								moq_net::track::Subscription::default()
+									.with_priority(C::PRIORITY)
+									.with_max_delay(max_delay),
+							)
+							.await?;
+						let track = moq_mux::container::Consumer::new(track, container);
+						Self::run_track(on_frame, track, close).await
+					})
+					.await
+			},
+		)
 	}
 
 	async fn run_track(
@@ -591,15 +537,7 @@ impl Consume {
 	}
 
 	pub fn track_close(&mut self, track: Id) -> Result<(), Error> {
-		// Signal shutdown; the task delivers a final callback and removes itself.
-		self.track_task
-			.get_mut(track)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::TrackNotFound)?
-			.close
-			.take()
-			.ok_or(Error::TrackNotFound)?;
-		Ok(())
+		self.track_task.close(track, Error::TrackNotFound)
 	}
 
 	/// Read the payload of a frame as a single contiguous slice.
@@ -653,21 +591,16 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		let channel = oneshot::channel();
+		let (task, close) = Task::new(on_frame);
 		let (update, updates) = mpsc::unbounded_channel();
-		let entry = RawTaskEntry {
-			close: Some(channel.0),
-			update,
-			callback: on_frame,
-		};
-		let id = self.raw_task.insert(Some(entry))?;
+		let id = self.raw_task.insert(Some(RawTaskEntry { task, update }))?;
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(async move {
 				let mut track = broadcast.track(&name)?.subscribe(subscription.clone()).await?.ordered();
 				Self::apply_raw_subscription(&mut track, subscription);
-				Self::run_raw(on_frame, track, channel.1, updates).await
+				Self::run_raw(on_frame, track, close, updates).await
 			}))
 			.await;
 
@@ -675,45 +608,22 @@ impl Consume {
 			// Pull it out from under the lock so the callback never runs while held.
 			let entry = State::lock().consume.raw_task.remove(id).flatten();
 			if let Some(entry) = entry {
-				entry.callback.call(res);
+				entry.task.callback.call(res);
 			}
 		});
 
 		Ok(id)
 	}
 
+	/// Apply a raw reader's preferences, which join at the latest group unless a range
+	/// names a floor of its own.
 	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
-		let subscription = subscription.unwrap_or_default();
-		// Reads start where the lowest range does. Without a floor of its own (the oldest
-		// range, the default) a raw reader joins at the latest group.
-		let latest = match track.poll_largest(&kio::Waiter::noop()) {
-			std::task::Poll::Ready(Some(position)) => Some(position.group),
-			_ => None,
-		};
-		let start = subscription
-			.ranges
-			.iter()
-			.map(|range| match range.start {
-				moq_net::track::Anchor::Absolute(start) => Some(start.group),
-				moq_net::track::Anchor::Relative(u64::MAX) => latest,
-				moq_net::track::Anchor::Relative(back) => latest.map(|latest| latest.saturating_sub(back)),
-			})
-			.min()
-			.flatten();
-		// They stop past the last absolute end; an open or relative one follows the live edge.
-		let end = subscription
-			.ranges
-			.iter()
-			.map(|range| match range.end {
-				Some(moq_net::track::Anchor::Absolute(end)) => Some(end),
-				_ => None,
-			})
-			.collect::<Option<Vec<_>>>()
-			.map(|ends| ends.into_iter().max().unwrap_or_default());
-		track.set_groups((
-			start.map_or(Bound::Unbounded, Bound::Included),
-			end.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
-		));
+		let mut subscription = subscription.unwrap_or_default();
+		for range in &mut subscription.ranges {
+			if range.start == moq_net::track::Range::oldest().start {
+				range.start = moq_net::track::Range::live().start;
+			}
+		}
 		// A closed track makes the update meaningless; the reader already sees the close.
 		let _ = track.update(subscription);
 	}
@@ -817,15 +727,12 @@ impl Consume {
 	}
 
 	pub fn raw_track_close(&mut self, track: Id) -> Result<(), Error> {
-		// Signal shutdown; the task delivers a final callback and removes itself.
 		self.raw_task
 			.get_mut(track)
 			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::TrackNotFound)?
-			.close
-			.take()
-			.ok_or(Error::TrackNotFound)?;
-		Ok(())
+			.task
+			.close(Error::TrackNotFound)
 	}
 
 	/// Fill `dst` with a raw frame's payload. The pointer is valid until the
@@ -865,30 +772,19 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		let channel = oneshot::channel();
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_datagram,
-		};
-		let id = self.datagram_task.insert(Some(entry))?;
-
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(async move {
-				let track = broadcast.track(&name)?.subscribe(None).await?;
-				Self::run_datagrams(on_datagram, track, channel.1).await
-			}))
-			.await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().consume.datagram_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.datagram_task.spawn(
+			on_datagram,
+			|state| &mut state.consume.datagram_task,
+			|close| async move {
+				driver
+					.watch(async move {
+						let track = broadcast.track(&name)?.subscribe(None).await?;
+						Self::run_datagrams(on_datagram, track, close).await
+					})
+					.await
+			},
+		)
 	}
 
 	async fn run_datagrams(
@@ -914,15 +810,7 @@ impl Consume {
 	}
 
 	pub fn datagram_track_close(&mut self, track: Id) -> Result<(), Error> {
-		// Signal shutdown; the task delivers a final callback and removes itself.
-		self.datagram_task
-			.get_mut(track)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::TrackNotFound)?
-			.close
-			.take()
-			.ok_or(Error::TrackNotFound)?;
-		Ok(())
+		self.datagram_task.close(track, Error::TrackNotFound)
 	}
 
 	/// Fill `dst` with a datagram's payload, timestamp, and sequence. The pointer is
@@ -948,23 +836,10 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Look up a video rendition by catalog index, mirroring the index-based selection in `video`.
-	pub fn video_rendition(&self, catalog: Id, index: usize) -> Result<Rendition<hang::catalog::VideoConfig>, Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let (name, config) = consume
-			.catalog
-			.video
-			.renditions
-			.iter()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
-		Ok(consume.rendition(name, config))
-	}
-
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 	///
-	/// `on_value` is called with a value ID for each new latest value; a consumer that falls
-	/// behind collapses the backlog and only sees the newest. Values must be released with
+	/// `on_value` is called with a value ID for each state, in order; a group superseded by a
+	/// newer one before it is read is skipped. Values must be released with
 	/// [`Self::json_value_close`]. Pass the same compression the producer used.
 	pub fn json_snapshot(
 		&mut self,
@@ -982,31 +857,20 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		let channel = oneshot::channel();
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_value,
-		};
-		let id = self.json_task.insert(Some(entry))?;
-
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(async move {
-				let track = broadcast.track(&name)?.subscribe(None).await?;
-				let consumer = moq_json::snapshot::Consumer::<serde_json::Value>::new(track, config);
-				Self::run_json_snapshot(on_value, consumer, channel.1).await
-			}))
-			.await;
-
-			// Deliver one final terminal callback (code <= 0), then drop the entry.
-			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().consume.json_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.json_task.spawn(
+			on_value,
+			|state| &mut state.consume.json_task,
+			|close| async move {
+				driver
+					.watch(async move {
+						let track = broadcast.track(&name)?.subscribe(None).await?;
+						let consumer = moq_json::snapshot::Consumer::<serde_json::Value>::new(track, config);
+						Self::run_json_snapshot(on_value, consumer, close).await
+					})
+					.await
+			},
+		)
 	}
 
 	async fn run_json_snapshot(
@@ -1025,9 +889,10 @@ impl Consume {
 				},
 			};
 
-			let json = serde_json::to_string(&value)?;
-			// Hold the lock only to buffer the value; release it before the callback.
-			let value_id = State::lock().consume.json_value.insert(json)?;
+			// Serialize before locking, hold the lock only to buffer the value, and release it
+			// before the callback.
+			let value = JsonValue::new(value)?;
+			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
 	}
@@ -1052,29 +917,20 @@ impl Consume {
 		let broadcast = context.broadcast.clone();
 		let name = name.to_string();
 
-		let channel = oneshot::channel();
-		let entry = TaskEntry {
-			close: Some(channel.0),
-			callback: on_value,
-		};
-		let id = self.json_task.insert(Some(entry))?;
-
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(async move {
-				let track = broadcast.track(&name)?.subscribe(None).await?;
-				let consumer = moq_json::stream::Consumer::<serde_json::Value>::new(track, config);
-				Self::run_json_stream(on_value, consumer, channel.1).await
-			}))
-			.await;
-
-			let entry = State::lock().consume.json_task.remove(id).flatten();
-			if let Some(entry) = entry {
-				entry.callback.call(res);
-			}
-		});
-
-		Ok(id)
+		self.json_task.spawn(
+			on_value,
+			|state| &mut state.consume.json_task,
+			|close| async move {
+				driver
+					.watch(async move {
+						let track = broadcast.track(&name)?.subscribe(None).await?;
+						let consumer = moq_json::stream::Consumer::<serde_json::Value>::new(track, config);
+						Self::run_json_stream(on_value, consumer, close).await
+					})
+					.await
+			},
+		)
 	}
 
 	async fn run_json_stream(
@@ -1093,8 +949,8 @@ impl Consume {
 				},
 			};
 
-			let json = serde_json::to_string(&value)?;
-			let value_id = State::lock().consume.json_value.insert(json)?;
+			let value = JsonValue::new(value)?;
+			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
 	}
@@ -1102,24 +958,19 @@ impl Consume {
 	/// Signal a JSON consumer task (snapshot or stream) to stop. The task still delivers one
 	/// final terminal callback and then removes itself, so `user_data` stays valid until then.
 	pub fn json_close(&mut self, task: Id) -> Result<(), Error> {
-		self.json_task
-			.get_mut(task)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::TrackNotFound)?
-			.close
-			.take()
-			.ok_or(Error::TrackNotFound)?;
-		Ok(())
+		self.json_task.close(task, Error::TrackNotFound)
 	}
 
 	/// Fill `dst` with a JSON value delivered via a consumer callback. The pointer is valid
 	/// until the value is released with [`Self::json_value_close`].
 	pub fn json_value(&self, value: Id, dst: &mut moq_json_value) -> Result<(), Error> {
-		let json = self.json_value.get(value).ok_or(Error::FrameNotFound)?;
+		let value = self.json_value.get(value).ok_or(Error::FrameNotFound)?;
 
 		*dst = moq_json_value {
-			json: json.as_str().as_ptr() as *const c_char,
-			json_len: json.len(),
+			json: value.json.as_ptr() as *const c_char,
+			json_len: value.json.len(),
+			timestamp_us: value.timestamp_us.unwrap_or_default(),
+			timestamp_present: value.timestamp_us.is_some(),
 		};
 
 		Ok(())
@@ -1130,17 +981,21 @@ impl Consume {
 		self.json_value.remove(value).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
-	/// Look up an audio rendition by catalog index, mirroring the index-based selection in `audio`.
-	pub fn audio_rendition(&self, catalog: Id, index: usize) -> Result<Rendition<hang::catalog::AudioConfig>, Error> {
+
+	/// Look up a video or audio rendition by catalog index, mirroring the selection in [`Self::media`].
+	pub fn rendition<C: Media>(&self, catalog: Id, index: usize) -> Result<Rendition<C>, Error> {
+		let (consume, name, config) = self.select(catalog, index)?;
+		Ok(consume.rendition(name, config))
+	}
+
+	/// A catalog and its rendition at `index`, in catalog order.
+	fn select<C: Media>(&self, catalog: Id, index: usize) -> Result<(&ConsumeCatalog, &String, &C), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let (name, config) = consume
-			.catalog
-			.audio
-			.renditions
+		let (name, config) = C::renditions(&consume.catalog)
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
-		Ok(consume.rendition(name, config))
+		Ok((consume, name, config))
 	}
 }
 
@@ -1172,7 +1027,7 @@ mod supervision_tests {
 				sections: Vec::new(),
 			})
 			.unwrap();
-		let rendition = consume.audio_rendition(id, 0).unwrap();
+		let rendition = consume.rendition::<hang::catalog::AudioConfig>(id, 0).unwrap();
 		*trigger
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;

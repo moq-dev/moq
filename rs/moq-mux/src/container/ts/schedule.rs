@@ -165,9 +165,9 @@ struct Unit {
 	keyframe: bool,
 	/// It was pushed after its due slot went out, so it goes out as soon as it can.
 	late: bool,
-	/// For a PES the source placed, the media time in nanoseconds its first byte goes out at,
-	/// no earlier. It keeps no deadline of ours: it goes out as soon after as the buffers let it.
-	place: Option<u128>,
+	/// The first byte's placement in nanoseconds and payload prefix (the section pointer field).
+	/// It keeps no deadline of ours: it goes out as soon after as the buffers let it.
+	place: Option<(u128, usize)>,
 	/// Its bytes in the PID's decoder buffer, until it decodes.
 	held: usize,
 	/// The decode time and bytes of each frame of a PES that packs several, which leave the
@@ -683,27 +683,29 @@ impl Schedule {
 		self.queue(pid, timing, None, packets, keyframe, frames)
 	}
 
-	/// Queue a PES on `pid` the source placed at `place` nanoseconds on the media timeline:
-	/// its first byte goes out then, never earlier, with its TS header just before it. It
+	/// Queue a PES or section placed at `place` nanoseconds on the media timeline:
+	/// its first byte goes out then, never earlier, with its TS header and `prefix` payload
+	/// bytes (the section pointer field) just before it. It
 	/// decodes at `decode`, or each of `frames` at its own time, as [`Self::push_frames`]
 	/// lists them, which only the PID's decoder buffer reads: the unit misses no deadline.
 	pub fn push_placed(
 		&mut self,
 		pid: u16,
 		(place, decode): (u128, u128),
+		prefix: usize,
 		packets: Vec<u8>,
 		keyframe: bool,
 		frames: Vec<(u128, usize)>,
 	) -> anyhow::Result<()> {
 		let timing = Timing { by: place, decode };
-		self.queue(pid, timing, Some(place), packets, keyframe, frames)
+		self.queue(pid, timing, Some((place, prefix)), packets, keyframe, frames)
 	}
 
 	fn queue(
 		&mut self,
 		pid: u16,
 		timing: Timing,
-		place: Option<u128>,
+		place: Option<(u128, usize)>,
 		packets: Vec<u8>,
 		keyframe: bool,
 		mut frames: Vec<(u128, usize)>,
@@ -811,7 +813,7 @@ impl Schedule {
 	/// and otherwise the first that opens at or after it, as nothing times the packets
 	/// within an unpadded slot. Slot `index` opens one slot behind its boundary ([`grid_pcr`]).
 	fn release(&self, unit: &Unit) -> u128 {
-		if let Some(place) = unit.place {
+		if let Some((place, _)) = unit.place {
 			let slot = PCR_INTERVAL.as_nanos();
 			return match self.rate {
 				Some(_) => place / slot + 1,
@@ -1032,12 +1034,12 @@ impl Schedule {
 				let packet = opening.as_deref().unwrap_or(rest);
 				let packet = &packet[..TsPacket::SIZE];
 				let pid = self::pid(packet);
-				// A placed PES's first byte, after its packet's header, waits for its placement.
-				if let Some(place) = unit.place
+				// The first PES or section byte waits, with its TS header and pointer just before it.
+				if let Some((place, prefix)) = unit.place
 					&& pid == unit.pid
 					&& packet[1] & 0x40 != 0
 				{
-					let header = (TsPacket::SIZE - payload(packet).len()) as u128;
+					let header = (TsPacket::SIZE - payload(packet).len() + prefix) as u128;
 					let at = place as i128 - (header * 8 * 1_000_000_000 / u128::from(rate)) as i128;
 					if now < at {
 						waiting.push(Reverse((at, lane)));
@@ -1444,6 +1446,29 @@ mod tests {
 			}
 		}
 		out
+	}
+
+	/// The pointer byte goes just before placement, so it cannot cost a section another packet.
+	#[test]
+	fn placed_first_byte_accounts_for_the_section_pointer() {
+		for prefix in [0, 1] {
+			let mut schedule = Schedule::new(Duration::from_millis(500));
+			schedule.set_rate(Some(1_600_000));
+			let mut packet = unit(7, 1);
+			packet[1] |= 0x40;
+			// A packet starts at 69 ms on this rate's lattice; each byte takes 5 us.
+			let place = 69_000_000 + (4 + prefix as u128) * 5_000;
+			schedule
+				.push_placed(7, (place, place), prefix, packet, true, Vec::new())
+				.unwrap();
+			let wire = wire(&mut schedule, &unit(8, 1));
+			let (start, _) = wire.iter().find(|(_, packet)| pid(packet) == 7).unwrap();
+			let first = start * 1_000_000_000.0 + (4 + prefix) as f64 * 5_000.0;
+			assert!(
+				(first - place as f64).abs() < 0.5,
+				"prefix {prefix}: first byte at {first} ns, expected {place} ns"
+			);
+		}
 	}
 
 	/// The peak fills in bytes of a transport buffer fed by `pids` on the wire at `rate` and

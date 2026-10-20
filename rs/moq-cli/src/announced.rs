@@ -11,7 +11,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use crate::args::MoqSide;
 
 /// Follow the broadcasts announced on a relay as they start and end.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// Only follow paths under this prefix.
@@ -176,7 +176,7 @@ mod tests {
 	use tokio::io::{AsyncBufReadExt, BufReader, DuplexStream, Lines};
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
-	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_EPOCH", "MOQ_BROADCAST"];
+	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_BROADCAST"];
 
 	/// A running relay holding `demo/a`, `demo/b`, and `other/c` from one publisher.
 	struct Fixture {

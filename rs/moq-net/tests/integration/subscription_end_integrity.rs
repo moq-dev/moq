@@ -113,7 +113,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 		}
 	});
 
-	moq_clock::timeout(TIMEOUT, track.demand().used())
+	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -252,7 +252,9 @@ async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<m
 		}
 	});
 
-	track.demand().used().await.expect("no subscriber appeared");
+	crate::support::wanted(track.demand())
+		.await
+		.expect("no subscriber appeared");
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, HEAD[0]).unwrap();
 	settle().await;

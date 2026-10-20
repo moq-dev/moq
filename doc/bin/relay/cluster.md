@@ -21,6 +21,12 @@ namespace prefix is illegal before draft 16), so a link to a peer without the
 MoQ Solicit extension, such as moxygen, learns only what that peer announces
 unasked. moxygen announces nothing unasked on draft 14.
 
+A track from a moq-transport publisher keeps its Object IDs, object properties,
+and END\_OF\_GROUP status objects across a moq-lite-07 link, since relays
+always offer the [ietf extension](/draft/moq-ietf) that carries them. Over an
+older moq-lite link they are lost: a moq-transport subscriber behind it sees
+consecutive objects with no properties.
+
 When a moq-lite-04 or later peer withdraws a broadcast, the routes relayed
 through it go with it at once. A change of best route is announced after
 300 ms, so stale paths are retracted once instead of advertised in turn;
@@ -46,9 +52,10 @@ re-request on a restart, and a relay drops its copy of the old instance,
 including every path beneath a prefix claim when one of them moves to another
 worker.
 
-Failover routes must carry copies of the same broadcast: a source whose track
-differs in timescale, retention, publisher priority, or group order is refused
-for that track.
+Failover routes must carry copies of one publisher's broadcast. Independent
+importers use distinct epochs and switch as a restart, even when fed one stream.
+A source whose track differs in timescale, retention, publisher priority, or
+group order is refused for that track.
 
 A route whose original publisher (its first hop) changes under the same epoch is
 updated in place on both wire protocols, so the broadcast never briefly vanishes

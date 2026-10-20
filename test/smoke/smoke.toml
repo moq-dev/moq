@@ -1,0 +1,20 @@
+# Relay config for the cross-language interop smoke test.
+# Anonymous access, self-signed localhost cert, QUIC + WebSocket on 127.0.0.1:4443.
+# Mirrors moq-dev/moq's test/smoke/smoke.toml. smoke-legacy.toml carries the
+# pre-0.15 layout for relays that predate the [server] -> [listen] rename.
+
+[log]
+level = "info"
+
+[listen]
+# QUIC on UDP. 127.0.0.1 avoids IPv6 flakiness on CI runners.
+bind = "127.0.0.1:4443"
+tls.generate = ["localhost", "127.0.0.1"]
+
+[web.http]
+# HTTP + WebSocket on TCP, also serving /certificate.sha256 for cert pinning.
+listen = "127.0.0.1:4443"
+
+[auth]
+# Allow anonymous access to everything.
+public = "**"

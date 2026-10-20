@@ -714,7 +714,7 @@ impl Drop for Held {
 ///
 /// Hop-based routing on broadcasts prevents announcement loops regardless of topology.
 #[serde_with::serde_as]
-#[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+#[derive(usage_rs::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
@@ -788,7 +788,7 @@ pub struct Config {
 		env = "MOQ_CLUSTER_CONNECT_API_TLS_ROOT",
 		setting = "cluster.connect_api_tls_root"
 	)]
-	#[usage(value_hint = usage::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub connect_api_tls_root: Vec<PathBuf>,
 
@@ -856,7 +856,7 @@ impl Config {
 /// so a rack or a home lab meshes with no seed list and no shared rendezvous.
 /// A LAN peer authenticates with its mDNS credential on `/.cluster/<credential>`
 /// and is never handed [`Config::token`].
-#[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+#[derive(usage_rs::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
@@ -1268,7 +1268,7 @@ impl Cluster {
 			self.scope(lease, &request)
 		}
 		.await;
-		result.inspect_err(|err| self.refusals.record(err.into()))
+		result.inspect_err(|err| self.refusals.record_auth(err))
 	}
 
 	/// Network sessions enforce changing grants in AUTH, within a fixed root and SETUP role.
@@ -1282,7 +1282,7 @@ impl Cluster {
 			self.scope_session(lease, &request)
 		}
 		.await;
-		result.inspect_err(|err| self.refusals.record(err.into()))
+		result.inspect_err(|err| self.refusals.record_auth(err))
 	}
 
 	pub(crate) fn scope_session(

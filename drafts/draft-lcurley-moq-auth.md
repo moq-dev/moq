@@ -185,7 +185,8 @@ AUTH_ERROR Message {
 
 **Error Code**:
 A code MUST fit in 32 bits; a larger value is a PROTOCOL_VIOLATION.
-A code from the REQUEST_ERROR registry ({{moqt}}): UNAUTHORIZED, MALFORMED_AUTH_TOKEN, EXPIRED_AUTH_TOKEN, or NOT_SUPPORTED ({{prefixes}}).
+A code from the REQUEST_ERROR registry ({{moqt}}): UNAUTHORIZED, MALFORMED_AUTH_TOKEN, EXPIRED_AUTH_TOKEN, NOT_SUPPORTED ({{prefixes}}), or GOING_AWAY.
+GOING_AWAY answers an AUTH the acceptor no longer admits after its GOAWAY ({{moqt}}); it refuses the request, not the token, so the token stays valid for another session.
 
 **Reason Phrase**:
 A human-readable reason, at most 8,192 bytes.
@@ -228,6 +229,12 @@ This document requests three registrations in the "MOQT Message Types" registry 
 
 
 --- back
+
+# Changelog
+
+## Since draft-lcurley-moq-auth-00 (in progress)
+
+- AUTH_ERROR can carry GOING_AWAY, refusing an AUTH past the acceptor's GOAWAY without refusing the token.
 
 # Acknowledgments
 {:numbered="false"}

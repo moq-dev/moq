@@ -68,6 +68,19 @@ impl Manual {
 }
 
 impl Installed {
+	/// The clock installed on the current tokio runtime, if any.
+	///
+	/// For a runtime of its own, such as an io_uring worker, created on a thread that
+	/// entered the tokio runtime, to keep that runtime's clock.
+	pub fn current() -> Option<Self> {
+		current()
+	}
+
+	/// Complete once this clock reaches `at`, whichever thread polls it.
+	pub fn sleep_until(&self, at: Instant) -> crate::Sleep {
+		crate::Sleep::installed(self.clone(), at)
+	}
+
 	/// The current instant.
 	pub fn now(&self) -> Instant {
 		self.0.lock().unwrap().clock.now()

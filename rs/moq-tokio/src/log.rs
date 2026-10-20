@@ -10,7 +10,7 @@ use url::Url;
 
 /// Tracing log configuration.
 #[serde_with::serde_as]
-#[derive(Clone, usage::Args, Serialize, Deserialize, Debug)]
+#[derive(Clone, usage_rs::Args, Serialize, Deserialize, Debug)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]

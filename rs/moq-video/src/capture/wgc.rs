@@ -320,7 +320,7 @@ mod tests {
 			.reserve()
 			.with_timeline_hint(config.gop.duration(config.framerate));
 		let mut producer = Producer::with_track(track, reserved, rendition).unwrap();
-		assert!(producer.demand().is_used());
+		assert!(producer.demand().wanted().is_some());
 
 		// Only one captured picture arrives; more than three intervals of paced
 		// output must still reach a real video subscriber with advancing timestamps.

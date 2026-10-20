@@ -14,6 +14,12 @@ import pytest
 FROM_GROUP_0 = [moq.Range(start=cast(moq.Anchor, moq.Anchor.ABSOLUTE(group=0, frame=0)))]
 
 
+async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
+    """Wait until some subscriber wants the track, or none does."""
+    while (await demand.wanted_changed() is not None) != wanted:
+        pass
+
+
 def create_announced(origin: moq.OriginProducer, path: str) -> moq.BroadcastProducer:
     broadcast = origin.create_broadcast(path)
     broadcast.announce()
@@ -482,18 +488,23 @@ async def test_fetch_group_and_serve_dynamic_miss():
 
 async def test_json_snapshot_roundtrip():
     broadcast = moq.BroadcastProducer()
-    producer = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
+    producer = moq.json.SnapshotProducer(broadcast, track, compression=True)
     consumer = moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("status"), compression=True)
 
-    producer.update({"state": "live", "viewers": 1})
-    value = await asyncio.wait_for(anext(consumer), timeout=5.0)
-    assert value == {"state": "live", "viewers": 1}
+    for viewers in range(1, 5):
+        producer.update({"viewers": viewers}, timestamp=timedelta(milliseconds=viewers))
 
-    producer.update({"state": "live", "viewers": 2})
+    # Iteration yields every state in order; latest() skips the buffered third.
     value = await asyncio.wait_for(anext(consumer), timeout=5.0)
-    assert value == {"state": "live", "viewers": 2}
+    assert value == moq.json.Timed({"viewers": 1}, timedelta(milliseconds=1))
+    value = await asyncio.wait_for(anext(consumer), timeout=5.0)
+    assert value == moq.json.Timed({"viewers": 2}, timedelta(milliseconds=2))
+    value = await asyncio.wait_for(consumer.latest(), timeout=5.0)
+    assert value == moq.json.Timed({"viewers": 4}, timedelta(milliseconds=4))
 
     producer.finish()
+    assert await asyncio.wait_for(consumer.latest(), timeout=5.0) is None
 
 
 async def test_json_stream_roundtrip():
@@ -504,7 +515,7 @@ async def test_json_stream_roundtrip():
     for n in range(3):
         producer.append({"n": n})
         record = await asyncio.wait_for(anext(consumer), timeout=5.0)
-        assert record == {"n": n}
+        assert record == moq.json.Timed({"n": n}, None)
 
     producer.finish()
 
@@ -516,23 +527,23 @@ async def test_json_producers_report_demand():
     snapshot_demand = snapshot.demand()
     stream_demand = stream.demand()
     assert snapshot_demand.name == "status"
-    assert not snapshot_demand.is_used()
+    assert snapshot_demand.wanted() is None
 
     consumer = broadcast.consume()
     snapshot_consumer = moq.json.SnapshotConsumer(await consumer.subscribe_track("status"), compression=True)
     stream_consumer = moq.json.StreamConsumer(await consumer.subscribe_track("events"))
-    await asyncio.wait_for(snapshot_demand.used(), timeout=5.0)
-    await asyncio.wait_for(stream_demand.used(), timeout=5.0)
-    assert snapshot_demand.is_used()
+    await asyncio.wait_for(until_wanted(snapshot_demand), timeout=5.0)
+    await asyncio.wait_for(until_wanted(stream_demand), timeout=5.0)
+    assert snapshot_demand.wanted() == 0
 
     snapshot_consumer.cancel()
     stream_consumer.cancel()
-    await asyncio.wait_for(snapshot_demand.unused(), timeout=5.0)
-    await asyncio.wait_for(stream_demand.unused(), timeout=5.0)
+    await asyncio.wait_for(until_wanted(snapshot_demand, False), timeout=5.0)
+    await asyncio.wait_for(until_wanted(stream_demand, False), timeout=5.0)
 
     snapshot.finish()
     with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
-        await asyncio.wait_for(snapshot_demand.used(), timeout=5.0)
+        await asyncio.wait_for(until_wanted(snapshot_demand), timeout=5.0)
 
 
 async def test_dynamic_track_request():
@@ -546,7 +557,7 @@ async def test_dynamic_track_request():
     request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
     assert request.name == "events"
     demand = request.demand()
-    assert demand.is_used()
+    assert demand.wanted() is not None
 
     # Accept the request as a raw track (which unblocks the subscribe), then write.
     track = request.accept()
@@ -559,12 +570,12 @@ async def test_dynamic_track_request():
     assert frame.payload == payload
 
     track_consumer.cancel()
-    await asyncio.wait_for(demand.unused(), timeout=5.0)
+    await asyncio.wait_for(until_wanted(demand, False), timeout=5.0)
     track.finish()
     broadcast.close()
     del track
     with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
-        await asyncio.wait_for(demand.used(), timeout=5.0)
+        await asyncio.wait_for(until_wanted(demand), timeout=5.0)
 
 
 async def test_media_subscribe_refuses_a_non_rendition():

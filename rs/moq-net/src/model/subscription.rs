@@ -3,6 +3,9 @@ use std::{
 	time::Duration,
 };
 
+mod window;
+pub(super) use window::{Resolved, Window};
+
 /// Subscriber-side preferences for receiving a track.
 ///
 /// Each subscriber holds its own [`Subscription`]; the publisher observes an
@@ -70,11 +73,10 @@ pub struct Subscription {
 	/// for nothing.
 	///
 	/// A request to the publisher, aggregated across every live subscriber as the union of
-	/// their ranges, so it says what the publisher sends, not what any one subscriber sees.
-	/// The one place it touches this subscriber's reads is where its cursor starts: at the
-	/// lowest group any of its ranges names. [`crate::track::Subscriber::set_groups`] is the
-	/// local read filter. See [Local cursor vs wire
-	/// preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
+	/// their ranges, and this subscriber's read filter: it reads only the groups its own
+	/// ranges cover, whatever another subscriber widens the union to.
+	/// [`crate::track::Subscriber::set_groups`] narrows the reads further. See [Local cursor
+	/// vs wire preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
 	pub ranges: Vec<Range>,
 	/// Which pending group the publisher sends first; see [`Order`].
 	///
@@ -83,47 +85,6 @@ pub struct Subscription {
 	/// subscribers fresh. Each subscriber's own publisher (a relay's downstream session)
 	/// still serves it in its own order.
 	pub order: Order,
-	/// A moq-transport NEW_GROUP_REQUEST this subscriber is waiting on.
-	///
-	/// Relay-only, so it stays out of the public API: the aggregate the public getters
-	/// report leaves it out. Cleared once this subscriber is handed a group that answers
-	/// it, so a request never outlives what it asked for.
-	// private: passthrough
-	pub(crate) new_group: Option<NewGroup>,
-}
-
-/// A NEW_GROUP_REQUEST as one hop holds it.
-///
-/// Subscribers' requests combine as the greatest: the one answered later, whose answer
-/// answers both. Between requests answered alike, the higher value says the most upstream,
-/// and any value says more than a 0.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-// private: passthrough
-pub(crate) struct NewGroup {
-	/// The first group sequence that answers it here: the one after the newest this hop
-	/// held when it arrived, not the one the subscriber is about to join.
-	pub first: u64,
-	/// The value as received, which is what goes upstream: the subscriber's largest known
-	/// group plus one, or 0 when it knows none.
-	pub value: u64,
-}
-
-impl NewGroup {
-	/// A request for `value`, arriving while this hop's newest group is `latest`, or `None`
-	/// when a group the hop holds already answers it.
-	///
-	/// Any newer group answers it here, even one below a value past the newest held. The
-	/// subscriber learned of its groups from the publisher, which so answers with a group at
-	/// or past the value; holding out for that exact group would only ask again, and a
-	/// value naming a group that never existed would ask on every group.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn new(value: u64, latest: Option<u64>) -> Option<Self> {
-		if value != 0 && latest.is_some_and(|latest| value <= latest) {
-			return None;
-		}
-		let first = latest.map_or(0, |latest| latest.saturating_add(1));
-		Some(Self { first, value })
-	}
 }
 
 /// Which of a subscription's pending groups the publisher sends first.
@@ -143,13 +104,13 @@ pub enum Order {
 /// Where one end of a [`Range`] falls: a fixed position, or a count of groups back from the
 /// latest one.
 ///
-/// A relative anchor resolves against the latest group of the hop that serves it, once,
-/// when it starts serving. Before any group exists it resolves at the first one, so
-/// [`Range::live`] starts there.
+/// A relative anchor resolves against the latest group of the hop that serves it, when it
+/// starts serving and again whenever the subscriber replaces its ranges. Before any group
+/// exists it resolves at the first one, so [`Range::live`] starts there.
 ///
 /// No published wire carries one yet: upstream, a relative start is no floor, the same
-/// request as [`Range::oldest`], and a relative end is no end. Behind a moq-transport upstream,
-/// which joins without a floor at the live group, `Relative(n)..` starts there.
+/// request as [`Range::oldest`], and a relative end is no end. Behind a moq-transport
+/// upstream, which joins without a floor at the live group, `Relative(n)..` starts there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Anchor {
 	/// This exact position.
@@ -205,16 +166,6 @@ impl Range {
 				false => Anchor::Absolute(Position::group(start)),
 			},
 			end: end.map(|end| Anchor::Absolute(Position::group(end))),
-		}
-	}
-
-	/// The first position this range delivers, or `None` while it waits on a latest group.
-	fn resolve_start(&self, latest: Option<u64>) -> Option<Position> {
-		match self.start {
-			Anchor::Absolute(start) => Some(start),
-			// Nothing sits below group 0, so the farthest offset needs no latest group.
-			Anchor::Relative(u64::MAX) => Some(Position::default()),
-			Anchor::Relative(back) => Some(Position::group(latest?.saturating_sub(back))),
 		}
 	}
 
@@ -296,7 +247,6 @@ impl Default for Subscription {
 			max_delay: Duration::ZERO,
 			ranges: vec![Range::oldest()],
 			order: Order::Descending,
-			new_group: None,
 		}
 	}
 }
@@ -394,42 +344,56 @@ impl Subscription {
 	}
 
 	/// These preferences with every range raised to start no earlier than `floor` and
-	/// stop no later than `end`, the exclusive end.
+	/// stop no later than `end`, the exclusive end, without ever widening one.
 	///
-	/// A relative anchor becomes the bound itself, since which of the two is tighter
-	/// depends on a latest group this hop may not know. That asks for no less than the
-	/// range would.
-	pub(super) fn clamped(&self, floor: Option<Position>, end: Option<Position>) -> Self {
+	/// `resolved` names where each range resolved, by index, so a relative anchor
+	/// becomes its own group, raised to `floor` or capped at `end`. A start not resolved
+	/// keeps its anchor, since the floor may lie before it, so the caller drops what it
+	/// resolves to below `floor`; an end not resolved becomes the bound.
+	pub(super) fn clamped(
+		&self,
+		floor: Option<Position>,
+		end: Option<Position>,
+		resolved: &[Option<Resolved>],
+	) -> Self {
+		let clamping = floor.is_some() || end.is_some();
 		let ranges = self
 			.ranges
 			.iter()
-			.map(|range| Range {
-				start: match (range.start, floor) {
-					(start, None) => start,
-					(Anchor::Absolute(start), Some(floor)) => Anchor::Absolute(start.max(floor)),
-					(Anchor::Relative(_), Some(floor)) => Anchor::Absolute(floor),
-				},
-				end: match (range.end, end) {
-					(requested, None) => requested,
-					(Some(Anchor::Absolute(requested)), Some(end)) => Some(Anchor::Absolute(requested.min(end))),
-					(_, Some(end)) => Some(Anchor::Absolute(end)),
-				},
+			.enumerate()
+			.map(|(index, range)| {
+				let resolved = resolved.get(index).copied().flatten().filter(|_| clamping);
+				let start = match (range.start, resolved) {
+					(Anchor::Relative(_), Some(resolved)) => Anchor::Absolute(Position::group(resolved.start)),
+					(start, _) => start,
+				};
+				let requested = match (range.end, resolved.and_then(|resolved| resolved.end)) {
+					(Some(Anchor::Relative(_)), Some(resolved)) => Some(Anchor::Absolute(Position::group(resolved))),
+					(requested, _) => requested,
+				};
+				Range {
+					start: match (start, floor) {
+						(Anchor::Absolute(start), Some(floor)) => Anchor::Absolute(start.max(floor)),
+						(start, _) => start,
+					},
+					end: match (requested, end) {
+						(requested, None) => requested,
+						(Some(Anchor::Absolute(requested)), Some(end)) => Some(Anchor::Absolute(requested.min(end))),
+						(_, Some(end)) => Some(Anchor::Absolute(end)),
+					},
+				}
 			})
 			.collect();
 		Self { ranges, ..self.clone() }
 	}
 
-	/// The lowest group this subscription's ranges start at, resolving relative starts
-	/// against `latest`. `None` while one waits on a latest group that does not exist yet.
-	///
-	/// Empty ranges ask for nothing, and no ranges at all floor nowhere: group 0.
-	pub(super) fn floor(&self, latest: Option<u64>) -> Option<u64> {
-		let mut floor = None;
-		for range in self.ranges.iter().filter(|range| !range.is_empty()) {
-			let start = range.resolve_start(latest)?.group;
-			floor = Some(floor.map_or(start, |floor: u64| floor.min(start)));
-		}
-		Some(floor.unwrap_or(0))
+	/// Whether a subscriber joins at the live edge: a range counting back from the latest
+	/// group and following it. A fixed start resumes a known group instead, such as a route
+	/// switch picking up where the reader stopped.
+	pub(super) fn joins_live(&self) -> bool {
+		self.ranges
+			.iter()
+			.any(|range| matches!(range.start, Anchor::Relative(_)) && range.end.is_none())
 	}
 }
 
@@ -450,7 +414,6 @@ impl Combined {
 		combined.priority = combined.priority.max(sub.priority);
 		combined.max_delay = combined.max_delay.max(sub.max_delay);
 		combined.ranges.extend_from_slice(&sub.ranges);
-		combined.new_group = combined.new_group.max(sub.new_group);
 		// Sequence-first prioritization is enabled only when every subscriber wants it.
 		if let Order::Descending = sub.order {
 			combined.order = Order::Descending;
@@ -666,26 +629,28 @@ mod tests {
 	/// group exists only the farthest offset resolves, since it is group 0 regardless.
 	#[test]
 	fn relative_starts_resolve_against_the_latest_group() {
+		let floor = |sub: &Subscription, latest| Window::new(&sub.ranges, latest).floor();
+
 		let live = Subscription::default().with_ranges([Range::live()]);
-		assert_eq!(live.floor(Some(7)), Some(7));
-		assert_eq!(live.floor(None), None);
+		assert_eq!(floor(&live, Some(7)), Some(7));
+		assert_eq!(floor(&live, None), None);
 
 		let buffering = Subscription::default().with_ranges([range(Anchor::Relative(3), None)]);
-		assert_eq!(buffering.floor(Some(7)), Some(4));
-		assert_eq!(buffering.floor(Some(1)), Some(0), "an offset past the start clamps");
+		assert_eq!(floor(&buffering, Some(7)), Some(4));
+		assert_eq!(floor(&buffering, Some(1)), Some(0), "an offset past the start clamps");
 
-		assert_eq!(Subscription::default().floor(None), Some(0));
+		assert_eq!(floor(&Subscription::default(), None), Some(0));
 
 		// The lowest range wins, and one unresolved range leaves the whole floor unresolved.
 		let mixed = Subscription::default().with_ranges([range(absolute(4, 0), None), Range::live()]);
-		assert_eq!(mixed.floor(Some(3)), Some(3));
-		assert_eq!(mixed.floor(Some(9)), Some(4));
-		assert_eq!(mixed.floor(None), None);
+		assert_eq!(floor(&mixed, Some(3)), Some(3));
+		assert_eq!(floor(&mixed, Some(9)), Some(4));
+		assert_eq!(floor(&mixed, None), None);
 
 		// Nothing asked for floors nowhere, and an empty range asks for nothing.
-		assert_eq!(Subscription::default().with_ranges([]).floor(None), Some(0));
+		assert_eq!(floor(&Subscription::default().with_ranges([]), None), Some(0));
 		let empty = Subscription::default().with_ranges([Range::groups(5..5), Range::groups(10..)]);
-		assert_eq!(empty.floor(None), Some(10));
+		assert_eq!(floor(&empty, None), Some(10));
 	}
 
 	/// The bounds a wire without ranges carries: the lowest absolute start and the highest
@@ -840,29 +805,5 @@ mod tests {
 			Order::Descending
 		);
 		assert_eq!(combine(&[descending, ascending]).unwrap().order, Order::Descending);
-	}
-
-	/// Any group newer than the hop held answers a request, a value it already holds asks
-	/// nothing, and merged requests are answered once every subscriber's would be.
-	#[test]
-	fn new_group_requests_merge() {
-		let zero = NewGroup::new(0, Some(5)).unwrap();
-		assert_eq!(zero, NewGroup { value: 0, first: 6 });
-		// A value past the next group is still answered by it, so it can never ask again.
-		let nine = NewGroup::new(9, Some(5)).unwrap();
-		assert_eq!(nine, NewGroup { value: 9, first: 6 });
-		assert_eq!(NewGroup::new(4, None), Some(NewGroup { value: 4, first: 0 }));
-		// A value the hop already holds is answered.
-		assert_eq!(NewGroup::new(5, Some(5)), None);
-		// Answered alike, the value goes up in place of the 0, and the higher value wins.
-		assert_eq!(zero.max(nine), nine);
-		assert_eq!(nine.max(zero), nine);
-		let six = NewGroup::new(6, Some(5)).unwrap();
-		assert_eq!(six.max(nine), nine);
-		assert_eq!(nine.max(six), nine);
-		// Otherwise the one answered later.
-		let later = NewGroup::new(0, Some(7)).unwrap();
-		assert_eq!(nine.max(later), later);
-		assert_eq!(later.max(nine), later);
 	}
 }

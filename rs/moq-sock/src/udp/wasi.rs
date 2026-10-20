@@ -14,6 +14,7 @@ pub struct UdpSocketState {
 }
 
 impl UdpSocketState {
+    /// Sets `socket` non-blocking and returns its state; WASI has no offloads to configure.
     pub fn new(socket: UdpSockRef<'_>) -> io::Result<Self> {
         socket.set_nonblocking(true)?;
 
@@ -25,6 +26,7 @@ impl UdpSocketState {
         send(socket, transmit)
     }
 
+    /// Receives datagrams into `bufs`, filling one [`RecvMeta`] per message, and returns how many messages arrived.
     pub fn recv(
         &self,
         socket: UdpSockRef<'_>,
@@ -82,6 +84,7 @@ impl UdpSocketState {
         socket.0.recv_buffer_size()
     }
 
+    /// Whether transmitted datagrams might get fragmented by the IP layer
     #[inline]
     pub fn may_fragment(&self) -> bool {
         true

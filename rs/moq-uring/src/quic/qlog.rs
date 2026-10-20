@@ -80,9 +80,8 @@ impl Sink {
 		let dir = dir.into();
 		let process = std::process::id();
 		let sink = NEXT_SINK.fetch_add(1, Ordering::Relaxed);
-		let started = std::time::SystemTime::now()
-			.duration_since(std::time::UNIX_EPOCH)
-			.unwrap_or_default()
+		let started = moq_clock::wall()
+			.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
 			.as_millis();
 
 		// A read-only or missing directory is reported here, where the

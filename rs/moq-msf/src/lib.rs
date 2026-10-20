@@ -17,6 +17,8 @@
 //! - <https://www.ietf.org/archive/id/draft-ietf-moq-msf-01.txt>
 //! - <https://www.ietf.org/archive/id/draft-ietf-moq-cmsf-00.txt>
 
+#![warn(missing_docs)]
+
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;

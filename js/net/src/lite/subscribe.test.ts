@@ -190,30 +190,25 @@ test("SubscribeStart carries the largest position on draft-07", async () => {
 });
 
 test("SubscribeEnd round-trips on draft-05", async () => {
-	// Type, length, group: no stream count before draft-07.
-	expect(await encode(Version.DRAFT_05, { end: new SubscribeEnd(7, 3) })).toEqual(new Uint8Array([1, 1, 7]));
-	const got = await responseRoundtrip(Version.DRAFT_05, { end: new SubscribeEnd(7, 3) });
+	// Type, length, exclusive final group.
+	expect(await encode(Version.DRAFT_05, { end: new SubscribeEnd(7) })).toEqual(new Uint8Array([1, 1, 7]));
+	const got = await responseRoundtrip(Version.DRAFT_05, { end: new SubscribeEnd(7) });
 	expect("end" in got).toBe(true);
 	if (!("end" in got)) throw new Error("expected end");
-	expect([got.end.group, got.end.streams]).toEqual([7, 0]);
+	expect(got.end.group).toBe(7);
 });
 
-test("SubscribeEnd carries the stream count on draft-07", async () => {
-	expect(await encode(Version.DRAFT_07, { end: new SubscribeEnd(7, 3) })).toEqual(new Uint8Array([1, 2, 7, 3]));
-	const got = await responseRoundtrip(Version.DRAFT_07, { end: new SubscribeEnd(7, 3) });
-	if (!("end" in got)) throw new Error("expected end");
-	expect([got.end.group, got.end.streams]).toEqual([7, 3]);
+test("SubscribeEnd has no stream count on draft-07", async () => {
+	expect(await encode(Version.DRAFT_07, { end: new SubscribeEnd(7) })).toEqual(new Uint8Array([1, 1, 7]));
 });
 
-test("SubscribeDrop is gone on draft-07", async () => {
-	const drop: SubscribeResponse = { drop: new SubscribeDrop({ start: 1, end: 3, error: 0 }) };
-	await expect(encode(Version.DRAFT_07, drop)).rejects.toThrow();
-
-	// A draft-06 DROP is an unknown response type on draft-07.
-	const wire06 = await encode(Version.DRAFT_06, drop);
-	await expect(
-		decodeSubscribeResponse(new Reader(undefined, wire06, Version.DRAFT_07), Version.DRAFT_07),
-	).rejects.toThrow("unknown subscribe response type: 2");
+test("SubscribeDrop is restored on draft-07", async () => {
+	const drop: SubscribeResponse = { drop: new SubscribeDrop({ start: 1, end: 3, error: 7 }) };
+	const wire = await encode(Version.DRAFT_07, drop);
+	expect(wire).toEqual(new Uint8Array([2, 3, 1, 3, 7]));
+	const got = await responseRoundtrip(Version.DRAFT_07, drop);
+	if (!("drop" in got)) throw new Error("expected drop");
+	expect([got.drop.start, got.drop.end, got.drop.error]).toEqual([1, 3, 7]);
 });
 
 test("SubscribeDrop is type 0x2 on draft-05 and 0x1 on draft-04", async () => {
@@ -312,3 +307,23 @@ test.each([Version.DRAFT_03, Version.DRAFT_05, Version.DRAFT_06])(
 		expect(decoded.order).toBe("descending");
 	},
 );
+
+test("wanted group survives lite-07 and disappears on legacy wires", async () => {
+	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+		for (const wantedGroup of [undefined, 0, 3, Number.MAX_SAFE_INTEGER]) {
+			const update = new SubscribeUpdate({ priority: 7, wantedGroup });
+			const encoded = await encodeMessage(version, update);
+			const decoded = await SubscribeUpdate.decode(new Reader(undefined, encoded, version), version);
+			expect(decoded.wantedGroup).toBe(version === Version.DRAFT_07 ? wantedGroup : undefined);
+		}
+	}
+});
+
+test("wanted groups refuse malformed input before writing bytes", async () => {
+	for (const wantedGroup of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN]) {
+		expect(() => new SubscribeUpdate({ priority: 0, wantedGroup })).toThrow(RangeError);
+		const update = new SubscribeUpdate({ priority: 0 });
+		update.wantedGroup = wantedGroup;
+		await expect(encodeMessage(Version.DRAFT_07, update)).rejects.toThrow(RangeError);
+	}
+});

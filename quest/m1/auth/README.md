@@ -48,10 +48,10 @@ Decisions settled while planning, recorded so review does not relitigate them:
   arrive on `requests()`, a moq-transport request is held to its token's
   grant, an update's token replaces it, and no lite wire changes. Step 2,
   lite requests naming an AUTH stream, is dropped; what it would have closed,
-  a request racing the token it relies on, is
-  [A request right behind its token](/quest/m1/auth/request-race.md). Step 3
+  a request racing the token it relies on, landed as a presenter-side wait in
+  [#5992](https://github.com/moq-dev/moq/pull/5992). Step 3
   sends outgoing request tokens on moq-transport through `Route::auth` as
-  `USE_VALUE` ([Live requests follow their auth](/quest/m1/auth/request-update.md));
+  `USE_VALUE` ([#5695](https://github.com/moq-dev/moq/pull/5695));
   lite has nothing to send, since the token already sits in the union.
 - ✅ Decided 2026-10-15 (maintainer, #5148): `auth::Handle::authorize`
   keeps its name and now means the connection credential's grant; the
@@ -97,7 +97,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   broadcast outside the union aborts the session with `Unauthorized`, naming
   the path. The check runs against the grants in hand once every token the
   session presented is answered, setup, replayed, or app-added alike
-  ([request race](/quest/m1/auth/request-race.md)). The origin is
+  ([#5992](https://github.com/moq-dev/moq/pull/5992)). The origin is
   untouched, so a broadcast shared across sessions (P2P hops, a cluster) is
   refused only where it is refused. Grant shrinkage cancels previously
   authorized work on this session without aborting it or deleting the shared
@@ -144,9 +144,7 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Required
 
-- [Live requests follow their auth](/quest/m1/auth/request-update.md) - a route swaps its auth and the session sends the update, keeping the request up
 - [Auth outlives its session](/quest/m1/auth/issuer.md) - one `auth::Handle` spans a connection's sessions, so a route's auth survives a reconnect
-- [A request right behind its token](/quest/m1/auth/request-race.md) - a lite request relying on a just-presented token is admitted, with no auth field on any request
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - extra credentials ride

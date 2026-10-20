@@ -118,9 +118,10 @@ ignores the end and start may keep cached objects of the old run under the same
 names, so an end and a start is not a cache flush.
 
 `moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
-RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
-passing the same [`moq --epoch`](/bin/cli#publisher-runs), which only the importers that derive their tracks from the input accept, except under [encryption](/concept/hang#encryption). See [Clustering](/bin/relay/cluster) for how a
-relay uses this.
+RTMP, SRT, and WHIP ingests mint one per connection. Independent importers use
+distinct epochs, even when fed one stream. Only replicas of one publisher's
+bytes share its epoch, such as one publisher announced through multiple relays. See [Clustering](/bin/relay/cluster) for
+how a relay uses this.
 
 ### Multiple CDNs
 
@@ -184,7 +185,12 @@ to a prefix. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
-union of every open token's grant. A token the peer has no verifier for, or
+union of every open token's grant. A request outside the known union waits
+while a non-empty token already presented is unanswered, then proceeds or
+fails against the settled union; a covered request does not wait. Each wait
+logs its path and duration. To renew without interrupting live requests the
+new grant still covers, await the new token's acceptance before dropping the
+old one. A token the peer has no verifier for, or
 whose grant is too large to send, fails with `Unsupported` and ends only that
 token; the session and its other grants stay up. A relay with an
 [auth server](/bin/relay/auth#in-band-renewal) verifies these tokens through it,
@@ -201,7 +207,9 @@ exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
 to namespace prefixes. Older versions have no grant; the URL token keeps working
 everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
-authorization token. The token belongs to the session that added it, so after a
+authorization token. Naming a fresh token renews the announcement in place with
+`REQUEST_UPDATE` from draft 16, and re-announces it on drafts 14 and 15, so it
+can outlive the token it started with. The token belongs to the session that added it, so after a
 reconnect the application adds it again and re-announces. moq-lite has no
 per-request token, so there an announcement rides the session's scope.
 
@@ -223,10 +231,16 @@ Each subscription carries the knobs that decide behavior under congestion:
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 | **Ranges** | Which groups to ask for: from a group, or a number of groups back from the latest, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
 
-Ranges are a request, not a filter. A subscriber reads from where its lowest
-range starts, and may also get groups another subscriber of the same track
-asked for. A relay merges its subscribers' ranges into one upstream request,
-which today's wire versions carry as the single span covering them.
+On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
+This lets a finished subscription settle without waiting for missing groups.
+Datagram delivery stays best effort.
+
+Ranges are both a request and a filter. A subscriber reads only the groups its
+own ranges cover, resolved again whenever it replaces them, even when another
+subscriber of the same track asked for more. Widening them, including lowering
+the start, also serves the cached groups they newly cover, never one already
+served. A relay merges its subscribers' ranges into one upstream request, which
+today's wire versions carry as the single span covering them.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
@@ -255,7 +269,10 @@ untimed.
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning
 reader or the next fetch finds it. That copy is not live meanwhile: readers get
-nothing from it until the source answers again.
+nothing from it until the source answers again, and its latest group is unknown
+until then too, so a player starting at the latest waits for the answer instead
+of starting from what the ended feed left. A reader's latest group stays within
+the groups it limits itself to, and ends once the track does.
 
 The publisher may declare a retention window per track. Omission sets no limit;
 zero keeps only the live edge. Relays preserve that declaration, and may still

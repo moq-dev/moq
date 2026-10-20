@@ -38,9 +38,8 @@ pub struct MoqSubscription {
 	/// The spans of the track to deliver, or null for everything `max_delay_us` still
 	/// considers fresh. An empty list asks for nothing.
 	///
-	/// A request to the publisher, aggregated across every subscriber. The one place it
-	/// touches this subscription's reads is where they start: at the lowest group any
-	/// range starts at.
+	/// A request to the publisher, aggregated across every subscriber, and this
+	/// subscription's read filter: it reads only the groups its own ranges cover.
 	#[uniffi(default = None)]
 	pub ranges: Option<Vec<MoqRange>>,
 	/// Which pending group the publisher sends first, or null for newest first.

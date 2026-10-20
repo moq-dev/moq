@@ -185,7 +185,7 @@ async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
 	updates
 }
 
-async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_net::Version>, expect_frame: bool) {
+async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_net::Version>) {
 	let (a_port, a) = spawn_relay(11, vec![], cluster_version).await;
 	let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], cluster_version).await;
 	let (c_port, c) = spawn_relay(
@@ -204,10 +204,7 @@ async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_ne
 	let updates = watcher.await.expect("viewer task");
 
 	// The announce is only half the contract: the route it advertises must
-	// actually serve a frame at the far end of the mesh. Over IETF cluster
-	// sessions that data path is still broken for UNKNOWN publishers (see
-	// unknown_publisher_frames_over_an_ietf_cluster below), so only the lite
-	// variant asserts it for now.
+	// actually serve a frame at the far end of the mesh.
 	let frame = read_first_frame(d_port).await;
 
 	drop(publisher);
@@ -223,9 +220,7 @@ async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_ne
 		unannounces, 0,
 		"the broadcast flapped while its publisher stayed up: {updates:?}"
 	);
-	if expect_frame {
-		assert_eq!(frame.expect("read through the mesh"), b"hello");
-	}
+	assert_eq!(frame.expect("read through the mesh"), b"hello");
 }
 
 /// Every ingest version that can carry a broadcast must survive the same
@@ -316,47 +311,13 @@ async fn unknown_publisher_republish_stays_routable() {
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_a_lite_cluster_triangle() {
-	assert_unknown_publisher_stays_announced(None, true).await;
+	assert_unknown_publisher_stays_announced(None).await;
 }
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
 	let version = "moq-transport-19".parse().expect("parse version");
-	assert_unknown_publisher_stays_announced(Some(version), false).await;
-}
-
-/// KNOWN GAP: over IETF inter-relay sessions an UNKNOWN publisher's broadcast
-/// now stays announced (the fix above), but its frames never arrive at the far
-/// relay - recv_group fails with `dropped` while a DECLARED publisher's frames
-/// flow fine over the same mesh. The fleet's inter-relay sessions negotiate
-/// lite, so this only bites IETF federation; pinned here so it isn't
-/// forgotten, ignored so it doesn't fail CI until the data path is fixed.
-#[tokio::test]
-#[ignore = "UNKNOWN publisher frames do not flow over IETF cluster sessions"]
-async fn unknown_publisher_frames_over_an_ietf_cluster() {
-	let version: moq_net::Version = "moq-transport-19".parse().expect("parse version");
-	let (a_port, a) = spawn_relay(11, vec![], Some(version)).await;
-	let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], Some(version)).await;
-	let (c_port, c) = spawn_relay(
-		13,
-		vec![format!("tcp://127.0.0.1:{a_port}"), format!("tcp://127.0.0.1:{b_port}")],
-		Some(version),
-	)
-	.await;
-	let (d_port, d) = spawn_relay(14, vec![format!("tcp://127.0.0.1:{c_port}")], Some(version)).await;
-	tokio::time::sleep(Duration::from_millis(500)).await;
-
-	let _publisher = publish_unknown(a_port).await;
-	tokio::time::sleep(Duration::from_millis(750)).await;
-
-	let frame = read_first_frame(d_port).await;
-
-	a.abort();
-	b.abort();
-	c.abort();
-	d.abort();
-
-	assert_eq!(frame.expect("read through the IETF mesh"), b"hello");
+	assert_unknown_publisher_stays_announced(Some(version)).await;
 }
 
 /// Same drill over Lite04 inter-relay sessions, which have no restart support.
@@ -367,7 +328,7 @@ async fn unknown_publisher_frames_over_an_ietf_cluster() {
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_a_lite04_cluster_triangle() {
 	let version = "moq-lite-04".parse().expect("parse version");
-	assert_unknown_publisher_stays_announced(Some(version), true).await;
+	assert_unknown_publisher_stays_announced(Some(version)).await;
 }
 
 /// The next route and whether it is active.

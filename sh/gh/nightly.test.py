@@ -2,8 +2,11 @@
 
 import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 
@@ -56,6 +59,38 @@ class NightlyTest(unittest.TestCase):
         self.assertIn("--bench wire", shared[0])
         self.assertEqual(release[-1], "just gh criterion -p moq-gst --bench catalog")
         self.assertTrue(calls[-1].startswith("just gh benchmark-report rust "))
+
+    def test_every_cargo_bench_target_runs_nightly(self):
+        covered = set()
+        workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
+        for group in ("rust-bench", "rust-extra", "rust-uring"):
+            self.assertIn(f"recipe: gh nightly {group}\n", workflow)
+            result, calls = self.run_group(group)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for call in calls:
+                args = shlex.split(call)
+                if args[:3] != ["just", "gh", "criterion"]:
+                    continue
+                packages = [args[i + 1] for i, arg in enumerate(args) if arg == "-p"]
+                targets = [args[i + 1] for i, arg in enumerate(args) if arg == "--bench"]
+                for package in packages:
+                    manifest = ROOT / "rs" / package / "Cargo.toml"
+                    for bench in tomllib.loads(manifest.read_text()).get("bench", []):
+                        if "*" in targets or bench["name"] in targets:
+                            covered.add((package, bench["name"]))
+        declared = {(manifest.parent.name, bench["name"])
+                    for manifest in (ROOT / "rs").glob("*/Cargo.toml")
+                    for bench in tomllib.loads(manifest.read_text()).get("bench", [])}
+        self.assertEqual(declared - covered, set(), "Cargo bench targets missing from Nightly")
+
+    def test_dev_shell_jobs_trust_the_nix_cache(self):
+        # Without the flake's substituter, the dev shell builds uncached tools from
+        # source and outlasts short jobs: the benchmark site timed out before publishing.
+        workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
+        jobs = re.split(r"^  (?=[\w-]+:\n)", workflow.split("\njobs:\n", 1)[1], flags=re.M)
+        for job in jobs:
+            if "nix develop" in job:
+                self.assertIn("uses: ./.github/actions/nix", job, job.splitlines()[0])
 
     def test_benchmark_tests_stay_out_of_cargo_bench(self):
         result, calls = self.run_group("rust-test")

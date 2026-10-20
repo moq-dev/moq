@@ -9,6 +9,7 @@ as well as by name. Values are any JSON-serializable Python object.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
@@ -19,13 +20,34 @@ from moq_ffi import (
     MoqJsonStreamConfig,
     MoqJsonStreamConsumer,
     MoqJsonStreamProducer,
+    MoqJsonValue,
 )
 
-from ._records import _opt_us
+from ._records import _opt_from_us, _opt_us
+from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand, TrackProducer
 from .subscribe import TrackConsumer
 
-__all__ = ["SnapshotConsumer", "SnapshotProducer", "StreamConsumer", "StreamProducer"]
+__all__ = ["SnapshotConsumer", "SnapshotProducer", "StreamConsumer", "StreamProducer", "Timed"]
+
+
+@dataclass(frozen=True)
+class Timed:
+    """A parsed JSON value and the timestamp of the frame that carried it.
+
+    ``timestamp`` is on the broadcast clock, and ``None`` on an untimed track. It is
+    rounded down to a whole microsecond, so a tick on a track like 90 kHz may not
+    survive a read and republish exactly.
+    """
+
+    value: Any
+    timestamp: timedelta | None
+
+    @staticmethod
+    def _from_ffi(value: MoqJsonValue | None) -> Timed | None:
+        if value is None:
+            return None
+        return Timed(value=json.loads(value.value), timestamp=_opt_from_us(value.timestamp_us))
 
 
 class SnapshotProducer:
@@ -92,12 +114,13 @@ class StreamProducer:
         self._inner.finish()
 
 
-class SnapshotConsumer:
-    """Async iterator over a JSON snapshot track, yielding the latest value (lossy).
+class SnapshotConsumer(_Stream[Timed]):
+    """Async iterator over a JSON snapshot track, yielding each state in order (lossy).
 
-    Each item is a parsed Python object. A consumer that has fallen behind collapses the backlog
-    and yields only the latest value. Pass the same ``compression`` the producer used. Usable as
-    an async context manager that cancels on exit.
+    Each item is a :class:`Timed`. Groups older than the subscription's ``max_delay`` are skipped,
+    so a playhead reader sets that budget to its distance behind live; :meth:`latest` skips to the
+    newest state instead. Pass the same ``compression`` the producer used. Usable as an async
+    context manager that cancels on exit.
     """
 
     def __init__(self, track: TrackConsumer, *, compression: bool = False) -> None:
@@ -105,51 +128,34 @@ class SnapshotConsumer:
         config = MoqJsonSnapshotConfig(compression=compression)
         self._inner = MoqJsonSnapshotConsumer(track._inner, config)
 
-    async def __aenter__(self):
-        return self
+    async def _next(self) -> Timed | None:
+        return Timed._from_ffi(await self._inner.next())
 
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
+    async def latest(self) -> Timed | None:
+        """Skip to the newest state, or wait for one. ``None`` once the track ends.
 
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Any:
-        value = await self._inner.next()
-        if value is None:
-            raise StopAsyncIteration
-        return json.loads(value)
+        Skipped states are gone; iteration continues after this one.
+        """
+        return Timed._from_ffi(await self._inner.latest())
 
     def cancel(self) -> None:
-        """Cancel all current and future next() calls."""
+        """Cancel all current and future reads."""
         self._inner.cancel()
 
 
-class StreamConsumer:
+class StreamConsumer(_Stream[Timed]):
     """Async iterator over a JSON stream track, yielding every record in order (lossless).
 
-    Each item is a parsed Python object. Pass the same ``compression`` the producer used. Usable
-    as an async context manager that cancels on exit.
+    Each item is a :class:`Timed`. Pass the same ``compression`` the producer used. Usable as an
+    async context manager that cancels on exit.
     """
 
     def __init__(self, track: TrackConsumer, *, compression: bool = False) -> None:
         config = MoqJsonStreamConfig(compression=compression)
         self._inner = MoqJsonStreamConsumer(track._inner, config)
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> Any:
-        value = await self._inner.next()
-        if value is None:
-            raise StopAsyncIteration
-        return json.loads(value)
+    async def _next(self) -> Timed | None:
+        return Timed._from_ffi(await self._inner.next())
 
     def cancel(self) -> None:
         """Cancel all current and future next() calls."""
