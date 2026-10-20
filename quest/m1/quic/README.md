@@ -64,9 +64,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 ## Required
 
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
-- [A reset group keeps its header](/quest/m1/quic/group-reset.md) - a lite
-  publisher resets a group with `RESET_STREAM_AT`, so its subscriber drops the
-  tail grace
 
 ## Related
 
