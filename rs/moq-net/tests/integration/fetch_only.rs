@@ -186,7 +186,7 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 			assert!(track.subscription().is_none(), "{version}: the query subscribed");
 
 			let mut sub = copy.subscribe(None).await.unwrap();
-			track.demand().used().await.unwrap();
+			crate::support::wanted(track.demand()).await.unwrap();
 			// Far from any arrival time, so a frame stamped on arrival cannot pass.
 			let stamp = Timestamp::from_millis(123_456).unwrap();
 			let mut group = track.append_group().unwrap();

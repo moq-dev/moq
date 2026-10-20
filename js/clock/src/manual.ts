@@ -16,6 +16,9 @@ export class Manual {
 	#timers: Timer[] = [];
 	#order = 0;
 	#revision = 0;
+	#fired = 0;
+	#firing = false;
+	#armed?: () => void;
 	#backend: Backend = {
 		now: () => this.#now,
 		wall: () => this.wall(),
@@ -26,6 +29,7 @@ export class Manual {
 			this.#up(timer.index);
 			this.#revision++;
 			this.#fire();
+			this.#armed?.();
 			return () => {
 				this.#remove(timer);
 			};
@@ -61,6 +65,35 @@ export class Manual {
 			await drain();
 			this.#fire();
 			if (revision === this.#revision) return;
+		}
+	}
+
+	/**
+	 * Wait until a timer is armed, advance exactly to the earliest deadline, then drain like
+	 * `advanceAsync` and return the instant reached. Awaits forever if no timer is ever armed.
+	 */
+	async fire(): Promise<Instant> {
+		if (this.#firing) throw new Error("fire already pending");
+		this.#firing = true;
+		const fired = this.#fired;
+		try {
+			for (;;) {
+				// Lets a pending microtask chain arm an earlier timer before choosing the deadline.
+				await drain();
+				// arm() runs an already-due timer at once, so it never waits in the heap.
+				const at = this.#fired !== fired ? this.#now : this.#timers[0]?.at;
+				if (at !== undefined) {
+					await this.advanceAsync(Instant.durationSince(Instant(at), this.#now));
+					return this.#now;
+				}
+				// A host task, such as I/O, may arm the timer later than any drain can wait for.
+				await new Promise<void>((resolve) => {
+					this.#armed = resolve;
+				});
+				this.#armed = undefined;
+			}
+		} finally {
+			this.#firing = false;
 		}
 	}
 
@@ -121,6 +154,7 @@ export class Manual {
 			if (!first || first.at > this.#now) return;
 			this.#remove(first);
 			this.#revision++;
+			this.#fired++;
 			first.ready();
 		}
 	}

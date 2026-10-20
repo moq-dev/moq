@@ -28,8 +28,6 @@ mod location;
 pub(crate) mod max_age;
 pub mod message;
 mod namespace;
-#[cfg(feature = "async")]
-mod new_group;
 mod object;
 pub mod peer;
 mod priority;

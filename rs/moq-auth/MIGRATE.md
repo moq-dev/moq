@@ -10,6 +10,9 @@ How to update your code for each breaking change, newest first.
 Wait on it with `moq_clock::sleep_until`, which runs on tokio's clock in production.
 `deadline` and `validate` read wall time from `moq_clock::wall()`, so a test on `moq_clock::sim` or a `moq_clock::Manual` clock decides when a grant expires; stamp `expires` from that clock too.
 
+`Key::verify` and the reference server's default expiry use that wall clock too.
+Session `End` durations and the server's idle-session accounting use its monotonic clock, so advancing controlled time advances those durations without a host-clock wait.
+
 ### Roles carry `Access` (#5697)
 
 `publish` and `subscribe` on `Claims`, `Permissions`, and `Grant` are `Access`, which holds the path patterns and an optional per-connection `Rate` cap.

@@ -2420,6 +2420,31 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 	}
 });
 
+/** An absolute filter has a fixed start, so its SUBSCRIBE is no join even over the refresh ratio. */
+test("draft-20: an absolute subscribe is no join", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, refresh: 0 });
+	writeGroup(track, 3);
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n },
+		}),
+	);
+
+	try {
+		expect(track.demand().wanted.peek()).toBe(0);
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
 /**
  * The draft's own current-group join: a Next Object subscription for the live tail, plus a
  * StartGroup=1 fill for the head already published. The two must meet exactly, so the head

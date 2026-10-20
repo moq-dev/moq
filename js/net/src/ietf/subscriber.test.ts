@@ -12,6 +12,7 @@ import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
+import * as demandUtil from "../util/demand.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { Connection } from "./connection.ts";
@@ -1239,22 +1240,24 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 	let returned: track.Subscriber | undefined;
 	const resumed = Promise.withResolvers<void>();
 	const waiting = Promise.withResolvers<void>();
+	const unwanted = demandUtil.unwanted;
+	const unwantedSpy = spyOn(demandUtil, "unwanted");
 	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
 		const producer = pending(request);
 		const demand = producer.demand();
-		const unused = demand.unused.bind(demand);
 		let returnedOnce = false;
-		spyOn(demand, "unused").mockImplementation(async () => {
+		unwantedSpy.mockImplementation(async (watched) => {
+			if (watched !== demand) return unwanted(watched);
 			if (returnedOnce) {
 				waiting.resolve();
-				return unused();
+				return unwanted(demand);
 			}
 			returnedOnce = true;
-			await unused();
-			const peek = demand.used.peek.bind(demand.used);
+			await unwanted(demand);
+			const peek = demand.wanted.peek.bind(demand.wanted);
 			// Return after the watcher checks demand, before its result crosses the
 			// promise race to the setup continuation. No real-time sleeps are involved.
-			const observed = spyOn(demand.used, "peek").mockImplementationOnce(() => {
+			const observed = spyOn(demand.wanted, "peek").mockImplementationOnce(() => {
 				const used = peek();
 				observed.mockRestore();
 				queueMicrotask(() => {
@@ -1270,6 +1273,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 	// Restore real timers even if an injection promise outlives the test.
 	onTestFinished(() => {
 		captured.mockRestore();
+		unwantedSpy.mockRestore();
 		opening.mockRestore();
 		first.close();
 		returned?.close();
@@ -1312,15 +1316,16 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 	const broadcast = subscriber.consume(Path.from("room"));
 	const pending = hooks.pendingTrackProducer;
 	const resumed = Promise.withResolvers<track.Subscriber>();
+	const unwanted = demandUtil.unwanted;
+	const unwantedSpy = spyOn(demandUtil, "unwanted");
 	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
 		const producer = pending(request);
 		const demand = producer.demand();
-		const unused = demand.unused.bind(demand);
-		spyOn(demand, "unused").mockImplementationOnce(async () => {
-			await unused();
-			const peek = demand.used.peek.bind(demand.used);
+		unwantedSpy.mockImplementationOnce(async (watched) => {
+			await unwanted(watched);
+			const peek = demand.wanted.peek.bind(demand.wanted);
 			let checks = 0;
-			const observed = spyOn(demand.used, "peek").mockImplementation(() => {
+			const observed = spyOn(demand.wanted, "peek").mockImplementation(() => {
 				const used = peek();
 				// The first check is the watcher; the second is the setup loop's
 				// final check. A queued viewer must see that cancellation committed.
@@ -1338,6 +1343,7 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 	// Runner timeouts do not unwind an async test parked on the injection promise.
 	onTestFinished(() => {
 		captured.mockRestore();
+		unwantedSpy.mockRestore();
 		first.close();
 		returned?.close();
 		broadcast.close();

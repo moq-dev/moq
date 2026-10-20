@@ -55,6 +55,19 @@ window; one failed coded-size growth tone (60/81) while the delay rose with
 real video lateness on the same `video/1`; one failed on a subscribe update
 racing the old track's finish (`stream aborted by the remote server`).
 
+2026-10-19: CI now runs the focused rename case independently after the full
+media run, so an unrelated cold-start failure no longer prevents the codec and
+coded-size measurements from running. The full media gate and all content,
+timing, tone and skew thresholds are unchanged. Workflow validation passed.
+
+The local focused run built the relay, CLI and browser page, then failed before
+any playback measurement: Playwright 1.64's pinned Chromium could not load
+`libglib-2.0.so.0` on NixOS. The installed Nix browser closure is Playwright
+1.63's Chromium and does not match the current pin. Establish the supported
+matching browser runtime before rerunning; no playback result or mutation
+control was obtained. Keep this quest open until the complete applicable
+oracle passes and the codec and size identity mutation controls are confirmed.
+
 ## Related
 
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - the same contract for the Rust publishers

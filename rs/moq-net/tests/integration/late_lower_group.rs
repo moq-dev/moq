@@ -136,7 +136,7 @@ async fn session(version: &str, relay: bool, start: Option<Position>) -> Vec<(u6
 		read_all(&mut sub).await
 	});
 
-	moq_clock::timeout(TIMEOUT, track.demand().used())
+	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();

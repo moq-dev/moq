@@ -23,9 +23,9 @@ use crate::rml::messages::{RtmpMessage, UserControlEventType};
 use crate::rml::sessions::StreamMetadata;
 use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
+use moq_clock::Instant;
 use std::collections::HashMap;
 use std::mem;
-use std::time::SystemTime;
 
 type ClientResult = Result<Vec<ClientSessionResult>, ClientSessionError>;
 
@@ -50,7 +50,7 @@ type ClientResult = Result<Vec<ClientSessionResult>, ClientSessionError>;
 /// Any violation of these points have a high probability of causing RTMP chunk parsing errors
 /// by either the `ClientSession` or the peer.
 pub struct ClientSession {
-	start_time: SystemTime,
+	start_time: Instant,
 	serializer: ChunkSerializer,
 	deserializer: ChunkDeserializer,
 	config: ClientSessionConfig,
@@ -72,7 +72,7 @@ impl ClientSession {
 	/// such as setting the outbound chunk size
 	pub fn new(config: ClientSessionConfig) -> Result<(ClientSession, Vec<ClientSessionResult>), ClientSessionError> {
 		let session = ClientSession {
-			start_time: SystemTime::now(),
+			start_time: Instant::now(),
 			serializer: ChunkSerializer::new(),
 			deserializer: ChunkDeserializer::new(),
 			next_transaction_id: 1,
@@ -889,22 +889,29 @@ impl ClientSession {
 	}
 
 	fn get_epoch(&self) -> RtmpTimestamp {
-		match self.start_time.elapsed() {
-			Ok(duration) => {
-				let milliseconds = (duration.as_secs() * 1000) + (duration.subsec_nanos() as u64 / 1_000_000);
-
-				// Casting to u32 should auto-wrap the value as expected.  If not a stream will probably
-				// break after 49 days but testing shows it should wrap
-				RtmpTimestamp::new(milliseconds as u32)
-			}
-
-			Err(_) => RtmpTimestamp::new(0), // Time went backwards, so just consider time as at epoch
-		}
+		// RTMP timestamps wrap every 2^32 milliseconds.
+		RtmpTimestamp::new(self.start_time.elapsed().as_millis() as u32)
 	}
 
 	fn get_next_transaction_id(&mut self) -> u32 {
 		let transaction_id = self.next_transaction_id;
 		self.next_transaction_id += 1;
 		transaction_id
+	}
+}
+
+#[cfg(test)]
+mod clock_tests {
+	use super::*;
+
+	#[moq_clock::test]
+	async fn session_epoch_uses_the_timer_clock() {
+		let (session, _) = ClientSession::new(ClientSessionConfig::new()).unwrap();
+		moq_clock::sleep(std::time::Duration::from_millis(12_345)).await;
+		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
+		moq_clock::sim::step_wall(moq_clock::Wall::UNIX_EPOCH);
+		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
+		moq_clock::sleep(std::time::Duration::from_millis(1 << 32)).await;
+		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
 	}
 }
