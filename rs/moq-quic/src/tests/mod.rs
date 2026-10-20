@@ -579,15 +579,15 @@ fn client_stateless_reset() {
 
 /// Restart the server from a fresh config built from `restart`, and report whether the client's
 /// next packet for the old connection drew a stateless reset
-fn restarted_server_resets(restart: &[u8]) -> bool {
+fn restarted_server_resets(restart: &[u8; 32]) -> bool {
     let _guard = subscribe();
-    let config = |secret: &[u8]| {
+    let config = |secret: &[u8; 32]| {
         let mut config = EndpointConfig::default();
         config.reset_secret(secret);
         Arc::new(config)
     };
 
-    let mut pair = Pair::new(config(b"first secret"), server_config());
+    let mut pair = Pair::new(config(&[1; 32]), server_config());
     let (client_ch, _) = pair.connect();
     pair.drive(); // Flush any post-handshake frames
     pair.server.endpoint = Endpoint::new(config(restart), Some(Arc::new(server_config())), true);
@@ -603,12 +603,12 @@ fn restarted_server_resets(restart: &[u8]) -> bool {
 
 #[test]
 fn reset_secret_survives_a_restart() {
-    assert!(restarted_server_resets(b"first secret"));
+    assert!(restarted_server_resets(&[1; 32]));
 }
 
 #[test]
 fn reset_secret_must_match() {
-    assert!(!restarted_server_resets(b"other secret"));
+    assert!(!restarted_server_resets(&[2; 32]));
 }
 
 /// After a restart every peer's next packet draws a reset at once, so a reset secret answers
@@ -617,7 +617,7 @@ fn reset_secret_must_match() {
 fn reset_secret_resets_connections_each_millisecond() {
     let _guard = subscribe();
     let mut config = EndpointConfig::default();
-    config.reset_secret(b"secret");
+    config.reset_secret(&[1; 32]);
     let mut cids = (config.connection_id_generator_factory)();
     let mut endpoint = Endpoint::new(Arc::new(config), Some(Arc::new(server_config())), true);
 

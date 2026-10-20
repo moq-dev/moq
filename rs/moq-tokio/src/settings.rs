@@ -32,8 +32,8 @@ pub struct Listen {
 	#[usage(env = "MOQ_LISTEN_QUIC_LB_NONCE", cli("--listen-quic-lb-nonce"))]
 	lb_nonce: Option<u64>,
 
-	#[usage(env = "MOQ_LISTEN_QUIC_RESET_KEY", cli("--listen-quic-reset-key"))]
-	reset_key: Option<String>,
+	#[usage(env = "MOQ_LISTEN_QUIC_RESET_SECRET", cli("--listen-quic-reset-secret"))]
+	reset_secret: Option<String>,
 
 	#[usage(flatten)]
 	tls: ListenTls,

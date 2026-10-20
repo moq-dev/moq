@@ -210,9 +210,9 @@ pub enum Error {
 	#[error("QUIC-LB connection IDs cannot be combined with per-core workers")]
 	ShardWithQuicLb,
 
-	/// The stateless reset key file could not be read, or holds too short a secret.
-	#[error("failed to load the stateless reset key")]
-	ResetKey(#[source] std::io::Error),
+	/// The stateless reset secret is neither 64 hexadecimal characters nor a file holding them.
+	#[error("invalid stateless reset secret")]
+	ResetSecret(#[source] crate::secret::Error),
 
 	/// The mTLS client verifier could not be built from the configured roots.
 	#[error("failed to build client certificate verifier")]
@@ -806,8 +806,9 @@ impl Server {
 		let mut endpoint_config = driver::EndpointConfig::default();
 		// First, since it also keys the default connection ID generator. The ones
 		// below validate a predecessor's IDs without it.
-		if let Some(secret) = config.reset_secret().map_err(Error::ResetKey)? {
-			endpoint_config.reset_secret(&secret);
+		if let Some(secret) = &config.reset_secret {
+			let secret = crate::secret::Secret::load(secret).map_err(Error::ResetSecret)?;
+			endpoint_config.reset_secret(secret.as_bytes());
 		}
 
 		// Configure connection ID generator with server ID if provided

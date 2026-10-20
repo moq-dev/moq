@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `mdns::Secret` is `secret::Secret` (#5910)
+
+The 32-byte secret type moved out of `mdns` so `listen.reset_secret` shares it.
+Name it `moq_tokio::secret::Secret`; `new` and `load` now return `secret::Error` instead of `mdns::Error`.
+
 ### `jemalloc::tikv_jemallocator` is 0.7 (#6053)
 
 The re-exported allocator crate moved from tikv-jemallocator 0.6 to 0.7.

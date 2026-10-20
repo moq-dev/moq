@@ -105,7 +105,7 @@ impl Endpoint {
 		// MTU discovery is off (the GSO pool sends fixed SEGMENT datagrams),
 		// so the endpoint has no reason to allow it either.
 		let endpoint = moq_quic::Endpoint::new(
-			super::endpoint_config(socket.shard(), config.reset_secret.as_deref())?,
+			super::endpoint_config(socket.shard(), config.reset_secret.as_ref())?,
 			server,
 			false,
 		);

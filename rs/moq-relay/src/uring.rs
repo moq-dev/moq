@@ -77,9 +77,9 @@ struct Serve {
 	/// `listen.timeout`, which each worker's endpoint starts at a connection's
 	/// first packet.
 	timeout: Option<std::time::Duration>,
-	/// `listen.reset_key`'s secret, shared so any worker resets any worker's
+	/// `listen.reset_secret`, shared so any worker resets any worker's
 	/// connections, a restarted group's included.
-	reset_secret: Option<Arc<[u8]>>,
+	reset_secret: Option<[u8; 32]>,
 }
 
 /// A bound group of io_uring QUIC workers sharing one port.
@@ -105,7 +105,7 @@ pub struct Workers {
 	alpns: Arc<Vec<String>>,
 	versions: moq_net::Versions,
 	timeout: Option<std::time::Duration>,
-	reset_secret: Option<Arc<[u8]>>,
+	reset_secret: Option<[u8; 32]>,
 
 	threads: Vec<(u16, std::thread::JoinHandle<()>)>,
 	stops: Vec<Arc<Stop>>,
@@ -219,9 +219,12 @@ impl Workers {
 		udp.gso = quic.gso.unwrap_or(true);
 
 		let reset_secret = listen
-			.reset_secret()
-			.context("failed to load the stateless reset key")?
-			.map(Arc::from);
+			.reset_secret
+			.as_deref()
+			.map(moq_tokio::secret::Secret::load)
+			.transpose()
+			.context("invalid --listen-quic-reset-secret")?
+			.map(|secret| *secret.as_bytes());
 
 		let (failures_tx, failures) = tokio::sync::mpsc::unbounded_channel();
 		tracing::info!(workers = count, %addr, "bound io_uring QUIC workers");
@@ -290,7 +293,7 @@ impl Workers {
 			versions: self.versions.clone(),
 			local: self.addr,
 			timeout: self.timeout,
-			reset_secret: self.reset_secret.clone(),
+			reset_secret: self.reset_secret,
 		};
 
 		let cores = match self.pin {
@@ -533,7 +536,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
 		endpoint_config.activity = serve.shutdown.activity.clone();
 		endpoint_config.handshake.timeout = serve.timeout;
-		endpoint_config.reset_secret = serve.reset_secret.clone();
+		endpoint_config.reset_secret = serve.reset_secret;
 		let endpoint =
 			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))

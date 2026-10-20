@@ -28,7 +28,7 @@ use super::server;
 pub use super::driver::Endpoint;
 
 /// What an endpoint serves, beyond dialing.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct Config {
 	/// Tracks accepted connections from admission until transport closure.
@@ -48,14 +48,27 @@ pub struct Config {
 	/// How incoming handshakes are bounded.
 	pub handshake: super::handshake::Config,
 
-	/// The secret the stateless reset key is derived from, or `None` for a random
-	/// key per endpoint.
+	/// The random 32-byte secret the stateless reset key is derived from, or
+	/// `None` for a random key per endpoint.
 	///
 	/// A restarted endpoint given the same secret resets its predecessor's
 	/// connections instead of leaving peers to wait out their idle timeout. Live
 	/// endpoints sharing it reset each other's, so only share it behind one
 	/// address that routes by connection ID.
-	pub reset_secret: Option<std::sync::Arc<[u8]>>,
+	pub reset_secret: Option<[u8; 32]>,
+}
+
+// By hand, so the reset secret never reaches a log.
+impl std::fmt::Debug for Config {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Config")
+			.field("activity", &self.activity)
+			.field("server", &self.server)
+			.field("backlog", &self.backlog)
+			.field("handshake", &self.handshake)
+			.field("reset_secret", &self.reset_secret.map(|_| "[redacted]"))
+			.finish()
+	}
 }
 
 impl Default for Config {

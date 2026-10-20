@@ -1,4 +1,4 @@
-//! A server restarted with the same `listen.reset_key` resets its predecessor's
+//! A server restarted with the same `listen.reset_secret` resets its predecessor's
 //! connections, so a peer learns at once that they are gone instead of waiting out
 //! its idle timeout.
 //!
@@ -11,11 +11,13 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use moq_tokio::quic::driver;
 
+const RESET_SECRET: &str = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+
 struct Fixture {
 	cert: rustls::pki_types::CertificateDer<'static>,
 	cert_path: PathBuf,
 	key_path: PathBuf,
-	reset_key: PathBuf,
+	reset_secret: PathBuf,
 	_dir: tempfile::TempDir,
 }
 
@@ -36,13 +38,13 @@ impl Fixture {
 			cert: cert.der().clone(),
 			cert_path: write("server.pem", cert.pem().as_bytes()),
 			key_path: write("server.key", key.serialize_pem().as_bytes()),
-			reset_key: write("reset.key", &[0x5a; 32]),
+			reset_secret: write("reset.key", format!("{RESET_SECRET}\n").as_bytes()),
 			_dir: dir,
 		}
 	}
 
 	/// Serve on `port` (0 for any) from a runtime of its own, returned with the bound port.
-	fn serve(&self, port: u16, reset_key: bool) -> (tokio::runtime::Runtime, u16) {
+	fn serve(&self, port: u16, reset_secret: Option<String>) -> (tokio::runtime::Runtime, u16) {
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(1)
 			.enable_all()
@@ -53,7 +55,7 @@ impl Fixture {
 		config.listen.bind = Some(format!("127.0.0.1:{port}").parse().unwrap());
 		config.listen.tls.cert = vec![self.cert_path.clone()];
 		config.listen.tls.key = vec![self.key_path.clone()];
-		config.listen.reset_key = reset_key.then(|| self.reset_key.clone());
+		config.listen.reset_secret = reset_secret;
 
 		let port = runtime.block_on(async move {
 			let mut listener = config
@@ -79,7 +81,10 @@ impl Fixture {
 
 /// Connect, crash the server and restart it on the same port, then report how the
 /// client's connection ended once it next sent something.
-fn restart(reset_key: bool) -> Result<driver::ConnectionError, tokio::time::error::Elapsed> {
+///
+/// With a secret, the predecessor reads it from a file and the successor takes the
+/// same hex inline, so both forms must derive the same key.
+fn restart(reset_secret: bool) -> Result<driver::ConnectionError, tokio::time::error::Elapsed> {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let fixture = Fixture::new();
 	let client = tokio::runtime::Builder::new_current_thread()
@@ -87,7 +92,8 @@ fn restart(reset_key: bool) -> Result<driver::ConnectionError, tokio::time::erro
 		.build()
 		.expect("client runtime");
 
-	let (server, port) = fixture.serve(0, reset_key);
+	let file = reset_secret.then(|| fixture.reset_secret.to_str().unwrap().to_string());
+	let (server, port) = fixture.serve(0, file);
 	let (_endpoint, conn) = client.block_on(async {
 		let mut roots = rustls::RootCertStore::empty();
 		roots.add(fixture.cert.clone()).expect("root");
@@ -111,7 +117,7 @@ fn restart(reset_key: bool) -> Result<driver::ConnectionError, tokio::time::erro
 	});
 
 	drop(server);
-	let (_server, _) = fixture.serve(port, reset_key);
+	let (_server, _) = fixture.serve(port, reset_secret.then(|| RESET_SECRET.to_string()));
 
 	client.block_on(async {
 		let mut send = conn.open_uni(Default::default()).await.expect("open");

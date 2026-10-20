@@ -2157,7 +2157,7 @@ async fn lan_discovery(
 		config = config.with_node(url);
 	}
 	if let Some(secret) = secret {
-		let secret = moq_tokio::mdns::Secret::load(secret).context("invalid --cluster-lan-secret")?;
+		let secret = moq_tokio::secret::Secret::load(secret).context("invalid --cluster-lan-secret")?;
 		config = config.with_secret(secret);
 	}
 	Ok(config.advertise().await?)

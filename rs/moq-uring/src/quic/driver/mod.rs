@@ -95,7 +95,7 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 /// key, and the largest datagram we tell peers we can receive.
 pub(crate) fn endpoint_config(
 	shard: Option<moq_sock::shard::Shard>,
-	reset_secret: Option<&[u8]>,
+	reset_secret: Option<&[u8; 32]>,
 ) -> Result<Arc<moq_quic::EndpointConfig>, Error> {
 	let mut config = moq_quic::EndpointConfig::default();
 	// The random ids below validate a predecessor's too, so the reset reaches them.

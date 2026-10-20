@@ -89,8 +89,8 @@ impl EndpointConfig {
         self
     }
 
-    /// Derive the reset key from `secret` with HKDF-SHA256, so an endpoint restarted with the same
-    /// secret resets its predecessor's connections
+    /// Derive the reset key from a random 32-byte `secret` with HKDF-SHA256, so an endpoint
+    /// restarted with the same secret resets its predecessor's connections
     ///
     /// Every endpoint holding the secret resets every other holder's connections, so RFC 9000
     /// section 21.11 requires that packets for a live connection only ever reach its owner: share
@@ -106,7 +106,7 @@ impl EndpointConfig {
     /// 20ms takes 40s. A reset is always smaller than the packet that drew it, so this never
     /// amplifies, and the limit still caps what a flood of spoofed packets can reflect.
     #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-    pub fn reset_secret(&mut self, secret: &[u8]) -> &mut Self {
+    pub fn reset_secret(&mut self, secret: &[u8; 32]) -> &mut Self {
         #[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
         use aws_lc_rs::{hkdf, hmac};
         #[cfg(feature = "ring")]
