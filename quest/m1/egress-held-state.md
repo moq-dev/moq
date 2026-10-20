@@ -68,7 +68,7 @@ Recommended directions (the implementer settles the shape):
   decide who gets the next stream.
 - A parked group that can no longer be served (aborted, evicted, expired)
   leaves at once and is named to the subscriber where the version can, through
-  [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
+  SUBSCRIBE_DROP.
 - The serving budget never exceeds what this hop would retain anyway: clamp
   the requested or defaulted max delay by the local retention (the
   `cache_duration` ceiling, the track's `max_age`, and possibly the pool's idle
@@ -113,7 +113,6 @@ none on the wire; possibly a relay default).
 
 - [Bound incomplete messages](/quest/m1/quic/receive-memory.md) - the ingress counterpart: a receiver withholds QUIC credit to bound what it holds, and this quest bounds what the sender holds while it does
 - [Rust request credit](/quest/m1/rs-request-credit.md) - requests fail fast without stream credit; publisher group streams are left to this quest
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - how a publisher names a group it gave up on
 - [Scope track priority](/quest/m1/track-priority-scope.md) - who gets the next stream across subscriptions and tenants
 - [Public serving](/quest/m1/public-model/serve.md) - makes group expiry while serving public; coordinate the publisher serve loops with it
 - [Treat network input as untrusted](https://github.com/moq-dev/moq/pull/5961) - the rule this quest applies

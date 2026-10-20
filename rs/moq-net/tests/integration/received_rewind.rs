@@ -91,7 +91,7 @@ async fn relay(downstream: &str) -> (Option<moq_net::Timescale>, Vec<u64>) {
 		(timescale, got)
 	});
 
-	moq_clock::timeout(TIMEOUT, track.demand().used())
+	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();

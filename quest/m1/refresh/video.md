@@ -42,7 +42,3 @@ covers a ratio crossing within 500 ms of the previous keyframe.
 
 Public API: set by the open decision above, either an encoder or rendition
 config field for the ratio, or none for a fixed default. Wire: none.
-
-## Required
-
-- [Core](/quest/m1/refresh/core.md) - `Demand::wanted` and `track::Info::refresh`

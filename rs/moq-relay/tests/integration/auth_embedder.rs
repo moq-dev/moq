@@ -158,10 +158,14 @@ async fn gateway_admission_refuses_once_in_the_shared_stats_registry() {
 	let (result, ()) = tokio::join!(
 		cluster.admit(&auth, auth.request(Transport::Srt, "/unattributed")),
 		async {
-			admissions.next().await.unwrap().refuse(auth::Error::Refused);
+			admissions
+				.next()
+				.await
+				.unwrap()
+				.refuse(auth::Error::Refused(Default::default()));
 		}
 	);
-	assert!(matches!(result, Err(auth::Error::Refused)));
+	assert!(matches!(result, Err(auth::Error::Refused(_))));
 	let values = registry.snapshot().sessions();
 	assert_eq!(values.len(), 1);
 	assert_eq!(values[0].0, moq_net::stats::Tier::default());
@@ -174,4 +178,43 @@ async fn gateway_admission_refuses_once_in_the_shared_stats_registry() {
 		"",
 		"a refused admission counts under the empty label"
 	);
+}
+
+#[tokio::test]
+async fn embedded_expired_refusals_keep_verified_root_and_tier() {
+	tokio::time::pause();
+	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let mut config = moq_relay::stats::Config::default();
+	config.enabled = true;
+	let producer = config.build(cluster.origin.clone());
+	let registry = producer.registry().clone();
+	let cluster = cluster.with_stats(producer);
+	let (auth, mut admissions) = auth::Auth::embedded("edge");
+	for tier in [None, Some("edge")] {
+		let mut refusal = moq_auth::Refusal::default();
+		refusal.reason = moq_auth::refusal::Reason::Expired;
+		refusal.root = Some("verified/tenant".into());
+		refusal.tier = tier.map(str::to_owned);
+		let expected = refusal.clone();
+		let (result, ()) = tokio::join!(
+			cluster.admit(&auth, auth.request(Transport::Rtmp, "/attacker/path")),
+			async {
+				admissions.next().await.unwrap().refuse(auth::Error::Refused(refusal));
+			}
+		);
+		let Err(auth::Error::Refused(actual)) = result else {
+			panic!("expected typed refusal")
+		};
+		assert_eq!(actual, expected);
+	}
+	let mut report = moq_net::stats::Report::default();
+	registry.report(&mut report);
+	assert_eq!(report.sessions.len(), 2);
+	for entry in report.sessions {
+		assert!(["", "edge"].contains(&entry.tier.as_str()));
+		assert_eq!(entry.label.as_str(), "verified/tenant");
+		let presence = entry.presence;
+		assert_eq!(presence.sessions_started, 0);
+		assert_eq!(presence.sessions_refused.expired, 1);
+	}
 }

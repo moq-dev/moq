@@ -30,4 +30,4 @@ Public API: behavior only. Wire: none.
 
 ## Related
 
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - explicit terminal dispositions end recovery without waiting for a newer group
+- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - explicit terminal dispositions end recovery without waiting for a newer group

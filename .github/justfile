@@ -6,15 +6,16 @@ check:
     sh/gh/alert.sh check-coverage
     bun test sh/gh/alert.test.ts
     bun sh/gh/check-runs.ts
+    python3 bench/relay.test.py
 
 # Tests of repository tooling; nightly, not on every pull request.
 test:
+    python3 sh/coverage.test.py
     python3 sh/size/report.test.py
     python3 sh/size/release.test.py
     python3 sh/size/nightly.test.py
     python3 bench/compare.test.py
     python3 bench/summary.test.py
-    python3 bench/relay.test.py
     python3 bench/profile.test.py
     python3 bench/ffi.test.py
     python3 sh/gh/gst-formula.test.py
@@ -26,10 +27,11 @@ test:
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
     python3 sh/gh/ffi.test.py
-    bun test sh/gh/ffi.test.ts
+    bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts
     python3 sh/rs/package-rename.test.py
     python3 sh/rs/select.test.py
     python3 sh/js/workspace.test.py
+    python3 sh/js/audit.test.py
     python3 sh/rs/test-lints.test.py
     python3 sh/rs/model-markers.test.py
     python3 sh/gh/nightly.test.py
