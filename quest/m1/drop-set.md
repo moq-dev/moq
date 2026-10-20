@@ -20,14 +20,16 @@ which keeps drops final for now.
 
 - **One run-length set per track.** The track state keeps the dropped and
   expired group runs within the subscription range. Each run carries its
-  reason (stale, cut, never produced, evicted) and, for a stale run, the
+  reason (stale, cut, never produced, evicted or expired past retention)
+  and, for a stale run, the
   budget it was judged under. A group that arrives removes its sequence; a
   drop never removes a group that already arrived.
 - **Each cursor judges for itself, a run at a time.** A cursor walks the
   set's runs in its range, never their sequences, and settles each whole run
   in O(1):
   - A run whose reason does not depend on the budget (a cut, a group never
-    produced) is dropped for every reader as one range, as today.
+    produced, an eviction or retention expiry) is dropped for every reader
+    as one range, as today.
   - A received stale run is dropped promptly as one range for a reader
     whose budget is no wider than the one it was judged under and whose
     range covers this relay's aggregate range for the track, which the
@@ -76,8 +78,13 @@ which keeps drops final for now.
   and the B2 re-drop look identical, and no guess settles a B2 reader. On
   lite-07 SUBSCRIBE_DROP carries `Max Age`: the budget a staleness verdict
   was judged under, encoded like `Publisher Max Age` (milliseconds plus one),
-  with `0` for a drop that does not depend on the budget (a cut, a group
-  never produced). The relay records each run with that exact budget. A B1
+  with `0` for a drop that does not depend on the budget: a cut, a group
+  never produced, or a group evicted or expired past retention, none of
+  which depends on the reader's budget. A widening never reverses a `0`
+  drop; a reader that still wants an evicted group asks for it again with a
+  past-range request, as resolved-demand already does, and the upstream
+  fills it if it still holds it. The relay records each run with that
+  exact budget. A B1
   drop then settles only readers no wider than B1, and the B2 re-drop
   settles a B2 reader. The cost is one varint per drop, a few bytes on an
   event that is already per group, which is worth an unambiguous term.
@@ -124,7 +131,8 @@ unknown again.
 
 The per-cursor record keeps resolved-demand's pool bound and floor rule,
 with "final" narrowed: only a delivered run or a budget-independent drop (a
-cut, a group never produced, or any drop reported over lite-05 or lite-06)
+cut, a group never produced, an eviction or retention expiry, or any drop
+reported over lite-05 or lite-06)
 folds into the floor. A stale run reported on lite-07 within reach of the
 max age bound is budget-qualified, so it is treated like an unknown hole:
 the floor never rises over it, and if the pool must evict it or a run above
@@ -162,6 +170,10 @@ Test on mock time through a relay:
 - Through a lite-06 hop, a reported group stays dropped for every reader,
   with no session error.
 - A shrink sends no drops.
+- Rust and `js/net` each encode and decode an eviction drop and a
+  retention-expiry drop with `Max Age` `0`, across languages, and a
+  widening re-offers neither, while a past-range request still gets an
+  evicted group the upstream holds.
 - A reader whose range is narrower than the relay's aggregate range is not
   settled by a received stale drop: it fills G by range and gets G or a
   drop judged under its own range, while a reader covering the aggregate
