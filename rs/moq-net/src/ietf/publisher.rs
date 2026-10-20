@@ -26,10 +26,9 @@ use crate::{
 use super::{Message, Version, cluster, error::request, peer, request_update};
 
 /// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
+const MAX_SAFE_DELAY_MS: u64 = super::max_age::MAX_MILLIS;
 
-/// Build the serving-side subscription for a peer whose wire protocol carries no
-/// max delay preference. The receiver applies its own budget after the transfer.
+/// Preserve retained groups when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
@@ -1225,6 +1224,9 @@ where
 					// A live SUBSCRIBE's NEW_GROUP_REQUEST asks nothing more: subscribing is itself
 					// a join, which the track's refresh ratio judges.
 					let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
+					if let Some(max_age) = msg.max_age {
+						subscription.max_delay = Duration::from_millis(max_age);
+					}
 					// A range that resolves without the live edge has a fixed start, which is no
 					// join: bound the subscription before subscribing so the ratio never judges it.
 					// From the start of its group, so a relay's copy holds the group's head for
@@ -1722,6 +1724,11 @@ where
 			serve
 				.set_priority(super::priority::from_wire(priority))
 				.map_err(failed)?;
+		}
+		if let Some(max_age) = update.max_age {
+			let mut subscription = serve.track.subscription();
+			subscription.max_delay = Duration::from_millis(max_age);
+			serve.track.update(subscription).map_err(failed)?;
 		}
 		if let Some(value) = update.new_group {
 			serve.request_new_group(value);
@@ -6980,6 +6987,7 @@ mod serve_tests {
 			Version::Draft14 => {
 				let mut body = Vec::new();
 				ietf::SubscribeUpdate {
+					max_age: None,
 					new_group: None,
 					request_id: RequestId(UPDATE_ID.into()),
 					subscription_request_id: Some(RequestId(0)),
@@ -7097,6 +7105,7 @@ mod serve_tests {
 	fn new_group_update(version: Version, id: u64, value: u64) -> Vec<u8> {
 		let mut body = Vec::new();
 		ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: Some(value),
 			request_id: RequestId(id),
 			subscription_request_id: matches!(version, Version::Draft15 | Version::Draft16).then_some(RequestId(0)),
@@ -7292,6 +7301,7 @@ mod serve_tests {
 			Version::Draft14 => {
 				let mut body = Vec::new();
 				ietf::SubscribeUpdate {
+					max_age: None,
 					new_group: None,
 					request_id: RequestId(2),
 					subscription_request_id: Some(RequestId(0)),
@@ -7713,6 +7723,7 @@ mod serve_tests {
 
 	fn subscribe(filter: Filter, fill: Option<ietf::Fill>) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(REQUEST_ID),
 			track_namespace: crate::Path::new("room"),
@@ -11264,6 +11275,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(0x40),
 			subscription_request_id,
@@ -11576,6 +11588,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(rid),
 			subscription_request_id,
@@ -11602,6 +11615,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(rid),
 			subscription_request_id,
@@ -12800,8 +12814,7 @@ mod tests {
 		slot
 	}
 
-	/// moq-transport cannot carry the receiver's max delay budget, so the serving
-	/// subscription must preserve everything the producer still retains.
+	/// An absent max age preserves everything the producer still retains.
 	#[test]
 	fn serving_subscription_keeps_retained_backlog() {
 		let producer = track::Producer::new(
@@ -14105,6 +14118,7 @@ mod tests {
 			},
 			solicit,
 			hidden: false,
+			max_age: false,
 			auth: false,
 			active_count: false,
 			epoch: false,
@@ -15024,6 +15038,7 @@ mod tests {
 			.run_subscribe_stream(
 				stream,
 				ietf::Subscribe {
+					max_age: None,
 					new_group: None,
 					request_id: RequestId(1),
 					track_namespace: crate::Path::new("nothing/here"),
@@ -15397,6 +15412,7 @@ mod range_tests {
 
 	fn subscribe(filter: Filter) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("broadcast"),

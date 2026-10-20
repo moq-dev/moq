@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { GrantSchema, RequestSchema, TokenSchema } from "./contract.ts";
+import { GrantSchema, RefusalSchema, RequestSchema, TokenSchema } from "./contract.ts";
 
 // The fixtures below are what the Rust `moq_auth::Request` and `Grant` serialize to,
 // so a server written against these schemas reads what a relay sends.
@@ -126,4 +126,17 @@ test("a grant round trips and is validated", () => {
 test("an auth endpoint grant accepts a capped role", () => {
 	const grant = GrantSchema.parse({ publish: { path: "alice/**", rate: 8_000_000 } });
 	expect(grant).toHaveProperty("publish.rate", 8_000_000);
+});
+
+test("refusal reasons preserve verified attribution and accept future reasons", () => {
+	for (const reason of ["refused", "forbidden", "expired"] as const) {
+		expect(RefusalSchema.parse({ reason, root: "tenant", tier: "edge" })).toEqual({
+			reason,
+			root: "tenant",
+			tier: "edge",
+		});
+		expect(RefusalSchema.parse({ reason })).toEqual({ reason });
+	}
+	expect(RefusalSchema.parse({ reason: "future" })).toEqual({ reason: "refused" });
+	expect(RefusalSchema.safeParse({ reason: 42 }).success).toBe(false);
 });

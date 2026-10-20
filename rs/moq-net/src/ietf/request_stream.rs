@@ -305,6 +305,7 @@ pub(super) struct Update {
 	/// The first Request ID: the update's own on drafts 14-16, which their answer names.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
+	pub(super) max_age: Option<u64>,
 	/// Why the update is refused, which fails the subscription: [`Error::GoingAway`],
 	/// [`Error::Unsupported`], a
 	/// [`DecodeError::MalformedAuthToken`] for tokens that repeat, or a
@@ -328,7 +329,7 @@ impl Update {
 
 	/// Decode the message body, after its type and length.
 	fn decode_body(data: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		use super::{Fill, Filter, Location, Opaque, Parameters, RequestId};
+		use super::{Fill, Filter, Location, Opaque, RequestId};
 		let request_id = RequestId::decode(data, version)?;
 		match version {
 			Version::Draft14 => {
@@ -341,7 +342,10 @@ impl Update {
 				let _end_group = data.varint()?;
 				let priority = data.u8()?;
 				let forward = data.bool()?;
-				let tokens = Parameters::skip_request(data)?;
+				decode_params!(data, version,
+					0x03 => tokens: Vec<super::token::RequestToken>,
+					super::max_age::PARAMETER => max_age: Option<u64>,
+				);
 				if !data.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
@@ -349,6 +353,7 @@ impl Update {
 				return Ok(Self {
 					request_id,
 					priority: Some(priority),
+					max_age: super::max_age::validate(max_age)?,
 					refused,
 					authorization_token,
 					new_group: None,
@@ -377,6 +382,7 @@ impl Update {
 			0x28 => property_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x29 => track_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x32 => new_group: Option<u64> where super::subscribe::has_new_group_request(version),
+			super::max_age::PARAMETER => max_age: Option<u64>,
 		);
 		if !data.is_empty() {
 			return Err(DecodeError::InvalidValue);
@@ -396,6 +402,7 @@ impl Update {
 		Ok(Self {
 			request_id,
 			priority,
+			max_age: super::max_age::validate(max_age)?,
 			refused,
 			authorization_token,
 			new_group,
