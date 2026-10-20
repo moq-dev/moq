@@ -862,16 +862,16 @@ class World:
                 candidates = [convoy_point, *nearby_spawn_points(points, convoy_point.location)]
 
             vehicle = self._spawn_vehicle(truck_bp, candidates)
-            # A synchronous spawn lands on the next tick, and the transform the
-            # convoy is laid out from is read back from that tick's snapshot.
-            self._world.wait_for_tick(SPAWN_TICK_TIMEOUT)
-            if index == 0:
-                lead_transform = vehicle.get_transform()
             cameras: list[carla.Sensor] = []
             # Every sensor spawned so far, in spawn order, so the failure paths
             # below can walk them without caring which kind each one is.
             sensors: list[carla.Sensor] = []
             try:
+                # A synchronous spawn lands on the next tick, and the transform the
+                # convoy is laid out from is read back from that tick's snapshot.
+                self._world.wait_for_tick(SPAWN_TICK_TIMEOUT)
+                if index == 0:
+                    lead_transform = vehicle.get_transform()
                 for rendition in camera.renditions():
                     camera_bp = library.find("sensor.camera.rgb")
                     camera_bp.set_attribute("image_size_x", str(rendition.width))
@@ -903,7 +903,7 @@ class World:
                 try:
                     vehicle.destroy()
                 except RuntimeError as err:
-                    log.warning("failed to clean up vehicle after %s sensor spawn failed: %s", name, err)
+                    log.warning("failed to clean up vehicle after %s spawn failed: %s", name, err)
                 raise
             try:
                 truck = Truck(

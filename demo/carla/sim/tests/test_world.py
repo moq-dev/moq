@@ -608,6 +608,34 @@ def test_sensor_spawn_failure_attempts_every_cleanup(interrupt: BaseException) -
     assert events == ["sd.destroy", "hd.destroy", "vehicle.destroy"]
 
 
+def test_spawn_tick_failure_destroys_the_vehicle() -> None:
+    """The vehicle is in the world before its landing tick, and `destroy` cannot see it yet."""
+    events = []
+    blueprint = SimpleNamespace(set_attribute=lambda *_args: None, has_attribute=lambda _name: True)
+    transform = SimpleNamespace(location=SimpleNamespace(x=0.0, y=0.0, z=0.0))
+    vehicle = SimpleNamespace(id=1, destroy=lambda: events.append("vehicle.destroy"))
+
+    def wait_for_tick(_timeout: float) -> None:
+        raise RuntimeError("time-out while waiting for the simulator")
+
+    world = World.__new__(World)
+    world._world = SimpleNamespace(
+        get_blueprint_library=lambda: SimpleNamespace(find=lambda _name: blueprint),
+        get_map=lambda: SimpleNamespace(get_spawn_points=lambda: [transform]),
+        try_spawn_actor=lambda _blueprint, _transform: vehicle,
+        wait_for_tick=wait_for_tick,
+        spawn_actor=lambda *_args, **_kwargs: pytest.fail("no sensor spawns before the tick"),
+    )
+    world._tm_port = 8000
+    world._map = None
+    world.trucks = []
+
+    with pytest.raises(RuntimeError, match="time-out"):
+        world.spawn(["truck1"], world_module.CameraConfig(), "front")
+
+    assert events == ["vehicle.destroy"]
+
+
 def test_every_truck_is_protected_from_traffic_manager_idle_deletion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
