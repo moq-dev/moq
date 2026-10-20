@@ -29,7 +29,7 @@ merge batch, ranked by how likely each hides a product bug.
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did. moq-tokio's
 `a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
-known exception, tracked by [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
+known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
 
 Added 2026-10-19 (maintainer): three more, the redial pair first since CI
 hit it.

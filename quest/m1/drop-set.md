@@ -110,10 +110,9 @@ which keeps drops final for now.
 - **Draft wording.** `drafts/draft-lcurley-moq-lite.md` states, for lite-07's
   restored SUBSCRIBE_DROP, that a drop holds only under the terms in effect
   when it was sent, that a widening re-offers held groups and re-drops the
-  rest, and that a later group, when sent, wins over its drop. Whichever of this and
-  [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md)
-  lands second writes it, including the `Max Age` field above, which is
-  free to add because lite-07 is unpublished.
+  rest, and that a later group, when sent, wins over its drop. This quest
+  writes it, including the `Max Age` field above, which is free to add
+  because lite-07 is unpublished.
 
 Code it replaces, in Rust and `js/net` alike:
 
@@ -217,9 +216,9 @@ unchanged.
 ## Required
 
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - the re-offer path this extends to reported groups
-- [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md) - restores the lite-07 drop whose wire and behavior this extends
 
 ## Related
 
+- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - settles what the same message's Error Code means on lite-07
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
 - [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache

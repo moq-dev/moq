@@ -89,7 +89,7 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 
 - [Discarded-Retry backport](/quest/m0/retry-backport.md) - one injected or corrupted Retry no longer kills a handshake on the release line, via a moq-noq 1.3.x patch
 
-- [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
+- [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [Draft-22 release notices](/quest/m0/release-22/README.md) - tell testers and reporters which published releases contain their fixes
 - [nixpkgs ships the lld fix](/quest/m0/nixpkgs-lld-fix.md) - waiting on NixOS/nixpkgs#568680 to reach `nixpkgs-unstable`, which the release build fix bumps to
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish

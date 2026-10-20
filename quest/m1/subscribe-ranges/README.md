@@ -28,8 +28,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   not accidentally give it the live SUBSCRIBE zero-delay default. SUBSCRIBE_UPDATE
   replaces the list. Lite FETCH is removed from
   lite-07; published versions keep it, answered through the same model.
-- **Holes.** SUBSCRIBE_DROP (restored in lite-07 by
-  [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md)) names every sequence in the
+- **Holes.** SUBSCRIBE_DROP (restored in lite-07) names every sequence in the
   requested ranges the publisher won't deliver: never existed, expired, or
   refused upstream. Datagram groups are always dropped in a past range (#4982). The
   publisher delivers what it has and fills the rest as upstream answers.
@@ -89,7 +88,6 @@ every sequence delivered or dropped.
 ## Required
 
 - [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - `Dynamic` fills misses by range, and a subscriber reads only its own ranges
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity

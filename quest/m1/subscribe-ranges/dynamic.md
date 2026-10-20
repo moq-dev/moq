@@ -25,7 +25,7 @@ on `Dynamic` rather than a group request. Time anchors land separately; see
   `moq_relay::fetch_group` (added in the 2026-10-05 audit).
 - Every sequence in range either arrives or is named as dropped, so a reader
   never waits on a miss. Share the accounting with
-  [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) rather than adding a second one:
+  SUBSCRIBE_DROP rather than adding a second one:
   the cursor's drop scan already names only sequences inside the reader's own
   ranges.
 - Decided in the 2026-10-10 audit: `max_delay` caps every range, including
@@ -38,7 +38,3 @@ on `Dynamic` rather than a group request. Time anchors land separately; see
   restoring a historical exemption.
 - Benchmark filling over range count and span as separate axes, beside
   `track_range_serving`, which covers serving.
-
-## Related
-
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
