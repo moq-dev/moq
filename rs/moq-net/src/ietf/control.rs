@@ -86,6 +86,8 @@ struct ControlState {
 	modern: Spent,
 	/// The most runs `modern` may hold. Forgetting one would make its IDs usable again.
 	history: u64,
+	/// A draft-18 GOAWAY has frozen admission of new peer requests.
+	going_away: bool,
 }
 
 /// The MAX_REQUEST_ID window we grant the peer.
@@ -132,6 +134,7 @@ impl Control {
 				// The peer takes the other parity: a client's IDs are even, a server's odd.
 				modern: Spent::new(u64::from(client)),
 				history: crate::session::Limits::default().requests(),
+				going_away: false,
 			}),
 		}
 	}
@@ -166,6 +169,19 @@ impl Control {
 		self
 	}
 
+	/// Freeze draft-18 admission and name the smallest peer ID not admitted: the first one
+	/// a reordered stream skipped, or else the next.
+	pub fn goaway(&self) -> Result<RequestId, Error> {
+		let mut state = self.state.lock();
+		let modern = &state.modern;
+		let cutoff = modern.missing.keys().next().copied().unwrap_or(modern.next);
+		if cutoff >= 1 << 62 {
+			return Err(SessionError::Internal.into());
+		}
+		state.going_away = true;
+		Ok(RequestId(cutoff))
+	}
+
 	pub fn max_request_id(&self, max: RequestId) {
 		// Mutating through the guard wakes any `next_request_id` waiting on the limit.
 		self.state.lock().request_id_max = Some(max);
@@ -191,7 +207,11 @@ impl Control {
 				return Err(SessionError::Internal.into());
 			}
 			modern.spend(id.0);
-			return Ok(None);
+			return if state.going_away {
+				Err(Error::GoingAway)
+			} else {
+				Ok(None)
+			};
 		};
 		if id.0 >= incoming.max {
 			tracing::warn!(id = %id, max = incoming.max, live = incoming.live, "peer exceeded MAX_REQUEST_ID");
@@ -301,6 +321,35 @@ impl Drop for RequestPermit {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn goaway_freezes_request_admission_at_current_progress() {
+		for client in [false, true] {
+			let control = Control::new(None, client);
+			let first = u64::from(client);
+			assert_eq!(control.goaway().unwrap(), RequestId(first));
+			assert!(matches!(control.accept(RequestId(first)), Err(Error::GoingAway)));
+
+			let control = Control::new(None, client);
+			control.accept(RequestId(first)).unwrap();
+			control.accept(RequestId(first + 2)).unwrap();
+			assert_eq!(control.goaway().unwrap(), RequestId(first + 4));
+
+			// A reordered stream skipped first + 2, which is the smallest ID not processed.
+			let control = Control::new(None, client);
+			control.accept(RequestId(first)).unwrap();
+			control.accept(RequestId(first + 4)).unwrap();
+			assert_eq!(control.goaway().unwrap(), RequestId(first + 2));
+			// The skipped ID may still arrive after GOAWAY, and is past the cutoff too.
+			for id in [first + 2, first + 6, first + 8] {
+				assert!(matches!(control.accept(RequestId(id)), Err(Error::GoingAway)));
+			}
+			assert!(matches!(
+				control.accept(RequestId(first)),
+				Err(Error::Session(SessionError::InvalidRequestId))
+			));
+		}
+	}
 
 	fn granted(control: &Control) -> Option<u64> {
 		match control.poll_grant(&kio::Waiter::noop()) {

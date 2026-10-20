@@ -57,6 +57,8 @@ import {
 	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
+	hasSynced,
+	hasTrackStream,
 	resolvesStart,
 	updateSupported,
 	Version,
@@ -70,19 +72,6 @@ export const SUBSCRIBE_SETUP_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
 // Cost::DRAIN: cost is the whole mechanism, not a separate state.
 const DRAIN_COST: Cost = 2n ** 62n - 1n;
-
-// The TRACK stream and implicit SUBSCRIBE acceptance are lite-05+.
-function supportsTrackStream(version: Version): boolean {
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-			return false;
-		default:
-			return true;
-	}
-}
 
 // What a subscription has set up so far, so a revocation (or a timeout) can reach it at
 // any stage.
@@ -313,6 +302,7 @@ export class Subscriber {
 			// The ANNOUNCEs still owed of the peer's initial set (lite-05+). Older versions
 			// mark no boundary, so they sync once the request is out, as a best effort.
 			let initial = 0;
+			let waitingSynced = hasSynced(this.version);
 			if (hasAnnounceOk(this.version)) {
 				const ok = await race([AnnounceOk.decode(stream.reader, this.version), announced.closed]);
 				// A consumer that leaves before the peer answers ends the request now, not on the answer.
@@ -388,18 +378,23 @@ export class Subscriber {
 
 			// Receive announce updates (for Draft03+, this includes initial state)
 			for (;;) {
-				if (initial === 0) announced.synced();
+				if (initial === 0 && !waitingSynced) announced.synced();
 
 				const announce = await race([
 					decodeAnnounceBroadcastMaybe(stream.reader, this.version),
 					announced.closed,
 				]);
 				// undefined: the stream ended. null: the consumer closed cleanly.
-				if (announce === undefined && initial > 0) {
+				if (announce === undefined && (initial > 0 || waitingSynced)) {
 					throw new ProtocolViolation("announce stream ended inside the initial set");
 				}
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
+				if (announce.status === "synced") {
+					if (!waitingSynced) throw new ProtocolViolation("duplicate SYNCED");
+					waitingSynced = false;
+					continue;
+				}
 
 				// The counted initial set is ANNOUNCEs only, so anything else cuts it short. An
 				// unknown message counts for nothing either way.
@@ -772,9 +767,7 @@ export class Subscriber {
 			// its FIN; older drafts just close it. Either way group streams can still be in
 			// flight, so the track ends only once the tail is accounted for. A reset rejects
 			// instead, so the track ends with that error rather than a clean tail.
-			const responses = supportsTrackStream(this.version)
-				? this.runResponses(stream, entry)
-				: stream.reader.closed;
+			const responses = hasTrackStream(this.version) ? this.runResponses(stream, entry) : stream.reader.closed;
 			let tailSettled = false;
 			const closed = responses.then(async () => {
 				await this.#settleTail(entry);
@@ -848,7 +841,7 @@ export class Subscriber {
 		let producer: track.Producer;
 		let drainOk = false;
 
-		if (supportsTrackStream(this.version)) {
+		if (hasTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
 			const { info, stream } = await this.#trackInfo(
 				msg.broadcast,
@@ -985,7 +978,7 @@ export class Subscriber {
 		epoch?: Epoch.Valid,
 		hold?: AbortSignal,
 	): Promise<track.Info> {
-		if (!supportsTrackStream(this.version)) {
+		if (!hasTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
 		const deadline = new Deadline();
@@ -1084,7 +1077,7 @@ export class Subscriber {
 			});
 			void group.closed.then(() => disposeGrant?.());
 			if (this.#denied(broadcast)) throw refused;
-			if (!supportsTrackStream(this.version)) {
+			if (!hasTrackStream(this.version)) {
 				throw new Error("fetch group requires moq-lite-05 or newer");
 			}
 

@@ -33,11 +33,17 @@ pub enum VideoCodec {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VideoCodecKind {
+	/// H.264 / AVC.
 	H264,
+	/// H.265 / HEVC.
 	H265,
+	/// VP8.
 	VP8,
+	/// VP9.
 	VP9,
+	/// AV1.
 	AV1,
+	/// Any codec not listed above.
 	Unknown,
 }
 

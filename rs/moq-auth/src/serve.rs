@@ -104,36 +104,70 @@ pub struct Policy {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Refusal {
+	/// No keys are configured, so no token can be verified.
 	#[error("no keys are configured, so a token cannot be verified")]
 	NoKeys,
-	#[error("the token names no key and the key directory needs one")]
+	/// The token has no `kid`, and the configured keys need one to choose a key.
+	#[error("the token names no key and the configured keys need one")]
 	MissingKeyId,
+	/// The token's key could not be found or loaded: its `kid` is malformed or matches no key, or the key source is unreadable.
 	#[error("the token's key is unknown")]
 	UnknownKey,
+	/// The token failed to decode, verify, or authorize.
 	#[error("the token is invalid: {0}")]
 	InvalidToken(String),
+	/// The token's root does not overlap the dialed path.
 	#[error("the token root `{root}` does not overlap the dialed path `{path}`")]
-	RootMismatch { root: String, path: String },
+	RootMismatch {
+		/// The token's root.
+		root: String,
+		/// The dialed path.
+		path: String,
+	},
+	/// Nothing is granted at the dialed path.
 	#[error("nothing is granted at `{path}`")]
-	NoAccess { path: String, root: Option<String> },
+	NoAccess {
+		/// The dialed path.
+		path: String,
+		/// The verified token's root, absent without a token.
+		root: Option<String>,
+	},
+	/// A client certificate was presented, but the policy grants nothing to certificates.
 	#[error("a certificate was presented but nothing is granted to certificates")]
 	NoMtlsGrant,
+	/// Neither a token nor a certificate was presented, and anonymous access is not granted.
 	#[error("anonymous access is not granted")]
 	NoPublicGrant,
+	/// The token already holds its limit of live sessions.
 	#[error("too many live sessions for this token")]
-	TokenLimit { root: Option<String> },
+	TokenLimit {
+		/// The verified token's root, absent without a token.
+		root: Option<String>,
+	},
+	/// The remote address already holds its limit of live sessions.
 	#[error("too many live sessions from this address")]
-	RemoteLimit { root: Option<String> },
+	RemoteLimit {
+		/// The verified token's root, absent without a token.
+		root: Option<String>,
+	},
+	/// A SETUP token and a different `jwt` query were both presented.
 	#[error("a SETUP token and a different `jwt` query were presented; present one")]
 	TwoTokens,
+	/// The SETUP token type is not 0, a JWT.
 	#[error("SETUP token type {0:#x} is not supported; only type 0 (a JWT) is")]
 	UnsupportedToken(u64),
+	/// Both a JWT and a client certificate were presented.
 	#[error("both a JWT and a client certificate were presented; present one")]
 	TokenAndCertificate,
+	/// The policy's grant bound is beyond what the system clock can represent.
 	#[error("the policy's grant bound reaches past the system clock's range")]
 	ExpiresOutOfRange,
+	/// The token's expiry has passed.
 	#[error("the token has expired")]
-	Expired { root: String },
+	Expired {
+		/// The token's root.
+		root: String,
+	},
 }
 
 impl Refusal {
