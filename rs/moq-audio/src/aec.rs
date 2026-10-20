@@ -1150,7 +1150,9 @@ mod tests {
 			// Drain the tap the way the microphone callback would, and add up
 			// what the speaker was given.
 			let mut state = canceller.inner.state.lock().unwrap();
-			let Some(reference) = state.reference.as_mut() else { continue };
+			let Some(reference) = state.reference.as_mut() else {
+				continue;
+			};
 			reference.set_output_stream_ready(true);
 			while reference.available_frames() >= REFERENCE_FRAME {
 				reference.read_interleaved(&mut buf, false);
