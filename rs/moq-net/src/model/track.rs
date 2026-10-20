@@ -15506,6 +15506,26 @@ mod test {
 		assert_eq!(read, vec![0, 1]);
 	}
 
+	/// A track of only datagrams starts no group, so a time start is judged against each
+	/// datagram's own timestamp rather than letting every one through.
+	#[test]
+	fn a_datagram_is_judged_against_a_time_start_by_its_timestamp() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Time(at(3500)),
+			end: None,
+		}]));
+		for millis in [3000, 3400, 3500, 3700] {
+			producer.append_datagram(at(millis), &b"x"[..]).unwrap();
+		}
+		let mut read = Vec::new();
+		while let Some(Ok(Some(datagram))) = subscriber.recv_datagram().now_or_never() {
+			read.push(datagram.sequence);
+		}
+		assert_eq!(read, vec![2, 3]);
+	}
+
 	/// An untimed track refuses a time anchor wherever the ranges reach it.
 	#[test]
 	#[cfg(feature = "async")]
