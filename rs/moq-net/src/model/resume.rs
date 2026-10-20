@@ -1244,14 +1244,13 @@ impl Recover {
 		}
 	}
 
-	/// Poll for the serving route's copy of the group, holding `frames` and positioned at
-	/// their end. A reader that inflates a compressed group needs it from frame 0.
+	/// Poll for the serving route's copy of the group, positioned at frame `index`.
 	///
 	/// `failed` is the error the current copy ended with, if it did; a stall is `None`.
 	/// Returns the copy's error when nothing can continue the group.
 	pub(super) fn poll(
 		&mut self,
-		frames: std::ops::Range<u64>,
+		index: u64,
 		failed: Option<&Error>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Replacement>> {
@@ -1281,7 +1280,7 @@ impl Recover {
 			// fixes its content. A stall only moves to the serving copy, so two stalled copies
 			// never trade the group back and forth.
 			if failed.is_some()
-				&& let Some(replacement) = self.held(frames.clone())
+				&& let Some(replacement) = self.held(index)
 			{
 				return Poll::Ready(Ok(replacement));
 			}
@@ -1296,7 +1295,7 @@ impl Recover {
 			if generation == self.generation && failed.is_none() {
 				return Poll::Pending;
 			}
-			let res = self.poll_serving(generation, &serving, frames.clone(), failed, waiter);
+			let res = self.poll_serving(generation, &serving, index, failed, waiter);
 			// The serving route failed too, and no front is left to replace it.
 			if let (Poll::Pending, Some(err)) = (&res, failed)
 				&& (closed || end.is_some())
@@ -1317,9 +1316,9 @@ impl Recover {
 		}
 	}
 
-	/// The group from the newest of the reader's other copies that still holds `frames` of it
-	/// unfailed, positioned at their end.
-	fn held(&self, frames: std::ops::Range<u64>) -> Option<Replacement> {
+	/// The group from the newest of the reader's other copies that still holds it unfailed,
+	/// positioned at frame `index`.
+	fn held(&self, index: u64) -> Option<Replacement> {
 		let reader = self.reader.as_ref()?.upgrade()?;
 		let reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 		reader.copies.iter().rev().find_map(|copy| {
@@ -1327,7 +1326,9 @@ impl Recover {
 				return None;
 			}
 			let mut group = copy.track.peek_group(self.sequence)?;
-			continues(&self.handoff, self.sequence, &copy.track, &mut group, frames.clone()).then(|| Replacement {
+			lend_head(&self.handoff, self.sequence, &copy.track, &group);
+			group.start_at(index);
+			(group.index() == index).then(|| Replacement {
 				group,
 				generation: copy.generation,
 				copy: copy.track.clone(),
@@ -1340,29 +1341,30 @@ impl Recover {
 		&mut self,
 		generation: u64,
 		serving: &track::Consumer,
-		frames: std::ops::Range<u64>,
+		index: u64,
 		failed: Option<&Error>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Replacement>> {
 		// A newer copy's subscription delivered it: continue from there. The copy that
 		// failed delivered it already, so its subscription will not again.
 		let same = generation == self.generation;
-		if !same
-			&& let Poll::Ready(Some(mut group)) = serving.poll_group(self.sequence, waiter)
-			&& continues(&self.handoff, self.sequence, serving, &mut group, frames.clone())
-		{
-			return Poll::Ready(Ok(Replacement {
-				group,
-				generation,
-				copy: serving.clone(),
-			}));
+		if !same && let Poll::Ready(Some(mut group)) = serving.poll_group(self.sequence, waiter) {
+			lend_head(&self.handoff, self.sequence, serving, &group);
+			group.start_at(index);
+			if group.index() == index {
+				return Poll::Ready(Ok(Replacement {
+					group,
+					generation,
+					copy: serving.clone(),
+				}));
+			}
 		}
 
 		// Otherwise ask for the rest. The subscription may still deliver it first.
 		if self.fetch.as_ref().is_none_or(|(asked, _)| *asked != generation) {
 			let options = group::Fetch {
 				max_delay: self.max_delay,
-				frame_start: frames.start,
+				frame_start: index,
 				..Default::default()
 			};
 			self.fetch = Some((generation, Fetch::Pending(serving.fetch_group(self.sequence, options))));
@@ -1376,7 +1378,9 @@ impl Recover {
 			Fetch::Refused(err) => err.clone(),
 			Fetch::Pending(pending) => match ready!(kio::Task::poll(&mut **pending, waiter)) {
 				Ok(mut group) => {
-					if continues(&self.handoff, self.sequence, serving, &mut group, frames.clone()) {
+					lend_head(&self.handoff, self.sequence, serving, &group);
+					group.start_at(index);
+					if group.index() == index {
 						return Poll::Ready(Ok(Replacement {
 							group,
 							generation,
@@ -1437,23 +1441,6 @@ impl Recover {
 		});
 		self.fetch = None;
 	}
-}
-
-/// Whether `copy`'s `group` still holds `frames`, positioning it at their end. The failed
-/// copy released the frames before the reader's, so a reader that inflates takes them from
-/// the replacement.
-fn continues(
-	handoff: &group::Handoff,
-	sequence: u64,
-	copy: &track::Consumer,
-	group: &mut group::Consumer,
-	frames: std::ops::Range<u64>,
-) -> bool {
-	lend_head(handoff, sequence, copy, group);
-	group.start_at(frames.start);
-	let held = group.index() == frames.start;
-	group.start_at(frames.end);
-	held && group.index() == frames.end
 }
 
 /// Lend the head `handoff` holds to `serving`'s copy of group `sequence`, `group`, when that
@@ -1692,8 +1679,8 @@ mod test {
 		);
 	}
 
-	/// A plain reader of a compressed group inflates the replacement's frames from frame 0,
-	/// since the failed copy released the ones it read.
+	/// A plain reader of a compressed group inflates from frame 0, so the replacement that
+	/// fetches only the rest adopts the failed route's compressed head.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_failed_compressed_group_continues_from_the_replacement() {
@@ -1716,18 +1703,70 @@ mod test {
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading).as_ref(), Some(&frames[0]));
 		assert_eq!(read(&mut reading).as_ref(), Some(&frames[1]));
+		open.abort(Error::Dropped).unwrap();
 
 		let b = compressed();
-		let mut whole = b.create_group(group::Info { sequence: 0 }).unwrap();
-		for (ms, frame) in frames.iter().enumerate() {
-			whole.write_frame(ts(ms as u64), frame.clone()).unwrap();
-		}
-		whole.finish().unwrap();
+		let dynamic = b.dynamic();
 		routes.serve(b.consume());
-		open.abort(Error::Cancel).unwrap();
-
+		assert!(reading.read_frame().now_or_never().is_none());
+		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		assert_eq!((request.sequence(), request.frame_start()), (0, 2));
+		let mut rest = request.accept(None).unwrap();
+		rest.write_frame(ts(2), frames[2].clone()).unwrap();
+		rest.finish().unwrap();
 		assert_eq!(read(&mut reading).as_ref(), Some(&frames[2]));
 		assert_eq!(read(&mut reading), None);
+		assert_eq!(read_cached(&b.consume(), 0), frames);
+	}
+
+	/// Once the failed route's compressed head is reclaimed, a replacement holding only the
+	/// rest cannot be inflated, so the plain read fails with the route's error.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_compressed_group_without_its_head_fails_the_read() {
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_capacity(1 << 40));
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let info = crate::track::Info::timed().with_compress(true);
+		let routes = Producer::new();
+		let logical = track::Request::new(broadcast.clone(), "video")
+			.routes(routes.consume())
+			.accept(info.clone());
+		let a = track::Producer::new(broadcast.clone(), "video", info.clone());
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let frame = || bytes::Bytes::from("z".repeat(64));
+
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), frame()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(frame().to_vec()));
+		let handoff = open.consume().handoff();
+		open.abort(Error::Dropped).unwrap();
+		drop(a);
+
+		let b = track::Producer::new(broadcast.clone(), "video", info.clone());
+		let dynamic = b.dynamic();
+		routes.serve(b.consume());
+		assert!(reading.read_frame().now_or_never().is_none());
+		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		assert_eq!(request.frame_start(), 1);
+
+		// Shrink the pool so the next write reclaims the held head.
+		let other = track::Producer::new(broadcast, "other", crate::track::Info::timed());
+		pool.resize(pool.used().saturating_sub(1));
+		let mut filler = other.append_group().unwrap();
+		filler.write_frame(ts(0), frame()).unwrap();
+		filler.finish().unwrap();
+		assert!(handoff.head().is_none(), "the shrink reclaimed the head");
+
+		let mut rest = request.accept(None).unwrap();
+		rest.write_frame(ts(1), frame()).unwrap();
+		rest.finish().unwrap();
+		let res = reading.read_frame().now_or_never().expect("fails instead of spinning");
+		assert!(matches!(res, Err(Error::Dropped)), "{res:?}");
 	}
 
 	#[test]

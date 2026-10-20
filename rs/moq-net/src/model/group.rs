@@ -2468,17 +2468,19 @@ impl Consumer {
 			if self.cursor.state.read().sparse() {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
-			// A plain read of a compressed group inflates from frame 0.
-			let index = self.cursor.index as u64;
-			let start = match !self.cursor.raw && self.cursor.state.read().flate.is_some() {
-				true => 0,
-				false => index,
-			};
-			let replacement = match recover.poll(start..index, failed.as_ref(), waiter) {
+			let replacement = match recover.poll(self.cursor.index as u64, failed.as_ref(), waiter) {
 				Poll::Ready(Ok(group)) => group,
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => return Poll::Pending,
 			};
+			// A plain read inflates from frame 0, which a replacement starting later lacks
+			// when the failed route's head was not lent to it.
+			if !self.cursor.raw
+				&& replacement.group.first_frame() > 0
+				&& replacement.group.cursor.state.read().flate.is_some()
+			{
+				return Poll::Ready(Err(failed.unwrap_or(Error::Lagged)));
+			}
 			// Same frames by index, so only the channel changes; read progress and the
 			// cap stay this cursor's.
 			let (index, end, raw) = (self.cursor.index, self.cursor.end, self.cursor.raw);

@@ -814,7 +814,7 @@ impl Consumer {
 			if self.state.read().sparse() {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
-			let mut replacement = match recover.poll(*index..*index, failed.as_ref(), waiter) {
+			let mut replacement = match recover.poll(*index, failed.as_ref(), waiter) {
 				Poll::Ready(Ok(group)) => group,
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => return Poll::Pending,
