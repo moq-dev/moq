@@ -8,6 +8,7 @@ How to update your code for each breaking change, newest first.
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
 Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
+Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
 ### JSON consumers return `*json.Timed` (#5677)
 

@@ -1589,6 +1589,47 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	}
 }
 
+func TestClosingAPreparedAnswerRefusesTheRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	dynamic, err := origin.Dynamic("live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dynamic.Cancel()
+
+	consumer := origin.Consume()
+	done := make(chan error, 1)
+	go func() {
+		_, err := consumer.RequestBroadcast(ctx, "live/cam")
+		done <- err
+	}()
+
+	request, err := dynamic.RequestedBroadcast(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := request.Prepare(moq.MintEpoch())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Close()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("RequestBroadcast succeeded, want the abandoned answer refused")
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("RequestBroadcast err = %v, want a refusal before the deadline", err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
+
 // us is a raw frame's optional timestamp in microseconds.
 func us(v uint64) *uint64 { return &v }
 

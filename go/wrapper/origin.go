@@ -133,6 +133,11 @@ func (p *BroadcastPrepared) Publish() (*BroadcastProducer, error) {
 	return &BroadcastProducer{inner: inner}, nil
 }
 
+// Close abandons the answer if it was not published, refusing every waiting requester.
+func (p *BroadcastPrepared) Close() {
+	p.inner.Destroy()
+}
+
 // OriginConsumer discovers and requests broadcasts published to an origin.
 type OriginConsumer struct {
 	inner *ffi.MoqOriginConsumer
