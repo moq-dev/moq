@@ -332,6 +332,15 @@ send-depth:
 quic-stress:
     just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
 
+# Run moq-audio's ignored output-device tests against a private PulseAudio null sink.
+audio-devices:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir=$(mktemp -d)
+    trap 'rm -rf "$dir"' EXIT
+    python3 test/lib/pulse.py --dir "$dir/run" -- \
+        just rs test -p moq-audio --features aec,pulseaudio --run-ignored only -E 'not test(/benchmark_/)'
+
 # Needs nightly and cargo-fuzz; CI replays the corpus on stable through each
 # crate's own tests instead. See rs/moq-net/fuzz/README.md and rs/moq-quic/fuzz/README.md.
 

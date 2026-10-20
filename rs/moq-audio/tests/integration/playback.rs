@@ -1,8 +1,8 @@
 //! Device round trip for [`moq_audio::playback`].
 //!
-//! Ignored by default: these open the real output device, which CI runners
-//! don't have (and which would make noise if they did). Run them on a machine
-//! with speakers via:
+//! Ignored by default: these open the real output device. Nightly runs them
+//! against a private PulseAudio null sink with `just rs audio-devices`; on a
+//! machine with speakers, run them against the default device via:
 //!
 //! ```text
 //! nix develop --command cargo test -p moq-audio --features playback -- --ignored
