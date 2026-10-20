@@ -753,27 +753,17 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 		url,
 	} = accepted;
 
-	// The path + `?jwt=` ride the URL for WebTransport and the SETUP for raw
-	// QUIC; either way the grant comes from the shared runtime, which owns the
-	// auth client.
-	let (path, query) = match &url {
-		Some(url) => (url.path().to_string(), url.query().map(str::to_owned)),
-		None => {
-			let setup = request.path();
-			match setup.split_once('?') {
-				Some((path, query)) => (path.to_string(), Some(query.to_string())),
-				None => (setup.to_string(), None),
-			}
-		}
-	};
-	let path = if path.is_empty() { "/".to_string() } else { path };
-	// Only a WebTransport session carries a URL.
+	// WebTransport addresses its path through the URL, but both transports can
+	// carry a credential in the MoQ SETUP.
 	let transport = match url {
 		Some(_) => moq_auth::Transport::WebTransport,
 		None => moq_auth::Transport::Quic,
 	};
-	let mut auth_request = serve.auth.request(transport, path.clone());
-	auth_request.query = query;
+	let mut auth_request = crate::auth::request_for_setup(&serve.auth, &request, transport);
+	if let Some(url) = &url {
+		auth_request.path = url.path().to_string();
+		auth_request.query = url.query().map(str::to_owned);
+	}
 	auth_request.remote = Some(remote);
 	auth_request.local = Some(serve.local);
 	// Like the tokio listener: the SNI, else the host a WebTransport client addressed.
@@ -784,7 +774,6 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 			.map(str::to_owned)
 	});
 	auth_request.alpn = alpn.clone();
-	auth_request.role = request.role().and_then(crate::auth::role);
 	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 	let admission = lifecycle.clone();
 	let (admitted, registration) = match lifecycle

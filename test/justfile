@@ -23,7 +23,7 @@ default:
 harness:
     ./lib/harness.test.sh
     ./interop/relay-log.test.sh
-    cd .. && bun test test/interop/compat/resolve.test.ts
+    cd .. && bun test test/interop/compat/resolve.test.ts test/interop/compat/claims.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
     cd interop/clients/js && bun test ./harness.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts

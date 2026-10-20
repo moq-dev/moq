@@ -44,8 +44,7 @@ async fn link(version: Version, publisher: &origin::Producer, subscriber: &origi
 	connect_mock(options).await
 }
 
-/// Every demand edge a `broadcast::Demand` or `track::Demand` reports from here on,
-/// `true` for used.
+/// Every demand edge a `broadcast::Demand` reports from here on, `true` for used.
 macro_rules! record {
 	($demand:expr) => {{
 		let edges = Rc::new(RefCell::new(Vec::new()));
@@ -58,6 +57,25 @@ macro_rules! record {
 					break;
 				}
 				log.borrow_mut().push(false);
+			}
+		}));
+		edges
+	}};
+}
+
+/// Every demand edge a `track::Demand` reports from here on, `true` for wanted.
+macro_rules! record_track {
+	($demand:expr) => {{
+		let edges = Rc::new(RefCell::new(Vec::new()));
+		let log = edges.clone();
+		let mut demand = $demand;
+		drop(moq_clock::sim::spawn(async move {
+			let mut was = false;
+			while let Ok(wanted) = demand.wanted_changed().await {
+				if wanted.is_some() != was {
+					was = wanted.is_some();
+					log.borrow_mut().push(was);
+				}
 			}
 		}));
 		edges
@@ -93,7 +111,10 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	let served = (requests.clone(), track_edges.clone());
 	let publisher = moq_clock::sim::spawn(async move {
 		while let Ok(request) = dynamic.requested_track().await {
-			served.1.borrow_mut().get_or_insert_with(|| record!(request.demand()));
+			served
+				.1
+				.borrow_mut()
+				.get_or_insert_with(|| record_track!(request.demand()));
 			moq_clock::sleep(STARTUP).await;
 			let track = request.accept(timed());
 			let mut group = track.append_group().unwrap();
@@ -142,7 +163,7 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	drop(received);
 	drop(subscriber);
 	let track = requests.borrow()[0].0.clone();
-	moq_clock::timeout(TIMEOUT, track.demand().unused())
+	moq_clock::timeout(TIMEOUT, crate::support::unwanted(track.demand()))
 		.await
 		.unwrap_or_else(|_| panic!("{label}: demand outlived the reader"))
 		.unwrap();
@@ -226,9 +247,9 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 		"{label}: the query never reached the publisher"
 	);
 	let track = requests.borrow()[0].0.clone();
-	assert!(track.demand().is_used(), "{label}: a held query let go");
+	assert!(track.demand().wanted().is_some(), "{label}: a held query let go");
 	drop(query);
-	moq_clock::timeout(TIMEOUT, track.demand().unused())
+	moq_clock::timeout(TIMEOUT, crate::support::unwanted(track.demand()))
 		.await
 		.unwrap_or_else(|_| panic!("{label}: a dropped query is still demand"))
 		.unwrap();
@@ -243,9 +264,12 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 		.unwrap_or_else(|_| panic!("{label}: no group arrived"))
 		.unwrap()
 		.expect("the track is live");
-	assert!(track.demand().is_used(), "{label}: the subscription is not demand");
+	assert!(
+		track.demand().wanted().is_some(),
+		"{label}: the subscription is not demand"
+	);
 	drop(subscriber);
-	moq_clock::timeout(TIMEOUT, track.demand().unused())
+	moq_clock::timeout(TIMEOUT, crate::support::unwanted(track.demand()))
 		.await
 		.unwrap_or_else(|_| panic!("{label}: the publisher still reads the track as used"))
 		.unwrap();
@@ -289,7 +313,7 @@ async fn held_tracks_share_the_cap_with_their_subscriptions() {
 			let track = broadcast.create_track(format!("t{i}"), timed()).unwrap();
 			let mut group = track.append_group().unwrap();
 			group.write_frame(Timestamp::ZERO, b"key".as_ref()).unwrap();
-			let edges = record!(track.demand());
+			let edges = record_track!(track.demand());
 			tracks.push((track, group, edges));
 		}
 		broadcast.announce(Default::default()).unwrap();
