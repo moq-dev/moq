@@ -14,7 +14,7 @@ pub struct UdpSocketState {
 }
 
 impl UdpSocketState {
-    /// Configures `socket` for this platform's offloads and ancillary data and returns its state.
+    /// Sets `socket` non-blocking and returns its state; WASI has no offloads to configure.
     pub fn new(socket: UdpSockRef<'_>) -> io::Result<Self> {
         socket.set_nonblocking(true)?;
 

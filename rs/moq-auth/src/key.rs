@@ -74,10 +74,10 @@ pub enum KeyMaterial {
 		/// The curve the key belongs to.
 		#[serde(rename = "crv")]
 		curve: EllipticCurve,
-		/// The public key, base64url encoded.
+		/// The public key bytes, base64url encoded in the JWK.
 		#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 		x: Vec<u8>,
-		/// The private key, base64url encoded, absent for a public key.
+		/// The private key bytes, base64url encoded in the JWK, absent for a public key.
 		#[serde(
 			rename = "d",
 			default,
