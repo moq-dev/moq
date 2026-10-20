@@ -673,10 +673,7 @@ class Reader implements ResumeSource {
 	}
 
 	fork(options?: track.Subscription): track.Subscriber {
-		this.sync();
-		const serving = this.#serving();
-		if (!serving) throw new Error("track has no serving route to fork from");
-		return serving.sub.fork(options);
+		return hooks.resumeSubscriber(this.route.name, options, (shell) => new Reader(this.route, shell, this.#record));
 	}
 
 	close(): void {
