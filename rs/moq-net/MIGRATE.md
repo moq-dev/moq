@@ -9,6 +9,15 @@ How to update your code for each breaking change, newest first.
 `track::Anchor` gains `Time(Timestamp)`, the group containing a presentation time, so exhaustive matches need an arm for it.
 Subscribing or updating with one on an untimed track fails with `Error::TimestampMismatch`.
 
+### Each group has one writer (#6020)
+
+`group::Producer` no longer implements `Clone`: keep one writer and move it by value between owners, or put it behind a lock when several callers write it.
+Use `consume()` to read and `demand()` to watch readers or closure with `closed()`.
+`Deref<Target = group::Info>` remains, so `producer.clone()` can now copy the `Info` instead of a writer and fail at a later call; remove those clones explicitly.
+`finish` now takes `&mut self`. `Error::FrameOpen` is removed because owning the writer prevents concurrent frame writes or finishing with an open frame.
+Dropping an unfinished writer now aborts the group with `Error::Dropped` immediately, even while the track cache retains the group.
+`group::Producer` is `#[must_use]`, so a discarded `track.append_group()?;` now warns: finish the group, or hold the writer while it stays open.
+
 ### Ranges filter each subscriber's reads (#5929)
 
 A `track::Subscriber` now reads only the groups its own `Subscription::ranges` cover, resolved again whenever `update` replaces them; before, they only set where its reads started.

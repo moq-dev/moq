@@ -544,7 +544,7 @@ fn bench_fanout_frame(c: &mut Criterion) {
 					let mut elapsed = Duration::ZERO;
 					for _ in 0..iterations {
 						if written == FRAMES_PER_GROUP {
-							if let Some(open) = open.take() {
+							if let Some(mut open) = open.take() {
 								open.finish().unwrap();
 							}
 							open = Some(fanout.track.append_group().unwrap());

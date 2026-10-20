@@ -41,7 +41,6 @@ Public API: none. Wire: none.
 ## Required
 
 - [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
-- [moq-ffi cancel during connect](/quest/m1/test-flakes-2/ffi-cancel-connect.md) - `client_cancel_aborts_a_pending_connect` orders its cancel deterministically, fixing the code if the race is real
 - [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md) - moq-tokio's loopback QUIC tests stop timing out on the macOS Platform job
 
 ## Related

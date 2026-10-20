@@ -79,6 +79,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Pin Quest's gate](/quest/m0/ci/quest-gate-pin.md) - make shared command admission available
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - condition: the maintainer bootstrap; then measure hits, restore time, and expiry
-- [Nix cache](/quest/m0/ci/nix-cache.md) - `nix.moq.dev` on R2 replaces Cachix for CI and releases
+- [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - condition: the `nix.moq.dev` PR merges; then confirm CI and releases use it and retire Cachix
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the first `moq-ffi-v*` tag that runs `Release FFI`, and a `Shipping sizes` run; verify the wrappers and size keys
 - [Faster runners](/quest/m0/ci/runners.md) - pick hosted, Blacksmith or the NixOS desktop from measurements of the optimized queue
