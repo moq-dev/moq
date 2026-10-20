@@ -82,6 +82,7 @@ struct Shared<S: crate::transport::poll::Session> {
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
 	interests: Interests,
+	listings: Listings,
 	fetches: crate::session::Slots,
 	// The send time an untimed track's frames carry on Lite05/06, which can't mark them
 	// untimed (see `wire_timestamp`).
@@ -204,6 +205,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				peer_grant: config.peer_grant,
 				owed: AtomicUsize::new(0),
 				interests: Interests::new(config.subscriptions),
+				listings: Listings::default(),
 				fetches: config.fetches,
 				runtime: config.runtime.clone(),
 				estimate: config.estimate,
@@ -1902,10 +1904,88 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 	}
 }
 
+/// The TRACKS listings open on a session, at most one per broadcast instance.
+///
+/// Each listing queues the broadcast's whole listed set, so duplicates would multiply that
+/// memory and every change's fanout past what the subscription cap counts. A newer listing
+/// replaces the older rather than being refused: a subscriber that stops listing and lists
+/// again can open the new stream before we see the old one close.
+#[derive(Clone, Default)]
+struct Listings {
+	state: kio::Lock<ListingsState>,
+}
+
+#[derive(Default)]
+struct ListingsState {
+	next: u64,
+	open: HashMap<crate::PathOwned, Vec<Listed>>,
+}
+
+/// One open listing, cancelled when this drops.
+struct Listed {
+	id: u64,
+	broadcast: crate::broadcast::Consumer,
+	_live: kio::Producer<()>,
+}
+
+impl Listings {
+	/// Register a listing of `broadcast`, cancelling the session's older listing of it.
+	fn register(&self, path: &crate::Path, broadcast: &crate::broadcast::Consumer) -> ListedGuard {
+		let live = kio::Producer::new(());
+		let superseded = live.consume();
+		let mut state = self.state.lock();
+		let id = state.next;
+		state.next += 1;
+		let open = state.open.entry(path.to_owned()).or_default();
+		// Dropped once the lock is released, cancelling the older listing.
+		let _older = open
+			.iter()
+			.position(|listed| listed.broadcast.is_clone(broadcast))
+			.map(|older| open.swap_remove(older));
+		open.push(Listed {
+			id,
+			broadcast: broadcast.clone(),
+			_live: live,
+		});
+		drop(state);
+		ListedGuard {
+			listings: self.clone(),
+			path: path.to_owned(),
+			id,
+			superseded,
+		}
+	}
+}
+
+/// A registered listing: closes once a newer listing of the same broadcast replaces it.
+struct ListedGuard {
+	listings: Listings,
+	path: crate::PathOwned,
+	id: u64,
+	superseded: kio::Consumer<()>,
+}
+
+impl Drop for ListedGuard {
+	fn drop(&mut self) {
+		let mut state = self.listings.state.lock();
+		let Some(open) = state.open.get_mut(&self.path) else {
+			return;
+		};
+		let _ours = open
+			.iter()
+			.position(|listed| listed.id == self.id)
+			.map(|ours| open.swap_remove(ours));
+		if open.is_empty() {
+			state.open.remove(&self.path);
+		}
+	}
+}
+
 /// Answers a TRACKS stream: the broadcast's listed tracks, SYNCED, then each change,
-/// until the broadcast ends.
+/// until the broadcast ends or a newer listing of it on the session replaces this one.
 struct TracksServe {
 	tracks: crate::broadcast::Tracks,
+	listed: ListedGuard,
 }
 
 impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
@@ -1924,9 +2004,10 @@ impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
 		msg.epoch.as_ref()
 	}
 
-	fn start(_: &Shared<S>, _: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
+	fn start(shared: &Shared<S>, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
 		Ok(Self {
 			tracks: broadcast.tracks()?,
+			listed: shared.listings.register(&msg.broadcast, &broadcast),
 		})
 	}
 
@@ -1940,6 +2021,9 @@ impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
 		writer: &mut Writer<S::SendStream, Version>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
+		if self.listed.superseded.poll_closed(waiter).is_ready() {
+			return Poll::Ready(Err(Error::Cancel));
+		}
 		// Pull an event only once the last is out, so a stalled requester's changes collapse
 		// in the listing's queue rather than pile up here.
 		ready!(writer.poll_flush(&mut waiter.context()))?;
@@ -7159,6 +7243,52 @@ mod tests {
 				"{version}: late decode error was swallowed"
 			);
 		}
+	}
+
+	/// A second listing of a broadcast on one session replaces the first, so a peer cannot
+	/// multiply the listed set's memory and fanout by listing it again.
+	#[moq_clock::test]
+	async fn a_newer_listing_of_a_broadcast_replaces_the_older() {
+		use kio::Task;
+		let version = Version::Lite07;
+		let origin = crate::origin::Config::new(Hop::random()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let request = lite::Tracks {
+			broadcast: crate::Path::new("room"),
+			epoch: None,
+		};
+		let request = request.encode_bytes(version).unwrap().to_vec();
+		let mut session = ScriptedSession::per_stream(vec![request.clone(), request]);
+		let log = session.log.clone();
+		let older = Stream::open(&mut session, version).await.unwrap();
+		let newer = Stream::open(&mut session, version).await.unwrap();
+		let estimate = kio::Producer::default();
+		let probe = probe_server(session.clone(), older, version, &estimate);
+		probe.shared.peer_setup.set(lite::Setup::default());
+		let mut shared = probe.shared;
+		Arc::get_mut(&mut shared).expect("one owner").origin = origin.consume();
+		let control = |stream| Control {
+			shared: shared.clone(),
+			runtime: crate::time::sim(),
+			state: ControlState::Tracks(RequestServe::new(shared.clone(), stream)),
+		};
+
+		// Whether the control is still serving after the runtime settles.
+		async fn serving(control: &mut Control<ScriptedSession>) -> bool {
+			moq_clock::timeout(Duration::from_millis(1), kio::wait(|waiter| control.poll(waiter)))
+				.await
+				.is_err()
+		}
+
+		let mut older = control(probe.stream.unwrap());
+		assert!(serving(&mut older).await, "the listing ended early");
+		let mut newer = control(newer);
+		assert!(serving(&mut newer).await, "the newer listing ended early");
+		assert!(!serving(&mut older).await, "the older listing outlived its replacement");
+		assert_eq!(log.resets(), vec![crate::StreamError::Cancel.to_code()]);
+		assert!(log.closes().is_empty(), "a repeated listing closed the session");
+		assert!(serving(&mut newer).await, "the newer listing ended");
 	}
 
 	#[moq_clock::test]

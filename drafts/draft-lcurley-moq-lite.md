@@ -565,6 +565,8 @@ A Track listed again under a removed name is the same Track: within one Broadcas
 
 The listing is relative to this hop: a relay answers with the Tracks it currently holds and never waits on its upstream, so a relay without a listing of its own sends SYNCED at once and its upstream's Tracks follow as live TRACKS_ADD.
 A relay SHOULD answer every listing of a Broadcast from one upstream Tracks Stream.
+A subscriber SHOULD hold at most one Tracks Stream per Broadcast, since each costs the publisher the whole listed set.
+A publisher keeps only the newest Tracks Stream per Broadcast on a session and resets any older one with CANCELLED, rather than refusing the newer: a subscriber that stops listing and lists again can open the new stream before the publisher sees the old one close.
 
 The publisher keeps a pending queue per stream, keyed by Track name in the order the changes happened.
 A removal of a Track the subscriber has not been sent cancels its add, and a removal followed by an add of a name it was sent collapses in place into that removal then that add, so a stalled subscriber costs the names it was sent plus the listed set.
