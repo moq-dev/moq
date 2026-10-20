@@ -260,7 +260,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 					&mut run.announced,
 				)?;
 			}
-			lite::AnnounceBroadcast::Skipped => {}
+			lite::AnnounceBroadcast::Skipped | lite::AnnounceBroadcast::Synced => {}
 		}
 		Ok(())
 	}
@@ -1386,7 +1386,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					};
 					let version = self.subscriber.version;
 					// Lite03/04 mark no initial set, so the request going out is the best
-					// boundary. Lite01/02 mark it with ANNOUNCE_INIT, newer ones with a count.
+					// boundary. Lite01/02 use ANNOUNCE_INIT, lite05/06 a count, lite07 SYNCED.
 					if !version.has_announce_ok() && !matches!(version, Version::Lite01 | Version::Lite02) {
 						self.snapshot = None;
 					}
@@ -1402,9 +1402,9 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 				PrefixState::ReadOk { stream } => {
 					// Lite05+: the publisher reports its own origin id, which we stamp onto
 					// every received Announce's hop chain since it no longer does so itself.
-					// Its `active` count marks where the initial set ends.
+					// Lite05/06 mark the initial set by count; lite07 waits for SYNCED.
 					let ok = ready!(stream.reader.poll_decode::<lite::AnnounceOk>(&mut cx))?;
-					if ok.active == 0 {
+					if ok.active == 0 && !self.subscriber.version.has_synced() {
 						self.snapshot = None;
 					}
 					// A peer may legally report id 0 (no identity). Keep it: the assigned
@@ -1492,6 +1492,12 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					loop {
 						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
 							Poll::Ready(Ok(Some(announce))) => {
+								if matches!(announce, lite::AnnounceBroadcast::Synced) {
+									if self.snapshot.take().is_none() {
+										return Poll::Ready(Err(Error::ProtocolViolation));
+									}
+									continue;
+								}
 								if run.initial > 0 {
 									match announce {
 										lite::AnnounceBroadcast::Active { .. } => run.initial -= 1,
@@ -1502,11 +1508,11 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 								}
 								self.subscriber.handle_announce(&self.prefix, announce, run)?;
 								// Released only once the last counted route is in the origin.
-								if run.initial == 0 {
+								if run.initial == 0 && !self.subscriber.version.has_synced() {
 									self.snapshot = None;
 								}
 							}
-							Poll::Ready(Ok(None)) if run.initial > 0 => {
+							Poll::Ready(Ok(None)) if run.initial > 0 || self.snapshot.is_some() => {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
 							Poll::Ready(Ok(None)) => {
@@ -4462,16 +4468,27 @@ mod tests {
 		assert!(!cursor.is_synced());
 	}
 
-	/// A count of zero is synced on the ANNOUNCE_OK.
+	/// An empty lite-07 set waits for the ordered SYNCED event.
 	#[moq_clock::test]
 	async fn an_empty_initial_set_catches_up_at_once() {
 		const VERSION: Version = Version::Lite07;
-		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0)]);
+		let synced = |w: &mut crate::coding::Encoder<'_>| lite::AnnounceBroadcast::Synced.encode(w, VERSION).unwrap();
+		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &synced]);
 		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
 		let cursor = consumer.announced();
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		assert!(cursor.is_synced());
+	}
+
+	#[moq_clock::test]
+	async fn a_duplicate_synced_is_refused() {
+		const VERSION: Version = Version::Lite07;
+		let synced = |w: &mut crate::coding::Encoder<'_>| lite::AnnounceBroadcast::Synced.encode(w, VERSION).unwrap();
+		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &synced, &synced]);
+		let (mut prefix, _consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
+		let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+		assert!(matches!(err, Error::ProtocolViolation));
 	}
 
 	/// Anything but a start inside the counted set cuts it short: a protocol violation.

@@ -447,3 +447,18 @@ export function wireTimescale(version: Version, timescale: Timescale | null | un
 			return timescale ?? undefined;
 	}
 }
+
+/** Whether discovery streams mark their initial set with SYNCED rather than a count. */
+export function hasSynced(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
