@@ -6090,6 +6090,49 @@ impl AnnounceConsumer {
 		self.state.read().pending.len()
 	}
 
+	// A wider wire grant must reuse pending slots, rather than bypass the initial queue.
+	// private: tuning
+	#[cfg(feature = "async")]
+	pub(crate) fn replay<'a>(
+		&mut self,
+		advertised: impl IntoIterator<Item = &'a PathOwned>,
+		revoked: &HashSet<PathOwned>,
+	) {
+		let advertised: HashSet<_> = advertised.into_iter().collect();
+		let table = self.shared.lock();
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		for id in &self.ids {
+			let Some(cursor) = table.cursors.get(id) else {
+				continue;
+			};
+			for (presented, (_, meta, _, captures, _)) in &cursor.current {
+				let prefix = cursor.under.join(presented);
+				if revoked.contains(&prefix) {
+					state.apply_unannounce(prefix, meta.clone(), captures.clone());
+					continue;
+				}
+				if advertised.contains(&prefix) {
+					if state.pending.get(&prefix).is_some_and(|pending| {
+						matches!(
+							pending.update,
+							Some(PendingUpdate::Unannounce(_) | PendingUpdate::UnannounceAnnounce { .. })
+						)
+					}) {
+						state.apply_announce(prefix, meta.clone(), captures.clone());
+					}
+					continue;
+				}
+				// The wire never sent this route, so it is a fresh start without a hold.
+				state.delivered.remove(&prefix);
+				self.held.remove(&prefix);
+				self.retracted.remove(&prefix);
+				state.put(prefix, PendingUpdate::Announce((meta.clone(), captures.clone())));
+			}
+		}
+	}
+
 	/// Returns the root that is automatically stripped from emitted prefixes.
 	pub fn root(&self) -> &Path<'_> {
 		&self.root

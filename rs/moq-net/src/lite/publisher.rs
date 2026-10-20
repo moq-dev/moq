@@ -976,6 +976,7 @@ struct AnnounceRun {
 	live: HashMap<crate::PathOwned, Advertised>,
 	phase: AnnouncePhase,
 	initial: Option<usize>,
+	replay: bool,
 	// Our grant and the ceiling on the peer: only what both let us publish is
 	// announced, and a shrink withdraws what they no longer cover.
 	auth: Option<crate::auth::Gate>,
@@ -1013,16 +1014,22 @@ impl AnnounceRun {
 			live: HashMap::new(),
 			phase: AnnouncePhase::Init,
 			initial: None,
+			replay: false,
 			auth: None,
 			epoch: 0,
 			permit: Default::default(),
 		}
 	}
 
-	fn sent(&mut self) {
+	fn sent<S: crate::transport::poll::Session>(&mut self, stream: &mut Stream<S, Version>) -> Result<(), Error> {
 		if let Some(remaining) = &mut self.initial {
 			*remaining = remaining.saturating_sub(1);
+			if *remaining == 0 {
+				stream.writer.buffer(&lite::AnnounceBroadcast::Synced)?;
+				self.initial = None;
+			}
 		}
+		Ok(())
 	}
 
 	/// Whether we may announce `suffix` (relative to the requested prefix).
@@ -1040,6 +1047,10 @@ impl AnnounceRun {
 	) -> Result<(), Error> {
 		let grew = !self.permit.covers(&permit);
 		self.permit = permit;
+		if self.version.has_synced() {
+			self.replay = true;
+			return Ok(());
+		}
 
 		let revoked: Vec<_> = self
 			.live
@@ -1120,7 +1131,7 @@ impl AnnounceRun {
 						cost,
 					})?,
 				}
-				self.sent();
+				self.sent(stream)?;
 			}
 			// Pre-restart versions have no way to update a live
 			// advertisement; the peer keeps the original chain.
@@ -1180,7 +1191,7 @@ impl AnnounceRun {
 			hops: chain,
 			cost,
 		})?;
-		self.sent();
+		self.sent(stream)?;
 		Ok(())
 	}
 
@@ -1211,7 +1222,7 @@ impl AnnounceRun {
 				stream
 					.writer
 					.buffer(&lite::AnnounceBroadcast::Restart { id, epoch, hops, cost })?;
-				self.sent();
+				self.sent(stream)?;
 			}
 			_ => {
 				self.retract(stream, suffix.clone(), absolute)?;
@@ -1244,7 +1255,7 @@ impl AnnounceRun {
 				hops: Hops::new(),
 			})?,
 		}
-		self.sent();
+		self.sent(stream)?;
 		Ok(())
 	}
 
@@ -1359,6 +1370,17 @@ impl AnnounceRun {
 
 			if matches!(self.phase, AnnouncePhase::Closing) {
 				return stream.writer.poll_closed(&mut cx);
+			}
+
+			if self.replay {
+				let revoked = self
+					.live
+					.keys()
+					.filter(|suffix| !self.permitted(suffix))
+					.cloned()
+					.collect();
+				announced.replay(self.live.keys(), &revoked);
+				self.replay = false;
 			}
 
 			// A grant change applies before the next update, so a route it no longer
@@ -2575,6 +2597,98 @@ mod announce_test {
 		assert!(!messages.iter().any(
 			|msg| matches!(msg, lite::AnnounceBroadcast::Active { suffix, .. } if suffix.rest.as_str() == "z/removed")
 		));
+	}
+
+	#[test]
+	fn a_partial_regrant_cannot_overtake_an_initial_route() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _a = origin.announce("a", origin::Route::default()).unwrap();
+		let _b = origin.announce("b", origin::Route::default()).unwrap();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+		let budget = kio::Producer::new(1usize);
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut stream = Stream::<SinkSession, Version> {
+			writer: Writer::new(SinkSend::stepped(log, budget.consume()), Version::Lite07),
+			reader: Reader::new(PendingRecv, Version::Lite07),
+		};
+		let mut run = AnnounceRun::new(crate::Path::new("").to_owned(), consumer.hop(), Version::Lite07);
+		let waiter = kio::Waiter::noop();
+		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
+		let auth = crate::auth::Handle::new(false);
+		auth.authorize(&crate::auth::Grant {
+			subscribe: crate::Pattern::literal("b").unwrap().into(),
+			..Default::default()
+		});
+		let Poll::Ready(restricted) = auth.poll_permit(crate::auth::Direction::Publish, &mut 0, &waiter) else {
+			panic!("the changed grant is ready");
+		};
+		run.regrant(&mut stream, &consumer, restricted).unwrap();
+		*budget.write().ok().unwrap() = 8;
+		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
+		wire.take_ok();
+		let messages = wire.take_announces();
+		assert!(matches!(&messages[1], lite::AnnounceBroadcast::Active { suffix, .. } if suffix.rest.as_str() == "b"));
+		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced);
+		assert_eq!(messages[3], lite::AnnounceBroadcast::EndedId { id: 0 });
+	}
+
+	#[test]
+	fn synced_cuts_a_regrant_burst_at_the_initial_bound() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _a = origin.announce("a", origin::Route::default()).unwrap();
+		let _b = origin.announce("b", origin::Route::default()).unwrap();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+		let budget = kio::Producer::new(0usize);
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut stream = Stream::<SinkSession, Version> {
+			writer: Writer::new(SinkSend::stepped(log, budget.consume()), Version::Lite07),
+			reader: Reader::new(PendingRecv, Version::Lite07),
+		};
+		let mut run = AnnounceRun::new(crate::Path::new("").to_owned(), consumer.hop(), Version::Lite07);
+		let waiter = kio::Waiter::noop();
+		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
+		let auth = crate::auth::Handle::new(false);
+		auth.authorize(&crate::auth::Grant::default());
+		let Poll::Ready(restricted) = auth.poll_permit(crate::auth::Direction::Publish, &mut 0, &waiter) else {
+			panic!("the changed grant is ready");
+		};
+		run.regrant(&mut stream, &consumer, restricted).unwrap();
+		let _live = origin.announce("c", origin::Route::default()).unwrap();
+		run.regrant(&mut stream, &consumer, crate::auth::Permit::default())
+			.unwrap();
+		*budget.write().ok().unwrap() = 4;
+		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
+		wire.take_ok();
+		let messages = wire.take_announces();
+		assert_eq!(messages.len(), 4);
+		let initial: std::collections::BTreeSet<_> = messages[..2]
+			.iter()
+			.map(|message| match message {
+				lite::AnnounceBroadcast::Active { suffix, .. } => suffix.rest.as_str(),
+				other => panic!("expected an initial start, got {other:?}"),
+			})
+			.collect();
+		assert_eq!(initial, std::collections::BTreeSet::from(["a", "b"]));
+		assert_eq!(messages[2], lite::AnnounceBroadcast::Synced);
+		assert_eq!(
+			messages
+				.iter()
+				.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Synced))
+				.count(),
+			1
+		);
 	}
 
 	#[test]
