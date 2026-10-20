@@ -15,12 +15,15 @@ require `Platform scope`, `macOS` and `Windows` in main's merge queue, which
 never got activated.
 
 - Main ruleset 2420853 requires `Check` and `Test` from the GitHub Actions
-  integration (15368) and nothing else. Keep that until
-  [one CI pass](/quest/m0/ci/one-pass.md) lands, then replace both with the
-  single job's name right after it merges, before enqueuing anything else.
-  An older open PR reports the new name after its next push or edit.
+  integration (15368) and nothing else. [One CI pass](/quest/m0/ci/one-pass.md)
+  folds them into one job that keeps the name `Check`. Remove `Test` from the
+  ruleset just before that PR is enqueued. Removing a context only loosens
+  the gate, and groups built earlier still report both, so nothing waits on a
+  context the workflow stops reporting.
 - Release ruleset 24392632 has no merge queue and requires `Check` and
-  `Test`. Add `Platform scope`, `macOS`, `Windows`, and the workflows
+  `Test`. In the same edit as the cut that carries the one-pass workflow to
+  `release`, remove `Test` there too, and add `Platform scope`, `macOS`,
+  `Windows`, and the workflows
   [cloud CI only in the queue](/quest/m0/ci/queue-only.md) moves off main
   PRs. Only require a context that every release PR reports: a workflow with
   path filters never reports on an unrelated diff and would block forever,

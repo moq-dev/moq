@@ -2,8 +2,9 @@
 
 ## Goal
 
-Pull requests get a CI verdict without queueing behind the hosted runner
-limits, and every job spends its minutes on the work its diff selected rather
+Pull requests are validated locally with `just ci` and get their cloud verdict
+from the merge queue without waiting behind the hosted runner limits, and
+every job spends its minutes on the work its diff selected rather
 than on setup, cold caches, or repeated builds. Concurrent local agents share
 expensive-command capacity, and retained tests earn their cost through useful
 regression signal. Valuable checks stay gated or move to an appropriate queue

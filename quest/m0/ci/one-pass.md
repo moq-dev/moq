@@ -42,8 +42,10 @@ Decisions (maintainer, 2026-10-19): shrink Check, then fold it.
   replace mbx; revisit it after the audit.
 - Rejected: keeping two jobs and only trimming each.
 
-The required context names change, so the main ruleset has to switch to the
-new job name when this lands; [release gates](/quest/m0/ci/release-gates.md)
+The single job keeps the name `Check`, so a required context never goes
+missing: the maintainer removes `Test` from the main ruleset just before
+this PR is enqueued, which only loosens the gate, and merge groups built
+earlier still report both. [Release gates](/quest/m0/ci/release-gates.md)
 owns the ruleset edits. Record the queue's wall time per entry before and
 after in the PR.
 
