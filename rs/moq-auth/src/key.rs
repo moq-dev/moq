@@ -15,9 +15,13 @@ use std::{collections::HashSet, fmt, path::Path as StdPath};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum KeyOperation {
+	/// Compute a signature.
 	Sign,
+	/// Verify a signature.
 	Verify,
+	/// Decrypt content.
 	Decrypt,
+	/// Encrypt content.
 	Encrypt,
 }
 
@@ -27,6 +31,7 @@ pub enum KeyOperation {
 pub enum KeyMaterial {
 	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.2>
 	EC {
+		/// The curve the point lies on.
 		#[serde(rename = "crv")]
 		curve: EllipticCurve,
 		/// The X-coordinate of an EC key
@@ -46,8 +51,10 @@ pub enum KeyMaterial {
 	},
 	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.3>
 	RSA {
+		/// The public modulus and exponent.
 		#[serde(flatten)]
 		public: RsaPublicKey,
+		/// The private parameters, absent for a public key.
 		#[serde(flatten, skip_serializing_if = "Option::is_none")]
 		private: Option<RsaPrivateKey>,
 	},
@@ -64,10 +71,13 @@ pub enum KeyMaterial {
 	},
 	/// <https://datatracker.ietf.org/doc/html/rfc8037#section-2>
 	OKP {
+		/// The curve the key belongs to.
 		#[serde(rename = "crv")]
 		curve: EllipticCurve,
+		/// The public key, base64url encoded.
 		#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 		x: Vec<u8>,
+		/// The private key, base64url encoded, absent for a public key.
 		#[serde(
 			rename = "d",
 			default,
@@ -84,13 +94,16 @@ pub enum KeyMaterial {
 /// See <https://datatracker.ietf.org/doc/html/rfc7518#section-6.2.1.1>
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub enum EllipticCurve {
+	/// NIST P-256.
 	#[serde(rename = "P-256")]
 	P256,
+	/// NIST P-384.
 	#[serde(rename = "P-384")]
 	P384,
 	// jsonwebtoken doesn't support the ES512 algorithm, so we can't implement this
 	// #[serde(rename = "P-521")]
 	// P521,
+	/// Ed25519, for OKP keys.
 	#[serde(rename = "Ed25519")]
 	Ed25519,
 }
@@ -100,8 +113,10 @@ pub enum EllipticCurve {
 /// See <https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.1>
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RsaPublicKey {
+	/// The modulus.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub n: Vec<u8>,
+	/// The public exponent.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub e: Vec<u8>,
 }
@@ -111,18 +126,25 @@ pub struct RsaPublicKey {
 /// See <https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2>
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RsaPrivateKey {
+	/// The private exponent.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub d: Vec<u8>,
+	/// The first prime factor.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub p: Vec<u8>,
+	/// The second prime factor.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub q: Vec<u8>,
+	/// The first factor's CRT exponent.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub dp: Vec<u8>,
+	/// The second factor's CRT exponent.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub dq: Vec<u8>,
+	/// The first CRT coefficient.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub qi: Vec<u8>,
+	/// Other prime information, for keys with more than two primes.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub oth: Option<Vec<RsaAdditionalPrime>>,
 }
@@ -130,10 +152,13 @@ pub struct RsaPrivateKey {
 /// Additional prime information for multi-prime RSA keys.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RsaAdditionalPrime {
+	/// The prime factor.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub r: Vec<u8>,
+	/// The factor's CRT exponent.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub d: Vec<u8>,
+	/// The factor's CRT coefficient.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub t: Vec<u8>,
 }
