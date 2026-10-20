@@ -125,7 +125,7 @@ jobs:
           # published moq.pc and CMake package still advertise -lva/-lva-drm, so
           # the c-pkgconfig and c-cmake variants pass them to the linker. Drop it
           # once a libmoq release ships without those. The hand-rolled `c` variant
-          # already omits them, see LIBMOQ_OS_LIBS in smoke.sh.
+          # already omits them, see LIBMOQ_OS_LIBS in the smoke harness.
           # gstreamer1.0-* provides gst-launch/gst-inspect + the core elements
           # (filesink) the moq-gst subscriber loads the prebuilt plugin against.
           # pkg-config + cmake drive the c-pkgconfig / c-cmake build variants
@@ -307,7 +307,7 @@ jobs:
         run: |
           # The `rust` impl runs a native `moq auth`, which only the
           # cargo/apt/brew/nix channels install. The docker channel's moq wrapper
-          # doesn't mount token.sh's scratch dir, so it exercises the Rust
+          # doesn't mount the token lane's scratch dir, so it exercises the Rust
           # verifier through the rust-docker cell instead of plain `rust`.
           if [ "${{ matrix.channel }}" = "docker" ]; then
             impls="js-node,js-bun,rust-docker"
