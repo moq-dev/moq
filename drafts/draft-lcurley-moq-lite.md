@@ -1328,7 +1328,7 @@ Present from lite-07.
 How each Group of this Track is compressed: none (0x0), or DEFLATE (0x1), each Group one DEFLATE stream as specified by {{moqflate}}.
 Any other value is a PROTOCOL_VIOLATION.
 When Compression is not none, FRAME messages and datagrams carry an `Inflated Size`.
-A publisher that cannot send this field, on lite-06 and earlier, MUST send the Track's frames inflated instead; a relay inflates each Group once for every such subscriber.
+A publisher that cannot send this field, on lite-06 and earlier, MUST send the Track's frames inflated instead.
 
 ## SUBSCRIBE_OK {#subscribe-ok}
 A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start position.

@@ -1719,6 +1719,45 @@ mod test {
 		assert_eq!(read_cached(&b.consume(), 0), frames);
 	}
 
+	/// A slice that inflates to other than its declared size fails a plain read of the
+	/// logical track, instead of resuming it from the copy that failed, forever.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_malformed_compressed_frame_fails_the_read() {
+		let info = crate::track::Info::timed().with_compress(true);
+		let routes = Producer::new();
+		let logical = track::Request::new(Arc::new(broadcast::Info::default()), "video")
+			.routes(routes.consume())
+			.accept(info.clone());
+		let a = track::Producer::new(Arc::new(broadcast::Info::default()), "video", info);
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+		let frame = || bytes::Bytes::from("z".repeat(64));
+
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(ts(0), frame()).unwrap();
+		let slice = super::super::flate::Encoder::new().frame(&frame());
+		let header = crate::model::frame::Header {
+			info: crate::model::frame::Info {
+				size: slice.len() as u64,
+				timestamp: Some(ts(1)),
+			},
+			fields: None,
+			inflated: Some(frame().len() as u64 + 1),
+		};
+		let mut corrupt = group
+			.create_frame_owned(header, &crate::model::frame::Budget::default())
+			.unwrap();
+		corrupt.write(slice).unwrap();
+		let mut group = corrupt.finish().unwrap();
+		group.finish().unwrap();
+
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(frame().to_vec()));
+		let res = reading.read_frame().now_or_never().expect("a result");
+		assert!(matches!(res, Err(Error::WrongSize)), "{res:?}");
+	}
+
 	/// Once the failed route's compressed head is reclaimed, a replacement holding only the
 	/// rest cannot be inflated, so the plain read fails with the route's error.
 	#[test]

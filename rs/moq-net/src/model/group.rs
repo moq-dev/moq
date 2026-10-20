@@ -332,14 +332,15 @@ impl Flate {
 		encoder.frame(payload)
 	}
 
-	/// Drop the codec state once no frame follows: the encoder, and the decoder if its
-	/// readers already inflated every frame.
-	fn finish(&mut self) {
+	/// Drop the codec state once no frame follows at `fin`: the encoder, and the decoder if
+	/// its readers already inflated every frame.
+	fn finish(&mut self, fin: usize) {
 		if self.encoder.take().is_some() {
 			self.plain.bill.sub(flate::ENCODER_HEAP);
 		}
 		let mut plain = self.plain.lock();
-		if plain.frames.len() == self.sizes.len() {
+		plain.fin = Some(fin);
+		if plain.frames.len() == fin {
 			self.plain.drop_decoder(&mut plain);
 		}
 	}
@@ -372,6 +373,9 @@ struct PlainState {
 	decoder: Option<flate::Decoder>,
 	// Inflated frames, from the group's first.
 	frames: VecDeque<Bytes>,
+	// The group's frame count once finished, so the decoder drops after the last frame.
+	// Kept here rather than taken with the slices, which may predate the finish.
+	fin: Option<usize>,
 	// The first failure, sticky: every later frame builds on the one that failed.
 	err: Option<Error>,
 	// Why the group released its frames, failing a late inflater rather than billing past
@@ -404,6 +408,12 @@ impl Plain {
 		}
 	}
 
+	/// Whether inflating failed on the group's content, rather than its release.
+	fn malformed(&self) -> bool {
+		let state = self.lock();
+		state.released.is_none() && state.err.is_some()
+	}
+
 	fn release(&self, err: Error) {
 		let mut state = self.lock();
 		state.decoder = None;
@@ -422,8 +432,6 @@ struct Inflate {
 	from: usize,
 	// Each slice with its declared inflated size.
 	slices: Vec<(Bytes, u64)>,
-	// The group's frame count once finished, so the decoder drops after the last frame.
-	fin: Option<usize>,
 }
 
 impl Inflate {
@@ -457,7 +465,7 @@ impl Inflate {
 					meter.inflated(frame.len() as u64);
 					state.frames.push_back(frame);
 					self.plain.len.store(state.frames.len(), Ordering::Release);
-					if self.fin == Some(state.frames.len()) {
+					if state.fin == Some(state.frames.len()) {
 						self.plain.drop_decoder(&mut state);
 					}
 				}
@@ -550,6 +558,11 @@ impl GroupState {
 		}
 	}
 
+	/// Whether a compressed group's content failed to inflate.
+	fn malformed(&self) -> bool {
+		self.flate.as_ref().is_some_and(|flate| flate.plain.malformed())
+	}
+
 	/// Whether the first frame opened, or the group ended without one.
 	fn started(&self) -> bool {
 		!matches!(self.timeline, Timeline::Empty) || self.fin.is_some() || self.abort.is_some()
@@ -630,7 +643,6 @@ impl GroupState {
 			slices: (from..=last)
 				.map(|local| (self.frames[local].payload.clone(), flate.sizes[local]))
 				.collect(),
-			fin: self.fin,
 		})
 	}
 
@@ -1594,10 +1606,11 @@ impl Producer {
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = modify(&self.handle.state)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
-		state.fin = Some(state.next_index);
+		let fin = state.next_index;
+		state.fin = Some(fin);
 		// No frame follows to compress.
 		if let Some(flate) = &mut state.flate {
-			flate.finish();
+			flate.finish(fin);
 		}
 		// A finished group can no longer raise the track's largest, which may end its stream.
 		self.handle.cache.finish_largest(self.sequence);
@@ -2555,6 +2568,8 @@ impl Consumer {
 					self.recover = None;
 					return res;
 				}
+				// Content that failed to inflate is the group's under its name, so no copy fixes it.
+				Poll::Ready(Err(_)) if !self.cursor.raw && self.cursor.state.read().malformed() => return res,
 				Poll::Ready(Err(err)) => Some(err.clone()),
 				Poll::Pending => None,
 			};
@@ -4837,6 +4852,16 @@ mod test {
 		let stored = group.handle.state.read().charge.size();
 		assert_eq!(read_plain(&mut reader).unwrap().unwrap(), verbose(1));
 		assert_eq!(group.handle.cache_size(), stored + inflated);
+
+		// So does one whose reader took the last slice before the group finished.
+		let mut group = compressed_group(&pool);
+		group.write_frame(None, verbose(0)).unwrap();
+		group.write_frame(None, verbose(1)).unwrap();
+		let job = take_slices(&group, 1);
+		group.finish().unwrap();
+		job.run(&stats::Meter::default());
+		let stored = group.handle.state.read().charge.size();
+		assert_eq!(group.handle.cache_size(), stored + inflated, "the decoder is dropped");
 	}
 
 	/// A plain read of a compressed group that started past frame 0 lags on every read,

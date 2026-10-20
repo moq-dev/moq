@@ -2564,7 +2564,7 @@ impl Producer {
 			.filter(|size| *size <= super::datagram::MAX_DATAGRAM_PAYLOAD)
 			.ok_or(Error::FrameTooLarge)?;
 		let payload = super::flate::Decoder::new().frame(&deflated, size)?;
-		self.stats.meter().inflated(payload.len() as u64);
+		let inflated = payload.len() as u64;
 		self.insert_wire_datagram(super::datagram::Stored {
 			datagram: Datagram {
 				sequence,
@@ -2573,7 +2573,10 @@ impl Producer {
 			},
 			wire: None,
 			deflated: Some(deflated),
-		})
+		})?;
+		// Only once stored, so a refused datagram counts toward nothing.
+		self.stats.meter().inflated(inflated);
+		Ok(())
 	}
 
 	/// Create a group with a single frame, at the given presentation timestamp.

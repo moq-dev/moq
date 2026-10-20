@@ -93,7 +93,8 @@ impl Decoder {
 	///
 	/// Output grows as it is produced and stops at `size`, so a slice that inflates past
 	/// its declaration costs no more than the declaration. [`Error::WrongSize`] if the
-	/// output differs from `size`, [`Error::MalformedTrack`] if the slice is not DEFLATE.
+	/// output differs from `size`, [`Error::MalformedTrack`] if the slice is not DEFLATE or
+	/// ends the stream, which a group never does.
 	pub(super) fn frame(&mut self, slice: &[u8], size: usize) -> Result<Bytes> {
 		if slice.is_empty() {
 			return match size {
@@ -116,6 +117,10 @@ impl Decoder {
 					.0
 					.decompress(input, &mut tmp, FlushDecompress::Sync)
 					.map_err(|_| Error::MalformedTrack)?;
+				// A final block would let trailing bytes and every later frame go unread.
+				if matches!(status, Status::StreamEnd) {
+					return Err(Error::MalformedTrack);
+				}
 				let consumed = (self.0.total_in() - before_in) as usize;
 				let produced = (self.0.total_out() - before_out) as usize;
 				if out.len() + produced > size {
@@ -124,7 +129,7 @@ impl Decoder {
 				out.extend_from_slice(&tmp[..produced]);
 				input = &input[consumed..];
 
-				if matches!(status, Status::StreamEnd) || (input.is_empty() && produced < tmp.len()) {
+				if input.is_empty() && produced < tmp.len() {
 					break;
 				}
 				// No progress: the marker needed no further output.
@@ -204,6 +209,22 @@ mod test {
 		assert!(matches!(Decoder::new().frame(&slice, 512), Err(Error::WrongSize)));
 		assert!(matches!(Decoder::new().frame(&slice, 2048), Err(Error::WrongSize)));
 		assert!(matches!(Decoder::new().frame(b"", 1), Err(Error::WrongSize)));
+	}
+
+	/// A final block is malformed even when it inflates to the declared size.
+	#[test]
+	fn a_final_block_is_malformed() {
+		let payload = b"the quick brown fox";
+		let mut compress = Compress::new(flate2::Compression::new(LEVEL), false);
+		let mut slice = Vec::with_capacity(64);
+		let status = compress
+			.compress_vec(payload, &mut slice, FlushCompress::Finish)
+			.unwrap();
+		assert!(matches!(status, Status::StreamEnd));
+		assert!(matches!(
+			Decoder::new().frame(&slice, payload.len()),
+			Err(Error::MalformedTrack)
+		));
 	}
 
 	#[test]

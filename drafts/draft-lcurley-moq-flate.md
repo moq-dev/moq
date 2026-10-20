@@ -68,7 +68,8 @@ A publisher MUST omit it from each object and a consumer MUST append it before d
 
 A zero-length payload is neither compressed nor decompressed.
 
-The stream is never terminated: no object ends in a final block, so a consumer decompresses incrementally and MUST NOT treat the absent end of stream as truncation.
+The stream is never terminated: a publisher MUST NOT emit a final block, and a consumer MUST treat one as malformed and abandon the subgroup.
+A consumer decompresses incrementally and MUST NOT treat the absent end of stream as truncation.
 
 A consumer missing an object MUST abandon the rest of the subgroup, which it can no longer decompress.
 The compression level is a publisher's choice; any conformant stream decodes.
@@ -103,6 +104,15 @@ The format lives inside object payloads, and the declaration in the transport th
 
 
 --- back
+
+# Changelog
+
+## Since draft-lcurley-moq-flate-00 (in progress)
+
+- Compression is declared by the transport instead of the application: {{moql}} carries a Compression codec in TRACK_INFO and each object's Inflated Size on FRAME and datagrams.
+- A relay inflates for a peer whose transport does not declare compression.
+- A datagram is compressed alone, as a stream of its own.
+- A consumer rejects an object that inflates to other than its declared size, or that ends in a final block.
 
 # Acknowledgments
 {:numbered="false"}
