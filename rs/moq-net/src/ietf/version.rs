@@ -89,6 +89,7 @@ mod tests {
 		};
 
 		let subscribe = Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("broadcast"),
@@ -168,6 +169,7 @@ mod tests {
 	#[test]
 	fn draft22_changes_only_the_location_filter() {
 		let subscribe = Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("broadcast"),

@@ -1,7 +1,7 @@
 /**
- * The JSON a relay POSTs to an auth server per session event, and the grant it answers with.
+ * The JSON a relay POSTs to an auth server per session event, and the grant or refusal it answers with.
  *
- * Mirrors `moq_auth::Request` and `moq_auth::Grant` in the Rust crate: a server written
+ * Mirrors `moq_auth::Request`, `moq_auth::Grant`, and `moq_auth::Refusal` in the Rust crate: a server written
  * in TypeScript validates a request and builds a grant with these schemas.
  *
  * @module
@@ -187,3 +187,15 @@ export const GrantSchema = z
 		}),
 	);
 export type Grant = z.infer<typeof GrantSchema>;
+
+/** The reason and verified attribution an auth server returns with HTTP 403. */
+export const RefusalSchema = z.object({
+	/** Unknown reason strings read as `refused`. */
+	reason: z.pipe(z.string(), z.catch(z.enum(["refused", "forbidden", "expired"]), "refused")),
+	/** A root named by a verified credential, never an unverified request path. */
+	root: z.optional(PathSchema),
+	/** The tier resolved by the decider; absent uses the default tier. */
+	tier: z.optional(z.string()),
+});
+/** A typed refusal returned by an admission decider. */
+export type Refusal = z.infer<typeof RefusalSchema>;

@@ -327,21 +327,21 @@ final class SmokeTests: XCTestCase {
         let snapshotDemand = try snapshot.demand()
         let streamDemand = try stream.demand()
         XCTAssertEqual(snapshotDemand.name, "status")
-        XCTAssertFalse(snapshotDemand.isUsed)
+        XCTAssertNil(snapshotDemand.wanted)
         let consumer = try broadcast.consume()
 
         let snapshotConsumer = try Json.SnapshotConsumer<[String: Int]>(
             track: try await consumer.subscribeTrack(name: "status"))
         let streamConsumer = try Json.StreamConsumer<[String: Int]>(
             track: try await consumer.subscribeTrack(name: "events"))
-        try await snapshotDemand.used()
-        try await streamDemand.used()
-        XCTAssertTrue(snapshotDemand.isUsed)
+        while try await snapshotDemand.wantedChanged() == nil {}
+        while try await streamDemand.wantedChanged() == nil {}
+        XCTAssertEqual(snapshotDemand.wanted, 0)
 
         snapshotConsumer.cancel()
         streamConsumer.cancel()
-        try await snapshotDemand.unused()
-        try await streamDemand.unused()
+        while try await snapshotDemand.wantedChanged() != nil {}
+        while try await streamDemand.wantedChanged() != nil {}
 
         try broadcast.close()
     }

@@ -405,19 +405,12 @@ impl Rendition {
 
 	/// Start following this rendition's own timeline, trimmed to the listed segments. `history`
 	/// reads it from the start, as the reference does in history mode.
-	///
-	/// A rendition the catalog indexes no timeline for resolves nothing but the reference's rows.
 	pub(crate) fn watch(&self, history: bool) {
 		self.history.store(history, Ordering::Relaxed);
-		let track = self.track_name();
-		if !self.section.timelines.contains_key(track) {
-			self.spans.end();
-			return;
-		}
 		let watcher = tokio::spawn(watch_spans(
 			self.catalog.clone(),
 			self.section.clone(),
-			track.to_string(),
+			self.track_name().to_string(),
 			self.spans.clone(),
 			history,
 		));
@@ -644,10 +637,6 @@ impl Rendition {
 	fn check_range(&self) -> Result<()> {
 		if !super::durable(&self.section) {
 			return Err(crate::Error::RangeNotDurable);
-		}
-		// Without its own timeline every listed segment would be a gap.
-		if !self.section.timelines.contains_key(self.track_name()) {
-			return Err(crate::Error::RangeUnavailable("rendition has no timeline".into()));
 		}
 		if !self.history.load(Ordering::Relaxed) {
 			return Err(crate::Error::RangeUnavailable(

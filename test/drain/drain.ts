@@ -55,7 +55,7 @@ const HANDOVER = Milli(2000);
 
 const path = Moq.Path.from("drain");
 // Publisher epochs travel on the work-in-progress moq-lite-07 only, which nothing offers by default.
-const websocket = { protocols: ["moq-lite-07-wip"] };
+const versions = ["moq-lite-07-wip"];
 const trackName = "seq";
 
 function log(message: string) {
@@ -116,7 +116,7 @@ broadcast.announce({ epoch: Moq.Epoch.mint() });
 const publisher = new Moq.Connection({
 	url: new URL(`http://127.0.0.1:${bPort}/`),
 	publish: published.consume(),
-	websocket,
+	versions,
 });
 
 let lastPublished = -1;
@@ -143,7 +143,7 @@ const viewer = new Moq.Connection({
 	url: new URL(`http://127.0.0.1:${proxyPort}/`),
 	consume: watched,
 	goaway: { handover: HANDOVER },
-	websocket,
+	versions,
 });
 
 // One request and one subscription, at the default zero budget, read for the whole run: the

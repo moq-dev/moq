@@ -78,5 +78,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - groups cut short by a session close
+- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - groups cut short by a session close
 - [QUIC ack hook](/quest/m2/quic-ack-hook.md) - a FIN/ack hook in the QUIC layer

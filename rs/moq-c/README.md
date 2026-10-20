@@ -90,6 +90,7 @@ int32_t moq_publish_media_demand(uint32_t media, moq_status_callback on_demand, 
 int32_t moq_encode_video_demand(uint32_t producer, moq_status_callback on_demand, void *user_data);
 int32_t moq_encode_audio_demand(uint32_t producer, moq_status_callback on_demand, void *user_data);
 int32_t moq_publish_demand_cancel(uint32_t watcher);
+int32_t moq_publish_demand_wanted(uint32_t watcher, uint64_t *group, bool *present);
 
 // Publishing: Requests
 int32_t moq_publish_dynamic(uint32_t broadcast, moq_status_callback on_request, void *user_data);

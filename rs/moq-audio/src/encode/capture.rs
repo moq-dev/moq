@@ -793,21 +793,23 @@ trait Demand {
 
 impl Demand for moq_net::track::Demand {
 	async fn used(&mut self) -> bool {
-		match moq_net::track::Demand::used(self).await {
-			Ok(()) => true,
-			Err(err) => {
-				log_track_ended(err);
-				false
-			}
-		}
+		until_wanted(self, true).await
 	}
 
 	async fn unused(&mut self) -> bool {
-		match moq_net::track::Demand::unused(self).await {
-			Ok(()) => true,
+		until_wanted(self, false).await
+	}
+}
+
+/// Wait until some subscriber wants the track, or none does.
+async fn until_wanted(demand: &mut moq_net::track::Demand, wanted: bool) -> bool {
+	loop {
+		match demand.wanted_changed().await {
+			Ok(next) if next.is_some() == wanted => return true,
+			Ok(_) => {}
 			Err(err) => {
 				log_track_ended(err);
-				false
+				return false;
 			}
 		}
 	}

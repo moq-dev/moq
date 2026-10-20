@@ -126,16 +126,13 @@ mod test {
 	fn demand_follows_subscribers() {
 		let (producer, consumer) = producer(Config::default());
 		let demand = producer.demand();
-		let waiter = kio::Waiter::noop();
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
+		assert_eq!(demand.wanted(), Some(0));
 
 		drop(consumer);
-		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Ok(()))));
-		assert!(demand.poll_used(&waiter).is_pending());
+		assert_eq!(demand.wanted(), None);
 
 		let _consumer = producer.consume();
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
-		assert!(demand.poll_unused(&waiter).is_pending());
+		assert_eq!(demand.wanted(), Some(0));
 	}
 
 	fn compressed() -> Config {

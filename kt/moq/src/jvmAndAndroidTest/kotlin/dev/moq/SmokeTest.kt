@@ -425,12 +425,12 @@ class SmokeTest {
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             assertEquals("status", demand.name())
-            assertEquals(false, demand.isUsed())
+            assertEquals(null, demand.wanted())
 
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
-            demand.used()
+            while (demand.wantedChanged() == null) {}
             consumer.cancel()
-            demand.unused()
+            while (demand.wantedChanged() != null) {}
         }
     }
 
