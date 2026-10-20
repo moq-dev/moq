@@ -494,6 +494,11 @@ async function resolveInfo(state: TrackState): Promise<Info> {
 	}
 }
 
+// Whether `a` is past `b`.
+function after(a: Location, b: Location): boolean {
+	return a.group > b.group || (a.group === b.group && a.frame > b.frame);
+}
+
 async function nextLargest(
 	state: TrackState,
 	seen: Location | undefined,
@@ -501,10 +506,7 @@ async function nextLargest(
 ): Promise<Location | undefined> {
 	for (;;) {
 		const largest = state.largest.peek();
-		if (
-			largest &&
-			(!seen || largest.group > seen.group || (largest.group === seen.group && largest.frame > seen.frame))
-		) {
+		if (largest && (!seen || after(largest, seen))) {
 			commit(largest);
 			return largest;
 		}
@@ -1102,12 +1104,7 @@ export class Producer {
 	#advanceLargest(largest: Location | undefined): void {
 		if (!largest) return;
 		const current = this.#state.largest.peek();
-		if (
-			current &&
-			(current.group > largest.group || (current.group === largest.group && current.frame >= largest.frame))
-		) {
-			return;
-		}
+		if (current && !after(largest, current)) return;
 		this.#largestOpen = true;
 		this.#state.largest.set(largest);
 		for (const sink of this.#sinks) sink.largest.set(largest);
@@ -1596,7 +1593,10 @@ export class Subscriber {
 	#delivered = new Delivered();
 	// Whether a resumed reader has read groups, so a datagram read keeps copies they still need.
 	#groupsRead = false;
+	// What {@link largest} last reported, and whether it ended: moving the bounds afterwards
+	// does not bring it back.
 	#largestSeen?: Location;
+	#largestDone = false;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
 	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
@@ -1957,18 +1957,39 @@ export class Subscriber {
 	}
 
 	/**
-	 * The track's largest location, its newest group or datagram at the newest frame (0 while
-	 * empty): the current one at first, then each newer one (skipping any in between), and
-	 * `undefined` once the track ends. Seeded by the publisher's report, so it can name a frame
-	 * before its group arrives.
+	 * The largest location within {@link setGroups}: the current one at first, then each newer
+	 * one (skipping any in between), and `undefined` once the track ends.
+	 *
+	 * The largest is the track's newest group or datagram at the newest frame (0 while empty), as
+	 * the publisher reported it and its feed delivered since, so it can name a frame before its
+	 * group arrives. A largest past the cap or below the floor reports nothing: the cache does not
+	 * stand in for it, so a cap moved below the largest stays pending. Moving the bounds wakes a
+	 * pending read, which reports the largest once it is within them and newer than the last report.
 	 */
 	async largest(): Promise<Location | undefined> {
+		if (this.#largestDone) return undefined;
 		if (this.#resume) {
 			const largest = await this.#resume.largest(this.#largestSeen);
 			if (largest) this.#largestSeen = largest;
+			else this.#largestDone = true;
 			return largest;
 		}
-		return nextLargest(this.#state, this.#largestSeen, (largest) => (this.#largestSeen = largest));
+		for (;;) {
+			const { start, end } = this.#cursor.peek();
+			const largest = this.#state.largest.peek();
+			const within =
+				largest && largest.group >= start && (end === undefined || largest.group < end) ? largest : undefined;
+			const seen = this.#largestSeen;
+			if (within && (!seen || after(within, seen))) {
+				this.#largestSeen = within;
+				return within;
+			}
+			if (this.#state.closed.peek() !== undefined || this.#state.largestEnded.peek()) {
+				this.#largestDone = true;
+				return undefined;
+			}
+			await Signal.race(this.#state.largest, this.#state.closed, this.#state.largestEnded, this.#cursor);
+		}
 	}
 
 	// The newest frame buffered for this subscriber, which a wire answer names as its edge:
@@ -2020,6 +2041,7 @@ export class Subscriber {
 	 * Limit subsequent reads without rewinding read progress or changing the wire request.
 	 * An omitted start preserves the current floor; an omitted end removes the cap.
 	 * Raising the end makes unread buffered groups available again.
+	 * {@link largest} reports within these bounds.
 	 */
 	setGroups(groups: Groups): void {
 		const { start, end } = groupBounds(groups);
@@ -2532,7 +2554,7 @@ export class Ordered {
 		return this.#subscriber.subscription;
 	}
 
-	/** The track's largest location; see {@link Subscriber.largest}. */
+	/** The largest location within {@link setGroups}; see {@link Subscriber.largest}. */
 	largest(): Promise<Location | undefined> {
 		return this.#subscriber.largest();
 	}

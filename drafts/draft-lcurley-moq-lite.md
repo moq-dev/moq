@@ -512,9 +512,9 @@ A route claims capability rather than inventory, so a subscription for a covered
 The track's immutable publisher properties are not carried here; they are fetched once via a [Track Stream](#track-stream).
 The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret FRAME messages, and MAY open the Track and Subscribe streams concurrently, buffering frames until it arrives.
 
-The publisher sends SUBSCRIBE_OK once the absolute start position is resolved, and SUBSCRIBE_END once no further groups will be produced and every Group Stream it opens for the subscription has been opened (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
-The publisher closes its side of the stream (FIN) after SUBSCRIBE_END, once every counted Group Stream has finished or been reset.
-After reading the publisher's FIN, the subscriber MUST close its side (FIN) once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every remaining counted stream has arrived or exhausted the subscriber's grace period.
+The publisher sends SUBSCRIBE_OK once the absolute start position is resolved, and SUBSCRIBE_END as soon as the exclusive final group is known (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
+The publisher closes its side of the stream (FIN) after SUBSCRIBE_END, once every Group Stream has finished or been reset.
+After reading the publisher's FIN, the subscriber MUST close its side (FIN) once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every sequence in range has arrived, been named by SUBSCRIBE_DROP, or exhausted the subscriber's grace period.
 A publisher closing its session gracefully MUST wait for the subscriber's FIN or reset on every Subscribe Stream before closing the connection; a transport acknowledgement alone does not confirm the subscriber read the tail.
 A subscriber MAY cancel by closing its side (FIN); the publisher then closes its side (FIN) without owing SUBSCRIBE_END.
 Unbounded subscriptions stay open until SUBSCRIBE_END, and either endpoint MAY reset the stream at any time.
@@ -563,6 +563,7 @@ Either endpoint can open an Auth Stream (0x7) to present a token and learn what 
 The opener sends a single AUTH message and keeps its side open for as long as the token applies.
 Each endpoint SHOULD open one Auth Stream with an empty token right after the session starts, so both learn what the credential the connection already presented (the request URI, a client certificate, or nothing) allows.
 The acceptor replies with an AUTH_OK carrying the grant, or an AUTH_ERROR refusing the token.
+The grant MUST join the acceptor's scope before it sends AUTH_OK.
 It MAY send further AUTH_OK messages to replace the grant, such as with a lowered expiry, and MAY send an AUTH_ERROR after an AUTH_OK to revoke it; the latest AUTH_OK is the token's grant.
 After an AUTH_ERROR the acceptor closes its side of the stream.
 The opener withdraws a token by closing or resetting its side of the stream, and the acceptor then closes its own.
@@ -571,7 +572,13 @@ A grant names the paths the opener may publish to the acceptor and subscribe to 
 An endpoint's scope is the union of the grants of its open Auth Streams, and a stream that ends removes its grant from the union.
 When the union shrinks, an endpoint SHOULD withdraw its announcements and cancel its subscriptions that the union no longer covers, keeping the session and everything still covered.
 An endpoint that cancels a subscription, or refuses or stops serving a request, because the union does not cover it resets the stream with UNAUTHORIZED.
-An endpoint that announces a broadcast outside the union once its own setup tokens are answered SHOULD close the session with UNAUTHORIZED, rather than wait for a subscription that will never come.
+The acceptor judges each request against the union when it reads the request.
+A presenter MUST NOT send a request outside its known union while any non-empty token it presented remains unanswered; an unknown union covers no paths for this rule.
+Once those tokens are answered, it sends the request if the union covers it, or refuses it locally.
+An empty token does not hold requests: the connection credential is judged before the session serves requests.
+The same wait applies before closing the session for announcing a broadcast outside the union.
+An endpoint that announces a broadcast outside the settled union, and still announces it once the wait ends, SHOULD close the session with UNAUTHORIZED, rather than wait for a subscription that will never come.
+To renew a token without interrupting requests the new grant still covers, the presenter waits for the new token's AUTH_OK before withdrawing the old token.
 
 An acceptor that does not verify a token in band, or cannot express its grant in AUTH_OK, MUST send AUTH_ERROR with NOT_SUPPORTED and close its side of the stream.
 This applies before or after an AUTH_OK, including when a grant exceeds the message size limit.
@@ -1337,7 +1344,6 @@ SUBSCRIBE_END Message {
   Type (i) = 0x1
   Message Length (i)
   Group (i)
-  Stream Count (i)
 }
 ~~~
 
@@ -1349,14 +1355,30 @@ The exclusive end of the range: the absolute sequence number of the first group 
 A value of 0 means the track ended before producing any groups.
 The subscriber MUST NOT wait for any group at or after this sequence.
 
-**Stream Count**:
-The number of Group Streams the publisher opened for this subscription, whether they finished or were reset.
-A group that was skipped, never produced, delivered only as a datagram, or given up before its stream opened is not counted.
-A relay counts the Group Streams it opened itself, never the count it received upstream.
+The publisher SHOULD send SUBSCRIBE_END as soon as the exclusive final group is known, even while lower groups are still in flight.
 
-The publisher MUST NOT send SUBSCRIBE_END until every Group Stream it will open for the subscription has been opened, so the count is final; it does not wait for them to finish.
-The subscriber has received every Group Stream once it has read the header of `Stream Count` of them, which MAY happen after SUBSCRIBE_END or the FIN since streams are not ordered.
-A Group Stream reset before its header arrived is never seen, so a subscriber SHOULD bound how long it waits for the rest, for example by `Subscriber Max Age`.
+## SUBSCRIBE_DROP {#subscribe-drop}
+
+A publisher names groups it will not deliver with SUBSCRIBE_DROP on the Subscribe Stream.
+
+~~~
+SUBSCRIBE_DROP Message {
+  Type (i) = 0x2
+  Message Length (i)
+  Group Start (i)
+  Group End (i)
+  Error Code (i)
+}
+~~~
+
+**Group Start** and **Group End** are the inclusive range of group sequences the publisher gave up.
+**Error Code** is an application-specific error code; 0 means the groups are simply unavailable.
+
+For every sequence in the subscription's range, the publisher MUST send a Group Stream, send a datagram, or name it in SUBSCRIBE_DROP.
+This includes sequences it skipped and streams reset before their headers were delivered.
+A reliably delivered reset retaining the Group Stream header accounts for that group instead.
+The publisher SHOULD send SUBSCRIBE_DROP as soon as it gives a sequence up, without waiting for SUBSCRIBE_END.
+A datagram counts as sent even if it is lost; a subscriber SHOULD bound its wait for unaccounted sequences, for example by Subscriber Max Age.
 
 ## FETCH
 FETCH is sent by a subscriber to request a single group from a track.
@@ -1636,9 +1658,8 @@ The `Message Length` describes the payload size on the wire.
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
 - Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
-- Added `Stream Count` to SUBSCRIBE_END: the number of Group Streams opened for the subscription. SUBSCRIBE_END is now sent once every counted Group Stream has opened, rather than as soon as the final group is known.
-- Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
-- The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
+- Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every sequence is accounted for by a Group Stream, a datagram, or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.
+- SUBSCRIBE_END declares the final boundary while lower groups can still be in flight; the Subscribe Stream FIN follows once every Group Stream has finished or been reset.
 - Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
 - Added a local link preference to route selection, after the newest Epoch and before the 0 Hop ID check: the higher preference a subscriber assigns to the arriving link wins, and an unassigned link is neutral. Not carried on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
@@ -1653,6 +1674,7 @@ The `Message Length` describes the payload size on the wire.
 - A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
 - Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
 - Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
+- Required scope widening before AUTH_OK and presenter-side waiting for unanswered non-empty tokens before sending an uncovered request or rejecting a publication; renewal waits for AUTH_OK before withdrawing the old token.
 
 ## moq-lite-06
 

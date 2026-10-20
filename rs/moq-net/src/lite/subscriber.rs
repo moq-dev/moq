@@ -2088,7 +2088,7 @@ mod tests {
 			requested: Some(Position::group(2)),
 			tail: Default::default(),
 			served: None,
-			end: Some(lite::SubscribeEnd { group: 10, streams: 0 }),
+			end: Some(lite::SubscribeEnd { group: 10 }),
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -2410,7 +2410,7 @@ mod tests {
 				version,
 			)
 			.unwrap();
-			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 2, streams: 1 })
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 2 })
 				.encode(
 					&mut crate::coding::Encoder::new(&mut responses, version.into()),
 					version,
@@ -2597,7 +2597,7 @@ mod tests {
 			.unwrap();
 		}
 		if clean {
-			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, streams: 0 })
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0 })
 				.encode(
 					&mut crate::coding::Encoder::new(&mut responses, version.into()),
 					version,
@@ -2807,6 +2807,56 @@ mod tests {
 				"{stage}: an unused track kept waiting on TRACK_INFO"
 			);
 		}
+	}
+
+	/// A track waiting on an unanswered token ends once nobody wants it, rather than
+	/// holding its task and track until a token that may never be answered.
+	#[moq_clock::test]
+	async fn an_unused_track_stops_waiting_for_auth() {
+		let auth = crate::auth::Handle::new(true);
+		let _token = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: SinkSession::default(),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth,
+		});
+
+		let broadcast = crate::broadcast::Info::new().produce();
+		let mut dynamic = broadcast.dynamic();
+		let consumer = broadcast.consume();
+		let mut waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));
+		assert!(futures::poll!(waiting.as_mut()).is_pending());
+		let request = dynamic.requested_track().now_or_never().unwrap().expect("request");
+
+		let mut run = TrackServeRun::new(
+			TrackServe {
+				validity: Default::default(),
+				route: None,
+				subscriber,
+				path: Path::new("room").to_owned(),
+				epoch: None,
+				name: "video".to_string(),
+			},
+			request,
+		);
+		let waiter = kio::Waiter::noop();
+		assert!(
+			kio::Task::poll(&mut run, &waiter).is_pending(),
+			"waits on the token while the track is wanted"
+		);
+
+		drop(waiting);
+		assert!(
+			kio::Task::poll(&mut run, &waiter).is_ready(),
+			"an unused track kept waiting on its token"
+		);
 	}
 
 	/// `establish` puts exactly one SUBSCRIBE on the wire, and the id is registered
@@ -3056,7 +3106,6 @@ mod tests {
 		serving.mode = ServeMode::Tail {
 			settle: Settle::new(&serve.subscriber.runtime, tail.consume()),
 			owed: Some(0..1),
-			streams: None,
 		};
 		assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
 		peer.close(crate::SessionError::Unauthorized.to_code(), "revoked");
@@ -3113,7 +3162,7 @@ mod tests {
 				send.reset(crate::StreamError::NotFound.to_code());
 			} else {
 				let mut end = Vec::new();
-				lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, streams: 0 })
+				lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0 })
 					.encode(&mut crate::coding::Encoder::new(&mut end, version.into()), version)
 					.unwrap();
 				std::future::poll_fn(|cx| send.poll_write(cx, &end)).await.unwrap();
@@ -4653,7 +4702,7 @@ struct SubStream<S: crate::transport::poll::Session> {
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
 	served: Option<u64>,
-	/// The track's exclusive end and stream count (SUBSCRIBE_END), once declared.
+	/// The track's exclusive end (SUBSCRIBE_END), once declared.
 	end: Option<lite::SubscribeEnd>,
 }
 
@@ -5490,10 +5539,37 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 	}
 }
 
+impl<S: crate::transport::poll::Session> TrackServeRun<S> {
+	/// Nobody wants the track anymore (the origin failed over, the reader left): stop
+	/// waiting on a token or a peer that may never answer, which would otherwise hold
+	/// this task, its TRACK stream, and the track for good. Dropping the fetch resets the
+	/// stream. Ready once the request is released.
+	fn poll_unused(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let TrackRunState::Info { request, .. } = &self.state else {
+				return Poll::Pending;
+			};
+			let pending = request.as_ref().expect("request pending");
+			ready!(crate::util::poll_unwanted(&mut pending.demand(), waiter));
+			if pending.reject_unused(Error::Cancel) {
+				self.state = TrackRunState::Done;
+				return Poll::Ready(());
+			}
+			// Demand returned in the gap and won inside `reject_unused`: poll again so the
+			// unused wait is armed for when it leaves.
+		}
+	}
+}
+
 impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		// Checked before the auth wait too, so an abandoned request never parks on a token.
+		if self.poll_unused(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		ready!(self.gate.poll_ready(waiter));
 		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
 		if !matches!(self.state, TrackRunState::Finish(_)) && self.gate.poll_denied(waiter).is_ready() {
 			self.revoke();
@@ -5502,20 +5578,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 		loop {
 			match &mut self.state {
 				TrackRunState::Info { request, info } => {
-					// Nobody wants the track anymore (the origin failed over, the reader
-					// left): stop waiting on a peer that may never answer, which would
-					// otherwise hold this task, its TRACK stream, and the track for good.
-					// Dropping the fetch resets the stream.
-					let pending = request.as_ref().expect("request pending");
-					if crate::util::poll_unwanted(&mut pending.demand(), waiter).is_ready() {
-						if pending.reject_unused(Error::Cancel) {
-							self.state = TrackRunState::Done;
-							return Poll::Ready(());
-						}
-						// Demand returned in the gap and won inside `reject_unused`: poll
-						// again so the unused wait is armed for when it leaves.
-						continue;
-					}
+					// Abandonment was checked at the top of this poll, arming its wait.
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
 					let request = request.take().expect("request pending");
 					match res {
@@ -5751,13 +5814,11 @@ enum ServeMode<S: crate::transport::poll::Session> {
 	/// exactly like the old inline await.
 	Establish(Establish<S>),
 	/// The upstream FIN'd, so the track is over, but QUIC does not order streams: keep
-	/// the subscription routable until the counted headers arrive (lite-07), or every
-	/// owed group is accounted for (older drafts). The grace bounds a stream reset
-	/// before its header arrived.
+	/// the subscription routable until every owed group is accounted for. The grace bounds
+	/// an unaccounted sequence, such as a lost datagram.
 	Tail {
 		settle: Settle,
 		owed: Option<std::ops::Range<u64>>,
-		streams: Option<u64>,
 	},
 }
 
@@ -5975,14 +6036,13 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						}
 					}
 				}
-				ServeMode::Tail { settle, owed, streams } => {
+				ServeMode::Tail { settle, owed } => {
 					let _ = self.fetches.poll(waiter);
 					self.feed_fetches
 						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
 					if settle
-						.poll(waiter, |tail| match streams {
-							Some(streams) => tail.streams() >= *streams,
-							None => owed.clone().is_some_and(|owed| tail.covers(owed)),
+						.poll(waiter, |tail| {
+							owed.as_ref().is_some_and(|owed| tail.covers(owed.clone()))
 						})
 						.is_ready()
 					{
@@ -6231,11 +6291,6 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								self.mode = ServeMode::Tail {
 									settle: Settle::new(&serve.subscriber.runtime, active.tail.consume()),
 									owed: active.owed(requested_end),
-									streams: active
-										.end
-										.as_ref()
-										.filter(|_| serve.subscriber.version.has_stream_count())
-										.map(|end| end.streams),
 								};
 								continue;
 							}
@@ -6265,6 +6320,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 /// is implicit from the request.
 struct FetchServeRun<S: crate::transport::poll::Session> {
 	validity: crate::model::broadcast::RequestValidity,
+	gate: crate::auth::Gate,
 	serve: TrackServe<S>,
 	session: S,
 	timescale: Option<Timescale>,
@@ -6315,6 +6371,7 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 		let group = request.sequence();
 		Self {
 			validity: serve.validity.start(),
+			gate: serve.gate(),
 			serve,
 			session,
 			timescale,
@@ -6398,6 +6455,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 
 			match &mut self.state {
 				FetchRunState::Open { request } => {
+					ready!(self.gate.poll_ready(waiter));
 					let mut stream = match ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,

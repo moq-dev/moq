@@ -636,6 +636,7 @@ impl Default for Messages {
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {
+				max_age: None,
 				new_group: None,
 				request_id: ietf::RequestId(2),
 				track_namespace: Path::new("room/alice"),

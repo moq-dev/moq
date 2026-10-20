@@ -234,6 +234,43 @@ test("integration: lite subscription options and updates reach the publisher", a
 	server.abort();
 });
 
+// Both handshake paths: a SETUP-negotiated draft (16) and ALPN-selected ones (17+).
+test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])(
+	"integration: %s carries the subscriber max age to the publisher",
+	async (alpn) => {
+		const pair = createMockTransportPair(alpn);
+		const origin = new OriginProducer();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+
+		const broadcast = publish(origin, Path.from("test"));
+		const accepted = (async () => {
+			const request = await wireOf(broadcast).requested();
+			if (!request) throw new Error("no request");
+			return request.accept({ timescale: Timescale.MILLI });
+		})();
+
+		const remote = wireOf(client).consume(Path.from("test"));
+		const subscriber = remote.track("video").subscribe({ maxDelay: Milli(250) });
+		const producer = await accepted;
+		// Without the negotiated parameter the publisher keeps its whole backlog instead.
+		expect(producer.subscription.peek()?.maxDelay).toBe(Milli(250));
+
+		const updated = producer.subscription.changed();
+		subscriber.update({ maxDelay: Milli(500) });
+		expect((await updated)?.maxDelay).toBe(Milli(500));
+
+		subscriber.close();
+		remote.close();
+		broadcast.close();
+		origin.close();
+		client.abort();
+		server.abort();
+	},
+);
+
 test("integration: lite carries a fractional maxDelay as a whole millisecond", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_05);
 	const origin = new OriginProducer();

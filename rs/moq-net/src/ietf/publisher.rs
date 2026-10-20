@@ -26,10 +26,9 @@ use crate::{
 use super::{Message, Version, cluster, error::request, peer, request_update};
 
 /// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
+const MAX_SAFE_DELAY_MS: u64 = super::max_age::MAX_MILLIS;
 
-/// Build the serving-side subscription for a peer whose wire protocol carries no
-/// max delay preference. The receiver applies its own budget after the transfer.
+/// Preserve retained groups when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
 	Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
@@ -1221,6 +1220,9 @@ where
 					// A live SUBSCRIBE's NEW_GROUP_REQUEST asks nothing more: subscribing is itself
 					// a join, which the track's refresh ratio judges.
 					let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
+					if let Some(max_age) = msg.max_age {
+						subscription.max_delay = Duration::from_millis(max_age);
+					}
 					// A range that resolves without the live edge has a fixed start, which is no
 					// join: bound the subscription before subscribing so the ratio never judges it.
 					// From the start of its group, so a relay's copy holds the group's head for
@@ -1711,6 +1713,11 @@ where
 			serve
 				.set_priority(super::priority::from_wire(priority))
 				.map_err(failed)?;
+		}
+		if let Some(max_age) = update.max_age {
+			let mut subscription = serve.track.subscription();
+			subscription.max_delay = Duration::from_millis(max_age);
+			serve.track.update(subscription).map_err(failed)?;
 		}
 		if let Some(value) = update.new_group {
 			serve.request_new_group(value);
@@ -2583,7 +2590,9 @@ where
 				})
 				.await?;
 			let mut prior = None;
+			let mut budget = kio::coop::Budget::new(32);
 			for (ordinal, frame) in (group.first..).zip(group.frames) {
+				kio::wait(|waiter| budget.poll_yield(waiter)).await;
 				let object = frame.fields.as_ref().map_or(ordinal, |fields| fields.id);
 				let position = fetch_prior(self.version, prior, object)?;
 				prior = Some(object);
@@ -5554,7 +5563,8 @@ mod group_priority_test {
 
 	/// Drive `serve` beside a sibling that only counts its turns, until `done`, checking every
 	/// poll stays under `most` by `progress` and leaves the sibling its turn.
-	fn serve_beside_a_sibling(
+	/// Each task-set pass returns to the executor so its children's yields reach the task.
+	async fn serve_beside_a_sibling(
 		mut serve: TrackServe<SinkSession>,
 		mut produce: impl FnMut() -> bool + 'static,
 		progress: impl Fn() -> usize,
@@ -5581,22 +5591,26 @@ mod group_priority_test {
 			serve.poll(waiter).map(|res| res.expect("serve"))
 		}));
 
-		let owner = kio::Waiter::noop();
 		let mut polls = 0;
-		while progress() < done {
+		kio::wait(|owner| {
+			if progress() >= done {
+				return Poll::Ready(());
+			}
 			let before = progress();
-			assert!(tasks.poll(&owner).is_pending(), "the serve never ends");
+			assert!(tasks.poll(owner).is_pending(), "the serve never ends");
 			polls += 1;
 			let made = progress() - before;
 			assert!(made <= most, "one poll made {made} progress");
 			assert_eq!(turns.load(Ordering::Relaxed), polls, "the sibling missed a turn");
 			assert!(polls <= 2 * done as u64, "the serve stalled");
-		}
+			Poll::Pending
+		})
+		.await;
 	}
 
 	/// A track that always has another group ready yields within its budget.
-	#[test]
-	fn a_busy_track_yields_to_its_siblings() {
+	#[moq_clock::test]
+	async fn a_busy_track_yields_to_its_siblings() {
 		/// `TrackServe`'s passes per poll; each starts at most one group.
 		const BUDGET: usize = 32;
 		const GROUPS: u64 = 10_000;
@@ -5639,7 +5653,8 @@ mod group_priority_test {
 			|| opened.load(Ordering::Relaxed) as usize,
 			BUDGET,
 			GROUPS as usize,
-		);
+		)
+		.await;
 	}
 
 	/// On a transport with send groups, a subscription opens one at its priority and its
@@ -5776,7 +5791,8 @@ mod group_priority_test {
 			|| log.writes.lock().unwrap().len(),
 			2 * (BUDGET + 1) * 2 * PAYLOAD,
 			FRAMES * PAYLOAD,
-		);
+		)
+		.await;
 	}
 
 	/// Serve one group at `version` with `timescale` and return the header plus what follows it.
@@ -6768,6 +6784,7 @@ mod serve_tests {
 			Version::Draft14 => {
 				let mut body = Vec::new();
 				ietf::SubscribeUpdate {
+					max_age: None,
 					new_group: None,
 					request_id: RequestId(UPDATE_ID.into()),
 					subscription_request_id: Some(RequestId(0)),
@@ -6878,6 +6895,7 @@ mod serve_tests {
 	fn new_group_update(version: Version, id: u64, value: u64) -> Vec<u8> {
 		let mut body = Vec::new();
 		ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: Some(value),
 			request_id: RequestId(id),
 			subscription_request_id: matches!(version, Version::Draft15 | Version::Draft16).then_some(RequestId(0)),
@@ -7068,6 +7086,7 @@ mod serve_tests {
 			Version::Draft14 => {
 				let mut body = Vec::new();
 				ietf::SubscribeUpdate {
+					max_age: None,
 					new_group: None,
 					request_id: RequestId(2),
 					subscription_request_id: Some(RequestId(0)),
@@ -7478,6 +7497,7 @@ mod serve_tests {
 
 	fn subscribe(filter: Filter, fill: Option<ietf::Fill>) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(REQUEST_ID),
 			track_namespace: crate::Path::new("room"),
@@ -9267,6 +9287,49 @@ mod serve_tests {
 		run_fetch(h, fetch_type, group_order, true).await
 	}
 
+	#[moq_clock::test]
+	async fn a_cached_standalone_fetch_yields_while_writing() {
+		for version in FETCH_DRAFTS {
+			let h = serve(version);
+			let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+			for _ in 0..256 {
+				group.write_frame(timestamp(), vec![7; 1024]).unwrap();
+			}
+			group.finish().unwrap();
+			settle().await;
+
+			let done = std::rc::Rc::new(std::cell::Cell::new(false));
+			let saw_payload = std::rc::Rc::new(std::cell::Cell::new(false));
+			let sibling = moq_clock::sim::spawn({
+				let done = done.clone();
+				let saw_payload = saw_payload.clone();
+				let log = h.log.clone();
+				async move {
+					while !done.get() {
+						if log.writes.lock().unwrap().len() > 1024 {
+							saw_payload.set(true);
+						}
+						moq_clock::sim::yield_now().await;
+					}
+				}
+			});
+			let wire = standalone_fetch(
+				&h,
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 256 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			done.set(true);
+			sibling.await.unwrap();
+			assert!(wire.len() > 256 * 1024);
+			assert!(
+				saw_payload.get(),
+				"{version}: writing the cached group starved its sibling"
+			);
+		}
+	}
+
 	/// A standalone FETCH of `room/<track>`, spelled as [`standalone_fetch`] describes.
 	fn fetch_range(version: Version, track: &'static str, start: Location, end: Location) -> FetchType<'static> {
 		let namespace = crate::Path::new("room");
@@ -10986,6 +11049,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(0x40),
 			subscription_request_id,
@@ -11298,6 +11362,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(rid),
 			subscription_request_id,
@@ -11324,6 +11389,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(rid),
 			subscription_request_id,
@@ -12517,8 +12583,7 @@ mod tests {
 		slot
 	}
 
-	/// moq-transport cannot carry the receiver's max delay budget, so the serving
-	/// subscription must preserve everything the producer still retains.
+	/// An absent max age preserves everything the producer still retains.
 	#[test]
 	fn serving_subscription_keeps_retained_backlog() {
 		let producer = track::Producer::new(
@@ -13822,6 +13887,7 @@ mod tests {
 			},
 			solicit,
 			hidden: false,
+			max_age: false,
 			auth: false,
 			active_count: false,
 			epoch: false,
@@ -14727,6 +14793,7 @@ mod tests {
 			.run_subscribe_stream(
 				stream,
 				ietf::Subscribe {
+					max_age: None,
 					new_group: None,
 					request_id: RequestId(1),
 					track_namespace: crate::Path::new("nothing/here"),
@@ -15100,6 +15167,7 @@ mod range_tests {
 
 	fn subscribe(filter: Filter) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
+			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("broadcast"),
