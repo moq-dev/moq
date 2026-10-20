@@ -74,7 +74,6 @@ lands before the cut.
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [Subscribing readers never ask TRACK_STATUS](/quest/m1/track-status-race.md) - a reader's subscription lands with its request, and the NOT_SUPPORTED fallback goes away
-- [IETF max age](/quest/m1/ietf-max-age.md) - a moq-transport subscriber sets lite's max age through a timestamp-draft SUBSCRIBE parameter
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [Browser follows a renamed track](/quest/m1/browser-rename-check.md) - a real browser keeps playing when `@moq/publish` renames a track after a codec change, while size-only changes keep their identity
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
