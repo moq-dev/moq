@@ -855,7 +855,8 @@ impl<E: CatalogExt> Producer<E> {
 	/// rendition ID, or the track name for an `m2ts` or verbatim `mpegts` track.
 	///
 	/// Counters are cumulative for the life of the catalog, so a track that ended keeps its final
-	/// counts and a later track under the same key continues them. Fold this into a
+	/// counts and a later track under the same key continues them, until 1,024 keys are held: then
+	/// ended tracks make way for new ones. Fold this into a
 	/// [`hang::stats::Snapshot`] on the stats interval.
 	pub fn stats(&self) -> std::collections::BTreeMap<String, hang::stats::Rendition> {
 		self.sent.sent()

@@ -6,7 +6,7 @@
 //! [`Source`](crate::Source) for what a viewer reads.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -80,38 +80,57 @@ impl Received {
 	}
 }
 
-/// The most rendition IDs a registry keeps. Entries are never evicted, so a remote catalog that
-/// keeps renaming its renditions would otherwise grow it, and each report, without bound.
+/// The most rendition IDs a registry keeps, so that a remote catalog that keeps renaming its
+/// renditions cannot grow it, and each report, without bound.
 const MAX_ENTRIES: usize = 1024;
 
 /// Counters keyed by rendition ID, shared by the tracks that bump them and the reporter that reads
 /// them.
-pub(crate) struct Registry<T>(Mutex<BTreeMap<String, Arc<T>>>);
+pub(crate) struct Registry<T> {
+	entries: Mutex<BTreeMap<String, Arc<T>>>,
+	/// Whether a name has gone unreported because every entry was live, which is logged once.
+	full: AtomicBool,
+}
 
 impl<T> Default for Registry<T> {
 	fn default() -> Self {
-		Self(Mutex::default())
+		Self {
+			entries: Mutex::default(),
+			full: AtomicBool::new(false),
+		}
 	}
 }
 
 impl<T: Default> Registry<T> {
-	/// The counters for `name`, continuing those of an earlier track under that name. Past
-	/// [`MAX_ENTRIES`] names, a new one counts into counters no report reads.
+	/// The counters for `name`, continuing those of an earlier track under that name. At
+	/// [`MAX_ENTRIES`] names, those no track still counts into make way; with every one live, a new
+	/// name counts into counters no report reads.
 	pub(crate) fn track(&self, name: &str) -> Arc<T> {
-		let mut entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
 		if let Some(counters) = entries.get(name) {
 			return counters.clone();
 		}
 		if entries.len() >= MAX_ENTRIES {
+			// Each track holds its counters for as long as it runs, so the registry's is the last.
+			entries.retain(|_, counters| Arc::strong_count(counters) > 1);
+		}
+		if entries.len() >= MAX_ENTRIES {
+			if !self.full.swap(true, Relaxed) {
+				tracing::warn!(
+					name,
+					limit = MAX_ENTRIES,
+					"every reported rendition is live; not reporting more"
+				);
+			}
 			return Arc::default();
 		}
 		entries.entry(name.to_string()).or_default().clone()
 	}
 
-	/// Read every entry. A track that ended keeps its final counts for the registry's life, as the
+	/// Read every entry. A track that ended keeps its final counts until the registry fills, as the
 	/// catalog a finished import leaves up still lists it.
 	fn report<R>(&self, read: impl Fn(&T) -> R) -> BTreeMap<String, R> {
-		let entries = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
 		entries
 			.iter()
 			.map(|(name, counters)| (name.clone(), read(counters)))
@@ -161,18 +180,28 @@ mod tests {
 		assert_eq!(registry.sent()["video"].bytes, 30);
 	}
 
+	/// With every entry live a new name goes unreported and a known one still counts; once the
+	/// tracks end, a new name takes their place.
 	#[test]
-	fn renditions_past_the_cap_are_not_kept() {
+	fn renditions_past_the_cap_replace_ended_ones() {
 		let registry = Registry::<Sent>::default();
-		for n in 0..=MAX_ENTRIES {
-			registry.track(&format!("r{n}")).add(1, 1, 0);
+		let live: Vec<_> = (0..MAX_ENTRIES).map(|n| registry.track(&format!("r{n}"))).collect();
+		for counters in &live {
+			counters.add(1, 1, 0);
 		}
+		registry.track("late").add(1, 1, 0);
 		let report = registry.sent();
 		assert_eq!(report.len(), MAX_ENTRIES);
-		assert!(!report.contains_key(&format!("r{MAX_ENTRIES}")));
+		assert!(!report.contains_key("late"));
 
 		registry.track("r0").add(1, 1, 0);
 		assert_eq!(registry.sent()["r0"].frames, 2);
+
+		drop(live);
+		registry.track("late").add(1, 1, 0);
+		let report = registry.sent();
+		assert_eq!(report.keys().collect::<Vec<_>>(), ["late"]);
+		assert_eq!(report["late"].frames, 1);
 	}
 
 	#[test]
