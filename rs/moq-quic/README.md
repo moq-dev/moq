@@ -43,11 +43,11 @@ quinn itself, the async layer from the same commit, is the `quic::driver` module
 
 ```sh
 git -C ../quinn format-patch -1 --stdout <sha> -- quinn/src \
-  | perl -pe 's#([ab])/quinn/src/lib\.rs#$1/rs/moq-tokio/src/quic/driver/mod.rs#g; s#([ab])/quinn/src/#$1/rs/moq-tokio/src/quic/driver/#g; s/\bcrate::/crate::quic::driver::/g; s/\bproto::/moq_quic::/g; s/\budp::/moq_sock::udp::/g' \
+  | sed -E 's#([ab])/quinn/src/lib\.rs#\1/rs/moq-tokio/src/quic/driver/mod.rs#g; s#([ab])/quinn/src/#\1/rs/moq-tokio/src/quic/driver/#g; s/(^|[^[:alnum:]_])crate::/\1crate::quic::driver::/g; s/(^|[^[:alnum:]_])proto::/\1moq_quic::/g; s/(^|[^[:alnum:]_])udp::/\1moq_sock::udp::/g' \
   | git am -3
 ```
 
-It runs `perl` because BSD sed, as on macOS, has no `\b` and would silently leave the paths unrewritten.
+The word boundaries are spelled `(^|[^[:alnum:]_])` because BSD sed, as on macOS, has no `\b` and would silently leave the paths unrewritten.
 The driver is tokio-only: the `Runtime` trait, smol, the `futures-io` impls, and the lock-tracking mutex are dropped, so hunks touching them are skipped.
 moq-tokio's `quic::web` module is `web-transport-moq` from moq-dev/noq at [`e27c0ce0`](https://github.com/moq-dev/noq/commit/e27c0ce00741d81c8620b98e345d4f2c88e0768c), which has no upstream left to track.
 
