@@ -19,10 +19,13 @@ Decided with the maintainer on 2026-10-20, from #5543's follow-ups. Start once
   the source's config changes.
 - Derive `fov` from the equirectangular bounds.
 - Refuse what the catalog cannot describe, since an absent field claims flat
-  video or plain channels: a cubemap or mesh projection, and an Opus family 2
-  stream outside a square channel count of at least 4 (zeroth order, or one
-  carrying RFC 8486's non-diegetic stereo pair). Input RFC 8486 itself
-  forbids is malformed and refused the same way.
+  video or plain channels: a cubemap or mesh projection, so Google's
+  mesh-based VR180 is refused until the catalog has a mesh kind. For Opus
+  family 2, RFC 8486 allows `(1 + n)^2 + 2j` channels with `j` 0 or 1; only
+  `j = 0` with `n` of at least 1 (4, 9, 16, ... channels) maps to
+  `ambisonic`, and zeroth order or a non-diegetic stereo pair (1, 3, 6, 11,
+  ... channels) is refused. A count RFC 8486 forbids is malformed and refused
+  the same way.
 - `mp4-atom` 0.16.2 has no `st3d` or `sv3d` atom; add them in
   kixelated/mp4-atom. `webm-iterable` already names the Matroska elements.
 - An fMP4 Opus track needs the `dOps` mapping table that
@@ -30,9 +33,10 @@ Decided with the maintainer on 2026-10-20, from #5543's follow-ups. Start once
   fMP4 follows it; Matroska and raw Opus do not wait.
 - Exporters writing the fields back are out of scope.
 
-Tests: a fixture per source (MP4 360 and VR180, Matroska stereo, Opus
-first-order ambisonics) imports with the expected fields, and a cubemap, an
-ambisonic stream with non-diegetic stereo, and a malformed one are refused.
+Tests: a fixture per source (MP4 360, a 180-degree equirectangular MP4 with
+`equi` bounds, Matroska stereo, Opus first-order ambisonics) imports with the
+expected fields, and a cubemap, a mesh VR180, an ambisonic stream with
+non-diegetic stereo, and a malformed one are refused.
 
 Public API: none beyond the catalog fields #5543 adds. Wire: none.
 

@@ -15,9 +15,12 @@ Decided with the maintainer on 2026-10-20, from the follow-ups of
 [#5765](https://github.com/moq-dev/moq/pull/5765), which implements the
 deadline.
 
-- Drive `serve_client` in process on controlled time, with an auth decider
-  that can stall, rather than the binary on wall time. If it cannot be driven
-  that way, open the smallest seam that lets it.
+- Drive `moq --listen`'s listener in process on controlled time, through the
+  path that runs admission under the handshake deadline (#5765's
+  `Request::within`), with an auth decider that can stall, rather than the
+  binary on wall time. Calling `serve_client` alone would leave the deadline
+  out. If the listener cannot be driven that way, open the smallest seam that
+  lets it.
 - Match the relay's `auth_lifetime` cases so the two listeners stay alike.
 
 Public API: none. Wire: none.

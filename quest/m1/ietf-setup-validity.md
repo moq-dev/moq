@@ -34,8 +34,9 @@ Decided with the maintainer on 2026-10-20, from #6061's follow-ups:
   and response waits remain here.
 
 Regression tests on sim time, one per wait, each failing on main by timing
-out: a revocation and a route retirement during the wait refuse the request
-promptly, on drafts 14 and 16 and on 17+ where the wait differs.
+out: a revoked, narrowed, and expired grant and a route retirement during
+the wait each refuse the request promptly, on drafts 14 and 16 and on 17+
+where the wait differs.
 
 Public API: none. Wire: none.
 

@@ -37,6 +37,9 @@ Decided with the maintainer on 2026-10-17 (see the
   what it says, and run `just drafts check`.
 - A browser sender can't see whether it is app-limited; settle how to judge
   it from what it sends against the estimate.
+- Settle how the schedule stays within its overhead budget: how padding's
+  share of sent bytes is counted over time, and what a cluster does once it
+  would exceed the budget.
 
 Tests, on `@moq/clock`'s `Manual`:
 
@@ -52,6 +55,8 @@ Tests, on `@moq/clock`'s `Manual`:
   media frame delay and deadline misses against budgets set before tuning:
   lowest priority can't preempt padding already in flight or queued at the
   bottleneck, so a frame ready just after a cluster can still wait behind it.
+  Assert that repeated clusters on a path with no room stay within the
+  overhead budget.
   Wire it into CI at least nightly, sharing the epic's shaped-uplink setup.
 
 ## Required

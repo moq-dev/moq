@@ -41,7 +41,8 @@ mechanism wins first" step:
   adapters. A controller with no ProbeBW_UP phase (such as the
   [realtime controller](/quest/m2/quic-realtime/README.md)) can't, so its
   sessions keep `Report`: [padding](/quest/m2/probe/padding.md) is
-  browser-only.
+  browser-only. Nor can a session with no media in flight; the native rung
+  disable keeps its lowest rung encoding for that reason.
 
 Acceptance, in moq-quic's seeded simulation (`rs/moq-quic/src/tests/`,
 extending `Bottleneck` to step its rate) and wired into CI at least nightly:

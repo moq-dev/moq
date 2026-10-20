@@ -29,8 +29,8 @@ Readers with their own follow loop today move onto the announced request:
 - The TS stitching follower (`rs/moq-mux/src/container/ts/follower.rs`), if
   the announced request fits how it marks a break.
 
-Readers that resolve once (`subscribe`, `fetch`) either follow the same way
-or say in the PR why they stay on one instance.
+`subscribe` reads until its track ends, so it follows like the rest. Only a
+finite read such as `fetch` stays on the one instance it resolved.
 
 The stdout exports already do this: TS follows with `--stitch`, and the other
 formats ride the old instance until its route dies and its tracks error. Audit

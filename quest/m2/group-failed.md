@@ -18,9 +18,10 @@ the lite publisher.
   exists by the time this starts, propose deleting the quest.
 - Return a handle or an event stream, not a callback.
 - A relay fans a track out to many subscribers, and a hostile subscriber can
-  fail streams on purpose. Coalesce per group so N subscribers failing one
-  group cost one event, and benchmark the path swept over subscribers and
-  groups.
+  fail streams on purpose. Coalesce per group, keyed by the publisher's track
+  and the group's sequence (the track belongs to one broadcast instance), so
+  N subscribers or retries failing one group cost one event, and benchmark
+  the path swept over subscribers and groups.
 - Carry it through moq-ffi and the bindings only once a binding consumer
   asks.
 

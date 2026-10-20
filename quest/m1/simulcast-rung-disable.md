@@ -45,6 +45,9 @@ with padding.
   reservation at its ceiling. The session's probe target sums every live
   reservation, so it keeps probing for the stopped rung and the estimate can
   rise to fund it. No padding handle or burst schedule is driven from `Rung`.
+- The lowest rendition never disables. Native probing retransmits in-flight
+  data, so a session with every rung stopped has nothing to probe with once
+  its last packets are acknowledged, and could never re-enable a rung.
 - Assign descending track priority down the renditions so the allocator
   fills lower rungs first; [Scope track priority](/quest/m1/track-priority-scope.md)
   settles how that number also orders sends.
@@ -56,8 +59,9 @@ with padding.
 Tests with mocked time: a shrinking grant disables the top rung first and
 keeps the lower ones at their share; a recovering grant re-enables it only
 past the hysteresis and after its viewers left; a jittering grant near the
-boundary does not flap the catalog. Prove one shaped-uplink run through
-moq-ffi.
+boundary does not flap the catalog; a grant below every boundary keeps the
+lowest rung encoding. Prove one shaped-uplink run through moq-ffi, including
+a path that reopens after the grant fell below the lowest rung.
 
 Public API: the shared rule in `moq_mux::rate` and whatever knobs the
 publishers expose for it. Wire: none; `enabled` already exists.

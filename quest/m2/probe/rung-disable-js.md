@@ -18,7 +18,7 @@ probing, while a browser can only probe with
   than tuning a JS-only one. Its decisions hold here too: catalog state
   follows what the encoder applied, recovery does not depend on demand, and a
   disabled rung keeps its reservation at its ceiling so the session keeps
-  probing for it.
+  probing for it. The lowest rendition never disables either.
 - Today each encoder reserves its ceiling and follows its own grant down
   (`js/publish/src/video/encoder.ts`). The manual `enabled` input already
   publishes `enabled: false` and stops encoding; this drives that state from
