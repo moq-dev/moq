@@ -92,6 +92,21 @@ Raw logs and Cargo timing reports were local only; re-measure rather than
 trusting anything beyond these tables. `cargo llvm-lines` was unavailable in
 the pinned shell.
 
+Measured 2026-10-20 on `eecb86c5f` (same shell, two jobs, host load 18 to
+21): `cargo llvm-lines` 0.4.48 works from `nix shell nixpkgs#cargo-llvm-lines`.
+The moq-tokio dev lib (default features) emits 1,653,007 LLVM IR lines in
+53,946 copies. By defining crate: moq-net 35.1%, core 17.9%, tokio 15.1%,
+moq-tokio 11.4%. 43.5% (719,215 lines) is generic code instantiated once per
+transport: `transport::Session<qmux::Session>` 14.5% and
+`transport::Session<quic::web::Session>` 14.1%, each again wrapped in moq-net's
+IETF `ControlStreamAdapter` (7.5% each). Erasing the transport once at
+moq-net's session entry would drop most of that, but boxes streams and adds a
+dynamic call per poll, so it needs a benchmark; it is a follow-up candidate.
+usage-rs derive output (`::_::` config functions) is 85,831 lines (5.2%); the
+crate is external (jdx/usage). moq-net, moq-relay, moq-mux, and moq-cli
+llvm-lines runs and a release `-Z time-passes` attribution were started and
+interrupted before finishing.
+
 Remaining work before completing this run:
 
 1. Record a successful ordinary net-edit `just check` with a formatted probe,
