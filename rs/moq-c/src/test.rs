@@ -1735,13 +1735,11 @@ fn raw_track_subscription_options_and_update() {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
 			group: 1,
 			frame: 0,
-			timestamp_us: 0,
 		},
 		end: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
 			group: 2,
 			frame: 0,
-			timestamp_us: 0,
 		},
 		end_present: true,
 	}];
@@ -1812,71 +1810,40 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A time anchor starts at the group containing that presentation time.
 #[test]
-fn raw_track_time_anchor() {
+fn raw_track_relative_update_counts_from_the_track_edge() {
 	let origin = id(moq_origin_create());
-	let path = b"raw-track-time";
+	let path = b"raw-track-relative";
 	let broadcast = publish_broadcast(origin, path);
 
 	let track_name = b"data";
-	let info = moq_track_info {
-		priority: 3,
-		max_age_us: 1_000_000,
-		max_age_present: true,
-		timescale: 1_000_000,
-		timescale_present: true,
-		refresh: 0,
-		refresh_present: false,
-	};
-	let track =
-		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
-
-	let payloads: [&[u8]; 3] = [b"zero", b"one", b"two"];
-	for (i, payload) in payloads.into_iter().enumerate() {
+	let track = id(unsafe {
+		moq_publish_track(
+			broadcast,
+			track_name.as_ptr() as *const c_char,
+			track_name.len(),
+			std::ptr::null(),
+		)
+	});
+	let publish = |payload: &[u8]| {
 		assert_eq!(
-			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), i as u64 * 20_000) },
+			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), 0) },
 			0
 		);
-	}
-
-	let consume = request_broadcast(origin, path);
-
-	let frame_cb = Callback::new();
-	let ranges = [moq_range {
-		start: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
-			group: 0,
-			frame: 0,
-			timestamp_us: 30_000,
-		},
-		end: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-			group: 0,
-			frame: 0,
-			timestamp_us: 0,
-		},
-		end_present: false,
-	}];
-	let subscription = moq_subscription {
-		priority: 5,
-		max_delay_us: 1_000_000,
+	};
+	let anchor = |kind: moq_anchor_kind, group: u64| moq_anchor {
+		kind: kind as u32,
+		group,
+		frame: 0,
+	};
+	let subscribe = |ranges: &[moq_range]| moq_subscription {
+		priority: 0,
+		max_delay_us: 60_000_000,
 		ranges: ranges.as_ptr(),
 		ranges_len: ranges.len(),
 		order: 0,
 	};
-	let consumer = id(unsafe {
-		moq_consume_track(
-			consume,
-			track_name.as_ptr() as *const c_char,
-			track_name.len(),
-			&subscription,
-			Some(channel_callback),
-			frame_cb.ptr,
-		)
-	});
-
-	for expected in [&b"one"[..], b"two"] {
+	let recv = |frame_cb: &Callback| {
 		let frame_id = id(frame_cb.recv());
 		let mut frame = moq_frame {
 			payload: std::ptr::null(),
@@ -1886,104 +1853,48 @@ fn raw_track_time_anchor() {
 			keyframe: false,
 		};
 		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
-		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
-		assert_eq!(received, expected);
+		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) }.to_vec();
 		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
-	}
-
-	assert_eq!(moq_consume_track_cancel(consumer), 0);
-	assert_eq!(frame_cb.recv_terminal(), 0);
-	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-/// An untimed track refuses a time anchor update at the call, keeping its ranges. The C
-/// API only publishes timed tracks, so the track comes from moq-net.
-#[test]
-fn raw_track_update_refuses_time_on_untimed() {
-	let origin = id(moq_origin_create());
-	let path = b"raw-track-untimed";
-	let broadcast = publish_broadcast(origin, path);
-
-	let track_name = b"data";
-	let track = State::lock()
-		.publish
-		.track(
-			Id::try_from(broadcast).unwrap(),
-			"data",
-			Some(moq_net::track::Info::default().with_timescale(None)),
-		)
-		.unwrap();
-	let write = |payload: &'static [u8]| {
-		State::lock()
-			.publish
-			.track_producer(track)
-			.unwrap()
-			.write_frame(None, payload)
-			.unwrap()
+		received
 	};
 
+	publish(b"zero");
 	let consume = request_broadcast(origin, path);
+
+	// Group 0 only: the reader's cap sits below where the track will be.
+	let first = [moq_range {
+		start: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 0),
+		end: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 1),
+		end_present: true,
+	}];
 	let frame_cb = Callback::new();
 	let consumer = id(unsafe {
 		moq_consume_track(
 			consume,
 			track_name.as_ptr() as *const c_char,
 			track_name.len(),
-			std::ptr::null(),
+			&subscribe(&first),
 			Some(channel_callback),
 			frame_cb.ptr,
 		)
 	});
+	assert_eq!(recv(&frame_cb), b"zero");
 
-	// The first frame proves the subscription is established.
-	write(b"zero");
-	let frame_id = id(frame_cb.recv());
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	publish(b"one");
+	publish(b"two");
 
-	let ranges = [moq_range {
-		start: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
-			group: 0,
-			frame: 0,
-			timestamp_us: 0,
-		},
-		end: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-			group: 0,
-			frame: 0,
-			timestamp_us: 0,
-		},
+	// The latest group is the track's, group 2, not the newest one under the old cap.
+	let latest = [moq_range {
+		start: anchor(moq_anchor_kind::MOQ_ANCHOR_RELATIVE, 0),
+		end: anchor(moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE, 0),
 		end_present: false,
 	}];
-	let update = moq_subscription {
-		priority: 3,
-		max_delay_us: 1_000_000,
-		ranges: ranges.as_ptr(),
-		ranges_len: ranges.len(),
-		order: 0,
-	};
-	assert!(unsafe { moq_consume_track_update(consumer, &update) } < 0);
-
-	// The consumer keeps reading under its old ranges.
-	write(b"one");
-	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_frame {
-		payload: std::ptr::null(),
-		payload_size: 0,
-		timestamp_us: 0,
-		timestamp_present: false,
-		keyframe: false,
-	};
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
-	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
-	assert_eq!(received, b"one");
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	assert_eq!(unsafe { moq_consume_track_update(consumer, &subscribe(&latest)) }, 0);
+	assert_eq!(recv(&frame_cb), b"two");
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);

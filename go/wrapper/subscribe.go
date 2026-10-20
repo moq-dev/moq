@@ -99,17 +99,7 @@ type TrackConsumer struct {
 // or (nil, nil) when the track ends. Prefer this for live, latency-sensitive
 // consumption.
 func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
-	res, err := bridge.CallHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
-		res, err := t.inner.RecvGroup(ctx)
-		if err != nil || res == nil {
-			return nil, err
-		}
-		return *res, nil
-	})
-	if err != nil || res == nil {
-		return nil, err
-	}
-	return &GroupConsumer{inner: res}, nil
+	return t.group(ctx, t.inner.RecvGroup)
 }
 
 // NextGroup returns the next group in sequence order, skipping forward if
@@ -117,8 +107,12 @@ func (t *TrackConsumer) RecvGroup(ctx context.Context) (*GroupConsumer, error) {
 // more than latency. Shares the sequence cursor with ReadFrame: a group one
 // method has already taken is not returned by the other.
 func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
+	return t.group(ctx, t.inner.NextGroup)
+}
+
+func (t *TrackConsumer) group(ctx context.Context, next func(context.Context) (**ffi.MoqGroupConsumer, error)) (*GroupConsumer, error) {
 	res, err := bridge.CallHandle(ctx, t.inner.Cancel, func(ctx context.Context) (*ffi.MoqGroupConsumer, error) {
-		res, err := t.inner.NextGroup(ctx)
+		res, err := next(ctx)
 		if err != nil || res == nil {
 			return nil, err
 		}
@@ -156,14 +150,15 @@ func (t *TrackConsumer) Info() (TrackInfo, error) {
 	return trackInfoFromFFI(info), nil
 }
 
-// Update changes this subscriber's delivery preferences. It fails on a
-// negative MaxDelay, or a time anchor the track can't serve.
+// Update changes this subscriber's delivery preferences. It fails only on a
+// negative MaxDelay.
 func (t *TrackConsumer) Update(subscription Subscription) error {
 	sub, err := subscription.ffi()
 	if err != nil {
 		return err
 	}
-	return t.inner.Update(sub)
+	t.inner.Update(sub)
+	return nil
 }
 
 // Groups ranges over groups in sequence order.

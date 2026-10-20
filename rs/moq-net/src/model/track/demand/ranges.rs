@@ -4,8 +4,7 @@
 //! where it ends, so a position is covered while the running sum stays above zero. A treap
 //! keeps each subtree's sum and lowest running sum, so a change touches two boundaries and
 //! asks one range-minimum question, whatever else the audience holds. Ranges anchored to
-//! the latest group or to a time can't be placed on that line and are counted by value
-//! instead.
+//! the latest group can't be placed on that line and are counted by value instead.
 
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
@@ -140,8 +139,6 @@ impl Ranges {
 		match range.start {
 			Anchor::Absolute(start) => self.absolute.tail().is_some_and(|tail| tail <= start),
 			Anchor::Relative(back) => self.farthest().is_some_and(|farthest| back <= farthest),
-			// Where a time falls among the groups is the serving hop's to say.
-			Anchor::Time(_) => false,
 		}
 	}
 }

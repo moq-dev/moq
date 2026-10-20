@@ -90,7 +90,7 @@ See the [concepts](/concept/) page for a breakdown of the layering, rationale, a
 
 ## Setup
 
-Get up and running in seconds with [Nix](https://nixos.org/download.html) ([+Flakes](https://nixos.wiki/wiki/Flakes)), or be lame and [install stuff manually](/setup/install):
+Get up and running in seconds with [Nix](https://nixos.org/download.html) ([+Flakes](https://wiki.nixos.org/wiki/Flakes)), or be lame and [install stuff manually](/setup/install):
 
 ```bash
 # Runs a relay, media publisher, and the web server

@@ -15,6 +15,7 @@ from moq_ffi import (
 )
 
 from ._records import _from_us, _opt_us, _to_us
+from ._stream import _Stream
 from .media import CatalogProducer, Dimensions, Video
 from .publish import TrackDemand
 from .session import Bandwidth, Reservation
@@ -128,7 +129,7 @@ class Producer:
         self._inner.finish()
 
 
-class Consumer:
+class Consumer(_Stream[VideoDecodedFrame]):
     """Async iterator of decoded frames. Construct with :meth:`subscribe`.
 
     Each frame owns its decoded picture until it is garbage collected;
@@ -147,20 +148,8 @@ class Consumer:
     def __init__(self, inner: MoqVideoConsumer) -> None:
         self._inner = inner
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> VideoDecodedFrame:
-        frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return frame
+    async def _next(self) -> VideoDecodedFrame | None:
+        return await self._inner.next()
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering video frames."""

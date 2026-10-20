@@ -593,8 +593,8 @@ pub struct moq_subscription {
 
 /// A span of a track to deliver: from `start` up to `end`, or onward without one.
 ///
-/// A relative or time start is the first frame of its group, and a relative or time end
-/// includes its whole group. An absolute end is exclusive.
+/// A relative start is the first frame of its group, and a relative end includes its whole
+/// group. An absolute end is exclusive.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
@@ -619,8 +619,6 @@ pub struct moq_anchor {
 	pub group: u64,
 	/// The frame within `group`, read only with `MOQ_ANCHOR_ABSOLUTE`.
 	pub frame: u64,
-	/// The presentation time in microseconds, read only with `MOQ_ANCHOR_TIME`.
-	pub timestamp_us: u64,
 }
 
 /// How a [moq_anchor] names its position.
@@ -632,8 +630,6 @@ pub enum moq_anchor_kind {
 	MOQ_ANCHOR_ABSOLUTE = 0,
 	/// A count of groups back from the latest one.
 	MOQ_ANCHOR_RELATIVE = 1,
-	/// The group containing a presentation time. An untimed track refuses it.
-	MOQ_ANCHOR_TIME = 2,
 }
 
 /// Which of a subscription's pending groups the publisher sends first. Zero is the default.
@@ -656,9 +652,6 @@ fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 			})
 		}
 		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
-		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => {
-			moq_net::track::Anchor::Time(moq_net::Timestamp::from_micros(anchor.timestamp_us)?)
-		}
 		_ => return Err(Error::InvalidCode),
 	})
 }
@@ -3581,7 +3574,9 @@ pub unsafe extern "C" fn moq_consume_video(
 		let index = index as usize;
 		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.video(catalog, index, max_delay, on_frame)
+		State::lock()
+			.consume
+			.media::<hang::catalog::VideoConfig>(catalog, index, max_delay, on_frame)
 	})
 }
 
@@ -3625,7 +3620,9 @@ pub unsafe extern "C" fn moq_consume_audio(
 		let index = index as usize;
 		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.audio(catalog, index, max_delay, on_frame)
+		State::lock()
+			.consume
+			.media::<hang::catalog::AudioConfig>(catalog, index, max_delay, on_frame)
 	})
 }
 
@@ -3729,10 +3726,7 @@ pub unsafe extern "C" fn moq_consume_track(
 ///
 /// Pass NULL for `subscription` to reset to moq-net defaults.
 ///
-/// Returns a zero on success, or a negative code on failure, such as a time anchor on an
-/// untimed track, which leaves the subscription as it was. An update made before the
-/// subscription is established applies once it is, so a refusal then ends the consumer
-/// through its callback instead.
+/// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct,

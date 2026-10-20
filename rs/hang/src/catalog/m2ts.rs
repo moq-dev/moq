@@ -18,9 +18,8 @@ pub struct M2ts {
 	/// The track carrying the packets, published in the same broadcast as the catalog.
 	pub track: String,
 
-	/// Whether every group the publisher's latest two-second window started began at a random
-	/// access point of the multiplex's video stream, or of its clock PID when it has none, so a
-	/// subscriber can decode from the first object of any of them.
+	/// Whether every group starts at a random access point of the multiplex's video stream, or of
+	/// its clock PID when it has none, so a subscriber can decode from the first object of any.
 	///
 	/// Only ever true for a single program with at most one video stream: programs or video
 	/// streams sharing a clock can stagger their GOPs, leaving no packet that starts all of them.
@@ -28,8 +27,8 @@ pub struct M2ts {
 	#[serde(default)]
 	pub random_access: bool,
 
-	/// The rate the source's PCR paced the whole multiplex at over that window, in bits per
-	/// second, null packets included. Present only while the source holds a constant rate.
+	/// The rate the source's PCR paced the whole multiplex at, in bits per second, null packets
+	/// included. Present only while the source holds a constant rate.
 	#[serde(default)]
 	pub mux_rate: Option<u64>,
 }

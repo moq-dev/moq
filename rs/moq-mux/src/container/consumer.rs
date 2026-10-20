@@ -43,6 +43,8 @@ pub(crate) enum Item {
 /// With a non-zero max delay, slow groups are tolerated up to that budget before being
 /// skipped. A missing sequence gets the same tolerance: there is no way to tell a stream
 /// that lost the delivery race from one the cache evicted.
+/// Its budget also expires after that much monotonic time blocked on it, so a marker
+/// behind a hole is delivered even when the track is paused.
 ///
 /// Delivery starts at the lowest absolute start among the
 /// [`Subscription::ranges`](moq_net::track::Subscription::ranges) when every range names one, waiting for that group under the budget; without one it
@@ -97,6 +99,10 @@ pub struct Consumer<F: Container> {
 
 	// How far we may drift from the live edge before skipping a group.
 	max_delay: std::time::Duration,
+
+	// Missing sequence and when it first blocked delivery; cleared when the cursor moves.
+	hole: Option<(u64, moq_clock::Instant)>,
+	hole_timer: Option<std::pin::Pin<Box<moq_clock::Sleep>>>,
 
 	// The furthest presentation point delivered so far: max(timestamp + duration), endpoints
 	// included. `None` until the first item, so a loss before it is no gap.
@@ -182,6 +188,8 @@ impl<F: Container> Consumer<F> {
 			startup: start.is_none(),
 			newest: false,
 			max_delay,
+			hole: None,
+			hole_timer: None,
 			edge: None,
 			start: None,
 			floor: None,
@@ -362,6 +370,11 @@ impl<F: Container> Consumer<F> {
 		})?;
 
 		'read: loop {
+			if self.pending.front().is_none_or(|group| group.sequence <= self.current) {
+				self.hole = None;
+				self.hole_timer = None;
+			}
+
 			// Return the next frame from the current group if possible.
 			// If the current group is finished or errored, advance to the next group.
 			if let Some(group) = self.pending.front_mut()
@@ -496,20 +509,44 @@ impl<F: Container> Consumer<F> {
 			// the gap outright, since no new group can arrive. That proof covers only
 			// sequences that never arrived: finishing the track ends new groups, not
 			// the frames still flowing on ones already open, so arrived groups are
-			// settled below by their own FIN, abort, or the budget.
-			if let Some(front_sequence) = self.pending.front().map(|g| g.sequence)
-				&& front_sequence > self.current
-				&& let Some((_, next_start)) = next_group
-				&& (finished || max_timestamp.saturating_sub(next_start) >= self.max_delay)
+			// settled below by their own FIN, abort, or the budget. Sequences the
+			// subscriber's own ranges exclude never arrive either, so a gap between two
+			// ranges closes at once.
+			if let Some(front) = self.pending.front()
+				&& front.sequence > self.current
 			{
-				// A data marker has no timestamp to show the missing sequences held nothing.
-				let bare = self.pending.front().is_some_and(|group| group.bare);
-				if bare || !pts_contiguous(current_end.or(self.presented_end), next_start) {
-					self.lose();
+				let sequence = front.sequence;
+				if self.hole.is_none_or(|(sequence, _)| sequence != self.current) {
+					self.hole = Some((self.current, moq_clock::now()));
 				}
-				self.current = front_sequence;
-				self.note_group_edge();
-				continue;
+				let since = self.hole.unwrap().1;
+				let elapsed = since.elapsed() >= self.max_delay;
+				let aged = next_group.is_some_and(|(_, start)| max_timestamp.saturating_sub(start) >= self.max_delay);
+				let excluded = self
+					.track
+					.as_ref()
+					.is_some_and(|track| track.next_in_range(self.current).is_none_or(|next| next >= sequence));
+				if finished || elapsed || aged || excluded {
+					let _ = self.pending.front_mut().unwrap().look_all(waiter, &self.format);
+					let front = self.pending.front_mut().unwrap();
+					let empty = front.empty && matches!(front.group.poll_finished(waiter), Poll::Ready(Ok(_)));
+					let front = self.pending.front().unwrap();
+					let next_start = front.min_timestamp.map(std::time::Duration::from).or(front.max_end);
+					// A data marker has no timestamp to prove continuity across the hole.
+					if !empty && next_start.is_none_or(|start| !pts_contiguous(self.presented_end, start)) {
+						self.lose();
+					}
+					self.current = sequence;
+					self.note_group_edge();
+					continue;
+				}
+				if let Some(wake) = since.checked_add(self.max_delay) {
+					let timer = self
+						.hole_timer
+						.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(wake)));
+					timer.as_mut().reset(wake);
+					let _ = waiter.poll_future(timer.as_mut());
+				}
 			}
 
 			// The current group is blocking. Everything it could still present ends
@@ -550,26 +587,6 @@ impl<F: Container> Consumer<F> {
 				continue;
 			}
 
-			if finished
-				&& let Some(front_sequence) = self.pending.front().map(|g| g.sequence)
-				&& front_sequence > self.current
-			{
-				let _ = self.pending.front_mut().unwrap().look_all(waiter, &self.format);
-				let front = self.pending.front().unwrap();
-				let next_start = front.min_timestamp.map(std::time::Duration::from).or(front.max_end);
-				// A data marker has no timestamp to show the missing sequences held nothing.
-				let lost = match next_start {
-					Some(start) => !pts_contiguous(current_end.or(self.presented_end), start),
-					None => front.bare,
-				};
-				if lost {
-					self.lose();
-				}
-				self.current = front_sequence;
-				self.note_group_edge();
-				continue;
-			}
-
 			if finished && self.pending.is_empty() {
 				if let Some(err) = self.track_error.take() {
 					// The caller only gets the bare error, with nothing to say which track died.
@@ -600,6 +617,8 @@ impl<F: Container> Consumer<F> {
 	}
 
 	fn note_group_edge(&mut self) {
+		self.hole = None;
+		self.hole_timer = None;
 		if let Some((_, ts)) = self.start {
 			self.floor = Some(ts);
 		}
@@ -1211,6 +1230,84 @@ mod tests {
 		track.finish().unwrap();
 
 		assert_eq!(items(&mut reader).await, ["0", "10000", "gap 10000+0", "end 10000"]);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_sequence_hole_before_a_paused_data_marker_expires() {
+		for budget in [Duration::ZERO, Duration::from_millis(100)] {
+			let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+			let subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_delay(budget));
+			let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+			write_group(&mut track, 0, &[ts(10_000)]);
+			assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
+			let mut marker = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
+			marker.write_frame(ts(10_000), Bytes::new()).unwrap();
+			marker.finish().unwrap();
+
+			if !budget.is_zero() {
+				assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+				tokio::time::advance(budget - Duration::from_millis(1)).await;
+				assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+				let before = moq_clock::now();
+				let read = moq_clock::timeout(Duration::from_millis(2), reader.read())
+					.await
+					.unwrap()
+					.unwrap();
+				assert!(matches!(read, Some(Read::Gap { .. })));
+				assert_eq!(
+					before.elapsed(),
+					Duration::from_millis(1),
+					"the hole timer wakes the reader"
+				);
+			} else {
+				assert!(matches!(
+					reader.poll_read(&kio::Waiter::noop()),
+					Poll::Ready(Ok(Some(Read::Gap { .. })))
+				));
+			}
+			assert!(
+				matches!(reader.poll_read(&kio::Waiter::noop()), Poll::Ready(Ok(Some(Read::End { group: 2, end }))) if end == ts(10_000))
+			);
+			track.finish().unwrap();
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_filled_sequence_hole_gives_the_next_hole_a_fresh_budget() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscriber =
+			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(100)));
+		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
+		write_group(&mut track, 0, &[ts(0)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 0, .. })
+		));
+		write_group(&mut track, 2, &[ts(20_000)]);
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		tokio::time::advance(Duration::from_millis(50)).await;
+		write_group(&mut track, 1, &[ts(10_000)]);
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 1, .. })
+		));
+		assert!(matches!(
+			reader.read().await.unwrap(),
+			Some(Read::Frame { group: 2, .. })
+		));
+		let mut marker = track.create_group(moq_net::group::Info { sequence: 4 }).unwrap();
+		marker.write_frame(ts(20_000), Bytes::new()).unwrap();
+		marker.finish().unwrap();
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		tokio::time::advance(Duration::from_millis(99)).await;
+		assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
+		tokio::time::advance(Duration::from_millis(1)).await;
+		assert!(matches!(
+			reader.poll_read(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Some(Read::Gap { .. })))
+		));
+		assert!(matches!(reader.read().await.unwrap(), Some(Read::End { group: 4, .. })));
+		track.finish().unwrap();
 	}
 
 	/// A malformed data marker group found while looking ahead fails the reader, rather than
@@ -3247,6 +3344,38 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		let micros: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros()).collect();
 		assert_eq!(micros, vec![0, 100_000], "the open group's late frames are delivered");
+	}
+
+	/// A gap between two ranges is never read, so the reader walks over it at once rather
+	/// than waiting a budget, or forever on an open track, for groups it never gets.
+	#[tokio::test]
+	async fn an_excluded_gap_between_ranges_does_not_stall() {
+		tokio::time::pause();
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(Duration::from_secs(10))
+			.with_ranges([
+				moq_net::track::Range::groups(0..1),
+				moq_net::track::Range::groups(10..11),
+			]);
+		let mut consumer = Consumer::new(
+			track.subscribe(subscription),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+		for sequence in [0, 5, 10] {
+			write_group(&mut track, sequence, &[ts(sequence * 100_000)]);
+		}
+
+		let mut micros = Vec::new();
+		for _ in 0..2 {
+			let frame = tokio::time::timeout(Duration::from_millis(200), consumer.read_frame())
+				.await
+				.expect("the open track still delivers the later range")
+				.unwrap()
+				.expect("a frame");
+			micros.push(frame.timestamp.as_micros());
+		}
+		assert_eq!(micros, vec![0, 1_000_000]);
 	}
 
 	/// A relative start names its floor once resolved: delivery starts that many groups

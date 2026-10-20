@@ -1,5 +1,5 @@
 import { Nano, Second } from "@moq/clock";
-import { type Getter, Once, Signal } from "@moq/signals";
+import { type Getter, Once, race, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
@@ -7,7 +7,7 @@ import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
+import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -16,28 +16,26 @@ import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, RequestWindowError, type Session } from "./adapter.ts";
 import { AuthMessage, supported as authSupported, IetfAuthWire } from "./auth.ts";
 import * as Cluster from "./cluster.ts";
-import { type RequestKind, toRequestCode } from "./error.ts";
-import { Fetch, FetchError, FetchHeader } from "./fetch.ts";
+import type { RequestKind } from "./error.ts";
+import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Group } from "./object.ts";
-import { Publish, PublishError } from "./publish.ts";
-import { PublishNamespace, PublishNamespaceError } from "./publish_namespace.ts";
+import { Publish } from "./publish.ts";
+import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
-import { RequestError } from "./request.ts";
-import { malformed } from "./request_stream.ts";
-import { Subscribe, SubscribeError, SubscribeUpdate } from "./subscribe.ts";
+import { malformed, refuse } from "./request_stream.ts";
+import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import {
 	SUBSCRIBE_TRACKS_ID,
 	SubscribeNamespace,
-	SubscribeNamespaceError,
 	SubscribeNamespaceLegacy,
 	SubscribeOptions,
 } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { MalformedAuthToken } from "./token.ts";
-import { TRACK_STATUS_ERROR_14, TrackStatusRequest } from "./track.ts";
+import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
 
 // The PADDING stream type (draft-18+): bytes a peer sends to probe for bandwidth.
@@ -126,6 +124,7 @@ export class Connection implements Established {
 		publish,
 		solicit,
 		hidden = false,
+		maxAge = false,
 		activeCount = false,
 		cluster,
 		auth = false,
@@ -150,6 +149,8 @@ export class Connection implements Established {
 		solicit?: boolean;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
+		/** Whether the peer accepts subscriber max age. */
+		maxAge?: boolean;
 		/** Whether both SETUPs declared MoQ Active Count. */
 		activeCount?: boolean;
 		/**
@@ -191,8 +192,15 @@ export class Connection implements Established {
 					this.#close({ closeCode: err.code, reason: err.message });
 					return;
 				}
-				console.error("adapter error", err);
-				this.#close();
+				if (sessionClosed(err)) {
+					this.#close();
+					return;
+				}
+				this.#violated(
+					err instanceof ProtocolViolation
+						? err
+						: new ProtocolViolation("control stream failed", { cause: err }),
+				);
 			});
 		}
 
@@ -231,6 +239,7 @@ export class Connection implements Established {
 		this.#cluster = cluster;
 		this.#epoch = epoch;
 		this.#subscriber = new Subscriber({
+			maxAge,
 			session: this.#session,
 			quic,
 			cluster,
@@ -240,6 +249,7 @@ export class Connection implements Established {
 			solicit,
 			goaway: this.#goaway,
 			grant: this.#auth.scope,
+			auth: this.#auth,
 		});
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
@@ -307,7 +317,7 @@ export class Connection implements Established {
 			];
 			// Fail loud on a publication our grant never covers, once the peer has answered the
 			// credential we presented at setup.
-			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered()));
+			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered(), this.#auth));
 			await Promise.all(tasks);
 		} catch (err) {
 			if (!this.#closed) {
@@ -529,24 +539,11 @@ export class Connection implements Established {
 
 	/** Refuse a request MALFORMED_AUTH_TOKEN, ending its stream. Mirrors Rust's `token::reject`. */
 	async #refuseToken(stream: Stream, kind: RequestKind, requestId: bigint) {
-		const version = this.#session.version;
-		// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into.
-		const id14 = {
-			subscribe: SubscribeError.id,
-			fetch: FetchError.id,
-			publish: PublishError.id,
-			publish_namespace: PublishNamespaceError.id,
-			subscribe_namespace: SubscribeNamespaceError.id,
-			track_status: TRACK_STATUS_ERROR_14,
-		}[kind];
-		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
-		await stream.writer.u53(version === Version.DRAFT_14 ? id14 : RequestError.id);
-		await new RequestError({
-			requestId: legacy ? requestId : undefined,
-			errorCode: toRequestCode("malformed_auth_token", kind, version),
+		await refuse(stream, this.#session.version, kind, {
+			requestId,
+			condition: "malformed_auth_token",
 			reasonPhrase: "repeated AUTHORIZATION TOKEN",
-		}).encode(stream.writer, version);
-		stream.close();
+		});
 	}
 
 	// A malformed OBJECT_DATAGRAM is the peer breaking the protocol, like an invalid stream type.
@@ -623,33 +620,46 @@ export class Connection implements Established {
 	 */
 	async #runGoAway(controlStream: Stream, version: IetfVersion) {
 		try {
-			for (;;) {
-				const done = await controlStream.reader.done();
-				if (done) return;
+			const read = async () => {
+				for (;;) {
+					const done = await controlStream.reader.done();
+					if (done) throw new ProtocolViolation("control stream closed");
 
-				const msg = await this.#readGoAway(controlStream, version).catch((err: unknown) => {
-					throw malformed(err, "setup stream message");
-				});
-				if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
-				// A client may leave, but only the server may name where to go.
-				if (!this.#client && msg.newSessionUri !== "") {
-					throw new ProtocolViolation("client GOAWAY must not name a redirect");
-				}
-				// Draft-18's Request ID names our IDs: even when we are the client, odd for a server.
-				// It is required here, on the control stream.
-				if (version === Version.DRAFT_18 && msg.requestId === undefined) {
-					throw new ProtocolViolation("draft-18 GOAWAY on the control stream lacks a Request ID");
-				}
-				if (msg.requestId !== undefined && msg.requestId % 2n !== (this.#client ? 0n : 1n)) {
-					throw new ProtocolViolation("GOAWAY Request ID has the wrong parity", {
-						code: SessionCode.InvalidRequestId,
+					const msg = await this.#readGoAway(controlStream, version).catch((err: unknown) => {
+						throw malformed(err, "setup stream message");
 					});
+					if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+					// A client may leave, but only the server may name where to go.
+					if (!this.#client && msg.newSessionUri !== "") {
+						throw new ProtocolViolation("client GOAWAY must not name a redirect");
+					}
+					// Draft-18's Request ID names our IDs: even when we are the client, odd for a server.
+					// It is required here, on the control stream.
+					if (version === Version.DRAFT_18 && msg.requestId === undefined) {
+						throw new ProtocolViolation("draft-18 GOAWAY on the control stream lacks a Request ID");
+					}
+					if (msg.requestId !== undefined && msg.requestId % 2n !== (this.#client ? 0n : 1n)) {
+						throw new ProtocolViolation("GOAWAY Request ID has the wrong parity", {
+							code: SessionCode.InvalidRequestId,
+						});
+					}
+					// Reject bytes already behind GOAWAY before a caller can close on the drain.
+					if (controlStream.reader.tryDecode((c) => c.u8()) !== undefined)
+						throw new ProtocolViolation("message after control stream GOAWAY");
+					this.#goaway.set(msg.drain());
 				}
-				this.#goaway.set(msg.drain());
-			}
+			};
+			const stopped = controlStream.writer.closed.then(() => {
+				throw new ProtocolViolation("control stream stopped");
+			});
+			await race([read(), stopped]);
 		} catch (err) {
-			if (err instanceof ProtocolViolation) this.#violated(err);
-			else if (!this.#closed) console.error("error reading setup stream", err);
+			if (!this.#closed && !sessionClosed(err))
+				this.#violated(
+					err instanceof ProtocolViolation
+						? err
+						: new ProtocolViolation("control stream failed", { cause: err }),
+				);
 		} finally {
 			this.#close();
 		}

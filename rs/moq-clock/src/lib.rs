@@ -23,6 +23,8 @@
 //! starts at [`Instant::ZERO`], and the `#[moq_clock::test]` attribute that runs an
 //! `async fn` test on it. Enable it for dev-dependencies only.
 
+#![warn(missing_docs)]
+
 mod deadline;
 #[cfg(feature = "manual")]
 mod installed;

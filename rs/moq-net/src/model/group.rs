@@ -1478,13 +1478,6 @@ impl Producer {
 		self.state.read().started()
 	}
 
-	/// Whether this copy may yet present the group's frame 0: it holds it, and nothing
-	/// opened or ended it.
-	pub(super) fn may_start(&self) -> bool {
-		let state = self.state.read();
-		state.offset == 0 && !state.started()
-	}
-
 	/// Where the group starts in presentation time: its first frame's timestamp, or
 	/// `None` while no frame has been opened or when that frame is untimed.
 	///

@@ -12,10 +12,6 @@ rust-version.workspace = true
 keywords = ["quic", "io-uring", "networking", "linux"]
 categories = ["asynchronous", "network-programming", "os::linux-apis"]
 
-# The self dev-dependency below only enables a feature; no code names it.
-[package.metadata.cargo-shear]
-ignored = ["moq-uring"]
-
 [features]
 default = ["quic"]
 # QUIC and WebTransport on moq-quic, with TLS through rustls.

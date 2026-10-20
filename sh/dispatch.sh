@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Run `just check`, `just fix`, or `just ci check|test` over the branch diff.
+# Run `just check`, `just fix`, or `just ci [check|test]` over the branch diff.
 # `--query` prints the selection instead; `ci-platform` exists only as a query.
 #
-# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query]
+# Usage: sh/dispatch.sh check|fix|ci|ci-check|ci-test [BASE|--all] [--query]
 #        sh/dispatch.sh ci-platform BASE|--all --query
 #
 # The branch diff is resolved once and matched against the impact map below,
 # the one place that says which paths put which module in scope. `check` is
-# `ci-check` plus `ci-test`, which CI runs as parallel jobs with MOQ_STRICT=1,
-# so there is no second definition of "checked".
+# `ci-check` plus `ci-test`, which the merge queue runs as parallel jobs with
+# MOQ_STRICT=1, so there is no second definition of "checked". `ci` runs both
+# halves in turn, as a contributor does before pushing.
 set -euo pipefail
 
-usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query], or ci-platform BASE|--all --query"
+usage="usage: sh/dispatch.sh check|fix|ci|ci-check|ci-test [BASE|--all] [--query], or ci-platform BASE|--all --query"
 action=${1:?$usage}
 base=${2:-}
 query=${3:-}
@@ -21,6 +22,14 @@ if [[ $# -gt 3 || (-n "$query" && "$query" != --query) || ("$action" == ci-platf
 fi
 case "$action" in
     check | fix | ci-check | ci-test | ci-platform) ;;
+    ci)
+        if [[ -n "$query" ]]; then
+            echo "$usage" >&2
+            exit 2
+        fi
+        "$0" ci-check "$base"
+        exec "$0" ci-test "$base"
+        ;;
     *)
         echo "$usage" >&2
         exit 2
@@ -63,13 +72,16 @@ declare -A scope=(
     # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
     # fails a check that reads a cross-tree input this pattern misses.
     # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
-    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
-    [rs]='^(rs/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    [rs]='^(rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
+    # The CARLA demo's simulator worker and launchers. Its player is a JS
+    # package and its GPU bridge a Rust crate, so those modules cover them.
+    [carla]='^demo/carla/(sim/|justfile$)'
     [drafts]='^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)'
     # Quest documents form one graph, so any change validates the whole tree,
     # as does a bump of the flake-pinned validator.
@@ -140,6 +152,7 @@ declare -A tools=(
     [moq_sh]='dash'
     [rs]='cargo jq'
     [bench]='cargo'
+    [carla]='uv'
     [drafts]='bun kramdown-rfc xml2rfc'
     [quest]='quest'
     [drill]=''
@@ -175,8 +188,8 @@ declare -A compiles=(
 )
 
 case "$action" in
-    check | ci-check) modules=(js workers moq_sh drafts rs bench quest drill py kt swift go dart cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
-    fix) modules=(js rs py dart obs markdown shell toml nix justfile) ;;
+    check | ci-check) modules=(js workers moq_sh drafts rs bench carla quest drill py kt swift go dart cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
+    fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
     ci-test) modules=(js rs py) ;;
 esac
 

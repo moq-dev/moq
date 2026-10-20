@@ -33,7 +33,15 @@ mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
-**Connect.** A 2xx with a grant admits. A 401 or 403 refuses. Anything else,
+**Connect.** A 2xx with a grant admits. A 403 can carry JSON such as
+`{"reason":"expired","root":"rooms/123","tier":"edge"}`. The reason is
+`refused`, `forbidden`, or `expired`; unknown reason strings read as `refused`.
+A legacy plain-text 401 or 403 still reads as `refused`. Optional `root` and
+`tier` attribute refusal counters, with an absent tier using the default.
+Only name a root from a verified credential, including an expired token whose
+signature and key scope were verified. Never copy the unverified dialed path
+into `root`: that would let callers create unbounded stats entries.
+Anything else,
 including a timeout or an unparseable body, refuses and logs an error, so
 nothing is admitted because the server was down. A grant that names nothing
 refuses, and so does one already expired: expiry is exact, with no grace for
@@ -361,7 +369,9 @@ An application that [embeds](/bin/relay/#embed) the relay can decide
 admissions itself, without the HTTP: leave `[auth]` empty and take
 `relay.admissions()` before `run`. Each `Admission` carries the same
 `moq_auth::Request` a server would read, and is answered with a lease or a
-refusal. A fixed lease never changes; a `lease::Producer` the application keeps
+refusal. Pass the shared `moq_auth::Refusal` in `auth::Error::Refused` to
+`Admission::refuse`, using the same verified-root rule as an HTTP server.
+A fixed lease never changes; a `lease::Producer` the application keeps
 re-checks, updates, and revokes on its own clock. The relay still closes the
 session at the grant's `expires`, and an admission left unanswered for ten
 seconds is refused. `Admission::attached()` marks a token presented

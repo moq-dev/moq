@@ -37,7 +37,3 @@ Benchmark chat, 1:1 video, and fanout workloads with `N = 1/4/8/16` and `t = 0/5
 
 Decided in the 2026-09-30 audit: moved to m2. It trades latency for CPU,
 the win is unmeasured on `moq-quic`, and io_uring ships in no package.
-
-## Closes
-
-- [#3200](https://github.com/moq-dev/moq/issues/3200) - close this issue when the quest finishes

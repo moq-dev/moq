@@ -23,7 +23,7 @@ release, with clustering stability and the in-tree QUIC stack first.
   prerequisites. Their possible API breaks do not make them prerequisites of
   this cut. Existing playback and A/V clock validation remain here.
   Same-epoch importers were dropped (maintainer, 2026-10-19): a redundant
-  ingest pair runs on [distinct epochs](/quest/m0/broadcast-epoch/distinct-importer-epochs.md).
+  ingest pair runs on distinct epochs.
 - Finalized lite-07 is preferred by first-party Rust and JS clients, with
   older-version negotiation fallback. Servers accept it by default. Never
   reuse a published identifier for an incompatible wire change; deferred
@@ -63,9 +63,8 @@ lands before the cut.
 - [Compressed tracks](/quest/m1/compress/README.md) - a track flagged `compress` is DEFLATEd per group by moq-net, forwarded compressed, and inflated once on the relay for peers that cannot signal it; `catalog.json.z` and moq-flate go away
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - a claim answers each output by publishing it at its exact path under its own epoch, so a restarted output never reaches a returning reader as the old one's cache
-- [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
+- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - a dropped or cut group ends its reader with an error, never a clean end, across cache reclaim, cap changes, and recovery
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
-- [Announce SYNCED](/quest/m1/announce-synced.md) - lite-07's Announce stream marks its initial set with the same ordered SYNCED as TRACKS, replacing `Active Count`
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [A public model](/quest/m1/public-model/README.md) - every model item a built-in session reaches is public, unnecessary, or marked deliberately private, so a custom publisher, subscriber, or relay builds from the public model alone
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
@@ -73,8 +72,7 @@ lands before the cut.
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
-- [Subscribing readers never ask TRACK_STATUS](/quest/m1/track-status-race.md) - a reader's subscription lands with its request, and the NOT_SUPPORTED fallback goes away
-- [IETF max age](/quest/m1/ietf-max-age.md) - a moq-transport subscriber sets lite's max age through a timestamp-draft SUBSCRIBE parameter
+- [Report relays that refuse TRACK_STATUS](/quest/m1/track-status-race.md) - moqx and any other relay refusing TRACK_STATUS with an undefined code get an upstream report
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [Browser follows a renamed track](/quest/m1/browser-rename-check.md) - a real browser keeps playing when `@moq/publish` renames a track after a codec change, while size-only changes keep their identity
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
@@ -87,7 +85,6 @@ lands before the cut.
 - [Redundant ingest guide](/quest/m1/redundant-ingest-guide.md) - a setup page on redundant ingest over multiple routes, for any publisher
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [moq-ffi reports why a first dial fails](/quest/m1/ffi-first-dial-failure.md) - OBS names the reason while the first dial retries, as moq-c already can
-- [Typed refusal reason](/quest/m1/refusal-reason.md) - an auth server's 403 names the reason (including `expired`) and the root and tier, so the relay's session outcomes count and attribute refusals
 - [Scope track priority](/quest/m1/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
@@ -106,10 +103,8 @@ lands before the cut.
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - a warm relay serves a reader with a wider max age the cached groups a cold relay would, with no wire change
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [SUBSCRIBE_OK names where delivery starts](/quest/m1/subscribe-ok-start.md) - a warm relay names the same start group as a cold one instead of groups it skipped as stale
-- [Rust resumed reads](/quest/m1/resume-ordered.md) - a Rust reader takes the lowest group across route copies in both orders, as JS does
 - [Resumed close](/quest/m1/resume-closed.md) - a resumed JS track keeps its declared end across copies, and its `closed` and `largest()` settle on a clean end
 - [Resumed in-flight groups](/quest/m1/resume-in-flight.md) - a replaced route copy stays while a group below its bound is in flight or it backs a handed-out group late, and no longer than the reader's budget
-- [Resumed forks](/quest/m1/resume-fork.md) - a fork of a resumed JS subscriber follows route swaps like its parent
 - [Recovered group readiness](/quest/m1/resume-readable.md) - a recovered JS group's `readable()` ignores frames its replacement replays
 - [Resumed datagrams](/quest/m1/resume-datagrams.md) - a resumed track skips only datagrams it already delivered, not every lower sequence
 - [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
@@ -123,10 +118,19 @@ lands before the cut.
 - [Gateway linger](/quest/m1/linger-gateways.md) - HLS, RTMP, SRT and RTC imports linger at a clean end, cut short by a newer epoch at the same path
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
 - [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - group sequence 2^62-1 reaches a lite-06 subscriber or is refused loudly, instead of vanishing
+- [Track live signal](/quest/m1/track-live.md) - a reader can wait for its track's feed to be live, so a player skips old cached groups while a fresh upstream subscription starts
+- [moq-mux docs](/quest/m1/docs-mux.md) - every public moq-mux item has rustdoc and the crate warns on missing docs
+- [Binding docs](/quest/m1/docs-bindings.md) - every public moq-ffi and moq-c item has rustdoc, carried into the generated bindings and `moq.h`
+- [JS export docs](/quest/m1/docs-js.md) - every public JS export and class member has TSDoc, and `just check` enforces it
 
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
 
+- [Nightly media players](/quest/m1/media-engines-nightly.md) - the Firefox and WebKit player rows pass, or an engine that cannot play leaves the nightly matrix
+
 - [Dead code and API surface audit](/quest/m1/audit-dead-code.md) - repeat the removal audit before the next major release
+- [Test coverage audit](/quest/m1/audit-test-coverage.md) - repeat the coverage audit against the m0 baselines before the next major release
+- [Test and CI cost audit](/quest/m1/audit-test-cost.md) - the slowest, flakiest, and least valuable tests and CI jobs are fixed, deleted, or planned
+- [Documentation audit](/quest/m1/audit-docs.md) - stale pages, examples, links, and undocumented exports are fixed or planned
 
 ## Related
 

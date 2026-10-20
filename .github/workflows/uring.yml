@@ -5,7 +5,10 @@ permissions:
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, closed]
+    # Main PRs skip it; nightly.yml's `rs uring` runs the whole suite on main.
+    # `edited` catches a main PR retargeted to release.
+    branches: [release]
+    types: [opened, synchronize, reopened, edited, closed]
     paths:
       # The shared Rust selector walks reverse dependencies, including feature
       # dependencies. Broad paths keep newly added shared crates covered.
@@ -52,6 +55,9 @@ jobs:
 
       - name: Rust cache
         uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
       - name: io_uring
         run: nix develop --command just rs uring-changed "$CI_BASE"
