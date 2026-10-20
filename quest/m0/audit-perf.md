@@ -38,7 +38,7 @@ duplicate it.
 
 Audit evidence (2026-10-19, second checkpoint, incomplete):
 
-- History: `gh-pages` gains a commit per night, and Pages first deployed on
+- History (updated 2026-10-20): `gh-pages` gains a commit per night, and Pages first deployed on
   2026-10-20; the [benchmark regression table](/quest/m0/bench-site.md)
   turns it into a page. Re-runs of the Benchmark site job add duplicate
   points for one commit, so compare by commit.

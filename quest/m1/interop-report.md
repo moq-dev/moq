@@ -24,7 +24,8 @@ Decided with the maintainer on 2026-10-20.
   single-writer comment on Nightly's `benchmark-site` job to describe the
   per-directory ownership.
 - The harness emits structured results next to its logs, one record per
-  case: suite, case, client pair, transport, version, outcome, and duration.
+  case: suite, case, publisher, subscriber, transport, version, outcome, and
+  duration.
   Suite and case keep apart the media QA controls that share one browser
   pairing (frozen video, silent audio, offset audio, leaked session,
   lagging latecomer). The report is generated from those records, never by
