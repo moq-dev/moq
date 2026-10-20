@@ -48,10 +48,8 @@ Audit checkpoint (2026-10-19, base `82c2d5dde`):
   against their declarations, but those builds and GStreamer inspection
   remain to be exercised.
 - The stats documentation validator, `quest check` (438 documents), and
-  `git diff --check` passed. Full `just check` has not run: automatic approval
-  review rejected it under shared-host load, and a later all-interval load
-  guard also stopped it before checks started. Re-run it once load is below
-  16; bound build jobs to fit the shared host.
+  `git diff --check` passed, and so did `just check` on the changed packages
+  (the doc site and the JS packages).
 - The exported-symbol audit is incomplete. Of 38 Rust library roots, 12
   enable `missing_docs`; 24 publishable roots do not: hang, kio, libmoq,
   moq-archive, moq-audio, moq-auth, moq-c, moq-clock, moq-ffi, moq-flate,
