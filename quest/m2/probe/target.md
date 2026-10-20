@@ -38,13 +38,18 @@ Decided with the maintainer on 2026-10-17 (see the
   [Players](/quest/m2/probe/players.md) hold these handles.
 - **Viewer grants.** Decided with the maintainer on 2026-10-19: a viewer
   handle carries a grant the way a publisher `Reservation` does, splitting the
-  receive estimate across live handles by `max` and priority with the send
-  `Allocator`'s strict-priority split (`rs/moq-net/src/model/bandwidth.rs`).
-  Today every `<moq-watch>` on a pooled connection selects against 0.8x the
-  whole `estimatedRecvRate`, so N watchers over-select about N times.
-  Rejected: each watcher measuring its own subscription's rate, which stays
-  app-limited and can't see headroom, and dividing the estimate by the
-  watcher count, which ignores priority and demand.
+  receive estimate across live handles max-min fair by `max`, the split the
+  send `Allocator` applies within one priority tier
+  (`rs/moq-net/src/model/bandwidth.rs`). A handle asking for less than an even
+  cut takes all of it and leaves the rest to the others. Today every
+  `<moq-watch>` on a pooled connection selects against 0.8x the whole
+  `estimatedRecvRate`, so N watchers over-select about N times. Rejected: each
+  watcher measuring its own subscription's rate, which stays app-limited and
+  can't see headroom, and dividing the estimate by the watcher count, which
+  ignores each handle's `max`.
+  Handles carry no priority: subscription priorities are per track and fixed
+  by kind, so no per-broadcast priority exists to divide by. Add one when a
+  player needs to favor one broadcast over another.
 - **Peer target.** A sending session probes to the larger of its own target
   and the peer's PROBE target. Each hop is independent: a relay never forwards
   a viewer's target upstream, and the PROBE target stays per connection, with
@@ -81,8 +86,8 @@ Tests with mocked time, Rust and JS: the send target follows reservations
 being added, updated, and dropped, demanded or not; viewer handles sum into
 the PROBE target sent to the peer; the session probes to the larger of its
 reservations and the peer's target; a session that publishes and watches
-keeps the two directions apart; viewer grants split the receive estimate by
-priority and `max` and never sum above it; `Increase` is advertised only with a sender;
+keeps the two directions apart; viewer grants split the receive estimate
+max-min fair by `max` and never sum above it; `Increase` is advertised only with a sender;
 opting out sends no target and probes nothing.
 
 The sums fan out over reservations and viewer handles, so add a benchmark
