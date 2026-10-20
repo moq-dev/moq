@@ -34,7 +34,7 @@ pub(crate) struct SessionId {
 /// Every rendition is written and labelled BT.709 limited. `Color::infer` would
 /// pick BT.601 for the 240p rendition, but its pixels are scaled from the same
 /// conversion, so the label follows the conversion rather than the size.
-const COLOR: Color = Color::Bt709Limited;
+const COLOR: Color = Color::BT709;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Session {
