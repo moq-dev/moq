@@ -31,6 +31,11 @@ too much space, and hid regressions instead of surfacing them.
   Flag when the change exceeds max(10%, 3 times the series' median absolute
   deviation over those points). A row with fewer points than that shows grey.
   Hosted runners vary between runs, so each series' own spread sets its bar.
+- **Stale series:** a failed or cancelled source adds no history point
+  (`prepare` in `sh/gh/bench-report.py`), and on 2026-10-20 `bench-rust`
+  failed. A series whose newest point is older than the newest nightly
+  commit is marked stale with its age, never shown or flagged as tonight's
+  result, and a whole source missing tonight shows as one stale section.
 - **One point per commit:** re-running the Benchmark site job appends another
   point for the same commit. On 2026-10-20, two re-runs left three identical
   points for `f13283b30`. Collapse points by commit (the latest wins), so

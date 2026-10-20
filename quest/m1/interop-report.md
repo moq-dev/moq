@@ -32,7 +32,10 @@ Decided with the maintainer on 2026-10-20.
 - The page's `<title>` labels it on the Pages root, which lists every report
   directory ([moq-dev/moq#6079](https://github.com/moq-dev/moq/pull/6079)).
 - Only scheduled runs on `main` publish; manual and release-PR runs keep
-  their results in the run.
+  their results in the run. The workflow's concurrency group
+  (`interop-${{ github.ref }}`, `cancel-in-progress: true`) lets a manual run
+  on `main` cancel the scheduled one, losing that night's report: key the
+  group by event too, so only a run of the same kind cancels another.
 - Re-running a job in place leaves two `github-pages` artifacts, which
   `deploy-pages` refuses. Delete the stale one before a re-run.
 
