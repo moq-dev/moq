@@ -101,6 +101,7 @@ pkgs.testers.runNixOSTest {
       networking.interfaces.eth0.ipv4.addresses = lib.mkForce [ ];
       virtualisation.qemu.options = [
         "-fw_cfg name=opt/io.systemd.credentials/runner-token,file=${pkgs.writeText "runner-token" "fixture"}"
+        "-device virtio-balloon-pci,free-page-reporting=on"
       ];
       systemd.services.cache-seed-fixture = {
         requiredBy = [ "github-runner-runner.service" ];
@@ -243,6 +244,17 @@ pkgs.testers.runNixOSTest {
     with subtest("the runner inherits the hosted CI locked-memory budget"):
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/memlock")
         guest.succeed("test $(cat /var/cache/github-runner-home/.cache/mbx/memlock) = 65536")
+
+    with subtest("the guest reports freed pages and drops caches only between jobs"):
+        # Feature bit 5 is VIRTIO_BALLOON_F_REPORTING, negotiated only when the guest driver uses it.
+        guest.succeed("test $(cut -c6 /sys/bus/virtio/drivers/virtio_balloon/virtio*/features) = 1")
+        guest.succeed("systemd-run --unit=fake-job ${pkgs.python3}/bin/python3 -c 'import time; time.sleep(600)' Runner.Worker")
+        guest.wait_until_succeeds("pgrep -f 'Runner[.]Worker'")
+        guest.succeed("systemctl start runner-reclaim.service")
+        guest.succeed("journalctl -u runner-reclaim.service | grep -F 'keeping caches'")
+        guest.succeed("systemctl stop fake-job")
+        guest.succeed("systemctl start runner-reclaim.service")
+        guest.succeed("journalctl -u runner-reclaim.service | grep -F 'Dropped caches'")
 
     with subtest("local Nix and mbx storage survive runner and VM restarts"):
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/marker")

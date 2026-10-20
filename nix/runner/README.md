@@ -91,11 +91,15 @@ The runner's home is `/var/cache/github-runner-home`; mbx uses
 `/var/cache/github-runner-home/.cache/mbx`. Workflows must select mbx's local backend
 on this runner. There is no cache-warming service or cache server. Persistent job
 state is shared with subsequent jobs, so route only trusted work to the runner.
+The guest hands freed memory back to the host and drops its page cache while no
+job runs, so an idle VM holds little more than its running services; the next job
+reads its caches from disk.
 For MoQ, set `MOQ_QUEUE_RUNNER` to the runner label after a representative CI run
 passes; release pull requests use hosted runners and main pull requests skip cloud CI.
 
 `just gh runner-vm` builds a guest image and runs NixOS integration tests for
 startup without carrier, public egress for multiple guests, private-network and
 sibling-guest isolation including spoofed established replies, compatible host NAT
-settings, the runner's locked-memory budget, and Nix/mbx persistence across runner
+settings, the runner's locked-memory budget, free page reporting and idle cache
+drops, and Nix/mbx persistence across runner
 and guest restarts.
