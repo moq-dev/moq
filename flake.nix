@@ -158,7 +158,13 @@
             cargo-hack
             cargo-nextest
             # Source-based test coverage (`just rs coverage`).
-            cargo-llvm-cov
+            # Its LLVM test helpers must read the compiler's profile format.
+            (cargo-llvm-cov.override {
+              rustPlatform = makeRustPlatform {
+                cargo = rust-toolchain;
+                rustc = rust-toolchain;
+              };
+            })
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
             # Cargo.lock selects the matching schema version, independently of
             # nixpkgs' default wasm-bindgen-cli.

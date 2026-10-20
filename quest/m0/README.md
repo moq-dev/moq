@@ -89,7 +89,6 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [Draft-22 release notices](/quest/m0/release-22/README.md) - tell testers and reporters which published releases contain their fixes
-- [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on #412 to publish the patched 0.6.x that main adopts
 - [qmux credit](/quest/m0/qmux-credit.md) - main adopts qmux 0.6 credit and close fixes; the 0.5 backport is independent
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription

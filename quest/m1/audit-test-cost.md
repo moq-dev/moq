@@ -52,9 +52,9 @@ What the m0 run (2026-10-19) learned; check these first:
   stats producer benchmark lint.
 - Planned by the m0 run: [redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md),
   [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md), and
-  [nightly media players](/quest/m1/media-engines-nightly.md). Owned
-  elsewhere: release builds by [release builds link](/quest/m0/release-link.md),
-  and Rust advisories by the dependency audit. The Nix wasm-bindgen CLI now
+  [nightly media players](/quest/m1/media-engines-nightly.md). Rust advisories
+  are owned by the dependency audit. The release toolchain now links, and
+  the Nix wasm-bindgen CLI now
   follows `Cargo.lock` ([#6031](https://github.com/moq-dev/moq/pull/6031)).
 
 Baselines from queue run

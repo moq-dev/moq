@@ -27,10 +27,10 @@ baselines recorded here. It already attributes FFI growth with
 
 ### Checkpoint (2026-10-19, main at 2b28f5eac)
 
-The nightly `sizes` job has never produced a report: it needs the Linux
-release builds, which fail to link until
-[release builds link](/quest/m0/release-link.md) lands, so it is skipped every
-night. These baselines come from published release assets (x86_64 Linux,
+At this checkpoint, the nightly `sizes` job had never produced a report
+because the Linux release builds failed to link. The release toolchain is
+now fixed; collect the next nightly report and remeasure main with
+`cargo zigbuild`. These baselines come from published release assets (x86_64 Linux,
 stripped as shipped) and local builds of main (host linker instead of
 `cargo zigbuild`, so compare main to main, not to the release column).
 
