@@ -98,7 +98,7 @@ cleanup and the global lint ratchet belong to
 ## Required
 
 - [Every crate on moq-clock](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-clock, with controlled tests for the production/public API migrations
-- [JS timers fire at their own deadlines](/quest/m1/time/js-deadlines.md) - `Manual.advanceAsync` steps to each deadline and `Effect.interval` arms its first period synchronously
+- [JS timers fire at their own deadlines](/quest/m1/time/js-deadlines.md) - `Manual.advance` (renamed from `advanceAsync`) steps to each deadline, sync `advance` becomes `jump`, and `Effect.interval` arms its first period synchronously
 
 ## Related
 
