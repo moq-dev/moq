@@ -264,4 +264,42 @@ for (const [version, alpn] of [
 			origin.close();
 		}
 	});
+
+	for (const end of ["FIN", "reset"] as const) {
+		test(`${alpn} an idle advertisement whose answer ends by ${end} is offered again`, async () => {
+			const pair = createMockTransportPair(alpn);
+			const control = await Stream.open(pair.server, { version });
+			await Stream.accept(pair.client, version);
+			const origin = new OriginProducer();
+			origin.createBroadcast(Path.from("room")).announce();
+			const connection = new Connection({
+				url: new URL("https://relay.example/"),
+				quic: pair.server,
+				control,
+				maxRequestId: 100n,
+				version,
+				client: false,
+				publish: origin.consume(),
+			});
+			const offered = async () => {
+				const request = await Stream.accept(pair.client, version);
+				if (!request) throw new Error("no advertisement");
+				expect(await request.reader.u53()).toBe(PublishNamespace.id);
+				const msg = await PublishNamespace.decode(request.reader, version);
+				expect(msg.trackNamespace).toEqual(Path.from("room"));
+				return request;
+			};
+			try {
+				const first = await offered();
+				await first.writer.u53(RequestOk.id);
+				await new RequestOk({ requestId: undefined }).encode(first.writer, version);
+				if (end === "reset") first.writer.reset(new StreamError(StreamCode.Cancel));
+				else first.writer.close();
+				await offered();
+			} finally {
+				connection.abort();
+				origin.close();
+			}
+		});
+	}
 }

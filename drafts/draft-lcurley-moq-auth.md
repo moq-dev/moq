@@ -230,6 +230,12 @@ This document requests three registrations in the "MOQT Message Types" registry 
 
 --- back
 
+# Changelog
+
+## Since draft-lcurley-moq-auth-00 (in progress)
+
+- AUTH_ERROR can carry GOING_AWAY, refusing an AUTH past the acceptor's GOAWAY without refusing the token.
+
 # Acknowledgments
 {:numbered="false"}
 

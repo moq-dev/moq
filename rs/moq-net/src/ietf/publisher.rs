@@ -14621,6 +14621,54 @@ mod tests {
 		);
 	}
 
+	/// From draft 18 an idle advertisement keeps reading, so a peer that FINs or resets its
+	/// answer while nothing is pending has the namespace offered again.
+	#[moq_clock::test]
+	async fn an_idle_advertisement_that_ends_is_offered_again() {
+		use crate::transport::memory;
+		const VERSION: Version = Version::Draft18;
+
+		for fin in [true, false] {
+			let origin = unheld_origin();
+			let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+			settle().await;
+
+			let (session, mut peer) = memory::pair(memory::Config::default());
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				session,
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				declared(Some(false)),
+				VERSION,
+			);
+			let run = moq_clock::sim::spawn(publisher.run_publish_namespaces());
+
+			let mut offered = async || {
+				let mut stream = moq_clock::timeout(Duration::from_secs(10), Stream::accept(&mut peer, VERSION))
+					.await
+					.expect("no advertisement")
+					.unwrap();
+				assert_eq!(stream.reader.varint().await.unwrap(), ietf::PublishNamespace::ID);
+				let _: ietf::Body = stream.reader.decode().await.unwrap();
+				stream
+			};
+			let mut first = offered().await;
+			let mut ok = bytes::Bytes::from(publish_namespace_ok(VERSION).await);
+			first.writer.write_all(&mut ok).await.unwrap();
+			// Paused time advances once every task is idle: the answer was read, and the
+			// advertisement is parked on its idle reader.
+			moq_clock::sleep(Duration::from_millis(1)).await;
+			match fin {
+				true => first.writer.finish().unwrap(),
+				false => first.writer.abort(&Error::Cancel),
+			}
+			offered().await;
+			assert!(!run.is_finished(), "fin={fin}: the loop ended");
+		}
+	}
+
 	/// A peer that resets a request's stream while its renewal is in flight ends only that
 	/// request: the loop keeps running and advertises the namespace afresh.
 	#[moq_clock::test]

@@ -326,6 +326,9 @@ export class Publisher {
 	// told on request. On draft-16 and later {@link runSubscribeNamespace} also carries
 	// every match: a NAMESPACE is discovery, not a second route.
 	#advertised: Getter<Advertisements | undefined>;
+	// Bumped when an idle draft-18+ advertisement ends without an update, so the announce
+	// loop re-offers it instead of holding a request the peer dropped.
+	#lapsed = new Signal(0);
 	#publish?: OriginConsumer;
 
 	// What every advertisement carries on a session that negotiated the MoQ Cluster
@@ -1513,12 +1516,19 @@ export class Publisher {
 					const grant = this.#grant.changed(() => resolve("changed"));
 					// A token that ended leaves the request carrying it to be made again without.
 					const ended = this.#auth?.ended.changed(() => resolve("changed"));
+					const lapsed = this.#lapsed.changed(() => resolve("changed"));
 					dispose = () => {
 						table();
 						grant();
 						ended?.();
+						lapsed();
 					};
 				});
+
+				// The peer no longer holds a namespace whose request ended while idle.
+				for (const key of [...ns.active.keys()]) {
+					if (!requests.has(key)) ns.active.delete(key);
+				}
 
 				const advertised = this.#advertised.peek();
 				if (!advertised) {
@@ -1783,7 +1793,7 @@ export class Publisher {
 			if (answer === "held" && request) {
 				const held: NamespaceRequest = { path, requestId, stream: request, auth };
 				requests.set(path, held);
-				if (this.#session.version >= Version.DRAFT_18) held.reply = this.#readAdvertisement(held);
+				if (this.#session.version >= Version.DRAFT_18) held.reply = this.#readAdvertisement(held, requests);
 			}
 			return answer;
 		} catch (err: unknown) {
@@ -1801,8 +1811,11 @@ export class Publisher {
 		}
 	}
 
-	// Keep reading while an advertisement is idle, so GOAWAY validation never waits for an update.
-	#readAdvertisement(request: NamespaceRequest): Promise<number | undefined> {
+	/**
+	 * Keep reading while an advertisement is idle, so GOAWAY validation never waits for an
+	 * update. A stream that ends while idle drops the request, and the announce loop re-offers it.
+	 */
+	#readAdvertisement(request: NamespaceRequest, requests: Requests): Promise<number | undefined> {
 		const reply = nextMessage(request.stream.reader, this.#session.version, this.#session.client)
 			.then((type) => {
 				if (type !== undefined && !request.updating)
@@ -1816,9 +1829,20 @@ export class Publisher {
 				}
 				throw err;
 			});
-		// A later update consumes the result; failures are acted on as soon as they arrive.
-		void reply.catch(() => undefined);
+		// A later update consumes an answer; an end is acted on as soon as it arrives.
+		void reply.then(
+			(type) => type === undefined && this.#lapse(request, requests),
+			() => this.#lapse(request, requests),
+		);
 		return reply;
+	}
+
+	/** Drop an idle advertisement whose stream ended, unless an update already took it over. */
+	#lapse(request: NamespaceRequest, requests: Requests) {
+		if (request.updating || requests.get(request.path) !== request) return;
+		requests.delete(request.path);
+		request.stream.abort(new StreamError(StreamCode.Cancel, { message: "advertisement ended" }));
+		this.#lapsed.update((n) => n + 1);
 	}
 
 	/**
@@ -1889,7 +1913,7 @@ export class Publisher {
 					}
 					this.#answered(await RequestOk.decode(reader, version));
 					request.updating = false;
-					if (version >= Version.DRAFT_18) request.reply = this.#readAdvertisement(request);
+					if (version >= Version.DRAFT_18) request.reply = this.#readAdvertisement(request, requests);
 					return "held";
 				})(),
 				ADVERTISE_TIMEOUT,
