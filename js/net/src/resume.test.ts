@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
@@ -9,6 +10,7 @@ import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
 import type * as track from "./track.ts";
+import { unwanted } from "./util/demand.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
 const EPOCH = Epoch.parse("01900000-0000-7000-8000-000000000001");
@@ -98,6 +100,125 @@ async function setup() {
 		},
 	};
 }
+
+test("a fork continues its open group across a route failure after its parent closes", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const front = new Front();
+	front.serve(a.consume());
+	const parent = front.consumer.track("seq").subscribe();
+	const fork = parent.fork();
+	try {
+		const stalled = ta.write(0, 1, false);
+		const group = await fork.recvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		parent.close();
+
+		const next = group.readFrame();
+		tb.write(0, 3);
+		front.serve(b.consume());
+		stalled.close(new StreamError(StreamCode.SessionClosed));
+		expect(dec.decode((await next)?.payload)).toBe("0.1");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.2");
+		expect(await group.readFrame()).toBeUndefined();
+	} finally {
+		parent.close();
+		fork.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+test.each(["conclude", "park"] as const)("a fork made after the front's %s replays its parent's copy", async (end) => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	const front = new Front();
+	front.serve(a.consume());
+	const parent = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	ta.write(1);
+	expect(drain(parent)).toEqual([1]);
+	front[end]();
+	const fork = parent.fork({ maxDelay: Milli(10_000) });
+	try {
+		expect(drain(fork)).toEqual([0, 1]);
+	} finally {
+		parent.close();
+		fork.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
+test("a resumed fork has its own preferences and replay cursor", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const front = new Front();
+	front.serve(a.consume());
+	const parent = front.consumer.track("seq").subscribe({
+		priority: 2,
+		groups: { start: { included: 1 } },
+	});
+	ta.write(0);
+	ta.write(1);
+	expect(drain(parent)).toEqual([1]);
+	const fork = parent.fork({ priority: 7, maxDelay: Milli(10_000) });
+	try {
+		expect(drain(fork)).toEqual([0, 1]);
+		fork.update({ priority: 9 });
+		expect(parent.subscription.peek()?.priority).toBe(2);
+		expect(fork.subscription.peek()?.priority).toBe(9);
+		const subscribed = tb.producer.subscription.changed();
+		front.serve(b.consume());
+		expect((await subscribed)?.priority).toBe(9);
+		const narrowed = tb.producer.subscription.changed();
+		fork.close();
+		expect((await narrowed)?.priority).toBe(2);
+		tb.write(2);
+		expect(drain(parent)).toEqual([2]);
+		parent.close();
+		await unwanted(tb.producer.demand());
+	} finally {
+		parent.close();
+		fork.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+test("a resumed fork shares an on-demand track request", async () => {
+	const a = new BroadcastProducer();
+	const requested = wireOf(a).requested();
+	const front = new Front();
+	front.serve(a.consume());
+	const parent = front.consumer.track("seq").subscribe();
+	const request = await requested;
+	if (!request) throw new Error("expected on-demand track request");
+	const producer = request.accept();
+	const extra = wireOf(a).requested();
+	const fork = parent.fork();
+	try {
+		producer.writeFrame({ payload: enc.encode("shared") });
+		for (const subscriber of [parent, fork]) {
+			const group = await subscriber.recvGroup();
+			expect(dec.decode((await group?.readFrame())?.payload)).toBe("shared");
+			group?.close();
+		}
+	} finally {
+		parent.close();
+		fork.close();
+		front.consumer.close();
+		a.close();
+	}
+	expect(await extra).toBeUndefined();
+});
 
 test("a subscription reads on across a same-epoch route swap, each group once", async () => {
 	const { a, b, active, request, swap, close } = await setup();

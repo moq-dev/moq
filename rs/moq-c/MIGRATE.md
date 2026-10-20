@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON values carry their timestamp (#5677)
+
+`moq_json_value` gains `timestamp_us` and `timestamp_present`, which changes its ABI.
+A snapshot consumer's callback now fires for each state in order instead of only the newest.
+Timestamps are rounded down to a whole microsecond.
+
+### Ranges filter reads (#5929)
+
+A raw track consumer now reads only the groups its `ranges` cover, rather than every group from the lowest start to the last absolute end.
+
 ### Demand reports the wanted group (#5930)
 
 `moq_track_info` gains `refresh` and `refresh_present`, which changes its ABI; a zeroed field leaves refresh off.

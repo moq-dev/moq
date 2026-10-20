@@ -1,4 +1,4 @@
-import { Elapsed, Instant, Milli, Nano, now, sleep, timeout } from "@moq/clock";
+import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
@@ -46,6 +46,7 @@ import {
 	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
+	hasSynced,
 	hasTrackStream,
 	resolvesStart,
 	Version,
@@ -57,12 +58,6 @@ const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
 const PROBE_MAX_DELTA = 0.25;
 const PROBE_RTT_DELTA = 0.25;
-// How long a finished group's stream has to complete after its last write, plus its payload
-// at GROUP_COMPLETION_RATE. `Writer.close` only queues the FIN, and a stream that never
-// completes while the session stays up keeps the only copy of the group the subscriber could
-// still receive, so past this the stream is reset.
-const GROUP_COMPLETION_TIMEOUT = 3000; // ms
-const GROUP_COMPLETION_RATE = 50; // bytes per ms, the slowest uplink a group drains at
 
 /** Map a signed delta to an unsigned zigzag varint value (mirrors Rust `varint::zigzag`). */
 function zigzag(delta: bigint): bigint {
@@ -601,6 +596,94 @@ export class Publisher {
 				return;
 			}
 
+			if (hasSynced(this.version)) {
+				dispose();
+				const pending = new Map<Path.Valid, { end: boolean; next?: Advertised }>();
+				const closed = new Once<null | Error>();
+				void stream.reader.closed.then(
+					() => closed.set(null),
+					(err: unknown) => closed.set(error(err)),
+				);
+				let wake: (() => void) | undefined;
+				let ended = false;
+				const queue = () => {
+					const table = this.#advertised.peek();
+					ended = table === undefined;
+					const latest = table ? visible(table) : new Map<Path.Valid, Advertised>();
+					for (const suffix of pending.keys()) {
+						if (!active.has(suffix) && !latest.has(suffix)) pending.delete(suffix);
+					}
+					for (const suffix of active.keys()) {
+						if (!latest.has(suffix)) pending.set(suffix, { end: true });
+					}
+					for (const [suffix, snap] of latest) {
+						const prev = active.get(suffix);
+						const queued = pending.get(suffix);
+						if (
+							queued?.end ||
+							!prev ||
+							!sameInstance(prev, snap) ||
+							!routesEqual(onWire(prev.route), onWire(snap.route))
+						) {
+							pending.set(suffix, { end: queued?.end ?? false, next: snap });
+						} else {
+							pending.delete(suffix);
+						}
+					}
+					wake?.();
+				};
+				const stopTable = this.#advertised.subscribe(queue);
+				const stopGrant = this.#grant?.subscribe(queue);
+				dispose = () => {
+					stopTable();
+					stopGrant?.();
+				};
+				queue();
+				let remaining: number | undefined = pending.size;
+				await new AnnounceOk(this.hop, 0).encode(stream.writer, this.version);
+				for (;;) {
+					if (remaining !== undefined && (remaining === 0 || pending.size === 0)) {
+						remaining = undefined;
+						await encodeAnnounceBroadcast(stream.writer, { status: "synced" }, this.version);
+					}
+					const departed = closed.peek();
+					if (departed instanceof Error) throw departed;
+					if (this.#withdrawal.closing.peek() || departed === null || (ended && pending.size === 0)) break;
+					const first = pending.entries().next();
+					if (first.done) {
+						const changed = new Promise<"changed">((resolve) => {
+							wake = () => resolve("changed");
+						});
+						if ((await race([changed, stream.reader.closed, this.#withdrawal.closing])) !== "changed")
+							break;
+						continue;
+					}
+					const [suffix, entry] = first.value;
+					if (entry.end) {
+						if (entry.next) pending.set(suffix, { end: false, next: entry.next });
+						else pending.delete(suffix);
+						active.delete(suffix);
+						await retract(suffix);
+					} else if (entry.next) {
+						pending.delete(suffix);
+						const prev = active.get(suffix);
+						active.set(suffix, entry.next);
+						if (!prev) await announce(suffix, entry.next.route);
+						else if (!sameInstance(prev, entry.next)) await restart(suffix, entry.next.route);
+						else await update(suffix, entry.next.route);
+					}
+					if (remaining !== undefined) remaining -= 1;
+				}
+				if (this.#withdrawal.closing.peek()) {
+					if (remaining !== undefined)
+						await encodeAnnounceBroadcast(stream.writer, { status: "synced" }, this.version);
+					for (const suffix of active.keys()) await retract(suffix);
+					stream.close();
+					await stream.writer.closed;
+				}
+				return;
+			}
+
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed
 
@@ -810,6 +893,11 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				apply: (update) => {
+					// Every update restates the wanted group. Past our largest it is a join, which
+					// repeats the pending ask; at or below it the group already exists.
+					const largest = hooks.peekLargest(track).largest?.group;
+					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
+						hooks.joinSubscriber(track);
 					const end = exclusiveGroupEnd(update.endGroup);
 					track.update({
 						priority: update.priority,
@@ -1348,6 +1436,7 @@ export class Publisher {
 				const info = await wireOf(front).resolveTrackInfo(track, release.signal);
 				return new TrackInfoMessage({
 					priority: info.priority,
+					refresh: info.refresh,
 					// Publisher Max Age: the publisher's retention bound, advertised so
 					// relays re-serve with the same window.
 					maxAge: info.maxAge,
@@ -1521,8 +1610,6 @@ export class Publisher {
 			// Whether the cursor ever reached the requested start, which decides how the
 			// end of the group is read below.
 			let reached = startFrame === 0;
-			// Payload bytes written, which size the completion deadline.
-			let bytes = 0;
 
 			for (;;) {
 				const read = await race([hooks.readGroupFrame(group), stream.closed]);
@@ -1552,36 +1639,18 @@ export class Publisher {
 
 					await hooks.guardGroup(group, () => stream.u53(read.frame.payload.byteLength));
 					await hooks.guardGroup(group, () => stream.write(read.frame.payload));
-					bytes += read.frame.payload.byteLength;
 				} finally {
 					read.complete();
 				}
 			}
 
 			stream.close();
-			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			// The group's budget still applies while the FIN is pending, as the Rust GroupServe
-			// does; the live edge, which no budget can expire, falls to a deadline sized to the
-			// group, and a stream that never completes is reset past it.
-			let failed: Error | undefined;
-			try {
-				failed = await hooks.guardGroup(group, () =>
-					timeout(
-						Nano.fromMilli(Milli(GROUP_COMPLETION_TIMEOUT + bytes / GROUP_COMPLETION_RATE)),
-						stream.closed.then(() => undefined, error),
-					),
-				);
-			} catch (err: unknown) {
-				failed =
-					err instanceof Elapsed
-						? new StreamError(StreamCode.DeliveryTimeout, {
-								message: `group ${group.sequence} stream never completed`,
-							})
-						: error(err);
-				stream.reset(failed);
-			}
 			group.close();
-			return failed;
+			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
+			// Its bytes still hold the connection until acknowledged, so a group gone stale
+			// meanwhile is reset like one still serving, as the Rust `GroupServe` does.
+			await hooks.guardGroup(group, () => stream.closed);
+			return undefined;
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);

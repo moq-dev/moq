@@ -91,4 +91,3 @@ method because moq-ffi drives it internally). Wire: none.
 ## Related
 
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - touches the same window code
-- [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - touches the same snapshot consumers and bindings

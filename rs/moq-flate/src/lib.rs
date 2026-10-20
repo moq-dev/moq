@@ -2,8 +2,8 @@
 //!
 //! Two track modes carry the payloads:
 //!
-//! - [`snapshot`]: **lossy**. One value updated over time; a consumer only gets the most recent
-//!   one. Older values are superseded and dropped.
+//! - [`snapshot`]: **lossy**. One value updated over time; `next` yields states inside the drift
+//!   budget, while `latest` skips to the newest state. Superseded groups may be lost.
 //! - [`stream`]: **lossless**. An ordered append-log of self-contained payloads, delivered in order
 //!   with nothing superseded. Bounded by the group budget: see [`stream`] for what happens once
 //!   it is spent.
@@ -51,6 +51,7 @@
 //! [RFC 1951]: https://www.rfc-editor.org/rfc/rfc1951.html
 //! [RFC 7692]: https://www.rfc-editor.org/rfc/rfc7692.html#section-7.2.1
 
+#![warn(missing_docs)]
 // The browser transport is `!Send`, so on wasm the shared state behind the track modes' `Arc`s is
 // too and clippy suggests `Rc`. The same code is genuinely cross-thread on native, so `Arc` stays
 // and the lint is unactionable here.

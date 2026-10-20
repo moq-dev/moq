@@ -13,7 +13,7 @@ import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
-import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
+import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
@@ -813,33 +813,41 @@ test("lite draft-06: a cut dropped then re-created is not served", async () => {
 	}
 });
 
-// A group stream that never completes after its FIN keeps the only copy the subscriber could
-// still receive. Past the deadline its size allows, the publisher resets it and drops the
-// group; the next group is unaffected.
-test("lite draft-06: a group stream that never completes is reset past its deadline", async () => {
+// A group stream that never completes after its FIN still holds the connection. Like the
+// Rust `GroupServe`, the publisher waits on it only while the age budget keeps the group:
+// the newest group is never stale, and once its successor arrived a full budget ago the
+// stream is reset with `Old` and the group dropped.
+test("lite draft-06: a group stream that never completes is reset once the group goes stale", async () => {
 	const clock = new Manual();
 	const restore = clock.install();
-	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
+	const budget = Milli(1_000);
+	// The track's max age caps the subscription's budget.
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, maxAge: budget });
 	try {
 		sub.serve(0);
 		expect(await sub.servedSequence()).toBe(0);
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
 
-		const reset = sub.stall();
+		let reason: unknown;
+		const reset = sub.stall().then((value) => {
+			reason = value;
+		});
 		sub.serve(1);
 		expect(await sub.servedHeader()).toBe(1);
-		// The frame and the FIN follow the header; the deadline starts once they are written.
 		await flush();
-		await clock.advanceAsync(Nano.fromMilli(Milli(2_999)));
-		expect(await Promise.race([reset, flush().then(() => "open")])).toBe("open");
-		await clock.advanceAsync(Nano.fromMilli(Milli(2)));
-		expect(toStreamCode(fromTransport(await reset))).toBe(StreamCode.DeliveryTimeout);
-		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
-		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
+		await clock.advanceAsync(Nano.fromMilli(Milli(budget * 10)));
+		expect(reason).toBeUndefined();
 
 		sub.serve(2);
 		expect(await sub.servedSequence()).toBe(2);
+		await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+		expect(reason).toBeUndefined();
+		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await reset;
+		expect(toStreamCode(fromTransport(reason))).toBe(StreamCode.Old);
+		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
 	} finally {
 		await sub.close();
 		restore();
@@ -2618,3 +2626,70 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		}
 	});
 }
+
+test("lite-07 SYNCED survives an initial removal and continuous earlier-prefix churn", async () => {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const removed = publish(origin, Path.from("z/removed"));
+	const retained = publish(origin, Path.from("z/retained"));
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let output!: ReadableStreamDefaultController<Uint8Array>;
+	const reader = new Reader(
+		new ReadableStream<Uint8Array>({
+			start(controller) {
+				output = controller;
+			},
+		}),
+		undefined,
+		version,
+	);
+	let writes = 0;
+	let churnEnabled = true;
+	const churn: BroadcastProducer[] = [];
+	const stream = new Stream({
+		version,
+		readable: new ReadableStream<Uint8Array>(),
+		writable: new WritableStream<Uint8Array>({
+			async write(chunk) {
+				if (writes++ === 0) {
+					entered.resolve();
+					await release.promise;
+				}
+				output.enqueue(new Uint8Array(chunk));
+				if (churnEnabled) {
+					churn.push(publish(origin, Path.from(`a/${writes}`)));
+					if (churn.length > 2) churn.shift()?.close();
+				}
+			},
+		}),
+	});
+	const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
+	try {
+		await entered.promise;
+		removed.close();
+		release.resolve();
+		expect((await AnnounceOk.decode(reader, version)).active).toBe(0);
+		const events: AnnounceBroadcast[] = [];
+		for (let i = 0; i < 3; i++) {
+			const event = await decodeAnnounceBroadcast(reader, version);
+			events.push(event);
+			if (event.status === "synced") break;
+		}
+		expect(events[0]).toMatchObject({ status: "active", suffix: "z/retained" });
+		expect(events.at(-1)).toEqual({ status: "synced" });
+		expect(events).not.toContainEqual(expect.objectContaining({ suffix: "z/removed" }));
+	} finally {
+		churnEnabled = false;
+		await publisher.drain();
+		await running;
+		publisher.close();
+		retained.close();
+		for (const broadcast of churn) broadcast.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+	}
+});

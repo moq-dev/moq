@@ -1,8 +1,9 @@
 use crate::{broadcast, cache, stats, track};
+use hashlink::LinkedHashMap;
 use kio::Task;
 use std::{
 	cmp::Reverse,
-	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+	collections::{BTreeSet, HashMap, HashSet, VecDeque},
 	fmt,
 	sync::Arc,
 	sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -471,7 +472,7 @@ pub struct Route {
 	/// solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer with a
 	/// PUBLISH_NAMESPACE, which carries it), and moq-lite (which rides the session's scope)
 	/// advertise the route unnamed. Swapping it is an update that renews the request with
-	/// REQUEST_UPDATE from draft 17, or ends and makes it again before. After a
+	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. After a
 	/// reconnect, add the token on the new session and name that. Local, like
 	/// [`Self::source`]: a relay never forwards it.
 	pub auth: Option<crate::auth::Auth>,
@@ -806,13 +807,18 @@ enum PendingUpdate {
 	},
 }
 
-/// Pending updates keyed by prefix. `BTreeMap` keeps memory strictly bounded by
-/// the number of distinct prefixes with outstanding work (collapsed pairs are
-/// fully erased) and gives a deterministic lexicographic delivery order so
-/// tests can predict it.
+// An update is taken only while collapsing it under the cursor state lock.
+struct Pending {
+	update: Option<PendingUpdate>,
+	// A later live event must not consume an earlier snapshot entry's debt.
+	owed: bool,
+}
+
+/// Pending updates keep their insertion order when metadata changes. Fully removing
+/// cancelled entries bounds memory by prefixes with outstanding work.
 #[derive(Default)]
 struct OriginConsumerState {
-	pending: BTreeMap<PathOwned, PendingUpdate>,
+	pending: LinkedHashMap<PathOwned, Pending>,
 	/// Prefixes whose most recently delivered update was an announce. A pending
 	/// `Announce` is ambiguous on its own: it is an unseen initial announce (a
 	/// retraction cancels it entirely) or a metadata update on a route the
@@ -828,39 +834,51 @@ struct OriginConsumerState {
 	/// holds back (nothing waits on losing sync), except the last landing, which
 	/// takes the write guard to owe the queue too. Only the table lock changes it.
 	waiting: AtomicUsize,
-	/// The pending prefixes the consumer still owes reading from before the last
-	/// snapshot landed. Synced once empty and nothing is `waiting`.
-	owed: BTreeSet<PathOwned>,
+	/// Pending entries from before the last snapshot landed. Synced at zero
+	/// when no source is `waiting`; held metadata changes are not counted.
+	owed: usize,
 }
 
 impl OriginConsumerState {
 	/// Whether the consumer has read everything its sources announced before they
 	/// synced. A torn-down origin has no sources left to wait on.
 	fn synced(&self) -> bool {
-		(self.waiting.load(Ordering::Relaxed) == 0 || self.ended) && self.owed.is_empty()
+		(self.waiting.load(Ordering::Relaxed) == 0 || self.ended) && self.owed == 0
 	}
 
 	/// Owe every pending update that changes which prefixes are announced: a start
 	/// the consumer has not seen, or an end. A re-price or restart of a delivered
 	/// route leaves the set as it is, and may be held, so it is not owed.
 	fn owe(&mut self) {
-		self.owed = self
-			.pending
-			.iter()
-			.filter(|(prefix, update)| {
-				!self.delivered.contains(*prefix)
-					|| matches!(
-						update,
-						PendingUpdate::Unannounce(_) | PendingUpdate::UnannounceAnnounce { .. }
-					)
-			})
-			.map(|(prefix, _)| prefix.clone())
-			.collect();
+		self.owed = 0;
+		for (prefix, pending) in &mut self.pending {
+			pending.owed = !self.delivered.contains(prefix)
+				|| matches!(
+					pending.update,
+					Some(PendingUpdate::Unannounce(_) | PendingUpdate::UnannounceAnnounce { .. })
+				);
+			self.owed += usize::from(pending.owed);
+		}
+	}
+
+	fn put(&mut self, prefix: PathOwned, update: PendingUpdate) {
+		match self.pending.get_mut(&prefix) {
+			Some(pending) => pending.update = Some(update),
+			None => {
+				self.pending.insert(
+					prefix,
+					Pending {
+						update: Some(update),
+						owed: false,
+					},
+				);
+			}
+		}
 	}
 
 	fn apply_announce(&mut self, prefix: PathOwned, meta: RouteMeta, captures: Option<Vec<Pattern>>) {
 		let meta = (meta, captures);
-		let new = match self.pending.remove(&prefix) {
+		let new = match self.pending.get_mut(&prefix).and_then(|pending| pending.update.take()) {
 			// First announce, a stale announce being replaced, or a metadata update.
 			None | Some(PendingUpdate::Announce(_)) => PendingUpdate::Announce(meta),
 			// The consumer still owes the restart; this only moves its metadata.
@@ -870,7 +888,7 @@ impl OriginConsumerState {
 				PendingUpdate::UnannounceAnnounce { old, new: meta }
 			}
 		};
-		self.pending.insert(prefix, new);
+		self.put(prefix, new);
 	}
 
 	/// Another instance replaces the route at `prefix`, or announces it afresh when
@@ -884,7 +902,7 @@ impl OriginConsumerState {
 		release: Option<Release>,
 	) {
 		let meta = (meta, captures);
-		let new = match self.pending.remove(&prefix) {
+		let new = match self.pending.get_mut(&prefix).and_then(|pending| pending.update.take()) {
 			Some(PendingUpdate::Unannounce(old) | PendingUpdate::UnannounceAnnounce { old, .. }) => {
 				PendingUpdate::UnannounceAnnounce { old, new: meta }
 			}
@@ -895,26 +913,27 @@ impl OriginConsumerState {
 			// The consumer never saw the old instance, so this is its first announce.
 			_ => PendingUpdate::Announce(meta),
 		};
-		self.pending.insert(prefix, new);
+		self.put(prefix, new);
 	}
 
 	fn apply_unannounce(&mut self, prefix: PathOwned, last: RouteMeta, captures: Option<Vec<Pattern>>) {
 		let last = (last, captures);
-		match self.pending.remove(&prefix) {
+		match self.pending.get_mut(&prefix).and_then(|pending| pending.update.take()) {
 			// The pending announce was never delivered and neither was any earlier
 			// one, so the pair cancels entirely, and nothing is owed for it.
 			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&prefix) => {
-				self.owed.remove(&prefix);
+				let pending = self.pending.remove(&prefix).unwrap();
+				self.owed -= usize::from(pending.owed);
 			}
 			// Either nothing is pending or the pending announce was a metadata
 			// update on a delivered route; the consumer still owes a retraction.
 			None | Some(PendingUpdate::Announce(_) | PendingUpdate::Restart(..) | PendingUpdate::Unannounce(_)) => {
-				self.pending.insert(prefix, PendingUpdate::Unannounce(last));
+				self.put(prefix, PendingUpdate::Unannounce(last));
 			}
 			// The embedded announce cancels with this retraction; the consumer still
 			// needs the leading one.
 			Some(PendingUpdate::UnannounceAnnounce { old, .. }) => {
-				self.pending.insert(prefix, PendingUpdate::Unannounce(old));
+				self.put(prefix, PendingUpdate::Unannounce(old));
 			}
 		}
 	}
@@ -940,6 +959,7 @@ impl OriginConsumerState {
 	) -> Result<PathOwned, Option<Instant>> {
 		let mut wake = None;
 		for (prefix, update) in &self.pending {
+			let update = update.update.as_ref().unwrap();
 			let Some(now) = now.filter(|_| !hold.is_zero() && !self.ended) else {
 				return Ok(prefix.clone());
 			};
@@ -986,20 +1006,22 @@ impl OriginConsumerState {
 
 	/// Take the pending update at `prefix` for delivery.
 	fn take_prefix(&mut self, prefix: PathOwned) -> AnnounceEvent {
-		let event = self.take_update(prefix);
+		let (event, owed) = self.take_update(prefix);
 		let (AnnounceEvent::Start(announce)
 		| AnnounceEvent::Update(announce)
 		| AnnounceEvent::Restart(announce)
 		| AnnounceEvent::End(announce)) = &event;
 		// A trailing announce left pending is still owed.
-		if !self.pending.contains_key(&announce.prefix) {
-			self.owed.remove(&announce.prefix);
+		if owed && !self.pending.contains_key(&announce.prefix) {
+			self.owed -= 1;
 		}
 		event
 	}
 
-	fn take_update(&mut self, prefix: PathOwned) -> AnnounceEvent {
-		let ((meta, captures), kind): (_, fn(Announce) -> AnnounceEvent) = match self.pending.remove(&prefix).unwrap() {
+	fn take_update(&mut self, prefix: PathOwned) -> (AnnounceEvent, bool) {
+		let pending = self.pending.remove(&prefix).unwrap();
+		let owed = pending.owed;
+		let ((meta, captures), kind): (_, fn(Announce) -> AnnounceEvent) = match pending.update.unwrap() {
 			PendingUpdate::Announce(meta) => {
 				// The consumer has seen this prefix before, so it is a metadata update.
 				let kind = match self.delivered.insert(prefix.clone()) {
@@ -1020,22 +1042,31 @@ impl OriginConsumerState {
 				// Deliver the retraction now; leave the trailing announce pending so
 				// the next take returns it for the same prefix.
 				self.delivered.remove(&prefix);
-				self.pending.insert(prefix.clone(), PendingUpdate::Announce(new));
+				self.pending.insert(
+					prefix.clone(),
+					Pending {
+						update: Some(PendingUpdate::Announce(new)),
+						owed,
+					},
+				);
 				(old, AnnounceEvent::End)
 			}
 		};
-		kind(Announce {
-			prefix,
-			captures,
-			route: Route {
-				hops: meta.0,
-				cost: meta.1,
-				via: Hop::UNKNOWN,
-				source: meta.2,
-				epoch: meta.3,
-				auth: meta.4,
-			},
-		})
+		(
+			kind(Announce {
+				prefix,
+				captures,
+				route: Route {
+					hops: meta.0,
+					cost: meta.1,
+					via: Hop::UNKNOWN,
+					source: meta.2,
+					epoch: meta.3,
+					auth: meta.4,
+				},
+			}),
+			owed,
+		)
 	}
 }
 
@@ -6061,6 +6092,56 @@ impl AnnounceConsumer {
 		kio::wait(|waiter| self.poll_synced(waiter)).await
 	}
 
+	// The wire sender uses this only to bound its initial replay.
+	// private: tuning
+	#[cfg(feature = "async")]
+	pub(crate) fn pending_len(&self) -> usize {
+		self.state.read().pending.len()
+	}
+
+	// A wider wire grant must reuse pending slots, rather than bypass the initial queue.
+	// private: tuning
+	#[cfg(feature = "async")]
+	pub(crate) fn replay<'a>(
+		&mut self,
+		advertised: impl IntoIterator<Item = &'a PathOwned>,
+		revoked: &HashSet<PathOwned>,
+	) {
+		let advertised: HashSet<_> = advertised.into_iter().collect();
+		let table = self.shared.lock();
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		for id in &self.ids {
+			let Some(cursor) = table.cursors.get(id) else {
+				continue;
+			};
+			for (presented, (_, meta, _, captures, _)) in &cursor.current {
+				let prefix = cursor.under.join(presented);
+				if revoked.contains(&prefix) {
+					state.apply_unannounce(prefix, meta.clone(), captures.clone());
+					continue;
+				}
+				if advertised.contains(&prefix) {
+					if state.pending.get(&prefix).is_some_and(|pending| {
+						matches!(
+							pending.update,
+							Some(PendingUpdate::Unannounce(_) | PendingUpdate::UnannounceAnnounce { .. })
+						)
+					}) {
+						state.apply_announce(prefix, meta.clone(), captures.clone());
+					}
+					continue;
+				}
+				// The wire never sent this route, so it is a fresh start without a hold.
+				state.delivered.remove(&prefix);
+				self.held.remove(&prefix);
+				self.retracted.remove(&prefix);
+				state.put(prefix, PendingUpdate::Announce((meta.clone(), captures.clone())));
+			}
+		}
+	}
+
 	/// Returns the root that is automatically stripped from emitted prefixes.
 	pub fn root(&self) -> &Path<'_> {
 		&self.root
@@ -6396,6 +6477,32 @@ mod tests {
 		assert!(announced.is_synced());
 	}
 
+	#[test]
+	fn initial_routes_precede_live_prefixes() {
+		let producer = origin(1).produce();
+		let _initial = producer.announce("z/initial", Route::default()).unwrap();
+		let mut announced = producer.consume().announced();
+		let _live = producer.announce("a/live", Route::default()).unwrap();
+		announced.assert_next_active("z/initial");
+		assert!(announced.is_synced());
+	}
+
+	#[test]
+	fn stalled_initial_replay_collapses_churn_without_a_backlog() {
+		let producer = origin(1).produce();
+		let initial = producer.announce("z/initial", Route::default()).unwrap();
+		let mut announced = producer.consume().announced();
+		for i in 0..1_000 {
+			let transient = producer.announce(format!("a/{i}"), Route::default()).unwrap();
+			initial.update(Route::default().with_cost(i)).unwrap();
+			drop(transient);
+			assert_eq!(announced.state.read().pending.len(), 1);
+		}
+		announced.assert_next_active("z/initial");
+		assert!(announced.is_synced());
+		announced.assert_next_wait();
+	}
+
 	/// A start and end that cancel before being read are owed nothing.
 	#[test]
 	fn a_cancelled_start_still_catches_up() {
@@ -6664,9 +6771,9 @@ mod tests {
 		announced.assert_next_wait();
 
 		let mut announced = project.clone().with_hidden(true).announced();
+		announced.expect_next_active("cam").await;
 		announced.expect_next_active(".svc").await;
 		announced.expect_next_active(".svc/foo").await;
-		announced.expect_next_active("cam").await;
 		announced.assert_next_wait();
 
 		// Rooted inside the mount, the claim covers the root itself.
@@ -6994,7 +7101,7 @@ mod tests {
 		let _b = producer.announce("room/bob", Route::default()).unwrap();
 
 		let mut announced = producer.consume().announced();
-		// BTreeMap order: lexicographic by prefix.
+		// Replay follows the table traversal order.
 		announced.expect_next_active("room/alice").await;
 		announced.expect_next_active("room/bob").await;
 		announced.assert_next_wait();
@@ -8932,11 +9039,11 @@ mod tests {
 			.unwrap();
 
 		assert_eq!(announced.expect_next_active("client").await.source(), Source::Local);
+		assert_eq!(announced.expect_next_active("gateway").await.source(), Source::Local);
 		assert_eq!(
 			announced.expect_next_active("forwarded").await.source(),
 			Source::Peer(origin(7))
 		);
-		assert_eq!(announced.expect_next_active("gateway").await.source(), Source::Local);
 
 		// The mark survives narrowing the handle.
 		let scoped = peer.scope("room", &Patterns::from(Pattern::all())).unwrap();

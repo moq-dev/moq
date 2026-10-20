@@ -1,0 +1,16 @@
+name: Install Nix
+description: Install Nix and trust the flake's own nixConfig, which names the nix.moq.dev cache.
+
+runs:
+  using: composite
+  steps:
+    # Nix ignores a flake's `nixConfig` unless told to accept it, and would then
+    # rebuild from source everything nixpkgs doesn't serve: ~12 minutes of
+    # uniffi-bindgen-go alone in every job that enters the dev shell. Accepting
+    # it keeps flake.nix the only place that names the cache and its key. The
+    # flake is this checkout, which these jobs already run as code.
+    - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+      with:
+        determinate: false
+        extra-conf: |
+          accept-flake-config = true

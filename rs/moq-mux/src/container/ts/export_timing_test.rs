@@ -214,7 +214,7 @@ impl Live {
 			} else {
 				let tick = self.tick;
 				let keyframe = tick.is_multiple_of(GOP);
-				if keyframe && let Some(group) = self.group.take() {
+				if keyframe && let Some(mut group) = self.group.take() {
 					match std::mem::take(&mut self.stalling) {
 						true => self.stalled.push(group),
 						false => group.finish().unwrap(),
@@ -281,7 +281,7 @@ impl Live {
 
 	/// End the broadcast and let every leg render what it holds.
 	async fn finish(&mut self, legs: &mut [&mut Leg]) {
-		if let Some(group) = self.group.take() {
+		if let Some(mut group) = self.group.take() {
 			group.finish().unwrap();
 		}
 		self.stalled.clear();
