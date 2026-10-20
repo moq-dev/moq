@@ -67,6 +67,16 @@ impl Instant {
 	pub(crate) fn since_origin(self) -> Duration {
 		Duration::from_nanos(self.0)
 	}
+
+	/// The instant as nanoseconds from the origin, for lock-free storage.
+	pub(crate) const fn to_nanos(self) -> u64 {
+		self.0
+	}
+
+	/// The instant `nanos` past the origin.
+	pub(crate) const fn from_nanos(nanos: u64) -> Self {
+		Self(nanos)
+	}
 }
 
 impl Add<Duration> for Instant {

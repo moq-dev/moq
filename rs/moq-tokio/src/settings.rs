@@ -260,6 +260,9 @@ pub struct Quic {
 
 	#[usage(env = "MOQ_QUIC_QLOG", cli("--quic-qlog"))]
 	qlog: Option<String>,
+
+	#[usage(env = "MOQ_QUIC_KEYLOG", cli("--quic-keylog"))]
+	keylog: Option<bool>,
 }
 
 /// Log settings (`[log]`, `--log-level`).

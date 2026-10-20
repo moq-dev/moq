@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `CongestionControl` gained `none` (#5926)
+
+`CongestionControl.none` runs no congestion control and no pacing, for tests and controlled links.
+An exhaustive `switch` needs one more case.
+Spell it out as `CongestionControl.none` when assigning to `QuicConfig.congestionControl`: a bare `.none` there is `nil`, the backend's default.
+
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Set `QuicConfig.keylog` to `true` as well to capture them; without `SSLKEYLOGFILE` the client or server refuses to build.
+
 ### Subscriptions carry group ranges (#5732)
 
 `Subscription.groupStart` and `groupEnd` are replaced by `ranges`, a list of `Subscription.Range` whose ends are a `Subscription.Anchor` (`.absolute(group:frame:)` or `.relative(groups:)`), and an optional `order`.
@@ -106,10 +117,15 @@ Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusHead))
 ```
 
-### Container byte-stream importers take an init record
+### Container byte streams use `Media.ContainerProducer` (#5919)
 
-`Media.ContainerStreamProducer` takes a `Media.ContainerStreamInit` holding the format instead of a bare format.
-Its optional `timebase`, also on `Media.ContainerInit`, shares one source's offset across container imports.
+`BroadcastProducer.publishContainerStream` has no separate importer: a container recovers its own framing, so `Media.ContainerProducer` takes chunks split anywhere.
+Pass empty `data` and write the stream through it.
+`Media.ContainerInit`'s optional `timebase` shares one source's offset across container imports.
+
+```swift
+let stream = try Media.ContainerProducer(broadcast: broadcast, initData: Media.ContainerInit(format: .fmp4, data: Data()))
+```
 
 ### Timestamps are optional
 

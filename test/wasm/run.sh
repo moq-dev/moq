@@ -174,7 +174,11 @@ for flavour in "${FLAVOURS[@]}"; do
     [[ -z "$version_flag" ]] || args+=(--listen-version "$version_flag")
 
     echo "starting $name relay on 127.0.0.1:${port}..."
-    harness_spawn "relay-$name" "$HARNESS_RUN/relay-$name.log" "$RELAY" "${args[@]}"
+    # moq-net at debug logs each request's answer and end, so a case that stalls shows
+    # which hop stopped: the page's own log has the far end, and the relay's only shows
+    # requests starting at info.
+    harness_spawn "relay-$name" "$HARNESS_RUN/relay-$name.log" \
+        env RUST_LOG="${RUST_LOG:-info,moq_net=debug}" "$RELAY" "${args[@]}"
 
     if ! harness_ready "$url/certificate.sha256" 30 "$HARNESS_PID"; then
         echo "$name relay never became ready" >&2

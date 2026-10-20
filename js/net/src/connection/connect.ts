@@ -33,6 +33,13 @@ export interface WebSocketProps {
 	 * If WebSocket won the previous race for a given URL, this is 0.
 	 */
 	delay?: Milli;
+
+	/**
+	 * The protocols to offer, most preferred first, as `webtransport.protocols` does for
+	 * WebTransport. Defaults to every supported protocol except the work-in-progress
+	 * `moq-lite-07-wip`; an unsupported one throws.
+	 */
+	protocols?: string[];
 }
 
 /**
@@ -180,6 +187,9 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 		return connectTransport(url, transport, wiring);
 	}
 
+	// Resolved before racing, so a misconfigured protocol fails the call rather than one transport.
+	const versions = props.websocket?.enabled !== false ? websocketVersions(props.websocket?.protocols) : undefined;
+
 	// Stop transports after one connects or the caller aborts.
 	const { promise: raced, resolve: done } = Promise.withResolvers<void>();
 	const cancel = Promise.race([raced, abort]);
@@ -190,10 +200,7 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 	// NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
 	const headstart =
 		!webtransport || websocketWon.has(url.toString()) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
-	const websocket =
-		props.websocket?.enabled !== false
-			? connectWebSocket(props.websocket?.url ?? url, headstart, cancel)
-			: undefined;
+	const websocket = versions ? connectWebSocket(props.websocket?.url ?? url, headstart, cancel, versions) : undefined;
 
 	if (!websocket && !webtransport) {
 		throw new Error("no transport available; WebTransport not supported and WebSocket is disabled");
@@ -370,7 +377,7 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, early, solicit, hidden, activeCount, cluster, auth } = await exchangeSetup(
+	const { control, early, solicit, hidden, activeCount, cluster, auth, epoch } = await exchangeSetup(
 		session,
 		version,
 		"moq-lite-js",
@@ -389,6 +396,7 @@ async function handshakeAlpn(
 		activeCount,
 		cluster,
 		auth,
+		epoch,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
 		version,
@@ -524,34 +532,54 @@ async function connectWebTransport(
 	return quic;
 }
 
+// moq-transport-18 and newer are pinned to qmux-01. Every other ALPN we
+// support is currently negotiated as `qmux-00.{alpn}` on the wire, but we
+// don't want to lock that in: set the value to `null` so the polyfill
+// advertises every QMux draft it knows about and the server picks one.
+// Insertion order is the negotiation preference on the wire.
+const WEBSOCKET_VERSIONS = {
+	[Lite.ALPN_06]: null,
+	[Lite.ALPN_05]: null,
+	[Lite.ALPN_04]: null,
+	[Lite.ALPN_03]: null,
+	[Lite.ALPN]: null,
+	[Ietf.ALPN.DRAFT_22]: "qmux-01",
+	[Ietf.ALPN.DRAFT_21]: "qmux-01",
+	[Ietf.ALPN.DRAFT_20]: "qmux-01",
+	[Ietf.ALPN.DRAFT_19]: "qmux-01",
+	[Ietf.ALPN.DRAFT_18]: "qmux-01",
+	[Ietf.ALPN.DRAFT_17]: null,
+	[Ietf.ALPN.DRAFT_16]: null,
+	[Ietf.ALPN.DRAFT_15]: null,
+} as const satisfies Record<string, QmuxVersion | QmuxVersion[] | null>;
+
+// The QMux versions to offer per ALPN: `protocols` in their order, or the defaults. Lite-07 is
+// work-in-progress, so it is offered only when asked for.
+function websocketVersions(protocols?: string[]): Record<string, QmuxVersion | QmuxVersion[] | null> {
+	if (!protocols) return WEBSOCKET_VERSIONS;
+	const supported: Record<string, QmuxVersion | QmuxVersion[] | null> = {
+		[Lite.ALPN_07_WIP]: null,
+		...WEBSOCKET_VERSIONS,
+	};
+	const versions: Record<string, QmuxVersion | QmuxVersion[] | null> = {};
+	for (const protocol of protocols) {
+		if (!Object.hasOwn(supported, protocol)) throw new Error(`unsupported WebSocket protocol: ${protocol}`);
+		versions[protocol] = supported[protocol];
+	}
+	return versions;
+}
+
 // TODO accept arguments to control the port/path used.
-async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>): Promise<Session | undefined> {
+async function connectWebSocket(
+	url: URL,
+	delay: number,
+	cancel: Promise<void>,
+	versions: Record<string, QmuxVersion | QmuxVersion[] | null>,
+): Promise<Session | undefined> {
 	const timer = sleep(Nano.fromMilli(Milli(delay)));
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
-
-	// moq-transport-18 and newer are pinned to qmux-01. Every other ALPN we
-	// support is currently negotiated as `qmux-00.{alpn}` on the wire, but we
-	// don't want to lock that in: set the value to `null` so the polyfill
-	// advertises every QMux draft it knows about and the server picks one.
-	// Insertion order is the negotiation preference on the wire.
-	const versions = {
-		// Lite.ALPN_07_WIP omitted on purpose: lite-07 is work-in-progress, not advertised by default.
-		[Lite.ALPN_06]: null,
-		[Lite.ALPN_05]: null,
-		[Lite.ALPN_04]: null,
-		[Lite.ALPN_03]: null,
-		[Lite.ALPN]: null,
-		[Ietf.ALPN.DRAFT_22]: "qmux-01",
-		[Ietf.ALPN.DRAFT_21]: "qmux-01",
-		[Ietf.ALPN.DRAFT_20]: "qmux-01",
-		[Ietf.ALPN.DRAFT_19]: "qmux-01",
-		[Ietf.ALPN.DRAFT_18]: "qmux-01",
-		[Ietf.ALPN.DRAFT_17]: null,
-		[Ietf.ALPN.DRAFT_16]: null,
-		[Ietf.ALPN.DRAFT_15]: null,
-	} as const satisfies Record<string, QmuxVersion | QmuxVersion[] | null>;
 
 	// The default (`requireProtocol: false`) also advertises bare `qmux-01`,
 	// `qmux-00`, and `webtransport` so we still interop with relays that only
