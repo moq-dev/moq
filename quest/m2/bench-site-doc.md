@@ -2,7 +2,7 @@
 
 ## Goal
 
-A reader of the moq docs finds the [benchmark trend site](/quest/m2/bench-site.md)
+A reader of the moq docs finds the [benchmark regression table](/quest/m0/bench-site.md)
 and knows what the binding numbers mean when choosing a language: what each
 binding costs relative to Rust, and where to see it over time.
 
@@ -15,4 +15,4 @@ summarize, don't copy numbers that go stale. The bindings overview in
 
 ## Required
 
-- [Benchmark trend site](/quest/m2/bench-site.md) - the site this links
+- [Benchmark regression table](/quest/m0/bench-site.md) - the page this links

@@ -29,8 +29,8 @@ regression. An ordered reader past F already skips F-1, so only arrival order
 gains.
 
 - Keep a bounded copy while a gap under its bound is still open, using the rule
-  [Resume reorder](/quest/m1/resume-reorder.md) settles for a passed group (a
-  gap stays open for the subscription's grace) rather than a second rule.
+  `track::Consumer::poll_group` applies to a passed group (a gap in the track's
+  arrivals stays open for the subscription's grace) rather than a second rule.
 - The copy goes once its group channel ends, every sequence under the bound has
   arrived or been dropped, or the reader's budget has expired the gap. Never
   wait on a peer past that: relays report what they have.
@@ -100,7 +100,3 @@ Regression tests in both languages, with mocked time:
   its last group, and the reader gets that group before the end.
 
 Public API: behavior only. Wire: none.
-
-## Related
-
-- [Resume reorder](/quest/m1/resume-reorder.md) - the gap rule this reuses
