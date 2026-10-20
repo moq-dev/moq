@@ -20,9 +20,12 @@ Decided with the maintainer on 2026-10-17:
 
 - Design-only, with a design-review gate: open the PR as a draft and get the
   maintainer's approval of the choice before any implementation quest starts.
-- Nothing waits on it (maintainer, 2026-10-19): the broadcast wrappers
-  merged in [#5876](https://github.com/moq-dev/moq/pull/5876), and the Rust
-  publishers declare every track they serve.
+- The Rust publishers do not wait on it (maintainer, 2026-10-19): the
+  broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876),
+  and [rust-publish](/quest/m2/e2ee/rust-publish.md) declares every track it
+  serves. [Reopen](/quest/m2/e2ee/reopen.md) and the
+  [consumer shape](/quest/m2/e2ee/consumer.md) still wait, since the chosen
+  mapping can change the physical names they handle.
 
 Background: a physical track name is a one-way HKDF of the semantic name
 (the draft's Key Derivation section). Only the CDN sees physical names, and a

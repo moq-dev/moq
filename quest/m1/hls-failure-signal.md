@@ -22,18 +22,28 @@ Failures take two paths today, and both end the playlist as finished:
   success and failure alike. Give the feed a failed state beside `ended`, set
   on a timeline error; late-created renditions start failed like they start
   ended.
+- A retained past reference: in history mode `watch_catalog` keeps old
+  reference watchers after a handoff, and when one errors `watch_timeline`
+  takes the `finish(...) == false` branch and retires its rows
+  (`renditions.pop`), so the recording loses a prefix and still ends as
+  complete. Mark the feed failed there too instead of only retiring the rows.
 - A rendition's own timeline: `watch_spans` calls `Spans::fail`
   (`rs/moq-hls/src/export/spans.rs`), and `Rendition::snapshot_as`
   (`rendition.rs`) folds a failed last row into `finished`. Expose that
   rendition-local failure to the playlist route instead of rendering
   `EXT-X-ENDLIST`.
 
-The playlist and manifest routes (`rs/moq-hls/src/server/routes.rs`) answer
-the existing no-store error response for either failure. Segments already
-listed may stay fetchable; only the listings refuse.
+The media playlist routes (`rs/moq-hls/src/server/routes.rs`) answer the
+existing no-store error response for any of these failures. The DASH manifest
+is broadcast-wide, so it answers that error only for a shared or retained
+reference failure; a rendition-local failure omits that representation and
+keeps its siblings available. Segments already listed may stay fetchable;
+only the listings refuse.
 
-Test a mid-history group that fails to FETCH or decode, a live timeline
-error, a single failed rendition beside a healthy one, and the DASH manifest.
+Test a mid-history group that fails to FETCH or decode, a retained reference
+failing after a handoff, a live timeline error, a single failed rendition
+beside a healthy one (its playlist errors, the sibling's and the DASH
+manifest's do not), and the DASH manifest after a shared failure.
 Update `doc/` where it describes how an export ends.
 
 Public API: none expected. Wire: none; HTTP responses change for a failed
