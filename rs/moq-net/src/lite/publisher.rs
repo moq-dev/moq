@@ -2098,7 +2098,7 @@ enum FetchServe {
 		chunk: Option<bytes::Bytes>,
 		batch: Box<Objects>,
 		batch_pos: usize,
-		/// The `ietf` extension's object records, for a relayed group.
+		/// The `ietf` extension's object records, when negotiated.
 		records: Option<lite::ietf::Records>,
 	},
 }
@@ -3840,7 +3840,7 @@ enum GroupState<S: crate::transport::poll::Session> {
 		chunk: Option<bytes::Bytes>,
 		batch: Box<Objects>,
 		batch_pos: usize,
-		/// The `ietf` extension's object records, for a relayed group.
+		/// The `ietf` extension's object records, when negotiated.
 		records: Option<lite::ietf::Records>,
 	},
 	/// Every frame is written and the FIN sent: wait for the acknowledgement so a

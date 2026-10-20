@@ -1029,14 +1029,16 @@ struct FrameIngest {
 	version: Version,
 	/// Where the stream's frames start, the first Object ID until a record names it.
 	frame_start: u64,
-	/// `Some` for a group relayed under the `ietf` extension: every frame follows an
+	/// `Some` once the Group State of the `ietf` extension arrived: every frame follows an
 	/// object record.
 	records: Option<RecordIngest>,
 }
 
-/// A relayed group's object records on ingest.
-#[derive(Default)]
+/// A group's object records on ingest, under the `ietf` extension.
 struct RecordIngest {
+	/// The Group State carried relay state. Otherwise every record is plain: its Object ID
+	/// is the frame's index, with no properties and no END_OF_GROUP.
+	relayed: bool,
 	/// The previous record's Object ID, `None` before the first.
 	prior: Option<u64>,
 	/// The record of the frame being read: its Object ID, properties, and Prior Object ID Gap.
@@ -1046,8 +1048,7 @@ struct RecordIngest {
 enum IngestPhase {
 	/// Reading the `ietf` extension's Group State.
 	State,
-	/// Reading a relayed group's next object record. Stream end here means the group
-	/// has no more objects.
+	/// Reading the next object record. Stream end here means the group has no more objects.
 	Object,
 	/// Reading the record's properties block, whose size comes first.
 	Properties { id: u64, end: bool, size: Option<usize> },
@@ -1119,20 +1120,23 @@ impl FrameIngest {
 			match &mut self.phase {
 				IngestPhase::State => {
 					let state = ready!(reader.poll_varint(&mut cx))?;
-					match lite::ietf::decode_state(state, self.frame_start)? {
-						Some(wire) => {
-							group.set_wire(wire)?;
-							self.records = Some(RecordIngest::default());
-							self.phase = IngestPhase::Object;
-						}
-						None => self.phase = IngestPhase::Timing,
+					let wire = lite::ietf::decode_state(state, self.frame_start)?;
+					let relayed = wire.is_some();
+					if let Some(wire) = wire {
+						group.set_wire(wire)?;
 					}
+					self.records = Some(RecordIngest {
+						relayed,
+						prior: None,
+						pending: None,
+					});
+					self.phase = IngestPhase::Object;
 				}
 				IngestPhase::Object => {
 					let Some(code) = ready!(reader.poll_varint_maybe(&mut cx))? else {
 						return Poll::Ready(Ok(()));
 					};
-					let records = self.records.as_mut().expect("only a relayed group has records");
+					let records = self.records.as_mut().expect("the Group State came first");
 					let (id, end) = lite::ietf::decode_object(records.prior, code)?;
 					if records.prior.is_none()
 						&& let Some(mut wire) = group.wire()
@@ -1155,8 +1159,12 @@ impl FrameIngest {
 						}
 					};
 					let block = ready!(reader.poll_read_exact(&mut cx, len))?;
-					let decoded = lite::ietf::decode_properties(&block, self.timescale, self.version)?;
 					let (id, end) = (*id, *end);
+					let records = self.records.as_mut().expect("the Group State came first");
+					if !records.relayed && (end || !block.is_empty()) {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					let decoded = lite::ietf::decode_properties(&block, self.timescale, self.version)?;
 					if end {
 						group.mark_gap(id, decoded.gap)?;
 						group.set_end_object(crate::model::object::Fields {
@@ -1165,7 +1173,6 @@ impl FrameIngest {
 						})?;
 						self.phase = IngestPhase::Ended;
 					} else {
-						let records = self.records.as_mut().expect("only a relayed group has records");
 						records.pending = Some((id, decoded.properties, decoded.gap));
 						self.phase = IngestPhase::Timing;
 					}
@@ -1201,12 +1208,19 @@ impl FrameIngest {
 						return Poll::Ready(Ok(()));
 					};
 					// A frame that says nothing a plain frame would not keeps no fields.
-					let fields = match self.records.as_mut().and_then(|records| records.pending.take()) {
-						Some((id, properties, gap)) => {
+					let fields = match &mut self.records {
+						Some(records) => {
+							let (id, properties, gap) = records.pending.take().expect("a record precedes each frame");
 							group.mark_gap(id, gap)?;
+							// The frame header already carries the time, so a record may omit it.
 							let plain = id == group.frame_count() as u64
 								&& properties.is_plain()
-								&& properties.timestamp == timestamp.map(|time| time.value());
+								&& properties
+									.timestamp
+									.is_none_or(|time| Some(time) == timestamp.map(|time| time.value()));
+							if !plain && !records.relayed {
+								return Poll::Ready(Err(Error::ProtocolViolation));
+							}
 							(!plain).then(|| Arc::new(crate::model::object::Fields { id, properties }))
 						}
 						None => None,
@@ -2408,6 +2422,96 @@ mod tests {
 					assert!(matches!(track.closed().now_or_never(), Some(Error::ProtocolViolation)));
 				}
 			}
+		}
+	}
+
+	/// Receive group 0 of an untimed track over a lite-07 session that negotiated the
+	/// `ietf` extension, its stream holding `body` after the GROUP header.
+	async fn receive_ietf(body: &[u64]) -> (Result<(), Error>, track::Producer) {
+		use crate::transport::poll::Session as _;
+
+		let version = Version::Lite07;
+		let mut script = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+		lite::Group {
+			subscribe: 7,
+			sequence: 0,
+			frame_start: 0,
+		}
+		.encode(&mut encoder, version)
+		.unwrap();
+		for value in body {
+			encoder.varint(*value).unwrap();
+		}
+		let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand).offer_ietf(true);
+		peer_setup.set(lite::Setup {
+			ietf: true,
+			..Default::default()
+		});
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: session.clone(),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup,
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
+		});
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default().with_timescale(None),
+		);
+		subscriber.subscribes.lock().insert(
+			7,
+			TrackEntry {
+				producer: track.clone(),
+				timescale: None,
+				tail: Default::default(),
+			},
+		);
+
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
+		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
+		(res, track)
+	}
+
+	/// Object records: `(Skip << 1) | END`, the properties block's length, then the frame.
+	#[moq_clock::test]
+	async fn ietf_records_frame_a_group() {
+		// A plain group: Group State 0, then frame 0 with an empty record.
+		let (res, track) = receive_ietf(&[0, 0, 0, 1, u64::from(b'x')]).await;
+		res.unwrap();
+		let mut group = track.consume().peek_group(0).unwrap();
+		assert_eq!(group.read_frame().now_or_never().unwrap().unwrap().unwrap().payload, b"x"[..]);
+
+		// A relayed group starting at Object 4, then END_OF_GROUP at Object 6.
+		let (res, track) = receive_ietf(&[0x1, 4 << 1, 0, 1, u64::from(b'x'), (1 << 1) | 1, 0]).await;
+		res.unwrap();
+		let group = track.consume().peek_group(0).unwrap();
+		assert_eq!(group.end_object().map(|end| end.id), Some(6));
+		assert_eq!(group.wire().map(|wire| wire.first_id), Some(4));
+	}
+
+	/// A record the Group State does not allow, or bytes past END_OF_GROUP, are refused.
+	#[moq_clock::test]
+	async fn ietf_records_refuse_what_their_group_cannot_hold() {
+		for (body, reason) in [
+			(&[0x20][..], "an unknown Group State bit"),
+			(&[0x2][..], "relay state without RELAYED"),
+			(&[0, 1 << 1, 0, 1, 0], "a plain group skipping an Object ID"),
+			(&[0, 1, 0], "a plain group with END_OF_GROUP"),
+			(&[0, 0, 2, 0x10, 0], "a plain group with properties"),
+			(&[0x1, 1, 0, 0], "a byte after END_OF_GROUP"),
+			(&[0x1, 0, 0], "a stream ending inside a frame"),
+		] {
+			let (res, _) = receive_ietf(body).await;
+			assert!(res.is_err(), "accepted {reason}");
 		}
 	}
 

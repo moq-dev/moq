@@ -12162,12 +12162,49 @@ mod stitch_tests {
 
 	/// Relay `script` through a track the ingress times in `timescale`, which the cache
 	/// normalizes to microseconds like [`accepted_info`].
+	///
+	/// Also relays it through a second relay behind a moq-lite hop with the `ietf`
+	/// extension, which must not change a byte.
 	async fn relay_passthrough_timed(
 		script: Vec<u8>,
 		ingress: Version,
 		egress: Version,
 		fetch: Option<(u64, u64)>,
 		timescale: Option<Timescale>,
+	) -> (Vec<u8>, crate::lite::test_transport::Log) {
+		let direct = relay_passthrough_via(script.clone(), ingress, egress, fetch, timescale, false).await;
+		let hopped = relay_passthrough_via(script, ingress, egress, fetch, timescale, true).await;
+		let fetch_ok = |bytes: &[u8]| {
+			let mut decoder = Decoder::new(bytes, egress.into());
+			(decoder.varint().ok()? == ietf::FetchOk::ID).then_some(())?;
+			let ok = ietf::FetchOk::decode(&mut decoder, egress).ok()?;
+			Some((ok, bytes[bytes.len() - decoder.remaining()..].to_vec()))
+		};
+		match (fetch_ok(&direct.0), fetch_ok(&hopped.0)) {
+			// A moq-lite FETCH says nothing of the track, so only a subscription tells the
+			// second relay that the track ended. Everything else must match.
+			(Some((direct_ok, direct_rest)), Some((hopped_ok, hopped_rest)))
+				if direct_ok.end_of_track && !hopped_ok.end_of_track =>
+			{
+				assert_eq!(hopped_ok.properties, direct_ok.properties, "{ingress} -> {egress}");
+				assert_eq!(hopped_rest, direct_rest, "{ingress} -> {egress}: the hop changed the objects");
+			}
+			_ => assert_eq!(
+				hopped.0, direct.0,
+				"{ingress} -> {egress}: the moq-lite hop changed the relayed objects"
+			),
+		}
+		direct
+	}
+
+	/// [`relay_passthrough_timed`] through one relay, or two joined by a moq-lite `hop`.
+	async fn relay_passthrough_via(
+		script: Vec<u8>,
+		ingress: Version,
+		egress: Version,
+		fetch: Option<(u64, u64)>,
+		timescale: Option<Timescale>,
+		hop: bool,
 	) -> (Vec<u8>, crate::lite::test_transport::Log) {
 		use crate::lite::test_transport::Sent;
 		let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
@@ -12187,6 +12224,13 @@ mod stitch_tests {
 		let mut stream = h.stream().await.with_version(ingress);
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 		track.finish().unwrap();
+		let (served, _sessions) = match hop {
+			true => {
+				let (served, sessions) = crate::lite::ietf::test_hop(&origin, "room", [true, true]).await;
+				(served, Some(sessions))
+			}
+			false => (origin, None),
+		};
 
 		let mut downstream = ScriptedSession::per_stream(vec![vec![]]);
 		let peer = peer::PeerSetup::default();
@@ -12194,7 +12238,7 @@ mod stitch_tests {
 		let publisher = crate::ietf::Publisher::new(
 			crate::time::sim(),
 			downstream.clone(),
-			origin.consume(),
+			served.consume(),
 			Control::new(None, false),
 			None,
 			peer,
@@ -12732,10 +12776,13 @@ mod stitch_tests {
 
 	#[moq_clock::test]
 	async fn passthrough_preserves_datagram_objects_through_dispatch() {
-		for version in [Version::Draft15, Version::Draft22] {
-			for ranged in [false, true]
-				.into_iter()
-				.filter(|ranged| !*ranged || version == Version::Draft22)
+		// Also through a second relay behind a moq-lite hop with the `ietf` extension.
+		for (version, ranged, hop) in [Version::Draft15, Version::Draft22]
+			.into_iter()
+			.flat_map(|version| [(version, false), (version, true)])
+			.filter(|(version, ranged)| !*ranged || *version == Version::Draft22)
+			.flat_map(|(version, ranged)| [(version, ranged, false), (version, ranged, true)])
+		{
 			{
 				let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
@@ -12771,13 +12818,20 @@ mod stitch_tests {
 					original.push(datagram);
 				}
 				track.finish().unwrap();
+				let (served, _sessions) = match hop {
+					true => {
+						let (served, sessions) = crate::lite::ietf::test_hop(&origin, "room", [true, true]).await;
+						(served, Some(sessions))
+					}
+					false => (origin, None),
+				};
 				let mut downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
 				let peer = peer::PeerSetup::default();
 				peer.set(peer::Peer::default());
 				let publisher = crate::ietf::Publisher::new(
 					crate::time::sim(),
 					downstream.clone(),
-					origin.consume(),
+					served.consume(),
 					Control::new(None, false),
 					None,
 					peer,
@@ -12824,7 +12878,7 @@ mod stitch_tests {
 					.await;
 				let sent = downstream.log.datagrams.lock().unwrap();
 				original.retain(|datagram| !ranged || datagram.object_id == Some(7));
-				assert_eq!(sent.len(), original.len());
+				assert_eq!(sent.len(), original.len(), "{version} ranged={ranged} hop={hop}");
 				let inherited = super::super::priority::to_wire(track.publisher_priority());
 				for (bytes, mut expected) in sent.iter().zip(original) {
 					expected.track_alias = 3;

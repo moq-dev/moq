@@ -504,6 +504,33 @@ mod tests {
 		}
 	}
 
+	/// The `ietf` offer is an empty parameter that only a version with the extension sends,
+	/// and an older one ignores like any unknown parameter.
+	#[test]
+	fn ietf_offer_is_lite07_only() {
+		let msg = Setup {
+			ietf: true,
+			..Default::default()
+		};
+		let buf = msg.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
+		assert!(msg.encode_bytes(Version::Lite06).is_err());
+
+		// Length, one parameter, its 8-byte QUIC varint ID, and an empty value.
+		let older = [0x0a, 0x01, 0xc0, 0, 0, 0, 0x49, 0x45, 0x54, 0x46, 0x00];
+		assert_eq!(
+			Setup::decode_slice(&older, Version::Lite06).unwrap().0,
+			Setup::default()
+		);
+
+		// A value it does not define is refused.
+		let mut valued = buf.to_vec();
+		assert_eq!(valued.pop(), Some(0), "the offer ends in its empty value");
+		valued.extend([1, 7]);
+		valued[0] += 1;
+		assert!(Setup::decode_slice(&valued, Version::Lite07).is_err());
+	}
+
 	/// Never emit a SETUP our own receiver would refuse.
 	#[test]
 	fn encode_enforces_the_setup_limit() {

@@ -265,7 +265,8 @@ pub(crate) fn stamp(properties: &mut Properties, timescale: Option<Timescale>) {
 	properties.timescale = timescale.filter(|_| properties.timestamp.is_some() || properties.sealed_time);
 }
 
-/// A group stream's object records on egress, sent before each frame of a relayed group.
+/// A group stream's object records on egress, sent before each frame once the extension
+/// is negotiated.
 pub(crate) struct Records {
 	/// The previous record's Object ID, `None` before the first.
 	prior: Option<u64>,
@@ -276,10 +277,10 @@ pub(crate) struct Records {
 
 impl Records {
 	/// Buffer the Group State for a stream serving `group` from its current index, and
-	/// return the records its frames need, `None` for a plain group.
+	/// return the records its frames need.
 	///
-	/// `capped` when the stream stops before the group may end. Writes nothing unless
-	/// the session negotiated the extension.
+	/// `capped` when the stream stops before the group may end. Writes nothing and returns
+	/// `None` unless the session negotiated the extension.
 	pub fn start<W: crate::transport::poll::SendStream>(
 		writer: &mut Writer<W, Version>,
 		ietf: bool,
@@ -294,7 +295,7 @@ impl Records {
 		let wire = group.wire();
 		let whole = group.index() <= group.first_frame();
 		writer.buffer_varint(encode_state(wire.as_ref(), whole, capped))?;
-		Ok(wire.map(|_| Self {
+		Ok(Some(Self {
 			prior: None,
 			timescale,
 			version,
@@ -599,5 +600,266 @@ mod tests {
 		encode_datagram(&mut Encoder::new(&mut plain, V.into()), None, V).unwrap();
 		assert_eq!(plain, [0]);
 		assert_eq!(decode_datagram(&mut Decoder::new(&plain, V.into()), V).unwrap(), None);
+	}
+}
+
+/// Peer a relay behind `upstream` over moq-lite 07, the way a cluster does. The client
+/// (downstream) and server (upstream) each offer the `ietf` extension per `offer`.
+/// Returns the downstream origin once it learned of `broadcast`, and the sessions to hold.
+#[cfg(test)]
+pub(crate) async fn test_hop(
+	upstream: &crate::origin::Producer,
+	broadcast: &str,
+	offer: [bool; 2],
+) -> (crate::origin::Producer, [crate::Session; 2]) {
+	use crate::model::ProduceTest;
+	let version = crate::Version::Lite(Version::Lite07);
+	let downstream = crate::origin::Config::new(crate::Hop::new(3).unwrap()).produce();
+	let (client, server) = crate::transport::memory::pair(crate::transport::memory::Config {
+		protocol: Some(version.alpn().to_string()),
+		..Default::default()
+	});
+	let extensions = |ietf| {
+		let mut extensions = crate::setup::Extensions::default();
+		extensions.ietf = ietf;
+		extensions
+	};
+	let dial = crate::Client::new()
+		.with_versions(version.into())
+		.with_extensions(extensions(offer[0]))
+		.with_subscriber(downstream.clone());
+	let serve = crate::Server::new()
+		.with_versions(version.into())
+		.with_extensions(extensions(offer[1]))
+		.with_publisher(&upstream.consume());
+	let (client, server) = futures::join!(
+		async {
+			let (session, driver) = dial.connect(moq_clock::now(), client).await.unwrap();
+			drop(moq_clock::sim::spawn(crate::time::run(driver)));
+			session
+		},
+		async {
+			let (session, driver) = serve.accept(moq_clock::now(), server).await.unwrap();
+			drop(moq_clock::sim::spawn(crate::time::run(driver)));
+			session
+		},
+	);
+	downstream
+		.consume()
+		.routed(broadcast)
+		.await
+		.expect("the hop announced the broadcast");
+	(downstream, [client, server])
+}
+
+#[cfg(test)]
+mod hop_tests {
+	use super::*;
+	use crate::{Timestamp, frame, model::ProduceTest, track};
+	use std::time::Duration;
+
+	const TIMEOUT: Duration = Duration::from_secs(5);
+
+	fn ts(millis: u64) -> Timestamp {
+		Timestamp::new(millis, Timescale::MILLI).unwrap()
+	}
+
+	fn property(id: u64, value: u64) -> Property {
+		Property {
+			id,
+			value: Value::Int(value),
+		}
+	}
+
+	/// Write a frame carrying relay `fields`, as moq-transport ingress does.
+	fn write(group: &mut group::Producer, millis: u64, fields: Option<crate::model::object::Fields>, payload: &[u8]) {
+		let mut frame = group
+			.create_frame_owned(
+				frame::Header {
+					info: frame::Info {
+						size: payload.len() as u64,
+						timestamp: Some(ts(millis)),
+					},
+					fields: fields.map(Arc::new),
+				},
+				&frame::Budget::default(),
+			)
+			.unwrap();
+		frame.write(Bytes::copy_from_slice(payload)).unwrap();
+		frame.finish().unwrap();
+	}
+
+	/// A frame's Object ID and properties, when it keeps any.
+	fn fields(frame: &frame::Object) -> Option<(u64, Properties)> {
+		frame.fields.as_ref().map(|fields| (fields.id, fields.properties.clone()))
+	}
+
+	async fn next(group: &mut group::Consumer) -> Option<frame::Object> {
+		moq_clock::timeout(TIMEOUT, kio::wait(|waiter| group.poll_read_object(waiter)))
+			.await
+			.expect("no frame")
+			.unwrap()
+	}
+
+	async fn subscribe(origin: &crate::origin::Producer) -> (track::Consumer, track::Subscriber) {
+		let broadcast = moq_clock::timeout(TIMEOUT, origin.consume().request_broadcast("room", None))
+			.await
+			.expect("no broadcast")
+			.unwrap();
+		let track = broadcast.track("video").unwrap();
+		let subscriber = moq_clock::timeout(TIMEOUT, track.subscribe(None))
+			.await
+			.expect("no subscription")
+			.unwrap();
+		(track, subscriber)
+	}
+
+	async fn recv(subscriber: &mut track::Subscriber) -> group::Consumer {
+		moq_clock::timeout(TIMEOUT, subscriber.recv_group())
+			.await
+			.expect("no group")
+			.unwrap()
+			.expect("track finished")
+	}
+
+	/// A relayed group crosses the hop frame by frame while it is still open, with its
+	/// Object IDs, properties, and END_OF_GROUP position, and its track's properties.
+	/// A side that does not offer the extension gets the plain frames alone.
+	#[moq_clock::test]
+	async fn relayed_state_crosses_while_the_group_is_open() {
+		for offer in [[true, true], [true, false], [false, true]] {
+			let negotiated = offer == [true, true];
+			let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+			let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
+			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
+			let track_properties = crate::model::object::TrackProperties {
+				values: vec![property(0x40, 3)],
+				..Default::default()
+			};
+			info.properties = Some(Arc::new(track_properties.clone()));
+			let track = broadcast.create_track("video", info).unwrap();
+
+			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+			group
+				.set_wire(group::Wire {
+					sparse: false,
+					first_object: true,
+					first_id: 6,
+					extensions: true,
+					has_end: true,
+					fetchable: true,
+					last: None,
+				})
+				.unwrap();
+			let first = crate::model::object::Fields {
+				id: 6,
+				properties: Properties {
+					timestamp: Some(0),
+					values: vec![property(0x20, 1), property(GAP, 6)],
+					timescale: Some(Timescale::MILLI),
+					..Default::default()
+				},
+			};
+			group.mark_gap(6, Some(6)).unwrap();
+			write(&mut group, 0, Some(first.clone()), b"a");
+
+			let (downstream, _sessions) = test_hop(&upstream, "room", offer).await;
+			let (copy, mut subscriber) = subscribe(&downstream).await;
+			let mut received = recv(&mut subscriber).await;
+
+			// The upstream group is still open.
+			let frame = next(&mut received).await.unwrap();
+			assert_eq!(&frame.payload[..], b"a");
+			assert_eq!(frame.timestamp, Some(ts(0)));
+			match negotiated {
+				true => {
+					assert_eq!(fields(&frame), Some((first.id, first.properties.clone())), "{offer:?}");
+					let wire = received.wire().expect("relay state");
+					assert!(wire.first_object && wire.extensions && wire.has_end);
+					assert_eq!(wire.first_id, 6);
+				}
+				false => {
+					assert!(frame.fields.is_none(), "{offer:?}");
+					assert!(received.wire().is_none(), "{offer:?}");
+				}
+			}
+
+			// Object 9 marks the two it skipped, then the group ends at Object 10.
+			let second = crate::model::object::Fields {
+				id: 9,
+				properties: Properties {
+					timestamp: Some(1),
+					values: vec![property(GAP, 2)],
+					timescale: Some(Timescale::MILLI),
+					..Default::default()
+				},
+			};
+			group.mark_gap(9, Some(2)).unwrap();
+			write(&mut group, 1, Some(second.clone()), b"b");
+			group.mark_gap(10, None).unwrap();
+			group
+				.set_end_object(crate::model::object::Fields {
+					id: 10,
+					properties: Properties::default(),
+				})
+				.unwrap();
+			group.finish().unwrap();
+
+			let frame = next(&mut received).await.unwrap();
+			assert_eq!(&frame.payload[..], b"b");
+			assert!(next(&mut received).await.is_none());
+			let info = moq_clock::timeout(TIMEOUT, copy.query()).await.unwrap().unwrap();
+			match negotiated {
+				true => {
+					assert_eq!(fields(&frame), Some((second.id, second.properties.clone())));
+					assert_eq!(received.end_object().map(|end| end.id), Some(10));
+					assert!(received.wire().unwrap().fetchable, "every jump was marked");
+					assert_eq!(info.properties.as_deref(), Some(&track_properties));
+				}
+				false => {
+					assert!(frame.fields.is_none());
+					assert!(received.end_object().is_none());
+					assert!(info.properties.is_none());
+				}
+			}
+		}
+	}
+
+	/// Groups and datagrams from a moq-lite publisher cross a negotiated hop as plain as
+	/// they left: no relay state appears on the way.
+	#[moq_clock::test]
+	async fn plain_media_crosses_unchanged() {
+		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
+		let mut track = broadcast
+			.create_track("video", track::Info::timed().with_timescale(Timescale::MILLI))
+			.unwrap();
+		let (downstream, sessions) = test_hop(&upstream, "room", [true, true]).await;
+		let (_copy, mut subscriber) = subscribe(&downstream).await;
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(ts(5), b"key".to_vec()).unwrap();
+		let mut received = recv(&mut subscriber).await;
+		let frame = next(&mut received).await.unwrap();
+		assert_eq!((frame.timestamp, &frame.payload[..]), (Some(ts(5)), &b"key"[..]));
+		assert!(frame.fields.is_none() && received.wire().is_none());
+		group.write_frame(ts(6), b"delta".to_vec()).unwrap();
+		group.finish().unwrap();
+		let frame = next(&mut received).await.unwrap();
+		assert_eq!((frame.timestamp, &frame.payload[..]), (Some(ts(6)), &b"delta"[..]));
+		assert!(frame.fields.is_none());
+		assert!(next(&mut received).await.is_none());
+		assert!(received.end_object().is_none());
+
+		track.insert_datagram(7, ts(9), b"datagram".to_vec()).unwrap();
+		let datagram = moq_clock::timeout(TIMEOUT, kio::wait(|waiter| subscriber.poll_recv_wire_datagram(waiter)))
+			.await
+			.expect("no datagram")
+			.unwrap()
+			.unwrap();
+		assert_eq!((datagram.sequence, datagram.timestamp), (7, Some(ts(9))));
+		assert_eq!(&datagram.payload[..], b"datagram");
+		assert!(datagram.wire.is_none());
+		drop(sessions);
 	}
 }

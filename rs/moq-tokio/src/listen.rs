@@ -146,7 +146,7 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The moq-transport extensions to offer in SETUP, all by default.
+	/// The extensions to offer in SETUP, every moq-transport one by default.
 	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,

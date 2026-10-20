@@ -184,10 +184,12 @@ async fn read_fetch(
 	}
 	// Relayed Object IDs need not match frame ordinals, so a relayed group is read from
 	// its first frame and filtered by ID. Its marked gaps cover the IDs between where it
-	// starts and its first object; a start below that misses to the upstream.
+	// starts and its first object; a start below that misses to the upstream. A miss may
+	// be relayed too, which only the upstream knows, so it fetches the whole group.
 	let frame_start = match (&wire, &cached) {
 		(Some(_), Some(group)) => skip.min(group.first_frame()),
-		_ => skip,
+		(None, Some(_)) => skip,
+		(_, None) => 0,
 	};
 	let mut group = track
 		.fetch_group(
