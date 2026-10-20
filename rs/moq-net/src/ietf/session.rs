@@ -1346,22 +1346,7 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			) {
 			let request_id = RequestId::decode(&mut data.decoder(version), version)?;
 			match publisher.control.accept(request_id) {
-				Err(Error::GoingAway) => {
-					return super::request_stream::reject(
-						stream,
-						ietf::RequestError {
-							request_id: None,
-							error_code: super::error::request::to_code(
-								&Error::GoingAway,
-								super::error::request::Kind::Subscribe,
-								version,
-							),
-							reason_phrase: "going away".into(),
-							retry_interval: 0,
-						},
-					)
-					.await;
-				}
+				Err(Error::GoingAway) => return refuse_going_away(stream, id, version).await,
 				result => {
 					result?;
 				}
@@ -1407,6 +1392,32 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 		}
 		Ok(())
 	}
+}
+
+/// Refuse a request past our GOAWAY cutoff with the answer its kind reads: an AUTH
+/// presenter reads only AUTH_OK and AUTH_ERROR.
+async fn refuse_going_away<S: crate::transport::poll::Session>(
+	stream: Stream<S, Version>,
+	id: u64,
+	version: Version,
+) -> Result<(), Error> {
+	if id == auth::Auth::ID {
+		return auth::refuse_going_away(stream).await;
+	}
+	super::request_stream::reject(
+		stream,
+		ietf::RequestError {
+			request_id: None,
+			error_code: super::error::request::to_code(
+				&Error::GoingAway,
+				super::error::request::Kind::Subscribe,
+				version,
+			),
+			reason_phrase: "going away".into(),
+			retry_interval: 0,
+		},
+	)
+	.await
 }
 
 /// Monitor the peer's SETUP stream for GOAWAY until the session closes.
@@ -3473,6 +3484,29 @@ mod tests {
 			"closed with different codes: {closes:?}"
 		);
 		closes.first().map(|(code, _)| SessionError::from_code(*code))
+	}
+
+	/// A request past our GOAWAY cutoff is refused in the answer its kind reads: an AUTH
+	/// with AUTH_ERROR carrying GOING_AWAY, since its presenter takes anything else as a
+	/// violation, and the rest with REQUEST_ERROR.
+	#[moq_clock::test]
+	async fn a_request_past_our_goaway_is_refused_in_its_own_answer() {
+		const VERSION: Version = Version::Draft18;
+		let reason = b"going away";
+		let body = [&[0x6, reason.len() as u8][..], reason].concat();
+		for (id, answer) in [
+			(auth::Auth::ID, frame(VERSION, auth::AuthError::ID, &body)),
+			(
+				ietf::Subscribe::ID,
+				frame(VERSION, ietf::RequestError::ID, &[&[0x6, 0][..], &body[1..]].concat()),
+			),
+		] {
+			let mut session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			let log = session.log.clone();
+			let stream = Stream::open(&mut session, VERSION).await.unwrap();
+			refuse_going_away(stream, id, VERSION).await.unwrap();
+			assert_eq!(*log.writes.lock().unwrap(), answer, "{id:#x}");
+		}
 	}
 
 	/// A malformed request closes the session with the draft's code: a Request ID of the

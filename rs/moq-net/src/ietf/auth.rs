@@ -198,6 +198,8 @@ impl Message for AuthError {
 const UNAUTHORIZED: u64 = 0x1;
 const NOT_SUPPORTED: u64 = 0x3;
 const EXPIRED_AUTH_TOKEN: u64 = 0x5;
+/// Draft-17 assigned it, the first draft this extension negotiates on.
+const GOING_AWAY: u64 = 0x6;
 
 /// The AUTH_ERROR code for a refusal. The public API speaks session codes, and the
 /// actionable distinctions this registry carries are unsupported, expired, and unauthorized.
@@ -214,8 +216,24 @@ fn from_code(code: u64) -> Error {
 	match code {
 		NOT_SUPPORTED => Error::Unsupported,
 		EXPIRED_AUTH_TOKEN => Error::Expired,
+		GOING_AWAY => Error::GoingAway,
 		_ => Error::Session(SessionError::Unauthorized),
 	}
+}
+
+/// Refuse an AUTH past our GOAWAY cutoff with AUTH_ERROR, the only answer its presenter reads.
+#[cfg(feature = "async")]
+pub(super) async fn refuse_going_away<S: crate::transport::poll::Session>(
+	mut stream: Stream<S, Version>,
+) -> Result<(), Error> {
+	let reply = AuthError {
+		code: GOING_AWAY,
+		reason: "going away".to_string(),
+	};
+	stream.writer.encode_message(&reply).await?;
+	// A peer dropping the response after reading the refusal is a normal end.
+	let _ = stream.writer.close().await;
+	Ok(())
 }
 
 /// What the peer's connection credential earns by default: publishing what our
@@ -387,9 +405,9 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 					};
 					let err = from_code(refused.code);
 					tracing::warn!(%err, code = refused.code, reason = %refused.reason, "auth token refused");
-					// A grant the acceptor could not tell is unknown, not empty, so only a
-					// real refusal settles the union.
-					if !matches!(err, Error::Unsupported) {
+					// A grant the acceptor could not tell, or never judged, is unknown, not
+					// empty, so only a real refusal settles the union.
+					if !matches!(err, Error::Unsupported | Error::GoingAway) {
 						self.handle.refused(self.id);
 					}
 					return err;

@@ -49,6 +49,7 @@ impl<T> Queue<T> {
 
 	/// Dequeue the next message, waiting while the queue is open and empty.
 	/// Returns `None` once the queue is closed and drained.
+	#[cfg(test)]
 	async fn pop(&self) -> Option<T> {
 		kio::wait(|waiter| self.poll_pop(waiter)).await
 	}
@@ -66,7 +67,7 @@ impl<T> Queue<T> {
 			.map(|mut state| state.messages.pop_front())
 	}
 
-	/// Stop future pushes; buffered messages still drain, then `pop` returns `None`.
+	/// Stop future pushes; buffered messages still drain, then `poll_pop` returns `None`.
 	fn close(&self) {
 		self.0.lock().closed = true;
 	}
@@ -876,10 +877,22 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		let _ = self.shared.control.push(raw.into());
 	}
 
-	/// Writer task: drains the queue and writes to the control stream. A write failing,
-	/// such as after the peer's STOP_SENDING, is a protocol violation.
+	/// Writer task: drains the queue and writes to the control stream. The peer's
+	/// STOP_SENDING, seen while idle or as a failed write, is a protocol violation.
 	async fn run_write(&self, mut writer: Writer<S::SendStream, Version>) -> Result<(), Error> {
-		while let Some(msg) = self.shared.control.pop().await {
+		loop {
+			let msg = kio::wait(|waiter| {
+				// Never finished, so any end is the peer's or the session's.
+				if let Poll::Ready(res) = writer.poll_closed(&mut waiter.context()) {
+					let err = res
+						.err()
+						.map_or(Error::ProtocolViolation, super::session::control_stream_error);
+					return Poll::Ready(Err(err));
+				}
+				self.shared.control.poll_pop(waiter).map(Ok)
+			})
+			.await?;
+			let Some(msg) = msg else { break };
 			let mut buf = std::io::Cursor::new(msg);
 			writer
 				.write_all(&mut buf)
@@ -1967,6 +1980,28 @@ mod tests {
 			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
+		}
+	}
+
+	/// A STOP_SENDING on a legacy control stream ends the session even with nothing queued
+	/// to write, while the peer keeps its own half open.
+	#[moq_clock::test]
+	async fn a_legacy_control_stream_stopped_while_idle_is_a_protocol_violation() {
+		use crate::transport::memory;
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let (mut session, mut peer) = memory::pair(memory::Config::default());
+			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
+			let mut remote = crate::coding::Stream::accept(&mut peer, version).await.unwrap();
+			remote.reader.abort(&Error::Cancel);
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
+			let res = moq_clock::timeout(
+				std::time::Duration::from_secs(10),
+				adapter.run(stream.reader, stream.writer, protocol),
+			)
+			.await
+			.expect("an idle writer missed the STOP_SENDING");
+			assert!(matches!(res, Err(Error::ProtocolViolation)), "{version:?}: {res:?}");
 		}
 	}
 

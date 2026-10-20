@@ -1,6 +1,6 @@
 import { Unsupported } from "../auth.ts";
 import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
-import { ProtocolViolation, SessionCode, SessionError } from "../error.ts";
+import { ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "../error.ts";
 import * as Path from "../path.ts";
 import type { Reader, Stream, Writer } from "../stream.ts";
 import type { Session } from "./adapter.ts";
@@ -47,6 +47,8 @@ export function intoSetup(params: SetupOptions, version: IetfVersion) {
 const UNAUTHORIZED = 0x1;
 const NOT_SUPPORTED = 0x3;
 const EXPIRED_AUTH_TOKEN = 0x5;
+/** Draft-17 assigned it, the first draft this extension negotiates on. */
+const GOING_AWAY = 0x6;
 
 /** Longest AUTH_ERROR reason, in bytes, matching the Rust decoder. */
 const MAX_REASON = 8192;
@@ -211,6 +213,7 @@ export class AuthError {
 	toError(): Error {
 		if (this.code === NOT_SUPPORTED) return new Unsupported(this.reason);
 		if (this.code === EXPIRED_AUTH_TOKEN) return new SessionError(SessionCode.Expired, { reason: this.reason });
+		if (this.code === GOING_AWAY) return new StreamError(StreamCode.GoingAway, { reason: this.reason });
 		return new SessionError(SessionCode.Unauthorized, { reason: this.reason });
 	}
 }

@@ -479,8 +479,11 @@ export class AuthSession implements Handle {
 				}
 				console.warn("auth token refused", reply.refused);
 				// A refused setup token leaves an empty union, not an unknown (unrestricted)
-				// one. A grant the acceptor could not tell is unknown, not empty.
-				if (!(reply.refused instanceof Unsupported)) this.#replied = true;
+				// one. A grant the acceptor could not tell, or never judged, is unknown, not empty.
+				const unjudged =
+					reply.refused instanceof Unsupported ||
+					(reply.refused instanceof StreamError && reply.refused.code === StreamCode.GoingAway);
+				if (!unjudged) this.#replied = true;
 				result = reply.refused;
 				stream.close();
 				break;
