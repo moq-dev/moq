@@ -118,9 +118,10 @@ ignores the end and start may keep cached objects of the old run under the same
 names, so an end and a start is not a cache flush.
 
 `moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
-RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
-passing the same [`moq --epoch`](/bin/cli#publisher-runs), which only the importers that derive their tracks from the input accept, except under [encryption](/concept/hang#encryption). See [Clustering](/bin/relay/cluster) for how a
-relay uses this.
+RTMP, SRT, and WHIP ingests mint one per connection. Independent importers use
+distinct epochs, even when fed one stream. Only replicas of one publisher's
+bytes share its epoch, such as one publisher announced through multiple relays. See [Clustering](/bin/relay/cluster) for
+how a relay uses this.
 
 ### Multiple CDNs
 
@@ -264,7 +265,10 @@ untimed.
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning
 reader or the next fetch finds it. That copy is not live meanwhile: readers get
-nothing from it until the source answers again.
+nothing from it until the source answers again, and its latest group is unknown
+until then too, so a player starting at the latest waits for the answer instead
+of starting from what the ended feed left. A reader's latest group stays within
+the groups it limits itself to, and ends once the track does.
 
 The publisher may declare a retention window per track. Omission sets no limit;
 zero keeps only the live edge. Relays preserve that declaration, and may still

@@ -82,10 +82,6 @@ encoders on every target change.
 - [Fetch and catalog](/quest/m3/ladder/fetch.md) - uncached FETCH encodes at
   the shared applied target, and rung state survives a source catalog refresh
 
-## Closes
-
-- [#2858](https://github.com/moq-dev/moq/issues/2858) - close this issue when the questline finishes
-
 ## Related
 
 - [#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the other sender that reserves but never follows its grant
