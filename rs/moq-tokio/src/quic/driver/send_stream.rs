@@ -2,6 +2,7 @@ use std::{
     future::{Future, poll_fn},
     io,
     pin::{Pin, pin},
+    sync::atomic::Ordering,
     task::{Context, Poll},
 };
 
@@ -39,6 +40,8 @@ pub struct SendStream {
     finished: bool,
     /// The offset and code a drop before `finish` resets at
     drop_reset: (u64, VarInt),
+    /// `reset` or `reset_at` succeeded, so `stopped` has nothing left to wait for
+    reset: bool,
 }
 
 impl SendStream {
@@ -49,6 +52,7 @@ impl SendStream {
             is_0rtt,
             finished: false,
             drop_reset: (0, VarInt::from_u32(0)),
+            reset: false,
         }
     }
 
@@ -217,6 +221,8 @@ impl SendStream {
             return Ok(());
         }
         conn.inner.send_stream(self.stream).reset(error_code)?;
+        self.reset = true;
+        conn.stopped_by_reset(self.stream);
         conn.wake();
         Ok(())
     }
@@ -238,6 +244,8 @@ impl SendStream {
         conn.inner
             .send_stream(self.stream)
             .reset_at(offset, error_code)?;
+        self.reset = true;
+        conn.stopped_by_reset(self.stream);
         conn.wake();
         Ok(())
     }
@@ -276,8 +284,9 @@ impl SendStream {
     ///
     /// Yields `Some` with the stop error code if the peer stops the stream. Yields `None` if the
     /// local side [`finish()`](Self::finish)es the stream and then the peer acknowledges receipt
-    /// of all stream data (although not necessarily the processing of it), after which the peer
-    /// closing the stream is no longer meaningful.
+    /// of all stream data (although not necessarily the processing of it), or once the local side
+    /// resets it with [`reset()`](Self::reset) or [`reset_at()`](Self::reset_at), after which the
+    /// peer closing the stream is no longer meaningful.
     ///
     /// For a variety of reasons, the peer may not send acknowledgements immediately upon receiving
     /// data. As such, relying on `stopped` to know when the peer has read a stream to completion
@@ -291,23 +300,40 @@ impl SendStream {
         let conn = self.conn.clone();
         let stream = self.stream;
         let is_0rtt = self.is_0rtt;
+        // Join the waiters now rather than on the first poll, so a reset in between, which no
+        // stream event reports, still reaches this future.
+        let waiters = {
+            let mut conn = conn.state.lock("SendStream::stopped");
+            match send_stream_stopped(&mut conn, stream, is_0rtt) {
+                Some(output) => Err(output),
+                None if self.reset => Err(Ok(None)),
+                None => Ok(conn.stopped.entry(stream).or_default().clone()),
+            }
+        };
         async move {
+            let mut waiters = match waiters {
+                Ok(waiters) => waiters,
+                Err(output) => return output,
+            };
             loop {
                 // The `Notify::notified` future needs to be created while the lock is being held,
                 // otherwise a wakeup could be missed if triggered inbetween releasing the lock
                 // and creating the future.
                 // The lock may only be held in a block without `await`s, otherwise the future
                 // becomes `!Send`. `Notify::notified` is lifetime-bound to `Notify`, therefore
-                // we need to declare `notify` outside of the block, and initialize it inside.
-                let notify;
+                // we need to declare `waiters` outside of the block, and update it inside.
                 {
                     let mut conn = conn.state.lock("SendStream::stopped");
                     if let Some(output) = send_stream_stopped(&mut conn, stream, is_0rtt) {
                         return output;
                     }
+                    if waiters.reset.load(Ordering::Relaxed) {
+                        return Ok(None);
+                    }
 
-                    notify = conn.stopped.entry(stream).or_default().clone();
-                    notify.notified()
+                    // A wakeup that resolved nothing removed the waiters; join the current ones
+                    waiters = conn.stopped.entry(stream).or_default().clone();
+                    waiters.notify.notified()
                 }
                 .await
             }

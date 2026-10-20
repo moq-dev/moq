@@ -7,7 +7,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker, ready},
 };
@@ -642,6 +642,12 @@ impl Connection {
         self.0.state.lock("stats").inner.stats()
     }
 
+    /// How many streams have `SendStream::stopped` waiters registered, to check none leak
+    #[cfg(test)]
+    pub(crate) fn stopped_waiters(&self) -> usize {
+        self.0.state.lock("stopped_waiters").stopped.len()
+    }
+
     /// The wire counters the driver updates as it sends and receives.
     #[cfg(feature = "net")]
     pub(crate) fn wire(&self) -> moq_net::transport::Wire {
@@ -1092,7 +1098,7 @@ pub(crate) struct State {
     endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
     pub(crate) blocked_writers: FxHashMap<StreamId, Waker>,
     pub(crate) blocked_readers: FxHashMap<StreamId, Waker>,
-    pub(crate) stopped: FxHashMap<StreamId, Arc<Notify>>,
+    pub(crate) stopped: FxHashMap<StreamId, Arc<StopWaiters>>,
     /// Always set to Some before the connection becomes drained
     pub(crate) error: Option<ConnectionError>,
     sender: Pin<Box<dyn UdpSender>>,
@@ -1372,6 +1378,14 @@ impl State {
         self.close(0u32.into(), Bytes::new(), shared);
     }
 
+    /// Resolves the stream's `stopped` waiters on a local reset, which no stream event reports
+    pub(crate) fn stopped_by_reset(&mut self, id: StreamId) {
+        if let Some(waiters) = self.stopped.remove(&id) {
+            waiters.reset.store(true, Ordering::Relaxed);
+            waiters.notify.notify_waiters();
+        }
+    }
+
     pub(crate) fn check_0rtt(&self) -> Result<(), ()> {
         if self.inner.is_handshaking()
             || self.inner.accepted_0rtt()
@@ -1411,16 +1425,24 @@ fn wake_all(wakers: &mut FxHashMap<StreamId, Waker>) {
     wakers.drain().for_each(|(_, waker)| waker.wake())
 }
 
-fn wake_stream_notify(stream_id: StreamId, wakers: &mut FxHashMap<StreamId, Arc<Notify>>) {
-    if let Some(notify) = wakers.remove(&stream_id) {
-        notify.notify_waiters()
+/// The `SendStream::stopped` futures waiting on one stream
+#[derive(Debug, Default)]
+pub(crate) struct StopWaiters {
+    pub(crate) notify: Notify,
+    /// The stream was reset locally, so it will neither finish nor be stopped by the peer
+    pub(crate) reset: AtomicBool,
+}
+
+fn wake_stream_notify(stream_id: StreamId, wakers: &mut FxHashMap<StreamId, Arc<StopWaiters>>) {
+    if let Some(waiters) = wakers.remove(&stream_id) {
+        waiters.notify.notify_waiters()
     }
 }
 
-fn wake_all_notify(wakers: &mut FxHashMap<StreamId, Arc<Notify>>) {
+fn wake_all_notify(wakers: &mut FxHashMap<StreamId, Arc<StopWaiters>>) {
     wakers
         .drain()
-        .for_each(|(_, notify)| notify.notify_waiters())
+        .for_each(|(_, waiters)| waiters.notify.notify_waiters())
 }
 
 /// Errors that can arise when sending a datagram
