@@ -122,10 +122,14 @@ lands before the cut.
 - [Gateway linger](/quest/m1/linger-gateways.md) - HLS, RTMP, SRT and RTC imports linger at a clean end, cut short by a newer epoch at the same path
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
 - [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - group sequence 2^62-1 reaches a lite-06 subscriber or is refused loudly, instead of vanishing
+- [moq-mux docs](/quest/m1/docs-mux.md) - every public moq-mux item has rustdoc and the crate warns on missing docs
+- [Binding docs](/quest/m1/docs-bindings.md) - every public moq-ffi and moq-c item has rustdoc, carried into the generated bindings and `moq.h`
+- [JS export docs](/quest/m1/docs-js.md) - every public JS export and class member has TSDoc, and `just check` enforces it
 
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
 
 - [Dead code and API surface audit](/quest/m1/audit-dead-code.md) - repeat the removal audit before the next major release
+- [Documentation audit](/quest/m1/audit-docs.md) - stale pages, examples, links, and undocumented exports are fixed or planned
 
 ## Related
 
