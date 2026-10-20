@@ -4092,12 +4092,7 @@ where
 
 		let (payload, status) = match datagram.body {
 			ietf::DatagramBody::Payload(payload) => (payload, None),
-			ietf::DatagramBody::Status(DOES_NOT_EXIST)
-				if !matches!(self.version, Version::Draft14 | Version::Draft15) =>
-			{
-				return Err(Error::Session(SessionError::ProtocolViolation));
-			}
-			ietf::DatagramBody::Status(status) if super::object::status_defined(status) => {
+			ietf::DatagramBody::Status(status) if super::object::status_defined(status, self.version) => {
 				(bytes::Bytes::new(), Some(status))
 			}
 			ietf::DatagramBody::Status(_) => return Err(Error::Session(SessionError::ProtocolViolation)),
@@ -4192,7 +4187,7 @@ enum Ended {
 	Track { object: u64, properties: bool },
 }
 
-use super::object::{DOES_NOT_EXIST, END_OF_GROUP, END_OF_TRACK};
+use super::object::{END_OF_GROUP, END_OF_TRACK};
 
 /// The start of a subgroup stream's first object, peeked before its group is created.
 #[derive(Debug, Clone, Copy)]

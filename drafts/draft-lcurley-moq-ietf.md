@@ -141,6 +141,7 @@ Properties {
 
 A receiver MUST treat any other encoding as malformed, including 0: an empty Properties says the object has none.
 DELIVERY_TIMEOUT lets a relay refuse to forward property 0x06 to a draft that would read it differently.
+Only drafts 19 and later assign it, so a receiver MUST treat DELIVERY_TIMEOUT with any encoding but 4 as malformed.
 
 **Property Block**:
 Every property of the object, serialized as the {{moqt}} drafts of its encoding serialize an object's properties, in ascending ID order.
@@ -149,6 +150,8 @@ It MUST NOT be empty or longer than 65,536 bytes.
 On a timed track an object with a FRAME, or a datagram without a Status, MUST NOT carry one longer than 65,526 bytes, leaving room for the largest Timestamp a relay restates ([Timestamps](#timestamps)): a one-byte key and a value of up to nine bytes.
 A relay MUST refuse a {{moqt}} object whose properties, less its mutable Timestamp, exceed that, so every object it forwards fits.
 A receiver MUST treat a block its encoding's drafts would refuse as malformed.
+The encoding names the drafts the object came from, so a receiver MUST also treat a block as malformed on an object none of them could send with properties.
+Only draft 14 lets a status object carry them, so a block on the END_OF_GROUP record MUST have encoding 1, and a datagram with a block MUST have fields an OBJECT_DATAGRAM Type of those drafts carries ([Datagrams](#datagrams)).
 Other properties are opaque to this extension.
 
 ## Timestamps {#timestamps}
@@ -234,6 +237,7 @@ A datagram with a Status MUST have an empty Payload, as {{moqt}} sends no payloa
 A non-zero Status carries no object: it has no Timestamp, even on a timed track.
 A receiver MUST drop a datagram whose Status no {{moqt}} draft defines: only 0 (Normal), 1 (DOES_NOT_EXIST, drafts 14 and 15), 3 (END_OF_GROUP), and 4 (END_OF_TRACK) are relayed.
 It MUST also drop one whose fields no {{moqt}} OBJECT_DATAGRAM Type can carry, such as STATUS with END_OF_GROUP.
+With Properties, only the drafts of their encoding count: from draft 17 on a non-zero Status carries no properties, so one needs encoding 1 or 2, and DOES_NOT_EXIST needs encoding 1.
 
 
 # Security Considerations

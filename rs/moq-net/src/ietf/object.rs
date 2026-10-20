@@ -7,7 +7,7 @@ use crate::{
 	model::object::{Encoding, Properties, Property, Value},
 };
 
-pub(super) fn encoding(version: Version) -> Encoding {
+pub(crate) fn encoding(version: Version) -> Encoding {
 	match version {
 		Version::Draft14 | Version::Draft15 => Encoding::Absolute,
 		Version::Draft16 => Encoding::DeltaQuic,
@@ -16,8 +16,16 @@ pub(super) fn encoding(version: Version) -> Encoding {
 	}
 }
 
+/// The drafts that serialize properties in the `family` encoding, one of which sent any
+/// block claiming it.
+pub(crate) fn drafts(family: Encoding) -> impl Iterator<Item = Version> {
+	Version::ALL
+		.into_iter()
+		.filter(move |version| encoding(*version) == family)
+}
+
 /// Draft-19 assigns property 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
-pub(super) fn has_delivery_timeout(version: Version) -> bool {
+pub(crate) fn has_delivery_timeout(version: Version) -> bool {
 	!matches!(
 		version,
 		Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18
@@ -31,16 +39,18 @@ pub(crate) const END_OF_GROUP: u64 = 0x3;
 /// Object status: no object at or past this location exists (every implemented draft).
 pub(crate) const END_OF_TRACK: u64 = 0x4;
 
-/// Whether any implemented draft defines the Object Status `status`, 0 being Normal.
-///
-/// Egress drops a DOES_NOT_EXIST for a draft without it, so a relay may hold one.
-pub(crate) fn status_defined(status: u64) -> bool {
-	matches!(status, 0 | DOES_NOT_EXIST | END_OF_GROUP | END_OF_TRACK)
+/// Whether `version` defines the Object Status `status`, 0 being Normal.
+pub(crate) fn status_defined(status: u64, version: Version) -> bool {
+	match status {
+		0 | END_OF_GROUP | END_OF_TRACK => true,
+		DOES_NOT_EXIST => matches!(version, Version::Draft14 | Version::Draft15),
+		_ => false,
+	}
 }
 
 /// Only draft-14 lets a status object, such as END_OF_GROUP, carry properties.
 #[cfg(feature = "async")]
-pub(super) fn status_has_properties(version: Version) -> bool {
+pub(crate) fn status_has_properties(version: Version) -> bool {
 	version == Version::Draft14
 }
 

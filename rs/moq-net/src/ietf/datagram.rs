@@ -57,15 +57,6 @@ impl ObjectDatagram {
 		}
 	}
 
-	/// Whether any implemented draft defines this datagram's Type: draft-14 and every
-	/// later draft each define one set.
-	fn defined(&self) -> bool {
-		let kind = self.kind();
-		[Version::Draft14, Version::Draft15]
-			.into_iter()
-			.any(|version| Self::valid(kind, version))
-	}
-
 	/// The Type bits this datagram's fields set.
 	fn kind(&self) -> u64 {
 		let mut kind = 0;
@@ -89,8 +80,9 @@ impl ObjectDatagram {
 }
 
 impl crate::model::datagram::Wire {
-	/// Whether moq-transport defines a datagram of this shape on some draft, as its ingress
-	/// checks one. Egress resolves the Object ID and priority each draft needs.
+	/// Whether a moq-transport draft defines a datagram of this shape, as its ingress checks
+	/// one, and a draft of its block's encoding when it has one: that draft sent it. Egress
+	/// resolves the Object ID and priority each draft needs.
 	pub(crate) fn defined(&self) -> bool {
 		let shape = ObjectDatagram {
 			track_alias: 0,
@@ -104,8 +96,25 @@ impl crate::model::datagram::Wire {
 				None => DatagramBody::Payload(Bytes::new()),
 			},
 		};
-		shape.defined() && self.status.is_none_or(super::object::status_defined)
+		let kind = shape.kind();
+		let family = self.properties.block.as_ref().map(|block| block.encoding);
+		Version::ALL
+			.into_iter()
+			.filter(|version| family.is_none_or(|family| super::object::encoding(*version) == family))
+			.any(|version| {
+				ObjectDatagram::valid(kind, version)
+					&& self.status.is_none_or(|status| {
+						super::object::status_defined(status, version)
+							&& (family.is_none() || carries_properties(status, version))
+					})
+			})
 	}
+}
+
+/// Whether `version` lets a datagram of Object Status `status` carry properties: from
+/// draft-17 on, only a Normal Object may.
+fn carries_properties(status: u64, version: Version) -> bool {
+	status == 0 || matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 }
 
 impl Encode<Version> for ObjectDatagram {
@@ -134,9 +143,7 @@ impl Encode<Version> for ObjectDatagram {
 
 		match &self.body {
 			DatagramBody::Status(status) => {
-				// Draft-17 on: only a Normal Object may carry Properties.
-				let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
-				if !legacy && *status != 0 && self.properties.is_some() {
+				if self.properties.is_some() && !carries_properties(*status, version) {
 					return Err(EncodeError::InvalidState);
 				}
 				w.varint(*status)?
@@ -181,9 +188,7 @@ impl Decode<Version> for ObjectDatagram {
 		let body = match kind & flag::STATUS != 0 {
 			true => {
 				let status = r.varint()?;
-				// Draft-17 on: only a Normal Object may carry Properties.
-				let legacy = matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16);
-				if !legacy && status != 0 && properties.is_some() {
+				if properties.is_some() && !carries_properties(status, version) {
 					return Err(DecodeError::InvalidValue);
 				}
 				if !r.is_empty() {

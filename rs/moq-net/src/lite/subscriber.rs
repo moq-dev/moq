@@ -1169,7 +1169,7 @@ impl FrameIngest {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
 					if end {
-						let decoded = lite::ietf::decode_properties(&block, self.timescale, false, self.version)?;
+						let decoded = lite::ietf::decode_end(&block, self.timescale, self.version)?;
 						group.mark_gap(id, decoded.gap)?;
 						group.set_end_object(crate::model::object::Fields {
 							id,

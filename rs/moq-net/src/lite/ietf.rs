@@ -133,7 +133,16 @@ fn decode_encoding(code: u64) -> Result<Option<Encoding>, DecodeError> {
 }
 
 fn decode_flags(flags: u64) -> Result<(bool, Option<Encoding>), DecodeError> {
-	Ok((flags & DELIVERY_TIMEOUT != 0, decode_encoding(flags >> 1)?))
+	let delivery_timeout = flags & DELIVERY_TIMEOUT != 0;
+	let encoding = decode_encoding(flags >> 1)?;
+	// Only a draft that assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT sets it.
+	if delivery_timeout
+		&& !encoding.is_some_and(|encoding| {
+			crate::ietf::object::drafts(encoding).any(crate::ietf::object::has_delivery_timeout)
+		}) {
+		return Err(DecodeError::InvalidValue);
+	}
+	Ok((delivery_timeout, encoding))
 }
 
 /// Track Properties delta-encoded in the family they arrived in, as moq-transport sent
@@ -252,6 +261,19 @@ pub(crate) fn decode_properties(
 		},
 		gap: checked.gap,
 	})
+}
+
+/// Decode the END_OF_GROUP record's body on a track in `timescale`. It is a status
+/// object, so a block must claim a draft that lets one carry properties.
+#[cfg(feature = "async")]
+pub(crate) fn decode_end(body: &[u8], timescale: Option<Timescale>, version: Version) -> Result<Decoded, DecodeError> {
+	let decoded = decode_properties(body, timescale, false, version)?;
+	if let Some(block) = &decoded.properties.block
+		&& !crate::ietf::object::drafts(block.encoding).any(crate::ietf::object::status_has_properties)
+	{
+		return Err(DecodeError::InvalidValue);
+	}
+	Ok(decoded)
 }
 
 /// A group stream's object records on egress, sent before each frame once the extension
@@ -549,7 +571,7 @@ mod tests {
 		];
 		let properties = Properties {
 			sealed_time: Some(crate::Timestamp::new(77, Timescale::MILLI).unwrap()),
-			block: crate::ietf::object::block(&values, Encoding::DeltaQuic, true).unwrap(),
+			block: crate::ietf::object::block(&values, Encoding::DeltaQuic, false).unwrap(),
 		};
 		let body = encode_properties(&properties, V).unwrap();
 		let decoded = decode_properties(&body, Some(Timescale::MILLI), true, V).unwrap();
@@ -895,6 +917,65 @@ mod tests {
 			.unwrap();
 		assert_eq!(wire.properties.heap(), block.len() as u64);
 		assert!(wire.properties.heap() < (COUNT * size_of::<Property>()) as u64 / 10);
+	}
+
+	/// A body holding property 0x20 = 1, which every family serializes alike, claiming the
+	/// encoding `code`.
+	fn claiming(code: u8, delivery_timeout: bool) -> [u8; 3] {
+		[code << 1 | u8::from(delivery_timeout), 0x20, 1]
+	}
+
+	/// DELIVERY_TIMEOUT names the draft-19 meaning of 0x06, so only a block or list claiming
+	/// the draft-18-and-later encoding may set it.
+	#[test]
+	fn delivery_timeout_claims_a_draft_that_assigns_it() {
+		for code in 1..=4 {
+			let ok = code == 4;
+			assert_eq!(
+				decode_properties(&claiming(code, true), None, true, V).is_ok(),
+				ok,
+				"{code}"
+			);
+			assert!(
+				decode_properties(&claiming(code, false), None, true, V).is_ok(),
+				"{code}"
+			);
+			let list = |delivery_timeout| {
+				TrackProperties::decode_msg(&mut Decoder::new(&claiming(code, delivery_timeout), V.into()), V).is_ok()
+			};
+			assert_eq!(list(true), ok, "{code}");
+			// Track Properties start at draft-16.
+			assert_eq!(list(false), code != 1, "{code}");
+		}
+	}
+
+	/// Only draft-14 lets a status object carry properties, so the END_OF_GROUP record's
+	/// block must claim the drafts 14 and 15 encoding.
+	#[cfg(feature = "async")]
+	#[test]
+	fn an_end_record_block_claims_a_draft_that_carries_one() {
+		for code in 1..=4 {
+			assert_eq!(decode_end(&claiming(code, false), None, V).is_ok(), code == 1, "{code}");
+		}
+		assert!(decode_end(&[], None, V).is_ok());
+	}
+
+	/// A datagram's block names its family, so one of those drafts must define the whole
+	/// datagram: from draft-17 on a non-zero Status carries no properties, and only drafts
+	/// 14 and 15 define DOES_NOT_EXIST.
+	#[test]
+	fn a_datagram_block_claims_a_draft_that_sends_its_shape() {
+		for (status, codes) in [(0, &[1, 2, 3, 4][..]), (1, &[1]), (3, &[1, 2]), (4, &[1, 2])] {
+			for code in 1..=4 {
+				let mut buf = Vec::new();
+				let w = &mut Encoder::new(&mut buf, V.into());
+				w.varint(RELAYED | STATUS).unwrap();
+				w.varint(status).unwrap();
+				w.bytes(&claiming(code, false)).unwrap();
+				let decoded = decode_datagram(&mut Decoder::new(&buf, V.into()), None, V);
+				assert_eq!(decoded.is_ok(), codes.contains(&code), "{status}: {code}");
+			}
+		}
 	}
 }
 
