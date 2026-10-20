@@ -225,7 +225,7 @@ jobs:
           path: ${{ matrix.artifact-path }}
           retention-days: 45
 
-  # gh-pages is the one Pages site, including future Criterion regression
+  # gh-pages is the one Pages site, including the benchmark regression table and its
   # history. smoke.yml also commits its relay report there under relays/; each
   # writer touches only its own directory, deploys the whole branch, and holds
   # the benchmark-pages group so they never race.
@@ -296,7 +296,7 @@ jobs:
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: benchmark-site
-      - name: Deploy charts
+      - name: Deploy site
         id: deploy
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 

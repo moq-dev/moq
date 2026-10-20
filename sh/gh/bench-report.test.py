@@ -1,13 +1,17 @@
-"""Nightly charts accept measurements, refuse malformed data, and share one history branch."""
+"""Nightly reports accept measurements, refuse malformed data, flag regressions, and share one history branch."""
+from datetime import datetime, timezone
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+DAY = 86400
+START = datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp()
 spec = importlib.util.spec_from_file_location('report', Path(__file__).with_name('bench-report.py'))
 report = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(report)
@@ -84,14 +88,76 @@ class ReportTest(unittest.TestCase):
         (source / 'report.json').unlink()
         with self.assertRaises(ValueError):
             report.prepare(self.root, output)
+        # With every source failed, no point is recorded but the table still rebuilds from history.
+        (source / 'outcome.json').write_text('{"status":"failure"}')
+        report.prepare(self.root, output)
+        self.assertEqual(json.loads((output / 'costs.json').read_text()), [])
 
-    def test_landing_page_keeps_existing_charts_and_history(self):
+    def history(self, kind, runs):
+        """Store runs of (commit, day, {name: value}) the way github-action-benchmark does."""
+        unit = 'MB/s' if kind == 'rates' else 'ns'
+        entries = [{'commit': {'id': commit, 'timestamp': f'2026-10-{day:02}T08:00:00Z'}, 'date': (START + day * DAY) * 1000,
+                    'benches': [{'name': name, 'unit': unit, 'value': number} for name, number in values.items()]}
+                   for commit, day, values in runs]
+        path = self.root / 'bench' / kind / 'data.js'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(report.HISTORY_PREFIX + json.dumps({'entries': {kind: entries}}, indent=2))
+
+    def rows(self, commit=None):
+        page = report.regressions(self.root, commit, now=START + 31 * DAY)
+        return page, dict(re.findall(r'<tr><td>([^<]*)<td>[^<]*<td>[^<]*<td class="(\w*)">', page))
+
+    def test_flags_beyond_each_series_noise(self):
+        steady = [100, 101, 99, 100, 102, 98, 100]
+        noisy = [100, 140, 70, 120, 80, 130, 60]
+        runs = [(f'c{day}', day, {'bench-a/step': number, 'bench-a/noisy': loud, 'bench-a/zero': 0,
+                                  'bench-a/flat': 0, 'bench-a/drift': number})
+                for day, (number, loud) in enumerate(zip(steady, noisy), 1)]
+        runs.append(('c8', 8, {'bench-a/step': 120, 'bench-a/noisy': 150, 'bench-a/zero': 1, 'bench-a/flat': 0,
+                               'bench-a/drift': 105, 'bench-a/short': 1}))
+        self.history('costs', runs)
+        self.history('rates', [(commit, day, {'bench-a/rate': 50 if commit == 'c8' else 100})
+                               for commit, day, _ in runs])
+        page, rows = self.rows()
+        self.assertEqual(rows, {'bench-a/step': 'worse', 'bench-a/rate': 'worse', 'bench-a/zero': 'worse',
+                                'bench-a/noisy': '', 'bench-a/flat': '', 'bench-a/drift': '',
+                                'bench-a/short': 'muted'})
+        # Worst first: the rate halved, the step rose a fifth, and a zero baseline sorts above both.
+        self.assertLess(page.index('bench-a/zero'), page.index('bench-a/rate'))
+        self.assertLess(page.index('bench-a/rate'), page.index('bench-a/step'))
+        self.assertIn('Regressions (3)', page)
+        self.assertIn('1 of 8 points', page)
+        self.assertIn('+20.0%', page)
+
+    def test_reruns_collapse_and_failed_sources_go_stale(self):
+        runs = [(f'c{day}', day, {'bench-a/x': 100, 'bench-a/retired': 100, 'bench-b/y': 100}) for day in range(1, 8)]
+        # A re-run records the same commit again; the earlier, regressed point must not count.
+        runs += [('c8', 8, {'bench-a/x': 200, 'bench-a/retired': 100, 'bench-b/y': 200}),
+                 ('c8', 9, {'bench-a/x': 100, 'bench-a/retired': 100, 'bench-b/y': 200})]
+        self.history('costs', runs)
+        page, rows = self.rows()
+        self.assertEqual(rows, {'bench-a/x': '', 'bench-a/retired': '', 'bench-b/y': 'worse'})
+        # bench-b failed on the next nightly, so its regression is not tonight's result,
+        # and bench-a no longer measures the retired series.
+        self.history('costs', runs + [('c9', 10, {'bench-a/x': 100})])
+        page, rows = self.rows()
+        self.assertEqual(rows, {'bench-a/x': '', 'bench-b/y': 'muted'})
+        self.assertIn('stale: last measured 2026-10-10 at c8, 22 days ago', page)
+        self.assertIn('Regressions (0)', page)
+        # When every source fails, the nightly commit has no point at all.
+        page, rows = self.rows('c10')
+        self.assertEqual(rows, {'bench-a/x': 'muted', 'bench-b/y': 'muted'})
+
+    def test_table_replaces_charts_and_keeps_history(self):
+        with self.assertRaises(ValueError):
+            report.index(self.root)
+        self.history('costs', [('c1', 1, {'bench-a/<x>': 1})])
         chart = self.root / 'bench' / 'costs'
-        chart.mkdir(parents=True)
         (chart / 'index.html').write_text('chart')
-        (chart / 'data.js').write_text('history')
+        history = (chart / 'data.js').read_text()
         report.index(self.root)
-        self.assertIn('costs/', (chart.parent / 'index.html').read_text())
+        self.assertIn('bench-a/&lt;x&gt;', (chart.parent / 'index.html').read_text())
+        self.assertIn('url=../', (chart / 'index.html').read_text())
         relays = self.root / 'relays'
         relays.mkdir()
         (relays / 'index.html').write_text('<title>Relay smoke</title>')
@@ -99,7 +165,7 @@ class ReportTest(unittest.TestCase):
         landing = (self.root / 'index.html').read_text()
         self.assertIn('<a href="bench/">MoQ benchmarks</a>', landing)
         self.assertIn('<a href="relays/">Relay smoke</a>', landing)
-        self.assertEqual((chart / 'data.js').read_text(), 'history')
+        self.assertEqual((chart / 'data.js').read_text(), history)
         self.assertTrue((self.root / '.nojekyll').exists())
 
     def test_first_and_subsequent_history_publications(self):
@@ -116,7 +182,7 @@ class ReportTest(unittest.TestCase):
         commands = self.root / 'commands'
         commands.mkdir()
         just = commands / 'just'
-        just.write_text(f'#!/bin/sh\nexec python3 {ROOT}/sh/gh/bench-report.py "$3" "$4"\n')
+        just.write_text(f'#!/bin/sh\nshift 2\nexec python3 {ROOT}/sh/gh/bench-report.py "$@"\n')
         just.chmod(0o755)
         env = dict(os.environ, PATH=f'{commands}:{os.environ["PATH"]}')
         publisher = ROOT / 'sh/gh/bench-publish.sh'
@@ -125,10 +191,13 @@ class ReportTest(unittest.TestCase):
                            capture_output=True)
             history = self.root / f'history-{iteration}'
             git('worktree', 'add', str(history), 'gh-pages', cwd=checkout)
+            stored = report.HISTORY_PREFIX + json.dumps({'entries': {'costs': [{
+                'commit': {'id': f'c{iteration}', 'timestamp': '2026-10-20T08:00:00Z'}, 'date': iteration,
+                'benches': [{'name': 'bench-a/x', 'unit': 'ns', 'value': iteration}]}]}})
             chart = history / 'bench' / 'costs'
             chart.mkdir(parents=True, exist_ok=True)
             (chart / 'index.html').write_text('chart')
-            (chart / 'data.js').write_text(f'run {iteration}')
+            (chart / 'data.js').write_text(stored)
             git('add', '.', cwd=history)
             git('commit', '-m', 'Measured result', cwd=history)
             git('worktree', 'remove', str(history), cwd=checkout)
@@ -136,10 +205,13 @@ class ReportTest(unittest.TestCase):
             subprocess.run(['bash', str(publisher), 'finish', str(site)], cwd=checkout, env=env,
                            check=True, capture_output=True)
             self.assertFalse((site / 'source').exists())
-            self.assertEqual((site / 'bench/costs/data.js').read_text(), f'run {iteration}')
+            self.assertEqual((site / 'bench/costs/data.js').read_text(), stored)
+            # The source checkout's commit has no point, so the only source is stale.
+            self.assertIn('stale: last measured', (site / 'bench/index.html').read_text())
             git('worktree', 'remove', str(site), cwd=checkout)
             git('branch', '-D', 'gh-pages', cwd=checkout)
-        self.assertEqual(git('--git-dir', str(remote), 'show', 'gh-pages:bench/costs/data.js').stdout, 'run 2')
+        self.assertEqual(git('--git-dir', str(remote), 'show', 'gh-pages:bench/costs/data.js').stdout, stored)
+        self.assertIn('url=../', git('--git-dir', str(remote), 'show', 'gh-pages:bench/costs/index.html').stdout)
 
 
 if __name__ == '__main__':
