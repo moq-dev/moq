@@ -2317,16 +2317,16 @@ mod tests {
 	async fn a_failing_redial_reports_why_until_it_connects() {
 		// Hold the failing listener until the runtime ends: a released port can
 		// become another process's listener while the connection keeps retrying.
-		let refused = dead().await.socket_addrs(|| None).unwrap();
+		let failing = dead().await.socket_addrs(|| None).unwrap();
 		assert!(
-			std::net::TcpListener::bind(refused[0]).is_err(),
+			std::net::TcpListener::bind(failing[0]).is_err(),
 			"the failing port stays reserved"
 		);
 		let (live, mut accepted, _task) = serve(crate::origin::spawn()).await;
 
 		// Unique to this test: the table is process-wide.
 		const HOST: &str = "failing-redial.test";
-		crate::resolve::hosts::point(HOST, refused);
+		crate::resolve::hosts::point(HOST, failing);
 
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some(MIN_BACKOFF);
@@ -2368,34 +2368,28 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn closing_between_retries_clears_the_failure() {
-		const WAIT: Duration = Duration::from_secs(10);
-
-		// Nothing listens here, so every dial is refused.
-		let refused = std::net::TcpListener::bind("127.0.0.1:0")
-			.expect("bind")
-			.local_addr()
-			.expect("local addr");
+		// A held port, not a released one: another test's server could claim a
+		// released port, and the dial would connect instead of failing.
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some(MIN_BACKOFF);
 		config.backoff.max = Some(MIN_BACKOFF);
 		config.backoff.timeout = Some(Duration::ZERO);
 		let client = config.init(Default::default()).unwrap();
-		let connection = client.connect(url(&format!("tcp://{refused}/")));
+		let connection = client.connect(dead().await);
 		let mut monitor = connection.monitor();
 
-		tokio::time::timeout(WAIT, async {
-			while monitor.failure().is_none() {
-				tokio::time::sleep(MIN_BACKOFF).await;
-			}
+		kio::wait(|waiter| {
+			monitor.state.poll(waiter, |state| match state.failure {
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
+			})
 		})
 		.await
-		.expect("the refused dial never reported a failure");
+		.unwrap_or_else(|_| panic!("the connection ended before reporting its retry reason"));
 
 		connection.close().await.expect("close");
 		// Resolves with an error once the loop's state is final.
-		let ended = tokio::time::timeout(WAIT, monitor.presence_changed())
-			.await
-			.expect("the loop never ended");
+		let ended = monitor.presence_changed().await;
 		assert!(ended.is_err(), "nothing connected, so only the end moves presence");
 		assert!(monitor.failure().is_none(), "nothing is retrying");
 	}
