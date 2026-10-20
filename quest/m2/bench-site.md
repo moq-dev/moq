@@ -13,8 +13,8 @@ site.
 The pipeline landed in #5759 (`9fcb3f327`), including the shared history
 publisher and explicit Pages deployment. Through 2026-10-19 the publisher
 never finished: it built the full dev shell without the cachix substituter
-and hit its 15-minute timeout, so no `gh-pages` branch exists. It now runs
-on the runner's python3 and git alone. Pages is still off
+and hit its 15-minute timeout, so no `gh-pages` branch exists. It now skips
+the dev shell, taking only `just` from the pinned nixpkgs. Pages is still off
 (`gh api repos/moq-dev/moq/pages` returns 404): the maintainer switches it
 to **Source: GitHub Actions**, then verify the first Nightly deployment at
 <https://moq-dev.github.io/moq/bench/>. Until then the deploy step fails
