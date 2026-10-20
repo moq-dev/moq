@@ -2344,6 +2344,13 @@ mod tests {
 		})
 		.await
 		.unwrap_or_else(|_| panic!("the connection ended before reporting its retry reason"));
+		assert_eq!(
+			monitor
+				.failure()
+				.expect("the monitor reports the retry reason")
+				.to_string(),
+			failure.to_string()
+		);
 		assert!(
 			matches!(&failure, Error::Tcp(err) if matches!(err.as_ref(), crate::tcp::Error::Connect(reason) if !reason.is_empty())),
 			"{failure}"
