@@ -155,7 +155,7 @@ impl Shape {
 
 	fn id(&self, version: &str) -> String {
 		format!(
-			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}{}",
+			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}{}{}",
 			self.relays,
 			self.publishers,
 			self.broadcasts,
