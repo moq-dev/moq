@@ -42,8 +42,8 @@ with three verdicts:
   only in a run artifact or log is invisible: publish it, summarize it, or
   stop producing it. Each report on the Pages site owns one `gh-pages`
   directory: its workflow commits only that directory, deploys the whole
-  branch, and joins the `benchmark-pages` concurrency group, so no deploy
-  drops another report (decided 2026-10-20 with the
+  branch, and joins the `benchmark-pages` concurrency group with
+  `queue: max`, so no deploy drops another report (decided 2026-10-20 with the
   [interop report](/quest/m1/interop-report.md); Nightly's `benchmark-site`
   comment still claims a single writer until the first second writer lands).
 - **Cost:** runner-minutes per month by runner type, from the org billing API
