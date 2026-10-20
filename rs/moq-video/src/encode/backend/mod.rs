@@ -593,6 +593,7 @@ mod tests {
 		assert!(!always_cuts(Codec::H264, &named("v4l2")), "V4L2 learns it at open");
 		assert!(!always_cuts(Codec::H264, &named("nonexistent")), "nothing to open");
 
+		let _probe = probe::exclusive();
 		for candidate in NAMED_ONLY {
 			let backend = (candidate.open)(&config()).unwrap();
 			assert_eq!(backend.can_cut(), candidate.cuts, "{}", candidate.name);
