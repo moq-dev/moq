@@ -1006,28 +1006,34 @@ impl Consumer {
 		name: &str,
 		subscription: Option<&track::Subscription>,
 	) -> Result<(kio::Consumer<track::TrackState>, Option<track::Preferences>), Error> {
-		let mut state = self.state.lock();
+		let mut state = loop {
+			let mut state = self.state.lock();
 
-		if state.closing {
-			return Err(Error::Unroutable);
-		}
-
-		// Reuse a live producer if one is already publishing the track. `get` drops a
-		// closed entry and returns `None`, so we fall through to a fresh request.
-		if let Some(weak) = state.tracks.get(name) {
-			match weak.try_consume(subscription) {
-				Some(resolved) => return Ok(resolved),
-				// It closed between the liveness probe and the count bump (an idle
-				// teardown committing under us). Reclaim it and request the track
-				// again, rather than handing back a consumer of a dead track.
-				None => {
-					state.tracks.remove(name);
-				}
+			if state.closing {
+				return Err(Error::Unroutable);
 			}
-		}
+
+			// Reuse a live producer if one is already publishing the track. `get` drops a
+			// closed entry and returns `None`, so we fall through to a fresh request.
+			let Some(weak) = state.tracks.get(name) else {
+				break state;
+			};
+			// Join outside the lock: the subscription and the first consumer wake the
+			// serving session, which may re-enter this broadcast. The track's own lock
+			// still orders the join against its idle teardown.
+			drop(state);
+			if let Some(resolved) = weak.try_consume(subscription) {
+				return Ok(resolved);
+			}
+			// It closed between the liveness probe and the count bump (an idle teardown
+			// committing under us). Look again: `get` reclaims it and the track is
+			// requested again, rather than handing back a consumer of a dead track.
+		};
 
 		if let Some(pending) = state.requests.join(name) {
-			// Coalesce onto a queued request for the same name.
+			// Coalesce onto a queued request for the same name. Joining under the lock
+			// wakes no subscription observer: only a handler that popped the request
+			// can watch its subscriptions, and popping moves it to `tracks`.
 			return Ok(pending.join(subscription));
 		}
 
@@ -1318,6 +1324,36 @@ mod test {
 			let _pending = consumer.subscribe(expected.clone());
 			assert_eq!(*inspect.seen.lock().unwrap(), Some(Some(expected)), "lookup: {lookup}");
 		}
+	}
+
+	#[test]
+	fn a_subscription_wakes_its_observers_outside_the_broadcast_lock() {
+		struct Reenter {
+			broadcast: Consumer,
+			woken: std::sync::atomic::AtomicBool,
+		}
+		impl std::task::Wake for Reenter {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				// Deadlocks if the subscribe that woke us still holds the broadcast lock.
+				let _ = self.broadcast.track("other");
+				self.woken.store(true, std::sync::atomic::Ordering::Relaxed);
+			}
+		}
+
+		let producer = Info::new().produce();
+		let mut track = producer.create_track("catalog", None).unwrap();
+		let reenter = Arc::new(Reenter {
+			broadcast: producer.consume(),
+			woken: Default::default(),
+		});
+		let waiter = kio::Waiter::new(std::task::Waker::from(reenter.clone()));
+		assert!(track.poll_subscription_changed(&waiter).is_pending());
+		let consumer = producer.consume().track("catalog").unwrap();
+		let _pending = consumer.subscribe(track::Subscription::default().with_priority(3));
+		assert!(reenter.woken.load(std::sync::atomic::Ordering::Relaxed));
 	}
 
 	#[test]
