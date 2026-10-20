@@ -46,8 +46,15 @@ beside a healthy one (its playlist errors, the sibling's and the DASH
 manifest's do not), and the DASH manifest after a shared failure.
 Update `doc/` where it describes how an export ends.
 
-Public API: none expected. Wire: none; HTTP responses change for a failed
-export.
+Embedders that skip the server router read the same failure from the public
+API: `Rendition::playlist` (already a `Result`) returns an error for a failed
+feed, and `Broadcaster::manifest` changes from `Option<String>` to a `Result`,
+so a failed shared timeline differs from a manifest that is not listable yet.
+The routes map those errors to the 5xx.
+
+Public API: breaking, `export::Broadcaster::manifest` returns a `Result`, and
+a new `Error` variant for a failed timeline; add a `MIGRATE.md` entry. Wire:
+none; HTTP responses change for a failed export.
 
 ## Related
 
