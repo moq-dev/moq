@@ -28,13 +28,15 @@ pub type Target = fn(&[u8]) -> bool;
 pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Producer) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
 	// Object properties come from a moq-transport publisher, whose draft serialized them.
-	let mut info = track::Info::default();
-	info.properties = properties.then(|| {
-		std::sync::Arc::new(crate::model::object::TrackProperties {
-			version: ietf::Version::Draft22,
-			values: Vec::new(),
-		})
-	});
+	let info = track::Info {
+		properties: properties.then(|| {
+			std::sync::Arc::new(crate::model::object::TrackProperties {
+				version: ietf::Version::Draft22,
+				values: Vec::new(),
+			})
+		}),
+		..Default::default()
+	};
 	let track = broadcast.create_track("objects", info).unwrap();
 	let mut group = track.append_group().unwrap();
 	let payload = Bytes::from_static(&[0; 64]);

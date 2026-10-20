@@ -202,6 +202,7 @@ impl Info {
 	}
 
 	/// The draft the track's moq-transport publisher spoke, `None` for a moq-lite one.
+	// private: passthrough
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
 		self.properties.as_ref().map(|properties| properties.version)
 	}
