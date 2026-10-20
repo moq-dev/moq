@@ -7,7 +7,13 @@ import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../
 import * as Path from "../path.ts";
 import { Follow } from "../util/observed.ts";
 import { wireOf } from "../wire.ts";
-import { type ConnectProps, connect, type WebSocketProps, type WebTransportProps } from "./connect.ts";
+import {
+	type ConnectProps,
+	connect,
+	normalizeVersions,
+	type WebSocketProps,
+	type WebTransportProps,
+} from "./connect.ts";
 import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
@@ -136,8 +142,8 @@ export class Reload {
 	 */
 	readonly bandwidth: Allocator;
 
-	/** Ordered protocol offer retained across retries and redirects. */
-	readonly protocols?: readonly string[];
+	/** Protocol versions to offer, most preferred first, kept across retries and redirects. */
+	readonly versions?: readonly string[];
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
@@ -235,7 +241,7 @@ export class Reload {
 		this.delay = props?.delay ?? {};
 		this.goaway = props?.goaway ?? {};
 		this.redirect = this.#redirect;
-		this.protocols = props?.protocols ? [...props.protocols] : undefined;
+		this.versions = normalizeVersions(props);
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		this.publish = props?.publish;
@@ -393,7 +399,7 @@ export class Reload {
 							url: dialing,
 							// A redirect names the relay; a fallback URL pinned for the old one does not follow.
 							websocket: this.#redirect.peek() ? { ...this.websocket, url: undefined } : this.websocket,
-							protocols: this.protocols,
+							versions: this.versions,
 							webtransport: this.webtransport,
 							publish: this.publish,
 							consume: this.consume,

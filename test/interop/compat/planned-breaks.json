@@ -1,20 +1,10 @@
 {
 	"moq-lite-07-wip": {
-		"reason": "Re-accepted by the maintainer (2026-10-13): this draft is unpublished and its wire is still changing. Remeasured 2026-10-15 against these releases: every lite-07-wip cell fails, since released moq-cli, moq-relay, and @moq/net reject current lite-07-wip sessions (long buffer, invalid value, hop count exceeds maximum). Compare stable lite drafts; reassess when any affected release changes.",
+		"reason": "Re-accepted by the maintainer (2026-10-13): this draft is unpublished and its wire is still changing. Remeasured 2026-10-19 against these releases: all 16 cross-version lite-07-wip media, publication, and FETCH cells fail, while its FETCH capability check and the stable lite-01 through lite-06 cells pass. Current and released lite-07-wip framing differs (long buffer, invalid value, protocol violation). Reassess when any affected release changes.",
 		"releases": {
-			"moq-cli": "0.14.5",
-			"moq-relay": "0.17.5",
-			"@moq/net": "0.4.3"
-		}
-	},
-	"catalog-archive": {
-		"reason": "#4034 replaced the required archive `track` with `timelines`. Remeasured 2026-10-15: released Rust readers (moq-cli 0.14.5, hang 0.21.14) carry the tolerant parser and accept current catalogs, but released @moq/hang still rejects them. Remove once an @moq/hang release carries the tolerant parser.",
-		"releases": {
-			"@moq/hang": "0.5.2"
-		},
-		"cells": {
-			"lanes": ["media-js-native-node"],
-			"publisher": "current"
+			"moq-cli": "0.14.7",
+			"moq-relay": "0.17.7",
+			"@moq/net": "0.4.4"
 		}
 	}
 }

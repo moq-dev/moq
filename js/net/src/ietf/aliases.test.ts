@@ -48,6 +48,14 @@ test("sharing an alias across subscriptions to one track is not fatal", () => {
 	expect(() => aliases.set(7n, {}, { broadcast: "cam", name: "video" })).toThrow(SharedTrackAlias);
 });
 
+// Another publisher instance is other content under the same name (MoQ Epoch).
+test("one alias for two epochs of a track is a collision", () => {
+	const aliases = new TrackAliases<object>();
+	aliases.set(7n, {}, { broadcast: "cam", name: "video", epoch: "a" });
+
+	expect(() => aliases.set(7n, {}, { broadcast: "cam", name: "video", epoch: "b" })).toThrow(DuplicateTrackAlias);
+});
+
 // Metadata keyed by an alias (the track's timescale) must only be torn down by whoever
 // still owns the binding, so retirement reports ownership rather than returning void.
 test("retire reports whether the caller still owned the alias", () => {

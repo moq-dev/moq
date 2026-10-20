@@ -21,9 +21,10 @@ on a fixed sleep. moq-relay's in-memory integration tests
 (`tests/integration/connection.rs`) move onto the sim with
 [the runtime trait](/quest/m2/runtime-trait.md), not here.
 
-The targeted moq-auth grant conversion belongs to
-[auth refresh](/quest/m1/test-flakes-2/auth-refresh-mock-time.md); reuse that
-change rather than implementing a second migration. It need not wait here.
+moq-auth's `Grant` and lease clock, and moq-relay's lease, credential, and
+admission timers, already run on moq-clock (`Grant::deadline` returns a
+`moq_clock::Instant`); build on that rather than migrating them again. What
+remains in moq-auth is its JWT claim checks (`claims.rs`, `key.rs`) and `serve`.
 
 Fix mixed clocks first: anything that reads std time but waits on tokio time
 (a backoff's stability window, a gate computed with std `Instant` and slept
@@ -32,6 +33,13 @@ with tokio) is a bug under paused time.
 Split the PR by crate group if review needs it; ban direct clock reads in each
 production scope as it finishes. Unrelated legacy test conversions and the
 workspace-wide lint ratchet follow in m2.
+
+The current checkpoint migrates auth clock reads, RTMP session timestamps and
+deadlines, archive retention, and listener stall accounting. The rest of the
+workspace and public `SystemTime` fields still need migration. In particular,
+SRT and WebRTC hand instants to third-party APIs on std's clock, and audio/video
+device threads block outside an async runtime; those boundaries still need
+clock support rather than a second host-clock read at each call site.
 
 Public API: breaking wherever a crate exposes an instant or a time source.
 Wire: none.

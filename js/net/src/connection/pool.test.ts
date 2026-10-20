@@ -626,12 +626,12 @@ test("a handle's announcements sync with the shared origin", async () => {
 	handle.close();
 });
 
-test("shared connections distinguish ordered protocol preferences", async () => {
+test("shared connections distinguish ordered versions", async () => {
 	const dials = stubTransports();
-	const protocols = [Lite.ALPN_07_WIP, Lite.ALPN_06, Lite.ALPN_05];
-	const first = new Connection({ url, protocols, share: true, linger });
-	const same = new Connection({ url, protocols: [...protocols], share: true, linger });
-	const reversed = new Connection({ url, protocols: [...protocols].reverse(), share: true, linger });
+	const versions = ["moq-lite-07-wip", "moq-lite-06", "moq-lite-05"];
+	const first = new Connection({ url, versions, share: true, linger });
+	const same = new Connection({ url, versions: [...versions], share: true, linger });
+	const reversed = new Connection({ url, versions: [...versions].reverse(), share: true, linger });
 	const defaults = new Connection({ url, linger });
 	try {
 		await advance();
@@ -648,13 +648,13 @@ test("shared connections distinguish ordered protocol preferences", async () => 
 	}
 });
 
-test("a caller cannot mutate an acquired protocol preference", async () => {
+test("a caller cannot mutate acquired versions", async () => {
 	const dials = stubTransports();
-	const protocols = [Lite.ALPN_07_WIP, Lite.ALPN_05];
-	const first = new Connection({ url, protocols, linger });
-	protocols.reverse();
-	const original = new Connection({ url, protocols: [Lite.ALPN_07_WIP, Lite.ALPN_05], linger });
-	const changed = new Connection({ url, protocols, linger });
+	const versions = ["moq-lite-07-wip", "moq-lite-05"];
+	const first = new Connection({ url, versions, linger });
+	versions.reverse();
+	const original = new Connection({ url, versions: ["moq-lite-07-wip", "moq-lite-05"], linger });
+	const changed = new Connection({ url, versions, linger });
 	try {
 		await advance();
 		expect(first.origin.peek()).toBe(original.origin.peek());
@@ -667,7 +667,7 @@ test("a caller cannot mutate an acquired protocol preference", async () => {
 	}
 });
 
-test("GOAWAY keeps protocol pools distinct at the redirected URL", async () => {
+test("GOAWAY keeps version pools distinct at the redirected URL", async () => {
 	const moved = new URL("https://example.com:5443/pool");
 	const peers: WebTransport[] = [];
 	globalThis.WebTransport = function RedirectTransport(address: string | URL) {
@@ -676,8 +676,8 @@ test("GOAWAY keeps protocol pools distinct at the redirected URL", async () => {
 		void accept(pair.server, new URL(address));
 		return pair.client;
 	} as unknown as typeof WebTransport;
-	const protocols = [Lite.ALPN_07_WIP, Lite.ALPN_06];
-	const first = new Connection({ url, protocols, linger });
+	const versions = ["moq-lite-07-wip", "moq-lite-06"];
+	const first = new Connection({ url, versions, linger });
 	const resident = new Connection({ url: moved, linger });
 	let joined: Connection | undefined;
 	let defaults: Connection | undefined;
@@ -692,7 +692,7 @@ test("GOAWAY keeps protocol pools distinct at the redirected URL", async () => {
 		await stream.writer.u53(Lite.StreamId.Goaway);
 		await new Lite.Goaway(moved.href).encode(stream.writer, Lite.Version.DRAFT_06);
 		await advance();
-		joined = new Connection({ url: moved, protocols, linger });
+		joined = new Connection({ url: moved, versions, linger });
 		defaults = new Connection({ url: moved, linger });
 		await advance();
 		expect(joined.status.peek()).toBe("connected");

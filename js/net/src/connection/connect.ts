@@ -47,8 +47,11 @@ export interface CertificateHash {
 	value: BufferSource | string;
 }
 
-/** WebTransport options extended with friendlier certificate pinning (hex hashes or a raw certificate). */
-export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes"> {
+/**
+ * WebTransport options extended with friendlier certificate pinning (hex hashes or a raw certificate).
+ * The subprotocols come from {@link ConnectProps.versions}, shared with the WebSocket fallback.
+ */
+export interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes" | "protocols"> {
 	/**
 	 * Pin the server to one or more certificate hashes. Each `value` may be raw
 	 * bytes or a hex string; the algorithm defaults to `sha-256`.
@@ -63,42 +66,84 @@ export interface WebTransportProps extends Omit<WebTransportOptions, "serverCert
 	serverCertificate?: string | BufferSource;
 }
 
-const PROTOCOL_VERSIONS = {
-	[Lite.ALPN_07_WIP]: null,
-	[Lite.ALPN_06]: null,
-	[Lite.ALPN_05]: null,
-	[Lite.ALPN_04]: null,
-	[Lite.ALPN_03]: null,
-	[Lite.ALPN]: null,
+type SetupVersion = Lite.Version | Ietf.Version;
+
+// Each version name, most preferred first, with the ALPN that negotiates it. Names sharing
+// `moql` then negotiate in SETUP, where `setup` is the version code offered.
+const VERSIONS: Record<string, { alpn: string; setup?: SetupVersion }> = {
+	"moq-lite-07-wip": { alpn: Lite.ALPN_07_WIP },
+	"moq-lite-06": { alpn: Lite.ALPN_06 },
+	"moq-lite-05": { alpn: Lite.ALPN_05 },
+	"moq-lite-04": { alpn: Lite.ALPN_04 },
+	"moq-lite-03": { alpn: Lite.ALPN_03 },
+	"moq-lite-02": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_02 },
+	"moq-lite-01": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_01 },
+	"moq-transport-22": { alpn: Ietf.ALPN.DRAFT_22 },
+	"moq-transport-21": { alpn: Ietf.ALPN.DRAFT_21 },
+	"moq-transport-20": { alpn: Ietf.ALPN.DRAFT_20 },
+	"moq-transport-19": { alpn: Ietf.ALPN.DRAFT_19 },
+	"moq-transport-18": { alpn: Ietf.ALPN.DRAFT_18 },
+	"moq-transport-17": { alpn: Ietf.ALPN.DRAFT_17 },
+	"moq-transport-16": { alpn: Ietf.ALPN.DRAFT_16 },
+	"moq-transport-15": { alpn: Ietf.ALPN.DRAFT_15 },
+	"moq-transport-14": { alpn: Lite.ALPN, setup: Ietf.Version.DRAFT_14 },
+};
+
+// Experimental lite-07 is offered only when named.
+const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => name !== "moq-lite-07-wip");
+
+// moq-transport-18 and newer are pinned to qmux-01. Every other ALPN is currently
+// negotiated as `qmux-00.{alpn}`, but `null` lets the polyfill advertise every QMux draft
+// it knows and the server pick one.
+const QMUX: Record<string, QmuxVersion | QmuxVersion[] | null> = {
 	[Ietf.ALPN.DRAFT_22]: "qmux-01",
 	[Ietf.ALPN.DRAFT_21]: "qmux-01",
 	[Ietf.ALPN.DRAFT_20]: "qmux-01",
 	[Ietf.ALPN.DRAFT_19]: "qmux-01",
 	[Ietf.ALPN.DRAFT_18]: "qmux-01",
-	[Ietf.ALPN.DRAFT_17]: null,
-	[Ietf.ALPN.DRAFT_16]: null,
-	[Ietf.ALPN.DRAFT_15]: null,
-} as const satisfies Record<string, QmuxVersion | QmuxVersion[] | null>;
+};
 
-// Experimental lite-07 stays opt-in on both transports.
-const DEFAULT_PROTOCOLS = Object.keys(PROTOCOL_VERSIONS).filter((protocol) => protocol !== Lite.ALPN_07_WIP);
+/** What one version list offers: the ALPNs in preference order, and the SETUP versions behind `moql`. */
+interface Offer {
+	alpns: string[];
+	setup: SetupVersion[];
+	/** Whether the caller named the versions, so the peer must pick one of them. */
+	explicit: boolean;
+}
 
-/** Validate and snapshot an ordered protocol offer before acquiring a connection. @internal */
-export function normalizeProtocols(
-	protocols?: readonly string[],
-	webtransport?: WebTransportProps,
-): string[] | undefined {
-	if (protocols === undefined) return undefined;
-	if (webtransport?.protocols !== undefined)
-		throw new TypeError("set protocols on the connection instead of webtransport");
-	if (protocols.length === 0) throw new TypeError("protocols must not be empty");
-	const seen = new Set<string>();
-	for (const protocol of protocols) {
-		if (!Object.hasOwn(PROTOCOL_VERSIONS, protocol)) throw new TypeError(`unsupported protocol: ${protocol}`);
-		if (seen.has(protocol)) throw new TypeError(`duplicate protocol: ${protocol}`);
-		seen.add(protocol);
+function offer(versions?: readonly string[]): Offer {
+	const names = versions ?? DEFAULT_VERSIONS;
+	const alpns = new Set<string>();
+	const setup: SetupVersion[] = [];
+	for (const name of names) {
+		const version = VERSIONS[name];
+		if (!version) throw new TypeError(`unsupported version: ${name}`);
+		alpns.add(version.alpn);
+		if (version.setup !== undefined) setup.push(version.setup);
 	}
-	return [...protocols];
+	return { alpns: [...alpns], setup, explicit: versions !== undefined };
+}
+
+/** Validate and snapshot an ordered version list before acquiring a connection. @internal */
+export function normalizeVersions(props?: {
+	versions?: readonly string[];
+	webtransport?: WebTransportProps;
+	websocket?: WebSocketProps;
+}): string[] | undefined {
+	if (props?.webtransport && "protocols" in props.webtransport)
+		throw new TypeError("webtransport.protocols was removed; set versions instead");
+	if (props?.websocket && "protocols" in props.websocket)
+		throw new TypeError("websocket.protocols was removed; set versions instead");
+	const versions = props?.versions;
+	if (versions === undefined) return undefined;
+	if (versions.length === 0) throw new TypeError("versions must not be empty");
+	const seen = new Set<string>();
+	for (const name of versions) {
+		if (!Object.hasOwn(VERSIONS, name)) throw new TypeError(`unsupported version: ${name}`);
+		if (seen.has(name)) throw new TypeError(`duplicate version: ${name}`);
+		seen.add(name);
+	}
+	return [...versions];
 }
 
 /** Options for {@link connect}. */
@@ -107,10 +152,11 @@ export interface ConnectProps {
 	url: URL;
 
 	/**
-	 * Ordered ALPNs to offer on both transports, including any desired fallbacks; omit for stable defaults.
-	 * A legacy peer that negotiates no application ALPN still uses the compatibility handshake.
+	 * Protocol versions to offer on every transport, most preferred first, spelled like
+	 * `moq-lite-06`. Defaults to every supported version except the work-in-progress
+	 * `moq-lite-07-wip`; list every fallback you still want.
 	 */
-	protocols?: readonly string[];
+	versions?: readonly string[];
 
 	/** WebTransport options. */
 	webtransport?: WebTransportProps;
@@ -186,8 +232,8 @@ const NEVER_ABORTED = new AbortController().signal;
  */
 export async function connect({ url, ...props }: ConnectProps): Promise<Established> {
 	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
-	props.protocols = normalizeProtocols(props.protocols, props.webtransport);
-	if (props.transport && props.protocols) throw new TypeError("protocols cannot reconfigure a supplied transport");
+	props.versions = normalizeVersions(props);
+	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
 	const signal = props.signal ?? NEVER_ABORTED;
 	signal.throwIfAborted();
 
@@ -220,10 +266,12 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 		extensions: Extensions.offered(props.extensions),
 	};
 
+	const offered = offer(props.versions);
+
 	if (props.transport) {
 		const transport = props.transport;
 		void abort.then(() => transport.close());
-		return connectTransport(url, transport, wiring);
+		return connectTransport(url, transport, wiring, offered.setup);
 	}
 
 	// Stop transports after one connects or the caller aborts.
@@ -231,11 +279,7 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 	const cancel = Promise.race([raced, abort]);
 
 	const webtransport = isWebTransportSupported()
-		? connectWebTransport(
-				url,
-				cancel,
-				props.protocols ? { ...props.webtransport, protocols: [...props.protocols] } : props.webtransport,
-			)
+		? connectWebTransport(url, cancel, offered.alpns, props.webtransport)
 		: undefined;
 
 	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket has won in the past.
@@ -244,7 +288,7 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 		!webtransport || websocketWon.has(url.toString()) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
 	const websocket =
 		props.websocket?.enabled !== false
-			? connectWebSocket(props.websocket?.url ?? url, { delay: headstart, cancel, protocols: props.protocols })
+			? connectWebSocket(props.websocket?.url ?? url, headstart, cancel, offered.alpns)
 			: undefined;
 
 	if (!websocket && !webtransport) {
@@ -277,22 +321,31 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 	}
 
 	// The remaining setup is identical whether the transport was raced or supplied.
-	const protocol = (session as { protocol?: string }).protocol;
-	if (props.protocols && protocol && !props.protocols.includes(protocol)) {
+	const protocol = (session as { protocol?: string }).protocol || undefined;
+	if (offered.explicit && protocol && !offered.alpns.includes(protocol)) {
 		session.close();
 		throw new Error(`server selected an unoffered protocol: ${protocol}`);
 	}
-	return await connectTransport(url, session as WebTransport, wiring);
+	if (offered.explicit && !protocol && offered.setup.length === 0) {
+		session.close();
+		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
+	}
+	return await connectTransport(url, session as WebTransport, wiring, offered.setup);
 }
 
-async function connectTransport(url: URL, session: WebTransport, wiring: SessionProps): Promise<Established> {
+async function connectTransport(
+	url: URL,
+	session: WebTransport,
+	wiring: SessionProps,
+	setup: SetupVersion[],
+): Promise<Established> {
 	const closed = session.closed.then(fromClose, error);
 	const terminal = closed.then((cause) => {
 		throw cause ?? new Error("session closed during SETUP");
 	});
 
 	try {
-		return await Promise.race([terminal, negotiate(url, session, wiring)]);
+		return await Promise.race([terminal, negotiate(url, session, wiring, setup)]);
 	} catch (cause) {
 		// We refused the peer's SETUP and already closed with the code that says why.
 		if (cause instanceof ProtocolViolation) throw cause;
@@ -316,7 +369,13 @@ async function connectTransport(url: URL, session: WebTransport, wiring: Session
 
 // Negotiate the MoQ protocol over an established transport. The caller races this against
 // the session closing so a close code is not lost behind a failed or stalled SETUP stream.
-async function negotiate(url: URL, session: WebTransport, wiring: SessionProps): Promise<Established> {
+// `setup` lists the versions a `moql` or ALPN-less session offers in SETUP.
+async function negotiate(
+	url: URL,
+	session: WebTransport,
+	wiring: SessionProps,
+	setup: SetupVersion[],
+): Promise<Established> {
 	// The DOM lib has no `protocol` property yet. It is "" when none was negotiated, and
 	// undefined in a browser that predates subprotocols (Firefox before 155).
 	const protocol: string | undefined = (session as { protocol?: string }).protocol || undefined;
@@ -372,15 +431,13 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	Ietf.hiddenIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, setupVersion);
 
-	const client = new Ietf.ClientSetup({
-		versions:
-			setupVersion === Ietf.Version.DRAFT_16
-				? [Ietf.Version.DRAFT_16]
-				: setupVersion === Ietf.Version.DRAFT_15
-					? [Ietf.Version.DRAFT_15]
-					: [Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14],
-		parameters: params,
-	});
+	const offered =
+		setupVersion === Ietf.Version.DRAFT_16
+			? [Ietf.Version.DRAFT_16]
+			: setupVersion === Ietf.Version.DRAFT_15
+				? [Ietf.Version.DRAFT_15]
+				: setup;
+	const client = new Ietf.ClientSetup({ versions: offered, parameters: params });
 	await client.encode(stream.writer, setupVersion);
 
 	const serverCompat = await stream.reader.u53();
@@ -389,6 +446,9 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	}
 
 	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
+	if (!(offered as number[]).includes(server.version)) {
+		throw new Error(`server selected an unoffered version: 0x${server.version.toString(16)}`);
+	}
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
 		return new Lite.Connection({
@@ -427,7 +487,7 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, early, solicit, hidden, activeCount, cluster, auth } = await exchangeSetup(
+	const { control, early, solicit, hidden, activeCount, cluster, auth, epoch } = await exchangeSetup(
 		session,
 		version,
 		"moq-lite-js",
@@ -446,6 +506,7 @@ async function handshakeAlpn(
 		activeCount,
 		cluster,
 		auth,
+		epoch,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
 		version,
@@ -500,6 +561,7 @@ async function resolveCertificateHashes(options?: WebTransportProps): Promise<We
 async function connectWebTransport(
 	url: URL,
 	cancel: Promise<void>,
+	alpns: string[],
 	options?: WebTransportProps,
 ): Promise<WebTransport | undefined> {
 	let finalUrl = url;
@@ -510,8 +572,8 @@ async function connectWebTransport(
 	const finalOptions: WebTransportOptions = {
 		allowPooling: false,
 		congestionControl: "low-latency",
-		protocols: DEFAULT_PROTOCOLS,
 		...webtransport,
+		protocols: alpns,
 	};
 
 	// Accumulate caller-provided pins first, then append anything we fetch below,
@@ -568,26 +630,22 @@ async function connectWebTransport(
 // TODO accept arguments to control the port/path used.
 async function connectWebSocket(
 	url: URL,
-	{ delay, cancel, protocols }: { delay: number; cancel: Promise<void>; protocols?: readonly string[] },
+	delay: number,
+	cancel: Promise<void>,
+	alpns: string[],
 ): Promise<Session | undefined> {
 	const timer = sleep(Nano.fromMilli(Milli(delay)));
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
 
-	// moq-transport-18 and newer are pinned to qmux-01. Every other ALPN we
-	// support is currently negotiated as `qmux-00.{alpn}` on the wire, but we
-	// don't want to lock that in: set the value to `null` so the polyfill
-	// advertises every QMux draft it knows about and the server picks one.
-	// Insertion order is the negotiation preference on the wire.
-
 	// The default (`requireProtocol: false`) also advertises bare `qmux-01`,
 	// `qmux-00`, and `webtransport` so we still interop with relays that only
 	// know a wire-format version (today's moq-relay only accepts bare
 	// `webtransport`).
 	const quic = new Session(url, {
-		protocols: [...(protocols ?? DEFAULT_PROTOCOLS)],
-		versions: PROTOCOL_VERSIONS,
+		protocols: alpns,
+		versions: Object.fromEntries(alpns.map((alpn) => [alpn, QMUX[alpn] ?? null])),
 	});
 
 	// Wait for the WebSocket to connect, or for the cancel promise to resolve.

@@ -1,5 +1,5 @@
 /**
- * A reconnecting, shareable connection: one origin and reconnect loop per URL and protocol offer.
+ * A reconnecting, shareable connection: one origin and reconnect loop per URL and version list.
  *
  * @module
  */
@@ -19,7 +19,7 @@ import {
 	type ConnectProps as ConnectPropsType,
 	certificateHash,
 	connect,
-	normalizeProtocols,
+	normalizeVersions,
 	type WebSocketProps as WebSocketPropsType,
 	type WebTransportProps as WebTransportPropsType,
 } from "./connect.ts";
@@ -52,14 +52,14 @@ export interface ConnectionProps {
 	linger?: Milli;
 
 	/**
-	 * Share a pooled transport keyed on the URL and ordered protocol offer. By default, options specific to this
-	 * handle use a private reconnect loop; otherwise connections share by URL and protocol offer.
+	 * Share a pooled transport keyed on the URL and ordered versions. By default, options specific to this
+	 * handle use a private reconnect loop; otherwise connections share by URL and versions.
 	 * Explicit `true` refuses options a pool cannot honor.
 	 */
 	share?: boolean;
 
-	/** Ordered protocols shared by both transports; connections pool by URL and this offer. */
-	protocols?: readonly string[];
+	/** Protocol versions to offer, most preferred first, spelled like `moq-lite-06`; connections pool by URL and this list. */
+	versions?: readonly string[];
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportPropsType;
@@ -92,7 +92,7 @@ export interface ConnectionProps {
 
 /**
  * A cloneable handle on a MoQ connection: `new Connection({ url })` reconnects and, by
- * default, shares one origin and reconnect loop with handles using the same URL and protocols.
+ * default, shares one origin and reconnect loop with handles using the same URL and versions.
  *
  * The shared {@link origin} is wired to both directions. Everything the relay announces
  * lands in it, a publish into it is announced to the relay, and a page that publishes and
@@ -206,7 +206,7 @@ export class Connection {
 	 * (plus the linger window) wants them.
 	 */
 	constructor(props?: ConnectionProps) {
-		const protocols = normalizeProtocols(props?.protocols, props?.webtransport);
+		const versions = normalizeVersions(props);
 		refuse(props);
 		this.#signals = new Effect();
 
@@ -226,7 +226,7 @@ export class Connection {
 		const href = this.#signals.computed((effect) => effect.get(this.url)?.href);
 
 		if (props && (props.share === false || requiresPrivate(props))) {
-			this.#runPrivate({ ...props, protocols }, href);
+			this.#runPrivate({ ...props, versions }, href);
 			return;
 		}
 
@@ -235,7 +235,7 @@ export class Connection {
 			const key = effect.get(href);
 			if (!key) return;
 
-			const lease = acquire(key, protocols, linger);
+			const lease = acquire(key, versions, linger);
 			effect.cleanup(lease.release);
 
 			effect.set(this.#origin, lease.origin, undefined);
@@ -259,7 +259,7 @@ export class Connection {
 			enabled: this.enabled,
 			publish: props.publish ?? (owned ? origin.consume() : undefined),
 			consume: origin,
-			protocols: props.protocols,
+			versions: props.versions,
 			webtransport: props.webtransport,
 			websocket: props.websocket,
 			delay: props.delay,
@@ -406,7 +406,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 
 /** One shared connection and the handles keeping it alive. */
 interface Entry {
-	/** The pool key: the dialed URL and protocols, moved together on GOAWAY. */
+	/** The pool key: the dialed URL and versions, moved together on GOAWAY. */
 	key: string;
 	origin: Origin.Producer;
 	connection: Reload;
@@ -418,20 +418,20 @@ interface Entry {
 /** The process-wide pool backing {@link Connection}. */
 const pool = new Map<string, Entry>();
 
-// Preserve ordered protocol offers when a redirect moves the URL.
-function poolKey(url: string, protocols?: readonly string[]): string {
-	return JSON.stringify([url, protocols]);
+// Preserve the ordered versions when a redirect moves the URL.
+function poolKey(url: string, versions?: readonly string[]): string {
+	return JSON.stringify([url, versions]);
 }
 
 /** Take a reference on the shared entry, creating it on first use. */
-function acquire(url: string, protocols?: readonly string[], linger?: Milli): Entry & { release: () => void } {
-	const key = poolKey(url, protocols);
+function acquire(url: string, versions?: readonly string[], linger?: Milli): Entry & { release: () => void } {
+	const key = poolKey(url, versions);
 	let entry = pool.get(key);
 	if (!entry) {
 		const origin = new Origin.Producer();
 		const connection = new Reload({
 			url: new URL(url),
-			protocols,
+			versions,
 			enabled: true,
 			publish: origin.consume(),
 			consume: origin,
@@ -453,7 +453,7 @@ function acquire(url: string, protocols?: readonly string[], linger?: Milli): En
 		// the handles it has until they release it.
 		connection.redirect.subscribe((redirect) => {
 			if (!redirect) return;
-			const key = poolKey(redirect.href, protocols);
+			const key = poolKey(redirect.href, versions);
 			if (key === created.key) return;
 			if (pool.get(created.key) === created) pool.delete(created.key);
 			created.key = key;

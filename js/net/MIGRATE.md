@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `webtransport.protocols` is `versions` (#5979)
+
+Move the list to the top-level `versions` of `connect` or `Connection`, spelled as version names: `moq-transport-22`, not the ALPN `moqt-22`; lite names are unchanged.
+It now applies to the WebSocket fallback too, so list every fallback you still want, such as `versions: ["moq-lite-07-wip", "moq-lite-06"]`.
+Passing `webtransport.protocols` throws a `TypeError`.
+
 ### An expired group fails with `Old` even when drained (#5944)
 
 A reader parked at the end of an unfinished group whose `maxDelay` gives up now rejects with a `StreamError` of code `StreamCode.Old`, even after reading every frame, where `readFrame()` used to resolve `undefined`.

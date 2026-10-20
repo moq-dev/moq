@@ -18,7 +18,7 @@ const origin = new Moq.Origin.Producer();
 const connection = await Moq.Connection.connect({
 	url: new URL(url),
 	websocket: { enabled: false },
-	...(version ? { webtransport: { protocols: [version] } } : {}),
+	...(version ? { versions: [version] } : {}),
 	...(role === "publish" ? { publish: origin.consume() } : { consume: origin }),
 });
 try {
