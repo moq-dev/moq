@@ -68,7 +68,7 @@ source, and unwinding so a panic closes only its connection.
 
 Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
 quests here. The nixpkgs bump broke the Linux zigbuild release builds (its
-GCC 16 miscompiles lld 21, fixed upstream and waiting on `nixpkgs-unstable`),
+GCC 16 miscompiles lld 21; fixed by bumping nixpkgs past the upstream fix),
 and fat LTO in the release profile broke the fuzz build. Audio quality has been
 red since it landed, against budgets recorded locally; re-measuring them on
 the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
