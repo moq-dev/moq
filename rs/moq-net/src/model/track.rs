@@ -2708,6 +2708,17 @@ impl Producer {
 		}
 	}
 
+	/// Restart the age of every arrival gap reaching into `groups`, which the live feed's
+	/// subscription newly asks for.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/ingest.md
+	pub(crate) fn demand_arrivals(&self, groups: ops::Range<u64>) {
+		if let Ok(mut state) = self.modify() {
+			let now = state.cache.pool().now_wall();
+			state.arrivals.demand(groups, now);
+		}
+	}
+
 	/// Readers get nothing from the cache until [`Self::set_live`]: the upstream
 	/// subscription ended with this copy still held, so what it cached may go stale.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
