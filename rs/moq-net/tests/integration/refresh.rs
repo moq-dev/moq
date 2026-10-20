@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! Refresh joins traverse two real protocol hops, judged independently from each cache.
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 use moq_net::{Hop, Version, origin, track};
