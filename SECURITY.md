@@ -24,4 +24,4 @@ Anything received over the network is untrusted, so we treat these as vulnerabil
 - Leaking one session's media or metadata to another.
 
 Bugs in dependencies are in scope when our code is affected.
-`rs/moq-quic` is a hard fork of quinn, so quinn advisories are ported by hand; tell us if we missed one.
+`rs/moq-quic`, `rs/moq-sock`, and `rs/moq-tokio` carry a hard fork of quinn that `cargo audit` can't match, so quinn advisories are ported by hand; tell us if we missed one.
