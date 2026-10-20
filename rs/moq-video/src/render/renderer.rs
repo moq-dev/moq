@@ -1435,7 +1435,7 @@ mod tests {
 	/// GPU. Run with `--ignored`.
 	#[cfg(apple)]
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Metal GPU; see quest/m3/video-hardware.md"]
 	async fn imports_survive_decoder_pool_recycling() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(256, 256);
@@ -1465,7 +1465,7 @@ mod tests {
 	/// Run with `--ignored`.
 	#[cfg(apple)]
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Metal GPU; see quest/m3/video-hardware.md"]
 	async fn the_metal_import_matches_the_cpu_path() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(64, 64);

@@ -77,7 +77,7 @@ async fn open() -> playback::Engine {
 /// The whole path: open the default device, play a tone, and confirm the mixer
 /// saw it and the device drained it.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs an output device; run by just rs audio-devices"]
 async fn plays_a_tone_through_the_default_device() {
 	let engine = open().await;
 	let mut sink = engine.sink(input()).expect("a sink");
@@ -105,7 +105,7 @@ async fn plays_a_tone_through_the_default_device() {
 /// Two sinks on one device, which is the case a call with several participants
 /// hits and the reason `Engine` and `Sink` are separate types.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs an output device; run by just rs audio-devices"]
 async fn mixes_two_sinks_and_honors_volume() {
 	let engine = open().await;
 
@@ -136,7 +136,7 @@ async fn mixes_two_sinks_and_honors_volume() {
 /// enumeration is not a promise, since a device can be listed but held
 /// exclusively or backed by nothing.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs an output device; run by just rs audio-devices"]
 async fn switches_devices_without_dropping_sinks() {
 	let devices = playback::devices().await.expect("device enumeration");
 	assert!(!devices.is_empty(), "no output devices");
@@ -176,7 +176,7 @@ async fn switches_devices_without_dropping_sinks() {
 /// The driver thread belongs to the sinks as much as the engine, so playback
 /// survives dropping the handle it was created from.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs an output device; run by just rs audio-devices"]
 async fn sink_outlives_its_engine() {
 	let mut sink = {
 		let engine = open().await;

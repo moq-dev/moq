@@ -1113,7 +1113,7 @@ mod tests {
 	/// microphone then stops hearing the speaker is an acoustic question about
 	/// the room, not something a test can assert.
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs an output device; run by just rs audio-devices"]
 	async fn taps_a_real_output_device() {
 		let engine = playback::Engine::open(playback::Config::default())
 			.await
