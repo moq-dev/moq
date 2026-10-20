@@ -144,6 +144,11 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 	moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
 		.expect("no subscriber appeared");
+	// Let the publisher answer while the track is still empty. Before draft 20, a group
+	// written first sits below SUBSCRIBE_OK's Largest Object, so it would arrive as a
+	// joining FETCH, which the track ending first refuses, not as the subscription's own
+	// late stream. Paused time advances only once every task is idle.
+	moq_clock::sleep(Duration::from_millis(1)).await;
 
 	pair.server_transport.hold_unis();
 	if final_sequence > 0 {

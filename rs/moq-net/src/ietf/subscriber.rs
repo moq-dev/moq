@@ -1128,8 +1128,8 @@ where
 		tracing::debug!(%prefix, "subscribe_namespace sent");
 
 		// Read response
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		let count = match type_id {
@@ -1191,6 +1191,7 @@ where
 				negotiated,
 				&mut live,
 				Initial { initial, snapshot },
+				&mut messages,
 			)
 			.await;
 		for (path, advert) in live {
@@ -1206,6 +1207,7 @@ where
 	/// `live` tracks the suffixes this stream has advertised, so a repeat is recognized
 	/// as an update rather than a second advertisement, and the caller can release
 	/// whatever is still held when the stream ends.
+	#[allow(clippy::too_many_arguments)]
 	async fn run_namespace_entries<T: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<T, Version>,
@@ -1214,19 +1216,19 @@ where
 		negotiated: ietf::Negotiated,
 		live: &mut HashMap<PathOwned, Advertisement>,
 		mut initial: Initial,
+		messages: &mut super::request_stream::Messages<S>,
 	) -> Result<(), Error> {
 		loop {
 			// Every counted NAMESPACE is in the origin by now, dropped ones included.
 			if initial.initial == 0 {
 				initial.snapshot = None;
 			}
-			let type_id = match stream.reader.varint_maybe().await? {
-				Some(id) => id,
+			let super::request_stream::Framed(type_id, body) = match messages.next(&mut stream.reader).await? {
+				Some(message) => message,
 				// A stream ending inside the counted set cut it short.
 				None if initial.initial > 0 => return Err(Error::ProtocolViolation),
 				None => break,
 			};
-			let body: ietf::Body = stream.reader.decode().await?;
 			let mut data = body.decoder(self.version);
 
 			match type_id {
@@ -1695,6 +1697,7 @@ where
 		// does, and the caller's guard ends it when the old grant does. Messages behind a
 		// pending verdict wait in `renewal`, handled in order once it resolves.
 		let mut renewal = request_update::Renewal::<(u64, ietf::Body)>::default();
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		// Draft-19+ only: the peer finished its send direction, which does not withdraw the
 		// advertisement there, so stop reading and keep watching the writer.
 		let mut finished = false;
@@ -1734,10 +1737,7 @@ where
 					// Keep reading while a verdict is pending, so a withdrawal still ends the
 					// announce: a buffered update must not mask a later terminal.
 					if !finished {
-						return match stream
-							.reader
-							.poll_decode_maybe::<super::request_stream::Framed>(&mut cx)
-						{
+						return match messages.poll_next(&mut stream.reader, &mut cx) {
 							Poll::Ready(Ok(Some(super::request_stream::Framed(id, body)))) => {
 								Poll::Ready(Turn::Message(id, body))
 							}
@@ -1758,7 +1758,18 @@ where
 						// Its request ID is spent on arrival, so one dropped with the queue stays spent.
 						if self.version != Version::Draft16 {
 							let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
-							self.spend(update_id)?;
+							if let Err(err) = self.spend(update_id) {
+								if matches!(err, Error::GoingAway) {
+									return Ok(Withdraw::Cancel(
+										update_id,
+										crate::auth::Refusal {
+											error: err,
+											reason: "going away".to_string(),
+										},
+									));
+								}
+								return Err(err);
+							}
 							spent.insert(update_id);
 						}
 						// Decoded on arrival too, so a session-fatal update still closes the session
@@ -1858,8 +1869,20 @@ where
 			// adapter already spent it when it routed the update here, and a queued one was
 			// spent when it arrived.
 			let update_id = ietf::RequestId::decode(&mut body.decoder(self.version), self.version)?;
-			if self.version != Version::Draft16 && !spent.remove(&update_id) {
-				self.spend(update_id)?;
+			if self.version != Version::Draft16
+				&& !spent.remove(&update_id)
+				&& let Err(err) = self.spend(update_id)
+			{
+				if matches!(err, Error::GoingAway) {
+					return Ok(Withdraw::Cancel(
+						update_id,
+						crate::auth::Refusal {
+							error: err,
+							reason: "going away".to_string(),
+						},
+					));
+				}
+				return Err(err);
 			}
 			let msg = match ietf::PublishNamespaceUpdate::decode_msg(&mut data, self.version) {
 				// A token refusal rejects the update, which withdraws the advertisement as
@@ -2055,6 +2078,9 @@ where
 	/// Spend a peer's request ID, closing the session on one it already used.
 	fn spend(&self, id: RequestId) -> Result<(), Error> {
 		if let Err(err) = self.control.accept(id) {
+			if matches!(err, Error::GoingAway) {
+				return Err(err);
+			}
 			self.session.clone().close(
 				super::error::to_session_code(&crate::SessionError::from(&err)),
 				"invalid request ID",
@@ -2102,46 +2128,15 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::PublishNamespace, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				stream.writer.buffer_varint(ietf::PublishNamespaceError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::PublishNamespaceError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.buffer_varint(ietf::RequestError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				stream.writer.buffer_varint(ietf::RequestError::ID)?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
-		Ok(())
+		super::request_stream::write_error(
+			&mut stream.writer,
+			request::Kind::PublishNamespace,
+			request_id,
+			err,
+			reason,
+			self.version,
+		)
+		.await
 	}
 
 	/// Refuse a PUBLISH on the bidi stream that carries it.
@@ -2152,46 +2147,15 @@ where
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		let error_code = request::to_code(err, request::Kind::Publish, self.version);
-
-		match self.version {
-			Version::Draft14 => {
-				stream.writer.varint(ietf::PublishError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::PublishError {
-						request_id,
-						error_code,
-						reason_phrase: reason.into(),
-					})
-					.await?;
-			}
-			Version::Draft15 | Version::Draft16 => {
-				stream.writer.varint(ietf::RequestError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: Some(request_id),
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-			_ => {
-				stream.writer.varint(ietf::RequestError::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::RequestError {
-						request_id: None,
-						error_code,
-						reason_phrase: reason.into(),
-						retry_interval: 0,
-					})
-					.await?;
-			}
-		}
-		Ok(())
+		super::request_stream::write_error(
+			&mut stream.writer,
+			request::Kind::Publish,
+			request_id,
+			err,
+			reason,
+			self.version,
+		)
+		.await
 	}
 
 	/// Attach the route for one newly advertised namespace, returning the id that names
@@ -2859,9 +2823,10 @@ where
 			Gone,
 		}
 
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let mut retired = false;
 		let setup = {
-			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
+			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream, &mut messages));
 			loop {
 				let setup = kio::wait(|waiter| {
 					let response = waiter.poll_future(response.as_mut());
@@ -3117,11 +3082,11 @@ where
 			group: largest.group,
 			object: largest.object.saturating_add(1),
 		});
-		// REQUEST_UPDATEs sent and not yet answered. Drafts 14-16 answer on the control
-		// stream by the update's own Request ID, which reaches no subscription, so only
-		// later drafts count them.
+		// REQUEST_UPDATEs sent and not yet answered. Draft-14 answers none, and draft-15's
+		// answer names only the update's own Request ID, which reaches no subscription, so
+		// only draft-16 on count them; the adapter routes draft-16's back by that ID.
 		let unanswered = AtomicU64::new(0);
-		let answered_here = !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16);
+		let answered_here = !matches!(self.version, Version::Draft14 | Version::Draft15);
 
 		let mut fetch_done = fetching.is_none();
 		// Our grant stopped covering the track, which is aborted rather than kept lingering.
@@ -3130,7 +3095,12 @@ where
 		// Nobody subscribing at all (only fetches asked) needs no subscription.
 		let mut subscribed = track.subscription().is_some();
 		let idle = {
-			let mut done = std::pin::pin!(Self::read_publish_done(&mut stream.reader, self.version, &unanswered));
+			let mut done = std::pin::pin!(Self::read_publish_done(
+				&mut stream.reader,
+				self.version,
+				&unanswered,
+				&mut messages
+			));
 			loop {
 				let end = kio::wait(|waiter| {
 					if gate.poll_denied(waiter).is_ready() {
@@ -3436,17 +3406,15 @@ where
 		reader: &mut Reader<S::RecvStream, Version>,
 		version: Version,
 		unanswered: &AtomicU64,
+		messages: &mut super::request_stream::Messages<S>,
 	) -> Result<u64, Error> {
 		// A refused update is followed by PUBLISH_DONE, which ends the subscription. Its
 		// count stays, so no further update goes out meanwhile, and no answer is owed.
 		let mut refused = false;
 		loop {
-			let type_id = match reader.varint_maybe().await? {
-				Some(type_id) => type_id,
-				None => return Err(Error::ProtocolViolation),
-			};
+			let super::request_stream::Framed(type_id, body) = messages.message(reader).await?;
 			if type_id == ietf::PublishDone::ID {
-				let msg: ietf::PublishDone = reader.decode().await?;
+				let msg: ietf::PublishDone = body.message(version)?;
 				tracing::debug!(message = ?msg, "received publish done");
 				msg.end(version)?;
 				return Ok(msg.stream_count);
@@ -3456,7 +3424,6 @@ where
 			if !answer {
 				return Err(Error::UnexpectedMessage);
 			}
-			let body: ietf::Body = reader.decode().await?;
 			let mut data = body.decoder(version);
 			match type_id {
 				ietf::RequestOk::ID => {
@@ -3677,8 +3644,9 @@ where
 				})
 				.map(drop)
 		};
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let accepted = {
-			let mut response = std::pin::pin!(self.read_fetch_response(&mut stream));
+			let mut response = std::pin::pin!(self.read_fetch_response(&mut stream, &mut messages));
 			kio::wait(|waiter| {
 				if cancelled(waiter).is_ready() {
 					return Poll::Ready(false);
@@ -3690,8 +3658,31 @@ where
 			.await
 		};
 		if accepted {
-			// The request stays open while the subscription still needs its fill.
-			kio::wait(cancelled).await;
+			// The request stays open while the subscription still needs its fill. From draft 18
+			// it may carry a GOAWAY meanwhile; before that, nothing follows the answer here.
+			let mut finished = matches!(
+				self.version,
+				Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+			);
+			let mut failed = false;
+			kio::wait(|waiter| {
+				if !finished {
+					let mut cx = waiter.context();
+					match messages.poll_end(&mut stream.reader, &mut cx) {
+						Poll::Ready(Ok(())) => finished = true,
+						Poll::Ready(Err(_)) => {
+							failed = true;
+							return Poll::Ready(());
+						}
+						Poll::Pending => {}
+					}
+				}
+				cancelled(waiter)
+			})
+			.await;
+			if failed {
+				settle_join_live(&fill, live);
+			}
 		} else {
 			settle_join_live(&fill, live);
 		}
@@ -3701,9 +3692,12 @@ where
 
 	/// `true` when the publisher answered FETCH_OK. A FETCH_ERROR / REQUEST_ERROR is a
 	/// refusal, not a session error: the live subscription continues.
-	async fn read_fetch_response(&self, stream: &mut Stream<S, Version>) -> Result<bool, Error> {
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+	async fn read_fetch_response(
+		&self,
+		stream: &mut Stream<S, Version>,
+		messages: &mut super::request_stream::Messages<S>,
+	) -> Result<bool, Error> {
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		match type_id {
@@ -3723,10 +3717,13 @@ where
 		}
 	}
 
-	async fn read_subscribe_response(&self, stream: &mut Stream<S, Version>) -> Result<Option<Accepted>, Error> {
+	async fn read_subscribe_response(
+		&self,
+		stream: &mut Stream<S, Version>,
+		messages: &mut super::request_stream::Messages<S>,
+	) -> Result<Option<Accepted>, Error> {
 		// Read type_id + size + body from the stream
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		match type_id {
@@ -3876,8 +3873,8 @@ where
 	/// Read the answer to a TRACK_STATUS: TRACK_STATUS_OK, or the publisher's refusal as an
 	/// error.
 	async fn read_track_status_response(&self, stream: &mut Stream<S, Version>) -> Result<ietf::TrackStatusOk, Error> {
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		let code = match type_id {
@@ -4922,11 +4919,12 @@ where
 			Ok::<_, Error>(())
 		}
 		.await;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let mut retired = false;
 		let res = match res {
 			Err(err) => Some(Err(err)),
 			Ok(()) => {
-				let mut response = std::pin::pin!(self.read_group_fetch_response(&mut stream));
+				let mut response = std::pin::pin!(self.read_group_fetch_response(&mut stream, &mut messages));
 				kio::wait(|waiter| {
 					let response = waiter.poll_future(response.as_mut());
 					if let Poll::Ready(Err(err)) = response {
@@ -5057,7 +5055,7 @@ where
 					Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 						super::request_stream::poll_legacy_end(&mut stream, self.version, &mut cx)
 					}
-					_ => stream.reader.poll_closed(&mut cx),
+					_ => messages.poll_end(&mut stream.reader, &mut cx),
 				};
 				match closed {
 					Poll::Ready(Err(err)) => return Poll::Ready(Some(err)),
@@ -5117,9 +5115,12 @@ where
 	}
 
 	/// Read the answer to a group FETCH: FETCH_OK, or the publisher's refusal as an error.
-	async fn read_group_fetch_response(&self, stream: &mut Stream<S, Version>) -> Result<ietf::FetchOk, Error> {
-		let type_id = stream.reader.varint().await?;
-		let body: ietf::Body = stream.reader.decode().await?;
+	async fn read_group_fetch_response(
+		&self,
+		stream: &mut Stream<S, Version>,
+		messages: &mut super::request_stream::Messages<S>,
+	) -> Result<ietf::FetchOk, Error> {
+		let super::request_stream::Framed(type_id, body) = messages.message(&mut stream.reader).await?;
 		let mut data = body.decoder(self.version);
 
 		match type_id {
@@ -5704,8 +5705,13 @@ mod tests {
 		let mut session = ScriptedSession::eof(responses);
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		let mut reader = Reader::new(recv, Version::Draft19);
-		let result =
-			Subscriber::<ScriptedSession>::read_publish_done(&mut reader, Version::Draft19, &AtomicU64::new(0)).await;
+		let result = Subscriber::<ScriptedSession>::read_publish_done(
+			&mut reader,
+			Version::Draft19,
+			&AtomicU64::new(0),
+			&mut crate::ietf::request_stream::Messages::new(session.clone(), true),
+		)
+		.await;
 		if clean {
 			assert_eq!(result.unwrap(), 0);
 		} else {

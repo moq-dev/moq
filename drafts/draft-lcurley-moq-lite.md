@@ -408,8 +408,15 @@ The publisher replies with a single ANNOUNCE_OK message followed by announcement
 - ANNOUNCE_END: a previously started route is no longer advertised.
 - ANNOUNCE_UPDATE: a previously started advertisement was atomically updated (new hops or cost).
 - ANNOUNCE_RESTART: another publisher instance now serves a previously started advertisement.
+- SYNCED: the initial set is complete.
 
-ANNOUNCE_OK carries metadata that applies to every announcement on the stream: the publisher's own `Hop ID` (the implicit trailing entry of every announcement's path) and the number of initial announcements, which lets the subscriber deliver the initial set as a batch (see [ANNOUNCE_OK](#announce-ok)).
+ANNOUNCE_OK carries metadata that applies to every announcement on the stream: the publisher's own `Hop ID` (the implicit trailing entry of every announcement's path) (see [ANNOUNCE_OK](#announce-ok)).
+The publisher MUST send [SYNCED](#synced) exactly once, after the initial set.
+The subscriber MAY batch announcements until SYNCED; subsequent announcements are live updates.
+The initial set is relative to this hop: a relay answers with what it holds without waiting for upstreams.
+Each reader's pending queue MUST collapse updates by route in insertion order, rewriting existing entries in place and omitting an unseen route that ends.
+The publisher MUST send SYNCED at the first drain of that queue or after sending N events, whichever comes first, where N is the queue size when the reader subscribed.
+A retraction of a route already sent MAY precede SYNCED.
 
 Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per advertisement.
 The id never appears on the wire; both endpoints derive it from the message order on the (reliable, ordered) stream.
@@ -949,7 +956,6 @@ It carries metadata that is constant for the lifetime of the stream and applies 
 ANNOUNCE_OK Message {
   Message Length (i)
   Hop ID (i)
-  Active Count (i)
 }
 ~~~
 
@@ -960,11 +966,18 @@ The value 0 is reserved to mean "unknown": either no Hop ID was assigned (e.g. w
 A publisher that assigns a Hop ID MUST choose a non-zero value, and SHOULD assign itself one (a fresh random value per session suffices), so downstream receivers can detect loops through it.
 Receivers reconstruct the full path as `Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
 
-**Active Count**:
-The number of ANNOUNCE_START messages that the publisher will send immediately as the initial set.
-The subscriber MAY block reporting any announcement to the application until all `Active Count` initial announcements have arrived, then deliver the initial set as a batch.
-Any announcements beyond `Active Count` are live updates and SHOULD be reported as they arrive.
-A value of `0` is valid and means the publisher is offering no initial available broadcasts; all subsequent announcements (if any) are live updates.
+## SYNCED {#synced}
+The initial set on a discovery stream has been delivered.
+
+~~~
+SYNCED Message {
+  Type (i) = 0x4
+  Message Length (i) = 0
+}
+~~~
+
+SYNCED has no body and assigns no Announce ID.
+A second SYNCED on the same stream, or a stream ending before SYNCED, is a PROTOCOL_VIOLATION.
 
 
 ## ANNOUNCE_START {#announce-start}
@@ -1194,6 +1207,7 @@ MUST be 0 when `Group End` is 0, since an unbounded subscription has no end grou
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
 A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscription.
 The start and end group can be changed in either direction (growing or shrinking).
+Lowering `Group Start` covers the groups below the old start that the publisher still holds, not only those that arrive later; a group already sent is not sent again.
 
 ~~~
 SUBSCRIBE_UPDATE Message {
@@ -1608,6 +1622,8 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
+
 - A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's. Receivers do not check it, since a received timestamp may be a send time.
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 
@@ -1618,6 +1634,7 @@ The `Message Length` describes the payload size on the wire.
 - SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
 - Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
+- A SUBSCRIBE_UPDATE that lowers `Group Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - A publisher SHOULD order a datagram among the subscription's streams as if it were its Group's stream, ahead of that stream when both exist. It SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.

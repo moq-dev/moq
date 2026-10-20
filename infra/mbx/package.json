@@ -1,0 +1,7 @@
+{
+	"name": "mbx-moq-dev",
+	"private": true,
+	"devDependencies": {
+		"wrangler": "^4"
+	}
+}
