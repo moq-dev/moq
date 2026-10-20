@@ -4550,24 +4550,15 @@ struct Reported {
 	position: Option<Position>,
 	// The stream ended: moving the bounds afterwards does not bring it back.
 	ended: bool,
-	// The task that last polled, woken when the bounds move. One is enough: polling
-	// takes `&mut self`.
-	waker: Option<std::task::Waker>,
+	// The parked poll, woken when the bounds move. Its registration dies with its waiter,
+	// so a dropped `largest()` future leaves nothing behind.
+	parked: kio::WaiterList,
 }
 
 impl Reported {
-	/// Remember the parked task, to wake when the bounds move.
-	fn park(&mut self, waker: &std::task::Waker) {
-		if !self.waker.as_ref().is_some_and(|last| last.will_wake(waker)) {
-			self.waker = Some(waker.clone());
-		}
-	}
-
 	/// The bounds moved: wake a parked poll, since the largest may now be within them.
 	fn bounds_moved(&mut self) {
-		if let Some(waker) = self.waker.take() {
-			waker.wake();
-		}
+		self.parked.wake();
 	}
 }
 
@@ -5708,9 +5699,9 @@ impl Subscriber {
 		let poll = self.poll_largest_within(bounds, waiter);
 		// Only a parked poll waits on the bounds; a finished one is not woken by them.
 		match poll {
-			Poll::Pending => self.largest.park(waiter.waker()),
+			Poll::Pending => waiter.register(&mut self.largest.parked),
 			Poll::Ready(next) => {
-				self.largest.waker = None;
+				self.largest.parked = kio::WaiterList::new();
 				self.largest.ended = next.is_none();
 			}
 		}
@@ -6588,6 +6579,18 @@ mod test {
 			Poll::Ready(None),
 			"the stream already ended"
 		);
+	}
+
+	/// A dropped poll leaves no registration behind for a bounds move to wake.
+	#[test]
+	fn largest_forgets_a_dropped_poll() {
+		let producer = track_producer("test", Info::default());
+		let mut reader = producer.subscribe(replay());
+		let (flag, waiter) = Flag::waiter();
+		assert!(reader.poll_largest(&waiter).is_pending());
+		drop(waiter);
+		reader.set_groups(..);
+		assert!(!flag.take(), "the dropped poll was not woken");
 	}
 
 	/// A poll that reported is not parked, so moving the bounds afterwards does not wake it.
