@@ -107,10 +107,15 @@ authorization and hidden names work exactly as without one.
   of the old instance, so a new subscriber never sees its cached groups.
 
 The epoch and the restart message travel on moq-lite 07, which is opt-in.
-Older moq-lite versions and moq-transport carry neither, so their routes have
-no epoch and a restart reaches them as an end then a start of the path. Without
-an epoch, any other route winning is a restart, even a reconnect over the same
-path, since nothing says it serves the same bytes.
+moq-transport carries the epoch from draft 17 when both sides offer the [epoch
+extension](/draft/moq-epoch), on by default. A restart onto another epoch is
+advertised before the old one is withdrawn, so the path is never absent, and one
+that gains or loses an epoch is an end then a start. Older moq-lite versions,
+older moq-transport drafts, and a side that declines the extension carry no
+epoch. Without an epoch, any other route winning is a restart, even a reconnect
+over the same path, since nothing says it serves the same bytes. A peer that
+ignores the end and start may keep cached objects of the old run under the same
+names, so an end and a start is not a cache flush.
 
 `moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
 RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
@@ -127,9 +132,9 @@ compared. A subscription uses the preferred link that has a route and moves to t
 next when that route goes; a publisher pushes the same broadcast to every CDN.
 
 The move resumes without a seam only between routes with the same epoch, which
-needs moq-lite 07 on both links. A CDN speaking moq-transport carries no epoch, so
-moving onto it, or back off it, is a restart and the player requests the path
-again.
+needs moq-lite 07, or moq-transport draft 17 or later with the epoch extension,
+on both links. A CDN link that carries no epoch makes moving onto it, or back
+off it, a restart, and the player requests the path again.
 
 ### Hidden broadcasts
 

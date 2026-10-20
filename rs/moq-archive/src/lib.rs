@@ -21,6 +21,7 @@ pub mod info;
 mod mock;
 mod path;
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod proof;
 pub mod reader;
 mod recover;

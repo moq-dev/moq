@@ -84,6 +84,10 @@ final class ConnectOptions {
   /// Directory to write qlog traces into; fails unless [qlogSupported].
   final String? qlog;
 
+  /// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
+  /// decrypting a capture. Off by default; on without `SSLKEYLOGFILE` fails.
+  final bool keylog;
+
   /// Set false to stop the WebSocket fallback racing QUIC, e.g. against a
   /// relay that only serves QUIC. On by default.
   final bool? websocketEnabled;
@@ -125,6 +129,7 @@ final class ConnectOptions {
     this.mtuDiscovery,
     this.congestionControl,
     this.qlog,
+    this.keylog = false,
     this.websocketEnabled,
     this.websocketDelay,
     this.reconnect = true,
@@ -164,6 +169,7 @@ final class ConnectOptions {
         mtuDiscovery: mtuDiscovery,
         congestionControl: congestionControl,
         qlog: qlog,
+        keylog: keylog,
       ),
       websocket: MoqWebSocketConfig(
         enabled: websocketEnabled,

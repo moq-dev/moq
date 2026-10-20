@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Build and package the obs-moq plugin for release.
 # Usage: ./build.sh [--target TARGET] [--version VERSION] [--output DIR]
+#                   [--moq-release VERSION | --moq-archive FILE]
 #
 # The required toolchain must already be on PATH; this script only drives
 # CMake. Per platform:
@@ -21,6 +22,7 @@ TARGET=""
 VERSION=""
 OUTPUT_DIR="dist"
 MOQ_RELEASE=""
+MOQ_ARCHIVE_FILE=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -36,6 +38,14 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
+        --moq-archive)
+            MOQ_ARCHIVE_FILE="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+            [[ -f "$MOQ_ARCHIVE_FILE" ]] || {
+                echo "Archive not found: $MOQ_ARCHIVE_FILE" >&2
+                exit 1
+            }
+            shift 2
+            ;;
         --moq-release)
             # Link a published moq-cpp release of this version instead of
             # building cpp/moq from source. CMake fetches the matching
@@ -45,7 +55,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h | --help)
-            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--moq-release VERSION]"
+            echo "Usage: $0 [--target TARGET] [--version VERSION] [--output DIR] [--moq-release VERSION | --moq-archive FILE]"
             exit 0
             ;;
         *)
@@ -54,6 +64,19 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$MOQ_RELEASE" && -n "$MOQ_ARCHIVE_FILE" ]]; then
+    echo "Choose --moq-release or --moq-archive" >&2
+    exit 1
+fi
+if [[ -n "$MOQ_ARCHIVE_FILE" ]]; then
+    archive_name=$(basename "$MOQ_ARCHIVE_FILE")
+    if [[ ! "$archive_name" =~ ^moq-cpp-([0-9]+\.[0-9]+\.[0-9]+)- ]]; then
+        echo "Malformed moq-cpp archive name: $archive_name" >&2
+        exit 1
+    fi
+    MOQ_RELEASE="${BASH_REMATCH[1]}"
+fi
 
 if [[ -z "$TARGET" ]]; then
     TARGET=$(cc -dumpmachine 2>/dev/null || echo unknown)
@@ -96,17 +119,18 @@ OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "Building obs-moq $VERSION for $TARGET (preset: $PRESET)..."
-CONFIGURE_ARGS=()
+# Clear cached archive/source choices when changing package inputs.
+CONFIGURE_ARGS=("-DMOQ_LOCAL=$SCRIPT_DIR/../.." -DMOQ_VERSION= "-DMOQ_ARCHIVE_FILE=$MOQ_ARCHIVE_FILE")
 # Stamp the plugin's compiled-in version (project version, macOS Info.plist,
 # Windows resource) to match what we're building, not buildspec.json's 0.0.1.
 if [[ -n "$VERSION" ]]; then
     CONFIGURE_ARGS+=("-DPLUGIN_VERSION_OVERRIDE=$VERSION")
 fi
 if [[ -n "$MOQ_RELEASE" ]]; then
-    # Empty MOQ_LOCAL forces CMake's release-download branch; MOQ_VERSION and
+    # Empty MOQ_LOCAL selects an archive; MOQ_VERSION and
     # MOQ_TARGET steer it at this target's archive. MOQ_ARCHIVE is correct per
     # preset already.
-    echo "Linking moq-cpp release v$MOQ_RELEASE ($TARGET)"
+    echo "Linking moq-cpp v$MOQ_RELEASE ($TARGET)${MOQ_ARCHIVE_FILE:+ from $MOQ_ARCHIVE_FILE}"
     CONFIGURE_ARGS+=(-DMOQ_LOCAL= "-DMOQ_VERSION=$MOQ_RELEASE" "-DMOQ_TARGET=$TARGET")
 fi
 cmake --preset "$PRESET" ${CONFIGURE_ARGS[@]+"${CONFIGURE_ARGS[@]}"}

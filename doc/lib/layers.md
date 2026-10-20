@@ -33,7 +33,7 @@ Sessions, origins, broadcasts, tracks, and groups: `Client`, `Server`,
 
 | Language | Module | Example |
 | --- | --- | --- |
-| Rust | [`moq_net`](/lib/rs/moq-net), with `moq_tokio` to connect and listen | `moq_net::BroadcastProducer` |
+| Rust | [`moq_net`](/lib/rs/moq-net), with `moq_tokio` to connect and listen | `moq_net::broadcast::Producer` |
 | Python | `moq` | `moq.BroadcastProducer` |
 | Go | `moq.dev/moq` | `moq.BroadcastProducer` |
 | Kotlin | `dev.moq` | `dev.moq.BroadcastProducer` |
@@ -46,8 +46,8 @@ Sessions, origins, broadcasts, tracks, and groups: `Client`, `Server`,
 
 The catalog, encoded-media imports, and container-decoded reads, merging
 Rust's hang and moq-mux: `CatalogProducer`, `CatalogConsumer`, `Timebase`,
-`TrackProducer`, `TrackStreamProducer`, `ContainerProducer`,
-`ContainerStreamProducer`, `TrackConsumer`, and `GroupConsumer`.
+`TrackProducer`, `TrackStreamProducer`, `ContainerProducer`, `TrackConsumer`,
+and `GroupConsumer`.
 
 | Language | Module | Example |
 | --- | --- | --- |

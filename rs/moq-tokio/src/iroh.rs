@@ -23,6 +23,42 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn iroh::endpoint::Cont
 	match family {
 		CongestionControl::Loss => Arc::new(noq_proto::congestion::CubicConfig::default()),
 		CongestionControl::Delay => Arc::new(noq_proto::congestion::Bbr3Config::default()),
+		CongestionControl::None => Arc::new(Unlimited),
+	}
+}
+
+/// No congestion control: a window that never shrinks, too large for noq to pace.
+///
+/// noq has no such controller, so this mirrors moq-quic's `congestion::Unlimited`.
+#[derive(Clone, Copy, Debug)]
+struct Unlimited;
+
+impl noq_proto::congestion::Controller for Unlimited {
+	fn on_congestion_event(&mut self, _: std::time::Instant, _: std::time::Instant, _: bool, _: bool, _: u64, _: u64) {}
+
+	fn on_mtu_update(&mut self, _: u16) {}
+
+	// noq turns its pacer off for any window past `u32::MAX`.
+	fn window(&self) -> u64 {
+		u64::MAX
+	}
+
+	fn clone_box(&self) -> Box<dyn noq_proto::congestion::Controller> {
+		Box::new(*self)
+	}
+
+	fn initial_window(&self) -> u64 {
+		u64::MAX
+	}
+
+	fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+		self
+	}
+}
+
+impl noq_proto::congestion::ControllerFactory for Unlimited {
+	fn build(self: Arc<Self>, _: std::time::Instant, _: u16) -> Box<dyn noq_proto::congestion::Controller> {
+		Box::new(*self)
 	}
 }
 
@@ -200,8 +236,8 @@ impl Config {
 	/// iroh is a single P2P endpoint shared by both roles, so it takes the client
 	/// section (the per-connection knobs are symmetric). It honors the knobs its
 	/// transport-config builder exposes (stream limits, idle timeout, keep-alive,
-	/// MTU discovery, congestion control, flow-control windows). It cannot disable
-	/// GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
+	/// MTU discovery, congestion control, flow-control windows), and key logging. It
+	/// cannot disable GSO, so `gso = false` fails with [`Error::GsoUnsupported`].
 	pub async fn bind(self, quic: &crate::quic::Config) -> Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
@@ -250,6 +286,7 @@ impl Config {
 			Endpoint::builder(iroh::endpoint::presets::N0)
 		}
 		.secret_key(secret_key)
+		.keylog(quic.keylog)
 		.transport_config(transport.build());
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr(addr)?;
@@ -536,6 +573,9 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<noq_proto::congestion::Bbr3>().is_ok());
+
+		let none = congestion_factory(CongestionControl::None).build(now, mtu);
+		assert!(none.into_any().downcast::<Unlimited>().is_ok());
 	}
 
 	/// The connection keep-alive is the resolved interval, not iroh's 5s heartbeat.

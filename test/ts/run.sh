@@ -24,6 +24,7 @@
 #   ./run.sh --leak                # 1080p video with no HRD, filling its level's 24 Mb/s leak
 #   ./run.sh --full                # the same with two audio PIDs, filling its multiplex with no nulls
 #   ./run.sh --fragment-pes        # split generated clear PES headers across packets
+#   ./run.sh --klv                 # add KLV and DVB AC-3, carried as whole PES, and grade them
 #   ./run.sh --delay 2s            # pass the exporter's --delay
 #   ./run.sh --rate 7000000        # bufferbloat: 7 Mb/s to the subscriber behind a deep queue (moq-shaper)
 #   ./run.sh --loss 10             # drop 10% of the relay's datagrams to the subscriber (moq-shaper)
@@ -83,6 +84,7 @@ HEADROOM=""     # the same plus four audio PIDs, in a multiplex faster than the 
 LEAK=""         # publish video with no HRD at its level's leak, as a full-rate feed does
 FULL=""         # the same with audio, in a multiplex the source fills with no nulls
 FRAGMENT_PES="" # use following null slots for fragmented PES headers
+KLV=""          # inject asynchronous and synchronous KLV beside DVB AC-3, and grade every PES
 LOSS=""         # percent of relay -> subscriber datagrams dropped at random by moq-shaper
 RATE=""         # bits/s moq-shaper carries from the relay to the subscriber, behind QUEUE
 QUEUE=""        # how long a datagram may wait for RATE before the path tail-drops it
@@ -170,6 +172,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --fragment-pes)
             FRAGMENT_PES=1
+            shift
+            ;;
+        --klv)
+            KLV=1
             shift
             ;;
         --delay)
@@ -270,11 +276,20 @@ if [[ -n "$FRAGMENT_PES" && -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN
     exit 1
 fi
 
+if [[ -n "$KLV" && -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$PAIR$LIVE$PASSTHROUGH$MPTS" ]]; then
+    echo "error: --klv generates its own clip and grades the demultiplexed export's PES" >&2
+    exit 1
+fi
+
 # An impaired path to the subscriber, 25 ms each way through moq-shaper, so it needs no
 # privileges and leaves the host's network alone. `--rate` congests it the way real paths
 # fail and is what judges the export; `--loss` drops datagrams at random (moq-dev/moq#4613),
 # which real paths do not, so it only proves QUIC retransmission keeps the output whole.
 SHAPED="$LOSS$RATE"
+if [[ -n "$LOSS" && -n "$RATE$LIVE" ]]; then
+    echo "error: --loss cannot be combined with --rate or --live; use --rate without random loss for quality grading" >&2
+    exit 1
+fi
 if [[ -n "$SHAPED" && -n "$ANALYZE_ONLY$PAIR" ]]; then
     echo "error: --loss and --rate impair the round-trip's one subscriber and cannot be combined with --analyze-only or --pair" >&2
     exit 1
@@ -487,6 +502,22 @@ elif [[ -n "$FULL" ]]; then
     tsp -I file "$PADDED_TS" -P filter --negate --pid 0x1FFF \
         -P pcradjust --bitrate "$BITRATE" --ignore-pts --ignore-dts -O file "$SRC_TS"
     echo "  ${NULLS} null packets dropped of ${PACKETS}: ${BITRATE} b/s"
+elif [[ -n "$KLV" ]]; then
+    echo "### generating ~${DURATION}s clip with DVB AC-3 and KLV"
+    # The importer decodes neither DVB AC-3 (system_b's private data with an AC-3 descriptor)
+    # nor KLV, so it carries each PES whole. FFmpeg's default PES size puts several AC-3 sync
+    # frames in each, whose PTS times only the first: the export has to remove each from the
+    # T-STD buffer at its own decode time. klv.py then fills null slots with KLV.
+    ffmpeg -y -hide_banner -loglevel error \
+        -f lavfi -i "testsrc=size=1280x720:rate=25" \
+        -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
+        -f lavfi -i "sine=frequency=500:sample_rate=48000" \
+        -t "$DURATION" -map 0:v -map 1:a -map 2:a -ac 2 \
+        -c:v libx264 -profile:v high -preset veryfast -pix_fmt yuv420p \
+        -x264-params "keyint=25:min-keyint=25:scenecut=0" -b:v 8M \
+        -c:a:0 aac -b:a:0 128k -c:a:1 ac3 -b:a:1 192k \
+        -f mpegts -mpegts_flags system_b -muxrate "$BITRATE" -pcr_period 20 "$HARNESS_RUN/media.ts"
+    python3 "$DIR/klv.py" inject "$HARNESS_RUN/media.ts" "$SRC_TS" --report "$HARNESS_RUN/klv-injected.json"
 else
     echo "### generating ~${DURATION}s broadcast-like ${OPEN_GOP:+open-GOP }clip with ffmpeg"
     # CBR with a 20 ms PCR, like a contribution feed. Not cosmetic: `regulate`
@@ -834,7 +865,7 @@ fi
 # pair. Other arms retain their specific structural/model oracles until their
 # acquisition and decoder-priming contracts are covered by fixtures. A path
 # narrower than the media sheds groups, which only holes.py grades.
-if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$RATE" ]]; then
+if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$KLV$RATE" ]]; then
     if ! python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode"; then
         # The exporter counts what it dropped (late), trimmed (before its output began),
         # and lost upstream (gaps), and logs each loss, so the failure says which it was.
@@ -853,7 +884,7 @@ fi
 # grade only the access units that arrived. Under --rate the path is narrower than the media,
 # so the export has to shed: only whole groups, and never the last, which a stall or a
 # latency that grew with the queue would cost.
-if [[ -n "$HRD$HEADROOM$LEAK$FULL" || (-n "$RATE" && -z "$SOURCE") ]]; then
+if [[ -n "$HRD$HEADROOM$LEAK$FULL$KLV" || (-n "$RATE" && -z "$SOURCE") ]]; then
     echo
     if ! python3 "$DIR/holes.py" "$SUB_TS" "$SRC_TS" ${RATE:+--shed}; then
         echo >&2
@@ -890,6 +921,17 @@ if [[ -n "$OPEN_GOP" ]]; then
     if ! python3 "$DIR/open-gop.py" "$SRC_TS" "$SUB_TS" $STRICT; then
         echo >&2
         echo "error: open-GOP analysis failed (see round-trip logs below)" >&2
+        dump_logs
+        exit 1
+    fi
+fi
+
+# Each private PES is the source's, at the source's placement.
+if [[ -n "$KLV" ]]; then
+    echo
+    if ! python3 "$DIR/klv.py" grade "$SRC_TS" "$SUB_TS" --report-json "$HARNESS_RUN/klv.json"; then
+        echo >&2
+        echo "error: KLV analysis failed (see round-trip logs below)" >&2
         dump_logs
         exit 1
     fi

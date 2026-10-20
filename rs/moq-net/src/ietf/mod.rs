@@ -17,6 +17,7 @@ pub mod cluster;
 #[cfg(feature = "async")]
 mod control;
 mod datagram;
+pub(crate) mod epoch;
 pub(crate) mod error;
 mod fetch;
 mod filter;
@@ -26,8 +27,6 @@ pub mod hidden;
 mod location;
 pub mod message;
 mod namespace;
-#[cfg(feature = "async")]
-mod new_group;
 mod object;
 pub mod peer;
 mod priority;

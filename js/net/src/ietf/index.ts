@@ -4,6 +4,7 @@ export * as Auth from "./auth.ts";
 export * as Cluster from "./cluster.ts";
 export * from "./connection.ts";
 export * from "./datagram.ts";
+export * as Epoch from "./epoch.ts";
 export * from "./fetch.ts";
 export * from "./goaway.ts";
 export * from "./hidden.ts";

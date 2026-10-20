@@ -5,7 +5,9 @@
 //! deadline. The rest of the deadline is handed to whatever the application
 //! layers on top (HTTP/3, MoQ SETUP) as [`Info::deadline`].
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use moq_clock::Instant;
 
 /// How an endpoint bounds the handshakes it accepts.
 #[derive(Clone, Debug, Default)]

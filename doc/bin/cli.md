@@ -90,9 +90,16 @@ taking the wrap that lands it nearest the clock, so media that gets more than
 13.25 hours ahead of it (a jump that far, or a long file read faster than real
 time) reads as a rewind.
 
-MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
-and subtitle PIDs through as tracks. SCTE-35 cues wait for a media timestamp;
-input ending or declaring a clock break before that timestamp is refused.
+MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3/Opus, and passes
+SCTE-35 and every other stream it does not decode (KLV, subtitles, DVB AC-3)
+through as tracks. Each such PES goes through whole, at its place on the program clock
+(PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
+is refused with a warning: any in a program with no PCR, and one whose PES carry
+an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
+or have a malformed header.
+SCTE-35 cues and private PES wait for a media timestamp; input ending or
+declaring a clock break before that timestamp is refused, so a program of data
+alone fails.
 PES and untimed section staging share a bounded budget, so a source that never
 supplies a PES boundary or clock fails rather than retaining bytes indefinitely.
 It takes one program: a multi-program
@@ -104,7 +111,8 @@ logs feed health (stalled streams, TR 101 290 errors) without changing what it
 publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
 program aboard, for what demultiplexing cannot carry, such as a scrambled
-service; `export ts --passthrough` writes it back out. FLV covers H.264 + AAC.
+service; `export ts --passthrough` writes it back out. FLV accepts the same
+legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
 `import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
 re-encoding. RTP rides the RTSP connection, so run it on the camera's network
@@ -116,7 +124,7 @@ including when the camera sends no media for 10 seconds or no keyframe for 30,
 until a fatal error (refused access, or no stream it can publish), and
 each RTSP session is a new broadcast with its own catalog, since the session's
 RTP time restarts; a camera whose clock jumps mid-session is restarted the same
-way. Embed [`moq-rtsp`](https://docs.rs/moq-rtsp) for your own supervision,
+way. Embed [`moq-rtsp`](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp) for your own supervision,
 such as two of a camera's URLs as renditions of one broadcast.
 
 ```bash
@@ -329,12 +337,12 @@ rtsp` one per RTSP session, and `import ts --program all` one per program.
 A restarted process takes the name at once: viewers see the broadcast restart,
 and their next subscribe reaches the new run instead of waiting for its group
 numbers to catch up. Epochs cross a connection only on moq-lite 07, which is
-opt-in, and order by the host's clock there, so a host whose clock runs behind
-the old run's waits for it to close. Older versions and moq-transport carry no
-epoch, so a restart from another session is the newest route at an equal cost,
-or a better one.
+opt-in, and on moq-transport draft 17 and later, and order by the host's clock
+there, so a host whose clock runs behind the old run's waits for it to close.
+Other versions carry no epoch, so a restart from another session is the newest
+route at an equal cost, or a better one.
 
-On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
+On a version that carries epochs, two processes that pass the same `--epoch` (a UUIDv7, such as
 `uuidgen -7` prints) are one publisher: relays fail over between them
 mid-group, so they must produce identical tracks with aligned groups. Each
 derives its catalog clock from the epoch's wall time, so fed one stream they
@@ -444,8 +452,8 @@ the break. `--linger` also bounds a mid-stream stitch from the replacement
 announcement through its first catalog snapshot; expiry exits 1. The default
 `--linger 0s` follows only a replacement whose catalog is already available.
 Without `--stitch` the export stays on the old publisher while it is
-up. Only lite-07 sessions carry epochs, so on the default version every return
-is a replacement. An export that fails while the broadcast stays up, such as on
+up. Only lite-07 and moq-transport draft 17+ sessions carry epochs, so on the
+default version every return is a replacement. An export that fails while the broadcast stays up, such as on
 a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
 so the other formats refuse `--linger`.
 

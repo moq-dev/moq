@@ -30,11 +30,11 @@ mod cid_queue;
 pub mod coding;
 mod constant_time;
 mod entropy;
-// Not part of the public API: compiled only for the crate's own tests and for the
-// `fuzz/` harness. The connection target needs a TLS provider.
+// Not part of the public API: compiled only for the crate's own tests, the benches, and
+// the `fuzz/` harness. The connection target needs ring or aws-lc-rs for the endpoint's keys.
 #[cfg(all(
     any(test, feature = "fuzz"),
-    any(feature = "rustls-aws-lc-rs", feature = "rustls-ring")
+    any(feature = "aws-lc-rs", feature = "ring")
 ))]
 #[doc(hidden)]
 pub mod fuzz;
