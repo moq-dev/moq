@@ -140,7 +140,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(payload))) = consumer.poll_next(&waiter) {
-			out.push(payload);
+			out.push(payload.value);
 		}
 		out
 	}
@@ -317,7 +317,7 @@ mod test {
 				"compression={compression}"
 			);
 			assert!(refused(producer.append(huge.clone())), "compression={compression}");
-			assert!(producer.demand().is_used(), "a refusal must not end the track");
+			assert!(producer.demand().wanted().is_some(), "a refusal must not end the track");
 
 			producer.append(&b"second"[..]).unwrap();
 			producer.finish().unwrap();
@@ -498,7 +498,7 @@ mod test {
 
 		assert!(matches!(
 			consumer.poll_next(&waiter),
-			Poll::Ready(Ok(Some(payload))) if payload == Bytes::from_static(b"first")
+			Poll::Ready(Ok(Some(payload))) if payload.value == Bytes::from_static(b"first")
 		));
 		assert!(matches!(
 			consumer.poll_next(&waiter),
@@ -540,7 +540,7 @@ mod test {
 
 		assert!(matches!(
 			consumer.poll_next(&waiter),
-			Poll::Ready(Ok(Some(payload))) if payload == vec![1u8; 8]
+			Poll::Ready(Ok(Some(payload))) if payload.value == vec![1u8; 8]
 		));
 		assert!(matches!(
 			consumer.poll_next(&waiter),

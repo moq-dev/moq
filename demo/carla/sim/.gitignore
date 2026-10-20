@@ -1,0 +1,7 @@
+# The runtime venv, rebuilt by venv.sh.
+.venv/
+__pycache__/
+*.egg-info/
+# Left behind by the Python checks.
+.pytest_cache/
+.ruff_cache/

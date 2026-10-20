@@ -6,8 +6,10 @@
 //! subscriber `S` links to both, ranking `A` first with
 //! [`origin::Producer::with_preference`] while pricing `B` cheaper, so only the
 //! preference puts `A` ahead. Losing `A` moves `S` to `B`, and `A` returning moves it
-//! back. Between lite-07 routes with the same epoch each move resumes the subscription.
-//! A moq-transport `B` carries no epoch, so each move is a restart and a re-request.
+//! back. Between routes with the same epoch each move resumes the subscription, whether
+//! `B` speaks lite-07 or moq-transport with the MoQ Epoch extension. A moq-transport `B`
+//! that cannot carry the epoch (before draft-17) makes each move a restart and a
+//! re-request.
 
 use crate::support;
 
@@ -265,12 +267,11 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
 	}
 }
 
-/// Two lite-07 CDNs under one epoch: `S` reads through `A` although `B` is cheaper,
-/// resumes on `B` when `A` goes, and moves back once `A` returns, every frame once.
-#[moq_clock::test]
-async fn preferred_cdn_fails_over_and_back() {
+/// Two CDNs under one epoch, `B` over `secondary`: `S` reads through `A` although `B` is
+/// cheaper, resumes on `B` when `A` goes, and moves back once `A` returns, every frame once.
+async fn fails_over_and_back(secondary: &str) {
 	moq_clock::timeout(TEST_TIMEOUT, async {
-		let mut topology = Topology::new("moq-lite-07-wip".parse().unwrap()).await;
+		let mut topology = Topology::new(secondary.parse().unwrap()).await;
 		let mut announced = topology.subscriber.consume().announced();
 		let start = announced.next().await.expect("announced");
 		assert!(
@@ -306,13 +307,31 @@ async fn preferred_cdn_fails_over_and_back() {
 	.expect("timed out");
 }
 
-/// A moq-transport `B` carries no epoch, so `S` cannot resume onto it: losing `A`
-/// restarts the path and ends the subscription, and a re-request lands on `B`. `A`
-/// returning is another restart, and a re-request lands back on `A`.
 #[moq_clock::test]
-async fn transport_secondary_restarts() {
+async fn preferred_cdn_fails_over_and_back() {
+	fails_over_and_back("moq-lite-07-wip").await;
+}
+
+/// A moq-transport `B` with the MoQ Epoch extension carries `P`'s epoch, so `S` resumes
+/// across a chain mixing lite-07 and moq-transport exactly as it does over lite-07 alone.
+#[moq_clock::test]
+async fn transport_secondary_fails_over_and_back() {
+	fails_over_and_back("moq-transport-22").await;
+}
+
+/// The same over the first draft that can carry the epoch.
+#[moq_clock::test]
+async fn transport_17_secondary_fails_over_and_back() {
+	fails_over_and_back("moq-transport-17").await;
+}
+
+/// A moq-transport `B` before draft-17 carries no epoch, so `S` cannot resume onto it:
+/// losing `A` restarts the path and ends the subscription, and a re-request lands on `B`.
+/// `A` returning is another restart, and a re-request lands back on `A`.
+#[moq_clock::test]
+async fn epochless_secondary_restarts() {
 	moq_clock::timeout(TEST_TIMEOUT, async {
-		let mut topology = Topology::new("moq-transport-22".parse().unwrap()).await;
+		let mut topology = Topology::new("moq-transport-16".parse().unwrap()).await;
 		let mut announced = topology.subscriber.consume().announced();
 		let start = announced.next().await.expect("announced");
 		assert!(via_a(&start), "{start:?}");

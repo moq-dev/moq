@@ -171,6 +171,8 @@ const (
 	CongestionControlLoss = ffi.MoqCongestionControlLoss
 	// CongestionControlDelay is delay-based (BBR): it keeps queues short and the send rate steady.
 	CongestionControlDelay = ffi.MoqCongestionControlDelay
+	// CongestionControlNone runs no congestion control and no pacing, for tests and controlled links.
+	CongestionControlNone = ffi.MoqCongestionControlNone
 )
 
 // Versions lists the protocol versions offered by default, most preferred

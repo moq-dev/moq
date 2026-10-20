@@ -40,7 +40,7 @@ pub struct Decoder<T> {
 	plain: Vec<u8>,
 
 	/// Reused key buffers for validating remote patches before changing the baseline.
-	check: RefCell<crate::merge::CheckScratch>,
+	check: RefCell<crate::strict::Scratch>,
 
 	/// The reconstructed value, `None` until the first snapshot.
 	current: Option<Value>,
@@ -56,7 +56,7 @@ impl<T> Decoder<T> {
 			max_size: config.max_size,
 			flate: None,
 			plain: Vec::new(),
-			check: RefCell::new(crate::merge::CheckScratch::default()),
+			check: RefCell::new(crate::strict::Scratch::default()),
 			current: None,
 			_marker: PhantomData,
 		}
@@ -81,8 +81,7 @@ impl<T> Decoder<T> {
 		{
 			return Err(Error::TooLarge(limit));
 		}
-		// A `Value` keeps only the last of a repeated key, so refuse one before parsing, as deltas do.
-		crate::merge::check(plain, &self.check)?;
+		crate::strict::check(plain, &self.check)?;
 		self.current = Some(serde_json::from_slice(plain)?);
 		self.check_size()
 	}
@@ -228,15 +227,26 @@ mod test {
 		out
 	}
 
-	/// A snapshot that repeats a key is refused rather than resolved to the last copy, the same as a
-	/// delta, so a reader can't be handed a different value than a stricter parser would see.
+	/// A frame that repeats a key is refused rather than resolved to the last copy, so a reader
+	/// can't be handed a different value than a stricter parser would see.
 	#[test]
-	fn duplicate_snapshot_keys_are_rejected() {
-		for payload in [br#"{"version":5,"version":3}"#.as_slice(), br#"{"a":{"b":1,"b":2}}"#] {
+	fn duplicate_keys_are_refused() {
+		let vectors = crate::strict::test::vectors();
+		for payload in &vectors.refused {
 			let mut decoder = Decoder::<Value>::new(consume(Compression::None));
-			let err = decoder.snapshot(payload).unwrap_err();
-			assert!(err.to_string().contains("duplicate JSON object key"), "{err}");
+			let err = decoder.snapshot(payload.as_bytes()).unwrap_err();
+			assert!(matches!(err, Error::DuplicateKey), "{payload}: {err}");
 			assert!(decoder.value().is_none());
+
+			decoder.snapshot(b"{}").unwrap();
+			let err = decoder.delta(payload.as_bytes()).unwrap_err();
+			assert!(matches!(err, Error::DuplicateKey), "{payload}: {err}");
+			assert!(decoder.value().is_none());
+		}
+		for payload in &vectors.accepted {
+			let mut decoder = Decoder::<Value>::new(consume(Compression::None));
+			decoder.snapshot(payload.as_bytes()).unwrap();
+			decoder.delta(payload.as_bytes()).unwrap();
 		}
 	}
 

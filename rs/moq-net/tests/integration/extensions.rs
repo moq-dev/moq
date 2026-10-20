@@ -150,3 +150,76 @@ async fn a_declined_auth_extension_is_not_negotiated() {
 		}
 	}
 }
+
+/// The route `path` is announced on in `origin` right now, if any.
+fn route(origin: &origin::Producer, path: &str) -> Option<origin::Route> {
+	let mut announced = origin.consume().announced();
+	let mut route = None;
+	while let Some(event) = announced.try_next() {
+		match event {
+			moq_net::announce::Event::Start(update)
+			| moq_net::announce::Event::Update(update)
+			| moq_net::announce::Event::Restart(update) => {
+				if update.prefix.as_str() == path {
+					route = Some(update.route);
+				}
+			}
+			moq_net::announce::Event::End(update) => {
+				if update.prefix.as_str() == path {
+					route = None;
+				}
+			}
+		}
+	}
+	route
+}
+
+/// MoQ Epoch carries the publisher's epoch, in either direction, only when both sides
+/// offer it on draft-17 or later. A side declining it, or an older draft, leaves the
+/// route epochless exactly as before the extension, and nothing on the wire breaks the
+/// session.
+#[moq_clock::test]
+async fn an_epoch_crosses_only_when_both_offer_it() {
+	for name in MOQT {
+		let version: Version = name.parse().unwrap();
+		let negotiable = !matches!(name, "moq-transport-14" | "moq-transport-15" | "moq-transport-16");
+		for server_publishes in [true, false] {
+			for declines in [None, Some("server"), Some("client")] {
+				let context = format!("{name}, server publishes: {server_publishes}, declines: {declines:?}");
+				let publisher = produce_origin(1);
+				let subscriber = produce_origin(2);
+
+				let mut options = MockConnectOptions::new(version);
+				match server_publishes {
+					true => {
+						options.server_publish = Some(publisher.consume());
+						options.client_subscribe = Some(subscriber.clone());
+					}
+					false => {
+						options.client_publish = Some(publisher.consume());
+						options.server_subscribe = Some(subscriber.clone());
+					}
+				}
+				let no_epoch = declined(|e| e.epoch = false);
+				match declines {
+					Some("server") => options.server_extensions = no_epoch,
+					Some(_) => options.client_extensions = no_epoch,
+					None => {}
+				}
+				let pair = connect_mock(options).await;
+
+				let epoch = moq_net::Epoch::mint();
+				let broadcast = publisher.create_broadcast("room/cam").unwrap();
+				broadcast
+					.announce(origin::Route::default().with_epoch(epoch.clone()))
+					.unwrap();
+				moq_clock::sleep(SETTLE).await;
+
+				let route = route(&subscriber, "room/cam").unwrap_or_else(|| panic!("{context}: never announced"));
+				let expected = (negotiable && declines.is_none()).then_some(epoch);
+				assert_eq!(route.epoch, expected, "{context}");
+				assert_open(&pair, &context);
+			}
+		}
+	}
+}

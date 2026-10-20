@@ -21,6 +21,7 @@ pub struct Sleep {
 }
 
 enum Timer {
+	Queue(crate::deadline::Timer),
 	Host(crate::runtime::Timer),
 	#[cfg(feature = "sim")]
 	Sim(crate::sim::Timer),
@@ -30,6 +31,13 @@ enum Timer {
 
 /// Complete once the ambient clock reaches `at`; at once if it already has.
 pub fn sleep_until(at: Instant) -> Sleep {
+	if let Some(deadlines) = crate::deadline::entered() {
+		return Sleep {
+			at: Some(at),
+			timer: Timer::Queue(crate::deadline::Timer::new(&deadlines, Some(at))),
+			parked: None,
+		};
+	}
 	#[cfg(feature = "sim")]
 	if let Some(timer) = crate::sim::Timer::new(at) {
 		return Sleep {
@@ -40,11 +48,7 @@ pub fn sleep_until(at: Instant) -> Sleep {
 	}
 	#[cfg(feature = "manual")]
 	if let Some(clock) = crate::installed::current() {
-		return Sleep {
-			at: Some(at),
-			timer: Timer::Installed(crate::installed::Timer::new(clock, at)),
-			parked: None,
-		};
+		return Sleep::installed(clock, at);
 	}
 	Sleep {
 		at: Some(at),
@@ -64,6 +68,16 @@ pub fn sleep(duration: Duration) -> Sleep {
 }
 
 impl Sleep {
+	/// A sleep on an installed clock, whichever thread polls it.
+	#[cfg(feature = "manual")]
+	pub(crate) fn installed(clock: crate::Installed, at: Instant) -> Self {
+		Self {
+			at: Some(at),
+			timer: Timer::Installed(crate::installed::Timer::new(clock, at)),
+			parked: None,
+		}
+	}
+
 	/// The instant this completes at, or the clock's last instant for one that never does.
 	pub fn deadline(&self) -> Instant {
 		self.at.unwrap_or(Instant::MAX)
@@ -77,14 +91,17 @@ impl Sleep {
 	/// Re-arm on the same backend, or never fire (`None`).
 	fn set(&mut self, at: Option<Instant>) {
 		self.at = at;
-		// A never-firing sleep parks its timer at the end of time, unpolled, so it arms nothing.
-		let at = at.unwrap_or(Instant::MAX);
+		// A never-firing sleep parks its timer at the end of time, unpolled, so it arms
+		// nothing. A queue's deadline disarms instead, so the queue's owner never parks
+		// on it.
+		let end = at.unwrap_or(Instant::MAX);
 		match &mut self.timer {
-			Timer::Host(timer) => timer.reset(at),
+			Timer::Queue(timer) => timer.set(at),
+			Timer::Host(timer) => timer.reset(end),
 			#[cfg(feature = "sim")]
-			Timer::Sim(timer) => timer.reset(at),
+			Timer::Sim(timer) => timer.reset(end),
 			#[cfg(feature = "manual")]
-			Timer::Installed(timer) => timer.reset(at),
+			Timer::Installed(timer) => timer.reset(end),
 		}
 		// The reset may come from another task than the one parked here.
 		if let Some(parked) = self.parked.take() {
@@ -103,6 +120,7 @@ impl Future for Sleep {
 		}
 		// Each backend compares against its own clock, not the poller's.
 		match &mut self.timer {
+			Timer::Queue(timer) => timer.poll(cx),
 			Timer::Host(timer) => timer.poll(cx),
 			#[cfg(feature = "sim")]
 			Timer::Sim(timer) => timer.poll(cx),

@@ -48,10 +48,11 @@ broadcast with a `.hang` suffix, use a canvas at least as tall as the top rung
 (1080p by default), and a source bitrate above that rung (the Quality profile's
 8 Mbps clears the default 5 Mbps 1080p rung).
 
-Local check before moq.pro (requires a CLI built with the `transcode` feature):
+Local check before moq.pro (requires a CLI built with the `transcode` feature, plus
+`openh264` for the software encoder a GPU-less host needs):
 
 ```bash
-cargo install --locked moq-cli --features transcode
+cargo install --locked moq-cli --features transcode,openh264
 # OBS Go Live to e.g. my-obs.hang on a local relay, then:
 moq --connect http://localhost:4443/anon --broadcast my-obs.hang transcode
 # Watch my-obs.hang/transcode.hang
@@ -83,6 +84,9 @@ CA, reconnect pacing, QUIC tuning (congestion control, idle timeout,
 keep-alive, segmentation offload, MTU discovery, and qlog traces when the build
 supports them), and the WebSocket fallback race. A rejected value stops the
 stream with the reason in the log rather than silently using a default.
+To decrypt a packet capture, turn on **TLS key log** here or in a MoQ Source's
+properties and start OBS with `SSLKEYLOGFILE` naming the file; the variable
+alone writes nothing, and the toggle without it fails the connection.
 
 The plugin is C++ over the [generated C++ bindings](/lib/cpp/) and ships with
 every moq-cpp release. Stopping finishes the tracks and drains for up to one

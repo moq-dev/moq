@@ -197,6 +197,23 @@ int main()
 	}
 	printf("restored keys apply: ok\n");
 
+	// The TLS key log is off unless the toggle asks for it.
+	{
+		obs_data settings;
+		MoQSettings::Defaults(&settings);
+		settings.bools["advanced"] = true;
+		CHECK(settings.default_bools["quic_keylog"] == false);
+
+		moq::ClientConfig config;
+		CHECK(MoQSettings::Configure(&settings, config).empty());
+		CHECK(config.quic.keylog != true);
+
+		settings.bools["quic_keylog"] = true;
+		CHECK(MoQSettings::Configure(&settings, config).empty());
+		CHECK(config.quic.keylog == true);
+	}
+	printf("key log is opt-in: ok\n");
+
 	// A hand-edited scene collection naming an unknown family refuses rather than ignores it.
 	{
 		obs_data settings;

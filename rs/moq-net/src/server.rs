@@ -442,6 +442,7 @@ impl Server {
 				let peer_declared = ietf::peer::Peer {
 					solicit: ietf::solicit::from_setup(&params, v)?,
 					hidden: ietf::hidden::from_setup(&params, v),
+					max_age: ietf::max_age::from_setup(&params, v),
 					active_count: ietf::active_count::from_setup(&params, v),
 					..Default::default()
 				};
@@ -715,6 +716,7 @@ where
 						ietf::solicit::into_setup(&mut parameters, v);
 					}
 					ietf::hidden::into_setup(&mut parameters, v);
+					ietf::max_age::into_setup(&mut parameters, v);
 					ietf::active_count::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
 				}

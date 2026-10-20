@@ -232,13 +232,24 @@ impl StreamsState {
             self.max[dir as usize] = count;
         }
         self.received_max_data(params.initial_max_data);
-        for (&id, slot) in self.send.iter_mut() {
-            if id.initiator() != self.side
-                && id.dir() == Dir::Bi
-                && let Some(s) = slot.as_mut()
-            {
-                s.max_data = params.initial_max_stream_data_bidi_local.into();
-            }
+
+        // A client's 0-RTT streams opened under the remembered windows, which a server that
+        // accepts 0-RTT may only raise (RFC 9000 7.4.1). No peer stream can exist yet.
+        let side = self.side;
+        let raised: Vec<StreamId> = self
+            .send
+            .iter_mut()
+            .filter(|(id, _)| id.initiator() == side)
+            .filter_map(|(&id, slot)| {
+                let max = match id.dir() {
+                    Dir::Bi => params.initial_max_stream_data_bidi_remote,
+                    Dir::Uni => params.initial_max_stream_data_uni,
+                };
+                slot.as_mut()?.increase_max_data(max.into()).then_some(id)
+            })
+            .collect();
+        for id in raised {
+            self.send_unblocked(id);
         }
     }
 
@@ -872,20 +883,11 @@ impl StreamsState {
 
         self.insert_remote(id);
 
-        let write_limit = self.write_limit();
         let max_send_data = self.max_send_data(id);
         if let Some(ss_opt) = self.send.get_mut(&id) {
             let ss = ss_opt.get_or_insert_with(|| Send::new(max_send_data));
             if ss.increase_max_data(offset) {
-                if write_limit > 0 {
-                    self.events.push_back(StreamEvent::Writable { id });
-                } else if !ss.connection_blocked {
-                    // The stream is still blocked on the connection flow control
-                    // window. In order to get unblocked when the window relaxes
-                    // it needs to be in the connection blocked list.
-                    ss.connection_blocked = true;
-                    self.connection_blocked.push(id);
-                }
+                self.send_unblocked(id);
             }
         } else if id.initiator() == self.side && self.is_local_unopened(id) {
             debug!("got MAX_STREAM_DATA on unopened {}", id);
@@ -895,6 +897,20 @@ impl StreamsState {
         }
 
         Ok(())
+    }
+
+    /// Wake the writer of a stream whose flow control limit just rose past what it has written
+    fn send_unblocked(&mut self, id: StreamId) {
+        if self.write_limit() > 0 {
+            self.events.push_back(StreamEvent::Writable { id });
+            return;
+        }
+        // Still blocked on the connection window, so wait in the list that wakes when it relaxes
+        let ss = self.send.get_mut(&id).and_then(|s| s.as_mut()).unwrap();
+        if !ss.connection_blocked {
+            ss.connection_blocked = true;
+            self.connection_blocked.push(id);
+        }
     }
 
     /// Whether the local send buffer prevents the application from writing more data.
@@ -1358,6 +1374,42 @@ mod tests {
         assert!(should_transmit.0);
         assert!(pending.max_stream_id[Dir::Uni as usize]);
         assert_eq!(client.local_max_data - initial_max, MESSAGE_SIZE as u64);
+    }
+
+    /// Stopping a stream whose final size is known frees it, so its stream ID credit goes out at
+    /// once instead of waiting for the next packet to arrive.
+    #[test]
+    fn stop_after_reset_issues_stream_credit() {
+        let mut client = StreamsState::new(
+            Side::Client,
+            1u32.into(),
+            1u32.into(),
+            1024 * 1024,
+            (1024 * 1024u32).into(),
+            (1024 * 1024u32).into(),
+        );
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        assert_eq!(
+            client
+                .received_reset(frame::ResetStream {
+                    id,
+                    error_code: 0u32.into(),
+                    final_offset: 0u32.into(),
+                    reliable_size: None,
+                })
+                .unwrap(),
+            ShouldTransmit(false)
+        );
+
+        let mut pending = Retransmits::default();
+        RecvStream {
+            id,
+            state: &mut client,
+            pending: &mut pending,
+        }
+        .stop(0u32.into())
+        .unwrap();
+        assert!(pending.max_stream_id[Dir::Uni as usize]);
     }
 
     #[test]

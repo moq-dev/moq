@@ -40,7 +40,7 @@ use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 // the doc comment to one line: Usage renders the rest as `--help` body text, where
 // rustdoc links read as noise.
 /// moq-cli: a media router that wires endpoints onto a shared MoQ Origin.
-#[derive(usage::Cli, Clone)]
+#[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq", version = env!("CARGO_PKG_VERSION"))]
 #[usage(completion, settings)]
@@ -66,7 +66,7 @@ pub struct Cli {
 // read like it scopes that stage, when there is only ever one connection. As with
 // [`Cli`], the doc comment stays one line because Usage shows it in `--help`.
 /// A stage after the first: the verb and endpoint, without the globals.
-#[derive(usage::Cli, Clone)]
+#[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq")]
 #[usage(completion, settings)]
@@ -92,7 +92,7 @@ pub struct Invocation {
 	/// otherwise make `moq auth` and `moq completion` fail for everyone who has one.
 	/// Read from the parse itself rather than from the built fields, so a flag added
 	/// to any flattened config is refused without anyone listing it here.
-	given: Vec<&'static usage::Flag<'static>>,
+	given: Vec<&'static usage_rs::Flag<'static>>,
 
 	/// The stages, in the order given. Never empty.
 	pub stages: Vec<Command>,
@@ -155,7 +155,7 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// Whether `flag` is one of the flags `T` declares.
-fn owns<T: usage::spec::CommandArgs>(flag: &usage::Flag<'_>) -> bool {
+fn owns<T: usage_rs::spec::CommandArgs>(flag: &usage_rs::Flag<'_>) -> bool {
 	T::COMMAND.flags.iter().any(|own| own.key == flag.key)
 }
 
@@ -199,7 +199,7 @@ impl Invocation {
 	/// `--iroh-*` settings it dials with. Answered from the command line, like
 	/// [`Self::reject`].
 	pub fn dial_only(&self, command: &str, allow: &[&str]) -> anyhow::Result<()> {
-		let dials = |flag: &&&usage::Flag<'_>| {
+		let dials = |flag: &&&usage_rs::Flag<'_>| {
 			#[cfg(feature = "iroh")]
 			if owns::<moq_tokio::iroh::Config>(flag) {
 				return true;
@@ -224,7 +224,7 @@ impl Invocation {
 		if self.moq.serves() {
 			return Ok(());
 		}
-		let listens = |flag: &&&usage::Flag<'_>| {
+		let listens = |flag: &&&usage_rs::Flag<'_>| {
 			owns::<moq_tokio::listen::Config>(flag)
 				|| owns::<moq_relay::auth::Config>(flag)
 				|| owns::<moq_relay::stats::Config>(flag)
@@ -239,7 +239,7 @@ impl Invocation {
 	}
 
 	/// `--a, --b` for the flags given, or `None` when there are none.
-	fn names<'a>(flags: impl Iterator<Item = &'a &'static usage::Flag<'static>>) -> Option<String> {
+	fn names<'a>(flags: impl Iterator<Item = &'a &'static usage_rs::Flag<'static>>) -> Option<String> {
 		let names: Vec<String> = flags.map(|flag| format!("--{}", flag.longs[0])).collect();
 		(!names.is_empty()).then(|| names.join(", "))
 	}
@@ -315,29 +315,6 @@ impl Invocation {
 			}
 		}
 
-		if self.moq.epoch.is_some() {
-			let mut publishes = false;
-			for command in &self.stages {
-				match command {
-					Command::Import(import) => {
-						if let Some(reason) = import.source.epoch_refusal() {
-							anyhow::bail!("--epoch makes instances one publisher of identical tracks, but {reason}");
-						}
-						publishes = true;
-					}
-					#[cfg(feature = "transcode")]
-					Command::Transcode(_) => anyhow::bail!(
-						"--epoch makes instances one publisher of identical tracks, but two `transcode` encoders never produce the same bytes"
-					),
-					_ => {}
-				}
-			}
-			anyhow::ensure!(
-				publishes,
-				"--epoch names what this process publishes, but nothing here publishes"
-			);
-		}
-
 		for command in &self.stages {
 			let Command::Export(export) = command else {
 				continue;
@@ -389,17 +366,19 @@ impl Invocation {
 /// moq-bench, which parse more than once for their own reasons. This adds the
 /// failure category, which only this crate's callers ask about.
 fn parse_error(
-	spec: &usage::argv::spec::Spec<'_>,
-	root: &usage::Command<'_>,
+	spec: &usage_rs::argv::spec::Spec<'_>,
+	root: &usage_rs::Command<'_>,
 	argv: &[&OsStr],
-	err: usage::Error<'_, '_>,
+	err: usage_rs::Error<'_, '_>,
 ) -> ParseError {
 	let kind = match &err {
-		usage::Error::Help { .. } | usage::Error::HelpAll { .. } => ParseErrorKind::DisplayHelp,
-		usage::Error::Version { .. } => ParseErrorKind::DisplayVersion,
-		usage::Error::UnknownFlag { .. } | usage::Error::UnexpectedArg { .. } => ParseErrorKind::UnknownArgument,
-		usage::Error::MissingSubcommand | usage::Error::MissingArgsHelp { .. } => ParseErrorKind::MissingSubcommand,
-		usage::Error::InvalidValue(_) | usage::Error::InvalidChoice { .. } => ParseErrorKind::ValueValidation,
+		usage_rs::Error::Help { .. } | usage_rs::Error::HelpAll { .. } => ParseErrorKind::DisplayHelp,
+		usage_rs::Error::Version { .. } => ParseErrorKind::DisplayVersion,
+		usage_rs::Error::UnknownFlag { .. } | usage_rs::Error::UnexpectedArg { .. } => ParseErrorKind::UnknownArgument,
+		usage_rs::Error::MissingSubcommand | usage_rs::Error::MissingArgsHelp { .. } => {
+			ParseErrorKind::MissingSubcommand
+		}
+		usage_rs::Error::InvalidValue(_) | usage_rs::Error::InvalidChoice { .. } => ParseErrorKind::ValueValidation,
 		_ => ParseErrorKind::Other,
 	};
 	ParseError::new(kind, moq_tokio::cli::answer(spec, root, argv, err).message())
@@ -415,7 +394,7 @@ fn parse_error(
 /// The three transport sections are read as plain fields. [`Invocation`] refuses a
 /// released spelling while parsing, so a field left unset here means the command
 /// line really did leave it unset.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct MoqSide {
 	/// The default broadcast name for every stage that doesn't name its own.
@@ -430,25 +409,6 @@ pub struct MoqSide {
 	/// The released spelling of [`Self::broadcast`].
 	#[usage(long = "name", hide = true)]
 	name: Option<String>,
-
-	/// Announce under this epoch (a UUIDv7) instead of minting a fresh one per run.
-	///
-	/// Relays resume a subscription only between routes with the same epoch, so
-	/// redundant publishers of one broadcast pass the same value and fail over
-	/// seamlessly. Leave it unset otherwise: a fresh epoch per run is what makes a
-	/// restarted publisher replace the old broadcast instead of resuming into it.
-	/// Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
-	/// accept it, since the other publishers' tracks differ between instances.
-	///
-	/// The epoch's wall time also fixes the catalog clock, so publishers of one stream
-	/// agree on it and on every timestamp wherever each started: PTS zero is the epoch's
-	/// time, and for `ts` one 33-bit wrap (about 26.5 hours) before it. The wall mapping is
-	/// then off by the source clock's reading at the epoch's time, which for a TS program
-	/// clock is anywhere within half a wrap. Near either end of that range, processes whose
-	/// clocks or delivery differ can place one timestamp a wrap apart, and redundant `flv`
-	/// imports stop matching at FLV's 49.7-day millisecond wrap.
-	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
-	pub epoch: Option<hang::moq_net::Epoch>,
 
 	/// MoQ client config (`--connect`, `--connect-bind`, `--connect-tls-*`, ...).
 	#[usage(flatten)]
@@ -596,13 +556,13 @@ impl MoqSide {
 	/// A flattened config's flags sit in this struct's table under the keys that
 	/// config minted, so the table is the complete list. The chunk already parsed,
 	/// so nothing stops the walk early.
-	fn given(argv: &[&OsStr]) -> Vec<&'static usage::Flag<'static>> {
-		use usage::spec::CommandArgs;
+	fn given(argv: &[&OsStr]) -> Vec<&'static usage_rs::Flag<'static>> {
+		use usage_rs::spec::CommandArgs;
 
-		let mut given: Vec<&'static usage::Flag<'static>> = Vec::new();
-		let mut parser = usage::Parser::new(Cli::command(), argv);
+		let mut given: Vec<&'static usage_rs::Flag<'static>> = Vec::new();
+		let mut parser = usage_rs::Parser::new(Cli::command(), argv);
 		while let Some(Ok(event)) = parser.next_event() {
-			if let usage::Event::Flag { flag, .. } = event
+			if let usage_rs::Event::Flag { flag, .. } = event
 				&& <Self as CommandArgs>::COMMAND
 					.flags
 					.iter()
@@ -618,7 +578,7 @@ impl MoqSide {
 
 /// The verb: for `import`/`export` it is also the data direction, the pivot
 /// between the MoQ side and the endpoint.
-#[derive(usage::Subcommands, Clone)]
+#[derive(usage_rs::Subcommands, Clone)]
 pub enum Command {
 	/// Route media INTO MoQ from one source.
 	Import(Import),
@@ -731,7 +691,7 @@ impl Command {
 // ------------------------------------------------------------------ import
 
 /// import = one source -> MoQ.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Import {
 	/// The broadcast this stage publishes, overriding the process-wide `--broadcast`.
@@ -782,7 +742,7 @@ impl Import {
 
 /// The single source feeding the Origin on an import. The container formats read
 /// from stdin; the gateways bridge another protocol.
-#[derive(usage::Subcommands, Clone)]
+#[derive(usage_rs::Subcommands, Clone)]
 pub enum ImportSource {
 	/// Raw H.264 Annex-B from stdin.
 	Avc3,
@@ -826,31 +786,10 @@ impl ImportSource {
 			_ => return None,
 		})
 	}
-
-	/// Why `--epoch` can't name this source, or `None` when it can: the source must
-	/// announce once per run and derive its tracks from the input alone.
-	fn epoch_refusal(&self) -> Option<&'static str> {
-		match self {
-			Self::Ts(args) if args.program == Some(TsProgram::All) => {
-				Some("`import ts --program all` mints an epoch per program")
-			}
-			Self::Rtmp(_) | Self::Srt(_) => Some("the RTMP and SRT imports mint an epoch per connection"),
-			Self::Rtsp(_) => Some("`import rtsp` mints an epoch per RTSP session, since each restarts its RTP time"),
-			Self::Rtc(rtc) if rtc.listen.is_some() => Some("the WHIP listener mints an epoch per connection"),
-			Self::Rtc(_) => Some("`import rtc --connect` timestamps frames from its own RTP session"),
-			Self::Avc3 => Some("`import avc3` timestamps frames from their arrival on stdin"),
-			Self::Archive(_) => {
-				Some("`import archive` rewrites the catalog and timeline groups it replays under the live names")
-			}
-			#[cfg(feature = "capture")]
-			Self::Capture(_) => Some("two `import capture` encoders never produce the same bytes"),
-			Self::Ts(_) | Self::Fmp4 | Self::Flv | Self::Hls(_) => None,
-		}
-	}
 }
 
 /// The MPEG-TS stdin container: which programs of a multiplex to publish.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct TsImport {
 	/// Import one program of a multi-program stream, by its PAT program number, or `all` to
@@ -928,7 +867,7 @@ impl std::str::FromStr for TsProgram {
 // ------------------------------------------------------------------ export
 
 /// export = MoQ -> one sink.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Export {
 	/// The broadcast this stage subscribes to, overriding the process-wide `--broadcast`.
@@ -977,7 +916,7 @@ impl Export {
 
 /// The single sink draining the Origin on an export. The container formats write
 /// to stdout; the gateways bridge another protocol.
-#[derive(usage::Subcommands, Clone)]
+#[derive(usage_rs::Subcommands, Clone)]
 pub enum ExportSink {
 	/// Fragmented MP4 / CMAF to stdout.
 	Fmp4(Fragmented),
@@ -1085,7 +1024,7 @@ pub struct Stdout {
 }
 
 /// Staleness options for stdout sinks without a fixed release delay.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Container {
 	/// How far a group may fall behind the live edge before it is skipped (e.g. `500ms`, `1s`).
@@ -1120,7 +1059,7 @@ impl Container {
 }
 
 /// A stdout container with a fixed release delay.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Buffered {
 	/// How long after its decode time each frame is written (e.g. `500ms`); late frames are dropped.
@@ -1159,7 +1098,7 @@ impl Buffered {
 }
 
 /// A buffered Matroska output with an optional cluster cap.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct BufferedFragmented {
 	#[usage(flatten)]
@@ -1170,7 +1109,7 @@ pub struct BufferedFragmented {
 }
 
 /// The MPEG-TS stdout container.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Transport {
 	/// How far behind the source the output runs (e.g. `2s`), like an SRT receiver's latency,
@@ -1228,7 +1167,7 @@ impl Transport {
 }
 
 /// The fMP4 stdout container with a fragment cap.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Fragmented {
 	#[usage(flatten)]
@@ -1556,56 +1495,19 @@ mod tests {
 		}
 	}
 
-	/// `--epoch` reaches the importers that announce once per run and derive their tracks
-	/// from the input alone, and is refused everywhere else: an ingest that announces per
-	/// connection, a publisher whose timestamps or bytes come from the instance, or no
-	/// publisher at all.
 	#[test]
-	fn epoch_applies_only_to_a_once_per_run_publisher() {
-		let _env = crate::test_env::EnvGuard::clear(&["MOQ_EPOCH"]);
+	fn independent_importers_cannot_select_a_shared_epoch() {
 		let epoch = hang::moq_net::Epoch::mint().to_string();
-		let parse = |stage: &[&str]| {
-			let argv = ["moq", "--connect", "http://relay/anon", "--epoch", &epoch].into_iter();
-			Invocation::try_parse_from(argv.chain(stage.iter().copied())).expect("parse")
-		};
-
-		let cli = parse(&["import", "fmp4"]);
-		cli.validate().expect("a stdin import takes an epoch");
-		assert_eq!(cli.moq.epoch.map(|epoch| epoch.to_string()), Some(epoch.clone()));
-
-		for accepted in [
-			&["import", "ts"][..],
-			&["import", "ts", "--program", "1"],
-			&["import", "ts", "--passthrough"],
-			&["import", "flv"],
-			&["import", "hls", "https://example.com/live.m3u8"],
-		] {
-			parse(accepted)
-				.validate()
-				.unwrap_or_else(|err| panic!("{accepted:?} refused --epoch: {err:#}"));
-		}
-
-		for refused in [
-			&["import", "rtmp", "--listen", "[::]:1935"][..],
-			&["import", "rtmp", "--connect", "rtmp://example.com/live/key"],
-			&["import", "srt", "--connect", "srt://example.com:9000"],
-			&["import", "rtsp", "--connect", "rtsp://example.com/stream"],
-			&["import", "rtc", "--listen", "[::]:8080"],
-			&["import", "rtc", "--connect", "https://example.com/whep"],
-			&["import", "ts", "--program", "all"],
-			&["import", "avc3"],
-			&["import", "archive", "file:///tmp/recording"],
-			#[cfg(feature = "capture")]
-			&["import", "capture"],
-			#[cfg(feature = "transcode")]
-			&["transcode"],
-			&["export", "fmp4"],
-		] {
-			assert!(parse(refused).validate().is_err(), "{refused:?} accepted --epoch");
-		}
-
-		let malformed = Invocation::try_parse_from(["moq", "--epoch", "42", "import", "fmp4"]);
-		assert!(malformed.is_err(), "--epoch accepted a value that is not a UUIDv7");
+		let refused = Invocation::try_parse_from([
+			"moq",
+			"--connect",
+			"http://relay/anon",
+			"--epoch",
+			&epoch,
+			"import",
+			"ts",
+		]);
+		assert!(refused.is_err(), "independent importers cannot claim identical content");
 	}
 
 	/// A stage carries config of its own, and the check has to reach it.
@@ -2270,7 +2172,6 @@ mod tests {
 			&["--auth-public", "**"],
 			&["--stats-enabled"],
 			&["--drain-timeout", "500ms"],
-			&["--epoch", "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b"],
 		];
 		let dial: &[&[&str]] = &[
 			&["--connect", "https://relay.example"],
@@ -2698,7 +2599,7 @@ mod tests {
 	/// add the draft, and this fails until every list has it.
 	#[test]
 	fn version_choices_match_the_parser() {
-		fn walk<'a>(cmd: &'a usage::argv::spec::CommandMeta<'a>, found: &mut Vec<(&'a str, Vec<&'a str>)>) {
+		fn walk<'a>(cmd: &'a usage_rs::argv::spec::CommandMeta<'a>, found: &mut Vec<(&'a str, Vec<&'a str>)>) {
 			for flag in cmd.flags {
 				let Some(long) = flag.flag.longs.first() else {
 					continue;

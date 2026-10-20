@@ -5,6 +5,22 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Usage types come from usage-rs 7 (#6060)
+
+The relay's `Args` and `Config` derives now implement usage-rs 7 traits.
+A CLI that flattens them depends on `usage-rs = "7"` under its own name: the derives emit `::usage_rs` paths and no longer read `Cargo.toml`.
+
+### Typed admission refusals (#5996)
+
+`auth::Error::Refused` now carries the shared `moq_auth::Refusal`.
+Pass `auth::Error::Refused(moq_auth::Refusal::default())` to `Admission::refuse` for an unattributed refusal, or set its `reason`, optional verified `root`, and `tier`.
+Match `auth::Error::Refused(refusal)` to inspect it; never use the dialed path as refusal attribution.
+
+### Key logging is opt-in (#5907)
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Add `--quic-keylog` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = true`) to capture them; without `SSLKEYLOGFILE` it stops startup.
+
 ### Cluster dials build from a template (#5674)
 
 `Relay::client()` and `Cluster::with_client` are removed.

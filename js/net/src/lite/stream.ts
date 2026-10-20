@@ -1,13 +1,3 @@
-import type { AnnounceRequest } from "./announce.ts";
-import type { Goaway } from "./goaway.ts";
-import type { Group } from "./group.ts";
-import type { SessionClient } from "./session.ts";
-import type { Subscribe } from "./subscribe.ts";
-import type { Track } from "./track.ts";
-
-export type StreamBi = SessionClient | AnnounceRequest | Subscribe | Track | Goaway;
-export type StreamUni = Group;
-
 export const StreamId = {
 	Session: 0,
 	Announce: 1,
