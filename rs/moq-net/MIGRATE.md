@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Anchors can name a time
+### Anchors can name a time (#6074)
 
 `track::Anchor` gains `Time(Timestamp)`, the group containing a presentation time, so exhaustive matches need an arm for it.
 Subscribing or updating with one on an untimed track fails with `Error::TimestampMismatch`.

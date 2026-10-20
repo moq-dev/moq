@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Anchors can name a time
+### Anchors can name a time (#6074)
 
 `Anchor` gains a time variant, so exhaustive switches need a case for it.
 `TrackConsumer.update` now throws on a time anchor an untimed track can't serve.

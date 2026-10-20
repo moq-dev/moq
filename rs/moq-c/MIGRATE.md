@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Anchors can name a time
+### Anchors can name a time (#6074)
 
 `moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.
 `moq_consume_track_update` fails with a negative code when the track refuses an update, such as a time anchor on an untimed track, leaving the subscription as it was.
