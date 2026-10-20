@@ -4,9 +4,9 @@
 
 moq-cli's `export::redundant_importers_switch_through_bufferbloat_on_lite_07`
 (`rs/moq-cli/tests/integration/export.rs`) passes reliably, fixed at its
-cause. On current main it failed 3 of 10 local runs with "stitching export
-exited", and it is the slowest test in the queue suite (37 s, past nextest's
-30 s SLOW mark).
+cause. On current main it failed 3 of 10 isolated local runs and 2 of 3
+loaded `just check` runs with "stitching export exited". It is also the
+slowest test in the queue suite (37 s, past nextest's 30 s SLOW mark).
 
 ## Plan
 
