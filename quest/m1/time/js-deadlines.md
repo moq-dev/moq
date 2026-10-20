@@ -48,10 +48,15 @@ Decided 2026-10-20, with reasons:
   stepped variant beside a jumping default: that would leave the default wrong.
 - **The first interval period is armed synchronously,** rather than documenting
   a microtask-late first tick that every caller would have to work around.
-  `Effect.interval` starts its `Interval` at `now + period` instead of
-  consuming an immediate tick (tokio's `interval_at`). Keep that start private
-  unless a second consumer needs it; exporting `intervalAt` would also want a
-  Rust mirror.
+  `Effect.interval` lives in `@moq/signals` and cannot reach `Interval`'s
+  private deadline, so it drops `Interval` and loops on the exported
+  `sleepUntil(next)`, which arms synchronously. It starts at `now + period`
+  and computes the `Delay` deadline itself: `max(scheduled + period, now +
+  period)`. This needs no `@moq/clock` API change; exporting an `intervalAt`
+  or changing `Interval`'s first tick would add public surface and want a Rust
+  mirror. Unlike an `Interval`, which keeps the clock it was created on, each
+  `sleepUntil` reads the clock installed at that moment; document that on
+  `Effect.interval`.
 - **`fire()` keeps its behavior,** advancing exactly to the earliest deadline;
   its doc comment and body call `advanceAsync` and move to `advance`. Check it
   still composes with the stepping loop.
