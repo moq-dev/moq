@@ -1,15 +1,10 @@
 name: Runner VM
 
 on:
+  workflow_call:
   pull_request:
-    paths:
-      - "nix/**"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/justfile"
-      - ".github/workflows/runner-vm.yml"
-  push:
-    branches: [main]
+    branches: [release]
+    types: [opened, synchronize, reopened, edited, closed]
     paths:
       - "nix/**"
       - "flake.nix"
@@ -20,8 +15,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: runner-vm-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

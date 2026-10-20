@@ -244,6 +244,7 @@ export class Connection implements Established {
 			solicit,
 			goaway: this.#goaway,
 			grant: this.#auth.scope,
+			auth: this.#auth,
 		});
 		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
 
@@ -311,7 +312,7 @@ export class Connection implements Established {
 			];
 			// Fail loud on a publication our grant never covers, once the peer has answered the
 			// credential we presented at setup.
-			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered()));
+			if (this.#client) tasks.push(this.#publisher.runEnforce(this.#auth.setupAnswered(), this.#auth));
 			await Promise.all(tasks);
 		} catch (err) {
 			if (!this.#closed) {

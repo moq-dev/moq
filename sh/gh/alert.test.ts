@@ -46,7 +46,7 @@ test("cron workflows only alert on scheduled failures", async () => {
 });
 
 test("ordinary CI never subscribes to Discord alerts", () => {
-	for (const name of ["Check", "Cache", "OBS", "Platform", "Quest", "Runner VM"]) {
+	for (const name of ["Check", "Cache", "OBS", "Platform", "Quest"]) {
 		expect(watched).not.toContain(name);
 	}
 });
