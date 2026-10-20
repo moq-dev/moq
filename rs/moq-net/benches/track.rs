@@ -1336,11 +1336,7 @@ fn bench_time_end(c: &mut Criterion) {
 		for groups in [64u64, 512, 4096] {
 			group.throughput(Throughput::Elements(groups * readers as u64));
 			group.bench_function(BenchmarkId::new(format!("{readers}r"), groups), |b| {
-				b.iter_batched_ref(
-					|| TimeEnd::new(readers, groups),
-					TimeEnd::run,
-					BatchSize::PerIteration,
-				);
+				b.iter_batched_ref(|| TimeEnd::new(readers, groups), TimeEnd::run, BatchSize::PerIteration);
 			});
 		}
 	}

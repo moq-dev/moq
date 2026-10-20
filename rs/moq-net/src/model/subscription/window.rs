@@ -566,11 +566,17 @@ mod tests {
 
 		fn next_held(&self, from: u64) -> Option<(u64, Held)> {
 			self.asked.set(self.asked.get() + 1);
-			self.held.range(from..).next().map(|(&sequence, held)| (sequence, *held))
+			self.held
+				.range(from..)
+				.next()
+				.map(|(&sequence, held)| (sequence, *held))
 		}
 
 		fn gone(&self, sequence: u64) -> Option<u64> {
-			self.gone.iter().find(|gone| gone.contains(&sequence)).map(|gone| gone.end)
+			self.gone
+				.iter()
+				.find(|gone| gone.contains(&sequence))
+				.map(|gone| gone.end)
 		}
 
 		fn complete(&self) -> bool {
@@ -730,7 +736,11 @@ mod tests {
 		let mut groups = Groups::new([Groups::started(3, 3000), Groups::started(6, 6000)]);
 		let mut window = Window::new(&[range(time(3000), time(4000))], Some(6), &groups).unwrap();
 		assert!(!window.is_settled(), "4 and 5 may still arrive inside the end");
-		assert_eq!(covered(&window, 8), vec![3, 4, 5], "but never 6, known to start past it");
+		assert_eq!(
+			covered(&window, 8),
+			vec![3, 4, 5],
+			"but never 6, known to start past it"
+		);
 
 		// 4 arrives yet to start: the one read on speculation, so 5 waits.
 		groups.held.insert(4, Held::Pending);
@@ -758,7 +768,12 @@ mod tests {
 	#[test]
 	fn an_unsettled_time_end_reads_one_group_on_speculation() {
 		let mut groups = Groups::new([(3, Held::Pending), (4, Held::Pending), (5, Held::Pending)]);
-		let mut window = Window::new(&[range(Anchor::Absolute(Position::group(3)), time(3500))], Some(5), &groups).unwrap();
+		let mut window = Window::new(
+			&[range(Anchor::Absolute(Position::group(3)), time(3500))],
+			Some(5),
+			&groups,
+		)
+		.unwrap();
 		assert_eq!(covered(&window, 8), vec![3]);
 
 		groups.held.insert(3, Held::Started(at(3000)));
@@ -814,8 +829,12 @@ mod tests {
 	/// A datagram is one frame, so its own timestamp places it against a time end.
 	#[test]
 	fn a_datagram_is_judged_by_its_own_timestamp() {
-		let window = Window::new(&[range(Anchor::Absolute(Position::group(0)), time(3500))], None, &Groups::default())
-			.unwrap();
+		let window = Window::new(
+			&[range(Anchor::Absolute(Position::group(0)), time(3500))],
+			None,
+			&Groups::default(),
+		)
+		.unwrap();
 		assert!(window.admits_datagram(9, Some(at(3500))));
 		assert!(!window.admits_datagram(9, Some(at(3600))));
 	}

@@ -15161,8 +15161,12 @@ mod test {
 			let subscriber = producer.subscribe(replay().with_ranges(ranges));
 			let mut reader = Reader::new(subscriber, ordered);
 			assert_eq!(reader.drain(), vec![0, 1], "1 is read on speculation, 2 and 3 wait");
-			groups[0].write_frame(at(3600), bytes::Bytes::from_static(b"x")).unwrap();
-			groups[1].write_frame(at(4000), bytes::Bytes::from_static(b"x")).unwrap();
+			groups[0]
+				.write_frame(at(3600), bytes::Bytes::from_static(b"x"))
+				.unwrap();
+			groups[1]
+				.write_frame(at(4000), bytes::Bytes::from_static(b"x"))
+				.unwrap();
 			assert_eq!(reader.drain(), Vec::<u64>::new(), "ordered: {ordered}");
 			assert_eq!(
 				reader.resolved(),
@@ -15195,17 +15199,25 @@ mod test {
 		});
 		moq_clock::sim::yield_now().await;
 		assert!(!parked.is_finished(), "1 waits on 0 starting");
-		groups[0].write_frame(at(3000), bytes::Bytes::from_static(b"x")).unwrap();
+		groups[0]
+			.write_frame(at(3000), bytes::Bytes::from_static(b"x"))
+			.unwrap();
 		moq_clock::sim::yield_now().await;
 		assert!(!parked.is_finished(), "1 is read, and 2 waits on 1 starting");
 
 		// 1 stalls, so only 2 starting inside the end lifts the cap past it.
-		groups[2].write_frame(at(3200), bytes::Bytes::from_static(b"x")).unwrap();
+		groups[2]
+			.write_frame(at(3200), bytes::Bytes::from_static(b"x"))
+			.unwrap();
 		let (one, two, mut subscriber) = parked.await.unwrap();
 		assert_eq!((one, two), (1, 2));
 		assert_eq!(drain(&mut subscriber), vec![3], "3 is the speculative one now");
-		groups[3].write_frame(at(3600), bytes::Bytes::from_static(b"x")).unwrap();
-		groups[1].write_frame(at(3100), bytes::Bytes::from_static(b"x")).unwrap();
+		groups[3]
+			.write_frame(at(3600), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		groups[1]
+			.write_frame(at(3100), bytes::Bytes::from_static(b"x"))
+			.unwrap();
 		assert_eq!(
 			subscriber.resolved_ranges(),
 			vec![Some(Resolved { start: 0, end: Some(3) })]
