@@ -160,11 +160,11 @@ pub enum Error {
 	#[error("auth server unavailable: {0}")]
 	Unavailable(String),
 
-	/// The auth URL is not https://, unix://, or http:// to a loopback address.
+	/// The auth URL is plain http:// to a host other than loopback.
 	#[error("auth URL must be https://, unix://, or http:// to a loopback address: {0}")]
 	InsecureUrl(String),
 
-	/// The auth URL did not parse.
+	/// The auth URL has an unsupported scheme, or is a `unix:` URL that names no socket path.
 	#[error("invalid auth URL: {0}")]
 	InvalidUrl(String),
 
