@@ -153,9 +153,12 @@ async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
 		let (_, first) = tokens.next().await.expect("the announce's token");
 
-		// Ending the grant cancels the announcement, which the client has yet to read when
-		// the swap writes its update.
+		// Ending the grant cancels the announcement. The idle request reads that and the
+		// retry offers it again under the token the route still holds, so the swap renews
+		// the new request.
 		drop(first);
+		let (token, _again) = tokens.next().await.expect("offered again after the cancel");
+		assert_eq!(token, b"first");
 		moq_clock::sleep(Duration::from_secs(1)).await;
 		let second = pair.client.auth().add("second").await.expect("kept for requests");
 		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();

@@ -1,7 +1,7 @@
 import { Once, race } from "@moq/signals";
 import { Mutex } from "async-mutex";
 import type { Drain } from "../connection/goaway.ts";
-import { error, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
+import { error, ProtocolViolation, SessionCode, SessionError, sessionClosed } from "../error.ts";
 import { type OpenOptions, Reader, Stream, type Writer } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
@@ -538,9 +538,10 @@ export class ControlStreamAdapter implements Session {
 			});
 			await race([read(), stopped]);
 		} catch (err: unknown) {
+			// A closing session fails this stream too, which reports the session's error.
 			cause =
-				err instanceof ProtocolViolation || err instanceof RequestWindowError
-					? err
+				err instanceof ProtocolViolation || err instanceof RequestWindowError || sessionClosed(err)
+					? error(err)
 					: new ProtocolViolation(error(err).message, { cause: err });
 			throw cause;
 		} finally {

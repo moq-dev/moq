@@ -205,13 +205,15 @@ impl GoAways {
 		}
 		Ok(())
 	}
-	pub fn poll_next<R: crate::transport::poll::RecvStream>(
+
+	/// Read the next `T`, consuming at most one GOAWAY before it.
+	pub fn poll_next<T: Decode<Version> + std::fmt::Debug, R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut crate::coding::Reader<R, Version>,
 		cx: &mut Context<'_>,
-	) -> Poll<Result<Option<Framed>, Error>> {
+	) -> Poll<Result<Option<T>, Error>> {
 		loop {
-			match ready!(reader.poll_decode_maybe::<Next<Framed>>(cx))? {
+			match ready!(reader.poll_decode_maybe::<Next<T>>(cx))? {
 				Some(Next::GoAway { redirect }) => self.receive(redirect)?,
 				Some(Next::Message(message)) => return Poll::Ready(Ok(Some(message))),
 				None => return Poll::Ready(Ok(None)),

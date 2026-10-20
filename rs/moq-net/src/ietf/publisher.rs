@@ -14093,9 +14093,10 @@ mod tests {
 			.unwrap();
 		settle().await;
 
-		// One stream: the PUBLISH_NAMESPACE request and its update, each answered OK.
+		// One stream, answering the PUBLISH_NAMESPACE. The update goes unanswered: an answer
+		// scripted ahead of it would arrive while the request is idle, which is a violation.
 		let ok = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok.clone(), ok].concat()]);
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok]);
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
@@ -14179,8 +14180,9 @@ mod tests {
 			.unwrap();
 		let counted = counted.writes.lock().unwrap().clone();
 		let ok = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok, counted].concat()]);
+		let session = crate::lite::test_transport::ScriptedSession::new(ok);
 		let log = session.log.clone();
+		let peer = session.clone();
 
 		let publisher = Publisher::new(
 			crate::time::sim(),
@@ -14202,6 +14204,9 @@ mod tests {
 		}
 		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
 
+		// Queued behind the OK the idle request already read, so it answers the update:
+		// nothing wakes the reader until the update goes out.
+		peer.push(&counted);
 		// Repricing sends the REQUEST_UPDATE whose OK is counted.
 		let _warm = origin
 			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
@@ -14244,9 +14249,10 @@ mod tests {
 			.unwrap();
 		settle().await;
 
-		// One stream: the advertisement from A and its update to B, each answered OK.
+		// One stream, answering the advertisement from A. Its update to B goes unanswered: an
+		// answer scripted ahead of it would arrive while the request is idle.
 		let ok = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok.clone(), ok].concat()]);
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok]);
 		let log = session.log.clone();
 
 		let publisher = Publisher::new(
@@ -14382,8 +14388,10 @@ mod tests {
 			.unwrap();
 		settle().await;
 
+		// The update goes unanswered: an answer scripted ahead of it would arrive while the
+		// request is idle.
 		let ok = publish_namespace_ok(VERSION).await;
-		let (publisher, log) = auth_publisher(&origin, &auth, vec![[ok.clone(), ok].concat()], VERSION);
+		let (publisher, log) = auth_publisher(&origin, &auth, vec![ok], VERSION);
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"cam", 1).await;
 		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
@@ -14562,8 +14570,9 @@ mod tests {
 		settle().await;
 
 		let ok = publish_namespace_ok(VERSION).await;
-		let session = crate::lite::test_transport::ScriptedSession::per_stream_reset(vec![ok.clone(), ok]);
+		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![ok.clone(), ok]);
 		let log = session.log.clone();
+		let peer = session.clone();
 		let publisher = Publisher::new(
 			crate::time::sim(),
 			session,
@@ -14576,6 +14585,9 @@ mod tests {
 		.with_auth(auth.clone());
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"first", 1).await;
+		// The idle request has read its OK and parked, so the reset waits for the renewal
+		// to wake it.
+		peer.close(crate::lite::test_transport::Close::Reset);
 		cam.update(crate::origin::Route::default().with_auth(present(b"second")))
 			.unwrap();
 		poll_until(&mut run, &log, b"second", 1).await;
@@ -14706,12 +14718,13 @@ mod tests {
 		settle().await;
 
 		// Stream 1 accepts the advertisement and refuses its update, with a wait shorter
-		// than the retry sweep; stream 2 accepts the fresh advertisement.
+		// than the retry sweep. The streams share one script, so the refusal is queued once
+		// the idle request has read its OK.
 		let ok = publish_namespace_ok(VERSION).await;
 		let refusal = publish_namespace_error(VERSION, 50).await;
-		let session =
-			crate::lite::test_transport::ScriptedSession::per_stream(vec![[ok.clone(), refusal].concat(), ok]);
+		let session = crate::lite::test_transport::ScriptedSession::new(ok);
 		let log = session.log.clone();
+		let peer = session.clone();
 
 		let publisher = Publisher::new(
 			crate::time::sim(),
@@ -14733,6 +14746,7 @@ mod tests {
 		}
 		assert_eq!(occurrences(&log, b"cam"), 1, "the advertisement never went out");
 
+		peer.push(&refusal);
 		let _warm = origin
 			.announce("cam", crate::origin::Route::default().with_epoch(epoch).with_cost(0))
 			.unwrap();

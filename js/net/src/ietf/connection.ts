@@ -7,7 +7,7 @@ import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
+import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -189,6 +189,10 @@ export class Connection implements Established {
 				if (this.#closed) return;
 				if (err instanceof RequestWindowError) {
 					this.#close({ closeCode: err.code, reason: err.message });
+					return;
+				}
+				if (sessionClosed(err)) {
+					this.#close();
 					return;
 				}
 				this.#violated(
@@ -660,7 +664,7 @@ export class Connection implements Established {
 			});
 			await race([read(), stopped]);
 		} catch (err) {
-			if (!this.#closed)
+			if (!this.#closed && !sessionClosed(err))
 				this.#violated(
 					err instanceof ProtocolViolation
 						? err

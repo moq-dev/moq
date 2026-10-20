@@ -390,8 +390,9 @@ where
 			}
 			_ => {
 				let control = Control::new(None, client).with_history(limits.requests());
-				// Send SETUP and retain its writer for the session's lifetime.
-				let setup = run_setup(
+				// Send SETUP and retain its writer for the session's lifetime. Only a failure
+				// ends the session; the other branches report how it closed.
+				let setup = err_only(run_setup(
 					runtime.clone(),
 					session.clone(),
 					version,
@@ -405,7 +406,7 @@ where
 					},
 					goaway.clone(),
 					control.clone(),
-				);
+				));
 
 				// Only the dialing side fails loud on a publication outside its grant: a
 				// server's publish origin is everything the peer may read, not what it
@@ -566,8 +567,8 @@ where
 					if let Poll::Ready(err) = waiter.poll_future(enforce.as_mut()) {
 						return Poll::Ready(Err(err));
 					}
-					if let Poll::Ready(result) = waiter.poll_future(setup.as_mut()) {
-						return Poll::Ready(result);
+					if let Poll::Ready(err) = waiter.poll_future(setup.as_mut()) {
+						return Poll::Ready(Err(err));
 					}
 					if task_set.poll(waiter).is_ready() {
 						return Poll::Ready(Ok(()));
@@ -817,8 +818,9 @@ async fn run_setup<S: crate::transport::poll::Session>(
 
 	// Hold the writer alive until the session closes, sending a GOAWAY if the
 	// drain trigger fires meanwhile. The trigger resolves `None` when the session
-	// drops without draining; keep holding either way (closing this stream
-	// mid-session is a protocol violation on strict peers).
+	// drops without draining; keep holding either way, since a FIN mid-session is
+	// a protocol violation the peer closes over.
+	let mut untriggered = false;
 	let payload = kio::wait(|waiter| {
 		let mut cx = waiter.context();
 		if session.poll_closed(&mut cx).is_ready() {
@@ -827,7 +829,14 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		if writer.poll_closed(&mut cx).is_ready() {
 			return std::task::Poll::Ready(Err(Error::ProtocolViolation));
 		}
-		goaway.poll_triggered(waiter).map(Ok)
+		if !untriggered {
+			match goaway.poll_triggered(waiter) {
+				std::task::Poll::Ready(Some(payload)) => return std::task::Poll::Ready(Ok(Some(payload))),
+				std::task::Poll::Ready(None) => untriggered = true,
+				std::task::Poll::Pending => {}
+			}
+		}
+		std::task::Poll::Pending
 	})
 	.await?;
 
@@ -1413,9 +1422,10 @@ async fn run_goaway<R: crate::transport::poll::RecvStream>(
 		.map_err(control_stream_error)
 }
 
-/// A control stream cannot end independently of its session.
+/// A control stream cannot end independently of its session, so its own failure is the
+/// peer's violation. The session closing or timing out under it passes through.
 pub(super) fn control_stream_error(err: Error) -> Error {
-	if is_protocol_violation(&err) || matches!(err, Error::Session(_) | Error::Encode(_)) {
+	if is_protocol_violation(&err) || matches!(err, Error::Session(_) | Error::Encode(_) | Error::IdleTimeout) {
 		err
 	} else {
 		Error::ProtocolViolation
@@ -3455,7 +3465,12 @@ mod tests {
 		.unwrap();
 		let _ = moq_clock::timeout(std::time::Duration::from_secs(10), driver).await;
 		let closes = log.closes();
-		assert!(closes.len() <= 1, "closed more than once: {closes:?}");
+		// A request stream closes at the source and its task may close again; the transport
+		// keeps the first, so only a disagreeing code would reach the peer.
+		assert!(
+			closes.iter().all(|(code, _)| *code == closes[0].0),
+			"closed with different codes: {closes:?}"
+		);
 		closes.first().map(|(code, _)| SessionError::from_code(*code))
 	}
 

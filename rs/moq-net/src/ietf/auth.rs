@@ -488,6 +488,19 @@ impl Serve {
 	}
 }
 
+/// Anything but a GOAWAY after the presenter's Auth: refused once its type is read,
+/// rather than waiting on a body that cannot make it legal.
+#[cfg(feature = "async")]
+#[derive(Debug)]
+struct Unexpected;
+
+#[cfg(feature = "async")]
+impl crate::coding::Decode<Version> for Unexpected {
+	fn decode(r: &mut crate::coding::Decoder<'_>, _: Version) -> Result<Self, crate::coding::DecodeError> {
+		Err(crate::coding::DecodeError::InvalidMessage(r.varint()?))
+	}
+}
+
 /// Write the acceptor's replies until either side ends the token. `default` feeds
 /// the default acceptor's grant into the outbox as it changes.
 #[cfg(feature = "async")]
@@ -507,12 +520,10 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 	loop {
 		let next = kio::wait(|waiter| {
 			let mut cx = std::task::Context::from_waker(waiter.waker());
-			if let Poll::Ready(res) = goaways.poll_next(&mut stream.reader, &mut cx).map(|res| {
-				res.and_then(|message| match message {
-					None => Ok(()),
-					Some(_) => Err(Error::ProtocolViolation),
-				})
-			}) {
+			if let Poll::Ready(res) = goaways
+				.poll_next::<Unexpected, _>(&mut stream.reader, &mut cx)
+				.map(|res| res.map(|_| ()))
+			{
 				return Poll::Ready(Next::Withdrawn(res));
 			}
 			if let Some(default) = default.as_deref_mut()

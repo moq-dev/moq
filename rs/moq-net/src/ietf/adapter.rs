@@ -47,6 +47,12 @@ impl<T> Queue<T> {
 		true
 	}
 
+	/// Dequeue the next message, waiting while the queue is open and empty.
+	/// Returns `None` once the queue is closed and drained.
+	async fn pop(&self) -> Option<T> {
+		kio::wait(|waiter| self.poll_pop(waiter)).await
+	}
+
 	/// Poll for the next message; ready with `None` once closed and drained.
 	fn poll_pop(&self, waiter: &kio::Waiter) -> Poll<Option<T>> {
 		self.0
@@ -60,7 +66,7 @@ impl<T> Queue<T> {
 			.map(|mut state| state.messages.pop_front())
 	}
 
-	/// Stop future pushes; buffered messages still drain, then `poll_pop` returns `None`.
+	/// Stop future pushes; buffered messages still drain, then `pop` returns `None`.
 	fn close(&self) {
 		self.0.lock().closed = true;
 	}
@@ -870,25 +876,17 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		let _ = self.shared.control.push(raw.into());
 	}
 
-	/// Writer task: drains the queue and writes to the control stream.
+	/// Writer task: drains the queue and writes to the control stream. A write failing,
+	/// such as after the peer's STOP_SENDING, is a protocol violation.
 	async fn run_write(&self, mut writer: Writer<S::SendStream, Version>) -> Result<(), Error> {
-		loop {
-			let message = kio::wait(|waiter| {
-				if writer.poll_closed(&mut waiter.context()).is_ready() {
-					return Poll::Ready(Err(Error::ProtocolViolation));
-				}
-				self.shared.control.poll_pop(waiter).map(Ok)
-			})
-			.await?;
-			let Some(message) = message else {
-				return Ok(());
-			};
-			let mut buf = std::io::Cursor::new(message);
+		while let Some(msg) = self.shared.control.pop().await {
+			let mut buf = std::io::Cursor::new(msg);
 			writer
 				.write_all(&mut buf)
 				.await
 				.map_err(super::session::control_stream_error)?;
 		}
+		Ok(())
 	}
 
 	/// Dispatcher loop that reads control stream messages and routes them.
@@ -1456,7 +1454,7 @@ mod tests {
 			shared
 				.open_incoming(target_id, Bytes::from_static(b"request"), None)
 				.unwrap();
-			let (_, mut recv) = kio::wait(|waiter| shared.incoming.poll_pop(waiter)).await.unwrap();
+			let (_, mut recv) = shared.incoming.pop().await.unwrap();
 			assert_eq!(
 				recv.read_chunk(usize::MAX).await.unwrap(),
 				Some(Bytes::from_static(b"request"))
@@ -1589,7 +1587,7 @@ mod tests {
 		let n = stream.write(b"hello").await.unwrap();
 		assert_eq!(n, 5);
 
-		let data = kio::wait(|waiter| control.poll_pop(waiter)).await.unwrap();
+		let data = control.pop().await.unwrap();
 		assert_eq!(data, &b"hello"[..]);
 	}
 
@@ -1650,7 +1648,7 @@ mod tests {
 			.open_incoming(request_id, encode_msg(&msg, version), None)
 			.unwrap();
 
-		let (_, mut recv) = kio::wait(|waiter| shared.incoming.poll_pop(waiter)).await.unwrap();
+		let (_, mut recv) = shared.incoming.pop().await.unwrap();
 
 		// Drain the advertisement the stream opened with, so both halves are quiescent
 		// and a later read only sees what the terminal message routes.

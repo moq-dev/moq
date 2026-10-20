@@ -3680,19 +3680,17 @@ where
 			.await
 		};
 		if accepted {
-			// The request stays open while the subscription still needs its fill.
-			let mut finished = false;
+			// The request stays open while the subscription still needs its fill. From draft 18
+			// it may carry a GOAWAY meanwhile; before that, nothing follows the answer here.
+			let mut finished = matches!(
+				self.version,
+				Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+			);
 			let mut failed = false;
 			kio::wait(|waiter| {
 				if !finished {
 					let mut cx = waiter.context();
-					let ended = match self.version {
-						Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-							super::request_stream::poll_legacy_end(&mut stream, self.version, &mut cx)
-						}
-						_ => messages.poll_end(&mut stream.reader, &mut cx),
-					};
-					match ended {
+					match messages.poll_end(&mut stream.reader, &mut cx) {
 						Poll::Ready(Ok(())) => finished = true,
 						Poll::Ready(Err(_)) => {
 							failed = true;
