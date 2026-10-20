@@ -854,7 +854,7 @@ mod tests {
 		// 1 is a datagram the starts index never sees: the end settles before 2 by
 		// sequence, but 1 presents past it.
 		let groups = Groups {
-			gone: vec![1..2],
+			gone: std::iter::once(1..2).collect(),
 			..Groups::new([Groups::started(0, 0), Groups::started(2, 10_000)])
 		};
 		let window = Window::new(&[range(time(0), time(5000))], None, &groups).unwrap();
