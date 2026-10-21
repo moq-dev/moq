@@ -1,0 +1,5 @@
+paths:
+  .github/workflows/check.yml:
+    ignore:
+      # Delivered to Actions but missing from its event docs: https://github.com/rhysd/actionlint/issues/726
+      - 'invalid activity type "destroyed" for "merge_group" Webhook event'
