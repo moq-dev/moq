@@ -39,7 +39,7 @@ The quickest way to see it in action (requires [Nix](https://nixos.org/download.
 nix develop -c just
 ```
 
-Then visit <http://localhost:5173>. Don't have Nix? See the [demo guide](https://doc.moq.dev/setup/) for manual setup.
+It opens the watch, publish, and stats pages in your browser, or visit <http://localhost:5173/watch.html>. Don't have Nix? See the [demo guide](https://doc.moq.dev/setup/) for manual setup.
 
 ## Architecture
 
