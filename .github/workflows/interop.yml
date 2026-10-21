@@ -10,28 +10,8 @@ on:
   # Nightly: catch an interop regression in the current tree before a user does.
   schedule:
     - cron: "0 8 * * *"
-  # On release PRs that touch the harness itself, so a backported change to the
-  # interop test is validated before it merges. Main PRs skip it; the schedule
-  # above covers main. `edited` catches a main PR retargeted to release.
-  pull_request:
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "test/lib/**"
-      - "test/p2p/**"
-      - "js/p2p/**"
-      - "test/interop/**"
-      - "test/max-age/**"
-      - "test/portrait/**"
-      - "rs/moq-tokio/tests/integration/max_age.rs"
-      # The interop job also depends on the recipe that invokes it and the
-      # workspace membership that links the JS clients to source.
-      - "test/justfile"
-      - "package.json"
-      # The Go client builds against the modules this script stages.
-      - "sh/go/**"
-      - "cpp/moq/**"
-      - ".github/workflows/interop.yml"
+  # release-gate.yml, on release PRs that touch the harness.
+  workflow_call:
 
 concurrency:
   group: interop-${{ github.ref }}

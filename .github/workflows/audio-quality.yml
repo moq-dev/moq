@@ -7,22 +7,6 @@ name: Audio quality
 # in nightly.yml.
 on:
   workflow_call:
-  pull_request:
-    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
-    # retargeted to release.
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "js/watch/**"
-      # The container consumer decides what a replay delivers, waits for, and skips, on the
-      # groups, tracks, and signals underneath it.
-      - "js/hang/**"
-      - "js/net/**"
-      - "js/signals/**"
-      - "test/audio-quality/**"
-      - "test/lib/**"
-      - "test/justfile"
-      - ".github/workflows/audio-quality.yml"
 
 concurrency:
   group: audio-quality-${{ github.ref }}
