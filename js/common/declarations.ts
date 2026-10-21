@@ -58,6 +58,8 @@ export function dtsPath(files: Map<string, unknown>, from: string, specifier: st
 	const base = resolve(dirname(from), specifier).replace(/\.(js|jsx|ts|tsx)$/, "");
 	const file = `${base}.d.ts`;
 	const index = join(base, "index.d.ts");
+	// A trailing slash names the directory, so only its index can match.
+	if (specifier.endsWith("/")) return index;
 	return files.has(file) || !files.has(index) ? file : index;
 }
 

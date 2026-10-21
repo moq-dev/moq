@@ -57,3 +57,12 @@ test("an extensionless import resolves to the file before a directory index", ()
 	]);
 	expect(problems(root, files)).toEqual([]);
 });
+
+test("a trailing slash resolves to the directory index over a file", () => {
+	const files = new Map([
+		["/dist/foo.d.ts", "export declare const value: number;\n"],
+		["/dist/foo/index.d.ts", "export declare const other: number;\n"],
+		["/dist/index.d.ts", 'import { other } from "./foo/";\n'],
+	]);
+	expect(problems(root, files)).toEqual([]);
+});
