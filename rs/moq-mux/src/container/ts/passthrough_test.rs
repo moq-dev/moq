@@ -10,7 +10,6 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::fixture::{ACCESS, Flags, MS, Mux, WRAP, paced, program};
-use super::import::test::{WRAP_MICROS, epoch_clock, epoch_time};
 use super::passthrough::{
 	GROUP_BYTES_MAX, GROUP_OBJECTS_MAX, PacketSizeError, Passthrough, PcrGapError, PcrRestartError, PcrRewindError,
 };
@@ -77,21 +76,8 @@ async fn import_onto(
 	chunk: usize,
 	pcr_pid: Option<u16>,
 ) -> anyhow::Result<Imported> {
-	let timebase = catalog.timebase();
-	import_on(broadcast, catalog, timebase, data, chunk, pcr_pid).await
-}
-
-/// [`import_onto`] on `timebase`, one of `catalog`'s.
-async fn import_on(
-	broadcast: moq_net::broadcast::Producer,
-	catalog: crate::catalog::Producer,
-	timebase: crate::catalog::Timebase,
-	data: &[u8],
-	chunk: usize,
-	pcr_pid: Option<u16>,
-) -> anyhow::Result<Imported> {
 	let consumer = broadcast.consume();
-	let mut passthrough = Passthrough::new(broadcast.clone(), timebase.reserve())?;
+	let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve())?;
 	if let Some(pid) = pcr_pid {
 		passthrough = passthrough.with_pcr_pid(pid);
 	}
@@ -100,17 +86,9 @@ async fn import_on(
 		passthrough.decode(chunk)?;
 	}
 	passthrough.finish()?;
-	read_back(&consumer, &name, &catalog).await
-}
 
-/// Every object of the finished track `name`, and the catalog as it stands.
-async fn read_back(
-	consumer: &moq_net::broadcast::Consumer,
-	name: &str,
-	catalog: &crate::catalog::Producer,
-) -> anyhow::Result<Imported> {
 	let mut track = consumer
-		.track(name)?
+		.track(&name)?
 		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_DELAY))
 		.await?;
 	let mut objects = Vec::new();
@@ -354,71 +332,21 @@ async fn two_programs_on_one_clock_publish_no_random_access() {
 	}
 }
 
-/// The window a second program was on air in publishes no random access, and the first window
-/// carried whole on one program wins it back.
+/// Groups started while a second program was on air stay cached, so dropping back to one program
+/// does not win random access back.
 #[tokio::test(start_paused = true)]
-async fn random_access_returns_once_a_window_carries_one_program() {
+async fn random_access_lost_to_a_second_program_stays_lost() {
 	let mut mux = Mux::default();
 	mux.pat(&[(1, 0x20), (2, 0x30)])
 		.pmt(0x20, 1, 0x100, &[(0x1b, 0x100)], 0)
 		.pmt(0x30, 2, 0x100, &[(0x1b, 0x200)], 0);
 	paced(&mut mux, 0x100, 0, 30, 10, 4);
 	program(&mut mux, 0x100);
-	paced(&mut mux, 0x100, 1_200 * MS, 100, 10, 4);
+	paced(&mut mux, 0x100, 1_200 * MS, 30, 10, 4);
 	let data = mux.bytes();
-	let cut = pcr_at(&data, 3_000 * MS);
-	let early = import(&data[..cut], cut, None).await.unwrap();
-	assert!(!early.section().random_access, "the window with two programs");
 	let imported = import(&data, data.len(), None).await.unwrap();
-	assert!(imported.groups().len() >= 12);
-	assert!(imported.section().random_access, "the window after it");
-}
-
-/// A window holds the PCR intervals that start in it: a second program carried past a line, up to
-/// the first PCR after it, counts in the window before the line, and the window from the line on
-/// carries one program throughout.
-#[tokio::test(start_paused = true)]
-async fn a_layout_change_before_the_first_pcr_past_a_line_counts_before_it() {
-	let mut mux = Mux::default();
-	mux.pat(&[(1, 0x20), (2, 0x30)])
-		.pmt(0x20, 1, 0x100, &[(0x1b, 0x100)], 0)
-		.pmt(0x30, 2, 0x100, &[(0x1b, 0x200)], 0);
-	// The last PCR before the 2 s line is at 1.98 s; most of the interval after it, program 2's
-	// packets included, lies past the line, and the PAT drops program 2 before the 2.02 s PCR.
-	paced(&mut mux, 0x100, 20 * MS, 50, 10, 4);
-	mux.fill(0x200, 20);
-	program(&mut mux, 0x100);
-	paced(&mut mux, 0x100, 2_020 * MS, 60, 10, 4);
-	let data = mux.bytes();
-	let end = pcr_at(&data, 4_020 * MS);
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve()).unwrap();
-	passthrough.decode(&data[..end + 188]).unwrap();
-	let section = catalog.snapshot().m2ts.expect("the window from 2 s has passed");
-	assert!(section.random_access, "the window from the line carried one program");
-}
-
-/// The section waits for the first window that starts at or after the first group, so the catalog
-/// first lists the track with a whole window behind it.
-#[tokio::test(start_paused = true)]
-async fn the_catalog_waits_for_a_whole_window() {
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	// The first group starts at 0.52 s, so the window from 2 s is the first after it.
-	paced(&mut mux, 0x100, 520 * MS, 120, 10, 4);
-	let data = mux.bytes();
-	let end = pcr_at(&data, 4_000 * MS);
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve()).unwrap();
-	passthrough.decode(&data[..end]).unwrap();
-	assert!(catalog.snapshot().m2ts.is_none(), "listed before a whole window");
-	passthrough.decode(&data[end..end + 188]).unwrap();
-	let section = catalog.snapshot().m2ts.expect("listed once the window passed");
-	assert!(section.random_access);
-	// 250 packets a window, and 5 random access points: 255 * 1504 bits over two seconds.
-	assert_eq!(section.mux_rate, Some(192_000));
+	assert!(imported.groups().len() >= 6);
+	assert!(!imported.section().random_access);
 }
 
 #[tokio::test(start_paused = true)]
@@ -491,9 +419,8 @@ async fn a_source_without_random_access_groups_every_second() {
 	let imported = import(&data, data.len(), None).await.unwrap();
 	assert!(!imported.section().random_access);
 	let groups = imported.groups();
-	// The first group waits for a random access point that never comes. The first PCR sits on a
-	// line, so the first line watched from a PCR before its second is at 2 s.
-	assert_eq!(groups[0][0].micros, 2_000_000 - micros_before_pcr(&data, 2_000_000));
+	// The first group waits a second for a random access point that never comes.
+	assert_eq!(groups[0][0].micros, 1_000_000 - micros_before_pcr(&data, 1_000_000));
 	for group in &groups {
 		assert_eq!(group.len(), 25, "a second of 40 ms objects");
 	}
@@ -572,15 +499,11 @@ async fn objects_after_the_last_pcr_extrapolate_its_rate() {
 /// The section describes the track for as long as the importer lives, however the track ends.
 #[tokio::test(start_paused = true)]
 async fn the_section_goes_with_the_importer() {
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	paced(&mut mux, 0x100, 0, 125, 10, 4);
-	let data = mux.bytes();
 	for abort in [false, true] {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve()).unwrap();
-		passthrough.decode(&data).unwrap();
+		passthrough.decode(KYRION_H264).unwrap();
 		assert!(catalog.snapshot().m2ts.is_some(), "abort {abort}");
 		if abort {
 			passthrough.abort(moq_net::Error::Cancel);
@@ -655,324 +578,9 @@ async fn a_flagged_jump_forward_starts_a_group_behind_a_break() {
 	}
 }
 
-/// Where in `data` the packet carrying PCR `ticks` starts.
-fn pcr_at(data: &[u8], ticks: u64) -> usize {
-	let packet = data.chunks(188).position(|pkt| header(pkt).pcr == Some(ticks));
-	packet.expect("a packet carrying that PCR") * 188
-}
-
-/// A passthrough importer whose clock a shared epoch at `epoch` placed: PCR zero one wrap before it.
-struct Placed {
-	broadcast: moq_net::broadcast::Consumer,
-	catalog: crate::catalog::Producer,
-	passthrough: Passthrough,
-	name: String,
-}
-
-impl Placed {
-	fn new(epoch: std::time::SystemTime) -> Self {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-		let timebase = catalog.timebase();
-		timebase
-			.place(moq_net::Timestamp::ZERO, epoch - Duration::from_micros(WRAP_MICROS))
-			.unwrap();
-		let passthrough = Passthrough::new(broadcast.clone(), timebase.reserve()).unwrap();
-		Self {
-			broadcast: broadcast.consume(),
-			catalog,
-			name: passthrough.track().to_string(),
-			passthrough,
-		}
-	}
-
-	async fn finish(mut self) -> Imported {
-		self.passthrough.finish().unwrap();
-		read_back(&self.broadcast, &self.name, &self.catalog).await.unwrap()
-	}
-}
-
-/// Whether each object starts a group.
-fn starts(imported: &Imported) -> Vec<bool> {
-	let objects = &imported.objects;
-	(0..objects.len())
-		.map(|i| i == 0 || objects[i].group != objects[i - 1].group)
-		.collect()
-}
-
-/// Import `data` placed by one epoch from its first byte, and again, on a host clock 7 ms ahead,
-/// from the program and then the packet carrying PCR `join`, the two fed in step. From the second's
-/// first group on, both must publish the same objects in the same groups, and from the second's
-/// first section on, the same section after every PCR.
-async fn import_twice_placed(data: &[u8], prefix: usize, join: u64) -> (Imported, Imported) {
-	import_twice_placed_from(data, prefix, pcr_at(data, join)).await
-}
-
-/// [`import_twice_placed`], the second importer joining at byte `split`.
-async fn import_twice_placed_from(data: &[u8], prefix: usize, split: usize) -> (Imported, Imported) {
-	let epoch = epoch_time();
-	let hosts = [epoch + Duration::from_secs(600), epoch + Duration::from_millis(600_007)];
-	crate::clock::fake_host_wall(hosts[0]);
-	let mut first = Placed::new(epoch);
-	first.passthrough.decode(&data[..split]).unwrap();
-	crate::clock::fake_host_wall(hosts[1]);
-	let mut second = Placed::new(epoch);
-	second.passthrough.decode(&data[..prefix]).unwrap();
-	let mut described = false;
-	for pkt in data[split..].chunks(188) {
-		crate::clock::fake_host_wall(hosts[0]);
-		first.passthrough.decode(pkt).unwrap();
-		crate::clock::fake_host_wall(hosts[1]);
-		second.passthrough.decode(pkt).unwrap();
-		let Some(pcr) = header(pkt).pcr else { continue };
-		let section = second.catalog.snapshot().m2ts;
-		described |= section.is_some();
-		if described {
-			assert_eq!(section, first.catalog.snapshot().m2ts, "the sections after PCR {pcr}");
-		}
-	}
-	assert!(described, "the joiner described no window");
-	let (first, second) = (first.finish().await, second.finish().await);
-
-	assert_eq!(first.catalog.clock, Some(epoch_clock(epoch)));
-	assert_eq!(second.catalog.clock, first.catalog.clock);
-	assert!(!second.objects.is_empty(), "the joiner published nothing");
-	let skip = first.objects.len() - second.objects.len();
-	for (index, (first, second)) in first.objects[skip..].iter().zip(&second.objects).enumerate() {
-		assert_eq!(
-			(first.micros, &first.payload),
-			(second.micros, &second.payload),
-			"object {index} of the importer that joined"
-		);
-	}
-	assert_eq!(starts(&first)[skip..], starts(&second), "group starts");
-	(first, second)
-}
-
-/// Importers placed by one epoch publish identical objects across a PCR wrap, the second joining
-/// after it.
-#[tokio::test(start_paused = true)]
-async fn importers_sharing_an_epoch_publish_identical_objects_across_a_wrap() {
-	const WRAP: u64 = (1 << 33) * 300;
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	let prefix = mux.out.len();
-	let start = WRAP - 2_000 * MS;
-	for i in 0..250 {
-		mux.packet(0x100, Flags::pcr((start + i * 40 * MS) % WRAP));
-		if i % 10 == 0 {
-			mux.packet(0x100, ACCESS);
-		}
-		mux.fill(0x101, 3);
-	}
-	let data = mux.bytes();
-	let (first, _) = import_twice_placed(&data, prefix, 1_000 * MS).await;
-	let micros: Vec<u64> = first.objects.iter().map(|object| object.micros).collect();
-	assert!(micros.windows(2).all(|pair| pair[0] < pair[1]), "{micros:?}");
-}
-
-/// Importers placed by one epoch agree across a flagged jump that carries the source over a wrap,
-/// the second joining after it and never seeing the flag.
-#[tokio::test(start_paused = true)]
-async fn importers_sharing_an_epoch_agree_across_a_flagged_jump() {
-	const WRAP: u64 = (1 << 33) * 300;
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	let prefix = mux.out.len();
-	paced(&mut mux, 0x100, WRAP - 3_000 * MS, 50, 10, 4);
-	// Flagged three seconds on from the PCR due a second short of the wrap, so the jump crosses it.
-	mux.packet(0x100, Flags::pcr(2_000 * MS).discontinuity());
-	mux.fill(0x101, 4);
-	paced(&mut mux, 0x100, 2_040 * MS, 150, 10, 4);
-	let data = mux.bytes();
-	let (first, _) = import_twice_placed(&data, prefix, 3_000 * MS).await;
-	let micros: Vec<u64> = first.objects.iter().map(|object| object.micros).collect();
-	assert!(micros.windows(2).all(|pair| pair[0] <= pair[1]), "{micros:?}");
-}
-
-/// Importers placed by one epoch cut the same groups and describe them alike wherever the second
-/// joined, as a restarted one does: on random access points rarer than the grid, on none, and on a
-/// clock two programs share.
-/// Every join falls after a cut on the grid, and the later ones after the first importer recorded a
-/// rate.
-#[tokio::test(start_paused = true)]
-async fn importers_sharing_an_epoch_cut_the_same_groups() {
-	// Random access every `gop` PCRs on program 1's video, and how many programs share the clock.
-	for (gop, programs) in [(36, 1), (0, 1), (36, 2)] {
-		let mut mux = Mux::default();
-		match programs {
-			1 => program(&mut mux, 0x100),
-			_ => {
-				mux.pat(&[(1, 0x20), (2, 0x30)])
-					.pmt(0x20, 1, 0x100, &[(0x1b, 0x100)], 0)
-					.pmt(0x30, 2, 0x100, &[(0x1b, 0x200)], 0);
-			}
-		}
-		let prefix = mux.out.len();
-		for i in 0..400 {
-			mux.packet(0x100, Flags::pcr(i * 40 * MS));
-			if gop != 0 && i % gop == 0 {
-				mux.packet(0x100, ACCESS);
-			}
-			if programs == 2 && i % 36 == 18 {
-				mux.packet(0x200, ACCESS);
-			}
-			mux.fill(0x101, 4);
-		}
-		let data = mux.bytes();
-		for join in [2_520, 4_720, 7_360] {
-			let (first, _) = import_twice_placed(&data, prefix, join * MS).await;
-			let fallback = first
-				.groups()
-				.iter()
-				.any(|group| !header(&group[0].payload).random_access);
-			assert!(fallback, "gop {gop}: the grid cut");
-			if gop == 0 || programs == 2 {
-				assert!(!first.section().random_access, "gop {gop}, {programs} programs");
-			}
-			assert!(first.section().mux_rate.is_some(), "gop {gop}: a rate was recorded");
-		}
-	}
-}
-
-/// Importers placed by one epoch split groups at the object ceiling alike, the ceiling counted
-/// from a group start both made.
-#[tokio::test(start_paused = true)]
-async fn importers_sharing_an_epoch_split_full_groups_alike() {
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	let prefix = mux.out.len();
-	mux.packet(0x100, Flags::pcr(0).random_access());
-	// A PCR in every packet, 200 µs apart: the ceiling fills before each line of the grid.
-	for i in 1..60_000 {
-		mux.packet(0x100, Flags::pcr(i * 5_400));
-	}
-	let data = mux.bytes();
-	let (first, second) = import_twice_placed(&data, prefix, 3_300 * MS).await;
-	let full = second
-		.groups()
-		.iter()
-		.filter(|group| group.len() == GROUP_OBJECTS_MAX)
-		.count();
-	assert!(full >= 3, "{full} groups at the ceiling");
-	assert!(!first.section().random_access);
-}
-
-/// A joiner whose first PCR lands exactly on a window's line misses the grid cut its partner made
-/// there, so the first window it describes is the one after: describing that window would publish
-/// random access the partner lost to the cut.
-#[tokio::test(start_paused = true)]
-async fn a_joiner_on_a_window_line_describes_the_window_after() {
-	const WINDOW: u64 = 2_000 * MS;
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	let prefix = mux.out.len();
-	// The placed epoch puts these PCRs one wrap on, so `offset` lands every fiftieth on a line.
-	let offset = (WINDOW - WRAP % WINDOW) % WINDOW;
-	for i in 0..400 {
-		mux.packet(0x100, Flags::pcr(offset + i * 40 * MS));
-		// No random access before 4 s, then one just after the PCR on each whole second.
-		if i >= 100 && i % 25 == 0 {
-			mux.packet(0x100, ACCESS);
-		}
-		mux.fill(0x101, 4);
-	}
-	let data = mux.bytes();
-	let (first, second) = import_twice_placed(&data, prefix, offset + 4_000 * MS).await;
-	assert!(
-		first.section().random_access,
-		"every group from 6 s on is a random access point"
-	);
-	assert_eq!(first.section(), second.section());
-}
-
-/// A joiner whose first PCR is a flagged jump on a line of the grid that it cannot see as one, the
-/// retransmitted copy of the flagged PCR or a PCR whose flag came in the packet before, waits out
-/// the spacing after it as its partner, which counted the jump there, does.
-#[tokio::test(start_paused = true)]
-async fn a_joiner_on_a_jump_it_cannot_see_waits_out_the_spacing() {
-	const LINE: u64 = 1_000 * MS;
-	for retransmitted in [true, false] {
-		let mut mux = Mux::default();
-		program(&mut mux, 0x100);
-		let prefix = mux.out.len();
-		// The placed epoch puts these PCRs one wrap on, so `offset` lands every 25th on a line.
-		let offset = (LINE - WRAP % LINE) % LINE;
-		paced(&mut mux, 0x100, offset, 100, 0, 4);
-		let jump = offset + 11 * LINE;
-		if retransmitted {
-			mux.packet(0x100, Flags::pcr(jump).discontinuity());
-			mux.out.extend_from_within(mux.out.len() - 188..);
-		} else {
-			mux.packet(0x100, Flags::default().discontinuity());
-			mux.packet(0x100, Flags::pcr(jump));
-		}
-		mux.fill(0x101, 4);
-		paced(&mut mux, 0x100, jump + 40 * MS, 250, 0, 4);
-		let data = mux.bytes();
-		let split = pcr_at(&data, jump) + if retransmitted { 188 } else { 0 };
-		import_twice_placed_from(&data, prefix, split).await;
-	}
-}
-
-/// The grid lies on the timeline the epoch places, so it runs on regularly across a PCR wrap that
-/// would shift a grid of raw ticks by about 0.72 s, and an importer joining after the wrap cuts on
-/// it too.
-#[tokio::test(start_paused = true)]
-async fn the_grid_runs_on_across_a_wrap() {
-	const WRAP: u64 = (1 << 33) * 300;
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	let prefix = mux.out.len();
-	let start = WRAP - 3_000 * MS;
-	for i in 0..300 {
-		mux.packet(0x100, Flags::pcr((start + i * 40 * MS) % WRAP));
-		mux.fill(0x101, 4);
-	}
-	let data = mux.bytes();
-	let (first, _) = import_twice_placed(&data, prefix, 2_000 * MS).await;
-	let groups = first.groups();
-	assert!(groups.len() >= 10, "{} groups", groups.len());
-	for group in &groups {
-		let pcr = header(&group[0].payload).pcr.expect("a cut on the grid falls on a PCR");
-		let unwrapped = if pcr >= start { pcr } else { pcr + WRAP };
-		let past = unwrapped % (1_000 * MS);
-		assert!(past < 40 * MS, "a cut {} ms past the line", past / MS);
-	}
-}
-
-/// With every PCR in the era nearest the clock and nothing clamping it, a flagged jump forward by
-/// less than the object a random access point started already reached would start its group
-/// before that one: the import ends rather than shift the timeline off the source's clock.
-#[tokio::test(start_paused = true)]
-async fn a_flagged_jump_short_of_a_group_start_ends_the_import() {
-	let mut mux = Mux::default();
-	program(&mut mux, 0x100);
-	paced(&mut mux, 0x100, 10_000 * MS, 20, 10, 4);
-	mux.packet(0x100, Flags::pcr(10_800 * MS));
-	mux.packet(0x100, ACCESS);
-	mux.fill(0x101, 4);
-	// A millisecond on from the last PCR, short of the access point's group a few ms after it.
-	mux.packet(0x100, Flags::pcr(10_801 * MS).discontinuity());
-	mux.fill(0x101, 4);
-	paced(&mut mux, 0x100, 10_841 * MS, 20, 10, 4);
-	let data = mux.bytes();
-	let err = match import(&data, data.len(), None).await {
-		Ok(_) => panic!("the jump was clamped onto the group it falls short of"),
-		Err(err) => err,
-	};
-	assert!(
-		err.chain().any(|cause| matches!(
-			cause.downcast_ref::<crate::Error>(),
-			Some(crate::Error::TimestampRewind(_))
-		)),
-		"{err:?}"
-	);
-}
-
 /// A capture that took the catalog's clock first keeps it: the import shifts every object by one
-/// offset that lands its first PCR at now, so the timeline still never steps back and a flagged
-/// jump still adds its step.
+/// offset that lands the first at now, so the timeline still never steps back and a flagged jump
+/// still adds its step.
 #[tokio::test(start_paused = true)]
 async fn an_import_shifts_onto_a_clock_already_in_use() {
 	let mut mux = Mux::default();
@@ -997,10 +605,9 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 
 	assert_eq!(catalog.snapshot().clock, fixed, "the import never moves the clock");
 	let first = shifted.objects[0].micros;
-	let lead = verbatim.objects[0].micros - 3_600_000_000;
 	assert!(
-		(before + lead..=after + lead).contains(&first),
-		"the first PCR lands at now: {before} {first} {after}, {lead} µs ahead of it"
+		(before..=after).contains(&first),
+		"lands at now: {before} {first} {after}"
 	);
 	let offset = first as i64 - verbatim.objects[0].micros as i64;
 	assert!(offset < 0, "an hour in shifts back onto the capture's five seconds");

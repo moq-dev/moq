@@ -8,9 +8,11 @@ use std::sync::Arc;
 
 mod bbr3;
 mod cubic;
+mod unlimited;
 
 pub use bbr3::{Bbr3, Bbr3Config};
 pub use cubic::{Cubic, CubicConfig};
+pub use unlimited::Unlimited;
 
 /// Common interface for different congestion controllers
 pub trait Controller: Send + Sync {

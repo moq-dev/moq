@@ -1049,7 +1049,7 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 		video, expected,
 		"continuous leading pictures survive; only join and later-hole orphans are trimmed"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(
 		(stats.dropped, stats.trimmed),
 		(2, 2),
@@ -1935,6 +1935,53 @@ async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str, kind: 
 	frames
 }
 
+/// The import counts what each rendition writes and the export what it reads: both agree with
+/// the frames a subscriber reads back, and only video counts keyframes.
+#[tokio::test(start_paused = true)]
+async fn stats_count_what_the_import_writes_and_the_export_reads() {
+	let data = include_bytes!("test_data/bbb_cbr.ts");
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let sent = catalog.stats();
+	let video = snapshot.video.renditions.keys().map(|name| (name, Kind::Video));
+	let audio = snapshot.audio.renditions.keys().map(|name| (name, Kind::Audio));
+	let renditions: Vec<_> = video.chain(audio).collect();
+	assert_eq!(
+		renditions.len(),
+		2,
+		"the clip carries one video and one audio rendition"
+	);
+	assert_eq!(sent.len(), renditions.len(), "a report per rendition: {sent:?}");
+	for (name, kind) in renditions {
+		let frames = read_frames(&consumer, name, kind).await;
+		let report = &sent[name];
+		assert!(!frames.is_empty(), "{name} carries frames");
+		assert_eq!(report.frames, frames.len() as u64, "{name} frames");
+		assert_eq!(
+			report.bytes,
+			frames.iter().map(Vec::len).sum::<usize>() as u64,
+			"{name} bytes"
+		);
+		assert_eq!(report.keyframes > 0, kind == Kind::Video, "{name} keyframes");
+	}
+
+	let source = crate::source::announced(&consumer).await;
+	drain_with(open_export(source.clone()).await.unwrap()).await;
+	let received = source.stats();
+	for (name, report) in &sent {
+		assert_eq!(received[name].frames, report.frames, "{name} frames read");
+		assert_eq!(received[name].bytes, report.bytes, "{name} bytes read");
+		assert!(received[name].arrival.is_some(), "{name} records its newest arrival");
+	}
+}
+
 /// Both real Kyrion MP2 programs must survive TS -> MoQ -> TS byte-for-byte, and
 /// the PMT must re-announce them as MPEG-1 audio (0x03): the capture is 48 kHz,
 /// so the half-rate type (0x04) would be unfaithful. This capture is a dirty start
@@ -2696,7 +2743,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 		}
 		assert!(
 			ingested.iter().all(|(_, ts)| *ts != Timestamp::ZERO),
-			"{source}: cues stamped with the video PTS, not zero"
+			"{source}: cues stamped with their PCR placement"
 		);
 
 		// Export and re-ingest.
@@ -5516,7 +5563,7 @@ async fn a_start_group_cut_short_starts_at_the_next() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe the export starts at: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing that went out lost a frame");
 	assert_eq!(stats.gaps, 1, "the cut is counted");
 	assert!(stats.trimmed >= 5, "the cut-off start is counted: {}", stats.trimmed);
@@ -5593,7 +5640,7 @@ async fn audio_dropped_ahead_of_a_moved_start_is_not_started() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
 	assert!(stats.trimmed > 0);
 }
@@ -5637,7 +5684,7 @@ async fn a_stale_start_group_holds_the_audio_behind_the_next_keyframe() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe the export starts at: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
 	assert!(stats.trimmed > 0);
 }
@@ -10101,4 +10148,115 @@ async fn placed_ac3_pes_keeps_its_sync_frames_together() {
 	let out = placed_out(&export_placed(placed).await.unwrap());
 	assert_eq!(out.len(), 1);
 	assert_eq!(out[0].bytes, pes);
+}
+
+/// Section placement is an arrival, so cues beside the tune-in keyframe precede its PTS.
+#[tokio::test(start_paused = true)]
+async fn placed_section_survives_tune_in_beside_the_keyframe() {
+	let mut input = Placed::new(vec![(500, CUE.to_vec()), (1_500, CUE.to_vec()), (2_500, CUE.to_vec())]);
+	input.video = (0..25).map(|k| 2_000 + 40 * k).collect();
+	input.entry.pes_packet = None;
+	input.entry.verbatim = Some(tscat::Verbatim::new(0x86, tscat::Framing::Section));
+	let slices = export_placed(input).await.unwrap();
+	let starts: Vec<_> = slices
+		.iter()
+		.filter(|slice| {
+			slice.payload.as_chunks::<188>().0.iter().any(|packet| {
+				(u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])) == PLACED_PID && packet[1] & 0x40 != 0
+			})
+		})
+		.map(slice_pcr)
+		.collect();
+	assert_eq!(
+		starts,
+		vec![1_500_000_000, 2_500_000_000],
+		"only the cue before the keyframe departs is dropped"
+	);
+}
+
+/// A cue's first section byte keeps its source position when remuxed onto a new constant rate.
+#[tokio::test(start_paused = true)]
+async fn placed_sections_keep_their_source_positions() {
+	const RATE: u64 = 2_000_000;
+	const PID: u16 = 0x21;
+	let data = include_bytes!("test_data/scte35/ffmpeg.ts");
+	let mut clocks = Vec::new();
+	let mut starts = Vec::new();
+	for (k, packet) in data.as_chunks::<188>().0.iter().enumerate() {
+		if let Some(pcr) = super::import::pcr(packet) {
+			clocks.push(((k * 188 + 10) as u64, pcr));
+		}
+		let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+		if pid == PID && packet[1] & 0x40 != 0 {
+			let payload = 4 + if packet[3] & 0x20 != 0 {
+				1 + usize::from(packet[4])
+			} else {
+				0
+			};
+			starts.push((k * 188 + payload + 1 + usize::from(packet[payload])) as u64);
+		}
+	}
+	let source: Vec<_> = starts
+		.iter()
+		.map(|&at| {
+			let before = clocks.iter().rposition(|&(byte, _)| byte <= at).unwrap();
+			let (a, b) = match clocks.get(before + 1) {
+				Some(&after) => (clocks[before], after),
+				None => (clocks[before - 1], clocks[before]),
+			};
+			(a.1 + (at - a.0) * (b.1 - a.1) / (b.0 - a.0)) / 27
+		})
+		.collect();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(data).unwrap();
+	import.finish().unwrap();
+	let name = scte_track(&catalog.snapshot()).unwrap();
+	let cues = read_cues(&consumer, &name).await;
+	assert_eq!(
+		cues.iter().map(|(_, time)| time.as_micros() as u64).collect::<Vec<_>>(),
+		source
+	);
+	let mut exporter = open_ts(
+		crate::source::announced(&consumer).await,
+		crate::catalog::CatalogFormat::Hang,
+	)
+	.await
+	.unwrap()
+	.with_delay(RECORDING_MAX_AGE)
+	.with_replay()
+	.with_mux_rate(RATE);
+	let mut output = Vec::new();
+	while let Ok(Some(slice)) = tokio::time::timeout(DRAIN, exporter.next())
+		.await
+		.map(|next| next.unwrap())
+	{
+		for (k, packet) in slice.payload.as_chunks::<188>().0.iter().enumerate() {
+			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+			if pid == PID && packet[1] & 0x40 != 0 {
+				let payload = 4 + if packet[3] & 0x20 != 0 {
+					1 + usize::from(packet[4])
+				} else {
+					0
+				};
+				let byte = k * 188 + payload + 1 + usize::from(packet[payload]);
+				output.push(slice_pcr(&slice) + byte as u128 * 8 * 1_000_000_000 / u128::from(RATE));
+			}
+		}
+	}
+	assert_eq!(output.len(), source.len());
+	let packet = 188 * 8 * 1_000_000_000 / u128::from(RATE);
+	for (&first, &source) in output.iter().zip(&source) {
+		let place = u128::from(source) * 1_000;
+		assert!(
+			first >= place && first < place + packet,
+			"source first byte at {place} ns, export at {first} ns"
+		);
+	}
 }

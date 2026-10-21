@@ -39,7 +39,8 @@ async fn main() -> anyhow::Result<()> {
 				.connect(url)
 				.established()
 				.await?;
-			track.demand().used().await?;
+			let mut demand = track.demand();
+			while demand.wanted_changed().await?.is_none() {}
 			// Declare the end before the final group's payload is even available.
 			track.finish_at(moq_net::track::Position::group(GROUPS))?;
 			for sequence in 0..GROUPS {

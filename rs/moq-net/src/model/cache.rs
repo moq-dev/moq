@@ -745,13 +745,18 @@ impl Track {
 		}
 	}
 
-	/// Poll for a largest location newer than `seen`, recording it there. `None` once the
-	/// track ended with nothing newer.
-	pub(super) fn poll_largest(&self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+	/// Poll for a largest location within `bounds` newer than `seen`, recording it there.
+	/// `None` once the track ended with nothing newer.
+	pub(super) fn poll_largest(
+		&self,
+		seen: &mut Option<Position>,
+		bounds: track::Bounds,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<Position>> {
 		let newer = |largest: &Largest| {
 			largest
 				.position
-				.filter(|position| seen.is_none_or(|seen| *position > seen))
+				.filter(|position| bounds.contains(position.group) && seen.is_none_or(|seen| *position > seen))
 		};
 		let largest = ready!(
 			self.largest
@@ -767,13 +772,13 @@ impl Track {
 		Poll::Ready(next)
 	}
 
-	/// The largest frame newer than `seen` without waiting, recording it there.
-	pub(super) fn take_largest(&self, seen: &mut Option<Position>) -> Option<Position> {
+	/// The largest frame within `bounds` newer than `seen` without waiting, recording it there.
+	pub(super) fn take_largest(&self, seen: &mut Option<Position>, bounds: track::Bounds) -> Option<Position> {
 		let next = self
 			.largest
 			.read()
 			.position
-			.filter(|position| seen.is_none_or(|seen| *position > seen));
+			.filter(|position| bounds.contains(position.group) && seen.is_none_or(|seen| *position > seen));
 		if next.is_some() {
 			*seen = next;
 		}
@@ -814,19 +819,15 @@ impl Track {
 		&self.wakes
 	}
 
-	pub(super) fn watch_aborts(&self) -> aborts::Watch {
-		self.aborts.get_or_init(Arc::default).watch()
-	}
-
 	/// Watch every group the publisher cuts, rather than chosen sequences.
 	pub(super) fn watch_cuts(&self) -> aborts::Watch {
 		self.aborts.get_or_init(Arc::default).watch_cuts()
 	}
 
-	/// Notify watchers that group `sequence` aborted, and whether the publisher cut it.
+	/// Notify watchers that group `sequence` aborted, if the publisher cut it.
 	pub(super) fn aborted(&self, sequence: u64, cut: bool) {
-		if let Some(aborts) = self.aborts.get() {
-			aborts.notify(sequence, cut);
+		if cut && let Some(aborts) = self.aborts.get() {
+			aborts.notify(sequence);
 		}
 	}
 
@@ -1120,6 +1121,14 @@ impl Charge {
 		self.access.clone()
 	}
 
+	/// An [`Extra`] against this charge's account, detached when the charge is.
+	pub(super) fn extra(&self) -> Extra {
+		Extra {
+			track: self.track.clone(),
+			bytes: AtomicU64::new(0),
+		}
+	}
+
 	/// Tick of the group's last cache access.
 	pub(super) fn accessed(&self) -> u64 {
 		self.access.get()
@@ -1193,6 +1202,67 @@ impl Charge {
 }
 
 impl Drop for Charge {
+	fn drop(&mut self) {
+		self.clear();
+	}
+}
+
+/// Bytes a group keeps beside its cached frames, billed to the same pool and account as
+/// its [`Charge`] but reachable outside the group's write lock: a compressed group's
+/// inflated copy, which its readers build, and its codec state. Released on [`Self::clear`] or drop.
+///
+/// Its owner serializes the changes; the count is atomic so the eviction walk can size
+/// the group without that owner's lock.
+#[derive(Default)]
+pub(super) struct Extra {
+	track: Option<Arc<Track>>,
+	bytes: AtomicU64,
+}
+
+impl Extra {
+	/// Bill `n` more bytes.
+	pub(super) fn add(&self, n: u64) {
+		if let Some(track) = &self.track {
+			track.pool.add(n);
+			track.written.fetch_add(n, Ordering::Relaxed);
+			self.bytes.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
+	/// Settle the track's eviction debt, taking its lock: call with no group lock held.
+	pub(super) fn settle(&self) {
+		if let Some(track) = &self.track {
+			track.settle(None);
+		}
+	}
+
+	/// Bytes currently billed.
+	pub(super) fn size(&self) -> u64 {
+		self.bytes.load(Ordering::Relaxed)
+	}
+
+	/// Release `n` billed bytes.
+	pub(super) fn sub(&self, n: u64) {
+		if let Some(track) = &self.track {
+			let prior = self
+				.bytes
+				.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bytes| {
+					Some(bytes.saturating_sub(n))
+				})
+				.expect("always updates");
+			track.pool.sub(prior.min(n));
+		}
+	}
+
+	/// Release every billed byte.
+	pub(super) fn clear(&self) {
+		if let Some(track) = &self.track {
+			track.pool.sub(self.bytes.swap(0, Ordering::Relaxed));
+		}
+	}
+}
+
+impl Drop for Extra {
 	fn drop(&mut self) {
 		self.clear();
 	}

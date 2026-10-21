@@ -58,5 +58,53 @@ fn steering(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, steering);
+/// One fill drains every track's available backlog before polling output.
+fn acquisition(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_time()
+		.start_paused(true)
+		.build()
+		.unwrap();
+	let mut group = c.benchmark_group("jitter_acquisition");
+	group.measurement_time(Duration::from_secs(1));
+	group.warm_up_time(Duration::from_millis(200));
+	group.sample_size(10);
+	for tracks in [1u16, 4, 16, 64] {
+		for frames in [16u64, 64, 256] {
+			group.bench_function(BenchmarkId::new(tracks.to_string(), frames), |b| {
+				b.iter(|| {
+					runtime.block_on(async {
+						let start = moq_clock::now();
+						let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
+						buffer.expect(1..=tracks);
+						for track in 1..=tracks {
+							for frame in 0..frames {
+								buffer
+									.push(
+										track,
+										jitter::Arrival {
+											arrived: start,
+											read: start,
+											decode: Timestamp::from_millis(frame * 20).unwrap(),
+											restart: 0,
+											skip: 0,
+											cut: 0,
+											sync: frame % 15 == 0,
+											leading: false,
+											item: (),
+										},
+									)
+									.unwrap();
+							}
+						}
+						std::hint::black_box(buffer.poll_next(&kio::Waiter::noop()));
+					})
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, steering, acquisition);
 criterion_main!(benches);

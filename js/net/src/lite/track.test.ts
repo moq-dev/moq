@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
+import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
@@ -59,7 +60,8 @@ test("TrackInfo for Rust's default Info matches cross-language wire bytes", asyn
 test("TrackInfo carries an untimed track as zero on lite-07 and milliseconds before", async () => {
 	const info = new TrackInfo({ priority: 1 });
 	const lite07 = await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07);
-	expect(lite07.at(-1)).toBe(0);
+	// The timescale, then the compression codec.
+	expect(lite07.at(-2)).toBe(0);
 	const got = await TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07);
 	expect(got.timescale).toBeUndefined();
 
@@ -72,6 +74,22 @@ test("TrackInfo carries an untimed track as zero on lite-07 and milliseconds bef
 		zero[zero.length - 1] = 0;
 		await expect(TrackInfo.decode(new Reader(undefined, zero, version), version)).rejects.toThrow(RangeError);
 	}
+});
+
+test("TrackInfo carries the compression codec on lite-07 only", async () => {
+	const info = new TrackInfo({ priority: 1, compress: true });
+	const lite07 = await bytes((w) => info.encode(w, Version.DRAFT_07), Version.DRAFT_07);
+	expect(lite07.at(-1)).toBe(1);
+	const got = await TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07);
+	expect(got.compress).toBe(true);
+
+	// Anything but none (0) or DEFLATE (1) is a protocol violation.
+	lite07[lite07.length - 1] = 2;
+	await expect(TrackInfo.decode(new Reader(undefined, lite07, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow(
+		ProtocolViolation,
+	);
+
+	await expect(bytes((w) => info.encode(w, Version.DRAFT_06), Version.DRAFT_06)).rejects.toThrow();
 });
 
 test("Track request round-trips on draft-05", async () => {
@@ -201,3 +219,14 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 		}
 	});
 }
+
+test("refresh ratio survives lite-07 and disappears on legacy wires", async () => {
+	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+		for (const refresh of [undefined, 0, 3, 0xffff_ffff]) {
+			const info = new TrackInfo({ priority: 7, refresh });
+			const encoded = await bytes((w) => info.encode(w, version), version);
+			const decoded = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
+			expect(decoded.refresh).toBe(version === Version.DRAFT_07 ? refresh : undefined);
+		}
+	}
+});

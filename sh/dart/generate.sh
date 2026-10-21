@@ -35,15 +35,24 @@ done < <(env -0)
 shopt -u nocasematch
 
 host=$(rustc -vV | sed -n 's/^host: //p')
-# The same features as the hook, too.
-env -i "${hook_env[@]}" cargo build --locked --release --package moq-ffi --features openh264 \
+# Checkouts use a dev build; benchmark and release staging opt into release.
+profile=${MOQ_FFI_PROFILE:-debug}
+case "$profile" in
+    debug) profile_args=() ;;
+    release) profile_args=(--release) ;;
+    *)
+        echo "error: unsupported MOQ_FFI_PROFILE: $profile" >&2
+        exit 1
+        ;;
+esac
+env -i "${hook_env[@]}" cargo build --locked ${profile_args[@]+"${profile_args[@]}"} --package moq-ffi --features openh264 \
     --target "$host" \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 case "$host" in
-    *-apple-*) library="$WORKSPACE_DIR/target/$host/release/libmoq_ffi.dylib" ;;
-    *-windows-*) library="$WORKSPACE_DIR/target/$host/release/moq_ffi.dll" ;;
-    *) library="$WORKSPACE_DIR/target/$host/release/libmoq_ffi.so" ;;
+    *-apple-*) library="$WORKSPACE_DIR/target/$host/$profile/libmoq_ffi.dylib" ;;
+    *-windows-*) library="$WORKSPACE_DIR/target/$host/$profile/moq_ffi.dll" ;;
+    *) library="$WORKSPACE_DIR/target/$host/$profile/libmoq_ffi.so" ;;
 esac
 
 mkdir -p "$OUTPUT_DIR"

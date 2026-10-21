@@ -63,6 +63,16 @@ public final class Client: Sendable {
     public func cancel() {
         ffi.cancel()
     }
+
+    /// Why the pending `connect(to:)` is still dialing: the error that failed its
+    /// latest attempt, or `nil` while nothing has failed or no connect is pending.
+    ///
+    /// A first dial that keeps failing and retrying never returns from `connect(to:)`,
+    /// so poll this to show the reason. Giving up for good throws from `connect(to:)`
+    /// instead. Once connected, `Session.failure()` reports the reconnects.
+    public func failure() -> MoqError? {
+        ffi.failure()
+    }
 }
 
 /// The protocol versions offered by default, most preferred first, spelled the way

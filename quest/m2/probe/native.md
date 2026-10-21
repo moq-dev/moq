@@ -40,8 +40,12 @@ Acceptance, in moq-quic's seeded simulation (`rs/moq-quic/src/tests/`,
 extending `Bottleneck` to step its rate) and wired into CI at least nightly:
 an illustrative 2 Mbit/s source seeking 4 Mbit/s while the path steps 3 to 12
 to 3 Mbit/s, on identical media traces and wire budgets. Cover keyframes, idle
-restart, stale high estimates, receiver credit limits, random and burst loss,
-shallow queues, compressed ACKs, and competing CUBIC and BBR flows. Set the
+restart, stale high estimates, receiver credit limits, compressed ACKs, and
+competing CUBIC and BBR flows. Add a congested arm below the media bitrate
+behind a deep but finite queue for impairment acceptance and performance.
+Verify actual overflow drops, adding competing loss-based traffic if BBR
+alone will not fill it. Sweep queue depth separately. Random or scripted burst loss may
+prove recovery correctness, but never gates performance. Set the
 deadline, overhead, and fairness budgets before tuning. Report validated
 upward adaptation, downward reaction, estimate age, frame deadlines, queue
 delay, unique goodput, and redundant bytes, against a no-probing baseline. A
@@ -60,5 +64,3 @@ to 17, so sessions on those drafts would keep `Report`.
 
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - decides when in-flight data has expired
 - [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
-- [noq#811](https://github.com/n0-computer/noq/issues/811) - probing while app-limited, proposed to n0
-- [noq#476](https://github.com/n0-computer/noq/issues/476) - the earlier bitrate-probing ask

@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A lost catalog track is `Error::Moq` (#6114)
+
+`catalog::Consumer::next` and `poll_next` return `Error::Moq` when the catalog track fails, instead of flattening it into `Error::Json`.
+Match `Error::Moq` to tell a lost source from a malformed catalog.
+
+### `M2ts::random_access` covers the whole track (#5967)
+
+`random_access` no longer describes the latest two-second window: it is true only while every group the track has published started at a random access point.
+Once a group starts any other way (a fallback cut, a size cut, or a layout with several programs or video streams), it turns false for the rest of the track.
+Don't wait for it to come back: treat false as final, and resubscribe to a new broadcast if you need random access again.
+
+`mux_rate` is the rate the publisher measures over its own recent PCR intervals, not a window on a grid shared between publishers.
+It can be absent until the first measurement, change when the source's rate does, and clear when the source stops holding one rate, so read it again on each catalog update.
+
 ### The catalog root carries a reader `version` (#5806)
 
 `version` is reserved at the catalog root: decoding refuses a catalog newer than this crate reads with `Error::UnsupportedVersion`, and serializing fails if the extension `E` has its own `version` member.

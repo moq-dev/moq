@@ -32,9 +32,70 @@ with unavailable transport measurements absent. Missing rendition counters
 mean zero, and JavaScript preserves omission. A known-zero gauge or transport
 measurement stays explicit, so it remains distinct from unavailable.
 
-These types do not enable automatic reporting in a publisher or player.
-See the [hang draft](/draft/moq-hang#media-stats) for track framing,
-field units, and the feedback convention.
+`moq import --stats` and `moq export --echo` report them from the
+[CLI](/bin/cli#stats-and-feedback). An import counts the frames and payload
+bytes it writes to each rendition, and video keyframes; an export counts what
+it reads and records its newest arrival. See the
+[hang draft](/draft/moq-hang#media-stats) for track framing, field units, and
+the feedback convention.
+
+### MPEG-TS sections
+
+A TS import or export adds sections of its own, which
+`moq_mux::container::ts::stats::Report` reads. As above, counters are
+cumulative and omitted at zero, and a gauge is omitted until it is measured.
+
+`mpegts` holds `streams`, one row per elementary stream keyed by its PID in
+decimal, and the stream-wide counters. A row has `track` (the track suffix),
+`class` (`audio`, `video`, or `data`; an unknown class reads as `data`),
+`units` (access units delivered), and `quiet`, a gauge: milliseconds of
+program clock since its last access unit. Its losses are `resyncs`, bytes
+`discarded` scanning for audio sync, `unconfirmed` frames, `damaged` units,
+`unplaced` units the program clock could not place, the times the stream was
+`refused`, and its shares of `continuityCountError`, `transportError`, and
+`ptsError`.
+
+The stream-wide counters count ETSI TR 101 290 checks at that standard's
+fixed limits:
+
+| Field | Check |
+| --- | --- |
+| `tsSyncLoss` | 1.1 `TS_sync_loss` |
+| `syncByteError` | 1.2 `Sync_byte_error` |
+| `patError` | 1.3 `PAT_error_2` |
+| `continuityCountError` | 1.4 `Continuity_count_error` |
+| `pmtError` | 1.5 `PMT_error_2` |
+| `transportError` | 2.1 `Transport_error` |
+| `crcError` | 2.2 `CRC_error`, on the PAT and PMT only |
+| `pcrRepetitionError` | 2.3a `PCR_repetition_error` |
+| `pcrDiscontinuityIndicatorError` | 2.3b `PCR_discontinuity_indicator_error` |
+| `ptsError` | 2.5 `PTS_error` |
+
+An import grades the stream as it arrived. An export builds every header
+itself and runs no checks, so its counters stay zero and only its rows'
+`units` and `quiet` move. Neither grades the wire a receiver sees downstream.
+The PCR checks are graded on PCR values, not arrival: they speak for the
+encoder's insertion, since the network re-times arrival, and a forward step
+over 100 ms counts as both. 1.6 `PID_error` is covered, more strictly, by each
+row's `units` and `quiet`: a dead video path behind a live mux still sends
+PCR-only packets on its PID, which a packet count reads as live.
+`PCR_accuracy_error` is not measured. No verdict is computed: a sparse stream
+such as SCTE-35 is quiet for seconds by design, so an alarm reads counter
+rates and `quiet` against its own thresholds.
+
+An export also reports `release`, how it keeps up with the source: what it
+drops, trims and never receives, and how its output clock tracks the
+source's. `export ts --passthrough` reports it without `mpegts`.
+
+| Field | Meaning |
+| --- | --- |
+| `dropped` | Frames lost from the output after their stream began: missed their release deadline, or a video track dropped them waiting for its next keyframe. |
+| `trimmed` | Frames dropped before their stream's first went out, so the output starts on a whole group led by a keyframe. Nothing is missing for these. |
+| `gaps` | Times the source skipped media it will never deliver: a group lost or expired upstream, or a resubscription. A declared break is not one. |
+| `margin` | Gauge, milliseconds: the least time any frame arrived before its deadline over the last second. Negative when one missed. |
+| `offset` | Gauge, milliseconds: how far the output clock sits from the source's plus the delay. Positive holds frames longer than the delay. The clock pulls it shut over ten minutes. |
+| `drift` | Gauge, parts per million: the source clock's rate against ours, positive running fast. |
+| `outOfTolerance` | Measurements that found the source clock past the 30 ppm ISO/IEC 13818-1 allows, which the output cannot follow. |
 
 ## Broadcasts
 
@@ -212,6 +273,7 @@ stale.
     "subscriptions_started": 6, "subscriptions_ended": 2,
     "fetches": 0,
     "bytes": 1048576, "frames": 900, "groups": 30, "datagrams": 0,
+    "inflated": 0,
     "stale": { "bytes": 0, "frames": 0, "groups": 0, "datagrams": 0 },
     "announced": 1, "announced_closed": 0,
     "broadcasts": 3, "broadcasts_closed": 1,
@@ -229,6 +291,7 @@ stale.
 | `fetches` | One-shot group fetches requested, including ones that found nothing. Their payload counts in `bytes`, `frames`, and `groups`. |
 | `bytes` / `frames` / `groups` | Payload delivered. |
 | `datagrams` | Groups delivered as an unreliable datagram. A subset of `groups`. |
+| `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy, plus received compressed datagrams, which inflate on arrival. Not part of `bytes`, which counts payload as stored or sent. |
 | `stale` | Payload skipped because it aged past a subscriber's latency budget, with the same four fields. Disjoint from the top-level payload counters. |
 
 The last six fields are legacy spellings of the `*_started` and `*_ended`
@@ -243,7 +306,7 @@ should prefer the canonical name and fall back to the legacy one.
     "requests": 3, "sessions_started": 12, "sessions_ended": 10,
     "sessions": 12, "sessions_closed": 10,
     "sent_bytes": 1048576, "received_bytes": 524288,
-    "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0 },
+    "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
     "wire_tx": 2048, "wire_rx": 1024
@@ -282,10 +345,13 @@ qmux counter source; unavailable counters are never estimated from payload.
 Readers default missing wire fields to zero for older relays.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
-They never start a session. The relay's own refusals have no resolved label, so
-they count under the empty label on the default tier; an embedder can count one
-it refuses itself with `stats::Handle::refuse`, under the label and tier it
-resolved.
+They never start a session. `expired` counts a verified credential that expired
+before admission. An auth-server or embedded refusal can name a root from a
+verified credential and an optional tier; that root is the refusal's stats label,
+with an absent tier using the default. A refusal without a verified root counts
+under the empty label, never the dialed path. An embedder can also count a refusal
+with `stats::Handle::refuse`, under the label and tier it resolved. Older readers
+ignore `expired`; newer readers default a missing counter to zero.
 
 `sessions_failed` counts admitted sessions that ended abnormally, by kind: a
 subset of `sessions_ended`, so the live count is unchanged. A clean close by

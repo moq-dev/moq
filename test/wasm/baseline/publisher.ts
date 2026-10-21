@@ -10,7 +10,7 @@ async function prepare(config: Workload): Promise<void> {
 		const origin = new Moq.Origin.Producer();
 		const broadcast = origin.createBroadcast(Moq.Path.from(`${config.id}/${index}`));
 		const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MILLI });
-		const demand = track.demand().used;
+		const demand = track.demand().wanted;
 		broadcast.announce();
 		const connection = await Moq.Connection.connect({
 			url: new URL(config.url),
@@ -25,7 +25,7 @@ async function prepare(config: Workload): Promise<void> {
 		});
 		writers.push(
 			(async () => {
-				while (!demand.peek() && track.closed.peek() === undefined)
+				while (demand.peek() === undefined && track.closed.peek() === undefined)
 					await Promise.race([demand.changed(), track.closed]);
 				if (track.closed.peek() !== undefined) return;
 				const group = new Moq.Group.Producer(config.sequence);

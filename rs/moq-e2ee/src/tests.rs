@@ -530,11 +530,11 @@ fn reserved_track_serves_on_demand() {
 		protected.producer.generation().name("audio").unwrap().as_str()
 	);
 	let demand = request.demand();
-	assert!(!demand.is_used());
+	assert!(!demand.wanted().is_some());
 
 	let subscribing = protected.consumer.subscribe("audio", subscribe_all()).unwrap();
 	assert!(subscribing.poll_ok(&kio::Waiter::noop()).is_pending());
-	assert!(demand.is_used());
+	assert!(demand.wanted().is_some());
 
 	let mut audio = request.accept(timed());
 	let mut reader = resolve(&subscribing).unwrap();
@@ -752,7 +752,7 @@ impl Parked {
 fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	let mut pair = pair("video");
 	let demand = pair.net.demand();
-	assert!(demand.is_used());
+	assert!(demand.wanted().is_some());
 
 	// One authentic frame, then silence. The group and the track stay open.
 	let name: Name = pair.net.name().parse().unwrap();
@@ -800,7 +800,7 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	assert!(frame.woken(), "parked frame read was not woken");
 	assert!(track.woken(), "parked group and datagram reads were not woken");
 	assert!(
-		!demand.is_used(),
+		!demand.wanted().is_some(),
 		"track demand stayed live after authentication failure"
 	);
 	assert!(!bad_demand.is_used(), "failed group demand stayed live");
@@ -844,7 +844,7 @@ fn dropping_track_releases_demand_while_group_is_held() {
 
 	let mut group = recv_group(&mut pair.consumer);
 	drop(pair.consumer);
-	assert!(!demand.is_used(), "a held group kept the track subscription");
+	assert!(!demand.wanted().is_some(), "a held group kept the track subscription");
 
 	// The held group is not failed by the unsubscribe.
 	assert_eq!(read_frame(&mut group).plaintext, &b"ok"[..]);
@@ -878,14 +878,14 @@ fn bad_datagram_stays_an_event_and_keeps_demand() {
 		frame.poll(|waiter| good.poll_read_frame(waiter)),
 		Poll::Pending
 	));
-	assert!(demand.is_used());
+	assert!(demand.wanted().is_some());
 
 	pair.producer.insert_datagram(1, ms(3), b"next").unwrap();
 	match recv_datagram(&mut pair.consumer) {
 		Event::Datagram(d) => assert_eq!(&d.plaintext[..], b"next"),
 		other => panic!("{other:?}"),
 	}
-	assert!(demand.is_used());
+	assert!(demand.wanted().is_some());
 }
 
 #[test]

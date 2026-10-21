@@ -177,8 +177,11 @@ impl Applied {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
+	/// Encoded width in pixels.
 	pub width: u32,
+	/// Encoded height in pixels.
 	pub height: u32,
+	/// Encoded frame rate.
 	pub framerate: Rate,
 	/// Target bitrate. `None` derives a sane default
 	/// from resolution and framerate (~0.07 bits per pixel per second).
@@ -188,6 +191,7 @@ pub struct Config {
 	pub gop: Gop,
 	/// Output codec. Defaults to [`Codec::H264`].
 	pub codec: Codec,
+	/// Which encoder implementation to use. Defaults to [`Kind::Auto`].
 	pub kind: Kind,
 	/// How the encoder trades latency for compression. Defaults to
 	/// [`Preset::LowLatency`].
@@ -437,7 +441,9 @@ impl Encoder {
 	/// Rarely needed: the encoder opens groups automatically, so reach for this
 	/// only when something outside the encoder needs a boundary at a specific
 	/// frame. A source group boundary (transcode mirrors the source's groups) is
-	/// the usual reason; a scene change or a source switch is another.
+	/// the usual reason; a scene change, a source switch, or a subscriber joining
+	/// over [`track::Info::refresh`](moq_net::track::Info::refresh) are others.
+	/// Capture cuts for joiners itself.
 	///
 	/// The request waits for the next [`encode`](Self::encode) rather than applying
 	/// at once, so it is safe to call before the frame exists. Calling it repeatedly
@@ -929,7 +935,7 @@ mod tests {
 	/// which GPU-less CI runners lack. Run with `--ignored`.
 	#[cfg(target_os = "windows")]
 	#[test]
-	#[ignore]
+	#[ignore = "needs a Media Foundation hardware encoder; see quest/m3/video-hardware.md"]
 	fn mediafoundation_cpu_rgba() {
 		let config = Config {
 			kind: Kind::Named("mediafoundation".into()),
@@ -972,7 +978,7 @@ mod tests {
 	/// a GPU. Run with `--ignored`.
 	#[cfg(all(target_os = "windows", feature = "capture"))]
 	#[tokio::test]
-	#[ignore]
+	#[ignore = "needs a Windows camera and GPU; see quest/m3/video-hardware.md"]
 	async fn mediafoundation_camera_texture() {
 		let mut camera = crate::capture::open(&crate::capture::Config::default())
 			.await

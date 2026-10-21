@@ -167,11 +167,15 @@ pub const NAMES: &[&str] = &[
 	"openh264",
 ];
 
-/// A backend constructor: name, the codecs it can emit, and an opener.
+/// A backend constructor: name, the codecs it can emit, an opener, and whether it can always cut.
 struct Candidate {
 	name: &'static str,
 	codecs: &'static [Codec],
 	open: fn(&Config) -> Result<Box<dyn Backend>, Error>,
+	/// Whether every encoder this opens honors a cut ([`Backend::can_cut`]), known before
+	/// opening one. V4L2 learns it from the driver at open, so it cannot promise.
+	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
+	cuts: bool,
 	#[cfg(target_os = "linux")]
 	vulkan: bool,
 }
@@ -184,6 +188,7 @@ const HARDWARE: &[Candidate] = &[
 		name: videotoolbox::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: videotoolbox::VideoToolbox::open,
+		cuts: true,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -192,6 +197,7 @@ const HARDWARE: &[Candidate] = &[
 		name: mediafoundation::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
+		cuts: true,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -200,6 +206,7 @@ const HARDWARE: &[Candidate] = &[
 		name: mediacodec::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediacodec::MediaCodec::open,
+		cuts: true,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -208,6 +215,7 @@ const HARDWARE: &[Candidate] = &[
 		name: nvenc::NAME,
 		codecs: &[Codec::H264, Codec::H265],
 		open: nvenc::Nvenc::open,
+		cuts: true,
 		#[cfg(target_os = "linux")]
 		vulkan: true,
 	},
@@ -216,6 +224,7 @@ const HARDWARE: &[Candidate] = &[
 		name: vaapi::NAME,
 		codecs: &[Codec::H264],
 		open: vaapi::Vaapi::open,
+		cuts: true,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -227,6 +236,7 @@ const HARDWARE: &[Candidate] = &[
 		name: v4l2::NAME,
 		codecs: &[Codec::H264],
 		open: v4l2::V4l2::open,
+		cuts: false,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -241,6 +251,7 @@ const SOFTWARE: &[Candidate] = &[
 		name: openh264::NAME,
 		codecs: &[Codec::H264],
 		open: openh264::Openh264::open,
+		cuts: true,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -255,6 +266,7 @@ const NAMED_ONLY: &[Candidate] = &[
 		name: probe::NAME,
 		codecs: &[Codec::H264],
 		open: probe::Probe::open,
+		cuts: true,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -262,6 +274,7 @@ const NAMED_ONLY: &[Candidate] = &[
 		name: probe::NO_CUT,
 		codecs: &[Codec::H264],
 		open: probe::Probe::open_no_cut,
+		cuts: false,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -297,12 +310,24 @@ impl<'a> Attempt<'a> {
 /// Open the best encoder for `config.codec` + `config.kind`, trying candidates
 /// in priority order and falling back until one succeeds.
 pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
-	let codec = config.codec;
+	select(attempts(config.codec, &config.kind), config)
+}
+
+/// Whether whichever backend [`open`] picks for `codec` + `kind` honors a cut, answered
+/// before opening one: every candidate it may fall to must promise it.
+#[cfg_attr(not(feature = "capture"), allow(dead_code))]
+pub(crate) fn always_cuts(codec: Codec, kind: &Kind) -> bool {
+	let attempts = attempts(codec, kind);
+	!attempts.is_empty() && attempts.iter().all(|attempt| attempt.candidate.cuts)
+}
+
+/// The candidates [`open`] tries for `codec` + `kind`, in order.
+fn attempts(codec: Codec, kind: &Kind) -> Vec<Attempt<'static>> {
 	let supports = move |c: &Candidate| c.codecs.contains(&codec);
 	let hardware = HARDWARE.iter().filter(|c| supports(c)).map(Attempt::hardware);
 	let software = SOFTWARE.iter().filter(|c| supports(c)).map(Attempt::software);
 
-	let attempts: Vec<Attempt> = match &config.kind {
+	match kind {
 		Kind::Auto => hardware.chain(software).collect(),
 		Kind::Hardware => hardware.collect(),
 		Kind::Software => software.collect(),
@@ -312,9 +337,7 @@ pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
 			.chain(SOFTWARE.iter().chain(NAMED_ONLY.iter()).map(Attempt::software))
 			.filter(|a| supports(a.candidate) && a.candidate.name == name)
 			.collect(),
-	};
-
-	select(attempts, config)
+	}
 }
 
 /// Try `attempts` in order and return the first encoder that opens, warning when
@@ -540,6 +563,7 @@ mod tests {
 		name: "stub",
 		codecs: &[Codec::H264],
 		open: Stub::open,
+		cuts: true,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	};
@@ -550,12 +574,30 @@ mod tests {
 		name: "driverless",
 		codecs: &[Codec::H264],
 		open: |_| Err(Error::Codec(anyhow::anyhow!("driver libraries not found"))),
+		cuts: true,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	};
 
 	fn config() -> Config {
 		Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
+	}
+
+	/// Only a selection whose every candidate promises cuts may advertise them, and a
+	/// candidate's promise holds for the encoder it opens.
+	#[test]
+	fn always_cuts_needs_every_candidate_to_promise() {
+		let named = |name: &str| Kind::Named(name.to_owned());
+		assert!(always_cuts(Codec::H264, &named(probe::NAME)));
+		assert!(!always_cuts(Codec::H264, &named(probe::NO_CUT)));
+		assert!(!always_cuts(Codec::H264, &named("v4l2")), "V4L2 learns it at open");
+		assert!(!always_cuts(Codec::H264, &named("nonexistent")), "nothing to open");
+
+		let _probe = probe::exclusive();
+		for candidate in NAMED_ONLY {
+			let backend = (candidate.open)(&config()).unwrap();
+			assert_eq!(backend.can_cut(), candidate.cuts, "{}", candidate.name);
+		}
 	}
 
 	#[tracing_test::traced_test]

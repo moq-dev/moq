@@ -19,8 +19,11 @@ and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast we
 catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps use `time.Duration`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
+`TrackInfo.Compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
 `moq.dev/moq/flate` publishes opaque snapshot and stream payloads; its `Update` / `Append`
 and the JSON producers take a final `*time.Duration` timestamp argument (`nil` for untimed).
+JSON consumers return a `*Timed` holding the value and that timestamp; `SnapshotConsumer.Latest`
+skips to the newest state where `Next` yields each one. Read timestamps are rounded down to a whole microsecond.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.Now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.

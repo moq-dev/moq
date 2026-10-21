@@ -1,10 +1,19 @@
 cmake_minimum_required(VERSION 3.28)
 
 # Build the in-tree C++ package (cpp/moq) by default. Release-only builds clear
-# MOQ_LOCAL and must select the published archive explicitly, so this never
+# MOQ_LOCAL and must select a release archive explicitly, so this never
 # silently drifts to an old static version.
 set(MOQ_LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Path to the moq repo (builds cpp/moq in-tree)")
-set(MOQ_VERSION "" CACHE STRING "Published moq-cpp version (required without MOQ_LOCAL)")
+set(MOQ_VERSION "" CACHE STRING "moq-cpp archive version (required without MOQ_LOCAL)")
+set(MOQ_ARCHIVE_FILE "" CACHE FILEPATH "Local moq-cpp release archive instead of a download")
+if(MOQ_ARCHIVE_FILE)
+  if(MOQ_LOCAL)
+    message(FATAL_ERROR "MOQ_ARCHIVE_FILE requires an empty MOQ_LOCAL")
+  endif()
+  if(NOT EXISTS "${MOQ_ARCHIVE_FILE}" OR IS_DIRECTORY "${MOQ_ARCHIVE_FILE}")
+    message(FATAL_ERROR "moq-cpp archive not found: ${MOQ_ARCHIVE_FILE}")
+  endif()
+endif()
 
 # One predicate for both the version derivation here and the link/fetch choice
 # below, so the two can't drift apart.
@@ -22,7 +31,16 @@ else()
   if(NOT MOQ_VERSION)
     message(FATAL_ERROR "MOQ_VERSION is required when MOQ_LOCAL does not contain cpp/moq")
   endif()
+  if(NOT MOQ_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "Unsupported moq-cpp version: ${MOQ_VERSION}")
+  endif()
   set(_moq_link_version "${MOQ_VERSION}")
+  if(MOQ_ARCHIVE_FILE)
+    get_filename_component(_moq_archive_name "${MOQ_ARCHIVE_FILE}" NAME)
+    if(NOT _moq_archive_name STREQUAL "moq-cpp-${MOQ_VERSION}-${MOQ_TARGET}.${MOQ_ARCHIVE}")
+      message(FATAL_ERROR "moq-cpp archive does not match version, target, and format: ${_moq_archive_name}")
+    endif()
+  endif()
 endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
@@ -70,11 +88,17 @@ if(_moq_local_build)
   add_subdirectory("${MOQ_LOCAL}/cpp/moq" moq-cpp)
 else()
   include(FetchContent)
-  FetchContent_Declare(
-    moq-cpp
-    URL
-      https://github.com/moq-dev/moq/releases/download/cpp-v${_moq_link_version}/moq-cpp-${_moq_link_version}-${MOQ_TARGET}.${MOQ_ARCHIVE}
-  )
+  if(MOQ_ARCHIVE_FILE)
+    file(SHA256 "${MOQ_ARCHIVE_FILE}" _moq_archive_hash)
+    set(_moq_archive "${MOQ_ARCHIVE_FILE}")
+    set(_moq_archive_options URL_HASH "SHA256=${_moq_archive_hash}")
+  else()
+    set(
+      _moq_archive
+      "https://github.com/moq-dev/moq/releases/download/cpp-v${_moq_link_version}/moq-cpp-${_moq_link_version}-${MOQ_TARGET}.${MOQ_ARCHIVE}"
+    )
+  endif()
+  FetchContent_Declare(moq-cpp URL "${_moq_archive}" ${_moq_archive_options})
   FetchContent_MakeAvailable(moq-cpp)
 
   find_package(moq-cpp REQUIRED PATHS ${moq-cpp_SOURCE_DIR} NO_DEFAULT_PATH)

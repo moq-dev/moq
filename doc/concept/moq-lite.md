@@ -56,6 +56,15 @@ always a prefix. A service that serves only some of the paths beneath it
 refuses the rest as they are requested. Announcements are hints; the request is
 what decides.
 
+Inside a broadcast, a reader can list its tracks (moq-lite-07, Rust only so
+far): each track with its fixed properties, a synced mark, then tracks as they
+come and go. Listing is discovery, not delivery: subscribe to each track you
+want, and its groups still cached upstream reach you late. A broadcast lists
+the tracks its publisher creates, never one served only on request, and a path
+served under a prefix claim has nothing to list. Like announcements, a relay
+syncs on what it holds now, so a fresh relay syncs empty and its upstream's
+tracks follow.
+
 Each route carries the chain of relay identities it passed through, which is
 how forwarding loops are caught, and a cost, which is how a subscriber picks
 among several routes to the same broadcast. It may also carry a
@@ -118,9 +127,10 @@ ignores the end and start may keep cached objects of the old run under the same
 names, so an end and a start is not a cache flush.
 
 `moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
-RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
-passing the same [`moq --epoch`](/bin/cli#publisher-runs), which only the importers that derive their tracks from the input accept, except under [encryption](/concept/hang#encryption). See [Clustering](/bin/relay/cluster) for how a
-relay uses this.
+RTMP, SRT, and WHIP ingests mint one per connection. Independent importers use
+distinct epochs, even when fed one stream. Only replicas of one publisher's
+bytes share its epoch, such as one publisher announced through multiple relays. See [Clustering](/bin/relay/cluster) for
+how a relay uses this.
 
 ### Multiple CDNs
 
@@ -184,7 +194,12 @@ to a prefix. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
-union of every open token's grant. A token the peer has no verifier for, or
+union of every open token's grant. A request outside the known union waits
+while a non-empty token already presented is unanswered, then proceeds or
+fails against the settled union; a covered request does not wait. Each wait
+logs its path and duration. To renew without interrupting live requests the
+new grant still covers, await the new token's acceptance before dropping the
+old one. A token the peer has no verifier for, or
 whose grant is too large to send, fails with `Unsupported` and ends only that
 token; the session and its other grants stay up. A relay with an
 [auth server](/bin/relay/auth#in-band-renewal) verifies these tokens through it,
@@ -201,7 +216,9 @@ exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
 to namespace prefixes. Older versions have no grant; the URL token keeps working
 everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
-authorization token. The token belongs to the session that added it, so after a
+authorization token. Naming a fresh token renews the announcement in place with
+`REQUEST_UPDATE` from draft 16, and re-announces it on drafts 14 and 15, so it
+can outlive the token it started with. The token belongs to the session that added it, so after a
 reconnect the application adds it again and re-announces. moq-lite has no
 per-request token, so there an announcement rides the session's scope.
 
@@ -221,12 +238,23 @@ Each subscription carries the knobs that decide behavior under congestion:
 | **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
-| **Ranges** | Which groups to ask for: from a group, or a number of groups back from the latest, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
+| **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
 
-Ranges are a request, not a filter. A subscriber reads from where its lowest
-range starts, and may also get groups another subscriber of the same track
-asked for. A relay merges its subscribers' ranges into one upstream request,
-which today's wire versions carry as the single span covering them.
+On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
+This lets a finished subscription settle without waiting for missing groups.
+Datagram delivery stays best effort.
+
+Ranges are both a request and a filter. A subscriber reads only the groups its
+own ranges cover, resolved again whenever it replaces them, even when another
+subscriber of the same track asked for more. Widening them, including lowering
+the start, also serves the cached groups they newly cover, never one already
+served. A relay merges its subscribers' ranges into one upstream request, which
+today's wire versions carry as the single span covering them. A time anchor is
+resolved from the groups the serving hop holds; upstream it asks for everything
+max delay allows, and an untimed track refuses it. At the live edge, a time end
+may let one group through before its first frame shows it starts past the end:
+the first group that has yet to start is handed out without waiting for that
+frame, and the next one waits on it. A datagram is judged by its own timestamp.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
@@ -252,10 +280,21 @@ untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
 
+A publisher may compress a track, which pays off for repetitive data such as
+JSON and not for media. Each group's frames become one DEFLATE stream
+([moq-flate](/draft/moq-flate)), and a datagram
+compresses alone. Only the work-in-progress moq-lite 07 carries the compressed
+bytes. A relay forwards them as received and inflates each group once for every
+other subscriber, moq-transport included, so readers always see the original
+frames. Rust publishes and relays compressed tracks; js/net refuses them for now.
+
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning
 reader or the next fetch finds it. That copy is not live meanwhile: readers get
-nothing from it until the source answers again.
+nothing from it until the source answers again, and its latest group is unknown
+until then too, so a player starting at the latest waits for the answer instead
+of starting from what the ended feed left. A reader's latest group stays within
+the groups it limits itself to, and ends once the track does.
 
 The publisher may declare a retention window per track. Omission sets no limit;
 zero keeps only the live edge. Relays preserve that declaration, and may still

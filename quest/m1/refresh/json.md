@@ -60,7 +60,7 @@ revised in the #5734 review.
   that cannot forward requests, so a joiner there downloads at most up to
   the caps.
 - This works locally without wire support: a local subscriber's join
-  drives `wanted` through [core](/quest/m1/refresh/core.md) alone.
+  drives `wanted` through the track model alone.
 - **In-repo users follow:** the hang and moq-mux catalog producers
   (`deltas: false`), `js/publish` catalog, moq-stats, the moq-room and
   `js/room` chat windows, the moq-hls and moq-archive tests, benches, and
@@ -68,8 +68,8 @@ revised in the #5734 review.
   keep deltas.
 - **Bindings.** Replace `delta_ratio` with `deltas` in moq-ffi
   (`rs/moq-ffi/src/json.rs`), moq-c, the py, swift, go, kt, and dart wrappers, and
-  `doc/lib/*`. The ratio reaches them through `MoqTrackInfo::refresh` from
-  [core](/quest/m1/refresh/core.md), and the moq-ffi driver above refreshes
+  `doc/lib/*`. The ratio reaches them through `MoqTrackInfo::refresh`, and
+  the moq-ffi driver above refreshes
   their producers with no wrapper change. Update the moq-json and `@moq/json`
   READMEs and add an entry to each affected package's `MIGRATE.md`.
 - moq-flate is unchanged. Its snapshot mode already opens a group per
@@ -88,11 +88,6 @@ Public API: breaking (`delta_ratio` and `op_ratio` replaced by `deltas` and
 and Rust `Producer::refresh` / `poll_refresh` added; bindings gain no refresh
 method because moq-ffi drives it internally). Wire: none.
 
-## Required
-
-- [Core](/quest/m1/refresh/core.md) - `Demand::wanted` and `track::Info::refresh`
-
 ## Related
 
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - touches the same window code
-- [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - touches the same snapshot consumers and bindings
