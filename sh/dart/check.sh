@@ -51,7 +51,7 @@ done
 
 generated=$(mktemp -d)
 trap 'rm -rf "$generated"' EXIT
-"$DART_DIR/../sh/dart/generate.sh" "$generated"
+MOQ_FFI_PROFILE=debug "$DART_DIR/../sh/dart/generate.sh" "$generated"
 touch "$generated/built"
 
 for file in moq.dart uniffi_runtime.dart; do
@@ -91,7 +91,7 @@ done
 # otherwise silently double this check's Rust build. Cargo rewrites the .d
 # dep-info file even on a no-op, so only the libraries count.
 host=$(rustc -vV | sed -n 's/^host: //p')
-if [[ -n "$(find "$DART_DIR/../target/$host/release" -maxdepth 1 -name '*moq_ffi.*' ! -name '*.d' -newer "$generated/built")" ]]; then
+if [[ -n "$(find "$DART_DIR/../target/$host/debug" -maxdepth 1 -name '*moq_ffi.*' ! -name '*.d' -newer "$generated/built")" ]]; then
     echo "error: the moq_ffi build hook rebuilt moq-ffi; update hook_vars in sh/dart/generate.sh to match the Dart SDK" >&2
     exit 1
 fi

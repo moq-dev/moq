@@ -1,25 +1,14 @@
+// The SETUP surface only. The session code is imported from `connection.ts` on demand, so a bundle
+// that negotiates lite never loads it; re-exporting it here would pull it into the static graph.
 export * from "./active_count.ts";
-export * from "./adapter.ts";
-export * as Auth from "./auth.ts";
+export * as Auth from "./auth_setup.ts";
 export * as Cluster from "./cluster.ts";
-export * from "./connection.ts";
-export * from "./datagram.ts";
 export * as Epoch from "./epoch.ts";
-export * from "./fetch.ts";
-export * from "./goaway.ts";
 export * from "./hidden.ts";
 export * from "./max_age.ts";
-export * from "./object.ts";
 export * from "./parameters.ts";
-export * from "./publish.ts";
-export * from "./publish_namespace.ts";
-export * from "./publisher.ts";
-export * from "./request.ts";
+export { initialMaxRequestId } from "./request.ts";
 export * from "./setup.ts";
 export * from "./solicit.ts";
-export * from "./subscribe.ts";
-export * from "./subscribe_namespace.ts";
-export * from "./subscriber.ts";
 export * from "./token.ts";
-export * from "./track.ts";
 export * from "./version.ts";
