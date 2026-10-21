@@ -23,10 +23,10 @@ from moq_ffi import (
     MoqJsonValue,
 )
 
+from . import publish, subscribe
 from ._records import _opt_from_us, _opt_us
 from ._stream import _Stream
-from .publish import BroadcastProducer, TrackDemand, TrackProducer
-from .subscribe import TrackConsumer
+from .publish import BroadcastProducer, TrackDemand
 
 __all__ = ["SnapshotConsumer", "SnapshotProducer", "StreamConsumer", "StreamProducer", "Timed"]
 
@@ -63,7 +63,7 @@ class SnapshotProducer:
     def __init__(
         self,
         broadcast: BroadcastProducer,
-        track: TrackProducer,
+        track: publish.TrackProducer,
         *,
         delta_ratio: int | None = None,
         compression: bool = False,
@@ -97,7 +97,7 @@ class StreamProducer:
     carries is refused.
     """
 
-    def __init__(self, broadcast: BroadcastProducer, track: TrackProducer, *, compression: bool = False) -> None:
+    def __init__(self, broadcast: BroadcastProducer, track: publish.TrackProducer, *, compression: bool = False) -> None:
         config = MoqJsonStreamConfig(compression=compression)
         self._inner = MoqJsonStreamProducer(broadcast._inner, track._inner, config)
 
@@ -123,7 +123,7 @@ class SnapshotConsumer(_Stream[Timed]):
     context manager that cancels on exit.
     """
 
-    def __init__(self, track: TrackConsumer, *, compression: bool = False) -> None:
+    def __init__(self, track: subscribe.TrackConsumer, *, compression: bool = False) -> None:
         # delta_ratio is producer-only, so leave it at its default here.
         config = MoqJsonSnapshotConfig(compression=compression)
         self._inner = MoqJsonSnapshotConsumer(track._inner, config)
@@ -150,7 +150,7 @@ class StreamConsumer(_Stream[Timed]):
     async context manager that cancels on exit.
     """
 
-    def __init__(self, track: TrackConsumer, *, compression: bool = False) -> None:
+    def __init__(self, track: subscribe.TrackConsumer, *, compression: bool = False) -> None:
         config = MoqJsonStreamConfig(compression=compression)
         self._inner = MoqJsonStreamConsumer(track._inner, config)
 
