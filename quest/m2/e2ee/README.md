@@ -56,7 +56,7 @@ Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust
   publishers emit encrypted catalogs and no plaintext semantic catalog in
   E2EE mode, through the moq-net traits
-- [Encrypted consumer shape](/quest/m2/e2ee/consumer.md) - one consumer shape, the producer's mirror, shared by browser, CLI, and FFI
+- [Encrypted consumer shape](/quest/m2/e2ee/consumer.md) - one consumer shape, the producer's mirror, shared by browser and CLI (moq-ffi is out of scope for this epic)
 - [Encrypted browser components](/quest/m2/e2ee/browser.md) - browser publish
   and watch components handle encrypted audio and video without leaking
   credentials into browser-owned surfaces

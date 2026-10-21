@@ -30,7 +30,9 @@ VMs, so its thresholds fire on runner noise.
   cross-run history stays informational on the regression table.
 - Extend `bench/run.sh` and `sh/gh/nightly.sh` (`just gh nightly rust-bench`,
   `rust-extra`, and `rust-uring`) with the paired mode instead of writing a second runner, and publish its
-  table through `just gh benchmark-report` into the report.
+  table through `just gh benchmark-report` into the report. `nightly.sh`
+  exits on a failure before it publishes today; publish first, so the table
+  exists when the regression alert fires.
 - The nightly jobs measure in Criterion's quick mode for runtime; the paired
   run needs enough samples for its threshold. Weigh a full run of the
   compared targets against the nightly's time budget.

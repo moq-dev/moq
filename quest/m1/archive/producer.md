@@ -143,7 +143,8 @@ group, with no frame lost or duplicated), a track name holding `/` or
 starting with `.` round-tripping as one segment,
 DVR pruning with grace, a track added mid-recording, `moq export archive`
 recording two broadcasts announced under its prefix into their own key
-prefixes, a track interleaving groups
+prefixes, a same-path restart under a new epoch recording into a new key
+prefix while the old producer's objects stay untouched, a track interleaving groups
 and datagrams stored with each sequence's form, a clean end writing no
 marker until the listing ends and then each track's `end` (including a
 mid-group end) followed by the broadcast's `.end`, a track removed and

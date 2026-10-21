@@ -5,9 +5,10 @@
 moq-mux writes and reads through the
 [moq-net traits](/quest/m2/net-wrap/traits.md), defaulting to moq-net's
 types: the importers, catalog, container producers and consumers, timeline,
-json and binary tracks, `Source`, and TS export. Handed an encrypted
-broadcast, every importer publishes it, and every exporter reads one,
-without knowing.
+json and binary tracks, `Source`, and TS export. The moq-video and moq-audio
+encode producers built on moq-mux take them too. Handed an encrypted
+broadcast, every importer and capture encoder publishes it, and every
+exporter reads one, without knowing.
 
 ## Plan
 
@@ -16,6 +17,11 @@ without knowing.
   `import/`), `catalog/`, `timeline.rs`, `json.rs`, `binary.rs`,
   `source.rs`, and the TS exporter under `container/ts`. About 250 type
   references across these modules.
+- Capture: `moq_video::encode::Producer::new` takes a concrete
+  `moq_net::broadcast::Producer` and `moq_audio::encode::Producer::new` a
+  `&mut` one (`rs/moq-video/src/encode/producer.rs`,
+  `rs/moq-audio/src/encode/producer.rs`), so `moq import capture` could not
+  hand them an encrypted broadcast. Make both generic the same way.
 - Demand gating stays as it is: importers and `Source` read
   `track::Demand` and preferences through the trait.
 - No behavior change with the defaults. Keep the `containers` Criterion

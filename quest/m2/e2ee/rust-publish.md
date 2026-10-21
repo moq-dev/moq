@@ -15,8 +15,9 @@ Publishers use `Credential::produce()` and its `generation::Producer`; the
 producing/consuming split landed separately in #5313.
 
 Decided 2026-10-20 (maintainer): the e2ee wrappers implement the
-[moq-net traits](/quest/m2/net-wrap/README.md), and moq-mux takes them, so
-mux, video, audio, and timeline publishers already publish into an encrypted
+[moq-net traits](/quest/m2/net-wrap/README.md), and moq-mux and the
+moq-video and moq-audio encoders take them, so mux, video, audio, and
+timeline publishers already publish into an encrypted
 broadcast under semantic names with no change here. This quest keeps only
 what the traits do not cover. Every track these publishers serve is declared
 in advance, so it does not wait on the
@@ -43,4 +44,4 @@ Public API: a new error from the e2ee producer. Wire: none.
 ## Required
 
 - [moq-e2ee implements the traits](/quest/m2/net-wrap/e2ee.md) - the encrypted broadcast moq-mux publishes into
-- [moq-mux takes the traits](/quest/m2/net-wrap/mux.md) - the publishers this relies on to stay unchanged
+- [moq-mux takes the traits](/quest/m2/net-wrap/mux.md) - the mux and capture publishers this relies on to stay unchanged

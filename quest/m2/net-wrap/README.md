@@ -48,8 +48,9 @@ and its trait-versus-bridge comparison:
   publisher gate output on `track::Demand`, so a wrapper must not keep
   encoders active with no downstream viewer or drop downstream preference
   updates. Test idle and active demand through a wrapper.
-- **Scope is every writer and reader above moq-net:** moq-mux, moq-json,
-  moq-stats, hang, and the CLI paths, plus the JS packages that need it.
+- **Scope is every writer and reader above moq-net:** moq-mux (with the
+  moq-video and moq-audio encoders built on it), moq-json, moq-stats, hang,
+  and the CLI paths, plus the JS packages that need it.
 - **Ships in m2 with e2ee**, not in m1's breaking release: it is a public
   API break, and e2ee is its first consumer.
 
@@ -68,7 +69,7 @@ above.
 - [moq-net traits](/quest/m2/net-wrap/traits.md) - moq-net exports producer and consumer traits at every level, implemented by its own types
 - [moq-e2ee implements the traits](/quest/m2/net-wrap/e2ee.md) - the e2ee broadcast, track, and group wrappers implement the traits, proving them before the adopters land
 - [moq-json, moq-stats, and hang take the traits](/quest/m2/net-wrap/json.md) - json snapshots, streams, windows, the stats producer, and hang's tracks write and read through the traits
-- [moq-mux takes the traits](/quest/m2/net-wrap/mux.md) - importers, catalog, container, timeline, json and binary tracks, `Source`, and TS export are generic over the traits
+- [moq-mux takes the traits](/quest/m2/net-wrap/mux.md) - importers, catalog, container, timeline, json and binary tracks, `Source`, TS export, and the moq-video and moq-audio encoders are generic over the traits
 - [CLI paths take the traits](/quest/m2/net-wrap/cli.md) - the CLI's publish and play paths hand moq-mux any broadcast that implements them
 - [JS mirror](/quest/m2/net-wrap/js.md) - `@moq/net` exports the same interfaces, taken by `@moq/hang`, `@moq/publish`, and `@moq/watch`, and implemented by `@moq/e2ee`
 
