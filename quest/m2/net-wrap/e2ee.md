@@ -38,14 +38,19 @@ the reverse (decided 2026-10-20, maintainer):
 - The subscriber's wrapper learns the logical flag from authenticated E2EE
   metadata, never from the physical track (decided 2026-10-20, maintainer):
   the physical track's `compress` is always false, so it can't signal it.
-  The metadata lives in the E2EE track mapping or the encrypted catalog, and
-  a flag that fails authentication fails the track loudly. Prefer the track
-  mapping: the [E2EE epic](/quest/m2/e2ee/README.md) keeps catalog formats
-  out of moq-e2ee, and [migrate](/quest/m1/compress/migrate.md) drops hang's
-  `compression` field. Either way the subscriber needs the flag before
-  inflating, without changing moq-net's `track(name)`; propose the encoding
-  in the PR. Record it in `draft-lcurley-moq-e2ee.md`, replacing the
-  Catalogs section's `.z` sibling rule.
+  The metadata lives in the E2EE track mapping, and a flag that fails
+  authentication fails the track loudly. Not the encrypted catalog: the
+  catalog track is itself compressed, so a subscriber would need the flag
+  before it could inflate the catalog that carries it. The
+  [E2EE epic](/quest/m2/e2ee/README.md) also keeps catalog formats out of
+  moq-e2ee, and [migrate](/quest/m1/compress/migrate.md) drops hang's
+  `compression` field. The subscriber needs the flag before inflating,
+  without changing moq-net's `track(name)`; propose the encoding in the PR.
+  Record it in `draft-lcurley-moq-e2ee.md`, replacing the Catalogs section's
+  `.z` sibling rule.
+- Frames: AEAD authenticates a whole frame, so the wrapper's frame producer
+  buffers chunks from `write` and seals at `finish`, and its frame consumer
+  yields chunks only after the frame authenticates.
 - Demand and preference cross the wrapper: an encrypted track's demand is
   its physical track's, and preference updates reach the physical track.
 - Keep the nonce rules the epic specifies: a group producer still owns its

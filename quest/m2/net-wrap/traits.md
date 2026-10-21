@@ -16,9 +16,15 @@ the methods exactly as moq-net has them today.
 - Cover each role writers and readers hold: `broadcast::Producer`,
   `broadcast::Consumer`, `track::Producer`, `track::Request`,
   `track::Dynamic`, `track::Consumer`, `track::Subscriber`,
-  `group::Producer`, and `group::Consumer`. Associated types link the
-  levels, so a broadcast producer's `create_track` returns its own track
-  producer, whose `create_group` returns its own group producer.
+  `group::Producer`, `group::Consumer`, `frame::Producer`, and
+  `frame::Consumer`. Associated types link the levels, so a broadcast
+  producer's `create_track` returns its own track producer, whose
+  `create_group` returns its own group producer, whose `create_frame`
+  returns its own frame producer. moq-mux's fMP4 and LOC importers stream
+  chunks through `create_frame` and `write`, and readers use `next_frame`
+  and `read_chunk`, so without the frame level they stay concrete or buffer
+  whole frames. `frame::Producer<'_>` borrows its group, so its associated
+  type is generic over that lifetime.
 - `poll_*` methods are the required ones; the async forms are provided
   methods over them, so no `async fn` in a trait forces a `Send` bound.
 - Demand (`demand`, `subscription_changed`, `Request::accept` and `reject`)

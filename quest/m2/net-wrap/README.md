@@ -34,9 +34,10 @@ and its trait-versus-bridge comparison:
   methods writers and readers call today, with the same names, arguments,
   and errors: `create_track`, `reserve_track`, `dynamic`, `demand`,
   `create_group(group::Info)`, `append_group`, `append_datagram`,
-  `insert_datagram`, `write_frame`, `finish`, `abort(self, Error)`,
-  `closed`, `track(name)` then `.subscribe(..)`, `recv_group`,
-  `recv_datagram`, `read_frame`, and their `poll_*` forms. A wrapper adapts
+  `insert_datagram`, `write_frame`, `create_frame`, `write`, `finish`,
+  `abort(self, Error)`, `closed`, `track(name)` then `.subscribe(..)`,
+  `recv_group`, `recv_datagram`, `read_frame`, `next_frame`, `read_chunk`,
+  and their `poll_*` forms. A wrapper adapts
   to moq-net, not the other way around: moq-e2ee's error converts into
   `moq_net::Error`.
 - **Terminal propagation crosses the wrapper.** Finish, typed aborts (such

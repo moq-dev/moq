@@ -41,7 +41,7 @@ The line owns the pre-cut check: every `doc/lib/c` sample and the C interop
 client build and run against the built release archive, not only in-tree.
 [Published archive proof](/quest/m2/release/c-publish.md) repeats it after
 publication; [old-crate retirement](/quest/m2/release/c-retire.md) follows
-its final notice release and is not a prerequisite of this preparation.
+that publication and is not a prerequisite of this preparation.
 
 The hand-written crate gets no more feature work: its shutdown, CMake library,
 and fetch quests were abandoned for this line, and hidden is done.

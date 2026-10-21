@@ -6,10 +6,14 @@ An embedder can give each `moq-srt` connection a bitrate cap through a rate
 handle that stays valid across live rate updates. An SRT pull never sends
 more media payload than the cap plus a burst, retransmits included, and an
 SRT publish past the cap plus burst is closed with a reason the embedder can
-log. The cap counts payload, like the [QUIC caps](/quest/m2/rate-quic.md).
-TS, SRT, and UDP overhead sits outside it: moq-srt picks the muxing and
-packet sizes, so the overhead per payload byte is fixed, and a viewer can't
-inflate it. This backs
+log. The cap counts payload, like the [QUIC caps](/quest/m2/rate-quic.md),
+but which payload depends on who muxes. On a pull, it is media payload: TS,
+SRT, and UDP overhead sits outside it, because moq-srt picks the muxing and
+packet sizes, so the overhead per payload byte is fixed and a viewer can't
+inflate it. On a publish, it is the MPEG-TS payload the SRT socket yields,
+TS headers, adaptation fields, and padding included, because the publisher
+picks the muxing and could otherwise pad without limit. SRT and UDP
+headers stay outside both. This backs
 moq.pro's
 [ingest](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/rate-ingest.md)
 and [egress](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/rate-egress.md)
@@ -31,8 +35,10 @@ enforcement needs it and nobody owned it.
   Retransmissions draw from the same bucket, and one with no credit left is
   skipped, which needs the hook `srt-protocol`'s sender exposes when driven
   directly.
-- Publish: SRT has no receiver backpressure, so meter received bytes and
-  close the established session past cap plus burst. An established SRT
+- Publish: SRT has no receiver backpressure, so meter the received TS bytes
+  before demuxing and close the established session past cap plus burst. A
+  CBR encoder's null packets count, so an embedder sizes the cap to the
+  publisher's mux rate, not its media bitrate. An established SRT
   shutdown carries no reason, and `Forbidden` is a handshake rejection sent
   only before `accept`, so it stays for admission refusals; the rate-limit
   reason goes to the embedder instead.
@@ -40,7 +46,8 @@ enforcement needs it and nobody owned it.
 - Tests: a capped pull stays under cap plus burst; two pulls with different
   caps, each reporting every packet lost for several burst windows, stay
   under their own; a publisher over the cap is closed mid-session, apart from
-  a `Forbidden` admission refusal; under the cap nothing changes.
+  a `Forbidden` admission refusal; a publisher whose TS mux rate, padding
+  included, stays under the cap is untouched; under the cap nothing changes.
 
 Public API: a rate handle and a rate-limit close reason on moq-srt's server.
 Wire: none.
