@@ -29,7 +29,3 @@ wire request starts at frame 0. Mirror it in `js/net` if
 [JavaScript](/quest/m1/compress/js.md) has landed compressed tracks by then.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Core](/quest/m1/compress/core.md) - the compressed tracks and requesting model this fixes

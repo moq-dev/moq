@@ -1408,6 +1408,7 @@ fn publish_track_invalid_broadcast() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
+		compress: false,
 	};
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
 	assert!(moq_publish_track_group(9999) < 0);
@@ -1439,6 +1440,7 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
+		compress: false,
 	};
 
 	assert!(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
@@ -1715,6 +1717,7 @@ fn raw_track_subscription_options_and_update() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
+		compress: false,
 	};
 	let track =
 		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
@@ -1828,6 +1831,7 @@ fn raw_track_time_anchor() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
+		compress: false,
 	};
 	let track =
 		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
@@ -2781,6 +2785,7 @@ fn track_demand_reports_the_wanted_group() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: true,
+		compress: false,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 

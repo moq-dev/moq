@@ -95,7 +95,8 @@ async fn a_listing_carries_track_info() {
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_max_age(Duration::from_secs(3))
 		.with_priority(9)
-		.with_refresh(4);
+		.with_refresh(4)
+		.with_compress(true);
 	let _a = broadcast.create_track("a", info).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -114,6 +115,7 @@ async fn a_listing_carries_track_info() {
 	assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	assert_eq!(info.priority, 9);
 	assert_eq!(info.refresh, Some(4));
+	assert!(info.compress);
 }
 
 /// A listed track is a track like any other: a SUBSCRIBE from the listing reads the
