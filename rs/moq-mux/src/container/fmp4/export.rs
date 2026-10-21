@@ -153,6 +153,8 @@ pub struct Fragment {
 }
 
 /// A rendition's latest catalog entry.
+// One per rendition, so the variant sizes never add up to an allocation's worth.
+#[allow(clippy::large_enum_variant)]
 enum Rendition {
 	Video(VideoConfig),
 	Audio(AudioConfig),

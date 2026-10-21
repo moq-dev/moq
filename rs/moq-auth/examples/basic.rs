@@ -1,5 +1,8 @@
 // cargo run --example basic
 
+// A standalone program stamping a real token, so it reads the host clock.
+#![allow(clippy::disallowed_methods)]
+
 use std::time::{Duration, SystemTime};
 
 fn main() -> anyhow::Result<()> {
