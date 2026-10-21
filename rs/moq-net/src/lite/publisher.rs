@@ -1962,6 +1962,8 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 			priority: info.priority,
 			max_age: info.max_age,
 			timescale: info.timescale,
+			// An older peer is served the frames inflated.
+			compress: info.compress && shared.version.has_compression(),
 		})?;
 		if ietf {
 			writer.buffer(&lite::ietf::TrackProperties(info.properties.clone()))?;
@@ -2009,7 +2011,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
 
 	fn poll(
 		&mut self,
-		_: &Shared<S>,
+		shared: &Shared<S>,
 		writer: &mut Writer<S::SendStream, Version>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
@@ -2024,6 +2026,8 @@ impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
 					priority: info.priority,
 					max_age: info.max_age,
 					timescale: info.timescale,
+					// An older peer is served the frames inflated.
+					compress: info.compress && shared.version.has_compression(),
 				},
 			},
 			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
@@ -2245,7 +2249,7 @@ enum FetchServe {
 	},
 }
 
-/// A batch of frames with their relay metadata, which the `ietf` extension forwards.
+/// A batch of frames read for egress, each with what the wire needs beside it.
 type Objects = arrayvec::ArrayVec<frame::Object, 8>;
 
 impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
@@ -2312,6 +2316,10 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 
 					// Matches the timescale TRACK_INFO declared for the track.
 					let timescale = shared.version.wire_timescale(group.timescale());
+					// And its compression, which a lite-07 peer receives as stored.
+					if shared.version.has_compression() {
+						group = group.compressed();
+					}
 					let capped = msg.end_frame.is_some();
 					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale, shared.version)?;
 
@@ -2357,8 +2365,9 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 							}
 							buffer_frame_info(
 								writer,
-								batched.timestamp,
-								batched.payload.len() as u64,
+								batched.frame.timestamp,
+								batched.inflated,
+								batched.frame.payload.len() as u64,
 								*timescale,
 								prev_ts,
 								&shared.runtime,
@@ -2392,6 +2401,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 									buffer_frame_info(
 										writer,
 										next.timestamp,
+										next.inflated,
 										next.size,
 										*timescale,
 										prev_ts,
@@ -3349,6 +3359,7 @@ mod announce_test {
 fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	timestamp: Option<crate::Timestamp>,
+	inflated: Option<u64>,
 	size: u64,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
@@ -3356,6 +3367,10 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 ) -> Result<(), Error> {
 	if let Some(timescale) = timescale {
 		buffer_zigzag_delta(writer, wire_timestamp(timestamp, timescale, runtime)?, prev_ts)?;
+	}
+	// Only a compressed group read in its stored form has one, and only on lite-07.
+	if let Some(inflated) = inflated {
+		writer.buffer_varint(inflated)?;
 	}
 	writer.buffer_varint(size)?;
 	Ok(())
@@ -3443,7 +3458,7 @@ fn poll_recv_next(
 			Poll::Pending => {}
 		}
 		if datagrams {
-			match track.poll_recv_wire_datagram(waiter)? {
+			match track.poll_recv_stored_datagram(waiter)? {
 				Poll::Ready(Some(datagram)) => return Poll::Ready(Ok(Recv::Datagram(datagram))),
 				// Datagram side finished but groups are still paused/pending: keep waiting on groups.
 				Poll::Ready(None) => {}
@@ -3652,11 +3667,14 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 			(true, Some(wire)) => Some(Some(wire.as_ref().clone())),
 		};
 		let sequence = datagram.sequence;
+		// A lite-07 peer takes a compressed track's datagram as stored, others inflated.
+		let (payload, inflated) = datagram.sent(self.version.has_compression());
 		let body = lite::Datagram {
 			subscribe: self.id,
 			sequence,
 			timestamp,
-			payload: datagram.datagram.payload,
+			inflated,
+			payload: payload.clone(),
 			ietf,
 		};
 		// has_datagrams is checked before this runs, and the timescale is set wherever the
@@ -3920,7 +3938,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				Poll::Pending => {
 					self.first = Some(group);
 					if self.datagrams
-						&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_wire_datagram(waiter)?
+						&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_stored_datagram(waiter)?
 					{
 						self.serve_datagram(datagram);
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -4041,6 +4059,9 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// Send a datagram, recording its sequence once it went out.
 	fn serve_datagram(&mut self, datagram: crate::model::datagram::Stored) {
 		let sequence = datagram.sequence;
+		// Metered in the form the wire carries.
+		let (payload, _) = datagram.sent(self.ctx.version.has_compression());
+		self.track.meter_datagram(payload.len() as u64);
 		if self.ctx.serve_datagram(datagram) {
 			self.mark_served(sequence);
 		}
@@ -4247,6 +4268,11 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		rank: Rank<GroupOf<S>>,
 		group: group::Consumer,
 	) -> Self {
+		// A lite-07 peer receives a compressed group as stored, others inflated.
+		let group = match ctx.version.has_compression() {
+			true => group.compressed(),
+			false => group,
+		};
 		Self {
 			ctx,
 			rank,
@@ -4443,8 +4469,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									.and_then(|()| {
 										buffer_frame_info(
 											writer,
-											batched.timestamp,
-											batched.payload.len() as u64,
+											batched.frame.timestamp,
+											batched.inflated,
+											batched.frame.payload.len() as u64,
 											self.ctx.timescale,
 											&mut self.prev_ts,
 											&self.ctx.runtime,
@@ -4489,6 +4516,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 												buffer_frame_info(
 													writer,
 													next.timestamp,
+													next.inflated,
 													next.size,
 													self.ctx.timescale,
 													&mut self.prev_ts,

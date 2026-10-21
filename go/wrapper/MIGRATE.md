@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `TrackInfo` gains `Compress` (#5928)
+
+A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals need no change.
+
 ### Anchors can name a time (#6074)
 
 `AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.
