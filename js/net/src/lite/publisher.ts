@@ -1570,7 +1570,12 @@ export class Publisher {
 			// Watch the group while the transport parks the open, and release that watch
 			// once the open settles. tryOpen owns resetting a slot that arrives too late.
 			const opened = Promise.withResolvers<void>();
-			const abandoned = hooks.guardGroup(group, () => opened.promise).catch(() => {});
+			let failure: Error | undefined;
+			const abandoned = hooks
+				.guardGroup(group, () => opened.promise)
+				.catch((err: unknown) => {
+					failure = error(err);
+				});
 			let stream: Writer | undefined;
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
@@ -1583,7 +1588,7 @@ export class Publisher {
 				opened.resolve();
 			}
 			if (!stream) {
-				const failed = new Error("no stream slot");
+				const failed = failure ?? new Error("no stream slot");
 				group.close(failed);
 				return failed;
 			}

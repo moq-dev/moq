@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
+import { StreamCode } from "./error.ts";
 import { Producer as Group } from "./group.ts";
 import { randomHop } from "./hop.ts";
 import { NativeSession } from "./ietf/adapter.ts";
@@ -7,7 +8,7 @@ import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { Subscribe as IetfSubscribe } from "./ietf/subscribe.ts";
 import { ALPN, Version as Ietf } from "./ietf/version.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
-import { Subscribe as LiteSubscribe } from "./lite/subscribe.ts";
+import { decodeSubscribeResponse, Subscribe as LiteSubscribe } from "./lite/subscribe.ts";
 import { ALPN_05, ALPN_07_WIP, Version as Lite } from "./lite/version.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as Origin } from "./origin.ts";
@@ -117,6 +118,15 @@ for (const protocol of protocols) {
 					await clock.advanceAsync(Nano.fromMilli(Milli(1)));
 				} else await clock.advanceAsync(Nano.fromMilli(Milli(33_750)));
 				expect(ended).toBe(true);
+				if (protocol.kind === "lite") {
+					for (;;) {
+						const response = await decodeSubscribeResponse(client.reader, protocol.version);
+						if (!("drop" in response) || response.drop.start !== 0) continue;
+						const cause = mode === "expires" ? StreamCode.Old : StreamCode.TooFarBehind;
+						expect(response.drop.error).toBe(protocol.version === Lite.DRAFT_07 ? cause : 0);
+						break;
+					}
+				}
 				// The transport cannot cancel createUnidirectionalStream. A late slot is reset,
 				// never used to transmit the obsolete group's header or frames.
 				slot.resolve();
