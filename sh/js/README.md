@@ -1,6 +1,6 @@
 # JavaScript checks
 
-`just check` and `just ci check|test` pass the dispatcher’s JS-impacting paths to
+`just check` and `just ci` pass the dispatcher’s JS-impacting paths to
 `just js check-changed|test-changed`. The selector reads the root Bun workspace
 list and each package manifest, then selects changed packages and their
 transitive dependents across runtime, development, peer and optional dependencies.
