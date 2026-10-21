@@ -38,8 +38,22 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 	}
 
 	/// Poll for the next catalog update.
+	///
+	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
+	/// `broadcast` reference or echo prefix walks above the root. Such a reference names no broadcast, and the
+	/// root is the consumer's authorized subtree, so it is an attempt to reference content the
+	/// consumer cannot name. The whole catalog is rejected rather than the one rendition: a
+	/// publisher that emits one has a bug (or is hostile), and silently serving the rest hides
+	/// that from the operator while the missing rendition surfaces much later as a track that
+	/// never fills.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		let value = ready!(self.inner.poll_next(waiter)).map_err(|err| crate::Error::Json(err.to_string()))?;
+		let value = ready!(self.inner.poll_latest(waiter))
+			.map_err(|err| match err {
+				// A transport failure stays typed so callers can tell a lost source from a bad catalog.
+				moq_json::Error::Net(err) => crate::Error::Moq(err),
+				err => crate::Error::Json(err.to_string()),
+			})?
+			.map(|value| value.value);
 		let catalog = value.map(Catalog::from_value).transpose()?;
 		if let Some(catalog) = catalog.as_ref() {
 			catalog.check_renditions()?;
@@ -57,6 +71,10 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 	}
 }
 
+/// Reject the catalog if a track reference or echo prefix walks above the root.
+///
+/// Every section carrying a relative broadcast path must be included here; a section left out
+/// silently exempts its paths from the containment check.
 fn check_resolvable<E>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
 	let video = catalog.video.renditions.iter();
 	let audio = catalog.audio.renditions.iter();
@@ -145,6 +163,20 @@ mod test {
 			.unwrap();
 		group.finish().unwrap();
 		assert_eq!(consumer.next().await.unwrap(), Some(published));
+	}
+
+	#[tokio::test]
+	async fn a_lost_track_is_a_transport_error() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
+			.unwrap();
+		let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
+		track.abort(moq_net::Error::Cancel).unwrap();
+		assert!(matches!(
+			consumer.next().await,
+			Err(crate::Error::Moq(moq_net::Error::Cancel))
+		));
 	}
 
 	#[tokio::test]

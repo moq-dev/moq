@@ -5,8 +5,9 @@ description: The reference implementation, as a set of crates on crates.io
 
 # Rust
 
-The reference implementation. Every crate is on
-[crates.io](https://crates.io/search?q=moq) with API docs on docs.rs.
+The reference implementation. Published crates are on
+[crates.io](https://crates.io/search?q=moq) with API docs on docs.rs; source
+links cover crates awaiting their first release.
 
 ## Crates
 
@@ -16,7 +17,7 @@ The reference implementation. Every crate is on
 | [moq-pattern](https://docs.rs/moq-pattern) | Path patterns such as `room/**`. Re-exported by moq-net and moq-auth. |
 | [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebSocket, or iroh, from config or CLI flags. |
 | [moq-sock](https://docs.rs/moq-sock) | Socket binding and CPU pinning for thread-per-core listeners. |
-| [moq-ice](https://docs.rs/moq-ice) | The ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
+| [moq-ice](https://github.com/moq-dev/moq/tree/main/rs/moq-ice) | The ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
 | [moq-uring](https://docs.rs/moq-uring) | Experimental Linux io\_uring server for moq-lite. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
@@ -33,7 +34,7 @@ The reference implementation. Every crate is on
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
 | [moq-clock](/lib/rs/moq-clock) | One clock for time and timers on tokio, the browser, and a deterministic test simulator. |
-| [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtsp](https://docs.rs/moq-rtsp), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |
+| [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtsp](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |
 | [moq-ffi](https://docs.rs/moq-ffi), [moq-c](/lib/c/) | The UniFFI core behind the language bindings, and the C ABI. |
 | [moq-relay](/bin/relay/), [moq-cli](/bin/cli) | The binaries, also usable as crates. |
 | [web-transport](https://github.com/moq-dev/web-transport) | The QUIC/WebTransport/qmux transports, in a sibling repository. |
@@ -76,10 +77,10 @@ let mut broadcast = origin.publish("my-stream.hang", Default::default())?;
 // each requested path for the application to accept or reject.
 ```
 
-The session and the origin work run concurrently (`tokio::select!` or
-`spawn`), since the announcement loop is live. Before exiting,
-`session.close().await` delivers what was already queued, then `Client::close`
-sends the QUIC close. Runnable examples:
+The connection and origin helpers spawn their drivers. Watch
+`session.closed()` alongside the announcement loop to handle a connection
+that gives up. Before exiting, `session.close().await` delivers what was
+already queued, then `Client::close` sends the QUIC close. Runnable examples:
 [`rs/hang/examples/video.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs)
 (publish) and
 [`subscribe.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs).
@@ -93,15 +94,18 @@ the relay's settings; see the [relay reference](/bin/relay/config#quic).
 ## WebAssembly
 
 `moq-net` compiles to `wasm32-unknown-unknown` and rides the browser's own
-`WebTransport` through the `web-transport` crate, so Rust logic can be shared
-between native and web. Skip `moq-tokio` there, build the transport with
-`web_transport::ClientBuilder`, and drive the returned session future with
-`wasm_bindgen_futures::spawn_local` (nothing is `Send` on wasm). If you just
+`WebTransport`, so Rust logic can be shared between native and web. Skip
+`moq-tokio` there. A client handshake returns a session and a separate driver;
+spawn `moq_net::time::run(driver)` on the browser executor, and drive the
+origin the same way. The [browser transport adapter](https://github.com/moq-dev/moq/blob/main/rs/moq-wasm/src/transport.rs)
+and [handshake](https://github.com/moq-dev/moq/blob/main/rs/moq-wasm/src/lib.rs)
+show the setup, including advertising the supported MoQ ALPNs. If you just
 want MoQ in a page, the [TypeScript libraries](/lib/js/) are the easier path.
 
 ## Conventions
 
 The API is producer/consumer pairs at every level (origin, broadcast, track,
 group). Producers write and consumers read; cloning a consumer shares the
-subscription, and the last clone dropping closes it. Everything is
-`async`, executor-agnostic, and errors are typed enums with `thiserror`.
+subscription, and the last clone dropping closes it. The core exposes
+executor-agnostic `poll_*` methods with optional async helpers; `moq-tokio`
+handles native runtime integration. Errors are typed enums with `thiserror`.

@@ -3,7 +3,7 @@
 ## Goal
 
 Someone with the hardware can run the video validation: a Windows machine
-with MJPEG and YUY2 cameras, a live camera per platform, a KDE/Wayland desktop
+with MJPEG and YUY2 cameras, an Apple Silicon Mac, a live camera per platform, a KDE/Wayland desktop
 with an Intel or AMD GPU, a sandbox that can show the camera portal dialog,
 and a Raspberry Pi 4 or 5 whose CSI camera appears as a PipeWire node, which
 also validates the [embedded video path](/quest/m3/video-embedded.md).

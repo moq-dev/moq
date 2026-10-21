@@ -1,17 +1,10 @@
 #!/usr/bin/env bash
-# Run `just check`, `just fix`, or `just ci check|test` over the branch diff.
-# `--query` prints the selection instead; `ci-platform` exists only as a query.
-#
-# Usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query]
-#        sh/dispatch.sh ci-platform BASE|--all --query
-#
-# The branch diff is resolved once and matched against the impact map below,
-# the one place that says which paths put which module in scope. `check` is
-# `ci-check` plus `ci-test`, which CI runs as parallel jobs with MOQ_STRICT=1,
-# so there is no second definition of "checked".
+# Run `just check`, `just fix`, or `just ci` over one resolved branch diff.
+# `--query` prints the selection before CI installs its toolchain and caches.
+# `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
 
-usage="usage: sh/dispatch.sh check|fix|ci-check|ci-test [BASE|--all] [--query], or ci-platform BASE|--all --query"
+usage="usage: sh/dispatch.sh check|fix|ci [BASE|--all] [--query], or ci-platform BASE|--all --query"
 action=${1:?$usage}
 base=${2:-}
 query=${3:-}
@@ -20,7 +13,7 @@ if [[ $# -gt 3 || (-n "$query" && "$query" != --query) || ("$action" == ci-platf
     exit 2
 fi
 case "$action" in
-    check | fix | ci-check | ci-test | ci-platform) ;;
+    check | fix | ci | ci-platform) ;;
     *)
         echo "$usage" >&2
         exit 2
@@ -63,13 +56,16 @@ declare -A scope=(
     # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
     # fails a check that reads a cross-tree input this pattern misses.
     # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
-    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
-    [rs]='^(rs/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    [rs]='^(rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
+    # The CARLA demo's simulator worker and launchers. Its player is a JS
+    # package and its GPU bridge a Rust crate, so those modules cover them.
+    [carla]='^demo/carla/(sim/|justfile$)'
     [drafts]='^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)'
     # Quest documents form one graph, so any change validates the whole tree,
     # as does a bump of the flake-pinned validator.
@@ -140,6 +136,7 @@ declare -A tools=(
     [moq_sh]='dash'
     [rs]='cargo jq'
     [bench]='cargo'
+    [carla]='uv'
     [drafts]='bun kramdown-rfc xml2rfc'
     [quest]='quest'
     [drill]=''
@@ -161,9 +158,9 @@ declare -A tools=(
     [gh]='actionlint bun'
 )
 
-# `check` and `ci-check` share every lint; they differ in how rs compiles and
-# whether the tests run.
-verb=${action#ci-}
+# CI and the local check share one selection and one lint/test dispatch.
+verb=$action
+[[ "$verb" != ci ]] || verb=check
 
 # The modules whose run compiles Rust through Cargo, so CI restores the Rust
 # build cache only when one is selected. JS checks build @moq/wasm for its
@@ -171,13 +168,11 @@ verb=${action#ci-}
 declare -A compiles=(
     [check]='rs bench js py kt go dart cpp obs_compile'
     [fix]='rs'
-    [test]='rs py'
 )
 
 case "$action" in
-    check | ci-check) modules=(js workers moq_sh drafts rs bench quest drill py kt swift go dart cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
-    fix) modules=(js rs py dart obs markdown shell toml nix justfile) ;;
-    ci-test) modules=(js rs py) ;;
+    check | ci) modules=(js workers moq_sh drafts rs bench carla quest drill py kt swift go dart cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
+    fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
 esac
 
 selected=()
@@ -247,9 +242,9 @@ for module in "${selected[@]}"; do
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # Test enforces default-feature clippy through its compile. Check keeps
-        # the other lints and distinct feature/target builds.
-        check:rs) if [[ "$action" == check ]]; then just rs check-test-changed "$rs_list"; else just rs lint-changed "$rs_list"; fi ;;
+        # The preamble keeps docs and target-specific lints; the test build
+        # below enforces default-feature clippy without a second compile.
+        check:rs) just rs lint-changed "$rs_list" ;;
         check:bench) cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring ;;
         check:quest) quest check ;;
         check:drill) just test drill-sensitivity --apply-only ;;
@@ -271,18 +266,16 @@ for module in "${selected[@]}"; do
         fix:toml) RUST_LOG=error taplo format ;;
         fix:nix) files '*.nix' | xargs -0 nixfmt ;;
         fix:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --justfile ;;
-        test:js) just js test-changed "$js_list" ;;
-        test:rs) just rs test-changed "$rs_list" ;;
         *:shell) sh/shell.sh "$verb" ;;
         *) just "$module" "$verb" ;;
     esac
 done
 
-# The rest of `check`'s tests. rs ran its own above, and the kt, swift, go, and
-# dart checks always run theirs.
-if [[ "$action" == check ]]; then
+# The bindings run their tests in the preamble; these suites run once here.
+if [[ "$verb" == check ]]; then
     for module in "${selected[@]}"; do
         case "$module" in
+            rs) just rs test-changed "$rs_list" ;;
             js) just js test-changed "$js_list" ;;
             py) just py test ;;
         esac

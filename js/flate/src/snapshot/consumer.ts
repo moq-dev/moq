@@ -31,11 +31,11 @@ export class Consumer {
 	/**
 	 * Get the next value in group order, or `undefined` once the track ends.
 	 *
-	 * Buffers every value the reader has not reached yet. On a timed track, a group the
-	 * subscription's `maxDelay` proves too old is skipped: the default of zero keeps only the
-	 * newest group, so a playhead reader sets `maxDelay` to how far it trails the live edge. An
-	 * untimed track never proves a group stale, so a reader that falls behind replays the whole
-	 * backlog; use {@link latest} to skip it. A group lost to a gap resyncs from the next one.
+	 * Buffers every value the reader has not reached yet. A group the subscription's `maxDelay`
+	 * proves too old is skipped, counting media time and wall time, or wall time alone for an
+	 * untimed track. The default of zero keeps only the newest group, so a playhead reader sets
+	 * `maxDelay` to how far it trails the live edge. Use {@link latest} to skip straight to the
+	 * head. A group lost to a gap resyncs from the next one.
 	 */
 	next(): Promise<Timed<Uint8Array> | undefined> {
 		return this.#read(false);

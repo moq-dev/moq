@@ -440,6 +440,12 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 		}
 	}
 	let gets = recording.gets();
+	for rendition in ["360p", "1080p", "audio"] {
+		assert!(
+			gets.contains(&format!("rec/{rendition}/.info")),
+			"track metadata binds before End: {gets:?}"
+		);
+	}
 	assert!(gets.iter().any(|path| path.contains("timeline")), "{gets:?}");
 	assert!(
 		!gets.iter().any(|path| is_media(path)),
@@ -457,10 +463,7 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 		.unwrap()
 		.unwrap();
 	assert_eq!(&low[4..8], b"moof");
-	assert_eq!(
-		recording.gets(),
-		["rec/360p/.info", "rec/360p/segments/0000000000000000001"]
-	);
+	assert_eq!(recording.gets(), ["rec/360p/segments/0000000000000000001"]);
 	let high = replay
 		.rendition(Kind::Video, "1080p")
 		.listed_segment(2)
@@ -468,10 +471,7 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 		.unwrap()
 		.unwrap();
 	assert_eq!(&high[4..8], b"moof");
-	assert_eq!(
-		recording.gets(),
-		["rec/1080p/.info", "rec/1080p/segments/0000000000000000002"]
-	);
+	assert_eq!(recording.gets(), ["rec/1080p/segments/0000000000000000002"]);
 
 	// An audio segment spans four groups but still costs one object GET.
 	let audio = replay
@@ -481,10 +481,7 @@ async fn playlists_read_only_timelines_and_segments_their_own_objects() {
 		.unwrap()
 		.unwrap();
 	assert_eq!(&audio[4..8], b"moof");
-	assert_eq!(
-		recording.gets(),
-		["rec/audio/.info", "rec/audio/segments/0000000000000000001"]
-	);
+	assert_eq!(recording.gets(), ["rec/audio/segments/0000000000000000001"]);
 
 	// A repeated request hits the reader's cache, including the immutable `.info`.
 	replay
@@ -716,17 +713,12 @@ async fn range_playlist_refuses_non_durable_or_windowed_timelines() {
 		Some(Err(crate::Error::RangeNotDurable))
 	));
 
-	// A rendition without its own timeline would list only gaps.
+	// A rendition without its own timeline would list only gaps, so it is not served at all.
 	let mut archive = durable();
 	archive.timelines.remove("360p");
 	let untimed = Replay::open_with(&recording, 64 * 1024 * 1024, archive, config).await;
-	assert!(matches!(
-		untimed
-			.rendition(Kind::Video, "360p")
-			.playlist(Some(range), None)
-			.now_or_never(),
-		Some(Err(crate::Error::RangeUnavailable(_)))
-	));
+	assert!(untimed.broadcaster.rendition(Kind::Video, "360p").is_none());
+	assert!(untimed.broadcaster.rendition(Kind::Video, "1080p").is_some());
 }
 
 #[tokio::test(start_paused = true)]

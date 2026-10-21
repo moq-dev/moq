@@ -25,7 +25,7 @@ select_packages() {
         return
     fi
 
-    grep -q '^rs/' "$list" || return 0
+    grep -qE '^(rs|demo)/' "$list" || return 0
 
     # `--no-deps` keeps this to workspace members and off the network.
     local metadata
@@ -34,20 +34,27 @@ select_packages() {
     # A seed is the first path segment under `rs/`, so only a crate whose
     # manifest sits directly at `rs/<dir>/Cargo.toml` can be one. That drops
     # the `*-fuzz` crates (at `rs/<crate>/fuzz`), which a diff to their crate would
-    # otherwise select as a dependent and compile libFuzzer for. The separator
-    # is normalized first so Windows paths split too.
-    metadata=$(jq '.packages |= map((.manifest_path |= gsub("\\\\"; "/")) | select(.manifest_path | split("/")[-3] == "rs"))' <<<"$metadata")
+    # otherwise select as a dependent and compile libFuzzer for. A demo's crate
+    # sits at `demo/<demo>/<dir>/Cargo.toml` and is a seed for its directory.
+    # The separator is normalized first so Windows paths split too.
+    metadata=$(jq '.packages |= map((.manifest_path |= gsub("\\\\"; "/")) | select((.manifest_path | split("/")) as $p | $p[-3] == "rs" or $p[-4] == "demo"))' <<<"$metadata")
 
-    # A changed path is a seed only because every crate directory is named
-    # after its crate. Under-selecting checks nothing, so fall back to all.
-    if jq -e '.packages[] | select((.manifest_path | split("/")[-2]) != .name)' <<<"$metadata" >/dev/null; then
+    # A changed path under `rs/` is a seed only because every crate directory
+    # there is named after its crate. Under-selecting checks nothing, so fall
+    # back to all.
+    if jq -e '.packages[] | (.manifest_path | split("/")) as $p | select($p[-3] == "rs" and $p[-2] != .name)' <<<"$metadata" >/dev/null; then
         echo "rs: a crate directory no longer matches its crate name; selecting everything." >&2
         echo ALL
         return
     fi
 
     local seeds edges selected
-    seeds=$(sed -n 's|^rs/\([^/]*\)/.*|\1|p' "$list" | sort -u)
+    seeds=$({
+        sed -n 's|^rs/\([^/]*\)/.*|\1|p' "$list"
+        jq -r --rawfile list "$list" '($list | split("\n")) as $paths | .packages[]
+            | (.manifest_path | split("/")) as $p | select($p[-4] == "demo")
+            | select(any($paths[]; startswith("demo/\($p[-3])/\($p[-2])/"))) | .name' <<<"$metadata"
+    } | sort -u)
     edges=$(jq -r '.packages[] | .name as $name | .dependencies[] | "\($name) \(.name)"' <<<"$metadata")
 
     # A crate is rebuilt when anything it depends on changed, so walk the edges
@@ -92,32 +99,9 @@ wants() {
     [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$names"
 }
 
-# The feature contract scripts are no crate, so their own diff selects
-# nothing and still has to reach the gates below.
-media_script=
-tokio_script=
-net_script=
-if [[ -f "$list" ]]; then
-    if grep -qx 'sh/rs/media-features.sh' "$list"; then media_script=1; fi
-    if grep -qx 'sh/rs/tokio-features.sh' "$list"; then tokio_script=1; fi
-    if grep -qx 'sh/rs/net-features.sh' "$list"; then net_script=1; fi
-fi
-
-# Global build inputs select ALL. Otherwise isolate permutations when their
-# owning crate changes; dependency-only diffs keep the cheaper boundary checks.
-feature_owner_changed() {
-    [[ "$packages" == ALL ]] || grep -qE "$1" "$list"
-}
-
 case "$packages" in
     "")
-        if [[ ("$action" == check* || "$action" == lint) && -n "$media_script$tokio_script$net_script" ]]; then
-            if [[ -n "$media_script" ]]; then just rs media-features --all; fi
-            if [[ -n "$tokio_script" ]]; then just rs tokio-features --all; fi
-            if [[ -n "$net_script" ]]; then just rs net-features; fi
-        else
-            echo "rs: no crates affected; skipping."
-        fi
+        echo "rs: no crates affected; skipping."
         exit 0
         ;;
     ALL) echo "rs: selecting the workspace" ;;
@@ -139,15 +123,6 @@ case "$action" in
         ;;
     check | check-test | lint)
         just rs "$action" "${flags[@]}"
-        # Workspace feature unification hides a broken moq-tokio feature set
-        # whenever any dependent enables a transport.
-        if [[ -n "$tokio_script" ]] || wants moq-tokio; then
-            args=()
-            if feature_owner_changed '^(rs/moq-tokio/|sh/rs/tokio-features\.sh$)'; then args+=(--all); fi
-            just rs tokio-features "${args[@]}"
-        fi
-        # Likewise every dependent turns moq-net's default `async` feature back on.
-        if [[ -n "$net_script" ]] || wants moq-net; then just rs net-features; fi
         # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
         # wasm32 pass checks it. moq-mux, moq-ffi, and moq-clock ride along in that pass, and
         # nothing depends on moq-ffi, so each has to reach it on its own.
@@ -161,12 +136,6 @@ case "$action" in
         if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
         # The relay's io_uring listener, off the default feature set.
         if wants moq-relay; then just rs uring-check; fi
-        # Each media feature shape compiles on its own, about two minutes.
-        if [[ -n "$media_script" ]] || wants '(moq-video|moq-audio|moq-transcode)'; then
-            args=()
-            if feature_owner_changed '^(rs/moq-(video|audio|transcode)/|sh/rs/media-features\.sh$)'; then args+=(--all); fi
-            just rs media-features "${args[@]}"
-        fi
         ;;
     fix)
         just rs fix "${flags[@]}"

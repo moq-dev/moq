@@ -7,7 +7,13 @@ import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../
 import * as Path from "../path.ts";
 import { Follow } from "../util/observed.ts";
 import { wireOf } from "../wire.ts";
-import { type ConnectProps, connect, type WebSocketProps, type WebTransportProps } from "./connect.ts";
+import {
+	type ConnectProps,
+	connect,
+	normalizeVersions,
+	type WebSocketProps,
+	type WebTransportProps,
+} from "./connect.ts";
 import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
@@ -19,6 +25,11 @@ import type { Probe, Stats } from "./stats.ts";
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
  * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the current
  * URL. A new URL or a disable/re-enable starts another sequence.
+ *
+ * A GOAWAY off a session that outlived {@link ReloadDelay.initial} migrates at once, unless it
+ * sends the connection back to an endpoint that already redirected it elsewhere and the
+ * session lived less than {@link ReloadDelay.max}. Two peers redirecting to each other thus
+ * wait out this backoff and count against the timeout.
  */
 export type ReloadDelay = {
 	/** The delay before reconnecting (default: 1000ms). */
@@ -32,8 +43,8 @@ export type ReloadDelay = {
 
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
-	 * (default: 0, unlimited). Resets after each successful connection, a URL change, or a
-	 * disable/re-enable.
+	 * (default: 0, unlimited). Resets after each successful connection outside a redirect loop,
+	 * a URL change, or a disable/re-enable.
 	 */
 	timeout?: Milli;
 };
@@ -136,6 +147,9 @@ export class Reload {
 	 */
 	readonly bandwidth: Allocator;
 
+	/** Protocol versions to offer, most preferred first, kept across retries and redirects. */
+	readonly versions?: readonly string[];
+
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportProps;
 
@@ -199,6 +213,11 @@ export class Reload {
 	// dials. Retired when it closes, at its handover cap, or when the sequence ends.
 	#draining: Draining | undefined;
 
+	// The current run of migrations. A redirect back to an endpoint that already sent us away is
+	// a loop, however healthy each session looked. Reset when a session ends without a GOAWAY,
+	// outlives the capped delay, or a new sequence starts.
+	#redirects = new Redirects();
+
 	// Whether a connect attempt is in flight, so a retiring predecessor reports the right status.
 	#dialing = false;
 
@@ -232,6 +251,7 @@ export class Reload {
 		this.delay = props?.delay ?? {};
 		this.goaway = props?.goaway ?? {};
 		this.redirect = this.#redirect;
+		this.versions = normalizeVersions(props);
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 		this.publish = props?.publish;
@@ -389,6 +409,7 @@ export class Reload {
 							url: dialing,
 							// A redirect names the relay; a fallback URL pinned for the old one does not follow.
 							websocket: this.#redirect.peek() ? { ...this.websocket, url: undefined } : this.websocket,
+							versions: this.versions,
 							webtransport: this.webtransport,
 							publish: this.publish,
 							consume: this.consume,
@@ -417,6 +438,7 @@ export class Reload {
 					if (ended === undefined) return;
 					if (ended === null || ended instanceof Error) {
 						console.warn("connection closed, reconnecting");
+						this.#redirects.reset();
 						if (this.established.peek() === connection) this.established.set(undefined);
 						this.#retry(effect, connected, ended ?? undefined);
 						return;
@@ -426,12 +448,34 @@ export class Reload {
 					// A pinned WebSocket URL can win the race against the primary. Judge the
 					// redirect against that endpoint, not the primary we never reached.
 					const socket = this.#redirect.peek() ? undefined : this.websocket?.url;
-					if (!this.#migrate(connection, dialed(dialing, connection.transport, socket), ended)) return;
+					const at = dialed(dialing, connection.transport, socket);
+					const before = this.#redirect.peek();
+					if (!this.#migrate(connection, at, ended)) return;
+					const after = this.#redirect.peek();
+
+					// Two peers that each outlive the initial delay can still bounce us between
+					// them forever. Returning to an endpoint that already sent us elsewhere in this
+					// run of migrations escalates the backoff, which never resets mid-loop, so the
+					// retry window still applies. A one-way rolling restart never revisits one, and
+					// a GOAWAY back to the same place is a restart, not a move, so it never counts.
+					// A session that outlived the capped delay already redials no faster than the
+					// backoff would allow, so it starts a new run: rolling restarts days apart
+					// never add up to a loop.
+					const lived = Instant.durationSince(now(), connected);
+					if (lived >= Nano.fromMilli(this.delay?.max ?? DEFAULT_DELAY.max)) this.#redirects.reset();
+					// Only a redirect this GOAWAY named is a move. An empty or ignored one reconnects
+					// in place, even when that reruns the race a WebSocket fallback won.
+					const from = endpoint(at);
+					const to = after && after !== before ? endpoint(after) : from;
+					if (to !== from && this.#redirects.move(from, to)) {
+						this.#retry(effect, undefined, new Error("redirect loop"));
+						return;
+					}
 
 					// A session that outlived the initial delay was healthy, so its handover is not a
 					// failure. One redirected almost at once still migrates, but through the backoff,
 					// so two peers bouncing us between them escalate to the capped delay.
-					if (Instant.durationSince(now(), connected) < Nano.fromMilli(this.#initial())) {
+					if (lived < Nano.fromMilli(this.#initial())) {
 						this.#retry(effect, connected, new Error("peer redirected immediately"));
 						return;
 					}
@@ -577,6 +621,7 @@ export class Reload {
 		this.#delay = undefined;
 		this.#deadline = undefined;
 		this.#sequenceHref = undefined;
+		this.#redirects.reset();
 		this.#draining?.retire();
 	}
 
@@ -717,5 +762,48 @@ class Draining {
 		this.#timer.abort();
 		this.#connection.abort();
 		this.#onRetire();
+	}
+}
+
+/**
+ * Where `url` dials, without its query or fragment, where a peer may mint fresh credentials on
+ * every redirect. Two URLs that differ only there reach the same endpoint.
+ */
+function endpoint(url: URL): string {
+	const bare = new URL(url);
+	bare.search = "";
+	bare.hash = "";
+	return bare.href;
+}
+
+/**
+ * A run of GOAWAY redirects, and whether it has revisited an endpoint. The peer picks every
+ * hop, so remembering them all would grow without bound. Brent's cycle detection instead keeps
+ * one departed endpoint, replaced at doubling intervals, and catches a cycle of any length
+ * within a few laps of it. Once caught, the run stays a loop until reset.
+ */
+export class Redirects {
+	#mark: string | undefined;
+	#span = 1;
+	#hops = 0;
+	#loop = false;
+
+	/** Record leaving `from` for a different endpoint `to`, and return whether this run loops. */
+	move(from: string, to: string): boolean {
+		if (to === this.#mark) this.#loop = true;
+		if (++this.#hops === this.#span) {
+			this.#mark = from;
+			this.#span *= 2;
+			this.#hops = 0;
+		}
+		return this.#loop;
+	}
+
+	/** Start a new run. */
+	reset(): void {
+		this.#mark = undefined;
+		this.#span = 1;
+		this.#hops = 0;
+		this.#loop = false;
 	}
 }

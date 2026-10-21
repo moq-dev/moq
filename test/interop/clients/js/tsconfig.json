@@ -12,6 +12,8 @@
 		"open-gop",
 		"capture-channel-count.browser.ts",
 		"buffering",
+		"publish-ui.browser.ts",
+		"publish-ui",
 		"media.ts",
 		"src",
 		"vite.config.ts",

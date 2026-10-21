@@ -16,6 +16,8 @@ import dev.moq.json.SnapshotConfig
 import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
 import dev.moq.json.StreamConfig
+import dev.moq.json.Timed
+import dev.moq.json.decode
 import dev.moq.json.update
 import dev.moq.json.valuesAs
 import kotlinx.serialization.Serializable
@@ -409,12 +411,16 @@ class SmokeTest {
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
-            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
-            producer.update(Status(state = "live"))
-
+            val config = SnapshotConfig(deltaRatio = 8u, compression = false)
+            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
+            val producer = SnapshotProducer(broadcast, track, config)
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
-            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first())
+            for (n in 1..4) producer.update(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
+
+            // `next` yields every state in order; `latest` skips the buffered third.
+            assertEquals(Timed(Status(state = "live1"), 1.milliseconds), consumer.next()?.decode<Status>())
+            assertEquals(Timed(Status(state = "live2"), 2.milliseconds), consumer.next()?.decode<Status>())
+            assertEquals(Timed(Status(state = "live4"), 4.milliseconds), consumer.latest()?.decode<Status>())
         }
     }
 
@@ -425,12 +431,28 @@ class SmokeTest {
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             assertEquals("status", demand.name())
-            assertEquals(false, demand.isUsed())
+            assertEquals(null, demand.wanted())
 
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
-            demand.used()
+            while (demand.wantedChanged() == null) {}
             consumer.cancel()
-            demand.unused()
+            while (demand.wantedChanged() != null) {}
+        }
+    }
+
+    @Test
+    fun `cancelling a flow collection cancels its native handle`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
+            val demand: TrackDemand = producer.demand()
+            producer.update(Status(state = "live"))
+
+            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
+            while (demand.wantedChanged() == null) {}
+            // `first` cancels the collection, which must release the subscription without an explicit cancel.
+            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
+            while (demand.wantedChanged() != null) {}
         }
     }
 
@@ -447,7 +469,7 @@ class SmokeTest {
             producer.update("""{"state":"raw"}""")
 
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
-            assertEquals(Status(state = "raw"), consumer.valuesAs<Status>().first())
+            assertEquals(Timed(Status(state = "raw"), null), consumer.valuesAs<Status>().first())
         }
     }
 

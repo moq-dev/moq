@@ -35,13 +35,16 @@ bind = "/run/moq/internal.sock"
 allow.uid = [1001]
 
 [listen.extensions]                  # moq-transport SETUP extensions to offer, each on by default.
+                                     # The relay always offers ietf, for moq-lite-07 relay links.
 auth = false                         # Decline MoQ Auth (draft 17+).
 solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
 epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch (draft 17+).
 ```
 
-`timeout` bounds the whole handshake, transport through MoQ SETUP, so a peer
-that connects and never speaks is closed instead of held open by keep-alives.
+`timeout` bounds the whole handshake, transport through MoQ SETUP and auth
+admission, so a peer that connects and never speaks, or whose admission never
+gets an answer, is closed instead of held open by keep-alives. An HTTP read's
+admission is bounded by the same value from the request's arrival.
 
 A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, and `lb_id` (or `load_balancer`), which
@@ -56,7 +59,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 
 ```toml
 [quic]
-congestion_control = "delay"         # "delay" (BBR, the default) or "loss" (CUBIC).
+congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
@@ -68,6 +71,9 @@ send_window = 16777216               # Unacknowledged outgoing data, in bytes. D
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 keylog = false                       # Write TLS secrets to the file SSLKEYLOGFILE names. Default.
 ```
+
+`congestion_control = "none"` runs no congestion control and no pacing. It is
+meant for tests and controlled links, where nothing else shares the path.
 
 `SSLKEYLOGFILE` alone writes nothing: set `keylog = true` too, and only while
 debugging, since the file decrypts every captured session.

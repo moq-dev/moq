@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cross-language media interop test against THIS checkout.
 #
-# Unlike the standalone moq-dev/smoke repo (which installs each client from its
+# Unlike test/smoke (which installs each client from its
 # public registry to catch packaging breakage), this builds every client from
 # the workspace source. It proves the code in the tree interoperates across
 # implementations before anything is published: a relay built from rs/moq-relay,
@@ -69,7 +69,7 @@ TAIL_ONLY=0
 PROFILE="${INTEROP_PROFILE:-debug}"
 
 # Binaries under test. Built from source below unless overridden to point at a
-# prebuilt (mirrors the standalone moq-dev/smoke repo's RELAY_BIN/MOQ_BIN escape hatch).
+# prebuilt (mirrors test/smoke's RELAY_BIN/MOQ_BIN escape hatch).
 RELAY="${RELAY_BIN:-}"
 MOQ="${MOQ_BIN:-}"
 
@@ -1243,7 +1243,7 @@ if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 && "$IN_TREE" -eq 1 ]]; then
         fi
     done
     if needs js-native-node; then
-        for version in moq-lite-05 moq-lite-06; do
+        for version in moq-lite-05 moq-lite-06 moq-lite-07-wip; do
             run_drop_pair rust js-native-node "$version"
             run_drop_pair js-native-node rust "$version"
         done

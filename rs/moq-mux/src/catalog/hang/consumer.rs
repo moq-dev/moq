@@ -1,6 +1,4 @@
-use std::task::{Poll, ready};
-
-use moq_net::PathOwned;
+use std::task::Poll;
 
 use super::{Catalog, CatalogExt};
 use crate::Result;
@@ -8,8 +6,9 @@ use crate::catalog::CatalogFormat;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
-/// This wraps a [`moq_json::snapshot::Consumer`], reconstructing the JSON catalog from the latest
-/// group's snapshot (plus any future deltas) to discover available audio and video tracks.
+/// This wraps [`hang::catalog::Consumer`], which reconstructs the JSON catalog from the latest
+/// group's snapshot and checks its renditions, remembering which [`CatalogFormat`] it reads and
+/// reporting failures as this crate's [`Error`](crate::Error).
 ///
 /// Generic over the application extension `E` (defaulting to `()`); yields a
 /// [`Catalog<E>`](super::Catalog).
@@ -18,23 +17,16 @@ use crate::catalog::CatalogFormat;
 /// catalog, taken from the track's [`broadcast::Info::path`](moq_net::broadcast::Info::path).
 /// A catalog that misuses that reference is rejected outright (see [`Self::poll_next`]).
 pub struct Consumer<E: CatalogExt = ()> {
-	// Decoded in two steps, so a catalog needing a newer reader fails with a typed error.
-	inner: moq_json::snapshot::Consumer<serde_json::Value>,
-	_ext: std::marker::PhantomData<E>,
+	inner: hang::catalog::Consumer<E>,
 	format: CatalogFormat,
-	/// Path of the broadcast serving this catalog, which rendition references and the
-	/// echo prefix resolve against.
-	base: PathOwned,
 }
 
 impl<E: CatalogExt> Consumer<E> {
 	/// Create a new catalog consumer from a MoQ track subscriber (uncompressed `catalog.json`).
 	pub fn new(track: moq_net::track::Subscriber) -> Self {
 		Self {
+			inner: hang::catalog::Consumer::new(track),
 			format: CatalogFormat::Hang,
-			base: track.broadcast().path.clone(),
-			inner: moq_json::snapshot::Consumer::new(track, moq_json::snapshot::consumer::Config::default()),
-			_ext: std::marker::PhantomData,
 		}
 	}
 
@@ -42,13 +34,9 @@ impl<E: CatalogExt> Consumer<E> {
 	///
 	/// The track must be the compressed one (see [`hang::Catalog::COMPRESSED_NAME`]).
 	pub fn compressed(track: moq_net::track::Subscriber) -> Self {
-		let mut config = moq_json::snapshot::consumer::Config::default();
-		config.compression = moq_json::Compression::Deflate;
 		Self {
+			inner: hang::catalog::Consumer::compressed(track),
 			format: CatalogFormat::HangZ,
-			base: track.broadcast().path.clone(),
-			inner: moq_json::snapshot::Consumer::new(track, config),
-			_ext: std::marker::PhantomData,
 		}
 	}
 
@@ -59,20 +47,16 @@ impl<E: CatalogExt> Consumer<E> {
 	/// Poll for the next catalog update.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
-	/// `broadcast` reference or echo prefix walks above the root. Such a reference names no broadcast, and the
-	/// root is the consumer's authorized subtree, so it is an attempt to reference content the
-	/// consumer cannot name. The whole catalog is rejected rather than the one rendition: a
-	/// publisher that emits one has a bug (or is hostile), and silently serving the rest hides
-	/// that from the operator while the missing rendition surfaces much later as a track that
-	/// never fills.
+	/// `broadcast` reference or echo prefix walks above the root, rejecting the whole catalog
+	/// (see [`hang::catalog::Consumer::poll_next`]). A transport failure is
+	/// [`Error::Moq`](crate::Error::Moq).
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		let value = ready!(self.inner.poll_next(waiter))?;
-		let catalog = value.map(Catalog::from_value).transpose()?;
-		if let Some(catalog) = catalog.as_ref() {
-			catalog.check_renditions()?;
-			check_resolvable(&self.base, catalog)?;
-		}
-		Poll::Ready(Ok(catalog))
+		self.inner.poll_next(waiter).map_err(|err| match err {
+			// Lifted to this crate's variants, which `Source` reports for the same faults.
+			hang::Error::Moq(err) => crate::Error::Moq(err),
+			hang::Error::EscapingBroadcast(rel) => crate::Error::EscapingBroadcast(rel),
+			err => crate::Error::Hang(err),
+		})
 	}
 
 	/// Get the next catalog update.
@@ -91,42 +75,6 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 	fn from(inner: moq_net::track::Subscriber) -> Self {
 		Self::new(inner)
 	}
-}
-
-/// Reject the catalog if a track reference or echo prefix walks above the root.
-///
-/// Every section carrying a relative broadcast path must be included here; a section left out
-/// silently exempts its paths from the containment check.
-fn check_resolvable<E: CatalogExt>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
-	let video = catalog.video.renditions.iter();
-	let audio = catalog.audio.renditions.iter();
-	let text = catalog.text.renditions.iter();
-	let json = catalog.json.tracks.iter();
-	let binary = catalog.binary.tracks.iter();
-
-	for (rendition, rel) in video
-		.map(|(name, config)| (name, config.broadcast.as_ref()))
-		.chain(audio.map(|(name, config)| (name, config.broadcast.as_ref())))
-		.chain(text.map(|(name, config)| (name, config.broadcast.as_ref())))
-		.chain(json.map(|(name, config)| (name, config.broadcast.as_ref())))
-		.chain(binary.map(|(name, config)| (name, config.broadcast.as_ref())))
-	{
-		let Some(rel) = rel.filter(|rel| !rel.is_empty()) else {
-			continue;
-		};
-
-		if base.try_resolve(rel).is_none() {
-			tracing::error!(rendition, %rel, catalog = %base, "rejecting catalog: broadcast reference escapes the root");
-			return Err(crate::Error::EscapingBroadcast(rel.to_string()));
-		}
-	}
-
-	if let Some(echo) = &catalog.echo
-		&& base.try_resolve(&echo.path).is_none()
-	{
-		return Err(crate::Error::EscapingBroadcast(echo.path.to_string()));
-	}
-	Ok(())
 }
 
 #[cfg(test)]
@@ -571,6 +519,20 @@ mod test {
 		old_group.finish().expect("old catalog group should finish");
 
 		assert!(matches!(consumer.poll_next(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	/// A lost catalog track is a transport error, so a caller can hold for the source to return
+	/// instead of failing as if the catalog were malformed.
+	#[test]
+	fn a_lost_track_is_a_transport_error() {
+		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut consumer: Consumer = Consumer::new(track.subscribe(None));
+		track.abort(moq_net::Error::Cancel).expect("catalog track should abort");
+
+		assert!(matches!(
+			consumer.poll_next(&kio::Waiter::noop()),
+			Poll::Ready(Err(crate::Error::Moq(moq_net::Error::Cancel)))
+		));
 	}
 
 	#[test]

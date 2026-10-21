@@ -92,17 +92,7 @@ for source in current released js-current js-released; do
         if [[ "$verifier" == current ]]; then bin="$CURRENT"; else bin="$RELEASED"; fi
         "$bin" auth verify --key "$HARNESS_RUN/key.jwk" --in "$HARNESS_RUN/$source.jwt" >"$HARNESS_RUN/$source.$verifier.claims"
         # `auth verify` prints the claims' Rust Debug form, the CLI's only output.
-        python3 - "$HARNESS_RUN/$source.$verifier.claims" <<'PY'
-import re, sys
-text = re.sub(r"\s+", "", open(sys.argv[1]).read())
-def patterns(field):
-    block = re.search(field + r":Patterns\(\[(.*?)\]", text)
-    assert block, f"no {field} in {text}"
-    return re.findall(r'Pattern\("([^"]*)"\)', block.group(1))
-root = re.search(r'root:"([^"]*)"', text)
-claims = (root and root.group(1), patterns("publish"), patterns("subscribe"))
-assert claims == ("compat", ["video/**"], ["**"]), f"token scope changed: {claims}"
-PY
+        bun "$DIR/compat/claims.ts" "$HARNESS_RUN/$source.$verifier.claims"
     done
     bun "$DIR/compat/client.ts" verify "$HARNESS_RUN/key.jwk" "$HARNESS_RUN/$source.jwt"
     bun "$HARNESS_RUN/js/client.ts" verify "$HARNESS_RUN/key.jwk" "$HARNESS_RUN/$source.jwt"

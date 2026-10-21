@@ -456,6 +456,14 @@ pub struct moq_json_value {
 	/// The JSON document as UTF-8, NOT NULL terminated.
 	pub json: *const c_char,
 	pub json_len: usize,
+
+	/// The timestamp of the frame that carried the value in microseconds, or 0 when
+	/// `timestamp_present` is false. Rounded down to a whole microsecond, so a tick on a track
+	/// like 90 kHz may not survive a read and republish exactly.
+	pub timestamp_us: u64,
+
+	/// Whether the frame carries a timestamp. A value read from an untimed track does not.
+	pub timestamp_present: bool,
 }
 
 /// Information about a frame of media.
@@ -519,6 +527,12 @@ pub struct moq_track_info {
 	/// Whether `timescale` is set. When false, the default microsecond timescale
 	/// applies, matching the `timestamp_us` units used everywhere else in this ABI.
 	pub timescale_present: bool,
+
+	/// A joining subscriber asks for a new group once the newest group's bytes after its
+	/// first frame exceed `refresh` times that frame. `0` asks once any frame follows the first.
+	pub refresh: u32,
+	/// Whether `refresh` is set. When false, a joining subscriber never asks for a new group.
+	pub refresh_present: bool,
 }
 
 impl TryFrom<&moq_track_info> for moq_net::track::Info {
@@ -536,6 +550,9 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
 		}
+		if info.refresh_present {
+			out = out.with_refresh(info.refresh);
+		}
 		Ok(out)
 	}
 }
@@ -543,12 +560,13 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 /// Whether a published track has subscribers, as reported by a demand watcher.
 ///
 /// The positive values an `on_demand` callback receives; `0` and negative codes are
-/// the terminal statuses every callback shares.
+/// the terminal statuses every callback shares. [moq_publish_demand_wanted] reads which
+/// group the subscribers want.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_demand {
-	/// At least one subscriber is active.
+	/// At least one subscriber is active. Repeats when the wanted group moves.
 	MOQ_DEMAND_USED = 1,
 	/// No subscriber is active.
 	MOQ_DEMAND_UNUSED = 2,
@@ -583,8 +601,8 @@ pub struct moq_subscription {
 
 /// A span of a track to deliver: from `start` up to `end`, or onward without one.
 ///
-/// A relative start is the first frame of its group, and a relative end includes its whole
-/// group. An absolute end is exclusive.
+/// A relative or time start is the first frame of its group, and a relative or time end
+/// includes its whole group. An absolute end is exclusive.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
@@ -609,6 +627,8 @@ pub struct moq_anchor {
 	pub group: u64,
 	/// The frame within `group`, read only with `MOQ_ANCHOR_ABSOLUTE`.
 	pub frame: u64,
+	/// The presentation time in microseconds, read only with `MOQ_ANCHOR_TIME`.
+	pub timestamp_us: u64,
 }
 
 /// How a [moq_anchor] names its position.
@@ -620,6 +640,8 @@ pub enum moq_anchor_kind {
 	MOQ_ANCHOR_ABSOLUTE = 0,
 	/// A count of groups back from the latest one.
 	MOQ_ANCHOR_RELATIVE = 1,
+	/// The group containing a presentation time. An untimed track refuses it.
+	MOQ_ANCHOR_TIME = 2,
 }
 
 /// Which of a subscription's pending groups the publisher sends first. Zero is the default.
@@ -642,6 +664,9 @@ fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 			})
 		}
 		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
+		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => {
+			moq_net::track::Anchor::Time(moq_net::Timestamp::from_micros(anchor.timestamp_us)?)
+		}
 		_ => return Err(Error::InvalidCode),
 	})
 }
@@ -1132,7 +1157,7 @@ pub struct moq_client_config {
 	pub quic_mtu_discovery: bool,
 	pub has_quic_mtu_discovery: bool,
 
-	/// Congestion control family name, or NULL for the backend's choice.
+	/// Congestion control family name (`loss`, `delay`, or `none`), or NULL for the backend's choice.
 	pub quic_congestion_control: *const c_char,
 	pub quic_congestion_control_len: usize,
 
@@ -2221,10 +2246,11 @@ pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 /// Watch whether a media track has subscribers, so an encoder runs only while someone watches.
 ///
 /// `on_demand` fires right away with the current [moq_demand] state, again on every
-/// change, then exactly once more with a terminal code: `0` (the track ended or the
-/// watcher was stopped with [moq_publish_demand_cancel]) or a negative error. After the
-/// terminal (`<= 0`) callback, `user_data` is never touched again. Reporting the current
-/// state first means a track that went unused before the watcher existed still reports it.
+/// change, including a move of the wanted group that [moq_publish_demand_wanted] reads,
+/// then exactly once more with a terminal code: `0` (the track ended or the watcher was
+/// stopped with [moq_publish_demand_cancel]) or a negative error. After the terminal
+/// (`<= 0`) callback, `user_data` is never touched again. Reporting the current state
+/// first means a track that went unused before the watcher existed still reports it.
 ///
 /// A container handle is refused: it publishes several tracks and has no single demand.
 ///
@@ -2259,6 +2285,29 @@ pub extern "C" fn moq_publish_demand_cancel(watcher: u32) -> i32 {
 	ffi::enter(move || {
 		let watcher = ffi::parse_id(watcher)?;
 		State::lock().publish.demand_close(watcher)
+	})
+}
+
+/// Read the group a demand watcher's subscribers want, typically from its `on_demand` callback.
+///
+/// `present` is false while nobody subscribes. Otherwise subscribers want `group` or later:
+/// once `group` passes the largest group written, start a new one (a keyframe). `group`
+/// never goes back, so once a group reaches it nothing is pending until a joiner asks again.
+///
+/// Returns zero on success, or a negative code once the watcher's terminal callback fired.
+///
+/// # Safety
+/// - `group` and `present` must be valid pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_demand_wanted(watcher: u32, group: *mut u64, present: *mut bool) -> i32 {
+	ffi::enter(move || {
+		let watcher = ffi::parse_id(watcher)?;
+		let group = unsafe { group.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let present = unsafe { present.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let wanted = State::lock().publish.demand_wanted(watcher)?;
+		*group = wanted.unwrap_or(0);
+		*present = wanted.is_some();
+		Ok(())
 	})
 }
 
@@ -3540,7 +3589,9 @@ pub unsafe extern "C" fn moq_consume_video(
 		let index = index as usize;
 		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.video(catalog, index, max_delay, on_frame)
+		State::lock()
+			.consume
+			.media::<hang::catalog::VideoConfig>(catalog, index, max_delay, on_frame)
 	})
 }
 
@@ -3584,7 +3635,9 @@ pub unsafe extern "C" fn moq_consume_audio(
 		let index = index as usize;
 		let max_delay = std::time::Duration::from_micros(max_delay_us);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
-		State::lock().consume.audio(catalog, index, max_delay, on_frame)
+		State::lock()
+			.consume
+			.media::<hang::catalog::AudioConfig>(catalog, index, max_delay, on_frame)
 	})
 }
 
@@ -3688,7 +3741,10 @@ pub unsafe extern "C" fn moq_consume_track(
 ///
 /// Pass NULL for `subscription` to reset to moq-net defaults.
 ///
-/// Returns a zero on success, or a negative code on failure.
+/// Returns a zero on success, or a negative code on failure, such as a time anchor on an
+/// untimed track, which leaves the subscription as it was. An update made before the
+/// subscription is established applies once it is, so a refusal then ends the consumer
+/// through its callback instead.
 ///
 /// # Safety
 /// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct,
@@ -3829,8 +3885,8 @@ pub extern "C" fn moq_consume_datagrams_cancel(task: u32) -> i32 {
 
 /// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 ///
-/// `on_value` is called with a positive value ID for each new latest value; a consumer that
-/// falls behind collapses the backlog and only sees the newest. It is called exactly once more
+/// `on_value` is called with a positive value ID for each state, in order; a group superseded by
+/// a newer one before it is read is skipped, so a slow reader stays bounded. It is called exactly once more
 /// with a terminal `0` (track ended / closed) or a negative error, after which `user_data` is
 /// never touched again, so release it there. Read each value with [moq_consume_json_value] and
 /// release it with [moq_consume_json_value_free]. Pass the same compression the producer used.
@@ -3899,7 +3955,7 @@ pub unsafe extern "C" fn moq_consume_json_stream(
 
 /// Read a JSON value delivered via a [moq_consume_json_snapshot] or [moq_consume_json_stream] callback.
 ///
-/// Fills `dst.json` / `dst.json_len`; the pointer is valid until the value is released with
+/// Fills `dst.json` / `dst.json_len` and the frame timestamp; the pointer is valid until the value is released with
 /// [moq_consume_json_value_free].
 ///
 /// Returns a zero on success, or a negative code on failure.

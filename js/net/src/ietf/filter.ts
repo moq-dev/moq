@@ -55,7 +55,7 @@ export function isDraft20(version: IetfVersion): boolean {
  * Draft-22 replaced the length-inferred field list with a Location Filter Type that names
  * the fields that follow, so the value carries no Length.
  */
-export function isDraft22(version: IetfVersion): boolean {
+function isDraft22(version: IetfVersion): boolean {
 	return isDraft20(version) && version !== Version.DRAFT_20 && version !== Version.DRAFT_21;
 }
 

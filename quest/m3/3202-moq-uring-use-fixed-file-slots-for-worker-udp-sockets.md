@@ -33,7 +33,3 @@ Benchmark steady-state send/receive traffic and high socket-churn workloads. Rec
 Decided in the 2026-09-30 audit: moved to m2. The hot-path win is
 unmeasured on `moq-quic`, and io_uring ships in no package. Decided 2026-10-08:
 moved to m3 with the rest of the speculative ring work; no fleet demand.
-
-## Closes
-
-- [#3202](https://github.com/moq-dev/moq/issues/3202) - close this issue when the quest finishes
