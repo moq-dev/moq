@@ -43,16 +43,13 @@ jobs:
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ steps.token.outputs.token }}
-          branch: codex/smoke-toolchain
+          branch: smoke/toolchain-update
           base: main
           draft: always-true
           add-paths: |
             test/smoke/flake.lock
             test/smoke/clients/js/package.json
-          commit-message: |
-            chore(smoke): refresh the toolchain and matching Playwright pin
-
-            Co-Authored-By: GPT-6 <noreply@openai.com>
+          commit-message: "chore(smoke): refresh the toolchain and matching Playwright pin"
           title: "chore(smoke): refresh the toolchain and matching Playwright pin"
           body: |
             ## Problem
@@ -74,5 +71,3 @@ jobs:
             ## Follow-ups
 
             The updater validated freshness and launched the updated browser. Dispatch Smoke on this branch to run the full published-package matrix before marking ready. This workflow does not enqueue or merge updates.
-
-            (Written by GPT-6)
