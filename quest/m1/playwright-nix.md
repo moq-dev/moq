@@ -2,15 +2,28 @@
 
 ## Goal
 
-Every Playwright check (`test/interop`, `test/video`, `test/p2p`,
-`test/wasm`, `test/audio-quality`, `bench/browser`) runs in the root
-devShell, locally on NixOS and in CI, against the Chromium build that Nix
-provides. No check needs a hand-set `LD_LIBRARY_PATH` or a
-`playwright install`.
+Every Playwright check runs in the root devShell, locally on NixOS and in CI,
+against the Chromium build that Nix provides. No check needs a hand-set
+`LD_LIBRARY_PATH` or a `playwright install`, and no contributor doc tells
+anyone to run one.
+
+Inventory on `main` (2026-10-21); recheck with
+`git grep -n "playwright install"` and every `package.json` that depends on
+`playwright`:
+
+- Packages: `test/interop/clients/js`, `test/video`, `test/p2p`, `test/wasm`,
+  `test/audio-quality/clients/js`, `bench/browser`.
+- Scripts: `test/interop/interop.sh`, `test/portrait/run.sh` (run in CI as
+  `just test portrait`), `test/audio-quality/{run,record}.sh`,
+  `bench/browser/run.sh`, and the `test/justfile` recipes.
+- Workflows: `interop.yml`, `video.yml`, `wasm.yml`, `nightly.yml`.
+- Docs: `test/interop/README.md` (says the devShell lacks Chromium) and
+  `test/wasm/README.md` (says to run `bunx playwright install chromium`).
 
 Out of scope: the Firefox and WebKit rows, which
-[Nightly media players](/quest/m1/media-engines-nightly.md) owns, and
-`test/smoke`, which keeps its own flake on purpose.
+[Nightly media players](/quest/m1/media-engines-nightly.md) owns (its
+`nightly.yml` step keeps installing those engines), and `test/smoke`, which
+keeps its own flake on purpose.
 
 ## Plan
 
@@ -27,10 +40,10 @@ Decided 2026-10-20 with the maintainer:
   supplying host libraries to a downloaded Chromium (nix-ld or an FHS env)
   depends on the host's library compatibility, and building playwright 1.64
   in the repo's overlay is maintenance for a gap nixpkgs closes on its own.
-- **CI switches too.** The video, interop, wasm, and nightly workflows drop
-  `playwright install --with-deps` and the `just` recipes drop
-  `bunx playwright install chromium`, so CI and local runs share one Chromium.
+- **CI switches too.** Every workflow, script, and recipe in the inventory
+  drops its Chromium install, so CI and local runs share one Chromium.
 - **The pin is enforced.** A check in `just check` fails when any package's
   npm `playwright` differs from `PLAYWRIGHT_VERSION`, like
   `test/smoke/freshness.sh`, so a nixpkgs bump cannot silently drift.
-- No user-facing docs: this changes only contributor tooling.
+- The READMEs in the inventory say the devShell provides Chromium. No new
+  user-facing docs: this changes only contributor tooling.
