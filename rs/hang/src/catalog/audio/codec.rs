@@ -61,25 +61,26 @@ pub enum AudioCodec {
 }
 
 /// Coarse audio codec family, used for tag-only matching.
+// Explicit discriminants keep `as` values stable: a new kind takes the next number.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AudioCodecKind {
 	/// Advanced Audio Coding.
-	AAC,
+	AAC = 0,
 	/// Opus.
-	Opus,
+	Opus = 1,
 	/// Unknown or unsupported codec.
-	Unknown,
+	Unknown = 2,
 	/// Free Lossless Audio Codec.
-	Flac,
+	Flac = 3,
 	/// MPEG-1/2 Audio Layer III.
-	Mp3,
+	Mp3 = 4,
 	/// Uncompressed interleaved little-endian IEEE-754 binary32 PCM.
-	Pcm,
+	Pcm = 5,
 	/// Dolby Digital (AC-3).
-	Ac3,
+	Ac3 = 6,
 	/// Dolby Digital Plus (E-AC-3).
-	Ec3,
+	Ec3 = 7,
 }
 
 impl AudioCodec {
