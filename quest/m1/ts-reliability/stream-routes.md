@@ -80,10 +80,13 @@ A dropped PID reuses `stats::Stream`, with no new field: a row keyed by its
 PID in `Snapshot::streams`, an empty `track`, `Class::Data`, and `refused`
 counting the PID's dropped packets, with one warning on the first. Widen the
 `Snapshot::streams` and `refused` docs to say so, and report that as a
-public API change in meaning. When a later PMT claims a PID that has a
-dropped row, the carried stream takes over that row and keeps its
-accumulated `refused`, since counters never go backward; the drop and the
-carried row never coexist under one key. Coordinate the serialized shape with
+public API change in meaning. A PID keeps one row for its whole life,
+whoever owns it: a PMT that claims a dropped PID, releases a carried one, or
+claims it again moves that row between the carrying `Import` and the
+dropped-PID owner (`Programs` under `--program all`) with every cumulative
+counter intact, since counters never go backward. `track` and `class` follow
+the current owner, empty and `Data` while dropped, and two rows never
+coexist under one key. Coordinate the serialized shape with
 [TS health counters](/quest/m2/ts-health-stats.md).
 
 Rust: `rs/moq-mux` TS import (and export for MPEG-2 video `pesPacket`
@@ -95,8 +98,10 @@ Tests: generated `fixture::Mux` inputs with MPEG-2 video, each DSM-CC type,
 0x86 without CUEI, LATM, a PAT network entry with a NIT, a CAT plus
 scrambled ES, a PSIP base PID, an unlisted PID, media before its first PMT,
 a two-program MPTS under `--program all` whose second program's media
-precedes its PMT, a PAT listing a program whose PMT never arrives, an
-unlisted PID that a later PMT revision adds, and the same MPTS under `--program 1` with no rows for
+precedes its PMT, a PAT listing a program whose PMT never arrives, one
+PID's full lifecycle (unlisted, added by a PMT revision, removed while its
+packets continue, then added again) with its row's counters checked at each
+step, and the same MPTS under `--program 1` with no rows for
 program 2's PIDs, asserting the catalog, the
 stats rows (the unlisted PID's row asserted field by field), and an export
 round trip of the carried streams. The MPEG-2 video arm also runs the TSDuck
