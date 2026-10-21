@@ -1,5 +1,9 @@
 import asyncio
+import threading
 
+import pytest
+
+from moq_carla_sim import watchdog as watchdog_module
 from moq_carla_sim.watchdog import Heartbeat, Watchdog
 
 
@@ -28,6 +32,29 @@ def test_a_stale_heartbeat_ends_the_process() -> None:
     time.now = 0.2
     reason = watchdog.check()
     assert reason is not None and reason.startswith("simulation clock has not advanced")
+
+
+def test_the_watchdog_thread_dies_on_a_stale_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The thread, not just `check`, is what ends a hung worker."""
+    reasons: list[str] = []
+    died = threading.Event()
+
+    def die(reason: str) -> None:
+        reasons.append(reason)
+        died.set()
+
+    monkeypatch.setattr(watchdog_module, "die", die)
+    time = FakeTime()
+    clock = Heartbeat("simulation clock", time)
+    watchdog = Watchdog(0.1, clock, now=time)
+    watchdog.start()
+    time.now = 1.0
+    try:
+        # The bound only fails a broken thread; a working one dies on its next check.
+        assert died.wait(timeout=5.0)
+    finally:
+        watchdog.stop()
+    assert reasons[0].startswith("simulation clock has not advanced")
 
 
 def test_a_blocked_event_loop_is_a_stall_even_while_the_clock_ticks() -> None:
