@@ -116,6 +116,15 @@ final class SmokeTests: XCTestCase {
         guard let request = try await accepted else { return XCTFail("server closed before accept") }
         let peer = try await request.accept()
 
+        // Ending both sessions ends any wait below, so a grant that never arrives fails
+        // rather than hangs.
+        let watchdog = Task {
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+            peer.cancel(code: 0)
+            session.cancel(code: 0)
+        }
+        defer { watchdog.cancel() }
+
         let everything = Grant(publish: ["**"], subscribe: ["**"], expiresUs: nil)
         for auth in [session.auth(), peer.auth()] {
             var grant = auth.grant()

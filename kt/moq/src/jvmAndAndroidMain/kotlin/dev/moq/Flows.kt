@@ -4,7 +4,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onCompletion
 import uniffi.moq.MoqException
@@ -59,7 +58,8 @@ fun AnnounceConsumer.updates(): Flow<AnnounceEvent> = pull { next() }.onCompleti
 /**
  * The session's grant: the current one, then each change, null while there is none.
  *
- * Completes when the session shuts down, and throws its close reason otherwise.
+ * Collections of one [Auth] share its place in the changes, so a second watcher takes
+ * its own from [Moq.auth]. Completes when the session shuts down, and throws its close reason otherwise.
  */
 fun Auth.grants(): Flow<Grant?> = flow {
     emit(grant())
@@ -73,7 +73,7 @@ fun Auth.grants(): Flow<Grant?> = flow {
         }
         emit(grant)
     }
-}.distinctUntilChanged()
+}
 
 /** Emits [next] until it returns null, checking for cancellation before each pull. */
 private fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {

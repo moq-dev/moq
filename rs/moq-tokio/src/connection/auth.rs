@@ -352,12 +352,13 @@ async fn present(
 				Err(err) => return Err(err.into()),
 			}
 		};
-		if let Some(answered) = answered.take() {
-			let _ = answered.send(Ok(()));
-		}
 		let mut watch = token.grant();
 		if let Ok(mut state) = producer.write() {
 			state.grant = watch.peek();
+		}
+		// After the grant, so `add` never returns a token that still reads none.
+		if let Some(answered) = answered.take() {
+			let _ = answered.send(Ok(()));
 		}
 		loop {
 			tokio::select! {

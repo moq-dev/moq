@@ -891,7 +891,6 @@ pub struct MoqSession {
 	/// One allocator for the session. Every [`bandwidth`](Self::bandwidth) handle
 	/// clones it, so they share one reservation registry.
 	bandwidth: Arc<MoqBandwidth>,
-	auth: Arc<MoqAuth>,
 }
 
 impl MoqSession {
@@ -945,13 +944,7 @@ impl MoqSession {
 		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
 		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe));
 		let bandwidth = Arc::new(MoqBandwidth::new(Self::mint_allocator(&inner)));
-		let auth = Arc::new(MoqAuth::new(match &inner {
-			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => crate::auth::Handle::Connection(connection.auth()),
-			Inner::Session(session) => crate::auth::Handle::Session(session.auth()),
-		}));
 		Self {
-			auth,
 			inner: inner.clone(),
 			closed: Task::new(inner.clone()),
 			status: Task::new(inner),
@@ -1109,10 +1102,16 @@ impl MoqSession {
 
 	/// The session's authorization: the grant its peer gave it, and more tokens to present.
 	///
-	/// Every call returns the same handle. A client session's handle survives reconnects,
-	/// presenting each added token again on every new connection.
+	/// Every call returns a new handle sharing the session's tokens, which tracks its own
+	/// [`grant_changed`](MoqAuth::grant_changed), so concurrent watchers each take one. A client
+	/// session's handle survives reconnects, presenting each added token again on every new
+	/// connection.
 	pub fn auth(&self) -> Arc<MoqAuth> {
-		self.auth.clone()
+		Arc::new(MoqAuth::new(match &self.inner {
+			#[cfg(not(target_arch = "wasm32"))]
+			Inner::Connection(connection) => crate::auth::Handle::Connection(connection.auth()),
+			Inner::Session(session) => crate::auth::Handle::Session(session.auth()),
+		}))
 	}
 
 	/// Hold receive-estimate demand until the returned consumer is released.

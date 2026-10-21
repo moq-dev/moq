@@ -676,13 +676,13 @@ run_publisher() {
             ;;
         python)
             ffmpeg_h264 | "$PY" "$CLIENTS/python/interop.py" \
-                publish --url "$url" --broadcast "$broadcast" "${auth[@]}"
+                publish --url "$url" --broadcast "$broadcast" ${auth[@]+"${auth[@]}"}
             ;;
         go)
-            ffmpeg_h264 | "$GO_INTEROP" publish --url "$url" --broadcast "$broadcast" "${auth[@]}"
+            ffmpeg_h264 | "$GO_INTEROP" publish --url "$url" --broadcast "$broadcast" ${auth[@]+"${auth[@]}"}
             ;;
         cpp)
-            ffmpeg_h264 | "$CPP_INTEROP" publish --url "$url" --broadcast "$broadcast" "${auth[@]}"
+            ffmpeg_h264 | "$CPP_INTEROP" publish --url "$url" --broadcast "$broadcast" ${auth[@]+"${auth[@]}"}
             ;;
         js-native)
             # exec, so the client leads the group and `stop_publisher` waits for its own close.
@@ -825,13 +825,13 @@ PYCODE
             ;;
         python)
             "$PY" "$CLIENTS/python/interop.py" \
-                subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" "${auth[@]}"
+                subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${auth[@]+"${auth[@]}"}
             ;;
         go)
-            "$GO_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" "${auth[@]}"
+            "$GO_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${auth[@]+"${auth[@]}"}
             ;;
         cpp)
-            "$CPP_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" "${auth[@]}"
+            "$CPP_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${auth[@]+"${auth[@]}"}
             ;;
         c)
             "$C_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"

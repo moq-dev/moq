@@ -279,7 +279,8 @@ final class Moq {
 extension AuthGrants on Auth {
   /// The current grant, then each change, null while there is none.
   ///
-  /// Ends when the session shuts down, and errors with its close reason otherwise.
+  /// Listens on one [Auth] share its place in the changes, so a second watcher
+  /// takes its own from [Moq.auth]. Ends when the session shuts down, and errors with its close reason otherwise.
   Stream<Grant?> grants() async* {
     yield grant();
     while (true) {

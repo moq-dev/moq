@@ -824,6 +824,9 @@ int main()
 		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
 		CHECK(o.PresentToken("fresh"));
 		CHECK(o.PresentToken("fresher"));
+		// The default protocol carries no in-band AUTH, so the relay's refusal is
+		// kept for the dock while the stream stays up.
+		CHECK(WaitFor([&] { return !o.TokenRefusal().empty(); }));
 		CHECK(o.IsLiveSession());
 		CHECK(signalCount() == 0);
 		o.Stop();

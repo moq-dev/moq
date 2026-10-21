@@ -51,14 +51,25 @@ impl Handle {
 	}
 
 	async fn add(self, token: String) -> Result<Token, MoqError> {
-		match self {
-			Self::Session(handle) => Ok(Token::Session(handle.add(token).await?)),
+		let token = match self {
+			Self::Session(handle) => Token::Session(handle.add(token).await?),
 			#[cfg(not(target_arch = "wasm32"))]
-			Self::Connection(handle) => Ok(Token::Connection(
-				handle.add(token).await.map_err(crate::session::map_closed_error)?,
-			)),
+			Self::Connection(handle) => Token::Connection(handle.add(token).await.map_err(crate::session::map_closed_error)?),
+		};
+		// A token the peer accepted carries a grant until it ends. Without AUTH, moq-transport
+		// accepts one at once for the requests that name it, but nothing here can name one, so
+		// it would never be sent. One already revoked is left for `closed` to report.
+		if token.grant().peek().is_none() && poll_now(token.closed()).is_pending() {
+			return Err(MoqError::Unsupported);
 		}
+		Ok(token)
 	}
+}
+
+/// Poll `future` once without waiting.
+fn poll_now<F: std::future::Future>(future: F) -> std::task::Poll<F::Output> {
+	let future = std::pin::pin!(future);
+	std::future::Future::poll(future, &mut std::task::Context::from_waker(std::task::Waker::noop()))
 }
 
 enum Watch {
@@ -125,15 +136,19 @@ pub struct MoqAuth {
 	/// The watch behind [`grant`](Self::grant), which reads without the lock.
 	peek: Watch,
 	/// The watch behind [`grant_changed`](Self::grant_changed), which tracks what this
-	/// handle last reported.
+	/// handle last reported. Concurrent callers share it, so each watcher takes its own handle.
 	changed: Task<Watch>,
 }
 
 impl MoqAuth {
 	pub(crate) fn new(handle: Handle) -> Self {
+		// Start from the grant as it is now, so a watcher reads that with `grant` and waits
+		// in `grant_changed` only for what follows, never for the same grant twice.
+		let mut changed = handle.grant();
+		let _ = poll_now(changed.changed());
 		Self {
 			peek: handle.grant(),
-			changed: Task::new(handle.grant()),
+			changed: Task::new(changed),
 			handle,
 		}
 	}
@@ -149,7 +164,11 @@ impl MoqAuth {
 		self.peek.peek()
 	}
 
-	/// Wait for the grant to differ from the one this handle last reported, returning it.
+	/// Wait for the grant to differ from the one this handle last reported, or held when it was
+	/// made, returning it.
+	///
+	/// Calls on one handle share what it last reported; an independent watcher takes its own
+	/// handle from [`MoqSession::auth`](crate::session::MoqSession::auth).
 	///
 	/// Errors once nothing will change it again, because the session ended.
 	pub async fn grant_changed(&self) -> Result<Option<MoqGrant>, MoqError> {
@@ -163,8 +182,8 @@ impl MoqAuth {
 	///
 	/// # Errors
 	///
-	/// [`MoqError::Unsupported`] when the session cannot carry another token, such as a
-	/// moq-lite version without AUTH.
+	/// [`MoqError::Unsupported`] when the session cannot carry another token: a version
+	/// without AUTH, or moq-transport without the MoQ Auth extension.
 	pub async fn add(&self, token: String) -> Result<Arc<MoqAuthToken>, MoqError> {
 		let handle = self.handle.clone();
 		let token = crate::ffi::detached(handle.add(token)).await?;

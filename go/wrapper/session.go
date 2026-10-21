@@ -74,8 +74,9 @@ func (s *Session) Bandwidth() *Bandwidth {
 }
 
 // Auth is the session's authorization: the grant its peer gave it, and more
-// tokens to present. A client session's handle survives reconnects, presenting
-// each added token again on every new connection.
+// tokens to present. Each call returns an independent watcher of the grant. A
+// client session's handle survives reconnects, presenting each added token again
+// on every new connection.
 func (s *Session) Auth() *Auth {
 	return &Auth{inner: s.inner.Auth()}
 }
@@ -95,7 +96,8 @@ func (a *Auth) Grant() *Grant {
 }
 
 // GrantChanged blocks until the grant differs from the one this handle last
-// reported, and returns it. It errors once the session ends.
+// reported, or held when it was made, and returns it. It errors once the session
+// ends.
 func (a *Auth) GrantChanged(ctx context.Context) (*Grant, error) {
 	grant, err := bridge.Call(ctx, nil, a.inner.GrantChanged)
 	return grantFromFFI(grant), err

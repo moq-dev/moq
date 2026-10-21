@@ -19,7 +19,8 @@ public final class Auth: Sendable {
     /// A client session reads `nil` while it reconnects.
     public func grant() -> Grant? { ffi.grant() }
 
-    /// Suspend until the grant differs from the one last reported, returning it.
+    /// Suspend until the grant differs from the one last reported, or held when this
+    /// handle was made, returning it.
     /// Throws once nothing will change it again, because the session ended.
     public func grantChanged() async throws -> Grant? { try await ffi.grantChanged() }
 

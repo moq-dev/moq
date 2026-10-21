@@ -97,9 +97,9 @@ private:
 	OBSEncoderAutoRelease audioEncoder;
 
 	bool running = false;
-	// The token the running stream last presented, so leaving the field unchanged
-	// does not present it again.
-	QString presentedToken;
+	// Whether the token field was typed in since its token was last presented, so
+	// leaving it unchanged does not present it again while a retyped one does.
+	bool tokenEdited = false;
 	// Filled when Go Live creates encoders; shown in Stats while publishing.
 	QString publishSummary;
 	QString latencySummary;

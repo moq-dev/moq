@@ -158,8 +158,9 @@ public final class Session: Sendable {
 
     /// The session's authorization: the grant its peer gave it, and more tokens to present.
     ///
-    /// A client session's handle survives reconnects, presenting each added token
-    /// again on every new connection.
+    /// Each call returns an independent watcher of the grant. A client session's
+    /// handle survives reconnects, presenting each added token again on every new
+    /// connection.
     public func auth() -> Auth {
         Auth(ffi.auth())
     }

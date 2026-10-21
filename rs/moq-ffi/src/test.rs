@@ -6581,10 +6581,15 @@ async fn data_track_names_cannot_collide() {
 /// Real sockets exercise the FFI runtime and both accepted/client session handles.
 /// Only lite-07 acknowledges the received tail; default lite-06 closes after transport ACKs.
 async fn shutdown_pair() -> (Arc<MoqServer>, Arc<MoqSession>, Arc<MoqSession>) {
+	session_pair("moq-lite-07-wip").await
+}
+
+/// A server, a client session connected to it on `version`, and the session it accepted.
+async fn session_pair(version: &str) -> (Arc<MoqServer>, Arc<MoqSession>, Arc<MoqSession>) {
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
 		tls: localhost_tls(),
-		versions: vec!["moq-lite-07-wip".into()],
+		versions: vec![version.into()],
 		..Default::default()
 	})
 	.unwrap();
@@ -6602,7 +6607,7 @@ async fn shutdown_pair() -> (Arc<MoqServer>, Arc<MoqSession>, Arc<MoqSession>) {
 	});
 	let client = MoqClient::new(MoqClientConfig {
 		tls: insecure_tls(),
-		versions: vec!["moq-lite-07-wip".into()],
+		versions: vec![version.into()],
 		bind: Some("127.0.0.1:0".into()),
 		once: true,
 		..Default::default()
@@ -6792,12 +6797,20 @@ fn grant(publish: &[&str], subscribe: &[&str]) -> crate::auth::MoqGrant {
 	}
 }
 
-/// Both sides of a session read the grant their peer gave them, and a peer that verifies no
-/// tokens of its own refuses another one as unsupported.
+/// Both sides of a session read the grant their peer gave them, on lite-07 and on moq-transport
+/// with the Auth extension, and a peer that verifies no tokens of its own refuses another one as
+/// unsupported.
 #[tokio::test]
 async fn auth_reads_the_peer_grant() {
-	let (server, client, accepted) = tokio::time::timeout(TIMEOUT, shutdown_pair()).await.expect("pair");
-	assert!(Arc::ptr_eq(&client.auth(), &client.auth()), "one handle per session");
+	for version in ["moq-lite-07-wip", "moq-transport-17"] {
+		auth_reads_the_peer_grant_on(version).await;
+	}
+}
+
+async fn auth_reads_the_peer_grant_on(version: &str) {
+	let (server, client, accepted) = tokio::time::timeout(TIMEOUT, session_pair(version))
+		.await
+		.expect("pair");
 
 	// Each side's origins span the root, so its peer grants it everything.
 	await_grant(&client.auth(), grant(&["**"], &["**"])).await;
@@ -6814,6 +6827,28 @@ async fn auth_reads_the_peer_grant() {
 		Some(grant(&["**"], &["**"])),
 		"a refusal leaves the union"
 	);
+
+	client.cancel(0);
+	accepted.cancel(0);
+	server.cancel();
+}
+
+/// moq-transport without the Auth extension carries a token only on a request that names it,
+/// which no binding can, so both sides refuse one rather than report a token nothing sends.
+#[tokio::test]
+async fn auth_refuses_a_token_nothing_carries() {
+	let (server, client, accepted) = tokio::time::timeout(TIMEOUT, session_pair("moq-transport-14"))
+		.await
+		.expect("pair");
+	for session in [&client, &accepted] {
+		let err = tokio::time::timeout(TIMEOUT, session.auth().add("extra".into()))
+			.await
+			.expect("add timed out")
+			.err()
+			.expect("a token nothing carries is refused");
+		assert!(matches!(err, MoqError::Unsupported), "refusal: {err:?}");
+		assert_eq!(session.auth().grant(), None, "no AUTH, no grant");
+	}
 
 	client.cancel(0);
 	accepted.cancel(0);
@@ -6866,6 +6901,8 @@ async fn auth_tokens_join_and_leave_the_union() {
 		.unwrap();
 	let auth = session.auth();
 	await_grant(&auth, grant(&["setup/**"], &[])).await;
+	// A second handle watches on its own and starts from the grant it was made with.
+	let watcher = session.auth();
 
 	let extra = tokio::time::timeout(TIMEOUT, auth.add("extra".into()))
 		.await
@@ -6874,6 +6911,11 @@ async fn auth_tokens_join_and_leave_the_union() {
 	assert_eq!(extra.grant(), Some(grant(&["extra/**"], &[])));
 	// Patterns are kept sorted.
 	await_grant(&auth, grant(&["extra/**", "setup/**"], &[])).await;
+	let seen = tokio::time::timeout(TIMEOUT, watcher.grant_changed())
+		.await
+		.expect("the second handle sees the change the first took")
+		.unwrap();
+	assert_eq!(seen, Some(grant(&["extra/**", "setup/**"], &[])));
 
 	extra.cancel();
 	await_grant(&auth, grant(&["setup/**"], &[])).await;

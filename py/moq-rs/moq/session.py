@@ -110,8 +110,9 @@ class Session:
     def auth(self) -> Auth:
         """The session's authorization: the grant its peer gave it, and more tokens to present.
 
-        A client session's handle survives reconnects, presenting each added token
-        again on every new connection."""
+        Each call returns an independent watcher of the grant. A client session's
+        handle survives reconnects, presenting each added token again on every new
+        connection."""
         return Auth(self._inner.auth())
 
     def recv_bandwidth(self) -> Bandwidth.Consumer | None:
@@ -151,7 +152,8 @@ class Auth:
         return Grant._from_ffi(self._inner.grant())
 
     async def grant_changed(self) -> Grant | None:
-        """Wait for the grant to differ from the one last reported, returning it.
+        """Wait for the grant to differ from the one last reported, or held when this
+        handle was made, returning it.
 
         Raises once nothing will change it again, because the session ended."""
         return Grant._from_ffi(await self._inner.grant_changed())

@@ -611,6 +611,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	connect(pollTimer, &QTimer::timeout, this, &MoQDock::UpdateStatus);
 
 	connect(urlEdit, &QLineEdit::editingFinished, this, &MoQDock::OnRelayUrlEdited);
+	connect(tokenEdit, &QLineEdit::textEdited, this, [this] { tokenEdited = true; });
 	connect(tokenEdit, &QLineEdit::editingFinished, this, &MoQDock::OnTokenEdited);
 	connect(pathEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
 	connect(encodingMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::OnEncodingChanged);
@@ -682,7 +683,7 @@ void MoQDock::OnTokenEdited()
 	SaveSettings();
 
 	const QString token = tokenEdit->text().trimmed();
-	if (!running || !output || token.isEmpty() || token == presentedToken)
+	if (!running || !output || token.isEmpty() || !tokenEdited)
 		return;
 
 	// The same refusal as Go Live: the URL is fixed while running, but the token
@@ -699,7 +700,7 @@ void MoQDock::OnTokenEdited()
 		status->setText("Not connected yet; edit the token again once live");
 		return;
 	}
-	presentedToken = token;
+	tokenEdited = false;
 }
 
 void MoQDock::PeelJwtFromRelayUrl()
@@ -1096,7 +1097,7 @@ void MoQDock::StartStream()
 
 	const std::string url = ConnectUrl().toStdString();
 	const std::string path = pathEdit->text().toStdString();
-	presentedToken = token;
+	tokenEdited = false;
 
 	SaveSettings();
 
@@ -1287,14 +1288,20 @@ void MoQDock::UpdateStatus()
 		return;
 	}
 
-	status->setText(stats.reconnects > 0 ? QString("● Connected · reconnects %1").arg(stats.reconnects)
-					     : QString("● Connected"));
-	status->setStyleSheet("color: #36a45e;");
+	const QString tokenRefusal = QString::fromStdString(moq->TokenRefusal());
+	QString connectedText = stats.reconnects > 0 ? QString("● Connected · reconnects %1").arg(stats.reconnects)
+						     : QString("● Connected");
+	if (!tokenRefusal.isEmpty())
+		connectedText += QStringLiteral(" · new token refused");
+	status->setText(connectedText);
+	status->setStyleSheet(tokenRefusal.isEmpty() ? "color: #36a45e;" : "color: #d08b1d;");
 
 	{
 		QStringList lines;
 		if (!publishSummary.isEmpty())
 			lines << publishSummary;
+		if (!tokenRefusal.isEmpty())
+			lines << QString("New publish token refused: %1").arg(tokenRefusal);
 		if (!stats.protocol.empty())
 			lines << QString("Protocol %1").arg(QString::fromStdString(stats.protocol));
 		if (!stats.dial.empty())

@@ -78,9 +78,11 @@ public:
 
 	// Present a fresh publish token on the connected session without reconnecting,
 	// replacing the one presented here before once the relay accepts it. False when
-	// there is no session yet. The outcome is logged; a relay without in-band AUTH
-	// refuses it.
+	// there is no session yet. The outcome is logged, and a refusal is kept for
+	// TokenRefusal(); a session without in-band AUTH refuses it.
 	bool PresentToken(const std::string &token);
+	// Why the relay refused the token PresentToken() last presented, or empty.
+	std::string TokenRefusal();
 
 private:
 	friend struct MoQOutputStatsTest;
@@ -179,6 +181,7 @@ private:
 	std::string epoch;
 	int last_failure_code = 0;
 	std::string last_failure_reason;
+	std::string token_refusal;
 
 	// Written on the worker, read by GetConnectTime().
 	std::atomic<int> connect_time_ms{0};
