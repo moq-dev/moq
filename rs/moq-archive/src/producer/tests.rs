@@ -768,6 +768,47 @@ async fn a_re_added_track_continues_and_its_marker_records_the_last_run() {
 	assert_eq!(end(&store, "video").await, Some(End::Error(64 + 3)));
 }
 
+/// A track re-added with other properties after it was listed is refused before any of its
+/// frames is stored under the listed properties.
+#[tokio::test(start_paused = true)]
+async fn a_re_added_track_is_stored_under_its_own_properties() {
+	let store = store();
+	let broadcast = broadcast::Info::new().produce();
+	let first = broadcast.create_track("video", timed().with_priority(1)).unwrap();
+	store.inner().hold_puts("video/.info");
+	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
+	settle().await;
+	drop(first);
+	settle().await;
+
+	let second = broadcast.create_track("video", timed().with_priority(2)).unwrap();
+	group(&second, 0, &[(0, "x")]);
+	store.inner().release();
+	settle().await;
+	sleep(SECOND).await;
+	settle().await;
+	assert!(objects(&store, "video", true).await.is_empty());
+
+	second.finish().unwrap();
+	broadcast.close();
+	let err = moq_clock::timeout(Duration::from_secs(1000), task)
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap_err();
+	assert!(
+		matches!(
+			err,
+			Error::Priority {
+				existing: 1,
+				intended: 2
+			}
+		),
+		"{err}"
+	);
+	assert!(objects(&store, "video", true).await.is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_stopped_producer_writes_no_marker() {
 	let store = store();

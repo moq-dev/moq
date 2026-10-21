@@ -30,7 +30,6 @@ pub(super) async fn record<S: ObjectStore>(
 ) -> Result<(String, Option<End>)> {
 	let mut track = Track::new(shared, &name, stored)?;
 	while let Some(info) = track.idle(&queue).await? {
-		track.properties(&info).await?;
 		let end = track.run(&info).await?;
 		track.end = Some(end);
 	}
@@ -166,8 +165,8 @@ impl<S: ObjectStore> Track<S> {
 
 	/// Record one subscription until both its groups and its datagrams end, returning how.
 	async fn run(&mut self, info: &moq_net::track::Info) -> Result<End> {
-		let config = &self.shared.config;
-		let max_delay = info.max_age.map_or(config.max_delay, |age| age.min(config.max_delay));
+		let shared = self.shared.clone();
+		let config = &shared.config;
 		let range = match self.next {
 			Some(next) => Range {
 				start: Anchor::Absolute(next),
@@ -177,17 +176,25 @@ impl<S: ObjectStore> Track<S> {
 		};
 		let subscription = Subscription::default()
 			.with_order(Order::Ascending)
-			.with_max_delay(max_delay)
+			.with_max_delay(delay(config, info))
 			.with_ranges([range]);
 
-		let track = match self.shared.broadcast.track(&self.name) {
-			Ok(track) => track,
-			Err(err) => return Ok(error(&err)),
+		let subscribed = match self.shared.broadcast.track(&self.name) {
+			Ok(track) => track.subscribe(subscription).await,
+			Err(err) => Err(err),
 		};
-		let subscriber = match track.subscribe(subscription).await {
+		let subscriber = match subscribed {
 			Ok(subscriber) => subscriber,
-			Err(err) => return Ok(error(&err)),
+			Err(err) => {
+				// The track keeps its `.info` beside the `end` this run leaves.
+				self.properties(info).await?;
+				return Ok(error(&err));
+			}
 		};
+		// The listing's info may describe an instance the name no longer resolves to, so the
+		// subscribed one's properties are what its frames are stored under.
+		self.properties(subscriber.info()).await?;
+		let max_delay = delay(config, subscriber.info());
 
 		let mut ordered = Ordered::new(subscriber, max_delay, self.next.map(|next| next.group));
 		// The group being stored, frame by frame.
@@ -443,6 +450,11 @@ fn timescale(info: &Info) -> Result<Option<Timescale>> {
 	info.timescale
 		.map(|timescale| Timescale::new(timescale).map_err(|_| Error::Timescale(timescale)))
 		.transpose()
+}
+
+/// How long a missing group is waited for: the configured cap, or the publisher's max age below it.
+fn delay(config: &super::Config, info: &moq_net::track::Info) -> Duration {
+	info.max_age.map_or(config.max_delay, |age| age.min(config.max_delay))
 }
 
 /// `duration` in `timescale` units, saturating.
