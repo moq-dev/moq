@@ -1,3 +1,5 @@
+//! Publish broadcasts, tracks, and groups.
+
 use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
@@ -96,11 +98,13 @@ pub(crate) struct BroadcastProducer {
 	pub(crate) driver: Background,
 }
 
+/// A broadcast in which tracks can be published.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastProducer {
 	pub(crate) state: std::sync::Mutex<Option<BroadcastProducer>>,
 }
 
+/// A handler for requests for tracks in a broadcast.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastDynamic {
 	task: Task<DynamicProducer>,
@@ -478,6 +482,7 @@ impl MoqTrackRequest {
 
 // ---- Track Producer ----
 
+/// A track to which groups, frames, or datagrams can be published.
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<moq_net::track::Producer>>,
@@ -628,6 +633,7 @@ impl MoqTrackProducer {
 	}
 }
 
+/// A group to which frames can be published.
 #[derive(uniffi::Object)]
 pub struct MoqGroupProducer {
 	sequence: u64,
