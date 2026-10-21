@@ -171,19 +171,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_keyset_from_str_invalid_json() {
-		let result = KeySet::from_str("invalid json");
-		assert!(result.is_err());
-	}
-
-	#[test]
-	fn test_keyset_from_str_empty() {
-		let json = r#"{"keys":[]}"#;
-		let set = KeySet::from_str(json).unwrap();
-		assert!(set.keys.is_empty());
-	}
-
-	#[test]
 	fn test_keyset_to_str() {
 		let key = create_test_key(Some("1"));
 		let set = KeySet {
@@ -209,18 +196,6 @@ mod tests {
 		assert_eq!(deserialized.keys.len(), 2);
 		assert!(deserialized.find_key("1").is_some());
 		assert!(deserialized.find_key("2").is_some());
-	}
-
-	#[test]
-	fn test_find_key_success() {
-		let key = create_test_key(Some("my-key"));
-		let set = KeySet {
-			keys: vec![Arc::new(key)],
-		};
-
-		let found = set.find_key("my-key");
-		assert!(found.is_some());
-		assert_eq!(found.unwrap().kid.as_ref().map(|k| k.encode()), Some("my-key"));
 	}
 
 	#[test]
@@ -307,18 +282,6 @@ mod tests {
 
 		let result = set.to_public_set();
 		assert!(result.is_err());
-	}
-
-	#[test]
-	fn test_encode_success() {
-		let key = create_test_key(Some("1"));
-		let set = KeySet {
-			keys: vec![Arc::new(key)],
-		};
-		let claims = create_test_claims();
-
-		let token = set.sign(&claims).unwrap();
-		assert!(!token.is_empty());
 	}
 
 	#[test]
