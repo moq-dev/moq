@@ -454,6 +454,8 @@ struct Held {
 	/// Tokens a change replaced, answered or not, kept presented until every
 	/// replacement has its answer so the grant never narrows in between.
 	retiring: Vec<Answer>,
+	/// Whether this session already logged that it carries no extra tokens.
+	unsupported: bool,
 }
 
 enum Answer {
@@ -494,6 +496,7 @@ impl Held {
 	/// Resolve when another token has its answer.
 	fn poll_answers(&mut self, session: &moq_net::Session, cx: &mut std::task::Context<'_>) -> Poll<()> {
 		let mut answered = false;
+		let mut unsupported = false;
 		for (_, answer) in &mut self.tokens {
 			let Answer::Waiting(opening) = answer else { continue };
 			let Poll::Ready(result) = opening.as_mut().poll(cx) else {
@@ -501,11 +504,17 @@ impl Held {
 			};
 			answered = true;
 			*answer = match result {
+				// Without AUTH, moq-transport accepts a token at once for the requests that name
+				// it, but a configured token rides no request, so nothing sends it.
+				Ok(auth) if auth.grant().peek().is_none() && auth.closed().now_or_never().is_none() => {
+					unsupported = true;
+					Answer::Refused
+				}
 				Ok(auth) => Answer::Granted(auth),
 				// The session ending is no verdict on the token.
 				Err(_) if session.closed().now_or_never().is_some() => Answer::Refused,
 				Err(moq_net::Error::Unsupported) => {
-					tracing::debug!("the peer takes no tokens in band; presenting only the connection credential");
+					unsupported = true;
 					Answer::Refused
 				}
 				Err(err) => {
@@ -513,6 +522,9 @@ impl Held {
 					Answer::Refused
 				}
 			};
+		}
+		if unsupported && !std::mem::replace(&mut self.unsupported, true) {
+			tracing::debug!("the peer takes no tokens in band; presenting only the connection credential");
 		}
 		self.settle();
 		match answered {
@@ -545,7 +557,11 @@ mod tests {
 	}
 
 	async fn pair() -> Pair {
-		let versions = moq_net::Versions::from("moq-lite-07-wip".parse::<moq_net::Version>().unwrap());
+		pair_on("moq-lite-07-wip").await
+	}
+
+	async fn pair_on(version: &str) -> Pair {
+		let versions = moq_net::Versions::from(version.parse::<moq_net::Version>().unwrap());
 		let config = || {
 			let mut config = qmux::Config::new(qmux::Version::QMux01);
 			config.protocol = qmux::Protocol::Negotiate(versions.alpns().iter().map(|alpn| alpn.to_string()).collect());
@@ -897,6 +913,23 @@ mod tests {
 		assert_eq!(presented, [b"a".to_vec(), b"b".to_vec()]);
 		let again = tokio::time::timeout(std::time::Duration::from_secs(1), pair.requests.recv()).await;
 		assert!(again.is_err(), "the connection credential was presented twice");
+	}
+
+	/// Without AUTH a configured token rides nothing, so it counts as unsupported rather
+	/// than granted, and the session logs that once.
+	#[tokio::test(start_paused = true)]
+	async fn a_configured_token_without_auth_is_unsupported() {
+		let pair = pair_on("moq-transport-14").await;
+		let mut held = Held::default();
+		held.update(&pair.client.auth(), vec!["a".parse().unwrap(), "b".parse().unwrap()]);
+		tokio::time::timeout(
+			std::time::Duration::from_secs(5),
+			std::future::poll_fn(|cx| held.poll_answers(&pair.client, cx)),
+		)
+		.await
+		.expect("no answer");
+		assert!(held.tokens.iter().all(|(_, answer)| matches!(answer, Answer::Refused)));
+		assert!(held.unsupported);
 	}
 
 	/// A replaced token is withdrawn only once its replacement has an answer, so the grant
