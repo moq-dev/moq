@@ -90,17 +90,42 @@ which keeps the synthesized header and misleads old exporters; and
 extrapolating placement from earlier PCRs without waiting, which is wrong
 on variable-rate multiplexes.
 
-The planning children settle catalog and clock contracts before production
-changes. Their output adds independently completable implementation quests to
-this line; an audit finding is not authorization to guess a public API.
+The semantic fidelity audit (2026-10-20) maps each source mechanism to its
+contract in the semantic lane. The guide's profile table starts from it;
+each open row has a child quest, and an audit finding is not authorization
+to guess a public API. Preserved means carried through the catalog or a
+track and re-emitted; normalized means rebuilt with the stated meaning;
+refused means an error or a counted drop.
+
+| Mechanism | Contract | Owner |
+|:--|:--|:--|
+| H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks` | landed |
+| AAC ADTS (0x0F), MP2, AC-3, E-AC-3, Opus (0x06 + `Opus`) | Preserved: audio rendition; Opus export labels mono and stereo only | landed |
+| Private and unknown PES types, LATM (0x11), metadata (0x15) | Preserved: `pesPacket`, PTS and DTS rebased | landed |
+| PES clock fields (ESCR, pack header, TREF), PES scrambling | Refused, counted in `refused` | landed |
+| Private sections (0x05), SCTE-35 (0x86 + `CUEI`) | Preserved: `verbatim` section, `pts_adjustment` rebased | landed |
+| MPEG-1/2 video (0x01/0x02) | Today clock only, payload discarded | [routes](/quest/m1/ts-reliability/stream-routes.md) |
+| DSM-CC types (0x0A to 0x0D), 0x86 without `CUEI` | Today PES-parsed into damage, or dropped uncounted | [routes](/quest/m1/ts-reliability/stream-routes.md) |
+| CAT, EMM/ECM, ATSC PSIP, other SI PIDs, unlisted PIDs, TS scrambling | Outside the profile, raw lane; today dropped uncounted | [routes](/quest/m1/ts-reliability/stream-routes.md) |
+| DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
+| Program identity, program and ES descriptors | Preserved, but captured once | [PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) |
+| PMT add, remove, retype; PID reuse; PAT changes | Today stale tracks on import, refusal or stale PMT on export | [PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) |
+| Programs without video | Today audio plus `pesPacket` only; sections or no media refused | [clockless export](/quest/m1/ts-reliability/clockless-export.md) |
+| PCR | Normalized: rebased, carried on the first video (else audio) PID | landed |
+| Mux rate, null stuffing | Normalized: re-padded to `muxRate` while the source is CBR | landed |
+| PSI and SI repetition | Normalized: PAT/PMT every 500 ms and at keyframes, SI at DVB maxima | landed |
+| Media PES headers, TS packet layer, PAT network PID entry | Normalized: rebuilt by export; the raw lane keeps them | landed |
+
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed; PSI runs and catalog linger
 remain with their current quests.
 
 ## Required
 
-- [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
+- [Live PAT/PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) - a revised PMT or PAT never leaves a track name meaning other content
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
+- [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
+- [Clockless export](/quest/m1/ts-reliability/clockless-export.md) - TS export rebuilds audio-only and data-only programs
 
 ## Related
 
