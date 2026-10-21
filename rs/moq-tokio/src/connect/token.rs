@@ -255,7 +255,10 @@ mod tests {
 		let credential = Credential::new(&url, &moq_net::Versions::all(), &tokens(&["a", "peer", "a"]));
 		assert_eq!(credential.url, url);
 		assert_eq!(credential.setup, None);
-		assert_eq!(credential.extra(&tokens(&["a", "peer", "a"]).tokens), tokens(&["a"]).tokens);
+		assert_eq!(
+			credential.extra(&tokens(&["a", "peer", "a"]).tokens),
+			tokens(&["a"]).tokens
+		);
 	}
 
 	#[test]

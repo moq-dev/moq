@@ -496,7 +496,9 @@ impl Held {
 		let mut answered = false;
 		for (_, answer) in &mut self.tokens {
 			let Answer::Waiting(opening) = answer else { continue };
-			let Poll::Ready(result) = opening.as_mut().poll(cx) else { continue };
+			let Poll::Ready(result) = opening.as_mut().poll(cx) else {
+				continue;
+			};
 			answered = true;
 			*answer = match result {
 				Ok(auth) => Answer::Granted(auth),
@@ -521,7 +523,11 @@ impl Held {
 
 	/// Withdraw the replaced tokens once nothing is waiting on an answer.
 	fn settle(&mut self) {
-		if !self.tokens.iter().any(|(_, answer)| matches!(answer, Answer::Waiting(_))) {
+		if !self
+			.tokens
+			.iter()
+			.any(|(_, answer)| matches!(answer, Answer::Waiting(_)))
+		{
 			self.retiring.clear();
 		}
 	}

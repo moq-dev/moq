@@ -69,6 +69,12 @@ class Client:
     ``versions`` restricts the protocol versions offered, most preferred first, spelled
     like ``"moq-lite-03"``; empty offers every supported version, which :func:`versions` lists.
 
+    ``tokens`` are credentials every dial presents. The first is the connection credential,
+    sent in SETUP and, while an offered version can't carry it there, the URL's ``?jwt=``;
+    each other one widens the session's grant over in-band AUTH. A URL that already carries
+    ``?jwt=`` keeps it, and then every token rides AUTH. Replace them before they expire
+    with :meth:`set_tokens`.
+
     ``timeout`` bounds one connect, dial and handshake together (zero waits forever).
     ``race`` and ``resolution_delay`` pace Happy Eyeballs. ``tls_host_name`` verifies the
     certificate against another name (SNI). ``idle_timeout``, ``keep_alive`` (zero disables
@@ -92,6 +98,7 @@ class Client:
         tls_host_name: str | None = None,
         bind: str | None = None,
         versions: Sequence[str] = (),
+        tokens: Sequence[str] = (),
         timeout: timedelta | None = None,
         race: timedelta | None = None,
         resolution_delay: timedelta | None = None,
@@ -116,6 +123,7 @@ class Client:
         self._config = MoqClientConfig(
             bind=bind,
             versions=_strs(versions, "versions"),
+            tokens=_strs(tokens, "tokens"),
             timeout_us=_opt_us(timeout, "timeout"),
             race_us=_opt_us(race, "race"),
             resolution_delay_us=_opt_us(resolution_delay, "resolution_delay"),
@@ -188,6 +196,19 @@ class Client:
                 self._inner.cancel()
                 self._inner = None
 
+    def set_tokens(self, tokens: Sequence[str]) -> None:
+        """Replace the credentials every dial presents, such as before the current ones expire.
+
+        The next dial presents them, and a live session with in-band AUTH presents them at
+        once, withdrawing each replaced token once its replacements are answered. After an
+        authorization refusal the client redials only if they changed.
+        """
+        tokens = _strs(tokens, "tokens")
+        if self._inner is None:
+            self._config.tokens = tokens
+        else:
+            self._inner.set_tokens(tokens)
+
     def create_broadcast(self, path: str) -> BroadcastProducer:
         """Create an unannounced broadcast at ``path``, invisible until announced. Announce it after populating tracks.
 
@@ -251,6 +272,7 @@ def connect(
     tls_host_name: str | None = None,
     bind: str | None = None,
     versions: Sequence[str] = (),
+    tokens: Sequence[str] = (),
     timeout: timedelta | None = None,
     race: timedelta | None = None,
     resolution_delay: timedelta | None = None,
@@ -287,6 +309,7 @@ def connect(
         tls_host_name=tls_host_name,
         bind=bind,
         versions=versions,
+        tokens=tokens,
         timeout=timeout,
         race=race,
         resolution_delay=resolution_delay,

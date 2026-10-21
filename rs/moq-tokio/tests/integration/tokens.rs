@@ -49,7 +49,10 @@ async fn serve(version: &str, refused: &'static str) -> Server {
 					.map(|token| String::from_utf8(token.value.clone()).unwrap()),
 			};
 			let rejected = seen.token.as_deref() == Some(refused)
-				|| seen.query.as_deref().is_some_and(|query| query.contains(&format!("jwt={refused}")));
+				|| seen
+					.query
+					.as_deref()
+					.is_some_and(|query| query.contains(&format!("jwt={refused}")));
 			sender.send(seen).ok();
 			let notify = notify.clone();
 			tokio::spawn(async move {
@@ -58,7 +61,9 @@ async fn serve(version: &str, refused: &'static str) -> Server {
 					request.reject(moq_tokio::server::Reject::Unauthorized).await.ok();
 					return;
 				}
-				let Ok((_session, _driver)) = request.ok().await else { return };
+				let Ok((_session, _driver)) = request.ok().await else {
+					return;
+				};
 				// Hold the session until the test's runtime shuts down.
 				std::future::pending::<()>().await;
 			});

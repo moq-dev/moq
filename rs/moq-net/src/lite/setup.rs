@@ -589,7 +589,10 @@ mod tests {
 				token: Some(unsendable),
 				..Default::default()
 			};
-			assert!(matches!(msg.encode_bytes(Version::Lite07), Err(EncodeError::Unsupported)));
+			assert!(matches!(
+				msg.encode_bytes(Version::Lite07),
+				Err(EncodeError::Unsupported)
+			));
 		}
 
 		// An empty value carries no credential, so it is refused rather than read as none.
@@ -610,7 +613,10 @@ mod tests {
 		let received = |buf: &[u8]| ReceivedSetup::decode_slice(buf, Version::Lite07).unwrap().0;
 
 		let client = PeerSetup::new(true, crate::transport::Binding::InBand);
-		assert!(matches!(client.receive(received(&buf)), Err(crate::Error::ProtocolViolation)));
+		assert!(matches!(
+			client.receive(received(&buf)),
+			Err(crate::Error::ProtocolViolation)
+		));
 		let server = PeerSetup::new(false, crate::transport::Binding::InBand);
 		server.receive(received(&buf)).unwrap();
 	}

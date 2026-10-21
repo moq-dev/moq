@@ -11,7 +11,7 @@ package dev.moq
 // listen facade (see Server.kt), which exposes the raw handle as `server`.
 /** A MoQ client built from a [ClientConfig]: connect it to a relay. */
 typealias Client = uniffi.moq.MoqClient
-/** Client configuration: bind address, versions, TLS, QUIC, WebSocket, reconnect pacing, and origins. */
+/** Client configuration: bind address, versions, tokens, TLS, QUIC, WebSocket, reconnect pacing, and origins. */
 typealias ClientConfig = uniffi.moq.MoqClientConfig
 /** Certificate trust and the mTLS identity for a [ClientConfig]. */
 typealias ClientTls = uniffi.moq.MoqClientTls

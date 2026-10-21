@@ -294,9 +294,11 @@ fn parse_tokens(tokens: Vec<String>) -> Result<Vec<moq_tokio::connect::Token>, M
 	tokens
 		.into_iter()
 		.map(|token| {
-			token.try_into().map_err(|err: moq_tokio::connect::EmptyToken| MoqError::Config {
-				reason: err.to_string(),
-			})
+			token
+				.try_into()
+				.map_err(|err: moq_tokio::connect::EmptyToken| MoqError::Config {
+					reason: err.to_string(),
+				})
 		})
 		.collect()
 }
