@@ -43,7 +43,10 @@ Decided by the maintainer on 2026-10-20, when the quest was first started
   one bounded run: `start: Position`, exclusive end group, priority, the most
   tolerant budget, and order. The handler calls `accept(sequence, info)` for
   each group it has and `drop_groups(range)` for the rest. Dropping the `Fill`
-  names whatever is left as dropped, in the track's existing `drops`.
+  names whatever is left as dropped, in the track's existing `drops`, but only
+  while a reader still wants it: once demand leaves, the fill is withdrawn like
+  a `group::Request` today and records nothing, so `drops` (durable) never
+  hides still-fetchable history from a later reader.
   Rejected: writing through `Producer::create_group`, since a fetch-only copy
   or an archive track has no live producer, and backfill must stay out of the
   arrival walk.
@@ -62,9 +65,9 @@ Decided by the maintainer on 2026-10-20, when the quest was first started
   magic value.
 - **Sessions.** A session serves a fill as it serves a group request today:
   one FETCH per group, one in flight per fill, newest first for a descending
-  reader, stopping when demand leaves, and dropping the rest once a fetched
-  group is stale under the fill's budget (a timed track's starts never
-  rewind). [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) turns lite-07
+  reader, withdrawing (not dropping) the fill when demand leaves, and
+  dropping the rest once a fetched group is stale under the fill's budget (a
+  timed track's starts never rewind). [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) turns lite-07
   fills into range subscriptions, and
   [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) into one FETCH
   per run. Until then, one SUBSCRIBE range can cost up to frontier minus floor
