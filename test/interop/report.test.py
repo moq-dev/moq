@@ -83,6 +83,8 @@ class ReportTest(unittest.TestCase):
         self.assertFalse(report.passed([], skipped))
         self.assertFalse(report.passed([], report.steps('{"Interop (full matrix)": "skipped"}')))
         self.assertFalse(report.passed([], {}))
+        # Every step green but no case recorded: the records were lost, not passed.
+        self.assertFalse(report.passed([], report.steps('{"Interop (full matrix)": "success"}')))
 
     def test_without_results_the_steps_still_render(self):
         records = report.load(self.results)
