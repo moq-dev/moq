@@ -1403,10 +1403,17 @@ impl Connection {
     fn close_inner(&mut self, now: Instant, reason: Close) {
         let was_closed = self.state.is_closed();
         if !was_closed {
+            // A peer that never answered the handshake will not answer the close either, so
+            // only the close timer would end the connection's activity. The closing period
+            // still answers a late reply; it just no longer holds up a shutdown.
+            let unanswered = matches!(&self.state, State::Handshake(state) if !state.rem_cid_set);
             self.close_common();
             self.set_close_timer(now);
             self.close = true;
             self.state = State::Closed(state::Closed { reason });
+            if unanswered {
+                self.report_draining();
+            }
         }
     }
 
