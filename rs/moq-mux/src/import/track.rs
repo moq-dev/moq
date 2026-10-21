@@ -1389,4 +1389,133 @@ mod tests {
 
 		import.finish().unwrap();
 	}
+
+	const H264_IDR: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+	const H265_IDR: &[u8] = &[0x26, 0x01, 0x80, 0xaa];
+
+	fn annexb(nals: &[&[u8]]) -> Vec<u8> {
+		nals.iter().flat_map(|nal| [&[0, 0, 0, 1], *nal].concat()).collect()
+	}
+
+	fn length_prefixed(nal: &[u8]) -> Vec<u8> {
+		[&(nal.len() as u32).to_be_bytes()[..], nal].concat()
+	}
+
+	/// `av1.mp4`'s av1C, and a temporal unit of its sequence header and a key frame.
+	fn av1_init_and_keyframe() -> (Vec<u8>, Vec<u8>) {
+		let mp4 = include_bytes!("../container/fmp4/test_data/av1.mp4");
+		let mut cursor = std::io::Cursor::new(&mp4[..]);
+		let moov = loop {
+			if let mp4_atom::Any::Moov(moov) = <mp4_atom::Any as mp4_atom::Decode>::decode(&mut cursor).unwrap() {
+				break moov;
+			}
+		};
+		let mp4_atom::Codec::Av01(av01) = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
+			panic!("expected av01");
+		};
+		let mut av1c = Vec::new();
+		mp4_atom::Encode::encode(&av01.av1c, &mut av1c).unwrap();
+		// Skip the box header: the importer takes the record itself.
+		let av1c = av1c[8..].to_vec();
+
+		let mut tu = vec![0x12, 0x00];
+		tu.extend_from_slice(&av01.av1c.config_obus);
+		tu.extend_from_slice(&[0x32, 0x01, 0x10]);
+		(av1c, tu)
+	}
+
+	/// Subscribe to `name` and read its first frame.
+	async fn first_frame(consumer: &moq_net::broadcast::Consumer, name: &str) -> crate::container::Frame {
+		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+		let mut media = crate::container::Consumer::new(
+			track,
+			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+		);
+		tokio::time::timeout(Duration::from_secs(1), media.read_frame())
+			.await
+			.expect("a frame")
+			.unwrap()
+			.expect("the track ended without a frame")
+	}
+
+	/// Every video format a binding can hand [`Track::video`] lands a keyframe on
+	/// its track. The facade dispatches per codec, and before this only Avc3,
+	/// Hvc1, and VP8 had ever decoded through it.
+	#[tokio::test(start_paused = true)]
+	async fn every_video_format_delivers_a_keyframe() {
+		use crate::codec::{h264, h265};
+
+		let sps = &h264_init()[4..29];
+		let avcc = [
+			&[1, sps[1], sps[2], sps[3], 0xff, 0xe1][..],
+			&(sps.len() as u16).to_be_bytes(),
+			sps,
+			&[1],
+			&(h264::fixtures::PPS.len() as u16).to_be_bytes(),
+			h264::fixtures::PPS,
+		]
+		.concat();
+		let (av1c, av1_keyframe) = av1_init_and_keyframe();
+		let vp9_keyframe = vec![0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00];
+
+		let cases = [
+			(VideoFormat::Avc1, avcc, length_prefixed(H264_IDR)),
+			(
+				VideoFormat::Hev1,
+				Vec::new(),
+				annexb(&[h265::fixtures::VPS, h265::fixtures::SPS, h265::fixtures::PPS, H265_IDR]),
+			),
+			(VideoFormat::Av01, av1c, av1_keyframe),
+			(VideoFormat::Vp9, Vec::new(), vp9_keyframe),
+		];
+		for (format, init, keyframe) in cases {
+			let (broadcast, catalog) = new_broadcast();
+			let consumer = broadcast.consume();
+			let request = broadcast.reserve_track("video").unwrap();
+			let mut import = Track::video(request, catalog.reserve(), VideoInit::new(format, init)).unwrap();
+
+			import.decode(keyframe, Some(Timestamp::from_micros(1_000).unwrap())).unwrap();
+			let frame = first_frame(&consumer, "video").await;
+			assert!(frame.keyframe, "{format}: the first frame opens a group");
+			assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap(), "{format}");
+			assert!(
+				catalog.snapshot().video.renditions.contains_key("video"),
+				"{format}: no rendition"
+			);
+			import.finish().unwrap();
+		}
+	}
+
+	/// [`TrackStream`] finds the frames in a raw byte stream however it is chunked,
+	/// and `finish` flushes the last one. Nothing had decoded through it before.
+	#[tokio::test(start_paused = true)]
+	async fn track_stream_splits_a_chunked_byte_stream() {
+		use crate::codec::h265;
+
+		let (_, av1_keyframe) = av1_init_and_keyframe();
+		let cases = [
+			(VideoFormat::Avc3, [h264_init(), annexb(&[H264_IDR])].concat(), H264_IDR),
+			(
+				VideoFormat::Hev1,
+				annexb(&[h265::fixtures::VPS, h265::fixtures::SPS, h265::fixtures::PPS, H265_IDR]),
+				H265_IDR,
+			),
+			(VideoFormat::Av01, av1_keyframe.clone(), &av1_keyframe[av1_keyframe.len() - 3..]),
+		];
+		for (format, stream, last) in cases {
+			let (broadcast, catalog) = new_broadcast();
+			let consumer = broadcast.consume();
+			let request = broadcast.reserve_track("video").unwrap();
+			let mut import = TrackStream::video(request, catalog.reserve(), VideoInit::new(format, Vec::new())).unwrap();
+
+			for chunk in stream.chunks(3) {
+				import.decode(chunk).unwrap();
+			}
+			import.finish().unwrap();
+
+			let frame = first_frame(&consumer, "video").await;
+			assert!(frame.keyframe, "{format}: the first frame opens a group");
+			assert!(frame.payload.ends_with(last), "{format}: the frame ends with its picture");
+		}
+	}
 }
