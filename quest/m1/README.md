@@ -100,7 +100,6 @@ lands before the cut.
 - [JS answers SUBSCRIBE_START like Rust](/quest/m1/js-start-parity.md) - a JS publisher's START names where its backlog starts, not its newest group
 - [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
-- [A failed HLS export answers with an error](/quest/m1/hls-failure-signal.md) - playlists answer a no-store 5xx once their timeline fails, and so does the DASH manifest for a shared reference failure, so a truncated recording never looks complete
 - [Close tail drain](/quest/m1/close-tail-drain.md) - after a peer close, subscribers read the group streams their transport already delivered instead of aborting them, so a finished tail arrives on every version
 - [GOAWAY deadline](/quest/m1/goaway-deadline.md) - the drain deadline counts from the trigger in moq-net and js/net, so a peer that stops reading cannot stall it
 - [Silent-peer close](/quest/m1/quic-silent-peer-drain.md) - moq-quic closes a connection that never heard its peer without the 3 s drain
