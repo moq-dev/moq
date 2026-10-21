@@ -1032,7 +1032,7 @@ class Recover implements GroupRecover {
 				// The serving route gave the group up, which ends it with that route's error however
 				// a fetch of the rest would answer. A copy that failed dropped its open groups with
 				// it, and a group the route failed is no verdict either.
-				const given = hooks.givenUp(serving.sub, this.#sequence);
+				const given = hooks.givenUp(serving.sub, this.sequence);
 				if (given.error && !routeFailed(given.error) && !(serving.sub.closed.peek() instanceof Error)) {
 					throw given.error;
 				}
