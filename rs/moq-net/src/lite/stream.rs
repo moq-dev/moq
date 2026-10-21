@@ -15,6 +15,7 @@ pub enum ControlType {
 	Goaway = 5,
 	Track = 6,
 	Auth = 7,
+	Tracks = 8,
 }
 
 impl Decode<Version> for ControlType {

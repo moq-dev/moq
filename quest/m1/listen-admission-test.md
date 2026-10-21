@@ -12,7 +12,7 @@ admission never waits, so nothing covers `serve_client`
 ## Plan
 
 Decided with the maintainer on 2026-10-20, from the follow-ups of
-[#5765](https://github.com/moq-dev/moq/pull/5765), which implements the
+[#5765](https://github.com/moq-dev/moq/pull/5765), which landed the
 deadline.
 
 - Drive `moq --listen`'s listener in process on controlled time, through the
@@ -24,7 +24,3 @@ deadline.
 - Match the relay's `auth_lifetime` cases so the two listeners stay alike.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Handshake deadline covers admission](/quest/m1/handshake-admission-deadline.md) - the bound this tests
