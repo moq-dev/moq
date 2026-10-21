@@ -2542,7 +2542,10 @@ mod tests {
 		])
 		.expect("parse");
 		assert!(cli.moq.validate().is_ok());
-		assert_eq!(cli.moq.cluster.lan.secret.as_deref(), Some("cluster.key"));
+		assert_eq!(
+			cli.moq.cluster.lan.secret.as_deref(),
+			Some(std::path::Path::new("cluster.key"))
+		);
 	}
 
 	/// The app is only read by the mesh, so configuring one without it is an

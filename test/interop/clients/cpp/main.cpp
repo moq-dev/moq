@@ -9,6 +9,9 @@
 //
 //   ffmpeg ... -f h264 - | cpp-interop publish --url http://localhost:4443 --broadcast b.hang
 //   cpp-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
+//
+// --auth-version offers only that version, one that carries AUTH: the client waits for the
+// grant the relay sends and prints it as an `auth granted` line before it starts.
 
 #include <moq/moq.hpp>
 
@@ -99,12 +102,38 @@ T until(moq::Future<T> future, Clock::time_point deadline, const char *what) {
     return ok(future.get(), what);
 }
 
-// The session owns its connection; the client that made it can go.
-std::shared_ptr<moq::Session> connect(const std::string &url, Clock::time_point deadline) {
+// A JSON list of strings, the shape the Rust client logs its grant's patterns in.
+std::string patterns(const std::vector<std::string> &list) {
+    std::string out = "[";
+    for (size_t i = 0; i < list.size(); i++) {
+        out += (i == 0 ? "\"" : ", \"") + list[i] + "\"";
+    }
+    return out + "]";
+}
+
+// The session owns its connection; the client that made it can go. With an `auth_version`,
+// waits for the relay's grant and prints it in the Rust client's `auth granted` shape.
+std::shared_ptr<moq::Session> connect(
+    const std::string &url, const std::string &auth_version, Clock::time_point deadline
+) {
     moq::ClientConfig config;
     config.tls.insecure = true;
+    if (!auth_version.empty()) {
+        config.versions = {auth_version};
+    }
     auto client = ok(moq::Client::init(config), "client init");
     open_session = until(client->connect(url), deadline, "connect");
+    if (!auth_version.empty()) {
+        auto auth = open_session->auth();
+        auto grant = auth->grant();
+        while (!grant) {
+            grant = until(auth->grant_changed(), deadline, "grant");
+        }
+        std::fprintf(
+            stderr, "auth granted publish=%s subscribe=%s\n", patterns(grant->publish).c_str(),
+            patterns(grant->subscribe).c_str()
+        );
+    }
     return open_session;
 }
 
@@ -135,10 +164,10 @@ void publish_tone(const std::shared_ptr<moq::AudioProducer> &audio, const std::a
     }
 }
 
-int publish(const std::string &url, const std::string &path) {
+int publish(const std::string &url, const std::string &path, const std::string &auth_version) {
     // No deadline to publish: the harness stops the publisher when the round ends.
     const auto forever = Clock::now() + std::chrono::hours(24);
-    auto session = connect(url, forever);
+    auto session = connect(url, auth_version, forever);
 
     // Hold the producer for the lifetime of the publish loop; close() unpublishes.
     auto broadcast = ok(session->publish()->create_broadcast(path), "create_broadcast");
@@ -189,10 +218,10 @@ int publish(const std::string &url, const std::string &path) {
     return 0;
 }
 
-int subscribe(const std::string &url, const std::string &path, double timeout) {
+int subscribe(const std::string &url, const std::string &path, const std::string &auth_version, double timeout) {
     const auto deadline =
         Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(timeout));
-    auto session = connect(url, deadline);
+    auto session = connect(url, auth_version, deadline);
 
     auto announced = ok(session->consume()->announced_broadcast(path), "announced_broadcast");
     auto consumer = until(announced->available(), deadline, "available");
@@ -238,11 +267,12 @@ int subscribe(const std::string &url, const std::string &path, double timeout) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fail("usage: cpp-interop publish|subscribe --url URL --broadcast PATH [--timeout SECONDS]");
+        fail("usage: cpp-interop publish|subscribe --url URL --broadcast PATH [--timeout SECONDS] [--auth-version V]");
     }
     const std::string role = argv[1];
     std::string url;
     std::string broadcast;
+    std::string auth_version;
     double timeout = 20;
     for (int i = 2; i + 1 < argc; i += 2) {
         const std::string flag = argv[i];
@@ -252,6 +282,8 @@ int main(int argc, char **argv) {
             broadcast = argv[i + 1];
         } else if (flag == "--timeout") {
             timeout = std::atof(argv[i + 1]);
+        } else if (flag == "--auth-version") {
+            auth_version = argv[i + 1];
         } else {
             fail(("unknown flag " + flag).c_str());
         }
@@ -259,12 +291,14 @@ int main(int argc, char **argv) {
     if (url.empty() || broadcast.empty()) {
         fail("--url and --broadcast are required");
     }
+    // Warnings and errors from the Rust layer, such as a publication outside the grant.
+    ok(moq::moq_log_level("warn"), "log level");
 
     if (role == "publish") {
-        return publish(url, broadcast);
+        return publish(url, broadcast, auth_version);
     }
     if (role == "subscribe") {
-        return subscribe(url, broadcast, timeout);
+        return subscribe(url, broadcast, auth_version, timeout);
     }
     fail(("unknown role " + role).c_str());
 }

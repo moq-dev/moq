@@ -15,6 +15,7 @@ import {
 	groupBounds,
 	hooks,
 	insertRun,
+	type Land,
 	type Recv,
 	type RecvDatagram,
 	type ResumeSource,
@@ -557,6 +558,8 @@ let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, sequence: number) => boolean;
+// Whether a group may still land on the producer's live feed; assigned in its static block.
+let mayLand: (producer: Producer, land: Land) => boolean;
 
 // The sequence-order cursor lives inside `Subscriber` (it shares the group buffer and the
 // drift anchor with the arrival cursor), so `Ordered` reaches it through this bridge,
@@ -767,6 +770,32 @@ export class Producer {
 			return mirror;
 		};
 		hooks.dropTrackGroups = (producer, start, end) => producer.#drop(start, end);
+		mayLand = (producer, land) => producer.#mayLand(land);
+	}
+
+	// Whether a group may still land from the live feed, by the rule a pending tail is judged
+	// by; see {@link Land}. Mirrors the Rust `TrackState::may_land`.
+	#mayLand(land: Land): boolean {
+		if (this.#state.closed.peek() !== undefined) return false;
+		let start = land.start;
+		if (!land.floor) {
+			const first = this.#arrivals.first();
+			if (first === undefined) return false;
+			start = Math.max(start, first);
+		}
+		start = Math.max(start, this.#served?.start ?? 0);
+		const declared = this.#state.end.peek();
+		const end = declared === undefined ? land.end : Math.min(land.end, finalSequence(declared));
+		const at = now();
+		const limit = Nano.fromMilli(land.grace);
+		const drops = this.#state.drops.peek();
+		return this.#arrivals
+			.gaps(start, end)
+			.some(
+				(gap) =>
+					(gap.since === undefined || Instant.durationSince(at, gap.since) < limit) &&
+					runGaps(drops, gap.start, gap.end).some((open) => !land.delivered?.covers(open.start, open.end)),
+			);
 	}
 
 	#drop(start: number, end: number): void {
@@ -1591,8 +1620,6 @@ export class Subscriber {
 	// Every group sequence this reader handed out, so a re-created group or one a second route
 	// delivers is handed out once.
 	#delivered = new Delivered();
-	// Whether a resumed reader has read groups, so a datagram read keeps copies they still need.
-	#groupsRead = false;
 	// What {@link largest} last reported, and whether it ended: moving the bounds afterwards
 	// does not bring it back.
 	#largestSeen?: Location;
@@ -1831,6 +1858,10 @@ export class Subscriber {
 		hooks.holdsGroup = (subscriber, sequence) => {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && cachedHolds(producer, sequence);
+		};
+		hooks.mayLand = (subscriber, land) => {
+			const producer = subscriber.#state.producer;
+			return producer !== undefined && mayLand(producer, land);
 		};
 		hooks.resumeSubscriber = (name, subscription, source) => {
 			const state = new TrackState(subscription);
@@ -2210,7 +2241,6 @@ export class Subscriber {
 	// A group from the routes' copies; see #resume.
 	#tryResumed(ordered: boolean): Recv {
 		const resume = this.#resume as ResumeSource;
-		this.#groupsRead = true;
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		if (closed !== undefined) return { kind: "done" };
@@ -2323,7 +2353,7 @@ export class Subscriber {
 			datagram.sequence >= start && (end === undefined || datagram.sequence < end);
 		if (this.#resume) {
 			for (;;) {
-				const recv = this.#resume.tryDatagram(this.#groupsRead ? this.#delivered : undefined);
+				const recv = this.#resume.tryDatagram(this.#delivered);
 				if (recv.kind !== "datagram" || inRange(recv.datagram)) return recv;
 			}
 		}

@@ -1,10 +1,27 @@
 import type * as Epoch from "../epoch.ts";
+import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasGroupOrder, hasRefresh, hasTrackStream, Version, wireTimescale } from "./version.ts";
+import { hasCompression, hasGroupOrder, hasRefresh, hasTrackStream, Version, wireTimescale } from "./version.ts";
+
+// TRACK_INFO `Compression` codec ids: none, or per-group DEFLATE (draft-lcurley-moq-flate).
+const COMPRESSION_NONE = 0;
+const COMPRESSION_DEFLATE = 1;
+
+async function decodeCompression(r: Reader): Promise<boolean> {
+	const codec = await r.u53();
+	switch (codec) {
+		case COMPRESSION_NONE:
+			return false;
+		case COMPRESSION_DEFLATE:
+			return true;
+		default:
+			throw new ProtocolViolation(`unknown compression: ${codec}`);
+	}
+}
 
 function guardTrack(version: Version) {
 	if (!hasTrackStream(version)) throw new Error("track stream not supported for this version");
@@ -71,17 +88,24 @@ export class TrackInfo {
 	 * out as milliseconds (see {@link wireTimescale}).
 	 */
 	timescale?: Timescale;
+	/**
+	 * Whether each group's frames are DEFLATE slices of one stream (draft-lcurley-moq-flate),
+	 * each FRAME carrying its inflated size. Lite-07 only.
+	 */
+	compress: boolean;
 
 	constructor({
 		priority = 0,
 		maxAge,
 		timescale,
 		refresh,
+		compress = false,
 	}: {
 		priority?: number;
 		maxAge?: number;
 		timescale?: number;
 		refresh?: number;
+		compress?: boolean;
 	}) {
 		if (!Number.isInteger(priority) || priority < 0 || priority > 255) {
 			throw new RangeError(`priority must be an integer in 0..=255: ${priority}`);
@@ -95,6 +119,7 @@ export class TrackInfo {
 		this.priority = priority;
 		this.maxAge = maxAge;
 		this.timescale = timescale === undefined ? undefined : Timescale(timescale);
+		this.compress = compress;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -106,6 +131,7 @@ export class TrackInfo {
 		await w.u62(legacy ? (age ?? BigInt(Number.MAX_SAFE_INTEGER)) : age === undefined ? 0n : age + 1n);
 		await w.u53(wireTimescale(version, this.timescale) ?? 0);
 		if (hasRefresh(version)) await w.u53(this.refresh === undefined ? 0 : this.refresh + 1);
+		if (hasCompression(version)) await w.u53(this.compress ? COMPRESSION_DEFLATE : COMPRESSION_NONE);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<TrackInfo> {
@@ -127,7 +153,14 @@ export class TrackInfo {
 		const scale = await r.u53();
 		const timescale = scale === 0 && !legacy ? undefined : Timescale(scale);
 		const refresh = hasRefresh(version) ? (await r.u53()) - 1 : undefined;
-		return new TrackInfo({ priority, maxAge, timescale, refresh: refresh === -1 ? undefined : refresh });
+		const compress = hasCompression(version) ? await decodeCompression(r) : false;
+		return new TrackInfo({
+			priority,
+			maxAge,
+			timescale,
+			refresh: refresh === -1 ? undefined : refresh,
+			compress,
+		});
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -146,6 +179,9 @@ export class TrackInfo {
 		)
 			throw new RangeError("refresh exceeds u32");
 		if (this.timescale !== undefined) Timescale(this.timescale);
+		if (this.compress && !hasCompression(version)) {
+			throw new Error("a compressed track needs lite-07");
+		}
 		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 

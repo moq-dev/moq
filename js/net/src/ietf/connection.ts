@@ -42,6 +42,12 @@ import { type IetfVersion, Version, versionName } from "./version.ts";
 // The PADDING stream type (draft-18+): bytes a peer sends to probe for bandwidth.
 const PADDING = 0x132b3e28n;
 
+// A handler owns its request stream, and ending the request (closing the session over a
+// violation) is its job: closing again here could only send a competing code.
+function handed(task: Promise<void>): Promise<void> {
+	return task.catch((err: unknown) => console.error("error processing bidi stream", err));
+}
+
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
  *
@@ -373,7 +379,7 @@ export class Connection implements Established {
 			case BigInt(SubscribeNamespace.id): {
 				const decoded = SubscribeNamespace.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "subscribe_namespace", decoded);
-				if (msg) await this.#publisher.runSubscribeNamespace(msg, stream);
+				if (msg) await handed(this.#publisher.runSubscribeNamespace(msg, stream));
 				break;
 			}
 			case BigInt(SubscribeNamespaceLegacy.id): {
@@ -403,14 +409,14 @@ export class Connection implements Established {
 				this.#spend(legacy.requestId);
 				try {
 					if (legacy.subscribeOptions === SubscribeOptions.PUBLISH) {
-						await this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream);
+						await handed(this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream));
 					} else {
 						const msg = new SubscribeNamespace({
 							requestId: legacy.requestId,
 							namespace: legacy.namespace,
 							hidden: legacy.hidden,
 						});
-						await this.#publisher.runSubscribeNamespace(msg, stream);
+						await handed(this.#publisher.runSubscribeNamespace(msg, stream));
 					}
 				} finally {
 					adapter?.releaseRequest(legacy.requestId);
@@ -426,7 +432,7 @@ export class Connection implements Established {
 			case BigInt(Subscribe.id): {
 				const decoded = Subscribe.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "subscribe", decoded);
-				if (msg) await this.#publisher.runSubscribe(msg, stream);
+				if (msg) await handed(this.#publisher.runSubscribe(msg, stream));
 				break;
 			}
 			case BigInt(SUBSCRIBE_TRACKS_ID): {
@@ -443,19 +449,19 @@ export class Connection implements Established {
 					throw malformed(err, "subscribe_tracks");
 				});
 				this.#session.spendRequest(request.requestId);
-				await this.#publisher.runSubscribeTracks(stream, request.namespace);
+				await handed(this.#publisher.runSubscribeTracks(stream, request.namespace));
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {
 				const decoded = TrackStatusRequest.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "track_status", decoded);
-				if (msg) await this.#publisher.runTrackStatusRequest(msg, stream);
+				if (msg) await handed(this.#publisher.runTrackStatusRequest(msg, stream));
 				break;
 			}
 			case BigInt(Fetch.id): {
 				const decoded = Fetch.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "fetch", decoded);
-				if (msg) await this.#publisher.runFetch(msg, stream);
+				if (msg) await handed(this.#publisher.runFetch(msg, stream));
 				break;
 			}
 
@@ -488,7 +494,7 @@ export class Connection implements Established {
 					break;
 				}
 
-				await this.#subscriber.runPublishNamespace(msg, stream);
+				await handed(this.#subscriber.runPublishNamespace(msg, stream));
 				break;
 			}
 			case BigInt(AuthMessage.id): {
@@ -500,7 +506,7 @@ export class Connection implements Established {
 			case BigInt(Publish.id): {
 				const decoded = Publish.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "publish", decoded);
-				if (msg) await this.#subscriber.runPublish(msg, stream);
+				if (msg) await handed(this.#subscriber.runPublish(msg, stream));
 				break;
 			}
 

@@ -3,7 +3,7 @@ import type * as Audio from "../audio";
 import type * as Video from "../video";
 import type { Media } from "./types";
 
-// Signals the screen capture reads.
+/** Signals the screen capture reads. */
 export type ScreenInput = {
 	// Whether to hold the capture open. Defaults to true. Enabling prompts the user to pick a surface,
 	// so construct an enabled screen source during a user gesture or start it later with a live input.
@@ -25,6 +25,7 @@ type ScreenOutput = {
 
 /** Captures a screen, window, or tab that the user picks. */
 export class Screen {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<ScreenInput>;
 
 	/** The live-editable video constraints, or false to capture audio only. */
@@ -35,6 +36,7 @@ export class Screen {
 	readonly #out: ScreenOutput = {
 		source: new Signal<Media | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();

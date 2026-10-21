@@ -137,6 +137,7 @@ impl<R: Incoming> Connection<R> {
 			request = request.with_subscriber(publisher);
 		}
 		let lease = lease.preparing(request.auth(), request.role())?;
+		let serving = lifecycle.shutdown.serve();
 		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
 		let (session, driver) = lifecycle
 			.shutdown
@@ -148,7 +149,7 @@ impl<R: Incoming> Connection<R> {
 		// Joined rather than awaited in turn, for a driver that runs only when polled. A
 		// spawned driver's panic still surfaces here, so it cannot look like cancellation.
 		let (result, driven) = futures::join!(
-			lifecycle.supervise(session, lease, registration, transport),
+			lifecycle.supervise(serving, session, lease, registration, transport),
 			R::drive(driver),
 		);
 		driven?;
@@ -328,13 +329,14 @@ impl Lifecycle {
 
 	pub(crate) async fn supervise(
 		&self,
+		serving: crate::shutdown::Serving,
 		session: moq_net::Session,
 		lease: auth::Lease,
 		registration: Option<crate::session::Registration>,
 		transport: impl std::fmt::Display,
 	) -> anyhow::Result<()> {
 		tracing::info!(version = %session.version(), %transport, "negotiated");
-		supervise(session, lease, self.shutdown.clone(), registration).await
+		supervise(session, lease, serving, registration).await
 	}
 }
 
@@ -344,26 +346,31 @@ impl Lifecycle {
 /// session the same way the relay does. Pass the [`session::Registration`](crate::session::Registration)
 /// from [`Registry::register`](crate::session::Registry::register) so a push on
 /// the internal listener re-checks this lease; `None` for a session that is
-/// not in the table.
+/// not in the table. Take `serving` with [`Observer::serve`](crate::shutdown::Observer::serve)
+/// before the SETUP reply.
 ///
 /// The lease is the decider's live word on the grant: a re-check re-authorizes the
 /// session in place, narrower or wider, and when it stops covering the session
 /// ([`auth::Lease::ended`]) the session closes with the reason. The session's own
-/// close is reported back through the lease as the `end` event. Either way, a relay
-/// shutdown drains the session with a GOAWAY instead of cutting it off, and does not
-/// exit before this returns or the drain deadline.
+/// close is reported back through the lease as the `end` event, and this returns only
+/// once the decider heard it (bounded by the auth client's request timeout). Either
+/// way, a relay shutdown drains the session with a GOAWAY instead of cutting it off,
+/// and its drain waits for this to return, past its deadline if the cleanup needs it.
 ///
 /// The session handle is `Send + Sync` whatever transport carries it, so this
 /// runs on the shared runtime even for sessions a pinned QUIC worker drives.
 pub async fn supervise(
 	session: moq_net::Session,
 	lease: auth::Lease,
-	mut shutdown: crate::shutdown::Observer,
+	serving: crate::shutdown::Serving,
 	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
 	let mut lease = lease.authorizing(&session);
-	let _serving = shutdown.serve();
-	loop {
+	let mut shutdown = serving.shutdown.clone();
+	// Held until the `end` is reported, so a drain past its deadline still waits for it.
+	let _serving = serving;
+	let reported = lease.reported();
+	let result = loop {
 		let nudged = async {
 			match &registration {
 				Some(registration) => registration.nudged().await,
@@ -373,26 +380,28 @@ pub async fn supervise(
 		tokio::select! {
 			err = session.closed() => {
 				lease.close_session(&err, session_bytes(&session));
-				return Err(err.into());
+				break Err(err.into());
 			}
 			why = lease.ended() => {
 				tracing::info!(%why, "lease ended, closing session");
 				session.abort(crate::auth::error(&why));
 				lease.close(why, session_bytes(&session));
-				return Ok(());
+				break Ok(());
 			}
 			_ = shutdown.started() => {
 				tracing::info!("relay shutting down; draining session");
 				// Empty URI: "reconnect to me" (the relay is restarting). The session's
 				// machine runs on its own, so the GOAWAY still reaches the wire while
-				// we wait here.
+				// we wait here, and the drain deadline closes it if the peer stays.
 				shutdown.drain_session(&session).await;
 				lease.close(moq_auth::lease::Reason::Shutdown, session_bytes(&session));
-				return Ok(());
+				break Ok(());
 			}
 			() = nudged => lease.revalidate(),
 		}
-	}
+	};
+	reported.await;
+	result
 }
 
 /// The transport's own totals, read once at the end so the `end` event carries

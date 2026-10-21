@@ -10,7 +10,7 @@ OBS Studio install.
 
 - **Publish**: Settings > Stream, choose "MoQ", enter the relay URL (with `?jwt=` if needed) and broadcast path, Start Streaming.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
-- **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (protocol, RTT, bandwidth, loss), and the reason while a stream reconnects.
+- **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (protocol, RTT, bandwidth, loss), and the reason while a stream connects or reconnects.
 
 Each Start Streaming publishes a fresh epoch, shown in the dock's Stats tab.
 The client's automatic reconnects keep the same epoch. A stop/start, or an OBS
@@ -23,7 +23,12 @@ The source plays Opus, AAC-LC (mono or stereo), and PCM audio. A channel count n
 
 Enter a relay URL explicitly. On the shared anonymous relay, use a unique path
 such as `https://cdn.moq.dev/anon/your-stream`. A URL with `?jwt=` fills the
-token field.
+token field. Editing the token while live presents the new one without
+reconnecting, on a session that carries in-band authorization: a
+`moq-transport` draft-17 or later version pinned under Advanced settings, with
+a relay that negotiates the MoQ Auth extension. The default protocol does not
+yet, so there the dock reports the new token as refused and it applies on the
+next Go Live.
 
 By default the dock tunes the encoder for low latency on this stream only:
 no B-frames or lookahead on the encoders that support turning them off. This

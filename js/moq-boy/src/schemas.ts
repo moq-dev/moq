@@ -22,5 +22,7 @@ export const GameStatusSchema = z.object({
 	stats: z.optional(GameStatsSchema),
 });
 
+/** Server-reported encoding and emulation performance stats. */
 export type GameStats = z.infer<typeof GameStatsSchema>;
+/** Per-frame status published by the emulator. */
 export type GameStatus = z.infer<typeof GameStatusSchema>;
