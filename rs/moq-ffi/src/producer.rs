@@ -98,13 +98,16 @@ impl Drop for BroadcastProducer {
 	}
 }
 
+/// The finished importers a broadcast keeps, or `None` once it ended.
+type Keeping = Option<Vec<Box<dyn kio::MaybeSend>>>;
+
 /// Finished importers a broadcast keeps until it ends.
 ///
 /// An importer's track unlists once its last producer drops, and a finish holds only listed
 /// tracks. An importer handle lets go of its producer when it finishes, so the broadcast keeps it
 /// here instead, and [`MoqBroadcastProducer::finish`] still holds the track.
 #[derive(Clone)]
-pub(crate) struct Finished(Arc<std::sync::Mutex<Option<Vec<Box<dyn kio::MaybeSend>>>>>);
+pub(crate) struct Finished(Arc<std::sync::Mutex<Keeping>>);
 
 impl Default for Finished {
 	fn default() -> Self {

@@ -509,6 +509,8 @@ impl MoqVideoProducer {
 	}
 
 	/// Flush any frames the codec is still holding and finalize the track.
+	///
+	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let producer = self

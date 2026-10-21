@@ -396,6 +396,9 @@ impl MoqAudioProducer {
 		self.reservation.lock().unwrap().clone()
 	}
 
+	/// Flush any pending samples and finish the track.
+	///
+	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;

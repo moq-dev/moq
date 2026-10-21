@@ -137,6 +137,7 @@ pub struct moq_audio_frame {
 pub(crate) struct AudioEncoder {
 	producer: moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>,
 	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
+	finished: crate::publish::Finished,
 }
 
 type AudioProducer = Shared<AudioEncoder>;
@@ -151,16 +152,18 @@ pub struct Audio {
 impl Audio {
 	pub fn publish(
 		&mut self,
-		broadcast: &mut moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer<moq_mux::catalog::hang::Extra>,
+		target: crate::publish::Target<'_>,
 		input: moq_audio::encode::Input,
 		options: moq_audio::encode::Options,
 		reserve: bool,
 	) -> Result<Id, Error> {
-		let producer = moq_audio::encode::Producer::new(broadcast, catalog, input, &options)?;
+		let producer = moq_audio::encode::Producer::new(target.producer, target.catalog.clone(), input, &options)?;
 		let reservation = reserve.then(|| Arc::new(options.bandwidth.reserve(&producer.demand(), producer.bitrate())));
-		self.producers
-			.insert(Shared::new(AudioEncoder { producer, reservation }))
+		self.producers.insert(Shared::new(AudioEncoder {
+			producer,
+			reservation,
+			finished: target.finished.clone(),
+		}))
 	}
 
 	pub(crate) fn reservation(&self, id: Id) -> Result<Option<Arc<moq_net::bandwidth::Reservation>>, Error> {
@@ -345,15 +348,7 @@ pub unsafe extern "C" fn moq_encode_audio(
 			options.bandwidth = state.bandwidth.allocator(id)?;
 		}
 		let State { publish, audio, .. } = &mut *state;
-		let (broadcast_producer, catalog) = publish.pair_mut(broadcast)?;
-
-		audio.publish(
-			broadcast_producer,
-			catalog.clone(),
-			encoder_input,
-			options,
-			bandwidth.is_some(),
-		)
+		audio.publish(publish.target(broadcast)?, encoder_input, options, bandwidth.is_some())
 	})
 }
 
@@ -434,6 +429,9 @@ pub unsafe extern "C" fn moq_encode_audio_frame(producer: u32, frame: *const moq
 }
 
 /// Flush any pending samples and finalize an audio producer.
+///
+/// The broadcast keeps the finished track, catalog rendition included, until it closes or its
+/// [moq_publish_finish] linger ends, so a late subscriber can still drain it.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 	ffi::enter(move || {
@@ -441,8 +439,12 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 		// The id is dropped first, so nothing new queues behind the flush; whatever
 		// is mid-encode still finishes before this takes the producer.
 		let producer = State::lock().audio.remove(producer)?;
-		let mut producer = producer.take().ok_or(Error::MediaNotFound)?.producer;
+		let AudioEncoder {
+			mut producer, finished, ..
+		} = producer.take().ok_or(Error::MediaNotFound)?;
 		producer.finish()?;
+		// The broadcast keeps the finished track, so its finish still holds it.
+		finished.keep(producer);
 		Ok(())
 	})
 }
