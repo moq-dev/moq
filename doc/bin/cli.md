@@ -347,13 +347,9 @@ Other versions carry no epoch, so a restart from another session is the newest
 route at an equal cost, or a better one.
 
 Each independent importer publishes its own epoch, even when two importers read
-one stream and publish one path. On a version that carries epochs, the newest
-importer wins new requests. If it leaves, a still-live older importer wins again
-as a restart. Players following announcements and `moq export ts --stitch`
-follow those restarts; other consumers end. `--stitch` also switches as soon as a newer
-importer starts, even while the current importer remains healthy. Each switch
-marks a program discontinuity, so redundant ingest does not promise hitless
-output.
+one stream and publish one path. See [Redundant ingest](/setup/redundancy) for
+same-path switching, subscriber-controlled selection on separate paths, and
+several routes to one publisher.
 
 An importer announces once its catalog names a servable track. Input that ends
 before then, such as an empty input or a header that configures no track,
