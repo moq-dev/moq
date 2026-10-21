@@ -76,7 +76,7 @@ pub enum Read {
 	End {
 		/// The group's sequence number. Only equality means anything: numbers may skip.
 		group: u64,
-		/// The declared media endpoint in the track's timescale.
+		/// Where the media stops, at the scale the marker was encoded with.
 		end: moq_net::Timestamp,
 	},
 }
