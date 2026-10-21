@@ -14875,7 +14875,7 @@ mod tests {
 		let mut ok = bytes::Bytes::from(publish_namespace_ok(version).await);
 		held.writer.write_all(&mut ok).await.unwrap();
 
-		let (_again, name) = offered().await;
+		let (mut again, name) = offered().await;
 		assert_eq!(
 			name, first,
 			"{version} fin={fin}: the failed namespace was not offered again"
@@ -14885,6 +14885,9 @@ mod tests {
 			"{version} fin={fin}: re-offered after {:?}",
 			ended.elapsed()
 		);
+		// Answered, so the loop moves on now rather than withdrawing it at its deadline.
+		let mut ok = bytes::Bytes::from(publish_namespace_ok(version).await);
+		again.writer.write_all(&mut ok).await.unwrap();
 
 		cams.remove(second);
 		match version {
