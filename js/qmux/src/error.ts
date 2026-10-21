@@ -10,7 +10,9 @@
  *  socket error, decode failure, ...).
  */
 export class SessionError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {
+	/** Always `"session"`, marking a session-level failure. */
 	readonly source = "session" as const;
+	/** Always `null`, since no stream was reset. */
 	readonly streamErrorCode = null;
 
 	constructor(message: string, options?: { cause?: unknown }) {
@@ -28,7 +30,9 @@ export class SessionError extends Error implements Pick<WebTransportError, "sour
  *  than being formatted into the message and lost.
  */
 export class StreamError extends Error implements Pick<WebTransportError, "source" | "streamErrorCode"> {
+	/** Always `"stream"`, marking a stream reset. */
 	readonly source = "stream" as const;
+	/** The application error code the reset carries. */
 	readonly streamErrorCode: number;
 
 	constructor(code: number, message = "stream reset") {
