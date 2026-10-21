@@ -77,6 +77,40 @@ test("only the public surface needs docs", () => {
 	expect(found).toEqual([]);
 });
 
+test("custom element reactions are exempt only on an element", () => {
+	const found = check({
+		"/dist/index.d.ts": [
+			"/** Documented. */",
+			"export declare class Hooks {",
+			"    connectedCallback(): void;",
+			"}",
+		].join("\n"),
+	});
+	expect(found).toEqual(["index.d.ts: Hooks.connectedCallback"]);
+});
+
+test("a namespace merged with a class has its members checked", () => {
+	const found = check({
+		"/dist/index.d.ts": [
+			"/** Documented. */",
+			"export declare class Producer {}",
+			"export declare namespace Producer {",
+			"    /** Documented. */",
+			"    type Config = number;",
+			"    type Bare = string;",
+			"    class Inner {",
+			"        run(): void;",
+			"    }",
+			"}",
+		].join("\n"),
+	});
+	expect(found).toEqual([
+		"index.d.ts: Producer.Bare",
+		"index.d.ts: Producer.Inner",
+		"index.d.ts: Producer.Inner.run",
+	]);
+});
+
 test("one documented overload or accessor covers the name", () => {
 	const found = check({
 		"/dist/index.d.ts": [

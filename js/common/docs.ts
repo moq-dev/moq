@@ -17,9 +17,12 @@ type Binding =
 	| { kind: "import"; specifier: string; name: string }
 	| { kind: "namespace"; specifier: string };
 
+// A name's declarations, each with the statement that carries its comments.
+type Declarations = Array<{ statement: Node; declaration: Node }>;
+
 type Module = {
-	// Top-level declarations by name, each with the statement that carries its comments.
-	locals: Map<string, Array<{ statement: Node; declaration: Node }>>;
+	// Top-level declarations by name.
+	locals: Map<string, Declarations>;
 	imports: Map<string, Binding>;
 	exports: Map<string, Binding>;
 	stars: string[];
@@ -57,21 +60,39 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 
 		const declarations = load(resolved.file).locals.get(resolved.name);
 		if (!declarations) throw new Error(`${relative(root, resolved.file)}: cannot find ${resolved.name}`);
-		const where = relative(root, resolved.file);
+		check(relative(root, resolved.file), path, declarations);
+	};
+
+	// Check one name's declarations, the public members of a class, and everything a namespace
+	// declares, since an ambient namespace exports all of it.
+	const check = (where: string, path: string, declarations: Declarations) => {
 		if (!declarations.some(({ statement }) => documented(statement))) found.push(`${where}: ${path}`);
 
 		const members = new Map<string, boolean>();
+		const nested = new Map<string, Declarations>();
 		for (const { declaration } of declarations) {
-			if (declaration.type !== "ClassDeclaration") continue;
-			for (const member of declaration.body.body) {
-				const name = memberName(member);
-				if (name === undefined) continue;
-				members.set(name, (members.get(name) ?? false) || documented(member));
+			if (declaration.type === "ClassDeclaration") {
+				const element = isElement(declaration.superClass);
+				for (const member of declaration.body.body) {
+					const name = memberName(member, element);
+					if (name === undefined) continue;
+					members.set(name, (members.get(name) ?? false) || documented(member));
+				}
+			} else if (declaration.type === "TSModuleDeclaration" && declaration.body.type === "TSModuleBlock") {
+				for (const statement of declaration.body.body) {
+					const inner = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
+					for (const name of declared(inner)) {
+						const list = nested.get(name) ?? [];
+						list.push({ statement, declaration: inner as Node });
+						nested.set(name, list);
+					}
+				}
 			}
 		}
 		for (const [name, ok] of members) {
 			if (!ok) found.push(`${where}: ${path}.${name}`);
 		}
+		for (const [name, list] of nested) check(where, `${path}.${name}`, list);
 	};
 
 	// Follow a binding to the file and local name that declares it; undefined for another package.
@@ -197,7 +218,7 @@ function documented(node: { leadingComments?: Comment[] | null }): boolean {
 	return (node.leadingComments ?? []).some((c) => c.type === "CommentBlock" && /^\*[\s*]*[^\s*/]/.test(c.value));
 }
 
-// Custom element reactions: the browser calls them, and the HTML spec documents them.
+// Custom element reactions: on an element, the browser calls them and the HTML spec documents them.
 const REACTIONS = new Set([
 	"observedAttributes",
 	"connectedCallback",
@@ -207,10 +228,17 @@ const REACTIONS = new Set([
 	"attributeChangedCallback",
 ]);
 
+// Whether a class extends an element class such as `HTMLElement`, by its name.
+function isElement(superClass: unknown): boolean {
+	const node = superClass as { type: string; name?: string; property?: { name?: string } } | null | undefined;
+	const name = node?.type === "MemberExpression" ? node.property?.name : node?.name;
+	return name !== undefined && /Element$/.test(name);
+}
+
 // The name of a class member a consumer can use, or undefined for one that needs no doc:
-// constructors, private and protected members, `#private`, custom element reactions, and
-// symbol-keyed members such as brands.
-function memberName(member: Node | { type: string; [key: string]: unknown }): string | undefined {
+// constructors, private and protected members, `#private`, an element's custom element
+// reactions, and symbol-keyed members such as brands.
+function memberName(member: Node | { type: string; [key: string]: unknown }, element: boolean): string | undefined {
 	const m = member as {
 		type: string;
 		kind?: string;
@@ -226,7 +254,7 @@ function memberName(member: Node | { type: string; [key: string]: unknown }): st
 	let name: string | undefined;
 	if (m.key.type === "Identifier") name = m.key.name;
 	else if (m.key.type === "StringLiteral" || m.key.type === "NumericLiteral") name = String(m.key.value);
-	return name === undefined || REACTIONS.has(name) ? undefined : name;
+	return name === undefined || (element && REACTIONS.has(name)) ? undefined : name;
 }
 
 // The declaration file a relative specifier resolves to, as a file or a directory index. A package
