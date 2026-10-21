@@ -14,8 +14,11 @@ import { SubscribeNamespaceError } from "./subscribe_namespace.ts";
 import { TRACK_STATUS_ERROR_14 } from "./track.ts";
 import { type IetfVersion, Version, versionName } from "./version.ts";
 
-/** A request stream the peer wrote `bytes` on, recording how the session was closed. */
-function requested(version: IetfVersion, bytes: Uint8Array, fin = false) {
+/**
+ * A request stream the peer wrote `bytes` on, then optionally ended once they were read,
+ * recording how the session was closed.
+ */
+function requested(version: IetfVersion, bytes: Uint8Array, end?: "fin" | "reset") {
 	const closes: (WebTransportCloseInfo | undefined)[] = [];
 	const quic = { close: (info?: WebTransportCloseInfo) => closes.push(info) } as unknown as WebTransport;
 	const session = { version, client: true, close: () => closes.push(undefined) } as unknown as Session;
@@ -23,7 +26,13 @@ function requested(version: IetfVersion, bytes: Uint8Array, fin = false) {
 		readable: new ReadableStream<Uint8Array>({
 			start(c) {
 				c.enqueue(bytes);
-				if (fin) c.close();
+			},
+			// Pulled once the bytes are read, whether or not anyone reads further.
+			pull(c) {
+				if (end === "fin") c.close();
+				// Shaped like the WebTransportError a peer's RESET_STREAM fails the read with.
+				if (end === "reset")
+					c.error(Object.assign(new Error("reset"), { source: "stream", streamErrorCode: null }));
 			},
 		}),
 		writable: new WritableStream<Uint8Array>(),
@@ -42,7 +51,7 @@ test("an oversized or truncated request stream message type is a protocol violat
 		// A two-byte varint prefix with its second byte missing.
 		const truncated = Uint8Array.of(0x80);
 		for (const bytes of [oversized, truncated]) {
-			const { request, closes } = requested(version, bytes, true);
+			const { request, closes } = requested(version, bytes, "fin");
 			await expect(request.next()).rejects.toBeInstanceOf(ProtocolViolation);
 			expect(closes[0]?.closeCode).toBe(SessionCode.ProtocolViolation);
 		}
@@ -84,7 +93,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
 
 	test(`${versionName(version)} a request stream's messages are taken whole, around a GOAWAY`, async () => {
 		// An empty REQUEST_OK, then FIN.
-		const { request, closes } = requested(version, Uint8Array.of(...GOAWAY, 7, 0, 0), true);
+		const { request, closes } = requested(version, Uint8Array.of(...GOAWAY, 7, 0, 0), "fin");
 		const framed = await request.next();
 		expect(framed?.type).toBe(7);
 		expect(await framed?.reader.u16()).toBe(0);
@@ -93,6 +102,17 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
 		const ended = await Promise.race([request.ended.then(() => true), Bun.sleep(10).then(() => false)]);
 		expect(ended).toBe(version === Version.DRAFT_18);
 		expect(closes).toEqual([]);
+	});
+
+	test(`${versionName(version)} a request ends behind a message nobody took`, async () => {
+		// FIN cancels only a draft-18 request; a reset cancels on every draft.
+		const ends = version === Version.DRAFT_18 ? (["fin", "reset"] as const) : (["reset"] as const);
+		for (const end of ends) {
+			// An empty REQUEST_UPDATE, then the peer's end.
+			const { request, closes } = requested(version, Uint8Array.of(2, 0, 0), end);
+			await request.ended;
+			expect(closes).toEqual([]);
+		}
 	});
 }
 

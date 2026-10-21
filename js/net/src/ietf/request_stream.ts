@@ -274,10 +274,18 @@ export class RequestStream {
 	// Start reading on the first wait.
 	#read(): Promise<Framed | undefined> {
 		if (this.#ahead === undefined) {
+			const version = this.#session.version;
 			this.#ahead = this.#readAhead();
+			// The read ahead stops at an untaken message, so watch for the peer's end apart from it.
+			this.#stream.reader.closed.then(
+				() => {
+					if (finCancels(version)) this.#end();
+				},
+				() => this.#end(),
+			);
 			// Drafts 14-16 adapt the request onto the control stream, whose virtual writer
 			// finishes while the request lives.
-			if (this.#session.version > Version.DRAFT_16)
+			if (version > Version.DRAFT_16)
 				this.writer.closed.then(
 					() => this.#end(),
 					() => this.#end(),
