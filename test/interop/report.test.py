@@ -78,6 +78,12 @@ class ReportTest(unittest.TestCase):
         self.assertIn('<tr><td>Portrait transcode</td><td class="fail">fail</td></tr>', page)
         self.assertIn('<tr><td>Released wire compatibility</td><td class="skip">skip</td></tr>', page)
 
+    def test_a_run_where_nothing_ran_is_not_green(self):
+        skipped = report.steps('{"Rust cache": "failure", "Interop (full matrix)": "skipped"}')
+        self.assertFalse(report.passed([], skipped))
+        self.assertFalse(report.passed([], report.steps('{"Interop (full matrix)": "skipped"}')))
+        self.assertFalse(report.passed([], {}))
+
     def test_without_results_the_steps_still_render(self):
         records = report.load(self.results)
         self.assertEqual(records, [])

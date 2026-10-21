@@ -66,6 +66,7 @@ jobs:
       # The relay, cli, moq-ffi, and moq-c all build from source. The nightly
       # run publishes them for the pull requests that touch the harness.
       - name: Rust cache
+        id: rust-cache
         uses: ./.github/actions/rust-cache
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
@@ -196,9 +197,11 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
           ARTIFACT_URL: ${{ steps.failure-artifact.outputs.artifact-url }}
           COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
-          # The suite inventory, in run order, named as the steps above.
+          # The suite inventory and its prerequisites, in run order, named as the steps
+          # above. Checkout and Nix need no entry: without them this step cannot run.
           STEPS: >-
             {
+            "Rust cache": "${{ steps.rust-cache.outcome }}",
             "Playwright Chromium": "${{ steps.setup.outcome }}",
             "Optional publisher retention": "${{ steps.max-age.outcome }}",
             "Harness regressions": "${{ steps.harness.outcome }}",

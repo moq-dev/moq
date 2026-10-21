@@ -63,8 +63,9 @@ def steps(text):
 
 
 def passed(records, suites):
-    return (all(record['outcome'] in ('pass', 'skip') for record in records)
-            and all(outcome != 'fail' for outcome in suites.values()))
+    """Nothing failed or went unreached, and something passed: a run where every step was skipped is not green."""
+    outcomes = [record['outcome'] for record in records] + list(suites.values())
+    return 'pass' in outcomes and all(outcome in ('pass', 'skip') for outcome in outcomes)
 
 
 def label(outcome, seconds=None):
