@@ -35,6 +35,7 @@ pub enum Error {
 	ReservedSampleRate,
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Typed MP3 configuration parsed from an MPEG audio frame header.

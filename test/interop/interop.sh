@@ -1099,12 +1099,20 @@ PYCODE
 
 # One media.ts invocation. It reports its own verdict (a negative control passes by failing on the
 # assertion it names), so the exit code is the whole answer.
+MEDIA_RUNS=0
 run_media() {
-    local name="$1" log started status=0
+    local name="$1" log started status=0 sink=()
     shift
     log="$HARNESS_RUN/media-${name//[^[:alnum:]._-]/-}.log"
     started=$SECONDS
-    (cd "$CLIENTS/js" && bun media.ts --url "$MEDIA_URL" --timeout "$TIMEOUT" "$@") >"$log" 2>&1 || status=$?
+    MEDIA_RUNS=$((MEDIA_RUNS + 1))
+    # Firefox only resumes an AudioContext on an output device, and a Linux CI runner has none. A
+    # private null sink gives it one, and keeps a local run off the desktop's speakers. macOS always
+    # has CoreAudio's output, and the dev shell has no PulseAudio there.
+    [[ "$(uname -s)" != Linux ]] ||
+        sink=(python3 "$WORKSPACE/test/lib/pulse.py" --dir "$HARNESS_RUN/pulse-$MEDIA_RUNS" --)
+    (cd "$CLIENTS/js" && "${sink[@]}" bun media.ts --url "$MEDIA_URL" --timeout "$TIMEOUT" "$@") >"$log" 2>&1 ||
+        status=$?
     if [[ "$status" -eq 0 ]]; then
         echo "  PASS  $name ($((SECONDS - started))s)"
         # The measurements are the point even when nothing fails: a skew or frame rate creeping

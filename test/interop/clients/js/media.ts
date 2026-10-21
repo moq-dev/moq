@@ -443,12 +443,16 @@ const browsers: Browser[] = [];
 
 // One browser per role. Chromium's default autoplay behavior varies with engagement and when the
 // graph is built, so require a gesture in this QA run. Pages in one browser share a renderer
-// scheduler, and the one that is not frontmost is throttled and reported hidden.
+// scheduler, and the one that is not frontmost is throttled and reported hidden. Chromium plays to
+// its fake output clock: on the private null sink interop.sh provides for Firefox, Chromium's graph
+// barely advances.
 async function browserFor(role: Role, args: string[] = []): Promise<Browser> {
 	const engine = role === "publisher" ? "chromium" : playerEngine;
 	console.error(`=== launching ${engine} ${role} ===`);
 	const browser = await launch(
-		engine === "chromium" ? ["--autoplay-policy=document-user-activation-required", ...args] : [],
+		engine === "chromium"
+			? ["--autoplay-policy=document-user-activation-required", "--disable-audio-output", ...args]
+			: [],
 		engine,
 	);
 	browsers.push(browser);
@@ -628,9 +632,10 @@ try {
 		description: "the player audio graph to exist before a gesture",
 		predicate: (state) => state.audioContext !== undefined,
 	});
+	// WebKit reports a context it has not started as "interrupted", outside the standard states.
 	check(
 		!beforePlayerGesture.userActivated &&
-			beforePlayerGesture.audioContext === "suspended" &&
+			(beforePlayerGesture.audioContext === "suspended" || beforePlayerGesture.audioContext === "interrupted") &&
 			beforePlayerGesture.toneStep === undefined,
 		"player gesture gate",
 		() => `player audio ran without a gesture: ${JSON.stringify(beforePlayerGesture)}`,

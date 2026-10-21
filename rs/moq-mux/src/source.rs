@@ -393,7 +393,7 @@ pub(crate) async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> 
 #[cfg(test)]
 pub(crate) async fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
 	let origin = produce_origin();
-	let dynamic = origin.dynamic("", Default::default()).unwrap();
+	let dynamic = origin.dynamic_route("", Default::default()).unwrap();
 	let served = broadcast.clone();
 	tokio::spawn(async move {
 		while let Ok(request) = dynamic.requested_broadcast().await {
@@ -425,7 +425,7 @@ mod tests {
 		let _catalog = origin.publish("pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "pub").await;
-		let dynamic = origin.dynamic("media", Default::default()).unwrap();
+		let dynamic = origin.dynamic_route("media", Default::default()).unwrap();
 		let binding = source.bind(Some(&Relative::new("media")), None).unwrap();
 		let request = dynamic.requested_broadcast().await.unwrap();
 

@@ -9033,7 +9033,7 @@ async fn a_follower_takes_its_own_instance_winning_back_for_no_replacement() {
 	info.epoch = Some(epoch.clone());
 	let mut served = info.produce();
 	let mut catalog = crate::catalog::Producer::<()>::new(&mut served, Default::default()).unwrap();
-	let pool = origin.dynamic("pool", route(epoch)).unwrap();
+	let pool = origin.dynamic_route("pool", route(epoch)).unwrap();
 	let consumer = served.consume();
 	tokio::spawn(async move {
 		while let Ok(request) = pool.requested_broadcast().await {
@@ -9179,7 +9179,7 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 	let mut served = info.produce();
 	let mut catalog = crate::catalog::Producer::<()>::new(&mut served, Default::default()).unwrap();
 	let mut track = aac_rendition(&mut served, &mut catalog, "a.aac");
-	let pool = origin.dynamic("pool", route).unwrap();
+	let pool = origin.dynamic_route("pool", route).unwrap();
 	let consumer = served.consume();
 	tokio::spawn(async move {
 		while let Ok(request) = pool.requested_broadcast().await {
@@ -9225,10 +9225,10 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	let mut follower = super::Follower::new(open_export(source).await.unwrap()).unwrap();
 	let quiet = Duration::from_secs(1);
 
-	let pool = origin.dynamic("pool", route(moq_net::Epoch::mint())).unwrap();
+	let pool = origin.dynamic_route("pool", route(moq_net::Epoch::mint())).unwrap();
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "a start");
 	drop(pool);
-	let pool = origin.dynamic("pool", route(moq_net::Epoch::mint())).unwrap();
+	let pool = origin.dynamic_route("pool", route(moq_net::Epoch::mint())).unwrap();
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "a restart");
 	drop(pool);
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "an end");

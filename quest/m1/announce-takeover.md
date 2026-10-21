@@ -88,11 +88,11 @@ ANNOUNCE_TAKEOVER; published versions retain their framing.
 
 ## Required
 
-- [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - `Request::prepare` then `publish` answers a claim at the exact path under a fresh epoch, the operation TAKEOVER continues
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - shared routing layer and per-stream identity
 
 ## Related
 
+- [Claim answer epochs](https://github.com/moq-dev/moq/pull/5678) - `Request::prepare` then `publish` answers a claim at the exact path under a fresh epoch, the operation TAKEOVER continues
 - [IETF takeover](/quest/m1/ietf-takeover.md) - negotiated IETF counterpart
 - [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - a proven continuation keeps a followed reference on its instance
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - replacements never substitute content into held handles

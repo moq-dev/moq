@@ -73,8 +73,8 @@ while let Some(event) = announced.next().await {
 let mut broadcast = origin.publish("my-stream.hang", Default::default())?;
 // moq-mux (from a container) or moq-video / moq-audio (from a device) fill it.
 // The route retracts on `unannounce()` or when the broadcast ends. To serve a whole
-// subtree on demand instead, `origin.dynamic("room", Default::default())?` yields
-// each requested path for the application to accept or reject.
+// subtree on demand instead, `origin.dynamic("room")?` yields each requested path:
+// `prepare(Epoch::mint())`, fill its broadcast, then `publish()`, or reject it.
 ```
 
 The connection and origin helpers spawn their drivers. Watch

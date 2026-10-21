@@ -18,6 +18,7 @@ type CacheableSupported = Supported & {
 /** A video source error that prevents choosing a usable rendition. */
 export type SourceError = "unsupported";
 
+/** What the viewer wants from the video rendition; the source picks the best one within it. */
 export type Target = {
 	// Optional manual override for the selected rendition name.
 	name?: string;
@@ -35,6 +36,7 @@ export type Target = {
 	bitrate?: number;
 };
 
+/** Signals the source reads. */
 export type SourceInput = {
 	broadcast: Getter<Broadcast | undefined>;
 	target: Getter<Target | undefined>;
@@ -202,6 +204,7 @@ function preferredRenditions(renditions: Record<string, Catalog.VideoConfig>): R
  * for video playback. The Decoder consumes whichever rendition it picks.
  */
 export class Source {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<SourceInput>;
 
 	readonly #out: SourceOutput = {
@@ -211,6 +214,7 @@ export class Source {
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.VideoConfig | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
@@ -385,6 +389,7 @@ export class Source {
 		return undefined;
 	}
 
+	/** Stop and release everything this holds. */
 	close(): void {
 		this.#signals.close();
 	}

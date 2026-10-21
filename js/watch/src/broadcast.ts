@@ -66,19 +66,24 @@ function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | unde
 	};
 }
 
-// Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
-// DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
-// catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
-// and is never auto-detected, so set it explicitly via `catalogFormat`.
+/**
+ * Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
+ * DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
+ * catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
+ * and is never auto-detected, so set it explicitly via `catalogFormat`.
+ */
 export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
+/** A catalog format the watcher can read; see {@link CATALOG_FORMATS}. */
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
 // "error" means the origin refused the broadcast; `out.error` says why.
 // "unsupported" means its catalog requires a newer player.
 type Status = "offline" | "loading" | "live" | "error" | "unsupported";
 
-// Signals the component reads. Whoever owns the backing Signal (the caller, or
-// another component whose output is wired in) does the writing.
+/**
+ * Signals the component reads. Whoever owns the backing Signal (the caller, or
+ * another component whose output is wired in) does the writing.
+ */
 export type BroadcastInput = {
 	// The origin to consume from. Independent of any connection: whichever sessions feed
 	// the origin resolve the broadcast, and the handle spans their reconnects.
@@ -120,8 +125,9 @@ type BroadcastOutput = {
 	catalog: Signal<Catalog.Root | undefined>;
 };
 
-// A catalog source that can wait for announcement before subscribing.
+/** A catalog source that can wait for announcement before subscribing. */
 export class Broadcast {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<BroadcastInput>;
 
 	readonly #out: BroadcastOutput = {
@@ -130,6 +136,7 @@ export class Broadcast {
 		error: new Signal<Error | undefined>(undefined),
 		catalog: new Signal<Catalog.Root | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// One announcement watch per referenced broadcast, shared by callers, so the origin only asks
@@ -445,6 +452,7 @@ export class Broadcast {
 		return this.#requestBroadcast(effect, origin, target.path);
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
 		for (const entry of this.#references.values()) entry.request.close();
