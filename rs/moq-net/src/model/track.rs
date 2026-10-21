@@ -158,11 +158,12 @@ pub struct Info {
 	///
 	/// On moq-transport, `Some` is advertised as DYNAMIC_GROUPS, which arrives as `Some(0)`.
 	pub refresh: Option<u32>,
-	/// The moq-transport Track Properties moq-net does not interpret, learned from an
-	/// upstream moq-transport session and forwarded unchanged. `None` when there are none.
+	/// The draft a moq-transport publisher spoke and the Track Properties moq-net does not
+	/// interpret, forwarded unchanged. `None` for a track published over moq-lite, which
+	/// therefore carries no moq-transport state.
 	///
-	/// Relay-only: moq-lite does not carry them. Shared, since every group holds a copy
-	/// of the info.
+	/// Relay-only: moq-lite carries them only between relays, with the `ietf` extension.
+	/// Shared, since every group holds a copy of the info.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
@@ -214,6 +215,12 @@ impl Info {
 	pub fn with_refresh(mut self, refresh: impl Into<Option<u32>>) -> Self {
 		self.refresh = refresh.into();
 		self
+	}
+
+	/// The draft the track's moq-transport publisher spoke, `None` for a moq-lite one.
+	// private: passthrough
+	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
+		self.properties.as_ref().map(|properties| properties.version)
 	}
 }
 
@@ -8531,8 +8538,9 @@ mod test {
 		.unwrap();
 
 		// Subscriber decodes the body and writes it downstream, preserving the sequence.
-		let wire = lite::Datagram::decode(body, version, false, |_| lite::Format {
+		let wire = lite::Datagram::decode(body, version, false, |_| lite::Framing {
 			timescale: Some(crate::Timescale::MICRO),
+			ietf: None,
 			compressed: false,
 		})
 		.unwrap();

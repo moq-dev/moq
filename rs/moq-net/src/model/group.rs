@@ -2754,6 +2754,14 @@ impl Consumer {
 		self.track.timescale
 	}
 
+	/// The draft the parent track's moq-transport publisher spoke, which serialized every
+	/// object's properties, or `None` for a moq-lite one.
+	#[cfg(feature = "async")]
+	// private: passthrough
+	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
+		self.track.ietf()
+	}
+
 	/// The index of the next frame this consumer will return.
 	///
 	/// Starts at 0, or at the group's first available frame once [`Self::set_frames`] has
