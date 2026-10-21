@@ -28,9 +28,13 @@ the reverse (decided 2026-10-20, maintainer):
   that hold the concrete type. A trait read can't carry it without
   breaking the exact mirror.
 - `track::Info.compress` is logical. Ciphertext doesn't compress, so the
-  wrapper compresses each group with moq-net's
+  wrapper compresses each group, and each datagram alone with a fresh
+  window, with moq-net's
   [track compression](/quest/m1/compress/README.md) before AEAD, creates the
-  physical track uncompressed, and inflates after decryption. This keeps
+  physical track uncompressed, and inflates after decryption. Sessions drop
+  a sealed datagram past the transport's datagram size as they drop an
+  oversized plaintext one, so document that the AEAD tag and any compression
+  growth count against the caller's payload budget. This keeps
   [rust-publish](/quest/m2/e2ee/rust-publish.md)'s rule that protected
   catalogs compress before encryption, and needs moq-net to expose its group
   codec to the wrapper. `@moq/e2ee` does the same in
