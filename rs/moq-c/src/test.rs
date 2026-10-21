@@ -2297,7 +2297,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 		ranges_len: 0,
 		order: 0,
 	};
-	let consumer = id(unsafe {
+	id(unsafe {
 		moq_consume_track(
 			consume,
 			name.as_ptr() as *const c_char,
@@ -2319,8 +2319,8 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload);
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
-	assert_eq!(moq_consume_track_cancel(consumer), 0);
-	frame_cb.recv_terminal();
+	// The track finished, so the subscription ends cleanly on its own, racing any cancel.
+	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 
 	assert_eq!(moq_publish_finish_close(finish), 0);

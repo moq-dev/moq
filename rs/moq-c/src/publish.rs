@@ -301,11 +301,12 @@ impl Publish {
 	/// finished tracks the handle holds.
 	pub fn finish(&mut self, broadcast: Id) -> Result<(Id, std::time::Duration), Error> {
 		let mut broadcast = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
-		if let Err(err) = broadcast.catalog.finish() {
+		// On failure the handle is gone, so close the broadcast rather than leave a dynamic holding it.
+		let ready = broadcast.catalog.finish().map_err(Error::from);
+		if let Err(err) = ready.and_then(|()| broadcast.driver.check()) {
 			broadcast.producer.close();
-			return Err(err.into());
+			return Err(err);
 		}
-		broadcast.driver.check()?;
 		// Released only once the finish holds their tracks.
 		let finished = broadcast.finished.release();
 		let finish = broadcast.producer.clone().finish();
@@ -1070,5 +1071,24 @@ mod supervision_tests {
 		drop(completion);
 		assert!(matches!(publish.container_cut(container), Err(Error::Panic)));
 		assert!(matches!(publish.container_finish(container), Err(Error::Panic)));
+	}
+
+	#[tokio::test]
+	async fn a_finish_after_a_driver_panic_closes_the_broadcast() {
+		let (origin, completion, trigger) = crate::ffi::panicking_origin();
+		let mut publish = Publish::default();
+		let broadcast = publish
+			.create((origin.create_broadcast("retained").unwrap(), completion.clone()))
+			.unwrap();
+		let producer = &publish.broadcast(broadcast).unwrap().producer;
+		// A dynamic handle outlives the consumed broadcast, so only an explicit close ends it.
+		let _dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(completion.finished().await, Err(Error::Panic)));
+		assert!(matches!(publish.finish(broadcast), Err(Error::Panic)));
+		assert!(consumer.is_closed());
 	}
 }

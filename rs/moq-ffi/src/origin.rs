@@ -682,6 +682,25 @@ mod supervision_tests {
 	}
 
 	#[tokio::test]
+	async fn a_finish_after_a_driver_panic_closes_the_broadcast() {
+		let (inner, completion, trigger) = crate::ffi::panicking_origin();
+		let origin = MoqOriginProducer::from_inner(Origin {
+			inner,
+			driver: completion.clone(),
+		});
+		let broadcast = origin.create_broadcast("retained".into()).unwrap();
+		// A dynamic handle outlives the consumed producer, so only an explicit close ends it.
+		let _dynamic = broadcast.dynamic().unwrap();
+		let consumer = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.consume();
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
+		assert!(matches!(broadcast.finish(), Err(MoqError::Task { .. })));
+		assert!(consumer.is_closed());
+	}
+
+	#[tokio::test]
 	async fn container_importers_keep_the_origin_failure_after_other_owners_are_released() {
 		use crate::media::{MoqContainerFormat, MoqContainerInit, MoqMediaContainerProducer, MoqMediaTimebase};
 		let (inner, completion, trigger) = crate::ffi::panicking_origin();

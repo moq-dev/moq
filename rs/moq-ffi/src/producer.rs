@@ -314,7 +314,7 @@ impl MoqBroadcastProducer {
 			let producer = broadcast.create_track(name, Some(info))?;
 			Ok(Arc::new(MoqTrackProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
-				finished: state.finished.clone(),
+				finished: std::sync::Mutex::new(Some(state.finished.clone())),
 			}))
 		})
 	}
@@ -348,12 +348,13 @@ impl MoqBroadcastProducer {
 	pub fn finish(&self) -> Result<Arc<MoqBroadcastFinish>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut state = self.state.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		// Finished before the broadcast is, so the catalog lingers with the media.
-		if let Err(err) = state.catalog.finish() {
+		// Finished before the broadcast is, so the catalog lingers with the media. On failure the
+		// producer is gone, so close the broadcast rather than leave a dynamic handle holding it.
+		let ready = state.catalog.finish().map_err(MoqError::from);
+		if let Err(err) = ready.and_then(|()| state.driver.check()) {
 			state.broadcast.close();
-			return Err(err.into());
+			return Err(err);
 		}
-		state.driver.check()?;
 		let broadcast = state.broadcast.clone();
 		// Released only once the finish holds their tracks.
 		let finished = state.finished.release();
@@ -599,7 +600,7 @@ impl MoqTrackRequest {
 		let request = self.take()?;
 		Ok(Arc::new(MoqTrackProducer {
 			inner: std::sync::Mutex::new(Some(request.accept(Some(info)))),
-			finished: self.finished.clone(),
+			finished: std::sync::Mutex::new(Some(self.finished.clone())),
 		}))
 	}
 
@@ -617,7 +618,8 @@ impl MoqTrackRequest {
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<moq_net::track::Producer>>,
-	finished: Finished,
+	// Taken by the first finish, so repeating it keeps the track only once.
+	finished: std::sync::Mutex<Option<Finished>>,
 }
 
 impl MoqTrackProducer {
@@ -749,7 +751,9 @@ impl MoqTrackProducer {
 		if track.end().is_none() {
 			track.finish()?;
 		}
-		self.finished.keep(track.clone());
+		if let Some(finished) = self.finished.lock().unwrap().take() {
+			finished.keep(track.clone());
+		}
 		Ok(())
 	}
 
@@ -851,6 +855,17 @@ mod metadata_tests {
 			consumer.poll_read_frame(&moq_net::kio::Waiter::noop()),
 			std::task::Poll::Ready(Err(moq_net::Error::Dropped))
 		));
+	}
+
+	#[test]
+	fn repeated_finishes_keep_the_track_once() {
+		let broadcast = MoqBroadcastProducer::new().unwrap();
+		let track = broadcast.publish_track("data".into(), None).unwrap();
+		for _ in 0..3 {
+			track.finish().unwrap();
+		}
+		let kept = broadcast.state.lock().unwrap().as_ref().unwrap().finished.0.lock().unwrap().as_ref().unwrap().len();
+		assert_eq!(kept, 1);
 	}
 
 	#[test]
