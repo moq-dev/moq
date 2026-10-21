@@ -2714,6 +2714,28 @@ test("explicit and producer-cut drops survive outside the group cache", async ()
 	producer.close();
 });
 
+test("a group ended by a cancel or cache policy is a hole, not a drop", async () => {
+	const producer = new TrackProducer("video").accept({});
+	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
+	const holes = [
+		new StreamError(StreamCode.Cancel, { message: "cancel" }),
+		new StreamError(StreamCode.Old, { message: "old" }),
+		new StreamError(StreamCode.Evicted, { message: "evicted" }),
+		new StreamError(StreamCode.DeliveryTimeout, { message: "late" }),
+		new TooFarBehind(),
+	];
+	for (const [sequence, hole] of holes.entries()) {
+		const group = new GroupProducer(sequence);
+		producer.writeGroup(group);
+		group.close(hole);
+	}
+	await settle();
+	for (const sequence of holes.keys()) expect(hooks.givenUp(reader, sequence).error).toBeUndefined();
+
+	reader.close();
+	producer.close();
+});
+
 test("an upstream drop ends a group still arriving with its error", async () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ maxDelay: Milli(60_000) });

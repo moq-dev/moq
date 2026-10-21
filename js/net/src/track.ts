@@ -8,7 +8,15 @@ import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
 import { Delivered } from "./delivered.ts";
-import { GroupTooLarge, ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
+import {
+	GroupTooLarge,
+	ProtocolViolation,
+	StreamCode,
+	StreamError,
+	TimestampMismatch,
+	TooFarBehind,
+	toStreamCode,
+} from "./error.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import {
 	type DropRun,
@@ -55,6 +63,17 @@ const MAX_DATAGRAMS = 64;
  * datagrams are dropped there; a payload above this cap could never fit anywhere.
  */
 const MAX_DATAGRAM_BYTES = 65535;
+
+// A group ended with one of these is a deliberate hole, never a cut readers see: cache policy,
+// a reader that fell behind, or a cancel such as a relay's own unsubscribe. Mirrors Rust's
+// `group::Handle::commit_abort`.
+const HOLES: ReadonlySet<number> = new Set([
+	StreamCode.Cancel,
+	StreamCode.DeliveryTimeout,
+	StreamCode.TooFarBehind,
+	StreamCode.Old,
+	StreamCode.Evicted,
+]);
 
 /**
  * A position within a track: a group's sequence and a frame's index inside it.
@@ -1231,7 +1250,7 @@ export class Producer {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
 		this.#undrop(group.sequence);
 		group.closed.then((closed) => {
-			if (!(closed instanceof Error) || closed instanceof TooFarBehind) return;
+			if (!(closed instanceof Error) || HOLES.has(toStreamCode(closed))) return;
 			// A re-created group already replaced this one.
 			const current = this.#cached.get(group.sequence);
 			if (current && current.group !== group) return;
