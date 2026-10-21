@@ -53,7 +53,9 @@ sessions a reconnect-to-me GOAWAY and waits up to `--drain-timeout` (default
 such as `moq-lite-03`, get none and are closed when the window ends. A second
 signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
 Pending handshakes and admission requests share the same drain window, and an
-open stdin pipe does not keep the process alive afterward.
+open stdin pipe does not keep the process alive afterward. Admission is part of
+the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission without
+a deadline.
 
 Add `--stats-enabled` before the first stage to publish accepted-session and
 traffic counters with the relay's `--stats-*` settings. An export-only listener
@@ -347,13 +349,9 @@ Other versions carry no epoch, so a restart from another session is the newest
 route at an equal cost, or a better one.
 
 Each independent importer publishes its own epoch, even when two importers read
-one stream and publish one path. On a version that carries epochs, the newest
-importer wins new requests. If it leaves, a still-live older importer wins again
-as a restart. Players following announcements and `moq export ts --stitch`
-follow those restarts; other consumers end. `--stitch` also switches as soon as a newer
-importer starts, even while the current importer remains healthy. Each switch
-marks a program discontinuity, so redundant ingest does not promise hitless
-output.
+one stream and publish one path. See [Redundant ingest](/setup/redundancy) for
+same-path switching, subscriber-controlled selection on separate paths, and
+several routes to one publisher.
 
 An importer announces once its catalog names a servable track. Input that ends
 before then, such as an empty input or a header that configures no track,
@@ -447,6 +445,38 @@ up. Only lite-07 and moq-transport draft 17+ sessions carry epochs, so on the
 default version every return is a replacement. An export that fails while the broadcast stays up, such as on
 a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
 so the other formats refuse `--linger`.
+
+## Stats and feedback
+
+`import --stats` names a stats track in the catalog and reports what each
+rendition has written, about once a second while someone subscribes, with the
+connection's RTT, estimated send rate, and loss. It covers the stdin imports;
+capture, the gateways, `archive`, and `ts --program all` refuse it.
+
+`export --echo <name>` answers a publisher that solicits feedback: under the
+catalog's `echo` path it publishes `<name>.echo`, reporting what each rendition
+the export reads has received and its newest arrival, until the export ends.
+It covers the stdout container exports and needs a hang catalog, so MSF
+refuses it.
+
+The `stats` and `echo` sinks print reports as JSON lines. `export stats`
+follows one broadcast's stats track until the broadcast ends; `export echo`
+prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
+`--broadcast` as they come and go, reading one that ends for 5 s more for its
+final report. Either sink stops reading a report that grows past 1 MiB.
+
+```bash
+moq ... --broadcast event import --stats ts < feed.ts
+moq ... --broadcast event export stats
+moq ... --broadcast event export --echo alice ts > out.ts
+moq ... --broadcast viewers export echo
+```
+
+Counters are cumulative for the life of the process: a rendition that ends
+keeps its final counts, and one that returns under the same ID continues them.
+A report holds 1,024 rendition IDs at most: past that, each new ID replaces
+one that has ended.
+[Stats](/concept/stats#media-reports) has the schema.
 
 ## Debugging
 
