@@ -513,7 +513,8 @@ fn blocking_server_pair(
         .with_root_certificates(roots)
         .with_no_client_auth();
     client_crypto.alpn_protocols = vec![client_alpn.to_vec()];
-    let mut client_config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto).unwrap()));
+    let mut client_config =
+        ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto).unwrap()));
     client_config.transport_config(transport);
     client.set_default_client_config(client_config);
 
