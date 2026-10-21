@@ -3479,7 +3479,7 @@ fn datagram_recv_buffer_overflow() {
     assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
     assert_eq!(
         pair.client_conn_mut(client_ch).datagrams().max_size(),
-        Some(Datagram::max_payload(WINDOW as u64) as usize)
+        Datagram::max_payload(WINDOW as u64).map(|n| n as usize)
     );
 
     const DATA1: &[u8] = &[0xAB; (PAYLOAD_WINDOW / 3) + 1];
@@ -3532,7 +3532,10 @@ fn datagram_of_max_size_keeps_connection() {
         .datagrams()
         .max_size()
         .unwrap();
-    assert_eq!(max_size, Datagram::max_payload(WINDOW as u64) as usize);
+    assert_eq!(
+        max_size,
+        Datagram::max_payload(WINDOW as u64).unwrap() as usize
+    );
 
     pair.client_datagrams(client_ch)
         .send(vec![0xAB; max_size].into(), Default::default())
@@ -3622,6 +3625,29 @@ fn datagram_unsupported() {
         Err(e) => panic!("unexpected error: {e}"),
         Ok(_) => panic!("unexpected success"),
     }
+}
+
+/// RFC 9221 section 3: a `max_datagram_frame_size` of 0 means no DATAGRAM support, and no frame,
+/// not even an empty one, fits it
+#[test]
+fn datagram_zero_limit_unsupported() {
+    let _guard = subscribe();
+    let server = ServerConfig {
+        transport: Arc::new(TransportConfig {
+            datagram_receive_buffer_size: Some(0),
+            ..TransportConfig::default()
+        }),
+        ..server_config()
+    };
+    let mut pair = Pair::new(Default::default(), server);
+    let (client_ch, server_ch) = pair.connect();
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+    assert_matches!(pair.client_datagrams(client_ch).max_size(), None);
+    assert_matches!(
+        pair.client_datagrams(client_ch)
+            .send(Bytes::new(), Default::default()),
+        Err(SendDatagramError::UnsupportedByPeer)
+    );
 }
 
 #[test]

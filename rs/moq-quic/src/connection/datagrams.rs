@@ -75,9 +75,9 @@ impl Datagrams<'_> {
         // datagrams to suffer avoidable packet loss.
         let max_size = Datagram::max_payload(
             (self.conn.path.current_mtu() as usize - self.conn.predict_1rtt_overhead(None)) as u64,
-        );
+        )?;
         let limit =
-            Datagram::max_payload(self.conn.peer_params.max_datagram_frame_size?.into_inner());
+            Datagram::max_payload(self.conn.peer_params.max_datagram_frame_size?.into_inner())?;
         Some(limit.min(max_size) as usize)
     }
 

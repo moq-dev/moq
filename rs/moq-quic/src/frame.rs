@@ -946,18 +946,19 @@ impl Datagram {
         } + self.data.len()
     }
 
-    /// The largest payload whose length-prefixed frame fits in `budget` bytes
+    /// The largest payload whose length-prefixed frame fits in `budget` bytes, if any frame does
     ///
     /// Exact, rather than reserving [`SIZE_BOUND`](FrameStruct::SIZE_BOUND)'s 8-byte length: a
-    /// 1200-byte `max_datagram_frame_size` carries 1197 bytes.
-    pub(crate) fn max_payload(budget: u64) -> u64 {
-        let mut payload = budget.saturating_sub(2);
+    /// 1200-byte `max_datagram_frame_size` carries 1197 bytes. Below two bytes not even an empty
+    /// frame fits, and RFC 9221 section 3 reads a limit of 0 as no DATAGRAM support.
+    pub(crate) fn max_payload(budget: u64) -> Option<u64> {
+        let mut payload = budget.checked_sub(2)?;
         while payload > 0
             && 1 + VarInt::from_u64(payload).map_or(8, VarInt::size) as u64 + payload > budget
         {
             payload -= 1;
         }
-        payload
+        Some(payload)
     }
 }
 
@@ -1146,22 +1147,23 @@ mod test {
 
     #[test]
     fn datagram_max_payload_is_exact() {
-        for budget in [0u64, 1, 2, 3, 64, 65, 66, 1200, 16385, 16386, 1 << 20] {
-            let payload = Datagram::max_payload(budget);
+        // Not even an empty frame fits
+        assert_eq!(Datagram::max_payload(0), None);
+        assert_eq!(Datagram::max_payload(1), None);
+        for budget in [2u64, 3, 64, 65, 66, 1200, 16385, 16386, 1 << 20] {
+            let payload = Datagram::max_payload(budget).unwrap();
             let frame = |n: u64| {
                 Datagram {
                     data: Bytes::from(vec![0; n as usize]),
                 }
                 .size(true) as u64
             };
-            if payload > 0 {
-                assert!(frame(payload) <= budget, "{budget}: {payload} overflows");
-            }
+            assert!(frame(payload) <= budget, "{budget}: {payload} overflows");
             assert!(
                 frame(payload + 1) > budget,
                 "{budget}: {payload} isn't the largest"
             );
         }
-        assert_eq!(Datagram::max_payload(1200), 1197);
+        assert_eq!(Datagram::max_payload(1200), Some(1197));
     }
 }
