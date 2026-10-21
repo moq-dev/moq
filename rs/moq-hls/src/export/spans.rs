@@ -10,8 +10,8 @@
 //!   from more than one record.
 //!
 //! A segment resolves only once the rendition's timeline has reached past its end (or ended), so
-//! every edge and every reload agree on its content. A failed timeline ends the rendition's
-//! playlist at its last record instead of listing the rest as gaps.
+//! every edge and every reload agree on its content. A failed timeline resolves only what its
+//! records cover, never listing the rest as gaps.
 
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -49,16 +49,16 @@ struct State {
 	ended: bool,
 	/// The timeline failed: no more records will arrive, and a segment past the last one fails
 	/// rather than resolving as a gap.
-	failed: bool,
+	failed: Option<crate::Error>,
 }
 
 impl State {
 	fn resolve(&self, is_video: bool, span: Range<Duration>) -> Content {
-		if self.failed && self.records.back().is_none_or(|last| last.end_time() < span.end) {
+		if self.failed.is_some() && self.records.back().is_none_or(|last| last.end_time() < span.end) {
 			return Content::Failed;
 		}
 		let records = self.records.iter().collect();
-		let ended = self.ended || self.failed;
+		let ended = self.ended || self.failed.is_some();
 		match is_video {
 			true => video(records, ended, span),
 			false => audio(records, ended, span),
@@ -77,7 +77,7 @@ impl Spans {
 			state: kio::Producer::new(State {
 				records: VecDeque::new(),
 				ended: false,
-				failed: false,
+				failed: None,
 			}),
 		}
 	}
@@ -132,11 +132,28 @@ impl Spans {
 		}
 	}
 
-	/// The timeline failed: segments its records cover still resolve, and later ones are
-	/// [`Content::Failed`].
-	pub fn fail(&self) {
+	/// The timeline failed with `err`: segments its records cover still resolve, and later ones
+	/// are [`Content::Failed`].
+	pub fn fail(&self, err: crate::Error) {
 		if let Ok(mut state) = self.state.write() {
-			state.failed = true;
+			state.failed = Some(err);
+		}
+	}
+
+	/// Why the timeline failed, if it did.
+	pub fn failure(&self) -> Option<crate::Error> {
+		self.state.read().failed.clone()
+	}
+
+	/// Poll until the timeline fails.
+	pub fn poll_failed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let poll = self.state.poll_ref(waiter, |state| match state.failed {
+			Some(_) => Poll::Ready(()),
+			None => Poll::Pending,
+		});
+		match poll {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			_ => Poll::Pending,
 		}
 	}
 
@@ -394,7 +411,7 @@ mod tests {
 		// Waiting on a keyframe that could still land near the boundary.
 		assert_eq!(spans.resolve(true, secs(4.0)..secs(6.0)), Content::Pending);
 
-		spans.fail();
+		spans.fail(crate::Error::NoVariants);
 		assert_eq!(
 			spans.resolve(true, secs(4.0)..secs(6.0)),
 			frames(&[(Position::group(2), Position::group(3))], None)
