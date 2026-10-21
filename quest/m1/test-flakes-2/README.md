@@ -49,7 +49,6 @@ Public API: none. Wire: none.
 
 - [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
 - [Draft-16 cancel race](/quest/m1/test-flakes-2/draft16-cancel-race.md) - the cancel-ahead-of-the-answer test settles the same way every run, fixing `run_publish_namespaces` if the order is real
-- [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md) - moq-tokio's loopback QUIC tests stop timing out on the macOS Platform job
 - [moq-tokio failed listen](/quest/m1/test-flakes-2/tokio-failed-listen.md) - the failed-listen test keeps its port reserved from first bind to final check
 
 ## Related

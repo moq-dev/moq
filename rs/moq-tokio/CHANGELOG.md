@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `server::Request::within` finishes a future, such as admitting the session, within what remains of the handshake deadline, closing the session with the timeout code otherwise.
+
 ## [0.19.23](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.22...moq-tokio-v0.19.23) - 2026-10-06
 
 ### Fixed
