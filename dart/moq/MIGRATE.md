@@ -14,6 +14,13 @@ Replace `request.accept(broadcast:)` with `request.prepare(epoch: mintEpoch())`,
 `Anchor` gains a time variant, so exhaustive switches need a case for it.
 `TrackConsumer.update` now throws on a time anchor an untimed track can't serve.
 
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Update `moq_ffi` and its native library together; older generated guards reject the rebuilt library.
+For a custom native library, regenerate its matching Dart bindings with `just dart generate`.
+Application calls are unchanged.
+
 ### JSON consumers return `Value` (#5677)
 
 `SnapshotConsumer.next()` and `StreamConsumer.next()` return `Value` (`value`, `timestampUs`) instead of a string; `timestampUs` is null when untimed.

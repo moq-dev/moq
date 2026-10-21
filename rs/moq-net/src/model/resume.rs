@@ -583,7 +583,7 @@ impl Subscriber {
 
 	/// Poll for sequences the serving copy gave up; see [`track::Subscriber::poll_drop`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(super) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<std::ops::Range<u64>> {
+	pub(super) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<(std::ops::Range<u64>, StreamError)> {
 		let mut reader = self.reader();
 		let sub = ready!(reader.poll_serving(waiter));
 		match sub {
@@ -1492,16 +1492,26 @@ impl Recover {
 		// A newer copy's subscription delivered it: continue from there. The copy that
 		// failed delivered it already, so its subscription will not again.
 		let same = generation == self.generation;
-		if !same && let Poll::Ready(Some(mut group)) = serving.poll_group(self.sequence, waiter) {
-			lend_head(&self.handoff, self.sequence, serving, &group);
-			group.start_at(index);
-			if group.index() == index {
-				return Poll::Ready(Ok(Replacement {
-					group,
-					generation,
-					copy: serving.clone(),
-				}));
+		match serving.poll_group(self.sequence, waiter) {
+			Poll::Ready(Ok(Some(mut group))) if !same => {
+				lend_head(&self.handoff, self.sequence, serving, &group);
+				group.start_at(index);
+				if group.index() == index {
+					return Poll::Ready(Ok(Replacement {
+						group,
+						generation,
+						copy: serving.clone(),
+					}));
+				}
 			}
+			// The serving route gave the group up, which ends a reader's group with that
+			// route's error however a fetch of the rest would answer. A drop judges that
+			// route's subscription, not whether the group exists, so it is no verdict on a
+			// fetch; nor is one a copy that failed dropped its open groups with.
+			Poll::Ready(Err(err)) if self.reader.is_some() && !copy_failed(serving) => {
+				return Poll::Ready(Err(err));
+			}
+			_ => {}
 		}
 
 		// Otherwise ask for the rest. The subscription may still deliver it first.
@@ -2040,6 +2050,68 @@ mod test {
 		assert!(chunks.read_chunk().now_or_never().unwrap().unwrap().is_none());
 	}
 
+	/// A resumed group that the serving route then gives up ends with that route's error,
+	/// with the subscription still open, no successor, no later writes, and the fetch for
+	/// the rest still unanswered: whether the old route failed or only stalled.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_resumed_group_ends_with_the_serving_routes_drop() {
+		for fails in [true, false] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::from_secs(10));
+
+			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut reading = recv(&mut sub);
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			if fails {
+				a.clone().abort(Error::Dropped).unwrap();
+			}
+
+			let b = copy();
+			let dynamic = b.dynamic();
+			routes.serve(b.consume());
+			assert!(reading.read_frame().now_or_never().is_none(), "fails={fails}");
+			let _pending = dynamic.requested_group().now_or_never().unwrap().unwrap();
+
+			b.drop_groups(0..1, StreamError::App(5));
+			let res = reading.read_frame().now_or_never();
+			assert!(
+				matches!(res, Some(Err(Error::Stream(StreamError::App(5))))),
+				"fails={fails}: {res:?}"
+			);
+		}
+	}
+
+	/// A drop judges the serving route's subscription, not whether the group exists, so a
+	/// fetched group it drops still waits on that route's fetch of the rest.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_fetched_group_outlives_the_serving_routes_drop() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
+		assert_eq!(
+			fetched.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
+			b"a".as_ref()
+		);
+
+		let b = copy();
+		let dynamic = b.dynamic();
+		routes.serve(b.consume());
+		b.drop_groups(0..1, StreamError::Old);
+		assert!(fetched.read_frame().now_or_never().is_none());
+		let _pending = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		assert!(fetched.read_frame().now_or_never().is_none());
+	}
+
 	/// Read a fetched group from frame 0, which must already be cached.
 	#[cfg(feature = "async")]
 	fn read_cached(track: &track::Consumer, sequence: u64) -> Vec<Vec<u8>> {
@@ -2466,7 +2538,7 @@ mod test {
 
 			match outcome {
 				"lands" => {}
-				"dropped" => a.drop_groups(1..2),
+				"dropped" => a.drop_groups(1..2, StreamError::NotFound),
 				_ => moq_clock::sleep(Duration::from_secs(1)).await,
 			}
 			if outcome != "lands" {

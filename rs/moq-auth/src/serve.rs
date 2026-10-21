@@ -7,6 +7,7 @@
 //! on a TCP or unix listener as `POST /`. `moq auth serve` is the CLI; the relay's
 //! tests run against it in process.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -153,6 +154,9 @@ pub enum Refusal {
 	/// A SETUP token and a different `jwt` query were both presented.
 	#[error("a SETUP token and a different `jwt` query were presented; present one")]
 	TwoTokens,
+	/// The query carries more than one `jwt` parameter.
+	#[error("the query carries more than one `jwt`; present one")]
+	DuplicateJwt,
 	/// The SETUP token type is not 0, a JWT.
 	#[error("SETUP token type {0:#x} is not supported; only type 0 (a JWT) is")]
 	UnsupportedToken(u64),
@@ -200,7 +204,7 @@ impl Policy {
 			return Err(Refusal::TokenAndCertificate);
 		}
 		let (permissions, expires, certificate, root) = if let Some(jwt) = jwt {
-			let claims = self.verify(jwt).await?;
+			let claims = self.verify(&jwt).await?;
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
 				crate::Error::RootMismatch(path) => Refusal::RootMismatch {
 					root: claims.root.clone(),
@@ -298,29 +302,31 @@ fn authorize(rules: &Permissions, path: &str) -> Result<Permissions, Refusal> {
 
 /// The JWT the request presents: its SETUP token, or else its `jwt` query parameter.
 /// Both at once count as one only when they are the same JWT.
-fn jwt(request: &Request) -> Result<Option<&str>, Refusal> {
-	match (&request.token, query_jwt(request)) {
+fn jwt(request: &Request) -> Result<Option<Cow<'_, str>>, Refusal> {
+	match (&request.token, query_jwt(request)?) {
 		// A client that offers a version without in-band auth copies its SETUP token
 		// into the URL too, so the same JWT arrives twice.
 		(Some(token), Some(jwt)) if token.kind == Token::OUT_OF_BAND && token.value == jwt.as_bytes() => Ok(Some(jwt)),
 		(Some(_), Some(_)) => Err(Refusal::TwoTokens),
 		(Some(token), None) if token.kind == Token::OUT_OF_BAND => std::str::from_utf8(&token.value)
-			.map(Some)
+			.map(|jwt| Some(jwt.into()))
 			.map_err(|_| Refusal::InvalidToken("the SETUP token is not UTF-8".into())),
 		(Some(token), None) => Err(Refusal::UnsupportedToken(token.kind)),
 		(None, jwt) => Ok(jwt),
 	}
 }
 
-/// The `jwt` query parameter, when the request carries a non-empty one. The last one
-/// wins, as it did on the relay, so a client that appends a fresh token is believed.
-fn query_jwt(request: &Request) -> Option<&str> {
-	let query = request.query.as_deref()?;
-	// Borrow rather than decode: a JWT is base64url and never needs unescaping.
-	query
-		.split('&')
-		.filter_map(|pair| pair.strip_prefix("jwt="))
-		.rfind(|jwt| !jwt.is_empty())
+/// The `jwt` query parameter, percent-decoded, when the request carries a non-empty
+/// one. A second `jwt` key, even an empty or escaped one, is refused rather than
+/// picking a winner. Decoding is a no-op on a well-formed JWT, which is base64url and dots.
+fn query_jwt(request: &Request) -> Result<Option<Cow<'_, str>>, Refusal> {
+	let mut jwt = None;
+	for (key, value) in url::form_urlencoded::parse(request.query.as_deref().unwrap_or_default().as_bytes()) {
+		if key == "jwt" && jwt.replace(value).is_some() {
+			return Err(Refusal::DuplicateJwt);
+		}
+	}
+	Ok(jwt.filter(|jwt| !jwt.is_empty()))
 }
 
 /// The remote address without its port, an IPv4-mapped IPv6 address folded to IPv4.
@@ -355,7 +361,7 @@ impl Sessions {
 	/// it counts against that JWT's cap until the session ends.
 	fn connect(&mut self, request: &Request, limits: Limits, root: Option<String>) -> Result<(), Refusal> {
 		// Decided before counting, so the credential is already known to be one JWT.
-		let token = jwt(request).ok().flatten().map(hash);
+		let token = jwt(request).ok().flatten().as_deref().map(hash);
 		let known = self.slots.get(&request.id);
 		let new_token = token.filter(|token| !known.is_some_and(|slot| slot.tokens.contains(token)));
 		if let (Some(cap), Some(token)) = (limits.token, new_token)
@@ -389,7 +395,7 @@ impl Sessions {
 	/// lost to a restart. The cap is not enforced here: the session was admitted, and
 	/// which survivor to revoke would be an accident of arrival order.
 	fn revalidate(&mut self, request: &Request) {
-		let token = jwt(request).ok().flatten().map(hash);
+		let token = jwt(request).ok().flatten().as_deref().map(hash);
 		let slot = self.slots.entry(request.id.clone()).or_insert_with(|| Slot {
 			tokens: Vec::new(),
 			remote: remote(request),
@@ -895,28 +901,41 @@ mod tests {
 		assert_eq!(policy.decide(&other_type).await.unwrap_err(), Refusal::TwoTokens);
 	}
 
+	/// Two `jwt` parameters would leave the server guessing which one the client meant.
 	#[tokio::test]
-	async fn the_last_jwt_in_the_query_wins() {
+	async fn a_duplicate_jwt_is_refused() {
 		let (dir, key) = key_dir();
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
+			public: rules(&["**"], &["**"]),
 			..Default::default()
 		};
-		let fresh = sign(&key, "demo", &["**"], &[], None);
+		let jwt = sign(&key, "demo", &["**"], &[], None);
 
-		// A client that appends a fresh token after a stale one is believed, as on the
-		// relay; a trailing empty value does not blank it out.
 		let mut request = request("/demo");
-		request.query = Some(format!("a=1&jwt=stale&jwt={fresh}&jwt="));
-		assert_eq!(query_jwt(&request), Some(fresh.as_str()));
+		request.query = Some(format!("a=1&jwt={jwt}"));
+		assert_eq!(query_jwt(&request).unwrap().as_deref(), Some(jwt.as_str()));
 		assert!(policy.decide(&request).await.is_ok());
 
-		request.query = Some(format!("jwt={fresh}&jwt=stale"));
-		let err = policy.decide(&request).await.unwrap_err();
-		assert!(matches!(err, Refusal::InvalidToken(_)), "{err}");
+		// Even the same token twice, an empty second one, or an escaped key.
+		for query in [
+			format!("jwt={jwt}&jwt={jwt}"),
+			format!("jwt={jwt}&jwt="),
+			format!("jwt=&jwt={jwt}"),
+			format!("jwt={jwt}&j%77t=stale"),
+		] {
+			request.query = Some(query);
+			assert_eq!(policy.decide(&request).await.unwrap_err(), Refusal::DuplicateJwt);
+		}
 
+		// An empty one alone is no token, so the session is anonymous.
 		request.query = Some("jwt=&b=2".into());
-		assert_eq!(query_jwt(&request), None);
+		assert_eq!(query_jwt(&request).unwrap(), None);
+		assert!(policy.decide(&request).await.is_ok());
+
+		// The value is percent-decoded once.
+		request.query = Some(format!("jwt={}", jwt.replace('.', "%2E")));
+		assert_eq!(query_jwt(&request).unwrap().as_deref(), Some(jwt.as_str()));
 	}
 
 	#[tokio::test]

@@ -14,6 +14,12 @@ Replace `request.accept(broadcast)` with `prepared = request.prepare(moq.mint_ep
 `Anchor` gains a `TIME` variant, the group containing a presentation time.
 `TrackConsumer.update` now raises on a time anchor an untimed track can't serve.
 
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Rebuild or reinstall the complete `moq-ffi` wheel, keeping its generated Python code
+and native library together; application calls are unchanged.
+
 ### JSON consumers yield `json.Timed` (#5677)
 
 `json.SnapshotConsumer` and `json.StreamConsumer` yield `Timed(value, timestamp)` instead of the bare value; `timestamp` is a `timedelta`, or `None` when untimed.

@@ -28,4 +28,3 @@ encoding on that hop needs a wire change, update
 ## Required
 
 - [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - adds `unchecked` and the untimed serving this changes
-- [Ingress-version provenance](/quest/m1/ietf-extension/lite.md) - adds `Info::ietf()`, which `unchecked` derives from
