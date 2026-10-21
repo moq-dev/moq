@@ -12,9 +12,10 @@ Check with `npm view @moq/qmux repository` (names moq-dev/moq) and
 
 ## Plan
 
-Waiting on publication and a maintainer with npm rights:
+Decided 2026-10-20 (maintainer): moq-dev/web-transport stops publishing
+`@moq/qmux` once moq's first release of it is on npm. Waiting on that
+publication and a maintainer with npm rights:
 
 - `npm deprecate @moq/web-socket-stream "Folded into @moq/qmux; see https://github.com/moq-dev/moq/blob/main/js/qmux/MIGRATE.md"`.
 - Remove or freeze `js/qmux` and `js/web-socket-stream` in moq-dev/web-transport,
   whose release script would otherwise publish a competing `@moq/qmux`.
-  That is a change in another repository, so the maintainer decides it.

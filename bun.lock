@@ -490,6 +490,17 @@
         "vite": "^8.3.4",
       },
     },
+    "test/qmux": {
+      "name": "@moq/qmux-interop",
+      "dependencies": {
+        "@moq/qmux": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.4.3",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "typescript": "7.0.2",
+      },
+    },
     "test/video": {
       "name": "@moq/video-test",
       "dependencies": {
@@ -813,6 +824,8 @@
     "@moq/publish": ["@moq/publish@workspace:js/publish"],
 
     "@moq/qmux": ["@moq/qmux@workspace:js/qmux"],
+
+    "@moq/qmux-interop": ["@moq/qmux-interop@workspace:test/qmux"],
 
     "@moq/room": ["@moq/room@workspace:js/room"],
 

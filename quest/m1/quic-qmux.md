@@ -64,9 +64,11 @@ The native scheduler does not wait for this dependent proof.
 Add the missing wire evidence before release: golden vectors for each of the four versions,
 bidirectional interoperability against the last web-transport `qmux` release (0.6.x, a
 test-only dependency), and the in-tree TypeScript qmux peer used by `js/net`.
-Restore the TS-driven suite `js/qmux` did not import (moq-dev/web-transport's
-`js/qmux/tests/interop.test.ts` with the `interop-server` and `interop-client` qmux
-examples it spawns): TS client and TS server against the Rust peer, per draft, wired into CI.
+Move `just test qmux` onto the in-tree crate: it runs `test/qmux/interop.test.ts`,
+the TS client and TS server against qmux 0.6.3's `interop-server` and
+`interop-client` examples per draft, installed with `cargo install` and run
+nightly. Bring those examples into the new crate and point the suite at them,
+so the TS peer interoperates with the qmux that ships.
 
 Acceptance carried over from the deleted m0 qmux credit quests (web-transport#412 and #413
 are no longer pursued): a session returns connection-level credit for every byte it

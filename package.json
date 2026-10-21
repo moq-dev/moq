@@ -54,6 +54,7 @@
 		"test/drain",
 		"test/video",
 		"test/p2p",
+		"test/qmux",
 		"test/wasm"
 	]
 }
