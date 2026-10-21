@@ -16,8 +16,9 @@ type Comment = { type: string; value: string; end?: number };
 type Binding =
 	| { kind: "local"; name: string }
 	| { kind: "import"; specifier: string; name: string }
-	// `documented` is set for an `export * as Name`, whose own statement carries the doc.
-	| { kind: "namespace"; specifier: string; documented?: boolean };
+	// `documented` is set for an `export * as Name`, whose own statement carries the doc, and
+	// `types` for `export type * as Name`, which re-exports only types.
+	| { kind: "namespace"; specifier: string; documented?: boolean; types?: boolean };
 
 // A name's declarations, each with the statement that carries its comments.
 type Declarations = Array<{ statement: Node; declaration: Node }>;
@@ -64,10 +65,12 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		const resolved = resolveBinding(file, binding);
 		if (!resolved) return;
 		if (resolved.kind === "namespace") {
-			const key = `${resolved.file}#*`;
+			// A namespace walked for its types alone is walked again where its values are public.
+			const typesOnly = types || (binding.kind === "namespace" && binding.types === true);
+			const key = `${resolved.file}#*${typesOnly ? ":types" : ""}`;
 			if (seen.has(key)) return;
 			seen.add(key);
-			walk(resolved.file, `${path}.`, types);
+			walk(resolved.file, `${path}.`, typesOnly);
 			return;
 		}
 
@@ -251,6 +254,7 @@ function parseModule(source: string): Module {
 								kind: "namespace",
 								specifier: statement.source.value,
 								documented: documented(statement, module.header),
+								types: statement.exportKind === "type",
 							});
 					} else if (s.type === "ExportSpecifier") {
 						const name = moduleName(s.local);

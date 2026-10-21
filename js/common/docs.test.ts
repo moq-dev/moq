@@ -204,6 +204,14 @@ test("a module reached by a type-only star is walked again as values", () => {
 	expect(found).toEqual(["foo.d.ts: run"]);
 });
 
+test("a type-only namespace re-export skips values", () => {
+	const found = check({
+		"/dist/inner.d.ts": "export declare const value: number;\nexport type Shape = number;\n",
+		"/dist/index.d.ts": '/** Documented. */\nexport type * as Types from "./inner";\n',
+	});
+	expect(found).toEqual(["inner.d.ts: Types.Shape"]);
+});
+
 test("an explicit export shadows the same name from a star", () => {
 	const found = check({
 		"/dist/inner.d.ts": "export declare const name: number;\n",
