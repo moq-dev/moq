@@ -198,7 +198,7 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 ## Stats
 
-`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. While a client session reconnects, `session->failure()` returns why as a `moq::Error`.
+`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. While a client session reconnects, `session->failure()` returns why as a `moq::Error`, and while its first `connect` is still retrying, `client->failure()` does.
 
 ## Shutdown
 
