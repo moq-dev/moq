@@ -14,6 +14,9 @@
 //!
 //! Run with `cargo bench -p moq-net`.
 
+// `iter_custom` timings measure the host clock on purpose.
+#![allow(clippy::disallowed_methods)]
+
 use std::{
 	hint::black_box,
 	time::{Duration, Instant},
