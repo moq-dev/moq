@@ -19,8 +19,14 @@ breaks one API once.
   once every sequence in a bounded window is delivered, dropped, stale, or
   unfillable. Today it parks past the window's end on purpose, so an update
   can still widen it; a reader that wants more keeps an open range instead.
-  A miss surfaces as that `None`, which moq-ffi maps to `NotFound`. The
-  `NotFetchable` and `Old` distinctions go, since no caller acts on them.
+  `Ok(None)` before any group arrives is a miss, which the moq-ffi fetch
+  wrapper reports as `NotFound`; after one, it is the range's end. A one-range
+  read surfaces no `NotFetchable` or `Old` result, and a peer's reset with
+  either names the group dropped. Every fetch boundary already treats
+  `NotFetchable` as not found (relay HTTP 404, hls `is_cache_miss`, moq-ffi
+  `map_fetch_error`, moq-c `NOT_FOUND`); a fetched `Old` becomes a miss too,
+  where relay HTTP answers 500 and moq-c reports `OLD` today. Both stay as wire
+  stream errors, and `Old` still aborts a cut group mid-read.
   Each affected package gets a `MIGRATE.md` entry.
 - A one-range subscription for a cached live group missing the frames its
   range starts at needs a head fill, which is why this requires frame bounds.

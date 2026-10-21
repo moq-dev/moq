@@ -6,7 +6,8 @@ A publisher's `track::Dynamic` receives range requests for misses instead of
 one request per group, and every sequence in a subscription's range either
 arrives or is named as dropped, so a reader never waits on a miss.
 `requested_group` is replaced by `requested_fill`, not kept beside it, in every
-caller and binding. Removing `fetch_group` is the follow-up
+caller and binding (the frozen moq-c ABI excepted, per the moq-c decision
+below). Removing `fetch_group` is the follow-up
 [fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md).
 
 ## Plan
@@ -41,8 +42,10 @@ Decided by the maintainer on 2026-10-20, when the quest was first started
   [frame bounds](/quest/m1/subscribe-ranges/frame-bounds.md) provides.
 - **Handler shape.** `Dynamic::requested_fill` yields a `track::Fill` naming
   one bounded run: `start: Position`, exclusive end group, priority, the most
-  tolerant budget, and order. The handler calls `accept(sequence, info)` for
-  each group it has and `drop_groups(range)` for the rest. Dropping the `Fill`
+  tolerant budget among its readers, and order. Each reader's cursor still
+  skips what is stale under its own `max_delay`, so sharing never relaxes it.
+  The handler calls `accept(sequence, info)` for each group it has and
+  `drop_groups(range)` for the rest. Dropping the `Fill`
   names whatever is left as dropped, in the track's existing `drops`, but only
   while a reader still wants it: once demand leaves, the fill is withdrawn like
   a `group::Request` today and records nothing, so `drops` (durable) never
@@ -65,13 +68,20 @@ Decided by the maintainer on 2026-10-20, when the quest was first started
   magic value.
 - **Sessions.** A session serves a fill as it serves a group request today:
   one FETCH per group, one in flight per fill, newest first for a descending
-  reader, withdrawing (not dropping) the fill when demand leaves, and
-  dropping the rest once a fetched group is stale under the fill's budget (a
-  timed track's starts never rewind). [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) turns lite-07
+  reader, withdrawing (not dropping) the fill when demand leaves. Once a
+  fetched group is stale under the fill's budget, the groups older than it
+  are too (a timed track's starts never rewind), so the fill stops fetching
+  them; in either order, newer groups still arrive. They are withdrawn, not
+  dropped, and each reader's cursor names them stale under its own budget,
+  since a later reader with a wider one may still fetch them. Only staleness
+  under publisher max-age, which binds every reader, goes in `drops`.
+  [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) turns lite-07
   fills into range subscriptions, and
   [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) into one FETCH
   per run. Until then, one SUBSCRIBE range can cost up to frontier minus floor
-  serialized upstream FETCHes; accepted rather than blocking on those quests.
+  serialized upstream FETCHes, each bounded by the fill's budget and stopped
+  when demand leaves, the same cost per-group requests carry today; accepted
+  rather than blocking on those quests.
 - **moq-c.** Whichever lands first decides it. If the generated C package
   ([moq-dev/moq#6052](https://github.com/moq-dev/moq/pull/6052)) has landed,
   `poll_requested_group` leaves the hand-written ABI with a `MIGRATE.md` entry
