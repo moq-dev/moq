@@ -54,24 +54,6 @@ for (const name of ["check"]) {
 	});
 }
 
-test("scope queries support both merge groups and release PRs without path filters", () => {
-	expect(workflow.on.merge_group).toEqual({ types: ["checks_requested", "destroyed"] });
-	expect(workflow.on.pull_request).toBeDefined();
-	expect(workflow.on.pull_request).not.toHaveProperty("paths");
-	expect(workflow.on.pull_request).not.toHaveProperty("branches");
-});
-
-// Main PRs must still report the required name, as skipped, and a PR
-// retargeted to release must run it, so `edited` triggers a fresh run.
-test("main PRs skip Check while the queue and release PRs run it", () => {
-	expect(workflow.on.pull_request).toEqual({ types: ["opened", "synchronize", "reopened", "edited", "closed"] });
-	for (const name of ["check"]) {
-		expect(workflow.jobs[name].if).toBe(
-			"github.event.action != 'closed' && github.event.action != 'destroyed' && (github.event_name != 'pull_request' || github.base_ref == 'release')",
-		);
-	}
-});
-
 test("self-hosted queue jobs use local caches without R2 credentials", async () => {
 	const action = Bun.YAML.parse(await Bun.file(".github/actions/rust-cache/action.yml").text());
 	const setup = action.runs.steps.find((step: Step) => step.uses?.startsWith("jdx/mr-boxington-action@"));

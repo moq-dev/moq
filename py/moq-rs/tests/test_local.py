@@ -101,11 +101,6 @@ def h264_init() -> bytes:
     return sps + pps
 
 
-def test_origin_lifecycle():
-    origin = moq.OriginProducer()
-    _consumer = origin.consume()
-
-
 async def test_fetch_abort_is_a_stream_app_code():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("events")

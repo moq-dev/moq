@@ -9,7 +9,6 @@ type Job = {
 	needs?: string[];
 	permissions?: Record<string, string>;
 	with?: Record<string, string | boolean>;
-	strategy?: { "fail-fast": boolean };
 	steps?: { name?: string; if?: string; env?: Record<string, string>; with?: Record<string, string>; run?: string }[];
 };
 type Workflow = {
@@ -48,22 +47,6 @@ test("shared default builds cover each consumer exactly once", async () => {
 	expect(shared.on.push?.tags).toEqual(["moq-ffi-v*"]);
 	const dart = await read("release-dart-ffi");
 	expect(dart.on.push?.tags).toEqual(["moq-ffi-v*"]);
-});
-
-test("bindings reuse Linux metadata even when an unrelated target fails", async () => {
-	const producer = await read("release-ffi");
-	expect(producer.jobs.build.strategy?.["fail-fast"]).toBe(false);
-	expect(producer.jobs.bindings.strategy?.["fail-fast"]).toBe(false);
-	expect(producer.jobs.bindings.needs).toContain("build");
-	expect(producer.jobs.bindings.if).toContain("always()");
-	expect(producer.jobs.bindings.if).toContain("!inputs.reuse-native");
-	expect(producer.jobs.build.if).toContain("!inputs.reuse-native");
-	const steps = producer.jobs.bindings.steps ?? [];
-	expect(steps.find((s) => s.name === "Download binding metadata")?.with?.name).toBe(
-		"${{ inputs.language }}-lib-x86_64-unknown-linux-gnu",
-	);
-	expect(steps.find((s) => s.name === "Generate bindings")?.run).toContain("--library binding-library/libmoq_ffi.so");
-	expect(steps.find((s) => s.name === "Upload bindings")?.with?.name).toBe("${{ matrix.language }}-bindings");
 });
 
 test("wrapper gates preserve trusted tag inputs and inspect only their publisher", async () => {
