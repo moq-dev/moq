@@ -164,8 +164,9 @@ fn main() -> anyhow::Result<()> {
 		})
 		.collect::<anyhow::Result<_>>()?;
 
-	// Pass the input packets through; insert the augmented PMT right after the first PMT,
-	// and splice the cues in at evenly spread positions so each lands on a later PTS.
+	// Pass the input packets through; insert the augmented PMT right after the first PMT and
+	// rewrite every later one to match, since a PMT that stops listing the SCTE-35 PID retires
+	// its track. Splice the cues in at evenly spread positions so each lands on a later PTS.
 	anyhow::ensure!(
 		input.len() % 188 == 0,
 		"input TS length {} is not a multiple of 188",
@@ -195,7 +196,14 @@ fn main() -> anyhow::Result<()> {
 
 	let mut out = Vec::new();
 	for (i, p) in packets.iter().enumerate() {
-		out.extend_from_slice(p);
+		if i > pmt_idx && pid_of(p) == pmt_pid.as_u16() {
+			anyhow::ensure!(p[1] & 0x40 != 0, "a PMT spanning packets cannot be rewritten in place");
+			// The input's own continuity counter, so the rewrite adds no counter error.
+			out.extend_from_slice(&[p[0], p[1], p[2], (aug_pmt[3] & 0xf0) | (p[3] & 0x0f)]);
+			out.extend_from_slice(&aug_pmt[4..]);
+		} else {
+			out.extend_from_slice(p);
+		}
 		if i == pmt_idx {
 			out.extend_from_slice(&aug_pmt);
 		}
