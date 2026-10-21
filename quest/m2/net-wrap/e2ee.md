@@ -35,6 +35,17 @@ the reverse (decided 2026-10-20, maintainer):
   catalogs compress before encryption, and needs moq-net to expose its group
   codec to the wrapper. `@moq/e2ee` does the same in
   [JS](/quest/m2/net-wrap/js.md).
+- The subscriber's wrapper learns the logical flag from authenticated E2EE
+  metadata, never from the physical track (decided 2026-10-20, maintainer):
+  the physical track's `compress` is always false, so it can't signal it.
+  The metadata lives in the E2EE track mapping or the encrypted catalog, and
+  a flag that fails authentication fails the track loudly. Prefer the track
+  mapping: the [E2EE epic](/quest/m2/e2ee/README.md) keeps catalog formats
+  out of moq-e2ee, and [migrate](/quest/m1/compress/migrate.md) drops hang's
+  `compression` field. Either way the subscriber needs the flag before
+  inflating, without changing moq-net's `track(name)`; propose the encoding
+  in the PR. Record it in `draft-lcurley-moq-e2ee.md`, replacing the
+  Catalogs section's `.z` sibling rule.
 - Demand and preference cross the wrapper: an encrypted track's demand is
   its physical track's, and preference updates reach the physical track.
 - Keep the nonce rules the epic specifies: a group producer still owns its
@@ -44,7 +55,8 @@ the reverse (decided 2026-10-20, maintainer):
   moq-json round trip through an encrypted track waits for
   [moq-json to take the traits](/quest/m2/net-wrap/json.md).
 
-Public API: the moq-e2ee wrapper signatures change to moq-net's. Wire: none.
+Public API: the moq-e2ee wrapper signatures change to moq-net's. Wire:
+`draft-lcurley-moq-e2ee.md` gains the authenticated logical `compress` flag.
 
 ## Required
 

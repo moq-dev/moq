@@ -4,8 +4,12 @@
 
 An embedder can give each `moq-srt` connection a bitrate cap through a rate
 handle that stays valid across live rate updates. An SRT pull never sends
-more than the cap plus a burst, retransmits included, and an SRT publish past
-the cap plus burst is closed with a reason the embedder can log. This backs
+more media payload than the cap plus a burst, retransmits included, and an
+SRT publish past the cap plus burst is closed with a reason the embedder can
+log. The cap counts payload, like the [QUIC caps](/quest/m2/rate-quic.md).
+TS, SRT, and UDP overhead sits outside it: moq-srt picks the muxing and
+packet sizes, so the overhead per payload byte is fixed, and a viewer can't
+inflate it. This backs
 moq.pro's
 [ingest](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/rate-ingest.md)
 and [egress](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/rate-egress.md)

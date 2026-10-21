@@ -19,14 +19,17 @@ its own decryption path.
 - `@moq/e2ee`'s broadcast, track, and group wrappers adapt to `@moq/net`'s
   method shapes, as moq-e2ee does in Rust, with its errors mapped to
   `@moq/net`'s. Like moq-e2ee, it compresses a `compress` track before
-  encryption and publishes the physical track uncompressed.
+  encryption, publishes the physical track uncompressed, and carries the
+  logical flag in the same authenticated E2EE metadata
+  ([e2ee](/quest/m2/net-wrap/e2ee.md)).
 - Demand and preference cross the wrapper: a publisher with no viewer
   through an encrypted track stays idle.
 - Test publish and watch round trips through a pass-through wrapper and
   through `@moq/e2ee`.
 
 Public API: new `@moq/net` interfaces; `@moq/e2ee` wrapper signatures change.
-Wire: none.
+Wire: the `draft-lcurley-moq-e2ee.md` compress flag from
+[e2ee](/quest/m2/net-wrap/e2ee.md).
 
 ## Required
 
