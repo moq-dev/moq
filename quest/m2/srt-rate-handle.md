@@ -28,10 +28,13 @@ enforcement needs it and nobody owned it.
   ([SRT on the shared socket](/quest/m2/one-port/srt-demux.md)). One port
   retires `srt-tokio` socket handling, so do not fork that backend to add
   this.
-- Pull: pace frames to the cap before muxing TS. Past cap plus burst, skip to
-  the next group; dropping 188-byte TS packets would leave partial frames.
-  As in [moq-rtc pacing](/quest/m2/rtc-pacing.md), skip only at a group
-  boundary, so a group larger than the burst is paced through to its end.
+- Pull: pace the TS packets each frame muxes into, charging their media
+  contribution, rather than whole frames, so a frame larger than the burst
+  is released gradually instead of waiting forever or exceeding cap plus
+  burst. Decide drops only before a group starts: past cap plus burst, skip
+  to the next group; dropping 188-byte TS packets would leave partial
+  frames. As in [moq-rtc pacing](/quest/m2/rtc-pacing.md), a group (or
+  frame) larger than the burst is paced through to its end.
   Retransmissions draw from the same bucket, and one with no credit left is
   skipped, which needs the hook `srt-protocol`'s sender exposes when driven
   directly.
@@ -43,7 +46,8 @@ enforcement needs it and nobody owned it.
   only before `accept`, so it stays for admission refusals; the rate-limit
   reason goes to the embedder instead.
 - Burst defaults to about one second of the cap, as on QUIC.
-- Tests: a capped pull stays under cap plus burst; two pulls with different
+- Tests: a capped pull stays under cap plus burst, including a single frame
+  larger than the burst, which still arrives; two pulls with different
   caps, each reporting every packet lost for several burst windows, stay
   under their own; a publisher over the cap is closed mid-session, apart from
   a `Forbidden` admission refusal; a publisher whose TS mux rate, padding

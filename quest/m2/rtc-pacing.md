@@ -15,12 +15,15 @@ byte is fixed, and the viewer can't inflate it. This backs moq.pro's
 Decided 2026-10-20 (maintainer): planned upstream now, because moq.pro's
 WHEP enforcement needs it and nobody owned it.
 
-- Pace frames to the cap before packetizing. Past cap plus burst, skip to
-  the next group, the same whole-group drop moq.pro's RTMP play uses.
-  Skip only at a group boundary: a group that has started is paced through
-  to its end even when it is larger than the burst, as large frames finish
-  gradually on [QUIC](/quest/m2/rate-quic.md), so an oversized keyframe
-  group still makes progress.
+- Pace the RTP packets each frame packetizes into, charging their media
+  payload, rather than whole frames: bucket credit caps at the burst, so a
+  frame larger than the burst could never be released whole without
+  exceeding cap plus burst. Decide drops only before a group starts: past
+  cap plus burst, skip to the next group, the same whole-group drop
+  moq.pro's RTMP play uses. A group that has started is paced through to
+  its end even when it, or one of its frames, is larger than the burst, as
+  large frames finish gradually on [QUIC](/quest/m2/rate-quic.md), so an
+  oversized keyframe group still makes progress.
   Dropping individual RTP packets would leave partial frames that corrupt
   the picture and draw NACKs and PLIs nobody can satisfy.
 - NACK resends draw from the same rate-plus-burst bucket as the frame pacer,
@@ -31,7 +34,8 @@ WHEP enforcement needs it and nobody owned it.
   to str0m with the maintainer's approval.
 - A per-session rate handle sets the cap and accepts live updates. The pacer
   counts media; the docs advise headroom for RTP overhead.
-- Tests: a capped viewer never receives more than cap plus burst; a viewer
+- Tests: a capped viewer never receives more than cap plus burst, including
+  a single frame larger than the burst, which still arrives; a viewer
   over the cap resumes cleanly on the next group; two viewers with different
   caps, each NACKing every packet for several burst windows, stay under
   their own cap plus burst.
