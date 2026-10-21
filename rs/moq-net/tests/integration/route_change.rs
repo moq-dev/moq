@@ -679,7 +679,10 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 		}
 		while let Ok((group, frame)) = rx.try_recv() {
 			let (_, payload) = frame.unwrap_or_else(|err| panic!("group {group} failed: {err}"));
-			after.entry(group).or_default().push(String::from_utf8(payload).unwrap());
+			after
+				.entry(group)
+				.or_default()
+				.push(String::from_utf8(payload).unwrap());
 		}
 	}
 	drop((broadcast, p_o, o_m1, o_m2, m1_e, m2_e));
