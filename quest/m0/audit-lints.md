@@ -26,8 +26,9 @@ Scope is every language (decided 2026-10-20): clippy and rustc overrides,
 `type: ignore`, Kotlin `@Suppress`, and the equivalents in Go, Swift, Dart,
 and C/C++. `dead_code` and `unused` suppressions belong to the [dead code
 audit](/quest/m1/audit-dead-code.md); skip them here. Generated or vendored
-bindings (`moq-nvenc`, `moq-v4l/src/sys`, `moq-rtmp/src/rml`) keep their
-blanket allows unless the generator can emit clean code.
+bindings (`moq-nvenc`, `moq-v4l/src/sys`, `moq-rtmp/src/rml`, and the
+untracked UniFFI output) keep their blanket allows unless the generator can
+emit clean code.
 
 A suppression stays only when fixing the lint would make the code worse; a
 signature reshaped to satisfy `too_many_arguments` or `large_enum_variant`
@@ -76,6 +77,11 @@ deprecation output too.
 - Rust `#[allow(deprecated)]`: 2, in a `moq-relay` cluster test and
   `moq-video` AVFoundation capture. No `#[deprecated]` items of our own.
 - JS: 33 `biome-ignore`, 45 `@ts-expect-error`, no `@deprecated` exports.
-- Python: 80 `noqa` or `type: ignore`. Kotlin: 139 `@Suppress`. Go, Swift,
-  Dart, and C/C++ had none found by a plain grep; confirm with each
-  toolchain's own syntax.
+- Python: 30 `noqa` or `type: ignore`, 24 of them in `py/moq-rs/tests`.
+  Kotlin, Go, Swift, Dart, and C/C++ had none found by a plain grep; confirm
+  with each toolchain's own syntax.
+
+Count with `git grep` so only tracked files count. Generated UniFFI bindings
+are untracked (`kt/.gitignore`) and carry their own suppressions, such as
+Kotlin's 139 `@Suppress`; leave them out, and fix a noisy one in the generator
+config instead of the output.
