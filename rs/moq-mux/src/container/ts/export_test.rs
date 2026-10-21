@@ -1049,7 +1049,7 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 		video, expected,
 		"continuous leading pictures survive; only join and later-hole orphans are trimmed"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(
 		(stats.dropped, stats.trimmed),
 		(2, 2),
@@ -5563,7 +5563,7 @@ async fn a_start_group_cut_short_starts_at_the_next() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe the export starts at: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing that went out lost a frame");
 	assert_eq!(stats.gaps, 1, "the cut is counted");
 	assert!(stats.trimmed >= 5, "the cut-off start is counted: {}", stats.trimmed);
@@ -5640,7 +5640,7 @@ async fn audio_dropped_ahead_of_a_moved_start_is_not_started() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
 	assert!(stats.trimmed > 0);
 }
@@ -5684,7 +5684,7 @@ async fn a_stale_start_group_holds_the_audio_behind_the_next_keyframe() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe the export starts at: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
 	assert!(stats.trimmed > 0);
 }

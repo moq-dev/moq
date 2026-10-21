@@ -1,10 +1,11 @@
 //! Wire-level QUIC datagram body for moq-lite-05 (§6.4).
 //!
 //! One datagram carries a single-frame group routed over an existing subscription. The body is
-//! `subscribe (i) | sequence (i) | [timestamp (i)] | payload (b)`, with the timestamp present only
-//! when the subscription's track carries one (see [`Version::wire_timescale`]). The payload runs to
-//! the datagram boundary, so unlike a [`super::Message`] there is no inner length prefix. The model
-//! counterpart is [`crate::Datagram`].
+//! `subscribe (i) | sequence (i) | [timestamp (i)] | [inflated size (i)] | payload (b)`, with the
+//! timestamp present only when the subscription's track carries one (see
+//! [`Version::wire_timescale`]) and the inflated size only when it is compressed (lite-07). The
+//! payload runs to the datagram boundary, so unlike a [`super::Message`] there is no inner length
+//! prefix. The model counterpart is [`crate::Datagram`].
 
 use crate::Timescale;
 use bytes::Bytes;
@@ -23,11 +24,24 @@ pub struct Datagram {
 	/// Absolute presentation timestamp in the track's wire timescale, or `None` on a track
 	/// that carries no timestamps.
 	pub timestamp: Option<u64>,
+	/// On a compressed track, the payload's inflated size; the payload is then its own
+	/// DEFLATE stream.
+	pub inflated: Option<u64>,
 	/// The frame payload, delimited by the datagram boundary.
 	pub payload: Bytes,
 	/// With the `ietf` extension negotiated, the moq-transport state a relay preserves, or
 	/// `Some(None)` for a plain datagram. `None` without the extension.
 	pub ietf: Option<Option<crate::model::datagram::Wire>>,
+}
+
+/// What a datagram body carries beyond its payload, which the subscription's track decides
+/// and the body itself does not say.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Format {
+	/// The units of the track's timestamps, or `None` when it carries none.
+	pub timescale: Option<Timescale>,
+	/// The track is compressed, so the payload's inflated size precedes it.
+	pub compressed: bool,
 }
 
 impl Encode<Version> for Datagram {
@@ -41,6 +55,10 @@ impl Encode<Version> for Datagram {
 			return Err(EncodeError::Version);
 		}
 
+		if self.inflated.is_some() && !version.has_compression() {
+			return Err(EncodeError::Version);
+		}
+
 		w.varint(self.subscribe)?;
 		w.varint(self.sequence)?;
 		if let Some(wire) = &self.ietf {
@@ -50,7 +68,7 @@ impl Encode<Version> for Datagram {
 			// Any status object carries no payload, which moq-transport could not send beside
 			// it, and a non-zero one carries no object and so no time either.
 			let status = wire.as_ref().and_then(|wire| wire.status);
-			if status.is_some() && !self.payload.is_empty()
+			if status.is_some() && (!self.payload.is_empty() || self.inflated.is_some())
 				|| status.is_some_and(|status| status != 0) && self.timestamp.is_some()
 			{
 				return Err(EncodeError::InvalidState);
@@ -59,6 +77,9 @@ impl Encode<Version> for Datagram {
 		}
 		if let Some(timestamp) = self.timestamp {
 			w.varint(timestamp)?;
+		}
+		if let Some(inflated) = self.inflated {
+			w.varint(inflated)?;
 		}
 
 		// Payload runs to the datagram boundary: written raw, no length prefix.
@@ -70,14 +91,13 @@ impl Encode<Version> for Datagram {
 impl Datagram {
 	/// Decode a whole datagram body. The payload shares `buf` rather than copying it.
 	///
-	/// `ietf` says whether the session negotiated the extension, and `timescale` gives the
-	/// units of the track of the given subscribe ID, if it is timed, which the body itself
-	/// does not say.
+	/// `ietf` says whether the session negotiated the extension, and `format` what the track
+	/// of the given subscribe ID carries, which the body itself does not say.
 	pub fn decode(
 		buf: Bytes,
 		version: Version,
 		ietf: bool,
-		timescale: impl FnOnce(u64) -> Option<Timescale>,
+		format: impl FnOnce(u64) -> Format,
 	) -> Result<Self, DecodeError> {
 		if !version.has_datagrams() || (ietf && !version.has_ietf()) {
 			return Err(DecodeError::Version);
@@ -86,7 +106,7 @@ impl Datagram {
 		let mut r = Decoder::new(&buf, version.into());
 		let subscribe = r.varint()?;
 		let sequence = r.varint()?;
-		let timescale = timescale(subscribe);
+		let Format { timescale, compressed } = format(subscribe);
 		let ietf = ietf
 			.then(|| super::ietf::decode_datagram(&mut r, timescale, version))
 			.transpose()?;
@@ -101,6 +121,11 @@ impl Datagram {
 		} else {
 			None
 		};
+		// A status has no payload to inflate.
+		let inflated = match compressed && version.has_compression() && status.is_none() {
+			true => Some(r.varint()?),
+			false => None,
+		};
 
 		// Everything remaining is the payload (the datagram boundary delimits it).
 		let payload = buf.slice(buf.len() - r.remaining()..);
@@ -112,6 +137,7 @@ impl Datagram {
 			subscribe,
 			sequence,
 			timestamp,
+			inflated,
 			payload,
 			ietf,
 		})
@@ -122,17 +148,54 @@ impl Datagram {
 mod test {
 	use super::*;
 
+	const TIMED: Format = Format {
+		timescale: Some(Timescale::MILLI),
+		compressed: false,
+	};
+
+	const COMPRESSED: Format = Format {
+		timescale: Some(Timescale::MILLI),
+		compressed: true,
+	};
+
+	/// A compressed track's inflated size sits between the timestamp and the payload.
+	#[test]
+	fn compressed_carries_the_inflated_size() {
+		let dg = Datagram {
+			subscribe: 1,
+			sequence: 2,
+			timestamp: Some(3),
+			inflated: Some(40),
+			payload: Bytes::from_static(b"slice"),
+			ietf: None,
+		};
+		let buf = dg.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(&buf[..4], [1, 2, 3, 40]);
+		assert_eq!(
+			Datagram::decode(buf, Version::Lite07, false, |_| COMPRESSED).unwrap(),
+			dg
+		);
+
+		for version in [Version::Lite05, Version::Lite06] {
+			assert!(
+				matches!(dg.encode_bytes(version), Err(EncodeError::Version)),
+				"{version}"
+			);
+		}
+	}
+
 	#[test]
 	fn roundtrip() {
 		let original = Datagram {
 			subscribe: 7,
 			sequence: 42,
 			timestamp: Some(1_000),
+			inflated: None,
 			payload: Bytes::from_static(b"hello"),
 			ietf: None,
 		};
 		let buf = original.encode_bytes(Version::Lite05).unwrap();
-		let decoded = Datagram::decode(buf, Version::Lite05, false, |_| Some(Timescale::MILLI)).unwrap();
+		let decoded = Datagram::decode(buf, Version::Lite05, false, |_| TIMED).unwrap();
 		assert_eq!(decoded, original, "payload has no trailing length prefix");
 	}
 
@@ -142,11 +205,12 @@ mod test {
 			subscribe: 0,
 			sequence: 0,
 			timestamp: Some(0),
+			inflated: None,
 			payload: Bytes::new(),
 			ietf: None,
 		};
 		let buf = original.encode_bytes(Version::Lite05).unwrap();
-		let decoded = Datagram::decode(buf, Version::Lite05, false, |_| Some(Timescale::MILLI)).unwrap();
+		let decoded = Datagram::decode(buf, Version::Lite05, false, |_| TIMED).unwrap();
 		assert_eq!(decoded, original);
 	}
 
@@ -158,6 +222,7 @@ mod test {
 			subscribe: 1,
 			sequence: 2,
 			timestamp: Some(3),
+			inflated: None,
 			payload: Bytes::from_static(b"world"),
 			ietf: None,
 		};
@@ -173,6 +238,7 @@ mod test {
 			subscribe: 1,
 			sequence: 2,
 			timestamp: None,
+			inflated: None,
 			payload: Bytes::from_static(b"world"),
 			ietf: None,
 		};
@@ -181,7 +247,7 @@ mod test {
 		assert_eq!(&buf[2..], b"world");
 		let decoded = Datagram::decode(buf, Version::Lite07, false, |id| {
 			assert_eq!(id, 1);
-			None
+			Format::default()
 		})
 		.unwrap();
 		assert_eq!(decoded, dg);
@@ -193,6 +259,7 @@ mod test {
 			subscribe: 1,
 			sequence: 2,
 			timestamp: None,
+			inflated: None,
 			payload: Bytes::from_static(b"world"),
 			ietf: None,
 		};
@@ -212,6 +279,7 @@ mod test {
 			subscribe: 1,
 			sequence: 2,
 			timestamp: Some(500),
+			inflated: None,
 			payload: Bytes::from_static(b"x"),
 			ietf: Some(Some(crate::model::datagram::Wire {
 				object_id: None,
@@ -233,14 +301,15 @@ mod test {
 		};
 		let decode = |dg: Datagram| {
 			let buf = dg.encode_bytes(Version::Lite07).unwrap();
-			Datagram::decode(buf, Version::Lite07, true, |_| Some(Timescale::MILLI))
+			Datagram::decode(buf, Version::Lite07, true, |_| TIMED)
 		};
 		assert!(decode(dg(0x20)).is_ok());
 		assert!(matches!(decode(dg(0x10)), Err(DecodeError::InvalidValue)));
 	}
 
 	/// A Normal status (0) is an empty object, which moq-transport sends as a status with
-	/// no payload, so a STATUS field beside a payload is refused whatever its value.
+	/// no payload, so a STATUS field beside a payload, or its inflated size, is refused
+	/// whatever its value.
 	#[test]
 	fn a_status_carries_no_payload() {
 		for status in [0, 3] {
@@ -248,6 +317,7 @@ mod test {
 				subscribe: 1,
 				sequence: 2,
 				timestamp: (status == 0).then_some(500),
+				inflated: None,
 				payload: Bytes::from_static(payload),
 				ietf: Some(Some(crate::model::datagram::Wire {
 					object_id: None,
@@ -262,16 +332,23 @@ mod test {
 				"{status}"
 			);
 			let empty = dg(b"");
+			let sized = Datagram {
+				inflated: Some(0),
+				..empty.clone()
+			};
+			assert!(
+				matches!(sized.encode_bytes(Version::Lite07), Err(EncodeError::InvalidState)),
+				"{status}"
+			);
 			let mut buf = empty.encode_bytes(Version::Lite07).unwrap().to_vec();
-			let decoded = Datagram::decode(Bytes::from(buf.clone()), Version::Lite07, true, |_| {
-				Some(Timescale::MILLI)
-			})
-			.unwrap();
-			assert_eq!(decoded, empty, "{status}");
+			for format in [TIMED, COMPRESSED] {
+				let decoded = Datagram::decode(Bytes::from(buf.clone()), Version::Lite07, true, |_| format).unwrap();
+				assert_eq!(decoded, empty, "{status}");
+			}
 			buf.push(b'x');
 			assert!(
 				matches!(
-					Datagram::decode(Bytes::from(buf), Version::Lite07, true, |_| Some(Timescale::MILLI)),
+					Datagram::decode(Bytes::from(buf), Version::Lite07, true, |_| TIMED),
 					Err(DecodeError::InvalidValue)
 				),
 				"{status}"
@@ -285,15 +362,14 @@ mod test {
 			subscribe: 1,
 			sequence: 2,
 			timestamp: Some(3),
+			inflated: None,
 			payload: Bytes::from_static(b"x"),
 			ietf: None,
 		};
 		assert!(matches!(dg.encode_bytes(Version::Lite04), Err(EncodeError::Version)));
 
 		assert!(matches!(
-			Datagram::decode(Bytes::from_static(b"\x01\x02\x03x"), Version::Lite04, false, |_| Some(
-				Timescale::MILLI
-			)),
+			Datagram::decode(Bytes::from_static(b"\x01\x02\x03x"), Version::Lite04, false, |_| TIMED),
 			Err(DecodeError::Version)
 		));
 	}

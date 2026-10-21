@@ -10,6 +10,12 @@ moq-net is optional, behind the default `net` feature that every transport featu
 A build with `default-features = false` and no transport feature loses `client`, `connect`, `connection`, `listen`, `origin`, `transport`, their root re-exports (`Client`, `Connection`, `ConnectError`, `Transport`, ...), `Error::MoqNet`, `Error::Connect`, `Error::connect_error`, `Error::is_auth`, and the `moq_net` re-export.
 Enable `net`, or a transport feature, to keep them.
 
+### `mdns::Secret` is `secret::Secret`, read from a file (#5910)
+
+The 32-byte secret type moved out of `mdns` so `listen.reset.secret` shares it, and it no longer parses inline hex.
+Name it `moq_tokio::secret::Secret`.
+Replace `Secret::load(value)` with `Secret::read(path)`, which reads a file of 64 hexadecimal characters and returns `secret::Error`; replace `Secret::new(hex)` and `str::parse` with `Secret::from([u8; 32])`, decoding the hex yourself.
+
 ### Dropping an unfinished send stream resets it (#5909)
 
 `quic::driver::SendStream` and `quic::web::SendStream` send `RESET_STREAM` with code 0 when dropped before `finish()`, instead of finishing implicitly.

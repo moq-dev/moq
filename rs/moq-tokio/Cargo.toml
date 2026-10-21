@@ -150,6 +150,10 @@ rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 # rustls without a provider, as iroh builds it, so the default test build covers an
 # `http://` dial's certificate fetch with no process default installed.
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
+# Sockets a test holds or inspects: which ones the process still holds, so the
+# worker tests can prove a stopped group closed its own, and port reservations
+# that never listen, so a test needn't release a port another test could take.
+socket2 = { workspace = true, features = ["all"] }
 # A fake STUN server for the WebRTC server-reflexive candidate test.
 stun-types = { workspace = true }
 tempfile = "3"
@@ -158,11 +162,6 @@ tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls = { workspace = true }
 toml = "1.1"
 tracing-test = { workspace = true, features = ["no-env-filter"] }
-
-# Which sockets the process still holds, so the worker tests can prove a stopped
-# group closed its own without rebinding a port another test could take.
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-socket2 = { workspace = true, features = ["all"] }
 
 # The examples and integration tests run MoQ sessions, which a driver-only build lacks.
 [[example]]

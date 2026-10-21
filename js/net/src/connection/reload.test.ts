@@ -12,7 +12,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { wireOf } from "../wire.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
-import { pumpAnnounced, Reload, type ReloadProps } from "./reload.ts";
+import { pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
@@ -701,4 +701,27 @@ test("a pump owes the retractions of the upstream it replaces", async () => {
 
 	pump.close();
 	producer.close();
+});
+
+test("redirect loop detection catches any cycle in constant memory", () => {
+	for (let tail = 0; tail < 4; tail++) {
+		for (let cycle = 2; cycle <= 8; cycle++) {
+			// `tail` one-way moves, then `cycle` endpoints redirecting around a ring.
+			const at = (hop: number) => (hop < tail ? `tail${hop}` : `ring${(hop - tail) % cycle}`);
+			const redirects = new Redirects();
+			let caught: number | undefined;
+			for (let hop = 0; hop < 4 * (tail + cycle); hop++) {
+				const loop = redirects.move(at(hop), at(hop + 1));
+				if (caught !== undefined) expect(loop, "a caught loop stays caught").toBe(true);
+				else if (loop) caught = hop;
+			}
+			const label = `tail ${tail}, cycle ${cycle}`;
+			expect(caught, label).toBeDefined();
+			// Never before the run first returns to an endpoint it left.
+			expect(caught, label).toBeGreaterThanOrEqual(tail + cycle - 1);
+		}
+	}
+
+	const redirects = new Redirects();
+	for (let hop = 0; hop < 1000; hop++) expect(redirects.move(`a${hop}`, `a${hop + 1}`)).toBe(false);
 });
