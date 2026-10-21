@@ -70,7 +70,16 @@ pub struct TrackInfo {
 	/// Lite07 encodes `None` as zero; Lite05/06 have no untimed encoding, so `None`
 	/// goes out as milliseconds (see [`Version::wire_timescale`]).
 	pub timescale: Option<Timescale>,
+	/// Whether FRAME payloads and datagrams are DEFLATE compressed per group, the only codec
+	/// the wire's `Compression` id names. Lite07+ only: an earlier peer is served the frames
+	/// inflated, so it is never set.
+	pub compress: bool,
 }
+
+/// TRACK_INFO `Compression`: no codec.
+const COMPRESSION_NONE: u64 = 0;
+/// TRACK_INFO `Compression`: per-group DEFLATE (draft-lcurley-moq-flate).
+const COMPRESSION_DEFLATE: u64 = 1;
 
 impl Message for TrackInfo {
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
@@ -100,12 +109,21 @@ impl Message for TrackInfo {
 				.map_err(|_| DecodeError::InvalidValue)?,
 			false => None,
 		};
+		let compress = match version.has_compression() {
+			true => match r.varint()? {
+				COMPRESSION_NONE => false,
+				COMPRESSION_DEFLATE => true,
+				_ => return Err(DecodeError::InvalidValue),
+			},
+			false => false,
+		};
 
 		Ok(Self {
 			priority,
 			refresh,
 			max_age,
 			timescale,
+			compress,
 		})
 	}
 
@@ -127,6 +145,15 @@ impl Message for TrackInfo {
 		if version.has_refresh() {
 			w.varint(self.refresh.map_or(0, |ratio| u64::from(ratio) + 1))?;
 		}
+		if version.has_compression() {
+			w.varint(match self.compress {
+				true => COMPRESSION_DEFLATE,
+				false => COMPRESSION_NONE,
+			})?;
+		} else if self.compress {
+			// The frames would arrive compressed with nothing saying so.
+			return Err(EncodeError::Version);
+		}
 		Ok(())
 	}
 }
@@ -141,6 +168,7 @@ mod test {
 			priority: 7,
 			max_age: Some(Duration::from_millis(2000)),
 			timescale: Some(Timescale::MICRO),
+			compress: false,
 		}
 	}
 
@@ -244,6 +272,7 @@ mod test {
 			max_age: info.max_age,
 			// The default track is untimed, which lite-05 declares as milliseconds.
 			timescale: info.timescale,
+			compress: false,
 		};
 		let mut buf = Vec::new();
 		info.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
@@ -296,6 +325,55 @@ mod test {
 	}
 
 	#[test]
+	fn lite07_carries_the_compression_codec() {
+		for compress in [false, true] {
+			let info = TrackInfo {
+				compress,
+				..info_sample()
+			};
+			let buf = info.encode_bytes(Version::Lite07).unwrap();
+			assert_eq!(buf.last(), Some(&u8::from(compress)));
+			assert_eq!(info_roundtrip(Version::Lite07, &info).compress, compress);
+		}
+
+		// The message body, without its length prefix, ends in the codec id.
+		let mut buf = Vec::new();
+		TrackInfo {
+			compress: true,
+			..info_sample()
+		}
+		.encode_msg(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
+		.unwrap();
+		// An unknown codec id, still a one-byte varint.
+		*buf.last_mut().unwrap() = 2;
+		let mut slice = buf.as_slice();
+		assert!(matches!(
+			crate::coding::decode_buf(&mut slice, Version::Lite07, TrackInfo::decode_msg),
+			Err(DecodeError::InvalidValue)
+		));
+	}
+
+	/// An older peer cannot be told, so a compressed track is never described to one.
+	#[test]
+	fn compression_needs_lite07() {
+		let info = TrackInfo {
+			compress: true,
+			..info_sample()
+		};
+		for version in [Version::Lite05, Version::Lite06] {
+			assert!(
+				matches!(info.encode_bytes(version), Err(EncodeError::Version)),
+				"{version}"
+			);
+			let plain = TrackInfo {
+				compress: false,
+				..info_sample()
+			};
+			assert!(!info_roundtrip(version, &plain).compress);
+		}
+	}
+
+	#[test]
 	fn track_info_errors_before_lite05() {
 		let mut buf = Vec::new();
 		assert!(
@@ -312,6 +390,7 @@ mod test {
 			priority: 255,
 			max_age: None,
 			timescale: Some(Timescale::new((1u64 << 62) - 1).unwrap()),
+			compress: false,
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
 		assert_eq!(got.priority, 255);
@@ -326,6 +405,7 @@ mod test {
 			priority: 0,
 			max_age: Some(Duration::from_nanos(999_999)),
 			timescale: Some(Timescale::MILLI),
+			compress: false,
 		};
 		let got = info_roundtrip(Version::Lite05, &info);
 		assert_eq!(got.max_age, Some(Duration::ZERO));
@@ -339,6 +419,7 @@ mod test {
 			priority: 7,
 			max_age: Some(Duration::from_millis(u64::MAX)),
 			timescale: Some(Timescale::MILLI),
+			compress: false,
 		};
 		// The partial bytes are the Writer's to drop; see `a_failed_encode_leaves_no_partial_bytes`.
 		assert!(matches!(

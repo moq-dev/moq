@@ -15,6 +15,7 @@ use rand::RngExt;
 
 use super::{
 	Requests, WeakCache, WeakEntry,
+	follow::AnnouncedBroadcast,
 	front::{Action, Candidate, Event, Front, Refusal},
 };
 use crate::{
@@ -5155,6 +5156,8 @@ pub struct Routing {
 	watch: Option<(Watch, u64)>,
 	// The ask in flight, dropped once it fails `Unroutable` until the routes move.
 	request: Option<Requesting>,
+	// The publisher instance every ask is pinned to, if any.
+	epoch: Option<crate::Epoch>,
 }
 
 impl kio::Task for Routing {
@@ -5193,7 +5196,11 @@ impl kio::Task for Routing {
 					let seen = watch.seen();
 					drop(table);
 					self.watch = Some((watch, seen));
-					self.request = Some(self.consumer.request(self.path.as_path(), None).into_inner());
+					self.request = Some(
+						self.consumer
+							.request(self.path.as_path(), self.epoch.as_ref())
+							.into_inner(),
+					);
 				}
 			}
 		}
@@ -5592,7 +5599,7 @@ impl Consumer {
 
 	/// Follow the announcements of the routes covering `path`, reduced to the one serving it.
 	///
-	/// This is how a player follows a broadcast across publisher restarts: play on a
+	/// [`Self::announced_broadcast`] resolves each instance this reports. Following by hand: play on a
 	/// [`Start`](AnnounceEvent::Start), drop everything and request the path afresh on a
 	/// [`Restart`](AnnounceEvent::Restart), and stop on an [`End`](AnnounceEvent::End). An
 	/// [`Update`](AnnounceEvent::Update) is the same publisher instance re-priced or failed
@@ -5635,17 +5642,50 @@ impl Consumer {
 	/// [`Error::Closed`] once the origin closes, and any other resolution
 	/// failure as-is. Await it, or poll it through [`kio::Task`].
 	pub fn routed_broadcast(&self, path: impl AsPath) -> kio::Pending<Routing> {
-		let path = path.as_path().to_owned();
+		kio::Pending::new(self.routing(path.as_path().to_owned(), None))
+	}
 
+	/// [`Self::routed_broadcast`], refusing any instance but `epoch` when one is pinned.
+	pub(super) fn routing(&self, path: PathOwned, epoch: Option<crate::Epoch>) -> Routing {
 		// `allowed` keeps narrower permissions intact: if the whole path is not
 		// reachable, no route can ever cover it, so bail rather than loop forever.
 		let request = (!self.allowed().matches(path.as_str())).then(|| Requesting::failed(Error::Unauthorized));
-		kio::Pending::new(Routing {
+		Routing {
 			consumer: self.clone(),
 			path,
 			watch: None,
 			request,
-		})
+			epoch,
+		}
+	}
+
+	/// Follow the broadcast at `path`, resolving each publisher instance that serves it.
+	///
+	/// The Rust form of JS `request(path, { announced: true })`. The first
+	/// [`available`](AnnouncedBroadcast::poll_available) resolves the instance serving the path
+	/// once one is announced, riding out churn as [`Self::routed_broadcast`] does. Each
+	/// later call waits for another instance to take over (an
+	/// [`AnnounceEvent::Restart`]), or for the path to be served again after an
+	/// [`AnnounceEvent::End`], even by the same instance. Drop what was read from the
+	/// previous instance then: its tracks end with an error once its routes go.
+	///
+	/// Pass an owned [`crate::Epoch`] to follow only that instance: another one taking
+	/// over is never handed out, and the instance is handed out again if it returns after
+	/// an end. Fails with [`Error::Unauthorized`] when this consumer's scope can never
+	/// cover the path, and with [`Error::InvalidPath`] when no pattern can spell it.
+	pub fn announced_broadcast(
+		&self,
+		path: impl AsPath,
+		epoch: impl Into<Option<crate::Epoch>>,
+	) -> Result<AnnouncedBroadcast, Error> {
+		let path = path.as_path();
+		let follow = self.follow(&path)?;
+		Ok(AnnouncedBroadcast::new(
+			self.clone(),
+			path.to_owned(),
+			epoch.into(),
+			follow,
+		))
 	}
 
 	/// Returns a consumer rooted at `root` and restricted to matching `patterns`.

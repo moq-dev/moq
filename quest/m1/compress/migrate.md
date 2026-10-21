@@ -48,5 +48,4 @@ Public API: removals listed above. Wire: the hang catalog loses
 
 ## Required
 
-- [Core](/quest/m1/compress/core.md) - Rust compresses opted-in tracks
 - [JavaScript](/quest/m1/compress/js.md) - js/publish and js/watch need the JS side before they drop `.z`
