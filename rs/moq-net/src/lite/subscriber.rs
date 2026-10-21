@@ -533,15 +533,19 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// A datagram says where the live feed is as well as a group does. Inserted first, so
 		// the copy goes live with it already showing.
 		let live = entry.producer.is_live();
-		let wire = dg.ietf.flatten().map(Arc::new);
-		entry.producer.insert_wire_datagram(crate::model::datagram::Stored {
+		let datagram = crate::model::datagram::Stored {
 			datagram: crate::Datagram {
 				sequence: dg.sequence,
 				timestamp,
 				payload: dg.payload,
 			},
-			wire,
-		})?;
+			wire: dg.ietf.flatten().map(Arc::new),
+			deflated: None,
+		};
+		match dg.inflated {
+			Some(size) => entry.producer.insert_deflated_datagram(datagram, size)?,
+			None => entry.producer.insert_wire_datagram(datagram)?,
+		}
 		if !live {
 			entry.producer.set_live(Some(Position::group(dg.sequence)));
 		}
@@ -1058,9 +1062,15 @@ enum IngestPhase {
 	/// Reading the timestamp delta (skipped without a timescale). Stream end here
 	/// means the group has no more frames.
 	Timing,
+	/// Reading a compressed Track's inflated size (lite-07), or skipped. Stream end here
+	/// also ends the group on an untimed Track, where nothing precedes it.
+	Inflated { timestamp: Option<Timestamp> },
 	/// Reading the frame size. Stream end here also ends the group (pre-lite-05,
 	/// where there is no timing prefix to act as the sentinel).
-	Size { timestamp: Option<Timestamp> },
+	Size {
+		timestamp: Option<Timestamp>,
+		inflated: Option<u64>,
+	},
 	/// Streaming the frame payload.
 	Payload { frame: frame::ProducerOwned },
 }
@@ -1191,7 +1201,7 @@ impl FrameIngest {
 				}
 				IngestPhase::Timing => {
 					let Some(scale) = self.framing.timescale else {
-						self.phase = IngestPhase::Size { timestamp: None };
+						self.phase = IngestPhase::Inflated { timestamp: None };
 						continue;
 					};
 					// The timestamp delta doubles as the per-frame sentinel.
@@ -1204,12 +1214,30 @@ impl FrameIngest {
 					self.prev_ts = next;
 					let timestamp = Timestamp::new(next, scale)
 						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-					self.phase = IngestPhase::Size {
+					self.phase = IngestPhase::Inflated {
 						timestamp: Some(timestamp),
 					};
 				}
-				IngestPhase::Size { timestamp } => {
+				IngestPhase::Inflated { timestamp } => {
 					let timestamp = *timestamp;
+					// Only a compressed Track carries it, and only lite-07 can mark one.
+					if !group.compressed() {
+						self.phase = IngestPhase::Size {
+							timestamp,
+							inflated: None,
+						};
+						continue;
+					}
+					let Some(inflated) = ready!(self.poll_header_varint(reader, &mut cx))? else {
+						return Poll::Ready(Ok(()));
+					};
+					self.phase = IngestPhase::Size {
+						timestamp,
+						inflated: Some(inflated),
+					};
+				}
+				IngestPhase::Size { timestamp, inflated } => {
+					let (timestamp, inflated) = (*timestamp, *inflated);
 					let Some(size) = ready!(self.poll_header_varint(reader, &mut cx))? else {
 						return Poll::Ready(Ok(()));
 					};
@@ -1232,10 +1260,13 @@ impl FrameIngest {
 					// oversized `size` and allocates up front only within the budget, so
 					// no pre-check is needed. No wire timestamp (pre-lite-05) means an
 					// untimed frame.
+					// A compressed frame stores the slice as it arrives, its inflated size
+					// checked against the same limits before anything inflates.
 					let frame = group.create_frame_owned(
 						frame::Header {
 							info: frame::Info { size, timestamp },
 							fields,
+							inflated,
 						},
 						&self.budget,
 					)?;
@@ -1786,7 +1817,8 @@ impl<S: crate::transport::poll::Session> TracksRecv<S> {
 						.with_timescale(info.timescale)
 						.with_max_age(info.max_age)
 						.with_priority(info.priority)
-						.with_refresh(info.refresh);
+						.with_refresh(info.refresh)
+						.with_compress(info.compress);
 					source.lister.add(name.clone(), info)?;
 					self.listed.insert(name, slot);
 				}
@@ -2582,6 +2614,7 @@ mod tests {
 						framing: lite::Framing {
 							timescale: Some(Timescale::MILLI),
 							ietf: None,
+							compressed: false,
 						},
 						tail: Default::default(),
 					},
@@ -2641,6 +2674,7 @@ mod tests {
 					framing: lite::Framing {
 						timescale: Some(Timescale::MILLI),
 						ietf: None,
+						compressed: false,
 					},
 					tail: Default::default(),
 				},
@@ -2670,6 +2704,7 @@ mod tests {
 		lite::Framing {
 			timescale,
 			ietf: Some(crate::ietf::Version::Draft18),
+			compressed: false,
 		}
 	}
 
@@ -2912,6 +2947,7 @@ mod tests {
 				framing: lite::Framing {
 					timescale: Some(Timescale::MILLI),
 					ietf: None,
+					compressed: false,
 				},
 				tail: Default::default(),
 			},
@@ -2982,6 +3018,7 @@ mod tests {
 				framing: lite::Framing {
 					timescale: Some(Timescale::MILLI),
 					ietf: None,
+					compressed: false,
 				},
 				tail: tail.clone(),
 			},
@@ -3266,6 +3303,7 @@ mod tests {
 				framing: lite::Framing {
 					timescale: Some(Timescale::MILLI),
 					ietf: None,
+					compressed: false,
 				},
 				tail: Default::default(),
 			},
@@ -3277,6 +3315,7 @@ mod tests {
 				sequence,
 				timestamp: Some(sequence),
 				payload: bytes::Bytes::from_static(b"x"),
+				inflated: None,
 				ietf: None,
 			}
 			.encode_bytes(VERSION)
@@ -6375,7 +6414,8 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 						.with_timescale(info.timescale)
 						.with_max_age(info.max_age)
 						.with_priority(info.priority)
-						.with_refresh(info.refresh);
+						.with_refresh(info.refresh)
+						.with_compress(info.compress);
 					if !ietf {
 						return Poll::Ready(Ok((model, HeldTrack(stream))));
 					}

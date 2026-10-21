@@ -210,6 +210,10 @@ pub enum Error {
 	#[error("QUIC-LB connection IDs cannot be combined with per-core workers")]
 	ShardWithQuicLb,
 
+	/// The stateless reset secret file could not be read or does not hold 64 hexadecimal characters.
+	#[error("invalid stateless reset secret")]
+	ResetSecret(#[source] crate::secret::Error),
+
 	/// The mTLS client verifier could not be built from the configured roots.
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
@@ -799,8 +803,15 @@ impl Server {
 			.unwrap_or(crate::server::DEFAULT_BIND);
 		let load_balancer = config.load_balancer();
 
-		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = driver::EndpointConfig::default();
+		// First, since it also keys the default connection ID generator. The ones
+		// below validate a predecessor's IDs without it.
+		if let Some(secret) = &config.reset.secret {
+			let secret = crate::secret::Secret::read(secret).map_err(Error::ResetSecret)?;
+			endpoint_config.reset_secret(secret.as_bytes());
+		}
+
+		// Configure connection ID generator with server ID if provided
 		if let Some(shard) = member.as_ref().map(listen::Socket::shard) {
 			if load_balancer.is_some() {
 				return Err(Error::ShardWithQuicLb);

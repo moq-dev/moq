@@ -86,6 +86,8 @@ fn rendezvous_error(error: Error, requested: bool, resolved: bool) -> Error {
 	if requested && missing { Error::Timeout } else { error }
 }
 
+// Returned from one poll and matched at once, so its size never sits in a task.
+#[allow(clippy::large_enum_variant)]
 enum FillStep {
 	Batch,
 	Partial(frame::Consumer),
@@ -14579,7 +14581,8 @@ mod tests {
 	}
 
 	/// A draft-16 peer's PUBLISH_NAMESPACE_CANCEL can beat its answer to our update. It
-	/// withdraws only that namespace, which is offered again, and the loop carries on.
+	/// withdraws only that namespace, which the jittered retry sweep offers again, and the
+	/// loop carries on.
 	#[moq_clock::test]
 	async fn a_draft_16_cancel_ahead_of_the_answer_ends_only_its_request() {
 		const VERSION: Version = Version::Draft16;
@@ -14601,8 +14604,15 @@ mod tests {
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"first-secret", 1).await;
 
+		// The re-offer waits out a randomly jittered sweep, which 1ms settles can overrun.
 		cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
-		poll_until(&mut run, &log, b"cam", 2).await;
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"cam") >= 2 {
+				break;
+			}
+			tick().await;
+		}
 
 		assert_eq!(occurrences(&log, b"cam"), 2, "the namespace was not offered again");
 		assert_eq!(log.bi_opens(), 2, "a fresh request after the cancel");

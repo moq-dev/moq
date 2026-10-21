@@ -190,6 +190,10 @@ Audio and video convenience decoders reject a catalog configuration with `enable
 
 Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to receive bandwidth estimates. `peek()` reads the current estimate in bits per second and `changed()` waits for a new one. Releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 
+## Compressed tracks
+
+`moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+
 ## Track demand
 
 `demand()->wanted()` is the group subscribers want, or `std::nullopt` while nobody subscribes, and `wanted_changed()` waits for it to move: start a new group once it passes your largest. Set `TrackInfo::refresh` to have a joining subscriber ask for a new group once the newest has grown past `refresh` times its first frame.

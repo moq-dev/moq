@@ -26,6 +26,7 @@ A missing data timestamp stays untimed; the library never substitutes zero or no
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
 and `await consumer.latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
+`TrackInfo(compress=True)` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
 `moq.flate.SnapshotProducer` / `StreamProducer` publish opaque payloads; their `update` / `append`
 and the JSON producers accept `timestamp=timedelta(...)` (`None` for untimed).
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
