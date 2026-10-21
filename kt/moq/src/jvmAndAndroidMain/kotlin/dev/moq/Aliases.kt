@@ -103,12 +103,14 @@ typealias Route = uniffi.moq.MoqRoute
 typealias Subscription = uniffi.moq.MoqSubscription
 /** A span of a track to deliver: from `start` up to `end`, or onward when `end` is null. */
 typealias Range = uniffi.moq.MoqRange
-/** Where one end of a [Range] falls: [AnchorAbsolute] or [AnchorRelative]. */
+/** Where one end of a [Range] falls: [AnchorAbsolute], [AnchorRelative], or [AnchorTime]. */
 typealias Anchor = uniffi.moq.MoqAnchor
 /** An exact group and frame. */
 typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
 /** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
 typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
+/** The group containing `timestampUs`, a presentation time in microseconds. */
+typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
 typealias Order = uniffi.moq.MoqOrder
 /** Options for fetching one past group by sequence. */
