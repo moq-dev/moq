@@ -8,8 +8,9 @@ instead of failing. Today `js/hang/src/util/libav.ts` loads the Opus-only
 `@libav.js/variant-opus-af` and carries a `TODO build with AAC support`.
 
 Once it lands, the Rust CLI interop publisher adds an AAC track beside its
-Opus one, so every interop subscriber decodes AAC through the
-symphonia-backed native paths and this fallback.
+Opus one. Node and Bun decode it through this fallback; the other subscribers
+use the decoders [interop audio delivery](/quest/m1/interop-audio.md) assigns
+them.
 
 ## Plan
 

@@ -22,8 +22,12 @@ Decided in planning (2026-10-20):
   delivery](/quest/m1/interop-audio.md), not here.
 - Browser AAC publish runs end to end for the first time in the AAC case.
 - Watch mute and volume are verified on the output (muted is silence, volume
-  scales the level), and `js/watch/src/audio/render-worklet.ts` gets a unit
-  test; today only the browser lanes reach it.
+  scales the level). The media QA probe taps `audio.out.root`, upstream of the
+  emitter's private volume `GainNode` (`js/watch/src/audio/emitter.ts`), so
+  these cases need an observation point after that gain, where samples reach
+  the speakers.
+- `js/watch/src/audio/render-worklet.ts` gets a unit test; today only the
+  browser lanes reach it.
 
 Recommendations:
 
