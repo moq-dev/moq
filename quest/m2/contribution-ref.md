@@ -30,16 +30,17 @@ references") and its decision notes rather than starting over:
   the caller's effect, resolved through the parent's `relativeBroadcast`.
   The child's rendition IDs stay its own, so a contribution's rendition
   never shadows a source rendition with the same ID.
-- `epoch` follows the reference epochs of
-  [catalog references](/quest/m0/broadcast-epoch/catalog-references.md):
-  the same validation, known-mismatch refusal, and epochless best effort. A
+- `epoch` follows the reference epochs that landed in
+  [#5699](https://github.com/moq-dev/moq/pull/5699): the same validation, known-mismatch refusal, and epochless best effort. A
   lazy contribution has no anticipated epoch, so a composer leaves it out
   until the contribution resolves. A reader that follows announcements
   follows the contribution's Start, End, and Restart; one that follows none
-  pins the first resolution for its parent catalog instance. Reuse that
-  quest's pinning; do not add a second one.
-- Rebase onto `main` after catalog references land: #5722 was stacked on
-  #5699's reference `epoch`.
+  pins the first resolution for its parent catalog instance. Reuse
+  `moq_mux::Source`'s pinning and the `Source::follow` from
+  [reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md);
+  do not add a second one.
+- #5722 was stacked on #5699's reference `epoch`, which has landed; rebuild
+  it on `main`.
 
 Per cross-package sync, land `rs/hang`, `js/hang`, `js/watch`, and
 `drafts/draft-lcurley-moq-hang.md` in one PR. Cover lazy resolution (listing
@@ -53,4 +54,4 @@ field.
 
 ## Required
 
-- [Catalog references pin their broadcast instances](/quest/m0/broadcast-epoch/catalog-references.md) - the reference epoch and pinning rules this entry reuses
+- [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - owns `Source::follow`, which a contribution's announcement followers reuse

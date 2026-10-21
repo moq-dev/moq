@@ -28,7 +28,11 @@ reader, so this quest lands after both and only sets the flag.
   their one track.
 - Consumers: `rs/moq-mux/src/catalog/consumer.rs`, `rs/moq-cli/src/subscribe.rs`,
   and `js/watch` lose their hangz paths; the CLI's archive path is already on
-  the archive consumer.
+  the archive consumer. moq-mux's hang catalog adapter over
+  `hang::catalog::Consumer` ([#6114](https://github.com/moq-dev/moq/pull/6114))
+  drops its `format` field and `CatalogFormat::HangZ` goes away; check whether
+  `catalog::msf::Consumer` can reuse hang's escaping-path check instead of
+  its own (decided 2026-10-20 instead of a separate quest).
 - moq-stats deltas: the `.z` side uses merge-patch deltas and the plain side
   does not. Keep deltas on the single track unless measuring stats bytes with
   and without them on a compressed track shows the saving is small; then

@@ -27,9 +27,7 @@ Rules every child keeps:
   budget). Wait out the jitter's whole window, not a count of small steps.
 
 This README's own work, after the children: run `just check --all` several
-times on a loaded machine, as the first round did. moq-tokio's
-`a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
-known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
+times on a loaded machine, as the first round did.
 
 Two children remain, ranked by how likely each hides a product bug: the
 redundant failover drift first, since it may hide a TS export bug and failed

@@ -68,7 +68,6 @@ lands before the cut.
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
 - [Refresh](/quest/m1/refresh/README.md) - a join asks for a fresh group once the current group's deltas exceed a publisher-advertised byte ratio, at every hop; replaces `Demand::used`/`unused` and moq-json's `delta_ratio`
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
-- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - a dropped or cut group ends its reader with an error, never a clean end, across cache reclaim, cap changes, and recovery
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - a warm relay serves a reader with a wider max age the cached groups a cold relay would, with no wire change
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
@@ -86,6 +85,7 @@ lands before the cut.
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
 - [IETF takeover](/quest/m1/ietf-takeover.md) - carry the shared takeover contract through the negotiated IETF epoch extension
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explain pinned catalogs, lazy jobs, takeover, restart and version compatibility
+- [Reference epoch bindings](/quest/m1/reference-epoch-bindings.md) - the UniFFI bindings and C ABI expose and honor a catalog reference's optional `epoch`
 - [Scope track priority](/quest/m1/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
@@ -98,7 +98,6 @@ lands before the cut.
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - the in-tree @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Resumed close](/quest/m1/resume-closed.md) - a resumed JS track keeps its declared end across copies, and its `closed` and `largest()` settle on a clean end
-- [Resume through an outage](/quest/m1/resume-outage.md) - a same-epoch resume after an unclosed route dies delivers the backlog its max age still holds, pinned by a regression test
 - [Resumed datagrams](/quest/m1/resume-datagrams.md) - a resumed track skips only datagrams it already delivered, not every lower sequence
 - [Rust resume holds a declared end](/quest/m1/resume-rust-end.md) - a resumed Rust track keeps a declared end across copies, dedupes flapping copies, and judges retention inside the reader's window
 - [JS answers SUBSCRIBE_START like Rust](/quest/m1/js-start-parity.md) - a JS publisher's START names where its backlog starts, not its newest group
@@ -112,23 +111,26 @@ lands before the cut.
 - [Gateway linger](/quest/m1/linger-gateways.md) - HLS, RTMP, SRT and RTC imports linger at a clean end, cut short by a newer epoch at the same path
 - [Interop finish](/quest/m1/interop-finish.md) - the interop matrix proves a clean broadcast finish across implementations
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
+- [fMP4 import unwraps to Legacy](/quest/m1/fmp4-import-unwrap.md) - fMP4 and HLS imports publish per-sample `Legacy` frames unless `--passthrough` asks for CMAF, and no first-party producer defaults to CMAF
+- [Load CMAF decode on demand](/quest/m1/hang-cmaf-lazy.md) - `@moq/watch` fetches the cml-based `@moq/hang/cmaf` only for CMAF renditions, and the unused public CMAF encoder is deleted
 - [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - group sequence 2^62-1 reaches a lite-06 subscriber or is refused loudly, instead of vanishing
 - [Track live signal](/quest/m1/track-live.md) - a reader can wait for its track's feed to be live, so a player skips old cached groups while a fresh upstream subscription starts
-- [Binding docs](/quest/m1/docs-bindings.md) - every public moq-ffi and moq-c item has rustdoc, carried into the generated bindings and `moq.h`
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
 - [moq-net compiles once](/quest/m1/net-erase-transport.md) - the session drivers stop monomorphizing per transport and per crate, saving several MiB of the relay, FFI library, `libmoq` and CLI
 - [Binding check cost](/quest/m1/binding-check-cost.md) - `moq.cpp` compiles once per C++ standard and Gradle stays warm, measured before and after
 - [Audio devices on ARM](/quest/m1/audio-devices-arm.md) - `just rs audio-devices` passes on the hosted ARM runner
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - queue nextest at 24 threads, stale Pages artifacts cleared, the actionlint ignore dropped
 - [Smoke flake bumps](/quest/m1/smoke-dependabot.md) - `test/smoke/flake.lock` bumps with its Playwright pin, automated or documented
+- [Playwright browsers from Nix](/quest/m1/playwright-nix.md) - every Playwright check runs on Nix's Chromium locally and in CI, with npm pinned to match
 - [moq-net internals](/quest/m1/net-internals.md) - no per-group session clones, no transport type parameter in lite and IETF internals, and the `Local` check measured
+- [Subscribe update churn](/quest/m1/subscribe-update-churn.md) - a viewer sends SUBSCRIBE_UPDATE only on a meaningful change, measured after the publisher stall fix
 - [Dead code and API surface audit](/quest/m1/audit-dead-code.md) - repeat the removal audit before the next major release
 - [Dependency and alternatives audit](/quest/m1/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
 - [Test cost audit](/quest/m1/audit-test-cost.md) - the slowest, flakiest, and least valuable tests are fixed, deleted, or planned
-- [Interop report](/quest/m1/interop-report.md) - nightly Interop results publish as a color-coded matrix on the Pages site instead of only in logs
 - [CI workflow audit](/quest/m1/audit-ci.md) - every workflow and job gives a signal someone sees, at a cost that signal justifies, or is fixed, moved, or deleted
 - [Documentation audit](/quest/m1/audit-docs.md) - stale pages, examples, links, and undocumented exports are fixed or planned
 - [Artifact size audit](/quest/m1/audit-size.md) - binary, FFI, WASM, and bundle growth since the m0 run is explained, fixed, or planned
+- [Compile time audit](/quest/m1/audit-compile-time.md) - build-time hotspots are measured against the m0 baselines and the worst are fixed or planned
 - [Quest tree audit](/quest/m1/audit-quests.md) - the tree agrees with itself and with main
 
 ## Related

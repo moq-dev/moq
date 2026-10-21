@@ -29,12 +29,13 @@ and fix the rest the same way:
 restart rule instead.
 
 Reuse `moq_mux::Source::follow` from
-[catalog references](/quest/m0/broadcast-epoch/catalog-references.md)
-rather than one rule per sink (decided 2026-10-20, maintainer). Each fix lands with a test that replaces the
+[reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md),
+built on `origin::Consumer::announced_broadcast`, rather than one rule per
+sink (decided 2026-10-20, maintainer). Each fix lands with a test that replaces the
 publisher while the sink runs.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - owns `Source::follow`, built on moq-net's announced request
+- [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - owns `Source::follow`, built on moq-net's announced request
