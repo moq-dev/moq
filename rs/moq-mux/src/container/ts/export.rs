@@ -353,6 +353,7 @@ impl Track {
 		}
 		if let Some((floor, ahead)) = self.leading_floor
 			&& pending.frame.timestamp < floor
+			&& !radl(stream_type, self.source.description(), &pending.frame)
 		{
 			jitter.lose(&self.pid, ahead);
 			return Ok(());
@@ -595,7 +596,10 @@ impl Track {
 			.unwrap_or(frame.timestamp);
 		let (key, pes) = self.release_key(decode, jitter.delay(), &frame)?;
 		let video = matches!(self.kind, Kind::Video(_));
-		let leading = video && !frame.keyframe && self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe);
+		let leading = video
+			&& !frame.keyframe
+			&& self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe)
+			&& !matches!(self.kind, Kind::Video(stream_type) if radl(stream_type, description.as_ref(), &frame));
 		if video && frame.keyframe {
 			self.keyframe = Some(frame.timestamp);
 		}
@@ -2448,7 +2452,8 @@ where
 	fn slot_due(&self) -> Option<(u128, moq_clock::Instant)> {
 		let (known, settled) = self.slot_settled()?;
 		let settled = Timestamp::from_micros(u64::try_from(settled / 1_000).ok()?).ok()?;
-		Some((known, self.jitter.at(settled)?))
+		// The tail of the generation still going out keeps its own clock after the next is acquired.
+		Some((known, self.jitter.at(self.generation, settled)?))
 	}
 
 	/// The `known` that settles the next grid slot, and the jitter buffer key, in nanoseconds,
@@ -3255,6 +3260,15 @@ fn ac3_sync_prefix(bytes: &[u8]) -> bool {
 	bytes.iter().zip([0x0b, 0x77]).all(|(&byte, sync)| byte == sync)
 }
 
+/// Whether a video frame is an HEVC RADL picture, which leads its keyframe but references only
+/// it, so it goes out wherever that keyframe does rather than being trimmed as an orphan.
+fn radl(stream_type: StreamType, description: Option<&Bytes>, frame: &Frame) -> bool {
+	stream_type == StreamType::H265
+		&& description
+			.and_then(|description| crate::codec::h265::hvcc_params(description).ok())
+			.is_some_and(|(length_size, _)| crate::codec::h265::hvc1_is_radl(&frame.payload, length_size))
+}
+
 /// Build the Annex-B elementary-stream payload for one video frame: rewrite the
 /// length-prefixed NALs to start-code-delimited NALs, injecting the parameter
 /// sets (SPS/PPS, plus VPS for H.265) from the avcC/hvcC after a leading AUD on
@@ -3595,7 +3609,7 @@ mod tests {
 			// The last available audio frame, including its scheduling lead, anchors both orders.
 			let (decode, key, _) = tracks[1].released.unwrap();
 			assert_eq!(decode.as_micros(), 800_000);
-			assert_eq!(jitter.at(key), Some(start + Duration::from_millis(500)), "{order:?}");
+			assert_eq!(jitter.at(0, key), Some(start + Duration::from_millis(500)), "{order:?}");
 			tokio::time::advance(Duration::from_millis(500)).await;
 			let video = std::iter::from_fn(|| match jitter.poll_next(&waiter) {
 				std::task::Poll::Ready(ready) => Some(ready),

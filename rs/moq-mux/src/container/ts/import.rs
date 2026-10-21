@@ -343,6 +343,13 @@ impl<E: catalog::Catalog> Import<E> {
 			// out of it would break every track in the program on line noise.
 			if self.pcr_pid.is_some_and(|p| p.as_u16() == pid) && pkt[1] & 0x80 == 0 {
 				if discontinuity_indicator(&pkt) {
+					// A PES this packet starts ends the one before it on its PID whole, on the old
+					// clock; only the other PIDs' are cut short by the break.
+					if pkt[1] & 0x40 != 0
+						&& let Ok(pid) = Pid::new(pid)
+					{
+						self.flush(pid)?;
+					}
 					self.timebase_break()?;
 					// The new timebase starts with the PCR the flag rides, if it rides one.
 					if let Some(pcr) = pcr(&pkt) {

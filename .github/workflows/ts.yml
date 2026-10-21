@@ -258,6 +258,14 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
           MOQ_QUIC_CONGESTION_CONTROL: loss
 
+      # Two minutes of MoQ content faults and a congested bottleneck, on a paused clock: each
+      # recovery graded against what was delivered and decoded, and the latency must not drift.
+      - name: TS long recovery
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just rs ts-recovery
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
       - name: Upload failure artifacts
         if: ${{ failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
