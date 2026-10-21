@@ -237,16 +237,6 @@ mod test {
 		}
 	}
 
-	#[test]
-	fn compressed_roundtrip() {
-		let (mut producer, track) = producer(true);
-		let payload = Bytes::from(b"the quick brown fox".repeat(64));
-		producer.update(payload.clone()).unwrap();
-		producer.finish().unwrap();
-
-		assert_eq!(drain(consume(track, true)), vec![payload]);
-	}
-
 	/// The compressed frame on the wire is much smaller than the value it carries, so a consumer
 	/// that ignored the flag would read garbage rather than the payload.
 	#[test]

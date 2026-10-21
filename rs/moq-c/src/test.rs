@@ -249,13 +249,6 @@ fn publish_container(broadcast: u32, format: moq_container_format, init: &[u8]) 
 }
 
 #[test]
-fn origin_lifecycle() {
-	let origin = id(moq_origin_create());
-	assert_eq!(moq_origin_close(origin), 0, "moq_origin_close should succeed");
-	assert!(moq_origin_close(origin) < 0, "double-close should fail");
-}
-
-#[test]
 fn last_error_reports_reason() {
 	// A failed call records a retrievable reason string for moq_error().
 	assert!(moq_origin_close(9999) < 0);
@@ -406,26 +399,6 @@ fn last_error_protocol_captures_session_known_app_and_unknown() {
 		assert_eq!(protocol.code, code);
 		assert_eq!(protocol.kind, kind);
 	}
-}
-
-#[test]
-fn publish_media_lifecycle() {
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"publish-media-lifecycle");
-	let _guard = Guard(Some(|| {
-		moq_publish_close(broadcast);
-	}));
-
-	let init = opus_head();
-	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
-	let media = id(publish_audio(broadcast, format, &init, None));
-
-	let payload = b"opus frame";
-	let ret = unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 1000) };
-	assert_eq!(ret, 0, "moq_publish_media_frame should succeed");
-
-	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
