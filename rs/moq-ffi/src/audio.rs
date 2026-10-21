@@ -124,9 +124,8 @@ pub struct MoqAudioEncoderInput {
 	pub channels: u32,
 }
 
-/// Codec-side configuration. `sample_rate` / `channels` `None` means
-/// "match the input (snapping the rate up to a libopus-supported
-/// value if necessary)".
+/// Codec-side configuration for a [`MoqAudioProducer`] or a standalone [`MoqAudioEncoder`].
+/// Opus snaps the encoded rate up to one libopus supports.
 #[derive(uniffi::Record)]
 pub struct MoqAudioEncoderOutput {
 	/// The codec used to encode this rendition.
@@ -134,10 +133,12 @@ pub struct MoqAudioEncoderOutput {
 	/// Track name for a broadcast-bound producer. `None` derives one from the codec.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
-	/// The encoded samples per second, or absent to match the input rate.
+	/// The encoded samples per second. Absent matches a producer's input rate,
+	/// or 48000 for a standalone encoder, which has no input to match.
 	#[uniffi(default = None)]
 	pub sample_rate: Option<u32>,
-	/// The encoded channel count, or absent to match the input.
+	/// The encoded channel count. Absent matches a producer's input, or 2 for a
+	/// standalone encoder, which has no input to match.
 	#[uniffi(default = None)]
 	pub channels: Option<u32>,
 	/// The target bitrate in bits per second, or absent for the codec default.
