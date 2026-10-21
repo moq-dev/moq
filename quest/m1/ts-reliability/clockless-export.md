@@ -51,9 +51,10 @@ audio plus SCTE-35, audio plus `pesPacket`, sections only, and `pesPacket`
 only, each through import and export with byte-exact section and PES
 payloads and placements. A data-only import crosses the PCR wrap with
 continuous timestamps, from a generated PCR that starts just before the
-wrap. Add a generated audio-plus-SCTE-35 arm to the
-TSDuck round trip in `test/ts`, so `compliance.py` grades PCR repetition and
-the PMT on a program whose clock rides audio or its own PID.
+wrap. Add generated audio-plus-SCTE-35 and sections-only arms to the
+TSDuck round trip in `test/ts`, so `compliance.py` grades `PCR_PID`, PCR
+repetition and the PMT both when the clock rides audio and when it rides
+its own PID.
 
 ## Related
 
