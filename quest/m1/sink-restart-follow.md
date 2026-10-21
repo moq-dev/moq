@@ -29,12 +29,13 @@ Readers with their own follow loop today move onto `announced_broadcast`:
 - The TS stitching follower (`rs/moq-mux/src/container/ts/follower.rs`), if
   `announced_broadcast` fits how it marks a break.
 
-`subscribe` reads until its track ends, so it follows like the rest. Only a
-finite read such as `fetch` stays on the one instance it resolved.
+A finite read such as `fetch` stays on the one instance it resolved.
 
-The stdout exports already do this: TS follows with `--stitch`, and the other
-formats ride the old instance until its route dies and its tracks error. Audit
-and fix the rest the same way:
+The stdout exports (`subscribe`) already follow only where the output marks
+the break: TS with `--stitch`. Every other format, and TS without `--stitch`,
+stays pinned to the old instance until its route dies and its tracks error,
+never concatenating independent instances into one stream. Keep that rule.
+Audit and fix the rest the same way:
 
 - `export hls`: `moq-hls`'s server resolves per request; check that a restart
   moves new requests to the new instance and how a playlist marks the break
