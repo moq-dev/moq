@@ -304,7 +304,8 @@ mod test {
 		assert!(matches!(dg.encode_bytes(Version::Lite04), Err(EncodeError::Version)));
 
 		assert!(matches!(
-			Datagram::decode(Bytes::from_static(b"\x01\x02\x03x"), Version::Lite04, false, |_| timed()),
+			Datagram::decode(Bytes::from_static(b"\x01\x02\x03x"), Version::Lite04, false, |_| timed(
+			)),
 			Err(DecodeError::Version)
 		));
 	}

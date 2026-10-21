@@ -1966,9 +1966,7 @@ mod tests {
 					.await
 					.unwrap();
 			} else {
-				let begin = h
-					.serve
-					.begin_subscription(&mut track, &mut Sub::None, lowered, true);
+				let begin = h.serve.begin_subscription(&mut track, &mut Sub::None, lowered, true);
 				assert!(matches!(begin, Ok(Begin::Establish(_))));
 			}
 
@@ -3379,8 +3377,7 @@ mod tests {
 			.create_track("catalog.json", crate::track::Info::timed())
 			.unwrap();
 		let mut sub = Sub::None;
-		let mut establish =
-			std::pin::pin!(serve.establish(&mut producer, &mut sub, Subscription::default()));
+		let mut establish = std::pin::pin!(serve.establish(&mut producer, &mut sub, Subscription::default()));
 
 		// Parked on the first write: the stream is open and nothing has been sent yet.
 		assert!(futures::poll!(establish.as_mut()).is_pending());
@@ -3678,12 +3675,7 @@ mod tests {
 		let mut sub = Sub::None;
 
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(mid_group_demand()),
-				true,
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(mid_group_demand()), true)
 			.await
 			.expect("an older peer must not fail the subscribe");
 
@@ -3710,12 +3702,7 @@ mod tests {
 			let mut sub = Sub::None;
 
 			h.serve
-				.handle_subscription(
-					&mut h.producer,
-					&mut sub,
-					Some(mid_group_demand()),
-					true,
-				)
+				.handle_subscription(&mut h.producer, &mut sub, Some(mid_group_demand()), true)
 				.await
 				.unwrap();
 
@@ -3800,12 +3787,7 @@ mod tests {
 		let mut sub = Sub::None;
 
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(Subscription::default()),
-				true,
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(Subscription::default()), true)
 			.await
 			.unwrap();
 		assert!(matches!(sub, Sub::Active(_)), "the first subscriber opens one");
@@ -3852,12 +3834,7 @@ mod tests {
 		let mut sub = Sub::None;
 
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(Subscription::default()),
-				true,
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(Subscription::default()), true)
 			.await
 			.unwrap();
 		assert!(matches!(sub, Sub::Active(_)), "the first subscriber opens one");
@@ -3907,24 +3884,14 @@ mod tests {
 		let mut sub = Sub::None;
 
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(Subscription::default()),
-				true,
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(Subscription::default()), true)
 			.await
 			.unwrap();
 		let established = h.wire().len();
 
 		// A lite-06 subscriber downstream now wants to resume mid-group.
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(mid_group_demand()),
-				true,
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(mid_group_demand()), true)
 			.await
 			.expect("a downstream frame offset must not tear down an older upstream");
 
@@ -4075,12 +4042,7 @@ mod tests {
 		// Live edge: the floor is unknown until the next declaration, so a
 		// group below the stale one must not be a permanent miss.
 		h.serve
-			.handle_subscription(
-				&mut h.producer,
-				&mut sub,
-				Some(Subscription::default()),
-				true,
-			)
+			.handle_subscription(&mut h.producer, &mut sub, Some(Subscription::default()), true)
 			.await
 			.unwrap();
 		assert_eq!(h.producer.start_sequence(), None);
@@ -5755,11 +5717,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// deregisters `id` if the establish fails.
 	///
 	/// The subscription's bounds come straight from the demand aggregate.
-	fn prepare_establish(
-		&self,
-		producer: &mut track::Producer,
-		subscription: Subscription,
-	) -> Establish<S> {
+	fn prepare_establish(&self, producer: &mut track::Producer, subscription: Subscription) -> Establish<S> {
 		let id = self.subscriber.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 
 		// Both halves of each bound come from the same position, so a frame can never
@@ -6659,12 +6617,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					}
 					match self.serving.poll_subscription_changed(waiter) {
 						Poll::Ready(Ok(pref)) => {
-							match serve.begin_subscription(
-								&mut self.serving,
-								&mut self.sub,
-								pref,
-								self.supports_update,
-							) {
+							match serve.begin_subscription(&mut self.serving, &mut self.sub, pref, self.supports_update)
+							{
 								Ok(Begin::Establish(est)) => self.mode = ServeMode::Establish(est),
 								Ok(Begin::None) => {}
 								// Updating the upstream failed: hand the track back for

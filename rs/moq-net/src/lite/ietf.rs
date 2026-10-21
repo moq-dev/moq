@@ -210,9 +210,7 @@ pub(crate) fn decode_properties(body: &[u8], framing: super::Framing, framed: bo
 #[cfg(feature = "async")]
 pub(crate) fn decode_end(body: &[u8], framing: super::Framing) -> Result<Decoded, DecodeError> {
 	let decoded = decode_properties(body, framing, false)?;
-	if decoded.properties.block.is_some()
-		&& !framing.ietf.is_some_and(crate::ietf::object::status_has_properties)
-	{
+	if decoded.properties.block.is_some() && !framing.ietf.is_some_and(crate::ietf::object::status_has_properties) {
 		return Err(DecodeError::InvalidValue);
 	}
 	Ok(decoded)
@@ -374,7 +372,10 @@ impl Message for TrackProperties {
 }
 
 /// Encode a datagram's relay state after its Group Sequence, or a plain one's as 0.
-pub(crate) fn encode_datagram(w: &mut Encoder<'_>, wire: Option<&crate::model::datagram::Wire>) -> Result<(), EncodeError> {
+pub(crate) fn encode_datagram(
+	w: &mut Encoder<'_>,
+	wire: Option<&crate::model::datagram::Wire>,
+) -> Result<(), EncodeError> {
 	let Some(wire) = wire else {
 		return w.varint(0);
 	};
@@ -545,16 +546,16 @@ mod tests {
 	fn properties_refuse_what_is_not_canonical() {
 		let timed = from(Draft::Draft18, Some(Timescale::MILLI));
 		for (body, reason) in [
-			(&[0x10, 5][..], "a timed track's mutable Timestamp, which its frame holds"),
+			(
+				&[0x10, 5][..],
+				"a timed track's mutable Timestamp, which its frame holds",
+			),
 			(&[0x0b, 2, 0x0b, 0][..], "a nested Immutable Properties"),
 		] {
 			assert!(decode_properties(body, timed, true).is_err(), "accepted {reason}");
 		}
 		// A track published over moq-lite has no moq-transport properties.
-		let lite = super::super::Framing {
-			ietf: None,
-			..timed
-		};
+		let lite = super::super::Framing { ietf: None, ..timed };
 		assert!(decode_properties(&[0x20, 1], lite, true).is_err());
 	}
 
@@ -666,7 +667,10 @@ mod tests {
 		assert!(decode(&wire(&list[..max as usize], draft18)).is_ok());
 		assert!(decode(&wire(&list, draft18)).is_err(), "more than ingress keeps");
 		// TIMESCALE belongs to TRACK_INFO.
-		assert!(decode(&wire(&[opaque(0x08)], draft18)).is_err(), "an understood property");
+		assert!(
+			decode(&wire(&[opaque(0x08)], draft18)).is_err(),
+			"an understood property"
+		);
 		assert!(
 			decode(&wire(&[opaque(0x40)], 0)).is_err(),
 			"properties on a moq-lite track"
@@ -687,7 +691,10 @@ mod tests {
 			id: IMMUTABLE,
 			value: Value::Bytes(Bytes::from_static(&[0x20, 0x01, 0x04, 0x05])),
 		};
-		let decoded = decode(&wire(std::slice::from_ref(&sealed), draft18)).unwrap().0.unwrap();
+		let decoded = decode(&wire(std::slice::from_ref(&sealed), draft18))
+			.unwrap()
+			.0
+			.unwrap();
 		assert!(decoded.sealed().eq([0x20, 0x24]));
 		assert!(
 			decode(&wire(&[sealed.clone(), sealed], draft18)).is_err(),
@@ -831,7 +838,10 @@ mod tests {
 				status: Some(status),
 				properties: Properties::default(),
 			};
-			let decoded = decode_datagram(&mut Decoder::new(&datagram(&wire), V.into()), from(Draft::Draft14, None));
+			let decoded = decode_datagram(
+				&mut Decoder::new(&datagram(&wire), V.into()),
+				from(Draft::Draft14, None),
+			);
 			assert_eq!(decoded.is_ok(), ok, "{status}");
 		}
 	}
@@ -847,7 +857,13 @@ mod tests {
 			status: Some(3),
 			properties: Properties::default(),
 		};
-		assert!(decode_datagram(&mut Decoder::new(&datagram(&wire), V.into()), from(Draft::Draft22, None)).is_err());
+		assert!(
+			decode_datagram(
+				&mut Decoder::new(&datagram(&wire), V.into()),
+				from(Draft::Draft22, None)
+			)
+			.is_err()
+		);
 	}
 
 	#[test]
@@ -860,8 +876,11 @@ mod tests {
 				status,
 				properties: Properties::default(),
 			};
-			let decoded =
-				decode_datagram(&mut Decoder::new(&datagram(&wire), V.into()), from(Draft::Draft22, None)).unwrap();
+			let decoded = decode_datagram(
+				&mut Decoder::new(&datagram(&wire), V.into()),
+				from(Draft::Draft22, None),
+			)
+			.unwrap();
 			assert_eq!(decoded, Some(wire));
 		}
 

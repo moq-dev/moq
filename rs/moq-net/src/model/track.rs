@@ -7884,7 +7884,8 @@ mod test {
 		let wire = lite::Datagram::decode(body, version, false, |_| lite::Framing {
 			timescale: Some(crate::Timescale::MICRO),
 			ietf: None,
-		}).unwrap();
+		})
+		.unwrap();
 		let mut downstream = track_producer("test", Info::timed());
 		let mut downstream_dg = downstream.subscribe(None);
 		downstream

@@ -13020,7 +13020,9 @@ mod stitch_tests {
 			{
 				let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", accepted_info(&Default::default(), version)).unwrap();
+				let track = broadcast
+					.create_track("video", accepted_info(&Default::default(), version))
+					.unwrap();
 				let mut h = Harness::with_timescale(Fill::Done, vec![], None);
 				h.subscriber.version = version;
 				h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
@@ -13146,7 +13148,9 @@ mod stitch_tests {
 			for (egress, status) in pairs {
 				let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", accepted_info(&Default::default(), ingress)).unwrap();
+				let track = broadcast
+					.create_track("video", accepted_info(&Default::default(), ingress))
+					.unwrap();
 				let mut h = Harness::with_timescale(Fill::Done, vec![], None);
 				h.subscriber.version = ingress;
 				h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());

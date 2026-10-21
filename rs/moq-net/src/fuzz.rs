@@ -171,7 +171,8 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 		for timescale in [Some(crate::Timescale::MILLI), None] {
 			for ietf in [None, Some(ietf::Version::Draft14), Some(ietf::Version::Draft22)] {
 				let framing = lite::Framing { timescale, ietf };
-				let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, negotiated, |_| framing)
+				let Ok(decoded) =
+					lite::Datagram::decode(Bytes::copy_from_slice(data), version, negotiated, |_| framing)
 				else {
 					continue;
 				};
@@ -491,14 +492,14 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| {
-				lite::Framing {
+			Self::Datagram => {
+				lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| lite::Framing {
 					timescale: Some(crate::Timescale::MILLI),
 					ietf: None,
-				}
-			})
-			.map(|_| 1)
-			.unwrap(),
+				})
+				.map(|_| 1)
+				.unwrap()
+			}
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
 		}
 	}

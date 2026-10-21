@@ -2458,7 +2458,9 @@ where
 			.iter()
 			.filter_map(|frame| Some((frame.fields.as_deref()?, frame.timestamp)));
 		for (fields, frame) in frames.chain(group.end_object.as_deref().map(|end| (end, None))) {
-			if let Err(err) = super::object::write(&fields.properties, group.info.ietf(), frame, self.version, timescale) {
+			if let Err(err) =
+				super::object::write(&fields.properties, group.info.ietf(), frame, self.version, timescale)
+			{
 				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
 			}
 		}
