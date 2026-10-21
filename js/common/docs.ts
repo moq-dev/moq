@@ -60,19 +60,29 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 
 		const declarations = load(resolved.file).locals.get(resolved.name);
 		if (!declarations) throw new Error(`${relative(root, resolved.file)}: cannot find ${resolved.name}`);
-		check(relative(root, resolved.file), path, declarations);
+		check(resolved.file, path, declarations);
 	};
 
-	// Check one name's declarations, the public members of a class, and everything a namespace
-	// declares, since an ambient namespace exports all of it.
-	const check = (where: string, path: string, declarations: Declarations) => {
+	// Check one name's declarations, the public members of a class and of the package's classes it
+	// extends, and everything a namespace declares, since an ambient namespace exports all of it.
+	const check = (file: string, path: string, declarations: Declarations) => {
+		const where = relative(root, file);
 		if (!declarations.some(({ statement }) => documented(statement))) found.push(`${where}: ${path}`);
 
 		const members = new Map<string, boolean>();
 		const nested = new Map<string, Declarations>();
 		for (const { declaration } of declarations) {
 			if (declaration.type === "ClassDeclaration") {
-				const element = isElement(declaration.superClass);
+				const superClass = declaration.superClass;
+				if (superClass?.type === "Identifier") {
+					const base = resolveBinding(file, { kind: "local", name: superClass.name });
+					const inherited = base?.kind === "local" ? load(base.file).locals.get(base.name) : undefined;
+					if (base?.kind === "local" && inherited && !seen.has(`${base.file}#${base.name}`)) {
+						seen.add(`${base.file}#${base.name}`);
+						check(base.file, base.name, inherited);
+					}
+				}
+				const element = isElement(superClass);
 				for (const member of declaration.body.body) {
 					const name = memberName(member, element);
 					if (name === undefined) continue;
@@ -92,7 +102,7 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		for (const [name, ok] of members) {
 			if (!ok) found.push(`${where}: ${path}.${name}`);
 		}
-		for (const [name, list] of nested) check(where, `${path}.${name}`, list);
+		for (const [name, list] of nested) check(file, `${path}.${name}`, list);
 	};
 
 	// Follow a binding to the file and local name that declares it; undefined for another package.
@@ -217,9 +227,12 @@ function parseModule(source: string): Module {
 	return module;
 }
 
-// A doc comment is a non-empty `/** */` block before the node.
+// A doc comment is a non-empty `/** */` block before the node. A file's `@module` block documents
+// the module, not the statement it happens to precede.
 function documented(node: { leadingComments?: Comment[] | null }): boolean {
-	return (node.leadingComments ?? []).some((c) => c.type === "CommentBlock" && /^\*[\s*]*[^\s*/]/.test(c.value));
+	return (node.leadingComments ?? []).some(
+		(c) => c.type === "CommentBlock" && /^\*[\s*]*[^\s*/]/.test(c.value) && !/@module\b/.test(c.value),
+	);
 }
 
 // Custom element reactions: on an element, the browser calls them and the HTML spec documents them.
@@ -242,7 +255,7 @@ function isElement(superClass: unknown): boolean {
 // The name of a class member a consumer can use, or undefined for one that needs no doc:
 // constructors, private and protected members, `#private`, an element's custom element
 // reactions, and members keyed by an expression, such as symbol brands.
-function memberName(member: Node | { type: string; [key: string]: unknown }, element: boolean): string | undefined {
+function memberName(member: unknown, element: boolean): string | undefined {
 	const m = member as {
 		type: string;
 		kind?: string;

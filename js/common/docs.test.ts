@@ -77,6 +77,27 @@ test("only the public surface needs docs", () => {
 	expect(found).toEqual([]);
 });
 
+test("members inherited from an unexported package class are checked", () => {
+	const found = check({
+		"/dist/base.d.ts": "export declare class Base {\n    run(): void;\n}\n",
+		"/dist/index.d.ts": [
+			'import { Base } from "./base";',
+			"/** Documented. */",
+			"export declare class Thing extends Base {}",
+			"/** Documented. */",
+			"export declare class Failure extends Error {}",
+		].join("\n"),
+	});
+	expect(found).toEqual(["base.d.ts: Base", "base.d.ts: Base.run"]);
+});
+
+test("a module block does not document the statement after it", () => {
+	const found = check({
+		"/dist/index.d.ts": "/**\n * The package.\n *\n * @module\n */\nexport declare const first: number;\n",
+	});
+	expect(found).toEqual(["index.d.ts: first"]);
+});
+
 test("a literal computed key is an ordinary member", () => {
 	const found = check({
 		"/dist/index.d.ts":
